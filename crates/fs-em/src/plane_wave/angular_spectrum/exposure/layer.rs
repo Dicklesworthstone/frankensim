@@ -52,20 +52,29 @@ pub struct AngularSpectrumExposureLayerField {
     storage_rate_per_depth_w_m: f64,
 }
 impl AngularSpectrumExposureLayerField {
-    pub fn field(&self) -> &AngularSpectrumExposureField { &self.field }
-    pub fn dissipation(&self) -> &[AngularSpectrumExposureLayerDissipation] { &self.dissipation }
-    pub fn absorbed_power_per_depth_w_m(&self) -> f64 { self.absorbed_power_per_depth_w_m }
-    pub fn storage_rate_per_depth_w_m(&self) -> f64 { self.storage_rate_per_depth_w_m }
+    pub fn field(&self) -> &AngularSpectrumExposureField {
+        &self.field
+    }
+    pub fn dissipation(&self) -> &[AngularSpectrumExposureLayerDissipation] {
+        &self.dissipation
+    }
+    pub fn absorbed_power_per_depth_w_m(&self) -> f64 {
+        self.absorbed_power_per_depth_w_m
+    }
+    pub fn storage_rate_per_depth_w_m(&self) -> f64 {
+        self.storage_rate_per_depth_w_m
+    }
 }
 
 struct FrequencyLayer<'b, 's, 'm> {
     omega: f64,
-    layer: PreparedAngularSpectrumLayer<'b, 's, 'm>,
+    layer: Option<PreparedAngularSpectrumLayer<'b, 's, 'm>>,
     poles: Vec<PoleTransfer>,
 }
 
-/// One selected layer with ONE original TE/TM cache per distinct frequency,
-/// shared across deterministic mean illumination and proper covariance factors.
+/// One selected layer with one original TE/TM cache per distinct frequency
+/// needing a one-sided response, shared across the mean and covariance factors.
+/// Two-sided lines reuse their already prepared native two-port columns.
 /// Original source states and frequency groups remain borrowed. Repeated depths
 /// do not solve the films or reevaluate constitutive laws again.
 pub struct PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
@@ -91,7 +100,12 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedAngularSpectrumExposureLayer<'_, 'b, 's, 'm>, AngularSpectrumError> {
         PreparedAngularSpectrumExposureLayer::new(
-            self.anchor, Some(self), &[], layer_index, limits, &mut cancelled,
+            self.anchor,
+            Some(self),
+            &[],
+            layer_index,
+            limits,
+            &mut cancelled,
         )
     }
 }
@@ -104,7 +118,12 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm>, AngularSpectrumError> {
         PreparedAngularSpectrumExposureLayer::new(
-            self.anchor, self.mean, self.factors, layer_index, limits, &mut cancelled,
+            self.anchor,
+            self.mean,
+            self.factors,
+            layer_index,
+            limits,
+            &mut cancelled,
         )
     }
 }
@@ -127,7 +146,9 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
         poll(cancelled)?;
-        let selected = anchor.source().layer(layer_index)
+        let selected = anchor
+            .source()
+            .layer(layer_index)
             .ok_or_else(|| bad("selected field layer is outside the original stack"))?;
         let law = LossLaw::new(selected.response)?;
         let n = anchor.modes.len();
@@ -142,75 +163,117 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         for bank in mean.into_iter().chain(factors.iter()) {
             poll(cancelled)?;
             if bank.anchor.grid() != anchor.grid()
-                || !bank.anchor.source().same_sources_and_geometry(anchor.source())
+                || !bank
+                    .anchor
+                    .source()
+                    .same_sources_and_geometry(anchor.source())
             {
-                return Err(bad("film exposure requires the same original materials, layers and grid"));
+                return Err(bad(
+                    "film exposure requires the same original materials, layers and grid",
+                ));
             }
-            groups = groups.checked_add(bank.frequency_count())
+            groups = groups
+                .checked_add(bank.frequency_count())
                 .ok_or_else(|| bad("film exposure frequency count overflow"))?;
-            point_line_pairs = n.checked_mul(bank.line_count())
+            point_line_pairs = n
+                .checked_mul(bank.line_count())
                 .and_then(|v| v.checked_add(point_line_pairs))
                 .ok_or_else(|| bad("film exposure line work overflow"))?;
-            pairs = pairs.checked_add(bank.point_frequency_pairs())
+            pairs = pairs
+                .checked_add(bank.point_frequency_pairs())
                 .ok_or_else(|| bad("film exposure pair work overflow"))?;
-            field_fft_work = field_fft_work.checked_add(bank.field_fft_work())
+            field_fft_work = field_fft_work
+                .checked_add(bank.field_fft_work())
                 .ok_or_else(|| bad("film exposure FFT work overflow"))?;
             let f = bank.frequency_count();
-            let scratch = f.checked_mul(f)
+            let scratch = f
+                .checked_mul(f)
                 .and_then(|v| v.checked_mul(extra_kernel_bytes))
-                .and_then(|v| v.checked_add(f.checked_mul(
-                    core::mem::size_of::<usize>() + core::mem::size_of::<[C64; 6]>()
-                )?))
+                .and_then(|v| {
+                    v.checked_add(f.checked_mul(
+                        core::mem::size_of::<usize>() + core::mem::size_of::<[C64; 6]>(),
+                    )?)
+                })
                 .and_then(|v| v.checked_add(bank.workspace_bytes()))
                 .ok_or_else(|| bad("film exposure workspace overflow"))?;
             query_workspace = query_workspace.max(scratch);
         }
-        let point_reservoir_frequency_pairs = pairs.checked_mul(law.poles.len() + 3)
+        let point_reservoir_frequency_pairs = pairs
+            .checked_mul(law.poles.len() + 3)
             .ok_or_else(|| bad("film exposure reservoir work overflow"))?;
-        let index_bytes = groups.checked_mul(core::mem::size_of::<&PlanarAngularSpectrum<'_, '_>>())
+        let index_bytes = groups
+            .checked_mul(core::mem::size_of::<ExposureLine<'_, '_, '_>>())
             .ok_or_else(|| bad("film exposure workspace overflow"))?;
-        if groups > 4096 || groups > limits.maximum_frequency_groups
+        if groups > 4096
+            || groups > limits.maximum_frequency_groups
             || point_line_pairs > limits.maximum_point_line_pairs
             || point_reservoir_frequency_pairs > limits.maximum_point_reservoir_frequency_pairs
             || field_fft_work > limits.maximum_fft_work
-            || index_bytes.checked_add(query_workspace)
+            || index_bytes
+                .checked_add(query_workspace)
                 .is_none_or(|v| v > limits.maximum_workspace_bytes)
         {
             return Err(bad("film exposure exceeds its work or workspace budget"));
         }
-        let mut representatives: Vec<&'b PlanarAngularSpectrum<'s, 'm>> = Vec::new();
-        representatives.try_reserve_exact(groups)
+        let mut representatives: Vec<ExposureLine<'b, 's, 'm>> = Vec::new();
+        representatives
+            .try_reserve_exact(groups)
             .map_err(|_| bad("film exposure frequency allocation failed"))?;
         for bank in mean.into_iter().chain(factors.iter()) {
             for group in 0..bank.frequency_count() {
                 poll(cancelled)?;
-                let lines: &'b [PlanarAngularSpectrum<'s, 'm>] = bank.lines;
-                representatives.push(&lines[bank.source_indices[bank.group_offsets[group]]]);
+                representatives.push(
+                    bank.lines
+                        .get(bank.source_indices[bank.group_offsets[group]]),
+                );
             }
         }
-        representatives.sort_unstable_by(|a, b| a.source().angular_frequency_rad_s()
-            .total_cmp(&b.source().angular_frequency_rad_s()));
-        representatives.dedup_by(|a, b|
-            a.source().angular_frequency_rad_s() == b.source().angular_frequency_rad_s());
+        // If both kinds share a frequency, keep a one-sided representative:
+        // it needs a shared cache, whereas two-sided lines already own theirs.
+        representatives.sort_unstable_by(|a, b| {
+            a.beam()
+                .source()
+                .angular_frequency_rad_s()
+                .total_cmp(&b.beam().source().angular_frequency_rad_s())
+                .then_with(|| a.is_two_sided().cmp(&b.is_two_sided()))
+        });
+        representatives.dedup_by(|a, b| {
+            a.beam().source().angular_frequency_rad_s()
+                == b.beam().source().angular_frequency_rad_s()
+        });
         poll(cancelled)?;
         let count = representatives.len();
-        let per_frequency_pairs = n.checked_mul(2)
+        let one_sided_count = representatives
+            .iter()
+            .filter(|line| !line.is_two_sided())
+            .count();
+        let per_frequency_pairs = n
+            .checked_mul(2)
             .and_then(|v| v.checked_mul(anchor.source().layer_count()))
             .ok_or_else(|| bad("film exposure preparation work overflow"))?;
-        let preparation_layer_mode_pairs = count.checked_mul(per_frequency_pairs)
+        let preparation_layer_mode_pairs = one_sided_count
+            .checked_mul(per_frequency_pairs)
             .ok_or_else(|| bad("film exposure preparation work overflow"))?;
-        let cache_bytes = n.checked_mul(core::mem::size_of::<[PreparedLayerField<'_, '_>; 2]>())
+        let shared_layer_bytes = n
+            .checked_mul(core::mem::size_of::<[PreparedLayerField<'_, '_>; 2]>())
+            .and_then(|v| v.checked_mul(one_sided_count))
+            .ok_or_else(|| bad("film exposure workspace overflow"))?;
+        let cache_bytes = law
+            .poles
+            .len()
+            .checked_mul(core::mem::size_of::<PoleTransfer>())
             .and_then(|v| v.checked_add(core::mem::size_of::<FrequencyLayer<'_, '_, '_>>()))
-            .and_then(|v| v.checked_add(law.poles.len().checked_mul(core::mem::size_of::<PoleTransfer>())?))
             .and_then(|v| v.checked_mul(count))
+            .and_then(|v| v.checked_add(shared_layer_bytes))
             .ok_or_else(|| bad("film exposure workspace overflow"))?;
         // Conservative peak: shared cache, one original bank query, source
         // indices, fixed preparation scratch, all sums and both output planes.
         // Other borrowed bank owners and allocator overhead are excluded.
-        let workspace_bytes = n.checked_mul(
+        let workspace_bytes = n
+            .checked_mul(
                 core::mem::size_of::<[Dd; 12]>()
-                + core::mem::size_of::<AngularSpectrumExposurePoint>()
-                + core::mem::size_of::<AngularSpectrumExposureLayerDissipation>()
+                    + core::mem::size_of::<AngularSpectrumExposurePoint>()
+                    + core::mem::size_of::<AngularSpectrumExposureLayerDissipation>(),
             )
             .and_then(|v| v.checked_add(cache_bytes))
             .and_then(|v| v.checked_add(query_workspace))
@@ -220,42 +283,82 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         if preparation_layer_mode_pairs > limits.maximum_frequency_layer_mode_pairs
             || workspace_bytes > limits.maximum_workspace_bytes
         {
-            return Err(bad("film exposure exceeds its preparation or workspace budget"));
+            return Err(bad(
+                "film exposure exceeds its preparation or workspace budget",
+            ));
         }
         let mut frequencies = Vec::new();
-        frequencies.try_reserve_exact(count)
+        frequencies
+            .try_reserve_exact(count)
             .map_err(|_| bad("film exposure cache allocation failed"))?;
-        for beam in representatives {
+        for line in representatives {
             poll(cancelled)?;
+            let beam = line.beam();
             let omega = beam.source().angular_frequency_rad_s();
             let mut poles = Vec::new();
-            poles.try_reserve_exact(law.poles.len())
+            poles
+                .try_reserve_exact(law.poles.len())
                 .map_err(|_| bad("film exposure reservoir allocation failed"))?;
             for &pole in law.poles {
                 poles.push(PoleTransfer::new(pole, omega)?);
             }
-            let layer = beam.prepare_layer(layer_index, AngularSpectrumLayerLimits {
-                maximum_layer_mode_pairs: per_frequency_pairs,
-                maximum_workspace_bytes: limits.maximum_workspace_bytes,
-                maximum_fft_work: limits.maximum_fft_work,
-            }, &mut *cancelled)?;
-            frequencies.push(FrequencyLayer { omega, layer, poles });
+            let layer = if line.is_two_sided() {
+                None
+            } else {
+                Some(beam.prepare_layer(
+                    layer_index,
+                    AngularSpectrumLayerLimits {
+                        maximum_layer_mode_pairs: per_frequency_pairs,
+                        maximum_workspace_bytes: limits.maximum_workspace_bytes,
+                        maximum_fft_work: limits.maximum_fft_work,
+                    },
+                    &mut *cancelled,
+                )?)
+            };
+            frequencies.push(FrequencyLayer {
+                omega,
+                layer,
+                poles,
+            });
         }
         poll(cancelled)?;
         Ok(Self {
-            anchor, mean, factors, layer_index, thickness_m: selected.thickness_m,
-            law, frequencies, workspace_bytes, preparation_layer_mode_pairs,
-            point_line_pairs, point_reservoir_frequency_pairs, field_fft_work,
+            anchor,
+            mean,
+            factors,
+            layer_index,
+            thickness_m: selected.thickness_m,
+            law,
+            frequencies,
+            workspace_bytes,
+            preparation_layer_mode_pairs,
+            point_line_pairs,
+            point_reservoir_frequency_pairs,
+            field_fft_work,
         })
     }
 
-    pub fn layer_index(&self) -> usize { self.layer_index }
-    pub fn frequency_count(&self) -> usize { self.frequencies.len() }
-    pub fn workspace_bytes(&self) -> usize { self.workspace_bytes }
-    pub fn preparation_layer_mode_pairs(&self) -> usize { self.preparation_layer_mode_pairs }
-    pub fn point_line_pairs(&self) -> usize { self.point_line_pairs }
-    pub fn point_reservoir_frequency_pairs(&self) -> usize { self.point_reservoir_frequency_pairs }
-    pub fn field_fft_work(&self) -> u64 { self.field_fft_work }
+    pub fn layer_index(&self) -> usize {
+        self.layer_index
+    }
+    pub fn frequency_count(&self) -> usize {
+        self.frequencies.len()
+    }
+    pub fn workspace_bytes(&self) -> usize {
+        self.workspace_bytes
+    }
+    pub fn preparation_layer_mode_pairs(&self) -> usize {
+        self.preparation_layer_mode_pairs
+    }
+    pub fn point_line_pairs(&self) -> usize {
+        self.point_line_pairs
+    }
+    pub fn point_reservoir_frequency_pairs(&self) -> usize {
+        self.point_reservoir_frequency_pairs
+    }
+    pub fn field_fft_work(&self) -> u64 {
+        self.field_fft_work
+    }
 
     /// Mean irreversible heat and signed storage rate on an interior plane.
     /// Integrating heat PLUS storage rate through depth gives the net boundary
@@ -276,35 +379,53 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         sums.try_reserve_exact(n)
             .map_err(|_| bad("film exposure sum allocation failed"))?;
         for point in 0..n {
-            if point % 64 == 0 { poll(&mut cancelled)?; }
+            if point % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
             sums.push([Dd::ZERO; 12]);
         }
         if let Some(mean) = self.mean {
             self.accumulate_bank(
-                mean, depth_m, false, |a, b| window.product_kernel(a, b),
-                product, &mut sums, &mut cancelled,
+                mean,
+                depth_m,
+                false,
+                |a, b| window.product_kernel(a, b),
+                product,
+                &mut sums,
+                &mut cancelled,
             )?;
         }
         for factor in self.factors {
             self.accumulate_bank(
-                factor, depth_m, true, |a, b| window.proper_product_kernel(a, b),
-                proper_product, &mut sums, &mut cancelled,
+                factor,
+                depth_m,
+                true,
+                |a, b| window.proper_product_kernel(a, b),
+                proper_product,
+                &mut sums,
+                &mut cancelled,
             )?;
         }
         let mut points = Vec::new();
         let mut dissipation = Vec::new();
-        points.try_reserve_exact(n)
+        points
+            .try_reserve_exact(n)
             .map_err(|_| bad("film exposure field allocation failed"))?;
-        dissipation.try_reserve_exact(n)
+        dissipation
+            .try_reserve_exact(n)
             .map_err(|_| bad("film exposure heat allocation failed"))?;
         let mut totals = [Dd::ZERO; 3];
         for (point, sum) in sums.into_iter().enumerate() {
-            if point % 64 == 0 { poll(&mut cancelled)?; }
+            if point % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
             let value = sum.map(Dd::to_f64);
             let heat = (sum[9] + sum[10]).to_f64();
-            if value.iter().any(|v| !v.is_finite()) || !heat.is_finite()
+            if value.iter().any(|v| !v.is_finite())
+                || !heat.is_finite()
                 || value[..6].iter().any(|v| *v < 0.0)
-                || value[9] < 0.0 || value[10] < 0.0
+                || value[9] < 0.0
+                || value[10] < 0.0
             {
                 return Err(bad("film exposure heat or storage rate is unrepresentable"));
             }
@@ -314,8 +435,10 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 poynting_w_m2: [value[6], value[7], value[8]],
             });
             dissipation.push(AngularSpectrumExposureLayerDissipation {
-                ohmic_heat_w_m3: value[9], polarization_heat_w_m3: value[10],
-                total_heat_w_m3: heat, storage_rate_w_m3: value[11],
+                ohmic_heat_w_m3: value[9],
+                polarization_heat_w_m3: value[10],
+                total_heat_w_m3: heat,
+                storage_rate_w_m3: value[11],
             });
             totals[0] = totals[0] + sum[8];
             totals[1] = totals[1] + sum[9] + sum[10];
@@ -328,7 +451,11 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         }
         poll(&mut cancelled)?;
         Ok(AngularSpectrumExposureLayerField {
-            field: AngularSpectrumExposureField { grid, points, normal_power_w: totals[0] },
+            field: AngularSpectrumExposureField {
+                grid,
+                points,
+                normal_power_w: totals[0],
+            },
             dissipation,
             absorbed_power_per_depth_w_m: totals[1],
             storage_rate_per_depth_w_m: totals[2],
@@ -347,9 +474,12 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
     ) -> Result<(), AngularSpectrumError> {
         poll(cancelled)?;
         let f = bank.frequency_count();
-        if f == 0 { return Ok(()); }
+        if f == 0 {
+            return Ok(());
+        }
         let mut kernels = Vec::new();
-        kernels.try_reserve_exact(f * f)
+        kernels
+            .try_reserve_exact(f * f)
             .map_err(|_| bad("film exposure kernel allocation failed"))?;
         for &a in &bank.frequencies {
             for &b in &bank.frequencies {
@@ -369,54 +499,73 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         let mut mapping = Vec::new();
         let mut fields = Vec::new();
         let mut filtered = Vec::new();
-        mapping.try_reserve_exact(f)
+        mapping
+            .try_reserve_exact(f)
             .map_err(|_| bad("film exposure index allocation failed"))?;
-        fields.try_reserve_exact(f)
+        fields
+            .try_reserve_exact(f)
             .map_err(|_| bad("film exposure field allocation failed"))?;
-        filtered.try_reserve_exact(f)
+        filtered
+            .try_reserve_exact(f)
             .map_err(|_| bad("film exposure reservoir field allocation failed"))?;
         for group in 0..f {
             poll(cancelled)?;
-            let index = self.frequencies.binary_search_by(|cache|
-                cache.omega.total_cmp(&bank.frequencies[group]))
+            let index = self
+                .frequencies
+                .binary_search_by(|cache| cache.omega.total_cmp(&bank.frequencies[group]))
                 .map_err(|_| bad("original film frequency cache is missing"))?;
             let layer = &self.frequencies[index].layer;
-            fields.push(bank.frequency_field_with(group, cancelled, |line, cancelled| {
-                layer.modal_field_for_beam(line, depth, cancelled)
-            })?);
+            fields.push(
+                bank.frequency_field_with(group, cancelled, |line, cancelled| {
+                    line.modal_layer_field(layer.as_ref(), self.layer_index, depth, cancelled)
+                })?,
+            );
             mapping.push(index);
             filtered.push([C64::ZERO; 6]);
         }
         for (point, sum) in sums.iter_mut().enumerate() {
             poll(cancelled)?;
             let moments = integrate_point_dd(
-                f, &kernels, |i| fields[i][point],
-                |k, a, b| product(k.product, a, b), cancelled,
-            ).map_err(moment_error)?;
+                f,
+                &kernels,
+                |i| fields[i][point],
+                |k, a, b| product(k.product, a, b),
+                cancelled,
+            )
+            .map_err(moment_error)?;
             let mut storage = instantaneous_storage_rate(
-                &kernels, f, |i| fields[i][point], &product,
-                self.law.epsilon_infinity, self.law.permeability, cancelled,
-            ).map_err(moment_error)?;
+                &kernels,
+                f,
+                |i| fields[i][point],
+                &product,
+                self.law.epsilon_infinity,
+                self.law.permeability,
+                cancelled,
+            )
+            .map_err(moment_error)?;
             let mut polarization_heat = Dd::ZERO;
             for pole in 0..self.law.poles.len() {
                 poll(cancelled)?;
                 for i in 0..f {
-                    if i % 64 == 0 { poll(cancelled)?; }
+                    if i % 64 == 0 {
+                        poll(cancelled)?;
+                    }
                     let transfer = self.frequencies[mapping[i]].poles[pole];
                     for c in 0..3 {
                         filtered[i][c] = fields[i][point][c] * transfer.heat;
                         filtered[i][c + 3] = fields[i][point][c] * transfer.storage;
                     }
                 }
-                let (heat, rate) = pole_moments(
-                    &kernels, &filtered, &product, cancelled,
-                ).map_err(moment_error)?;
+                let (heat, rate) =
+                    pole_moments(&kernels, &filtered, &product, cancelled).map_err(moment_error)?;
                 polarization_heat = polarization_heat + heat;
                 storage = storage + rate;
             }
-            for c in 0..9 { sum[c] = sum[c] + moments[c]; }
-            sum[9] = sum[9] + Dd::from_f64(self.law.conductivity)
-                * (moments[0] + moments[1] + moments[2]);
+            for c in 0..9 {
+                sum[c] = sum[c] + moments[c];
+            }
+            sum[9] = sum[9]
+                + Dd::from_f64(self.law.conductivity) * (moments[0] + moments[1] + moments[2]);
             sum[10] = sum[10] + polarization_heat;
             sum[11] = sum[11] + storage;
         }
@@ -427,12 +576,15 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
 fn moment_error(error: MomentError) -> AngularSpectrumError {
     match error {
         MomentError::Cancelled => AngularSpectrumError::Cancelled,
-        MomentError::Product(_) | MomentError::Unrepresentable =>
-            bad("film reservoir product is unrepresentable"),
+        MomentError::Product(_) | MomentError::Unrepresentable => {
+            bad("film reservoir product is unrepresentable")
+        }
     }
 }
 
-fn rotate_i(z: C64) -> C64 { C64::new(-z.im, z.re) }
+fn rotate_i(z: C64) -> C64 {
+    C64::new(-z.im, z.re)
+}
 
 fn instantaneous_storage_rate<P: Copy>(
     kernels: &[MomentKernel<P>],
@@ -448,14 +600,17 @@ fn instantaneous_storage_rate<P: Copy>(
     for i in 0..f {
         let a = field(i);
         for j in 0..f {
-            if j % 64 == 0 && cancelled() { return Err(MomentError::Cancelled); }
+            if j % 64 == 0 && cancelled() {
+                return Err(MomentError::Cancelled);
+            }
             let b = field(j);
             let kernel = kernels[i * f + j];
             for c in 0..3 {
-                electric = electric + product(kernel.product, rotate_i(a[c]), b[c])?
-                    * kernel.storage_frequency;
-                magnetic = magnetic + product(kernel.product, rotate_i(a[c + 3]), b[c + 3])?
-                    * kernel.storage_frequency;
+                electric = electric
+                    + product(kernel.product, rotate_i(a[c]), b[c])? * kernel.storage_frequency;
+                magnetic = magnetic
+                    + product(kernel.product, rotate_i(a[c + 3]), b[c + 3])?
+                        * kernel.storage_frequency;
             }
         }
     }
@@ -473,13 +628,15 @@ fn pole_moments<P: Copy>(
     let mut storage = Dd::ZERO;
     for (i, a) in fields.iter().enumerate() {
         for (j, b) in fields.iter().enumerate() {
-            if j % 64 == 0 && cancelled() { return Err(MomentError::Cancelled); }
+            if j % 64 == 0 && cancelled() {
+                return Err(MomentError::Cancelled);
+            }
             let kernel = kernels[i * f + j];
             for c in 0..3 {
                 heat = heat + product(kernel.product, a[c], b[c])?;
-                storage = storage + product(
-                    kernel.product, rotate_i(a[c + 3]), b[c + 3],
-                )? * kernel.storage_frequency;
+                storage = storage
+                    + product(kernel.product, rotate_i(a[c + 3]), b[c + 3])?
+                        * kernel.storage_frequency;
             }
         }
     }
@@ -503,10 +660,25 @@ mod tests {
         // -delta*cos(delta*t), without any common-carrier contribution.
         let expected = -delta
             * (delta * (window.start_s() + 0.5 * window.duration_s())).cos()
-            * half_width.sin() / half_width;
+            * half_width.sin()
+            / half_width;
         let fields = [
-            [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO, C64::ONE, C64::ZERO],
-            [C64::new(0.0, 1.0), C64::ZERO, C64::ZERO, C64::ZERO, C64::new(0.0, 1.0), C64::ZERO],
+            [
+                C64::ONE,
+                C64::ZERO,
+                C64::ZERO,
+                C64::ZERO,
+                C64::ONE,
+                C64::ZERO,
+            ],
+            [
+                C64::new(0.0, 1.0),
+                C64::ZERO,
+                C64::ZERO,
+                C64::ZERO,
+                C64::new(0.0, 1.0),
+                C64::ZERO,
+            ],
         ];
         let mut observed = Vec::new();
         for carrier in [0.0, 1_125_899_906_842_624.0] {
@@ -516,14 +688,21 @@ mod tests {
                 for b in frequencies {
                     kernels.push(MomentKernel {
                         product: window.proper_product_kernel(a, b).unwrap(),
-                        storage_frequency: (Dd::from_f64(a) - Dd::from_f64(b))
-                            * Dd::from_f64(0.5),
+                        storage_frequency: (Dd::from_f64(a) - Dd::from_f64(b)) * Dd::from_f64(0.5),
                     });
                 }
             }
             let actual = instantaneous_storage_rate(
-                &kernels, 2, |i| fields[i], proper_product, 1.0, 1.0, &mut || false,
-            ).unwrap().to_f64();
+                &kernels,
+                2,
+                |i| fields[i],
+                proper_product,
+                1.0,
+                1.0,
+                &mut || false,
+            )
+            .unwrap()
+            .to_f64();
             assert!((actual - expected).abs() < 5e-15, "{actual} != {expected}");
             observed.push(actual);
         }
@@ -551,18 +730,27 @@ mod tests {
                 });
             }
         }
-        let filtered = frequencies.iter().zip(electric).map(|(&omega, e)| {
-            let transfer = PoleTransfer::new(pole, omega).unwrap();
-            [e * transfer.heat, C64::ZERO, C64::ZERO,
-             e * transfer.storage, C64::ZERO, C64::ZERO]
-        }).collect::<Vec<_>>();
+        let filtered = frequencies
+            .iter()
+            .zip(electric)
+            .map(|(&omega, e)| {
+                let transfer = PoleTransfer::new(pole, omega).unwrap();
+                [
+                    e * transfer.heat,
+                    C64::ZERO,
+                    C64::ZERO,
+                    e * transfer.storage,
+                    C64::ZERO,
+                    C64::ZERO,
+                ]
+            })
+            .collect::<Vec<_>>();
         let (heat, storage) = pole_moments(&kernels, &filtered, product, &mut || false).unwrap();
         let mut electrical_work = Dd::ZERO;
         for i in 0..2 {
             for j in 0..2 {
                 // Independent original ODE: P = Delta E/(1+i omega tau).
-                let polarization = electric[j].scale(0.7)
-                    / C64::new(1.0, frequencies[j] * 0.4);
+                let polarization = electric[j].scale(0.7) / C64::new(1.0, frequencies[j] * 0.4);
                 let current = rotate_i(polarization).scale(frequencies[j]);
                 electrical_work = electrical_work
                     + product(kernels[i * 2 + j].product, electric[i], current).unwrap();

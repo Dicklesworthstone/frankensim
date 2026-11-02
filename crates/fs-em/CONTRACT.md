@@ -2438,9 +2438,10 @@ precision accumulation does not certify arbitrary relative accuracy near nulls.
 `AngularSpectrumExposure::prepare_layer` and
 `AngularSpectrumExposureEnsemble::prepare_layer` return one
 `PreparedAngularSpectrumExposureLayer` for a selected original film. One TE/TM
-interior response cache per distinct frequency is shared across the deterministic
-mean and proper covariance factors. Cache reuse requires the same original
-material owners, layer order, thicknesses, frequency and grid. Compensated
+interior response cache per distinct frequency needing a one-sided response is
+shared across the deterministic mean and proper covariance factors. Two-sided
+lines reuse their already prepared native two-port columns. Cache reuse requires
+the same original material owners, layer order, thicknesses, frequency and grid. Compensated
 equal-frequency modal sums precede each six-component FFT. Repeated depth
 queries perform no new film solve or constitutive evaluation.
 
@@ -2491,6 +2492,57 @@ refusal, budgets, depth and cancellation. The nine new Rust regressions await
 native execution. Independent JavaScript references are mathematical checks,
 not compilation or execution of this owner. No arbitrary-null relative
 accuracy or interval certificate is claimed.
+
+### Finite-window joint illumination from both faces
+
+`AngularSpectrumExposure::try_new_illumination` borrows complete
+`PreparedAngularSpectrumIllumination` lines. Every line retains both original
+face amplitudes, the same Cartesian tangential axes, exp(+i omega t) clock,
+material owners and exact physical stack. Lines may differ in frequency and
+spatial/polarization content. Equal-frequency modal E/H fields are coalesced
+before one six-component spatial synthesis; temporal products are formed only
+after all counterpropagating and spatial interference is present.
+
+The existing deterministic and proper-complex ensemble owners handle these
+lines through the same frequency grouping and moment contractions.
+An optional one-sided or two-sided mean can coexist with one-sided or two-sided
+factors. One factor declares a JOINT amplitude across faces and frequencies;
+placing sources on opposite faces does not imply statistical independence.
+The previously stated zero mean, identity factor covariance and zero
+pseudocovariance remain explicit assumptions, without Gaussianity, stationarity,
+source bandwidth or an inferred individual realization.
+
+`illumination_field` selects incoming, outgoing or total fields on either
+physical side. Cartesian normal Poynting flux retains its sign; a right-incident
+wave flows in the negative z direction. On a two-sided bank, the original
+`field` selectors map to incoming-left, outgoing-left, total-left and
+outgoing-right, respectively. An outgoing field includes reflection and
+opposite-face transmission coherently. For a one-sided bank, incoming-right
+is darkness and total-right is its original transmitted field.
+
+The SAME `prepare_layer` and reservoir contraction compute finite-window
+Ohmic/Debye heating and signed field/polarization storage. Already prepared
+two-port columns are reused without another film-response solve. Only distinct
+frequencies requiring a one-sided response allocate shared one-sided layer
+caches; mixed mean/factor banks share those caches as before. The native
+two-sided owners retain their original O(N*S) response storage and prior
+admission, while additional film-preparation work is proportional to
+F_one_sided*N*S. Temporal pair/FFT work, frequency-group and numerical-storage
+budgets still cover all authored banks. Cancellation publishes no partial
+exposure or heat plane.
+
+Both exterior channels inherit the native propagating, lossless-medium
+requirement. Original internal films may be lossy, critical or evanescent.
+The selected causal material reservoir and positive film thickness remain required
+for finite-window heating; no switch-on transient, temperature evolution or
+thermal energy debit is inferred. Five authored regressions cover analytic
+counterpropagating Maxwell fields at all six exterior selections, an independent
+two-port Debye/Ohmic heat-plus-storage balance, joint face covariance with a
+one-sided mean, coherent cancellation versus independent factors, original
+source identity, resource limits, darkness and cancellation/replay. Rustfmt
+parsed the source and test modules; Rust compilation and test execution remain
+unverified. Independent two-interface and real-time quadrature gave a
+1.77e-11 relative energy-balance residual for the two-frequency fixture.
 
 ### Two-sided coherent illumination and layer heating
 

@@ -17,6 +17,9 @@ use super::*;
 use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, ProperHarmonicProduct};
 use fs_math::dd::Dd;
 
+mod sources;
+use sources::{ExposureLine, ExposureLines, ExposureSide};
+
 mod ensemble;
 pub use ensemble::{AngularSpectrumExposureEnsemble, AngularSpectrumExposureEnsembleLimits};
 
@@ -77,7 +80,7 @@ impl AngularSpectrumExposureField {
 /// Equal-frequency lines are summed as fields before forming any products.
 pub struct AngularSpectrumExposure<'b, 's, 'm> {
     anchor: &'b PlanarAngularSpectrum<'s, 'm>,
-    lines: &'b [PlanarAngularSpectrum<'s, 'm>],
+    lines: ExposureLines<'b, 's, 'm>,
     frequencies: Vec<f64>,
     source_indices: Vec<usize>,
     group_offsets: Vec<usize>,
@@ -95,6 +98,40 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
     pub fn try_new(
         anchor: &'b PlanarAngularSpectrum<'s, 'm>,
         lines: &'b [PlanarAngularSpectrum<'s, 'm>],
+        limits: AngularSpectrumExposureLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        Self::new(
+            anchor,
+            ExposureLines::OneSided(lines),
+            limits,
+            &mut cancelled,
+        )
+    }
+
+    /// Observe jointly phased inputs at both original physical faces.
+    ///
+    /// Each prepared illumination retains its left AND right peak amplitudes
+    /// on one source clock. A proper covariance factor may therefore correlate
+    /// faces, polarizations, spatial modes and frequencies together. The native
+    /// two-port caches are borrowed and never rebuilt by this constructor.
+    pub fn try_new_illumination(
+        anchor: &'b PlanarAngularSpectrum<'s, 'm>,
+        lines: &'b [PreparedAngularSpectrumIllumination<'b, 's, 'm>],
+        limits: AngularSpectrumExposureLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        Self::new(
+            anchor,
+            ExposureLines::TwoSided(lines),
+            limits,
+            &mut cancelled,
+        )
+    }
+
+    fn new(
+        anchor: &'b PlanarAngularSpectrum<'s, 'm>,
+        lines: ExposureLines<'b, 's, 'm>,
         limits: AngularSpectrumExposureLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
@@ -128,8 +165,10 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             .try_reserve_exact(lines.len() + 1)
             .map_err(|_| bad("exposure group offset allocation failed"))?;
         let mut original_workspace = anchor.workspace_bytes();
-        for (index, line) in lines.iter().enumerate() {
+        for index in 0..lines.len() {
             poll(&mut cancelled)?;
+            let original = lines.get(index);
+            let line = original.beam();
             if line.grid() != anchor.grid()
                 || !line.source().same_sources_and_geometry(anchor.source())
             {
@@ -138,16 +177,18 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
                 ));
             }
             source_indices.push(index);
-            original_workspace = original_workspace.max(line.workspace_bytes());
+            original_workspace = original_workspace.max(original.workspace_bytes());
         }
         // In-place sorting needs no extra index allocation. The secondary
         // index gives stable within-frequency accumulation without relying on
         // sorting stability. Admission caps this bounded sort at 4096 lines.
         source_indices.sort_unstable_by(|left, right| {
-            lines[*left]
+            lines
+                .get(*left)
+                .beam()
                 .source()
                 .angular_frequency_rad_s()
-                .total_cmp(&lines[*right].source().angular_frequency_rad_s())
+                .total_cmp(&lines.get(*right).beam().source().angular_frequency_rad_s())
                 .then_with(|| left.cmp(right))
         });
         poll(&mut cancelled)?;
@@ -155,7 +196,7 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             if offset % 64 == 0 {
                 poll(&mut cancelled)?;
             }
-            let omega = lines[index].source().angular_frequency_rad_s();
+            let omega = lines.get(index).beam().source().angular_frequency_rad_s();
             if frequencies.last().copied() != Some(omega) {
                 frequencies.push(omega);
                 group_offsets.push(offset);
@@ -239,6 +280,40 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         window: HarmonicWindow,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AngularSpectrumExposureField, AngularSpectrumError> {
+        self.field_on(
+            ExposureSide::OneSided(side),
+            distance_from_face_m,
+            window,
+            &mut cancelled,
+        )
+    }
+
+    /// Finite-window fields of incoming, outgoing or total illumination at
+    /// either original face. The right-face normal flux keeps its Cartesian
+    /// sign; incoming right waves carry negative z flux. For a one-sided bank,
+    /// incoming-right is darkness and total-right is the transmitted field.
+    pub fn illumination_field(
+        &self,
+        side: AngularSpectrumIlluminationSide,
+        distance_from_face_m: f64,
+        window: HarmonicWindow,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumExposureField, AngularSpectrumError> {
+        self.field_on(
+            ExposureSide::TwoSided(side),
+            distance_from_face_m,
+            window,
+            &mut cancelled,
+        )
+    }
+
+    fn field_on(
+        &self,
+        side: ExposureSide,
+        distance_from_face_m: f64,
+        window: HarmonicWindow,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumExposureField, AngularSpectrumError> {
         poll(&mut cancelled)?;
         if !distance_from_face_m.is_finite() || distance_from_face_m < 0.0 {
             return Err(bad("field distance must be finite and nonnegative"));
@@ -306,7 +381,7 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
     fn frequency_field(
         &self,
         group: usize,
-        side: AngularSpectrumSide,
+        side: ExposureSide,
         distance: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<[C64; 6]>, AngularSpectrumError> {
@@ -320,9 +395,10 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         group: usize,
         cancelled: &mut F,
         mut modal_field: impl FnMut(
-            &PlanarAngularSpectrum<'s, 'm>,
+            ExposureLine<'b, 's, 'm>,
             &mut F,
-        ) -> Result<(Vec<[C64; 3]>, Vec<[C64; 3]>), AngularSpectrumError>,
+        )
+            -> Result<(Vec<[C64; 3]>, Vec<[C64; 3]>), AngularSpectrumError>,
     ) -> Result<Vec<[C64; 6]>, AngularSpectrumError> {
         let n = self.anchor.modes.len();
         let mut sums = Vec::new();
@@ -338,7 +414,7 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             &self.source_indices[self.group_offsets[group]..self.group_offsets[group + 1]];
         for &index in indices {
             poll(cancelled)?;
-            let line = &self.lines[index];
+            let line = self.lines.get(index);
             let (electric, magnetic) = modal_field(line, &mut *cancelled)?;
             for (i, ((sum, e), h)) in sums.iter_mut().zip(&electric).zip(&magnetic).enumerate() {
                 if i % 64 == 0 {
@@ -370,7 +446,7 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             electric.push([value[0], value[1], value[2]]);
             magnetic.push([value[3], value[4], value[5]]);
         }
-        let source = &self.lines[indices[0]];
+        let source = self.lines.get(indices[0]).beam();
         let synthesized = source.synthesize(electric, magnetic, &mut *cancelled)?;
         let mut field = Vec::new();
         field

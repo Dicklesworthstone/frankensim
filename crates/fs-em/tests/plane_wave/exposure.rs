@@ -1,4 +1,5 @@
 //! G1/G3 finite-window vector interference through the actual film operator.
+mod two_sided;
 use super::*;
 use fs_em::plane_wave::{
     angular_spectrum::{

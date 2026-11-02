@@ -182,6 +182,40 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
         window: HarmonicWindow,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AngularSpectrumExposureField, AngularSpectrumError> {
+        self.field_on(
+            ExposureSide::OneSided(side),
+            distance_from_face_m,
+            window,
+            &mut cancelled,
+        )
+    }
+
+    /// Joint left/right source covariance through the original two-port fields.
+    /// Mean and factors may each be one- or two-sided; all retain the same
+    /// physical materials, grid and common source clock. Faces are correlated
+    /// WITHIN each factor, never treated as independent by their location.
+    pub fn illumination_field(
+        &self,
+        side: AngularSpectrumIlluminationSide,
+        distance_from_face_m: f64,
+        window: HarmonicWindow,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumExposureField, AngularSpectrumError> {
+        self.field_on(
+            ExposureSide::TwoSided(side),
+            distance_from_face_m,
+            window,
+            &mut cancelled,
+        )
+    }
+
+    fn field_on(
+        &self,
+        side: ExposureSide,
+        distance_from_face_m: f64,
+        window: HarmonicWindow,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumExposureField, AngularSpectrumError> {
         poll(&mut cancelled)?;
         if !distance_from_face_m.is_finite() || distance_from_face_m < 0.0 {
             return Err(bad("field distance must be finite and nonnegative"));
@@ -256,7 +290,7 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
 // in the spatial/frequency contraction, and no second Maxwell implementation.
 fn accumulate_bank<P: Copy>(
     bank: &AngularSpectrumExposure<'_, '_, '_>,
-    side: AngularSpectrumSide,
+    side: ExposureSide,
     distance: f64,
     kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
