@@ -8,7 +8,7 @@ const NATURAL: f64 = core::f64::consts::TAU * 700.0;
 const DRIVE: f64 = core::f64::consts::TAU * 2600.0;
 const LIMITS: &str = "tone_limits 8 1048576 10000000 100000\n";
 
-fn observer(damping: f64) -> BroadbandModalObserver {
+pub(super) fn observer(damping: f64) -> BroadbandModalObserver {
     let model = ModalAcousticTimeModel::try_new(
         RATE,
         vec![ModalAcousticMode {
@@ -43,10 +43,14 @@ fn observer(damping: f64) -> BroadbandModalObserver {
 }
 
 fn program(text: &str, ports: &[Vec<f64>]) -> Result<ToneProgram, String> {
-    ToneProgram::read(text, 0, &[ports], RATE, &mut 10000)
+    ToneProgram::read(text, 0, &[ports], RATE, 1024, &mut 10000)
 }
 
-fn driver(text: &str, ports: &[Vec<f64>], observer: &BroadbandModalObserver) -> ToneDriver {
+pub(super) fn driver(
+    text: &str,
+    ports: &[Vec<f64>],
+    observer: &BroadbandModalObserver,
+) -> ToneDriver {
     let program = program(text, ports).unwrap();
     program
         .sources
@@ -154,7 +158,7 @@ fn continuous_record_clock_port_projection_and_preparation_limits_refuse() {
     ] {
         assert!(program(&bad, &[vec![1.0]]).is_err(), "accepted {bad}");
     }
-    assert!(ToneProgram::read(&good, 0, &[&[vec![1.0]]], RATE, &mut 1).is_err());
+    assert!(ToneProgram::read(&good, 0, &[&[vec![1.0]]], RATE, 1024, &mut 1).is_err());
     for bad in [
         good.replace("10000000", "1"),
         good.replace("100000\n", "1\n"),

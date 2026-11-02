@@ -2,7 +2,7 @@
 use super::{
     ForceInitialization, MAX_MODAL_PERFORMANCE_BYTES, MODAL_COUPLED_PERFORMANCE_HASH_DOMAIN,
     MODAL_COUPLED_PERFORMANCE_SCHEMA, ModalPerformanceInfo, ParsedPerformance, Reader,
-    tone_record::PhysicalTone,
+    tone_envelope::ToneEnvelopePlan, tone_record::PhysicalTone,
 };
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::{
@@ -38,6 +38,11 @@ pub struct CoupledTonePerformance {
     sine: Vec<f64>,
     next_cosine: Vec<f64>,
     next_sine: Vec<f64>,
+    envelopes: Option<ToneEnvelopePlan>,
+    force_cosine: Vec<f64>,
+    force_sine: Vec<f64>,
+    force_cosine_end: Vec<f64>,
+    force_sine_end: Vec<f64>,
     next_event: usize,
     completed: u64,
     max_block: usize,
@@ -59,6 +64,8 @@ impl CoupledTonePerformance {
     /// ```
     ///
     /// Tones are physical forces continuous from t=0 over the declared window.
+    /// Optional `envelopes`/`envelope`/`gain` records give piecewise-affine
+    /// physical force gains without resetting carrier phase or resonant state.
     /// MAX_TONES includes the held DC column and is at most 32. The dense cold
     /// dimension is at most 256; total tone storage is at most 128 MiB and
     /// preparation work at most 100 billion multiply-add terms. Driver phase
@@ -150,6 +157,20 @@ impl CoupledTonePerformance {
                 &mut parsed.force_config.max_projection_terms,
             )?);
         }
+        let envelopes = ToneEnvelopePlan::read_optional(
+            &mut reader,
+            count,
+            parsed.info.samples,
+            &mut budget.max_dense_bytes,
+        )?;
+        let envelope_coefficients = if envelopes.is_some() { coefficients } else { 0 };
+        let envelope_bytes = envelope_coefficients
+            .checked_mul(4 * core::mem::size_of::<f64>())
+            .ok_or("coupled envelope buffer size overflow")?;
+        budget.max_dense_bytes = budget
+            .max_dense_bytes
+            .checked_sub(envelope_bytes)
+            .ok_or("coupled envelope force buffers exceed source storage")?;
         let receiver = broadband::ReceiverSpec::read_optional(&mut reader, parsed.info.modes)?;
         let mut offsets = Vec::with_capacity(parsed.voices.len());
         let mut modes = 0;
@@ -220,8 +241,12 @@ impl CoupledTonePerformance {
                 .initialize_static_equilibrium(&held, &gate)
                 .map_err(|e| e.to_string())?;
         }
-        let source =
-            CoupledModalTones::new(network, &omega, budget, &gate).map_err(|e| e.to_string())?;
+        let source = if envelopes.is_some() {
+            CoupledModalTones::new_affine(network, &omega, budget, &gate)
+        } else {
+            CoupledModalTones::new(network, &omega, budget, &gate)
+        }
+        .map_err(|e| e.to_string())?;
         let source = broadband::Source::new(source, receiver, parsed.info.sample_rate_hz, &gate)?;
         let mut info = parsed.info;
         info.input_hash = fs_blake3::hash_domain(MODAL_COUPLED_PERFORMANCE_HASH_DOMAIN, bytes);
@@ -234,6 +259,11 @@ impl CoupledTonePerformance {
             next_sine: vec![0.0; coefficients],
             cosine,
             sine,
+            envelopes,
+            force_cosine: vec![0.0; envelope_coefficients],
+            force_sine: vec![0.0; envelope_coefficients],
+            force_cosine_end: vec![0.0; envelope_coefficients],
+            force_sine_end: vec![0.0; envelope_coefficients],
             next_event: 0,
             completed: 0,
             max_block,
@@ -254,6 +284,10 @@ impl CoupledTonePerformance {
     /// Authored physical tone records, excluding the held DC coordinate.
     pub fn continuous_force_tones(&self) -> usize {
         self.source.tone_count() - 1
+    }
+    /// Explicit physical force gain curves, indexed by original tone records.
+    pub fn envelope_count(&self) -> usize {
+        self.envelopes.as_ref().map_or(0, ToneEnvelopePlan::count)
     }
     /// The explicit sampled receiver's fit, delay and held-out evidence, when
     /// present. Producer samples and this interpolation remain EstimateOnly.
@@ -283,10 +317,23 @@ impl CoupledTonePerformance {
             self.next_cosine[event.mode * tones] = event.force_n_per_sqrt_kg;
             next_event += 1;
         }
-        for mode in 0..self.held.len() {
-            self.cosine[mode * tones] = self.next_cosine[mode * tones];
-        }
-        let pressure = match self.source.step(&self.cosine, &self.sine) {
+        let candidate = if self.envelopes.is_some() {
+            // Scale independent carrier phases, including zero/re-attack.
+            // Stage both endpoints before changing any accepted held input.
+            self.stage_envelope_forces()?;
+            self.source.step_affine(
+                &self.force_cosine,
+                &self.force_sine,
+                &self.force_cosine_end,
+                &self.force_sine_end,
+            )
+        } else {
+            for mode in 0..self.held.len() {
+                self.cosine[mode * tones] = self.next_cosine[mode * tones];
+            }
+            self.source.step(&self.cosine, &self.sine)
+        };
+        let pressure = match candidate {
             Ok(pressure) => pressure,
             Err(error) => {
                 for (mode, &held) in self.held.iter().enumerate() {
@@ -302,7 +349,52 @@ impl CoupledTonePerformance {
         core::mem::swap(&mut self.sine, &mut self.next_sine);
         self.next_event = next_event;
         self.completed += 1;
+        if let Some(envelopes) = &mut self.envelopes {
+            envelopes.commit(self.completed);
+        }
         Ok(pressure)
+    }
+
+    fn stage_envelope_forces(&mut self) -> Result<(), RenderError> {
+        let envelopes = self.envelopes.as_ref().ok_or_else(refused)?;
+        let tones = self.source.tone_count();
+        // Query each original tone only once, then apply its gain to every
+        // signed modal projection. The held DC column keeps its event value.
+        for mode in 0..self.held.len() {
+            let dc = mode * tones;
+            self.force_cosine[dc] = self.next_cosine[dc];
+            self.force_cosine_end[dc] = self.next_cosine[dc];
+            self.force_sine[dc] = 0.0;
+            self.force_sine_end[dc] = 0.0;
+        }
+        for tone in 1..tones {
+            let [start, end] = envelopes.endpoints(tone - 1, self.completed).map_err(|_| {
+                RenderError::Control {
+                    what: "physical tone gain cursor or interpolation refused",
+                }
+            })?;
+            for mode in 0..self.held.len() {
+                let i = mode * tones + tone;
+                let values = [
+                    start * self.cosine[i],
+                    start * self.sine[i],
+                    end * self.cosine[i],
+                    end * self.sine[i],
+                ];
+                if values.iter().any(|x| !x.is_finite()) {
+                    return Err(RenderError::Control {
+                        what: "physical tone gain endpoints overflow",
+                    });
+                }
+                [
+                    self.force_cosine[i],
+                    self.force_sine[i],
+                    self.force_cosine_end[i],
+                    self.force_sine_end[i],
+                ] = values;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -365,3 +457,7 @@ mod tests;
 #[cfg(test)]
 #[path = "coupled_tones/broadband_tests.rs"]
 mod broadband_tests;
+
+#[cfg(test)]
+#[path = "coupled_tones/envelope_tests.rs"]
+mod envelope_tests;

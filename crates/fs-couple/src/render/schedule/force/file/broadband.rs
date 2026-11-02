@@ -29,6 +29,7 @@ pub struct BroadbandModalPerformance {
     events: Vec<ProjectedForceEvent>,
     tones: Vec<Option<tones::ToneDriver>>,
     tone_count: usize,
+    envelope_count: usize,
     next_event: usize,
     completed: u64,
     max_block: usize,
@@ -49,6 +50,10 @@ impl BroadbandModalPerformance {
     /// `tones COUNT`, and `tone VOICE PORT OMEGA_RAD_S COSINE_N SINE_N` records
     /// may precede `broadband`. These are physical forces, continuous from t=0
     /// over the declared window, alongside the existing held-force schedule.
+    /// Optional `envelopes COUNT`, `envelope TONE_INDEX POINT_COUNT` and
+    /// `gain SAMPLE GAIN` rows after the tones prescribe piecewise-linear force
+    /// gains on that same clock. The continuous affine envelope is integrated
+    /// inside each interval; it is not sampled into held amplitude steps.
     /// Static preload still uses the pre-window held loads. Tone limits include
     /// a DC column and share storage/work across affected voices conservatively.
     /// Coupled/nonlinear performances refuse: their within-step trajectories
@@ -80,6 +85,7 @@ impl BroadbandModalPerformance {
                     line,
                     &columns,
                     parsed.info.sample_rate_hz,
+                    parsed.info.samples,
                     &mut parsed.force_config.max_projection_terms,
                 )
             })
@@ -137,6 +143,9 @@ impl BroadbandModalPerformance {
         info.input_hash =
             fs_blake3::hash_domain("org.frankensim.modal-performance.broadband.v1", bytes);
         let tone_count = source_program.as_ref().map_or(0, |program| program.count);
+        let envelope_count = source_program
+            .as_ref()
+            .map_or(0, |program| program.envelope_count);
         let tone_drivers = match source_program {
             Some(program) => program
                 .sources
@@ -158,6 +167,7 @@ impl BroadbandModalPerformance {
             events,
             tones: tone_drivers,
             tone_count,
+            envelope_count,
             next_event: 0,
             completed: 0,
             max_block,
@@ -176,6 +186,10 @@ impl BroadbandModalPerformance {
     /// Authored physical tone records; existing held assignments are separate.
     pub const fn continuous_force_tones(&self) -> usize {
         self.tone_count
+    }
+    /// Authored physical-force envelopes; acoustic output is never scaled here.
+    pub const fn envelope_count(&self) -> usize {
+        self.envelope_count
     }
 }
 
@@ -403,3 +417,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "broadband/envelope_tests.rs"]
+mod envelope_tests;

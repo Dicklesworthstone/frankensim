@@ -14,7 +14,7 @@ tones COUNT
 tone VOICE_INDEX PORT_INDEX OMEGA_RAD_S COSINE_N SINE_N
 ```
 
-Every tone applies `COSINE_N*cos(OMEGA_RAD_S*t) + SINE_N*sin(OMEGA_RAD_S*t)`
+Without an envelope, each tone applies `COSINE_N*cos(OMEGA_RAD_S*t) + SINE_N*sin(OMEGA_RAD_S*t)`
 newtons through the voice's original signed force-port shapes. Time starts at
 the beginning of the performance, and the tones continue over its entire
 declared window. Frequencies can be inharmonic or arbitrarily off an FFT bin.
@@ -50,6 +50,50 @@ continuous forcing. Ordinary files without the new tone section keep their
 existing path. Nonlinear/contact v3-v5 schemas remain outside this linear owner.
 `--decimate` uses the existing explicit pressure-observation filter when
 mechanics run above 48 kHz.
+
+## Physical force attacks, releases and re-attacks
+
+`music_render modal examples/coupled_enveloped_tones.performance OUT.wav --block 512`
+adds continuous gain envelopes to the same coupled broadband example. Gain
+multiplies the physical actuator force before mechanical evolution; it never
+scales the emitted audio. A released source leaves mechanical, material,
+receiver and propagation histories intact, so physical ringdown remains.
+
+Place an optional knot section after the tone records and before the receiver:
+
+```text
+envelopes COUNT
+envelope TONE_INDEX POINT_COUNT
+gain SAMPLE GAIN
+```
+
+Repeat `gain` for each point and `envelope` for each declared curve. Tone indices
+refer to the original zero-based `tone` row order, including separate rows at
+the same frequency. Each curve starts at sample zero; subsequent samples must
+strictly increase and lie within the declared performance horizon. Gains are
+finite signed dimensionless force multipliers. They interpolate linearly
+between knots and hold their final value. Undeclared tones keep unit gain;
+`envelopes 0` keeps the original constant-tone path. Held DC events are separate.
+The common parser caps the aggregate at 65536 knots and reserves their payload
+from the existing source byte allowance before allocation.
+
+The affine preparation integrates both endpoint force coefficients on each
+sample interval using four rotating source coordinates per distinct modal
+tone. Both endpoints share the interval-start carrier basis. Original work,
+each heat channel, and the causal pressure filters use that same trajectory.
+Independent unscaled carrier phases continue through zero gain and negative
+gain; a re-attack never divides by the old gain or restarts its phase. Curves,
+events and carrier phase advance only after the complete observation accepts.
+The original force guard bounds the entire interval using endpoint coefficient
+norms. Dense dimensions and work grow explicitly; no modes or tones are dropped.
+
+Piecewise-affine interpolation is exact for the declared force history, within
+floating-point error. Approximating a smooth physical control requires refining
+its knots independently of the mechanics clock. Carrier-frequency admission
+does not certify that envelope sidebands or sharp knot transitions are
+bandlimited; an adequate observation clock and the existing decimation filter
+remain necessary. This path does not prescribe chirps or replace a nonlinear
+contact, jet, bow or hammer model with an authored envelope.
 
 ## Causal broadband pressure from the complete coupled trajectory
 

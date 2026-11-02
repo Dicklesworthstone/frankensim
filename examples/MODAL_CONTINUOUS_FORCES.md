@@ -47,3 +47,43 @@ phase advances only after an accepted step. The sidecar records the number of
 physical tones, the phase origin, and the continuous-forcing integrator. A
 complex constant legacy quadrature transfer is refused for these drives;
 provide a causal broadband operator or a real instantaneous velocity gain.
+
+## Continuous force attacks, releases and signed amplitude changes
+
+`examples/modal_enveloped_tones.performance` adds sample-clock force envelopes
+to the same model and receiver. Render it with the same command and a new output
+path. The optional records sit after all `tone` rows and before `broadband`:
+
+```text
+envelopes COUNT
+envelope TONE_INDEX POINT_COUNT
+gain SAMPLE GAIN
+```
+
+Each envelope refers to a zero-based tone row in its original file order,
+including when tones for different voices are interleaved. A tone can have one
+envelope. Its first knot must be at sample zero, subsequent sample indices must
+strictly increase, and every knot must lie in `0..=samples`. Gains are finite,
+signed physical force multipliers. The gain varies linearly between knots and
+holds its final value afterward. Tones without an envelope retain unit gain;
+ordinary held-force events and static preloads keep their original meanings.
+
+For example, knots `(0,0), (100,0), (400,1), (900,1), (1200,0)` prescribe silence,
+a continuous attack, a plateau and a release. The force is the declared tone
+multiplied by that continuous gain. It is integrated within each mechanical
+interval together with motion, physical work, heat and the causal receiver.
+The interval-end gain uses the same interval-start carrier basis; it is not a
+phase reset. A zero-gain interval keeps the carrier running, so a later attack
+has the phase implied by the original performance clock. Reversing gain sign
+reverses the physical force continuously through zero. Turning off the force
+does not erase existing mechanical vibration or receiver history.
+
+The shared parser admits at most 65536 knots in total. Knot payload, curve
+cursors and additional endpoint coefficient arrays consume the existing
+`tone_limits` storage budget; endpoint scaling also consumes its step-work
+allowance. The mechanics/filter preparation keeps its own bounded continuous
+affine operator. Malformed knots and insufficient storage/work refuse; gains
+are never replaced with held samples to fit the budget. Only accepted samples
+advance carrier phase and envelope cursors. Files with no envelopes keep the
+existing constant-amplitude propagation path. The sidecar records
+`physical_force_envelopes` and identifies continuous affine-envelope integration.

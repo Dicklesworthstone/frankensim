@@ -140,4 +140,27 @@ impl Source {
             }),
         }
     }
+
+    pub(super) fn step_affine(
+        &mut self,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+    ) -> Result<f64, RenderError> {
+        match self {
+            Self::Instantaneous(source) => source
+                .step_affine(cosine_start, sine_start, cosine_end, sine_end)
+                .map(|frame| frame.observer_pressure_pa)
+                .map_err(RenderError::Coupled),
+            Self::Broadband(receiver) => receiver
+                .step_affine(cosine_start, sine_start, cosine_end, sine_end)
+                .map_err(|error| match error {
+                    BroadbandCoupledModalError::Modal(error) => RenderError::Coupled(error),
+                    BroadbandCoupledModalError::Observation(_) => RenderError::Control {
+                        what: "causal coupled receiver refused the candidate envelope sample",
+                    },
+                }),
+        }
+    }
 }

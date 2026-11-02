@@ -31,6 +31,43 @@ motion, stores and clock unchanged. Five focused regressions cover exact
 uniform reduction, independent two-layer work, tiny contributions, invalid
 coverage, late rollback, network conservation and feedback admission.
 
+## Physical force envelopes in modal performance files
+
+The v1 broadband and v2 coupled continuous-tone file paths accept optional
+`envelopes COUNT`, unique `envelope TONE_INDEX POINT_COUNT`, and
+`gain SAMPLE GAIN` records after the original physical tone rows. Original
+tone-row indices survive per-voice grouping and exact-frequency coalescing.
+Each nonempty curve begins at sample zero, increases strictly within the
+declared horizon, interpolates finite signed gains linearly, and holds its
+last gain. Undeclared curves retain unit gain; zero envelopes keep the old
+constant preparation and numerical path. Held DC event assignments remain
+independent physical inputs.
+
+The shared parser bounds aggregate knots and reserves payload before allocation.
+Per-driver endpoint buffers and, for the independent path, additional scaling
+work are charged against the existing source allowances. Envelope-capable
+preparation admits complete affine source coordinates and original physical
+limits. Carrier coefficients remain unscaled accepted state, including through
+silence and re-attack. Both gain endpoints multiply that same interval-start
+carrier basis before the exact physical step. No output pressure is faded and
+no resonant, material, receiver or delay history is reset. Source phase, held
+events and gain cursors publish only after the physical/observation step accepts.
+
+Both existing CLI children expose the number of physical force envelopes and
+retain the original fit/delay, decimation and PCM semantics. The complete
+examples are `modal_enveloped_tones.performance` and
+`coupled_enveloped_tones.performance`. Focused file checks cover independently
+evaluated whole ramp segments and physical work, original tone indexing,
+silence/release/re-attack phase, bitwise callback partitions, residual physical
+ringdown, malformed knots, resource admission and rejected-step cursor
+preservation. Native executions of both actual CLI children produce 4800-sample
+48 kHz PCM16 WAVs with zero clipping through the unchanged encoding path.
+
+These are prescribed physical force histories. Knot refinement is independent
+of the mechanics clock; sharp envelope changes are not certified bandlimited
+by carrier admission. This does not infer a nonlinear excitation law or alter
+the estimate-only authority of sampled receiver transfers.
+
 ## Continuous physical tones in coupled performance files
 
 Continuous coupled force files (`render::schedule::force::file::coupled_tones`):

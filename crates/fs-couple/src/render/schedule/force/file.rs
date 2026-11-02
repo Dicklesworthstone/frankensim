@@ -63,6 +63,8 @@ pub mod broadband;
 pub mod coupled_tones;
 // Shared signed physical tone rows; mechanical schemas keep their own parser.
 mod tone_record;
+// Piecewise-affine physical source gains shared by independent/coupled paths.
+mod tone_envelope;
 /// Observer transfers from declared modal geometry and the surrounding gas.
 pub mod radiation;
 
