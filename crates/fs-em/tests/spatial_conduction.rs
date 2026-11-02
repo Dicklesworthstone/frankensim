@@ -2,6 +2,8 @@
 //! Manufactured source laws test implementation, not empirical material data.
 #[path = "spatial_conduction/contacts.rs"]
 mod contacts;
+#[path = "spatial_conduction/terminals.rs"]
+mod terminals;
 
 use fs_em::{conduction::ConductionControls, spatial::conduction::*};
 use fs_evidence::ValidityDomain;

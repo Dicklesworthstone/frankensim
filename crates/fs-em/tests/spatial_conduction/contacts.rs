@@ -381,3 +381,46 @@ fn invalid_trace_ownership_geometry_budget_and_cancel_refuse_without_replacing_f
         10.0,
     );
 }
+
+#[test]
+fn total_current_uses_the_same_contact_connection_and_local_surface_heat() {
+    for (pressure, area) in [(1e5, 0.4), (2e5, 1.6)] {
+        let problem = specimen([2.0, 5.0], pressure, 1.0, area);
+        let contact_resistivity = 3.0 - 1.5 * (pressure - 1e5) / 1e5;
+        let expected_resistance = (7.0 + contact_resistivity) / area;
+        let faces = super::terminals::terminal_faces(&problem, 2.0);
+        let response = problem
+            .resistance(&faces[0], &faces[1], controls(), &mut || false)
+            .unwrap();
+        near(response.resistance_ohm(), expected_resistance);
+        for current in [-0.3, 0.0, 0.75] {
+            let field = response
+                .field_at_current(current, 1e-10, 1e-9, &mut || false)
+                .unwrap();
+            near(field.power_w, current * current * expected_resistance);
+            near(
+                field.cell_power_w.iter().sum(),
+                current * current * 7.0 / area,
+            );
+            near(
+                field.contacts.iter().map(|c| c.power_w).sum(),
+                current * current * contact_resistivity / area,
+            );
+            for contact in &field.contacts {
+                near(contact.current_a, -0.5 * current);
+            }
+            near(field.supplied_power_w, field.power_w);
+        }
+        let contact_face = problem
+            .mesh()
+            .faces
+            .iter()
+            .position(|f| *f == [4, 5, 7])
+            .unwrap();
+        assert!(
+            problem
+                .resistance(&[contact_face], &faces[1], controls(), &mut || false)
+                .is_err()
+        );
+    }
+}

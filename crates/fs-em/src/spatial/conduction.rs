@@ -10,6 +10,8 @@
 
 mod contact;
 pub use contact::{SpatialConductionContact, SpatialConductionContactResponse};
+mod terminals;
+pub use terminals::SpatialResistance;
 
 use super::{
     ScalarBoundary, SpatialGeometry, SpatialMagneticError, dot, prepare_geometry,
@@ -272,6 +274,33 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         controls: ConductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialConductionField> {
+        let traces = self.prepare_boundary(boundary, controls, cancelled)?;
+        // The load is positive INTO the conductor. The shared trace helper
+        // only integrates signed data; unlike magnetic B.n no sign reversal
+        // belongs between the electrical load and K V.
+        let (relative, report) = solve_scalar_system(
+            &self.stiffness,
+            &traces.flux_load_wb,
+            &traces.prescribed,
+            controls.linear,
+            cancelled,
+        )?;
+        self.recover_field(
+            relative,
+            traces,
+            controls.current_tolerance_a,
+            controls.power_tolerance_w,
+            report,
+            cancelled,
+        )
+    }
+
+    fn prepare_boundary(
+        &self,
+        boundary: &SpatialConductionBoundary,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ScalarBoundary> {
         check(cancelled)?;
         if !controls.current_tolerance_a.is_finite()
             || controls.current_tolerance_a <= 0.0
@@ -301,13 +330,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
             }
         }
         let g = &self.geometry;
-        let ScalarBoundary {
-            prescribed,
-            physical_prescribed,
-            flux_load_wb: loads,
-            gauges,
-            references,
-        } = prepare_scalar_boundary_traces(
+        Ok(prepare_scalar_boundary_traces(
             &g.mesh,
             &g.faces,
             &self.components,
@@ -318,17 +341,26 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                 .map(|t| (t.face, t.inward_current_density_a_m2)),
             controls.current_tolerance_a,
             cancelled,
-        )?;
-        // This load is positive INTO the conductor. The shared trace helper
-        // only integrates signed data; unlike magnetic B.n no sign reversal
-        // belongs between the electrical load and K V.
-        let (relative, report) = solve_scalar_system(
-            &self.stiffness,
-            &loads,
-            &prescribed,
-            controls.linear,
-            cancelled,
-        )?;
+        )?)
+    }
+
+    fn recover_field(
+        &self,
+        relative: Vec<f64>,
+        traces: ScalarBoundary,
+        current_tolerance_a: f64,
+        power_tolerance_w: f64,
+        report: Option<SolveReport>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialConductionField> {
+        let ScalarBoundary {
+            physical_prescribed,
+            flux_load_wb: loads,
+            gauges,
+            references,
+            ..
+        } = traces;
+        let g = &self.geometry;
         let n = g.mesh.vertex_count;
         let mut applied = vec![0.0; n];
         let mut nodal_boundary_current_a = vec![None; n];
@@ -395,10 +427,10 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         }
         let power_residual_w = finite(power_w - supplied_power_w)?;
         let hodge_power_residual_w = finite(power_w - hodge_power_w)?;
-        if current_residual_a.abs() > controls.current_tolerance_a
-            || maximum_free_current_residual_a > controls.current_tolerance_a
-            || power_residual_w.abs() > controls.power_tolerance_w
-            || hodge_power_residual_w.abs() > controls.power_tolerance_w
+        if current_residual_a.abs() > current_tolerance_a
+            || maximum_free_current_residual_a > current_tolerance_a
+            || power_residual_w.abs() > power_tolerance_w
+            || hodge_power_residual_w.abs() > power_tolerance_w
         {
             return Err(SpatialConductionError::Balance {
                 current_residual_a,

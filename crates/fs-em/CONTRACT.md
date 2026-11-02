@@ -363,6 +363,27 @@ one deterministic voltage gauge is applied. A current-density trace is not an
 equipotential total-current electrode. Source work includes authored trace loads
 and solved voltage reactions exactly once, using component-relative potentials.
 
+`resistance[_at_reference_voltage]` and `solve_current[_with_reference_voltage]`
+add ideal equipotential electrodes declared as disjoint unions of complete
+exterior faces. The total current is signed; the native field determines its
+local distribution, including heterogeneous parallel paths and source-backed
+contacts. Repeated faces, shared vertices between opposite terminals, internal
+contact faces and a pair with no bulk/contact-connected path refuse. An explicit
+zero drive retains the finite positive resistance established by a nonzero
+reference solve; it does not make disconnected terminals admissible.
+
+`SpatialResistance` retains that original source-bound operator, reference
+voltage, relative potential basis and field. Repeated `field_at_voltage` or
+`field_at_current` calls perform native field/contact recovery and physical
+acceptance without another Krylov solve. Actual signed currents, free-node
+residuals, bulk/contact Joule heat and terminal/Hodge work are recomputed;
+current control also checks both terminal reactions and authored I*V. The
+returned scaled field has no new linear-solve report. Material or contact
+refresh requires a new response; no nonlinear, inductive or moving-geometry
+extension is inferred. G1/G3/G4 regressions cover series resistance, unequal
+parallel current injection, rotated conductivity and SI scaling, separate
+contact heating, current reversal/zero, canonical face order and cancellation.
+
 Actual cell E=-grad(V), J=sigma E and volume-integrated E.J remain unsmoothed.
 Acceptance separately checks free-node/current balance, recovered versus Hodge
 power and supplied terminal work. These dimensional residual gates are not
