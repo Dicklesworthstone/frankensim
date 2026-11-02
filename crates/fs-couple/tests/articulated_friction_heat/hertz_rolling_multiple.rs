@@ -3,6 +3,9 @@
 //! solves independent force/torque and three-capacity equations, not production
 //! Schur matrices or mechanical heat reports.
 
+#[path = "hertz_rolling_multiple/driven.rs"]
+mod driven;
+
 use fs_contact::interface_binding::thermal_friction::SourceThermalCoulomb;
 use fs_couple::friction_heat::hertz::multiple::{
     RigidHertzIslandHeatConductivity, RigidHertzIslandHeatSource,

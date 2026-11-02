@@ -21417,3 +21417,28 @@ time refinement. Seven new physical groups cover an independent forced
 mechanical/thermal reference, mixed shear/spin/rolling, driven reversal and
 thermal weakening, common-acceleration/static limits, exact zero-drive behavior
 and late atomic source/cancellation refusal; eleven existing tests also pass.
+
+## Powered shared-body Hertz assemblies with finite thermal feedback
+
+`friction_heat::hertz_rolling::multiple::propose_rigid_hertz_rolling_island_driven_heat`
+accepts held external world forces and body-frame COM torques in complete
+original body order. The prepared native island retains full shared-body
+coupling and applies each participating body's drive once. Original per-face
+source temperatures and conductivities still determine each interface's surface
+heat; every sphere's patch bulk losses accumulate once into its unique original
+caloric inventory.
+
+`external_mechanical_work_j` remains an independently audited supply in
+`delta_K_unique_bodies + delta_H - Q_external - W_drive`, including common-body
+acceleration. All source and thermal trials restart accepted bodies and loaded
+rolling histories, with one final immutable proposal after cancellation and
+energy checks. The original unforced entry retains its native constructor and
+behavior without allocating a new whole-body zero-wrench input.
+
+Three new physical groups compare shared-sphere force/torque/three-capacity
+response with independent equations and temperature-dependent sources, check
+exact zero drive and common acceleration without additional physical heat, and
+exercise late source/cancellation refusal from loaded histories. All 27 shared
+Hertz/rolling finite-heat tests pass. Native spectator/normal-drive refusals,
+fixed geometry/load, held-effort event limits, original source applicability and
+thermal time-refinement requirements remain.

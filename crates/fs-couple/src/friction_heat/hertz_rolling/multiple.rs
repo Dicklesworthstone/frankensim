@@ -26,7 +26,7 @@ use fs_mbd::tangential_friction::hertz_rolling::multiple::{
     RigidHertzRollingIslandLaw,
 };
 use fs_mbd::tangential_friction::rolling::RigidRollingHistory;
-use fs_mbd::{MassProperties, RigidBodyState};
+use fs_mbd::{MassProperties, RigidBodyState, Wrench};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
@@ -133,9 +133,11 @@ pub struct HeatedRigidHertzRollingIslandCandidate<'m, P> {
     pub target_time_s: f64,
     /// Authored and callback outside heat measured before bulk injection.
     pub external_heat_j: f64,
+    /// Actual external wrench work counted once per original participating body.
+    pub external_mechanical_work_j: f64,
     /// Actual caloric change minus outside heat and both physical loss channels.
     pub heat_transfer_residual_j: f64,
-    /// Actual unique-body kinetic plus original caloric change minus outside heat.
+    /// Unique-body kinetic plus caloric change minus outside heat and drive work.
     pub combined_energy_residual_j: f64,
     /// Independent sum of the original native and heat-network audit residuals.
     pub summed_energy_residual_j: f64,
@@ -174,6 +176,86 @@ pub fn propose_rigid_hertz_rolling_island_heat<'m, P, E>(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     contacts: &[RigidHertzRollingIslandHeatContact<'_>],
+    thermal: &DepositionSimulation<'m>,
+    accepted_time_s: f64,
+    dt_s: f64,
+    controls: RigidHertzRollingIslandHeatControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(
+        &DepositionSimulation<'m>,
+        &[u64],
+        &[f64],
+    ) -> Result<RigidHertzIslandHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<HeatedRigidHertzRollingIslandCandidate<'m, P>, RigidHertzRollingIslandHeatError<E>> {
+    propose_heat(
+        bodies,
+        properties,
+        contacts,
+        None,
+        thermal,
+        accepted_time_s,
+        dt_s,
+        controls,
+        energy_guess_j,
+        resolve,
+        gate,
+    )
+}
+
+/// Joint powered contact-island response and original finite thermal network.
+///
+/// Wrenches follow the complete original body order, with world-frame forces
+/// and body-frame torques about each COM. The native owner applies drive once
+/// per participating body, preserves shared-body mobility and independently
+/// accounts for actual actuator work. It refuses drive outside this contact
+/// island and unresolved normal motion; there is no implicit normal support.
+///
+/// Surface work remains attached to each original face. All patches on one
+/// sphere contribute their bulk loss once to that sphere's original thermal
+/// inventory. Drive work, including common-body acceleration, stays an external
+/// mechanical supply and never becomes a heat source. All thermal trials start
+/// from the same accepted bodies and histories, and failures publish nothing.
+/// The original midpoint, frozen-geometry, source and thermal limits remain.
+#[allow(clippy::too_many_arguments)]
+pub fn propose_rigid_hertz_rolling_island_driven_heat<'m, P, E>(
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    contacts: &[RigidHertzRollingIslandHeatContact<'_>],
+    external: &[Wrench],
+    thermal: &DepositionSimulation<'m>,
+    accepted_time_s: f64,
+    dt_s: f64,
+    controls: RigidHertzRollingIslandHeatControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(
+        &DepositionSimulation<'m>,
+        &[u64],
+        &[f64],
+    ) -> Result<RigidHertzIslandHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<HeatedRigidHertzRollingIslandCandidate<'m, P>, RigidHertzRollingIslandHeatError<E>> {
+    propose_heat(
+        bodies,
+        properties,
+        contacts,
+        Some(external),
+        thermal,
+        accepted_time_s,
+        dt_s,
+        controls,
+        energy_guess_j,
+        resolve,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn propose_heat<'m, P, E>(
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    contacts: &[RigidHertzRollingIslandHeatContact<'_>],
+    external: Option<&[Wrench]>,
     thermal: &DepositionSimulation<'m>,
     accepted_time_s: f64,
     dt_s: f64,
@@ -292,14 +374,25 @@ pub fn propose_rigid_hertz_rolling_island_heat<'m, P, E>(
             },
         )
         .collect();
-    let prepared = PreparedRigidHertzRollingIsland::new(
-        bodies,
-        properties,
-        &native_contacts,
-        duration_s,
-        controls.mechanical,
-        gate,
-    )?;
+    let prepared = match external {
+        Some(external) => PreparedRigidHertzRollingIsland::new_driven(
+            bodies,
+            properties,
+            &native_contacts,
+            external,
+            duration_s,
+            controls.mechanical,
+            gate,
+        ),
+        None => PreparedRigidHertzRollingIsland::new(
+            bodies,
+            properties,
+            &native_contacts,
+            duration_s,
+            controls.mechanical,
+            gate,
+        ),
+    }?;
     let tolerance = controls
         .mechanical
         .mechanical
@@ -595,7 +688,9 @@ pub fn propose_rigid_hertz_rolling_island_heat<'m, P, E>(
         caloric_change - staged.external_heat_j - native.surface_heat_j - native.bulk_heat_j,
     )?;
     let combined = finite(
-        native.kinetic_after_j - native.kinetic_before_j + caloric_change - staged.external_heat_j,
+        native.kinetic_after_j - native.kinetic_before_j + caloric_change
+            - staged.external_heat_j
+            - native.external_work_j,
     )?;
     let summed = finite(native.total_energy_residual_j + trial.report().total_energy_residual_j)?;
     if transfer.abs() > controls.heat.total_j
@@ -609,6 +704,7 @@ pub fn propose_rigid_hertz_rolling_island_heat<'m, P, E>(
     let (thermal, staged, heat) = trial.accept(controls.heat, checkpoint)?;
     checkpoint()?;
     Ok(HeatedRigidHertzRollingIslandCandidate {
+        external_mechanical_work_j: staged.mechanical.report.external_work_j,
         mechanical: staged.mechanical,
         thermal,
         heat,
