@@ -427,6 +427,22 @@ fit and cannot call this L3 owner; no default consumer is migrated here.
 - `input_impedance` / `impedance_sweep` / `impedance_peaks` —
   `Z_in = p/U` at the inlet with per-solve diagnostics (minimum shear
   number, mouth `ka`).
+- `resonance::refine_response_resonance` — frequency, original complex
+  response and half-power bandwidth of one caller-isolated finite magnitude
+  peak. The callback evaluates the original duct, prepared multimodal or driven
+  network response at every frequency; no loss fitting, interpolation, gain
+  clipping or coarse-grid maximum is substituted. Golden-section and crossing
+  searches cache exact queried frequencies, retain their final brackets, and
+  obey explicit evaluation/cancellation limits. The peak bracket must resolve
+  both frequency and measured linewidth; lossless poles or unresolved widths
+  refuse instead of manufacturing a finite Q. The input interval must contain
+  one unimodal peak and both half-power crossings. Observed reversals and
+  missing crossings refuse; finite probes do not certify absence of hidden
+  features. Reported Q is `omega_peak / bandwidth` for the selected observable,
+  not a natural-frequency, complex-pole or decay-rate estimate. Validation uses
+  exact damped-oscillator peak/crossings, an off-grid Q=1e7 mobility peak,
+  extreme gain changes, and the original viscothermal cylinder on three
+  numerical-resolution rungs against the independent Kirchhoff loss limit.
 - `Segment::ToneHole` + `HoleState` + `tone_hole_shunt` — side
   branch (`[[1,0],[1/Z_h,1]]`). The chimney is a short cylinder:
   OPEN is that run plus a flanged mouth (Dalmont inner length

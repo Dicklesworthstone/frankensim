@@ -91,6 +91,8 @@ pub use wall::{WallLaw, WallModel};
 pub mod exterior;
 /// Generic frequency-domain duct graphs, loops and labelled N-port impedances.
 pub mod network;
+/// Bracketed resonance and half-power bandwidth from original harmonic responses.
+pub mod resonance;
 /// Exact thin-wall unflanged radiation load below the axisymmetric cutoff.
 pub mod levine_schwinger;
 pub use levine_schwinger::{LsQuadrature, LsSolution, LS_MAX_KA, levine_schwinger_impedance};
