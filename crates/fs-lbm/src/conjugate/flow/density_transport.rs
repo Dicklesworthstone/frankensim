@@ -7,6 +7,11 @@ use super::{
 use crate::conjugate::krylov::bicgstab_ilu0;
 use fs_sparse::{Coo, Csr};
 
+mod momentum;
+pub use momentum::{
+    MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport, MaterialMomentumStep,
+};
+
 /// Incoming material in the same physical and caloric convention as the cells.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdvectedMaterial {
@@ -96,6 +101,39 @@ pub struct MaterialAdvectionStep {
     pub mass_kg: Vec<f64>,
     pub specific_enthalpy_j_kg: Vec<f64>,
     pub report: MaterialAdvectionReport,
+    mass_transport: AcceptedMassTransport,
+}
+
+impl MaterialAdvectionStep {
+    /// Original accepted transfers, never reconstructed from a returned density.
+    /// The endpoint inventory is public for existing consumers; reject a caller
+    /// edit before using its private, immutable transport operator.
+    pub(super) fn accepted_mass_transport(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<&AcceptedMassTransport, ChtError> {
+        let transport = &self.mass_transport;
+        if self.mass_kg.len() != transport.row_of.len() {
+            return Err(refuse(
+                "accepted inventory shape was changed before dependent transport",
+            ));
+        }
+        for (c, &mass) in self.mass_kg.iter().enumerate() {
+            poll_every(gate, c)?;
+            let row = transport.row_of[c];
+            let expected = if row == usize::MAX {
+                0.0
+            } else {
+                transport.endpoint_mass_kg[row]
+            };
+            if mass != expected {
+                return Err(refuse(
+                    "accepted mass inventory was changed before dependent transport",
+                ));
+            }
+        }
+        Ok(transport)
+    }
 }
 
 impl FlowField {
@@ -223,13 +261,36 @@ pub(super) fn admit(
     Ok(density)
 }
 
-#[derive(Clone, Copy)]
-struct Route {
-    from: Option<usize>,
-    to: Option<usize>,
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum InletLocation {
+    Boundary(usize),
+    Source(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Route {
+    pub(super) from: Option<usize>,
+    pub(super) to: Option<usize>,
     volume: f64,
-    inlet: Option<AdvectedMaterial>,
-    mass: f64,
+    pub(super) inlet: Option<AdvectedMaterial>,
+    inlet_location: Option<InletLocation>,
+    pub(super) mass: f64,
+}
+
+/// The same accepted mass routes and donor operator serve momentum and EOS
+/// consumers. Private construction prevents an independently authored flux from
+/// being passed off as the mass transport that produced the returned inventory.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AcceptedMassTransport {
+    pub(super) cells: Vec<usize>,
+    row_of: Vec<usize>,
+    pub(super) initial_mass_kg: Vec<f64>,
+    pub(super) endpoint_mass_kg: Vec<f64>,
+    pub(super) routes: Vec<Route>,
+    parents: Vec<usize>,
+    closure: Vec<f64>,
+    operator: Csr,
+    diagonal: Vec<f64>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -278,7 +339,7 @@ pub(super) fn advect_projected_material(
     }
     let dt = controls.projection.duration_s;
     let mut routes = Vec::new();
-    let mut push = |from, to, volume: f64, inlet| -> Result<(), ChtError> {
+    let mut push = |from, to, volume: f64, inlet, inlet_location| -> Result<(), ChtError> {
         finite_positive("flow.transferred_volume", volume)?;
         if routes.len() >= controls.max_connections {
             return Err(refuse("material connection budget exhausted"));
@@ -288,6 +349,7 @@ pub(super) fn advect_projected_material(
             to,
             volume,
             inlet,
+            inlet_location,
             mass: 0.0,
         });
         Ok(())
@@ -306,7 +368,7 @@ pub(super) fn advect_projected_material(
             }
             let other = nb.map(|other| row_of[other]);
             if q > 0.0 {
-                push(Some(row), other, dt * q, None)?;
+                push(Some(row), other, dt * q, None, None)?;
             } else {
                 let inlet =
                     if nb.is_none() {
@@ -316,7 +378,13 @@ pub(super) fn advect_projected_material(
                     } else {
                         None
                     };
-                push(other, Some(row), dt * -q, inlet)?;
+                push(
+                    other,
+                    Some(row),
+                    dt * -q,
+                    inlet,
+                    nb.is_none().then_some(InletLocation::Boundary(f)),
+                )?;
             }
         }
         match input.volume_sources[c] {
@@ -325,10 +393,16 @@ pub(super) fn advect_projected_material(
                 volume_rate_m3_s,
                 material,
             } => {
-                push(None, Some(row), dt * volume_rate_m3_s, Some(material))?;
+                push(
+                    None,
+                    Some(row),
+                    dt * volume_rate_m3_s,
+                    Some(material),
+                    Some(InletLocation::Source(c)),
+                )?;
             }
             MaterialVolumeSource::Outflow { volume_rate_m3_s } => {
-                push(Some(row), None, dt * volume_rate_m3_s, None)?;
+                push(Some(row), None, dt * volume_rate_m3_s, None, None)?;
             }
         }
     }
@@ -494,10 +568,23 @@ pub(super) fn advect_projected_material(
         ));
     }
     poll(gate)?;
+    let mass_routes = routes.len();
+    let mass_transport = AcceptedMassTransport {
+        initial_mass_kg: cells.iter().map(|&c| input.mass_kg[c]).collect(),
+        endpoint_mass_kg: cells.iter().map(|&c| mass[c]).collect(),
+        cells,
+        row_of,
+        routes,
+        parents,
+        closure,
+        operator: a,
+        diagonal,
+    };
     Ok(MaterialAdvectionStep {
         projection: projected,
         mass_kg: mass,
         specific_enthalpy_j_kg: endpoint_h,
+        mass_transport,
         report: MaterialAdvectionReport {
             mass_before_kg: total_before.value,
             mass_after_kg: total_after.value,
@@ -509,7 +596,7 @@ pub(super) fn advect_projected_material(
             absolute_enthalpy_defect_j: energy_defect,
             density_iterations,
             enthalpy_iterations,
-            mass_routes: routes.len(),
+            mass_routes,
         },
     })
 }

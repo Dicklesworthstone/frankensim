@@ -24,7 +24,8 @@ pub use density_projection::{DensityProjection, DensityProjectionControls, Densi
 mod density_transport;
 pub use density_transport::{
     AdvectedMaterial, MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
-    MaterialAdvectionStep, MaterialVolumeSource,
+    MaterialAdvectionStep, MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport,
+    MaterialMomentumStep, MaterialVolumeSource,
 };
 mod phase_volume;
 pub use phase_volume::{

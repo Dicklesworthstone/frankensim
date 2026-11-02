@@ -133,7 +133,8 @@ pub use flow::{
     CoexistenceVolumeStep, DensityProjection, DensityProjectionControls, DensityProjectionReport,
     FlowFace, FlowField, LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport,
     MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
-    MaterialAdvectionStep, MaterialVolumeSource, ProjectionReport, lbm_duct_flow,
+    MaterialAdvectionStep, MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport,
+    MaterialMomentumStep, MaterialVolumeSource, ProjectionReport, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{

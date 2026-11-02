@@ -2660,6 +2660,26 @@ electronics cooling (the wedge's second physics after steady conduction).
   material/EOS closure. It does not infer phase expansion, mixing heat,
   pressure heat or a complete Navier–Stokes/enthalpy timestep. First-order
   donor diffusion and splitting error require spatial/temporal refinement.
+- `MaterialAdvectionStep::advect_momentum` consumes the exact accepted mass
+  transfers of that step, including phase-volume results. Private retained
+  routes and the already assembled mass*h operator serve all three momentum
+  components without another density solve or a reconstructed mass flux.
+  Original extensive momenta and prescribed pre-advection impulses remain
+  explicit, as do incoming boundary/source velocities. Component-centered
+  native solves provide donor velocities; paired transfers form authoritative
+  returned momenta, whose actual P/M independently passes the original donor
+  equations. Zero transfers and zero impulses retain original momentum exactly.
+  Local/global momentum and kinetic-energy gates include impulse representation,
+  external carry, nonnegative backward-Euler/upwind loss and the separate
+  energy contribution of retained mass roundoff. Numerical losses never change
+  enthalpy. The staggered projection retains pressure correction and its work;
+  cell momentum does not receive that correction again. Force splitting, phase
+  mobility and cell/face reconstruction remain with the enclosing owner.
+  Altered public masses, missing incoming velocities, numerical budget failure
+  or cancellation returns no candidate. Native G1/G3/G4 regressions check
+  analytic graded transport on all axes, injection/extraction, impulse work,
+  exact zero-flow continuation, closed circulation, velocity-datum invariance,
+  actual phase-volume consumption and independent roundoff-energy refusal.
 - `FlowField::advance_coexistence_volume` supplies a bounded physical consumer
   of that conservative transport: one mobile, common-velocity material mixture
   on ONE adjacent isothermal solid/liquid coexistence interval of its original
