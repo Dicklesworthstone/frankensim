@@ -25,6 +25,10 @@ use crate::{E, Q};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 
+mod lubricated;
+pub use lubricated::{DryLubricatedDiskExchange2, LubricationPlane2, PlaneLubricationExchange2};
+use lubricated::{FilmTotals2, PreparedPlanes2};
+
 /// Bounded numerical admission for the three coupled correction impulses.
 /// Angular impulses are divided by disk radius before tolerance comparison.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -125,7 +129,7 @@ pub struct ImmersedMomentum2 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[must_use]
 pub struct DryDiskExchange2 {
-    /// Original collision, with authored PLUS correction loads and unchanged
+    /// Original collision, with authored PLUS correction/film loads and unchanged
     /// physical dry inertia. Native forcing is the held incoming Guo source.
     pub native: PartialSaturationBodyExchange2,
     /// Location of the coupled impulse between the two free half-drifts.
@@ -147,13 +151,15 @@ pub struct DryDiskExchange2 {
     pub corrected_hydrodynamic_impulse: [f64; 3],
     /// Actual dry-body linear, orbital and spin angular momentum changes.
     pub body_momentum_change: [f64; 3],
-    /// Actual body change minus authored load and corrected reaction.
+    /// Actual body change minus authored load, corrected reaction and any
+    /// separately reported lubrication impulse.
     pub body_momentum_residual: [f64; 3],
     /// Stationary wall/exterior bounce impulse received by the fluid.
     pub boundary_fluid_impulse: [f64; 3],
     /// Angular momentum transported by periodic fluid seams.
     pub periodic_angular_impulse: f64,
-    /// Exterior fluid plus dry body minus physical sources and boundary fluxes.
+    /// Exterior fluid plus dry body minus physical sources, boundary fluxes and
+    /// any separately reported lubrication impulse received from plane reservoirs.
     pub combined_momentum_residual: [f64; 3],
     /// Authored impulse/couple work at the native midpoint rigid velocity.
     pub physical_external_work: f64,
@@ -269,6 +275,29 @@ impl DryDisk2 {
         config: DryDiskCouplingConfig2,
         cancel: &CancelGate,
     ) -> Result<DryDiskExchange2, DryDiskError2> {
+        self.step_inner(
+            grid,
+            external_impulse,
+            external_couple,
+            moment_origin,
+            config,
+            cancel,
+            None,
+        )
+        .map(|receipt| receipt.motion)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_inner(
+        &mut self,
+        grid: &mut Grid,
+        external_impulse: [f64; 2],
+        external_couple: f64,
+        moment_origin: [f64; 2],
+        config: DryDiskCouplingConfig2,
+        cancel: &CancelGate,
+        planes: Option<&PreparedPlanes2>,
+    ) -> Result<DryLubricatedDiskExchange2, DryDiskError2> {
         checkpoint(cancel)?;
         config.admit()?;
         admit_grid(grid, self.disk.dims)?;
@@ -294,6 +323,7 @@ impl DryDisk2 {
             origin: moment_origin,
             external: [external_impulse[0], external_impulse[1], external_couple],
             before,
+            planes,
         };
         let arm = subtract(center, moment_origin);
         let radius = self.disk.radius;
@@ -384,7 +414,11 @@ impl DryDisk2 {
         // no Jacobian probe or rejected trial may leave the published post.
         let after = &candidate.measure;
         let physical_external = about_origin(context.external, arm);
-        let correction_center = denormalize(correction, radius);
+        let mut correction_center = denormalize(correction, radius);
+        if candidate.films.active != 0 {
+            correction_center[0] -= candidate.films.impulse[0];
+            correction_center[1] -= candidate.films.impulse[1];
+        }
         let correction_origin = about_origin(correction_center, arm);
         let measured_correction: [f64; 3] = core::array::from_fn(|k| {
             after.interior.momentum[k] - before.interior.momentum[k] - after.interior_force[k]
@@ -401,11 +435,11 @@ impl DryDisk2 {
         let corrected_hydrodynamic =
             core::array::from_fn(|k| native_reaction[k] + measured_correction[k]);
         let body_change = body_increment(initial, candidate.body, moment_origin);
-        let body_residual = core::array::from_fn(|k| {
+        let mut body_residual = core::array::from_fn(|k| {
             body_change[k] - physical_external[k] - corrected_hydrodynamic[k]
         });
         let represented_force = core::array::from_fn(|k| after.force[k] - after.interior_force[k]);
-        let combined = core::array::from_fn(|k| {
+        let mut combined = core::array::from_fn(|k| {
             after.fluid.momentum[k]
                 - before.fluid.momentum[k]
                 - (after.interior.momentum[k] - before.interior.momentum[k])
@@ -415,9 +449,16 @@ impl DryDisk2 {
                 - after.boundary[k]
                 - if k == 2 { after.periodic } else { 0.0 }
         });
+        if candidate.films.active != 0 {
+            for k in 0..3 {
+                body_residual[k] -= candidate.films.impulse[k];
+                combined[k] -= candidate.films.impulse[k];
+            }
+        }
         let scale = norm(normalize(body_change, radius))
             .max(norm(normalize(physical_external, radius)))
-            .max(norm(normalize(corrected_hydrodynamic, radius)));
+            .max(norm(normalize(corrected_hydrodynamic, radius)))
+            .max(norm(normalize(candidate.films.impulse, radius)));
         let body_allowance = config.tolerance(scale)? + 4096.0 * f64::EPSILON * scale.max(1.0);
         let fluid_scale = norm(normalize(before.fluid.momentum, radius))
             .max(norm(normalize(after.fluid.momentum, radius)))
@@ -477,6 +518,20 @@ impl DryDisk2 {
             candidate_evaluations: evaluations,
             jacobian_condition: condition,
         };
+        let plane_receipts = if let Some(planes) = planes {
+            planes.admit_endpoint(candidate.body.center, radius, cancel)?;
+            planes.receipts(candidate.exchange.velocity_midpoint, moment_origin, cancel)?
+        } else {
+            Vec::new()
+        };
+        let receipt = DryLubricatedDiskExchange2 {
+            motion: receipt,
+            planes: plane_receipts,
+            body_impulse: candidate.films.impulse,
+            body_work: candidate.films.body_work,
+            plane_work: candidate.films.plane_work,
+            dissipated_energy: candidate.films.dissipation,
+        };
         checkpoint(cancel)?;
         grid.stream_from(&self.disk.post);
         self.disk.body = candidate.body;
@@ -488,7 +543,7 @@ impl DryDisk2 {
         &mut self,
         grid: &Grid,
         correction: [f64; 3],
-        context: &Context,
+        context: &Context<'_>,
         config: DryDiskCouplingConfig2,
         evaluations: &mut usize,
         cancel: &CancelGate,
@@ -532,10 +587,21 @@ impl DryDisk2 {
                 - Dd::from_f64(measure.interior_force[k]))
             .to_f64()
         });
-        let target = normalize(
+        let mut target = normalize(
             about_origin(target_origin, subtract(context.origin, context.center)),
             self.disk.radius,
         );
+        let films = if let Some(planes) = context.planes {
+            planes.evaluate(exchange.velocity_midpoint, context.origin, cancel)?
+        } else {
+            FilmTotals2::default()
+        };
+        if films.active != 0 {
+            // Every normal film passes through the disk center. Its torque
+            // there is exactly zero, even for simultaneous oblique planes.
+            target[0] += films.impulse[0];
+            target[1] += films.impulse[1];
+        }
         let residual = core::array::from_fn(|k| correction[k] - target[k]);
         if !target.into_iter().chain(residual).all(f64::is_finite) {
             return Err(DryDiskError2::Invalid(
@@ -549,6 +615,7 @@ impl DryDisk2 {
             measure,
             target,
             residual,
+            films,
         })
     }
 
@@ -706,12 +773,13 @@ impl DryDisk2 {
 }
 
 #[derive(Clone, Copy)]
-struct Context {
+struct Context<'a> {
     initial: PartialSaturationBody2,
     center: [f64; 2],
     origin: [f64; 2],
     external: [f64; 3],
     before: Measurement,
+    planes: Option<&'a PreparedPlanes2>,
 }
 struct Candidate {
     body: PartialSaturationBody2,
@@ -720,6 +788,7 @@ struct Candidate {
     measure: Measurement,
     target: [f64; 3],
     residual: [f64; 3],
+    films: FilmTotals2,
 }
 #[derive(Clone, Copy)]
 struct Measurement {

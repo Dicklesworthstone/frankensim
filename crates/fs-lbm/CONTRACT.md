@@ -5844,6 +5844,45 @@ are required. Multiple disks, body seam crossing, contact and free surfaces
 remain outside this owner. The existing `MovingDisk2` retains its explicit
 additional-inertia interpretation.
 
+### Simultaneous dry-disk and prescribed-plane normal lubrication
+
+`DryDisk2::step_with_lubrication_planes` adds up to 64 distinct prescribed
+translating `LubricationPlane2` reservoirs to the original physical dry-disk
+operator. The original `UnderResolvedCylinderPair2` normal resistance supplies
+the positive gap floor and cutoff subtraction. Its dynamic viscosity is in
+lattice units per unit depth; the caller matches the fluid viscosity and
+calibrates the unresolved-film cutoff.
+
+Every active film uses the same solved body midpoint velocity and frozen
+half-drift geometry. The existing three-unknown correction closes
+`J_supplemental = Delta Pi_inside - J_inside,F + sum(J_film)` with the
+original positive dry mass and polar inertia. It does not add sequential kicks
+or replace the native fluid collision. Empty or inactive plane sets retain the
+previous arithmetic and exact accepted state.
+
+Normal film impulses act through the disk center, with zero center couple and
+their actual moment about the requested fixed origin. Each plane receives the
+opposite impulse and moment. The returned `DryLubricatedDiskExchange2` separates
+film body work, each prescribed plane's reservoir work and nonnegative film
+dissipation from authored loads, the fictitious-interior correction, represented
+exterior forcing and hydrodynamic exchange. No thermal destination is implied.
+
+Start, midpoint and accepted endpoint gaps must remain positive. Intermediate
+nonlinear probes may cross a plane so that a sufficiently strong implicit film
+can prevent crossing in the accepted solution. Geometry and final receipt
+checks, numerical budgets and cancellation gates run before fluid/body
+publication. Input plane descriptors are immutable; the caller advances them
+only after an accepted tick. This owner adds no tangential film, contact law,
+finite-plane recoil, plane rotation or resolved fluid-wall boundary.
+
+The final actual-source closure passes six new film groups plus eight existing
+physical dry-disk and eight moving-disk/analytic geometry groups. These exercise
+exact inactive parity, simultaneous oblique films with independent resistance
+and translated-origin balances, driven-plane work, density-dependent Guo source
+and analytic interior moments, refusal/exact retry, and an implicit film that
+prevents the uncorrected candidate's crossing. Full Cargo remains blocked where
+the required sibling runtime dependency closure is absent.
+
 ### Electrically insulating interfaces in moving conductors
 
 `ElectricSetup::solve_with_cell_motion_topology` and

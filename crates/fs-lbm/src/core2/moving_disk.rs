@@ -13,7 +13,8 @@ use fs_math::det;
 
 mod dry;
 pub use dry::{
-    DryDisk2, DryDiskCouplingConfig2, DryDiskError2, DryDiskExchange2, ImmersedMomentum2,
+    DryDisk2, DryDiskCouplingConfig2, DryDiskError2, DryDiskExchange2, DryLubricatedDiskExchange2,
+    ImmersedMomentum2, LubricationPlane2, PlaneLubricationExchange2,
 };
 
 /// One moving disk and reusable geometry/collision scratch, in lattice units.
