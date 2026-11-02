@@ -32,6 +32,8 @@ use fs_math::{c64::C64, det};
 
 /// Shared bounded admission and original exact ZOH runtime for causal loads.
 pub mod load;
+/// Exact held-input realization of entrywise propagation delays.
+pub mod delayed;
 
 mod relocation;
 pub use relocation::shared_pole_relocation_scratch_bytes;

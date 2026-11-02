@@ -346,6 +346,45 @@ delays (`Z_ab = exp(-s tau_ab) Zhat_ab`).
 - `check_delayed_mimo_passivity` and `repair_delayed_mimo_passivity` work on
   the restored model, grid only.
 
+`mimo::delayed::PreparedDelayedMimoLoad` executes that same proper delayed
+operator with zero prehistory and the caller's physical clock. Writing
+`tau_ab/dt = d_ab + f_ab`, the retarded held input has two constant pieces in
+each interval: the older input for `f_ab*dt`, then the newer input for
+`(1-f_ab)*dt`. Each original real or conjugate-pair pole is propagated and
+integrated analytically over both pieces. Integer delays are exact ring
+indices; fractional delays retain their actual duration without interpolation
+or rounding. Every mutual entry remains present. The accepted delayed pole
+coordinates are term then matrix-entry order; input rings are shared across
+all output rows.
+
+The runtime exposes the exact interval-mean history and current-flow matrix
+for a simultaneous boundary solve. Current-flow terms occur only for arrivals
+inside the current interval. Its discrete frequency query is the transfer of
+this held-input/mean-output map, including the two input pieces, rather than a
+continuous phase multiplier applied to an ordinary sampled filter. Checked
+stepping allocates nothing. Preview may replace candidate pole scratch only;
+accept publishes poles and input rings together. Wrong shapes, nonfinite flow,
+effort or candidate coordinates refuse without changing accepted history or
+caller output. Cloning supports larger coupled transactions.
+
+`DelayedMimoLoadLimits` retains the original proper-source limits and adds a
+separate real delayed-state cap (at most 65536) and total input-ring cap
+(at most 2^24 values). Source `max_memory_bytes` covers the combined retained
+source/report, coefficient, coordinate and ring payload, excluding allocator
+bookkeeping and cold eigensolver scratch. Admission checks the restored
+continuous operator and the actual sampled mean-output operator separately;
+the delay-free residual need not be passive. Both reports remain GridOnly:
+neither a Hamiltonian certificate for the transcendental operator nor a joint
+discrete storage/closed-loop certificate is asserted. The caller owns the
+coupled work audit and complete declared-domain qualification.
+
+G1 tests integrate independent continuous unit-step responses at the exact
+arrival times, compare warm harmonic steps with the actual discrete query,
+and check integer/fractional first-arrival areas. G3 covers zero-delay parity
+with original MimoZoh. G0/G4 cover restored-versus-residual passivity,
+resource/refusal boundaries, hidden-coordinate overflow, abandoned previews,
+and exact retry of accepted poles and delay rings.
+
 The tests check the following:
 - known-model recovery (`< 1e-8`) and pole recovery;
 - realization parity;

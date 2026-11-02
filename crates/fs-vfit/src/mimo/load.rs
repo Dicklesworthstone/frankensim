@@ -55,17 +55,11 @@ pub struct PreparedMimoLoad {
     sampled: MimoPassivityReport,
 }
 
-impl PreparedMimoLoad {
-    /// Admit a finite stable proper impedance before allocating runtime states.
-    ///
-    /// Ports are bounded by 128, pole terms by 256, and real state dimension by
-    /// the caller's at-most-256 budget. Exact matrix shapes, real-pole residues,
-    /// conjugate-pair orientation and zero improper E are required. The complete
-    /// source band must reach Nyquist at this clock; both continuous and actual
-    /// sampled mean-output passivity checks must pass.
-    pub fn new(
-        model: &MimoModel, time_step_s: f64, limits: MimoLoadLimits,
-    ) -> Result<Self, MimoLoadError> {
+/// Shape, stability, physical-clock and retained-source admission shared with
+/// delayed loads. This does not infer passivity of the delay-free residual.
+pub(super) fn validate_source(
+    model: &MimoModel, time_step_s: f64, limits: MimoLoadLimits,
+) -> Result<usize, MimoLoadError> {
         if !time_step_s.is_finite() || time_step_s <= 0.0 {
             return Err(MimoLoadError("MIMO load requires a finite positive physical clock"));
         }
@@ -120,6 +114,22 @@ impl PreparedMimoLoad {
         if required > limits.max_memory_bytes {
             return Err(MimoLoadError("MIMO load payload exceeds its separate memory allowance"));
         }
+        Ok(required)
+}
+
+impl PreparedMimoLoad {
+    /// Admit a finite stable proper impedance before allocating runtime states.
+    ///
+    /// Ports are bounded by 128, pole terms by 256, and real state dimension by
+    /// the caller's at-most-256 budget. Exact matrix shapes, real-pole residues,
+    /// conjugate-pair orientation and zero improper E are required. The complete
+    /// source band must reach Nyquist at this clock; both continuous and actual
+    /// sampled mean-output passivity checks must pass.
+    pub fn new(
+        model: &MimoModel, time_step_s: f64, limits: MimoLoadLimits,
+    ) -> Result<Self, MimoLoadError> {
+        validate_source(model, time_step_s, limits)?;
+        let band = limits.band_rad_s;
         let continuous = check_mimo_passivity(model, (band[0], band[1]))
             .map_err(|_| MimoLoadError("MIMO continuous passivity admission failed"))?;
         if !continuous.passive {
