@@ -294,8 +294,10 @@ fn plate_force_and_flow(
     let mut r = vec![0.0; n * n];
     let mut g = vec![0.0; n * 2];
     for i in 0..nm {
-        if omegas[i] <= 0.0 || zetas[i] < 0.0 {
-            return Err(fs_phs::PhsError::NotPsd {
+        // frankensim-c2ftg: a scalar domain refusal, not a definiteness failure. Written so
+        // that a NaN frequency or damping ratio refuses too.
+        if !(omegas[i] > 0.0 && zetas[i] >= 0.0) {
+            return Err(fs_phs::PhsError::Unadmitted {
                 what: "modal parameters",
             });
         }
@@ -743,5 +745,52 @@ mod tests {
                 AcousticRealizeError::NonTerrestrialAir(_)
             ))
         ));
+    }
+
+    /// frankensim-c2ftg: a non-positive or NaN modal frequency, or a negative or NaN damping
+    /// ratio, is a domain refusal, and its text must not claim a definiteness failure, here or
+    /// through the public realization. Planted negative: a negative-definite `R` through fs-phs
+    /// admission still reports `NotPsd`.
+    #[test]
+    fn modal_parameter_refusal_is_unadmitted_and_an_indefinite_r_stays_not_psd() {
+        for (omega, zeta) in [
+            (0.0, 0.0),
+            (-1.0, 0.0),
+            (6_000.0, -0.1),
+            (f64::NAN, 0.0),
+            (6_000.0, f64::NAN),
+        ] {
+            let refused = plate_force_and_flow(&[omega], &[zeta], &[1.0], &[0.08]).err();
+            assert_eq!(
+                refused,
+                Some(fs_phs::PhsError::Unadmitted {
+                    what: "modal parameters"
+                })
+            );
+            let text = refused.unwrap().to_string();
+            assert_eq!(text, "refused: modal parameters");
+            assert!(!text.contains("positive semidefinite") && !text.contains("NotPsd"));
+        }
+        let mut spec = panel(0.004);
+        spec.omegas[0] = 0.0;
+        let refused = realize_plate_cavity(&spec, &pulse(64, 1.0), 8_000, 1.0).unwrap_err();
+        assert_eq!(
+            refused,
+            CavityPhsError::Phs("refused: modal parameters".to_string())
+        );
+        assert!(!refused.to_string().contains("positive semidefinite"));
+        let storage = Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap());
+        let indefinite = PortHamiltonian::new(
+            2,
+            1,
+            vec![0.0, 1.0, -1.0, 0.0],
+            vec![0.0, 0.0, 0.0, -0.5],
+            vec![0.0, 1.0],
+            storage,
+        );
+        assert_eq!(
+            indefinite.err(),
+            Some(fs_phs::PhsError::NotPsd { what: "R" })
+        );
     }
 }
