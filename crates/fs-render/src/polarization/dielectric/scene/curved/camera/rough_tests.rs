@@ -361,7 +361,7 @@ fn g0_native_rejected_facets_are_exact_zero_camera_samples_without_resampling() 
 }
 
 #[test]
-fn g3_untilted_brushing_moves_with_its_body_and_tilted_shading_stays_explicitly_refused() {
+fn g3_untilted_brushing_moves_with_its_body_and_tilted_shading_is_admitted() {
     with_cx(|cx| {
         let detail = SurfaceDetail::try_new(
             0.1,
@@ -468,9 +468,6 @@ fn g3_untilted_brushing_moves_with_its_body_and_tilted_shading_stays_explicitly_
             100_000,
         )
         .unwrap();
-        assert!(matches!(
-            CurvedCameraScene::try_new(cx, &native, &[], None),
-            Err(CameraRadianceError::UnsupportedSurface { object_id: 1 })
-        ));
+        assert!(CurvedCameraScene::try_new(cx, &native, &[], None).is_ok());
     });
 }

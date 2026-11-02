@@ -6,7 +6,7 @@
 //! transport. For reciprocal paths, the reverse Mueller matrix is a transpose
 //! up to polarization-convention sign matrices D. With unpolarized emission
 //! and intensity-only detection, e0^T D M^T D e0 = e0^T M e0. This does NOT
-//! provide a general polarized camera or tilted shading-normal transport.
+//! provide a general polarized camera.
 //!
 //! Radiance obeys L/n^2 along smooth isotropic lossless propagation. Consequently
 //! the sampled reciprocal power is multiplied ONCE by (n_camera/n_endpoint)^2,
@@ -17,8 +17,12 @@
 //! Jacobian, geometric cosine and masking. Their original single-scattering
 //! approximation is retained, including exact-zero rejected microfacets. No
 //! inter-facet multiple scattering or acceptance-conditioned resampling is added.
-//! Anisotropic brushing is admitted only with zero authored normal perturbation;
-//! tilted shading normals need a separate radiance/importance correction.
+//! Body-locked brushing uses the native effective radiance law, including
+//! authored normal tilt: F_mueller*G1(wi) under its native VNDF proposal. The
+//! forward-power owner instead uses the importance adjoint with its shading-
+//! normal projection correction. The camera selects its law at each facet,
+//! before forming that correction; directions, PDFs and both horizons agree.
+//! Decorative normals remain a shading approximation, not resolved grooves.
 //!
 //! References: Pediredla et al. (2020), "Path Tracing Estimators for Refractive Radiative Transfer",
 //! Eq. 3, <https://imaging.cs.cmu.edu/rrte/assets/Renderer_AuthorCopy.pdf>;
@@ -250,7 +254,9 @@ pub enum RadianceEndpoint {
 /// One spectral Monte Carlo estimate, before camera exposure or spectral/pixel
 /// integration. Surface branch probabilities are already included in its
 /// transport weight. The retained native path carries contact resolution,
-/// optical lengths, medium identity and the original termination.
+/// optical lengths, medium identity and the original termination. For tilted
+/// brushing, the retained reciprocal beam carries the reduced-radiance
+/// estimator's weight, not the public forward-light beam's importance weight.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraRadianceSample {
     radiance_w_m2_sr_nm: f64,
@@ -307,10 +313,8 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
                 | Interaction::CoatedDielectric { .. }
                 | Interaction::SmoothConductor { .. }
                 | Interaction::RoughConductor { .. }
+                | Interaction::BrushedConductor { .. }
                 | Interaction::Opaque => true,
-                Interaction::BrushedConductor { detail, .. } => {
-                    detail.normal_perturbation_rad() == 0.0
-                }
                 Interaction::Detector { .. } => false,
             };
             if !supported {
@@ -363,7 +367,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let path = self
             .scene
-            .trace(cx, beam, initial_medium, settings, seed, path_id)?;
+            .trace_with_seed_mode(cx, beam, initial_medium, settings, seed, path_id, true)?;
         self.finish(cx, path, initial_index)
     }
 
@@ -386,7 +390,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let path = self
             .scene
-            .trace_with_samples(cx, beam, initial_medium, settings, samples)?;
+            .trace_with_samples_mode(cx, beam, initial_medium, settings, samples, true)?;
         self.finish(cx, path, initial_index)
     }
 

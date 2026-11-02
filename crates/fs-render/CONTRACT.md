@@ -340,11 +340,19 @@ differentiable lift). Pure Rust throughout.
   calibration and are sampled only after proven homogeneous escape. Any
   positive absorption on the remaining infinite tail gives exact zero before
   source evaluation. Native rough dielectric/conductor and anisotropic brushing
-  with zero authored normal perturbation retain their original directional
-  proposal, Fresnel, masking and single-scattering approximation. Rejected
+  retain their original directional proposal, Fresnel, masking and
+  single-scattering approximation. Authored brushed-normal tilt now uses the
+  scalar camera law `F_mueller*G1(wi)`, selected before forming the forward-power
+  adjoint's correction `(ns.wo/ng.wo)*(ng.wi/ns.wi)`. Both laws keep the same
+  body-local frame, mark, spectral/host optics, PDF and horizon support. Public
+  forward-beam and molecular-power APIs retain their original importance law;
+  surface, raster and molecular camera consumers select the radiance law in
+  the shared surface driver. The camera's retained reciprocal beam therefore
+  carries an estimator weight, not a forward-power/heat-deposition measurement.
+  Decorative normals remain a shading approximation. Rejected
   microfacets are explicit exact-zero samples without resampling; geometric
-  cosine and refractive Jacobians are not applied twice. Tilted shading normals
-  and detector interactions refuse. Numerical limits and indistinguishable
+  cosine and refractive Jacobians are not applied twice. Detector interactions
+  refuse. Numerical limits and indistinguishable
   native extinction/underflow are unresolved
   errors. This covers reciprocal isotropic stationary media and intensity-only
   endpoints, not general polarized adjoints, diffuse/volume emission or
@@ -365,6 +373,12 @@ differentiable lift). Pure Rust throughout.
   samples to native scalar radiance weights, bare/coated metal to Fresnel and
   Smith masking, body-locked anisotropic brushing under rigid motion, and
   exact-zero rejection without an extra random draw.
+  Focused extensions compare the tilted camera weight directly with the native
+  scalar BSDF and the forward importance adjoint, retain coated-metal/absorbing-
+  film/GRIN references, and exercise spectral raster and molecular camera paths.
+  These added native integration regressions remain unexecuted in the
+  implementation environment; no multiple-scattering or geometry-detail claim
+  is added by admitting the existing bounded normal perturbation.
 
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original

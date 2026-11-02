@@ -65,6 +65,68 @@ fn g1_brushed_forward_power_matches_reversed_native_radiance_bsdf() {
 }
 
 #[test]
+fn g1_tilted_brush_camera_weight_matches_native_scalar_radiance_without_changing_power() {
+    let law = optics();
+    let mut admitted = 0;
+    let mut rejected = 0;
+    let mut distinct_adjoint = false;
+    for tilt in [0.0, 0.2, 0.35] {
+        let detail = detail(0.2, 3.0, tilt);
+        let frame = frame(&detail);
+        let material = Material::BrushedConductor { optics: law, detail };
+        for cosine in [0.005_f64, 0.4, 1.0] {
+            let wo = Vec3::new(0.0, (1.0 - cosine * cosine).sqrt(), cosine);
+            let source = beam(wo, Stokes::unpolarized(1.0));
+            for draw in [[0.0, 0.0], [0.13, 0.27], [0.6, 0.9], [0.99, 0.4]] {
+                let power = source.sample_brushed_conductor(&law, &detail, &frame, draw).unwrap();
+                let camera = source.sample_brushed_conductor_for_transport(
+                    &law, &detail, &frame, draw, true,
+                ).unwrap();
+                let Some(camera) = camera else {
+                    assert!(power.is_none());
+                    rejected += 1;
+                    continue;
+                };
+                let power = power.expect("identical native proposal support");
+                admitted += 1;
+                assert_eq!(camera.pdf, power.pdf);
+                assert_eq!(camera.beam.ray(), power.beam.ray());
+                assert_eq!(camera.beam.frame(), power.beam.frame());
+                assert_eq!(camera.beam.medium(), power.beam.medium());
+                let wi = camera.beam.ray().dir;
+                let projection = frame.geometric_normal.dot(wi) / camera.pdf;
+                let radiance = opaque_bsdf_eval(&material, frame.geometric_normal, wo, wi,
+                    550.0, Some(medium()), Some(&frame)).unwrap() * projection;
+                let importance = opaque_bsdf_eval(&material, frame.geometric_normal, wi, wo,
+                    550.0, Some(medium()), Some(&frame)).unwrap() * projection;
+                near(camera.beam.power().i, radiance);
+                near(power.beam.power().i, importance);
+                // Scalar correction commutes with every Stokes component;
+                // the reflection phase and reference-frame transport stay native.
+                let correction = (frame.shading_normal.dot(wo) / frame.geometric_normal.dot(wo))
+                    * (frame.geometric_normal.dot(wi) / frame.shading_normal.dot(wi));
+                same(power.beam.power(), Stokes {
+                    i: camera.beam.power().i * correction,
+                    q: camera.beam.power().q * correction,
+                    u: camera.beam.power().u * correction,
+                    v: camera.beam.power().v * correction,
+                });
+                if tilt == 0.0 { assert_eq!(camera, power); }
+                distinct_adjoint |= (radiance - importance).abs() > 0.1;
+                assert!(camera.beam.power().i <= 1.0 + 3e-12);
+            }
+        }
+        let below = beam(Vec3::new(0.0, -0.999_949_998_749_937_5, 0.01), Stokes::unpolarized(1.0));
+        if tilt > 0.0 {
+            assert!(below.sample_brushed_conductor_for_transport(
+                &law, &detail, &frame, [0.13, 0.27], true,
+            ).unwrap().is_none());
+        }
+    }
+    assert!(admitted > 0 && rejected > 0 && distinct_adjoint);
+}
+
+#[test]
 fn g3_polarization_reference_changes_do_not_rotate_the_brushing() {
     let d=detail(0.1,4.0,0.2); let f=frame(&d); let law=optics();
     for state in [Stokes::try_new(2.0,0.4,-0.7,0.3).unwrap(),Stokes::try_new(1.0,0.0,0.0,1.0).unwrap()] {

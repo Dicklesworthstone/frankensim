@@ -105,6 +105,7 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let path = self
             .scattering
+            .for_camera()
             .trace(cx, beam, initial_medium, settings, seed, path_id)?;
         self.finish(cx, path, initial_index)
     }
@@ -126,7 +127,7 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         cx.checkpoint()?;
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let path = self.scattering.trace_with_samples(
+        let path = self.scattering.for_camera().trace_with_samples(
             cx,
             beam,
             initial_medium,
@@ -154,7 +155,7 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         cx.checkpoint()?;
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let path = self.scattering.trace_with_tracking_samples(
+        let path = self.scattering.for_camera().trace_with_tracking_samples(
             cx,
             beam,
             initial_medium,

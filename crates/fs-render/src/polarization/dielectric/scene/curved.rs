@@ -341,13 +341,21 @@ impl<'a> CurvedPolarizedScene<'a> {
         seed: u64,
         path_id: u64,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
-        self.trace_with_samples(cx, beam, initial_medium, settings, |event| {
+        self.trace_with_seed_mode(cx, beam, initial_medium, settings, seed, path_id, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_with_seed_mode(
+        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
+        settings: CurvedTraceSettings, seed: u64, path_id: u64, radiance_brushing: bool,
+    ) -> Result<CurvedPathResult, CurvedSceneError> {
+        self.trace_with_samples_mode(cx, beam, initial_medium, settings, |event| {
             let block = philox4x32_10(
                 [path_id as u32, (path_id >> 32) as u32, event, 0x706f_6c32],
                 [seed as u32, (seed >> 32) as u32],
             );
             core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
-        })
+        }, radiance_brushing)
     }
 
     /// Trace through the native clearance/event owner. The sampler is called
@@ -362,12 +370,25 @@ impl<'a> CurvedPolarizedScene<'a> {
         settings: CurvedTraceSettings,
         samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<CurvedPathResult, CurvedSceneError> {
+        self.trace_with_samples_mode(cx, beam, initial_medium, settings, samples, false)
+    }
+
+    // Only reciprocal scalar cameras select the radiance shading-normal law.
+    // Refraction still transports native power here; the camera applies its
+    // single endpoint index ratio after the complete curved path.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_with_samples_mode(
+        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
+        settings: CurvedTraceSettings, samples: impl FnMut(u32) -> [f64; 3],
+        radiance_brushing: bool,
+    ) -> Result<CurvedPathResult, CurvedSceneError> {
         self.trace_with_flights(
             cx,
             beam,
             initial_medium,
             settings,
             samples,
+            radiance_brushing,
             0,
             |_, _| Ok(None),
             |_, _, _, _| Err(CurvedSceneError::NumericalRange),
@@ -386,6 +407,7 @@ impl<'a> CurvedPolarizedScene<'a> {
         initial_medium: usize,
         settings: CurvedTraceSettings,
         mut samples: impl FnMut(u32) -> [f64; 3],
+        radiance_brushing: bool,
         max_volume_events: u32,
         mut flight: impl FnMut(usize, f64) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
         mut scatter: impl FnMut(
@@ -679,13 +701,14 @@ impl<'a> CurvedPolarizedScene<'a> {
                     // The physical beam stays at its integrated endpoint.
                     let Some(next) = result
                         .beam
-                        .sample_instanced_brushed_conductor(
+                        .sample_instanced_brushed_conductor_for_transport(
                             &self.conductors[optics],
                             &detail,
                             transform,
                             local_point,
                             witness.normal,
                             [draw[0], draw[1]],
+                            radiance_brushing,
                         )
                         .map_err(SceneError::from)?
                     else {

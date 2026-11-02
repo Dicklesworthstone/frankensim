@@ -271,6 +271,7 @@ impl CurvedRayleighPath {
 pub struct CurvedRayleighScene<'a, 'scene, 'optics> {
     scene: &'a CurvedPolarizedScene<'scene>,
     media: &'a [Option<CurvedRayleighMedium<'optics>>],
+    radiance_brushing: bool,
 }
 impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
     pub fn try_new(
@@ -282,11 +283,17 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         if media.len() != scene.media.len() {
             return Err(SceneError::InvalidBindings.into());
         }
-        Ok(Self { scene, media })
+        Ok(Self { scene, media, radiance_brushing: false })
     }
 
     pub const fn surface_scene(&self) -> &'a CurvedPolarizedScene<'scene> {
         self.scene
+    }
+
+    // A stack-only borrowed view; original power paths and material/field
+    // identities remain unchanged. All three sampling APIs share this mode.
+    pub(super) fn for_camera(&self) -> Self {
+        Self { scene: self.scene, media: self.media, radiance_brushing: true }
     }
 
     /// Surface draws keep the native domain and surface ordinal. Flights use a
@@ -394,6 +401,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             initial_medium,
             settings.surfaces,
             surface_samples,
+            self.radiance_brushing,
             settings.max_volume_events,
             |medium, wavelength| {
                 let Some(law) = self.media[medium] else {

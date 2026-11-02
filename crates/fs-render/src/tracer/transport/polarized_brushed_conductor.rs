@@ -50,6 +50,19 @@ impl PolarizedBeam {
         frame: &ShadingFrame,
         samples: [f64; 2],
     ) -> Result<Option<BeamSample>, ConductorBeamError> {
+        self.sample_brushed_conductor_for_transport(optics, detail, frame, samples, false)
+    }
+
+    // Camera paths use the native effective radiance law. Keep this private:
+    // the public beam API continues to transport forward power/importance.
+    fn sample_brushed_conductor_for_transport(
+        self,
+        optics: &ConductorOptics,
+        detail: &SurfaceDetail,
+        frame: &ShadingFrame,
+        samples: [f64; 2],
+        radiance: bool,
+    ) -> Result<Option<BeamSample>, ConductorBeamError> {
         admit_samples(samples)?;
         admit_detail(detail)?;
         admit_frame(frame)?;
@@ -80,7 +93,11 @@ impl PolarizedBeam {
             wo.x + direction.x, wo.y + direction.y, wo.z + direction.z,
         ))?;
         let reflected = self.reflect_conductor(facet, optics)?.beam;
-        let weight = if frame.geometric_normal == frame.shading_normal {
+        // Native f_radiance = D*G*F/(4 ns.wo ng.wi), and the VNDF PDF is
+        // D*G1(wo)/(4 ns.wo). Thus f_radiance*ng.wi/pdf = F*G1(wi).
+        // Select it before forming the forward-power correction C, avoiding
+        // its real geometric-horizon singularity on a finite camera sample.
+        let weight = if radiance || frame.geometric_normal == frame.shading_normal {
             smith_g1_aniso(alpha_x, alpha_y, wi_local)
         } else {
             // G1(wi)/ns.wi = 2/(ns.wi + |(ax*wi.x,ay*wi.y,wi.z)|).
@@ -129,6 +146,24 @@ impl PolarizedBeam {
         world_normal: Vec3,
         samples: [f64; 2],
     ) -> Result<Option<BeamSample>, ConductorBeamError> {
+        self.sample_instanced_brushed_conductor_for_transport(
+            optics, detail, transform, local_point, world_normal, samples, false,
+        )
+    }
+
+    /// Internal reciprocal camera seam. Only the shading-normal geometric
+    /// weight changes; native public beams keep forward-power semantics.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sample_instanced_brushed_conductor_for_transport(
+        self,
+        optics: &ConductorOptics,
+        detail: &SurfaceDetail,
+        transform: RigidTransform,
+        local_point: Point3,
+        world_normal: Vec3,
+        samples: [f64; 2],
+        radiance: bool,
+    ) -> Result<Option<BeamSample>, ConductorBeamError> {
         admit_samples(samples)?;
         admit_detail(detail)?;
         if ![local_point.x, local_point.y, local_point.z].iter().all(|v| v.is_finite()) {
@@ -153,7 +188,7 @@ impl PolarizedBeam {
             bitangent: transform.transform_vector(local_frame.bitangent),
             mark_covered: local_frame.mark_covered,
         };
-        self.sample_brushed_conductor(optics, detail, &frame, samples)
+        self.sample_brushed_conductor_for_transport(optics, detail, &frame, samples, radiance)
     }
 }
 
