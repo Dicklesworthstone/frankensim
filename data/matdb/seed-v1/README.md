@@ -18,6 +18,9 @@ Prescribed selective partitions retain the same density evidence through
 rougher/cleaner concentrate and tailings, reporting component recovery and water balances.
 Source-declared contact-time recovery curves and conservative stirred-tank
 transport add explicit kinetics and retained inventory through changing flow.
+Separately sourced continuous single/uniform-rate laws now take actual slurry
+volume flow and active tank volume, returning contained-metal recovery and
+balanced outlet rates; the slurry example runs that complete connection.
 Mineral/reference data retain their own conditions; site work indices,
 conversion, recovery and process calibration remain explicit inputs.
 

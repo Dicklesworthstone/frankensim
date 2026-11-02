@@ -6,16 +6,30 @@
 //! The blend is 50% magnetite, 20% pyrite and 30% dolomite by dry mass.
 //! Work index, power, sizes, utilization and initial water are authored inputs.
 //! The optional target is a fraction, not percent; its default is 0.65.
+//! The resulting volume flow also drives two separately authored continuous
+//! recovery cards, with explicit active volume and a 3 g/t contained-metal assay.
 
-use std::{error::Error, path::Path};
+use std::{collections::BTreeMap, error::Error, path::Path};
 
-use fs_matdb::{MatDbError, NormalizedPack, Provenance, QueryPoint, SelectionPolicy};
+use fs_blake3::hash_domain;
+use fs_evidence::ValidityDomain;
+use fs_matdb::{
+    ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, MatDbError, NormalizedPack,
+    Provenance, QueryPoint, SelectionPolicy,
+};
 use fs_material::{
     comminution::{BondGrindingCard, BondSizeDomain, BondTestContext, BondWorkIndex},
+    recovery::{
+        MAXIMUM_RATE_PARAMETER, RATE_PARAMETER, RecoveryError, ULTIMATE_RECOVERY_PARAMETER,
+        continuous::{
+            CONTINUOUS_SINGLE_RATE_LAW, CONTINUOUS_UNIFORM_RATE_LAW, ContinuousRecoveryCard,
+            MEAN_RESIDENCE_TIME_AXIS, TANK_COUNT_AXIS,
+        },
+    },
     slurry::{DensitySource, SlurryComponent, SlurryStream, SolidsMassFraction},
 };
 use fs_qty::{
-    Dimensionless, Dims, Length, MassFlowRate, Power, QuantitySpec,
+    Dimensionless, Dims, Frequency, Length, MassFlowRate, Power, QuantitySpec, Time, Volume,
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 
@@ -63,6 +77,70 @@ fn water_point() -> Result<QueryPoint, MatDbError> {
             100_000.0,
         )?
         .with_quantity("phase-liquid", QuantitySpec::dimensional(Dims::NONE), 1.0)
+}
+
+fn authored_treatment(uniform: bool) -> Result<ContinuousRecoveryCard, RecoveryError> {
+    let (law, parameter, rate) = if uniform {
+        (
+            CONTINUOUS_UNIFORM_RATE_LAW,
+            MAXIMUM_RATE_PARAMETER,
+            2.0 / 21600.0,
+        )
+    } else {
+        (CONTINUOUS_SINGLE_RATE_LAW, RATE_PARAMETER, 1.0 / 21600.0)
+    };
+    let declaration = format!(
+        "Authored stationary local law, no measured ore calibration: {law}, version 1, \
+         Rinf=0.9; {parameter}={rate:.17e} s^-1; equal full ideal tanks; constant local \
+         rates and carrier flow; no hidden state. Mean-residence support 43200..172800 s, \
+         tank count 1..16, pH 9..11. Separate declaration from finite batch test evidence."
+    );
+    let artifact = hash_domain(
+        "mineral-slurry-authored-continuous-v1",
+        declaration.as_bytes(),
+    );
+    ContinuousRecoveryCard::from_card(ConstitutiveModelCard {
+        law: LawId(law.into()),
+        law_version: 1,
+        parameters: BTreeMap::from([
+            (
+                ULTIMATE_RECOVERY_PARAMETER.into(),
+                LawParameter {
+                    value: 0.9,
+                    dims: Dims::NONE,
+                },
+            ),
+            (
+                parameter.into(),
+                LawParameter {
+                    value: rate,
+                    dims: Frequency::DIMS,
+                },
+            ),
+        ]),
+        state_schema_version: 0,
+        initial_state: InitialStatePolicy::ZeroInternalState,
+        validity: ValidityDomain::unconstrained()
+            .with_quantity(
+                MEAN_RESIDENCE_TIME_AXIS,
+                QuantitySpec::dimensional(Time::DIMS),
+                43200.0,
+                172800.0,
+            )
+            .with_quantity(
+                TANK_COUNT_AXIS,
+                QuantitySpec::dimensional(Dims::NONE),
+                1.0,
+                16.0,
+            )
+            .with_quantity("pH", QuantitySpec::dimensional(Dims::NONE), 9.0, 11.0),
+        sources: vec![artifact],
+        provenance: Provenance {
+            source: declaration,
+            license: "project-owned synthetic example".into(),
+            artifact: Some(artifact),
+        },
+    })
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -197,6 +275,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "Water density is queried at 298.15 K and 100000 Pa; mineral measurement conditions remain unstated."
     );
+    println!(
+        "Authored downstream treatment: 8 equal tanks, 17000 m3 active volume, pH=10, 3 g/t contained-metal feed assay."
+    );
+    println!(
+        "Both separately authored continuous cards have Rinf=0.9 and mean local rate 1/(6 h); uniform rates span 0..2/(6 h)."
+    );
+    // The assay is an independent authored input, not inferred from a mineral
+    // formula or density source. 3 g/dry metric tonne = 3e-6 kg/kg dry solids.
+    let feed_metal = MassFlowRate::new(state.dry_solids_mass_flow.value() * 3.0e-6);
+    let treatment_conditions =
+        QueryPoint::new().with_quantity("pH", QuantitySpec::dimensional(Dims::NONE), 10.0)?;
+    for (label, uniform) in [("single", false), ("uniform", true)] {
+        let model = authored_treatment(uniform)?;
+        match model.evaluate_train(
+            8,
+            Volume::new(17000.0),
+            state.total_volume_flow,
+            feed_metal,
+            &treatment_conditions,
+        ) {
+            Ok(treatment) => println!(
+                "Treatment {label}: actual_flow_m3_s={} mean_residence_h={} recovery={} recovered_metal_kg_h={} tail_metal_kg_h={} mass_residual_kg_s={} source_card={}",
+                treatment.actual_train_flow.value(),
+                treatment.mean_residence_time.value() / 3600.0,
+                treatment.recovery.value(),
+                treatment.recovered_metal_flow.value() * 3600.0,
+                treatment.tail_metal_flow.value() * 3600.0,
+                treatment.conservation_residual.value(),
+                treatment.source_card.content_hash(),
+            ),
+            Err(RecoveryError::OutsideValidity) => println!(
+                "Treatment {label}: OutsideValidity; this slurry flow gives a mean residence outside the independently declared 12..48 h support."
+            ),
+            Err(error) => return Err(error.into()),
+        }
+    }
     println!(
         "Additive constituent volumes exclude gas, contraction, dissolution and settling. Source uncertainty is retained without a propagated slurry-density error bound."
     );

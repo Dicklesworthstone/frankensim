@@ -17,6 +17,10 @@ pub mod distributed;
 #[path = "recovery/residence.rs"]
 pub mod residence;
 
+/// Source-bound stationary recovery in an ideal stirred-tank train.
+#[path = "recovery/continuous.rs"]
+pub mod continuous;
+
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint};
 use fs_math::det;
 use fs_qty::{Dimensionless, Dims, Frequency, QuantitySpec, Time};

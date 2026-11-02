@@ -609,6 +609,72 @@ per call; longer intervals can be split into successive calls. These are
 forward model calculations, not deconvolution, measured plant calibration or
 a fitted leach/adsorption model.
 
+## Continuous treatment driven by actual slurry flow
+
+`recovery::continuous::ContinuousRecoveryCard` connects actual flow, active
+mixed volume and a separately declared stationary local kinetic law. For a
+single rate and N equal full ideal tanks, the recovered feed fraction is
+`Rinf * (1 - (1 + k*V/(N*Q))^(-N))`. The uniform-rate law analytically
+averages survival over `[0,kmax]`, preserving the same particle rate through
+all tanks. It never substitutes batch recovery evaluated at the mean residence.
+
+The two law IDs, `cstr-single-rate-recovery` and `cstr-uniform-rate-recovery`,
+require their own original source hashes and provenance, typed finite
+`mean-residence-time` and `tank-count` domains, and all other conditions.
+They reject a finite batch `elapsed-time` domain. A batch fit is therefore not
+silently extrapolated over an infinite residence-time distribution. These
+cards do not replace the separate transient inventory owner or the explicit
+discrete-population card above. Zero flow refuses a stationary treatment result.
+
+The API consumes the slurry model's existing typed result directly:
+
+```rust
+let treatment = model.evaluate_train(
+    8,
+    active_mixed_volume,
+    slurry.state().total_volume_flow,
+    contained_metal_feed,
+    &conditions,
+)?;
+```
+
+The response retains the complete source card, admitted conditions, actual
+volume/flow, derived mean residence, recovered and unrecovered fractions,
+feed/recovered/tail contained-metal rates, and their numerical closure.
+An assay is an independent input; a mineral's reference density does not
+supply a metal grade or predict its recovery.
+
+The existing `mineral_slurry` command now continues its source-backed Bond,
+water-addition and volume calculation into an authored eight-tank treatment
+example. Active volume is fixed at 17000 m³, pH is 10, and contained-metal
+grade is an independently authored 3 g/dry metric tonne. Both laws have
+Rinf=0.9 and mean local rate 1/(6 h); the uniform population spans 0..2/(6 h).
+
+| Solids mass fraction | Actual slurry flow, m³/s | Mean residence, h | Single-rate recovery | Uniform-rate recovery |
+| --- | ---: | ---: | ---: | ---: |
+| 0.65 | 0.195356574114 | 24.172323064 | 86.554859543% | 77.331774645% |
+| 0.50 | 0.311082927870 | 15.179946565 | 80.010623676% | 70.330265324% |
+
+This holds dry throughput and the authored contained-metal feed at 250 kg/s
+and 2.7 kg/h. Additional water increases actual volume flow and reduces the
+residence/recovery predicted by these declared laws. At 10% solids the slurry
+calculation remains valid, but treatment reports `OutsideValidity`: the
+residence has left the separately declared 12..48 h support. No value is clipped
+or extrapolated. Carrier-flow changes from dissolution, adsorption, reagent
+limits, transients and site calibration require their own models.
+
+A separate small example accepts actual flow as an optional m³/s argument:
+
+```bash
+cargo run -p fs-material --example continuous_recovery
+cargo run -p fs-material --example continuous_recovery -- 0.097678285
+```
+
+At its authored 24 h nominal residence, eight tanks give 86.488340192% recovery
+for the single-rate card and 77.243303571% for the equal-mean uniform card.
+Half flow gives 48 h and respectively 89.648437500% and 83.574368019%.
+These source-bound arithmetic scenarios are not calibrated plant forecasts.
+
 ## Focused verification
 
 Normal workspace commands for these slices:
@@ -616,7 +682,7 @@ Normal workspace commands for these slices:
 ```bash
 cargo test -p xtask --test mining_mineral_sources --test mining_mineral_coverage --test mining_reagent_sources --test mining_reagent_references --test mining_oxide_sources --test mining_copper_sources --test mining_reaction_balances
 cargo test -p fs-material comminution
-cargo test -p fs-material slurry::tests
+cargo test -p fs-material slurry::
 cargo test -p fs-material recovery::
 cargo test -p xtask --test mining_slurry_sources
 cargo test -p fs-thermochem stoichiometry::tests

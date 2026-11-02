@@ -32,6 +32,42 @@ and independently displays both contact-time curves. No deconvolution, field
 calibration, aqueous chemistry, segregation, adsorption, coupled reaction rate
 or actual process recovery is inferred by this forward hydraulic model.
 
+## Continuous recovery from actual train flow
+
+`recovery::continuous::ContinuousRecoveryCard` admits a separately sourced
+stationary local first-order law, with a single rate or a uniform population
+on `[0,kmax]`. Its law IDs differ from finite-time batch cards; it rejects an
+`elapsed-time` domain. The source must bound typed positive mean residence
+`V/Q`, integer tank count, and every additional declared condition. Active
+mixed volume and actual train flow remain separate typed inputs. Zero flow
+refuses a steady through-flow calculation rather than inventing recovery
+during a stop.
+
+For N equal full ideal tanks, single-rate survival is `(1+k*V/(N*Q))^(-N)`.
+The uniform law analytically integrates that survival over the original rate
+population. Rate classes keep their identities through the complete train;
+the remaining population is never reset after a tank. This does not evaluate
+batch recovery at the mean or silently extend finite test support into the
+infinite residence-time tail. No automatic batch-card conversion exists.
+
+`ContinuousTreatment` retains the original complete card, admitted conditions,
+actual volume/flow and mean residence, recovered and surviving fractions,
+contained-constituent feed/recovered/tail flows, and an independent conservation
+residual. Its dilute-constituent assumption leaves carrier flow unchanged.
+Stable small-response formulas and independent surviving-tail evaluation
+refuse unrepresentable positive results. Eight focused tests cover independent
+single-tank balances and ratewise train integration, source and geometry
+admission, batch-card refusal, changed flow, stops and numerical extremes.
+
+`continuous_recovery` compares one/eight tanks and two distributions at equal
+mean rate. `mineral_slurry` directly supplies its real source-backed volume
+flow to both continuous laws, with separately authored 17000 m³ active volume
+and a 3 g/t dry-feed contained-metal assay. Increasing water changes residence
+and recovery; unsupported residence prints `OutsideValidity` while retaining
+the valid upstream slurry result. These examples establish arithmetic and
+source flow integration, not measured calibration, transient reaction,
+adsorption, reagent limitation, bulk concentrate grade or volume change.
+
 ## Distributed rates and conservative particle separation
 
 `recovery::distributed::RecoveryCard` extends the source-qualified kinetic
