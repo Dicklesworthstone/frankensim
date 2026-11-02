@@ -1,5 +1,10 @@
 //! G1/G3: finite-film heat is separate from outgoing transmitted radiation.
 
+#[path = "transmitting_coating/refinement.rs"]
+mod refinement;
+#[path = "transmitting_coating/state.rs"]
+mod state;
+
 use super::*;
 use fs_blake3::ContentHash;
 use fs_render::conductor::{

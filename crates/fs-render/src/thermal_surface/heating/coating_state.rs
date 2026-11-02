@@ -10,7 +10,7 @@
 //! the assumptions of `try_new_coated`. Coefficients use the accepted interval
 //! start; temporal refinement is necessary for nonlinear optical/thermal feedback.
 
-use super::coating::AbsorptionReceiver;
+use super::coating::{AbsorptionReceiver, PreparedCoatingSource};
 use super::feedback::SurfaceConductorLaw;
 use super::*;
 use crate::conductor::{
@@ -54,6 +54,118 @@ pub struct StatefulCoatedSurfaceIlluminationSource<const N: usize> {
     pub substrate: SubstrateOpticsModel,
     pub incidence: SurfaceIncidence<N>,
     pub power: SpectralPowerSchedule<N>,
+}
+
+/// Finite films between fixed, real-index surrounding media. Every film reads
+/// its own native heat receiver; no thermal cell is assigned to transmitted
+/// radiation. Film and receiver order remains authored outside-to-inside even
+/// when reverse incidence changes the physical traversal.
+#[derive(Clone, Debug)]
+pub struct StatefulTransmittingSurfaceIlluminationSource<const N: usize> {
+    pub source_id: u64,
+    pub films: Vec<StatefulCoatingLayer>,
+    /// Incident-side indices and angle for the requested traversal direction.
+    pub incidence: SurfaceIncidence<N>,
+    pub transmitted_eta: [f64; N],
+    pub reverse: bool,
+    /// Source for the declared surrounding media and incidence geometry.
+    pub source_identity: ContentHash,
+    pub power: SpectralPowerSchedule<N>,
+}
+
+/// Borrow inputs for one mixed opaque/transmitting coating observer. All
+/// retained laws, schedules and packets are owned by the resulting observer.
+#[derive(Clone, Copy, Debug)]
+pub enum CoatingSurfaceSource<'a, const N: usize> {
+    FixedOpaque(&'a CoatedSurfaceIlluminationSource<N>),
+    FixedTransmitting(&'a TransmittingSurfaceIlluminationSource<N>),
+    StatefulOpaque(&'a StatefulCoatedSurfaceIlluminationSource<N>),
+    StatefulTransmitting(&'a StatefulTransmittingSurfaceIlluminationSource<N>),
+}
+
+#[derive(Clone, Copy)]
+enum SourceExit<'a, const N: usize> {
+    Opaque {
+        receiver: SurfaceHeatingReceiver,
+        optics: &'a SubstrateOpticsModel,
+    },
+    Transmitting {
+        transmitted_eta: [f64; N],
+        reverse: bool,
+        source_identity: ContentHash,
+    },
+}
+
+impl<const N: usize> SourceExit<'_, N> {
+    fn receiver(self) -> Option<SurfaceHeatingReceiver> {
+        match self {
+            Self::Opaque { receiver, .. } => Some(receiver),
+            Self::Transmitting { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StatefulSource<'a, const N: usize> {
+    source_id: u64,
+    films: &'a [StatefulCoatingLayer],
+    exit: SourceExit<'a, N>,
+    incidence: SurfaceIncidence<N>,
+    power: &'a SpectralPowerSchedule<N>,
+}
+
+impl<'a, const N: usize> StatefulSource<'a, N> {
+    fn receivers(self) -> impl Iterator<Item = SurfaceHeatingReceiver> + 'a {
+        self.films
+            .iter()
+            .map(|film| film.receiver)
+            .chain(self.exit.receiver())
+    }
+}
+
+impl<'a, const N: usize> CoatingSurfaceSource<'a, N> {
+    fn id(self) -> u64 {
+        match self {
+            Self::FixedOpaque(source) => source.source_id,
+            Self::FixedTransmitting(source) => source.source_id,
+            Self::StatefulOpaque(source) => source.source_id,
+            Self::StatefulTransmitting(source) => source.source_id,
+        }
+    }
+    fn power(self) -> &'a SpectralPowerSchedule<N> {
+        match self {
+            Self::FixedOpaque(source) => &source.power,
+            Self::FixedTransmitting(source) => &source.power,
+            Self::StatefulOpaque(source) => &source.power,
+            Self::StatefulTransmitting(source) => &source.power,
+        }
+    }
+    fn stateful(self) -> Option<StatefulSource<'a, N>> {
+        match self {
+            Self::StatefulOpaque(source) => Some(StatefulSource {
+                source_id: source.source_id,
+                films: &source.films,
+                exit: SourceExit::Opaque {
+                    receiver: source.substrate_receiver,
+                    optics: &source.substrate,
+                },
+                incidence: source.incidence,
+                power: &source.power,
+            }),
+            Self::StatefulTransmitting(source) => Some(StatefulSource {
+                source_id: source.source_id,
+                films: &source.films,
+                exit: SourceExit::Transmitting {
+                    transmitted_eta: source.transmitted_eta,
+                    reverse: source.reverse,
+                    source_identity: source.source_identity,
+                },
+                incidence: source.incidence,
+                power: &source.power,
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -115,10 +227,21 @@ enum Substrate {
     Fixed(ConductorOptics),
     Law(usize),
 }
+
+#[derive(Clone, Debug)]
+enum Exit<const N: usize> {
+    Opaque(Substrate),
+    Transmitting {
+        transmitted_eta: [f64; N],
+        reverse: bool,
+        source_identity: ContentHash,
+    },
+}
+
 #[derive(Debug)]
 struct Stack<const N: usize> {
     films: Box<[Film]>,
-    substrate: Substrate,
+    exit: Exit<N>,
     incidence: SurfaceIncidence<N>,
     cells: Box<[CellId]>,
 }
@@ -126,7 +249,7 @@ impl<const N: usize> Stack<N> {
     fn response(
         &self,
         resolved: &[Resolved],
-    ) -> Result<CoatedSurfacePowerResponse<N>, SurfaceHeatingError> {
+    ) -> Result<Arc<CoatingPacket<N>>, SurfaceHeatingError> {
         let layers: Vec<_> = self
             .films
             .iter()
@@ -139,35 +262,67 @@ impl<const N: usize> Stack<N> {
                 },
             })
             .collect();
-        let substrate = match &self.substrate {
-            Substrate::Fixed(optics) => optics,
-            Substrate::Law(index) => match &resolved[*index] {
-                Resolved::Substrate(optics) => optics,
-                _ => unreachable!("substrate binding retains its native optical type"),
-            },
-        };
-        CoatedSurfacePowerResponse::from_coated_conductor(
-            self.incidence.wavelengths_nm,
-            substrate,
-            CoherentCoatingStack::try_new(&layers)?,
-            self.incidence.incident_eta,
-            self.incidence.incidence_cosine,
-            self.incidence.s_power_fraction,
-        )
+        match &self.exit {
+            Exit::Opaque(substrate) => {
+                let substrate = match substrate {
+                    Substrate::Fixed(optics) => optics,
+                    Substrate::Law(index) => match &resolved[*index] {
+                        Resolved::Substrate(optics) => optics,
+                        _ => unreachable!("substrate binding retains its native optical type"),
+                    },
+                };
+                let response = CoatedSurfacePowerResponse::from_coated_conductor(
+                    self.incidence.wavelengths_nm,
+                    substrate,
+                    CoherentCoatingStack::try_new(&layers)?,
+                    self.incidence.incident_eta,
+                    self.incidence.incidence_cosine,
+                    self.incidence.s_power_fraction,
+                )?;
+                Ok(self.packet(
+                    *response.total(),
+                    response
+                        .film_absorbed_fractions()
+                        .iter()
+                        .copied()
+                        .chain(core::iter::once(*response.substrate_absorbed_fraction())),
+                ))
+            }
+            Exit::Transmitting {
+                transmitted_eta,
+                reverse,
+                source_identity,
+            } => {
+                let response = TransmittingSurfacePowerResponse::from_dielectric_stack(
+                    self.incidence.wavelengths_nm,
+                    &layers,
+                    self.incidence.incident_eta,
+                    *transmitted_eta,
+                    self.incidence.incidence_cosine,
+                    *reverse,
+                    self.incidence.s_power_fraction,
+                    *source_identity,
+                )?;
+                Ok(self.packet(
+                    *response.total(),
+                    response.film_absorbed_fractions().iter().copied(),
+                ))
+            }
+        }
     }
 
-    fn packet(&self, response: &CoatedSurfacePowerResponse<N>) -> Arc<CoatingPacket<N>> {
-        let fractions = response
-            .film_absorbed_fractions()
-            .iter()
-            .chain(core::iter::once(response.substrate_absorbed_fraction()));
+    fn packet(
+        &self,
+        total: SurfacePowerResponse<N>,
+        fractions: impl Iterator<Item = [f64; N]>,
+    ) -> Arc<CoatingPacket<N>> {
         Arc::new(CoatingPacket {
-            total: *response.total(),
+            total,
             receivers: self
                 .cells
                 .iter()
                 .zip(fractions)
-                .map(|(&cell, &absorbed)| AbsorptionReceiver { cell, absorbed })
+                .map(|(&cell, absorbed)| AbsorptionReceiver { cell, absorbed })
                 .collect(),
         })
     }
@@ -252,10 +407,11 @@ fn receiver_hash(hash: &mut DomainHasher, receiver: SurfaceHeatingReceiver, boun
         hash.update(&receiver.temperature_bounds_k.1.to_bits().to_le_bytes());
     }
 }
-fn stack_identity<const N: usize>(
-    source: &StatefulCoatedSurfaceIlluminationSource<N>,
-) -> ContentHash {
-    let mut hash = DomainHasher::new("org.frankensim.render.coating-feedback-stack.v1");
+fn stack_identity<const N: usize>(source: StatefulSource<'_, N>) -> ContentHash {
+    let mut hash = DomainHasher::new(match source.exit {
+        SourceExit::Opaque { .. } => "org.frankensim.render.coating-feedback-stack.v1",
+        SourceExit::Transmitting { .. } => "org.frankensim.render.transmitting-feedback-stack.v1",
+    });
     hash.update(&(N as u64).to_le_bytes());
     hash.update(&source.incidence.incidence_cosine.to_bits().to_le_bytes());
     for values in [
@@ -268,7 +424,7 @@ fn stack_identity<const N: usize>(
         }
     }
     hash.update(&(source.films.len() as u64).to_le_bytes());
-    for film in &source.films {
+    for film in source.films {
         receiver_hash(&mut hash, film.receiver, false);
         match &film.optics {
             CoatingOpticsModel::Fixed(optics) => {
@@ -297,15 +453,30 @@ fn stack_identity<const N: usize>(
             }
         }
     }
-    receiver_hash(&mut hash, source.substrate_receiver, false);
-    match &source.substrate {
-        SubstrateOpticsModel::Fixed(optics) => {
-            hash.update(&[0]);
-            hash.update(optics.content_identity().as_bytes());
+    match source.exit {
+        SourceExit::Opaque { receiver, optics } => {
+            receiver_hash(&mut hash, receiver, false);
+            match optics {
+                SubstrateOpticsModel::Fixed(optics) => {
+                    hash.update(&[0]);
+                    hash.update(optics.content_identity().as_bytes());
+                }
+                SubstrateOpticsModel::Law(law) => {
+                    hash.update(&[1]);
+                    hash.update(law.identity().as_bytes());
+                }
+            }
         }
-        SubstrateOpticsModel::Law(law) => {
-            hash.update(&[1]);
-            hash.update(law.identity().as_bytes());
+        SourceExit::Transmitting {
+            transmitted_eta,
+            reverse,
+            source_identity,
+        } => {
+            hash.update(source_identity.as_bytes());
+            hash.update(&[u8::from(reverse)]);
+            for value in transmitted_eta {
+                hash.update(&value.to_bits().to_le_bytes());
+            }
         }
     }
     hash.finalize()
@@ -341,55 +512,106 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
         if stateful.is_empty() {
             return Self::try_new_coated(fixed, thermal, budget, tolerance, checkpoint);
         }
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(count)
+            .map_err(|_| SurfaceHeatingError::Budget)?;
+        sources.extend(fixed.iter().map(CoatingSurfaceSource::FixedOpaque));
+        sources.extend(stateful.iter().map(CoatingSurfaceSource::StatefulOpaque));
+        Self::try_new_coating_stacks(
+            &sources,
+            thermal,
+            budget,
+            max_total_optical_knots,
+            tolerance,
+            checkpoint,
+        )
+    }
+
+    /// Compose fixed and independently state-dependent opaque/transmitting
+    /// stacks through one native observer and shared response cache. Every
+    /// finite film retains its authored heat receiver under reverse incidence;
+    /// a transmitting exit has no thermal destination. Distinct films may use
+    /// temperature or exact-caloric-enthalpy laws, including latent plateaus.
+    ///
+    /// Row budgets count each distinct law once. Changing a shared receiver/law
+    /// invalidates only its dependent stack packets; identical physical bindings
+    /// and geometry share their next solve. Dark domains remain binding without
+    /// rebuilding optical packets. Coefficients use accepted interval starts,
+    /// so nonlinear feedback requires temporal refinement.
+    pub fn try_new_coating_stacks(
+        sources: &[CoatingSurfaceSource<'_, N>],
+        thermal: &DepositionSimulation<'_>,
+        budget: SurfaceHeatingBudget,
+        max_total_optical_knots: usize,
+        tolerance: SurfaceHeatingTolerance,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, SurfaceHeatingError> {
+        checkpoint()?;
+        let count = sources.len();
+        if count > budget.max_sources {
+            return Err(SurfaceHeatingError::Budget);
+        }
         let mut source_ids = BTreeSet::new();
         let mut segments = 0usize;
-        for (id, power) in fixed
-            .iter()
-            .map(|s| (s.source_id, &s.power))
-            .chain(stateful.iter().map(|s| (s.source_id, &s.power)))
-        {
+        for source in sources {
             checkpoint()?;
-            if !source_ids.insert(id) {
+            if !source_ids.insert(source.id()) {
                 return Err(invalid("surface illumination source IDs must be unique"));
             }
             segments = segments
-                .checked_add(power.segment_count())
+                .checked_add(source.power().segment_count())
                 .ok_or(SurfaceHeatingError::Budget)?;
             if segments > budget.max_total_power_segments {
                 return Err(SurfaceHeatingError::Budget);
             }
         }
-        if stateful
+        if sources
             .iter()
+            .filter_map(|source| source.stateful())
             .any(|source| source.films.len() > MAX_COHERENT_STACK_LAYERS)
         {
             return Err(SurfaceHeatingError::Budget);
         }
-        let mut ordered: Vec<_> = stateful.iter().collect();
-        ordered.sort_unstable_by_key(|source| source.source_id);
+        let mut ordered: Vec<_> = sources.iter().copied().collect();
+        ordered.sort_unstable_by_key(|source| source.id());
         let mut bindings = BindingBuilder::default();
         let mut stacks = Vec::<Stack<N>>::new();
         let mut packets = Vec::new();
-        let mut initial = Vec::<CoatedSurfacePowerResponse<N>>::new();
         let mut groups = BTreeMap::new();
         let mut by_source = BTreeMap::new();
         let mut source_hashes = BTreeMap::new();
-        let mut prepared = fixed.to_vec();
-        for source in fixed {
-            let mut hash = DomainHasher::new("org.frankensim.render.fixed-coating-input.v1");
-            hash.update(source.response.identity().as_bytes());
-            hash.update(source.power.identity().as_bytes());
-            for receiver in source
-                .film_receivers
-                .iter()
-                .chain(core::iter::once(&source.substrate_receiver))
-            {
-                receiver_hash(&mut hash, *receiver, true);
-            }
-            source_hashes.insert(source.source_id, hash.finalize());
-        }
-        for source in ordered {
+        let mut prepared = Vec::new();
+        prepared
+            .try_reserve_exact(count)
+            .map_err(|_| SurfaceHeatingError::Budget)?;
+        for input in ordered {
             checkpoint()?;
+            let fixed = match input {
+                CoatingSurfaceSource::FixedOpaque(source) => Some((
+                    PreparedCoatingSource::opaque(source)?,
+                    source.response.identity(),
+                    "org.frankensim.render.fixed-coating-input.v1",
+                )),
+                CoatingSurfaceSource::FixedTransmitting(source) => Some((
+                    PreparedCoatingSource::transmitting(source)?,
+                    source.response.identity(),
+                    "org.frankensim.render.fixed-transmitting-input.v1",
+                )),
+                _ => None,
+            };
+            if let Some((source, identity, domain)) = fixed {
+                let mut hash = DomainHasher::new(domain);
+                hash.update(identity.as_bytes());
+                hash.update(source.power.identity().as_bytes());
+                for (receiver, _) in &source.bindings {
+                    receiver_hash(&mut hash, *receiver, true);
+                }
+                source_hashes.insert(source.source_id, hash.finalize());
+                prepared.push(source);
+                continue;
+            }
+            let source = input.stateful().expect("fixed inputs already prepared");
             let identity = stack_identity(source);
             let group = if let Some(&index) = groups.get(identity.as_bytes()) {
                 index
@@ -397,7 +619,7 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
                 let mut films = Vec::with_capacity(source.films.len());
                 let mut cells = Vec::with_capacity(source.films.len() + 1);
                 let mut law_slots = BTreeSet::new();
-                for film in &source.films {
+                for film in source.films {
                     checkpoint()?;
                     films.push(match &film.optics {
                         CoatingOpticsModel::Fixed(optics) => Film::Fixed(*optics),
@@ -415,30 +637,43 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
                     });
                     cells.push(film.receiver.thermal_cell);
                 }
-                let substrate = match &source.substrate {
-                    SubstrateOpticsModel::Fixed(optics) => Substrate::Fixed(*optics),
-                    SubstrateOpticsModel::Law(law) => {
-                        let slot = bindings.bind(
-                            Law::Substrate(Arc::clone(law)),
-                            source.substrate_receiver,
-                            thermal,
-                            max_total_optical_knots,
-                        )?;
-                        law_slots.insert(slot);
-                        Substrate::Law(slot)
+                let exit = match source.exit {
+                    SourceExit::Opaque { receiver, optics } => {
+                        let substrate = match optics {
+                            SubstrateOpticsModel::Fixed(optics) => Substrate::Fixed(*optics),
+                            SubstrateOpticsModel::Law(law) => {
+                                let slot = bindings.bind(
+                                    Law::Substrate(Arc::clone(law)),
+                                    receiver,
+                                    thermal,
+                                    max_total_optical_knots,
+                                )?;
+                                law_slots.insert(slot);
+                                Substrate::Law(slot)
+                            }
+                        };
+                        cells.push(receiver.thermal_cell);
+                        Exit::Opaque(substrate)
                     }
+                    SourceExit::Transmitting {
+                        transmitted_eta,
+                        reverse,
+                        source_identity,
+                    } => Exit::Transmitting {
+                        transmitted_eta,
+                        reverse,
+                        source_identity,
+                    },
                 };
-                cells.push(source.substrate_receiver.thermal_cell);
                 let stack = Stack {
                     films: films.into_boxed_slice(),
-                    substrate,
+                    exit,
                     incidence: source.incidence,
                     cells: cells.into_boxed_slice(),
                 };
-                let response = stack.response(&bindings.resolved)?;
+                let packet = stack.response(&bindings.resolved)?;
                 let group = stacks.len();
-                packets.push(Some(stack.packet(&response)));
-                initial.push(response);
+                packets.push(Some(packet));
                 for slot in law_slots {
                     bindings.laws[slot].groups.push(group);
                 }
@@ -447,24 +682,32 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
                 group
             };
             by_source.insert(source.source_id, group);
-            prepared.push(CoatedSurfaceIlluminationSource {
+            let packet = packets[group]
+                .as_ref()
+                .expect("admitted stack has its initial packet");
+            prepared.push(PreparedCoatingSource {
                 source_id: source.source_id,
-                film_receivers: source.films.iter().map(|film| film.receiver).collect(),
-                substrate_receiver: source.substrate_receiver,
-                response: initial[group].clone(),
+                receiver: source.exit.receiver(),
+                bindings: source
+                    .receivers()
+                    .zip(packet.receivers.iter().map(|receiver| receiver.absorbed))
+                    .collect(),
+                response: packet.total,
                 power: source.power.clone(),
             });
             let mut hash = DomainHasher::new("org.frankensim.render.stateful-coating-input.v1");
             hash.update(identity.as_bytes());
             hash.update(source.power.identity().as_bytes());
-            for film in &source.films {
-                receiver_hash(&mut hash, film.receiver, true);
+            for receiver in source.receivers() {
+                receiver_hash(&mut hash, receiver, true);
             }
-            receiver_hash(&mut hash, source.substrate_receiver, true);
             source_hashes.insert(source.source_id, hash.finalize());
         }
         let mut result =
-            Self::try_new_coated(&prepared, thermal, budget, tolerance, &mut checkpoint)?;
+            Self::try_new_partitioned(prepared, thermal, budget, tolerance, &mut checkpoint)?;
+        if stacks.is_empty() {
+            return Ok(result);
+        }
         let mut hash = DomainHasher::new("org.frankensim.render.stateful-coating-heating.v1");
         hash.update(&(N as u64).to_le_bytes());
         hash.update(&(count as u64).to_le_bytes());
@@ -558,7 +801,7 @@ impl<const N: usize> CoatingFeedbackState<N> {
             .checked_add(1)
             .ok_or(SurfaceHeatingError::Budget)?;
         let stack = &self.model.stacks[group];
-        let packet = stack.packet(&stack.response(&self.cache.resolved)?);
+        let packet = stack.response(&self.cache.resolved)?;
         checkpoint()?;
         Arc::make_mut(&mut self.cache).packets[group] = Some(Arc::clone(&packet));
         *evaluations = next;

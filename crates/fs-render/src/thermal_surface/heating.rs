@@ -27,8 +27,8 @@ pub use coating_feedback::SurfaceCoatingLaw;
 pub mod coating_state;
 use coating_state::CoatingFeedbackState;
 pub use coating_state::{
-    CoatingOpticsModel, StatefulCoatedSurfaceIlluminationSource, StatefulCoatingLayer,
-    SubstrateOpticsModel,
+    CoatingOpticsModel, CoatingSurfaceSource, StatefulCoatedSurfaceIlluminationSource,
+    StatefulCoatingLayer, StatefulTransmittingSurfaceIlluminationSource, SubstrateOpticsModel,
 };
 
 /// Explicit conductor optical constants versus native temperature or enthalpy.

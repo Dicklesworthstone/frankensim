@@ -4957,3 +4957,32 @@ fast-forward remains unchanged. Existing opaque source identities and numerical
 operation order are retained. G1/G3 regressions cover asymmetric reverse routing,
 TIR, weak stored enthalpy, lossless dispersion, empty-state pulse/ramp schedules,
 receiver/budget refusal and late cancellation without partial publication.
+
+### Stateful transmitting films compose with opaque coating sources
+
+`StatefulTransmittingSurfaceIlluminationSource` binds every finite film to its
+own native thermal receiver and fixed, dispersive-lossless or temperature/
+enthalpy optical model. `CoatingSurfaceSource` and
+`SurfaceOpticalHeating::try_new_coating_stacks` compose fixed and stateful opaque
+and transmitting sources in one observer. Existing opaque constructors delegate
+to the same preparation and retain their physical arithmetic and identities.
+Transmitting exits have fixed real spectral indices and no thermal destination;
+all film/receiver associations remain in authored order under reverse incidence.
+
+The common receiver/law bindings and coherent packet cache resolve independent
+film states, including distinct enthalpies at the same latent temperature.
+Direction, surrounding media, incidence and physical receivers distinguish
+packets. Identical bindings share their next solve; a changed film invalidates
+all dependent opaque or transmitting stacks. Native material/caloric identities,
+row/source/work budgets, dark-domain validation, accepted-endpoint checks and
+transactional rollback remain binding. Reflected and transmitted energy track
+the same updated coherent solution as the positive film heat.
+
+Coupling retains fixed geometry, whole-film thermal lumping, prompt
+thermalization and accepted-start coefficients; it requires time refinement and
+does not infer expansion, phase mixing or temperature-dependent surrounding
+media. Four G1/G3 regressions cover all four source kinds with exact static
+parity, reverse illumination of independently evolving films against a separate
+RK4 integration of native work and outgoing R/T energy over three refinements,
+latent forward/reverse cache sharing, canonical permutation/split advances,
+domain/caloric refusal and late cancellation followed by an identical retry.
