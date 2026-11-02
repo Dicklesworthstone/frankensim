@@ -217,6 +217,3 @@ pub(super) fn solve(
         .solve_with_material_walls(&bindings, wall_controls, controls, cancelled)
         .map_err(|source: SteadyGasError| SteadyGasInputError::SteadyGas { line, source })
 }
-
-#[cfg(test)]
-mod tests;

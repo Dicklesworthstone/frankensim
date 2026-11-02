@@ -108,7 +108,7 @@ pub(super) fn parse(
     })
 }
 
-impl Prepared {
+impl Prepared<'_> {
     pub(super) fn material_routes<'a>(
         &'a self, ready: &Ready, network: &DepositionSimulation<'_>, gate: &CancelGate,
     ) -> Result<(Vec<MaterialRelaxationHeatDestination<'a>>, Vec<MaterialRelaxationTemperature>)> {

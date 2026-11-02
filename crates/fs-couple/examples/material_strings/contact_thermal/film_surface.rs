@@ -71,7 +71,7 @@ impl PreparedRoute<'_> {
     }
 }
 
-impl Prepared {
+impl Prepared<'_> {
     pub(super) fn film_routes<'a>(&'a self, ready: &Ready,
         network: &DepositionSimulation<'_>) -> Result<Vec<PreparedRoute<'a>>> {
         let fiber_card = if ready.performance.bank().source().fiber_ribbon().is_some() {

@@ -87,7 +87,7 @@ fn moving_film_spec(profile: &Profile, block: usize) -> input::Spec {
     spec
 }
 
-fn film_bindings(prepared: &Prepared) -> Vec<LayerThermalCell<'_>> {
+fn film_bindings<'a>(prepared: &'a Prepared<'_>) -> Vec<LayerThermalCell<'a>> {
     prepared.profile.films.iter().map(|&(port, cell)| {
         let index = prepared.profile.cells.iter().position(|c| c.id == cell).unwrap();
         LayerThermalCell { port, cell, material: &prepared.sources[index].card,

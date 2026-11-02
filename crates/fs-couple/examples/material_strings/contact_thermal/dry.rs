@@ -96,7 +96,7 @@ fn centre_matches(interval: [f64; 2], origin: f64, position: f64) -> bool {
     expected.is_finite() && (actual - expected).abs() <= 64.0 * f64::EPSILON * scale
 }
 
-impl Prepared {
+impl Prepared<'_> {
     pub(super) fn thermal_strip(&self, strip: &Strip) -> Result<DryThermalCell<'_>> {
         let index = self.profile.cells.iter().position(|cell| cell.id == strip.cell)
             .ok_or("thermal strip cell is absent")?;

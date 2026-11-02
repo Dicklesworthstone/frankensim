@@ -103,11 +103,60 @@ performance, not a separate source lookup.
 | `film` | One retained material shear port and its unique finite cell. Bind every existing film exactly once. |
 | `series-heat` | One existing series-compliant drive and its receiving cell. Other drive losses retain their original external-loss account. A drive cannot be routed twice. |
 | `link` | Two distinct existing cells, physical interface area [m²], and positive distances from their temperature locations to that interface [m]. Conductance is `A / (d_a/k_a + d_b/k_b)`, re-evaluated from both original source cards at every endpoint. |
+| `integrated-link` | The same cells, area and distances, followed by a scalar iteration budget, absolute heat tolerance [W] and relative heat tolerance. The existing two-layer conduction owner integrates each material's original `k(T)` chart and solves one continuous interface heat flux. |
 
 Limits are 64 KiB, 256 cells, 1,024 links, 64 film bindings and 64 series heat
 routes. A profile needs at least one physical heat route. Film and series
 counts may individually be zero. Zero source conductivity gives zero
 conductance; no replacement conductivity is introduced.
+
+### Temperature-integrated internal conduction
+
+Any profile version can replace an individual `link` record with:
+
+```text
+integrated-link ID CELL_A CELL_B AREA DISTANCE_A DISTANCE_B ITERATIONS ABS_HEAT_TOL_W REL_HEAT_TOL
+```
+
+This selects a different spatial constitutive approximation, without adding a
+thermal cell, contact mass, source or time step. An ordinary `link` holds each
+half-cell's conductivity at that cell's endpoint temperature. An
+`integrated-link` treats both source-free half-cells as quasi-steady conducting
+layers and integrates their own piecewise-linear conductivity charts between
+the cell and interface temperatures. It uses perfect thermal contact at the
+interface; no unmeasured interface resistance is inferred. Both forms retain
+the original contact area, half-distances, finite-cell masses, caloric curves
+and conservative heat graph.
+
+For example, two equal half-cells of the same manufactured affine material
+with `k(290 K)=0.15` and `k(310 K)=0.25 W/(m K)`, an area of `1e-6 m²` and
+half-distances of `1e-5 m` have integrated conductance `0.01 W/K`. The
+endpoint approximation gives `0.009375 W/K`. The corresponding data-only
+record, once those original source cells exist, is:
+
+```text
+integrated-link 9 30 31 1e-6 1e-5 1e-5 96 1e-12 1e-12
+```
+
+Preparation pins the same conductivity claim already selected for each cell,
+retains every source breakpoint and receipt, and requires continuously
+supported, strictly positive static conductivity across its declared solid
+temperature interval. Every trial requires both source charts to support both
+endpoint temperatures; no extrapolation or material-source switch is allowed.
+Explicit zero-conductivity insulation remains available with an ordinary
+`link`; the positive-conductivity layer model refuses it rather than adding an
+artificial small conductivity.
+
+The scalar solve permits 1–256 iterations, a positive absolute tolerance and
+a nonnegative relative tolerance. It polls the original cancellation gate.
+Its accepted heat flux is lowered to the same conservative `G*(T_a-T_b)`
+transfer. The sum of absolute layer-continuity and flux-lowering errors,
+multiplied by the original sample period, must also fit the profile's thermal
+energy tolerance. A loose layer tolerance therefore cannot bypass the shared
+heat budget. The existing implicit contact solver re-evaluates the complete
+flux at each perturbed endpoint when forming its numerical tangent; the flux
+secant is not substituted for the nonlinear Jacobian. Existing mechanical
+sample admission and thermal energy acceptance remain unchanged.
 
 Neighbor-cell temperatures drive conduction; film temperatures also drive
 the contact constitutive law. Version 4 can additionally route the original fiber material's hereditary

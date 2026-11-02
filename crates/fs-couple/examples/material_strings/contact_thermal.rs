@@ -2,8 +2,8 @@
 //! Cells refer to material packs already used by this assembly. Density, Cp,
 //! conductivity and film constitutive properties are queried from those SAME
 //! cards. The profile supplies physical geometry and numerical resolution only.
-//! Outer boundaries are explicitly adiabatic; links use original series-Fourier
-//! conduction, with conductivity re-queried at every nonlinear endpoint.
+//! Outer boundaries are explicitly adiabatic. Links select endpoint-Fourier
+//! conduction or the original source-integrated two-layer flux at every trial.
 
 use super::*;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::{
@@ -15,6 +15,13 @@ use fs_material::phase::{
     SolidLiquidPhase,
 };
 use fs_material::state_point::{SPECIFIC_HEAT_CAPACITY_DIMS, THERMAL_CONDUCTIVITY_DIMS};
+use fs_material::thermal::{
+    conduction::{
+        ConductivityCurve, LayerConductionConfig, TwoLayerConduction,
+        source::ResolvedConductionLayer,
+    },
+    source::ThermalMaterialPoint,
+};
 use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionSimulation, Event,
@@ -53,6 +60,7 @@ struct Link {
     b: CellId,
     area: f64,
     distances: [f64; 2],
+    integrated: Option<LayerConductionConfig>,
 }
 #[derive(Clone, Debug)]
 pub struct Profile {
@@ -136,16 +144,25 @@ impl Profile {
         let mut rows = Rows {
             lines: std::str::from_utf8(bytes)?.lines(),
         };
-        let format = match rows.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) {
+        let format = match rows
+            .lines
+            .clone()
+            .next()
+            .and_then(|line| line.split_ascii_whitespace().next())
+        {
             Some("frankensim-contact-thermal-v1") => 1,
             Some("frankensim-contact-thermal-v2") => 2,
             Some("frankensim-contact-thermal-v3") => 3,
             Some("frankensim-contact-thermal-v4") => 4,
             _ => return Err("unsupported contact-thermal profile version".into()),
         };
-        rows.row(match format { 1 => "frankensim-contact-thermal-v1",
-            2 => "frankensim-contact-thermal-v2", 3 => "frankensim-contact-thermal-v3",
-            _ => "frankensim-contact-thermal-v4" })?.end()?;
+        rows.row(match format {
+            1 => "frankensim-contact-thermal-v1",
+            2 => "frankensim-contact-thermal-v2",
+            3 => "frankensim-contact-thermal-v3",
+            _ => "frankensim-contact-thermal-v4",
+        })?
+        .end()?;
         let mut boundary = rows.row("boundary")?;
         if boundary.word()? != "adiabatic" {
             return Err("contact-thermal requires an explicit adiabatic outer boundary".into());
@@ -211,7 +228,11 @@ impl Profile {
                 geometry,
             });
         }
-        let dry = if format >= 2 { dry::parse(&mut rows, &cells)? } else { Vec::new() };
+        let dry = if format >= 2 {
+            dry::parse(&mut rows, &cells)?
+        } else {
+            Vec::new()
+        };
         let mut films = Vec::new();
         for _ in 0..rows.count("films", 64)? {
             let mut row = rows.row("film")?;
@@ -225,8 +246,11 @@ impl Profile {
             }
             films.push((port, cell));
         }
-        let film_surfaces = if format >= 3 { film_surface::parse(&mut rows, &cells, &films)? }
-            else { Vec::new() };
+        let film_surfaces = if format >= 3 {
+            film_surface::parse(&mut rows, &cells, &films)?
+        } else {
+            Vec::new()
+        };
         let mut series = Vec::<SeriesDriveHeatDestination>::new();
         for _ in 0..rows.count("series", 64)? {
             let mut row = rows.row("series-heat")?;
@@ -244,24 +268,61 @@ impl Profile {
         }
         let material_heat = if format >= 4 {
             Some(material_heat::parse(&mut rows, &cells, &films)?)
-        } else { None };
-        if dry.iter().any(|route| films.iter().any(|&(port, _)| route.port() == port)) {
-            return Err("a physical contact cannot own both dry-interface and material-film heat".into());
+        } else {
+            None
+        };
+        if dry
+            .iter()
+            .any(|route| films.iter().any(|&(port, _)| route.port() == port))
+        {
+            return Err(
+                "a physical contact cannot own both dry-interface and material-film heat".into(),
+            );
         }
-        if dry.is_empty() && films.is_empty() && series.is_empty()
-            && material_heat.as_ref().is_none_or(|routes| routes.len() == 0) {
+        if dry.is_empty()
+            && films.is_empty()
+            && series.is_empty()
+            && material_heat
+                .as_ref()
+                .is_none_or(|routes| routes.len() == 0)
+        {
             return Err("contact-thermal profile has no physical heat route".into());
         }
         let mut links = Vec::<Link>::new();
         for _ in 0..rows.count("links", MAX_LINKS)? {
-            let mut row = rows.row("link")?;
-            let link = Link {
+            let mut row = Row {
+                words: rows
+                    .lines
+                    .next()
+                    .ok_or("missing contact-thermal link")?
+                    .split_ascii_whitespace(),
+            };
+            let integrated = match row.word()? {
+                "link" => false,
+                "integrated-link" => true,
+                _ => return Err("expected contact-thermal link or integrated-link record".into()),
+            };
+            let mut link = Link {
                 id: row.parse()?,
                 a: CellId(row.parse()?),
                 b: CellId(row.parse()?),
                 area: row.positive()?,
                 distances: [row.positive()?, row.positive()?],
+                integrated: None,
             };
+            if integrated {
+                let controls = LayerConductionConfig {
+                    max_iterations: row.parse()?,
+                    absolute_heat_tolerance_w: row.positive()?,
+                    relative_heat_tolerance: row.scalar()?,
+                };
+                if !(1..=256).contains(&controls.max_iterations)
+                    || controls.relative_heat_tolerance < 0.0
+                {
+                    return Err("integrated-link needs 1..=256 iterations and nonnegative relative heat tolerance".into());
+                }
+                link.integrated = Some(controls);
+            }
             row.end()?;
             if link.a == link.b
                 || links.iter().any(|l| l.id == link.id)
@@ -313,22 +374,37 @@ impl Profile {
     pub fn configure(&self, spec: &mut input::Spec) {
         spec.contact_thermal = true;
         spec.dry_contact_thermal = !self.dry.is_empty();
-        spec.retained_string_films = spec.bow_fibers.is_some() && !self.films.is_empty()
+        spec.retained_string_films = spec.bow_fibers.is_some()
+            && !self.films.is_empty()
             && self.film_surfaces.len() == self.films.len();
     }
 
     /// Compile thermal data from the SAME cached material objects as mechanics.
     /// A profile cannot silently load a different revision or substitute a
     /// constant for a missing Cp, density, conductivity or film property.
-    pub fn prepare(&self, ready: &Ready, gate: &CancelGate) -> Result<Prepared> {
+    pub fn prepare<'gate>(
+        &self,
+        ready: &Ready,
+        gate: &'gate CancelGate,
+    ) -> Result<Prepared<'gate>> {
         poll(gate)?;
         let mut sources = Vec::with_capacity(self.cells.len());
         for cell in &self.cells {
             poll(gate)?;
             let card = ready.catalog.get(&cell.pack)
                 .ok_or("contact-thermal cell must reference a material pack already used by this assembly")?.card.clone();
-            let point = |t| material_inputs::query_with_environment(&card, t, ready.spec.omega,
-                ready.spec.material_states.get(&cell.pack).map_or(&[], Vec::as_slice));
+            let point = |t| {
+                material_inputs::query_with_environment(
+                    &card,
+                    t,
+                    ready.spec.omega,
+                    ready
+                        .spec
+                        .material_states
+                        .get(&cell.pack)
+                        .map_or(&[], Vec::as_slice),
+                )
+            };
             let [low, initial, high] = cell.temperatures;
             let requirement = [
                 Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
@@ -339,12 +415,8 @@ impl Profile {
                 )?,
             ];
             let query = point(initial)?;
-            let state = resolve_material_state_point(
-                &card,
-                &query,
-                &requirement,
-                Pick::SingleClaimOnly,
-            )?;
+            let state =
+                resolve_material_state_point(&card, &query, &requirement, Pick::SingleClaimOnly)?;
             let cp = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
             let density = PropertyKey::new("density", Density::DIMS);
             let span = |a, b| -> Result<ResolvedHeatCapacityCurve> {
@@ -394,6 +466,47 @@ impl Profile {
             {
                 return Err("fixed contact-thermal cells require one constant reference density over the full source interval".into());
             }
+            let integrated_conductivity = if self
+                .links
+                .iter()
+                .any(|link| link.integrated.is_some() && [link.a, link.b].contains(&cell.id))
+            {
+                let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+                let selected = state
+                    .property("thermal_conductivity")
+                    .ok_or("missing source conductivity")?
+                    .answer()
+                    .receipt
+                    .selected;
+                let layer = ResolvedConductionLayer::new(
+                    &curve,
+                    ThermalMaterialPoint {
+                        material: &card,
+                        context: &query,
+                        temperature_axis: "T",
+                        liquid_fraction_axis: None,
+                    },
+                    &key,
+                    fs_matdb::ClaimSelection::Pinned(selected),
+                    SolidLiquidPhase::Solid,
+                    [low, high],
+                    || {
+                        if gate.is_requested() {
+                            Err(fs_thermal::enthalpy::DepositionError::Cancelled)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )?;
+                // Own the canonical prepared chart and its original source line;
+                // the same caloric curve below still owns all storage/history.
+                Some(IntegratedConductivity {
+                    curve: layer.conductivity_curve().clone(),
+                    source: std::sync::Arc::clone(layer.source_line()),
+                })
+            } else {
+                None
+            };
             sources.push(CellSource {
                 card,
                 query,
@@ -401,6 +514,7 @@ impl Profile {
                 curve,
                 source_curves: [cold, hot],
                 density: rho,
+                integrated_conductivity,
             });
         }
         let actual_films = (0..ready.spec.bow_contact_count())
@@ -443,20 +557,28 @@ impl Profile {
             profile: self.clone(),
             sources,
             sample_period_s: 1.0 / f64::from(ready.spec.rate),
+            gate,
         };
         // Validate the source masses, geometry and initial conductances before
         // creating any output. This processes only birth/contact events at t=0.
         let network = prepared.network(gate)?;
+        prepared.resolve(&network)?;
         let system = ready.performance.bank().system();
         for port in 0..system.port_count() {
-            if system.interface(port).is_some_and(|binding| binding.temperature_source().is_some())
-                && !self.dry.iter().any(|route| route.port() == port) {
+            if system
+                .interface(port)
+                .is_some_and(|binding| binding.temperature_source().is_some())
+                && !self.dry.iter().any(|route| route.port() == port)
+            {
                 return Err("every temperature-dependent dry port requires its original finite-cell heat route".into());
             }
         }
         for route in prepared.dry_routes(ready)? {
             route.heat.admit::<std::convert::Infallible>(
-                ready.performance.bank().system(), &network, self.controls.maximum_cells)?;
+                ready.performance.bank().system(),
+                &network,
+                self.controls.maximum_cells,
+            )?;
         }
         prepared.film_routes(ready, &network)?;
         prepared.material_routes(ready, &network, gate)?;
@@ -472,22 +594,65 @@ struct CellSource {
     curve: EquilibriumEnthalpyPhaseCurve,
     source_curves: [ResolvedHeatCapacityCurve; 2],
     density: f64,
+    integrated_conductivity: Option<IntegratedConductivity>,
 }
-pub struct Prepared {
+struct IntegratedConductivity {
+    curve: ConductivityCurve,
+    source: std::sync::Arc<fs_matdb::PropertyLineSlice>,
+}
+pub struct Prepared<'gate> {
     profile: Profile,
     sources: Vec<CellSource>,
     sample_period_s: f64,
+    gate: &'gate CancelGate,
 }
-impl Prepared {
-    fn conductance(&self, link: &Link, temperatures: [f64; 2]) -> Result<f64> {
-        let mut k = [0.0; 2];
-        for (i, id) in [link.a, link.b].iter().enumerate() {
-            let index = self
-                .profile
+impl Prepared<'_> {
+    fn checkpoint(&self) -> std::result::Result<(), fs_thermal::enthalpy::DepositionError> {
+        if self.gate.is_requested() {
+            Err(fs_thermal::enthalpy::DepositionError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    // Return the original flux secant and the absolute constitutive/lowering
+    // heat residual. The latter is charged to the shared thermal energy budget.
+    fn conductance(&self, link: &Link, temperatures: [f64; 2]) -> Result<(f64, f64)> {
+        self.checkpoint()?;
+        let indices = [link.a, link.b].map(|id| {
+            self.profile
                 .cells
                 .iter()
-                .position(|c| c.id == *id)
-                .ok_or("missing thermal link cell")?;
+                .position(|c| c.id == id)
+                .expect("admitted thermal link cell")
+        });
+        if let Some(controls) = link.integrated {
+            let curves = indices.map(|i| {
+                &self.sources[i]
+                    .integrated_conductivity
+                    .as_ref()
+                    .expect("admitted integrated conductivity")
+                    .curve
+            });
+            let response = TwoLayerConduction::new(curves, link.distances, link.area, 0.0)?
+                .evaluate(temperatures, controls, || self.checkpoint())?;
+            let applied = response.conductance_w_k * (temperatures[0] - temperatures[1]);
+            let lowering_error = (applied - response.power_a_to_b_w).abs();
+            let allowance = controls.absolute_heat_tolerance_w
+                + controls.relative_heat_tolerance
+                    * applied.abs().max(response.power_a_to_b_w.abs());
+            if !applied.is_finite() || !allowance.is_finite() || lowering_error > allowance {
+                return Err(
+                    "integrated-link flux cannot be lowered to its original thermal link".into(),
+                );
+            }
+            return Ok((
+                response.conductance_w_k,
+                response.layer_heat_residual_w.abs() + lowering_error,
+            ));
+        }
+        let mut k = [0.0; 2];
+        for (i, index) in indices.into_iter().enumerate() {
             let source = &self.sources[index];
             let query = source.state.query().with("T", temperatures[i])?;
             let state = source.state.at_query_point(&source.card, &query)?;
@@ -496,7 +661,7 @@ impl Prepared {
                 .ok_or("missing source conductivity")?
                 .value_si();
         }
-        Ok(series_conductance_w_k(link.area, link.distances, k)?)
+        Ok((series_conductance_w_k(link.area, link.distances, k)?, 0.0))
     }
     fn network(&self, gate: &CancelGate) -> Result<DepositionSimulation<'_>> {
         let mut events = Vec::new();
@@ -537,7 +702,8 @@ impl Prepared {
                     b: link.b,
                     area_m2: link.area,
                     conductance_w_k: self
-                        .conductance(link, [temperature(link.a), temperature(link.b)])?,
+                        .conductance(link, [temperature(link.a), temperature(link.b)])?
+                        .0,
                 }),
             });
         }
@@ -576,18 +742,28 @@ impl Prepared {
     }
     fn resolve(&self, network: &DepositionSimulation<'_>) -> Result<StepCoefficients<()>> {
         let mut conductances_w_k = BTreeMap::new();
+        let mut constitutive_residual_w = 0.0;
         for link in &self.profile.links {
-            conductances_w_k.insert(
-                link.id,
-                self.conductance(
-                    link,
-                    [
-                        network.temperature_k(link.a)?,
-                        network.temperature_k(link.b)?,
-                    ],
-                )?,
+            let (conductance, residual) = self.conductance(
+                link,
+                [
+                    network.temperature_k(link.a)?,
+                    network.temperature_k(link.b)?,
+                ],
+            )?;
+            conductances_w_k.insert(link.id, conductance);
+            constitutive_residual_w += residual;
+        }
+        if !constitutive_residual_w.is_finite()
+            || constitutive_residual_w * self.sample_period_s
+                > self.profile.controls.thermal_energy_tolerance_j
+        {
+            return Err(
+                "integrated-link layer residual exceeds the original thermal energy budget".into(),
             );
         }
+        // These are flux secants, not Jacobian entries. The existing implicit
+        // owner differentiates this callback by re-solving every perturbed trial.
         Ok(StepCoefficients {
             sources_w: BTreeMap::new(),
             conductances_w_k,
@@ -595,8 +771,15 @@ impl Prepared {
         })
     }
     pub fn describe(&self) {
-        if self.profile.material_heat.as_ref().is_some_and(material_heat::Routes::has_temperature_rates) {
-            eprintln!("body_material_rates=original source tau(T); fixed storage/maps; accepted interval rates, endpoint rates for next interval; first-order temperature partition");
+        if self
+            .profile
+            .material_heat
+            .as_ref()
+            .is_some_and(material_heat::Routes::has_temperature_rates)
+        {
+            eprintln!(
+                "body_material_rates=original source tau(T); fixed storage/maps; accepted interval rates, endpoint rates for next interval; first-order temperature partition"
+            );
         }
         eprintln!(
             "contact_thermal=source-bound finite solid cells; adiabatic exterior; retained films with optional sliding thermal counterfaces or moving dry footprints; original sample clock"
@@ -613,6 +796,14 @@ impl Prepared {
                 source.density * cell.geometry.volume_m3,
                 cell.temperatures[1]
             );
+            if let Some(conductivity) = &source.integrated_conductivity {
+                eprintln!(
+                    "contact_thermal_integrated_source={}; selected={:?}; knots={}",
+                    cell.id.0,
+                    conductivity.source.knots[0].1.receipt.selected,
+                    conductivity.source.knots.len()
+                );
+            }
         }
     }
     /// Use the original scheduled pressure owner and PCM writer. Optional bow
@@ -663,19 +854,31 @@ impl Prepared {
         let dry = self.dry_routes(ready)?;
         let resolve = |endpoint: &DepositionSimulation<'_>| self.resolve(endpoint);
         let mut performance = ready.performance.with_combined_contact_thermal_network(
-            network, bindings, self.profile.series.clone(), dry, material_heat,
-            self.profile.controls, gate, resolve,
+            network,
+            bindings,
+            self.profile.series.clone(),
+            dry,
+            material_heat,
+            self.profile.controls,
+            gate,
+            resolve,
         )?;
         if !material_rates.is_empty() {
             performance = performance.with_material_relaxation_temperature(material_rates)?;
         }
         if !film_routes.is_empty() {
-            performance = performance.with_trial_heat_source(|endpoint, ports|
-                self.resolve_with_films(endpoint, ports, &film_routes))?;
+            performance = performance.with_trial_heat_source(|endpoint, ports| {
+                self.resolve_with_films(endpoint, ports, &film_routes)
+            })?;
         }
         let result = match trace {
             Some(trace) => write_traced_pressure(
-                &mut performance, output, trace, &ready.spec, decimate, gate,
+                &mut performance,
+                output,
+                trace,
+                &ready.spec,
+                decimate,
+                gate,
                 |performance| performance.last_frame().map(|frame| &frame.mechanics),
             ),
             None => write_pressure(&mut performance, output, &ready.spec, decimate, gate),
