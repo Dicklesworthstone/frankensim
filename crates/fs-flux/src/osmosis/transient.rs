@@ -21,9 +21,10 @@
 //! implied. It does not infer crossflow, turbulence, ionic fields,
 //! concentration-dependent diffusion, or heat storage.
 //! Cell averages approximate center concentrations; spatial refinement and time
-//! refinement are separate obligations. Each call accepts ONE first-order
-//! implicit step, with bounded root work but no temporal error estimate or
-//! uniqueness claim for permeating-solute roots. All inventories, including film
+//! refinement are separate obligations. `step` accepts one first-order implicit
+//! step; `advance` estimates temporal error with conservative step doubling and
+//! prepared rollback storage. Neither claims uniqueness for permeating-solute
+//! roots. All inventories, including film
 //! water, enter the balance report. Reported pressure work is not a closed heat
 //! or chemical-energy balance. Failed/cancelled steps publish no state or time.
 
@@ -33,6 +34,10 @@ use fs_material::osmosis::polarization::{FilmPermeance, PolarizedMembraneTranspo
 use fs_material::osmosis::{
     HydraulicPermeance, MembraneTransport, OsmosisError, ReflectionCoefficient, SolutePermeance,
 };
+
+#[path = "transient/adaptive.rs"]
+pub mod adaptive;
+pub use adaptive::{TransientAdvanceControls, TransientAdvanceReport, TransientAdvanceWorkspace};
 
 /// Maximum finite cells on each side; all species share their geometry.
 pub const MAX_TRANSIENT_FILM_CELLS: usize = 4096;
@@ -53,6 +58,11 @@ pub enum TransientOsmosisError {
     InventoryBalance {
         species: usize,
         residual_mol: f64,
+    },
+    /// Temporal accuracy needs a step below the caller's admitted minimum.
+    TemporalAccuracy {
+        step_s: f64,
+        scaled_error: f64,
     },
 }
 impl core::fmt::Display for TransientOsmosisError {
@@ -810,6 +820,16 @@ impl TransientOsmoticPair {
         &mut self,
         duration_s: f64,
         controls: TransientStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<TransientStepReport> {
+        self.step_counted(duration_s, controls, &mut 0, cancelled)
+    }
+
+    fn step_counted(
+        &mut self,
+        duration_s: f64,
+        controls: TransientStepControls,
+        root_evaluations: &mut usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<TransientStepReport> {
         poll(&mut cancelled)?;
@@ -833,7 +853,12 @@ impl TransientOsmoticPair {
         }
         let before_water = self.total_solvent_volume_m3();
         let mut evaluations = 0;
-        let trial = self.solve_water(area_time, controls, &mut evaluations, &mut cancelled)?;
+        let trial = self.solve_water(area_time, controls, &mut evaluations, &mut cancelled);
+        // Include refused trials in an adaptive window's work account.
+        *root_evaluations = root_evaluations
+            .checked_add(evaluations)
+            .ok_or(OsmoticNetworkError::WorkBudget)?;
+        let trial = trial?;
         let vl = self.volume(0, trial.water);
         let vr = self.volume(self.rows - 1, trial.water);
         let count = self.species_count;

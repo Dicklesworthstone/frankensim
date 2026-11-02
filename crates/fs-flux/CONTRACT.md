@@ -2108,7 +2108,7 @@ concentration is continuous across internal faces, with no inferred partition
 coefficient or sorbed storage. Focused regressions cover analytical resistance,
 both flow directions, high material contrast and nonuniform spatial refinement.
 
-Each call accepts one backward-Euler step. Original exponentially fitted donor
+The `step` call accepts one backward-Euler step. Original exponentially fitted donor
 coefficients form a positive implicit amount system for each species. Native
 `fs_la::tridiagonal::TridiagonalWorkspace` solves it in linear work per species;
 all storage is prepared once. Terminal half cells use the existing polarization
@@ -2122,8 +2122,8 @@ pressure work for the declared linear chamber laws. Failure, cancellation,
 nonphysical amounts, volume depletion or exhausted work publish no state or
 clock. Only neutral ideal solutions are admitted: nonideal chemical transport,
 ionic fields, resolved crossflow, film hydraulic losses and heat storage are
-outside this owner. Root tolerances are not temporal error estimates; callers
-refine time and mesh independently.
+outside this owner. Root tolerances alone are not temporal error estimates;
+`step` callers refine time independently, and all callers still refine the mesh.
 
 The `transient_osmotic_filtration` example matches initial whole-system water
 and solute against the steady-film comparison, then exposes startup film
@@ -2131,6 +2131,35 @@ storage and face enrichment. Focused regressions cover analytical diffusion,
 multiple permeating species on unequal meshes, steady forward/reverse limits,
 time/space refinement, steep roots, inventory checks and atomic refusal.
 
+
+### Accuracy-controlled transient osmotic films
+
+`TransientOsmoticPair::advance` adds opt-in prepared temporal control. It
+compares one full backward-Euler step with two half steps from the same state,
+retains the fine conservative state without extrapolation, and controls every
+bulk/film solute amount, both bulk water volumes, and both reconstructed
+membrane surface concentrations. Supplied algebraic controls remain explicit
+caps and are tightened below temporal allowances. Root work includes coarse
+and refused trials; accepted-step, rejection and root budgets plus a minimum
+step bound the work.
+
+The exact representable requested endpoint is reached or the entire window
+refuses. A one-ULP terminal clock remainder is included before solving, and
+rounded unequal halves receive their actual algebraic budget shares and
+first-order error factor. Any refusal or cancellation, including after the last
+internal step, restores the original clock and inventories. Reports reconcile
+original/final inventories directly with compensated summation and accumulate
+only accepted physical pressure work. Prepared advancement allocates no storage;
+the optional snapshots require a separate admitted byte budget, leaving
+single-step storage unchanged.
+
+These are local temporal estimates, not spatial or accumulated global-error
+certificates or guarantees of nonlinear-root uniqueness. Authored regressions
+check analytical finite-reservoir relaxation, layered-film startup and surface
+polarization, exact/unequal-half clocks, work limits and late cancellation.
+The existing filtration example uses explicit nonuniform layers, matches its
+steady comparison by true series resistance and actual initial inventories,
+and reports adaptive work and balances through the physical transient.
 
 ## Finite Donnan swelling and mechanical water exchange
 
