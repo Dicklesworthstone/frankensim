@@ -64,8 +64,10 @@ use transport::{MassLocation3, MassTransport3};
 /// the core collision/streaming surface and its goldens are unchanged.
 /// Version 3 initializes ingress and newly wet cells in the full Guo source
 /// frame, interpolating physical velocity across unequal neighbor densities.
-/// Explicit `LegacyGlobal` replay retains its historical conversion arithmetic.
-pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 3;
+/// Version 4 reconstructs gas links in that same physical source frame.
+/// Explicit `LegacyGlobal` replay retains its historical conversion and gas
+/// reconstruction arithmetic.
+pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 4;
 
 /// Conversion semantics for new simulations versus historical trajectory replay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1228,11 +1230,25 @@ impl FreeSurface3 {
                 let perturbation = core::array::from_fn(|d| local_force[d] - base_force[d]);
                 let physical_velocity =
                     core::array::from_fn(|d| u_pre[d] + 0.5 * local_force[d] / rho_pre);
-                if self.local_force.is_some() {
-                    for axis in 0..3 {
-                        u_pre[axis] += 0.5 * perturbation[axis] / rho_pre;
-                    }
-                }
+                let (pressure_force, correct_pressure_source) =
+                    if self.redistribution == ConversionRedistribution3::LegacyGlobal {
+                        if self.local_force.is_some() {
+                            for axis in 0..3 {
+                                u_pre[axis] += 0.5 * perturbation[axis] / rho_pre;
+                            }
+                        }
+                        (perturbation, self.local_force.is_some())
+                    } else {
+                        // Pressure is a physical even moment. Stored Guo
+                        // populations carry -S/2, so their reconstructed pair
+                        // must sum to feq_i(rho_b,u) + feq_opp(rho_b,u)
+                        // - (S_i(u,F) + S_opp(u,F))/2. Using raw momentum/rho
+                        // in feq instead adds a force-squared pressure/stress;
+                        // correcting only a local perturbation makes the
+                        // result depend on the arbitrary reference-force split.
+                        u_pre = physical_velocity;
+                        (local_force, local_force.iter().any(|&value| value != 0.0))
+                    };
                 let mut new_f = [0.0f64; Q3];
                 // One geometry and boundary velocity serve every missing gas
                 // population. Interior cells never compute capillary curvature.
@@ -1268,17 +1284,17 @@ impl FreeSurface3 {
                                     }
                                     let eq = gas_equilibrium.as_ref().expect("reconstructed gas boundary");
                                     let value = eq[q] + eq[OPP3[q]] - post[&key][lane][OPP3[q]];
-                                    if self.local_force.is_some() {
+                                    if correct_pressure_source {
                                         value
                                             - 0.5
                                                 * (forcing::source(
                                                     q,
                                                     physical_velocity,
-                                                    perturbation,
+                                                    pressure_force,
                                                 ) + forcing::source(
                                                     OPP3[q],
                                                     physical_velocity,
-                                                    perturbation,
+                                                    pressure_force,
                                                 ))
                                     } else {
                                         value
@@ -1788,6 +1804,184 @@ mod capillary_boundary_tests {
                     }
                 }
                 assert!(created > 0);
+            }
+        });
+    }
+
+    #[test]
+    fn g1_planar_hydrostatic_pressure_remains_at_rest_in_all_six_directions() {
+        with_cx(|cx| {
+            for axis in 0..3 {
+                for sign in [-1.0, 1.0] {
+                    let mut force = [0.0; 3];
+                    force[axis] = sign * 0.001;
+                    let mut initial = Vec::new();
+                    for z in 0..8 {
+                        for y in 0..8 {
+                            for x in 0..8 {
+                                let coordinates = [x, y, z];
+                                if (sign > 0.0 && coordinates[axis] >= 4)
+                                    || (sign < 0.0 && coordinates[axis] < 4)
+                                {
+                                    // The flat free surface is halfway between
+                                    // the last wet node and first gas node.
+                                    // grad(p) = F and p = cs² rho, with rho=1
+                                    // at that plane. No density-dependent force.
+                                    let offset = coordinates[axis] as f64 + 0.5 - 4.0;
+                                    initial.push(FreeSurfaceInitialCell3 {
+                                        coordinates,
+                                        fill_fraction: 1.0,
+                                        density: 1.0 + offset * force[axis] / CS2_3,
+                                        velocity: [0.0; 3],
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    let mut surface = FreeSurface3::from_cells(
+                        [8; 3],
+                        0.8,
+                        force,
+                        0.0,
+                        ContactModel3::Neutral,
+                        &[],
+                        &initial,
+                        cx,
+                    )
+                    .unwrap();
+                    let mass = surface.ledger_mass();
+                    for _ in 0..64 {
+                        surface.step().unwrap();
+                    }
+                    for state in &initial {
+                        let [x, y, z] = state.coordinates;
+                        let sample = surface.sample_at(x, y, z).unwrap();
+                        assert!(
+                            sample.velocity.iter().all(|u| u.abs() < 2e-12),
+                            "axis={axis}, sign={sign}, cell={:?}: {:?}",
+                            state.coordinates,
+                            sample.velocity
+                        );
+                        assert!((sample.density - state.density).abs() < 2e-12);
+                        assert!((sample.fill_fraction - 1.0).abs() < 2e-12);
+                    }
+                    assert!((surface.ledger_mass() - mass).abs() < 2e-12 * mass);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn g1_gas_links_use_physical_pressure_independent_of_reference_force_split() {
+        with_cx(|cx| {
+            let force = [0.002, -0.003, 0.001];
+            let velocity = [0.02, -0.01, 0.015];
+            let density = 1.015;
+            let mut initial = Vec::new();
+            for z in 0..4 {
+                for y in 0..8 {
+                    for x in 0..8 {
+                        initial.push(FreeSurfaceInitialCell3 {
+                            coordinates: [x, y, z],
+                            fill_fraction: if z == 3 { 0.5 } else { 1.0 },
+                            density,
+                            velocity,
+                        });
+                    }
+                }
+            }
+            let make = |reference| {
+                FreeSurface3::from_cells(
+                    [8; 3],
+                    0.8,
+                    reference,
+                    0.0,
+                    ContactModel3::Neutral,
+                    &[],
+                    &initial,
+                    cx,
+                )
+                .unwrap()
+            };
+            let mut uniform = make(force);
+            let mut local = make([0.0; 3]);
+            let mut forces = BTreeMap::new();
+            for state in &initial {
+                let [x, y, z] = state.coordinates;
+                let (slot, lane) = local
+                    .grid
+                    .resolve_source(x as i64, y as i64, z as i64)
+                    .unwrap();
+                forces.insert((local.grid.active_keys()[slot], lane), force);
+            }
+            let gate = CancelGate::new_clock_free();
+            local.rebind_force_field(forces, &gate).unwrap();
+
+            let (slot, lane) = uniform.grid.resolve_source(4, 4, 3).unwrap();
+            let key = uniform.grid.active_keys()[slot];
+            let u = uniform.sample_at(4, 4, 3).unwrap().velocity;
+            let post = crate::d3q19::collision_kernel3()(
+                uniform.grid.populations(slot, lane),
+                uniform.grid.collision().0,
+                force,
+            )
+            .unwrap();
+            let pressure = (density - 1.0) * CS2_3;
+            uniform
+                .step_with_gas_pressure(&gate, 0.05, |_| Ok(pressure))
+                .unwrap();
+            local
+                .step_with_gas_pressure(&gate, 0.05, |_| Ok(pressure))
+                .unwrap();
+            let current_slot = uniform.grid.slot_of(key).unwrap();
+            let populations = uniform.grid.populations(current_slot, lane);
+            let u2: f64 = u.iter().map(|value| value * value).sum();
+            let uf: f64 = u.iter().zip(force).map(|(u, f)| u * f).sum();
+            for q in 1..Q3 {
+                if E3[q].2 != -1 {
+                    continue;
+                }
+                let e = [E3[q].0, E3[q].1, E3[q].2].map(f64::from);
+                let eu: f64 = e.iter().zip(u).map(|(e, u)| e * u).sum();
+                let ef: f64 = e.iter().zip(force).map(|(e, f)| e * f).sum();
+                // Independent even Guo moment: (S_i+S_opp)/2 =
+                // w_i[-3 u.F + 9 (e_i.u)(e_i.F)]. Adding this
+                // to the stored pair must recover physical equilibrium.
+                let physical_pair = populations[q]
+                    + post[OPP3[q]]
+                    + super::super::W3[q] * (-3.0 * uf + 9.0 * eu * ef);
+                let equilibrium_pair =
+                    2.0 * super::super::W3[q] * density * (1.0 + 4.5 * eu * eu - 1.5 * u2);
+                assert!((physical_pair - equilibrium_pair).abs() < 2e-15);
+            }
+            // The same physical force and state cannot depend on whether F
+            // is the uniform reference or a held local perturbation from zero.
+            for _ in 0..3 {
+                for state in &initial {
+                    let [x, y, z] = state.coordinates;
+                    let (a_slot, a_lane) = uniform
+                        .grid
+                        .resolve_source(x as i64, y as i64, z as i64)
+                        .unwrap();
+                    let (b_slot, b_lane) = local
+                        .grid
+                        .resolve_source(x as i64, y as i64, z as i64)
+                        .unwrap();
+                    for (a, b) in uniform
+                        .grid
+                        .populations(a_slot, a_lane)
+                        .iter()
+                        .zip(local.grid.populations(b_slot, b_lane))
+                    {
+                        assert!((a - b).abs() < 2e-13);
+                    }
+                }
+                uniform
+                    .step_with_gas_pressure(&gate, 0.05, |_| Ok(pressure))
+                    .unwrap();
+                local
+                    .step_with_gas_pressure(&gate, 0.05, |_| Ok(pressure))
+                    .unwrap();
             }
         });
     }

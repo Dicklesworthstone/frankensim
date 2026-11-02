@@ -3395,6 +3395,26 @@ second momentum integrator is retained. Zero load preserves ordinary evolution.
 The combined density excursion must fit a finite caller bound in (0,1).
 Pressure refusal and observed cancellation precede population/mass publication.
 
+The default version-4 boundary uses the physical Guo velocity
+`u = (sum(e_i f_i) + F/2)/rho` and the FULL local force. For a reconstructed
+opposite-link pair, its stored even moment is
+`feq_i(rho_boundary,u) + feq_opp(rho_boundary,u) - (S_i(u,F)+S_opp(u,F))/2`.
+This follows the native population source transformation; it is not a new
+published boundary algorithm. It removes the artificial force-squared stress
+introduced by putting raw momentum/rho into equilibrium, and makes pressure
+independent of the chosen uniform/local force split. Explicit `LegacyGlobal`
+replay retains its historical pressure and conversion arithmetic. Force-free
+reconstruction and the missing-gas-links-only choice are unchanged. Focused
+regressions require planar halfway hydrostatic columns to stay at rest for 64
+steps in all six gravity orientations, with the even Guo moment and equivalent
+force frames checked separately.
+This does not repair the general free-interface viscous-stress, geometry or
+transient force-balance limitations of the underlying reconstruction.
+For the forcing convention see Guo, Zheng and Shi (2002),
+<https://doi.org/10.1103/PhysRevE.65.046308>; for free-surface force-balance
+limitations see Schwarzmeier and Rüde (2023),
+<https://doi.org/10.1002/fld.5173>.
+
 `MaterialFreeSurfaceScaling::with_pressure_reference` fixes the absolute Pascal
 datum before constructing a trajectory. Its material-bound `step_with_gas_pressure`
 accepts absolute pressures at physical cell centers and lowers only their
@@ -5478,11 +5498,13 @@ New D3Q19 constructors select `ConversionRedistribution3::Local`.
 version-1 trajectories, including their nonlocal pooling. The frozen pour
 sentinel selects this replay mode and retains its original four-quadrant hash;
 new locality and thermal regressions exercise the corrected default. The
-independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 3 for the current default;
+independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 4 for the current default;
 version 2 introduced local redistribution, and version 3 corrects the density
-and force handling of fresh-cell initialization described below. Explicit
-`LegacyGlobal` replay retains its historical conversion arithmetic, leaving the
-unchanged D3Q19 core, boundary and sparse goldens untouched.
+and force handling of fresh-cell initialization described below. Version 4
+uses the physical Guo frame in gas-pressure reconstruction as described above.
+Explicit `LegacyGlobal` replay retains its historical conversion and
+gas-pressure arithmetic, leaving the unchanged D3Q19 core, boundary and sparse
+goldens untouched.
 
 D3Q19 records direct donor/recipient mass routes, including reversed routes for
 conversion debt. The original extensive enthalpy transport consumes these same
