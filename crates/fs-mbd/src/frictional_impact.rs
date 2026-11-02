@@ -23,6 +23,7 @@ use fs_contact::frictional_multicontact::{
     FrictionalContactError, FrictionalContactResult, NormalVelocityLaw, solve_frictional_contacts,
 };
 use fs_exec::CancelGate;
+use fs_math::dd::Dd;
 
 /// Original COM-relative material point on a dynamic body.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,6 +80,10 @@ pub struct RigidFrictionalImpactReport<R = FrictionalContactResult> {
     pub contact: R,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Actual kinetic change from native momentum increments and midpoint
+    /// velocities. Unlike subtracting the total energies, this retains small
+    /// contact losses alongside a large unchanged common translation.
+    pub kinetic_change_j: f64,
     /// Signed work supplied by explicitly moving prescribed supports.
     pub support_work_j: f64,
     pub relative_impulse_work_j: f64,
@@ -184,6 +189,34 @@ struct PreparedContact {
     influences: Vec<Influence>,
 }
 
+/// Accumulate simultaneous covectors before rounding the native body state.
+/// In particular, two large opposing impulses must not erase a smaller
+/// pre-existing momentum merely because their contacts have different IDs.
+#[derive(Clone, Copy, Default)]
+struct ImpulseAccumulator {
+    linear_world: [Dd; 3],
+    angular_body: [Dd; 3],
+}
+impl ImpulseAccumulator {
+    fn add(&mut self, body: RigidBodyState, arm_body: Vec3, impulse_world: Vec3) {
+        let impulse_body = body
+            .pose()
+            .orientation()
+            .rotate_world_to_body(impulse_world);
+        add_vector(&mut self.linear_world, impulse_world);
+        add_vector(&mut self.angular_body, arm_body.cross(impulse_body));
+    }
+}
+
+fn add_vector(sum: &mut [Dd; 3], value: Vec3) {
+    for (entry, component) in sum.iter_mut().zip(components(value)) {
+        *entry = *entry + Dd::from_f64(component);
+    }
+}
+fn rounded_vector(sum: [Dd; 3]) -> Vec3 {
+    Vec3::new(sum[0].to_f64(), sum[1].to_f64(), sum[2].to_f64())
+}
+
 /// Apply one globally admitted normal/friction event to original body states.
 ///
 /// The full contact matrix is assembled from shared native body influences.
@@ -193,6 +226,10 @@ struct PreparedContact {
 /// independently before publication. Dynamic contact witnesses are never moved
 /// to an invented common point: a finite gap can therefore refuse the angular
 /// balance even when a geometric activation tolerance admitted it.
+/// Point impulses and their original body-frame moments are accumulated before
+/// one native momentum update per body. Balance gates use the actual rounded
+/// increments and polarized kinetic changes, not differences of large scene
+/// totals. The diagnostic total energies remain available separately.
 ///
 /// Redundant contact rows may be admitted when the original contact operator
 /// proves a unique body velocity. Their individual impulses then remain one
@@ -396,38 +433,68 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
             }
         }
     }
-    let mut candidate = bodies.to_vec();
-    let mut support_work = 0.0;
-    let mut support_impulse = Vec3::ZERO;
-    let mut support_angular = Vec3::ZERO;
+    let mut impulses = vec![ImpulseAccumulator::default(); bodies.len()];
+    let mut support_work = Dd::ZERO;
+    let mut support_impulse = [Dd::ZERO; 3];
+    let mut support_angular = [Dd::ZERO; 3];
     for (slot, &index) in order.iter().enumerate() {
         poll_with(gate)?;
         let c = contacts[index];
         let impulse = world_impulse(prepared[slot].axes, physical.impulses[slot]);
-        candidate[c.point.body] = candidate[c.point.body]
-            .apply_impulse_at_body_point(properties[c.point.body], c.point.arm_body, impulse)?
-            .state_after;
+        impulses[c.point.body].add(bodies[c.point.body], c.point.arm_body, impulse);
         match c.other {
             RigidImpactCounterpart::Body(point) => {
-                candidate[point.body] = candidate[point.body]
-                    .apply_impulse_at_body_point(
-                        properties[point.body],
-                        point.arm_body,
-                        impulse.scale(-1.0),
-                    )?
-                    .state_after;
+                impulses[point.body].add(bodies[point.body], point.arm_body, impulse.scale(-1.0));
             }
             RigidImpactCounterpart::PrescribedPlane { velocity_world, .. } => {
-                support_work += impulse.dot(velocity_world);
-                support_impulse = support_impulse.add(impulse);
-                support_angular =
-                    support_angular.add(prepared[slot].positive_point_world.cross(impulse));
+                support_work = support_work + Dd::from_f64(impulse.dot(velocity_world));
+                add_vector(&mut support_impulse, impulse);
+                add_vector(
+                    &mut support_angular,
+                    prepared[slot].positive_point_world.cross(impulse),
+                );
             }
         }
     }
-    let (before, linear_before, angular_before) = totals_with(bodies, properties, gate)?;
-    let (after, linear_after, angular_after) = totals_with(&candidate, properties, gate)?;
-    let mut relative_work = 0.0;
+    let mut candidate = Vec::with_capacity(bodies.len());
+    let mut before = Dd::ZERO;
+    let mut after = Dd::ZERO;
+    let mut kinetic_change = Dd::ZERO;
+    let mut linear_change = [Dd::ZERO; 3];
+    let mut angular_change = [Dd::ZERO; 3];
+    for ((&body, &property), impulse) in bodies.iter().zip(properties).zip(impulses) {
+        poll_with(gate)?;
+        let applied = body.apply_momentum_impulse(
+            property,
+            rounded_vector(impulse.linear_world),
+            rounded_vector(impulse.angular_body),
+        )?;
+        candidate.push(applied.state_after);
+        before = before + Dd::from_f64(applied.work.kinetic_energy_before_j);
+        after = after + Dd::from_f64(applied.work.kinetic_energy_after_j);
+        kinetic_change = kinetic_change + Dd::from_f64(applied.work.kinetic_energy_change_j);
+        add_vector(&mut linear_change, applied.linear_increment_world);
+        // The event fixes every pose. Evaluate delta(x cross p + R L)
+        // directly, so an unchanged large orbital momentum cannot swallow
+        // the contact's spin or angular impulse about the same world origin.
+        add_vector(
+            &mut angular_change,
+            body.pose()
+                .position_world()
+                .cross(applied.linear_increment_world),
+        );
+        add_vector(
+            &mut angular_change,
+            body.pose()
+                .orientation()
+                .rotate_body_to_world(applied.angular_increment_body),
+        );
+    }
+    let before = before.to_f64();
+    let after = after.to_f64();
+    let support_work = support_work.to_f64();
+    let kinetic_change_j = kinetic_change.to_f64();
+    let mut relative_work = Dd::ZERO;
     let mut endpoint_error = 0.0_f64;
     for (slot, &index) in order.iter().enumerate() {
         poll_with(gate)?;
@@ -447,23 +514,31 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
             let velocity = relative.dot(prepared[slot].axes[axis]);
             endpoint_error = endpoint_error
                 .max((velocity - physical.relative_velocities_after[slot][axis]).abs());
-            relative_work += 0.5
-                * (kinematics[slot].relative_velocity_m_s[axis] + velocity)
-                * physical.impulses[slot][axis];
+            relative_work = relative_work
+                + Dd::from_f64(
+                    0.5 * (kinematics[slot].relative_velocity_m_s[axis] + velocity)
+                        * physical.impulses[slot][axis],
+                );
         }
     }
+    let relative_work = relative_work.to_f64();
     let report = RigidFrictionalImpactReport {
         contact_ids: order.iter().map(|&i| contacts[i].id).collect(),
         kinetic_before_j: before,
         kinetic_after_j: after,
+        kinetic_change_j,
         support_work_j: support_work,
         relative_impulse_work_j: relative_work,
-        work_energy_residual_j: after - before - support_work - relative_work,
-        total_energy_residual_j: after - before - support_work + physical.dissipated_energy,
-        support_impulse_ns: support_impulse,
-        support_angular_impulse_nms: support_angular,
-        linear_momentum_residual_ns: linear_after.sub(linear_before).sub(support_impulse),
-        angular_momentum_residual_nms: angular_after.sub(angular_before).sub(support_angular),
+        work_energy_residual_j: kinetic_change_j - support_work - relative_work,
+        total_energy_residual_j: kinetic_change_j - support_work + physical.dissipated_energy,
+        support_impulse_ns: rounded_vector(support_impulse),
+        support_angular_impulse_nms: rounded_vector(support_angular),
+        linear_momentum_residual_ns: rounded_vector(std::array::from_fn(|i| {
+            linear_change[i] - support_impulse[i]
+        })),
+        angular_momentum_residual_nms: rounded_vector(std::array::from_fn(|i| {
+            angular_change[i] - support_angular[i]
+        })),
         endpoint_velocity_residual_mps: endpoint_error,
         contact,
     };

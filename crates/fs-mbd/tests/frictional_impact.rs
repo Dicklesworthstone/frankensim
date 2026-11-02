@@ -66,6 +66,129 @@ fn plane(point: RigidImpactPoint, friction: f64, restitution: f64) -> RigidFrict
 }
 
 #[test]
+fn g3_contact_balance_retains_small_normal_loss_under_boost_and_origin_shift() {
+    let properties = [property(1.0, Vec3::new(1.0, 1.0, 1.0))];
+    for boost in [0.0, 1e6] {
+        for origin in [Vec3::ZERO, Vec3::new(0.7, -0.4, 1e9)] {
+            for restitution in [0.0, 0.5, 1.0] {
+                let initial = body(
+                    origin,
+                    UnitQuaternion::IDENTITY,
+                    Vec3::new(boost, 0.0, -0.3),
+                );
+                let mut bodies = [initial];
+                let mut contact = plane(
+                    RigidImpactPoint {
+                        body: 0,
+                        arm_body: Vec3::ZERO,
+                    },
+                    0.0,
+                    restitution,
+                );
+                contact.other = RigidImpactCounterpart::PrescribedPlane {
+                    point_world: origin,
+                    velocity_world: Vec3::new(boost, 0.0, 0.0),
+                };
+                let report = apply_rigid_frictional_impacts(
+                    &mut bodies,
+                    &properties,
+                    &[contact],
+                    controls(),
+                    &CancelGate::new(),
+                )
+                .unwrap_or_else(|error| panic!("boost={boost}, origin={origin:?}: {error:?}"));
+                let loss = 0.045 * (1.0 - restitution * restitution);
+                close(bodies[0].linear_momentum_world().z, 0.3 * restitution);
+                assert_eq!(bodies[0].linear_momentum_world().x, boost);
+                assert_eq!(bodies[0].angular_momentum_body(), Vec3::ZERO);
+                assert_eq!(bodies[0].pose(), initial.pose());
+                close(report.contact.dissipated_energy, loss);
+                close(report.kinetic_change_j, -loss);
+                close(report.work_energy_residual_j, 0.0);
+                close(report.total_energy_residual_j, 0.0);
+                close_vector(report.linear_momentum_residual_ns, Vec3::ZERO);
+                close_vector(report.angular_momentum_residual_nms, Vec3::ZERO);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_simultaneous_opposing_impulses_retain_existing_central_momentum() {
+    // The centre's original small momentum is representable. Updating it once
+    // per contact loses it alongside either O(mass) impulse; their RESULTANT
+    // must instead be applied to the original state once.
+    let mass = 2.0_f64.powi(20);
+    let small = 2.0_f64.powi(-34);
+    let properties = [property(mass, Vec3::new(mass, mass, mass)); 3];
+    let initial = [
+        body(
+            Vec3::ZERO,
+            UnitQuaternion::IDENTITY,
+            Vec3::new(mass, 0.0, 0.0),
+        ),
+        body(
+            Vec3::new(2.0, 0.0, 0.0),
+            UnitQuaternion::IDENTITY,
+            Vec3::new(small, 0.0, 0.0),
+        ),
+        body(
+            Vec3::new(4.0, 0.0, 0.0),
+            UnitQuaternion::IDENTITY,
+            Vec3::new(-mass, 0.0, 0.0),
+        ),
+    ];
+    let contacts = std::array::from_fn::<_, 2, _>(|i| RigidFrictionalContact {
+        id: 10 + i as u64,
+        point: RigidImpactPoint {
+            body: i,
+            arm_body: Vec3::new(1.0, 0.0, 0.0),
+        },
+        other: RigidImpactCounterpart::Body(RigidImpactPoint {
+            body: i + 1,
+            arm_body: Vec3::new(-1.0, 0.0, 0.0),
+        }),
+        normal_world: Vec3::new(-1.0, 0.0, 0.0),
+        tangent_world: Vec3::new(0.0, 1.0, 0.0),
+        activation_tolerance_m: 1e-10,
+        friction_coefficient: 0.0,
+        normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 0.0 },
+    });
+    let mut bodies = initial;
+    let report = apply_rigid_frictional_impacts(
+        &mut bodies,
+        &properties,
+        &contacts,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let left = report.contact.impulses[0][0];
+    let right = report.contact.impulses[1][0];
+    let expected = small + (left - right);
+    assert_eq!(bodies[1].linear_momentum_world().x, expected);
+    assert_ne!(
+        (small + left) - right,
+        expected,
+        "fixture must expose sequential rounding"
+    );
+    assert_eq!(report.linear_momentum_residual_ns, Vec3::ZERO);
+    assert_eq!(report.angular_momentum_residual_nms, Vec3::ZERO);
+
+    let mut reordered = initial;
+    let repeated = apply_rigid_frictional_impacts(
+        &mut reordered,
+        &properties,
+        &[contacts[1], contacts[0]],
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    assert_eq!(bodies, reordered);
+    assert_eq!(report.contact, repeated.contact);
+}
+
+#[test]
 fn g1_off_centre_impact_retains_normal_tangent_coupling_and_rotated_inertia() {
     let properties = [property(2.0, Vec3::new(1.0, 2.0, 2.0))];
     for angle in [0.0, core::f64::consts::FRAC_PI_2] {

@@ -15,6 +15,23 @@ increments. It reports linear, angular and work residuals without accepting or
 repairing them; the composing contact owner supplies physical gates. This is
 neither a contact law nor an angular-velocity state replacement.
 
+The original simultaneous rigid-contact owner now uses this primitive for both
+the circular and elliptic Coulomb paths. It accumulates every incident point
+impulse and its ORIGINAL body-frame moment in canonical contact order before
+one state update per body. Compensated reductions use the existing `fs-math`
+double-double owner; no point is relocated and no force couple is discarded.
+Native actual increments supply the total linear balance and
+`x cross delta_p + R delta_L` angular balance about the declared world origin.
+`kinetic_change_j` comes from polarized native increments, rather than
+subtracting two large kinetic-energy totals. The separate total energies remain
+diagnostic outputs. Unchanged large common translation or orbital momentum can
+therefore no longer mask a small contact loss or cause a false balance refusal.
+All original physical feasibility, endpoint-velocity, momentum and energy gates
+retain their tolerances; this does not forgive an unrepresentable physical
+impulse or infer a new contact law. G0/G3 regressions cover opposing simultaneous
+impulses, canonical permutation, a common transverse boost, origin shifts and
+normal restitution with unchanged controls.
+
 ## Linear rotor-bearing operating points
 
 `rotordynamics::RotorBearingModel` admits 1–32 original generalized coordinates
