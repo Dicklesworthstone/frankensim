@@ -15,6 +15,10 @@ use fs_qty::{Pressure, Temperature};
 mod coupled;
 pub use coupled::{MolecularEuler3d, MolecularStepReport3d};
 
+/// Explicit local subgrid transport for low-Mach, frozen-composition studies.
+#[cfg(feature = "experimental-sgs")]
+pub mod sgs;
+
 /// One complete molecular interval, without advancing the enclosing flow clock.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MolecularReport3d {
@@ -63,6 +67,8 @@ pub struct MolecularTransport3d<L> {
     law: L,
     boundary_impulses: Vec<BoundaryImpulse>,
     work: MolecularWorkspace,
+    #[cfg(feature = "experimental-sgs")]
+    sgs: Option<sgs::SubgridTransport>,
 }
 
 impl<L: TransportLaw> MolecularTransport3d<L> {
@@ -89,6 +95,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             grid: flow.grid,
             boundaries: flow.boundaries,
             law,
+            #[cfg(feature = "experimental-sgs")]
+            sgs: None,
             boundary_impulses: allocated(faces, Totals::default())?,
             work: MolecularWorkspace {
                 current: allocated(n, State::default())?,
@@ -168,6 +176,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &mut self.work.gradient,
                 &mut self.work.flux,
                 &mut self.work.binary,
+                #[cfg(feature = "experimental-sgs")]
+                self.sgs.as_mut(),
                 &mut cancelled,
             )?;
             let remaining = duration.value() - elapsed;
@@ -207,6 +217,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &mut self.work.gradient,
                             &mut self.work.flux,
                             &mut self.work.binary,
+                            #[cfg(feature = "experimental-sgs")]
+                            self.sgs.as_mut(),
                             &mut cancelled,
                         )?
                     };
@@ -240,6 +252,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut self.work.gradient,
                         &mut self.work.flux,
                         &mut self.work.binary,
+                        #[cfg(feature = "experimental-sgs")]
+                        self.sgs.as_mut(),
                         &mut cancelled,
                     )?;
                     parabolic(r2 * dt, controls.parabolic_cfl)?;
@@ -365,6 +379,7 @@ fn spatial<L: TransportLaw>(
     gradient: &mut [[[f64; 3]; 3]],
     fluxes: &mut [Vec<SpatialFaceFlux>; 3],
     binary: &mut [f64],
+    #[cfg(feature = "experimental-sgs")] mut subgrid: Option<&mut sgs::SubgridTransport>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, MolecularError> {
     let mut minimum_density = f64::INFINITY;
@@ -399,6 +414,10 @@ fn spatial<L: TransportLaw>(
                     0.5 * (upper[component + 1] - lower[component + 1]) / grid.spacing[axis];
             }
         }
+    }
+    #[cfg(feature = "experimental-sgs")]
+    if let Some(sgs) = subgrid.as_mut() {
+        sgs.prepare(primitive, gradient, cancelled)?;
     }
     let mut maximum_diffusivity: f64 = 0.0;
     for axis in 0..3 {
@@ -463,6 +482,14 @@ fn spatial<L: TransportLaw>(
                     "nonnegative finite molecular coefficients required",
                 ));
             }
+            #[cfg(feature = "experimental-sgs")]
+            let (mu, conductivity) = if let Some(sgs) = subgrid.as_ref() {
+                sgs.face_coefficients(
+                    gas, left, right, axis, index, temperature, pressure, mu, conductivity,
+                )?
+            } else {
+                (mu, conductivity)
+            };
             let longitudinal = (4.0 / 3.0) * mu + bulk;
             let cross = bulk - (2.0 / 3.0) * mu;
             // Cover both tangential cross-derivative stencils, variable face

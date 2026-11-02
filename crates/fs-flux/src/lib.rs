@@ -8,9 +8,10 @@
 //! convection on the single-valued face flux w·n, Picard steady
 //! solves, IMEX and fully implicit rheological BDF1 transients, and discrete
 //! adjoints. 2D
-//! triangle-mesh instantiation; 3D, BDM2+, projection time stepping,
-//! and LES closures are recorded successors with honesty labels —
-//! no turbulence model ships here, and nothing pretends otherwise.
+//! triangle-mesh instantiation; 3D BDM, higher order and projection time
+//! stepping remain successors. The separate Cartesian gas owner offers
+//! explicitly selected, exploratory local SGS stress/heat transport behind
+//! `experimental-sgs`; the incompressible BDM solver has no turbulence closure.
 
 #[cfg(feature = "continuum")]
 pub mod ale;

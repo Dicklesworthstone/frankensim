@@ -286,6 +286,9 @@ counts); chunked Cx polling belongs to the fs-exec driver layer.
   transform. Browser boundaries that only need this law may disable default
   features and select `quarter-wave`, avoiding unrelated continuum solvers and
   runtime infrastructure without copying the equation.
+- `experimental-sgs`: includes `experimental-compressible` and the shared
+  `fs-lbm` local closures. Only an explicit `with_sgs` constructor activates
+  subgrid stress and heat on the frozen-composition three-dimensional gas.
 
 ## Conformance tests
 
@@ -370,9 +373,9 @@ prediction. Those require independently sourced boundary data and owning
 physics. `remote_terminal_profile_fraction` is dimensionless standing-wave
 geometry and must never be labelled as volts or discharge reach.
 
-- Turbulence: NO LES/RANS closure ships here and nothing pretends
-  otherwise; the DG dissipation is a numerical property, not a
-  subgrid model.
+- The incompressible BDM solver has no LES/RANS closure; its DG dissipation
+  is a numerical property. The separate `experimental-sgs` Cartesian gas
+  path supplies explicit local subgrid stress/heat, with the limits below.
 - 3D (tets, BDM on faces), BDM2+/higher-order pressures, and curved
   boundaries — recorded successors on the same dof-Vandermonde
   surface (bead dcng's high-order FEEC would unblock them).
@@ -1105,6 +1108,37 @@ velocity components. They do not establish gas-specific molecular calibration,
 physical shock thickness, turbulence or experimental validity. Composition
 remains spatially uniform and frozen; 3-D species diffusion, reactions and
 radial/no-slip boundary-layer physics require their own admitted evolution.
+
+### Exploratory subgrid stress and heat in the three-dimensional gas
+
+With `experimental-sgs`, `MolecularTransport3d::with_sgs` and
+`MolecularEuler3d::with_sgs` consume the same explicitly authored Smagorinsky,
+WALE or Vreman closure as `fs-lbm`. Each SSP stage computes the full physical
+velocity gradient once; a preallocated per-cell dynamic-viscosity field is
+reused by faces. Smagorinsky/WALE use the declared multiplier times the cube
+root of cell volume; Vreman retains all three directional widths. The
+zero-coefficient control preserves molecular-only arithmetic and source calls.
+
+Faces add `mu_t = mean(rho*nu_t)` to deviatoric viscosity, retaining the original
+molecular bulk viscosity. Heat adds `mu_t*cp(T)/Pr_t`, using the original
+caloric source at the face temperature and the caller's positive turbulent
+Prandtl number. The existing shared momentum and total-energy flux carries
+both SGS stress work and heat, so internal heating is not added a second time.
+The total coefficients enter the parabolic bound at every stage and retry.
+A caller-authored maximum `mu_t/mu` is a typed refusal, never a silent clamp.
+State, time and published boundary impulses remain atomic on failure.
+
+The six focused SGS tests cover exact zero controls through the coupled Euler
+trajectory, all three active closures, periodic momentum/total-energy balance,
+resolved kinetic-to-internal energy conversion, an independent helical-mode
+stress/heat formula, temperature-mode decay, refusal atomicity and bitwise
+replay. These are numerical consistency tests, not DNS/experimental turbulence
+validation. The stress/heat model follows Nicoud's 2007 course equations
+(24)-(26); no dynamic coefficient, backscatter, SGS kinetic-energy equation,
+pressure-dilatation or shock/turbulence closure, evolving-species mixing, or
+wall model is supplied. Reflecting walls remain stationary adiabatic slip
+walls. Acceptance renders refuse. This opt-in low-Mach exploration lane does
+not change the default solver, incompressible BDM, or reacting-mixture paths.
 
 ### Evolving composition on the shared Cartesian discretization
 

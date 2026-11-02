@@ -41,6 +41,28 @@ pub struct MolecularEuler3d<L> {
 }
 
 impl<L: TransportLaw> MolecularEuler3d<L> {
+    /// Compose explicit subgrid stress and heat with the original Euler
+    /// advection and atomic retry mechanism. Every stage CFL includes SGS.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn with_sgs(
+        flow: Euler3d,
+        law: L,
+        config: sgs::SubgridConfig,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MolecularError> {
+        config.validate()?;
+        let mut result = Self::new(flow, law, &mut cancelled)?;
+        result.molecular.sgs = Some(sgs::SubgridTransport::new(&result.accepted, config)?);
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    /// Exact authored subgrid controls; `None` retains molecular-only flow.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn subgrid_config(&self) -> Option<sgs::SubgridConfig> {
+        self.molecular.subgrid_config()
+    }
+
     /// Bind the identical original source while preserving the complete field.
     pub fn new(
         flow: Euler3d,

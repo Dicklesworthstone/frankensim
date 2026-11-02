@@ -86,6 +86,17 @@ pub enum MolecularError {
     Flow(Error),
     /// Original molecular material-law refusal.
     Law(DissipationError),
+    /// Original shared local-closure refusal; no clipping or replacement.
+    #[cfg(feature = "experimental-sgs")]
+    Subgrid(fs_lbm::sgs3::SgsError),
+    /// A face exceeds the authored subgrid/molecular dynamic-viscosity ratio.
+    #[cfg(feature = "experimental-sgs")]
+    SubgridViscosityRatio {
+        axis: usize,
+        face: usize,
+        observed: f64,
+        maximum: f64,
+    },
     /// An SSP stage exceeds the declared parabolic estimate.
     ParabolicNumber { observed: f64, maximum: f64 },
     /// The complete duration exceeds the caller's attempt budget.

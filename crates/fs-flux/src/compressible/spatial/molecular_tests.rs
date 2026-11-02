@@ -28,6 +28,10 @@ const WALLS: Boundaries3d = Boundaries3d {
     z: WALL,
 };
 
+#[cfg(feature = "experimental-sgs")]
+#[path = "molecular/sgs_tests.rs"]
+mod sgs;
+
 fn law(g: &FrozenGas, mu: f64, bulk: f64, conductivity: f64) -> ConstantTransport {
     let models = g.source().components().to_vec();
     let ids: Vec<_> = models.iter().map(|m| m.species().clone()).collect();
