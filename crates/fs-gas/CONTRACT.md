@@ -905,7 +905,45 @@ The symmetric composition does not upgrade the underlying adaptive
 implicit-Euler chemistry to a certified second-order time method. Local
 chemistry error estimates are not global coupled error bounds. Physical
 species diffusion, heat conduction, viscosity, flames, sprays, real-gas phases,
-moving meshes and arbitrary reacting junction networks remain separate work.
+general moving meshes and arbitrary reacting junction networks remain separate work.
+
+### Finite-rate chemistry driving a resolved inertial piston
+
+`ReactingEuler1d::step_with_piston` composes the original cell chemistry half
+steps around `MixtureEuler1d::step_with_piston`. The first source uses the old
+cell volumes; the second uses their actual moved volumes. Changes in species
+and temperature therefore drive the original pressure waves and inertial wall.
+The reactor's existing physical-energy target and species-reference correction
+supply chemical conversion once; no additional heat-release source is added.
+The constant-area interval has a fixed left wall and one inertial right wall.
+
+Every complete attempt starts from the accepted field, geometry and piston
+velocity. A shorter mechanical/acoustic duration restarts both chemistry half
+steps at that duration. Second-half source refusal, failed whole-step balance
+or cancellation cannot publish the successful middle pressure/motion stage.
+The existing two field workspaces, reactor and amount buffer are reused. A
+bounded, cancellable same-owner geometry reset copies only private trial
+coordinates/volumes after motion; the ordinary stationary scratch-copy and
+molecular-owner geometry guards remain intact.
+
+`ReactivePistonStep` retains the original reactive and piston reports and adds
+actual physical chemical-gas energy change plus whole-step momentum/energy
+residuals. Endpoint species-reference changes participate in the physical
+energy balance, together with gas energy, piston kinetic energy and exterior
+pressure/additional-force work. The fixed left support carries its explicit
+opposite impulse with zero work. The same caller-authored piston tolerances
+gate whole-step balances as well as the pressure solve; callers must account
+for their per-cell chemistry tolerances when choosing that global budget.
+
+Four focused G1/G4 regressions cover unforced exothermic pressure-driven
+expansion and species/work/support balances; acoustic restart with independent
+stage replay at the accepted duration and moved volumes; a second chemistry
+refusal after successful compression; and cancellation/recovery after prior
+motion. They are authored but unexecuted under the session's worker resource
+limit. This entry does not advance the separately bound fixed-geometry
+molecular, finite-wall heat or network owners. Original chemistry method,
+splitting-error, source precision and unequal-caloric-contact limits remain;
+there is no general second-order, entropy-stability or combustion-validity claim.
 
 ## Characteristic compact-reservoir boundaries
 

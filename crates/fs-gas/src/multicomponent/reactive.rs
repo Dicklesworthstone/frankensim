@@ -22,6 +22,8 @@ pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 mod cell;
 pub use cell::CellChemistry;
+mod piston;
+pub use piston::ReactivePistonStep;
 
 /// Transport stability and bounded retries of the complete coupled step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,6 +126,8 @@ pub enum ReactiveError {
     Flow(FlowError),
     /// Molecular transport refused before the complete step could publish.
     Dissipation(DissipationError),
+    /// The original resolved pressure/piston owner refused a coupled trial.
+    Piston(crate::dynamics::piston::PistonError),
     /// One original-source finite-rate cell solve refused.
     Chemistry {
         /// Zero-based physical cell index.
@@ -169,6 +173,14 @@ impl From<DissipationError> for ReactiveError {
         match value {
             DissipationError::Cancelled => Self::Cancelled,
             other => Self::Dissipation(other),
+        }
+    }
+}
+impl From<crate::dynamics::piston::PistonError> for ReactiveError {
+    fn from(value: crate::dynamics::piston::PistonError) -> Self {
+        match value {
+            crate::dynamics::piston::PistonError::Cancelled => Self::Cancelled,
+            other => Self::Piston(other),
         }
     }
 }
@@ -351,7 +363,7 @@ impl ReactingEuler1d {
                     "reacting time increment cannot advance the clock",
                 ));
             }
-            self.trial.copy_physical_from(&self.accepted)?;
+            self.trial.copy_physical_with_motion_from(&self.accepted, &mut cancelled)?;
             let mut report = ChemistryReport::default();
             let attempt = (|| {
                 let first = match operator.as_deref_mut() {
@@ -427,74 +439,11 @@ impl ReactingEuler1d {
                 }
                 Ok((transport, true, dissipation)) => {
                     let after = self.trial.totals();
-                    let n = self.trial.gas.species_count();
-                    let mut residual = [0.0; MAX_COMPONENTS];
-                    let mut molecular_boundary = [0.0; MAX_COMPONENTS];
-                    if let Some(d) = dissipation {
-                        for k in 0..n + 2 {
-                            molecular_boundary[k] =
-                                d.first.boundary_change.get(k) + d.second.boundary_change.get(k);
-                        }
-                    }
-                    for k in 0..n {
-                        residual[k] = after.species_masses[k]
-                            - before.species_masses[k]
-                            - transport.boundary_change.species_masses[k]
-                            - molecular_boundary[k]
-                            - report.species_change_kg[k];
-                    }
-                    residual[n] = after.momentum
-                        - before.momentum
-                        - transport.boundary_change.momentum
-                        - molecular_boundary[n]
-                        - transport.area_momentum_impulse;
-                    residual[n + 1] = after.energy
-                        - before.energy
-                        - transport.boundary_change.energy
-                        - molecular_boundary[n + 1]
-                        - report.referenced_energy_change_j;
-                    let mass_residual_kg = sum((0..n).map(|k| {
-                        after.species_masses[k]
-                            - before.species_masses[k]
-                            - transport.boundary_change.species_masses[k]
-                            - molecular_boundary[k]
-                    }));
-                    let absolute_energy_residual_j = sum(core::iter::once(
-                        after.energy
-                            - before.energy
-                            - transport.boundary_change.energy
-                            - molecular_boundary[n + 1],
-                    )
-                    .chain((0..n).map(|k| {
-                        (after.species_masses[k]
-                            - before.species_masses[k]
-                            - transport.boundary_change.species_masses[k]
-                            - molecular_boundary[k])
-                            * self.trial.gas.energy_references()[k]
-                    })));
-                    if !residual[..n + 2].iter().all(|x| x.is_finite())
-                        || !mass_residual_kg.is_finite()
-                        || !absolute_energy_residual_j.is_finite()
-                        || !report.entropy_change_j_k.is_finite()
-                    {
-                        return Err(ReactiveError::Invalid(
-                            "non-finite coupled extensive balance",
-                        ));
-                    }
+                    let complete = coupled_report(&self.trial.gas, before, after,
+                        transport, report, dissipation, retry)?;
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.accepted, &mut self.trial);
-                    return Ok(ReactiveStepReport {
-                        elapsed: Time::new(duration),
-                        coupling_retries: retry,
-                        transport,
-                        chemistry: report,
-                        dissipation,
-                        before,
-                        after,
-                        conservation_residual: Totals::from_values(&residual[..n + 2], n),
-                        mass_residual_kg,
-                        absolute_energy_residual_j,
-                    });
+                    return Ok(complete);
                 }
                 Err(ReactiveError::Cancelled) => return Err(ReactiveError::Cancelled),
                 Err(error) => {
@@ -508,6 +457,82 @@ impl ReactingEuler1d {
             last: Box::new(last),
         })
     }
+}
+
+// Shared accounting for fixed and moving-volume reactive compositions. Actual
+// endpoint species changes retain the original physical chemical-energy datum.
+fn coupled_report(
+    gas: &super::MixtureGas,
+    before: Totals,
+    after: Totals,
+    transport: TransportStepReport,
+    chemistry: ChemistryReport,
+    dissipation: Option<SplitDissipationReport>,
+    coupling_retries: usize,
+) -> Result<ReactiveStepReport, ReactiveError> {
+    let n = gas.species_count();
+    let mut residual = [0.0; MAX_COMPONENTS];
+    let mut molecular_boundary = [0.0; MAX_COMPONENTS];
+    if let Some(d) = dissipation {
+        for k in 0..n + 2 {
+            molecular_boundary[k] =
+                d.first.boundary_change.get(k) + d.second.boundary_change.get(k);
+        }
+    }
+    for k in 0..n {
+        residual[k] = after.species_masses[k]
+            - before.species_masses[k]
+            - transport.boundary_change.species_masses[k]
+            - molecular_boundary[k]
+            - chemistry.species_change_kg[k];
+    }
+    residual[n] = after.momentum
+        - before.momentum
+        - transport.boundary_change.momentum
+        - molecular_boundary[n]
+        - transport.area_momentum_impulse;
+    residual[n + 1] = after.energy
+        - before.energy
+        - transport.boundary_change.energy
+        - molecular_boundary[n + 1]
+        - chemistry.referenced_energy_change_j;
+    let mass_residual_kg = sum((0..n).map(|k| {
+        after.species_masses[k]
+            - before.species_masses[k]
+            - transport.boundary_change.species_masses[k]
+            - molecular_boundary[k]
+    }));
+    let absolute_energy_residual_j = sum(core::iter::once(
+        after.energy - before.energy - transport.boundary_change.energy - molecular_boundary[n + 1],
+    )
+    .chain((0..n).map(|k| {
+        (after.species_masses[k]
+            - before.species_masses[k]
+            - transport.boundary_change.species_masses[k]
+            - molecular_boundary[k])
+            * gas.energy_references()[k]
+    })));
+    if !residual[..n + 2].iter().all(|x| x.is_finite())
+        || !mass_residual_kg.is_finite()
+        || !absolute_energy_residual_j.is_finite()
+        || !chemistry.entropy_change_j_k.is_finite()
+    {
+        return Err(ReactiveError::Invalid(
+            "non-finite coupled extensive balance",
+        ));
+    }
+    Ok(ReactiveStepReport {
+        elapsed: transport.elapsed,
+        coupling_retries,
+        transport,
+        chemistry,
+        dissipation,
+        before,
+        after,
+        conservation_residual: Totals::from_values(&residual[..n + 2], n),
+        mass_residual_kg,
+        absolute_energy_residual_j,
+    })
 }
 
 fn react_cells(

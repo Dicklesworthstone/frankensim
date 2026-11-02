@@ -126,6 +126,37 @@ impl Mesh1d {
         })
     }
 
+    /// Restore a private coupled scratch mesh from its accepted axial motion.
+    /// Connectivity and all face areas stay bound to the original owner. This
+    /// allocation-free reset may leave scratch partially copied on cancellation;
+    /// the caller must never expose it before completing its whole transaction.
+    pub(crate) fn reset_motion_from(
+        &mut self,
+        accepted: &Self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        if self.positions.len() != accepted.positions.len()
+            || self.volumes.len() != accepted.volumes.len()
+            || self.areas != accepted.areas
+            || self.uniform_area.is_none()
+            || self.uniform_area != accepted.uniform_area
+        {
+            return Err(Error::Invalid(
+                "moving scratch mesh has different topology or area",
+            ));
+        }
+        for (to, &from) in self.positions.iter_mut().zip(&accepted.positions) {
+            super::poll(cancelled)?;
+            *to = from;
+        }
+        for (to, &from) in self.volumes.iter_mut().zip(&accepted.volumes) {
+            super::poll(cancelled)?;
+            *to = from;
+        }
+        self.uniform_width = accepted.uniform_width;
+        Ok(())
+    }
+
     /// Constant-area GCL: the volume change uses the same face speeds as the
     /// ALE flux, not a separately rounded difference of displaced coordinates.
     pub(crate) fn prepare_motion(

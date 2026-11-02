@@ -269,6 +269,39 @@ impl MixtureEuler1d {
         self.time = other.time;
         Ok(())
     }
+    /// Reset only a private coupled trial after accepted or refused axial motion.
+    /// The ordinary stationary-owner copy above retains its exact-mesh guard.
+    pub(super) fn copy_physical_with_motion_from(
+        &mut self,
+        other: &Self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        if self.mesh == other.mesh {
+            return self.copy_physical_from(other);
+        }
+        if self.states.len() != other.states.len()
+            || self.gas != other.gas
+            || self.boundaries != other.boundaries
+        {
+            return Err(Error::Invalid(
+                "moving coupled scratch flow has a different owner",
+            ));
+        }
+        self.mesh
+            .reset_motion_from(&other.mesh, cancelled)
+            .map_err(super::moving::geometry_error)?;
+        let width = self.gas.species_count() + 2;
+        for (to, from) in self
+            .states
+            .chunks_exact_mut(width)
+            .zip(other.states.chunks_exact(width))
+        {
+            poll(cancelled)?;
+            to.copy_from_slice(from);
+        }
+        self.time = other.time;
+        Ok(())
+    }
     /// Validate a complete in-place scratch field before coupled publication.
     pub(super) fn validate_states(
         &self,
