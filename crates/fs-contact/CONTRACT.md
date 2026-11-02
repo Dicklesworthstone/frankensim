@@ -515,12 +515,29 @@ in actual load and footprint. This also refuses unowned force, area, stress,
 rate and unknown roles without guessing from axis names. Fixed temperature,
 composition, moisture and concentration retain their declared meanings.
 
-The path is explicitly normal-at-fixed-shear followed by held-load shear;
-simultaneous body motion needs a separate coupled trajectory owner and temporal
-refinement. Temperature stays at the original source condition. Five source
-integration groups cover original Hertz work/authority, growth and release,
-separation/recontact, typed condition refusal, material/interface substitutions
-and exact retry after operating-envelope or foreign-source refusal.
+`normal_step` followed by `advance` retains the explicitly split
+normal-at-fixed-shear/held-load-shear path. `advance_coupled_path` additionally
+admits simultaneous affine indentation and scalar shear through
+`loading::path::SourceMindlinPathInput`. The original normal source derives the
+endpoint load, pressure, footprint and normal potential from indentation; no
+independent force override or friction default enters this adapter. Initial and
+endpoint kinematics retain the original duration/rate/geometry envelope.
+
+The shared analytic `fs-tribo` path solves actual shear against the mechanical
+owner's released displacement and nonnegative compliance, using its average
+effort for both recoil and contact work. Source identities and complete history
+survive loading, unloading, reversal and separation. The result keeps original
+normal work/storage separate from shear storage and microslip heat. Cancellation
+or source/constitutive refusal publishes no candidate. Normal dynamics, rotating
+tangent frames, curved trajectory refinement and changing material conditions
+remain with their physical owners; temperature stays at the original source
+condition.
+
+Seven source integration groups cover original Hertz work/authority, growth and
+release, separation/recontact, typed condition refusal, material/interface
+substitutions, simultaneous compliant motion with work/load-line closure at
+1e-13 absolute, exact zero-compliance delegation, and retry after cancellation,
+operating-envelope or foreign-source refusal (G1/G3/G4).
 
 ### Generic normal-patch embedding (bead `frankensim-b8bxd.5.2`)
 

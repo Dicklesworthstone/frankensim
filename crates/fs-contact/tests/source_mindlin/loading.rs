@@ -8,6 +8,9 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 use super::*;
 
+#[path = "loading/path.rs"]
+mod path;
+
 fn source(young: f64, mu: f64) -> SourceHertzMindlinContact {
     SourceHertzMindlinContact::from_fixed_source(
         resolve(normal(young, Some(mu), Dims::NONE, false)).unwrap(),

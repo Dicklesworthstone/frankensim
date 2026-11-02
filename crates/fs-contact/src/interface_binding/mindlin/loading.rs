@@ -17,6 +17,10 @@ use super::{SourceMindlinContact, SourceMindlinError};
 use crate::normal_patch::PointNormalPatchReceipt;
 use crate::normal_patch::source::PointContactGeometry;
 
+/// Simultaneous normal/shear paths with the original source envelope and recoil.
+#[path = "loading/path.rs"]
+pub mod path;
+
 /// Isothermal changing-load contact retaining the complete original sources.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceHertzMindlinContact {
