@@ -30,6 +30,9 @@ use fs_phs::linear_exact::{
 use fs_phs::{PhsError, PortHamiltonian, PreparedStepError, QuadraticStorage};
 use fs_sparse::Csr;
 
+/// Exact all-mode propagation from a validated complete elastic eigenbasis.
+pub mod spectral;
+
 /// Explicit complete-state capacity and numerical allowances. No defaults.
 #[derive(Clone, Copy, Debug)]
 pub struct ExactLinearSolidControls {

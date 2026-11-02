@@ -3992,3 +3992,63 @@ affine force work and heat against continuous integrals and partitioned motion;
 and invalid/indefinite viscosity, resource limits, zero-C equivalence and
 refused/cancelled-step rollback. The five held-force and four affine-force
 regressions also pass, including the existing million-step phase check.
+
+## Complete-spectrum linear solid motion
+
+`dynamics::spectral::CompleteSpectralSolid::prepare_with_basis` admits all n
+generalized eigenpairs of the original n-coordinate TetElasticAssembly. The
+n*n basis is row-major with modes in columns. Every supplied eigenvalue must
+be finite and nonnegative and is retained verbatim. Missing modes, duplicate
+columns, invalid source matrices or incompatible dimensions refuse. This is a
+complete coordinate transformation; no spectral window, modal truncation,
+tail substitute, diagonal mass or fitted stiffness enters the motion.
+
+Preparation recomputes K phi - lambda M phi against the original matrices,
+using the caller's explicit absolute eigen-residual allowance plus a relative
+scale from that mode's actual K phi and lambda M phi. There is no unit-sized
+floor. The full row-sum norm of Phi^T M Phi - I must satisfy a declared
+tolerance strictly below one; initial u/v reconstruction has a separate
+relative allowance. Symmetry is admitted and rounded as in the dense exact
+owner. These are numerical residual checks, not interval-certified spectral
+enclosures or experimental qualification.
+
+Each fixed-clock mode uses exact oscillator/affine-source coefficients with
+stable entire-function series near zero. Zero-frequency modes retain the
+exact cubic displacement and quadratic velocity under force ramps without
+inverse stiffness. Physical force projection uses Phi^T; all displacement
+and velocity coordinates are reconstructed. The independent original-coordinate
+work is f_start dot Delta u + Delta f dot (u_after - mean(u)), obtained from
+integration by parts along the continuous trajectory, not from the energy
+difference or endpoint-average force. Original K/M energy, interval and
+compensated cumulative work are checked before accepting modal state, physical
+state, time or history. Force jumps between intervals apply no impulse.
+
+The 3n+1/4n+1 augmented-exponential limit does not apply to this owner. Explicit
+admission caps cover free coordinates, simultaneous preparation bytes,
+preparation and interval scalar products, and accepted steps. Preparation is
+O(n^3); retained storage and warm intervals are O(n^2). Cancellation is checked
+at rows and vector-sized arithmetic tiles; capacity, overflow, energy and
+cancellation refusals preserve the accepted state. This conservative path has
+zero physical dissipation and does not silently diagonalize a coupled viscous
+operator. General coupled viscosity retains the separate dense exact owner.
+
+The caller supplies the complete basis. The existing
+`fs_modal::eigh_gen_dense` can produce all n modes and is used explicitly by
+`examples/spectral_elastic_motion.rs`; its small, bounded cold eigensolve has
+no internal cancellation polls. No automatic unpolled eigensolve is hidden in
+the spectral owner, and no sparse million-coordinate scalability claim is made.
+
+Native verification passes four `tests/solid_spectral_dynamics.rs` tests:
+128 coupled coordinates against continuous analytical affine motion and work;
+rigid and tiny-positive modes against an independent ODE power series and
+partitioned ramps; invalid/incomplete bases including a 1e-30 stiffness
+falsifier; and exact capacity boundaries, cancellation, energy refusal and
+retry. `tests/solid_spectral_tet10.rs` runs actual 12-cell TET10 assembly,
+retains signed consistent mass, obtains all 108 native modes, exercises the
+lowest and highest modes, and independently checks original sparse K/M energy
+and force work. Measured free-motion energy error is 1.345e-20 J in that
+fixture. The example compiles and runs a synthetic nodal pulse/release through
+the same production geometry, assembly, spectrum and dynamics. This is
+represented-pencil temporal evidence, not mesh convergence or measured-material
+validation. The previous nine held/affine and five viscosity regressions pass
+alongside these new tests.
