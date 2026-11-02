@@ -1110,6 +1110,55 @@ Generally advecting unequal-caloric material contacts retain the original
 conservative scheme's pressure-oscillation limitation; no exact general
 pressure-equilibrium or entropy-stability claim follows from this extension.
 
+### Pressure-driven inertia of a resolved gas end wall
+
+`Euler1d::step_with_piston` couples the existing spatial Euler field to
+`dynamics::piston::Piston`, a finite inertial mass at the right endpoint. The
+left wall remains fixed, both ends are impermeable, and area is constant.
+The mesh alone owns wall position and area. Authored exterior pressure and
+additional force act on the piston; neither a uniform chamber law nor a
+second pressure model replaces the source-owned wave field. The existing
+zero-dimensional `fs-couple::cavity_phs::piston` owner remains independent.
+
+Each bounded scalar trial chooses midpoint velocity `w`, then runs the
+original moving-volume RK2 operator from the accepted field at the SAME
+duration. Its accepted right-wall pressure impulse `I` enters
+`M*(v1-v0)=I+dt*(F-A*p_ext)`, with `v1=2*w-v0`. The identical two-stage wall
+pressure supplies gas work. Consequently `Delta K=w*M*Delta v` pairs the
+mechanical update with the discrete gas exchange; no subsequent energy
+correction is applied. The report independently measures actual gas energy,
+wall kinetic change, exterior-pressure and force work, and both mechanical
+and combined momentum/energy defects. The fixed-left-wall reaction is
+explicit in the combined momentum balance and does zero work. External work
+uses represented mesh displacement, so a rounding discrepancy is admitted
+only within the same caller-specified physical energy tolerance.
+
+`PistonControl` requires a source-supported midpoint-speed bracket containing
+the accepted velocity, positive momentum/energy tolerances, and a bounded
+secant/bisection budget. Bracket speeds bound the initial relative-wave CFL;
+both gas stages retain original source, moving-geometry and CFL admission.
+Any retry halves and resets the complete coupled attempt. Only the last
+successfully evaluated candidate can publish gas, geometry, clock and piston
+velocity, after a final cancellation poll. Original gas workspace is reused;
+geometry scratch is allocated fallibly on first use. There are no per-trial
+field clones, and cancellation is never converted into a numerical retry.
+
+Five focused G0/G1/G3/G4 regressions cover balanced pressure, variable-Cp
+compression with source-energy-gauge invariance and global work/momentum
+closure, exact-duration replay of the final solved motion through the
+prescribed-wall owner, three mesh refinements against the independent
+small-amplitude acoustic piston-impedance solution before reflections, and
+early/late cancellation or source/bracket/geometry refusal. These tests are
+authored but unexecuted under the session's worker resource limit. The
+acoustic oracle is a linear small-amplitude limit; neither it nor residual
+closure establishes experimental validity or a general FSI stability theorem.
+Existing spatial-order and unequal-caloric-interface limits remain unchanged.
+This entry does not supply piston collisions, friction, springs, crank
+linkages, multiple moving inertial walls, heat or reactive/multicomponent
+coupling. Context: Lefrançois and Boufflet, SIAM Review 52(4), 747–767 (2010),
+<https://doi.org/10.1137/090758313>; the discrete work identity above is derived
+directly for this implementation, not inherited from that paper.
+
 
 ## Conservative molecular, thermal and viscous field evolution
 

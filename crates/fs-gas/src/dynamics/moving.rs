@@ -203,54 +203,15 @@ impl Euler1d {
                 Ok((a, b)) => {
                     let after =
                         totals(&self.work.candidate, moving.mesh.volumes(), &mut cancelled)?;
-                    let factor = 0.5 * dt * area;
-                    let left = Totals::from_array(core::array::from_fn(|k| {
-                        factor * (a.left.array()[k] + b.left.array()[k])
-                    }));
-                    let right = Totals::from_array(core::array::from_fn(|k| {
-                        -factor * (a.right.array()[k] + b.right.array()[k])
-                    }));
-                    let boundary = Totals::from_array(core::array::from_fn(|k| {
-                        left.array()[k] + right.array()[k]
-                    }));
-                    let residual = Totals::from_array(core::array::from_fn(|k| {
-                        after.array()[k] - before.array()[k] - boundary.array()[k]
-                    }));
-                    if !after
-                        .array()
-                        .iter()
-                        .chain(&left.array())
-                        .chain(&right.array())
-                        .chain(&boundary.array())
-                        .chain(&residual.array())
-                        .all(|value| value.is_finite())
-                    {
-                        return Err(Error::Invalid("moving extensive balance overflow"));
-                    }
+                    let mut report = reported_step(before, after, [a, b], dt, area)?;
+                    report.halvings = halvings;
+                    report.first_order_retry =
+                        first_order_retry && controls.reconstruction == Reconstruction::Muscl;
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.states, &mut self.work.candidate);
                     core::mem::swap(&mut self.mesh, &mut moving.mesh);
                     self.time += dt;
-                    return Ok(StepReport {
-                        elapsed: Time::new(dt),
-                        maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
-                        halvings,
-                        hll_fallback_faces: a.fallbacks + b.fallbacks,
-                        limited_cells: a.limited + b.limited,
-                        first_order_retry: first_order_retry
-                            && controls.reconstruction == Reconstruction::Muscl,
-                        before,
-                        after,
-                        boundary_change: boundary,
-                        left_boundary_change: left,
-                        right_boundary_change: right,
-                        area_momentum_impulse: 0.0,
-                        gravity_momentum_impulse: 0.0,
-                        gravity_work: 0.0,
-                        wall_momentum_impulse: 0.0,
-                        wall_heat: 0.0,
-                        conservation_residual: residual,
-                    });
+                    return Ok(report);
                 }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(error) => {
@@ -269,8 +230,59 @@ impl Euler1d {
     }
 }
 
+// The inertial wall consumes exactly the same RK exchanges as prescribed motion.
+pub(super) fn reported_step(
+    before: Totals,
+    after: Totals,
+    [a, b]: [Stage; 2],
+    dt: f64,
+    area: f64,
+) -> Result<StepReport, Error> {
+    let factor = 0.5 * dt * area;
+    let left = Totals::from_array(core::array::from_fn(|k| {
+        factor * (a.left.array()[k] + b.left.array()[k])
+    }));
+    let right = Totals::from_array(core::array::from_fn(|k| {
+        -factor * (a.right.array()[k] + b.right.array()[k])
+    }));
+    let boundary = Totals::from_array(core::array::from_fn(|k| left.array()[k] + right.array()[k]));
+    let residual = Totals::from_array(core::array::from_fn(|k| {
+        after.array()[k] - before.array()[k] - boundary.array()[k]
+    }));
+    if !after
+        .array()
+        .iter()
+        .chain(&left.array())
+        .chain(&right.array())
+        .chain(&boundary.array())
+        .chain(&residual.array())
+        .all(|value| value.is_finite())
+    {
+        return Err(Error::Invalid("moving extensive balance overflow"));
+    }
+    Ok(StepReport {
+        elapsed: Time::new(dt),
+        maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
+        halvings: 0,
+        hll_fallback_faces: a.fallbacks + b.fallbacks,
+        limited_cells: a.limited + b.limited,
+        first_order_retry: false,
+        before,
+        after,
+        boundary_change: boundary,
+        left_boundary_change: left,
+        right_boundary_change: right,
+        area_momentum_impulse: 0.0,
+        gravity_momentum_impulse: 0.0,
+        gravity_work: 0.0,
+        wall_momentum_impulse: 0.0,
+        wall_heat: 0.0,
+        conservation_residual: residual,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
-fn attempt(
+pub(super) fn attempt(
     gas: &FrozenGas,
     states: &[Conserved],
     mesh: &Mesh1d,

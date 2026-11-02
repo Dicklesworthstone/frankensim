@@ -18,6 +18,8 @@ mod moving;
 pub(crate) use moving::MovingWorkspace;
 /// Synchronized shock propagation through passages and finite rigid gas volumes.
 pub mod network;
+/// Resolved pressure waves driving an inertial end wall with common work accounting.
+pub mod piston;
 pub(crate) mod wall;
 
 pub use characteristic::EndWave;
