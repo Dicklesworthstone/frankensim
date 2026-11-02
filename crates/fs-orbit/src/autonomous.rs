@@ -146,7 +146,7 @@ impl Chart {
         let bytes = 8 * (3 * size * size + 64 * size
             + 4 * finest * (d + b.harmonics) as u128
             + count * (2 * d as u128 * (b.harmonics + 1) as u128
-                + b.max_newton as u128 + 32));
+                + 3 * d as u128 + b.max_newton as u128 + 32));
         if bytes > b.maximum_payload_bytes as u128 {
             return Err(invalid("complete continuation payload exceeds its allowance"));
         }
@@ -268,7 +268,7 @@ fn correct<P: ContinuableProblem, F: FnMut() -> bool>(
     let mut plus = vec![0.0; nc];
     let mut minus = vec![0.0; nc];
     let mut jac = vec![0.0; nz * nz];
-    let mut trace = Vec::new();
+    let mut trace = Vec::with_capacity(b.max_newton);
     for _ in 0..b.max_newton {
         eval.eval(&z, &mut aft, &mut raw)?;
         let r = augmented(chart, &raw, &z, reference, &phase, predictor, plane);
@@ -403,7 +403,9 @@ pub fn continue_autonomous_branch<P: ContinuableProblem>(
         let (mut z, second) = correct(&mut eval, &a, &seed1, &fixed, budget, 0.0)?;
         last_parameter = second.parameter;
         let mut direction = tangent(&chart, &a, &z, budget.minimum_oscillation)?;
-        let mut points = vec![first, second];
+        let mut points = Vec::with_capacity(budget.steps + 2);
+        points.push(first);
+        points.push(second);
         let mut step = budget.step_sizes[0];
         for _ in 0..budget.steps {
             poll(eval.cancelled)?;

@@ -9,6 +9,9 @@ use fs_orbit::{
 };
 use fs_phs::PortHamiltonian;
 
+/// Original physical-port feedback families on the shared continuation owner.
+pub mod continuation;
+
 mod shooting;
 pub use shooting::{
     PhsAutonomousControls, PhsAutonomousLevel, PhsAutonomousStability,

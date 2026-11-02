@@ -48,7 +48,49 @@ API — never instrument-shaped.
 - `ContinuableProblem` / `ContinuationBudget` / `continue_branch` —
   TRUE pseudo-arclength (bordered corrector on coefficients and the
   parameter jointly), so parameter folds are traversed, not stalled
-  at.
+  at. This original entry is forced-anchor only.
+- `autonomous::continue_autonomous_branch` adds complete autonomous
+  coefficient/frequency/parameter continuation with a full-waveform integral
+  phase condition, independent physical scales and explicit work/payload caps.
+  It returns `AutonomousBranch`, with exactly two corrected seeds plus the
+  declared number of accepted additional points, not a parameter endpoint.
+
+## Autonomous cycle continuation
+
+`AutonomousScales` separately conditions original states, balance rows,
+frequency and parameter. State coefficients use Parseval weights, so exact-zero
+harmonic padding does not change the arclength metric. Large DC offsets do not
+relax the absolute scaled residual tolerance or non-DC oscillation floor.
+
+The corrector retains every original HB row and adds an integral phase row
+from all non-DC state harmonics, plus a fixed-parameter seed row or arclength
+plane. It works when the first state has no oscillatory component. Frequency
+and physical parameter are independent unknowns. A phase-projected secant
+predicts later points; central differences, native LU, residual-decreasing
+backtracking and bounded step halving/growth correct them. No damping,
+equilibrium deflation or diagonal jitter is introduced on this path.
+
+Original AFT buffers and trigonometric tables are reused within each corrector.
+The existing independent odd-grid sampling test applies to every accepted
+point. Its `HbOrbit` retains physical coefficients/frequency and unscaled HB
+residual/trace/defect; separate fields retain the combined dimensionless
+residual, phase/arclength rows and scaled sampling discrepancy.
+
+Dimensions, full retained output/AFT/dense payload and total residual calls
+are bounded before the corresponding work. Cancellation is polled between
+residuals, Jacobian columns and steps; one native residual or LU remains atomic.
+On refusal the mutable family parameter returns to the last accepted value,
+or the first seed parameter before acceptance. No partial branch is published.
+Callbacks must be deterministic and may not conceal evolving state.
+
+The authored `tests/autonomous_continuation.rs` checks an analytical fold of
+cycles with a static first coordinate, amplitude-dependent frequency, common
+phase shifts, independent state/equation unit changes, zero harmonic padding,
+pre-source resource refusals, equilibrium refusal and parameter restoration.
+Its analytical family is lambda=(r^2-1)^2, omega=1+0.2*r^2. These are finite
+numerical regression claims, not existence, primitive-period, branch-identity,
+stability, fold-location or infinite-tail certificates. Extra-neutral
+conservative families and hybrid cycles remain outside this entry's claim.
 
 ## Invariants
 
@@ -60,14 +102,17 @@ API — never instrument-shaped.
   evaluations; the DC port is evaluated once per residual.
 - A converged candidate is re-evaluated on a finer `2m+1` grid.
   Both its residual and the norm of the change in retained balance
-  coefficients must meet the same tolerance and coefficient scaling.
+  coefficients must meet the same tolerance and coefficient scaling
+  (explicit absolute physical normalization for the autonomous branch above).
   Otherwise Newton resumes on the finer grid. There are at most four
   refinements; the fourth is a verification grid. Persistent disagreement
   returns `SamplingUnresolved`, and refinements also consume the existing
   Newton iteration budget.
 - This sampling gate also applies to every continuation corrector.
   Accepted points retain their actual residual trace and final verified
-  residual (including the arclength equation), never a fabricated zero.
+  residual, never a fabricated zero. The original forced corrector includes
+  arclength in that norm; the autonomous result separates physical HB norms
+  from its normalized phase/arclength diagnostics.
   `aft_samples` records the final verification grid and
   `sampling_defect` records the measured retained-coefficient change.
 - The adaptive entry points grow solved orders as `min(2N+1, max_harmonics)`.
@@ -94,23 +139,25 @@ API — never instrument-shaped.
   unknown-frequency seeds must remain positive and finite.
 - Canonical unknown ordering: DC block, then per-harmonic
   `Re`/`Im` blocks, state-major; the packing is the seed format.
-- A converged residual below the relative tolerance is the ONLY
+- A converged residual below the declared tolerance is the ONLY
   accepted discrete-balance evidence. Autonomous/backbone HB solves
   refuse equilibrium by name (`TrivialCollapse`), checking the full
-  non-DC spectrum rather than the fundamental alone. The existing
-  absolute autonomous collapse threshold is 1e-9 in packed state units.
+  non-DC spectrum rather than the fundamental alone. The original
+  absolute autonomous HB collapse threshold is 1e-9 in packed state units;
+  the new branch uses its explicit scaled RMS `minimum_oscillation`.
   Forced HB solves admit DC, zero, arbitrarily small, and higher-harmonic
   responses: their period is prescribed, not inferred from a cycle.
-  Equilibrium deflation applies only to autonomous/backbone anchors.
+  Equilibrium deflation applies only to the original autonomous/backbone anchors.
   Shooting applies its derivative-based equilibrium check only to
   autonomous problems: a forced response can have zero velocity at an
   ordinary turning point.
 - Every RK4 stage, shooting Jacobian, monodromy evaluation, and autonomous
   equilibrium check uses the admitted time-domain callback. Shooting never
   substitutes `island` for a general linear port's realized dynamics.
-- Conservative families carry a parity/phase nullspace: the Newton
-  step regularizes a singular factorization with a FIXED Tikhonov
-  jitter (deterministic); the converged residual gate is unchanged.
+- In the original HB solver, conservative families carry a parity/phase
+  nullspace: its Newton step regularizes a singular factorization with FIXED
+  Tikhonov jitter; the converged residual gate is unchanged. Autonomous
+  parameter continuation does not use that regularization.
 
 ## Error model
 
@@ -125,6 +172,9 @@ non-trivial unit-circle Floquet pair with nonzero angle:
 quasi-periodic drift is a NAMED no-claim in v1, never a wrong
 answer), forwarded `Eigen`.
 
+`autonomous::AutonomousContinuationError` adds typed argument, cancellation
+and residual-evaluation-limit refusals while retaining native numerical errors.
+
 ## Determinism class
 
 Deterministic: bounded deterministic grid refinement, fixed iteration caps and step policies,
@@ -133,8 +183,10 @@ repeatability is a conformance case.
 
 ## Cancellation behavior
 
-Pure synchronous computation; the heaviest unit is one dense LU per
-Newton iteration. No `Cx` integration.
+Synchronous computation; no direct `Cx` dependency. Original HB/shooting and
+forced continuation do not poll cancellation. The new autonomous entry accepts
+an explicit cancellation callback; an adapter may supply its original `Cx`
+checkpoint. Native AFT residuals and dense LU factorizations remain atomic.
 
 ## Unsafe boundary
 
@@ -191,9 +243,9 @@ combined physical RMS budget.
 ## No-claim boundaries
 
 - Quasi-periodic orbits (tori) are a NAMED refusal, not a claim.
-- The continuation corrector is forced-anchor v1; autonomous-branch
-  continuation (period as a continuation unknown) is a named
-  successor.
+- The original `continue_branch` remains forced-anchor. The additive autonomous
+  entry solves frequency independently but is fixed-order and does not certify
+  folds, stability, primitive periods, global branches or extra-neutral families.
 - Collocation is described by the I09 slot but not implemented here;
   shooting is the second method.
 - No a-priori truncation-error bound: the returned `N` remains disclosed
@@ -206,7 +258,7 @@ combined physical RMS budget.
   grids or lie outside the checked spectral band. Explicit input bandwidth
   must be admitted by domain adapters. Continuation remains fixed-order;
   adaptive order does not add relative-periodic, hybrid, matrix-free, or
-  cancellation/resume capabilities. Shooting is an independent cross-check
+  resume capabilities. Shooting is an independent cross-check
   only for problems with an equivalent time-domain
   formulation. The explicit callback is a model-supplied realization, not
   a proof of that equivalence. Frequency responses are never automatically

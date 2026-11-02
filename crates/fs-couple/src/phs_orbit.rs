@@ -28,6 +28,8 @@ pub use stability::{
     analyze_forced_orbit_stability,
 };
 mod autonomous;
+/// Full-state parameter branches of the original self-excited pHS.
+pub use autonomous::continuation as autonomous_continuation;
 pub use autonomous::{
     AutonomousPortFeedback, PhsAutonomousControls, PhsAutonomousLevel,
     PhsAutonomousStability, analyze_autonomous_feedback_stability,
