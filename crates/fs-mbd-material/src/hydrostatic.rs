@@ -9,6 +9,8 @@
 //! fluid, negligible density above the surface, prescribed hydrostatic reservoir.
 //! `LayeredHydrostaticMedium` also admits an overlying fluid and stable density
 //! layers, integrating displaced fluid mass and its centroid across interfaces.
+//! `LinearDensityHydrostaticMedium` integrates a continuous stable density
+//! gradient and its pressure potential on the same clipped displacement mesh.
 //! In the single-medium model gauge pressure is zero
 //! on the plane; uniform exterior pressure cancels on a closed envelope. No
 //! waves, drag, added mass, flooding, capillarity, compressible stratification
@@ -25,6 +27,7 @@
 
 mod geometry;
 mod layered;
+mod linear_density;
 mod step;
 mod finite_tank;
 pub use finite_tank::{
@@ -34,6 +37,7 @@ pub use finite_tank::{
 pub use step::{HydrostaticStep, HydrostaticStepControls, HydrostaticStepError};
 pub use geometry::{DisplacedVolume, DisplacementMesh, MAX_DISPLACEMENT_CELLS};
 pub use layered::{HydrostaticLayer, LayeredHydrostaticMedium, MAX_HYDROSTATIC_LAYERS};
+pub use linear_density::LinearDensityHydrostaticMedium;
 
 use fs_ga::{GaError, Se3, Vec3};
 use fs_material::MaterialError;

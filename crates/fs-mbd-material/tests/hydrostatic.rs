@@ -4,6 +4,8 @@ mod common;
 mod motion;
 #[path = "hydrostatic/layered.rs"]
 mod layered;
+#[path = "hydrostatic/linear_density.rs"]
+mod linear_density;
 #[path = "hydrostatic/finite_tank.rs"]
 mod finite_tank;
 use common::{close, density_card, point};

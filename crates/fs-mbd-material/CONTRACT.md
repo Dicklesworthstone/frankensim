@@ -856,6 +856,38 @@ tests cover analytic three-fluid moments, gas pressure/temperature-dependent
 lift, force/torque potential derivatives, native motion, interfacial heave and
 transactional cancellation/source refusal.
 
+## Continuous density stratification and neutral-depth restoring motion
+
+`hydrostatic::LinearDensityHydrostaticMedium` retains the original surface
+`FluidTransport` snapshot and an explicitly authored finite nonnegative density
+gradient. Below the planar free surface its profile is `rho(d) = rho0 + beta*d`,
+where downward depth is measured along the same gravity used by native mechanics.
+Surface density is positive; negative gradients, invalid depth queries and
+unrepresentable moments refuse. Above-surface density is neglected.
+
+The original tetrahedral clipping owner integrates the positive `d*dV` measure
+analytically. Its centroid and mean depth supply both `integral x*d dV` and
+`integral d^2 dV`; evaluating density only at the geometric centroid would miss
+the buoyant torque. Force, torque and `|g| integral(rho0*d + beta*d^2/2) dV`
+pressure potential describe the same configuration. Loading is O(cells) without
+allocations, and the extra degree-two arithmetic compiles out of the existing
+uniform/layered paths. A zero gradient delegates to the original uniform load.
+
+The shared `HydrostaticReservoir` interface supplies native endpoint-load Verlet
+motion, the absolute energy-defect gate and existing thermal-expansion coupling.
+A fully immersed body can now restore toward the depth where displaced-fluid
+mass balances its conserved material mass. Body mass and inertia never change
+with ambient density. G1/G3/G4 regressions in `tests/hydrostatic/linear_density.rs`
+cover independent slab/simplex integrals, tetrahedron order, force/torque potential
+derivatives, native second-order neutral-depth motion, uniform-limit parity,
+retained sources and cancellation/refusal.
+
+This is a prescribed static hydrostatic density profile, not an inferred EOS or
+a transported composition/temperature field. Source/profile validity and depth
+applicability remain caller obligations. Mixing, diffusion, entrainment, waves,
+drag, fluid inertia, added mass and reciprocal heat remain outside this model.
+Its regression evidence is numerical and does not establish empirical validity.
+
 ## Source-bound creeping-flow motion of a sphere (MR57)
 
 `VolumeMoments::sphere` supplies analytic volume and centroidal moments to the
