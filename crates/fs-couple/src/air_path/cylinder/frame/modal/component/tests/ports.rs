@@ -1,7 +1,7 @@
 //! G1/G3: the same physical ports and one reciprocal two-body trajectory.
 use super::*;
 use crate::air_path::cylinder::frame::harmonic_ports::FrameHarmonicPortBudget;
-use fs_phs::{PortHamiltonian, QuadraticStorage};
+use fs_phs::{PortHamiltonian, QuadraticStorage, ResistanceWitness};
 
 fn port_budget() -> FrameHarmonicPortBudget {
     FrameHarmonicPortBudget { max_ports:4,max_projection_terms:4096,max_mobility_entries:16,
@@ -72,7 +72,21 @@ fn monolithic(a:&MaterialFluidFrame<'_,FluidTransportState>,b:&MaterialFluidFram
         q[row*n+col]+=stiffness*spring[row]*spring[col];
         r[row*n+col]+=damping*resistance[row]*resistance[col];
     }}
+    // The monolithic resistance is the two bodies' own source squares (the factors their assemblies retain, placed
+    // block-diagonally) plus the dashpot's square sqrt(damping)*resistance: its witness is built from those, not re-derived
+    // from the summed matrix.
+    let mut rows=Vec::new();
+    for (offset,source) in [(0,a),(n_a,b)] {
+        let ns=source.system().state_dim();
+        let own=source.system().resistance_witness().expect("a frame/fluid assembly retains its source factor");
+        for row in own.rows().chunks_exact(ns) {
+            let mut full=vec![0.0;n];full[offset..offset+ns].copy_from_slice(row);rows.extend(full);
+        }
+    }
+    rows.extend(resistance.iter().map(|x| x*damping.sqrt()));
+    let witness=ResistanceWitness::try_from_source_rows(n,r.clone(),rows).unwrap();
     PortHamiltonian::new(n,2,j,r,g,Box::new(QuadraticStorage::new(q,n).unwrap())).unwrap()
+        .with_resistance_witness(witness).unwrap()
 }
 
 #[test]
@@ -81,6 +95,12 @@ fn two_original_wet_bodies_exchange_reciprocal_force_in_one_complete_native_step
     let b_frame=frame(false,800.0,3e6,200.0);
     let a=model(&a_frame,false,400.0,0.02);
     let b=model(&b_frame,false,3.0,0.002);
+    // The monolithic reference below stacks each body's retained source rows, so this test must not be able to pass on
+    // the path where the gate refused a witness (MagentaBadger 14025).
+    for body in [&a,&b] {
+        assert!(body.system().resistance_witness().is_some(),"the assembled system must carry its source-square witness");
+        assert!(body.resistance_witness_refusal().is_none());
+    }
     let gate=CancelGate::new_clock_free();
     let a_ports=a.harmonic_transverse_ports(&[(0,0.7)],port_budget(),&gate).unwrap();
     let b_ports=b.harmonic_transverse_ports(&[(0,0.3)],port_budget(),&gate).unwrap();
@@ -150,4 +170,36 @@ fn physical_port_binding_refuses_foreign_sources_incomplete_vectors_and_cancella
     assert!(port.accumulate_forces(network.components(),&[1.0],&mut force,&cancelled).is_err());
     assert_eq!(placement.physical_state(network.components(),&gate).unwrap(),saved);
     assert_eq!(network.samples_rendered(),0);
+}
+
+#[test]
+fn frame_fluid_system_retains_the_source_squares_of_its_resistance_and_refuses_a_bent_one() {
+    for two in [false,true] {
+        let frame=frame(two,1000.0,2e6,500.0);
+        let model=model(&frame,two,400.0,0.02);
+        let system=model.system();
+        let n=system.state_dim();
+        let (j,r,g)=system.structure();
+        let witness=system.resistance_witness().expect("the assembly retains its source factor");
+        let rows=witness.rows();
+        assert_eq!(rows.len(),n*n);
+        // The gate restated independently: the rows' Gram rebuilds every entry of R within 128 n eps |R_ij| (the
+        // local product sum at a structural zero).
+        let mut worst=0.0_f64;
+        for a in 0..n {for b in a..n {
+            let (mut gram,mut products)=(0.0,0.0);
+            for k in 0..n {let p=rows[k*n+a]*rows[k*n+b];gram+=p;products+=p.abs();}
+            let magnitude=if r[a*n+b]!=0.0 {r[a*n+b].abs()} else {products};
+            if magnitude>0.0 {worst=worst.max((gram-r[a*n+b]).abs()/(128.0*n as f64*f64::EPSILON*magnitude));}
+        }}
+        assert!(worst<=1.0,"rows rebuild R outside the componentwise gate: {worst:e}");
+        // Planted negative: one diagonal entry bent by 1e-9 relative is still a valid resistance of the same system
+        // but is not the one the rows were built for, so the witness is refused for it.
+        let mut bent=r.to_vec();
+        let k=(0..n).find(|&k| r[k*n+k]>0.0).unwrap();
+        bent[k*n+k]*=1.0+1e-9;
+        let storage=QuadraticStorage::new(system.storage().exact_quadratic_matrix().unwrap().to_vec(),n).unwrap();
+        let other=PortHamiltonian::new(n,g.len()/n,j.to_vec(),bent,g.to_vec(),Box::new(storage)).unwrap();
+        assert!(other.with_resistance_witness(witness.clone()).is_err());
+    }
 }

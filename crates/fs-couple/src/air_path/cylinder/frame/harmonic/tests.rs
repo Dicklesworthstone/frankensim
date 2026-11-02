@@ -329,3 +329,34 @@ fn source_mismatch_invalid_ports_and_cancellation_refuse_without_corrupting_fact
     assert!(matches!(ports.mobility(&prepared,&cancelled),Err(FrameHarmonicPortError::Cancelled)));
     assert_eq!(ports.mobility(&prepared,&gate).unwrap().entries,original.entries);
 }
+
+/// MagentaBadger 14025: the fixture of `source_mismatch_invalid_ports_and_cancellation_refuse_without_corrupting_factor`
+/// and `transverse_point_ports_use_original_geometry_and_preserve_rotation_work`. fs-phs's componentwise reconstruction
+/// gate refuses the source rows of this dry four-mode viscous frame, so the assembly builds WITHOUT a witness and keeps
+/// that refusal. The test pins that behaviour and prints the entries the gate objects to, so the cause is measured.
+#[test]
+fn dry_four_mode_viscous_frame_builds_without_a_witness_and_keeps_the_gate_refusal() {
+    use crate::air_path::cylinder::frame::regions::gate_report::pin_refusal;
+    use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
+    let frame=frame(true,1000.0,2e6,500.0);
+    let dry=model(&frame,4,vec![]);
+    let report=pin_refusal("harmonic dry 4-mode viscous frame, no fluid region",&dry);
+    assert!(report.failing>0);
+    // A consumer gets no substitute factor: an exact flow over the unwitnessed system factors R itself. Whether that
+    // builds is fs-phs's decision, so the outcome is printed, not assumed.
+    let n=dry.system().state_dim();
+    match PreparedExactZoh::new(dry.system(),0.0005,
+        LinearSplitBudget {max_modes:n,max_omega_dt:core::f64::consts::PI}) {
+        Ok(_) => eprintln!("GATE-REPORT harmonic dry 4-mode | exact ZOH over the unwitnessed system: built"),
+        Err(error) => eprintln!("GATE-REPORT harmonic dry 4-mode | exact ZOH over the unwitnessed system refuses: {error:?} \
+            (same as the retained refusal: {})",Some(&error)==dry.resistance_witness_refusal()),
+    }
+    // The same frame with fluid regions (the `condensed_response...` fixture): whether its off-diagonals are large enough
+    // for the gate to admit the rows is a measured fact, printed, not assumed.
+    let wet=model(&frame,4,vec![
+        FrameFluidRegion {element:1,span:[0.0,0.37],fluid:fluid(1000.0,0.01)},
+        FrameFluidRegion {element:1,span:[0.37,1.0],fluid:fluid(3.0,0.002)},
+    ]);
+    eprintln!("GATE-REPORT harmonic wet 4-mode (two regions) | witness attached: {}; retained refusal: {:?}",
+        wet.system().resistance_witness().is_some(),wet.resistance_witness_refusal());
+}

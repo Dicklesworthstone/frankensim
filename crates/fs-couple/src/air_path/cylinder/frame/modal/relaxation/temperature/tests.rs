@@ -195,4 +195,18 @@ fn unchanged_rates_refresh_original_receipts_but_curve_storage_and_stale_native_
     assert_eq!(system2.samples_rendered(),0);
 }
 
+/// MagentaBadger 14025: the one-mode wet layered frame behind this module's six fixtures. fs-phs's componentwise
+/// reconstruction gate refuses its source rows, so the assembly builds WITHOUT a witness and keeps that refusal. The
+/// test pins that and prints the entries the gate objects to: one retained mode has no modal off-diagonal at all, so
+/// whatever the printed entry is, it is not modal orthogonality.
+#[test]
+fn one_mode_wet_layered_frame_builds_without_a_witness_and_keeps_the_gate_refusal() {
+    let cards = [card(0,false,false,false),card(1,false,false,false)];
+    let frame = make_frame(&cards);
+    let model = make_model(&frame);
+    let report = crate::air_path::cylinder::frame::regions::gate_report::pin_refusal(
+        "temperature one-mode wet layered frame",&model);
+    assert!(report.failing>0);
+}
+
 mod shared;

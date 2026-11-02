@@ -677,6 +677,18 @@ impl ResistanceWitness {
         }
         Ok(Self { matrix, root })
     }
+
+    /// The checked factor rows, row-major `n x n` (`n` is the dimension of the
+    /// resistance this witness was built for): physical power is
+    /// `sum_k (rows[k] dot effort)^2` and `R = rows^T rows` within the
+    /// componentwise reconstruction gate the witness passed at construction.
+    /// Read-only; a producer composing a larger resistance (a monolithic
+    /// reference, a block-diagonal assembly) can stack these rows with its own
+    /// source squares and build a new witness from them.
+    #[must_use]
+    pub fn rows(&self) -> &[f64] {
+        &self.root
+    }
 }
 
 fn compose_resistance_witness(
@@ -1005,6 +1017,15 @@ impl PortHamiltonian {
     #[must_use]
     pub fn structure(&self) -> (&[f64], &[f64], &[f64]) {
         (&self.j, &self.r, &self.g)
+    }
+
+    /// The checked source-square witness for this system's exact `R`, when its
+    /// producer retained one ([`Self::with_resistance_witness`] or a physical
+    /// composition). Read-only; `None` means `R` carries no source factor and
+    /// exact flows factor it themselves under the componentwise gate.
+    #[must_use]
+    pub fn resistance_witness(&self) -> Option<&ResistanceWitness> {
+        self.resistance_witness.as_ref()
     }
 
     /// Effort `∇H(x)` — the co-state used by `y = Gᵀ ∇H`.

@@ -109,12 +109,27 @@ impl<'a, F: FluidTransport> MaterialFluidFrame<'a, F> {
                 });
             }
         }
-        let FrameFluidOperators { modal_mass, memory_masses, inverse_residual, system } =
+        let FrameFluidOperators { modal_mass, memory_masses, inverse_residual, system, witness_refusal } =
             assemble(&basis, &members, &stations, &material_ports, budget.mass_inverse_tolerance, gate)?;
         poll(gate)?;
         Ok(Self { frame, basis, members, stations, material_ports, modal_mass,
-            memory_masses, inverse_residual, mass_inverse_tolerance: budget.mass_inverse_tolerance, system })
+            memory_masses, inverse_residual, mass_inverse_tolerance: budget.mass_inverse_tolerance, system,
+            witness_refusal })
     }
+}
+
+/// The fs-phs reconstruction gate's refusal text for a source factor that cannot rebuild `R` entry by entry.
+const GATE_REFUSAL: &str = "physical resistance factor exceeds componentwise roundoff";
+
+/// Why an assembled system carries no `ResistanceWitness`: the refusal fs-phs's componentwise reconstruction gate
+/// returned for this assembly's own source squares, kept as the value it returned, with the uncompressed source rows it
+/// was given (row-major, `n` entries per row). The system is then exactly the one built without a witness: no substitute
+/// factor, no loosened gate. An exact flow over it factors `R` itself; fs-phs decides whether that builds.
+#[derive(Clone, Debug)]
+pub(super) struct WitnessRefusal {
+    pub error: PhsError,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub rows: Vec<f64>,
 }
 
 /// The SAME original physical assembly serves preparation and a prescribed
@@ -125,6 +140,7 @@ pub(super) struct FrameFluidOperators {
     pub memory_masses: Vec<f64>,
     pub inverse_residual: f64,
     pub system: PortHamiltonian,
+    pub witness_refusal: Option<WitnessRefusal>,
 }
 
 pub(super) fn assemble<F>(basis: &FrameVibrationBasis, members: &[LoadedFrameMember<F>],
@@ -163,15 +179,24 @@ pub(super) fn assemble<F>(basis: &FrameVibrationBasis, members: &[LoadedFrameMem
         g[(m+i)*m+i] = 1.0;
         for k in 0..m { q[(m+i)*n+m+k] = inverse[i*m+k]; }
     }
+    // Every loss below is a physical square: the solid port and the low tail dissipate r (projection . qdot)^2, a memory
+    // branch c (projection . qdot - v_branch)^2. R is their sum, so each square is also one row of a source factor
+    // (sqrt of its coefficient times the same projection / slip vector). Retaining those rows in a checked
+    // ResistanceWitness lets exact flows use the factor the assembly already holds instead of re-deriving one from the
+    // summed R, which is not diagonally dominant here (a station projection above 1 makes c(1-projection) negative) and
+    // so falls to an eigen factor that cannot meet fs-phs's componentwise reconstruction gate. The gate is unchanged.
+    let mut source_rows: Vec<f64> = Vec::new();
     for port in material_ports {
         poll(gate)?;
         add_outer(&mut r, n, m, &port.projection, port.resistance)?;
+        source_rows.extend(source_row(n, m, port.resistance, &port.projection, None)?);
     }
     for station in stations {
         poll(gate)?;
         let flow = &members[station.member].flow;
-        add_outer(&mut r, n, m, &station.projection,
-            positive(station.weight_m*flow.low_tail_resistance_per_length_n_s_m2())?)?;
+        let tail = positive(station.weight_m*flow.low_tail_resistance_per_length_n_s_m2())?;
+        add_outer(&mut r, n, m, &station.projection, tail)?;
+        source_rows.extend(source_row(n, m, tail, &station.projection, None)?);
         for (k, branch) in flow.branches().iter().enumerate() {
             poll(gate)?;
             let memory = station.first_memory+k;
@@ -185,13 +210,36 @@ pub(super) fn assemble<F>(basis: &FrameVibrationBasis, members: &[LoadedFrameMem
                 r[(m+i)*n+index] = cross;
                 r[index*n+m+i] = cross;
             }
+            source_rows.extend(source_row(n, m, c, &station.projection, Some(index))?);
         }
     }
     let storage = QuadraticStorage::new(q, n)?;
     poll(gate)?;
+    // The witness is evidence the assembly offers, not a precondition of the system: attach it when the fs-phs gate
+    // admits these rows. When the gate's componentwise reconstruction check refuses them, build the system as before,
+    // without a witness, and keep the refusal (see `gate_report` for what the gate objects to in the pinned fixtures).
+    // Any other refusal (malformed rows, asymmetry) is a fault in this assembly and propagates.
+    let attempt = fs_phs::ResistanceWitness::try_from_source_rows(n, r.clone(), source_rows.clone());
     let system = PortHamiltonian::new(n, m, j, r, g, Box::new(storage))?;
+    let (system, witness_refusal) = match attempt {
+        Ok(witness) => (system.with_resistance_witness(witness)?, None),
+        Err(error @ PhsError::LinearSplitBudget { what }) if what == GATE_REFUSAL =>
+            (system, Some(WitnessRefusal { error, rows: source_rows })),
+        Err(other) => return Err(other.into()),
+    };
     poll(gate)?;
-    Ok(FrameFluidOperators { modal_mass, memory_masses, inverse_residual, system })
+    Ok(FrameFluidOperators { modal_mass, memory_masses, inverse_residual, system, witness_refusal })
+}
+
+/// One row of the source factor of a loss `coefficient * (projection . qdot - v_branch)^2`: sqrt(coefficient) times
+/// the modal-momentum projection (state columns m..2m) and, for a memory branch, -1 on its own momentum column.
+fn source_row(n: usize, m: usize, coefficient: f64, projection: &[f64], branch: Option<usize>)
+    -> Result<Vec<f64>> {
+    let weight = finite(fs_math::det::sqrt(coefficient))?;
+    let mut row = vec![0.0; n];
+    for (i, &p) in projection.iter().enumerate() { row[m+i] = finite(weight*p)?; }
+    if let Some(index) = branch { row[index] = -weight; }
+    Ok(row)
 }
 
 /// Map the quadrature inside the original coordinate, NOT a shorter new beam.
@@ -236,4 +284,123 @@ fn admit_regions<F>(frame: &Frame2d, regions: &[FrameFluidRegion<F>], gate: &Can
     }
     poll(gate)?;
     Ok(lengths)
+}
+
+/// Test-only measurement of why fs-phs's reconstruction gate refuses an assembly's source rows. It repeats, step for
+/// step, what `ResistanceWitness::try_from_source_rows` does (QR-compress when there are more rows than states, else
+/// pad the rows to `n x n`; then the componentwise gate `|gram - R_ij| <= 128 n eps magnitude`, with the local product
+/// sum as magnitude at an exactly zero `R_ij`), and reports the entries instead of refusing. It changes no gate.
+#[cfg(test)]
+pub(super) mod gate_report {
+    use super::GATE_REFUSAL;
+    use crate::air_path::cylinder::frame::MaterialFluidFrame;
+    use fs_la::factor::qr;
+    use fs_phs::PhsError;
+
+    /// One entry of the reconstruction check, with the source terms that make it up.
+    #[derive(Clone, Debug)]
+    pub struct Entry {
+        pub i: usize,
+        pub j: usize,
+        pub gram: f64,
+        pub resistance: f64,
+        pub magnitude: f64,
+        pub error: f64,
+        pub limit: f64,
+        /// Largest and total absolute single source product `rows[k][i]*rows[k][j]` (the `c*p_i*p_j` terms).
+        pub largest_term: f64,
+        pub sum_abs_terms: f64,
+    }
+
+    #[derive(Debug)]
+    pub struct Report {
+        pub n: usize,
+        pub height: usize,
+        pub qr_path: bool,
+        pub failing: usize,
+        pub first_failure: Option<Entry>,
+        pub worst: Option<Entry>,
+    }
+
+    pub fn report(n: usize, resistance: &[f64], rows: &[f64]) -> Report {
+        assert!(n > 0 && rows.len() % n == 0 && resistance.len() == n*n);
+        let height = rows.len()/n;
+        let qr_path = height > n;
+        let scale = rows.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
+        let root: Vec<f64> = if qr_path {
+            if scale == 0.0 { vec![0.0; n*n] } else {
+                let normalized: Vec<f64> = rows.iter().map(|x| x/scale).collect();
+                let decomposition = qr(&normalized, height, n);
+                let mut root = vec![0.0; n*n];
+                for i in 0..n { for j in i..n { root[i*n+j] = scale*decomposition.r(i, j); } }
+                root
+            }
+        } else {
+            let mut padded = rows.to_vec();
+            padded.resize(n*n, 0.0);
+            padded
+        };
+        let mut failing = 0;
+        let (mut first_failure, mut worst): (Option<Entry>, Option<Entry>) = (None, None);
+        let mut worst_violation = -1.0_f64;
+        for i in 0..n {
+            for j in i..n {
+                let (mut gram, mut products) = (0.0, 0.0);
+                for k in 0..n {
+                    let product = root[k*n+i]*root[k*n+j];
+                    gram += product;
+                    products += product.abs();
+                }
+                let r = resistance[i*n+j];
+                let magnitude = if r != 0.0 { r.abs() } else { products };
+                let error = (gram - r).abs();
+                let limit = 128.0*n as f64*f64::EPSILON*magnitude;
+                let fails = !gram.is_finite() || !magnitude.is_finite() || error > limit;
+                let (mut largest_term, mut sum_abs_terms) = (0.0_f64, 0.0_f64);
+                for k in 0..height {
+                    let term = (rows[k*n+i]*rows[k*n+j]).abs();
+                    largest_term = largest_term.max(term);
+                    sum_abs_terms += term;
+                }
+                let entry = Entry { i, j, gram, resistance: r, magnitude, error, limit, largest_term, sum_abs_terms };
+                let violation = if limit > 0.0 { error/limit } else if error > 0.0 { f64::INFINITY } else { 0.0 };
+                if fails {
+                    failing += 1;
+                    if first_failure.is_none() { first_failure = Some(entry.clone()); }
+                }
+                if violation > worst_violation { worst_violation = violation; worst = Some(entry); }
+            }
+        }
+        Report { n, height, qr_path, failing, first_failure, worst }
+    }
+
+    fn describe(label: &str, which: &str, m: usize, report: &Report, e: &Entry) -> String {
+        let block = |x: usize| if x < m { "position" } else if x < 2*m { "momentum" } else { "memory" };
+        format!("GATE-REPORT {label} | {which}: m={m} n={} rows={} qr_path={} failing_entries={} \
+            entry=({},{}) [{}x{}] gram={:e} R_ij={:e} |gram-R_ij|={:e} limit(128 n eps magnitude)={:e} \
+            largest_term={:e} sum_abs_terms={:e} |R_ij|/largest_term={:e} |R_ij|/sum_abs_terms={:e}",
+            report.n, report.height, report.qr_path, report.failing, e.i, e.j, block(e.i), block(e.j), e.gram,
+            e.resistance, e.error, e.limit, e.largest_term, e.sum_abs_terms, e.resistance.abs()/e.largest_term,
+            e.resistance.abs()/e.sum_abs_terms)
+    }
+
+    /// The pinned behaviour of an assembly whose gate refused its source rows: no witness is attached, the retained
+    /// refusal is fs-phs's own value, and the replicated gate reproduces the refusal. Prints the measured entries.
+    pub fn pin_refusal<F>(label: &str, model: &MaterialFluidFrame<'_, F>) -> Report {
+        assert!(model.system().resistance_witness().is_none(), "{label}: a refused gate must leave no witness");
+        let refusal = model.witness_refusal.as_ref().unwrap_or_else(|| panic!("{label}: the refusal must be retained"));
+        assert_eq!(refusal.error, PhsError::LinearSplitBudget { what: GATE_REFUSAL });
+        assert_eq!(model.resistance_witness_refusal(), Some(&refusal.error));
+        let n = model.system().state_dim();
+        let m = model.basis().modes().len();
+        let (_, r, _) = model.system().structure();
+        let report = report(n, r, &refusal.rows);
+        eprintln!("GATE-REPORT {label} | refusal kept: {:?}", refusal.error);
+        let first = report.first_failure.as_ref()
+            .unwrap_or_else(|| panic!("{label}: the replicated gate must fail where fs-phs's did"));
+        eprintln!("{}", describe(label, "first failing entry in gate order", m, &report, first));
+        let worst = report.worst.as_ref().expect("worst entry");
+        eprintln!("{}", describe(label, "worst entry (largest error/limit)", m, &report, worst));
+        report
+    }
 }

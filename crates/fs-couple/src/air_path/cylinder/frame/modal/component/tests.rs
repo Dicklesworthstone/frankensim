@@ -91,6 +91,10 @@ fn original_complete_phs_trajectory_work_and_loss_match_shared_native_assembly()
     for two in [false, true] { for cached in [false, true] {
         let frame = frame(two, 1000.0, 2e6, 500.0);
         let model = model(&frame, two, 400.0, 0.02);
+        // The exact flow below factors this system's R. It must be the witnessed system, so this test cannot pass on
+        // the path where the gate refused a witness (MagentaBadger 14025).
+        assert!(model.system().resistance_witness().is_some(), "the assembled system must carry its source-square witness");
+        assert!(model.resistance_witness_refusal().is_none());
         let mut state = initial(&model);
         let (placement, mut network) = complete(&model, &state, cached);
         let gate = CancelGate::new_clock_free();

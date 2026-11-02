@@ -105,6 +105,7 @@ impl<F: FluidTransport> MaterialFluidFrame<'_, F> {
         self.memory_masses = operators.memory_masses;
         self.inverse_residual = operators.inverse_residual;
         self.system = operators.system;
+        self.witness_refusal = operators.witness_refusal;
         Ok(update)
     }
 }

@@ -146,6 +146,7 @@ pub struct MaterialFluidFrame<'a, F> {
     inverse_residual: f64,
     mass_inverse_tolerance: f64,
     system: PortHamiltonian,
+    witness_refusal: Option<regions::WitnessRefusal>,
 }
 
 /// Native proposal plus separate physical dissipation accounts. These losses
@@ -186,6 +187,13 @@ impl<F> MaterialFluidFrame<'_, F> {
     /// use the retained basis for physical force/moment projection. Raw native
     /// stepping bypasses step_candidate's source-clock and independent work gates.
     pub const fn system(&self) -> &PortHamiltonian { &self.system }
+    /// `None` when [`Self::system`] carries a `ResistanceWitness` built from this assembly's own source squares. Otherwise
+    /// the refusal fs-phs's componentwise reconstruction gate returned for those squares: the system is then the
+    /// unwitnessed one (exactly what was built before witnesses were offered) and the gate is unchanged. An exact flow
+    /// over it factors `R` itself; whether that builds is fs-phs's decision, not this assembly's.
+    pub fn resistance_witness_refusal(&self) -> Option<&PhsError> {
+        self.witness_refusal.as_ref().map(|refusal| &refusal.error)
+    }
 }
 
 fn project(basis: &FrameVibrationBasis, dofs: &[usize; 6], weights: &[f64; 6]) -> Result<Vec<f64>> {
