@@ -882,6 +882,48 @@ All nine existing multirate tests pass against the changed owner. These are
 native numerical and allocation checks, not measured wall-time acceleration or
 full workspace qualification.
 
+## Continuous tones through the complete quadratic physical model
+
+`linear_exact::PreparedExactTones` borrows or owns the original quadratic
+`PortHamiltonian` and prepares one positive interval for simultaneous cosine
+and sine inputs at every physical port. Coefficients are port-major in caller
+frequency order; angular frequencies are finite and nonnegative, with explicit
+DC. Exact duplicate frequencies combine in original order with compensated
+summation; unequal frequencies retain their beat and interference terms. The
+existing complete exponential/Gramian owner retains every original state,
+off-diagonal coupling, source column and material memory. This entry point
+accepts ordinary quadratic ODEs; it does not eliminate descriptor constraints.
+
+Original signed input work is integrated independently as paired source/output
+factors. Total heat and optional `ResistanceWitness` channels integrate the
+original positive resistance squares on that same forced trajectory. Paired
+QR composition retains signed cross-power without expanding differences of
+large quadratic forms; positive factors preserve nonnegative heat and small
+physical resistance scales. Channel witnesses may overlap and are not assumed
+to partition the original R. Actual average port outputs are returned separately
+from work: instantaneous or average force times average output is generally
+incorrect for continuous tones. The original storage change and 1e-12 relative
+physical balance gate remain authoritative; source quadratures have no added
+physical storage. Numerical quadrature/composition and balance checks are not
+rigorous interval certificates.
+
+Explicit dimension, byte and work admission includes all physical states,
+source quadratures and requested channels before dense factor allocation. The
+complete augmented dimension remains capped at 256; no state or tone is dropped
+to meet a limit. Prepared steps and cached phase rotation allocate nothing and
+evaluate no transcendentals with allocation-free storage callbacks. Caller
+state and phase remain external and checkpointable; every caller output stays
+unchanged on refusal. Source integration imposes no receiver-bandwidth or
+observation anti-aliasing guarantee.
+
+Eight focused native tests cover independent oscillator motion and power across
+damping regimes, exact secular resonance, a complete two-body Maxwell ODE with
+three physical heat channels, duplicate cancellation and DC/free motion, clock
+subdivision and replay, tiny heat around static balance, 1,000 allocation-free
+warm steps, and atomic/budget/cancellation refusals. Existing positive-heat,
+owned exact-flow, stiff-energy and common-flow regressions protect the shared
+numerical owners; full-workspace qualification is not asserted.
+
 ### Resonance spectrum of the original descriptor model
 
 `HarmonicModel::resonance_spectrum` discovers finite free modes inside an
@@ -1503,3 +1545,4 @@ nonlinear knot crossing alongside full mutual inductance; stable small work
 beside an unchanged energy bias; shared preparation and ownership/rank refusals.
 An independent modal test covers nF/pF/fF matrices and the same dynamics beside
 a held 1 F capacitor with 10^8 C charge, checking terminal KCL and physical work.
+

@@ -476,12 +476,21 @@ pub(crate) fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) 
 // rank. A common scale protects its squared column norms from tiny absolute
 // loss magnitudes; it does not discard small directions relative to others.
 pub(crate) fn compress(rows: &[f64], height: usize, n: usize) -> Result<Vec<f64>, PhsError> {
+    Ok(compress_paired(rows, None, height, n)?.0)
+}
+
+// Identical QR rotations may also act on a second observation. Keeping the
+// two factors preserves a signed cross integral without expanding products
+// that would lose small work under destructive source interference.
+fn compress_paired(
+    rows: &[f64], paired: Option<&[f64]>, height: usize, n: usize,
+) -> Result<(Vec<f64>, Option<Vec<f64>>), PhsError> {
     let scale = rows.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
-    if !scale.is_finite() {
+    if !scale.is_finite() || paired.is_some_and(|p| p.len() != height * n || !finite(p)) {
         return Err(refuse("positive heat factor is nonfinite"));
     }
     if scale == 0.0 {
-        return Ok(vec![0.0; n * n]);
+        return Ok((vec![0.0; n * n], paired.map(|_| vec![0.0; n * n])));
     }
     let normalized: Vec<_> = rows.iter().map(|x| x / scale).collect();
     let decomposition = qr(&normalized, height, n);
@@ -494,15 +503,47 @@ pub(crate) fn compress(rows: &[f64], height: usize, n: usize) -> Result<Vec<f64>
     if !finite(&root) {
         return Err(refuse("positive heat QR factor is nonfinite"));
     }
-    Ok(root)
+    let other = if let Some(paired) = paired {
+        let mut result = vec![0.0; n * n];
+        let mut column = vec![0.0; height];
+        for j in 0..n {
+            for i in 0..height {
+                column[i] = paired[i * n + j];
+            }
+            decomposition.apply_qt(&mut column);
+            for i in 0..n {
+                result[i * n + j] = column[i];
+            }
+        }
+        if !finite(&result) {
+            return Err(refuse("paired power factor is nonfinite"));
+        }
+        Some(result)
+    } else {
+        None
+    };
+    Ok((root, other))
 }
 
-fn integral_root(
+pub(super) fn integral_root(
     generator: &[f64],
     factor: &[f64],
     n: usize,
     dt: f64,
 ) -> Result<Vec<f64>, PhsError> {
+    Ok(integral_factors(generator, factor, None, n, dt)?.0)
+}
+
+pub(super) fn integral_cross_root(
+    generator: &[f64], left: &[f64], right: &[f64], n: usize, dt: f64,
+) -> Result<(Vec<f64>, Vec<f64>), PhsError> {
+    let (left, right) = integral_factors(generator, left, Some(right), n, dt)?;
+    Ok((left, right.expect("paired integral retains its second factor")))
+}
+
+fn integral_factors(
+    generator: &[f64], factor: &[f64], paired: Option<&[f64]>, n: usize, dt: f64,
+) -> Result<(Vec<f64>, Option<Vec<f64>>), PhsError> {
     let mut norm = 0.0_f64;
     for i in 0..n {
         let row: f64 = (0..n).map(|j| (dt * generator[i * n + j]).abs()).sum();
@@ -548,6 +589,7 @@ fn integral_root(
         0.1012285362903763,
     ];
     let mut samples = vec![0.0; 8 * n * n];
+    let mut paired_samples = paired.map(|_| vec![0.0; 8 * n * n]);
     for k in 0..8 {
         let node = 0.5 * (1.0 + NODES[k]);
         let at: Vec<_> = a.iter().map(|x| node * x).collect();
@@ -557,8 +599,14 @@ fn integral_root(
         for (target, value) in samples[k * n * n..(k + 1) * n * n].iter_mut().zip(output) {
             *target = weight * value;
         }
+        if let (Some(factor), Some(samples)) = (paired, paired_samples.as_mut()) {
+            let output = product(factor, &map, n);
+            for (target, value) in samples[k * n * n..(k + 1) * n * n].iter_mut().zip(output) {
+                *target = weight * value;
+            }
+        }
     }
-    let mut root = compress(&samples, 8 * n, n)?;
+    let (mut root, mut other) = compress_paired(&samples, paired_samples.as_deref(), 8 * n, n)?;
     for _ in 0..doublings {
         // W(2h)=W(h)+E(h)^T W(h) E(h): QR of [L; L E], never a
         // Gram matrix or exp(-A h). Stiff passive relaxation stays bounded.
@@ -566,13 +614,20 @@ fn integral_root(
         let mut stacked = Vec::with_capacity(2 * n * n);
         stacked.extend_from_slice(&root);
         stacked.extend_from_slice(&advanced);
-        root = compress(&stacked, 2 * n, n)?;
+        let paired_stacked = other.as_ref().map(|other| {
+            let advanced = product(other, &transition, n);
+            let mut stacked = Vec::with_capacity(2 * n * n);
+            stacked.extend_from_slice(other);
+            stacked.extend_from_slice(&advanced);
+            stacked
+        });
+        (root, other) = compress_paired(&stacked, paired_stacked.as_deref(), 2 * n, n)?;
         transition = product(&transition, &transition, n);
         if !finite(&transition) {
             return Err(refuse("positive heat transition overflows"));
         }
     }
-    Ok(root)
+    Ok((root, other))
 }
 
 #[cfg(test)]

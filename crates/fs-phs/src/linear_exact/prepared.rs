@@ -44,6 +44,8 @@ pub struct PreparedQuadraticFlow {
     growth_factor: f64,
     storage_norm_factor: f64,
     balanced_input: Vec<f64>,
+    source_scales: Vec<f64>,
+    rotating_sources: bool,
 }
 impl PreparedQuadraticFlow {
     /// Prepare the SAME energy-balanced exact-ZOH generator and stable Gramian
@@ -102,6 +104,7 @@ impl PreparedQuadraticFlow {
             budget,
             cancelled,
             None,
+            None,
         )
     }
 
@@ -133,7 +136,30 @@ impl PreparedQuadraticFlow {
             budget,
             cancelled,
             Some((generator_per_s, extra_scales)),
+            None,
         )
+    }
+
+    // The same complete operator/Gramian owner, with continuous source
+    // quadratures instead of held source coordinates. All physical states and
+    // original linear observations remain in their existing order.
+    pub(super) fn new_tones_controlled(
+        sys: &PortHamiltonian,
+        split: &LinearSplit,
+        dt: f64,
+        frequencies: &[f64],
+        linear_forms: &[Vec<f64>],
+        budget: DenseExponentialBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(
+            sys, split, dt, &[], linear_forms, budget, cancelled, None,
+            Some(frequencies),
+        )
+    }
+
+    pub(super) fn source_scales(&self) -> &[f64] {
+        &self.source_scales
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -146,9 +172,26 @@ impl PreparedQuadraticFlow {
         budget: DenseExponentialBudget,
         mut cancelled: impl FnMut() -> bool,
         extension: Option<(&[f64], &[f64])>,
+        tones: Option<&[f64]>,
     ) -> Result<Self, PreparedStepError> {
         check_cancel(&mut cancelled)?;
-        let (base_n, m) = (split.n, split.m);
+        let (base_n, ports) = (split.n, split.m);
+        let m = if let Some(frequencies) = tones {
+            if frequencies.is_empty()
+                || ports == 0
+                || extension.is_some()
+                || frequencies.iter().any(|v| !v.is_finite() || *v < 0.0)
+            {
+                return Err(refuse(
+                    "tone sources require nonempty finite frequencies and physical ports",
+                ).into());
+            }
+            ports.checked_mul(frequencies.len())
+                .and_then(|v| v.checked_mul(2))
+                .ok_or_else(|| refuse("tone source dimension overflow"))?
+        } else {
+            ports
+        };
         let n = base_n
             .checked_add(extension.map_or(0, |(_, scales)| scales.len()))
             .ok_or_else(|| refuse("prepared extended dimension overflow"))?;
@@ -195,7 +238,7 @@ impl PreparedQuadraticFlow {
         }
         if !split.quadratic.exact
             || sys.n != base_n
-            || sys.m != m
+            || sys.m != ports
             || sys.j != split.j
             || sys.r != split.r
             || sys.g != split.g
@@ -343,14 +386,44 @@ impl PreparedQuadraticFlow {
         }
         let mut generator = vec![0.0; d * d];
         let mut balanced_input = vec![0.0; n * m];
+        let mut source_scales = vec![1.0; m];
+        let mut physical_input = vec![0.0; n * ports];
         for i in 0..n {
             check_cancel(&mut cancelled)?;
             generator[i * d..i * d + n].copy_from_slice(&balanced[i * n..(i + 1) * n]);
-            for p in 0..m {
+            for p in 0..ports {
                 for j in 0..base_n {
-                    generator[i * d + n + p] += forward[i * n + j] * sys.g[j * m + p];
+                    physical_input[i * ports + p] += forward[i * n + j] * sys.g[j * ports + p];
                 }
-                balanced_input[i * m + p] = generator[i * d + n + p];
+            }
+        }
+        if let Some(frequencies) = tones {
+            for p in 0..ports {
+                let magnitude = (0..n)
+                    .map(|i| physical_input[i * ports + p].abs())
+                    .fold(0.0_f64, f64::max);
+                let scale = if magnitude == 0.0 { 1.0 } else { magnitude };
+                if !scale.is_finite() {
+                    return Err(refuse("tone input scale must be finite").into());
+                }
+                for (tone, &omega) in frequencies.iter().enumerate() {
+                    let c = 2 * (p * frequencies.len() + tone);
+                    source_scales[c] = scale;
+                    source_scales[c + 1] = scale;
+                    generator[(n + c) * d + n + c + 1] = omega;
+                    generator[(n + c + 1) * d + n + c] = -omega;
+                    for i in 0..n {
+                        generator[i * d + n + c] = physical_input[i * ports + p] / scale;
+                        balanced_input[i * m + c] = generator[i * d + n + c];
+                    }
+                }
+            }
+        } else {
+            for i in 0..n {
+                for p in 0..m {
+                    generator[i * d + n + p] = physical_input[i * m + p];
+                    balanced_input[i * m + p] = physical_input[i * m + p];
+                }
             }
         }
         let mut transpose = vec![0.0; n * n];
@@ -404,6 +477,8 @@ impl PreparedQuadraticFlow {
             growth_factor,
             storage_norm_factor,
             balanced_input,
+            source_scales,
+            rotating_sources: tones.is_some(),
         })
     }
 
@@ -418,6 +493,11 @@ impl PreparedQuadraticFlow {
         state: &[f64],
         input: &[f64],
     ) -> Result<f64, PhsError> {
+        if self.rotating_sources {
+            return Err(refuse(
+                "held-input interval envelope is not a continuous-tone envelope",
+            ));
+        }
         if state.len() != self.n || input.len() != self.m || !finite(state) || !finite(input) {
             return Err(refuse(
                 "coordinate interval bound state/input layout or finiteness",
@@ -485,7 +565,10 @@ impl PreparedQuadraticFlow {
             .map(|j| (0..self.n).map(|i| balanced[i] * self.forward[i * self.n + j]).sum())
             .collect();
         let input: Vec<f64> = (0..self.m)
-            .map(|p| w[(self.n + p) * self.d + last] + w[last * self.d + self.n + p])
+            .map(|p| {
+                (w[(self.n + p) * self.d + last] + w[last * self.d + self.n + p])
+                    * self.source_scales[p]
+            })
             .collect();
         if !finite(&state) || !finite(&input) {
             return Err(refuse("prepared linear observation map is nonfinite"));
@@ -511,7 +594,9 @@ impl PreparedQuadraticFlow {
                 .map(|j| self.forward[i * self.n + j] * state[j])
                 .sum();
         }
-        z[self.n..self.n + self.m].copy_from_slice(input);
+        for p in 0..self.m {
+            z[self.n + p] = self.source_scales[p] * input[p];
+        }
         z[self.d - 1] = 1.0;
         for i in 0..self.n {
             balanced[i] = (0..self.d)

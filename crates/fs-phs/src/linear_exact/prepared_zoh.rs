@@ -20,9 +20,9 @@ pub(super) fn energetic_scale_into(system: &PortHamiltonian, state: &[f64], effo
     scale
 }
 
-enum System<'a> { Borrowed(&'a PortHamiltonian), Owned(Box<PortHamiltonian>) }
+pub(super) enum System<'a> { Borrowed(&'a PortHamiltonian), Owned(Box<PortHamiltonian>) }
 impl System<'_> {
-    fn get(&self) -> &PortHamiltonian {
+    pub(super) fn get(&self) -> &PortHamiltonian {
         match self { Self::Borrowed(system) => system, Self::Owned(system) => system }
     }
 }
