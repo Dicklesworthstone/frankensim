@@ -799,3 +799,59 @@ unverified in this session because the native process runner is unavailable.
 Independent JavaScript angular and full finite-radius flux checks agreed to
 1.33e-15 relative error for the documented three-source fixture; those checks
 validate the reference equations, not Rust compilation.
+
+## Mixed deterministic, real and proper acoustic source ensembles
+
+`observation::PreparedHarmonicEnsemble` combines an optional deterministic
+mean with explicit real or proper-complex fluctuation factors on one original
+receiver/frame/source clock. A real factor has E[xi]=0 and E[xi^2]=1, retaining
+its authored waveform phase and both sum/difference-frequency products. A proper
+factor has E[z]=E[z^2]=0 and E[|z|^2]=1, so its sum-frequency terms vanish.
+All factors have the declared joint identity covariance, zero cross-factor
+moments and zero mixed real/proper moments. No Gaussian law, unknown-phase
+independence, stationarity or PSD-bin normalization is inferred.
+
+Real factors can represent phase-locked source-amplitude variability and
+nonzero complex pseudocovariance. A real covariance square root of the stacked
+real/imaginary source coefficients describes general positive-semidefinite
+nonproper fluctuations by construction. Proper factors can coexist without
+doubling their rank. The supplied physical peak field coefficients already
+carry the square-root weights and propagation phases.
+
+The deterministic, proper-only and mixed owners now share one field-moment
+implementation. Coalesced equal-frequency fields retain their DD real/imaginary
+components through every later contraction; they are not rounded back to C64
+before products. Hz-to-radian conversion and deterministic rotations use the
+shared extended kernel, preserving high-carrier beat frequencies and small
+cosine decrements. Means integrate the retained field against an exact unit
+DC field through the same kernel. These measures improve cancellation but do
+not establish relative accuracy at arbitrary nulls or certify transcendental
+errors.
+
+`WindowedAcousticEnsemble` reports ensemble/window means, uncentered pressure
+mean square, the full real symmetric velocity second-moment tensor and signed
+mean p*u [W/m^2]. Deterministic motion remains in the tensor; it is not centered
+fluctuation covariance or a detector-confidence interval. The deterministic
+owner also exposes full moments through `observe_window_moments` and its
+cancellable counterpart.
+
+For fixed spatial dimension, admission covers total factors, supplied lines
+and the sum of per-bank squared line counts before allocation. Preparation
+takes O(sum N_r^2), stores O(sum N_r) fields, and polls within grouping work.
+Observation takes O(sum M_r^2) for the distinct frequency counts M_r, allocates
+nothing and reuses each temporal kernel across the field components. Both
+legacy owners now have cancellable preparation; deterministic queries and full
+moment queries also have cancellation callbacks. Refusal publishes no partial
+operator/result and does not mutate an accepted owner.
+
+Seven authored G0/G1/G3/G4 regressions cover an exact eight-state real/proper
+ensemble against direct real-time integration, short-window nonproper power
+and signed flux, real factor-basis invariance and proper-as-real decomposition,
+high-carrier Hz beats, weak coherent residuals, physical clock/frame covariance,
+resource boundaries, cancellation/replay and darkness. The exact shared kernel,
+updated acoustic owners, seven new tests and eight prior proper-observation
+tests pass one focused native Rust type analysis (31 test definitions including
+16 shared-kernel tests). This is not execution or a full-crate build; both
+remain blocked by exhausted storage. An independent analytic versus eight-state
+real-time reference agrees within 3.22e-15 maximum absolute error for the
+nine reported fixture moments.

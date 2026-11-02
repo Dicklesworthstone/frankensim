@@ -1,4 +1,4 @@
-//! Finite-duration observations of harmonic acoustic fields and proper ensembles.
+//! Finite-duration observations of harmonic acoustic fields and source ensembles.
 //!
 //! All lines refer to one receiver, coordinate frame and physical time origin,
 //! using peak phasors `Re(A exp(-i omega t))`. The caller establishes that clock
@@ -14,10 +14,21 @@
 //! zero-mean proper complex coherence factors. Its ensemble average removes
 //! sum-frequency terms by the declared statistics, while cross-frequency beats
 //! within each factor remain. It never treats unknown phase as independence.
+//! [`PreparedHarmonicEnsemble`] also admits a deterministic mean and explicitly
+//! real factors, retaining phase-locked amplitude fluctuations and their
+//! nonzero pseudocovariance through the same field-moment implementation.
 
 use crate::AeroacError;
-use fs_fft::harmonic_window::{HarmonicWindow, WindowError};
+use fs_fft::harmonic_window::{
+    HarmonicProduct, HarmonicWindow, ProperHarmonicProduct, WindowError,
+};
 use fs_math::{c64::C64, dd::Dd, det};
+
+mod ensemble;
+pub use ensemble::{
+    HarmonicEnsembleBudget, HarmonicFactorStatistics, HarmonicFieldFactor,
+    PreparedHarmonicEnsemble, WindowedAcousticEnsemble,
+};
 
 /// A spectral line of an already propagated acoustic field.
 ///
@@ -85,7 +96,7 @@ impl<const D: usize> WindowedAcousticField<D> {
 /// each frequency-pair integral across pressure and velocity components.
 #[derive(Clone, Debug)]
 pub struct PreparedHarmonicField<const D: usize> {
-    lines: Vec<HarmonicFieldLine<D>>,
+    lines: Vec<PreparedLine<D>>,
 }
 
 impl<const D: usize> PreparedHarmonicField<D> {
@@ -94,12 +105,23 @@ impl<const D: usize> PreparedHarmonicField<D> {
     /// Empty input represents silence. The caller must not mix receivers,
     /// coordinate frames, amplitude conventions or unrelated random phases.
     /// Existing 2D/3D observers supply correctly normalized lines through their
-    /// `evaluate_harmonic_line` methods; the original source authority remains.
-    #[allow(clippy::float_cmp)] // Only exact frequency equality permits coherent coalescing.
+    /// evaluate_harmonic_line methods; their source/propagation limits remain.
     pub fn new(
         lines: &[HarmonicFieldLine<D>],
         budget: HarmonicObservationBudget,
     ) -> Result<Self, AeroacError> {
+        Self::new_cancellable(lines, budget, || false)
+    }
+
+    /// Admit and coalesce fields with bounded cancellation polls.
+    /// No partially prepared field is published after cancellation or refusal.
+    #[allow(clippy::float_cmp)] // Only exact frequency equality permits coalescing.
+    pub fn new_cancellable(
+        lines: &[HarmonicFieldLine<D>],
+        budget: HarmonicObservationBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        poll(&mut cancelled)?;
         if lines.len() > budget.max_lines
             || lines
                 .len()
@@ -108,48 +130,56 @@ impl<const D: usize> PreparedHarmonicField<D> {
         {
             return Err(invalid("harmonic observation exceeds the line/work budget"));
         }
+        let mut combined: Vec<PreparedLine<D>> = Vec::new();
+        combined
+            .try_reserve_exact(lines.len())
+            .map_err(|_| invalid("harmonic field allocation exceeds available memory"))?;
         for line in lines {
+            poll(&mut cancelled)?;
             let omega = core::f64::consts::TAU * line.frequency_hz;
             if !omega.is_finite() || omega <= 0.0 {
                 return Err(invalid("harmonic frequencies must be positive finite"));
             }
-            if !finite(line.pressure_pa) || line.particle_velocity_m_s.iter().any(|v| !finite(*v)) {
+            if !finite(line.pressure_pa)
+                || line
+                    .particle_velocity_m_s
+                    .iter()
+                    .any(|value| !finite(*value))
+            {
                 return Err(nonfinite("harmonic pressure or particle velocity"));
             }
-        }
-        let mut combined = Vec::new();
-        combined
-            .try_reserve_exact(lines.len())
-            .map_err(|_| invalid("harmonic field allocation exceeds available memory"))?;
-        for (i, line) in lines.iter().enumerate() {
-            if lines[..i]
-                .iter()
-                .any(|previous| previous.frequency_hz == line.frequency_hz)
-            {
-                continue;
-            }
-            let mut pressure = ComplexSum::default();
-            let mut velocity = [ComplexSum::default(); D];
-            for same in lines[i..]
-                .iter()
-                .filter(|same| same.frequency_hz == line.frequency_hz)
-            {
-                pressure.add(same.pressure_pa);
-                for (sum, value) in velocity.iter_mut().zip(same.particle_velocity_m_s) {
-                    sum.add(value);
+            let mut group = None;
+            for (index, previous) in combined.iter().enumerate() {
+                poll(&mut cancelled)?;
+                if previous.frequency_hz == line.frequency_hz {
+                    group = Some(index);
+                    break;
                 }
             }
-            let pressure_pa = pressure.value();
-            let particle_velocity_m_s = velocity.map(ComplexSum::value);
-            if !finite(pressure_pa) || particle_velocity_m_s.iter().any(|v| !finite(*v)) {
+            let index = group.unwrap_or(combined.len());
+            if index == combined.len() {
+                combined.push(PreparedLine {
+                    frequency_hz: line.frequency_hz,
+                    pressure: ComplexSum::default(),
+                    velocity: [ComplexSum::default(); D],
+                });
+            }
+            combined[index].pressure.add(line.pressure_pa);
+            for (sum, value) in combined[index]
+                .velocity
+                .iter_mut()
+                .zip(line.particle_velocity_m_s)
+            {
+                sum.add(value);
+            }
+        }
+        for line in &combined {
+            poll(&mut cancelled)?;
+            if !line.pressure.is_finite() || line.velocity.iter().any(|value| !value.is_finite()) {
                 return Err(nonfinite("coalesced harmonic field"));
             }
-            combined.push(HarmonicFieldLine {
-                frequency_hz: line.frequency_hz,
-                pressure_pa,
-                particle_velocity_m_s,
-            });
         }
+        poll(&mut cancelled)?;
         Ok(Self { lines: combined })
     }
 
@@ -159,78 +189,142 @@ impl<const D: usize> PreparedHarmonicField<D> {
         self.lines.len()
     }
 
-    /// Integrate pressure and energy flux over a finite observer-time window.
+    /// Integrate actual real pressure and energy flux on the source clock.
     ///
-    /// Both sum- and difference-frequency contributions are retained, including
-    /// for a window shorter than one period. Severe cancellation between close
-    /// distinct frequencies is still floating-point limited; a negative computed
-    /// pressure square refuses rather than being silently clamped to zero.
+    /// Both sum- and difference-frequency contributions survive. Grouped field
+    /// components and the Hz-to-radian conversion remain extended precision
+    /// through the contractions. This is not a relative certificate at a null.
     pub fn observe_window(
         &self,
         window: HarmonicWindow,
     ) -> Result<WindowedAcousticField<D>, AeroacError> {
-        let mut pressure_mean = Dd::from_f64(0.0);
-        let mut pressure_square = Dd::from_f64(0.0);
-        let mut velocity_mean = [Dd::from_f64(0.0); D];
-        let mut intensity = [Dd::from_f64(0.0); D];
-        for (i, a) in self.lines.iter().enumerate() {
-            let omega_a = core::f64::consts::TAU * a.frequency_hz;
-            let phase = window.mean_phase(omega_a).map_err(window_error)?;
-            pressure_mean = pressure_mean + Dd::from_f64((a.pressure_pa * phase).re);
-            for (sum, value) in velocity_mean.iter_mut().zip(a.particle_velocity_m_s) {
-                *sum = *sum + Dd::from_f64((value * phase).re);
-            }
-            for (j, b) in self.lines[..=i].iter().enumerate() {
+        self.observe_window_cancellable(window, || false)
+    }
+
+    /// Allocation-free observation with frequency-pair cancellation polls.
+    pub fn observe_window_cancellable(
+        &self,
+        window: HarmonicWindow,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<WindowedAcousticField<D>, AeroacError> {
+        let mut sums = FieldMoments::new();
+        self.accumulate(
+            window,
+            FactorKind::Deterministic,
+            true,
+            false,
+            &mut sums,
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        let value = sums.finish(window)?;
+        Ok(WindowedAcousticField {
+            window,
+            mean_pressure_pa: value.mean_pressure_pa,
+            mean_square_pressure_pa2: value.mean_square_pressure_pa2,
+            mean_particle_velocity_m_s: value.mean_particle_velocity_m_s,
+            mean_intensity_w_m2: value.mean_intensity_w_m2,
+        })
+    }
+
+    /// Also retain the full uncentered real velocity second-moment tensor.
+    pub fn observe_window_moments(
+        &self,
+        window: HarmonicWindow,
+    ) -> Result<WindowedAcousticEnsemble<D>, AeroacError> {
+        self.observe_window_moments_cancellable(window, || false)
+    }
+
+    /// Full deterministic moments with atomic cancellation and no allocation.
+    pub fn observe_window_moments_cancellable(
+        &self,
+        window: HarmonicWindow,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<WindowedAcousticEnsemble<D>, AeroacError> {
+        let mut sums = FieldMoments::new();
+        self.accumulate(
+            window,
+            FactorKind::Deterministic,
+            true,
+            true,
+            &mut sums,
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        sums.finish(window)
+    }
+
+    fn accumulate(
+        &self,
+        window: HarmonicWindow,
+        kind: FactorKind,
+        include_mean: bool,
+        full_velocity: bool,
+        sums: &mut FieldMoments<D>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AeroacError> {
+        poll(cancelled)?;
+        if include_mean {
+            for line in &self.lines {
+                poll(cancelled)?;
+                // A unit DC field integrates each retained component without
+                // rounding a tiny mean-phase decrement to C64 first.
                 let kernel = window
-                    .product_kernel(omega_a, core::f64::consts::TAU * b.frequency_hz)
+                    .product_kernel_hz(line.frequency_hz, 0.0)
                     .map_err(window_error)?;
-                let pp = kernel
-                    .mean_real_product_dd(a.pressure_pa, b.pressure_pa)
-                    .map_err(window_error)?;
-                pressure_square = pressure_square + pp;
-                if i != j {
-                    pressure_square = pressure_square + pp;
-                }
-                for (axis, sum) in intensity.iter_mut().enumerate() {
-                    let pu = kernel
-                        .mean_real_product_dd(a.pressure_pa, b.particle_velocity_m_s[axis])
+                let unit = [Dd::ONE, Dd::ZERO];
+                sums.pressure_mean = sums.pressure_mean
+                    + kernel
+                        .mean_real_product_parts_dd(line.pressure.parts(), unit)
                         .map_err(window_error)?;
-                    *sum = *sum + pu;
-                    if i != j {
-                        // Swap amplitudes AND their frequencies: this symmetric
-                        // real product uses u_a as its first argument.
-                        let up = kernel
-                            .mean_real_product_dd(a.particle_velocity_m_s[axis], b.pressure_pa)
+                for (sum, value) in sums.velocity_mean.iter_mut().zip(line.velocity) {
+                    *sum = *sum
+                        + kernel
+                            .mean_real_product_parts_dd(value.parts(), unit)
                             .map_err(window_error)?;
-                        *sum = *sum + up;
+                }
+            }
+        }
+        for (i, a) in self.lines.iter().enumerate() {
+            for (j, b) in self.lines[..=i].iter().enumerate() {
+                poll(cancelled)?;
+                let kernel = match kind {
+                    FactorKind::Deterministic => MomentKernel::Deterministic(
+                        window
+                            .product_kernel_hz(a.frequency_hz, b.frequency_hz)
+                            .map_err(window_error)?,
+                    ),
+                    FactorKind::Proper => MomentKernel::Proper(
+                        window
+                            .proper_product_kernel_hz(a.frequency_hz, b.frequency_hz)
+                            .map_err(window_error)?,
+                    ),
+                };
+                let pp = kernel.product(a.pressure, b.pressure)?;
+                sums.pressure_square = sums.pressure_square + pp;
+                if i != j {
+                    sums.pressure_square = sums.pressure_square + pp;
+                }
+                for (axis, sum) in sums.intensity.iter_mut().enumerate() {
+                    *sum = *sum + kernel.product(a.pressure, b.velocity[axis])?;
+                    if i != j {
+                        *sum = *sum + kernel.product(a.velocity[axis], b.pressure)?;
+                    }
+                }
+                if full_velocity {
+                    for (row, values) in sums.velocity.iter_mut().enumerate() {
+                        for (column, sum) in values.iter_mut().enumerate().skip(row) {
+                            *sum = *sum + kernel.product(a.velocity[row], b.velocity[column])?;
+                            if i != j {
+                                *sum =
+                                    *sum + kernel.product(a.velocity[column], b.velocity[row])?;
+                            }
+                        }
                     }
                 }
             }
         }
-        let mean_pressure_pa = pressure_mean.to_f64();
-        let mean_square_pressure_pa2 = pressure_square.to_f64();
-        let mean_particle_velocity_m_s = velocity_mean.map(Dd::to_f64);
-        let mean_intensity_w_m2 = intensity.map(Dd::to_f64);
-        if [mean_pressure_pa, mean_square_pressure_pa2]
-            .iter()
-            .chain(&mean_particle_velocity_m_s)
-            .chain(&mean_intensity_w_m2)
-            .any(|v| !v.is_finite())
-        {
-            return Err(nonfinite("finite-window acoustic field"));
-        }
-        if mean_square_pressure_pa2 < 0.0 {
-            return Err(invalid(
-                "finite-window pressure square lost numerical positivity",
-            ));
-        }
-        Ok(WindowedAcousticField {
-            window,
-            mean_pressure_pa,
-            mean_square_pressure_pa2,
-            mean_particle_velocity_m_s,
-            mean_intensity_w_m2,
-        })
+        poll(cancelled)
     }
 }
 
@@ -295,28 +389,36 @@ impl<const D: usize> WindowedAcousticStatistics<D> {
 /// squaring; merely close frequencies remain distinct. A deterministic mean
 /// field can be observed with [`PreparedHarmonicField`]: its mean-square and
 /// intensity add to these zero-mean fluctuation contributions without cross
-/// terms. Nonzero pseudocovariance requires a different model and is not implied.
+/// terms. Nonzero pseudocovariance is supported separately by explicitly real
+/// factors in [`PreparedHarmonicEnsemble`]; it is never inferred from these modes.
 #[derive(Clone, Debug)]
 pub struct PreparedProperHarmonicField<const D: usize> {
     modes: Vec<PreparedHarmonicField<D>>,
 }
 
 impl<const D: usize> PreparedProperHarmonicField<D> {
-    /// Admit supplied factors and their total preparation/observation work.
-    ///
-    /// Preparation has the same bounded synchronous behavior as the deterministic
-    /// owner. Empty factors are valid but count against `max_modes`; no factors
-    /// represent silence. Shape/range failures return no partially prepared bank.
+    /// Admit factors and total work. Empty factors count against max_modes.
     pub fn new(
         modes: &[&[HarmonicFieldLine<D>]],
         budget: ProperHarmonicObservationBudget,
     ) -> Result<Self, AeroacError> {
+        Self::new_cancellable(modes, budget, || false)
+    }
+
+    /// Cancellable preparation with no partially prepared factor bank.
+    pub fn new_cancellable(
+        modes: &[&[HarmonicFieldLine<D>]],
+        budget: ProperHarmonicObservationBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        poll(&mut cancelled)?;
         if modes.len() > budget.max_modes {
             return Err(invalid("proper harmonic field exceeds the mode budget"));
         }
         let mut lines = 0_usize;
         let mut pairs = 0_usize;
         for mode in modes {
+            poll(&mut cancelled)?;
             lines = lines
                 .checked_add(mode.len())
                 .ok_or_else(|| invalid("proper harmonic line count overflows"))?;
@@ -336,14 +438,16 @@ impl<const D: usize> PreparedProperHarmonicField<D> {
             .try_reserve_exact(modes.len())
             .map_err(|_| invalid("proper harmonic mode allocation exceeds available memory"))?;
         for mode in modes {
-            prepared.push(PreparedHarmonicField::new(
+            prepared.push(PreparedHarmonicField::new_cancellable(
                 mode,
                 HarmonicObservationBudget {
                     max_lines: budget.max_total_lines,
                     max_line_pairs: budget.max_line_pairs,
                 },
+                &mut cancelled,
             )?);
         }
+        poll(&mut cancelled)?;
         Ok(Self { modes: prepared })
     }
 
@@ -353,13 +457,7 @@ impl<const D: usize> PreparedProperHarmonicField<D> {
         self.modes.len()
     }
 
-    /// Observe the declared ensemble over a finite receiver-time interval.
-    ///
-    /// Work is O(sum_r M_r²) for M_r distinct frequencies per factor and fixed
-    /// spatial dimension, without allocation. One temporal kernel per pair is
-    /// reused across pressure, velocity covariance and intensity. Double-double
-    /// contractions survive until the entire bank is accumulated. Numerical
-    /// negativity refuses; relative accuracy at an arbitrary null is not assured.
+    /// Allocate nothing; reuse each temporal kernel across all field moments.
     pub fn observe_window(
         &self,
         window: HarmonicWindow,
@@ -367,117 +465,36 @@ impl<const D: usize> PreparedProperHarmonicField<D> {
         self.observe_window_cancellable(window, || false)
     }
 
-    /// Observe with bounded cancellation polls and no partial publication.
-    ///
-    /// The callback is polled before work, for each factor and frequency pair,
-    /// and before publication. Preparation is separately bounded and synchronous.
-    /// The immutable prepared bank remains reusable after a cancelled observation.
+    /// Bounded cancellation polls without partial publication or owner mutation.
     pub fn observe_window_cancellable(
         &self,
         window: HarmonicWindow,
-        mut is_cancelled: impl FnMut() -> bool,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<WindowedAcousticStatistics<D>, AeroacError> {
-        let mut pressure_square = Dd::ZERO;
-        let mut velocity = [[Dd::ZERO; D]; D];
-        let mut intensity = [Dd::ZERO; D];
-        let mut poll = || {
-            if is_cancelled() {
-                Err(AeroacError::Cancelled {
-                    what: "proper harmonic observation",
-                })
-            } else {
-                Ok(())
-            }
-        };
-        poll()?;
+        let mut sums = FieldMoments::new();
+        poll(&mut cancelled)?;
         for mode in &self.modes {
-            poll()?;
-            for (i, a) in mode.lines.iter().enumerate() {
-                for (j, b) in mode.lines[..=i].iter().enumerate() {
-                    poll()?;
-                    // The shared Hz path retains the frequency difference and
-                    // radian conversion together in extended precision; two
-                    // separately rounded carriers can lose the actual beat.
-                    let kernel = window
-                        .proper_product_kernel_hz(a.frequency_hz, b.frequency_hz)
-                        .map_err(window_error)?;
-                    let pp = kernel
-                        .mean_real_product_dd(a.pressure_pa, b.pressure_pa)
-                        .map_err(window_error)?;
-                    pressure_square = pressure_square + pp;
-                    if i != j {
-                        pressure_square = pressure_square + pp;
-                    }
-                    for (axis, sum) in intensity.iter_mut().enumerate() {
-                        *sum = *sum
-                            + kernel
-                                .mean_real_product_dd(a.pressure_pa, b.particle_velocity_m_s[axis])
-                                .map_err(window_error)?;
-                        if i != j {
-                            *sum = *sum
-                                + kernel
-                                    .mean_real_product_dd(
-                                        a.particle_velocity_m_s[axis],
-                                        b.pressure_pa,
-                                    )
-                                    .map_err(window_error)?;
-                        }
-                    }
-                    for (row, values) in velocity.iter_mut().enumerate() {
-                        for (column, sum) in values.iter_mut().enumerate().skip(row) {
-                            *sum = *sum
-                                + kernel
-                                    .mean_real_product_dd(
-                                        a.particle_velocity_m_s[row],
-                                        b.particle_velocity_m_s[column],
-                                    )
-                                    .map_err(window_error)?;
-                            if i != j {
-                                *sum = *sum
-                                    + kernel
-                                        .mean_real_product_dd(
-                                            a.particle_velocity_m_s[column],
-                                            b.particle_velocity_m_s[row],
-                                        )
-                                        .map_err(window_error)?;
-                            }
-                        }
-                    }
-                }
-            }
+            mode.accumulate(
+                window,
+                FactorKind::Proper,
+                false,
+                true,
+                &mut sums,
+                &mut cancelled,
+            )?;
         }
-        poll()?;
-        let mean_square_pressure_pa2 = pressure_square.to_f64();
-        let mean_intensity_w_m2 = intensity.map(Dd::to_f64);
-        let velocity_covariance_m2_s2: [[f64; D]; D] = core::array::from_fn(|row| {
-            core::array::from_fn(|column| velocity[row.min(column)][row.max(column)].to_f64())
-        });
-        if !mean_square_pressure_pa2.is_finite()
-            || mean_intensity_w_m2.iter().any(|value| !value.is_finite())
-            || velocity_covariance_m2_s2
-                .iter()
-                .flatten()
-                .any(|value| !value.is_finite())
-        {
-            return Err(nonfinite("finite-window proper acoustic statistics"));
-        }
-        if mean_square_pressure_pa2 < 0.0
-            || (0..D).any(|axis| velocity_covariance_m2_s2[axis][axis] < 0.0)
-        {
-            return Err(invalid(
-                "proper acoustic variance lost numerical positivity",
-            ));
-        }
+        poll(&mut cancelled)?;
+        let value = sums.finish(window)?;
         Ok(WindowedAcousticStatistics {
             window,
-            mean_square_pressure_pa2,
-            velocity_covariance_m2_s2,
-            mean_intensity_w_m2,
+            mean_square_pressure_pa2: value.mean_square_pressure_pa2,
+            velocity_covariance_m2_s2: value.velocity_second_moment_m2_s2,
+            mean_intensity_w_m2: value.mean_intensity_w_m2,
         })
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 struct ComplexSum {
     re: Dd,
     im: Dd,
@@ -489,8 +506,105 @@ impl ComplexSum {
         self.im = self.im + Dd::from_f64(value.im);
     }
 
-    fn value(self) -> C64 {
-        C64::new(self.re.to_f64(), self.im.to_f64())
+    fn parts(self) -> [Dd; 2] {
+        [self.re, self.im]
+    }
+
+    fn is_finite(self) -> bool {
+        [self.re.hi, self.re.lo, self.im.hi, self.im.lo]
+            .iter()
+            .all(|x| x.is_finite())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparedLine<const D: usize> {
+    frequency_hz: f64,
+    pressure: ComplexSum,
+    velocity: [ComplexSum; D],
+}
+
+#[derive(Clone, Copy)]
+enum FactorKind {
+    Deterministic,
+    Proper,
+}
+
+#[derive(Clone, Copy)]
+enum MomentKernel {
+    Deterministic(HarmonicProduct),
+    Proper(ProperHarmonicProduct),
+}
+
+impl MomentKernel {
+    fn product(self, a: ComplexSum, b: ComplexSum) -> Result<Dd, AeroacError> {
+        match self {
+            Self::Deterministic(kernel) => kernel.mean_real_product_parts_dd(a.parts(), b.parts()),
+            Self::Proper(kernel) => kernel.mean_real_product_parts_dd(a.parts(), b.parts()),
+        }
+        .map_err(window_error)
+    }
+}
+
+struct FieldMoments<const D: usize> {
+    pressure_mean: Dd,
+    velocity_mean: [Dd; D],
+    pressure_square: Dd,
+    velocity: [[Dd; D]; D],
+    intensity: [Dd; D],
+}
+
+impl<const D: usize> FieldMoments<D> {
+    fn new() -> Self {
+        Self {
+            pressure_mean: Dd::ZERO,
+            velocity_mean: [Dd::ZERO; D],
+            pressure_square: Dd::ZERO,
+            velocity: [[Dd::ZERO; D]; D],
+            intensity: [Dd::ZERO; D],
+        }
+    }
+
+    fn finish(self, window: HarmonicWindow) -> Result<WindowedAcousticEnsemble<D>, AeroacError> {
+        let value = WindowedAcousticEnsemble {
+            window,
+            mean_pressure_pa: self.pressure_mean.to_f64(),
+            mean_particle_velocity_m_s: self.velocity_mean.map(Dd::to_f64),
+            mean_square_pressure_pa2: self.pressure_square.to_f64(),
+            velocity_second_moment_m2_s2: core::array::from_fn(|row| {
+                core::array::from_fn(|column| {
+                    self.velocity[row.min(column)][row.max(column)].to_f64()
+                })
+            }),
+            mean_intensity_w_m2: self.intensity.map(Dd::to_f64),
+        };
+        if [value.mean_pressure_pa, value.mean_square_pressure_pa2]
+            .iter()
+            .chain(&value.mean_particle_velocity_m_s)
+            .chain(&value.mean_intensity_w_m2)
+            .chain(value.velocity_second_moment_m2_s2.iter().flatten())
+            .any(|x| !x.is_finite())
+        {
+            return Err(nonfinite("finite-window acoustic field moments"));
+        }
+        if value.mean_square_pressure_pa2 < 0.0
+            || (0..D).any(|axis| value.velocity_second_moment_m2_s2[axis][axis] < 0.0)
+        {
+            return Err(invalid(
+                "finite-window acoustic self moment lost numerical positivity",
+            ));
+        }
+        Ok(value)
+    }
+}
+
+fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AeroacError> {
+    if cancelled() {
+        Err(AeroacError::Cancelled {
+            what: "harmonic acoustic observation",
+        })
+    } else {
+        Ok(())
     }
 }
 
