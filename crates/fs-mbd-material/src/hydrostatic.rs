@@ -18,6 +18,8 @@
 //! `FiniteHydrostaticTank` instead solves the waterline of a conserved finite
 //! liquid inventory and supplies its gravitational potential to the same
 //! mechanical owner. It remains a quasistatic-pressure model without waves.
+//! `FiniteLayeredHydrostaticTank` also conserves each immiscible liquid's
+//! inventory and solves its moving interface through that same volume owner.
 //! A gas snapshot is admissible only
 //! as a caller-chosen local constant-density approximation, not its full EOS.
 //!
@@ -30,6 +32,8 @@ mod layered;
 mod linear_density;
 mod step;
 mod finite_tank;
+mod finite_layered;
+pub use finite_layered::{FiniteHydrostaticLayer, FiniteLayeredHydrostaticTank, FiniteTankInterface};
 pub use finite_tank::{
     FiniteHydrostaticTank, FiniteTankControls, FiniteTankDensityChange, FiniteTankFill,
     HydrostaticTankGeometry,
@@ -94,7 +98,8 @@ impl From<GaError> for HydrostaticError { fn from(e: GaError) -> Self { Self::Pr
 /// changes the same displacement geometry, fluid mass, force and pressure
 /// potential consumed by ordinary rigid motion. A load excludes body weight;
 /// its pressure-potential pose derivative must agree with its wrench.
-/// Reservoir sources and interfaces stay frozen during an accounting window.
+/// Reservoir sources and inventories stay frozen during an accounting window;
+/// finite-tank interfaces follow the actual displacement geometry.
 /// Cancellation remains generic, preserving the native per-cell callback path.
 pub trait HydrostaticReservoir {
     /// Gravity supplied exactly once to the native rigid-body integrator.

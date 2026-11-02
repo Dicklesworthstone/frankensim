@@ -881,6 +881,35 @@ late cancellation returns neither a new tank nor a partial audit. Focused
 regressions exercise analytic energy/waterline changes, continued native body
 motion, the dry-body datum, same-density exactness and atomic refusal.
 
+### Conserved finite immiscible layers
+
+`FiniteLayeredHydrostaticTank` retains one checked source snapshot and one
+positive volume per homogeneous immiscible liquid, supplied bottom-to-top.
+Densities cannot increase upward. The original finite-tank solver finds every
+interface from `A*h_i - V_sub(h_i) = C_i`, where `C_i` is the cumulative liquid
+volume below that interface. The individual inventories and source-derived
+masses stay fixed as the body moves; no prescribed interface hides an infinite
+fluid reservoir. Each cumulative residual has the original absolute volume
+gate; an individual layer residual is the difference of adjacent residuals.
+
+Nonnegative density jumps combine the original displaced volumes, first moments
+and finite-bath potentials. This yields density-weighted buoyancy and torque
+whose pose derivatives match the actual liquid stack's gravitational-storage
+change from the same empty-tank inventories. It avoids subtracting nearly equal
+thin-layer cut moments. The existing native endpoint-load Verlet step consumes
+that potential and recomputes moving interfaces at both endpoints. Load and
+step evaluation allocate nothing after construction; uniform-density stacks
+reuse the exact original total-inventory load. The explicit interface query
+returns at most 32 geometry records, with original volume defects and work counts.
+
+Source refusal, unstable ordering, lost inventory, unresolved interface order,
+overflow, geometry failure and late cancellation publish no proposed result.
+The same fixed-tank and envelope restrictions apply. Immiscibility and source
+applicability remain caller obligations; no fluid inertia, mixing, entrainment,
+capillarity, phase change or compressible EOS is inferred. Focused regressions
+check independent two-liquid mass/energy integrals, force and torque gradients,
+native interfacial heave, uniform identity and source/rollback behavior.
+
 ## Buoyancy through gas and layered liquid reservoirs
 
 `hydrostatic::LayeredHydrostaticMedium` accepts an optional upper
