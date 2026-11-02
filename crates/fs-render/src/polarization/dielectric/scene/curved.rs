@@ -43,6 +43,7 @@ use crate::gradient_index::{
 use crate::instances::InstanceScene;
 use crate::instances::proximity::{BoundaryGeometry, ProximityError};
 use crate::polarization::Stokes;
+use crate::spectral::SpectralReflectance;
 
 /// Native geometry walks retaining the original launch-angle derivatives.
 pub mod bundle;
@@ -214,6 +215,7 @@ pub struct CurvedPolarizedScene<'a> {
     media: &'a [SceneMedium<'a>],
     conductors: &'a [ConductorOptics],
     coatings: &'a [CoherentDielectricCoating],
+    reflectances: &'a [SpectralReflectance],
     boundaries: BoundaryGeometry<'a>,
 }
 
@@ -260,12 +262,31 @@ impl<'a> CurvedPolarizedScene<'a> {
         bindings: Vec<SurfaceBinding>,
         max_build_work: u64,
     ) -> Result<Self, CurvedSceneError> {
+        Self::try_new_with_materials(
+            cx, geometry, media, conductors, coatings, &[], bindings, max_build_work,
+        )
+    }
+
+    /// Borrow immutable optical and diffuse spectra once while retaining the
+    /// original native geometry and local-medium propagation authorities.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_materials(
+        cx: &Cx<'_>,
+        geometry: &'a InstanceScene,
+        media: &'a [SceneMedium<'a>],
+        conductors: &'a [ConductorOptics],
+        coatings: &'a [CoherentDielectricCoating],
+        reflectances: &'a [SpectralReflectance],
+        bindings: Vec<SurfaceBinding>,
+        max_build_work: u64,
+    ) -> Result<Self, CurvedSceneError> {
         cx.checkpoint()?;
         let bindings = admit_bindings(
             geometry,
             media.len(),
             conductors.len(),
             coatings.len(),
+            reflectances.len(),
             bindings,
         )?;
         if media.iter().any(|medium| {
@@ -282,6 +303,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             media,
             conductors,
             coatings,
+            reflectances,
             bindings,
             boundaries,
         })
@@ -359,8 +381,9 @@ impl<'a> CurvedPolarizedScene<'a> {
     }
 
     /// Trace through the native clearance/event owner. The sampler is called
-    /// only after an admitted dielectric, rough or brushed conductor event and
-    /// medium check. Rough/brushed metals use two samples; smooth metals use none.
+    /// only after an admitted boundary or nonblack diffuse event and medium
+    /// check. Rough/brushed metals and diffuse surfaces use two samples;
+    /// smooth metals and exact-black diffuse surfaces use none.
     /// Boundary departure is physical propagation, not a discarded ray offset.
     pub fn trace_with_samples(
         &self,
@@ -634,6 +657,28 @@ impl<'a> CurvedPolarizedScene<'a> {
                     result.termination = PathTermination::Opaque;
                     break;
                 }
+                Interaction::DepolarizingDiffuse { medium, reflectance } => {
+                    if result.medium != medium {
+                        return Err(SceneError::MediumMismatch {
+                            object_id: instance.object_id(),
+                            expected: medium,
+                            actual: result.medium,
+                        }.into());
+                    }
+                    let rho = self.reflectances[reflectance]
+                        .at(result.beam.wavelength_nm())
+                        .map_err(|_| BeamError::Dielectric(
+                            crate::dielectric::DielectricError::InvalidWavelength,
+                        ))?;
+                    if rho == 0.0 {
+                        result.termination = PathTermination::Opaque;
+                        break;
+                    }
+                    let draw = samples(event);
+                    result.beam = result.beam.sample_depolarizing_diffuse(
+                        witness.normal, rho, [draw[0], draw[1]],
+                    )?.beam;
+                }
                 Interaction::SmoothConductor { optics, medium } => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
@@ -809,6 +854,9 @@ fn checked_add(a: f64, b: f64) -> Result<f64, CurvedSceneError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod diffuse_tests;
 
 #[cfg(test)]
 mod rough_conductor_tests {

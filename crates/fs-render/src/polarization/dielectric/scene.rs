@@ -21,6 +21,7 @@ use super::transport::{BeamError, BeamMedium, BeamSample, PolarizedBeam};
 use crate::conductor::{CoherentDielectricCoating, ConductorOptics, ConductorSurface};
 use crate::dielectric::{DielectricEvent, DielectricGlass, DielectricSurface};
 use crate::instances::{InstanceError, InstanceHit, InstanceScene};
+use crate::spectral::SpectralReflectance;
 
 /// Admission bound on scene bindings and media; not a performance claim.
 pub const MAX_POLARIZED_SCENE_ITEMS: usize = 65_536;
@@ -60,6 +61,10 @@ pub enum Interaction {
     /// normal and radial roughness mark. Forward power uses the adjoint
     /// shading-normal law; no resolved groove geometry or heat law is inferred.
     BrushedConductor { optics: usize, medium: usize, detail: crate::surface_detail::SurfaceDetail },
+    /// Two-sided ideal depolarizing Lambertian reflection in the declared
+    /// surrounding medium. `reflectance` indexes the original borrowed
+    /// spectral reflectance table; no emission or subsurface law is inferred.
+    DepolarizingDiffuse { medium: usize, reflectance: usize },
     /// A two-sided ideal receiver. Positive Q uses the world reference axis
     /// projected transverse to each arriving ray. A parallel axis is refused.
     /// No lens/pupil transformation or grazing-angle polarizer model is inferred.
@@ -200,6 +205,7 @@ pub struct PolarizedScene<'a> {
     media: &'a [DielectricGlass],
     conductors: &'a [ConductorOptics],
     coatings: &'a [CoherentDielectricCoating],
+    reflectances: &'a [SpectralReflectance],
     bindings: Vec<SurfaceBinding>,
 }
 impl<'a> PolarizedScene<'a> {
@@ -231,10 +237,23 @@ impl<'a> PolarizedScene<'a> {
         coatings: &'a [CoherentDielectricCoating],
         bindings: Vec<SurfaceBinding>,
     ) -> Result<Self, SceneError> {
+        Self::try_new_with_materials(geometry, media, conductors, coatings, &[], bindings)
+    }
+
+    /// Borrow original optical and diffuse tables once. Surface records retain
+    /// indices, keeping spectral tables out of every copied interaction.
+    pub fn try_new_with_materials(
+        geometry: &'a InstanceScene,
+        media: &'a [DielectricGlass],
+        conductors: &'a [ConductorOptics],
+        coatings: &'a [CoherentDielectricCoating],
+        reflectances: &'a [SpectralReflectance],
+        bindings: Vec<SurfaceBinding>,
+    ) -> Result<Self, SceneError> {
         let bindings = admit_bindings(
-            geometry, media.len(), conductors.len(), coatings.len(), bindings,
+            geometry, media.len(), conductors.len(), coatings.len(), reflectances.len(), bindings,
         )?;
-        Ok(Self { geometry, media, conductors, coatings, bindings })
+        Ok(Self { geometry, media, conductors, coatings, reflectances, bindings })
     }
 
     /// Deterministic counter-based sampling keyed by `(seed, path_id, event)`.
@@ -369,6 +388,28 @@ impl<'a> PolarizedScene<'a> {
                     result.termination = PathTermination::Opaque;
                     return finish(cx, result);
                 }
+                Interaction::DepolarizingDiffuse { medium, reflectance } => {
+                    if result.medium != medium {
+                        return Err(SceneError::MediumMismatch {
+                            object_id: hit.object_id, expected: medium, actual: result.medium,
+                        });
+                    }
+                    let rho = self.reflectances[reflectance]
+                        .at(result.beam.wavelength_nm())
+                        .map_err(|_| BeamError::Dielectric(
+                            crate::dielectric::DielectricError::InvalidWavelength,
+                        ))?;
+                    if rho == 0.0 {
+                        result.termination = PathTermination::Opaque;
+                        return finish(cx, result);
+                    }
+                    let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
+                    let draw = samples(event);
+                    result.beam = result.beam.sample_depolarizing_diffuse(
+                        normal, rho, [draw[0], draw[1]],
+                    )?.beam;
+                    offset = settings.query_offset_m;
+                }
                 Interaction::SmoothConductor { optics, medium } => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
@@ -450,12 +491,14 @@ fn admit_bindings(
     media_count: usize,
     conductor_count: usize,
     coating_count: usize,
+    reflectance_count: usize,
     mut bindings: Vec<SurfaceBinding>,
 ) -> Result<Vec<SurfaceBinding>, SceneError> {
     if media_count == 0
         || media_count > MAX_POLARIZED_SCENE_ITEMS
         || conductor_count > MAX_POLARIZED_SCENE_ITEMS
         || coating_count > MAX_POLARIZED_SCENE_ITEMS
+        || reflectance_count > MAX_POLARIZED_SCENE_ITEMS
         || bindings.len() != geometry.instances().len()
         || bindings.len() > MAX_POLARIZED_SCENE_ITEMS
     {
@@ -480,6 +523,11 @@ fn admit_bindings(
                 if ![a.x, a.y, a.z].iter().all(|x| x.is_finite())
                     || a.x.abs().max(a.y.abs()).max(a.z.abs()) == 0.0
                 {
+                    return Err(SceneError::InvalidBindings);
+                }
+            }
+            Interaction::DepolarizingDiffuse { medium, reflectance } => {
+                if medium >= media_count || reflectance >= reflectance_count {
                     return Err(SceneError::InvalidBindings);
                 }
             }

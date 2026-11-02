@@ -1,7 +1,7 @@
 //! Scalar camera radiance through native reciprocal refractive paths.
 //!
 //! The camera launches a unit unpolarized reciprocal beam. Each native
-//! boundary retains its full Fresnel Mueller response divided by its actual
+//! boundary retains its complete Mueller response divided by its actual
 //! branch/directional proposal; bulk propagation retains Beer absorption and frame
 //! transport. For reciprocal paths, the reverse Mueller matrix is a transpose
 //! up to polarization-convention sign matrices D. With unpolarized emission
@@ -37,8 +37,10 @@
 //! no volume emission is assumed. Numerical distance/event limits are errors,
 //! never background. Native zero power cannot distinguish exact extinction from
 //! floating-point underflow and is unresolved before a positive finite source.
-//! Diffuse surface scattering, point-light connections, moving
-//! fields, gain and nonreciprocal media remain outside this consumer.
+//! Explicit depolarizing diffuse surfaces use their native cosine proposal and
+//! spectral reflectance while preserving the same curved path and medium.
+//! Point-light connections, emission at reflecting surfaces, moving fields,
+//! gain and nonreciprocal media remain outside this consumer.
 //! With `volumes`, `participating` adds the original reciprocal molecular
 //! scattering walk and retains this same endpoint radiometry.
 
@@ -314,6 +316,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
                 | Interaction::SmoothConductor { .. }
                 | Interaction::RoughConductor { .. }
                 | Interaction::BrushedConductor { .. }
+                | Interaction::DepolarizingDiffuse { .. }
                 | Interaction::Opaque => true,
                 Interaction::Detector { .. } => false,
             };
@@ -373,8 +376,9 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
 
     /// Caller variates have the native [microfacet_u, microfacet_v, branch]
     /// convention. Smooth dielectrics use only the third; rough dielectrics
-    /// use all three and rough/brushed conductors use the first two. The
-    /// proposals are not resampled or conditioned on reaching an emitter.
+    /// use all three; rough/brushed conductors and diffuse surfaces use the
+    /// first two. Exact-black diffuse surfaces require no draw. Proposals are
+    /// not resampled or conditioned on reaching an emitter.
     #[allow(clippy::too_many_arguments)]
     pub fn sample_ray_with_samples(
         &self,

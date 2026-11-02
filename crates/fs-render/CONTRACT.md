@@ -355,8 +355,8 @@ differentiable lift). Pure Rust throughout.
   refuse. Numerical limits and indistinguishable
   native extinction/underflow are unresolved
   errors. This covers reciprocal isotropic stationary media and intensity-only
-  endpoints, not general polarized adjoints, diffuse/volume emission or
-  point-light connections.
+  endpoints, not general polarized adjoints, emission at reflecting surfaces,
+  volume emission or point-light connections.
   `camera::raster::CurvedCameraRaster` prepares the original physical
   pinhole/thin-lens camera and traces each of four stratified wavelengths along
   its own curved path. Raster, lens, wavelength and boundary streams retain
@@ -379,6 +379,28 @@ differentiable lift). Pure Rust throughout.
   These added native integration regressions remain unexecuted in the
   implementation environment; no multiple-scattering or geometry-detail claim
   is added by admitting the existing bounded normal perturbation.
+
+- `transport::diffuse::DiffuseBeamSample` and
+  `Interaction::DepolarizingDiffuse { medium, reflectance }` add explicit
+  two-sided ideal depolarizing Lambertian reflection to the original straight
+  and curved scene walkers. Both `try_new_with_materials` constructors borrow
+  one immutable `SpectralReflectance` table; bindings retain indices rather
+  than copying spectra into every surface record. Geometric-normal cosine
+  sampling uses deterministic math and `M00=rho/pi`, yielding exactly `rho*I`
+  with zero Q/U/V. Position, wavelength and the exact local surrounding medium
+  remain unchanged. Original departure witnesses, absorption, phase/group
+  optical lengths and cumulative work/surface/distance limits continue across
+  the bounce. Exact black terminates without a random draw; positive-power
+  underflow refuses. The existing scalar camera, raster and molecular-volume
+  wrappers consume this same native walk and its one endpoint phase-index
+  conversion. Emitters remain bound only to original `Opaque` interactions;
+  diffuse reflection does not add emissive reflection, subsurface transport,
+  inferred material polarization, direct-light sampling or MIS. Differentiated
+  ray bundles explicitly refuse the nondelta interaction. Nine regressions
+  cover hemisphere power and moments, pole-safe frames, spectral diffuse
+  forward detectors in both walkers, gray/white/black camera radiance, analytic
+  curved finite-emitter visibility with Beer and group delay, table/medium
+  admission, underflow, cumulative limits and bundle refusal.
 
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original

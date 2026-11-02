@@ -488,7 +488,9 @@ impl CurvedPolarizedScene<'_> {
                     )?;
                     2
                 }
-                Interaction::RoughConductor { .. } | Interaction::BrushedConductor { .. } => {
+                Interaction::RoughConductor { .. }
+                | Interaction::BrushedConductor { .. }
+                | Interaction::DepolarizingDiffuse { .. } => {
                     return Err(CurvedBundleSceneError::UnsupportedInteraction {
                         object_id: instance.object_id(),
                     });
