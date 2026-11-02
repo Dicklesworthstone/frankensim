@@ -102,6 +102,26 @@ impl PreparedModalHarmonic {
         self.forcing_angular_frequency_rad_s
     }
 
+    /// Propose one mode's endpoint for a coupled continuous observer.
+    /// This pure operation uses exactly the motion used by the physical step;
+    /// it does not perform the model's state/energy admission or commit state.
+    ///
+    /// # Errors
+    /// Invalid mode index, nonfinite input, or unrepresentable motion.
+    pub fn advance_mode(
+        &self,
+        mode_index: usize,
+        state: super::super::ModalAcousticState,
+        cosine_force: f64,
+        sine_force: f64,
+    ) -> Result<super::super::ModalAcousticState, ModalAcousticTimeError> {
+        self.modes
+            .get(mode_index)
+            .ok_or_else(|| invalid("harmonic mode index must be admitted"))?
+            .motion
+            .advance(state, cosine_force, sine_force)
+    }
+
     /// Rotate a mode's force coefficients to the next prepared interval.
     /// Advance the caller's force phase only after a successful mechanical
     /// step. A checkpoint retains both mechanical state and force phase.
@@ -186,7 +206,7 @@ impl ModalAcousticTimeModel {
     }
 }
 
-fn require_mechanical_observation(
+pub(super) fn require_mechanical_observation(
     model: &ModalAcousticTimeModel,
 ) -> Result<(), ModalAcousticTimeError> {
     if model.modes.iter().any(|mode| {

@@ -6,6 +6,17 @@ use fs_math::det;
 
 type Matrix = [[f64; 4]; 4];
 
+pub(super) const NODES: [(f64, f64); 8] = [
+    (0.019855071751231884, 0.05061426814518813),
+    (0.10166676129318664, 0.11119051722668724),
+    (0.2372337950418355, 0.15685332293894366),
+    (0.4082826787521751, 0.181341891689181),
+    (0.5917173212478248, 0.181341891689181),
+    (0.7627662049581645, 0.15685332293894366),
+    (0.8983332387068134, 0.11119051722668724),
+    (0.9801449282487681, 0.05061426814518813),
+];
+
 #[derive(Clone, Debug)]
 pub(super) struct HarmonicIntegrals {
     duration: f64,
@@ -50,16 +61,6 @@ impl HarmonicIntegrals {
         // rule integrates products of these analytic trajectories to below
         // f64 rounding at the declared generator norm. This is not interval
         // certification: the returned allowances cover floating arithmetic.
-        const NODES: [(f64, f64); 8] = [
-            (0.019855071751231884, 0.05061426814518813),
-            (0.10166676129318664, 0.11119051722668724),
-            (0.2372337950418355, 0.15685332293894366),
-            (0.4082826787521751, 0.181341891689181),
-            (0.5917173212478248, 0.181341891689181),
-            (0.7627662049581645, 0.15685332293894366),
-            (0.8983332387068134, 0.11119051722668724),
-            (0.9801449282487681, 0.05061426814518813),
-        ];
         for (node, weight) in NODES {
             let flow = DampedTransition::small(angle * node, drag * node);
             let force = small_force(angle * node, drag * node, phase * node, false);
@@ -178,25 +179,38 @@ impl HarmonicIntegrals {
     }
 
     fn append_heat_row(&mut self, mut row: [f64; 4]) {
-        for i in 0..4 {
-            let old = self.heat_root[i][i];
-            let scale = old.abs().max(row[i].abs());
-            if scale == 0.0 {
-                continue;
-            }
-            let norm = scale * det::sqrt((old / scale).powi(2) + (row[i] / scale).powi(2));
-            let (c, s) = (old / norm, row[i] / norm);
-            self.heat_root[i][i] = norm;
-            for (j, value) in row.iter_mut().enumerate().skip(i + 1) {
-                let old = self.heat_root[i][j];
-                self.heat_root[i][j] = c * old + s * *value;
-                *value = -s * old + c * *value;
-            }
+        append_heat_row(self.heat_root.as_flattened_mut(), &mut row);
+    }
+}
+
+// Shared positive square-root update for fixed single-tone and dynamic
+// multiple-tone forms. Givens rotations never subtract stored energies.
+pub(super) fn append_heat_row(root: &mut [f64], row: &mut [f64]) {
+    let n = row.len();
+    for i in 0..n {
+        let old = root[i * n + i];
+        let Some((norm, c, s)) = heat_rotation(old, row[i]) else {
+            continue;
+        };
+        root[i * n + i] = norm;
+        for (j, value) in row.iter_mut().enumerate().skip(i + 1) {
+            let old = root[i * n + j];
+            root[i * n + j] = c * old + s * *value;
+            *value = -s * old + c * *value;
         }
     }
 }
 
-fn augmented_flow(
+pub(super) fn heat_rotation(old: f64, value: f64) -> Option<(f64, f64, f64)> {
+    let scale = old.abs().max(value.abs());
+    if scale == 0.0 {
+        return None;
+    }
+    let norm = scale * det::sqrt((old / scale).powi(2) + (value / scale).powi(2));
+    Some((norm, old / norm, value / norm))
+}
+
+pub(super) fn augmented_flow(
     flow: DampedTransition,
     force: [f64; 4],
     phase: f64,

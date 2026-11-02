@@ -9,7 +9,9 @@ use fs_math::det;
 
 mod integrals;
 mod runtime;
+mod tones;
 pub use runtime::PreparedModalHarmonic;
+pub use tones::{MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalTones};
 
 /// Cached motion for `q'' + 2*zeta*omega*q' + omega^2*q = F(t)`, where
 /// `F(t) = cosine_force*cos(Omega*t) + sine_force*sin(Omega*t)` and time is
@@ -153,40 +155,23 @@ impl HarmonicForceTransition {
         let flow = self.transition;
         let fc = h * cosine_force;
         let fs = h * sine_force;
-        let restoring = (self.angular_frequency_rad_s * q0) * flow.angle;
         let [qc, qs, vc, vs] = self.force;
         let driven_q = qc * fc + qs * fs;
         let driven_v = vc * fc + vs * fs;
-        let residual = if self.cosine_remainder {
-            fc - restoring
-        } else {
-            -restoring
-        };
-        let q = if flow.position_decrement.abs() < 0.5 {
-            q0 + h * (flow.b * v0 + flow.g * residual + driven_q)
-        } else {
-            let constant = if self.cosine_remainder {
-                flow.g * fc
-            } else {
-                0.0
-            };
-            flow.position_retention * q0 + h * (flow.b * v0 + constant + driven_q)
-        };
-        let velocity_increment = flow.b * residual + driven_v;
-        let v = if flow.velocity_decrement.abs() < 0.5 {
-            v0 + (velocity_increment - flow.velocity_decrement * v0)
-        } else {
-            flow.velocity_retention * v0 + velocity_increment
-        };
-        if ![fc, fs, restoring, q, v].into_iter().all(f64::is_finite) {
+        if ![fc, fs].into_iter().all(f64::is_finite) {
             return Err(invalid(
                 "harmonic scaled inputs and response must be representable",
             ));
         }
-        Ok(ModalAcousticState {
-            displacement_m_sqrt_kg: q,
-            velocity_m_sqrt_kg_per_s: v,
-        })
+        advance_response(
+            state,
+            h,
+            self.angular_frequency_rad_s,
+            flow,
+            self.cosine_remainder.then_some(fc),
+            driven_q,
+            driven_v,
+        )
     }
 
     /// Zero-state response contributed by this harmonic over the interval.
@@ -228,6 +213,45 @@ impl HarmonicForceTransition {
         }
         Ok((cosine, sine))
     }
+}
+
+// One homogeneous update plus an accumulated linear force convolution.
+// This is shared by scalar and multiple-tone motion: homogeneous state must
+// never be counted once per tone, and near-DC equilibrium uses a residual.
+fn advance_response(
+    state: ModalAcousticState,
+    h: f64,
+    omega: f64,
+    flow: DampedTransition,
+    held_impulse: Option<f64>,
+    driven_q: f64,
+    driven_v: f64,
+) -> Result<ModalAcousticState, ModalAcousticTimeError> {
+    let q0 = state.displacement_m_sqrt_kg;
+    let v0 = state.velocity_m_sqrt_kg_per_s;
+    let restoring = (omega * q0) * flow.angle;
+    let residual = held_impulse.map_or(-restoring, |fc| fc - restoring);
+    let q = if flow.position_decrement.abs() < 0.5 {
+        q0 + h * (flow.b * v0 + flow.g * residual + driven_q)
+    } else {
+        let constant = held_impulse.map_or(0.0, |fc| flow.g * fc);
+        flow.position_retention * q0 + h * (flow.b * v0 + constant + driven_q)
+    };
+    let velocity_increment = flow.b * residual + driven_v;
+    let v = if flow.velocity_decrement.abs() < 0.5 {
+        v0 + (velocity_increment - flow.velocity_decrement * v0)
+    } else {
+        flow.velocity_retention * v0 + velocity_increment
+    };
+    if ![q0, v0, restoring, q, v].into_iter().all(f64::is_finite) {
+        return Err(invalid(
+            "harmonic scaled inputs and response must be representable",
+        ));
+    }
+    Ok(ModalAcousticState {
+        displacement_m_sqrt_kg: q,
+        velocity_m_sqrt_kg_per_s: v,
+    })
 }
 
 fn invalid(what: &'static str) -> ModalAcousticTimeError {

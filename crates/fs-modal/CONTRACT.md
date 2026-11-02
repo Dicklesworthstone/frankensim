@@ -253,6 +253,32 @@ multimode subdivision/replay, tiny positive heat beneath a large lossless
 energy background and transactional refusals. Existing ZOH gates and exact
 motion regressions remain shared.
 
+`time::PreparedModalTones` extends the shared physical step to simultaneous
+continuous tones through `ModalAcousticTimeModel::step_tones_into`. Frequency
+ratios need not be integers. Every mode receives a caller-ordered cosine/sine
+row; the full force array is mode-major. One homogeneous state plus the shared
+scalar convolutions supplies motion. Exact duplicate frequencies are coalesced
+with compensated force sums; distinct nearby frequencies retain their beats.
+The power owner reuses the resolved scalar flow and QR rotations. Applying
+the same rotations to velocity and force rows retains their cross integral as
+paired factors: opposing contributions cancel before products, so small beat
+work survives without subtracting positive quadratic forms. Squared velocity
+factors give nonnegative heat, including every cross-frequency term. Neither
+account comes from endpoint energy subtraction or separate single-tone heats.
+
+`ModalToneBudget` bounds input tones (hard maximum 32), owned coefficient and
+preparation-scratch payload, and explicit preparation/step algebraic work
+scores before allocation. These scores are not wall-clock guarantees. Warm
+steps and mode previews allocate nothing and evaluate no transcendentals;
+the existing single-tone fast path remains available. Model binding, nominal
+Nyquist admission, transactional physical gates, externally checkpointed phase
+and separate broadband observation retain the single-tone contract. Power
+allowances remain numerical estimates; extreme cancellation and long repeated
+phase rotations retain finite-arithmetic limits. G1/G3 tests compare independent
+continuous-power integration across DC/inharmonic/critical/free/high-Q cases,
+close destructive beats, exact duplicate cancellation, resonance, multimode
+subdivision/replay, tiny near-DC heat, the active 32nd tone and budget refusals.
+
 `LinearForceTransition::pullback` returns `LinearForcePullback` cotangents for
 initial displacement/velocity and both endpoint forces, with frequency, damping
 and duration fixed. It transposes the same cached flow and force moments;
@@ -628,3 +654,4 @@ independent physical momentum, explicit elastic truncation, instability,
 incomplete nullspaces, factor/border budgets and cancellation. This remains an
 instantaneous fixed-frame update; it does not infer support impulses, finite
 rotations, remeshing or constitutive-history transfer.
+
