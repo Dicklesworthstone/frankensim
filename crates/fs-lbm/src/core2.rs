@@ -2447,14 +2447,22 @@ pub(crate) fn force_corrected_shear_rate(
     force: [f64; 2],
     tau: f64,
 ) -> f64 {
+    shear_rate_from_stress(force_corrected_stress(f, rho, u, force), rho, tau)
+}
+
+/// Physical second-order non-equilibrium stress, including the Guo
+/// half-source correction. Keeping the tensor permits independent bulk and
+/// deviatoric relaxation when a collision model does not use one BGK rate.
+pub(crate) fn force_corrected_stress(
+    f: &[f64; Q],
+    rho: f64,
+    u: [f64; 2],
+    force: [f64; 2],
+) -> [f64; 3] {
     let [sxx, sxy, syy] = nonequilibrium_stress(f, &crate::equilibrium(rho, u[0], u[1]));
-    shear_rate_from_stress(
-        [
-            sxx + u[0] * force[0],
-            sxy + 0.5 * (u[0] * force[1] + u[1] * force[0]),
-            syy + u[1] * force[1],
-        ],
-        rho,
-        tau,
-    )
+    [
+        sxx + u[0] * force[0],
+        sxy + 0.5 * (u[0] * force[1] + u[1] * force[0]),
+        syy + u[1] * force[1],
+    ]
 }

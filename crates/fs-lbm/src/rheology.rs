@@ -11,7 +11,9 @@
 //! represent at this resolution — the ledger says HOW MANY, honestly,
 //! instead of silently going unstable).
 
-use crate::core2::{Cell, Grid, force_corrected_shear_rate};
+use crate::core2::{
+    Cell, CollisionModel2, Grid, force_corrected_shear_rate, force_corrected_stress,
+};
 use crate::{CS2, Q};
 
 /// The τ stability floor (ν > 0 with margin; BGK folklore-free zone
@@ -176,9 +178,9 @@ pub(crate) struct LocalRelaxation {
 }
 
 impl LocalRelaxation {
-    fn from_target(target: f64, numerator: f64) -> Self {
+    fn from_target(target: f64, numerator: f64, fixed_rate: f64) -> Self {
         let tau = target.clamp(TAU_FLOOR, TAU_CAP);
-        let shear_rate = numerator / tau;
+        let shear_rate = combined_strain_rate(numerator / tau, fixed_rate);
         require_nonnegative_finite("applied shear rate", shear_rate);
         Self {
             tau,
@@ -189,29 +191,67 @@ impl LocalRelaxation {
     }
 }
 
+// Preserve the original BGK arithmetic when every second moment has the same
+// relaxation time. The fixed part is the strain from independently relaxed
+// trace moments, orthogonal to the deviatoric part in the Frobenius norm.
+fn combined_strain_rate(variable_rate: f64, fixed_rate: f64) -> f64 {
+    if fixed_rate == 0.0 {
+        variable_rate
+    } else {
+        // The fixed IEEE operation tree avoids platform-libm hypot while
+        // scaling before squaring keeps small/large admitted rates usable.
+        let scale = variable_rate.max(fixed_rate);
+        let a = variable_rate / scale;
+        let b = fixed_rate / scale;
+        scale * a.mul_add(a, b * b).sqrt()
+    }
+}
+
 impl PreparedRheology {
     /// Solve tau = 1/2 + nu(A/tau)/cs², with A=gamma*tau from the
     /// force-corrected population stress. For the admitted laws, gamma*nu
     /// is increasing, giving a unique positive root. The previous tau is
     /// only a warm start; it never determines the returned constitutive rate.
     pub(crate) fn solve(&self, numerator: f64, previous_tau: f64) -> LocalRelaxation {
+        self.solve_with_fixed_strain(numerator, 0.0, previous_tau)
+    }
+
+    /// Independently relaxed trace modes contribute a fixed orthogonal strain
+    /// invariant B, so gamma = sqrt((A/tau)^2 + B^2). Only the deviatoric
+    /// contribution varies with shear tau. Treating B as A/tau would apply
+    /// the shear relaxation rate to the collision's independent bulk mode.
+    fn solve_with_fixed_strain(
+        &self,
+        numerator: f64,
+        fixed_rate: f64,
+        previous_tau: f64,
+    ) -> LocalRelaxation {
         require_nonnegative_finite("non-equilibrium strain numerator", numerator);
+        require_nonnegative_finite("independent strain rate", fixed_rate);
         if let Some(tau) = self.constant_tau {
-            return LocalRelaxation::from_target(tau, numerator);
+            return LocalRelaxation::from_target(tau, numerator, fixed_rate);
         }
         if numerator == 0.0 {
             return LocalRelaxation::from_target(
-                0.5 + self.law.viscosity_and_slope(0.0).0 / CS2,
+                0.5 + self.law.viscosity_and_slope(fixed_rate).0 / CS2,
                 0.0,
+                fixed_rate,
             );
         }
         let target = |tau: f64| {
-            let (nu, slope) = self.law.viscosity_and_slope(numerator / tau);
+            let variable_rate = numerator / tau;
+            let rate = combined_strain_rate(variable_rate, fixed_rate);
+            let (nu, slope) = self.law.viscosity_and_slope(rate);
             // Zero/overflow may result from an extreme power law. Their
             // positive limiting responses still classify a floor/cap, while
             // NaN or a negative apparent viscosity cannot be published.
             assert!(!nu.is_nan() && nu >= 0.0, "invalid apparent viscosity");
-            (0.5 + nu / CS2, 1.0 + slope / (CS2 * tau))
+            let fraction = if fixed_rate == 0.0 {
+                1.0
+            } else {
+                (variable_rate / rate).powi(2)
+            };
+            (0.5 + nu / CS2, 1.0 + slope * fraction / (CS2 * tau))
         };
         let (mut lo, mut hi) = (TAU_FLOOR, TAU_CAP);
         let mut tau = if previous_tau.is_finite() {
@@ -221,24 +261,24 @@ impl PreparedRheology {
         };
         let (mut next, mut derivative) = target(tau);
         if (tau == lo && next <= lo) || (tau == hi && next >= hi) {
-            return LocalRelaxation::from_target(next, numerator);
+            return LocalRelaxation::from_target(next, numerator, fixed_rate);
         }
         let initial_residual = tau - next;
         if initial_residual.abs() <= 1e-12 * tau {
-            return LocalRelaxation::from_target(tau, numerator);
+            return LocalRelaxation::from_target(tau, numerator, fixed_rate);
         }
         // A settled cell needs only the warm-start evaluation above. If it
         // changes, only the endpoint in the root's direction is evaluated.
         if initial_residual < 0.0 {
             let cap_target = if tau == hi { next } else { target(hi).0 };
             if cap_target >= hi {
-                return LocalRelaxation::from_target(cap_target, numerator);
+                return LocalRelaxation::from_target(cap_target, numerator, fixed_rate);
             }
             lo = tau;
         } else {
             let floor_target = if tau == lo { next } else { target(lo).0 };
             if floor_target <= lo {
-                return LocalRelaxation::from_target(floor_target, numerator);
+                return LocalRelaxation::from_target(floor_target, numerator, fixed_rate);
             }
             hi = tau;
         }
@@ -246,7 +286,7 @@ impl PreparedRheology {
         for _ in 0..96 {
             let residual = tau - next;
             if residual.abs() <= 1e-12 * tau {
-                return LocalRelaxation::from_target(tau, numerator);
+                return LocalRelaxation::from_target(tau, numerator, fixed_rate);
             }
             if residual < 0.0 {
                 lo = tau;
@@ -291,6 +331,8 @@ pub struct RheologyStats {
 /// this does not make the time integration implicit. The strain
 /// includes the Guo half-source correction for both body acceleration and
 /// local external force; uniform acceleration is not material shear.
+/// Central-moment collision retains its unit bulk relaxation time: its trace
+/// strain and the shear-tau-dependent deviatoric strain are resolved separately.
 #[must_use]
 pub fn update_tau(grid: &mut Grid, law: Rheology) -> RheologyStats {
     let law = law.prepare();
@@ -306,8 +348,19 @@ pub fn update_tau(grid: &mut Grid, law: Rheology) -> RheologyStats {
         }
         let mm = grid.moments(i);
         let force = std::array::from_fn(|d| grid.g[d].mul_add(mm.rho, grid.fext[i][d]));
-        let numerator = force_corrected_shear_rate(&grid.f[i], mm.rho, mm.u, force, 1.0);
-        let local = law.solve(numerator, grid.tau[i]);
+        let local = if matches!(grid.collision, CollisionModel2::CentralMoment) {
+            let [sxx, sxy, syy] = force_corrected_stress(&grid.f[i], mm.rho, mm.u, force);
+            // Pi_dev = -2 rho cs² tau D_dev and tr(Pi) =
+            // -2 rho cs² tau_bulk tr(D), with tau_bulk=1 in this model.
+            // In 2-D, 2 D:D = 4(D_dev,xx² + D_xy²) + tr(D)².
+            let scale = 3.0 / mm.rho;
+            let numerator = scale * combined_strain_rate((0.5 * (sxx - syy)).abs(), sxy.abs());
+            let dilation = 0.5 * scale * (sxx + syy).abs();
+            law.solve_with_fixed_strain(numerator, dilation, grid.tau[i])
+        } else {
+            let numerator = force_corrected_shear_rate(&grid.f[i], mm.rho, mm.u, force, 1.0);
+            law.solve(numerator, grid.tau[i])
+        };
         grid.tau[i] = local.tau;
         stats.floored += u32::from(local.floored);
         stats.capped += u32::from(local.capped);
@@ -397,7 +450,87 @@ mod tests {
     use super::{
         Rheology, TAU_CAP, TAU_FLOOR, channel_flow, powerlaw_poiseuille_analytic, update_tau,
     };
-    use crate::{CS2, E, Grid, W, equilibrium};
+    use crate::{CS2, E, Grid, W, core2::CollisionModel2, equilibrium};
+
+    /// G0/G3: a mixed volumetric/deviatoric deformation has the same physical
+    /// invariant for BGK and central moments, although their trace relaxation
+    /// times differ. Manufacture each stress tensor from its own collision law
+    /// and independently reconstruct its populations, including the Guo frame.
+    #[test]
+    fn central_moment_rheology_uses_its_independent_bulk_relaxation() {
+        for law in [
+            Rheology::Newtonian { nu: 0.02 },
+            Rheology::Carreau {
+                nu0: 0.2,
+                nu_inf: 0.01,
+                lambda: 1000.0,
+                n: 0.5,
+            },
+            Rheology::PowerLaw { k: 0.5, n: 1.5 },
+        ] {
+            for strain in [
+                [[0.003, 0.0], [0.0, 0.003]],
+                [[0.003, -0.004], [-0.004, -0.001]],
+                [[-0.004, 0.002], [0.002, -0.001]],
+            ] {
+                let rate = (2.0_f64 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+                let expected_tau = 0.5 + law.viscosity(rate) / CS2;
+                assert!(expected_tau > TAU_FLOOR && expected_tau < TAU_CAP);
+                for collision in [CollisionModel2::Bgk, CollisionModel2::CentralMoment] {
+                    let bulk_tau = if collision == CollisionModel2::CentralMoment {
+                        1.0
+                    } else {
+                        expected_tau
+                    };
+                    for rho in [0.4, 2.5] {
+                        for force in [[0.0; 2], [0.003, -0.002]] {
+                            let u = [0.04, -0.03];
+                            let isotropic = 0.5 * (strain[0][0] + strain[1][1]);
+                            let stress: [[f64; 2]; 2] = std::array::from_fn(|a| {
+                                std::array::from_fn(|b| {
+                                    let trace = if a == b { isotropic } else { 0.0 };
+                                    -2.0 * rho
+                                        * CS2
+                                        * (expected_tau * (strain[a][b] - trace) + bulk_tau * trace)
+                                })
+                            });
+                            let mut populations = equilibrium(rho, u[0], u[1]);
+                            for (q, direction) in E.iter().enumerate() {
+                                let e = [f64::from(direction.0), f64::from(direction.1)];
+                                let mut contraction = 0.0;
+                                for a in 0..2 {
+                                    for b in 0..2 {
+                                        let delta = if a == b { CS2 } else { 0.0 };
+                                        contraction += (e[a] * e[b] - delta) * stress[a][b];
+                                    }
+                                }
+                                let eu = e[0] * u[0] + e[1] * u[1];
+                                let source: f64 = (0..2)
+                                    .map(|a| (3.0 * (e[a] - u[a]) + 9.0 * eu * e[a]) * force[a])
+                                    .sum();
+                                populations[q] +=
+                                    W[q] * (contraction / (2.0 * CS2 * CS2) - 0.5 * source);
+                            }
+                            for old_tau in [0.51, 1.0, 2.9] {
+                                let mut grid = Grid::uniform(2, 2, old_tau);
+                                grid.collision = collision;
+                                grid.f.fill(populations);
+                                grid.fext.fill(force);
+                                let stats = update_tau(&mut grid, law);
+                                assert!(
+                                    (stats.max_shear - rate).abs() < 5e-14,
+                                    "{collision:?}, {law:?}, strain={strain:?}, rho={rho}, force={force:?}: {} != {rate}",
+                                    stats.max_shear,
+                                );
+                                assert!(grid.tau.iter().all(|t| (t - expected_tau).abs() < 4e-12));
+                                assert_eq!((stats.floored, stats.capped), (0, 0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// G0/G3: changing the Guo force frame must not change the physical
     /// strain or the apparent viscosity. The equilibrium case represents
