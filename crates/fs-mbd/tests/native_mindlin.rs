@@ -1,6 +1,8 @@
 //! Native source-backed normal/shear recoil, work and physical-time refinement.
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod common;
+#[path = "native_mindlin/driven.rs"]
+mod driven;
 
 use fs_contact::interface_binding::mindlin::loading::{
     SourceHertzMindlinContact, SourceHertzMindlinState,

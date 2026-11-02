@@ -3281,6 +3281,31 @@ independent Hertz ODE, including second-order time refinement. G0/G4 checks
 cover unsupported motion, source/history identity, endpoint speed limits,
 iteration bounds, cancellation and identical retry.
 
+## Driven native Hertz loading and retained Mindlin shear
+
+`tangential_friction::mindlin::advance_rigid_mindlin_driven` admits held world
+COM forces and body-frame torques in original A/B order. Actual mass,
+orientation, full inertia and contact arms determine the external point
+acceleration. This acceleration enters the released normal and scalar-shear
+displacements before the original Hertz mean-force and retained Mindlin solves.
+Each body receives one summed external/contact resultant; the zero-drive entry
+retains the established action/reaction arithmetic.
+
+Full-body midpoint external work and commanded world momentum remain separate
+from reversible normal/shear storage and physical microslip heat. This includes
+negative actuator work when a preloaded contact releases energy. The original
+source endpoint gates, central geometry and immutable candidate publication
+remain. The phase holds geometry and wrenches fixed and assumes affine contact
+paths; pose/gyroscopic evolution, separation and recontact remain with their
+surrounding owners.
+
+Four new physical regression groups cover clamp-maintained compression and
+powered partial slip against the classical virgin Mindlin force and work,
+preload retention and actuator energy recovery, nonprincipal full inertia and
+world-frame/common-acceleration invariance, exact zero-drive reduction, and
+unsupported-motion/source-limit/late-cancellation refusal. All nine native
+Mindlin integration tests pass.
+
 ## Source-owned adhesive sliding and twisting on finite bodies
 
 `tangential_friction::adhesive` applies the original ordered junction-shear

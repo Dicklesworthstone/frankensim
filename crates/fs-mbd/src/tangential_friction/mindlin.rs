@@ -5,6 +5,8 @@
 //! arms determine midpoint recoil. The source-owned conservative normal mean
 //! drives both normal momentum and work; the source-owned Mindlin mean drives
 //! shear momentum, storage and heat. No caller effective mass is accepted.
+//! Held world forces and body torques can maintain compression and drive the
+//! same retained shear path. Their actual native work remains an external port.
 //!
 //! This is a frozen-geometry momentum phase, like the adjacent rigid-friction
 //! owners. The caller owns initial indentation, circular surface geometry,
@@ -15,7 +17,7 @@
 //! contact locator, rolling-memory transport or a finite-rotation integrator.
 
 use crate::{
-    DynamicsError, MassProperties, RigidBodyState, Vec3,
+    DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench,
     apply_equal_and_opposite_impulse_at_body_points,
 };
 use fs_contact::interface_binding::mindlin::loading::{
@@ -28,9 +30,12 @@ use fs_contact::normal_patch::{
 };
 use fs_tribo::{TangentialLaw, TangentialSolveConfig, partial_slip::TangentFrame};
 
+#[path = "mindlin/driven.rs"]
+mod driven;
 #[path = "mindlin/normal.rs"]
 mod normal;
 
+use driven::HeldDrive;
 use normal::solve_normal;
 
 /// Original A/B source ordering and physical attachment, held over one phase.
@@ -72,19 +77,30 @@ pub struct RigidMindlinReport {
     pub normal_iterations: usize,
     pub relative_velocity_before_m_s: [f64; 2],
     pub relative_velocity_after_m_s: [f64; 2],
+    /// Actual normal/shear contact acceleration from the held external wrenches.
+    pub driving_acceleration_m_s2: [f64; 2],
     /// Actual midpoint approach and shear from the two native endpoints [m].
     pub relative_displacement_m: [f64; 2],
     /// COM midpoint travel, exposed for the surrounding pose integrator [m].
     pub body_displacement_world_m: [Vec3; 2],
+    /// Contact impulse on B, excluding the external wrench on either body.
     pub impulse_on_b_world_ns: Vec3,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
+    /// Work of the contact impulses alone, evaluated on actual native motion.
     pub midpoint_impulse_work_j: f64,
+    pub external_wrench_work_j: f64,
+    /// Delta(K) minus actual contact and external work [J].
+    pub work_energy_residual_j: f64,
     pub displacement_residual_m: [f64; 2],
-    /// Delta(K + normal storage + shear storage) + physical heat [J].
+    /// Delta(K + normal storage + shear storage) + heat - external work [J].
     pub total_energy_residual_j: f64,
     pub linear_momentum_change_ns: Vec3,
     pub angular_momentum_change_nms: Vec3,
+    pub external_linear_impulse_ns: Vec3,
+    pub external_angular_impulse_nms: Vec3,
+    pub linear_momentum_residual_ns: Vec3,
+    pub angular_momentum_residual_nms: Vec3,
 }
 
 /// Publish both original body states and source-bound contact history together.
@@ -144,6 +160,42 @@ pub fn advance_rigid_mindlin(
     properties: [MassProperties; 2],
     contact: RigidMindlinContact<'_>,
     history: &SourceHertzMindlinState,
+    dt_s: f64,
+    controls: RigidMindlinControls,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<RigidMindlinCandidate, RigidMindlinError> {
+    advance_rigid_mindlin_driven(
+        bodies,
+        properties,
+        contact,
+        history,
+        [Wrench::ZERO; 2],
+        dt_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// Resolve held external drive, Hertz normal loading and retained Mindlin shear.
+///
+/// External COM forces are world-frame vectors; free torques are body-frame
+/// vectors, in original A/B order. Native acceleration enters both released
+/// displacements before the original source solves. The resulting external and
+/// contact impulses are applied together once per body, without a pre-kick.
+/// Full-body midpoint external work is separate from reversible contact storage
+/// and physical microslip heat, including when a preloaded contact returns work.
+///
+/// Geometry, arms, orientations and wrenches are held for this momentum phase.
+/// The source paths are affine in indentation and solved shear. Pose transport,
+/// gyroscopic evolution, curved trajectories and separation/recontact retain
+/// their surrounding owners; unsupported motion and source domains still refuse.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_rigid_mindlin_driven(
+    bodies: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    contact: RigidMindlinContact<'_>,
+    history: &SourceHertzMindlinState,
+    external: [Wrench; 2],
     dt_s: f64,
     controls: RigidMindlinControls,
     cancelled: &mut impl FnMut() -> bool,
@@ -258,10 +310,18 @@ pub fn advance_rigid_mindlin(
         finite(0.5 * dt_s * dt_s * mobility[0][0])?,
         finite(0.5 * dt_s * dt_s * mobility[1][1])?,
     ];
+    let drive = HeldDrive::new(bodies, properties, points, axes, external)?;
+    let mut free = [finite(dt_s * before[0])?, finite(dt_s * before[1])?];
+    if external != [Wrench::ZERO; 2] {
+        let half_dt_squared = finite(0.5 * dt_s * dt_s)?;
+        for axis in 0..2 {
+            free[axis] = finite(free[axis] + half_dt_squared * drive.acceleration[axis])?;
+        }
+    }
     let (indentation, normal_path, normal_iterations) = solve_normal(
         source,
         history.indentation_m(),
-        finite(dt_s * before[0])?,
+        free[0],
         compliance[0],
         dt_s,
         controls,
@@ -271,7 +331,7 @@ pub fn advance_rigid_mindlin(
         history,
         &SourceMindlinPathInput {
             indentation_m: indentation,
-            free_slip_increment_m: finite(dt_s * before[1])?,
+            free_slip_increment_m: free[1],
             dt_s,
             compliance_m_per_n: compliance[1],
             solve: controls.solve,
@@ -283,20 +343,17 @@ pub fn advance_rigid_mindlin(
     let impulse = normal
         .scale(finite(dt_s * normal_path.mean_force_n)?)
         .add(tangent.scale(finite(dt_s * force)?));
-    let native = apply_equal_and_opposite_impulse_at_body_points(
-        bodies[0],
-        properties[0],
-        contact.arms_body[0],
-        bodies[1],
-        properties[1],
-        contact.arms_body[1],
+    let native = drive.apply(
+        bodies,
+        properties,
+        contact.arms_body,
+        points,
         impulse,
+        dt_s,
+        cancelled,
     )?;
-    let after_bodies = [native.first.state_after, native.second.state_after];
-    let after_points = [
-        native.first.point_kinematics_after,
-        native.second.point_kinematics_after,
-    ];
+    let after_bodies = native.bodies;
+    let after_points = native.points;
     let after_relative = after_points[0]
         .point_velocity_world
         .sub(after_points[1].point_velocity_world);
@@ -339,7 +396,9 @@ pub fn advance_rigid_mindlin(
             force
         };
         audit(
-            after[axis] - (before[axis] - dt_s * mobility[axis][axis] * mean),
+            after[axis]
+                - (before[axis] - dt_s * mobility[axis][axis] * mean
+                    + dt_s * drive.acceleration[axis]),
             controls.velocity_tolerance_m_s,
             "actual native endpoint velocity",
         )?;
@@ -349,21 +408,21 @@ pub fn advance_rigid_mindlin(
             "native slip speed exceeds admitted phase",
         ));
     }
-    let kinetic_before = finite(
-        native.first.work.kinetic_energy_before_j + native.second.work.kinetic_energy_before_j,
-    )?;
-    let kinetic_after = finite(
-        native.first.work.kinetic_energy_after_j + native.second.work.kinetic_energy_after_j,
-    )?;
+    let kinetic_before = native.kinetic_before_j;
+    let kinetic_after = native.kinetic_after_j;
+    let work_residual =
+        finite(native.kinetic_energy_change_j - native.contact_work_j - native.external_work_j)?;
     let shear_change = finite(contact.law.stored_energy_j(&path.tangential.state) - stored_before)?;
     let energy_residual = finite(
         native.kinetic_energy_change_j
             + path.normal_work_j
             + shear_change
-            + path.tangential.dissipated_j,
+            + path.tangential.dissipated_j
+            - native.external_work_j,
     )?;
     for (residual, what) in [
         (native.work_energy_residual_j, "native impulse work"),
+        (work_residual, "native contact and external work"),
         (
             normal_path.work_j - path.normal_work_j,
             "original normal potential work",
@@ -384,15 +443,17 @@ pub fn advance_rigid_mindlin(
     ] {
         audit(residual, controls.energy_tolerance_j, what)?;
     }
-    let linear = native.linear_momentum_change_world;
+    let linear = native.linear_change_ns;
     let angular = angular_momentum(after_bodies).sub(angular_momentum(bodies));
+    let linear_residual = linear.sub(native.external_linear_ns);
+    let angular_residual = angular.sub(native.external_angular_nms);
     audit(
-        norm(linear)?,
+        norm(linear_residual)?,
         controls.linear_momentum_tolerance_ns,
         "native pair linear momentum",
     )?;
     audit(
-        norm(angular)?,
+        norm(angular_residual)?,
         controls.angular_momentum_tolerance_nms,
         "native pair angular momentum",
     )?;
@@ -418,16 +479,23 @@ pub fn advance_rigid_mindlin(
             normal_iterations,
             relative_velocity_before_m_s: before,
             relative_velocity_after_m_s: after,
+            driving_acceleration_m_s2: drive.acceleration,
             relative_displacement_m: travel,
             body_displacement_world_m: body_displacement,
             impulse_on_b_world_ns: impulse,
             kinetic_before_j: kinetic_before,
             kinetic_after_j: kinetic_after,
-            midpoint_impulse_work_j: native.impulse_work_j,
+            midpoint_impulse_work_j: native.contact_work_j,
+            external_wrench_work_j: native.external_work_j,
+            work_energy_residual_j: work_residual,
             displacement_residual_m: displacement_residual,
             total_energy_residual_j: energy_residual,
             linear_momentum_change_ns: linear,
             angular_momentum_change_nms: angular,
+            external_linear_impulse_ns: native.external_linear_ns,
+            external_angular_impulse_nms: native.external_angular_nms,
+            linear_momentum_residual_ns: linear_residual,
+            angular_momentum_residual_nms: angular_residual,
         },
     })
 }
