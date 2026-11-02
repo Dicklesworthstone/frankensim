@@ -25,6 +25,10 @@ pub use viscous::{ViscousRotorStep, ViscousRotorStepper};
 mod torsional;
 pub use torsional::{TorsionalRotorStep, TorsionalRotorStepper};
 
+#[path = "rotors/locked.rs"]
+mod locked;
+pub use locked::{LockedRotorDrift, LockedRotorImpulse, RotorLock, RotorLockEngagement};
+
 /// Maximum fixed-axis rotors in this allocation-free stepping lane.
 pub const MAX_AXIAL_ROTORS: usize = 32;
 

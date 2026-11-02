@@ -183,6 +183,34 @@ where claimed below.
   symplecticity, moving gimbals, variable stiffness/rest phase or parametric
   preload work is claimed. Full Cargo remains unavailable with missing
   constellation siblings.
+- `RotorBank::lock_mode(mask)` prepares retained ideal rotor/carrier shaft
+  locks with `I_mode=I_reduced+sum_selected J_i a_i a_i^T`.
+  Engagement applies simultaneous original-owner impulses with complete
+  carrier recoil, retaining attitude, total momentum and every shaft phase.
+  Aggregate perfectly inelastic mechanical loss is nonnegative; no per-lock
+  heat partition or finite thermal destination is inferred.
+  Locked `apply_impulse` admits unlocked-shaft and external BODY ports while
+  solving zero-work internal reactions. Already-admitted zero ports preserve
+  the canonical state exactly, without a numerical reprojection impulse.
+  Retained drift uses the existing native gyrostat on `I_mode` with only
+  unlocked stored rotor momentum. Selected absolute momenta evolve with
+  precession, their relative phases remain bit-for-bit fixed, and unlocked
+  phases use endpoint trapezoidal relative rates. Actual canonical kinetic
+  reconstruction and native drift defect are separately measured; neither
+  becomes physical damping. Releasing a lock means using the accepted
+  canonical state unchanged in ordinary rotor dynamics or another selection.
+  Preparation uses the original tensor owner; impulses and drift are O(N)
+  and allocation-free, with the original actual-transfer/recoil gates and
+  local-scale work admission. No finite friction capacity, event-time
+  prediction, moving axes, controller dynamics or exact-energy claim is made.
+  Five new native groups and sixteen existing rotor/viscous/torsional groups
+  pass on original numerical sources. Coaxial engagement loss/recoil,
+  nonorthogonal simultaneous locks/permutation/ports, retained phase, release,
+  reversal, empty selection and erased carrier transfer are covered.
+  An independent full-tensor Euler/RK4 reference gives 20/40/80-step combined
+  errors 8.00266e-5/2.00061e-5/5.00150e-6, demonstrating second-order
+  refinement in that fixture. Pinned formatting passes; the complete Cargo
+  target remains unavailable with missing constellation runtime siblings.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
