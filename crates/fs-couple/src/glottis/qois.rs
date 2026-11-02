@@ -4,9 +4,13 @@
 //! of de Cheveigne and Kawahara, YIN (JASA 2002, DOI 10.1121/1.1458024),
 //! equations 6–8 and section II.E. Unlike unconditional pitch tracking, this
 //! observer reports no identified pitch when no trough passes admission.
-//! Harmonic levels come from a joint DC/tone fit, not windowed bin projections.
+//! A bounded local frequency refinement then minimizes the joint DC/harmonic
+//! residual, so coarse pitch error does not masquerade as weak partials or noise.
 
-use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitError, HarmonicFitPlan};
+use fs_fft::harmonic::{
+    HarmonicFitBudget, HarmonicFitError, HarmonicFrequencyBudget, HarmonicFrequencyError,
+    refine_harmonic_frequency,
+};
 use fs_fft::{C64, Fft};
 use fs_math::det;
 
@@ -20,6 +24,12 @@ pub struct GlottalQoiOptions {
     /// Largest admitted cumulative-mean normalized difference, in (0, 1).
     /// This is an estimator threshold, not a calibrated voicing probability.
     pub periodicity_threshold: f64,
+    /// Absolute local frequency-correction tolerance [Hz]. This controls
+    /// numerical convergence, not physical pitch uncertainty.
+    pub frequency_tolerance_hz: f64,
+    /// Maximum joint fits during local frequency refinement of a voiced record.
+    /// Exhaustion is an explicit error, not acceptance of an unfinished fit.
+    pub max_frequency_evaluations: usize,
     /// Conservative limit on temporary numeric storage, excluding inputs
     /// and allocator metadata. Both FFT and joint-fit storage are admitted.
     pub max_workspace_bytes: usize,
@@ -31,6 +41,8 @@ impl Default for GlottalQoiOptions {
             min_f0_hz: 40.0,
             max_f0_hz: 500.0,
             periodicity_threshold: 0.1,
+            frequency_tolerance_hz: 1e-6,
+            max_frequency_evaluations: 24,
             max_workspace_bytes: 256 * 1024 * 1024,
         }
     }
@@ -53,6 +65,9 @@ pub enum GlottalQoiError {
     },
     /// The harmonic fit could not separate the declared columns reliably.
     HarmonicFit(HarmonicFitError),
+    /// The local frequency estimate was unidentifiable or failed to converge
+    /// within its declared range, evaluation limit, or numeric budget.
+    FrequencyRefinement(HarmonicFrequencyError),
 }
 
 impl core::fmt::Display for GlottalQoiError {
@@ -69,6 +84,7 @@ impl core::fmt::Display for GlottalQoiError {
                 )
             }
             Self::HarmonicFit(error) => error.fmt(f),
+            Self::FrequencyRefinement(error) => error.fmt(f),
         }
     }
 }
@@ -123,7 +139,8 @@ pub fn glottal_qois(flow: &[f64], gaps: &[f64], rate: f64) -> GlottalQois {
 
 /// Measure finite, equally long flow/gap records sampled at `rate` Hz.
 /// At least two periods at an admitted frequency must fit the record.
-/// Complexity is O(N log N) for pitch and O(N) for the fixed six-tone fit.
+/// Complexity is O(N log N) for coarse pitch and O(E N) for the fixed six-tone
+/// refinement, where E is bounded by `options.max_frequency_evaluations`.
 /// The entire record is assumed approximately stationary; chirps, aspiration,
 /// subharmonics and transients can remain in the exposed fit residual.
 pub fn glottal_qois_with_options(
@@ -148,10 +165,13 @@ pub fn glottal_qois_with_options(
         && options.max_f0_hz < 0.5 * rate
         && options.periodicity_threshold.is_finite()
         && options.periodicity_threshold > 0.0
-        && options.periodicity_threshold < 1.0)
+        && options.periodicity_threshold < 1.0
+        && options.frequency_tolerance_hz.is_finite()
+        && options.frequency_tolerance_hz > 0.0
+        && options.max_frequency_evaluations > 0)
     {
         return Err(invalid(
-            "invalid clock, sub-Nyquist pitch band, or periodicity threshold",
+            "invalid clock, sub-Nyquist band, periodicity threshold, or refinement limits",
         ));
     }
     let min_period = rate / options.max_f0_hz;
@@ -171,8 +191,9 @@ pub fn glottal_qois_with_options(
         .checked_next_power_of_two()
         .ok_or_else(|| invalid("FFT size overflow"))?;
     // 64L covers three complex FFT arrays, twiddles and subplan headroom.
-    // 256N covers the six-tone QR peak (216N+456), real/prefix/lag arrays
-    // and crossing marks, even though FFT scratch is dropped before QR.
+    // 256N covers the six-tone fit and real/prefix/lag arrays and crossing
+    // marks. The refiner separately admits its entire numeric peak after
+    // FFT scratch and the AC record are dropped.
     let required_bytes = n
         .checked_mul(256)
         .and_then(|bytes| {
@@ -222,23 +243,96 @@ pub fn glottal_qois_with_options(
     ) else {
         return Ok(result);
     };
+    drop(ac);
     result.jitter = jitter;
-    result.f0_hz = rate / period;
-    let orders: Vec<usize> = (1..=6)
-        .take_while(|&h| result.f0_hz * (h as f64) < 0.5 * rate)
-        .collect();
-    let plan = HarmonicFitPlan::new(
-        n,
+    let initial_f0 = rate / period;
+    // This is a local correction of an admitted periodic model, not an octave
+    // search. One inverse record duration or 2% pitch bounds the neighborhood.
+    let half_width = (0.02 * initial_f0).min(rate / (n - 1) as f64);
+    let lower = (initial_f0 - half_width).max(options.min_f0_hz);
+    let upper = (initial_f0 + half_width).min(options.max_f0_hz);
+    // Keep one fixed set of columns throughout refinement. If the refined
+    // pitch admits one more order, complete refinement with that order inside
+    // a tightened Nyquist bound and the remaining evaluation budget.
+    let all_orders = [1, 2, 3, 4, 5, 6];
+    let order_count = all_orders
+        .iter()
+        .take_while(|&&h| upper * (h as f64) < 0.5 * rate)
+        .count();
+    let orders = &all_orders[..order_count];
+    let fit_budget = HarmonicFitBudget {
+        max_workspace_bytes: options.max_workspace_bytes - 6 * core::mem::size_of::<usize>(),
+        min_reciprocal_condition: 1e-10,
+    };
+    let refined = refine_harmonic_frequency(
+        flow,
         1.0 / rate,
-        result.f0_hz,
-        &orders,
-        HarmonicFitBudget {
-            max_workspace_bytes: options.max_workspace_bytes - n * 8,
-            min_reciprocal_condition: 1e-10,
+        initial_f0,
+        orders,
+        HarmonicFrequencyBudget {
+            frequency_bounds_hz: [lower, upper],
+            absolute_tolerance_hz: options.frequency_tolerance_hz,
+            max_evaluations: options.max_frequency_evaluations,
+            fit: fit_budget,
         },
     )
-    .map_err(GlottalQoiError::HarmonicFit)?;
-    let fit = plan.fit(flow).map_err(GlottalQoiError::HarmonicFit)?;
+    .map_err(GlottalQoiError::FrequencyRefinement)?;
+    result.f0_hz = refined.fundamental_hz;
+    let final_count = all_orders
+        .iter()
+        .take_while(|&&h| result.f0_hz * (h as f64) < 0.5 * rate)
+        .count();
+    let final_orders = &all_orders[..final_count];
+    let fit = if final_orders.len() == orders.len() {
+        refined.fit
+    } else {
+        let used = refined.evaluations;
+        let remaining = options.max_frequency_evaluations.saturating_sub(used);
+        if remaining == 0 {
+            return Err(GlottalQoiError::FrequencyRefinement(
+                HarmonicFrequencyError::NotConverged {
+                    fundamental_hz: result.f0_hz,
+                    residual_rms: refined.fit.residual_rms,
+                    evaluations: used,
+                    last_correction_hz: refined.last_correction_hz,
+                },
+            ));
+        }
+        drop(refined.fit);
+        // At most one order can cross Nyquist in a +/-2% interval for orders
+        // 1..6. The second solve uses every order admissible at its seed.
+        let upper = upper.min((0.5 * rate / final_orders.len() as f64).next_down());
+        let complete = refine_harmonic_frequency(
+            flow,
+            1.0 / rate,
+            result.f0_hz,
+            final_orders,
+            HarmonicFrequencyBudget {
+                frequency_bounds_hz: [lower, upper],
+                absolute_tolerance_hz: options.frequency_tolerance_hz,
+                max_evaluations: remaining,
+                fit: fit_budget,
+            },
+        )
+        .map_err(|error| {
+            GlottalQoiError::FrequencyRefinement(match error {
+                HarmonicFrequencyError::NotConverged {
+                    fundamental_hz,
+                    residual_rms,
+                    evaluations,
+                    last_correction_hz,
+                } => HarmonicFrequencyError::NotConverged {
+                    fundamental_hz,
+                    residual_rms,
+                    evaluations: used + evaluations,
+                    last_correction_hz,
+                },
+                other => other,
+            })
+        })?;
+        result.f0_hz = complete.fundamental_hz;
+        complete.fit
+    };
     for (amplitude, phasor) in result.harmonic_peak_amplitudes.iter_mut().zip(&fit.phasors) {
         *amplitude = phasor.re.hypot(phasor.im);
         if !amplitude.is_finite() {

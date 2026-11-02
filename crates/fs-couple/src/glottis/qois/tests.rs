@@ -102,7 +102,12 @@ fn g1_missing_fundamental_keeps_the_period_without_fabricating_a_spectral_level(
 #[test]
 fn g3_physical_unit_scaling_preserves_measurements_and_nyquist_is_respected() {
     let (n, rate, f0) = (4321, 1800.0, 211.13);
-    let flow = voiced(n, rate, f0, 1, 4, 2e-4);
+    let mut flow = voiced(n, rate, f0, 1, 4, 2e-4);
+    // Keep a physical omitted tone above roundoff so the residual's scaling
+    // is meaningful after frequency refinement removes pitch-estimation error.
+    for (i, value) in flow.iter_mut().enumerate() {
+        *value += 1e-6 * det::cos(core::f64::consts::TAU * 345.67 * i as f64 / rate);
+    }
     let gaps = vec![1e-4; n];
     let base = glottal_qois(&flow, &gaps, rate);
     assert!(base.f0_hz > 200.0 && base.f0_hz < 220.0, "{base:?}");
@@ -130,6 +135,84 @@ fn g3_physical_unit_scaling_preserves_measurements_and_nyquist_is_respected() {
         }
         assert!((q.harmonic_residual_rms / scale / base.harmonic_residual_rms - 1.0).abs() < 1e-8);
     }
+    // The coarse-pitch search extends above 450 Hz, so h2 initially crosses
+    // Nyquist. The admitted final pitch must refine both physical harmonics,
+    // rather than fixing amplitudes at a pitch biased by the omitted h2.
+    let f0 = 449.99;
+    let flow: Vec<f64> = (0..4093)
+        .map(|i| {
+            let theta = core::f64::consts::TAU * f0 * i as f64 / rate;
+            5e-4 + 1e-4 * det::cos(theta) + 2e-5 * det::cos(2.0 * theta + 0.31)
+        })
+        .collect();
+    let q = glottal_qois(&flow, &vec![1e-4; flow.len()], rate);
+    assert!((q.f0_hz - f0).abs() < 2e-6, "{q:?}");
+    assert!(
+        (q.harmonic_peak_amplitudes[1] / 2e-5 - 1.0).abs() < 1e-5,
+        "{q:?}"
+    );
+    assert!(q.harmonic_residual_rms < 5e-10, "{q:?}");
+    assert!(q.harmonic_peak_amplitudes[2..].iter().all(|a| a.is_nan()));
+}
+
+#[test]
+fn g1_local_frequency_refinement_preserves_weak_partials_without_a_fundamental() {
+    let (n, rate, f0) = (8191, 8000.0, 463.731);
+    let amplitudes = [0.0, 1e-4, 4e-5, 1e-7, 3e-6, 1e-8];
+    let flow: Vec<f64> = (0..n)
+        .map(|j| {
+            5e-4 + amplitudes
+                .iter()
+                .enumerate()
+                .map(|(i, amplitude)| {
+                    let h = (i + 1) as f64;
+                    amplitude
+                        * det::cos(core::f64::consts::TAU * h * f0 * j as f64 / rate + 0.21 * h)
+                })
+                .sum::<f64>()
+        })
+        .collect();
+    let gaps = vec![1e-4; n];
+    let q = glottal_qois(&flow, &gaps, rate);
+    // The YIN-only seed was 0.309 Hz high on this noninteger-period record;
+    // its h2 and h3 amplitudes were respectively 54% and 94% too small.
+    assert!((q.f0_hz - f0).abs() < 2e-6, "{q:?}");
+    assert!(q.harmonic_residual_rms < 1e-9, "{q:?}");
+    assert!(q.harmonic_peak_amplitudes[0] < 5e-10, "{q:?}");
+    for (&actual, &expected) in q.harmonic_peak_amplitudes[1..].iter().zip(&amplitudes[1..]) {
+        assert!((actual / expected - 1.0).abs() < 2e-4, "{q:?}");
+    }
+    assert!(
+        q.jitter.is_nan(),
+        "multiple crossings cannot identify cycle jitter"
+    );
+
+    let limited = GlottalQoiOptions {
+        max_frequency_evaluations: 1,
+        ..GlottalQoiOptions::default()
+    };
+    assert!(matches!(
+        glottal_qois_with_options(&flow, &gaps, rate, limited),
+        Err(GlottalQoiError::FrequencyRefinement(_))
+    ));
+
+    let omitted_amplitude = 2e-7;
+    let with_omitted_tone: Vec<f64> = flow
+        .iter()
+        .enumerate()
+        .map(|(j, &value)| {
+            value
+                + omitted_amplitude
+                    * det::cos(core::f64::consts::TAU * 1179.43 * j as f64 / rate + 0.31)
+        })
+        .collect();
+    let noisy = glottal_qois(&with_omitted_tone, &gaps, rate);
+    assert!((noisy.f0_hz - f0).abs() < 2e-4, "{noisy:?}");
+    let omitted_rms = omitted_amplitude / core::f64::consts::SQRT_2;
+    assert!(
+        (noisy.harmonic_residual_rms / omitted_rms - 1.0).abs() < 0.01,
+        "{noisy:?}"
+    );
 }
 
 #[test]
@@ -160,6 +243,13 @@ fn g0_invalid_records_clock_and_memory_are_explicit_refusals() {
     assert!(glottal_qois_with_options(&[], &[], 16_000.0, options).is_err());
     assert!(glottal_qois_with_options(&flow[..8], &gaps[..8], 16_000.0, options).is_err());
     assert!(glottal_qois_with_options(&flow, &gaps[..n - 1], 16_000.0, options).is_err());
+    for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let invalid = GlottalQoiOptions {
+            frequency_tolerance_hz: tolerance,
+            ..options
+        };
+        assert!(glottal_qois_with_options(&flow, &gaps, 16_000.0, invalid).is_err());
+    }
     let limited = GlottalQoiOptions {
         max_workspace_bytes: 0,
         ..options

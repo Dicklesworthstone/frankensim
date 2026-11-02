@@ -5318,6 +5318,23 @@ None.
   identity, constant/noise/ramp rejection, fractional-period spectral tilt,
   missing fundamental, band edges, Nyquist, physical scaling, and refusals.
 
+- Glottal harmonic observation now refines the YIN-admitted fundamental by
+  the shared `fs-fft` bounded local variable-projection solve. The local
+  interval is the smaller of 2% of the coarse pitch and one inverse record
+  duration on each side, clipped to the declared pitch band. Numerical
+  frequency tolerance and the candidate-fit limit are explicit options;
+  nonconvergence, nonidentifiability, or resource refusal propagates through
+  the checked API instead of publishing an unfinished estimate. The observer
+  reuses the refined joint fit. If the refined pitch admits another member of
+  harmonics 1..6 below Nyquist, a second refinement includes that member under
+  a tightened Nyquist bound and the remaining candidate-fit budget. The
+  2% neighborhood admits at most one such extra order. Actual crossing
+  jitter remains independent of this stationary frequency refinement. The
+  missing-fundamental regression retains positive flow, h2/h3 dominance and a
+  10,000:1 amplitude range down to h6=1e-8 in flow units; an omitted
+  inharmonic tone remains in the physical residual. This local correction is
+  not a global pitch search, octave certification, or uncertainty estimate.
+
 - `tract` module (bead 3ez8g.8.1): the tract as A(x,t) with LICENSED
   charts (Assaneo 2011 PLOS CC-BY Table 2 — the authors' own 10-tube
   /a/ and /u/; Spanish, acoustically-inverted, formant-valid register
