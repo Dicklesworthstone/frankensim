@@ -5,8 +5,9 @@ and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and
 `matdb-catalog` discovery. No separate material registry or schema is required.
 
-The physical consumers are `fs_material::comminution` and
-`fs_thermochem::stoichiometry`. These are upstream building blocks: they do
+The physical consumers are `fs_material::comminution`, `fs_material::slurry`,
+`fs_material::recovery` and `fs_thermochem::stoichiometry`.
+These are upstream building blocks: they do
 not implement a FrankenMining flowsheet or complete its site-calibration
 beads. In particular, FrankenMining's plan §13.10 keeps located ore tests
 separate from public non-spatial material references, and §17.3 requires
@@ -359,6 +360,71 @@ The optional final argument is a solids mass fraction, not a percentage.
 The executable checks pack identities and prints every source hash. It does
 not infer packing, settling, entrained gas, viscosity or a separation recovery.
 
+## Recovery curves and material held in process tanks
+
+`fs_material::recovery::RecoveryKinetics` evaluates two explicitly selected
+contact-time models from an original `ConstitutiveModelCard`:
+
+| Law ID | Declared rate population | Recovery at contact time t |
+| --- | --- | --- |
+| `single-rate-recovery` | All recoverable material has rate k | `Rinf * (1 - exp(-k*t))` |
+| `uniform-rate-recovery` | Rates uniformly distributed over 0 to kmax | `Rinf * (1 - (1 - exp(-kmax*t))/(kmax*t))` |
+
+Both have a defined zero-time limit of zero. The card supplies dimensionless
+`ultimate-recovery` and an inverse-second `rate-constant` or
+`maximum-rate-constant`, with a typed `elapsed-time` validity window and every
+applicable grind, chemistry or temperature coordinate. Missing sources,
+unsupported model versions, incorrect dimensions and out-of-box conditions
+refuse. The full card, original source hashes and provenance stay available.
+These formulas do not select a rate distribution or calibrate parameters for
+an ore. For the authored Rinf=0.9 and rate endpoint 1/(6 h), the two curves
+give respectively 0.568909 and 0.331091 at six hours; the model choice matters.
+
+### Retained inventory and changing feed grades
+
+`recovery::residence::StirredTankCascade` supplies the separate forward
+hydraulic calculation for equal, full, perfectly mixed tanks. It advances a
+conserved tracer/metal concentration in **kg per m³ of slurry**, retaining
+each tank's state between intervals. Ore grade in g/dry tonne must first be
+converted using dry-solids mass per slurry volume. The slurry module's actual
+volume-flow result can be supplied directly as the train flow.
+
+An interval reports inlet and independently integrated outlet mass, mean
+outlet concentration, initial/final inventory and a conservation residual.
+Changing flow changes exchanged volume; stopped flow retains inventory and
+has no outlet mean. Failed intervals leave the prior state intact. The caller
+supplies active mixed volume and actual train flow, explicitly excluding any
+bypass/dead space. Mean residence is active volume divided by train flow.
+
+The example reproduces the plan's authored eight-tank, 24-hour mean-residence
+scenario: feed grade is normally 3 g/t, rises to 9 g/t for one 12-hour interval,
+then returns to 3 g/t. Applying a separately declared 88% extraction at the
+transport outlet yields these reporting-window results:
+
+| 12-hour interval | Mean tail grade, g/t | Naive same-interval recovery |
+| --- | ---: | ---: |
+| Feed pulse | 0.366053 | 95.932746% |
+| First interval after pulse | 0.548899 | 81.703370% |
+| Second interval after pulse | 0.713954 | 76.201535% |
+| Third interval after pulse | 0.504046 | 83.198457% |
+
+The apparent changes arise from material held in the tanks while feed grade
+changes. The extraction fraction remains 88%. The example applies that
+fraction downstream of transport; it does not couple a kinetic law into the
+hydraulic state or infer in-tank recovery. Its independent contact-time curve
+table illustrates the two recovery laws separately.
+
+```bash
+cargo run -p fs-material --example mineral_residence
+```
+
+The output includes source/card hashes, per-interval inventory changes and
+independent balance residuals, followed by stopped-flow and half-flow cases.
+The implementation admits at most 64 tanks and dimensionless exposure 4096
+per call; longer intervals can be split into successive calls. These are
+forward model calculations, not deconvolution, measured plant calibration or
+a fitted leach/adsorption model.
+
 ## Focused verification
 
 Normal workspace commands for these slices:
@@ -367,6 +433,7 @@ Normal workspace commands for these slices:
 cargo test -p xtask --test mining_mineral_sources --test mining_mineral_coverage --test mining_reagent_sources --test mining_reagent_references --test mining_oxide_sources --test mining_reaction_balances
 cargo test -p fs-material comminution
 cargo test -p fs-material slurry::tests
+cargo test -p fs-material recovery::
 cargo test -p xtask --test mining_slurry_sources
 cargo test -p fs-thermochem stoichiometry::tests
 ```

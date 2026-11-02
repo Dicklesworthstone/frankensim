@@ -76,6 +76,8 @@ pub mod magnetostrictive;
 pub mod plane_stress_viscosity;
 pub mod plastic;
 pub mod porous;
+/// Source-declared recovery kinetics and conservative stirred-tank residence.
+pub mod recovery;
 /// Molecular relaxation absorption and dispersion of any gas mixture (M0.1-W2).
 pub mod relaxation;
 pub mod section;

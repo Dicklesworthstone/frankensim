@@ -1,5 +1,37 @@
 # fs-material — CONTRACT
 
+## Recovery contact-time curves and conservative residence
+
+`recovery::RecoveryKinetics` consumes the complete original constitutive card
+for either a single first-order rate or a uniform population on `[0,kmax]`.
+It requires the exact law/version, dimensioned ultimate-recovery/rate parameters,
+zero internal state, original source hashes, provenance and a finite typed
+elapsed-time validity window. Every additional declared condition remains
+required. Actual contact time is separate from a hydraulic residence-time
+distribution; an ore name never supplies a kinetic parameter. Stable
+small-time evaluation retains positive representable response. The original
+card and any fit evidence remain inspectable without a new calibration claim.
+
+`recovery::residence::StirredTankCascade` advances a conserved constituent
+through equal, full, ideal stirred tanks under piecewise-constant feed and
+actual train flow. Concentration is constituent mass per slurry volume. The
+caller supplies active mixed volume and initial inventories; bypass/dead space
+is external and cannot silently alter the meaning of train flow. State persists
+across flow changes and stops. Each interval independently integrates outlet
+mass, reports its flow-weighted concentration, and checks inventory/inlet/outlet
+closure without a plug. Failed steps publish no new state.
+
+Positive source-scaled Poisson propagation has explicit 64-tank and 4096-exposure
+limits. Longer intervals must be split. Premature probability underflow cannot
+erase a representable physical response; truly unrepresentable positive paths
+refuse. G0/G1/G3 tests cover analytic single-tank endpoint/mean, independent
+Erlang pulse integration, stopped/variable flow, split intervals, numerical
+extremes, work bounds and transactionality. `mineral_residence` demonstrates
+the eight-tank transient bias with a separately declared downstream extraction
+and independently displays both contact-time curves. No deconvolution, field
+calibration, aqueous chemistry, segregation, adsorption, coupled reaction rate
+or actual process recovery is inferred by this forward hydraulic model.
+
 ## Source-bound mineral slurry streams
 
 `slurry::SlurryStream` converts explicit dry constituent and carrier-liquid
