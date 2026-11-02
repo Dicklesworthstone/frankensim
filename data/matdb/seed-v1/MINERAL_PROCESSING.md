@@ -428,6 +428,44 @@ The optional final argument is a solids mass fraction, not a percentage.
 The executable checks pack identities and prints every source hash. It does
 not infer packing, settling, entrained gas, viscosity or a separation recovery.
 
+### Selective rougher/cleaner separation with retained density evidence
+
+`slurry::separation::SelectiveSeparator` accepts a concentrate partition for
+every exact dry constituent and an independent carrier-liquid partition.
+Both outlet `SlurryStream` values retain their original material sources,
+queries and receipts. The result exposes per-component recovery, dry-component
+fractions, separate water recovery and balance residuals. Its fractions are
+prescribed inputs with provenance; the API does not manufacture a calibrated
+flotation, gravity or cyclone correlation from a mineral name.
+
+The runnable `mineral_partition_circuit` example uses the same four compiled
+packs above. It sends rougher concentrate to a cleaner and combines rougher
+and cleaner tailings through the existing stream mixer. All partitions are
+explicitly authored. Its source-backed volume/density calculation gives:
+
+| Stream | Dry solids, kg/s | Water, kg/s | Pulp density, kg/m³ |
+| --- | ---: | ---: | ---: |
+| Feed | 200 | 100 | 1979.185247 |
+| Rougher concentrate | 105 | 20 | 3047.961295 |
+| Final concentrate | 87.1 | 5 | 4202.496057 |
+| Combined tailings | 112.9 | 95 | 1603.399888 |
+
+The final concentrate contains 85.5 kg/s magnetite, 1.2 kg/s pyrite and
+0.4 kg/s dolomite: **98.163031% magnetite by dry constituent mass** at
+**85.5% overall magnetite recovery**. Each solid and water balance closes
+in the example. These are constituent fractions, not elemental metal assays.
+Mineral-by-size IDs can receive distinct partitions without being collapsed.
+Missing/extra partitions refuse; zero-solids grade and zero-feed recovery
+remain undefined rather than becoming zero or NaN.
+
+```bash
+cargo run -p fs-material --example mineral_partition_circuit -- \
+  "$mining_pack_dir/magnetite-handbook-mineralogy-reference.fsmatpk" \
+  "$mining_pack_dir/pyrite-handbook-mineralogy-reference.fsmatpk" \
+  "$mining_pack_dir/dolomite-handbook-mineralogy-reference.fsmatpk" \
+  "$mining_pack_dir/water-liquid-iapws-sr6-08.fsmatpk"
+```
+
 ### Yield stress and pipeline pressure requirements
 
 `fs_material::slurry::rheology` adds a source-qualified Herschel–Bulkley law

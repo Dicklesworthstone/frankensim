@@ -10,7 +10,8 @@
 //!
 //! Streams contain nonnegative kg/s rates. Components are sorted by identity,
 //! and sums use a fixed numeric order with compensation. Mixing preserves each
-//! constituent; splitting is nonselective. Density and composition are undefined
+//! constituent; the base splitter is nonselective, while [`separation`] accepts
+//! explicit component and carrier partitions. Density and composition are undefined
 //! for a zero-flow stream. Arithmetic that overflows or erases a positive phase
 //! through underflow is refused. All operations have explicit small size bounds.
 //!
@@ -23,6 +24,10 @@ use fs_matdb::{
 };
 use fs_qty::{Density, Dimensionless, Dims, MassFlowRate, QuantitySpec, VolumetricFlowRate};
 use std::collections::BTreeMap;
+
+/// Prescribed selective component/carrier partitions with conserved outlet streams.
+#[path = "slurry/separation.rs"]
+pub mod separation;
 
 /// Source-qualified Herschel–Bulkley/Bingham rheology and laminar pipe hydraulics.
 #[path = "slurry/rheology.rs"]

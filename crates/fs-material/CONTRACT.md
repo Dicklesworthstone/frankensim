@@ -101,6 +101,33 @@ calculation. No dissolution, reaction, thermal equilibration, volume contraction
 settling, rheology, liberation, separation efficiency or field calibration is
 inferred; source uncertainty is retained without inventing a mixture interval.
 
+## Selective separation of source-bound slurry constituents
+
+`slurry::separation::SelectiveSeparator` applies one explicit concentrate
+partition to each exact solid identity and a separate carrier-liquid partition.
+The existing `SlurryStream` outlets retain every original density source,
+typed query, evidence and usage receipt. Complementary concentrate/tailings
+flows preserve each constituent; no new material, dissolution or liberation
+is inferred. Provenance records the prescribed fractions without promoting
+them to calibrated flotation, gravity or cyclone performance.
+
+The result reports per-component flows, computed recovery and numerical closure,
+dry-component fractions in all three streams, carrier accounting, and total
+dry-mass yield. Fractions refer to the supplied identity set, which may include
+mineral-by-size classes; they are not elemental assays. Missing, extra or
+duplicate partitions refuse, including missing declarations for zero-flow IDs.
+Zero-feed recoveries and zero-solids grades are absent. Every fraction lies in
+[0,1]; positive unrepresentable outlets or metrics refuse atomically.
+
+Seven focused tests cover independent balances, two-stage rougher/cleaner
+accounting, density-source preservation, nonselective equivalence, distinct
+size-class routing, canonical ordering and undefined/numerical boundaries.
+`mineral_partition_circuit` runs that two-stage example using actual compiled
+magnetite, pyrite, dolomite and water packs, combines both tailings streams,
+and prints dry grade, recovery, volume flow and component/water residuals.
+It complements the separate size/element `ParticleStream` classifier; no
+automatic conversion between their distinct composition models is implied.
+
 ## Yield-stress slurry rheology and pipe pressure
 
 `slurry::rheology::HerschelBulkleyCard` retains an explicit yield stress,
