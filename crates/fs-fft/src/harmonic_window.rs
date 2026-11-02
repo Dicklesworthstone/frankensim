@@ -12,11 +12,13 @@
 use fs_math::{c64::C64, dd::Dd, det};
 
 mod spectrum;
-pub use spectrum::HarmonicCausalIntegral;
 pub use spectrum::{
     AngularHarmonicProductInput, HarmonicProductInput, HarmonicProductLaw,
     HarmonicProductSpectrumLimits, HarmonicProductTone, MAX_PRODUCT_SPECTRUM_TERMS,
     PreparedHarmonicProductSpectrum, ProductSpectrumError,
+};
+pub use spectrum::{
+    AngularHarmonicSpectrumTerm, HarmonicCausalIntegral, HarmonicSpectrumTermLimits,
 };
 
 /// A rejected observation window or unrepresentable moment.

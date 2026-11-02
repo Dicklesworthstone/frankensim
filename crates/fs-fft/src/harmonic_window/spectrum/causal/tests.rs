@@ -273,3 +273,127 @@ fn zero_duration_darkness_invalid_domains_and_cancellation_are_explicit() {
         Dd::ZERO
     );
 }
+
+#[test]
+fn dd_source_clock_preserves_elapsed_substeps_at_a_large_epoch() {
+    let epoch = 2.0_f64.powi(50);
+    let offset = 0.0625;
+    let duration = 0.03125;
+    assert_eq!(epoch + offset, epoch);
+    let spectrum = PreparedHarmonicProductSpectrum::from_angular_terms(
+        [AngularHarmonicSpectrumTerm {
+            angular_frequency_rad_s: Dd::ONE,
+            peak_amplitude: [Dd::from_f64(0.7), Dd::from_f64(0.2)],
+        }],
+        HarmonicSpectrumTermLimits {
+            maximum_terms: 1,
+            maximum_workspace_bytes: 4096,
+        },
+    )
+    .unwrap();
+    let rate = 0.7;
+    let result = spectrum
+        .causal_integral_from_clock_dd(Dd::from_pair(epoch, offset), duration, rate)
+        .unwrap();
+    let (se, ce) = epoch.sin_cos();
+    let expected = simpson(
+        |s| {
+            let (ss, cs) = (offset + s).sin_cos();
+            let real = ce * cs - se * ss;
+            let imaginary = se * cs + ce * ss;
+            (0.7 * real + 0.2 * imaginary) * (-rate * (duration - s)).exp()
+        },
+        duration,
+    );
+    close(result.weighted_integral_dd(), expected, 8e-14, duration);
+    let rounded = spectrum
+        .causal_integral(epoch + offset, duration, rate)
+        .unwrap();
+    assert!(
+        (result.weighted_integral_dd() - rounded.weighted_integral_dd())
+            .abs()
+            .hi
+            > 1e-5
+    );
+    let first = spectrum
+        .causal_integral_from_clock_dd(Dd::from_pair(epoch, offset), duration / 2.0, rate)
+        .unwrap();
+    let second = spectrum
+        .causal_integral_from_clock_dd(
+            Dd::from_pair(epoch, offset + duration / 2.0),
+            duration / 2.0,
+            rate,
+        )
+        .unwrap();
+    close(
+        first.weighted_integral_dd() * second.decay_dd() + second.weighted_integral_dd(),
+        result.weighted_integral_dd().to_f64(),
+        8e-14,
+        duration,
+    );
+}
+
+#[test]
+fn dd_clock_normalization_compatibility_and_refusal_are_explicit() {
+    let spectrum = prepare(vec![input(3.0, [0.5, 0.2], 0.0, [1.0, 0.0])]);
+    for start in [-0.3, 0.0, 1.7] {
+        let plain = spectrum.causal_integral(start, 0.2, 0.8).unwrap();
+        let dd = spectrum
+            .causal_integral_from_clock_dd(Dd::from_f64(start), 0.2, 0.8)
+            .unwrap();
+        assert_eq!(plain.integral_dd(), dd.integral_dd());
+        assert_eq!(plain.weighted_integral_dd(), dd.weighted_integral_dd());
+    }
+    let normalized = spectrum
+        .causal_integral_from_clock_dd(
+            Dd {
+                hi: 0.125,
+                lo: 0.125,
+            },
+            0.2,
+            0.8,
+        )
+        .unwrap();
+    assert_eq!(
+        normalized.weighted_integral_dd(),
+        spectrum
+            .causal_integral(0.25, 0.2, 0.8)
+            .unwrap()
+            .weighted_integral_dd()
+    );
+    for start in [
+        Dd {
+            hi: 0.0,
+            lo: f64::NAN,
+        },
+        Dd {
+            hi: f64::INFINITY,
+            lo: 0.0,
+        },
+    ] {
+        assert_eq!(
+            spectrum
+                .causal_integral_from_clock_dd(start, 0.2, 0.8)
+                .unwrap_err(),
+            ProductSpectrumError::Window(WindowError::InvalidWindow)
+        );
+    }
+    assert!(
+        spectrum
+            .causal_integral_from_clock_dd(
+                Dd {
+                    hi: f64::MAX,
+                    lo: f64::MAX
+                },
+                0.2,
+                0.8
+            )
+            .is_err()
+    );
+    assert_eq!(
+        spectrum
+            .causal_integral_from_clock_dd_cancellable(Dd::ZERO, 0.2, 0.8, || true)
+            .unwrap_err(),
+        ProductSpectrumError::Cancelled
+    );
+}

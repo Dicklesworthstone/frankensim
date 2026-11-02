@@ -313,3 +313,138 @@ fn angular_products_keep_sum_low_bits_and_the_negative_time_convention() {
         Err(ProductSpectrumError::Cancelled)
     ));
 }
+
+#[test]
+fn contracted_angular_terms_preserve_spatial_sums_signs_and_dd_frequency() {
+    let w = Dd::from_pair(2.0, 1.0);
+    let inputs = [
+        AngularHarmonicSpectrumTerm {
+            angular_frequency_rad_s: Dd::ZERO,
+            peak_amplitude: [Dd::from_f64(0.4), Dd::from_f64(99.0)],
+        },
+        AngularHarmonicSpectrumTerm {
+            angular_frequency_rad_s: w,
+            peak_amplitude: [Dd::from_f64(1e16), Dd::ZERO],
+        },
+        AngularHarmonicSpectrumTerm {
+            angular_frequency_rad_s: w,
+            peak_amplitude: [Dd::ONE, Dd::ZERO],
+        },
+        AngularHarmonicSpectrumTerm {
+            angular_frequency_rad_s: w,
+            peak_amplitude: [Dd::from_f64(-1e16), Dd::ZERO],
+        },
+        AngularHarmonicSpectrumTerm {
+            angular_frequency_rad_s: -w,
+            peak_amplitude: [Dd::from_f64(0.2), Dd::from_f64(0.3)],
+        },
+    ];
+    let admitted = HarmonicSpectrumTermLimits {
+        maximum_terms: inputs.len(),
+        maximum_workspace_bytes: inputs.len() * core::mem::size_of::<HarmonicProductTone>(),
+    };
+    let spectrum = PreparedHarmonicProductSpectrum::from_angular_terms(inputs, admitted).unwrap();
+    assert_eq!(spectrum.tones().len(), 1);
+    assert_eq!(
+        spectrum.tones()[0].angular_frequency_dd(),
+        Dd::from_f64(3.0)
+    );
+    assert_eq!(spectrum.dc_dd(), Dd::from_f64(0.4));
+    for t in [-0.8_f64, 0.0, 0.2, 1.3] {
+        let expected = 0.4 + 1.2 * (3.0 * t).cos() - 0.3 * (3.0 * t).sin();
+        assert!((spectrum.evaluate(t).unwrap() - expected).abs() < 2e-14);
+    }
+    let carrier = Dd::from_pair(2.0_f64.powi(50), 0.125);
+    let spectrum = PreparedHarmonicProductSpectrum::from_angular_terms(
+        [AngularHarmonicSpectrumTerm {
+            angular_frequency_rad_s: carrier,
+            peak_amplitude: [Dd::ONE, Dd::ZERO],
+        }],
+        admitted,
+    )
+    .unwrap();
+    assert_eq!(spectrum.tones()[0].angular_frequency_dd(), carrier);
+}
+
+#[test]
+fn contracted_term_admission_refuses_bad_values_and_preserves_empty_results() {
+    let term = AngularHarmonicSpectrumTerm {
+        angular_frequency_rad_s: Dd::ONE,
+        peak_amplitude: [Dd::ONE, Dd::ZERO],
+    };
+    let admitted = HarmonicSpectrumTermLimits {
+        maximum_terms: 1,
+        maximum_workspace_bytes: core::mem::size_of::<HarmonicProductTone>(),
+    };
+    let value = PreparedHarmonicProductSpectrum::from_angular_terms([term], admitted)
+        .unwrap()
+        .evaluate(0.2)
+        .unwrap();
+    for bad in [
+        HarmonicSpectrumTermLimits {
+            maximum_terms: 0,
+            ..admitted
+        },
+        HarmonicSpectrumTermLimits {
+            maximum_workspace_bytes: admitted.maximum_workspace_bytes - 1,
+            ..admitted
+        },
+    ] {
+        assert_eq!(
+            PreparedHarmonicProductSpectrum::from_angular_terms([term], bad).unwrap_err(),
+            ProductSpectrumError::Budget
+        );
+    }
+    assert_eq!(
+        PreparedHarmonicProductSpectrum::from_angular_terms([term, term], admitted).unwrap_err(),
+        ProductSpectrumError::Budget
+    );
+    assert_eq!(
+        PreparedHarmonicProductSpectrum::from_angular_terms(
+            [AngularHarmonicSpectrumTerm {
+                angular_frequency_rad_s: Dd::from_f64(f64::NAN),
+                ..term
+            }],
+            admitted
+        )
+        .unwrap_err(),
+        ProductSpectrumError::Window(WindowError::InvalidFrequency)
+    );
+    assert_eq!(
+        PreparedHarmonicProductSpectrum::from_angular_terms(
+            [AngularHarmonicSpectrumTerm {
+                peak_amplitude: [Dd::from_f64(f64::INFINITY), Dd::ZERO],
+                ..term
+            }],
+            admitted
+        )
+        .unwrap_err(),
+        ProductSpectrumError::Window(WindowError::NonFiniteAmplitude)
+    );
+    let mut polls = 0;
+    assert_eq!(
+        PreparedHarmonicProductSpectrum::from_angular_terms_cancellable([term], admitted, || {
+            polls += 1;
+            polls == 3
+        })
+        .unwrap_err(),
+        ProductSpectrumError::Cancelled
+    );
+    assert_eq!(
+        PreparedHarmonicProductSpectrum::from_angular_terms([term], admitted)
+            .unwrap()
+            .evaluate(0.2)
+            .unwrap(),
+        value
+    );
+    let empty = PreparedHarmonicProductSpectrum::from_angular_terms(
+        [],
+        HarmonicSpectrumTermLimits {
+            maximum_terms: 0,
+            maximum_workspace_bytes: 0,
+        },
+    )
+    .unwrap();
+    assert!(empty.tones().is_empty());
+    assert_eq!(empty.dc_dd(), Dd::ZERO);
+}

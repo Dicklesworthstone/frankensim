@@ -71,10 +71,43 @@ impl PreparedHarmonicProductSpectrum {
         start_s: f64,
         duration_s: f64,
         decay_rate_per_s: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<HarmonicCausalIntegral, ProductSpectrumError> {
+        self.causal_integral_from_clock_dd_cancellable(
+            Dd::from_f64(start_s),
+            duration_s,
+            decay_rate_per_s,
+            cancelled,
+        )
+    }
+
+    /// Retain a physical source epoch plus accepted elapsed time in DD.
+    /// This avoids erasing later substeps when an f64 absolute clock cannot
+    /// resolve their offset. Duration and decay semantics are unchanged.
+    pub fn causal_integral_from_clock_dd(
+        &self,
+        start_s: Dd,
+        duration_s: f64,
+        decay_rate_per_s: f64,
+    ) -> Result<HarmonicCausalIntegral, ProductSpectrumError> {
+        self.causal_integral_from_clock_dd_cancellable(
+            start_s,
+            duration_s,
+            decay_rate_per_s,
+            || false,
+        )
+    }
+
+    pub fn causal_integral_from_clock_dd_cancellable(
+        &self,
+        start_s: Dd,
+        duration_s: f64,
+        decay_rate_per_s: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<HarmonicCausalIntegral, ProductSpectrumError> {
         spectrum_poll(&mut cancelled)?;
-        if !start_s.is_finite()
+        if !start_s.hi.is_finite()
+            || !start_s.lo.is_finite()
             || !duration_s.is_finite()
             || duration_s < 0.0
             || !decay_rate_per_s.is_finite()
@@ -82,6 +115,7 @@ impl PreparedHarmonicProductSpectrum {
         {
             return Err(WindowError::InvalidWindow.into());
         }
+        let start_s = checked(Dd::from_pair(start_s.hi, start_s.lo))?;
         if duration_s == 0.0 {
             return Ok(HarmonicCausalIntegral {
                 integral: Dd::ZERO,
@@ -109,7 +143,7 @@ impl PreparedHarmonicProductSpectrum {
                 spectrum_poll(&mut cancelled)?;
             }
             let omega = tone.angular_frequency_dd();
-            let phase_start = checked(omega * Dd::from_f64(start_s))?;
+            let phase_start = checked(omega * start_s)?;
             let beta = checked(omega * duration)?;
             let (real, imaginary) = proper_phase(phase_start);
             let amplitude = [

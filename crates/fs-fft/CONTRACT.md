@@ -532,3 +532,52 @@ Together with the two new angular-admission regressions and existing
 temporal/spectrum tests, all 35 definitions compiled, linked and ran in a
 focused native Rust executable using the real fs_math library, with no
 nominal physics boundaries. This is not the full workspace quality gate.
+
+
+## Spatially contracted spectra and resolved nonlinear forcing
+
+`AngularHarmonicSpectrumTerm` admits an already-contracted REAL observable
+tone in the existing negative-time convention, with a DD angular frequency
+and DD peak amplitude. Its amplitude already includes physical quadrature
+weights and product normalization. `from_angular_terms[_cancellable]` retains
+DC, conjugates negative frequencies and uses the same deterministic coalescing
+path as the original field-product constructors. Native DD pairs are normalized
+before grouping. This lets domain adapters contract physical space first,
+without storing a separate tone for every quadrature point. Explicit term
+and vector-payload limits, the existing fixed tone ceiling and cancellation
+apply before publication. No statistics, units, spatial accuracy or dissipation
+are inferred from an already-contracted term.
+
+The causal integral also accepts a DD source-clock start through
+`causal_integral_from_clock_dd[_cancellable]`. A source epoch plus accepted
+elapsed time therefore remains resolved when a single f64 absolute timestamp
+would erase later substeps. The f64 API delegates to the same implementation;
+input normalization, validation, decay and physical-integral semantics agree.
+
+`input_ripple_bound[_cancellable]` bounds how far cumulative input can depart
+from the endpoint chord when the source is replaced by its exact interval mean.
+For F(s)=integral_0^s f(t0+u)du on [0,h], it returns B with
+|F(s)-(s/h)F(h)| <= B independently of t0. DC contributes zero. For each tone,
+a conservative amplitude envelope A gives the minimum of A*w*h^2/8, A*h/2
+and 2*A/w. The first is the linear interpolation remainder of the primitive
+(NIST DLMF https://dlmf.nist.gov/3.3.E5); the other two follow from the bounded
+input and bounded harmonic primitive. This detects unresolved energy excursions
+even when the net input over a complete carrier cycle is zero.
+
+Frequency intervals and every positive arithmetic operation are rounded
+outward with IEEE f64 predecessor/successor operations. The four absolute
+DD amplitude components are scaled before summation to avoid premature
+envelope overflow. Positive underflow is rounded upward, while exact darkness
+remains zero. The result encloses the retained analytic spectrum's input
+excursion, not source-model, propagation, spatial-quadrature or nonlinear
+state-solver errors. A domain integrator must still control its thermal/mechanical
+integration error and physical validity separately. All queries are O(distinct
+tones), allocation-free and cancellable; an unrepresentable bound refuses.
+
+Eight new tests cover contracted signed/DC/weak and DD-frequency terms,
+atomic admission, late DD-clock substeps and partition composition, direct
+primitive samples, full-cycle alias witnesses, small-window refinement,
+high-carrier suppression, weak cancellation, extreme finite amplitude scaling
+and cancellation. All 43 shared temporal/spectral/causal tests compiled,
+linked and executed with the real fs_math library and no nominal physics
+boundaries. This scoped execution is not the full workspace quality gate.

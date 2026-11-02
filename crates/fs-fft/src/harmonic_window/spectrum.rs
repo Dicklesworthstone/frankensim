@@ -8,6 +8,7 @@ use super::*;
 
 mod causal;
 pub use causal::HarmonicCausalIntegral;
+mod ripple;
 
 /// Hard bound on generated tones BEFORE frequency coalescing.
 pub const MAX_PRODUCT_SPECTRUM_TERMS: usize = 131_072;
@@ -51,6 +52,32 @@ pub struct AngularHarmonicProductInput {
     pub left_amplitude: [Dd; 2],
     pub right_amplitude: [Dd; 2],
     pub law: HarmonicProductLaw,
+}
+
+/// One already-contracted term of a REAL observable using exp(-i omega t).
+///
+/// Spatial quadratures can contract original field products before emitting
+/// this term. The peak amplitude already includes every physical weight and
+/// any one-half product normalization. Zero angular frequency contributes
+/// only its real part to DC; negative frequencies are conjugated. The input
+/// DD pairs are normalized without first rounding their sums to f64.
+///
+/// This declaration does not infer source statistics, spatial quadrature
+/// accuracy, units, dissipation, or a random realization from an expected
+/// waveform. Those belong to the original physical contraction.
+#[derive(Clone, Copy, Debug)]
+pub struct AngularHarmonicSpectrumTerm {
+    pub angular_frequency_rad_s: Dd,
+    pub peak_amplitude: [Dd; 2],
+}
+
+/// Admission for already-contracted terms, before frequency coalescing.
+#[derive(Clone, Copy, Debug)]
+pub struct HarmonicSpectrumTermLimits {
+    pub maximum_terms: usize,
+    /// Logical vector payload at its admitted capacity. Caller inputs,
+    /// iterator state, stack values and allocator overhead are excluded.
+    pub maximum_workspace_bytes: usize,
 }
 
 struct NativeHarmonicProductInput {
@@ -213,6 +240,52 @@ impl PreparedHarmonicProductSpectrum {
         )
     }
 
+    /// Prepare already-contracted real-observable terms without expanding
+    /// physical quadrature samples into separate retained tones.
+    pub fn from_angular_terms(
+        terms: impl IntoIterator<Item = AngularHarmonicSpectrumTerm>,
+        limits: HarmonicSpectrumTermLimits,
+    ) -> Result<Self, ProductSpectrumError> {
+        Self::from_angular_terms_cancellable(terms, limits, || false)
+    }
+
+    pub fn from_angular_terms_cancellable(
+        terms: impl IntoIterator<Item = AngularHarmonicSpectrumTerm>,
+        limits: HarmonicSpectrumTermLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ProductSpectrumError> {
+        spectrum_poll(&mut cancelled)?;
+        let capacity = limits.maximum_terms.min(MAX_PRODUCT_SPECTRUM_TERMS);
+        let bytes = capacity
+            .checked_mul(core::mem::size_of::<HarmonicProductTone>())
+            .ok_or(ProductSpectrumError::Budget)?;
+        if bytes > limits.maximum_workspace_bytes {
+            return Err(ProductSpectrumError::Budget);
+        }
+        let mut tones = Vec::new();
+        tones
+            .try_reserve_exact(capacity)
+            .map_err(|_| ProductSpectrumError::Allocation)?;
+        for (index, input) in terms.into_iter().enumerate() {
+            spectrum_poll(&mut cancelled)?;
+            if index >= capacity {
+                return Err(ProductSpectrumError::Budget);
+            }
+            let frequency = input.angular_frequency_rad_s;
+            if !frequency.hi.is_finite() || !frequency.lo.is_finite() {
+                return Err(WindowError::InvalidFrequency.into());
+            }
+            let frequency = checked(Dd::from_pair(frequency.hi, frequency.lo))?;
+            let mut amplitude = input.peak_amplitude;
+            for value in &mut amplitude {
+                check_amplitude(*value)?;
+                *value = checked(Dd::from_pair(value.hi, value.lo))?;
+            }
+            tones.push(tone(frequency, amplitude, index, true)?);
+        }
+        Self::finish(tones, true, cancelled)
+    }
+
     fn prepare(
         products: impl Iterator<Item = NativeHarmonicProductInput>,
         angular: bool,
@@ -268,6 +341,16 @@ impl PreparedHarmonicProductSpectrum {
                 tones.push(tone(checked(fa + fb)?, sum, order, angular)?);
             }
         }
+        Self::finish(tones, angular, cancelled)
+    }
+
+    // One coalescing path serves field products and physical quadrature
+    // contractions, preserving exact authored frequencies and input order.
+    fn finish(
+        mut tones: Vec<HarmonicProductTone>,
+        angular: bool,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ProductSpectrumError> {
         spectrum_poll(&mut cancelled)?;
         // The fixed generated-term ceiling bounds this synchronous sort.
         tones.sort_unstable_by(|a, b| {
