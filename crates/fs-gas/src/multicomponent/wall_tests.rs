@@ -1,7 +1,8 @@
 //! Independent physical oracles for a reflecting wall at local mixture composition.
 use crate::multicomponent::tests::{gas, source};
 use crate::multicomponent::{
-    Boundaries, Boundary, Conserved, FaceFlux, MixtureEuler1d, MixtureGas, StepControl,
+    Boundaries, Boundary, Conserved, Error, FaceFlux, MixtureEuler1d, MixtureGas, NormalCell,
+    NormalPrimitive, SpatialCell, SpatialPrimitive, StepControl,
 };
 use fs_qty::{Length, Time};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
@@ -44,6 +45,252 @@ fn close(actual: f64, expected: f64, scale: f64, tolerance: f64) {
         (actual - expected).abs() <= tolerance * scale,
         "actual={actual:.15e}, expected={expected:.15e}, scale={scale:.9e}, tolerance={tolerance:.3e}"
     );
+}
+
+#[test]
+fn moving_mixture_piston_closes_species_and_variable_caloric_work() {
+    for densities in [[0.24_f64, 0.96], [0.96, 0.24], [0.0, 1.2], [1.2, 0.0]] {
+        let rho1 = densities[0] + densities[1];
+        let (a, b, r) = mixture_coefficients(densities);
+        let (t1, speed) = (2.5_f64, 3.2_f64);
+        let p1 = rho1 * r * t1;
+        let mut expected = None;
+        for reference in [0.0, -1e18, 1e18] {
+            let gas = caloric_gas(true, reference);
+            for normal in [-1.0, 1.0] {
+                let wall_velocity = -normal * speed;
+                let mut flux = [f64::NAN; 6];
+                let report = gas
+                    .moving_wall_spatial_flux_from_primitive(
+                        SpatialPrimitive {
+                            partial_densities: &densities,
+                            normal_velocity: 0.0,
+                            transverse_velocity: [3.0, -4.0],
+                            pressure: p1,
+                        },
+                        normal,
+                        wall_velocity,
+                        &mut flux,
+                        || false,
+                    )
+                    .unwrap();
+                assert_eq!(&flux[..2], &[0.0; 2]);
+                assert_eq!(&flux[3..5], &[0.0; 2]);
+                assert_eq!(flux[5], flux[2] * wall_velocity);
+                assert!(!report.used_hll_fallback);
+                let p2 = flux[2];
+                let w = (p2 - p1) / (rho1 * speed) - speed;
+                let rho2 = rho1 * (speed + w) / w;
+                let t2 = p2 / (rho2 * r);
+                let delta_e = (a - r) * (t2 - t1) + 0.5 * b * (t2 * t2 - t1 * t1);
+                // The exact translating-piston shock gives a uniform swept
+                // slab. Its source-integrated thermal plus kinetic energy gain
+                // must equal the laboratory pressure work; tangential energy
+                // and formation references cancel by each species' mass law.
+                let energy_rate = rho1 * (speed + w) * (delta_e + 0.5 * speed * speed);
+                close(energy_rate, -normal * flux[5], energy_rate, 4e-9);
+                for density in densities {
+                    close(
+                        density * (speed + w),
+                        density * (rho2 / rho1) * w,
+                        1.0,
+                        4e-9,
+                    );
+                }
+                let entropy = a * (t2 / t1).ln() + b * (t2 - t1) - r * (p2 / p1).ln();
+                assert!(entropy > 0.0);
+                let invariant = (p2.to_bits(), report.signal_speed.to_bits());
+                if let Some(previous) = expected {
+                    assert_eq!(invariant, previous);
+                } else {
+                    expected = Some(invariant);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn moving_mixture_wall_reduces_to_stationary_and_preserves_frame_covariance() {
+    let gas = caloric_gas(true, 0.0);
+    let densities = [0.25, 0.75];
+    let planar = NormalPrimitive {
+        partial_densities: &densities,
+        normal_velocity: 0.5,
+        transverse_velocity: 2.0,
+        pressure: 1.5,
+    };
+    let spatial = SpatialPrimitive {
+        partial_densities: &densities,
+        normal_velocity: planar.normal_velocity,
+        transverse_velocity: [planar.transverse_velocity, 0.0],
+        pressure: planar.pressure,
+    };
+    let mut q2 = [0.0; 5];
+    gas.normal_conserved_into(planar, &mut q2).unwrap();
+    let cell2 = NormalCell {
+        partial_densities: &q2[..2],
+        normal_momentum: q2[2],
+        transverse_momentum: q2[3],
+        energy: q2[4],
+    };
+    let mut q3 = [0.0; 6];
+    gas.spatial_conserved_into(spatial, &mut q3).unwrap();
+    let cell3 = SpatialCell {
+        partial_densities: &q3[..2],
+        normal_momentum: q3[2],
+        transverse_momentum: [q3[3], q3[4]],
+        energy: q3[5],
+    };
+    for normal in [-1.0, 1.0] {
+        for wall_velocity in [0.0, -0.25, 1.0] {
+            let mut f2 = [0.0; 5];
+            let mut f3 = [0.0; 6];
+            let r2 = gas
+                .moving_wall_normal_flux_from_primitive(
+                    planar,
+                    normal,
+                    wall_velocity,
+                    &mut f2,
+                    || false,
+                )
+                .unwrap();
+            let r3 = gas
+                .moving_wall_spatial_flux_from_primitive(
+                    spatial,
+                    normal,
+                    wall_velocity,
+                    &mut f3,
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(r2, r3);
+            assert_eq!(f2[2], f3[2]);
+            assert_eq!(f2[4], f3[5]);
+            assert_eq!(&f3[..2], &[0.0; 2]);
+            assert_eq!(&f3[3..5], &[0.0; 2]);
+            let mut decoded2 = [0.0; 5];
+            let mut decoded3 = [0.0; 6];
+            let d2 = gas
+                .moving_wall_normal_flux(cell2, normal, wall_velocity, &mut decoded2, || false)
+                .unwrap();
+            let d3 = gas
+                .moving_wall_spatial_flux(cell3, normal, wall_velocity, &mut decoded3, || false)
+                .unwrap();
+            close(decoded2[2], f2[2], f2[2], 4e-9);
+            close(decoded3[2], f3[2], f3[2], 4e-9);
+            close(decoded2[4], f2[4], f2[2], 4e-9);
+            close(decoded3[5], f3[5], f3[2], 4e-9);
+            let boost = 4.0;
+            let translated = SpatialPrimitive {
+                normal_velocity: spatial.normal_velocity + boost,
+                transverse_velocity: [5.0, -2.0],
+                ..spatial
+            };
+            let mut boosted = [0.0; 6];
+            let br = gas
+                .moving_wall_spatial_flux_from_primitive(
+                    translated,
+                    normal,
+                    wall_velocity + boost,
+                    &mut boosted,
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(br, r3);
+            assert_eq!(boosted[2], f3[2]);
+            close(boosted[5], f3[5] + boost * f3[2], f3[2], 2e-14);
+            if wall_velocity == 0.0 {
+                let mut stationary2 = [0.0; 5];
+                let mut stationary3 = [0.0; 6];
+                assert_eq!(
+                    r2,
+                    gas.stationary_wall_normal_flux_from_primitive(
+                        planar,
+                        normal,
+                        &mut stationary2,
+                        || false
+                    )
+                    .unwrap()
+                );
+                assert_eq!(
+                    r3,
+                    gas.stationary_wall_spatial_flux_from_primitive(
+                        spatial,
+                        normal,
+                        &mut stationary3,
+                        || false
+                    )
+                    .unwrap()
+                );
+                assert_eq!(stationary2, f2);
+                assert_eq!(stationary3, f3);
+                assert_eq!(
+                    d2,
+                    gas.stationary_wall_normal_flux(cell2, normal, &mut stationary2, || false)
+                        .unwrap()
+                );
+                assert_eq!(
+                    d3,
+                    gas.stationary_wall_spatial_flux(cell3, normal, &mut stationary3, || false)
+                        .unwrap()
+                );
+                assert_eq!(stationary2, decoded2);
+                assert_eq!(stationary3, decoded3);
+            }
+        }
+    }
+}
+
+#[test]
+fn moving_mixture_wall_refuses_without_publishing_partial_work() {
+    let gas = caloric_gas(false, 0.0);
+    let densities = [0.7, 0.3];
+    let input = SpatialPrimitive {
+        partial_densities: &densities,
+        normal_velocity: 0.0,
+        transverse_velocity: [0.0; 2],
+        pressure: 0.4,
+    };
+    let original = [19.0; 6];
+    let mut output = original;
+    for velocity in [-30.0, 4.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            gas.moving_wall_spatial_flux_from_primitive(input, 1.0, velocity, &mut output, || {
+                false
+            })
+            .is_err()
+        );
+        assert_eq!(output, original);
+    }
+    assert!(
+        gas.moving_wall_spatial_flux_from_primitive(input, 1.0, -1.0, &mut output[..5], || false)
+            .is_err()
+    );
+    assert_eq!(output, original);
+    assert!(
+        gas.moving_wall_spatial_flux_from_primitive(input, 0.0, -1.0, &mut output, || false)
+            .is_err()
+    );
+    assert_eq!(output, original);
+    let mut count = 0;
+    gas.moving_wall_spatial_flux_from_primitive(input, 1.0, -1.0, &mut output, || {
+        count += 1;
+        false
+    })
+    .unwrap();
+    for stop in [1, count / 2, count] {
+        output = original;
+        let mut polls = 0;
+        assert_eq!(
+            gas.moving_wall_spatial_flux_from_primitive(input, 1.0, -1.0, &mut output, || {
+                polls += 1;
+                polls == stop
+            }),
+            Err(Error::Cancelled)
+        );
+        assert_eq!(output, original);
+    }
 }
 
 #[test]

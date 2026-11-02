@@ -22,6 +22,18 @@ impl MixtureGas {
         out: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FaceFlux, Error> {
+        self.moving_wall_flux(inside, primitive, outward_normal, 0.0, out, cancelled)
+    }
+
+    pub(super) fn moving_wall_flux(
+        &self,
+        inside: Cell<'_>,
+        primitive: Primitive,
+        outward_normal: f64,
+        wall_velocity: f64,
+        out: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
         poll(cancelled)?;
         if out.len() != self.species_count() + 2
             || !self.admissible_cell(inside)
@@ -38,16 +50,25 @@ impl MixtureGas {
         }
         let law = LocalCaloric::new(self, inside.partial_densities)?;
         let wall = WallSolver::new(&law)
-            .stopped_wall(primitive, outward_normal * primitive.velocity, cancelled)
+            .moving_wall(primitive, outward_normal, wall_velocity, cancelled)
             .map_err(wall_error)?;
         if !positive(wall.density) || !positive(wall.temperature) {
             return Err(Error::Invalid(
                 "unrepresentable wall density or temperature",
             ));
         }
+        let work = if wall_velocity == 0.0 {
+            0.0
+        } else {
+            wall.pressure * wall_velocity
+        };
+        if !work.is_finite() {
+            return Err(Error::Invalid("moving wall pressure work overflow"));
+        }
         poll(cancelled)?;
         out.fill(0.0);
         out[self.species_count()] = wall.pressure;
+        out[self.species_count() + 1] = work;
         Ok(FaceFlux {
             signal_speed: wall.signal_speed,
             used_hll_fallback: false,

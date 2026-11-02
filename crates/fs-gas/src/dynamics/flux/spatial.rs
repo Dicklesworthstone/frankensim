@@ -63,7 +63,7 @@ pub struct SpatialPrimitive {
     pub pressure: f64,
 }
 
-/// Shared three-dimensional face flux from the planar/volumetric HLLC kernel.
+/// Shared three-dimensional convective or slip-wall face flux.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SpatialFaceFlux {
     /// Mass flux [kg/(m² s)].
@@ -74,7 +74,8 @@ pub struct SpatialFaceFlux {
     pub transverse_momentum: [f64; 2],
     /// Referenced total-energy flux, including all kinetic energy [W/m²].
     pub energy: f64,
-    /// Largest magnitude of the actual numerical wave speeds [m/s].
+    /// Wave-speed bound [m/s], relative to the face for moving-wall APIs and
+    /// in the laboratory frame for stationary-face APIs.
     pub signal_speed: f64,
     /// Whether the shared kernel used its admitted HLL fallback.
     pub used_hll_fallback: bool,
@@ -205,5 +206,53 @@ impl FrozenGas {
         let (state, primitive) = self.spatial_state_at(state)?;
         self.trace_wall_interface(state, primitive, outward_normal, &mut cancelled)
             .map(SpatialFaceFlux::from)
+    }
+
+    /// Three-dimensional moving-face ALE slip-wall flux. The two tangential
+    /// momentum fluxes and mass flux are exactly zero, normal traction is the
+    /// original source's wall pressure, and energy flux is `p_star*wall_velocity`.
+    ///
+    /// Velocity and flux use the supplied normal axis; multiply flux by the
+    /// -1 or +1 `outward_normal` for outward transfer. The signal-speed bound is
+    /// RELATIVE TO THE WALL, not the laboratory frame. Tangential translation
+    /// does no inviscid work. The spatial owner must evolve face geometry and
+    /// cell volumes consistently; no moving-mesh time integration is implied.
+    pub fn moving_wall_spatial_flux(
+        &self,
+        state: SpatialConserved,
+        outward_normal: f64,
+        wall_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        let primitive = self.spatial_primitive(state, &mut cancelled)?;
+        self.trace_moving_wall_interface(
+            state,
+            primitive,
+            outward_normal,
+            wall_velocity,
+            &mut cancelled,
+        )
+        .map(SpatialFaceFlux::from)
+    }
+
+    /// Reconstructed-trace fast path to [`Self::moving_wall_spatial_flux`], with
+    /// the same source and complete kinetic-energy precision admission.
+    pub fn moving_wall_spatial_flux_from_primitive(
+        &self,
+        state: SpatialPrimitive,
+        outward_normal: f64,
+        wall_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (state, primitive) = self.spatial_state_at(state)?;
+        self.trace_moving_wall_interface(
+            state,
+            primitive,
+            outward_normal,
+            wall_velocity,
+            &mut cancelled,
+        )
+        .map(SpatialFaceFlux::from)
     }
 }

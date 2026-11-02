@@ -26,7 +26,8 @@ pub struct FaceFlux {
     pub momentum: f64,
     /// Referenced total-energy flux [W/m²]. Add `e_ref * mass` for physical energy.
     pub energy: f64,
-    /// Largest magnitude of the actual numerical face wave speeds [m/s].
+    /// Wave-speed bound [m/s], relative to the face for moving-wall APIs and
+    /// in the laboratory frame for stationary-face APIs.
     pub signal_speed: f64,
     /// Whether this face used the more dissipative HLL fallback.
     pub used_hll_fallback: bool,
@@ -119,7 +120,7 @@ pub struct NormalPrimitive {
     pub pressure: f64,
 }
 
-/// Shared HLLC/HLL flux in the same normal/tangent frame as its traces.
+/// Shared face flux in the same normal/tangent frame as its traces.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NormalFaceFlux {
     /// Mass flux [kg/(m² s)].
@@ -130,7 +131,8 @@ pub struct NormalFaceFlux {
     pub transverse_momentum: f64,
     /// Referenced total-energy flux, including transverse kinetic energy [W/m²].
     pub energy: f64,
-    /// Largest magnitude of the actual numerical face wave speeds [m/s].
+    /// Wave-speed bound [m/s], relative to the face for moving-wall APIs and
+    /// in the laboratory frame for stationary-face APIs.
     pub signal_speed: f64,
     /// Whether this face used the more dissipative HLL fallback.
     pub used_hll_fallback: bool,
@@ -287,6 +289,60 @@ impl FrozenGas {
         self.normal_wall_interface(state, p, outward_normal, &mut cancelled)
     }
 
+    /// Moving-face ALE flux at an adiabatic, impermeable slip wall.
+    ///
+    /// `wall_velocity` is along the supplied normal axis [m/s], and
+    /// `outward_normal` selects the domain side (-1 or +1). The original
+    /// caloric shock/rarefaction solve uses gas velocity relative to the wall.
+    /// In this axis the flux is `(0, p_star, 0, p_star * wall_velocity)`;
+    /// multiply by `outward_normal` for outward flux. The energy is mechanical
+    /// pressure work in the laboratory frame, with no advected mass or heat.
+    /// Tangential wall motion has no effect on this inviscid slip condition.
+    ///
+    /// `signal_speed` bounds waves RELATIVE TO THE MOVING FACE. A moving-volume
+    /// integrator must supply its geometry, geometric conservation law and
+    /// time quadrature; this flux must not be inserted into a stationary cell
+    /// update as if its volume had remained fixed. Zero wall speed reproduces
+    /// the stationary API. Unsupported caloric paths are refused unchanged.
+    pub fn moving_wall_normal_flux(
+        &self,
+        state: NormalConserved,
+        outward_normal: f64,
+        wall_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        let primitive = self.normal_primitive(state, &mut cancelled)?;
+        self.trace_moving_wall_interface(
+            state,
+            primitive,
+            outward_normal,
+            wall_velocity,
+            &mut cancelled,
+        )
+        .map(NormalFaceFlux::from)
+    }
+
+    /// Source-admitted reconstructed trace for [`Self::moving_wall_normal_flux`].
+    /// Avoids caloric inversion while retaining full kinetic-energy admission.
+    pub fn moving_wall_normal_flux_from_primitive(
+        &self,
+        state: NormalPrimitive,
+        outward_normal: f64,
+        wall_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (state, primitive) = self.normal_state_at(state)?;
+        self.trace_moving_wall_interface(
+            state,
+            primitive,
+            outward_normal,
+            wall_velocity,
+            &mut cancelled,
+        )
+        .map(NormalFaceFlux::from)
+    }
+
     fn normal_wall_interface(
         &self,
         state: NormalConserved,
@@ -345,9 +401,27 @@ impl FrozenGas {
         outward_normal: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NumericalFlux<N>, Error> {
-        let wall = self.wall_flux(state.normal_state(), primitive, outward_normal, cancelled)?;
+        self.trace_moving_wall_interface(state, primitive, outward_normal, 0.0, cancelled)
+    }
+
+    fn trace_moving_wall_interface<const N: usize>(
+        &self,
+        state: impl Trace<N>,
+        primitive: Primitive,
+        outward_normal: f64,
+        wall_velocity: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NumericalFlux<N>, Error> {
+        let wall = self.moving_wall_flux(
+            state.normal_state(),
+            primitive,
+            outward_normal,
+            wall_velocity,
+            cancelled,
+        )?;
         let mut values = [0.0; N];
         values[1] = wall.momentum;
+        values[N - 1] = wall.energy;
         flux(values, wall.signal_speed, false)
     }
 

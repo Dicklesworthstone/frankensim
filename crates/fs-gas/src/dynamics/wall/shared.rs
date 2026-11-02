@@ -88,6 +88,33 @@ impl<'a, L: CaloricLaw> WallSolver<'a, L> {
         Self { law }
     }
 
+    /// Resolve the same physical wall wave in the translating face's frame.
+    /// Density, temperature and pressure are Galilean invariants; only normal
+    /// velocity changes. The returned signal bound is relative to that face.
+    pub fn moving_wall(
+        &self,
+        p: Primitive,
+        outward_normal: f64,
+        wall_velocity: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<WallState, WallError<L::Error>> {
+        if !matches!(outward_normal, -1.0 | 1.0) || !wall_velocity.is_finite() {
+            return Err(WallError::Invalid("moving wall normal or velocity"));
+        }
+        let relative = if wall_velocity == 0.0 {
+            p
+        } else {
+            Primitive {
+                velocity: p.velocity - wall_velocity,
+                ..p
+            }
+        };
+        if !relative.velocity.is_finite() {
+            return Err(WallError::Invalid("moving wall relative velocity overflow"));
+        }
+        self.stopped_wall(relative, outward_normal * relative.velocity, cancelled)
+    }
+
     pub fn stopped_wall(
         &self,
         p: Primitive,

@@ -196,6 +196,59 @@ impl MixtureGas {
         )
     }
 
+    /// Three-dimensional moving-face ALE slip-wall flux with the original
+    /// evolving-mixture wall-pressure law. Species and both tangential momentum
+    /// fluxes are exactly zero; normal momentum is `p_star`, and laboratory
+    /// energy flux is mechanical pressure work `p_star*wall_velocity`.
+    ///
+    /// Velocity and flux use the supplied normal axis; multiply flux by the
+    /// -1 or +1 `outward_normal` for outward transfer. The signal-speed bound is
+    /// RELATIVE TO THE WALL. Tangential wall translation does no inviscid work.
+    /// Moving geometry, the geometric conservation law and time integration
+    /// remain the spatial owner's responsibility. Output has `species_count()+4`
+    /// components and is scratch until success; zero wall speed is stationary.
+    pub fn moving_wall_spatial_flux(
+        &self,
+        inside: SpatialCell<'_>,
+        outward_normal: f64,
+        wall_velocity: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        let primitive = self.spatial_primitive(inside, &mut cancelled)?;
+        self.moving_spatial_wall(
+            inside,
+            primitive,
+            outward_normal,
+            wall_velocity,
+            out,
+            &mut cancelled,
+        )
+    }
+
+    /// Source-admitted reconstructed trace for [`Self::moving_wall_spatial_flux`].
+    pub fn moving_wall_spatial_flux_from_primitive(
+        &self,
+        inside: SpatialPrimitive<'_>,
+        outward_normal: f64,
+        wall_velocity: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let n = self.species_count();
+        let mut q = [0.0; MAX_SPATIAL_COMPONENTS];
+        let primitive = self.spatial_conserved_into(inside, &mut q[..n + 4])?;
+        self.moving_spatial_wall(
+            from_slice(&q[..n + 4], n),
+            primitive,
+            outward_normal,
+            wall_velocity,
+            out,
+            &mut cancelled,
+        )
+    }
+
     fn spatial_wall(
         &self,
         inside: SpatialCell<'_>,
@@ -204,20 +257,34 @@ impl MixtureGas {
         out: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FaceFlux, Error> {
+        self.moving_spatial_wall(inside, primitive, outward_normal, 0.0, out, cancelled)
+    }
+
+    fn moving_spatial_wall(
+        &self,
+        inside: SpatialCell<'_>,
+        primitive: Primitive,
+        outward_normal: f64,
+        wall_velocity: f64,
+        out: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
         let n = self.species_count();
         if out.len() != n + 4 {
             return Err(Error::Invalid("spatial mixture wall output axis"));
         }
         let mut normal = [0.0; MAX_COMPONENTS];
-        let report = self.wall_flux(
+        let report = self.moving_wall_flux(
             self.spatial_reduction(inside)?,
             primitive,
             outward_normal,
+            wall_velocity,
             &mut normal[..n + 2],
             cancelled,
         )?;
         out.fill(0.0);
         out[n] = normal[n];
+        out[n + 3] = normal[n + 1];
         Ok(report)
     }
 

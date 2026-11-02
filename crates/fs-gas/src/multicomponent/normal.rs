@@ -182,6 +182,63 @@ impl MixtureGas {
         )
     }
 
+    /// Moving-face ALE flux at an impermeable adiabatic slip wall, using the
+    /// incident trace's actual composition and temperature-dependent calorics.
+    ///
+    /// `wall_velocity` is along the supplied normal axis [m/s]; `outward_normal`
+    /// is -1 or +1. Species and tangential momentum fluxes are exactly zero.
+    /// Normal momentum flux is `p_star`, and laboratory-frame energy flux is
+    /// the mechanical work `p_star*wall_velocity`. Multiply by `outward_normal`
+    /// for outward transfer. Tangential translation has no inviscid work.
+    ///
+    /// The reported wave-speed bound is RELATIVE TO THE MOVING FACE. The caller
+    /// owns moving geometry, cell-volume conservation and time quadrature;
+    /// these are not supplied by this face closure. Output has the same
+    /// `species_count()+3` layout as the stationary planar API and is scratch
+    /// until success. Zero wall speed retains stationary arithmetic.
+    pub fn moving_wall_normal_flux(
+        &self,
+        inside: NormalCell<'_>,
+        outward_normal: f64,
+        wall_velocity: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        let primitive = self.normal_primitive(inside, &mut cancelled)?;
+        self.moving_normal_wall(
+            inside,
+            primitive,
+            outward_normal,
+            wall_velocity,
+            out,
+            &mut cancelled,
+        )
+    }
+
+    /// Reconstructed-trace path to [`Self::moving_wall_normal_flux`], retaining
+    /// original caloric/source admission without a temperature inversion.
+    pub fn moving_wall_normal_flux_from_primitive(
+        &self,
+        inside: NormalPrimitive<'_>,
+        outward_normal: f64,
+        wall_velocity: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let n = self.species_count();
+        let mut q = [0.0; MAX_NORMAL_COMPONENTS];
+        let primitive = self.normal_conserved_into(inside, &mut q[..n + 3])?;
+        self.moving_normal_wall(
+            from_slice(&q[..n + 3], n),
+            primitive,
+            outward_normal,
+            wall_velocity,
+            out,
+            &mut cancelled,
+        )
+    }
+
     fn normal_wall(
         &self,
         inside: NormalCell<'_>,
@@ -190,20 +247,34 @@ impl MixtureGas {
         out: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FaceFlux, Error> {
+        self.moving_normal_wall(inside, primitive, outward_normal, 0.0, out, cancelled)
+    }
+
+    fn moving_normal_wall(
+        &self,
+        inside: NormalCell<'_>,
+        primitive: Primitive,
+        outward_normal: f64,
+        wall_velocity: f64,
+        out: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
         let n = self.species_count();
         if out.len() != n + 3 {
             return Err(Error::Invalid("planar mixture wall output axis"));
         }
         let mut normal = [0.0; MAX_COMPONENTS];
-        let report = self.wall_flux(
+        let report = self.moving_wall_flux(
             self.normal_reduction(inside)?,
             primitive,
             outward_normal,
+            wall_velocity,
             &mut normal[..n + 2],
             cancelled,
         )?;
         out.fill(0.0);
         out[n] = normal[n];
+        out[n + 2] = normal[n + 1];
         Ok(report)
     }
 

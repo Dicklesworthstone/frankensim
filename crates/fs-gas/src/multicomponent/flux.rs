@@ -6,7 +6,8 @@ use super::{
 /// Wave-speed receipt accompanying an allocation-free species/energy face flux.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FaceFlux {
-    /// Largest magnitude of the actual admitted numerical wave speeds [m/s].
+    /// Wave-speed bound [m/s], relative to the face for moving-wall APIs and
+    /// in the laboratory frame for stationary-face APIs.
     pub signal_speed: f64,
     /// Whether an inadmissible HLLC contact fell back to an admitted HLL state.
     pub used_hll_fallback: bool,

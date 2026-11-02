@@ -20,6 +20,19 @@ impl FrozenGas {
         outward_normal: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FaceFlux, Error> {
+        self.moving_wall_flux(inside, primitive, outward_normal, 0.0, cancelled)
+    }
+
+    /// Flux relative to an impermeable face moving along the normal axis.
+    /// The gas momentum/energy remain in the original laboratory frame.
+    pub(super) fn moving_wall_flux(
+        &self,
+        inside: Conserved,
+        primitive: Primitive,
+        outward_normal: f64,
+        wall_velocity: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
         poll(cancelled)?;
         if !self.admissible_state(inside)
             || !matches!(outward_normal, -1.0 | 1.0)
@@ -31,17 +44,31 @@ impl FrozenGas {
         {
             return Err(Error::Invalid("wall normal or interior trace"));
         }
-        let wall = self.stopped_wall(primitive, outward_normal * primitive.velocity, cancelled)?;
+        let wall = if wall_velocity == 0.0 {
+            self.stopped_wall(primitive, outward_normal * primitive.velocity, cancelled)?
+        } else {
+            WallSolver::new(self)
+                .moving_wall(primitive, outward_normal, wall_velocity, cancelled)
+                .map_err(wall_error)?
+        };
         if !positive(wall.density) || !positive(wall.temperature) {
             return Err(Error::Invalid(
                 "unrepresentable wall density or temperature",
             ));
         }
+        let work = if wall_velocity == 0.0 {
+            0.0
+        } else {
+            wall.pressure * wall_velocity
+        };
+        if !work.is_finite() {
+            return Err(Error::Invalid("moving wall pressure work overflow"));
+        }
         poll(cancelled)?;
         Ok(FaceFlux {
             mass: 0.0,
             momentum: wall.pressure,
-            energy: 0.0,
+            energy: work,
             signal_speed: wall.signal_speed,
             used_hll_fallback: false,
         })

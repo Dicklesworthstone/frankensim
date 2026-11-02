@@ -1005,7 +1005,41 @@ existing nonlinear duct tests pass against the refactored kernel, and the
 64-cell-per-branch manifold still reaches 4 ms in 527 steps with zero reported
 mass and physical-energy residuals. These are focused production-code checks,
 not a workspace Cargo/DSR result or experimental validation. Reactive/catalytic
-surface kinetics, wall heat transfer and moving-wall work remain separate models.
+surface kinetics and wall heat transfer remain separate models.
+
+### Resolved moving-wall pressure and mechanical work
+
+Frozen and evolving-mixture planar/spatial face owners additionally expose
+`moving_wall_normal_flux` and `moving_wall_spatial_flux`, each with a
+source-admitted primitive fast path. These are moving-face ALE fluxes. The
+original one-sided shock/rarefaction owner uses normal velocity relative to the
+wall and retains the same density, temperature, pressure, actual species
+composition, temperature-dependent calorics and source-domain refusals.
+
+In the supplied normal axis the flux contains exactly zero relative mass and
+species transfer, normal momentum `p_star`, zero tangential momentum, and
+laboratory-frame energy `p_star * wall_velocity`. Multiplication by the existing
+-1/+1 outward-normal sign gives outward transfer. Thus a piston doing work on
+the gas adds internal and kinetic energy through its pressure traction, with
+no duplicated heat or species-enthalpy transfer. Tangential translation has no
+effect on the inviscid slip pressure or work. Independent species formation
+references cancel because no species crosses the wall.
+
+The reported signal-speed bound is relative to the moving face, not the
+laboratory frame. Zero wall velocity retains stationary arithmetic and exactly
+zero work. Both adapters use the existing shared caloric wave kernel; successful
+face work creates no new gas/source owner and needs only bounded stack scratch.
+
+Seven added regressions cover independent constant-Cp piston shock/rarefaction
+pressures, variable-Cp swept-slab mass/momentum/energy balances, evolving-mixture
+species and formation-reference invariance, normal/tangential Galilean changes,
+relative wave-speed semantics, planar/spatial and conservative/primitive
+agreement, stationary identity, source limits and cancellation without partial
+work publication. They have not been executed in the current resource-limited
+session. This remains an instantaneous inviscid face closure: moving geometry,
+cell-volume evolution/geometric conservation, temporal quadrature, piston
+inertia and viscous wall work are the corresponding spatial/mechanical owners'
+responsibility. No stationary `Euler1d` update is silently treated as moving.
 
 
 ## Conservative molecular, thermal and viscous field evolution
