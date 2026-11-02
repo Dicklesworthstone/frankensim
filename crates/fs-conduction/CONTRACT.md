@@ -36,10 +36,25 @@ domain endpoints and a uniform element exactly at a true source slope corner;
 nonuniform elements may cross internal source knots. Existing caloric-chart
 differentiability guards remain active.
 
-This bounded adapter supports one original scalar source and caloric chart
-with an explicit isotropic interpretation. Existing tensor, sharp-melting,
-heterogeneous and declared-multiplier paths remain available through their
-original owners.
+The uniform adapter retains one original scalar source and caloric chart.
+`HeterogeneousEnthalpyBackwardEuler::from_phase_materials` binds one explicitly
+isotropic `MaterialPhaseTransport` per admitted material identity, retaining
+each original chart, enthalpy datum, source support and fixed reference density.
+Storage and source assembly share immutable element and vertex assignment maps.
+The shared uniform/assigned source-moment resolver feeds the existing residual,
+Newton, adaptive, contact and adjoint owners; material tables are not copied
+into per-element source objects.
+
+Distinct material IDs require separate traces and declared contact. Neither
+enthalpy datums nor phase charts are averaged across materials. Material-local
+source support and classical-adjoint smoothness remain explicit.
+`phase_transport_material`, `phase_transport_problem` and
+`phase_transport_heat_flux` expose the retained source, exact mesh/numerical
+basis and physical element-average flux. Existing history, heat-source and
+reference-density adjoints retain their original meanings; differentiating
+source claims or material assignments is not established by this binding.
+Tensor, sharp-melting and declared-multiplier paths remain available through
+their original owners.
 
 ## Enthalpy-dependent spatial enclosure emissivity
 

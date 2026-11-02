@@ -13,14 +13,11 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_material::thermal::conduction::phase::PreparedPhaseConductivity;
 
-use super::super::{
-    ASSEMBLY_TILE, EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError,
-    adjoint::EnthalpyAdjointError, finite, poll,
-};
-use crate::{
-    ConductionMesh, ConductionProblem, ConductivityModel, ScalarField, ThermalBoundary,
-    material::integrate_scalar_path,
-};
+use super::super::{ASSEMBLY_TILE, EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, poll};
+use crate::{ConductionMesh, ConductionProblem, ConductivityModel, ScalarField, ThermalBoundary};
+
+mod field;
+pub(in crate::transient::enthalpy) use field::PhaseFieldTransport;
 
 /// One original phase source interpreted explicitly as isotropic conductivity.
 /// The independently declared rho0 is fixed reference mass per mesh volume.
@@ -111,7 +108,7 @@ impl<'a> MaterialPhaseTransport<'a> {
             self.reference_density_kg_m3,
             budget,
         )?;
-        storage.sourced_phase = Some(self);
+        storage.sourced_phase = Some(PhaseFieldTransport::Uniform(self));
         Ok(storage)
     }
 
@@ -142,152 +139,6 @@ impl<'a> MaterialPhaseTransport<'a> {
         mesh: &ConductionMesh,
         h: &[f64],
     ) -> Result<Vec<[f64; 3]>, EnthalpyError> {
-        let (conductivity, _) = self.assemble(cx, mesh, h, false)?;
-        let mut temperature = Vec::with_capacity(h.len());
-        for (vertex, &value) in h.iter().enumerate() {
-            if vertex % ASSEMBLY_TILE == 0 {
-                poll(cx, vertex)?;
-            }
-            temperature.push(
-                self.source
-                    .caloric_curve()
-                    .state_at_specific_enthalpy(value)
-                    .map_err(|source| EnthalpyError::Phase { vertex, source })?
-                    .temperature_k(),
-            );
-        }
-        let mut flux = Vec::with_capacity(mesh.element_count());
-        for (element, (vertices, &k)) in mesh.complex().tets.iter().zip(&conductivity).enumerate() {
-            if element % ASSEMBLY_TILE == 0 {
-                poll(cx, element)?;
-            }
-            let mut gradient = [0.0; 3];
-            for (&vertex, shape_gradient) in vertices.iter().zip(&mesh.geometry().grads[element]) {
-                for (value, &shape) in gradient.iter_mut().zip(shape_gradient) {
-                    *value = temperature[vertex as usize].mul_add(shape, *value);
-                }
-            }
-            flux.push([
-                finite(-k * gradient[0])?,
-                finite(-k * gradient[1])?,
-                finite(-k * gradient[2])?,
-            ]);
-        }
-        poll(cx, mesh.element_count())?;
-        Ok(flux)
-    }
-
-    pub(in crate::transient::enthalpy) fn matches_numerical_basis(
-        &self,
-        problem: ConductionProblem<'_>,
-    ) -> bool {
-        std::ptr::eq(problem.material, &self.numerical_basis) && problem.element_materials.is_none()
-    }
-
-    pub(in crate::transient::enthalpy) fn admit_enthalpies(
-        &self,
-        cx: &Cx<'_>,
-        h: &[f64],
-    ) -> Result<(), EnthalpyError> {
-        let [lo, hi] = self.source.enthalpy_bounds_j_kg();
-        for (vertex, &value) in h.iter().enumerate() {
-            if vertex % ASSEMBLY_TILE == 0 {
-                poll(cx, vertex)?;
-            }
-            if !value.is_finite() {
-                return Err(EnthalpyError::InvalidInput(
-                    "finite nodal enthalpy required for phase conductivity",
-                ));
-            }
-            if value < lo || value > hi {
-                return Err(EnthalpyError::SourceEnthalpyOutsideDomain {
-                    vertex,
-                    specific_enthalpy_j_kg: value,
-                    lower_j_kg: lo,
-                    upper_j_kg: hi,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    /// Integrate each original k(h_h) path and its consistent nodal derivatives.
-    /// The leaf allocates nothing and polls crossed source knots. Element
-    /// buffers are O(elements); a forward-only residual skips all derivatives.
-    pub(in crate::transient::enthalpy) fn assemble(
-        &self,
-        cx: &Cx<'_>,
-        mesh: &ConductionMesh,
-        h: &[f64],
-        with_derivatives: bool,
-    ) -> Result<(Vec<f64>, Option<Vec<[f64; 4]>>), EnthalpyError> {
-        poll(cx, 0)?;
-        if h.len() != mesh.vertex_count() {
-            return Err(EnthalpyError::InvalidInput(
-                "one phase-source enthalpy per mesh vertex required",
-            ));
-        }
-        self.admit_enthalpies(cx, h)?;
-        let mut values = Vec::with_capacity(mesh.element_count());
-        let mut derivatives = with_derivatives.then(|| Vec::with_capacity(mesh.element_count()));
-        for (element, vertices) in mesh.complex().tets.iter().enumerate() {
-            if element % ASSEMBLY_TILE == 0 {
-                poll(cx, element)?;
-            }
-            let (average, tangent) = integrate_scalar_path(
-                Some(cx),
-                &self.knots,
-                vertices.map(|v| h[v as usize]),
-                with_derivatives,
-            )?;
-            values.push(average);
-            if let Some(derivatives) = &mut derivatives {
-                derivatives.push(tangent);
-            }
-        }
-        poll(cx, mesh.element_count())?;
-        Ok((values, derivatives))
-    }
-
-    // A nonuniform P1 integral is differentiable across an interior source
-    // knot. A uniform element at a true slope corner has only a semismooth
-    // choice. Domain endpoints also prohibit a two-sided source perturbation.
-    #[allow(clippy::float_cmp)] // Exact corners delimit classical differentiability.
-    pub(in crate::transient::enthalpy) fn admit_adjoint(
-        &self,
-        cx: &Cx<'_>,
-        mesh: &ConductionMesh,
-        h: &[f64],
-    ) -> Result<(), EnthalpyAdjointError> {
-        self.admit_enthalpies(cx, h)?;
-        let [lo, hi] = self.source.enthalpy_bounds_j_kg();
-        for (vertex, &value) in h.iter().enumerate() {
-            if vertex % ASSEMBLY_TILE == 0 {
-                poll(cx, vertex)?;
-            }
-            if value == lo || value == hi {
-                return Err(EnthalpyAdjointError::MaterialKink);
-            }
-        }
-        for (element, vertices) in mesh.complex().tets.iter().enumerate() {
-            if element % ASSEMBLY_TILE == 0 {
-                poll(cx, element)?;
-            }
-            let nodal = vertices.map(|v| h[v as usize]);
-            if nodal.iter().any(|&value| value != nodal[0]) {
-                continue;
-            }
-            if let Ok(index) = self.knots.binary_search_by(|k| k.0.total_cmp(&nodal[0])) {
-                if index > 0 && index + 1 < self.knots.len() {
-                    let a = self.knots[index - 1];
-                    let b = self.knots[index];
-                    let c = self.knots[index + 1];
-                    if (b.1 - a.1) / (b.0 - a.0) != (c.1 - b.1) / (c.0 - b.0) {
-                        return Err(EnthalpyAdjointError::MaterialKink);
-                    }
-                }
-            }
-        }
-        Ok(())
+        PhaseFieldTransport::Uniform(self).element_heat_flux(cx, mesh, h)
     }
 }

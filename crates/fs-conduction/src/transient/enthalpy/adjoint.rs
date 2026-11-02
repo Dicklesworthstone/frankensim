@@ -855,7 +855,7 @@ fn check_chart(
     storage: &EnthalpyBackwardEuler<'_, '_>,
     h: &[f64],
 ) -> Result<(), EnthalpyAdjointError> {
-    if let Some(source) = storage.sourced_phase {
+    if let Some(source) = storage.sourced_phase.as_ref() {
         source.admit_adjoint(cx, storage.mesh, h)?;
     }
     for (vertex, &value) in h.iter().enumerate() {

@@ -4,14 +4,15 @@
 //! A shared vertex must have exactly one material identity. Different materials
 //! therefore meet through separate traces and an explicitly declared thermal
 //! contact, not through an inferred mixture of enthalpy charts. Conductivity
-//! assignments remain owned by `ConductionProblem::element_materials`.
+//! assignments remain owned by `ConductionProblem::element_materials`, unless
+//! an original phase-source assignment explicitly binds them to these same IDs.
 //!
 //! This is a stationary reference-mass model: equilibrium density does not
 //! change storage, geometry does not move, and no phase-chart blending,
 //! material-selection derivative is inferred. Prescribed temperatures use each
 //! boundary node's own chart and must select unique enthalpies.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 mod radiation;
 mod material_ambient;
@@ -23,6 +24,7 @@ use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 
 use super::adjoint::{EnthalpyAdjointError, EnthalpyStepGradient, EnthalpyStepLinearization};
+use super::material::phase::{MaterialPhaseTransport, PhaseFieldTransport};
 use super::{
     EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
     finite, poll,
@@ -115,8 +117,8 @@ impl From<EnthalpyError> for HeterogeneousEnthalpyError {
 #[derive(Debug)]
 pub struct HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
     inner: EnthalpyBackwardEuler<'m, 'c>,
-    element_material_ids: Vec<usize>,
-    vertex_material_ids: Vec<usize>,
+    element_material_ids: Arc<[usize]>,
+    vertex_material_ids: Arc<[usize]>,
     material_count: usize,
     reference_materials: Vec<ReferenceEnthalpyMaterial<'c>>,
 }
@@ -251,11 +253,98 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
                 sourced_melting: None,
                 sourced_phase: None,
             },
-            element_material_ids: element_material_ids.to_vec(),
-            vertex_material_ids,
+            element_material_ids: Arc::from(element_material_ids),
+            vertex_material_ids: vertex_material_ids.into(),
             material_count: materials.len(),
             reference_materials: materials.to_vec(),
         })
+    }
+
+    /// Bind one original isotropic phase source and fixed reference density
+    /// per material to the existing heterogeneous enthalpy owner.
+    ///
+    /// Storage and conductivity share the same admitted vertex/element IDs.
+    /// Different material IDs require disjoint traces and declared contacts,
+    /// even when their source values or caloric charts happen to coincide.
+    /// Sources retain their own enthalpy datum, support and original chart.
+    pub fn from_phase_materials(
+        cx: &Cx<'_>,
+        mesh: &'m ConductionMesh,
+        materials: &'c [MaterialPhaseTransport<'c>],
+        element_material_ids: &[usize],
+        budget: EnthalpyBudget,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        poll(cx, 0)?;
+        // Bound the temporary reference inventory before allocating it; the
+        // original constructor admits the complete spatial assignment below.
+        if materials.len() > budget.max_elements {
+            return Err(EnthalpyError::Budget {
+                resource: "materials",
+                required: materials.len(),
+                limit: budget.max_elements,
+            }.into());
+        }
+        let mut reference = Vec::with_capacity(materials.len());
+        for (index, material) in materials.iter().enumerate() {
+            if index % ASSEMBLY_TILE == 0 {
+                poll(cx, index)?;
+            }
+            reference.push(ReferenceEnthalpyMaterial {
+                curve: material.conductivity_source().caloric_curve(),
+                reference_density_kg_m3: material.reference_density_kg_m3(),
+            });
+        }
+        let mut storage = Self::new(cx, mesh, &reference, element_material_ids, budget)?;
+        storage.inner.sourced_phase = Some(PhaseFieldTransport::Assigned {
+            materials,
+            element_material_ids: Arc::clone(&storage.element_material_ids),
+            vertex_material_ids: Arc::clone(&storage.vertex_material_ids),
+        });
+        Ok(storage)
+    }
+
+    /// Original source and reference density at a retained material-table ID.
+    /// Returns None for an unknown ID or a model prepared without phase sources.
+    #[must_use]
+    pub fn phase_transport_material(
+        &self,
+        material: usize,
+    ) -> Option<&'c MaterialPhaseTransport<'c>> {
+        self.inner.sourced_phase.as_ref()?.material(material)
+    }
+
+    /// Physical problem for the original phase-source assignment and exact mesh.
+    /// The shared unit numerical basis does not replace any physical source.
+    /// Separate tensor assignments or phase multipliers are refused at admission.
+    pub fn phase_transport_problem<'s>(
+        &'s self,
+        boundary: &'s crate::ThermalBoundary,
+        source: &'s crate::ScalarField,
+    ) -> Result<ConductionProblem<'s>, EnthalpyError> {
+        let phase = self.inner.sourced_phase.as_ref().ok_or(EnthalpyError::InvalidInput(
+            "heterogeneous transport has no bound original phase sources",
+        ))?;
+        Ok(ConductionProblem {
+            mesh: self.inner.mesh,
+            boundary,
+            material: phase.numerical_basis(),
+            element_materials: None,
+            source,
+        })
+    }
+
+    /// Element-average physical heat flux from each material's original k(h_h)
+    /// and its own nodal chart temperatures. Contact exchange remains in the
+    /// existing contact reports; this is not a face-conservative recovery.
+    pub fn phase_transport_heat_flux(
+        &self,
+        cx: &Cx<'_>,
+        h: &[f64],
+    ) -> Result<Vec<[f64; 3]>, EnthalpyError> {
+        let phase = self.inner.sourced_phase.as_ref().ok_or(EnthalpyError::InvalidInput(
+            "heterogeneous transport has no bound original phase sources",
+        ))?;
+        phase.element_heat_flux(cx, self.inner.mesh, h)
     }
 
     /// Exact stationary reference mesh used by storage and transport assembly.
@@ -897,7 +986,7 @@ pub struct HeterogeneousEnthalpyRadiationStepLinearization<'m> {
 struct ReferenceDensityLinearization<'m> {
     mesh: &'m ConductionMesh,
     specific_enthalpy_change: Vec<f64>,
-    element_material_ids: Vec<usize>,
+    element_material_ids: Arc<[usize]>,
     material_count: usize,
 }
 

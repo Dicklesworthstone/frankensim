@@ -310,7 +310,7 @@ pub struct EnthalpyBackwardEuler<'m, 'c> {
     // element-scale assembly with its retained unit tensor as numerical basis.
     sourced_melting: Option<&'c material::melting::MaterialMeltingTransport>,
     // Original multiaxis source integrated over P1 h, with no inferred phase mix.
-    sourced_phase: Option<&'c material::phase::MaterialPhaseTransport<'c>>,
+    sourced_phase: Option<material::phase::PhaseFieldTransport<'c>>,
 }
 
 #[derive(Debug)]
@@ -783,7 +783,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                 ));
             }
         }
-        if let Some(source) = self.sourced_phase {
+        if let Some(source) = self.sourced_phase.as_ref() {
             if !source.matches_numerical_basis(problem) {
                 return Err(EnthalpyError::InvalidInput(
                     "phase source requires its original problem tensor and no element override",
@@ -958,7 +958,7 @@ impl StepContext<'_, '_, '_, '_> {
     }
 
     fn phase_scales(&self, h: &[f64]) -> Result<Option<Vec<f64>>, EnthalpyError> {
-        if let Some(source) = self.storage.sourced_phase {
+        if let Some(source) = self.storage.sourced_phase.as_ref() {
             return source.assemble(self.cx, self.storage.mesh, h, false)
                 .map(|(values, _)| Some(values));
         }
@@ -1109,7 +1109,7 @@ impl StepContext<'_, '_, '_, '_> {
             .map(|radiation| radiation.assemble(self.cx, &temperature, h)).transpose()?;
         // The exact source moment pass returns values and derivatives together;
         // do not walk crossed source knots twice during a Newton linearization.
-        let (phase_scales, phase_derivatives) = if let Some(source) = self.storage.sourced_phase {
+        let (phase_scales, phase_derivatives) = if let Some(source) = self.storage.sourced_phase.as_ref() {
             let (values, derivatives) = source.assemble(self.cx, self.storage.mesh, h, true)?;
             (Some(values), derivatives)
         } else {
