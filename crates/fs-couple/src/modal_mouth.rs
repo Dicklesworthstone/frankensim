@@ -18,6 +18,9 @@
 /// Source-bound rational memory for all signed modal mouth coordinates.
 pub mod realization;
 
+/// Matched modal loading and physical receiver fields from one Galerkin solve.
+pub mod observation;
+
 use fs_bem::helmholtz::aperture::{
     Aperture, ApertureError, ApertureImpedance, ApertureRoute, aperture_impedance,
 };

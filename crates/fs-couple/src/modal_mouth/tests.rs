@@ -4,10 +4,10 @@ use fs_bem::reciprocal_radiation;
 use fs_material::gas::GasSpec;
 use fs_math::c64::C64;
 
-fn air() -> GasState {
+pub(super) fn air() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
 }
-fn budget() -> ModalMouthBemBudget {
+pub(super) fn budget() -> ModalMouthBemBudget {
     ModalMouthBemBudget {
         maximum_panels: 10_000,
         maximum_trace_entries: 100_000,
@@ -16,7 +16,7 @@ fn budget() -> ModalMouthBemBudget {
         maximum_basis_gram_defect: 0.2,
     }
 }
-fn fixture(around: usize, radial: usize) -> (SpherePanels, CircularMouthPatch) {
+pub(super) fn fixture(around: usize, radial: usize) -> (SpherePanels, CircularMouthPatch) {
     let radius = 0.02;
     let profile: Vec<_> = (0..=2 * radial)
         .map(|i| (i as f64 * radius / radial as f64, radius))
