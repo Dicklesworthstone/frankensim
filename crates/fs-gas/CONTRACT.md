@@ -400,6 +400,29 @@ formation contribution present exactly once. No separate reaction heat source
 is added. The source-path/positive-Cv interval admission is the same L1 helper
 used by the Euler EOS, including possible products absent from the feed.
 
+Caloric roots use `sum(c_i * Delta u_i(T_initial,T))` plus the compensated
+original reaction energy accumulated through accepted extents, instead of
+subtracting two gross formation-energy totals. Source reaction energies are
+combined before polynomial evaluation by the same L1 kinetic owner. This
+preserves actual reaction binding energies and variable Cv while canceling
+conserved reference offsets. Rejected stages do not change the accumulated
+chemical energy. The prepared workspace retains one species and one reaction
+reference vector; nonlinear trials allocate no additional storage.
+
+The physical `energy_residual_j` uses these source-integrated differences.
+`absolute_energy_residual_j` independently subtracts the original endpoint
+source energy from its target. Each accepted species update also records the
+original-energy equivalent of `c_new-c_old-nu*xi` as
+`composition_reference_roundoff_j`. It is a numerical inventory diagnostic,
+not heat. The independent absolute-energy check allows this measured term and
+a magnitude-scaled floating-point allowance; this is not an interval certificate.
+Element, charge and mass gates retain their original tolerances. Explicit
+absolute energy targets whose floating-point spacing exceeds the requested
+Joule tolerance refuse; temperature-initialized evolution retains its precise
+source-relative equation. G1/G3 tests independently recover temperature from
+the published product amounts, including changed binding energy and molecular
+count under positive and negative common elemental references.
+
 The Newton Jacobian combines the analytic concentration and temperature rate
 derivatives with `dT/dxi_j = -sum_i(nu_ij u_i)/sum_i(c_i Cv_i)`. A bounded scaled
 partial-pivot solve and positivity/energy backtracking support stiff reactions.

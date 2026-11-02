@@ -279,6 +279,135 @@ fn g1_exothermic_uv_reactor_conserves_energy_and_reaches_independent_equilibrium
 }
 
 #[test]
+fn g3_reactive_temperature_tracks_actual_products_under_large_formation_references() {
+    for reaction_energy_r in [1024.0, 2048.0] {
+        let mut baseline: Option<(f64, f64)> = None;
+        for formation_r in [0.0, 2.0_f64.powi(50), -2.0_f64.powi(50)] {
+            let models = vec![
+                source("A", 0.01, 4.0, formation_r * R, 0.0),
+                source("B", 0.01, 4.0, (formation_r - reaction_energy_r) * R, 0.0),
+            ];
+            let release = R
+                * (models[0].regions()[0].coefficients()[7]
+                    - models[1].regions()[0].coefficients()[7]);
+            let m = mechanism(
+                models,
+                vec![1, 1],
+                vec![reaction("A-B", &[("A", 1)], &[("B", 1)], 5.0)],
+            );
+            let result = run(&m, 500.0, 0.2, controls(2e-5));
+            let a = result.amounts()[0].value();
+            let b = result.amounts()[1].value();
+            // Independent first law using actual published populations and
+            // retained formation difference, not the solver's stored extents.
+            let expected_temperature = 500.0 + release * b / (3.0 * R * (a + b));
+            assert!(
+                (result.temperature().value() - expected_temperature).abs() < 2e-9,
+                "T={}, expected={expected_temperature}, {:?}",
+                result.temperature().value(),
+                result.balance()
+            );
+            assert!(result.balance().energy_residual_j.abs() <= controls(2e-5).energy_tolerance_j);
+            assert!(result.balance().absolute_energy_residual_j.is_finite());
+            assert!(
+                result
+                    .balance()
+                    .composition_reference_roundoff_j
+                    .is_finite()
+            );
+            if let Some((temperature, product)) = baseline {
+                assert!((result.temperature().value() - temperature).abs() < 2e-9);
+                assert!((b - product).abs() < 2e-12);
+            } else {
+                baseline = Some((result.temperature().value(), b));
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_reactive_caloric_balance_preserves_nuclei_when_molecular_count_changes() {
+    for formation_r in [0.0, 2.0_f64.powi(48)] {
+        let tr = 1000.0_f64;
+        let models = vec![
+            source("A", 0.001, 2.5, formation_r * R, 2.5 * (1.0 - tr.ln())),
+            source(
+                "A2",
+                0.002,
+                3.5,
+                2.0 * formation_r * R,
+                3.5 * (1.0 - tr.ln()),
+            ),
+        ];
+        let m = mechanism(
+            models,
+            vec![1, 2],
+            vec![reaction("A2-2A", &[("A2", 1)], &[("A", 2)], 50.0)],
+        );
+        let result = advance_adiabatic(
+            &m,
+            &[(id("A2"), Amount::new(1.0))],
+            Volume::new(0.01),
+            Temperature::new(tr),
+            Time::new(0.2),
+            controls(2e-5),
+            || false,
+        )
+        .unwrap();
+        let a = result.amounts()[0].value();
+        let a2 = result.amounts()[1].value();
+        assert!((a + 2.0 * a2 - 2.0).abs() < 3e-14);
+        // Constant Cv differs between atom and molecule: neither fixed total
+        // moles nor Cp can replace this independently evaluated UV balance.
+        let expected = 2.5 * tr / (1.5 * a + 2.5 * a2);
+        assert!((result.temperature().value() - expected).abs() < 2e-9);
+        assert!(result.balance().energy_residual_j.abs() <= controls(2e-5).energy_tolerance_j);
+    }
+}
+
+#[test]
+fn g0_unresolved_absolute_reactor_energy_refuses_without_disabling_temperature_initialization() {
+    let formation = 2.0_f64.powi(50) * R;
+    let m = mechanism(
+        vec![
+            source("A", 0.01, 4.0, formation, 0.0),
+            source("B", 0.01, 4.0, formation, 0.0),
+        ],
+        vec![1, 1],
+        vec![reaction("A-B", &[("A", 1)], &[("B", 1)], 3.0)],
+    );
+    let initial = run(&m, 500.0, 0.0, controls(1e-5));
+    let mut prepared = IsochoricReactor::new(m, controls(1e-5), || false).unwrap();
+    let feed = [Amount::new(1.0), Amount::new(0.0)];
+    let result = prepared.advance_adiabatic_energy(
+        &feed,
+        initial.internal_energy(),
+        Volume::new(0.01),
+        Temperature::new(500.0),
+        Time::new(0.1),
+        || false,
+    );
+    assert!(matches!(
+        result,
+        Err(IsochoricKineticsError::Invalid(
+            "absolute energy target cannot resolve tolerance; initialize from source temperature"
+        ))
+    ));
+    let result = prepared
+        .advance_adiabatic(
+            &feed,
+            Volume::new(0.01),
+            Temperature::new(500.0),
+            Time::new(0.1),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(result.temperature(), Temperature::new(500.0));
+    assert!(result.amounts()[1].value() > 0.0);
+    assert_eq!(feed, [Amount::new(1.0), Amount::new(0.0)]);
+}
+
+#[test]
 fn g1_dissociation_advances_molecular_count_and_coupled_pressure_temperature() {
     let tr = 1000.0_f64;
     let m = mechanism(

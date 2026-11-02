@@ -10,6 +10,16 @@ pub(super) struct Statistics {
 struct StateWorkspace {
     concentrations: Vec<f64>,
     kinetics: KineticWorkspaceV1,
+    energy_residual_density: f64,
+}
+
+struct CaloricReference {
+    temperature: Temperature,
+    species_energies: Vec<f64>,
+    reaction_energies: Vec<f64>,
+    target_increment_density: f64,
+    chemical_energy_density: Sum,
+    composition_roundoff_density: Sum,
 }
 
 /// One allocation per bounded vector/matrix at reactor construction. Stages,
@@ -18,7 +28,7 @@ pub(super) struct Reactor {
     pub mechanism: IdealGasKineticsV1,
     pub controls: IsochoricKineticsSolve,
     volume: f64,
-    target_density: f64,
+    caloric_reference: CaloricReference,
     /// Untouched whole-call feed for elemental and charge inventory audits.
     pub initial: Vec<f64>,
     /// Accepted composition about which the next local reaction extents act.
@@ -37,6 +47,8 @@ impl Reactor {
         let scalars = [
             &self.initial,
             &self.origin,
+            &self.caloric_reference.species_energies,
+            &self.caloric_reference.reaction_energies,
             &self.nu,
             &self.state.concentrations,
             &self.trial,
@@ -89,13 +101,21 @@ impl Reactor {
             mechanism,
             controls,
             volume: 1.0,
-            target_density: 0.0,
+            caloric_reference: CaloricReference {
+                temperature: Temperature::new(1.0),
+                species_energies: zeros(ns)?,
+                reaction_energies: zeros(nr)?,
+                target_increment_density: 0.0,
+                chemical_energy_density: Sum::default(),
+                composition_roundoff_density: Sum::default(),
+            },
             initial: zeros(ns)?,
             origin: zeros(ns)?,
             nu,
             state: StateWorkspace {
                 concentrations: zeros(ns)?,
                 kinetics,
+                energy_residual_density: 0.0,
             },
             trial: zeros(nr)?,
             residual: zeros(nr)?,
@@ -134,18 +154,20 @@ impl Reactor {
             temperature,
             &self.initial,
             &mut self.state.kinetics,
-            cancelled,
+            &mut *cancelled,
         )?;
         if !positive(initial.mass_density_kg_m3 * volume.value()) {
             return Err(IsochoricKineticsError::Invalid(
                 "unrepresentable original parcel mass",
             ));
         }
-        let target = target
-            .unwrap_or_else(|| Energy::new(initial.internal_energy_density_j_m3 * volume.value()));
+        let initial_energy = initial.internal_energy_density_j_m3 * volume.value();
+        let target = target.unwrap_or_else(|| Energy::new(initial_energy));
         let target_density = target.value() / volume.value();
+        let increment = (target.value() - initial_energy) / volume.value();
         if !target.value().is_finite()
             || !target_density.is_finite()
+            || !increment.is_finite()
             || !positive(self.controls.energy_tolerance_j / volume.value())
             || !positive(self.controls.absolute_amount_tolerance_mol / volume.value())
         {
@@ -154,7 +176,18 @@ impl Reactor {
             ));
         }
         self.volume = volume.value();
-        self.target_density = target_density;
+        self.caloric_reference.temperature = temperature;
+        self.caloric_reference
+            .species_energies
+            .copy_from_slice(self.state.kinetics.species_internal_energies());
+        self.mechanism.reaction_internal_energies_at(
+            temperature,
+            &mut self.caloric_reference.reaction_energies,
+            &mut *cancelled,
+        )?;
+        self.caloric_reference.target_increment_density = increment;
+        self.caloric_reference.chemical_energy_density = Sum::default();
+        self.caloric_reference.composition_roundoff_density = Sum::default();
         self.origin.copy_from_slice(&self.initial);
         self.stats = Statistics::default();
         Ok(target)
@@ -169,8 +202,59 @@ impl Reactor {
     /// macroscopic extents, destroying their representable positive domain.
     /// Local extents retain the same stoichiometric update and final original-
     /// feed conservation gates without clipping a species or seeding radicals.
-    pub fn rebase(&mut self, concentrations: &[f64]) {
+    pub fn rebase(
+        &mut self,
+        concentrations: &[f64],
+        extents: &[f64],
+    ) -> Result<(), IsochoricKineticsError> {
+        let mut chemical = self.caloric_reference.chemical_energy_density;
+        for (&extent, &energy) in extents
+            .iter()
+            .zip(&self.caloric_reference.reaction_energies)
+        {
+            chemical.add(extent * energy);
+        }
+        // Independently compare represented species changes with the accepted
+        // stoichiometric increments. An arbitrary formation reference must not
+        // convert harmless inventory roundoff into physical heat, but its
+        // absolute-energy equivalent is retained rather than silently erased.
+        let mut roundoff = self.caloric_reference.composition_roundoff_density;
+        for (i, (&after, &before)) in concentrations.iter().zip(&self.origin).enumerate() {
+            let mut discrepancy = Sum::default();
+            discrepancy.add(after);
+            discrepancy.add(-before);
+            for (j, &extent) in extents.iter().enumerate() {
+                discrepancy.add(-self.nu[i * extents.len() + j] * extent);
+            }
+            roundoff.add(discrepancy.value() * self.caloric_reference.species_energies[i]);
+        }
+        if !chemical.value().is_finite() || !roundoff.value().is_finite() {
+            return Err(IsochoricKineticsError::Invalid(
+                "unrepresentable chemical energy increment or inventory roundoff",
+            ));
+        }
         self.origin.copy_from_slice(concentrations);
+        self.caloric_reference.chemical_energy_density = chemical;
+        self.caloric_reference.composition_roundoff_density = roundoff;
+        Ok(())
+    }
+    pub fn energy_residual_j(&self) -> f64 {
+        self.state.energy_residual_density * self.volume
+    }
+    pub fn composition_reference_roundoff_j(&self) -> f64 {
+        self.caloric_reference.composition_roundoff_density.value() * self.volume
+    }
+    pub fn absolute_energy_roundoff_allowance_j(&self) -> f64 {
+        let mut bound = Sum::default();
+        for (i, &initial) in self.initial.iter().enumerate() {
+            for term in [
+                initial * self.caloric_reference.species_energies[i],
+                self.state.concentrations[i] * self.state.kinetics.species_internal_energies()[i],
+            ] {
+                bound.add((64.0 * f64::EPSILON * term.abs()) * self.volume);
+            }
+        }
+        bound.value()
     }
     pub fn resolve(
         &mut self,
@@ -182,7 +266,7 @@ impl Reactor {
             &self.mechanism,
             self.controls,
             self.volume,
-            self.target_density,
+            &self.caloric_reference,
             &self.origin,
             &self.nu,
             extents,
@@ -281,7 +365,6 @@ impl Reactor {
             return Err(failed(step, "unrepresentable implicit stage duration"));
         }
         let nr = base.len();
-        let ns = self.initial.len();
         let mut state = self.resolve(out, hint, cancelled)?;
         for iteration in 0..self.controls.maximum_newton_iterations {
             poll(cancelled)?;
@@ -313,14 +396,10 @@ impl Reactor {
             if !norm.is_finite() {
                 return Err(failed(step, "non-finite implicit residual"));
             }
-            let u = self.state.kinetics.species_internal_energies();
             for k in 0..nr {
-                let mut du = Sum::default();
-                for i in 0..ns {
-                    du.add(u[i] * self.nu[i * nr + k]);
-                }
                 self.temperature_extent_derivatives[k] =
-                    -du.value() / state.heat_capacity_v_density_j_m3_k;
+                    -self.state.kinetics.reaction_internal_energies()[k]
+                        / state.heat_capacity_v_density_j_m3_k;
             }
             let direct_fallback = self.newton.solve(
                 &self.nu,
@@ -345,7 +424,7 @@ impl Reactor {
                     &self.mechanism,
                     self.controls,
                     self.volume,
-                    self.target_density,
+                    &self.caloric_reference,
                     &self.origin,
                     &self.nu,
                     &self.trial,
@@ -936,7 +1015,7 @@ fn resolve(
     mechanism: &IdealGasKineticsV1,
     controls: IsochoricKineticsSolve,
     volume: f64,
-    target_density: f64,
+    caloric: &CaloricReference,
     initial: &[f64],
     nu: &[f64],
     extents: &[f64],
@@ -963,39 +1042,70 @@ fn resolve(
         work.concentrations[i] = c;
     }
     let tolerance = controls.energy_tolerance_j / volume;
+    let mut chemical = caloric.chemical_energy_density;
+    for (&extent, &energy) in extents.iter().zip(&caloric.reaction_energies) {
+        chemical.add(extent * energy);
+    }
     let evaluate = |temperature: f64,
                     work: &mut StateWorkspace,
                     statistics: &mut Statistics,
                     cancelled: &mut _| {
         statistics.temperature_evaluations += 1;
-        mechanism
+        let state = mechanism
             .evaluate_thermodynamics(
                 Temperature::new(temperature),
                 &work.concentrations,
                 &mut work.kinetics,
-                cancelled,
+                &mut *cancelled,
             )
-            .map_err(IsochoricKineticsError::from)
+            .map_err(IsochoricKineticsError::from)?;
+        let mut residual = chemical;
+        residual.add(-caloric.target_increment_density);
+        for (model, &concentration) in mechanism
+            .thermodynamics()
+            .models()
+            .iter()
+            .zip(&work.concentrations)
+        {
+            poll(cancelled)?;
+            if concentration == 0.0 {
+                continue;
+            }
+            let change = model
+                .molar_internal_energy_change(caloric.temperature, state.temperature)
+                .map_err(|source| KineticsErrorV1::SpeciesEvaluation {
+                    species: model.species().clone(),
+                    source,
+                })?;
+            residual.add(concentration * change.value());
+        }
+        work.energy_residual_density = residual.value();
+        if !work.energy_residual_density.is_finite() {
+            return Err(IsochoricKineticsError::Invalid(
+                "unrepresentable relative caloric residual",
+            ));
+        }
+        Ok(state)
     };
     let mut lo = controls.minimum_temperature_k;
     let mut hi = controls.maximum_temperature_k;
     let mut t = hint.clamp(lo, hi);
     let first = evaluate(t, work, statistics, &mut *cancelled)?;
-    let mut residual = first.internal_energy_density_j_m3 - target_density;
+    let mut residual = work.energy_residual_density;
     if residual.abs() <= tolerance {
         return Ok(first);
     }
     let lower = evaluate(lo, work, statistics, &mut *cancelled)?;
+    let lower_residual = work.energy_residual_density;
     let upper = evaluate(hi, work, statistics, &mut *cancelled)?;
-    if (lower.internal_energy_density_j_m3 - target_density).abs() <= tolerance {
+    let upper_residual = work.energy_residual_density;
+    if lower_residual.abs() <= tolerance {
         return evaluate(lo, work, statistics, &mut *cancelled);
     }
-    if (upper.internal_energy_density_j_m3 - target_density).abs() <= tolerance {
+    if upper_residual.abs() <= tolerance {
         return Ok(upper);
     }
-    if !(lower.internal_energy_density_j_m3 < target_density
-        && target_density < upper.internal_energy_density_j_m3)
-    {
+    if !(lower_residual < 0.0 && upper_residual > 0.0) {
         return Err(IsochoricKineticsError::EnergyNotBracketed {
             lower_energy_j: lower.internal_energy_density_j_m3 * volume,
             upper_energy_j: upper.internal_energy_density_j_m3 * volume,
@@ -1016,7 +1126,7 @@ fn resolve(
             lo + 0.5 * (hi - lo)
         };
         state = evaluate(t, work, statistics, &mut *cancelled)?;
-        residual = state.internal_energy_density_j_m3 - target_density;
+        residual = work.energy_residual_density;
         if residual.abs() <= tolerance {
             return Ok(state);
         }

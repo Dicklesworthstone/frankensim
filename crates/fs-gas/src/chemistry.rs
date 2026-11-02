@@ -164,8 +164,15 @@ pub struct IsochoricKineticsBalance {
     /// preserved, including a nonzero authored feed; no electrostatic field or
     /// physical admissibility of a net-charged homogeneous parcel is inferred.
     pub maximum_relative_charge_residual: f64,
-    /// Final actual internal energy minus the one conserved target, J.
+    /// Source-integrated sensible plus reaction energy minus the one target, J.
+    /// Conserved formation references cancel before this physical balance.
     pub energy_residual_j: f64,
+    /// Independent subtraction of the original endpoint absolute energy and
+    /// target [J]. Its f64 resolution can be worse than the physical tolerance.
+    pub absolute_energy_residual_j: f64,
+    /// Original-reference energy equivalent of represented species-update
+    /// roundoff [J]. This is not a physical heat input or a reaction source.
+    pub composition_reference_roundoff_j: f64,
     /// Actual final-minus-initial ideal-mixture entropy, J/K.
     pub entropy_change_j_k: f64,
     /// Smallest accepted step entropy increment, J/K; zero for zero duration.
@@ -425,6 +432,7 @@ fn advance_prepared<'a>(
         full_concentrations,
         amounts,
     } = prepared;
+    let explicit_target = target.is_some();
     let target = reactor.initialize(feed, volume, initial_temperature, target, &mut cancelled)?;
     current.fill(0.0);
     full.fill(0.0);
@@ -432,6 +440,16 @@ fn advance_prepared<'a>(
     fine.fill(0.0);
     current_concentrations.copy_from_slice(&reactor.initial);
     let initial = reactor.resolve(current, initial_temperature.value(), &mut cancelled)?;
+    // Resolve source support first so an out-of-domain target retains its
+    // physical EnergyNotBracketed refusal before the precision admission.
+    let target_magnitude = target.value().abs();
+    if explicit_target
+        && target_magnitude.next_up() - target_magnitude > controls.energy_tolerance_j
+    {
+        return Err(IsochoricKineticsError::Invalid(
+            "absolute energy target cannot resolve tolerance; initialize from source temperature",
+        ));
+    }
     let mut accepted = initial;
     let mut elapsed = 0.0;
     let mut step = controls.initial_step_s.min(duration.value());
@@ -524,7 +542,7 @@ fn advance_prepared<'a>(
                     &mut balance,
                 )?;
                 current_concentrations.copy_from_slice(reactor.concentrations());
-                reactor.rebase(current_concentrations);
+                reactor.rebase(current_concentrations, fine)?;
                 current.fill(0.0);
                 accepted = state;
                 elapsed = if step == remaining {
@@ -574,8 +592,10 @@ fn advance_prepared<'a>(
     }
     balance.mass_residual_kg =
         (accepted.mass_density_kg_m3 - initial.mass_density_kg_m3) * volume.value();
-    balance.energy_residual_j =
+    balance.energy_residual_j = reactor.energy_residual_j();
+    balance.absolute_energy_residual_j =
         accepted.internal_energy_density_j_m3 * volume.value() - target.value();
+    balance.composition_reference_roundoff_j = reactor.composition_reference_roundoff_j();
     balance.entropy_change_j_k =
         (accepted.entropy_density_j_m3_k - initial.entropy_density_j_m3_k) * volume.value();
     balance.nonlinear_iterations = reactor.stats.nonlinear_iterations;
@@ -595,11 +615,19 @@ fn advance_prepared<'a>(
     )?;
     let final_mass = accepted.mass_density_kg_m3 * volume.value();
     let final_energy = accepted.internal_energy_density_j_m3 * volume.value();
+    let absolute_roundoff = reactor.absolute_energy_roundoff_allowance_j();
+    let unexplained_absolute_residual = balance.absolute_energy_residual_j
+        - balance.energy_residual_j
+        - balance.composition_reference_roundoff_j;
     if !positive(final_mass)
         || !final_energy.is_finite()
         || !balance.mass_residual_kg.is_finite()
         || !balance.maximum_relative_element_residual.is_finite()
         || !balance.energy_residual_j.is_finite()
+        || !balance.absolute_energy_residual_j.is_finite()
+        || !balance.composition_reference_roundoff_j.is_finite()
+        || !absolute_roundoff.is_finite()
+        || !unexplained_absolute_residual.is_finite()
         || !balance.entropy_change_j_k.is_finite()
         || !balance.minimum_step_entropy_change_j_k.is_finite()
         || !balance.maximum_estimated_local_error.is_finite()
@@ -607,6 +635,7 @@ fn advance_prepared<'a>(
         || balance.mass_residual_kg.abs()
             > controls.relative_conservation_tolerance * initial.mass_density_kg_m3 * volume.value()
         || balance.energy_residual_j.abs() > controls.energy_tolerance_j
+        || unexplained_absolute_residual.abs() > controls.energy_tolerance_j + absolute_roundoff
         || balance.entropy_change_j_k < -controls.entropy_tolerance_j_k
         || amounts
             .iter()
@@ -765,7 +794,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), IsochoricKineticsErr
         Ok(())
     }
 }
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Sum {
     sum: f64,
     correction: f64,
