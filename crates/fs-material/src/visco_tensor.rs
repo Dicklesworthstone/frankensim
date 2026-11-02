@@ -227,44 +227,16 @@ impl TensorProny {
     }
     /// Full storage/loss tensors for exp(+i omega t), matching visco::modulus.
     /// The loss matrix is PSD; its OFF-DIAGONAL entries need not be positive.
+    /// The original frequency band applies here and to harmonic plane stress,
+    /// including laws obtained by fractional lowering. No extrapolation occurs.
     pub fn modulus_mandel(&self, omega: f64) -> Result<(Tangent6, Tangent6)> {
-        if !omega.is_finite() || omega < 0.0 {
-            return Err(invalid("frequency must be finite and nonnegative"));
-        }
-        let mut storage = self.c_eq;
-        let mut loss = [[0.0; 6]; 6];
-        if let Some(kv) = &self.kv_pa_s {
-            for i in 0..6 {
-                for j in 0..6 {
-                    loss[i][j] += omega * kv[i][j];
-                }
+        self.complex_modulus(omega).map_err(|error| match error {
+            crate::visco::ViscoError::Parameters { what } => invalid(what),
+            crate::visco::ViscoError::OutOfBand { .. } => {
+                invalid("frequency leaves the original tensor material band")
             }
-        }
-        for branch in self.branches() {
-            let z = omega * branch.tau_s;
-            // Stable at both ends, including overflow of positive omega*tau.
-            let (re, im) = if z <= 1.0 {
-                (z * (z / (1.0 + z * z)), z / (1.0 + z * z))
-            } else {
-                let u = 1.0 / z;
-                (1.0 / (1.0 + u * u), u / (1.0 + u * u))
-            };
-            for i in 0..6 {
-                for j in 0..6 {
-                    storage[i][j] += re * branch.c_pa[i][j];
-                    loss[i][j] += im * branch.c_pa[i][j];
-                }
-            }
-        }
-        if storage
-            .iter()
-            .flatten()
-            .chain(loss.iter().flatten())
-            .any(|v| !v.is_finite())
-        {
-            return Err(invalid("modulus overflow"));
-        }
-        Ok((storage, loss))
+            _ => invalid("invalid tensor material spectrum"),
+        })
     }
     /// Exact endpoint stress derivative for a prescribed linear strain ramp.
     /// Returned tensor uses the crate's tensor-shear Voigt convention.

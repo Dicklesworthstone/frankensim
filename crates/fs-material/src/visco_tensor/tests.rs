@@ -168,3 +168,53 @@ fn original_mandel_and_tensor_shear_histories_share_source_strain_admission() {
         assert_eq!(factored, factored_before);
     }
 }
+
+#[test]
+fn g0_all_tensor_spectra_and_plane_stress_retain_the_original_frequency_band() {
+    use crate::plane_stress_viscosity::MaterialPlane;
+    use crate::visco::ViscoError;
+
+    let low = 10.0_f64;
+    let high = 100.0_f64;
+    let law = model().with_band((low, high)).unwrap();
+    for omega in [low, 50.0, high] {
+        let spectrum = law.complex_modulus(omega).unwrap();
+        assert_eq!(law.modulus_mandel(omega).unwrap(), spectrum);
+        let plane = law.plane_stress(omega).unwrap();
+        let section = plane.section(0.003).unwrap();
+        assert!(section.bending[0][0].im > 0.0);
+        let (real, imag) = law.plane_stress_complex(MaterialPlane::Axes12, omega).unwrap();
+        let engineering = plane.engineering();
+        for i in 0..3 { for j in 0..3 {
+            close(engineering[i][j].re, real[3*i+j], 2e-13);
+            close(engineering[i][j].im, imag[3*i+j], 2e-13);
+        } }
+    }
+    // A one-ULP excursion must not turn a band-limited material into a
+    // broadband plate law through the alternative harmonic API.
+    for omega in [0.0, low.next_down(), high.next_up()] {
+        assert_eq!(law.complex_modulus(omega), Err(ViscoError::OutOfBand {
+            omega, band: (low, high),
+        }));
+        assert!(law.modulus_mandel(omega).is_err());
+        assert!(law.plane_stress(omega).is_err());
+        assert!(law.plane_stress_complex(MaterialPlane::Axes12, omega).is_err());
+    }
+    for omega in [f64::NAN, f64::INFINITY] {
+        assert!(law.complex_modulus(omega).is_err());
+        assert!(law.modulus_mandel(omega).is_err());
+        assert!(law.plane_stress(omega).is_err());
+    }
+}
+
+#[test]
+fn g0_tensor_spectral_apis_refuse_unrepresentable_kelvin_loss() {
+    let law = TensorProny::new_mandel(diagonal(10.0), vec![], 0.1).unwrap()
+        .with_kelvin_viscosity_mandel(diagonal(1e150)).unwrap();
+    let (_, loss) = law.complex_modulus(1e150).unwrap();
+    close(loss[0][0] / 1e300, 1.0, 2e-15);
+    assert_eq!(law.modulus_mandel(1e150).unwrap().1, loss);
+    assert!(law.complex_modulus(1e170).is_err());
+    assert!(law.modulus_mandel(1e170).is_err());
+    assert!(law.plane_stress(1e170).is_err());
+}

@@ -617,7 +617,7 @@ impl TensorProny {
     ///
     /// # Errors
     /// Returns [`ViscoError::OutOfBand`] if `omega` is outside [`Self::band_rad_s`],
-    /// or [`ViscoError::Parameters`] if `omega` is non-finite.
+    /// or [`ViscoError::Parameters`] if `omega` or the response is non-finite.
     pub fn complex_modulus(&self, omega: f64) -> Result<(Mandel6, Mandel6), ViscoError> {
         if !omega.is_finite() {
             return Err(ViscoError::Parameters {
@@ -655,6 +655,11 @@ impl TensorProny {
                     loss[i][j] += im_w * branch.c_pa[i][j];
                 }
             }
+        }
+        if storage.iter().flatten().chain(loss.iter().flatten()).any(|v| !v.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "tensor complex modulus overflowed",
+            });
         }
         Ok((storage, loss))
     }
@@ -832,11 +837,15 @@ impl TensorProny {
     /// Each branch obeys `τ_j q̇_j = -q_j + τ_j ε̇` componentwise in Mandel coordinates,
     /// updated via [`super::prony_ramp`]. Heat is integrated by polarization as a sum of
     /// squares `A_j ‖L_jᵀ (q_{j,0} + h_j δ)‖² + R_j ‖L_jᵀ δ‖² ≥ 0` with no clamp.
+    /// Nonzero Kelvin viscosity requires positive time for a strain change.
+    /// A bounded candidate history is published only after the full stress and
+    /// energy response is finite; refusal preserves the accepted state.
     ///
     /// # Errors
     /// Returns [`ViscoError::Parameters`] if `dt < 0`, `dt` or `strain_new` is non-finite,
     /// the original material small-strain bound is exceeded,
-    /// or `s.q.len() != self.branches.len()`.
+    /// `s.q.len() != self.branches.len()`, a Kelvin strain jump has zero duration,
+    /// or the response is unrepresentable.
     pub fn step(
         &self,
         s: &mut TensorPronyState,
@@ -856,6 +865,14 @@ impl TensorProny {
         self.validate_mandel_strain(&strain_new)?;
         let d_eps: [f64; 6] = core::array::from_fn(|i| strain_new[i] - s.strain[i]);
         let mid_eps: [f64; 6] = core::array::from_fn(|i| s.strain[i] + 0.5 * d_eps[i]);
+        if dt == 0.0
+            && d_eps.iter().any(|v| *v != 0.0)
+            && self.kv_pa_s.as_ref().is_some_and(|kv| kv.iter().flatten().any(|v| *v != 0.0))
+        {
+            return Err(ViscoError::Parameters {
+                what: "Kelvin viscosity requires positive time for a strain change",
+            });
+        }
 
         let is_hydrostatic = |v: &[f64; 6]| -> bool {
             v[0].to_bits() == v[1].to_bits()
@@ -888,6 +905,7 @@ impl TensorProny {
 
         if let (Some(kv), Some(kv_l)) = (&self.kv_pa_s, &self.kv_factor)
             && dt > 0.0
+            && kv.iter().flatten().any(|v| *v != 0.0)
         {
             let rate: [f64; 6] = core::array::from_fn(|i| d_eps[i] / dt);
             let kv_sig = matvec6(kv, &rate);
@@ -899,11 +917,14 @@ impl TensorProny {
             step_dissipated += dot6(&l_delta, &l_delta) / dt;
         }
 
-        for ((q_j, branch), (factor, &tag)) in s
+        // Include new_mandel's 256-branch bound, without allocating per step.
+        let mut next_q = [[0.0; 6]; crate::visco_tensor::MAX_BRANCHES];
+        for (branch_index, ((q_j, branch), (factor, &tag))) in s
             .q
-            .iter_mut()
+            .iter()
             .zip(&self.branches)
             .zip(self.factors.iter().zip(&self.branch_tags))
+            .enumerate()
         {
             let ramp = PronyRamp::new(dt / branch.tau_s);
             let q0 = *q_j;
@@ -914,7 +935,7 @@ impl TensorProny {
                 q_next[i] = nxt;
                 q_mean[i] = mn;
             }
-            *q_j = q_next;
+            next_q[branch_index] = q_next;
 
             match tag {
                 IsotropicBranchTag::Bulk { k3_pa }
@@ -952,11 +973,24 @@ impl TensorProny {
         }
 
         let step_work = dot6(&mean_stress, &d_eps);
+        let total_work = s.work + step_work;
+        let total_dissipated = s.dissipated + step_dissipated;
+        if stress.iter().chain(&mean_stress).any(|v| !v.is_finite())
+            || next_q[..self.branches.len()].iter().flatten().any(|v| !v.is_finite())
+            || [stored_new, step_work, step_dissipated, total_work, total_dissipated]
+                .iter().any(|v| !v.is_finite())
+            || step_dissipated < 0.0
+        {
+            return Err(ViscoError::Parameters {
+                what: "nonfinite constitutive response or energy",
+            });
+        }
+        s.q.copy_from_slice(&next_q[..self.branches.len()]);
         s.strain = strain_new;
         s.stress = stress;
         s.stored = stored_new;
-        s.work += step_work;
-        s.dissipated += step_dissipated;
+        s.work = total_work;
+        s.dissipated = total_dissipated;
         Ok(stress)
     }
 }

@@ -80,6 +80,60 @@ fn kelvin_consistent_tangent_and_instantaneous_jump_admission() {
 }
 
 #[test]
+fn g0_mandel_kelvin_step_refuses_instantaneous_and_overflowing_ramps_atomically() {
+    let material = law(true);
+    let mut state = material.state();
+    let initial = [0.002, -0.001, 0.0, 0.003, 0.001, -0.002];
+    material.step(&mut state, mandel(&initial), 0.04).unwrap();
+    let before = state.clone();
+    let target = mandel(&[-0.003, 0.002, 0.001, -0.002, 0.0, 0.003]);
+    for dt in [0.0, f64::from_bits(1)] {
+        assert!(material.step(&mut state, target, dt).is_err());
+        assert_eq!(state, before, "refused Kelvin ramp changed material memory");
+    }
+    // Retry the same strain over a resolved interval: no rejected work or
+    // partially relaxed Maxwell coordinates may leak into the accepted result.
+    let mut expected = before.clone();
+    let stress = material.step(&mut expected, target, 0.03).unwrap();
+    assert_eq!(material.step(&mut state, target, 0.03).unwrap(), stress);
+    assert_eq!(state, expected);
+
+    // Explicit zero viscosity and a genuinely lossless jump retain their
+    // finite elastic response; the refusal does not invent a damping floor.
+    let zero = TensorProny::new(*material.c_eq(), Some([[0.0;6];6]), vec![],
+        (0.0,f64::MAX)).unwrap();
+    let mut zero_state = zero.state();
+    assert!(zero.step(&mut zero_state, target, 0.0).is_ok());
+    assert_eq!(zero_state.dissipated, 0.0);
+    assert!(zero.step(&mut zero_state, target.map(|v| -v), f64::from_bits(1)).is_ok());
+    assert_eq!(zero_state.dissipated, 0.0);
+}
+
+#[test]
+fn g1_mandel_and_tensor_kelvin_histories_share_stress_heat_and_work() {
+    let material = law(true);
+    let mut state = material.state();
+    let mut history = material.history();
+    for (strain, dt) in [
+        ([0.01,-0.02,0.005,0.03,-0.01,0.02], 0.03),
+        ([-0.03,0.01,0.02,-0.01,0.03,-0.01], 0.07),
+        ([-0.03,0.01,0.02,-0.01,0.03,-0.01], 0.13),
+        ([0.0;6], 0.05),
+    ] {
+        let stress = material.step(&mut state, mandel(&strain), dt).unwrap();
+        let report = history.advance(strain, dt, ||false).unwrap();
+        for (actual, expected) in tensor(&stress).iter().zip(report.stress) {
+            close(*actual, expected);
+        }
+        close(state.stored, history.stored_energy());
+        close(state.work, history.work());
+        close(state.dissipated, history.dissipated());
+        close(state.work, state.stored + state.dissipated);
+        assert!(report.dissipated >= 0.0);
+    }
+}
+
+#[test]
 fn projected_kelvin_force_power_and_volume_use_the_same_strain_map() {
     let material = law(true);
     let columns = [[1.0,0.3,0.0,-0.5,0.2,0.0],[-0.4,0.7,0.0,0.1,0.0,0.2]];
