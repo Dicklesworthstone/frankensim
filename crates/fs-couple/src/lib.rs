@@ -85,6 +85,8 @@ pub mod material_circuit;
 pub mod material_immersed;
 /// Pack-backed material records and fixture labels for file-driven render inputs.
 pub mod material_source;
+/// Full geometry-derived BEM radiation on circular duct modal flow coordinates.
+pub mod modal_mouth;
 pub mod mm_line;
 /// Finite material moisture transport and its native mechanical consumers.
 pub mod moisture;
