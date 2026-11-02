@@ -30,20 +30,23 @@ back-plate	thickness	normal-p95-interior	0.00603	m	0.0001	published-measured	esr
 back-plate	thickness	normal-max-interior	0.00642	m	0.0001	published-measured	esrf-il-cannone-ct-2026	largest block value of the same cells, at x = -9.5 mm, z = -119.5 mm
 back-plate	arching	outer-crown-height-above-edge-plane	0.01056	m	0.0005	published-measured	esrf-il-cannone-ct-2026	outer surface at the crown (x = 5.5 mm, z = -101.5 mm) against the median outer surface of the 1 to 3 mm band inside the outline; the plate thickness is NOT added; other authors may define arch height differently
 back-plate	arching	edge-plane-y	0.02821	m	0.0005	published-measured	esrf-il-cannone-ct-2026	median outer-surface y of the 1 to 3 mm band inside the outline (scan frame)
-top-plate	f-hole-1	area	0.000409	m2	5e-06	published-measured	esrf-il-cannone-ct-2026	area of the unoccupied cells inside the outline (0.5 mm raster); hole 1 lies at negative x (the bass-bar side), hole 2 at positive x
-top-plate	f-hole-1	centroid-x	-0.0424566	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
-top-plate	f-hole-1	centroid-z	-0.1094065	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
-top-plate	f-hole-1	z-extent	0.073	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z from -140.00 to -67.00 mm
-top-plate	f-hole-1	x-extent	0.035	m	0.0005	published-measured	esrf-il-cannone-ct-2026	x from -63.50 to -28.50 mm
-top-plate	f-hole-1	length-along-principal-axis	0.07771164	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extent along the principal axis of the raster
-top-plate	f-hole-1	principal-axis-angle-from-z	0.3547532	rad	0.0175	published-measured	esrf-il-cannone-ct-2026	angle of the principal axis from +z toward +x
-top-plate	f-hole-2	area	0.00031275	m2	5e-06	published-measured	esrf-il-cannone-ct-2026	area of the unoccupied cells inside the outline (0.5 mm raster); hole 1 lies at negative x (the bass-bar side), hole 2 at positive x
-top-plate	f-hole-2	centroid-x	0.03990907	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
-top-plate	f-hole-2	centroid-z	-0.1051781	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
-top-plate	f-hole-2	z-extent	0.0725	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z from -140.00 to -67.50 mm
-top-plate	f-hole-2	x-extent	0.022	m	0.0005	published-measured	esrf-il-cannone-ct-2026	x from 31.50 to 53.50 mm
-top-plate	f-hole-2	length-along-principal-axis	0.07446431	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extent along the principal axis of the raster
-top-plate	f-hole-2	principal-axis-angle-from-z	-0.148656	rad	0.0175	published-measured	esrf-il-cannone-ct-2026	angle of the principal axis from +z toward +x
+top-plate	f-hole-1	area	0.00053075	m2	2.5e-06	published-measured	esrf-il-cannone-ct-2026	area of the open cells of the 0.5 mm raster (fhole_openings.py: a cell is open when at least 13 of its 25 cells of 0.1 mm are open through the plate; the 0.1 mm area is 530.75 mm2); sigma = the rule's largest error against the 0.1 mm area over the 25 offsets of the grid; the mesh resolution and u-inplane-scale are not in it; hole 1 lies at negative x (the bass-bar side), hole 2 at positive x
+top-plate	f-hole-1	centroid-x	-0.04051284	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
+top-plate	f-hole-1	centroid-z	-0.1058117	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
+top-plate	f-hole-1	z-extent	0.0745	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z from -140.50 to -66.00 mm
+top-plate	f-hole-1	x-extent	0.045	m	0.0005	published-measured	esrf-il-cannone-ct-2026	x from -64.00 to -19.00 mm
+top-plate	f-hole-1	length-along-principal-axis	0.08002162	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extent along the principal axis of the raster
+top-plate	f-hole-1	principal-axis-angle-from-z	0.4014792	rad	0.0175	published-measured	esrf-il-cannone-ct-2026	angle of the principal axis from +z toward +x
+top-plate	f-hole-1	bore	0.00251175	m	0.000147	published-measured	esrf-il-cannone-ct-2026	straight bore of the raster outline with the hole's measured through-resistance (top-plate-fhole-walls.tsv: vertical walls, R 0.00473 /mm, times the raster area); sigma = the same with the other layer family's R
+top-plate	f-hole-2	area	0.00049775	m2	3.59e-06	published-measured	esrf-il-cannone-ct-2026	area of the open cells of the 0.5 mm raster (fhole_openings.py: a cell is open when at least 13 of its 25 cells of 0.1 mm are open through the plate; the 0.1 mm area is 496.91 mm2); sigma = the rule's largest error against the 0.1 mm area over the 25 offsets of the grid; the mesh resolution and u-inplane-scale are not in it; hole 1 lies at negative x (the bass-bar side), hole 2 at positive x
+top-plate	f-hole-2	centroid-x	0.04149159	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
+top-plate	f-hole-2	centroid-z	-0.1060318	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
+top-plate	f-hole-2	z-extent	0.0735	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z from -140.50 to -67.00 mm
+top-plate	f-hole-2	x-extent	0.0425	m	0.0005	published-measured	esrf-il-cannone-ct-2026	x from 21.50 to 64.00 mm
+top-plate	f-hole-2	length-along-principal-axis	0.07771647	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extent along the principal axis of the raster
+top-plate	f-hole-2	principal-axis-angle-from-z	-0.3604133	rad	0.0175	published-measured	esrf-il-cannone-ct-2026	angle of the principal axis from +z toward +x
+top-plate	f-hole-2	bore	0.00227832	m	0.000292	published-measured	esrf-il-cannone-ct-2026	straight bore of the raster outline with the hole's measured through-resistance (top-plate-fhole-walls.tsv: normal walls, R 0.00458 /mm, times the raster area); sigma = the same with the other layer family's R
+top-plate	f-holes	bore-pair	0.00239309	m	6.71e-05	published-measured	esrf-il-cannone-ct-2026	one straight bore for both holes that keeps their parallel bore conductance: (A1 + A2) / (1/R1 + 1/R2); sigma = the same with each hole's other layer family
 bass-bar	extent	length-z	0.26185	m	0.0001	published-measured	esrf-il-cannone-ct-2026	z extent of the mesh
 bass-bar	section	area-max	3.844e-05	m2	1e-06	published-measured	esrf-il-cannone-ct-2026	largest section area (planes every 5 mm), at z = -90.05 mm
 bass-bar	section	width-x-at-area-max	0.00585	m	0.0002	published-measured	esrf-il-cannone-ct-2026	x extent of that section

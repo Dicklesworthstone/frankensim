@@ -834,8 +834,8 @@ fn cannone_options() -> super::super::shell::assembly::table::OptionsFile {
     super::super::shell::assembly::table::OptionsFile::parse(include_str!("../../cannone-h8.assembly")).unwrap()
 }
 
-/// The il Cannone violin body (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv: 48
-/// parts, 7042 nodes, 10192 triangles, 119 ties) written as a v4 assembled profile with `cannone_options`. The table's
+/// The il Cannone violin body (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv: 49
+/// parts, 7038 nodes, 10178 triangles, 120 ties) written as a v4 assembled profile with `cannone_options`. The table's
 /// frame has x across the body, y vertical and z along the strings.
 fn cannone_profile() -> (Profile, super::super::shell::assembly::table::ConvertedTable) {
     cannone_profile_with(&cannone_options(), CANNONE_H8)
@@ -844,13 +844,13 @@ fn cannone_profile() -> (Profile, super::super::shell::assembly::table::Converte
 const CANNONE_H8: &str =
     include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv");
 
-/// The same body meshed at 6 mm by the same generator (shell-assembly-h6.tsv: 64 parts, 11769 nodes, 17483 triangles,
-/// 157 ties), the largest table on file.
+/// The same body meshed at 6 mm by the same generator (shell-assembly-h6.tsv: 62 parts, 11699 nodes, 17409 triangles,
+/// 150 ties), the largest table on file.
 const CANNONE_H6: &str =
     include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h6.tsv");
 
 /// The 6 mm table's assembly choices (`cannone-h6.assembly`): h8's, with the window to 5 kHz (the spruce pack's source
-/// band) and the projection work its 11769 nodes need.
+/// band) and the projection work its 11699 nodes need.
 fn cannone_h6_options() -> super::super::shell::assembly::table::OptionsFile {
     super::super::shell::assembly::table::OptionsFile::parse(include_str!("../../cannone-h6.assembly")).unwrap()
 }
@@ -1038,8 +1038,9 @@ fn cannone_memory_selection_keeps_the_same_film_and_reserves_one_assembly_budget
     assert!(profile.preflight(&input::Spec::parse(unprepared.as_bytes()).unwrap()).is_err());
 }
 
-/// The actual violin table carries 45 exterior components and 60 material
-/// regions. An exterior selection covers them, without coating internal parts.
+/// The actual violin table carries 46 exterior components and 61 material
+/// regions (45 and 60 before the f-hole cut of 2026-11-01). An exterior
+/// selection covers them, without coating internal parts.
 #[test]
 fn cannone_varnish_selection_covers_only_declared_exterior_regions() {
     use super::super::shell::assembly::table::OptionsFile;
@@ -1052,8 +1053,8 @@ fn cannone_varnish_selection_covers_only_declared_exterior_regions() {
     assert_eq!(coated.width_m, bare.width_m);
     assert_eq!(coated.bridge_snaps_m, bare.bridge_snaps_m);
     assert_eq!(coated.cavity, bare.cavity);
-    assert_eq!(coated.profile.lines().filter(|line| line.starts_with("coatings ")).count(), 45);
-    assert_eq!(coated.profile.lines().filter(|line| line.starts_with("coating ")).count(), 60);
+    assert_eq!(coated.profile.lines().filter(|line| line.starts_with("coatings ")).count(), 46);
+    assert_eq!(coated.profile.lines().filter(|line| line.starts_with("coating ")).count(), 61);
     for component in ["bass-bar", "soundpost", "bridge"] {
         let section = coated.profile.split(&format!("component {component}\n")).nth(1).unwrap()
             .split("end-component").next().unwrap();
@@ -1224,15 +1225,15 @@ fn the_cannone_crown_joints_resolve_to_their_contact_mechanics_at_both_envelope_
 }
 
 /// Both il Cannone tables are admitted, and their four bridges land on bridge nodes within 0.6 mm of the string
-/// contacts and push along x. The 6 mm body's 64 components and 157 ties are exactly the assembly caps: one more
-/// component or one more tie refuses. Its rib set (2904 nodes, 5082 triangles) and its 11769 nodes and 17483 triangles
-/// in all fit the node and triangle caps. With the violin-sized strings (synthetic steel, `violin_performance`), each
-/// table's own cavity row as a physical neck and 128 body modes, each passes preflight: every check that runs before
-/// pack I/O and the reduction.
+/// contacts and push along x. The 6 mm body's 62 components and 150 ties sit under the assembly caps of 64 and 157:
+/// padded to exactly both caps it is admitted, and one past either cap refuses. Its rib set (2904 nodes, 5082
+/// triangles) and its 11699 nodes and 17409 triangles in all fit the node and triangle caps. With the violin-sized
+/// strings (synthetic steel, `violin_performance`), each table's own cavity row as a physical neck and 128 body modes,
+/// each passes preflight: every check that runs before pack I/O and the reduction.
 #[test]
 fn the_cannone_violin_body_at_6_mm_fills_the_assembly_caps_and_both_tables_pass_preflight() {
     let records = |text: &str, name: &str| text.lines().filter(|l| l.split(' ').next() == Some(name)).count();
-    let tables = [(cannone_options(), CANNONE_H8, (48, 119, 4)), (cannone_h6_options(), CANNONE_H6, (64, 157, 4))];
+    let tables = [(cannone_options(), CANNONE_H8, (49, 120, 4)), (cannone_h6_options(), CANNONE_H6, (62, 150, 4))];
     for (options, table, counts) in tables {
         let (profile, converted) = cannone_profile_with(&options, table);
         let text = &converted.profile;
@@ -1242,22 +1243,37 @@ fn the_cannone_violin_body_at_6_mm_fills_the_assembly_caps_and_both_tables_pass_
         profile.preflight(&cannone_inputs_with(&options, table, 96, 128).1).unwrap();
     }
     let text = &cannone_profile_with(&cannone_h6_options(), CANNONE_H6).1.profile;
-    let refusal = |text: &str| Profile::parse(text.as_bytes()).err().expect("one past the cap must refuse").to_string();
-    // One more component: the bridge again, under a new name.
-    let (start, end) = (text.find("component bridge\n").unwrap(), text.find("face-ties").unwrap());
-    let part_end = start + text[start..end].find("end-component\n").unwrap() + "end-component\n".len();
-    let copy = text[start..part_end].replacen("component bridge\n", "component bridge-copy\n", 1);
-    let one_more_component = format!("{}{copy}{}", &text[..part_end], &text[part_end..])
-        .replacen("components 64\n", "components 65\n", 1);
-    assert!(refusal(&one_more_component).contains("count exceeds its explicit range"));
-    // One more tie: the first edge tie again.
-    let lines: Vec<&str> = text.lines().collect();
-    let first = lines.iter().position(|l| l.starts_with("edge-tie ")).unwrap();
-    let f: Vec<&str> = lines[first].split(' ').collect();
-    let block = 1 + f[5].parse::<usize>().unwrap() + f[6].parse::<usize>().unwrap();
-    let one_more_tie = [&lines[..first + block], &lines[first..]].concat().join("\n")
-        .replacen("edge-ties 157\n", "edge-ties 158\n", 1);
-    assert!(refusal(&one_more_tie).contains("count exceeds its explicit range"));
+    let (components, ties) = (records(text, "component"), records(text, "edge-tie"));
+    // The h6 profile padded to `n` components (the bridge again, under new names: 281 nodes and 440 triangles each,
+    // inside the total node and triangle caps at 64) and `m` edge ties (the first edge tie again).
+    let padded = |n: usize, m: usize| -> String {
+        let (start, end) = (text.find("component bridge\n").unwrap(), text.find("face-ties").unwrap());
+        let part_end = start + text[start..end].find("end-component\n").unwrap() + "end-component\n".len();
+        let copies: String = (components..n)
+            .map(|k| text[start..part_end].replacen("component bridge\n", &format!("component bridge-copy-{k}\n"), 1))
+            .collect();
+        let grown = format!("{}{copies}{}", &text[..part_end], &text[part_end..])
+            .replacen(&format!("components {components}\n"), &format!("components {n}\n"), 1);
+        let lines: Vec<&str> = grown.lines().collect();
+        let first = lines.iter().position(|l| l.starts_with("edge-tie ")).unwrap();
+        let f: Vec<&str> = lines[first].split(' ').collect();
+        let block = 1 + f[5].parse::<usize>().unwrap() + f[6].parse::<usize>().unwrap();
+        let mut tied = lines[..first + block].to_vec();
+        for _ in ties..m {
+            tied.extend_from_slice(&lines[first..first + block]);
+        }
+        tied.extend_from_slice(&lines[first + block..]);
+        format!("{}\n", tied.join("\n")).replacen(&format!("edge-ties {ties}\n"), &format!("edge-ties {m}\n"), 1)
+    };
+    // Exactly at both caps is admitted.
+    let at_the_caps = padded(64, 157);
+    assert_eq!((records(&at_the_caps, "component"), records(&at_the_caps, "edge-tie")), (64, 157));
+    Profile::parse(at_the_caps.as_bytes()).expect("64 components and 157 edge ties must be admitted");
+    // One past either cap refuses.
+    for (n, m) in [(65, 157), (64, 158)] {
+        let refusal = Profile::parse(padded(n, m).as_bytes()).err().expect("one past the cap must refuse").to_string();
+        assert!(refusal.contains("count exceeds its explicit range"), "{n} components, {m} edge ties: {refusal}");
+    }
 }
 
 /// The violin-sized G3 rung's strings, bow and schedule (`violin_performance`: synthetic steel, NOT violin strings) on the
@@ -1280,8 +1296,8 @@ fn cannone_inputs_with(options: &super::super::shell::assembly::table::OptionsFi
     (profile, input::Spec::parse(performance.as_bytes()).unwrap())
 }
 
-/// Every assembled il Cannone mode between 15 Hz and 2 kHz: the window holds 30 (a request for 128 refuses, naming 30).
-const CANNONE_BODY_MODES: usize = 30;
+/// Every assembled il Cannone mode between 15 Hz and 2 kHz: the window holds 33 (a request for 128 refuses, naming 33).
+const CANNONE_BODY_MODES: usize = 33;
 
 /// The two violin shell packs, built by `xtask matdb-pack` from data/matdb/seed-v1, and the synthetic steel elsewhere.
 fn cannone_pack(name: &str) -> NormalizedPack {

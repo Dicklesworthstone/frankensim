@@ -11,8 +11,10 @@ pack maple violin-maple-sycamore-sonderegger2013-shell.fsmatpk
 # sampled storage and loss errors below 0.1%, and reserve at most 512 histories
 # after equal-time aggregation over the whole assembled body. This is a cap,
 # not a promise that all 512 fit the separate prepared resources. O1 retains 13
-# positive times: at 30 body modes there are at most 390 histories, which fit
-# the original 4 GiB / 1e15-work declaration; the full 512 case would refuse.
+# positive times: at the card's 33 body modes (30 before the f-hole cut of
+# 2026-11-01) there are at most 429 histories. At 30 modes, 390 fit the
+# original 4 GiB / 1e15-work declaration; 429 has not been prepared since. The
+# full 512 case would refuse.
 # The source fit
 # remains finite-band; causal continuation outside it is an authored model.
 # Use the existing cannone-dominant-g3.material-strings prepared resources.

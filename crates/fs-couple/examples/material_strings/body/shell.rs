@@ -38,8 +38,8 @@ const MAX_PROJECTION_WORK: usize = 268_435_456;
 // The shell projection work is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus force and pressure
 // projections (about 1.4e11 for MAX_TRIANGLES triangles and MAX_MODES modes). An assembly adds the owner's
 // conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`: about 2.0e12 in all at the v4 caps
-// (12288 nodes, 24576 triangles, 256 modes, 8 bridges). At 128 modes and four bridges it is 7.7e11 for the
-// 11769-node il Cannone at 6 mm and 2.3e11 for the 5805-node Esteso guitar. 2^41 on 64-bit hosts.
+// (12288 nodes, 24576 triangles, 256 modes, 8 bridges). At 128 modes and four bridges it is 7.6e11 for the
+// 11699-node il Cannone at 6 mm and 2.3e11 for the 5805-node Esteso guitar. 2^41 on 64-bit hosts.
 pub(super) const MAX_SHELL_PROJECTION_WORK: usize = if (1u64 << 41) > usize::MAX as u64 { usize::MAX } else { (1u64 << 41) as usize };
 
 #[derive(Clone, Debug)]

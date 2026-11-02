@@ -655,8 +655,13 @@ Rayleigh's thin circular hole gives `K = 2a`. Each raster cell is split
 - The 3-D finite-volume Schur complement agrees with the duct map.
 
 `cannone_f_hole_conductance_ladder` measures the CT f-holes of il Cannone
-in the body table's top thickness. It reports their ratio to the body
-example's equivalent-ellipse neck and gates only convergence.
+as a thin plate, each hole alone and both together, against the sum of
+their equivalent ellipses, and gates only convergence.
+`cannone_f_hole_conductance_table_reproduces` solves the specimen's
+`top-plate-fhole-conductance.tsv` again (`examples/fhole_conductance.rs`:
+both holes, and each alone, through the measured pair bore and through its
+own bore) and requires every printed digit. The h8 body table's neck must
+carry the pair row.
 
 No-claim: the plate is flat and infinite, and each side is a half-space,
 not the arched top, the finite body or its closed cavity. The flow is

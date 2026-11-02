@@ -20,7 +20,7 @@ Existing note directories refuse; completed or partial work is never overwritten
 The native solver remains responsible for admitting all source data and physics.
 
 The recipe preserves the committed 144 kHz clock. It runs the 6 mm shell mesh
-rung (`cannone-h6.assembly`, `shell-assembly-h6.tsv`) with all 132 body modes of
+rung (`cannone-h6.assembly`, `shell-assembly-h6.tsv`) with all 134 body modes of
 its 15 Hz to 5 kHz window (`cannone-dominant-g3-h6.material-strings`). Bowing
 one string retains the other three strings in the reciprocal mechanical
 assembly. Bow position is explicitly one tenth of that string's speaking length
@@ -35,11 +35,12 @@ assembly keeps the lowest n modes of its window. Those 30 modes end at or below
 2 kHz. Rendered at cc787fa72, the four open strings' 2-4 kHz bands sat 18 to
 46 dB below the 6 mm renders that the site plays.
 
-The window of `cannone-h6.assembly` holds 132 modes at the committed drilling
-constant (1e-2). A request for more refuses, and the refusal prints the count:
+The window of `cannone-h6.assembly` holds 134 modes at the committed drilling
+constant (1e-2), 132 before the f-hole cut of 2026-11-01 (pexfp.377). A request
+for more refuses, and the refusal prints the count:
 
 ```text
-Error: Material(Nonlinear("assembled shell window has fewer modes than requested: it holds 132, 184 requested"))
+Error: Material(Nonlinear("assembled shell window has fewer modes than requested: it holds 134, 184 requested"))
 ```
 
 The E5 measurements on h6 were taken at cc787fa72. Each render is 0.2 s; levels
@@ -59,10 +60,11 @@ The whole window cost 596 s of setup and 1585 s per simulated second. That was
 measured on one core of a lightly loaded host (ts2, load 9-17). It comes to
 about 5350 s for a 3 s note, 1.45 times the 8 mm note.
 
-`cannone-dominant-g3.material-strings` keeps the 8 mm rung's 30 modes, and its
-tests stay with it. The bow, hair and varnish experiments below were written
-for that rung, so their commands select it with `ASSEMBLY_OPTIONS`,
-`SHELL_TABLE` and, where needed, `MATERIAL_STRINGS_PERFORMANCE`.
+`cannone-dominant-g3.material-strings` keeps the 8 mm rung's 33 modes (30
+before the f-hole cut), and its tests stay with it. The bow, hair and varnish
+experiments below were written for that rung, so their commands select it with
+`ASSEMBLY_OPTIONS`, `SHELL_TABLE` and, where needed,
+`MATERIAL_STRINGS_PERFORMANCE`.
 
 ## Residual flexibility and open-string tuning
 

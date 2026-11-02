@@ -4,9 +4,10 @@
 //! b/a)`, and the flanged long duct, whose end correction tends to 0.8216 a
 //! at each end (Norris and Sheng 1989). Symmetry: rotations, a mirror and a
 //! translation of the raster. Measurement: the il Cannone f-holes from the
-//! CT raster, in the body table's top thickness (pexfp.366).
+//! CT raster, thin (pexfp.366) and through their measured bores, where the
+//! specimen's conductance table must come out digit for digit (pexfp.377).
 
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use fs_bem::plate_aperture::{
     ApertureRaster, PlateApertureConductance, PlateApertureOptions, plate_aperture_conductance,
@@ -233,20 +234,108 @@ fn read_f_holes() -> [Vec<(i64, i64)>; 2] {
     holes
 }
 
-/// The body table's top thickness at the holes [mm] and its two-hole neck
-/// conductance [mm], from its `neck` row.
-fn read_neck() -> (f64, f64) {
-    let path = format!("{SPECIMEN}shell-assembly-h8.tsv");
-    let text = std::fs::read_to_string(&path).unwrap();
-    let row = text
+/// A specimen table after its schema line: the header's columns and the rows,
+/// each as wide as the header.
+fn read_specimen_table(name: &str, schema: &str) -> (Vec<String>, Vec<Vec<String>>) {
+    let text = std::fs::read_to_string(format!("{SPECIMEN}{name}")).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some(schema), "{name} schema");
+    let header: Vec<String> = lines.next().unwrap().split('\t').map(str::to_owned).collect();
+    let rows: Vec<Vec<String>> = lines
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.split('\t').map(str::to_owned).collect())
+        .collect();
+    assert!(rows.iter().all(|r| r.len() == header.len()), "{name} row width");
+    (header, rows)
+}
+
+/// The conductance table, keyed by configuration, each row by column name.
+fn read_conductance_table() -> BTreeMap<String, BTreeMap<String, String>> {
+    let (header, rows) = read_specimen_table(
+        "top-plate-fhole-conductance.tsv",
+        "frankensim.specimen-fhole-conductance.v1",
+    );
+    rows.into_iter()
+        .map(|r| (r[0].clone(), header.iter().cloned().zip(r).collect()))
+        .collect()
+}
+
+/// A bore of the wall table [mm], as written: `("0", "bore-pair")` or
+/// `("1", "bore")`.
+fn wall_bore(hole: &str, quantity: &str) -> String {
+    let (_, rows) = read_specimen_table(
+        "top-plate-fhole-walls.tsv",
+        "frankensim.specimen-fhole-walls.v1",
+    );
+    let found: Vec<&Vec<String>> = rows
+        .iter()
+        .filter(|r| r[0] == hole && r[1] == quantity)
+        .collect();
+    assert_eq!(found.len(), 1, "wall row {hole} {quantity}");
+    assert_eq!(found[0][3], "mm");
+    found[0][2].clone()
+}
+
+/// The h8 body table's `cavity` neck radius and length [mm].
+fn read_h8_neck() -> (f64, f64) {
+    let text = std::fs::read_to_string(format!("{SPECIMEN}shell-assembly-h8.tsv")).unwrap();
+    let row: Vec<f64> = text
         .lines()
-        .find(|l| l.starts_with("meta\tneck\t"))
-        .unwrap();
-    let after = |key: &str| -> f64 {
-        let rest = &row[row.find(key).unwrap_or_else(|| panic!("{key} missing")) + key.len()..];
-        rest.split(' ').next().unwrap().parse().unwrap()
+        .find(|l| l.starts_with("cavity\t"))
+        .unwrap()
+        .split('\t')
+        .skip(1)
+        .map(|v| v.parse().unwrap())
+        .collect();
+    (row[1] * 1e3, row[2] * 1e3)
+}
+
+/// One ladder at subdivisions 1, 2, 4, 8 with its JSON lines: the conductances
+/// [m], the observed orders of the first and last triples, the Richardson limit
+/// and its extrapolation step [m], in the arithmetic of the example that writes
+/// the conductance table; a ladder that is not monotone or has an order below
+/// 0.5 fails.
+fn cannone_ladder(
+    name: &str,
+    cells: &[(i64, i64)],
+    thickness_mm: f64,
+) -> (Vec<f64>, f64, f64, f64, f64) {
+    let raster = ApertureRaster {
+        cell: 0.5e-3,
+        open: cells.to_vec(),
     };
-    (after("at the top thickness "), after("; total "))
+    let mut k = Vec::new();
+    for m in [1, 2, 4, 8] {
+        let (r, seconds) = solve(&raster, &options(thickness_mm * 1e-3, m));
+        println!(
+            "{{\"test\":\"cannone_f_holes\",\"holes\":\"{name}\",\"thickness_mm\":{thickness_mm},\"m\":{m},\"h_mm\":{:.4},\"cells\":{},\"layers\":{},\"fft_points\":{},\"K_mm\":{:.6},\"iterations\":{},\"inner_iterations\":{},\"residual\":{:.2e},\"seconds\":{seconds:.1}}}",
+            r.cell_side * 1e3,
+            r.cells,
+            r.layers,
+            r.fft_points,
+            r.conductance * 1e3,
+            r.iterations,
+            r.inner_iterations,
+            r.residual
+        );
+        k.push(r.conductance);
+    }
+    let (p_first, _) = richardson(&k[..3]);
+    let (p, limit) = richardson(&k);
+    let step = (k[3] - k[2]) / (2f64.powf(p) - 1.0);
+    println!(
+        "{{\"test\":\"cannone_f_holes\",\"holes\":\"{name}\",\"thickness_mm\":{thickness_mm},\"order\":[{p_first:.3},{p:.3}],\"K_limit_mm\":{:.4},\"K_limit_m\":{limit:.6e}}}",
+        limit * 1e3
+    );
+    assert!(
+        k.windows(2).all(|w| w[1] > w[0]),
+        "{name} t {thickness_mm}: not monotone {k:?}"
+    );
+    assert!(
+        p_first >= 0.5 && p >= 0.5,
+        "{name} t {thickness_mm}: orders {p_first} {p}: {k:?}"
+    );
+    (k, p_first, p, limit, step)
 }
 
 /// The equivalent ellipse of the body example on the raster cells: the area,
@@ -275,86 +364,94 @@ fn equivalent_ellipse_mm(cells: &[(i64, i64)]) -> (f64, f64) {
 
 #[test]
 fn cannone_f_hole_conductance_ladder() {
-    // Measurement, not a band check: the conductance of the CT f-hole
-    // outlines through the body table's top thickness, each hole alone and
-    // both together, on a subdivision ladder of the 0.5 mm raster.
+    // Measurement, not a band check: the conductance of the CT f-holes, each
+    // hole alone and both together, on a subdivision ladder of the 0.5 mm
+    // raster, as a thin plate and against the equivalent ellipse.
     let holes = read_f_holes();
-    let (t_mm, neck_mm) = read_neck();
     let both: Vec<(i64, i64)> = holes[0].iter().chain(&holes[1]).copied().collect();
     let configs: [(&str, &Vec<(i64, i64)>); 3] =
         [("hole1", &holes[0]), ("hole2", &holes[1]), ("both", &both)];
-    let mut ellipse = Vec::new();
+    let mut k0s = Vec::new();
     for (name, cells) in &configs[..2] {
         let (area, k0) = equivalent_ellipse_mm(cells);
-        let series = 1.0 / (1.0 / k0 + t_mm / area);
         println!(
-            "{{\"test\":\"cannone_f_holes\",\"holes\":\"{name}\",\"cells\":{},\"area_mm2\":{area:.2},\"ellipse_K0_mm\":{k0:.4},\"ellipse_series_K_mm\":{series:.4}}}",
+            "{{\"test\":\"cannone_f_holes\",\"holes\":\"{name}\",\"cells\":{},\"area_mm2\":{area:.2},\"ellipse_K0_mm\":{k0:.4}}}",
             cells.len()
         );
-        ellipse.push((k0, series));
+        k0s.push(k0);
     }
-    for thickness_mm in [0.0, t_mm] {
-        let mut limits = Vec::new();
-        for (name, cells) in &configs {
-            let raster = ApertureRaster {
-                cell: 0.5e-3,
-                open: (*cells).clone(),
-            };
-            let mut k = Vec::new();
-            for m in [1, 2, 4, 8] {
-                let (r, seconds) = solve(&raster, &options(thickness_mm * 1e-3, m));
-                println!(
-                    "{{\"test\":\"cannone_f_holes\",\"holes\":\"{name}\",\"thickness_mm\":{thickness_mm},\"m\":{m},\"h_mm\":{:.4},\"cells\":{},\"layers\":{},\"fft_points\":{},\"K_mm\":{:.6},\"iterations\":{},\"inner_iterations\":{},\"residual\":{:.2e},\"seconds\":{seconds:.1}}}",
-                    r.cell_side * 1e3,
-                    r.cells,
-                    r.layers,
-                    r.fft_points,
-                    r.conductance * 1e3,
-                    r.iterations,
-                    r.inner_iterations,
-                    r.residual
-                );
-                k.push(r.conductance * 1e3);
-            }
-            let (p_first, _) = richardson(&k[..3]);
-            let (p, limit) = richardson(&k);
-            println!(
-                "{{\"test\":\"cannone_f_holes\",\"holes\":\"{name}\",\"thickness_mm\":{thickness_mm},\"order\":[{p_first:.3},{p:.3}],\"K_limit_mm\":{limit:.4},\"K_limit_m\":{:.6e}}}",
-                limit * 1e-3
-            );
-            assert!(
-                k.windows(2).all(|w| w[1] > w[0]),
-                "{name} t {thickness_mm}: not monotone {k:?}"
-            );
-            assert!(
-                p_first >= 0.5 && p >= 0.5,
-                "{name} t {thickness_mm}: orders {p_first} {p}: {k:?}"
-            );
-            limits.push(limit);
+    let limits: Vec<f64> = configs
+        .iter()
+        .map(|(name, cells)| cannone_ladder(name, cells, 0.0).3 * 1e3)
+        .collect();
+    let reference: f64 = k0s.iter().sum();
+    println!(
+        "{{\"test\":\"cannone_f_holes\",\"thickness_mm\":0,\"K_both_mm\":{:.4},\"K_hole1_plus_hole2_mm\":{:.4},\"mutual_factor\":{:.5},\"ellipse_sum_mm\":{reference:.4},\"ratio_to_ellipse_sum\":{:.5}}}",
+        limits[2],
+        limits[0] + limits[1],
+        limits[2] / (limits[0] + limits[1]),
+        limits[2] / reference
+    );
+}
+
+#[test]
+fn cannone_f_hole_conductance_table_reproduces() {
+    // top-plate-fhole-conductance.tsv (crates/fs-bem/examples/fhole_conductance.rs)
+    // is the solver's ladder on the raster through the wall table's bores,
+    // digit for digit, and the h8 body table's neck carries its pair row: the
+    // flanged circular neck of that conductance through the pair bore.
+    let holes = read_f_holes();
+    let both: Vec<(i64, i64)> = holes[0].iter().chain(&holes[1]).copied().collect();
+    let table = read_conductance_table();
+    let (pair_bore, own) = (
+        wall_bore("0", "bore-pair"),
+        [wall_bore("1", "bore"), wall_bore("2", "bore")],
+    );
+    let configs: [(&str, &Vec<(i64, i64)>, &str); 5] = [
+        ("pair", &both, &pair_bore),
+        ("hole1-at-pair-bore", &holes[0], &pair_bore),
+        ("hole2-at-pair-bore", &holes[1], &pair_bore),
+        ("hole1-at-own-bore", &holes[0], &own[0]),
+        ("hole2-at-own-bore", &holes[1], &own[1]),
+    ];
+    assert_eq!(
+        table.keys().collect::<Vec<_>>(),
+        {
+            let mut names: Vec<&str> = configs.iter().map(|c| c.0).collect();
+            names.sort_unstable();
+            names
+        },
+        "the table's configurations"
+    );
+    for (name, cells, bore) in configs {
+        let row = &table[name];
+        assert_eq!(row["cells"], cells.len().to_string(), "{name} cells");
+        assert_eq!(row["thickness_mm"], bore, "{name} bore");
+        let (k, p_first, p, limit, step) = cannone_ladder(name, cells, bore.parse().unwrap());
+        let computed = [
+            format!("{:.6}", k[0] * 1e3),
+            format!("{:.6}", k[1] * 1e3),
+            format!("{:.6}", k[2] * 1e3),
+            format!("{:.6}", k[3] * 1e3),
+            format!("{p_first:.4}"),
+            format!("{p:.4}"),
+            format!("{:.6}", limit * 1e3),
+            format!("{:.6}", step * 1e3),
+        ];
+        let columns = [
+            "K_m1_mm", "K_m2_mm", "K_m4_mm", "K_m8_mm", "order_first", "order_last", "K_mm", "step_mm",
+        ];
+        for (column, value) in columns.iter().zip(&computed) {
+            assert_eq!(&row[*column], value, "{name} {column}");
         }
-        // The ellipse reference is the thin K0 for a thin plate and the
-        // body example's series 1/(1/K0 + t/A) through the plate; the table's
-        // neck is that series on its traced polygons.
-        let (k0s, series): (Vec<f64>, Vec<f64>) = ellipse.iter().copied().unzip();
-        let reference: f64 = if thickness_mm == 0.0 {
-            k0s.iter().sum()
-        } else {
-            series.iter().sum()
-        };
-        let neck = if thickness_mm == 0.0 {
-            String::new()
-        } else {
-            format!(
-                ",\"body_table_neck_mm\":{neck_mm},\"ratio_to_body_table_neck\":{:.5}",
-                limits[2] / neck_mm
-            )
-        };
-        println!(
-            "{{\"test\":\"cannone_f_holes\",\"thickness_mm\":{thickness_mm},\"K_both_mm\":{:.4},\"K_hole1_plus_hole2_mm\":{:.4},\"mutual_factor\":{:.5},\"ellipse_sum_mm\":{reference:.4},\"ratio_to_ellipse_sum\":{:.5}{neck}}}",
-            limits[2],
-            limits[0] + limits[1],
-            limits[2] / (limits[0] + limits[1]),
-            limits[2] / reference
-        );
     }
+    let k_pair: f64 = table["pair"]["K_mm"].parse().unwrap();
+    let (radius, length) = read_h8_neck();
+    let pair_bore_mm: f64 = pair_bore.parse().unwrap();
+    assert!((length - pair_bore_mm).abs() < 1e-9, "h8 neck length {length} mm");
+    let k_neck = std::f64::consts::PI * radius * radius / (length + 2.0 * 0.8216 * radius);
+    assert!(
+        ((k_neck - k_pair) / k_pair).abs() < 1e-6,
+        "h8 neck K {k_neck} mm against the table's {k_pair} mm"
+    );
 }

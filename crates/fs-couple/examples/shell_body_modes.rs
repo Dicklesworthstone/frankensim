@@ -13,8 +13,9 @@
 //! `PACK_DIR/<pack>.fsmatpk` is read for each pack name in the table. `--shapes` writes the displacement of the top and back
 //! nodes along their directors; `--node-shapes` writes the three displacement components of every node of every part.
 //! `--fholes` computes the sound holes' conductance from their raster (`frankensim.specimen-raster-runs.v1`) with
-//! `fs_bem::plate_aperture` at the table's neck length, and the neck becomes the circular flanged neck of that conductance
-//! instead of the table's equivalent-ellipse estimate.
+//! `fs_bem::plate_aperture` at the table's neck length, and the neck becomes the circular flanged neck of that conductance.
+//! A table written with its generator's `neck=bem` already carries that neck, through the holes' measured bore; on a
+//! `neck=ellipse` table the flag replaces the equivalent-ellipse estimate.
 use std::{collections::BTreeMap, error::Error, fs, io::Write, path::Path};
 
 use fs_bem::plate_aperture::{ApertureRaster, PlateApertureOptions, plate_aperture_conductance};
@@ -736,8 +737,8 @@ fn main() -> Result<()> {
     }
     // Enclosed air on the same modes: U = sum(w_i^2 q_i^2)/2 + (sum s_j q_j + a z)^2 k_c / 2, z = sqrt(M_neck) x.
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), TEMPERATURE_K, 101_325.0)?;
-    // The table's neck is its generator's equivalent-ellipse estimate; `--fholes` replaces it by the neck of the conductance
-    // computed on the hole raster, at the same length (the top thickness at the holes).
+    // `--fholes` replaces the table's neck by the neck of the conductance computed on the hole raster, at the table's neck
+    // length: the holes' measured pair bore on a `neck=bem` table, the top thickness at the holes on a `neck=ellipse` one.
     let neck_radius_m = match &fholes {
         None => table.neck_radius_m,
         Some(path) => {

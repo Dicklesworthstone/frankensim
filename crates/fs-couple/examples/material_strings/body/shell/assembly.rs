@@ -15,8 +15,8 @@ pub(crate) mod table;
 mod glue;
 
 // The il Cannone violin body at 6 mm
-// (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h6.tsv) has 64 components and
-// 157 ties, the largest table on file; both caps are exactly what it needs.
+// (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h6.tsv) has 62 components and
+// 150 ties, the largest table on file. Both caps are what it needed before the f-hole cut of 2026-11-01 (64 and 157).
 const MAX_COMPONENTS: usize = 64;
 // Totals across every component of one assembled body: four components at the per-component ceiling.
 const MAX_TOTAL_NODES: usize = 4 * MAX_NODES;

@@ -34,6 +34,16 @@ FANFIX = opts.get("fanfix", "0") == "1"  # repairs for meshes that leave a verte
 FANMOVE = opts.get("fanfix", "0") == "move"  # the interior part of that repair alone, keeping the merged patches (fanfix=1 re-derives them from the zones, which splits merged patches into more components)
 MIN_PATCH = int(opts.get("min_patch", "24"))  # interior zone patches smaller than this many triangles are merged into their neighbour
 ZSTEP = dict(top=float(opts.get("zone_step_top_mm", "0.2")), back=float(opts.get("zone_step_back_mm", "0.4")))
+# the f-holes' neck: "bem" (default) is the potential-flow conductance of both holes together through their measured bore
+# (top-plate-fhole-conductance.tsv, written by crates/fs-bem/examples/fhole_conductance.rs from the raster and the wall table);
+# "ellipse" is the estimate of the tables before 2026-11-01 (each hole's equivalent ellipse in series with t/A at the top
+# thickness, summed). The conductance table is computed at plan scale 1 and the measured bore, so a scaled or thickness-
+# shifted sensitivity table must say neck=ellipse.
+NECK = opts.get("neck", "bem")
+if NECK not in ("bem", "ellipse"):
+    raise SystemExit("neck must be bem or ellipse")
+if NECK == "bem" and (SC != 1.0 or T_SHIFT != 0.0):
+    raise SystemExit("neck=bem uses the conductance of the measured holes at scale 1 and the measured bore: a scaled or shifted table needs neck=ellipse")
 CENTRE = np.array([0.0, -87.0])  # plan-view centre of the body (x, z) for the declared scale
 
 META = []
@@ -851,7 +861,10 @@ def main():
     hole_rings, hole_pts = f_hole_rings(0.6 * H)
     for k, (hr, hp) in enumerate(zip(hole_rings, hole_pts)):
         extra_top["fhole%d" % (k + 1)] = (to_plan(hr), True, to_plan(hp))
-    meta("f_holes", "plan outline of each hole traced from the 0.5 mm raster runs (top-plate-fholes.tsv), simplified to 0.3 mm, spaced %.1f mm; polygon areas %s mm2 (table areas 409 and 313)" % (0.6 * H, ", ".join("%.0f" % abs(poly_area(r)) for r in hole_rings)))
+    _, fh_runs = ntable("top-plate-fholes.tsv")
+    raster_areas = [float(((fh_runs[fh_runs[:, 0] == k][:, 3] - fh_runs[fh_runs[:, 0] == k][:, 2]) * 0.5).sum()) for k in (1, 2)]
+    meta("f_holes", "plan outline of each hole traced from the 0.5 mm raster runs (top-plate-fholes.tsv), simplified to 0.3 mm, spaced %.1f mm; polygon areas %s mm2 (raster areas %s mm2)" % (
+        0.6 * H, ", ".join("%.0f" % abs(poly_area(r)) for r in hole_rings), " and ".join("%.0f" % a for a in raster_areas)))
     feature_top, circles_top, circles_back, extra_back = [], [], [], {}
     bar = bridge = post = None
     bar_pts = None
@@ -1204,23 +1217,49 @@ def main():
         meta("cavity_volume_exact", "inner-skin planform integral %.4f L (planform = the rib ring moved in by half the rib thickness %.3f mm, %d grid cells of 0.5 mm, height from the inner skins of back and top) minus the shells of the bass bar and soundpost %.4f L" % (vol_exact / 1e6, t_rib_half, len(G), solids / 1e6))
         vol_inner = vol_exact - solids
     t_holes = float(np.mean(top_fld.t(to_plan(np.vstack(hole_rings)))))
-    # the two f-holes as one circular neck of the same conductance: each hole is a thin-plate aperture of its elliptic equivalent (K0 = 2 a AGM(1, b/a)) in series with its through-thickness
-    # resistance t / A; the neck radius follows from K = pi r^2 / (t + 2 x 0.8216 r), the library's flanged end correction at both ends, at the top thickness at the holes
-    k_parts = []
-    for hr in hole_rings:
-        k0, a_h, ea, eb = ellipse_conductance(to_plan(hr))
-        k_parts.append((1.0 / (1.0 / k0 + t_holes / a_h), k0, a_h, ea, eb))
-    k_tot = sum(k[0] for k in k_parts)
-    r_eq = (1.6432 * k_tot + math.sqrt((1.6432 * k_tot) ** 2 + 4 * math.pi * k_tot * t_holes)) / (2 * math.pi)
-    f_rigid = 343.0 / (2 * math.pi) * math.sqrt(k_tot * 1e-3 / (vol_inner * 1e-9))
     meta("cavity_volume_midsurface_L", "%.4f" % (vol_mid / 1e6))
     meta("cavity_volume_L", ("%.4f (the exact inner-skin volume minus the bass bar and soundpost shells, see cavity_volume_exact)" if CAVITY_EXACT else "%.4f (midsurface facets oriented outward, the f-holes closed by planar patches at their mean height, minus half the thickness of every wall)") % (vol_inner / 1e6))
-    meta("neck", "one circular neck of the conductance of the two f-holes: per hole the equivalent ellipse (semi-axes %s mm) has thin-plate conductance K0 %s mm, in series with t/A at the top thickness %.2f mm gives %s mm; total %.2f mm; the neck radius that gives it with the flanged end correction 0.8216 r at both ends is %.2f mm (area %.0f mm2 against the hole area %.0f mm2), length = the top thickness; rigid-wall Helmholtz frequency of this neck and cavity %.0f Hz (c = 343 m/s); the equivalent-ellipse conductance of a curved f-hole is an approximation (UNKNOWN size of the error; named in the pre-registered scope)" % (
-        " and ".join("%.1f x %.1f" % (k[3], k[4]) for k in k_parts), " and ".join("%.1f" % k[1] for k in k_parts), t_holes, " and ".join("%.1f" % k[0] for k in k_parts), k_tot, r_eq, math.pi * r_eq ** 2, hole_area, f_rigid))
+    if NECK == "ellipse":
+        # each hole a thin-plate aperture of its elliptic equivalent (K0 = 2 a AGM(1, b/a)) in series with its through-thickness resistance t / A at the top thickness at the holes, summed
+        k_parts = []
+        for hr in hole_rings:
+            k0, a_h, ea, eb = ellipse_conductance(to_plan(hr))
+            k_parts.append((1.0 / (1.0 / k0 + t_holes / a_h), k0, a_h, ea, eb))
+        k_tot, neck_len = sum(k[0] for k in k_parts), t_holes
+        how = "per hole the equivalent ellipse (semi-axes %s mm) has thin-plate conductance K0 %s mm, in series with t/A at the top thickness %.2f mm gives %s mm; total %.2f mm" % (
+            " and ".join("%.1f x %.1f" % (k[3], k[4]) for k in k_parts), " and ".join("%.1f" % k[1] for k in k_parts), t_holes, " and ".join("%.1f" % k[0] for k in k_parts), k_tot)
+        caveat = "the equivalent-ellipse conductance of a curved f-hole is an approximation (UNKNOWN size of the error; named in the pre-registered scope)"
+    else:
+        # both holes together through their measured straight bore (fs_bem::plate_aperture, Richardson limit of subdivisions 1-8)
+        ch, cr = table("top-plate-fhole-conductance.tsv")
+        cond = {r[0]: dict(zip(ch, r)) for r in cr}
+        pair = cond["pair"]
+        cells = sum(int(round((b - a) / 0.5)) for _, _, a, b in fh_runs)
+        if int(pair["cells"]) != cells:
+            raise SystemExit("top-plate-fhole-conductance.tsv was computed on %s cells, the raster has %d: rerun fhole_conductance" % (pair["cells"], cells))
+        bore = dimension("top-plate", "f-holes", "bore-pair")
+        if abs(float(pair["thickness_mm"]) - bore) > 1e-9:
+            raise SystemExit("top-plate-fhole-conductance.tsv is at %s mm, dimensions.tsv's bore-pair is %.9g mm" % (pair["thickness_mm"], bore))
+        k_tot, neck_len = float(pair["K_mm"]), float(pair["thickness_mm"])
+        k1, k2 = float(cond["hole1-at-pair-bore"]["K_mm"]), float(cond["hole2-at-pair-bore"]["K_mm"])
+        how = ("fs_bem::plate_aperture on the 0.5 mm raster of both holes (%d cells) through one straight bore of %.3f mm (dimensions.tsv bore-pair: the holes' parallel bore conductance kept; "
+               "their own bores %.3f and %.3f mm), the Richardson limit of subdivisions 1, 2, 4, 8 (orders %s and %s, extrapolation step %s mm) from top-plate-fhole-conductance.tsv; total %.2f mm; "
+               "each hole alone through the same bore %.2f and %.2f mm (mutual factor %.4f), through its own bore %.2f and %.2f mm") % (
+            cells, neck_len, dimension("top-plate", "f-hole-1", "bore"), dimension("top-plate", "f-hole-2", "bore"), pair["order_first"], pair["order_last"], pair["step_mm"], k_tot,
+            k1, k2, k_tot / (k1 + k2), float(cond["hole1-at-own-bore"]["K_mm"]), float(cond["hole2-at-own-bore"]["K_mm"]))
+        caveat = ("the plate of the solve is flat, rigid and infinite with a half-space of air on each side: the arching, the finite body and the cavity side of each hole are not in it; "
+                  "one bore for both holes (top-plate-fhole-walls.tsv: hole 1's walls run vertical, flaring wider toward the cavity, hole 2's square to the arched surface); "
+                  "the areas carry u-inplane-scale (about 4 percent of area if the reduced volume's pitch is right), the plate mesh may include varnish, and the wood-gap-wood cells beside the "
+                  "openings (top-plate-fhole-walls.tsv) are unresolved")
+    # the neck radius that gives the conductance with the library's flanged end correction 0.8216 r at both ends: K = pi r^2 / (L + 2 x 0.8216 r)
+    r_eq = (1.6432 * k_tot + math.sqrt((1.6432 * k_tot) ** 2 + 4 * math.pi * k_tot * neck_len)) / (2 * math.pi)
+    f_rigid = 343.0 / (2 * math.pi) * math.sqrt(k_tot * 1e-3 / (vol_inner * 1e-9))
+    meta("neck", "one circular neck of the conductance of the two f-holes: %s; the neck radius that gives it with the flanged end correction 0.8216 r at both ends is %.2f mm (area %.0f mm2 against the hole area %.0f mm2), length %s; rigid-wall Helmholtz frequency of this neck and cavity %.0f Hz (c = 343 m/s); %s" % (
+        how, r_eq, math.pi * r_eq ** 2, hole_area, "= the top thickness" if NECK == "ellipse" else "%.3f mm (the bore)" % neck_len, f_rigid, caveat))
     meta("scale_and_shift", "plan-view scale %.4f (declared sensitivity u-inplane-scale), thickness shift %.3f mm (declared sensitivity u-segmentation-error)" % (SC, T_SHIFT))
     meta("packs", ", ".join("%s=%s" % kv for kv in sorted(PACKS.items())))
     meta("omitted", "neck and upper block, tail block, tailpiece, strings, chinrest, linings and corner blocks, purfling, varnish, glue compliance, the button and tail-end notch features of the plates (end rows narrower than 10 mm)")
-    write(vol_inner, r_eq, t_holes)
+    write(vol_inner, r_eq, neck_len)
 
 
 def write(vol_inner_mm3, r_eq_mm, neck_len_mm):

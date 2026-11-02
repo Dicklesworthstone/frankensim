@@ -73,36 +73,9 @@ def plate(name, npz, kind):
         if len(ii):
             rows.append(("%.2f" % (z0 + (j + 0.5) * h), "%.2f" % (x0 + ii[0] * h), "%.2f" % (x0 + (ii[-1] + 1) * h)))
     write("%s-outline.tsv" % name, "z_mm\tx_left_mm\tx_right_mm", rows)
-    # f-holes
-    holes = F & ~M
-    lab = np.zeros(holes.shape, np.int32)
-    k = 0
-    for i, j in zip(*np.nonzero(holes)):
-        if lab[i, j]:
-            continue
-        k += 1
-        stack = [(i, j)]
-        lab[i, j] = k
-        while stack:
-            a, b = stack.pop()
-            for da, db in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                p, q = a + da, b + db
-                if 0 <= p < nx and 0 <= q < nz and holes[p, q] and not lab[p, q]:
-                    lab[p, q] = k
-                    stack.append((p, q))
-    big = sorted([(int((lab == c).sum()), c) for c in range(1, k + 1)], reverse=True)
-    big = [(s, c) for s, c in big if s * h * h >= 100.0]
-    if big:
-        frows, info = [], []
-        for hid, (s, c) in enumerate(sorted(big, key=lambda sc: np.nonzero(lab == sc[1])[0].mean()), 1):
-            ii, jj = np.nonzero(lab == c)
-            info.append((hid, s * h * h, x0 + (ii.mean() + 0.5) * h, z0 + (jj.mean() + 0.5) * h))
-            for j in np.unique(jj):
-                col = np.nonzero(lab[:, j] == c)[0]
-                for a, b in cs.runs_of(np.isin(np.arange(nx), col)):
-                    frows.append((str(hid), "%.2f" % (z0 + (j + 0.5) * h), "%.2f" % (x0 + a * h), "%.2f" % (x0 + (b + 1) * h)))
-        write("%s-fholes.tsv" % name, "hole\tz_mm\tx_start_mm\tx_end_mm", frows)
-        print("   f-holes (id, area mm2, centroid x, centroid z):", [(i, round(a, 1), round(x, 1), round(z, 1)) for i, a, x, z in info])
+    # f-holes: written by fhole_openings.py from the mesh's through-openings at 0.1 mm. The rule that stood here (a 0.5 mm cell
+    # is wood when any surface sample falls in it, then only openings of 100 mm2 or more) closed the narrow necks of the
+    # hooks and dropped the hooks and eyes (MaroonOak, pexfp.377, 2026-11-01).
     # maps: 3 mm blocks (6 x 6 cells); medians over the valid cells of the block
     tv = np.abs(outer - inner)
     tv[(cnt < 2) | ~M] = np.nan

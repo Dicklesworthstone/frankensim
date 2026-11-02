@@ -1497,9 +1497,10 @@ With the two violin shell packs, both built by `xtask matdb-pack` from
 `data/matdb/seed-v1` (`packs/violin-spruce-norway-viala2020-shell.fsmatpk` as
 `@body` for the top, bass bar and soundpost,
 `packs/violin-maple-sycamore-sonderegger2013-shell.fsmatpk` for the back, ribs
-and bridge), the window from 15 Hz to 2 kHz holds 30
-assembled modes, 473.5 Hz to 1967.7 Hz. A request for more refuses once the
-window is solved and names the count it holds. Both packs state
+and bridge), the window from 15 Hz to 2 kHz holds 33
+assembled modes since the f-hole cut of 2026-11-01 (pexfp.377; before it, 30
+modes, 473.5 Hz to 1967.7 Hz, with the Q below). A request for more refuses once
+the window is solved and names the count it holds. Both packs state
 `constant_loss_reference_omega` (2 pi 200 rad/s), so the body modes' Q is
 68.3-80.3 across the window; without it the same packs gave a Kelvin-Voigt Q
 falling from 31.0 at 473.5 Hz to 7.2 at 1915.7 Hz. The ignored rungs in
@@ -1538,7 +1539,7 @@ starts with `#` is a comment. The command prints:
 `cannone-h8.assembly` holds il Cannone's choices. The rungs in
 `body/shell/tests.rs` read the same file. `cannone-h6.assembly` makes the same
 choices for the 6 mm table `shell-assembly-h6.tsv` beside it, with the
-projection work its 11769 nodes need, except the window: it reaches 5 kHz, the
+projection work its 11699 nodes need, except the window: it reaches 5 kHz, the
 narrower pack's validity. The spruce pack declares its source's band (Viala's
 model updating, 100-5000 Hz) and the maple pack Laemmlein's 150 Hz to 10 kHz
 sweep; no source reaches 5-6 kHz. The cavity row and the bridge snaps differ
@@ -1561,7 +1562,7 @@ Two inputs of this note are authored, not measured:
 card that the violin's `render.sh` renders. It differs from
 `cannone-dominant-g3.material-strings` in these records:
 - the body record carries h6's dimensions, as `assemble-shell` prints them, and
-  132 body modes;
+  134 body modes;
 - the cavity record is h6's row;
 - the prepared budget is 640 coordinates and 8589934592 bytes;
 - `residual-flexibility exact-static-green` follows the prepared budget;
@@ -1569,14 +1570,16 @@ card that the violin's `render.sh` renders. It differs from
   from the instrument's own pulse response: G 1.000993, D 1.001820, A 1.003014
   and E 0.999449. The violin README gives the probe and the readings.
 
-132 modes is the whole of h6's 15 Hz-5 kHz window at drilling 1e-2. A request
-for 184 refuses with `assembled shell window has fewer modes than requested: it
-holds 132, 184 requested`. With the body and cavity, the note has 576
-coordinates.
+134 modes is the whole of h6's 15 Hz-5 kHz window at drilling 1e-2 (132 before
+the f-hole cut of 2026-11-01). A request for 184 refuses with `assembled shell
+window has fewer modes than requested: it holds 134, 184 requested`. With the
+body and cavity, the note has 578 coordinates, computed as the 576 of the
+132-mode note plus the two added body modes (not read from a run).
 
-The h8 note's 30 modes end at or below 2 kHz. On h6, keeping only 30 modes
-leaves E5's partials 4-7 (2.65-4.64 kHz) 20 to 24 dB below the whole window.
-66 modes restore them up to about 3.3 kHz. The violin README has the measured
+The h8 note's 33 modes (30 before the cut) end at or below 2 kHz. On h6 before
+the cut, keeping only 30 modes left E5's partials 4-7 (2.65-4.64 kHz) 20 to 24
+dB below the whole window.
+66 modes restored them up to about 3.3 kHz. The violin README has the measured
 table and the cost: 596 s of setup and 1585 s per simulated second.
 
 `cannone-dominant-g3-crown-compliant.material-strings` and

@@ -4,7 +4,7 @@
 # cards supply ONLY bow speed/force/articulation and duration; their one-way body,
 # EI=0 string and constant modal damping are no longer the rendering route.
 # The body is the 6 mm rung (cannone-h6.assembly, shell-assembly-h6.tsv) with all
-# 132 modes of its 15 Hz-5 kHz window (cannone-dominant-g3-h6.material-strings).
+# 134 modes of its 15 Hz-5 kHz window (cannone-dominant-g3-h6.material-strings).
 # ASSEMBLY_OPTIONS, SHELL_TABLE and MATERIAL_STRINGS_PERFORMANCE select another
 # rung or card; README.md gives the 8 mm commands of the variant experiments.
 # usage: render.sh MATERIAL_STRINGS_BIN NEW_OUT_DIR [launcher options]

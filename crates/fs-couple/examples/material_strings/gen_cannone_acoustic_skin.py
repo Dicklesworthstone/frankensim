@@ -13,8 +13,9 @@ The skin reads only the table's own parts, so every skin vertex is a point of a 
   ring's plate nodes above and below, which close the half-plate-thickness slot between the rib edge and each plate;
 - the two f-holes closed by caps on every one of their boundary nodes; cap interior points lie on the least-squares plane of the
   hole's boundary and move with nothing. A cap carries its hole's share of the cavity's neck flow, K_i / (K_1 + K_2),
-  from each hole's potential-flow conductance alone (fs-bem plate_aperture, b224d16a6: 27.022 and 22.330 mm at the
-  table's 3.05 mm top); together the holes carry 0.918 of that sum, and how the coupling splits the flow is not known.
+  from each hole's potential-flow conductance alone through the table's neck bore: the `hole1-at-pair-bore` and
+  `hole2-at-pair-bore` rows of the specimen's top-plate-fhole-conductance.tsv (33.123 and 32.199 mm through 2.393 mm);
+  together the holes carry 0.892 of that sum (its `pair` row), and how the coupling splits the flow is not known.
 Left out, and stated: the plate overhang beyond the ring (2.5-8 mm fins whose two faces move together), the bridge, the
 bass bar and soundpost (inside), and the parts the table already omits (neck, blocks, linings, fingerboard, tailpiece).
 Checked before writing: every edge used twice in opposite directions, Euler characteristic 2, positive enclosed volume,

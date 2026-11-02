@@ -25,14 +25,18 @@ global displacement components of every node of every part (m/sqrt(kg), mass-nor
 After the coupled lists the example prints, for every open-sound-hole mode, the share of the shell kinetic energy carried by each group of
 parts, using lumped nodal masses: a third of each triangle's area times its thickness and its pack's density.
 
-`--fholes RASTER.tsv` replaces the table's neck. The table's `cavity` row is its generator's estimate: one circular neck
-of the summed equivalent-ellipse conductances (the `neck` meta row). With `--fholes`, the example computes the
-conductance of all the raster's holes together with `fs_bem::plate_aperture`, through a rigid plate of the neck length
-(the top thickness at the holes). It runs subdivisions 1, 2, 4 and 8 of the 0.5 mm cells and takes the Richardson
-limit, and it refuses a ladder that is not monotone or has an observed order below 0.5. The neck becomes the circular
-flanged neck of that conductance, found by bisection on the library's own neck. For il Cannone the raster is
-`top-plate-fholes.tsv`; the ladder takes about a minute on 16 workers. Still not represented: the arching of the top,
-the finite body, and the cavity side of the holes (a half-space stands in for each side).
+`--fholes RASTER.tsv` recomputes the table's neck from a hole raster. The table's `cavity` row is one circular flanged
+neck (the `neck` meta row says how it was found). `gen_violin_shell_assembly.py neck=bem`, the default since 2026-11-01,
+writes the neck of `top-plate-fhole-conductance.tsv`: the `fs_bem::plate_aperture` conductance of both f-holes together
+through their measured pair bore (`crates/fs-bem/examples/fhole_conductance.rs`), with the bore as the neck length.
+`neck=ellipse` writes the earlier estimate, the summed equivalent-ellipse conductances at the top thickness at the holes,
+which the scaled and shifted sensitivity tables still need. With `--fholes`, the example computes the conductance of all
+the raster's holes together with `fs_bem::plate_aperture`, through a rigid plate of the table's neck length. It runs
+subdivisions 1, 2, 4 and 8 of the 0.5 mm cells and takes the Richardson limit, and it refuses a ladder that is not
+monotone or has an observed order below 0.5. The neck becomes the circular flanged neck of that conductance, found by
+bisection on the library's own neck. For il Cannone the raster is `top-plate-fholes.tsv`, and on a `neck=bem` table the
+flag gives back the table's own neck; the ladder takes about a minute on 16 workers. Still not represented: the arching
+of the top, the finite body, and the cavity side of the holes (a half-space stands in for each side).
 
 `PACK_DIR/<name>.fsmatpk` must exist for the pack names in the table (`spruce`, `maple`). The violin top, bass bar and
 soundpost are Norway spruce (Viala et al. 2020 violin quarters); the runs before 2026-10-23 used the guitar Sitka pack
@@ -51,7 +55,7 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
   which some scaled meshes need and the base table does not; `cavity_volume=exact`, the default since 2026-10-23, records the
   air volume enclosed by the inner skins, 2.0610 L for the base table, and `cavity_volume=facet` the facet sum of the earlier
   tables, 1.9653 L, which is origin dependent for open surfaces; `uniform_t_mm` gives every plate zone one thickness, a weld
-  diagnostic). With every option at its default the output is byte-identical to the committed `shell-assembly-h8.tsv`. Every
+  diagnostic; `neck=bem`, the default, or `neck=ellipse`, see `--fholes` above). With every option at its default the output is byte-identical to the committed `shell-assembly-h8.tsv`. Every
   choice that is not a table number is a `meta` row of the output.
 - `check_shell_assembly.py TABLE name=kg/m3 ...` prints per component the facet-against-director alignment,
   triangle quality and mass, every tie's gap (about 1e-9 m when the generator is right) and the cavity volume, and

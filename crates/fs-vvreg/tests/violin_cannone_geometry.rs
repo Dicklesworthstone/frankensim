@@ -8,8 +8,10 @@
 //! UIowa violin of the recordings, and the boundary stays recorded in `unknowns.tsv`.
 
 use fs_vvreg::specimen::{
-    Dimensions, KeyedTable, SPECIMEN_GEOMETRY_ROOT, Specimen, SpecimenDescription, SpecimenTable,
+    Dimensions, KeyedTable, SPECIMEN_GEOMETRY_ROOT, Sigma, Specimen, SpecimenDescription,
+    SpecimenTable,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -247,4 +249,92 @@ fn section_tables_are_well_formed() {
         "theta_deg\tcentre_x_mm\tcentre_z_mm\tarea_mm2\tr_min_mm\tr_max_mm\ty_min_mm\ty_max_mm\tmean_width_mm",
     );
     assert!(rings.len() >= 170);
+}
+
+/// Open cells of each hole of a raster-runs table, on a grid of `cell_mm` with cell `(i, j)` covering
+/// `[i, i + 1) x [j, j + 1)` in cells; a value off the grid fails.
+fn raster_cells(file: &str, cell_mm: f64) -> BTreeMap<u32, BTreeSet<(i64, i64)>> {
+    let grid = |v: f64| {
+        let k = (v / cell_mm).round();
+        assert!((k * cell_mm - v).abs() < 1e-6, "{file}: {v} off the {cell_mm} mm grid");
+        k as i64
+    };
+    let mut holes: BTreeMap<u32, BTreeSet<(i64, i64)>> = BTreeMap::new();
+    for row in table(file, "hole\tz_mm\tx_start_mm\tx_end_mm") {
+        let j = grid(num(&row[1]) - 0.5 * cell_mm);
+        let cells = holes.entry(row[0].parse().unwrap()).or_default();
+        for i in grid(num(&row[2]))..grid(num(&row[3])) {
+            assert!(cells.insert((i, j)), "{file}: cell listed twice");
+        }
+    }
+    holes
+}
+
+/// The 0.5 mm cells with at least `min_open` of their 25 cells of 0.1 mm open.
+fn coarsened(fine: &BTreeSet<(i64, i64)>, min_open: usize) -> BTreeSet<(i64, i64)> {
+    let mut count: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+    for &(i, j) in fine {
+        *count.entry((i.div_euclid(5), j.div_euclid(5))).or_default() += 1;
+    }
+    count.into_iter().filter(|&(_, n)| n >= min_open).map(|(c, _)| c).collect()
+}
+
+/// The wall-table value of `(hole, quantity)`.
+fn wall(hole: &str, quantity: &str) -> f64 {
+    let rows = table("top-plate-fhole-walls.tsv", "hole\tquantity\tvalue\tunit\tnote");
+    let row = rows
+        .iter()
+        .find(|r| r[0] == hole && r[1] == quantity)
+        .unwrap_or_else(|| panic!("wall row {hole} {quantity}"));
+    num(&row[2])
+}
+
+#[test]
+fn f_hole_raster_is_the_half_open_coarsening_of_the_0p1_mm_openings() {
+    // top-plate-fholes.tsv is fhole_openings.py's 0.5 mm raster: a cell is open when at least 13 of its 25 cells of
+    // 0.1 mm are open through the plate (top-plate-fholes-0p1mm.tsv). Planted negative: the rule it replaced, a cell
+    // open only when all 25 are ("edge as wood"), gives other cells and falls short of the stated area by more than its
+    // sigma.
+    let dims = load().dimensions;
+    let fine = raster_cells("top-plate-fholes-0p1mm.tsv", 0.1);
+    let coarse = raster_cells("top-plate-fholes.tsv", 0.5);
+    assert_eq!(fine.keys().collect::<Vec<_>>(), [&1, &2]);
+    assert_eq!(coarse.keys().collect::<Vec<_>>(), [&1, &2]);
+    for hole in [1u32, 2] {
+        assert_eq!(coarsened(&fine[&hole], 13), coarse[&hole], "hole {hole}: not the half-open coarsening");
+        let row = dims
+            .get("top-plate", &format!("f-hole-{hole}"), "area")
+            .expect("area row");
+        let Sigma::Value(sigma) = row.sigma else { panic!("hole {hole}: area sigma unstated") };
+        let area = coarse[&hole].len() as f64 * 0.25e-6;
+        assert!(((area - row.value_si) / row.value_si).abs() < 1e-5, "hole {hole}: {area} against {}", row.value_si);
+        let edge_as_wood = coarsened(&fine[&hole], 25);
+        assert_ne!(edge_as_wood, coarse[&hole], "hole {hole}: the planted rule must differ");
+        let short = row.value_si - edge_as_wood.len() as f64 * 0.25e-6;
+        assert!(short > sigma, "hole {hole}: edge-as-wood falls short by {short} m2, sigma {sigma}");
+        // sigma is the rule's error against the 0.1 mm area, written by the extraction
+        assert!((sigma - wall(&hole.to_string(), "area-0p5mm-rule-error") * 1e-6).abs() < 1e-11);
+        assert!((wall(&hole.to_string(), "area-0p1mm") * 1e-6 - fine[&hole].len() as f64 * 0.01e-6).abs() < 1e-11);
+    }
+}
+
+#[test]
+fn f_hole_bores_equal_the_wall_table() {
+    // dimensions.tsv's bores are the wall table's: each hole's measured through-resistance times its raster area, and
+    // the one bore of both that keeps their parallel bore conductance.
+    let dims = load().dimensions;
+    let coarse = raster_cells("top-plate-fholes.tsv", 0.5);
+    let mut parallel = 0.0;
+    for hole in [1u32, 2] {
+        let h = hole.to_string();
+        let bore = value(&dims, "top-plate", &format!("f-hole-{hole}"), "bore");
+        assert!((bore - wall(&h, "bore") * 1e-3).abs() < 1e-9, "hole {hole} bore {bore}");
+        let area_mm2 = coarse[&hole].len() as f64 * 0.25;
+        assert!((wall(&h, "bore") - wall(&h, "through-resistance") * area_mm2).abs() < 1e-4);
+        parallel += 1.0 / wall(&h, "through-resistance");
+    }
+    let total_mm2 = (coarse[&1].len() + coarse[&2].len()) as f64 * 0.25;
+    let pair = value(&dims, "top-plate", "f-holes", "bore-pair");
+    assert!((pair - wall("0", "bore-pair") * 1e-3).abs() < 1e-9);
+    assert!((wall("0", "bore-pair") - total_mm2 / parallel).abs() < 1e-4);
 }

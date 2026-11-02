@@ -32,6 +32,7 @@ def rd_text(name):
 SCHEMAS = {
     "top-plate-outline.tsv": "frankensim.specimen-outline-rows.v1", "back-plate-outline.tsv": "frankensim.specimen-outline-rows.v1",
     "top-plate-fholes.tsv": "frankensim.specimen-raster-runs.v1", "bridge-silhouette.tsv": "frankensim.specimen-raster-runs.v1",
+    "top-plate-fholes-0p1mm.tsv": "frankensim.specimen-raster-runs.v1", "top-plate-fhole-walls.tsv": "frankensim.specimen-fhole-walls.v1",
     "top-plate-maps.tsv": "frankensim.specimen-plate-maps.v1", "back-plate-maps.tsv": "frankensim.specimen-plate-maps.v1",
     "ribs-sections.tsv": "frankensim.specimen-ring-sections.v1", "linings-sections.tsv": "frankensim.specimen-ring-sections.v1",
     "bass-bar-sections.tsv": "frankensim.specimen-sections.v1", "soundpost-sections.tsv": "frankensim.specimen-sections.v1", "bridge-sections.tsv": "frankensim.specimen-sections.v1",
@@ -101,11 +102,20 @@ for pl in ("top-plate", "back-plate"):
     add(pl, "arching", "edge-plane-y", ref * mm, "m", 0.5 * mm, "median outer-surface y of the 1 to 3 mm band inside the outline (scan frame)")
 
 h, fh = rd("top-plate-fholes.tsv")
+walls = {(r[0], r[1]): r for r in rd_text("top-plate-fhole-walls.tsv")[1]}  # fhole_openings.py: hole, quantity, value, unit, note
+
+
+def wall(hid, q):
+    return float(walls[(str(hid), q)][2])
+
+
 for hid in (1, 2):
     s = fh[fh[:, 0] == hid]
     zf, a, b = s[:, 1], s[:, 2], s[:, 3]
     area = ((b - a) * 0.5).sum()
-    add("top-plate", "f-hole-%d" % hid, "area", area * mm2, "m2", 5 * mm2, "area of the unoccupied cells inside the outline (0.5 mm raster); hole 1 lies at negative x (the bass-bar side), hole 2 at positive x")
+    add("top-plate", "f-hole-%d" % hid, "area", area * mm2, "m2", wall(hid, "area-0p5mm-rule-error") * mm2,
+        "area of the open cells of the 0.5 mm raster (fhole_openings.py: a cell is open when at least 13 of its 25 cells of 0.1 mm are open through the plate; the 0.1 mm area is %.2f mm2); sigma = the rule's largest error against the 0.1 mm area over the 25 offsets of the grid; the mesh resolution and u-inplane-scale are not in it; hole 1 lies at negative x (the bass-bar side), hole 2 at positive x"
+        % wall(hid, "area-0p1mm"))
     add("top-plate", "f-hole-%d" % hid, "centroid-x", (((a + b) / 2) * (b - a)).sum() / (b - a).sum() * mm, "m", 0.5 * mm, "area centroid of the raster")
     add("top-plate", "f-hole-%d" % hid, "centroid-z", (zf * (b - a)).sum() / (b - a).sum() * mm, "m", 0.5 * mm, "area centroid of the raster")
     add("top-plate", "f-hole-%d" % hid, "z-extent", (zf.max() - zf.min() + 0.5) * mm, "m", 0.5 * mm, "z from %.2f to %.2f mm" % (zf.min() - 0.25, zf.max() + 0.25))
@@ -116,6 +126,14 @@ for hid in (1, 2):
     proj = (X - X.mean(0)) @ ax
     add("top-plate", "f-hole-%d" % hid, "length-along-principal-axis", (proj.max() - proj.min()) * mm, "m", 0.5 * mm, "extent along the principal axis of the raster")
     add("top-plate", "f-hole-%d" % hid, "principal-axis-angle-from-z", np.arctan2(ax[0], ax[1]), "rad", np.radians(1.0), "angle of the principal axis from +z toward +x")
+    other = "normal" if walls[(str(hid), "wall-direction")][2] == "vertical" else "vertical"
+    add("top-plate", "f-hole-%d" % hid, "bore", wall(hid, "bore") * mm, "m", abs(wall(hid, "through-resistance-" + other) - wall(hid, "through-resistance")) * area * mm,
+        "straight bore of the raster outline with the hole's measured through-resistance (top-plate-fhole-walls.tsv: %s walls, R %.5f /mm, times the raster area); sigma = the same with the other layer family's R"
+        % (walls[(str(hid), "wall-direction")][2], wall(hid, "through-resistance")))
+area_k = [((fh[fh[:, 0] == k][:, 3] - fh[fh[:, 0] == k][:, 2]) * 0.5).sum() for k in (1, 2)]
+r_alt = [wall(k, "through-resistance-" + ("normal" if walls[(str(k), "wall-direction")][2] == "vertical" else "vertical")) for k in (1, 2)]
+add("top-plate", "f-holes", "bore-pair", wall(0, "bore-pair") * mm, "m", abs(sum(area_k) / sum(1 / r for r in r_alt) - wall(0, "bore-pair")) * mm,
+    "one straight bore for both holes that keeps their parallel bore conductance: (A1 + A2) / (1/R1 + 1/R2); sigma = the same with each hole's other layer family")
 
 h, b = rd("bass-bar-sections.tsv")
 zb, ar, cx, cy, x0, x1, y0, y1 = b.T
