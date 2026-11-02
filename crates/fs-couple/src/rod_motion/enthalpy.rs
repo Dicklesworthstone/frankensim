@@ -18,6 +18,9 @@
 /// Intrinsic torsional shear heat on the same finite-cell timeline.
 pub mod torsional;
 pub use torsional::{RodLayerTorsionalHeat, RodTorsionalHeating, RodTorsionalViscosity};
+/// Complete contact, radiation and source-fluid heat on the same rod history.
+pub mod heat;
+pub use heat::RodHeatError;
 
 use super::{
     PreparedRodLoads, RodMotion, RodMotionControls, RodMotionError, RodMotionInertia,
@@ -191,6 +194,8 @@ pub struct RodThermoelasticEntropy {
     pub mechanical_storage_change_j_k: f64,
     pub reservoir_entropy_input_j_k: f64,
     pub conduction_generation_j_k: f64,
+    /// Signed closed-radiation sum Q_cell/T_endpoint, distinct from authored supply.
+    pub radiation_exchange_entropy_j_k: f64,
     /// Nonnegative endpoint sum Q_torsion/T_end [J/K], a production quadrature
     /// under the first-order split, not the exact continuous integral of P/T.
     pub torsional_generation_j_k: f64,
@@ -205,11 +210,11 @@ pub struct RodThermoelasticEntropy {
 }
 
 /// One jointly accepted physical interval, including original numerical errors.
-pub struct RodThermoelasticReport {
+pub struct RodThermoelasticReport<S = MaterialNetworkSample> {
     /// Original frozen-temperature motion interval, before endpoint source refresh.
     pub mechanical: RodMotionStep,
     pub thermal: EnergyAudit,
-    pub source: MaterialNetworkSample,
+    pub source: S,
     pub sections: Vec<ConcentricRodThermoelasticState>,
     pub layers: Vec<RodThermoelasticExchange>,
     /// Frozen viscosity sources and actual original-layer heat deposits, if enabled.
@@ -217,6 +222,8 @@ pub struct RodThermoelasticReport {
     pub entropy: RodThermoelasticEntropy,
     pub reversible_heat_j: f64,
     pub external_thermal_heat_j: f64,
+    /// Uncorrected closed-enclosure numerical net, excluded from external supply.
+    pub closed_radiation_net_j: f64,
     pub mechanical_internal_energy_before_j: f64,
     pub mechanical_internal_energy_after_j: f64,
     /// Raw complete energy defect; includes the native signed motion error.
@@ -233,6 +240,7 @@ pub struct RodThermoelasticReport {
 pub struct RodThermoelasticSystem<'r, 'n, 'a, I = RodNodalInertia> {
     source: &'r RodMaterialSource<'a>,
     mechanical: RodMotion<I>,
+    network_source: &'n MaterialNetwork<'a>,
     prepared: PreparedMaterialNetwork<'n, 'a>,
     segments: Vec<Segment<'a>>,
     states: Vec<RodThermoelasticLayerState>,
@@ -357,6 +365,40 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         source_energy_tolerance_j: f64,
         gate: &CancelGate,
     ) -> Result<Self> {
+        Self::try_new_bound(mechanical, source, thermal, network_source, None, destinations,
+            source_energy_tolerance_j, gate)
+    }
+
+    /// Bind the same native rod while a complete heat assembly owns additional
+    /// finite-cell links. Preparation values admit topology only: every step
+    /// must resolve their actual source conductances again through the assembly.
+    /// Ordinary steps still refuse incomplete Fourier coverage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_link_conductances(
+        mechanical: RodMotion<I>,
+        source: &'r RodMaterialSource<'a>,
+        thermal: &DepositionSimulation<'_>,
+        network_source: &'n MaterialNetwork<'a>,
+        additional_links: &BTreeMap<u64, f64>,
+        destinations: &[RodLayerCell],
+        source_energy_tolerance_j: f64,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        Self::try_new_bound(mechanical, source, thermal, network_source, Some(additional_links),
+            destinations, source_energy_tolerance_j, gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_new_bound(
+        mechanical: RodMotion<I>,
+        source: &'r RodMaterialSource<'a>,
+        thermal: &DepositionSimulation<'_>,
+        network_source: &'n MaterialNetwork<'a>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
+        destinations: &[RodLayerCell],
+        source_energy_tolerance_j: f64,
+        gate: &CancelGate,
+    ) -> Result<Self> {
         check(gate)?;
         if !source_energy_tolerance_j.is_finite()
             || source_energy_tolerance_j < 0.0
@@ -368,9 +410,11 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
                 "rod/heat requires one common clock, complete layers, thermal-only network and finite source tolerance",
             ));
         }
-        let prepared = network_source
-            .prepare(thermal, || gate.is_requested())
-            .map_err(network)?;
+        let prepared = match additional_links {
+            Some(links) => network_source.prepare_with_link_conductances(
+                thermal, &[], links, || gate.is_requested()),
+            None => network_source.prepare(thermal, || gate.is_requested()),
+        }.map_err(network)?;
         let routes: BTreeMap<_, _> = destinations
             .iter()
             .map(|d| ((d.segment, d.layer), d.cell))
@@ -503,6 +547,7 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         Ok(Self {
             source,
             mechanical,
+            network_source,
             prepared,
             segments,
             states,
@@ -620,7 +665,24 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         energy_guess_j: &[f64],
         gate: &CancelGate,
     ) -> Result<RodThermoelasticReport> {
-        check(gate)?;
+        self.step_with_transport(thermal, target_s, loads, viscosity, &heat::Plain,
+            mechanical_controls, controls, energy_guess_j, gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_transport<H: heat::Transport>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        target_s: f64,
+        loads: StageLoads<'_>,
+        viscosity: Option<RodTorsionalViscosity<'_>>,
+        heat_source: &H,
+        mechanical_controls: RodMotionControls,
+        controls: RodThermoelasticSolve,
+        energy_guess_j: &[f64],
+        gate: &CancelGate,
+    ) -> Result<RodThermoelasticReport<H::Sample>> {
+        heat_source.checkpoint(gate)?;
         let before = self.mechanical.time_s();
         if thermal.time_s().to_bits() != before.to_bits()
             || !target_s.is_finite()
@@ -704,17 +766,17 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
             controls.driver(),
             energy_guess_j,
             |trial, _remaining| {
-                check(gate)?;
-                let mut transport = self
-                    .prepared
-                    .resolve(trial, || gate.is_requested())
-                    .map_err(network)?;
+                heat_source.checkpoint(gate)?;
+                let mut transport = heat_source.resolve(&self.prepared, trial, gate)?;
+                let radiation = heat_source.radiation(&transport.source);
+                let (radiation_net, radiation_entropy) = heat::exchange(radiation, trial, dt, gate)?;
                 let mut external_source_entropy = 0.0;
                 let mut has_external_source = false;
                 for (&id, cell) in trial.cells() {
                     for power in [
                         cell.boundary.source_w,
-                        transport.sources_w.get(&id).copied().unwrap_or(0.0),
+                        transport.sources_w.get(&id).copied().unwrap_or(0.0)
+                            - heat::cell_power_w(radiation, id),
                     ] {
                         external_source_entropy = finite(
                             external_source_entropy + dt * power / trial.temperature_k(id)?,
@@ -796,6 +858,8 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
                         exchanges,
                         external_source_entropy,
                         has_external_source,
+                        radiation_net,
+                        radiation_entropy,
                     ),
                     circuit_trials: 1,
                 })
@@ -807,7 +871,8 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
             true,
             || gate.is_requested(),
         )?;
-        let (source, sections, states, layers, external_source_entropy, has_external_source) =
+        let (source, sections, states, layers, external_source_entropy, has_external_source,
+            closed_radiation_net_j, radiation_exchange_entropy_j_k) =
             audit.source;
         let temperatures = states.iter().map(|s| s.temperature_k).collect::<Vec<_>>();
         let (candidate, _) = frozen
@@ -845,7 +910,7 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         )?;
         let reversible_heat_j = sum(layers.iter().map(|l| l.reversible_heat_j))?;
         let mut external_thermal_heat_j =
-            finite(audit.thermal.external_heat_j - reversible_heat_j)?;
+            finite(audit.thermal.external_heat_j - reversible_heat_j - closed_radiation_net_j)?;
         if let Some(heating) = &torsional {
             external_thermal_heat_j = finite(external_thermal_heat_j - heating.deposited_heat_j)?;
         }
@@ -890,6 +955,7 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
             entropy.thermal_storage_change_j_k + mechanical_entropy
                 - entropy.reservoir_entropy_input_j_k
                 - entropy.conduction_generation_j_k
+                - radiation_exchange_entropy_j_k
                 - external_source_entropy
                 - entropy.temporal_defect_j_k
                 - thermoelastic_defect
@@ -898,7 +964,7 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         if torsional.is_some() {
             accounting = finite(accounting - torsional_generation)?;
         }
-        check(gate)?;
+        heat_source.checkpoint(gate)?;
         let report = RodThermoelasticReport {
             mechanical,
             thermal: audit.thermal,
@@ -911,6 +977,7 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
                 mechanical_storage_change_j_k: mechanical_entropy,
                 reservoir_entropy_input_j_k: entropy.reservoir_entropy_input_j_k,
                 conduction_generation_j_k: entropy.conduction_generation_j_k,
+                radiation_exchange_entropy_j_k,
                 torsional_generation_j_k: torsional_generation,
                 external_source_at_cell_j_k: external_source_entropy,
                 has_unclassified_external_sources: has_external_source,
@@ -922,6 +989,7 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
             },
             reversible_heat_j,
             external_thermal_heat_j,
+            closed_radiation_net_j,
             mechanical_internal_energy_before_j: internal_before,
             mechanical_internal_energy_after_j: internal_after,
             total_energy_residual_j: total,

@@ -21,6 +21,8 @@ use fs_thermal::enthalpy::*;
 
 #[path = "enthalpy/torsional.rs"]
 mod torsional;
+#[path = "enthalpy/heat.rs"]
+mod heat;
 
 const LENGTH: f64 = 0.8;
 const RADIUS: f64 = 0.05;
@@ -112,6 +114,7 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
             0.0,
             THERMAL_CONDUCTIVITY_DIMS,
         ),
+        (fs_conduction::SURFACE_EMISSIVITY_PROPERTY, 0.6, 0.0, fs_conduction::EMISSIVITY_DIMS),
     ] {
         let upper = if matches!(
             name,
