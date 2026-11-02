@@ -1,22 +1,31 @@
-//! Scalar camera radiance through native smooth, reciprocal refractive paths.
+//! Scalar camera radiance through native reciprocal refractive paths.
 //!
-//! The camera launches a unit unpolarized reciprocal beam. Each native smooth
+//! The camera launches a unit unpolarized reciprocal beam. Each native
 //! boundary retains its full Fresnel Mueller response divided by its actual
-//! scalar branch proposal; bulk propagation retains Beer absorption and frame
+//! branch/directional proposal; bulk propagation retains Beer absorption and frame
 //! transport. For reciprocal paths, the reverse Mueller matrix is a transpose
 //! up to polarization-convention sign matrices D. With unpolarized emission
 //! and intensity-only detection, e0^T D M^T D e0 = e0^T M e0. This does NOT
-//! provide a general polarized camera or an adjoint for a rough/shading normal.
+//! provide a general polarized camera or tilted shading-normal transport.
 //!
 //! Radiance obeys L/n^2 along smooth isotropic lossless propagation. Consequently
 //! the sampled reciprocal power is multiplied ONCE by (n_camera/n_endpoint)^2,
 //! using the actual local phase indices. This includes continuous GRIN and
 //! discrete refraction together. No bundle-area Jacobian, source inverse-square
 //! factor or additional Fresnel probability belongs in this radiance estimator.
+//! Native GGX dielectric/conductor weights already include the solid-angle
+//! Jacobian, geometric cosine and masking. Their original single-scattering
+//! approximation is retained, including exact-zero rejected microfacets. No
+//! inter-facet multiple scattering or acceptance-conditioned resampling is added.
+//! Anisotropic brushing is admitted only with zero authored normal perturbation;
+//! tilted shading normals need a separate radiance/importance correction.
 //!
 //! References: Pediredla et al. (2020), "Path Tracing Estimators for Refractive Radiative Transfer",
 //! Eq. 3, <https://imaging.cs.cmu.edu/rrte/assets/Renderer_AuthorCopy.pdf>;
 //! Sekera (1966), polarized reciprocity, <https://doi.org/10.1364/JOSA.56.001732>.
+//! Rough transport and shading-normal conventions: PBRT 4e, section 9.7,
+//! <https://pbr-book.org/4ed/Reflection_Models/Rough_Dielectric_BSDF>, and PBRT 3e,
+//! section 16.1.3, <https://pbr-book.org/3ed-2018/Light_Transport_III_Bidirectional_Methods/The_Path-Space_Measurement_Equation>.
 //!
 //! Finite emitters are uniform, unpolarized radiance on original opaque geometry.
 //! An environment is evaluated only after proven homogeneous escape. Nonzero
@@ -24,7 +33,7 @@
 //! no volume emission is assumed. Numerical distance/event limits are errors,
 //! never background. Native zero power cannot distinguish exact extinction from
 //! floating-point underflow and is unresolved before a positive finite source.
-//! Diffuse/rough surface scattering, point-light connections, moving
+//! Diffuse surface scattering, point-light connections, moving
 //! fields, gain and nonreciprocal media remain outside this consumer.
 //! With `volumes`, `participating` adds the original reciprocal molecular
 //! scattering walk and retains this same endpoint radiometry.
@@ -227,8 +236,15 @@ impl core::error::Error for CameraRadianceError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RadianceEndpoint {
-    Surface { object_id: u64 },
+    Surface {
+        object_id: u64,
+    },
     Environment,
+    /// Exact zero from the native single-scattering microfacet proposal.
+    /// The retained path ends at this surface with its incoming beam state.
+    RejectedMicrofacet {
+        object_id: u64,
+    },
 }
 
 /// One spectral Monte Carlo estimate, before camera exposure or spectral/pixel
@@ -287,13 +303,15 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         for binding in &scene.bindings {
             cx.checkpoint()?;
             let supported = match binding.interaction {
-                Interaction::Dielectric { surface, .. } => surface.is_delta(),
-                Interaction::CoatedDielectric { .. }
+                Interaction::Dielectric { .. }
+                | Interaction::CoatedDielectric { .. }
                 | Interaction::SmoothConductor { .. }
+                | Interaction::RoughConductor { .. }
                 | Interaction::Opaque => true,
-                Interaction::RoughConductor { .. }
-                | Interaction::BrushedConductor { .. }
-                | Interaction::Detector { .. } => false,
+                Interaction::BrushedConductor { detail, .. } => {
+                    detail.normal_perturbation_rad() == 0.0
+                }
+                Interaction::Detector { .. } => false,
             };
             if !supported {
                 return Err(CameraRadianceError::UnsupportedSurface {
@@ -350,9 +368,9 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
     }
 
     /// Caller variates have the native [microfacet_u, microfacet_v, branch]
-    /// convention. In this smooth-only consumer only the third selects a
-    /// dielectric branch. The supplied probabilities are not resampled or
-    /// conditioned on reaching an emitter.
+    /// convention. Smooth dielectrics use only the third; rough dielectrics
+    /// use all three and rough/brushed conductors use the first two. The
+    /// proposals are not resampled or conditioned on reaching an emitter.
     #[allow(clippy::too_many_arguments)]
     pub fn sample_ray_with_samples(
         &self,
@@ -406,6 +424,22 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         initial_index: f64,
     ) -> Result<CameraRadianceSample, CameraRadianceError> {
         cx.checkpoint()?;
+        if path.termination() == PathTermination::RejectedMicrofacet {
+            let contact = path
+                .last_contact()
+                .ok_or(CameraRadianceError::NumericalRange)?;
+            // A rejected native VNDF draw is a known zero of the authored
+            // BSDF, not unknown continuation or underflow. Preserve the draw
+            // in the Monte Carlo denominator instead of trying another facet.
+            return Ok(CameraRadianceSample {
+                radiance_w_m2_sr_nm: 0.0,
+                transport_weight: 0.0,
+                endpoint: RadianceEndpoint::RejectedMicrofacet {
+                    object_id: contact.object_id,
+                },
+                path,
+            });
+        }
         let beam = path.beam();
         let wavelength = beam.wavelength_nm();
         let mut tail_transmission = 1.0;
@@ -502,3 +536,6 @@ fn finite_nonnegative(value: f64) -> Result<f64, CameraRadianceError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod rough_tests;

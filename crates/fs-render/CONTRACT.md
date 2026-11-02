@@ -331,7 +331,7 @@ differentiable lift). Pure Rust throughout.
   lengths use independent analytic references.
 
 - `polarization::dielectric::scene::curved::camera::CurvedCameraScene` consumes
-  native curved visibility, full smooth reciprocal Fresnel/frame transport and
+  native curved visibility, full smooth/GGX reciprocal Fresnel/frame transport and
   Beer integrals as scalar unpolarized camera radiance. It retains the native
   branch importance weights and applies one actual local phase-index factor
   `(n_camera/n_endpoint)^2`. No source-distance or bundle-area factor is added.
@@ -339,8 +339,13 @@ differentiable lift). Pure Rust throughout.
   explicit emitting sides. Environment maps require caller radiometric
   calibration and are sampled only after proven homogeneous escape. Any
   positive absorption on the remaining infinite tail gives exact zero before
-  source evaluation. Rough/brushed/detector interactions refuse. Numerical
-  limits and indistinguishable native extinction/underflow are unresolved
+  source evaluation. Native rough dielectric/conductor and anisotropic brushing
+  with zero authored normal perturbation retain their original directional
+  proposal, Fresnel, masking and single-scattering approximation. Rejected
+  microfacets are explicit exact-zero samples without resampling; geometric
+  cosine and refractive Jacobians are not applied twice. Tilted shading normals
+  and detector interactions refuse. Numerical limits and indistinguishable
+  native extinction/underflow are unresolved
   errors. This covers reciprocal isotropic stationary media and intensity-only
   endpoints, not general polarized adjoints, diffuse/volume emission or
   point-light connections.
@@ -355,7 +360,11 @@ differentiable lift). Pure Rust throughout.
   limits and cancellation. Twelve focused regressions cover curved visibility,
   phase-index radiance, Beer, branch averaging, emitting sides, calibrated
   directional backgrounds, reciprocal noncoplanar interfaces, independent
-  dispersive paths, physical camera sampling and refusal boundaries.
+  dispersive paths, physical camera sampling and refusal boundaries. Four
+  additional rough-surface regressions compare oblique bidirectional glass
+  samples to native scalar radiance weights, bare/coated metal to Fresnel and
+  Smith masking, body-locked anisotropic brushing under rigid motion, and
+  exact-zero rejection without an extra random draw.
 
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original

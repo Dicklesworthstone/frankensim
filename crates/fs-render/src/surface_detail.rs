@@ -176,6 +176,13 @@ impl SurfaceDetail {
         (self.base_alpha, self.base_alpha * self.anisotropy_ratio)
     }
 
+    /// Authored shading-normal tilt in radians. Exactly zero retains the
+    /// geometric normal while allowing anisotropic brushing and roughness marks.
+    #[must_use]
+    pub const fn normal_perturbation_rad(&self) -> f64 {
+        self.normal_perturbation_rad
+    }
+
     /// GGX alpha pair at a local chart point. A mark is a shading-only
     /// roughness contrast, clamped to the admitted GGX domain.
     #[must_use]
@@ -317,8 +324,8 @@ pub fn shading_frame(
             cosine * normal.z + sine * bitangent.z,
         ))
         .ok_or(SurfaceDetailError::NonFiniteInput)?;
-        let bitangent = normalize(cross(shading_normal, tangent))
-            .ok_or(SurfaceDetailError::NonFiniteInput)?;
+        let bitangent =
+            normalize(cross(shading_normal, tangent)).ok_or(SurfaceDetailError::NonFiniteInput)?;
         (shading_normal, bitangent)
     };
     Ok(ShadingFrame {

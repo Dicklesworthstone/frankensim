@@ -381,23 +381,21 @@ fn g0_opaque_bindings_unsupported_scattering_and_infinite_absorption_are_explici
         }
         let medium = glass(1.0, 0.0);
         let media = [SceneMedium::Homogeneous(&medium)];
-        let rough = CurvedPolarizedScene::try_new(
+        let detector = CurvedPolarizedScene::try_new(
             cx,
             &geometry,
             &media,
             vec![SurfaceBinding {
                 object_id: 9,
-                interaction: Interaction::Dielectric {
-                    outside: 0,
-                    inside: 0,
-                    surface: DielectricSurface::POLISHED,
+                interaction: Interaction::Detector {
+                    reference_axis: Vec3::new(0.0, 1.0, 0.0),
                 },
             }],
             100_000,
         )
         .unwrap();
         assert!(matches!(
-            CurvedCameraScene::try_new(cx, &rough, &[], None),
+            CurvedCameraScene::try_new(cx, &detector, &[], None),
             Err(CameraRadianceError::UnsupportedSurface { object_id: 9 })
         ));
         let smooth = CurvedPolarizedScene::try_new(
