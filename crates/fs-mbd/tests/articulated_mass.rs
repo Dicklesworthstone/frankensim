@@ -122,6 +122,89 @@ fn close_vector(actual: Vec3, expected: Vec3) {
 }
 
 #[test]
+fn impulse_changes_retain_small_work_and_recoil_under_a_common_boost() {
+    let model = model();
+    for boost in [0.0, 1e9] {
+        for position in [Vec3::default(), Vec3::new(0.7, -0.4, 1e9)] {
+            let pose = Se3::from_parts(So3::identity(), position).unwrap();
+            let base = FreeFloatingBaseState::new(
+                pose,
+                Twist::new(Vec3::default(), Vec3::new(boost, 0.0, -0.3)),
+            );
+            let mut impulses = [Wrench::default(); 3];
+            impulses[0] = Wrench::new(Vec3::default(), Vec3::new(0.0, 0.0, 1.8));
+            let response = apply_free_floating_impulses(
+                &model, base, &[0.0; 2], &[0.0; 2], &[0.0; 2], &impulses,
+            )
+            .unwrap();
+            close(response.kinetic_energy_change, -0.27);
+            close(response.kinetic_work_residual, 0.0);
+            close_vector(
+                response.linear_momentum_change_world,
+                Vec3::new(0.0, 0.0, 1.8),
+            );
+            close_vector(
+                response.angular_momentum_change_world,
+                position.cross(Vec3::new(0.0, 0.0, 1.8)),
+            );
+            close(response.base_after.twist_body.linear.z, 0.0);
+            assert_eq!(response.base_after.twist_body.linear.x, boost);
+            if boost != 0.0 {
+                assert!(
+                    (response.momentum_after.kinetic_energy
+                        - response.momentum_before.kinetic_energy
+                        - response.kinetic_energy_change)
+                        .abs()
+                        > 0.1
+                );
+            }
+
+            // Internal joint actuation supplies finite work and equal/opposite
+            // free-base recoil while the boosted translational energy is fixed.
+            let rotating = FreeFloatingBaseState::new(
+                pose,
+                Twist::new(Vec3::new(0.0, 0.0, 0.2), Vec3::new(boost, 0.0, 0.0)),
+            );
+            let internal = apply_free_floating_impulses(
+                &model,
+                rotating,
+                &[0.0; 2],
+                &[0.3, -0.1],
+                &[0.8, -0.3],
+                &[Wrench::default(); 3],
+            )
+            .unwrap();
+            close(internal.kinetic_energy_change, 0.9075);
+            close(internal.impulse_work, 0.9075);
+            close(internal.kinetic_work_residual, 0.0);
+            close_vector(internal.linear_momentum_change_world, Vec3::default());
+            close_vector(internal.angular_momentum_change_world, Vec3::default());
+        }
+    }
+}
+
+#[test]
+fn impulse_increment_reports_actual_rounded_endpoint_not_the_requested_load() {
+    let model = model();
+    let base = FreeFloatingBaseState::new(
+        Se3::identity(),
+        Twist::new(Vec3::default(), Vec3::new(2.0_f64.powi(53), 0.0, 0.0)),
+    );
+    let mut impulses = [Wrench::default(); 3];
+    impulses[0] = Wrench::new(Vec3::default(), Vec3::new(0.5, 0.0, 0.0));
+    let response =
+        apply_free_floating_impulses(&model, base, &[0.0; 2], &[0.0; 2], &[0.0; 2], &impulses)
+            .unwrap();
+    assert_eq!(response.base_after, base);
+    assert_eq!(response.linear_momentum_change_world, Vec3::default());
+    assert_eq!(response.angular_momentum_change_world, Vec3::default());
+    assert_eq!(response.kinetic_energy_change, 0.0);
+    assert_eq!(response.external_linear_impulse_world, impulses[0].force);
+    assert_eq!(response.kinetic_work_residual, -response.impulse_work);
+    assert!(response.kinetic_work_residual < 0.0);
+}
+
+#[test]
 fn free_body_offset_impulse_matches_independent_com_and_inertia_solution() {
     let center = Vec3::new(0.2, -0.1, 0.3);
     let inertia = SpatialInertia::new(

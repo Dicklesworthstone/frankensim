@@ -538,15 +538,12 @@ impl EventWorkspace {
             )?);
             let initial = response.momentum_before;
             let final_state = response.momentum_after;
-            energy_change =
-                finite(energy_change + (final_state.kinetic_energy - initial.kinetic_energy))?;
+            energy_change = finite(energy_change + response.kinetic_energy_change)?;
             energy_scale = finite(
                 energy_scale + initial.kinetic_energy.abs() + final_state.kinetic_energy.abs(),
             )?;
-            linear_change =
-                linear_change + (final_state.linear_momentum_world - initial.linear_momentum_world);
-            angular_change = angular_change
-                + (final_state.angular_momentum_world - initial.angular_momentum_world);
+            linear_change = linear_change + response.linear_momentum_change_world;
+            angular_change = angular_change + response.angular_momentum_change_world;
             linear_scale = finite(
                 linear_scale
                     + magnitude(initial.linear_momentum_world)

@@ -239,10 +239,7 @@ pub fn resolve_articulated_plane_impact(
     )?;
     let plane_work = finite(magnitude * plane_speed, "plane_work")?;
     let energy_balance_residual = finite(
-        response.momentum_after.kinetic_energy
-            - response.momentum_before.kinetic_energy
-            - plane_work
-            + normal_law.dissipated_energy,
+        response.kinetic_energy_change - plane_work + normal_law.dissipated_energy,
         "energy_balance_residual",
     )?;
     Ok(ArticulatedPlaneImpactResult {

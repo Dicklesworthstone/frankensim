@@ -21,6 +21,7 @@ pub mod contact_geometry;
 
 use core::fmt;
 use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
+use fs_math::dd::Dd;
 
 const SYMMETRY_TOLERANCE: f64 = 64.0 * f64::EPSILON;
 const PHYSICAL_TOLERANCE: f64 = 256.0 * f64::EPSILON;
@@ -991,6 +992,14 @@ pub struct FreeFloatingImpulseResponse {
     pub momentum_before: ArticulatedMomentum,
     /// Physical momentum and kinetic energy after the event.
     pub momentum_after: ArticulatedMomentum,
+    /// Actual linear-momentum increment, evaluated from returned link velocities
+    /// at the fixed configuration rather than subtracting whole-tree totals.
+    pub linear_momentum_change_world: Vec3,
+    /// Actual angular-momentum increment about the unchanged world origin.
+    pub angular_momentum_change_world: Vec3,
+    /// Actual polarized kinetic-energy increment, retaining small impulse work
+    /// alongside a large unchanged common translation.
+    pub kinetic_energy_change: f64,
     /// Sum of external linear impulses, in world coordinates, in N s.
     pub external_linear_impulse_world: Vec3,
     /// Sum of external angular impulses about the world origin, in N m s.
@@ -1427,6 +1436,83 @@ fn momentum_from_kinematics(
     })
 }
 
+/// Fixed-configuration increment from actual endpoint kinematics. Evaluating
+/// the quadratic energy difference at link COMs avoids both unchanged kinetic
+/// energy and cancellation between reference-origin rotational/orbital terms.
+fn momentum_increment_from_kinematics(
+    model: &ArticulatedModel,
+    before: &Kinematics,
+    after: &Kinematics,
+) -> Result<ArticulatedMomentum, ArticulatedError> {
+    let mut linear = [Dd::ZERO; 3];
+    let mut angular = [Dd::ZERO; 3];
+    let mut energy = Dd::ZERO;
+    for (index, link) in model.links.iter().enumerate() {
+        let old = before.body_twist[index];
+        let new = after.body_twist[index];
+        let delta = Twist::new(new.angular - old.angular, new.linear - old.linear);
+        let midpoint = old.scale(0.5).plus(new.scale(0.5));
+        let center = link.inertia.center_of_mass;
+        let delta_center = delta.linear + delta.angular.cross(center);
+        let midpoint_center = midpoint.linear + midpoint.angular.cross(center);
+        let delta_linear_body = delta_center.scale(link.inertia.mass);
+        let delta_spin_body = link.inertia.inertia_com.apply(delta.angular);
+        let pose = before.world_from_link[index];
+        let delta_linear_world = pose.rotation().rotate(delta_linear_body)?;
+        for (sum, value) in linear.iter_mut().zip([
+            delta_linear_world.x,
+            delta_linear_world.y,
+            delta_linear_world.z,
+        ]) {
+            *sum = *sum + Dd::from_f64(value);
+        }
+        // Accumulate spin, COM moment and world-origin orbital moment
+        // separately: combining them first can discard a small spin change.
+        for moment in [
+            pose.rotation().rotate(delta_spin_body)?,
+            pose.rotation().rotate(center.cross(delta_linear_body))?,
+            pose.translation().cross(delta_linear_world),
+        ] {
+            for (sum, value) in angular.iter_mut().zip([moment.x, moment.y, moment.z]) {
+                *sum = *sum + Dd::from_f64(value);
+            }
+        }
+        for value in [
+            delta_linear_body.x * midpoint_center.x,
+            delta_linear_body.y * midpoint_center.y,
+            delta_linear_body.z * midpoint_center.z,
+            delta_spin_body.x * midpoint.angular.x,
+            delta_spin_body.y * midpoint.angular.y,
+            delta_spin_body.z * midpoint.angular.z,
+        ] {
+            energy = energy + Dd::from_f64(value);
+        }
+    }
+    let change = ArticulatedMomentum {
+        linear_momentum_world: Vec3::new(
+            linear[0].to_f64(),
+            linear[1].to_f64(),
+            linear[2].to_f64(),
+        ),
+        angular_momentum_world: Vec3::new(
+            angular[0].to_f64(),
+            angular[1].to_f64(),
+            angular[2].to_f64(),
+        ),
+        kinetic_energy: energy.to_f64(),
+    };
+    validate_vec3(
+        change.linear_momentum_world,
+        "impulse.linear_momentum_change",
+    )?;
+    validate_vec3(
+        change.angular_momentum_world,
+        "impulse.angular_momentum_change",
+    )?;
+    ensure_finite_scalar(change.kinetic_energy, "impulse.kinetic_energy_change", 0)?;
+    Ok(change)
+}
+
 /// Apply specified impulses to a freely moving articulated tree in O(n) work.
 ///
 /// `body_impulses` contains spatial impulses about each link's origin, in that
@@ -1490,6 +1576,7 @@ pub fn apply_free_floating_impulses(
     )?;
     let momentum_before = momentum_from_kinematics(model, &before)?;
     let momentum_after = momentum_from_kinematics(model, &after)?;
+    let momentum_change = momentum_increment_from_kinematics(model, &before, &after)?;
     let mut impulse_world = Wrench::default();
     let mut impulse_work = 0.0;
     for (index, impulse) in body_impulses.iter().enumerate() {
@@ -1508,14 +1595,16 @@ pub fn apply_free_floating_impulses(
         impulse_work += impulse * (0.5 * joint_velocity[index] + 0.5 * joint_velocity_after[index]);
         ensure_finite_scalar(impulse_work, "impulse.work", index)?;
     }
-    let kinetic_work_residual =
-        momentum_after.kinetic_energy - momentum_before.kinetic_energy - impulse_work;
+    let kinetic_work_residual = momentum_change.kinetic_energy - impulse_work;
     ensure_finite_scalar(kinetic_work_residual, "impulse.kinetic_work_residual", 0)?;
     Ok(FreeFloatingImpulseResponse {
         base_after,
         joint_velocity_after,
         momentum_before,
         momentum_after,
+        linear_momentum_change_world: momentum_change.linear_momentum_world,
+        angular_momentum_change_world: momentum_change.angular_momentum_world,
+        kinetic_energy_change: momentum_change.kinetic_energy,
         external_linear_impulse_world: impulse_world.force,
         external_angular_impulse_world: impulse_world.torque,
         impulse_work,

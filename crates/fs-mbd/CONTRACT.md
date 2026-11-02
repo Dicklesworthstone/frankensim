@@ -1047,6 +1047,21 @@ G0/G1/G3 `tests/articulated_mass.rs` checks the independent offset-COM body
 solution, full three-inertia coupled response, internal reaction momentum,
 world-frame covariance, impulse-work closure, and atomic admission.
 
+The impulse receipt also exposes actual linear/angular momentum increments and
+`kinetic_energy_change`, evaluated from the returned link velocities at the
+fixed configuration. Kinetic change uses the polarized COM energy form; spin,
+COM-arm and world-origin orbital momentum increments are accumulated separately
+with the existing double-double scalar owner. This retains small physical work
+and recoil alongside a large unchanged translation or orbital momentum. The
+reported increment is not the requested load or an inverse-mass probe: a load
+too small to change the stored endpoint remains visible in the work residual.
+The single-plane impact and shared normal/frictional/stateful contact mechanics
+consume these increments rather than subtracting whole-tree totals. Native
+velocity updates, endpoint speed limits, constitutive tolerances and existing
+roundoff allowances remain unchanged. Focused regressions cover boosted contact
+loss, offset-world angular impulse, internal joint work and recoil, and an
+unrepresentable requested velocity increment.
+
 ## Continuous free-floating articulated trajectories
 
 `articulated::motion::step_free_floating` advances an actual base pose/twist and

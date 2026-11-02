@@ -88,6 +88,37 @@ fn plane() -> ArticulatedFrictionalContact {
 }
 
 #[test]
+fn shared_contact_energy_and_momentum_keep_small_changes_under_a_boost() {
+    let model = slider(Vec3::new(1.0, 0.0, 0.0));
+    for boost in [0.0, 1e9] {
+        for origin in [Vec3::default(), Vec3::new(0.7, -0.4, 1e9)] {
+            let pose = Se3::from_parts(So3::identity(), origin).unwrap();
+            let state = system(&model, pose, Vec3::new(boost, 0.0, -0.3), &[0.0]);
+            let mut contact = plane();
+            contact.friction_coefficient = 0.0;
+            contact.other = ContactCounterpart::PrescribedPlane {
+                point_world: origin,
+                velocity_world: Vec3::new(boost, 0.0, 0.0),
+            };
+            let result = resolve_articulated_frictional_contacts(
+                &[state],
+                &[contact],
+                FrictionalContactConfig::default(),
+                || false,
+            )
+            .unwrap();
+            close(result.contact.dissipated_energy, 0.135);
+            close(result.responses[0].kinetic_energy_change, -0.135);
+            close(result.energy_balance_residual, 0.0);
+            close_vector(result.linear_momentum_residual, Vec3::default());
+            close_vector(result.angular_momentum_residual, Vec3::default());
+            close(result.responses[0].base_after.twist_body.linear.z, 0.0);
+            assert_eq!(result.responses[0].base_after.twist_body.linear.x, boost);
+        }
+    }
+}
+
+#[test]
 fn sliding_joint_transmits_normal_recoil_but_retains_its_distinct_tangent_mass() {
     let model = slider(Vec3::new(1.0, 0.0, 0.0));
     // The two masses move together in z: Wnn=1/3. Only the unit-mass slider

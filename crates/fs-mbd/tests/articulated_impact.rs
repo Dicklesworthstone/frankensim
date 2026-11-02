@@ -63,6 +63,30 @@ fn plane_contact(
     }
 }
 
+#[test]
+fn normal_impact_retains_small_dissipation_under_a_transverse_boost() {
+    let model = single_body(inertia(2.0, Vec3::default(), [1.0; 3]));
+    for boost in [0.0, 1e9] {
+        for restitution in [0.0, 0.5, 1.0] {
+            let base = FreeFloatingBaseState::new(
+                Se3::identity(),
+                Twist::new(Vec3::default(), Vec3::new(boost, -0.3, 0.0)),
+            );
+            let contact = ArticulatedPointPlaneContact {
+                plane_velocity_world: Vec3::new(boost, 0.0, 0.0),
+                ..plane_contact(Vec3::default(), Vec3::default(), restitution)
+            };
+            let result = resolve_articulated_plane_impact(&model, base, &[], &[], contact).unwrap();
+            let loss = 0.09 * (1.0 - restitution * restitution);
+            close(result.normal_law.dissipated_energy, loss);
+            close(result.response.kinetic_energy_change, -loss);
+            close(result.energy_balance_residual, 0.0);
+            close(result.relative_normal_speed_after, 0.3 * restitution);
+            assert_eq!(result.response.base_after.twist_body.linear.x, boost);
+        }
+    }
+}
+
 /// G0/G1: a rotated body with an offset reference origin has contact response
 /// 1/m + (r_com cross n)^T I_com^-1 (r_com cross n). The independent Cartesian
 /// calculation checks the full velocity change, momentum, and restitution
