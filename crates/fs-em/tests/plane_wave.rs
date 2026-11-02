@@ -47,6 +47,9 @@ mod optical;
 #[path = "plane_wave/momentum.rs"]
 mod momentum;
 
+#[path = "plane_wave/two_sided_beam.rs"]
+mod two_sided_beam;
+
 fn source(
     properties: &[(&str, Dims, f64)],
     validity: ValidityDomain,

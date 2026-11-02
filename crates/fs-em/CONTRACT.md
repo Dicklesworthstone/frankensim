@@ -2236,6 +2236,47 @@ not evolve a temperature, claim isolated finite-edge convergence, or add a
 nonlinear, anisotropic or three-dimensional Maxwell solver. Thermal consumers
 must debit the reported absorption only once.
 
+### Coherent vector illumination from both physical faces
+
+`PlanarAngularSpectrum::prepare_illumination` adds an explicitly coherent
+right-face Ex/Ey grid to an original left-face beam. Both fields share the
+original frequency, transverse coordinates, periodic cell and phasor clock.
+Every spatial bin uses the existing `PreparedLayerIllumination` for both TE
+and TM, with fixed tangential axes on both faces. Both complete exterior light
+cones must propagate in lossless media; critical, evanescent and lossy source
+ports refuse even when a supplied amplitude is zero. No bin is discarded.
+
+The prepared owner reports positive incoming/outgoing watts per face and
+original positive per-film absorption. Each outgoing field is the coherent sum
+of reflection and opposite-face transmission. Exterior queries reconstruct
+complete E/H with the correct signed normal wavevector, including total
+standing-wave fields at either face. Interior queries contract the cached
+native source columns and synthesize every spatial/polarization contribution
+before applying the same local dielectric loss used by the one-sided owner.
+Counterbeam phase therefore changes spatial heat without deriving weak loss
+from an incident-minus-outgoing remainder. Integrated radiation force reuses
+the original homogeneous-exterior Maxwell-stress law and requires the same
+original lossless exterior source on both sides; force is not another heat
+or mechanical-work credit.
+
+Preparation costs O(points*layers) work/storage, explicitly bounded before
+allocation. It borrows the original beam and FFT plans and retains both native
+source columns per polarization/bin for subsequent O(points) field assembly
+and six original FFTs. No material law or stack scattering solve is repeated
+for a depth or exterior query. Force queries allocate nothing and contract
+the native loss modes in O(points*layers). Cancellation publishes no partial
+owner or field. These are operation bounds, not measured throughput claims.
+
+Four focused native integration groups compare independent direct Fourier and
+interface equations, characteristic-matrix interior fields and depth-integrated
+heat, exterior Maxwell stress, phase-dependent absorption, one-sided reduction,
+exact budget boundaries and source/cancellation refusal. They remain unexecuted
+in the implementation environment because dependency compilation exceeds its
+memory limit. The model remains monochromatic, planar and periodic: finite
+aperture edges, evanescent illumination sources, transient momentum storage,
+thermal state evolution and arbitrary coherence between different frequencies
+are not inferred by this addition.
+
 ### Spatial partial coherence through the same diffracting films
 
 `angular_spectrum::AngularSpectrumCoherence` borrows original prepared beams

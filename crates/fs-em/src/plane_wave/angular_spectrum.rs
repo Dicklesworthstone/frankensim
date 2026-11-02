@@ -42,6 +42,12 @@ pub use coherence::{
 
 mod force;
 
+mod two_sided;
+pub use two_sided::{
+    AngularSpectrumIlluminationLimits, AngularSpectrumIlluminationPower,
+    AngularSpectrumIlluminationSide, PreparedAngularSpectrumIllumination,
+};
+
 mod exposure;
 pub use exposure::{
     AngularSpectrumExposure, AngularSpectrumExposureEnsemble,

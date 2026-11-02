@@ -260,16 +260,29 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
             magnetic.push(h);
         }
         let field = beam.synthesize(electric, magnetic, &mut cancelled)?;
+        AngularSpectrumLayerField::from_field(field, self.heat_coefficient, &mut cancelled)
+    }
+}
+
+impl AngularSpectrumLayerField {
+    // Both one- and two-sided illumination form the complete coherent field
+    // before the same positive constitutive loss is applied in physical space.
+    pub(super) fn from_field(
+        field: AngularSpectrumField,
+        heat_coefficient: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        let n = field.electric_v_per_m().len();
         let mut absorbed_power_density_w_m3 = Vec::with_capacity(n);
         let mut sum = 0.0;
         for (index, e) in field.electric_v_per_m().iter().enumerate() {
             if index % 256 == 0 {
                 poll(&mut cancelled)?;
             }
-            let heat = if self.heat_coefficient == 0.0 {
+            let heat = if heat_coefficient == 0.0 {
                 0.0
             } else {
-                self.heat_coefficient * e.iter().map(|v| v.norm_sq()).sum::<f64>()
+                heat_coefficient * e.iter().map(|v| v.norm_sq()).sum::<f64>()
             };
             if !heat.is_finite() || heat < 0.0 {
                 return Err(bad("local dielectric heat is unrepresentable"));
@@ -277,8 +290,7 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
             absorbed_power_density_w_m3.push(heat);
             sum += heat;
         }
-        let absorbed_power_per_depth_w_m =
-            sum * self.beam.grid.spacing_m[0] * self.beam.grid.spacing_m[1];
+        let absorbed_power_per_depth_w_m = sum * field.grid.spacing_m[0] * field.grid.spacing_m[1];
         if !absorbed_power_per_depth_w_m.is_finite() {
             return Err(bad("integrated dielectric heat is unrepresentable"));
         }
