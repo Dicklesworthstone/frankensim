@@ -22,7 +22,7 @@ use super::*;
 use crate::d3q19::{E3, Q3};
 
 mod multiple;
-pub use multiple::DryBodiesExchange3;
+pub use multiple::{DryBodiesExchange3, DryLubricatedPlanesExchange3};
 
 /// Numerical admission for one implicit dry-body/retained-fluid correction.
 /// All impulses are lattice units. Angular residuals are divided by the shape's

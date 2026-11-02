@@ -7002,6 +7002,41 @@ forced full-tensor dynamics at a translated origin, distinct source subtraction,
 permutation covariance, three-body translation, exact singleton delegation and
 atomic refusal/retry. All six existing single-dry regressions also pass.
 
+### Physical dry spheres with simultaneous missing-film resistance
+
+`step_with_dry_lubricated_spheres` and
+`step_with_dry_lubricated_spheres_and_planes` compose the existing normal and
+optional reciprocal tangent/spin resistance with the bounded physical dry-body
+correction. Every full `6N` candidate retains original positive dry masses and
+complete tensors, solves the native films simultaneously, and uses the resulting
+shared collision/streaming state for actual interior Guo momentum. Each midpoint
+fictitious-fluid source is still subtracted exactly once.
+
+Native film impulses are separate from resolved-fluid hydrodynamic loads and
+are not reapplied to populations. Individual physical body balances include the
+film wrench once. The combined exterior-fluid-plus-dry account includes the
+opposite prescribed-plane reaction about the same fixed origin, including
+reaction couples; internal sphere-pair wrenches cancel. Individual plane
+reactions are exposed by `DryLubricatedPlanesExchange3`. Plane work is work
+received by the prescribed surface, with its reservoir supplying the negative.
+The native nonnegative film-loss receipt remains separate from any thermal
+destination.
+
+Plane geometry remains prescribed and supplies only unresolved-film resistance;
+it neither moves resolved fluid boundaries nor provides finite-inertia recoil.
+Existing film/mode limits, positive-gap admission, tangent asymptotic limits,
+dry candidate budgets, conditioning, volume checks and atomic publication remain
+authoritative. Empty planes preserve the sphere-only path; a singleton without
+planes delegates to the original single-dry owner. No contact law, GCL, exact
+impermeability or unconditional added-mass stability is added.
+
+Five new native groups pass, including unequal-density reciprocal resistance,
+translated-origin tangent/spin plane reactions, nonuniform forcing with distinct
+interior sources and 15 simultaneous pair/plane modes, inactive-film exact
+compatibility, and post-stream endpoint refusal with exact retry. All nine
+existing dry-assembly and six single-dry groups also pass. Full Cargo
+qualification remains blocked by the unavailable sibling runtime dependencies.
+
 
 ## Integer-cell planar piston geometry epochs (MR69 foundation)
 
