@@ -17,6 +17,7 @@ use crate::render::schedule::force::coupled::contact::friction::multiple::layer:
     thermal::{LayerThermalCell, LayerThermalError, continue_material_layer, deposit_heat},
 };
 use fs_exec::CancelGate;
+use fs_math::det;
 use fs_matdb::MaterialCard;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_material::state_point::{MaterialStatePointError, ResolvedShearLayer};
@@ -26,7 +27,7 @@ use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
 use fs_tribo::layer_contact::{ThirdBodyLayerContact, ThirdBodyLayerState};
 use fs_tribo::tangential::matrix::MatrixTangentialConfig;
-use fs_tribo::{TangentialLaw, TriboError};
+use fs_tribo::{FrictionRegime, TangentialLaw, TriboError};
 use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
 
@@ -110,6 +111,108 @@ fn number<E>(value: f64) -> Result<f64, PlanarMaterialLayerError<E>> {
             "unrepresentable planar thermoelastic coordinate or energy",
         ))
     }
+}
+
+/// One accepted mechanical step's loss, split into plastic and Maxwell-arm heat.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanarLayerHeatSplit {
+    /// Native nonnegative plastic loss [J]: the step's loss minus its relaxation part.
+    pub plastic_heat_j: f64,
+    /// The step's own relaxation heat, evaluated on its mechanical interval [J].
+    pub relaxation_heat_j: f64,
+    /// Worst-case rounding bound used by a scalar sliding step's identity [J];
+    /// zero where the identity is bitwise.
+    pub sliding_bound_j: f64,
+}
+
+const SAME_STEP: &str = "planar layer heat split is not this mechanical step";
+
+/// Split `loss_j`, the dissipation that `law`'s `advance()` reported for the step
+/// `old -> new` on `dt_s`, with that step's own relaxation part, and refuse unless the
+/// split belongs to that step. The live path calls this; nothing else defines the guard.
+///
+/// - Sign (`plastic_heat_j` contract: nonnegative): `loss_j - relaxation < 0` refuses.
+/// - Identity, bitwise where `advance()` forms the loss from the same parts: a tensor
+///   law adds `fl(fl(plastic + relaxation) + kelvin)` from the same `tensor_dissipation`
+///   (fs-tribo layer_contact/tensor.rs:622-627); a scalar step without plastic flow adds
+///   `fl(fl(0 + 0) + relaxation)` (layer_contact.rs:446-448, :485-493).
+/// - Identity, bounded, for a scalar sliding step: `advance()` forms the plastic work as
+///   `Y*d + (d/flow)*d` from its return distance `d`, while `step_dissipation` forms
+///   `Y*h + (c*(h/dt))*h` from `h = hypot(new.plastic - old.plastic)`. The two agree to
+///   the worst-case bound derived on `scalar_sliding_bound_j`, not bitwise.
+pub fn planar_layer_heat_split<E>(
+    law: &ThirdBodyLayerContact,
+    old: &ThirdBodyLayerState,
+    new: &ThirdBodyLayerState,
+    dt_s: f64,
+    regime: FrictionRegime,
+    loss_j: f64,
+) -> Result<PlanarLayerHeatSplit, PlanarMaterialLayerError<E>> {
+    let recomputed = law.step_dissipation(old, new, dt_s)?;
+    let relaxation_heat_j = recomputed.relaxation_j;
+    let plastic_heat_j = number(loss_j - relaxation_heat_j)?;
+    if plastic_heat_j < 0.0 {
+        return Err(invalid("planar layer plastic heat must be nonnegative"));
+    }
+    let scalar = law.stiffness_n_m().is_some();
+    let sliding_bound_j = if scalar && regime == FrictionRegime::Sliding {
+        let bound = scalar_sliding_bound_j::<E>(law, old, new, dt_s, loss_j)?;
+        if !(number(plastic_heat_j - recomputed.plastic_j)?.abs() <= bound) {
+            return Err(invalid(SAME_STEP));
+        }
+        bound
+    } else {
+        let total = number(number(recomputed.plastic_j + relaxation_heat_j)? + recomputed.kelvin_j)?;
+        if loss_j != total || (scalar && recomputed.plastic_j != 0.0) {
+            return Err(invalid(SAME_STEP));
+        }
+        0.0
+    };
+    Ok(PlanarLayerHeatSplit { plastic_heat_j, relaxation_heat_j, sliding_bound_j })
+}
+
+/// Worst-case bound on |fl(D - r) - P'| for a scalar sliding step, where D is
+/// `advance()`'s loss and P' is `step_dissipation`'s plastic part. u = eps/2,
+/// g(k) = k*u/(1 - k*u); every inequality below holds in round-to-nearest.
+/// - P = fl(D - r) against a = advance()'s fl(Y*d + fl(d/flow)*d): |P - a| <= 2g(3)*D.
+/// - a against Y*d + d^2/flow: g(3)*(Y*d + d^2/flow), and 1/flow <= (1 + g(1))*c/dt.
+/// - d^2/flow against (c/dt)*d^2: g(1)*(c/dt)*d^2 (flow = fl(dt/c)).
+/// - Y*d + (c/dt)*d^2 against Y*h + (c/dt)*h^2: |h - d|*(Y + (c/dt)*(h + d)).
+/// - Y*h + (c/dt)*h^2 against P': g(4)*(Y*h + (c/dt)*h^2) (four roundings deep).
+/// - |h - d| <= X + K*d, with det::hypot accurate to g(4) (four roundings),
+///   the return direction's norm within e_u = (u + g(4))/(1 - g(4)) of one,
+///   K = u + e_u + u*e_u for fl(d*dir), and the plastic-slip update and difference each
+///   within g(1) of the RESULT, so X = g(4)*h/(1 - g(4)) + g(1)*(sum|p_new| + sum|delta|).
+///   This term is relative to the accumulated slip, not to the increment. Then
+///   d <= d_max = (h + X)/(1 - K) and |h - d| <= X + K*d_max.
+/// The sum is evaluated in fewer than 32 roundings of nonnegative terms, so the
+/// final factor (1 + 64u) covers its own evaluation.
+fn scalar_sliding_bound_j<E>(
+    law: &ThirdBodyLayerContact,
+    old: &ThirdBodyLayerState,
+    new: &ThirdBodyLayerState,
+    dt_s: f64,
+    loss_j: f64,
+) -> Result<f64, PlanarMaterialLayerError<E>> {
+    const U: f64 = f64::EPSILON * 0.5;
+    let g = |k: f64| k * U / (1.0 - k * U);
+    let y = law.yield_force_n();
+    let q = law.plastic_resistance_n_s_m() / dt_s;
+    let (p, o) = (new.plastic_slip_m(), old.plastic_slip_m());
+    let delta = [p[0] - o[0], p[1] - o[1]];
+    let h = det::hypot(delta[0], delta[1]);
+    let e_u = (U + g(4.0)) / (1.0 - g(4.0));
+    let k = U + e_u + U * e_u;
+    let x = g(4.0) * h / (1.0 - g(4.0))
+        + g(1.0) * (p[0].abs() + p[1].abs() + delta[0].abs() + delta[1].abs());
+    let d = (h + x) / (1.0 - k);
+    let h_d = x + k * d;
+    let terms = 2.0 * g(3.0) * loss_j
+        + g(3.0) * (y * d + q * (1.0 + g(1.0)) * d * d)
+        + g(1.0) * q * d * d
+        + h_d * (y + q * (h + d))
+        + g(4.0) * (y * h + q * h * h);
+    number(terms * (1.0 + 64.0 * U))
 }
 fn numerical<E>(
     error: FiniteDifferenceError<PlanarMaterialLayerError<E>>,
@@ -412,9 +515,17 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
                     let reversible_heat_j = number(-coefficient_work_j - entropy_energy_change_j)?;
                     let internal_energy_change_j =
                         number(current.internal_energy_j - initial.internal_energy_j)?;
-                    let relaxation_heat_j = layer.law.step_dissipation(&layer.state,
-                        &mechanical.state, dt)?.relaxation_j;
-                    let plastic_heat_j = number(mechanical.frame.friction_dissipation_j-relaxation_heat_j)?;
+                    // Split the loss with the relaxation part of the SAME mechanical step: the
+                    // law and states passed to stage_candidate_with_law above, and the
+                    // mechanical clock network.dt that advance() used (planar.rs:283;
+                    // sample_period_s() returns it). The thermal interval (n+1)T-nT can
+                    // differ from T by an ulp, which made a sticking step's plastic part
+                    // negative. The predicate refuses a split that is not that step's.
+                    let mechanical_dt = owner.borrow().network().sample_period_s();
+                    let PlanarLayerHeatSplit { plastic_heat_j, relaxation_heat_j, .. } =
+                        planar_layer_heat_split::<E>(&layer.law, &layer.state,
+                            &mechanical.state, mechanical_dt, mechanical.frame.regime,
+                            mechanical.frame.friction_dissipation_j)?;
                     let physical_heat_j = number(mechanical.frame.friction_dissipation_j + reversible_heat_j)?;
                     let StepCoefficients {
                         mut sources_w,

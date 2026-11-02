@@ -3,7 +3,7 @@
 
 use super::*;
 use fs_couple::render::schedule::force::coupled::contact::friction::tangential::planar::material_layer::{
-    LayerThermalSolve, PlanarLayerThermalBinding, PlanarMaterialLayerSystem,
+    LayerThermalSolve, PlanarLayerThermalBinding, PlanarMaterialLayerSystem, planar_layer_heat_split,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -394,7 +394,10 @@ fn temperature_dependent_memory_closes_full_two_axis_thermal_root_and_preserves_
     assert_eq!(owner.stiffness_slope_n_m_k(), 0.0,
         "thermal memory must remain active even when equilibrium stiffness is constant");
     close(owner.relaxation_stiffness_slopes_n_m_k()[0], MEMORY_SLOPE, 1e-10);
+    let mut thermal_split_refusals = 0;
     for speed in [[0.0012, -0.0007], [0.0, 0.0], [-0.0010, 0.0006]] {
+        let old_state = owner.mechanics().state().clone();
+        let step_sample = owner.mechanics().network().samples_rendered();
         let old = owner.mechanics().state().elastic_slip_m();
         let old_r = owner.mechanics().state().relaxation_slip_m()[0];
         let old_t = heat.temperature_k(FILM).unwrap();
@@ -451,7 +454,36 @@ fn temperature_dependent_memory_closes_full_two_axis_thermal_root_and_preserves_
         close(frame.mechanical.network_energy_j-old_body+frame.layer_internal_energy_change_j
             +heat_energy(&heat)-old_h, frame.mechanical.drive_work_j, 2e-12);
         assert!(frame.total_energy_residual_j.abs() <= controls().total_energy_tolerance_j);
+        // The live same-step predicate on this frame, from public API only: the accepted
+        // law, and the continuation of the old history that binding.at applies.
+        let law = owner.mechanics().law();
+        let period = owner.mechanics().network().sample_period_s();
+        let continued = law.continue_state_with_work(&old_state).unwrap().state;
+        let new_state = owner.mechanics().state();
+        let (loss, regime) = (frame.mechanical.friction_dissipation_j, frame.mechanical.regime);
+        assert_eq!(regime, fs_tribo::FrictionRegime::Sticking);
+        let split = planar_layer_heat_split::<Infallible>(law, &continued, new_state, period,
+            regime, loss).unwrap();
+        assert_eq!((split.plastic_heat_j, split.relaxation_heat_j),
+            (frame.plastic_heat_j, frame.relaxation_heat_j));
+        // Identity negative: the same sticking pair with its loss one ulp off refuses.
+        let off = planar_layer_heat_split::<Infallible>(law, &continued, new_state, period,
+            regime, f64::from_bits(loss.to_bits() + 1)).unwrap_err();
+        assert!(format!("{off:?}").contains("planar layer heat split is not this mechanical step"),
+            "{off:?}");
+        // Sign negative: the split on the thermal interval (n+1)T-nT, as :415 used to make it.
+        let thermal_dt = (step_sample + 1) as f64 * period - step_sample as f64 * period;
+        let thermal_r = law.step_dissipation(&continued, new_state, thermal_dt).unwrap().relaxation_j;
+        if thermal_dt > period && thermal_r != split.relaxation_heat_j {
+            thermal_split_refusals += 1;
+            let refused = planar_layer_heat_split::<Infallible>(law, &continued, new_state,
+                thermal_dt, regime, loss).unwrap_err();
+            assert!(format!("{refused:?}").contains("planar layer plastic heat must be nonnegative"),
+                "{refused:?}");
+        }
     }
+    assert!(thermal_split_refusals > 0,
+        "no step put the thermal clock past T with a different relaxation part: the negative is vacuous");
     let state = owner.mechanics().state().clone();
     let source = owner.source().clone();
     let cells = heat.cells().clone();
@@ -571,8 +603,11 @@ fn nonproportional_plastic_history_heats_the_same_source_and_closes_internal_ene
     let original = owner.source().clone();
     let gate = CancelGate::new();
     let (mut work, mut network_loss, mut plastic, mut reversible) = (0.0, 0.0, 0.0, 0.0);
+    let mut previous_state: Option<fs_tribo::layer_contact::ThirdBodyLayerState> = None;
+    let mut stale_refusals = 0;
     for n in 0..32 {
         let speed = [[0.001, 0.0], [0.0, 0.001], [-0.001, 0.0], [0.0, -0.001]][n / 8];
+        let old_state = owner.mechanics().state().clone();
         let old_e = owner.mechanics().state().elastic_slip_m();
         let old_p = owner.mechanics().state().plastic_slip_m();
         let frame = owner
@@ -598,6 +633,31 @@ fn nonproportional_plastic_history_heats_the_same_source_and_closes_internal_ene
             frame.plastic_heat_j,
             frame.mechanical.friction_dissipation_j
         );
+        // The live same-step predicate: the matched pair returns the published split; a
+        // sliding frame fed the previous step's history refuses.
+        let law = owner.mechanics().law();
+        let period = owner.mechanics().network().sample_period_s();
+        let continued = law.continue_state_with_work(&old_state).unwrap().state;
+        let (loss, regime) = (frame.mechanical.friction_dissipation_j, frame.mechanical.regime);
+        let split = planar_layer_heat_split::<Infallible>(law, &continued, state, period, regime,
+            loss).unwrap();
+        assert_eq!((split.plastic_heat_j, split.relaxation_heat_j),
+            (frame.plastic_heat_j, frame.relaxation_heat_j));
+        if regime == fs_tribo::FrictionRegime::Sliding {
+            eprintln!("SLIDING-BOUND n={n} plastic_j {:e} bound_j {:e} bound/plastic {:e}",
+                split.plastic_heat_j, split.sliding_bound_j,
+                split.sliding_bound_j / split.plastic_heat_j);
+            if let Some(previous) = &previous_state {
+                if previous.plastic_slip_m() != old_p {
+                    let stale = law.continue_state_with_work(previous).unwrap().state;
+                    let refused = planar_layer_heat_split::<Infallible>(law, &stale, state, period,
+                        regime, loss).unwrap_err();
+                    assert!(format!("{refused:?}")
+                        .contains("planar layer heat split is not this mechanical step"), "{refused:?}");
+                    stale_refusals += 1;
+                }
+            }
+        }
         for i in 0..2 {
             // History consumes the constitutive displacement. The original
             // mechanical owner separately reports its actual endpoint mismatch.
@@ -646,7 +706,10 @@ fn nonproportional_plastic_history_heats_the_same_source_and_closes_internal_ene
             2e-11,
         );
         assert!(frame.total_energy_residual_j.abs() <= controls().total_energy_tolerance_j);
+        previous_state = Some(old_state);
     }
+    assert!(stale_refusals > 0,
+        "no sliding frame followed plastic flow: the stale-history negative is vacuous");
     assert!(plastic > 0.0);
     assert!(
         owner
