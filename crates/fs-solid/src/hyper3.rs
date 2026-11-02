@@ -888,7 +888,40 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         field: &gravity::GravityField3<'_>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
-        self.solve_loaded(None, Some((reference_density_kg_m3, field)), cx)
+        self.solve_loaded(
+            None,
+            Some((
+                gravity::ReferenceGravityDensity::PerElement(reference_density_kg_m3),
+                field,
+            )),
+            cx,
+        )
+    }
+
+    /// Solve with positive P1 reference density on the original mesh nodes.
+    ///
+    /// The same native Newton and line-search owner samples current positions
+    /// using fixed cubic reference-mass quadrature. Graded force, potential,
+    /// tangent and support reactions retain the original density moments;
+    /// current dilation never creates mass. The field is stationary and ramps
+    /// with the native load factor, as in [`Self::solve_with_gravity`].
+    ///
+    /// # Errors
+    /// Invalid nodal density/field, field-domain exit, or native equilibrium errors.
+    pub fn solve_with_nodal_density_gravity(
+        &self,
+        reference_nodal_density_kg_m3: &[f64],
+        field: &gravity::GravityField3<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
+        self.solve_loaded(
+            None,
+            Some((
+                gravity::ReferenceGravityDensity::Nodal(reference_nodal_density_kg_m3),
+                field,
+            )),
+            cx,
+        )
     }
 
     /// Combine conservative gravity with the existing current-area pressure.
@@ -916,7 +949,40 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         let unloaded = surface.validate_pressure(applied_pressure, cx)?;
         self.solve_loaded(
             (!unloaded).then_some((surface, applied_pressure)),
-            Some((reference_density_kg_m3, field)),
+            Some((
+                gravity::ReferenceGravityDensity::PerElement(reference_density_kg_m3),
+                field,
+            )),
+            cx,
+        )
+    }
+
+    /// Combine graded reference-density gravity and current-area pressure in
+    /// the original conservative/follower-load Newton owner.
+    ///
+    /// # Errors
+    /// Invalid nodal density/field/pressure binding, domain exit, or native solve errors.
+    pub fn solve_with_nodal_density_gravity_and_pressure(
+        &self,
+        reference_nodal_density_kg_m3: &[f64],
+        field: &gravity::GravityField3<'_>,
+        surface: &pressure::ClosedTetPressureSurface,
+        applied_pressure: pressure::TetPressure<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
+        checkpoint(cx)?;
+        if !surface.matches_reference(self.nodes_m, self.tetrahedra) {
+            return Err(HyperTetError::InvalidInput {
+                what: "the exact reference pressure surface is required".into(),
+            });
+        }
+        let unloaded = surface.validate_pressure(applied_pressure, cx)?;
+        self.solve_loaded(
+            (!unloaded).then_some((surface, applied_pressure)),
+            Some((
+                gravity::ReferenceGravityDensity::Nodal(reference_nodal_density_kg_m3),
+                field,
+            )),
             cx,
         )
     }
@@ -927,7 +993,10 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             &pressure::ClosedTetPressureSurface,
             pressure::TetPressure<'_>,
         )>,
-        gravity: Option<(&[f64], &gravity::GravityField3<'_>)>,
+        gravity: Option<(
+            gravity::ReferenceGravityDensity<'_>,
+            &gravity::GravityField3<'_>,
+        )>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
         self.solve_loaded_from(None, None, pressure, gravity, None, cx)
@@ -942,7 +1011,10 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             &pressure::ClosedTetPressureSurface,
             pressure::TetPressure<'_>,
         )>,
-        gravity: Option<(&[f64], &gravity::GravityField3<'_>)>,
+        gravity: Option<(
+            gravity::ReferenceGravityDensity<'_>,
+            &gravity::GravityField3<'_>,
+        )>,
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
@@ -977,7 +1049,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             &owned_elements
         };
         let gravity_weights = gravity
-            .map(|(density, _)| gravity::reference_weights(elements, density, cx))
+            .map(|(density, _)| {
+                gravity::bind_reference_weights(elements, self.nodes_m.len(), density, cx)
+            })
             .transpose()?;
         let n = self.nodes_m.len();
         let dofs = 3 * n;
@@ -1054,7 +1128,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     let sampled = gravity::evaluate(
                         self.nodes_m,
                         elements,
-                        gravity_weights.as_deref().expect("prepared gravity masses"),
+                        gravity_weights.as_ref().expect("prepared gravity masses"),
                         displacement,
                         field,
                         false,
@@ -1109,7 +1183,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     gravity::evaluate(
                         self.nodes_m,
                         elements,
-                        gravity_weights.as_deref().expect("prepared gravity masses"),
+                        gravity_weights.as_ref().expect("prepared gravity masses"),
                         &u,
                         field,
                         true,
@@ -1431,7 +1505,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             let sampled = gravity::evaluate(
                 self.nodes_m,
                 elements,
-                gravity_weights.as_deref().expect("prepared gravity masses"),
+                gravity_weights.as_ref().expect("prepared gravity masses"),
                 &u,
                 field,
                 false,

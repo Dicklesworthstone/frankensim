@@ -176,8 +176,50 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         field: &super::gravity::GravityField3<'_>,
         cx: &Cx<'_>,
     ) -> Result<super::gravity::TetGravityLoad3, HyperTetError> {
-        let weights =
-            super::gravity::reference_weights(&self.elements, reference_density_kg_m3, cx)?;
+        self.gravity_load_with_density(
+            super::gravity::ReferenceGravityDensity::PerElement(reference_density_kg_m3),
+            displacement_m,
+            field,
+            cx,
+        )
+    }
+
+    /// Current conservative gravity for positive P1 density on the original
+    /// mesh nodes. The cubic rule integrates the graded consistent mass exactly
+    /// for affine acceleration and retains reference inventory under deformation.
+    /// The callback is sampled at current vertices and current face centroids;
+    /// general fields still require spatial refinement.
+    ///
+    /// # Errors
+    /// Invalid density/displacement/field, overflow, or cancellation.
+    pub fn gravity_load_with_nodal_density(
+        &self,
+        reference_nodal_density_kg_m3: &[f64],
+        displacement_m: &[f64],
+        field: &super::gravity::GravityField3<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<super::gravity::TetGravityLoad3, HyperTetError> {
+        self.gravity_load_with_density(
+            super::gravity::ReferenceGravityDensity::Nodal(reference_nodal_density_kg_m3),
+            displacement_m,
+            field,
+            cx,
+        )
+    }
+
+    fn gravity_load_with_density(
+        &self,
+        density: super::gravity::ReferenceGravityDensity<'_>,
+        displacement_m: &[f64],
+        field: &super::gravity::GravityField3<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<super::gravity::TetGravityLoad3, HyperTetError> {
+        let weights = super::gravity::bind_reference_weights(
+            &self.elements,
+            self.problem.nodes_m.len(),
+            density,
+            cx,
+        )?;
         let result = super::gravity::evaluate(
             self.problem.nodes_m,
             &self.elements,

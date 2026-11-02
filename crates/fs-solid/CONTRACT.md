@@ -129,14 +129,27 @@ fatigue-to-stiffness/heat coupling in this extension.
 
 ## Conservative gravity on the current finite-strain configuration
 
-`hyper3::gravity` integrates a stationary world-field potential, acceleration
-and analytic spatial gradient at four current P1 tetrahedral quadrature points.
+With cellwise reference density, `hyper3::gravity` integrates a stationary
+world-field potential, acceleration and analytic spatial gradient at four
+current P1 tetrahedral quadrature points.
 `PreparedHyperTetProblem::gravity_load` retains the original reference geometry;
 the element-ordered densities are the same fixed reference densities consumed
 by native `reference_mass_matrix`. Current volume never creates or removes mass.
 Force, external-force tangent and potential use the same degree-two quadrature.
 Uniform and affine acceleration reproduce the full consistent reference-mass
 projection, including prescribed coordinates and material interfaces.
+
+The problem and prepared `gravity_load_with_nodal_density` entries admit one
+positive P1 reference density per original node. Their eight positive cubic
+points (vertices of weight V/40 and face centroids of weight 9V/40) integrate
+rho0*N_a*N_b exactly. Force, potential and analytic tangent share those fixed
+reference mass weights, preserving graded center of mass and inertia moments.
+Under admitted positive-J deformation this represents rho_current = rho0/det F: changed current
+volume does not change inventory or replace the retained field by cell means.
+Globally uniform nodal input retains the original four-point arithmetic.
+`solve_with_nodal_density_gravity` and its combined pressure entry use the same
+native Newton, line search and reaction owner; the bound mass weights are
+prepared once. Current vertices and face centroids must lie in the field domain.
 
 `HyperTetProblem::solve_with_gravity` uses that owner at every Newton and trial
 configuration, subtracts its analytic tangent from internal stiffness, includes
@@ -156,6 +169,14 @@ Focused G0/G1/G3 regressions in `tests/hyper3_gravity.rs` exercise heterogeneous
 native mass, finite-difference derivatives, rotated geometry, analytic finite
 stretch with pressure and support reactions, potential-datum invariance, and a
 three-rung nonlinear quadrature ladder. These are synthetic numerical checks.
+The nodal-density unit regressions additionally compare all cubic simplex
+moments, actual shared reference-mass action, deformed gravity force/energy/
+tangent and center-of-mass torque, nonlinear discrete-potential derivatives,
+and scalar-path bits. `tests/hyper3_gravity/nodal_density.rs` adds the native
+finite-stretch/pressure/reaction and public-admission regressions. The bounded
+native source validation executes the three new assembly regressions and the
+three shared-mass regressions; the full Newton integration regressions remain
+unexecuted in the current dependency-constrained environment.
 
 ## Fatigue on source-bound inertial J2 motion
 

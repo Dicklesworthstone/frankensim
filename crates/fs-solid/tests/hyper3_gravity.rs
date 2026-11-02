@@ -1,5 +1,7 @@
 //! G0/G1/G3: original reference mass, current-position gravity derivatives,
 //! conservative equilibrium and quadrature refinement on native hyper3.
+#[path = "hyper3_gravity/nodal_density.rs"]
+mod nodal_density;
 #[path = "tet10/support.rs"]
 mod support;
 use support::{block, with_cx};
