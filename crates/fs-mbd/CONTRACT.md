@@ -100,6 +100,31 @@ residuals are measured numerical defects, not response-error certificates.
 The harmonic solution is a sinusoidal particular solution: unstable homogeneous
 transients need not decay, so it does not imply an attained steady response.
 
+`RotorOperatingPoint::midpoint_stepper` now advances actual displacement/angle
+and velocity states through the complete constant-speed rotor equation. Native
+real partial-pivot LU factors `M + h/2 (C + Omega G) + h²/4 K` once; scaled mass
+Cholesky also supports instantaneous full-inertia generalized impulse kicks.
+Preparation costs O(n³); subsequent trajectory steps and kicks cost O(n²),
+within the existing 32-coordinate bound. The step solves for a velocity
+increment before updating the original state. The original impulse equation
+is independently checked on the actual returned endpoint, with no mass lumping,
+bearing symmetrization, damping floor or clipped impulse.
+
+The supplied midpoint load drives the reusable trajectory state. Separate
+signed input, bearing-velocity, stiffness and gyroscopic work accompanies each
+step; active/cross-coupled bearing work is retained, and gyroscopic work is zero
+in exact arithmetic. Symmetric conservative stiffness gives the usual midpoint
+quadratic-energy identity, while phase accuracy still needs timestep refinement.
+The physical rigid-rotor specialization preserves transverse angular momentum
+`H = Jd theta_dot + Jp Omega [theta_y, -theta_x]` during unsupported constant-spin
+whirl. The caller supplies load samples, coefficient validity and any event
+time. Spin acceleration and nonlinear bearing evolution require their own
+physical operators. Cancellation or failed balance publishes no partial state.
+
+The transient tests exercise full-mass impulse-to-trajectory response, native
+rigid-rotor angular momentum and energy, analytic whirl and damped ring-down
+refinement, nonsymmetric active work, and singular/underresolved/cancelled refusal.
+
 `rotordynamics::rigid::RigidRotor` supplies a concrete physical assembly. It
 lowers the original full centroidal inertia by the supplied proper reference
 rotation and admits axisymmetry under an explicit tight tolerance. Its four

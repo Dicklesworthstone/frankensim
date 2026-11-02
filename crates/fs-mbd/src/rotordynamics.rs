@@ -21,6 +21,9 @@ use fs_modal::{ModalError, quadratic_eigenvalues_with_cancel};
 /// Physical rigid-disk, bearing and imbalance assembly in original coordinates.
 pub mod rigid;
 
+/// Actual time-domain motion and impulse response at a fixed shaft speed.
+pub mod transient;
+
 /// Small dense operating-point bound; the quadratic companion has twice this size.
 pub const MAX_ROTOR_DOFS: usize = 32;
 /// Maximum operating points in one cancellable fixed-coefficient sweep.
@@ -43,6 +46,8 @@ pub enum RotorError {
     Modal(ModalError),
     /// Original complex factorization/solve refused; resonance is never floored.
     Linear(LuComplexError),
+    /// Original real transient factorization refused; no damping is inserted.
+    TransientLinear(fs_la::factor::FactorError),
     /// Original dynamic equilibrium did not meet the caller's residual limit.
     Residual {
         /// Measured scale-relative original-force residual.
@@ -327,7 +332,9 @@ impl RotorBearingModel {
         poll(&mut cancelled)?;
         if spin_samples_rad_s.len() < 2
             || spin_samples_rad_s.len() > MAX_CAMPBELL_SAMPLES
-            || spin_samples_rad_s.iter().any(|x| !x.is_finite() || *x < 0.0)
+            || spin_samples_rad_s
+                .iter()
+                .any(|x| !x.is_finite() || *x < 0.0)
             || spin_samples_rad_s.windows(2).any(|pair| pair[1] <= pair[0])
             || !excitation_order.is_finite()
             || excitation_order <= 0.0
@@ -340,8 +347,9 @@ impl RotorBearingModel {
             ));
         }
 
-        let signature = |speed: f64, cancelled: &mut dyn FnMut() -> bool|
-            -> Result<(usize, usize), RotorError> {
+        let signature = |speed: f64,
+                         cancelled: &mut dyn FnMut() -> bool|
+         -> Result<(usize, usize), RotorError> {
             let point = self.at_speed(speed, &mut *cancelled)?;
             let threshold = finite(excitation_order * speed)?;
             point.positive_frequency_signature(threshold, &mut *cancelled)
@@ -459,7 +467,8 @@ impl RotorBearingModel {
         let mut samples = Vec::with_capacity(spin_samples_rad_s.len());
         for &speed in spin_samples_rad_s {
             poll(&mut cancelled)?;
-            let alpha = self.at_speed(speed, &mut cancelled)?
+            let alpha = self
+                .at_speed(speed, &mut cancelled)?
                 .spectral_abscissa(&mut cancelled)?;
             samples.push((speed, alpha));
         }
@@ -505,7 +514,8 @@ impl RotorBearingModel {
                 if mid == lo || mid == hi {
                     break;
                 }
-                let a_mid = self.at_speed(mid, &mut cancelled)?
+                let a_mid = self
+                    .at_speed(mid, &mut cancelled)?
                     .spectral_abscissa(&mut cancelled)?;
                 used += 1;
                 if a_mid == 0.0 {
