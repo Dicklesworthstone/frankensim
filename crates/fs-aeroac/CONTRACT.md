@@ -747,3 +747,55 @@ determinism.
   spatial growth rate is low by the critical-layer resolution (4.4 %
   at dx 0.1, invariant 14).
 
+## Complete-sphere compact-array radiation power
+
+`curle3d::PreparedCompactRadiatedPower` integrates the cycle-mean outward power
+of prescribed peak volume-flow sources Q [m^3/s] and forces ON the fluid F [N].
+All sources share one frequency, coordinate frame and emission clock, using the
+original `FluidAcousticState`. With Z = rho c, its authority is
+
+`P = k^2/(8 pi Z) <|sum_j (Z Q_j + n.F_j) exp(-i k n.s_j)|^2>_sphere`.
+
+The angular average uses analytic scalar, vector and tensor spherical moments,
+retaining separated monopole/monopole, force/force and mixed Q/F interference.
+There is no angular quadrature in preparation or evaluation. Each individual
+source must admit the compact-source model; the complete array need not be
+compact. The `from_observer` adapter retains the original material, frequency
+and source geometry. It explicitly refuses molecular observers: attenuation
+changes the outward flux with radius, so a lossless integral cannot represent
+their emitted power.
+
+Exactly colocated sources are field-summed before quadratic products, in their
+original input order. Normalization, field sums and contractions use
+double-double arithmetic. A globally field-summed colocated baseline is combined
+with separate `j0(x)-1` and `j1(x)/x-1/3` corrections; small source-separation
+power is not obtained by subtracting two rounded order-one powers. This improves
+weak residuals but is not a certified relative enclosure at every null.
+Nonfinite or negative numerical power refuses instead of being clamped.
+
+For N original sources and M distinct positions, preparation is O(N^2), stored
+data are O(N + M^2), and coherent evaluation is O(N M + M^2), allocation-free and
+without trigonometry. Group sums are recomputed to keep application immutable
+and avoid caller-owned scratch. The independent-source path takes O(N).
+Explicit coherence factors obey E[xi_r conj(xi_s)] = delta_rs: sources and Q/F
+mechanisms interfere within a factor, while factors add powers. This
+cycle-average observable needs no proper-complex or Gaussian assumption.
+Factors use peak line units; a one-sided PSD bin of width df needs covariance
+2 df S, not an unscaled PSD factor.
+
+Source count, N^2, factor count and N^2 times factor count are checked before
+their admitted work or allocation. Preparation and evaluation poll cancellation
+and publish no partial operator or power. This is a homogeneous, stationary,
+lossless free-space result for prescribed sources; it does not add scattering,
+mutual loading, moving sources, finite-source validation or measured-SPL
+qualification.
+
+Nine authored regression tests cover SI normalization and observer binding,
+separated and mixed-source phase signs, full pressure-velocity flux through
+enclosing spheres, weak colocated residuals, tiny monopole and parallel/transverse
+force pairs, explicit coherence factors and unitary mixing, rigid transformations,
+resource limits, cancellation and molecular-model refusal. Rust execution remains
+unverified in this session because the native process runner is unavailable.
+Independent JavaScript angular and full finite-radius flux checks agreed to
+1.33e-15 relative error for the documented three-source fixture; those checks
+validate the reference equations, not Rust compilation.

@@ -14,8 +14,13 @@
 
 /// Prepared harmonic arrays of physical volume sources and force dipoles.
 pub mod array;
+/// Analytic whole-sphere power of coherent compact-source arrays.
+pub mod power;
 mod statistics;
 pub use array::{CoherentCompactField, CompactSourcePhasor, PreparedCompactSourceObserver};
+pub use power::{
+    CompactRadiatedPower, PreparedCompactRadiatedPower, RadiatedPowerBudget, RadiatedPowerModeBudget,
+};
 pub use statistics::{CoherenceBudget, CompactFieldStatistics};
 
 use crate::AeroacError;
