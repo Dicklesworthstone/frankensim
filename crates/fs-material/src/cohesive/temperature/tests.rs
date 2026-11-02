@@ -85,7 +85,7 @@ fn failed_bond_keeps_compression_and_never_rebonds() {
 }
 
 #[test]
-fn temperature_transfer_refuses_mixed_history_and_out_of_domain_without_mutation() {
+fn temperature_transfer_refuses_changed_envelope_and_out_of_domain_without_mutation() {
     use crate::cohesive::mixed_mode::MixedModeParameters;
     let common = law(10.0, 5.0, 5.0);
     let mixed = BilinearCohesive::new_mixed_mode(

@@ -5,7 +5,10 @@
 //! that surface, beta = Kt |gt|^2/(Kn <gn>^2 + Kt |gt|^2) selects
 //! `Gc = GIc + (GIIc-GIc) beta^eta` (Benzeggagh--Kenane).
 //!
-//! This implementation explicitly FREEZES beta and its envelope at initiation.
+//! At fixed coefficients this implementation FREEZES beta and its envelope at
+//! initiation. The physical active-separation direction is retained as well:
+//! an explicit `temperature` transfer reevaluates the envelope on that original
+//! direction, never on the current possibly rotated separation.
 //! Subsequent damage is driven by the maximum energy norm
 //! `r = sqrt(Kn <gn>^2 + Kt |gt|^2)`. This makes arbitrary subsequent straight
 //! jump paths passive, with exact analytic work, while reproducing the chosen
@@ -44,16 +47,27 @@ pub struct MixedModeParameters {
     pub bk_exponent: f64,
 }
 
-/// Immutable envelope chosen at the first strength-surface crossing.
+/// Retained physical initiation mode and the envelope at current coefficients.
+/// Ordinary mechanical updates never change this record. An explicit thermal
+/// transfer preserves the first direction and energy fraction, while rebuilding
+/// the current envelope using that direction and the new source coefficients.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixedModeHistory {
-    /// Shear share of undamaged recoverable energy at initiation, in [0,1].
+    /// Original shear share of undamaged energy at first initiation, in [0,1].
+    /// This historical observation does not change with temperature.
     pub energy_shear_fraction: f64,
-    /// Energy-norm initiation coordinate, sqrt(J/m2), not a distance.
+    /// Unit active physical separation at first initiation: [opening, shear1,
+    /// shear2]. Compression contributes zero; shear signs are retained.
+    pub onset_direction: [f64; 3],
+    /// Shear energy fraction on the ORIGINAL direction at current coefficients.
+    /// Different temperature dependence of Kn and Kt changes this weighting,
+    /// without changing the retained physical initiation mode.
+    pub envelope_shear_fraction: f64,
+    /// Current energy-norm initiation coordinate, sqrt(J/m2), not a distance.
     pub onset_sqrt_energy: f64,
     /// Complete-failure energy-norm coordinate, sqrt(J/m2).
     pub failure_sqrt_energy: f64,
-    /// Frozen BK fracture work for this point, J/m2.
+    /// BK fracture work on the retained mode at current coefficients, J/m2.
     pub fracture_energy_j_m2: f64,
 }
 
@@ -126,7 +140,7 @@ impl BilinearCohesive {
 }
 
 impl MixedModeHistory {
-    fn intact(self, maximum: f64) -> f64 {
+    pub(super) fn intact(self, maximum: f64) -> f64 {
         if maximum <= self.onset_sqrt_energy {
             1.0
         } else if maximum >= self.failure_sqrt_energy {
@@ -147,6 +161,34 @@ impl MixedModeHistory {
                 * ((maximum - self.onset_sqrt_energy)
                     / (self.failure_sqrt_energy - self.onset_sqrt_energy))
         }
+    }
+    /// Intersect the new quadratic strength surface with the SAME physical
+    /// initiation ray. Its energy weighting changes with Kn/Kt, so temperature
+    /// dependent BK data use that weighting rather than a rotated current gap.
+    pub(super) fn at_parameters(self, p: MixedModeParameters) -> Result<Self, CohesiveError> {
+        let radius = positive(coordinate(p, self.onset_direction)?)?;
+        let onset = positive(radius / positive(strength_coordinate(p, self.onset_direction)?)?)?;
+        let shear = det::sqrt(p.tangential_stiffness_pa_m)
+            * norm([0.0, self.onset_direction[1], self.onset_direction[2]])?;
+        let beta = finite((shear / radius) * (shear / radius))?.clamp(0.0, 1.0);
+        let fracture = positive(
+            p.mode_i_fracture_energy_j_m2
+                + (p.mode_ii_fracture_energy_j_m2 - p.mode_i_fracture_energy_j_m2)
+                    * det::pow(beta, p.bk_exponent),
+        )?;
+        let failure = positive(2.0 * (fracture / onset))?;
+        if failure <= onset {
+            return Err(CohesiveError::Invalid(
+                "thermal mixed envelope leaves positive-softening domain",
+            ));
+        }
+        Ok(Self {
+            envelope_shear_fraction: beta,
+            onset_sqrt_energy: onset,
+            failure_sqrt_energy: failure,
+            fracture_energy_j_m2: fracture,
+            ..self
+        })
     }
     fn envelope_work(self, start: f64, end: f64) -> f64 {
         let a = start.min(self.onset_sqrt_energy);
@@ -313,14 +355,17 @@ impl<'a> CohesivePoint<'a> {
     }
 }
 
-fn coordinate(p: MixedModeParameters, g: [f64; 3]) -> Result<f64, CohesiveError> {
+pub(super) fn coordinate(p: MixedModeParameters, g: [f64; 3]) -> Result<f64, CohesiveError> {
     norm([
         det::sqrt(p.normal_stiffness_pa_m) * g[0].max(0.0),
         det::sqrt(p.tangential_stiffness_pa_m) * g[1],
         det::sqrt(p.tangential_stiffness_pa_m) * g[2],
     ])
 }
-fn strength_coordinate(p: MixedModeParameters, g: [f64; 3]) -> Result<f64, CohesiveError> {
+pub(super) fn strength_coordinate(
+    p: MixedModeParameters,
+    g: [f64; 3],
+) -> Result<f64, CohesiveError> {
     norm([
         g[0].max(0.0) / (p.normal_strength_pa / p.normal_stiffness_pa_m),
         g[1] / (p.tangential_strength_pa / p.tangential_stiffness_pa_m),
@@ -358,9 +403,13 @@ pub(super) fn initiate(
             "mixed initiation leaves positive-softening domain",
         ));
     }
+    let active_g = active(g);
+    let length = positive(norm(active_g)?)?;
     Ok((
         MixedModeHistory {
             energy_shear_fraction: beta,
+            onset_direction: active_g.map(|component| component / length),
+            envelope_shear_fraction: beta,
             onset_sqrt_energy: onset,
             failure_sqrt_energy: failure,
             fracture_energy_j_m2: fracture,

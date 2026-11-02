@@ -3803,8 +3803,8 @@ The full bundle, exact source selections, ordered surfaces and texture frames
 remain accessible. The canonical fixed-external-condition policy applies to
 both value dependence and applicability: evolving gap, damage, stress, rate or
 frequency coordinates cannot be frozen into this rate-independent law. The
-ordinary binding keeps external conditions fixed. An explicit common-mode
-temperature successor uses `at_temperature` and the history transfer below;
+ordinary binding keeps external conditions fixed. An explicit temperature
+successor uses `at_temperature` and the history transfer below;
 there is no implicit coefficient refresh or inference of fracture heat.
 
 The existing common-mode cohesive law still owns traction, tangents,
@@ -3818,8 +3818,9 @@ refusals; structural source-to-force tests live in `fs-solid`.
 
 `CohesivePoint::transfer_temperature` preserves the original jump, retained
 damage and accumulated fracture loss while adopting an explicitly supplied
-common-mode law. It first changes coefficients at fixed damage, reporting the
-signed change in stored surface energy as parameter work. It then relaxes onto
+law from the same common- or mixed-mode family. It first changes coefficients at
+fixed damage, reporting the signed change in stored surface energy as parameter
+work. It then relaxes onto
 the new envelope at fixed jump, recording any additional released storage as
 nonnegative damage dissipation. Cooling and increased toughness cannot heal.
 The inverse damage map changes internal onset/failure coordinates without
@@ -3829,15 +3830,38 @@ frictional compression still use the original constitutive owners.
 `ResolvedBilinearCohesive::at_temperature` retains the same ordered interface
 card and exact selected claims, including explicit viscosity when selected.
 `require_temperature_successor` checks the original source, property selections,
-temperature meaning, all held coordinates and separation/rate bounds before a
-native owner may transfer history. Frozen-onset mixed-mode transfer refuses.
+temperature meaning, all held coordinates, envelope family and separation/rate
+bounds before a native owner may transfer history. The original model selection
+cannot switch even if the same bundle contains both sets of coefficients.
+
+For mixed-mode thermal transfer, `MixedModeHistory` retains the unit PHYSICAL
+active-separation direction at first damage initiation and its original energy
+shear fraction. The current-temperature envelope is evaluated on that direction,
+never on a subsequently rotated gap. The new quadratic strength surface fixes
+onset; `beta(T) = Kt |et|^2 / (Kn en^2 + Kt |et|^2)` and the original selected
+`GIc(T)`, `GIIc(T)` and BK exponent determine current toughness. The explicitly
+separate `envelope_shear_fraction` exposes changed energy weighting under
+anisotropic stiffness changes without overwriting the physical initiation mode
+or original beta. Uninitiated points retain no mode until a mechanical or
+fixed-jump thermal strength crossing. Damage and old fracture work remain
+irreversible under heating, cooling, unloading and changed mode toughness.
+Parameter work includes both anisotropic cohesive storage and undamaged
+compression; failed bonds retain compression without regained adhesion or
+viscosity. Ordinary fixed-temperature mixed-mode behavior is unchanged.
 
 This is a declared staggered endpoint model with prescribed temperature,
 not a cure/fatigue law, continuous thermal-path validation, heat partition or
 entropy proof. Parameter work belongs to the external thermal/material source;
-additional damage is a separate physical loss. Four focused G1/G3 tests cover
+additional damage is a separate physical loss. Focused G1/G3 tests cover
 analytical fixed-jump work/release, unloading and changed-Gc continuation,
-failed-bond compression, no healing and unsupported transfer refusal.
+failed-bond compression, no healing and changed-envelope refusal. Five mixed-mode
+regressions add thermal initiation, retained physical mode and original beta,
+anisotropic heating/cooling, independent work quadrature through rotating reload
+and rupture, pure opening/shear reductions and failed viscous compression.
+Source regressions exercise the original timed three-component point with and
+without physical viscosity. The existing native series joint is a pure-opening
+consumer; this extension does not create a shear-equilibrium joint solver or
+establish measured thermal mixed-mode calibration.
 
 ## Explicit independent isotropic elastic parameters
 

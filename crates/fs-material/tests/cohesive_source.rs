@@ -457,3 +457,141 @@ fn temperature_refresh_keeps_original_viscosity_claim_and_timed_physics() {
         assert_eq!(old.answer().receipt.selected, new.answer().receipt.selected);
     }
 }
+
+#[test]
+fn mixed_temperature_sources_keep_mode_claims_and_drive_the_original_timed_point() {
+    for viscous in [false, true] {
+        let mut inputs = mixed_mode_claims();
+        for (property, hot) in inputs
+            .iter_mut()
+            .zip([5e8, 3e8, 8e4, 8e4, 50.0, 200.0, 1.5, 3e9])
+        {
+            let PropertyValue::Scalar { value, dims } = &property.value else {
+                panic!("manufactured scalar fixture required");
+            };
+            property.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![(280.0, *value), (340.0, hot)],
+                dims: *dims,
+            };
+            property.interpolation = InterpolationPolicy::LinearInside;
+        }
+        if viscous {
+            inputs.push(claim(
+                COHESIVE_NORMAL_VISCOSITY_PROPERTY,
+                COHESIVE_VISCOSITY_DIMS,
+                2e7,
+            ));
+            inputs.push(claim(
+                COHESIVE_TANGENTIAL_VISCOSITY_PROPERTY,
+                COHESIVE_VISCOSITY_DIMS,
+                3e7,
+            ));
+        }
+        let card = card(
+            inputs,
+            "manufactured thermal mixed-mode bond, not measured data",
+        );
+        let query = QueryPoint::new().with("T", 280.0).unwrap();
+        let cold = if viscous {
+            resolve_viscous_bilinear_cohesive(
+                &card,
+                &query,
+                MaterialPropertySelection::SingleClaimOnly,
+                CohesiveEnvelope::FrozenOnsetMixedMode,
+                0.02,
+                0.2,
+            )
+            .unwrap()
+        } else {
+            resolve_mixed_mode_bilinear_cohesive(
+                &card,
+                &query,
+                MaterialPropertySelection::SingleClaimOnly,
+                0.02,
+            )
+            .unwrap()
+        };
+        let loaded = cold
+            .law()
+            .bonded_point()
+            .trial_over_time([0.0004, 0.0005, -0.0002], 0.5, 1e-8)
+            .unwrap()
+            .equilibrium
+            .point;
+        let original_mode = loaded.mixed_mode_history().unwrap();
+        let hot = cold.at_temperature(&card, "T", 340.0).unwrap();
+        cold.require_temperature_successor(&hot, "T").unwrap();
+        assert_eq!(hot.surfaces(), cold.surfaces());
+        assert_eq!(cold.resolved().query(), query);
+        assert_eq!(hot.law().maximum_separation_m(), 0.02);
+        assert_eq!(
+            hot.law().viscosity().map(|v| v.maximum_rate_m_s()),
+            viscous.then_some(0.2)
+        );
+        let parameters = hot.law().mixed_mode_parameters().unwrap();
+        assert_eq!(parameters.normal_stiffness_pa_m, 5e8);
+        assert_eq!(parameters.tangential_stiffness_pa_m, 3e8);
+        assert_eq!(parameters.mode_i_fracture_energy_j_m2, 50.0);
+        assert_eq!(parameters.mode_ii_fracture_energy_j_m2, 200.0);
+        assert_eq!(parameters.bk_exponent, 1.5);
+        for (old, new) in cold
+            .resolved()
+            .properties()
+            .iter()
+            .zip(hot.resolved().properties())
+        {
+            assert_eq!(old.requirement(), new.requirement());
+            assert_eq!(old.answer().receipt.selected, new.answer().receipt.selected);
+        }
+        let transfer = loaded.transfer_temperature(hot.law(), 1e-8).unwrap();
+        assert!(transfer.point.damage() >= loaded.damage());
+        assert!(transfer.damage_dissipated_j_m2 > 0.0);
+        let mode = transfer.point.mixed_mode_history().unwrap();
+        assert_eq!(mode.onset_direction, original_mode.onset_direction);
+        assert_eq!(
+            mode.energy_shear_fraction,
+            original_mode.energy_shear_fraction
+        );
+        assert!((mode.envelope_shear_fraction - 87.0 / 167.0).abs() < 1e-12);
+        let end = [0.0005, -0.0002, 0.0003];
+        let (continued, mean) = transfer
+            .point
+            .trial_over_time_with_mean_traction(end, 0.5, 1e-8)
+            .unwrap();
+        let work: f64 = (0..3)
+            .map(|i| mean[i] * (end[i] - transfer.point.jump_m()[i]))
+            .sum();
+        assert!((work - continued.total_work_j_m2()).abs() < 1e-8);
+        assert!(continued.equilibrium.point.dissipated_j_m2() >= loaded.dissipated_j_m2());
+        assert_eq!(continued.viscous_dissipated_j_m2 > 0.0, viscous);
+        assert!(cold.at_temperature(&card, "T", 341.0).is_err());
+        assert!(
+            cold.at_temperature(&card, "unowned_temperature", 300.0)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn thermal_successor_cannot_switch_envelopes_even_with_the_same_source_bundle() {
+    let mut inputs = mixed_mode_claims();
+    inputs.extend(properties().into_iter().take(3));
+    let card = card(
+        inputs.clone(),
+        "same complete original bundle, different model selection",
+    );
+    let resolved = bundle(&card, &inputs);
+    let common =
+        ResolvedBilinearCohesive::try_from_resolved(&card, resolved.clone(), 0.02).unwrap();
+    let mixed =
+        ResolvedBilinearCohesive::try_from_mixed_mode_resolved(&card, resolved, 0.02).unwrap();
+    assert_eq!(common.resolved(), mixed.resolved());
+    assert!(common.require_temperature_successor(&mixed, "T").is_err());
+    assert!(mixed.require_temperature_successor(&common, "T").is_err());
+    let hotter = mixed.at_temperature(&card, "T", 320.0).unwrap();
+    mixed.require_temperature_successor(&hotter, "T").unwrap();
+    assert!(hotter.law().mixed_mode_parameters().is_some());
+    assert_eq!(hotter.resolved().properties().len(), 11);
+}

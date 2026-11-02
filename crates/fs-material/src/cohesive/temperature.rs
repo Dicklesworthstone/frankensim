@@ -1,8 +1,8 @@
-//! Temperature changes of an existing common-mode cohesive interface.
+//! Temperature changes of an existing common- or mixed-mode cohesive interface.
 //!
 //! The declared constitutive ordering is coefficient change at fixed jump and
 //! damage, followed by irreversible relaxation onto the new envelope at that
-//! same jump. For `psi = (1-d) K |g_active|^2/2 + Kc <g_n>_-^2/2`, the first
+//! same jump. For `psi = (1-d) g_active.K.g_active/2 + Kc <g_n>_-^2/2`, the first
 //! stage supplies signed parameter work `psi(new K, old d)-psi(old K, old d)`.
 //! The second dissipates the released storage `psi(new K, old d)-psi(new K, d)`.
 //! Neither stage does mechanical displacement work or rewrites past fracture
@@ -12,7 +12,16 @@
 //! interpolation, thermal fatigue/cure law, heat partition or entropy model.
 //! The caller owns the thermal source and resolves temperature/load histories.
 //! A fixed-temperature law and its existing force/work integration stay intact.
-//! Mixed-mode refresh refuses: frozen-onset BK history needs a separate model.
+//!
+//! Mixed-mode transfer freezes the PHYSICAL active-separation direction `e`
+//! at first initiation. At new coefficients its quadratic strength surface
+//! gives `r0 = sqrt(Kn en^2+Kt |et|^2) / sqrt((Kn en/Tn)^2+(Kt |et|/Tt)^2)`.
+//! The current weighting is `beta(T) = Kt |et|^2/(Kn en^2+Kt |et|^2)` and
+//! `Gc(T) = GIc(T)+(GIIc(T)-GIc(T))*beta(T)^eta(T)`, `rf = 2 Gc/r0`.
+//! Original onset beta remains a separate historical observation. Changing Kn
+//! relative to Kt changes energy weighting without rotating the physical mode.
+//! An uninitiated point first crossing the changed strength surface adopts the
+//! held active gap's direction. No unseen temperature path is reconstructed.
 //!
 //! Temperature-dependent cohesive stiffness and fracture data are standard
 //! inputs (Abaqus, "Contact Cohesive Behavior", 2025). The history-preserving
@@ -20,6 +29,7 @@
 //! source data alone do not establish their calibration for a real adhesive.
 //! https://docs.software.vt.edu/abaqusv2025/English/SIMACAEITNRefMap/simaitn-c-cohesivebehavior.htm
 
+use super::mixed_mode::{coordinate, initiate, strength_coordinate};
 use super::{BilinearCohesive, CohesiveError, CohesivePoint, active, finite, norm, positive};
 
 /// Accepted fixed-jump temperature transfer and its surface-energy accounts.
@@ -38,9 +48,10 @@ pub struct CohesiveTemperatureStep<'a> {
 }
 
 impl CohesivePoint<'_> {
-    /// Transfer the SAME point to an explicitly supplied common-mode temperature
-    /// law. The source adapter additionally checks original card/claims and the
-    /// temperature coordinate; this numerical operation does not confer source
+    /// Transfer the SAME point to an explicitly supplied temperature law, keeping
+    /// its common- or frozen-physical-mode envelope. The source adapter checks
+    /// original card/claims and the temperature coordinate; this numerical
+    /// operation does not confer source
     /// authority. The immutable input remains retryable on every refusal.
     ///
     /// The new envelope may increase damage at the held jump, but may never
@@ -54,9 +65,9 @@ impl CohesivePoint<'_> {
         energy_tolerance_j_m2: f64,
     ) -> Result<CohesiveTemperatureStep<'b>, CohesiveError> {
         positive(energy_tolerance_j_m2)?;
-        if self.law.mixed_mode.is_some() || law.mixed_mode.is_some() {
+        if self.law.mixed_mode.is_some() != law.mixed_mode.is_some() {
             return Err(CohesiveError::Invalid(
-                "temperature transfer of frozen-onset mixed-mode history is not supported",
+                "temperature transfer cannot change the cohesive envelope model",
             ));
         }
         if norm(self.jump)? > law.maximum_separation {
@@ -71,22 +82,53 @@ impl CohesivePoint<'_> {
                 defect_j_m2: 0.0,
             });
         }
-        let intact = self.law.intact(self.maximum);
-        let retained = equivalent_maximum(law, intact)?;
-        let maximum = retained.max(norm(active(self.jump))?).min(law.failure);
-        let mut point = CohesivePoint {
-            law,
-            jump: self.jump,
-            maximum,
-            mixed_history: None,
-            fracture_reference: law.fracture(maximum),
-            dissipated_reference: self.dissipated_j_m2(),
+        let mut point = CohesivePoint { law, ..*self };
+        let before_damage = if let Some(p) = law.mixed_mode {
+            let intact = self.mixed_integrity();
+            // Viscosity-only/compression-only updates preserve the exact
+            // existing envelope and damage coordinate without roundoff drift.
+            if self.law.mixed_mode != law.mixed_mode {
+                point.mixed_history = match self.mixed_history {
+                    Some(history) => Some(history.at_parameters(p)?),
+                    None if strength_coordinate(p, self.jump)? >= 1.0 => {
+                        Some(initiate(p, [0.0; 3], self.jump)?.0)
+                    }
+                    None => None,
+                };
+                point.maximum = if let Some(history) = point.mixed_history {
+                    equivalent_maximum(
+                        history.onset_sqrt_energy,
+                        history.failure_sqrt_energy,
+                        intact,
+                        |value| history.intact(value),
+                    )?
+                    .max(coordinate(p, self.jump)?)
+                    .min(history.failure_sqrt_energy)
+                } else {
+                    0.0
+                };
+            }
+            point.fracture_reference = point
+                .mixed_history
+                .map_or(0.0, |history| history.fracture(point.maximum));
+            let g = active(self.jump);
+            let recoverable = 0.5 * (p.normal_stiffness_pa_m * g[0]) * g[0]
+                + 0.5 * (p.tangential_stiffness_pa_m * g[1]) * g[1]
+                + 0.5 * (p.tangential_stiffness_pa_m * g[2]) * g[2];
+            intact * recoverable
+        } else {
+            let intact = self.law.intact(self.maximum);
+            let retained =
+                equivalent_maximum(law.onset, law.failure, intact, |value| law.intact(value))?;
+            point.maximum = retained.max(norm(active(self.jump))?).min(law.failure);
+            point.fracture_reference = law.fracture(point.maximum);
+            let stiffness = law.stiffness * intact;
+            active(self.jump)
+                .iter()
+                .map(|&x| (0.5 * stiffness * x) * x)
+                .sum::<f64>()
         };
-        let stiffness = law.stiffness * intact;
-        let before_damage = active(self.jump)
-            .iter()
-            .map(|&x| (0.5 * stiffness * x) * x)
-            .sum::<f64>();
+        point.dissipated_reference = self.dissipated_j_m2();
         let compression = self.jump[0].min(0.0);
         let before_damage =
             finite(before_damage + (0.5 * law.compression_stiffness * compression) * compression)?;
@@ -115,24 +157,29 @@ impl CohesivePoint<'_> {
     }
 }
 
-fn equivalent_maximum(law: &BilinearCohesive, intact: f64) -> Result<f64, CohesiveError> {
+fn equivalent_maximum(
+    onset: f64,
+    failure: f64,
+    intact: f64,
+    envelope_integrity: impl Fn(f64) -> f64,
+) -> Result<f64, CohesiveError> {
     if intact == 1.0 {
         return Ok(0.0);
     }
     if intact == 0.0 {
-        return Ok(law.failure);
+        return Ok(failure);
     }
     // Invert intact = onset/r * (failure-r)/(failure-onset), avoiding
     // onset*failure overflow. Select the non-healing side of the inverse.
-    let ratio = law.onset / law.failure;
-    let mut maximum = positive(law.onset / (ratio + intact * (1.0 - ratio)))?
-        .max(law.onset)
-        .min(law.failure);
+    let ratio = onset / failure;
+    let mut maximum = positive(onset / (ratio + intact * (1.0 - ratio)))?
+        .max(onset)
+        .min(failure);
     for _ in 0..4 {
-        if law.intact(maximum) <= intact {
+        if envelope_integrity(maximum) <= intact {
             return Ok(maximum);
         }
-        maximum = maximum.next_up().min(law.failure);
+        maximum = maximum.next_up().min(failure);
     }
     Err(CohesiveError::Invalid(
         "nonrepresentable retained thermal damage",
@@ -141,3 +188,6 @@ fn equivalent_maximum(law: &BilinearCohesive, intact: f64) -> Result<f64, Cohesi
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod mixed_tests;

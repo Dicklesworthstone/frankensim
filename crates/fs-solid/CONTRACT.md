@@ -2999,7 +2999,9 @@ interface state; no thermal transport, fracture-heat partition or
 temperature-dependent cohesive-history transfer is inferred from that path.
 
 `SourceJoint::advance_with_interface_temperature[_controlled]` explicitly
-accepts a common-mode temperature successor from the same card and pinned claims.
+accepts a temperature successor from the same card, envelope and pinned claims.
+Its normal series geometry consumes common-mode or mixed-mode pure-opening
+data; the material extension does not supply shear equilibrium in this owner.
 It stages the material owner's fixed-jump history transfer before the original
 native equilibrium solve, retaining every bulk Maxwell strain, reference
 geometry and source assignment. `TemperatureJointReport` separates signed

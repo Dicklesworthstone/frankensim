@@ -2,7 +2,7 @@
 //!
 //! Interface definitions and their source receipts remain immutable. The
 //! existing cohesive point owns separation and irreversible damage. The explicit
-//! common-mode `at_temperature` path retains the same claims; its successor can
+//! `at_temperature` path retains the same envelope and claims; its successor can
 //! be consumed only with the point owner's temperature-history transfer.
 
 /// Explicit normal/shear source data for the frozen-onset BK extension.
@@ -55,7 +55,7 @@ impl ResolvedBilinearCohesive {
     /// rejects separation, damage, rate, frequency and other unowned axes,
     /// including applicability-only bounds on otherwise constant coefficients.
     /// The ordinary history update keeps these conditions fixed; an explicit
-    /// common-mode temperature successor requires its history-transfer owner.
+    /// temperature successor requires its history-transfer owner.
     /// The numerical separation limit is explicit and must include failure.
     pub fn try_from_resolved(
         card: &InterfaceSystemCard,
@@ -164,22 +164,37 @@ impl ResolvedBilinearCohesive {
                 source,
             })?;
         let resolved = self.resolved.at_query_point(card, &point)?;
+        let envelope = if self.law.mixed_mode_parameters().is_some() {
+            CohesiveEnvelope::FrozenOnsetMixedMode
+        } else {
+            CohesiveEnvelope::CommonMode
+        };
         match self.law.viscosity() {
             Some(viscosity) => Self::try_from_viscous_resolved(
                 card,
                 resolved,
-                CohesiveEnvelope::CommonMode,
+                envelope,
                 self.law.maximum_separation_m(),
                 viscosity.maximum_rate_m_s(),
             ),
-            None => Self::try_from_resolved(card, resolved, self.law.maximum_separation_m()),
+            None => match envelope {
+                CohesiveEnvelope::CommonMode => {
+                    Self::try_from_resolved(card, resolved, self.law.maximum_separation_m())
+                }
+                CohesiveEnvelope::FrozenOnsetMixedMode => Self::try_from_mixed_mode_resolved(
+                    card,
+                    resolved,
+                    self.law.maximum_separation_m(),
+                ),
+            },
         }
     }
 
     /// Admit an already resolved temperature successor for native history
     /// transfer. Required even if its numerical coefficients happen to agree.
     /// The physical source, receiving order, selected claims and all nonthermal
-    /// coordinates remain identical; mixed-mode history is not reinterpreted.
+    /// coordinates remain identical. The receiving history retains its original
+    /// common-mode or frozen-physical-initiation-mode interpretation.
     pub fn require_temperature_successor(
         &self,
         next: &Self,
@@ -191,6 +206,8 @@ impl ResolvedBilinearCohesive {
             || self.surfaces != next.surfaces
             || self.resolved.axis_quantities() != next.resolved.axis_quantities()
             || self.law.maximum_separation_m() != next.law.maximum_separation_m()
+            || self.law.mixed_mode_parameters().is_some()
+                != next.law.mixed_mode_parameters().is_some()
             || self.law.viscosity().map(|v| v.maximum_rate_m_s())
                 != next.law.viscosity().map(|v| v.maximum_rate_m_s())
         {
@@ -234,8 +251,7 @@ impl ResolvedBilinearCohesive {
         let legacy = axis == "T"
             && (quantity.is_none()
                 || quantity == Some(QuantitySpec::dimensional(fs_qty::Temperature::DIMS)));
-        if self.law.mixed_mode_parameters().is_some()
-            || !(legacy || quantity == Some(absolute))
+        if !(legacy || quantity == Some(absolute))
             || !self
                 .resolved
                 .state_coordinate(axis)
@@ -247,7 +263,7 @@ impl ResolvedBilinearCohesive {
                 .any(|property| !property.has_only_fixed_external_conditions(Some(axis), false))
         {
             return Err(invalid(
-                "common-mode cohesive refresh requires one original absolute-temperature axis",
+                "cohesive refresh requires one original absolute-temperature axis",
             ));
         }
         Ok(())

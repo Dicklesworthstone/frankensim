@@ -1,7 +1,7 @@
 //! Original material sources drive the native restrained-member/bond solve.
 //! Bulk temperatures may evolve along each source's admitted temperature line.
 //! The ordinary update retains fixed interface conditions. The explicit
-//! temperature update transfers common-mode damage before the original native
+//! temperature update transfers retained damage before the original native
 //! solve, keeping coefficient work and additional fracture release separate.
 
 use std::collections::BTreeMap;
@@ -238,7 +238,7 @@ impl<'a> SourceJoint<'a> {
     /// Bulk sources, Maxwell strains, geometry and clock stay bound.
     ///
     /// First change coefficients at fixed old jump/damage, then release any
-    /// additional damage demanded by the new common-mode envelope at that jump.
+    /// additional damage demanded by the new envelope at that jump.
     /// Finally use the original native solver at the new coefficients. The
     /// entire candidate is published only after an independent energy balance
     /// and the final cancellation gate. A failed nonlinear solve cannot publish
@@ -247,7 +247,8 @@ impl<'a> SourceJoint<'a> {
     /// This is a first-order staggered, prescribed-temperature update. Subdivide
     /// combined thermal/load paths for accuracy. Parameter work is an explicit
     /// external energy account, not an inferred heat source, thermal transport
-    /// calculation or entropy claim. Frozen-onset mixed-mode refresh refuses.
+    /// calculation or entropy claim. This normal series joint consumes common-
+    /// or mixed-mode pure-opening data; it does not solve shear equilibrium.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_with_interface_temperature_controlled(
         &self,
