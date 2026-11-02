@@ -141,7 +141,7 @@ impl ImpactSystem {
         source:Option<GasRecord>) -> Result<Self,ImpactError>
     {
         self.require_recomposition_without_mapped_memory()?;
-        if self.sample!=0 || self.gas_film.is_some() || !self.squeeze_films.is_empty() || !self.sliding_films.is_empty()
+        if self.sample!=0 || self.gas_film.is_some() || self.incompressible_film_count()!=0
             || geometry.port_count()!=self.modes {
             return Err(invalid("compressible film needs one cold exclusive full-basis gas graph"));
         }

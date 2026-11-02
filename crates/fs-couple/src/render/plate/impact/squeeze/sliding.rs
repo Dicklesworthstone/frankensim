@@ -37,7 +37,7 @@ impl ImpactSystem {
         self.require_recomposition_without_mapped_memory()?;
         let pressure_operator=film.pressure_operator();
         if self.gas_film.is_some() || pressure_operator.port_count()!=self.modes
-            || self.squeeze_films.len()+self.sliding_films.len()>=4 {
+            || self.incompressible_film_count()>=4 {
             return Err(invalid("sliding film mode count, duplicate gas image or four-island ceiling failed"));
         }
         let mut q=[0.0;MAX_IMPACT_MODES];

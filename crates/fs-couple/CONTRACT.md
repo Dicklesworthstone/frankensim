@@ -22468,3 +22468,48 @@ indices, original-network conduction, invalid route coverage/keys/duplicates,
 and cancellation or late chart refusal with retry. Production and regression
 sources pass Rustfmt parsing and bounded independent source review. Runtime
 tests and a full crate build remain unexecuted in the full-storage environment.
+
+## Generalized-Newtonian film resistance in impact mechanics
+
+`render::plate::impact::squeeze::power_law` binds the native
+`fs_tribo::resistive_film::power_law::PowerLawFilm` to the existing
+`ImpactSystem` force, directional tangent, and endpoint-acceptance paths.
+`with_power_law_film` accepts explicit SI channel laws and bounded nonlinear
+flow/work controls. Read-only count and indexed access preserve the complete
+constitutive owner; its insertion indices are independent of normal and
+sliding film indices.
+
+Both reference and prepared execution evaluate the full shear-dependent
+pressure law at the original configuration and actual discrete-gradient
+velocity. They add its work-conjugate force once through the original
+nonlinear dissipation callbacks; the analytic Newton image uses the same
+native law's directional tangent. The original time owner advances motion,
+retains material history, and accounts physical loss. Constitutive laws and
+their declared solver budgets remain immutable during mechanical trials.
+
+Normal-pressure, sliding, and generalized-Newtonian films share the existing
+four-island ceiling through one internal count. All attachment orders enforce
+this work bound and compressible-gas exclusion. Mechanical-mode dimensions,
+mapped support-memory restrictions, initial zero-rate domain admission, and
+final zero-rate endpoint admission are retained. The new field is initialized
+in the single mechanical constructor, and later relaxation/radiation memory
+attachment preserves its original mode coordinates and film ownership.
+
+The native owner refuses sealed pockets, invalid geometry, excessive
+pressure, unrepresentable terms, or failed flow/work convergence before
+the mechanical transaction publishes. Original cancellation and mechanical
+force/energy gates continue to govern accepted state and time. This is a
+stationary-wall, full-film reduction with prescribed laws; heat routing,
+temperature evolution, cavitation, inertia, and non-Newtonian sliding are
+separate capabilities.
+
+Focused regressions exercise an above-core thinning law against independently
+integrated stress profiles and a scalar discrete-gradient step, reference
+versus prepared finite-difference/analytic execution, directional derivatives,
+work and endpoint/attachment/refusal behavior. Exact coupling sources parse;
+a bounded independent owner review covers wiring and state preservation.
+The underlying exact Reynolds sources and 61 native film plus seven real
+math test definitions pass native type and borrow checking. An independent
+98-case numerical profile check bounds flux relative error below 6.3e-15 and
+pressure/aperture derivative error below 3.4e-10. Coupling runtime tests and a
+full crate build remain unexecuted in the full-storage environment.

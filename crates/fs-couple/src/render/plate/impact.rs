@@ -239,6 +239,7 @@ pub struct ImpactSystem {
     radiation:Option<radiation::Memory>,
     squeeze_films:Vec<squeeze::ResistiveFilm>,
     sliding_films:Vec<squeeze::sliding::ShearedFilm>,
+    power_law_films:Vec<squeeze::power_law::PowerLawFilm>,
     gas_film:Option<Rc<gas_film::Memory>>,
     // Immutable shared laws plus body/start addresses; no duplicate mesh data.
     membranes:Vec<(usize,usize,membrane::MembranePotential)>,
@@ -368,7 +369,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,material_contacts:Vec::new(),radiation:None,relaxation:None,squeeze_films:Vec::new(),sliding_films:Vec::new(),gas_film:None}.with_body_relaxation(stiffness_bound.sqrt())
+        Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,material_contacts:Vec::new(),radiation:None,relaxation:None,squeeze_films:Vec::new(),sliding_films:Vec::new(),power_law_films:Vec::new(),gas_film:None}.with_body_relaxation(stiffness_bound.sqrt())
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]
