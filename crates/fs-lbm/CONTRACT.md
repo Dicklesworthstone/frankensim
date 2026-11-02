@@ -711,6 +711,31 @@ unequal density, force-frame stress and carried momentum; public material tests
 exercise filling, thermal storage, normal subsequent transport, co-moving
 identity and transactional refusal.
 
+### Powered liquid outflow with reciprocal recoil
+
+`MaterialFreeSurfaceEnthalpy3::eject_interface_outflow` removes actual native
+interface mass at a prescribed outlet velocity through an explicitly selected
+ideal actuator. For removed mass `r`, old mass `m`, retained mass `M=m-r`, old
+velocity `u` and outlet velocity `v`, the remaining velocity is
+`u' = u - (r/M)*(v-u)`. Liquid plus stream retain their linear momentum. The
+external actuator supplies `W = 0.5*r*(m/M)*|v-u|^2` with zero net impulse.
+The caller must authorize a finite nonnegative batch work allowance and debit
+the returned actual work from its source. Work exceeding that allowance refuses
+the complete transaction. Required work uses stable relative velocities; actual
+native readback independently closes enthalpy plus kinetic energy against signed
+stream enthalpy, separately supplied heat, signed stream kinetic energy and W.
+
+Mechanical work never becomes heat or a negative mixing loss. The outgoing
+enthalpy itself must fit the same original pure-liquid fixed-density caloric
+chart. Outlet and accepted liquid speeds must both satisfy the original physical
+scenario. Canonical pressure density, native mass-to-volume conversion, physical
+nonequilibrium stress, source refresh and transactional publication use the same
+owners as inflow. Co-moving outflow requires exactly zero work and retains the
+original signed-exchange arithmetic. Exhaustion, excess recoil, unrepresented
+mass, coupled contact/surface restrictions and source-domain exits still refuse.
+This boundary does not infer evaporation recoil, nozzle pressure work, gas-volume
+displacement or thermodynamic phase expansion, and it does not advance time.
+
 ### Finite atmosphere on the native free-surface thermal timeline
 
 `step_with_finite_gas_environment` gives the same moving-liquid thermal owner

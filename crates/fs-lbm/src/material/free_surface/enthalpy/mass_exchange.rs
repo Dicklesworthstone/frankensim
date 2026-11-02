@@ -10,6 +10,43 @@ use super::*;
 
 mod inflow;
 pub use inflow::{FreeSurfaceMassInflow, FreeSurfaceMassInflowReport};
+mod outflow;
+pub use outflow::{FreeSurfaceMassOutflow, FreeSurfaceMassOutflowReport};
+
+#[derive(Clone, Copy)]
+enum TransferMomentum<'a> {
+    Mixing(&'a BTreeMap<MassLocation3, [f64; 3]>),
+    Ejection {
+        velocities: &'a BTreeMap<MassLocation3, [f64; 3]>,
+        maximum_work_j: f64,
+    },
+}
+
+impl TransferMomentum<'_> {
+    fn velocities(&self) -> &BTreeMap<MassLocation3, [f64; 3]> {
+        match self {
+            Self::Mixing(velocities) | Self::Ejection { velocities, .. } => velocities,
+        }
+    }
+
+    // Return the accepted velocity, physical mixing heat and supplied work.
+    // Ejection is not a negative-mass continuation of the mixing heat law.
+    fn state(
+        self,
+        old_mass: f64,
+        dm: f64,
+        new_mass: f64,
+        velocity: [f64; 3],
+        carried: [f64; 3],
+    ) -> Option<([f64; 3], f64, f64)> {
+        match self {
+            Self::Mixing(_) => inflow::mixing_state(old_mass, dm, new_mass, velocity, carried)
+                .map(|(next, heat)| (next, heat, 0.0)),
+            Self::Ejection { .. } => outflow::ejection_state(old_mass, dm, new_mass, velocity, carried)
+                .map(|(next, work)| (next, 0.0, work)),
+        }
+    }
+}
 
 /// Read-only selection of the mass increment the native interface can store.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,8 +78,8 @@ pub struct FreeSurfaceMassExchange {
 pub struct FreeSurfaceMassExchangeControls {
     /// Sum of absolute per-interface requested/represented mass defects [kg].
     pub mass_tolerance_kg: f64,
-    /// Sum of absolute per-interface enthalpy residuals [J]. Well-mixed inflow
-    /// also gates its independent enthalpy-plus-kinetic balance by this bound.
+    /// Sum of absolute per-interface enthalpy residuals [J]. Explicit-velocity
+    /// streams also gate their independent enthalpy-plus-kinetic balance here.
     pub energy_tolerance_j: f64,
     /// Sum of absolute component momentum defects [kg m/s].
     pub momentum_tolerance_kg_m_s: f64,
@@ -226,10 +263,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     fn exchange_interface_mass_model(
         &mut self,
         exchanges: &[FreeSurfaceMassExchange],
-        inflow: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
+        momentum: Option<TransferMomentum<'_>>,
         controls: FreeSurfaceMassExchangeControls,
         gate: &CancelGate,
-    ) -> Result<(FreeSurfaceMassExchangeReport, inflow::MixingBalance), Error> {
+    ) -> Result<(FreeSurfaceMassExchangeReport, inflow::KineticBalance), Error> {
         poll(gate)?;
         if exchanges.len() > self.controls.max_cells
             || [
@@ -269,7 +306,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let mut lattice = self.flow.lattice.clone();
         let mut h = self.h.clone();
-        let mut mixing = inflow::MixingBalance::default();
+        let mut kinetic_balance = inflow::KineticBalance::default();
         let mut report = FreeSurfaceMassExchangeReport {
             physical_time_s: self.physical_time_s(),
             mass_change_kg: 0.0,
@@ -294,7 +331,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             // The actual native dm owns the transfer. Center the update on the
             // old datum so a common caloric offset cannot manufacture heat.
             let mut relative_supply = dm * (transfer.specific_enthalpy_j_kg - old_h) + transfer.heat_j;
-            if let Some(inflow) = inflow {
+            if let Some(momentum) = momentum {
                 let before = self.flow.lattice.sample_at(
                     transfer.coordinates[0], transfer.coordinates[1], transfer.coordinates[2],
                 ).expect("admitted interface");
@@ -302,9 +339,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 for d in 0..3 {
                     velocity[d] = self.flow.scaling.velocity_si(before.velocity[d])?;
                 }
-                let (next, heat) = inflow::mixing_state(
-                    projection.initial_mass_kg, dm, new_mass_kg, velocity, inflow[&location],
-                ).ok_or(Error::Invalid("inflow mixing state is unrepresentable"))?;
+                let (next, heat, _) = momentum.state(
+                    projection.initial_mass_kg, dm, new_mass_kg, velocity,
+                    momentum.velocities()[&location],
+                ).ok_or(Error::Invalid("interface stream momentum is unrepresentable"))?;
                 let scale = self.flow.scaling.velocity_si(1.0)?;
                 let native = next.map(|u| u / scale);
                 inflow::admit_velocity(native, self.flow.scaling.flow().u_lattice)?;
@@ -381,7 +419,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                     .flow
                     .scaling
                     .velocity_si(after.velocity[axis] - before.velocity[axis])?;
-                let carried = inflow.and_then(|values| values.get(&location))
+                let carried = momentum.as_ref().and_then(|motion| motion.velocities().get(&location))
                     .map_or(dm * u, |incoming| dm * incoming[axis]);
                 let change = dm * u + new_mass * du;
                 old_velocity[axis] = u;
@@ -390,22 +428,30 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 report.momentum_change_kg_m_s[axis] += change;
                 report.absolute_momentum_defect_kg_m_s += (change - carried).abs();
             }
-            let heat = if let Some(inflow) = inflow {
-                let incoming = inflow.get(&location).copied().unwrap_or(old_velocity);
-                let heat = if transfer.is_some() {
-                    inflow::mixing_state(old_mass * mass_unit, dm, new_mass, old_velocity, incoming)
-                        .ok_or(Error::Invalid("inflow mixing balance is unrepresentable"))?.1
-                } else { 0.0 };
+            let heat = if let Some(momentum) = momentum {
+                let incoming = momentum.velocities().get(&location).copied().unwrap_or(old_velocity);
+                let (heat, work) = if transfer.is_some() {
+                    let (_, heat, work) = momentum.state(
+                        old_mass * mass_unit, dm, new_mass, old_velocity, incoming,
+                    ).ok_or(Error::Invalid("interface stream energy is unrepresentable"))?;
+                    (heat, work)
+                } else { (0.0, 0.0) };
                 let carried = 0.5 * dm * incoming.iter().map(|u| u * u).sum::<f64>();
                 let kinetic = inflow::kinetic_change(dm, new_mass, old_velocity, delta_velocity);
-                mixing.carried_kinetic_energy_j += carried;
-                mixing.kinetic_energy_change_j += kinetic;
-                mixing.mixing_heat_j += heat;
-                mixing.absolute_total_energy_defect_j +=
-                    (new_mass * dh - supplied_relative + kinetic - carried).abs();
+                kinetic_balance.carried_kinetic_energy_j += carried;
+                kinetic_balance.kinetic_energy_change_j += kinetic;
+                kinetic_balance.mixing_heat_j += heat;
+                kinetic_balance.mechanical_work_j += work;
+                let total_defect = new_mass * dh - supplied_relative + kinetic - carried;
+                // Preserve the original inflow arithmetic, including signed
+                // zero, while accounting for authored actuator work on exit.
+                kinetic_balance.absolute_total_energy_defect_j += match momentum {
+                    TransferMomentum::Mixing(_) => total_defect.abs(),
+                    TransferMomentum::Ejection { .. } => (total_defect - work).abs(),
+                };
                 heat
             } else { 0.0 };
-            let caloric_supply = if inflow.is_some() { supplied_relative + heat } else { supplied_relative };
+            let caloric_supply = if momentum.is_some() { supplied_relative + heat } else { supplied_relative };
             report.absolute_energy_defect_j += (new_mass * dh - caloric_supply).abs();
         }
         if [
@@ -427,7 +473,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             || report.absolute_mass_defect_kg > controls.mass_tolerance_kg
             || report.absolute_energy_defect_j > controls.energy_tolerance_j
             || report.absolute_momentum_defect_kg_m_s > controls.momentum_tolerance_kg_m_s
-            || !mixing.admitted(controls.energy_tolerance_j)
+            || !kinetic_balance.admitted(controls.energy_tolerance_j)
+            || matches!(momentum, Some(TransferMomentum::Ejection { maximum_work_j, .. })
+                if kinetic_balance.mechanical_work_j > maximum_work_j)
         {
             return Err(Error::Invalid(
                 "interface mass, enthalpy or momentum balance exceeded budget",
@@ -438,6 +486,6 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         self.h = h;
         self.states = resolved.states;
         self.rheology_samples = resolved.rheology;
-        Ok((report, mixing))
+        Ok((report, kinetic_balance))
     }
 }

@@ -30,24 +30,27 @@ pub struct FreeSurfaceMassInflowReport {
 }
 
 #[derive(Default)]
-pub(super) struct MixingBalance {
+pub(super) struct KineticBalance {
     pub(super) carried_kinetic_energy_j: f64,
     pub(super) kinetic_energy_change_j: f64,
     pub(super) mixing_heat_j: f64,
+    pub(super) mechanical_work_j: f64,
     pub(super) absolute_total_energy_defect_j: f64,
 }
 
-impl MixingBalance {
+impl KineticBalance {
     pub(super) fn admitted(&self, tolerance_j: f64) -> bool {
         [
             self.carried_kinetic_energy_j,
             self.kinetic_energy_change_j,
             self.mixing_heat_j,
+            self.mechanical_work_j,
             self.absolute_total_energy_defect_j,
         ]
         .into_iter()
         .all(f64::is_finite)
             && self.mixing_heat_j >= 0.0
+            && self.mechanical_work_j >= 0.0
             && self.absolute_total_energy_defect_j <= tolerance_j
     }
 }
@@ -108,8 +111,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             }
             exchanges.push(inflow.exchange);
         }
-        let (exchange, balance) =
-            self.exchange_interface_mass_model(&exchanges, Some(&velocities), controls, gate)?;
+        let (exchange, balance) = self.exchange_interface_mass_model(
+            &exchanges, Some(TransferMomentum::Mixing(&velocities)), controls, gate,
+        )?;
         Ok(FreeSurfaceMassInflowReport {
             exchange,
             carried_kinetic_energy_j: balance.carried_kinetic_energy_j,
@@ -124,7 +128,7 @@ pub(super) fn admit_velocity(native: [f64; 3], maximum: f64) -> Result<(), Error
     let speed = native[0].hypot(native[1]).hypot(native[2]);
     if !speed.is_finite() || speed > maximum {
         return Err(Error::Invalid(
-            "inflow exceeds the original scenario velocity bound",
+            "interface stream exceeds the original scenario velocity bound",
         ));
     }
     Ok(())
