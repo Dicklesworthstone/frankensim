@@ -98,6 +98,8 @@ pub enum ReedPerformanceError {
         /// Original thermal, caloric, phase, balance, work or mean-flow refusal.
         source: fs_material::gas_field::steady::SteadyGasError,
     },
+    /// An explicitly named wall pack or its caloric/conductivity source refused.
+    MaterialSource { line: usize, source: String },
     /// The original terminal transfer or physical receiver refused.
     Outlet(OutletError),
     /// The existing reed, TMM or gas realization refused.
@@ -114,6 +116,7 @@ impl core::fmt::Display for ReedPerformanceError {
             Self::Input { line, what } => write!(f, "reed input line {line}: {what}"),
             Self::Gas { line, source } => write!(f, "reed gas line {line}: {source}"),
             Self::SteadyGas { line, source } => write!(f, "reed steady gas line {line}: {source}"),
+            Self::MaterialSource { line, source } => write!(f, "reed wall material line {line}: {source}"),
             Self::Model(e) => write!(f, "reed model: {e}"),
             Self::Outlet(e) => write!(f, "reed outlet: {e}"),
             Self::Schedule(e) => write!(f, "reed input: {e}"),
@@ -359,6 +362,27 @@ impl ReedPerformance {
         Self::from_bytes_with_environment(bytes, max_block, policy, sources, None)
     }
 
+    /// Resolve stationary wall material cards through the caller's immutable
+    /// source loader. The library opens no files; numeric wall conductances
+    /// keep their existing grammar and execution path.
+    pub fn from_bytes_with_sources(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        sources: Option<&ThermochemicalSources<'_>>,
+        mut load_material: impl FnMut(&str) -> Result<fs_matdb::NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_material_environment(
+            bytes,
+            max_block,
+            policy,
+            sources,
+            None,
+            None,
+            &mut load_material,
+        )
+    }
+
     /// Bind a source-retaining axial temperature/composition field to the same
     /// authored reed, geometry, gestures and physical terminal observation.
     /// This accepts both prescribed fields and converged steady breath fields.
@@ -428,8 +452,31 @@ impl ReedPerformance {
         max_block: usize,
         policy: ObservationPolicy,
         sources: Option<&ThermochemicalSources<'_>>,
+        gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
+        source_reed: Option<BeatingReed>,
+    ) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_material_environment(
+            bytes,
+            max_block,
+            policy,
+            sources,
+            gas_field,
+            source_reed,
+            &mut |_| {
+                Err("stationary material walls require an explicit material-card loader".into())
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_bytes_with_material_environment(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        sources: Option<&ThermochemicalSources<'_>>,
         mut gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
         source_reed: Option<BeatingReed>,
+        load_material: &mut dyn FnMut(&str) -> Result<fs_matdb::NormalizedMaterialCardPack, String>,
     ) -> Result<Self, ReedPerformanceError> {
         if bytes.len() > MAX_REED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(
@@ -734,6 +781,7 @@ impl ReedPerformance {
                     air.pressure,
                     &segments,
                     &mut gas_records,
+                    load_material,
                 )?;
                 gas_field = Some((generated.solution().field().clone(), resolution));
                 steady_gas = Some(generated);
@@ -1392,4 +1440,3 @@ mod lay_tests;
 
 #[cfg(test)]
 mod viscous_tests;
-

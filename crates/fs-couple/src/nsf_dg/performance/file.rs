@@ -1006,9 +1006,13 @@ fn read_solids(rows: &mut Rows<'_>, dims: [usize; 3], dx_m: f64, cells: usize,
 // readers. Prefixes only identify the physical participant; they add no law.
 #[allow(clippy::too_many_arguments)]
 fn read_load(
-    rows: &mut Rows<'_>, upstream: bool, gas: &GasState,
-    sources: Option<&ThermochemicalSources<'_>>, records: &mut Vec<GasRecord>, gate: &CancelGate,
-    load_material: &mut impl FnMut(&str)->Result<NormalizedMaterialCardPack, String>,
+    rows: &mut Rows<'_>,
+    upstream: bool,
+    gas: &GasState,
+    sources: Option<&ThermochemicalSources<'_>>,
+    records: &mut Vec<GasRecord>,
+    gate: &CancelGate,
+    load_material: &mut impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
 ) -> Result<(DgSourceInput, DgMaterialWallLayout), ResolvedDgInputError> {
     let (kind, mut row) = if upstream {
         let mut row = rows.row("upstream_dg")?;
@@ -1021,8 +1025,17 @@ fn read_load(
         let kind = if rows.next_is("dg_tube") { "dg_tube" } else { "dg_bore" };
         (kind, rows.row(kind)?)
     };
-    let source = DgSourceInput::read(kind, row.line, &mut row.fields,
-        &mut || rows.next(), gas, sources, records, gate)?;
+    let source = DgSourceInput::read_with_material_sources(
+        kind,
+        row.line,
+        &mut row.fields,
+        &mut || rows.next(),
+        gas,
+        sources,
+        records,
+        gate,
+        load_material,
+    )?;
     row.end()?;
     let molecular_key = if upstream { "upstream_molecular" } else { "dg_molecular" };
     let source = if rows.next_is(molecular_key) {

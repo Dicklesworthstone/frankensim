@@ -1416,7 +1416,7 @@ fn load_with_all_sources(
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json,observation_json:None})
     } else {
-        let p=ReedPerformance::from_bytes_with_gas_sources(bytes,block,policy,sources).map_err(|e|e.to_string())?;
+        let p=ReedPerformance::from_bytes_with_sources(bytes,block,policy,sources,load_material).map_err(|e|e.to_string())?;
         let i=p.info();
         let observer_receipt=super::duct_metadata::reed_observer_json(&p).map_err(|e|e.to_string())?;
         let observer_json=format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));
@@ -1684,4 +1684,3 @@ mod tests {
         assert!(load(physical.as_bytes(), 37, ObservationPolicy::Acceptance).is_ok());
     }
 }
-

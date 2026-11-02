@@ -189,6 +189,56 @@ transfer coefficient. `WALL_T_K` is a prescribed wall temperature and
 `INITIAL_T_K` only seeds the bounded steady relaxation. The wall's own thermal
 storage is not advanced by this stationary problem.
 
+### Resolve stationary wall heat from an actual material card
+
+Both this reed reader and the DG reader below accept `material` in place of a
+cell's numeric conductance. Follow that cell immediately with its source and
+physical wall dimensions:
+
+```text
+gas_cell END_M material OUTER_RESERVOIR_T_K INITIAL_GAS_T_K
+gas_wall_material PACK STATE [AXIS=VALUE ...]
+gas_wall_source T_AXIS solid|liquid DENSITY_KEY CP_KEY CONDUCTIVITY_KEY MIN_T_K MAX_T_K CALORIC_TOL_J_KG
+gas_wall_geometry cylindrical THICKNESS_M AREAL_GAS_FILM_RESISTANCE_M2_K_W
+```
+
+After the normal `gas_solve` row, supply one shared wall-root control record if
+any cell uses a material wall:
+
+```text
+gas_wall_solve MAX_ITERATIONS ABSOLUTE_HEAT_TOLERANCE_W RELATIVE_HEAT_TOLERANCE
+```
+
+The wall material's normalized pack supplies density, specific heat capacity
+and conductivity across the explicitly declared temperature span. The compiled
+state and phase must agree with the declaration; fixed query coordinates retain
+their source quantities, and the varying temperature axis must not also appear
+among those fixed coordinates. Missing properties, gaps and extrapolation
+refuse. Pack paths use the same relative `MaterialRecord` convention as solid
+instrument parts. `music_render wind` and `ensemble --reed` load those packs
+relative to the performance file. Library callers supply them explicitly through
+`ReedPerformance::from_bytes_with_sources` or
+`DgSourceInput::read_with_material_sources`.
+
+The existing material conduction owner integrates the source's `k(T)` through
+the cylindrical shell and couples that flux to the same conservative gas solve.
+The bore supplies the actual inner radius and cell length. A cell may cross
+adjacent cylindrical segments only when their radii agree; tapered and profiled
+material-wall cells currently refuse. The areal film resistance is explicit,
+nonnegative data; zero represents perfect gas/inner-wall thermal contact, and no
+convection coefficient is guessed. Numeric-conductance cells can coexist with
+material cells. Each material wall replaces its cell's numeric thermal law.
+
+Changing only the pack therefore changes the stationary gas temperature and
+the original gas properties, reed feedback, DG propagation and observation.
+This is a frozen equilibrium preparation with a prescribed outer reservoir;
+it adds no finite solid heat storage or frequency-dependent acoustic wall
+admittance. `SteadyGasPerformance::material_walls()` retains original packs,
+source coordinates and physical dimensions. The same record survives DG
+preparation through `DgPortLoad::steady_gas()` and is included in native sidecars.
+
+### Stationary-flow admission
+
 The inlet mass flow is a prescribed stationary throughflow, independent of the
 oscillatory reed flow. It sets enthalpy/species transport and the admitted mean
 Mach number; this does not solve a steady pressure drop from the blowing

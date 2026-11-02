@@ -2,18 +2,21 @@
 //! Geometry, species transport and caloric inversion remain with their owners.
 
 use fs_duct::{DuctError, Segment};
-use fs_matdb::QueryPoint;
+use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::gas_field::input::PrimitiveGasColumns;
 use fs_material::gas_field::steady::{
-    AxialGasCell, GasInjection, MAX_STEADY_GAS_CELLS, MAX_STEADY_GAS_INJECTIONS,
-    SteadyAxialGas, SteadyGasError, SteadyGasSolution, SteadyGasSolve,
+    AxialGasCell, GasInjection, MAX_STEADY_GAS_CELLS, MAX_STEADY_GAS_INJECTIONS, SteadyAxialGas,
+    SteadyGasError, SteadyGasSolution, SteadyGasSolve,
 };
 use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources};
+use fs_material::thermal::conduction::LayerConductionConfig;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use std::str::SplitAsciiWhitespace;
 
 /// Geometry-bound stationary gas transport through a bore and open side paths.
 pub mod branched;
+pub mod wall;
+pub use wall::SteadyGasMaterialWall;
 
 /// The actual thermal/species problem and accepted solution behind a performance.
 /// These are owner results, not a separate reconstruction from acoustic output.
@@ -22,6 +25,8 @@ pub struct SteadyGasPerformance {
     problem: SteadyAxialGas,
     controls: SteadyGasSolve,
     solution: SteadyGasSolution,
+    material_walls: Vec<SteadyGasMaterialWall>,
+    wall_controls: Option<LayerConductionConfig>,
 }
 impl SteadyGasPerformance {
     /// Source-bound inlet, injections and wall cells, with geometry from the bore.
@@ -30,14 +35,35 @@ impl SteadyGasPerformance {
     pub fn controls(&self) -> SteadyGasSolve { self.controls }
     /// Published mass/species/enthalpy balances and the SAME acoustic gas field.
     pub fn solution(&self) -> &SteadyGasSolution { &self.solution }
+    /// Authored source identities, temperature ranges and physical shell geometry.
+    pub fn material_walls(&self) -> &[SteadyGasMaterialWall] {
+        &self.material_walls
+    }
+    /// Original conductivity-integral/root tolerances, present for material walls.
+    pub fn wall_controls(&self) -> Option<LayerConductionConfig> {
+        self.wall_controls
+    }
 }
 
 #[derive(Debug)]
 pub(crate) enum SteadyGasInputError {
-    Input { line: usize, what: &'static str },
-    Gas { line: usize, source: fs_material::MaterialError },
+    Input {
+        line: usize,
+        what: &'static str,
+    },
+    Gas {
+        line: usize,
+        source: fs_material::MaterialError,
+    },
     Geometry(DuctError),
-    SteadyGas { line: usize, source: SteadyGasError },
+    SteadyGas {
+        line: usize,
+        source: SteadyGasError,
+    },
+    MaterialSource {
+        line: usize,
+        source: String,
+    },
 }
 pub(crate) enum SteadyGasReadError<E> {
     Input(SteadyGasInputError),
@@ -139,6 +165,7 @@ impl SteadyGasInput {
         segments: &[Segment],
         records: &mut Vec<GasRecord>,
         cancelled: &mut impl FnMut() -> bool,
+        load_material: &mut dyn FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     ) -> Result<SteadyGasPerformance, SteadyGasReadError<E>> {
         let Self { line, count, injection_count, columns } = self;
         poll(line, cancelled)?;
@@ -157,10 +184,12 @@ impl SteadyGasInput {
             .map_err(|error| column_error(inlet_row.line, error))?;
         inlet_row.finish()?;
         let mut cells = Vec::with_capacity(count);
+        let mut material_walls = Vec::new();
+        let mut material_sources = wall::Sources::default();
         let mut start = 0.0;
         let mut geometry_steps = 0;
         let mut last_line = line;
-        for _ in 0..count {
+        for cell_index in 0..count {
             poll(line, cancelled)?;
             let mut cell = row(next, "gas_cell")?;
             last_line = cell.line;
@@ -171,13 +200,32 @@ impl SteadyGasInput {
             let (volume_m3, wall_area_m2) = geometry(
                 segments, start, end_m, cell.line, &mut geometry_steps, cancelled,
             )?;
+            let material_wall = cell.words.clone().next() == Some("material");
+            let wall_conductance_w_k = if material_wall {
+                cell.word()?;
+                0.0
+            } else {
+                cell.scalar()?
+            };
             cells.push(AxialGasCell {
                 end_m, volume_m3, wall_area_m2,
-                wall_conductance_w_k: cell.scalar()?,
+                wall_conductance_w_k,
                 wall_temperature_k: cell.positive()?,
                 initial_temperature_k: cell.positive()?,
             });
             cell.finish()?;
+            if material_wall {
+                material_walls.push(SteadyGasMaterialWall::read(
+                    next,
+                    cell_index,
+                    segments,
+                    start,
+                    end_m,
+                    &mut material_sources,
+                    load_material,
+                    cancelled,
+                )?);
+            }
             start = end_m;
         }
         if start != length {
@@ -210,20 +258,50 @@ impl SteadyGasInput {
             maximum_mean_mach: solve.positive()?,
         };
         solve.finish()?;
+        let wall_controls = if material_walls.is_empty() {
+            None
+        } else {
+            let mut row = row(next, "gas_wall_solve")?;
+            let controls = LayerConductionConfig {
+                max_iterations: row.count(1024)?,
+                absolute_heat_tolerance_w: row.scalar()?,
+                relative_heat_tolerance: row.scalar()?,
+            };
+            row.finish()?;
+            Some(controls)
+        };
         let (model, phase) = columns.into_parts();
         let problem = SteadyAxialGas {
             source: model, source_conditions: QueryPoint::new(), static_pressure_pa: pressure_pa,
             phase, inlet, inlet_mass_flow_kg_s, cells, injections,
         };
-        let solution = problem.solve(controls, &mut *cancelled)
-            .map_err(|source| SteadyGasInputError::SteadyGas { line, source })?;
+        let solution = if let Some(wall_controls) = wall_controls {
+            wall::solve(
+                &problem,
+                &material_walls,
+                wall_controls,
+                controls,
+                line,
+                cancelled,
+            )?
+        } else {
+            problem
+                .solve(controls, &mut *cancelled)
+                .map_err(|source| SteadyGasInputError::SteadyGas { line, source })?
+        };
         for &position in solution.field().stations_m() {
             poll(line, cancelled)?;
             let state = solution.field().state_at(position)
                 .map_err(|source| SteadyGasInputError::Gas { line, source })?;
             records.push(GasRecord::Thermochemical(state));
         }
-        Ok(SteadyGasPerformance { problem, controls, solution })
+        Ok(SteadyGasPerformance {
+            problem,
+            controls,
+            solution,
+            material_walls,
+            wall_controls,
+        })
     }
 }
 

@@ -465,7 +465,14 @@ impl Parsed {
             }
             row.finish()?;Some(state)
         } else {None};
-        let duct = DuctInput::read_with_gas_sources(&mut r, &air, gate, sources, &mut gas_records)?;
+        let duct = DuctInput::read_with_material_sources(
+            &mut r,
+            &air,
+            gate,
+            sources,
+            &mut gas_records,
+            load_material,
+        )?;
         let mut packs = wall::MaterialPacks::new();
         let dg_wall = wall::read(&mut r, &duct, &mut packs, load_material, gate)?;
         let finite_gas = if r.lines.clone().next()

@@ -2,6 +2,10 @@
 //! See gas-field-pulse.md for source preparation, file grammar and interpretation.
 #[path = "../src/bin/music_render/json.rs"]
 mod json;
+#[path = "../src/bin/music_render/material_packs.rs"]
+mod material_packs;
+#[path = "gas_field_pulse/steady_wall.rs"]
+mod steady_wall;
 #[path = "../src/bin/music_render/thermochemical.rs"]
 mod thermochemical;
 use json::json_string;
@@ -150,6 +154,7 @@ fn main() -> Result<()> {
             )?,
         });
     }
+    let steady_wall = steady_wall::Input::read_optional(&mut words)?;
     let viscothermal = match words.next() {
         None => None,
         Some(kind @ ("viscothermal" | "spatial_viscothermal")) => {
@@ -227,6 +232,30 @@ fn main() -> Result<()> {
         } else {
             Segment::Cylinder { radius, length }
         }],
+    };
+    let field = if let Some(input) = steady_wall {
+        let parent = Path::new(&args[1]).parent().unwrap_or(Path::new("."));
+        let (solution, provenance) =
+            input.solve(&field, &duct, material_packs::section_pack_loader(parent))?;
+        eprintln!(
+            "steady wall {provenance}; power residual bound={:e} W, energy residual={:e} J, substeps={}, maximum mean Mach={:e}",
+            solution.maximum_power_residual_bound_w(),
+            solution.maximum_energy_residual_j(),
+            solution.substeps(),
+            solution.maximum_mean_mach(),
+        );
+        for &x in solution.field().stations_m() {
+            let state = solution.field().state_at(x)?;
+            eprintln!(
+                "steady gas x={x:e} m, T={:e} K, rho={:e} kg/m3, c={:e} m/s",
+                state.state().temperature,
+                state.state().density,
+                state.state().sound_speed
+            );
+        }
+        solution.into_field()
+    } else {
+        field
     };
     let dg = DgDuct::new_with_gas_field(
         &duct,

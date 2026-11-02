@@ -1,0 +1,19 @@
+gas_field_pulse_v1
+cylinder 0.0073 0.57
+pressure 100000
+mesh 12 3
+time 0.000020833333333333333 384
+pulse 1 0.12 0.05
+species 2 N2 CO2
+stations 3
+station 0 340 0.96 0.04
+station 0.285 320 0.96 0.04
+station 0.57 320 0.96 0.04
+steady_wall
+wall_material aluminum-wall.fsmatpk first-heating 2 first-heating=1 source-pressure-known=0
+wall_source temperature solid density specific-heat-capacity thermal-conductivity 298.15 350 0.0001
+wall_geometry 0.003 0.01
+wall_reservoir 300
+wall_flow 0.0001
+gas_solve 298.15 350 0.0000001 64 0.01 2000 100000 0.00000001 0.00000001 0.05
+wall_solve 96 0.00000000001 0.000000000001

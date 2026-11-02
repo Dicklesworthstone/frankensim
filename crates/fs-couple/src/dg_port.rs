@@ -92,6 +92,7 @@ pub(crate) fn sum_terminal_work(frames: &[DgTerminalFrame]) -> f64 {
 pub struct DgPortLoad {
     duct: DgDuct,
     wall_source: Option<DgPortWallSource>,
+    steady_gas: Option<std::sync::Arc<input::SteadyGasPerformance>>,
     propagator: DgPropagator,
     state: DgState,
     inlet: PortId,
@@ -241,7 +242,7 @@ impl DgPortLoad {
             }
         };
         let mut load = Self {
-            duct, wall_source: None, propagator, state, inlet, impedance_pa_s_m3: 0.0,
+            duct, wall_source: None, steady_gas: None, propagator, state, inlet, impedance_pa_s_m3: 0.0,
             terminal, terminal_coupling, last_terminal_frame: None,
             last_terminal_frames: Vec::new(), last_driven_mouth_frame: None,
             last_independent_mouth_frame: None, last_independent_mouths_frame: None,
@@ -262,6 +263,13 @@ impl DgPortLoad {
     /// A driven mouth uses the physical inlet-minus-mouth pressure difference.
     #[must_use]
     pub const fn impedance_pa_s_m3(&self) -> f64 { self.impedance_pa_s_m3 }
+
+    /// Original stationary thermal/species source and accepted field, including
+    /// immutable material-wall packs. Shared across runtime candidates so source
+    /// receipts and caloric charts are not copied on a physical time step.
+    pub fn steady_gas(&self) -> Option<&input::SteadyGasPerformance> {
+        self.steady_gas.as_deref()
+    }
 
     /// Original geometry and material source.
     #[must_use]

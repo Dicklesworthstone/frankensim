@@ -25,6 +25,9 @@ use fs_qty::Density;
 
 use crate::thin_plate::{PlateMaterialModel, plate_elasticity, plate_property};
 
+/// Source-bound caloric and conductivity preparation shared by thermal inputs.
+pub mod thermal;
+
 /// Upper bound on a record's query axes.
 pub const MAX_RECORD_AXES: usize = 8;
 /// Upper bound on a pack path, state or fixture label.

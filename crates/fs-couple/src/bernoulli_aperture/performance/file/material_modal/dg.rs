@@ -128,13 +128,13 @@ impl MaterialModalDgValvePerformance {
             "dg_tube"
         } else { "dg_bore" };
         let mut row = rows.row(kind)?;
-        let duct = DgSourceInput::read(
+        let duct = DgSourceInput::read_with_material_sources(
             kind, row.line, &mut row.fields,
             &mut || {
                 let row = rows.next()?;
                 Ok::<_, PlateValveInputError>((row.line, row.fields))
             },
-            &ambient, gas_sources, &mut gases, gate,
+            &ambient, gas_sources, &mut gases, gate, &mut load_material,
         )?;
         row.finish()?;
         let duct = if rows.lines.clone().next().and_then(|line|
@@ -175,13 +175,13 @@ impl MaterialModalDgValvePerformance {
                 "dg_tube"
             } else { "dg_bore" };
             let mut row = rows.row(kind)?;
-            let source = DgSourceInput::read(
+            let source = DgSourceInput::read_with_material_sources(
                 kind, row.line, &mut row.fields,
                 &mut || {
                     let row = rows.next()?;
                     Ok::<_, PlateValveInputError>((row.line, row.fields))
                 },
-                &ambient, gas_sources, &mut gases, gate,
+                &ambient, gas_sources, &mut gases, gate, &mut load_material,
             )?;
             row.finish()?;
             let source = if rows.lines.clone().next().and_then(|line|

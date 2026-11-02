@@ -465,8 +465,9 @@ fn load_with_gas_sources(
             _ => return Err("--valve requires a supported plate-valve, material-modal or material-modal-DG source schema".into()),
         },
         Kind::Reed => {
-            let p = ReedPerformance::from_bytes_with_gas_sources(&bytes, block,
-                fs_couple::pcm_wav::observation::ObservationPolicy::Diagnostic,sources).map_err(|e| e.to_string())?;
+            let p = ReedPerformance::from_bytes_with_sources(&bytes, block,
+                fs_couple::pcm_wav::observation::ObservationPolicy::Diagnostic, sources,
+                super::plate_input::section_pack_loader(parent)).map_err(|e| e.to_string())?;
             let i = p.info();
             let exterior_json = format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));
             // The baffled outlet's one bound exterior; the legacy proxy has none.

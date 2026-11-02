@@ -39,12 +39,31 @@ pub mod wall;
 /// Keep source-line errors distinct from the original material and solver error.
 #[derive(Debug)]
 pub enum DgSourceError {
-    Input { line: usize, what: &'static str },
-    Gas { line: usize, source: fs_material::MaterialError },
-    SteadyGas { line: usize, source: fs_material::gas_field::steady::SteadyGasError },
-    Material { line: usize, source: fs_material::state_point::MaterialStatePointError },
+    Input {
+        line: usize,
+        what: &'static str,
+    },
+    Gas {
+        line: usize,
+        source: fs_material::MaterialError,
+    },
+    SteadyGas {
+        line: usize,
+        source: fs_material::gas_field::steady::SteadyGasError,
+    },
+    Material {
+        line: usize,
+        source: fs_material::state_point::MaterialStatePointError,
+    },
+    MaterialSource {
+        line: usize,
+        source: String,
+    },
     Physics(AcousticRealizeError),
-    Radiation { line: usize, source: MimoRadiationInputError },
+    Radiation {
+        line: usize,
+        source: MimoRadiationInputError,
+    },
 }
 impl core::fmt::Display for DgSourceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -53,6 +72,7 @@ impl core::fmt::Display for DgSourceError {
             Self::Gas { line, source } => write!(f, "DG material line {line}: {source}"),
             Self::SteadyGas { line, source } => write!(f, "DG steady gas line {line}: {source}"),
             Self::Material { line, source } => write!(f, "DG solid material line {line}: {source}"),
+            Self::MaterialSource { line, source } => write!(f, "DG wall source line {line}: {source}"),
             Self::Physics(source) => write!(f, "DG source physics: {source}"),
             Self::Radiation { line, source } => write!(f, "DG radiation line {line}: {source}"),
         }
@@ -66,6 +86,7 @@ impl From<SteadyGasInputError> for DgSourceError {
             SteadyGasInputError::Gas { line, source } => Self::Gas { line, source },
             SteadyGasInputError::Geometry(source) => Self::Physics(AcousticRealizeError::Duct(source)),
             SteadyGasInputError::SteadyGas { line, source } => Self::SteadyGas { line, source },
+            SteadyGasInputError::MaterialSource { line, source } => Self::MaterialSource { line, source },
         }
     }
 }
@@ -255,6 +276,41 @@ impl DgSourceInput {
         records: &mut Vec<GasRecord>,
         gate: &CancelGate,
     ) -> Result<Self, E> {
+        Self::read_with_material_sources(
+            kind,
+            line,
+            fields,
+            next_row,
+            ambient,
+            sources,
+            records,
+            gate,
+            &mut |_| {
+                Err("stationary material walls require an explicit material-card loader".into())
+            },
+        )
+    }
+
+    /// The shared bore grammar with caller-loaded stationary wall sources.
+    /// `gas_cell END material WALL_T INITIAL_T` is followed by
+    /// `gas_wall_material PACK STATE [AXIS=VALUE ...]`,
+    /// `gas_wall_source T_AXIS solid|liquid RHO CP K MIN_T MAX_T CALORIC_TOL`,
+    /// `gas_wall_geometry cylindrical THICKNESS_M AREAL_FILM_RESISTANCE_M2_K_W`.
+    /// Material cells require `gas_wall_solve ITERATIONS ABS_W REL` after
+    /// `gas_solve`. Their cylindrical radius and length come from the same bore.
+    /// This affects the stationary gas field, not the separate acoustic wall law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn read_with_material_sources<'a, E: From<DgSourceError>>(
+        kind: &str,
+        line: usize,
+        fields: &mut SplitAsciiWhitespace<'a>,
+        next_row: &mut impl FnMut() -> Result<(usize, SplitAsciiWhitespace<'a>), E>,
+        ambient: &GasState,
+        sources: Option<&ThermochemicalSources<'_>>,
+        records: &mut Vec<GasRecord>,
+        gate: &CancelGate,
+        load_material: &mut dyn FnMut(&str) -> Result<fs_matdb::NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, E> {
         checkpoint(gate, line)?;
         let mut row = Row { line, fields };
         let (segment_count, mut segments) = match kind {
@@ -376,7 +432,7 @@ impl DgSourceInput {
         }
         if let Some(input) = steady_input {
             let generated = input.read(next_row, ambient.pressure, &source.geometry.segments,
-                records, &mut || gate.is_requested())
+                records, &mut || gate.is_requested(), load_material)
                 .map_err(|error| error.into_error(|source| DgSourceError::from(source).into()))?;
             source.field = Some(generated.solution().field().clone());
             source.steady_gas = Some(generated);
@@ -793,7 +849,10 @@ impl DgSourceInput {
         dt: f64,
         gate: &CancelGate,
         wall_band_hz: Option<[f64; 2]>,
-        bind_wall: impl FnOnce(DgDuct) -> Result<(DgDuct, Option<super::DgPortWallSource>), DgSourceError>,
+        bind_wall: impl FnOnce(
+            DgDuct,
+        )
+            -> Result<(DgDuct, Option<super::DgPortWallSource>), DgSourceError>,
         bind_branches: impl FnOnce(Vec<DgBranch>) -> Result<Vec<DgBranch>, DgSourceError>,
     ) -> Result<DgPortLoad, DgSourceError> {
         checkpoint(gate, self.line)?;
@@ -884,6 +943,7 @@ impl DgSourceInput {
         };
         // Retain the exact source bound above beside the sole native operator.
         load.wall_source = wall_source;
+        load.steady_gas = self.steady_gas.map(std::sync::Arc::new);
         checkpoint(gate, self.line)?;
         let terminal_channels = self
             .terminal_channels

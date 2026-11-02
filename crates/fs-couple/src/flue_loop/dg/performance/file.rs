@@ -203,7 +203,7 @@ impl FlueDgFilePerformance {
         row.end()?;
         let kind = if rows.next_is("dg_tube") { "dg_tube" } else { "dg_bore" };
         let mut row = rows.row(kind)?;
-        let source = DgSourceInput::read(
+        let source = DgSourceInput::read_with_material_sources(
             kind, row.line, &mut row.fields,
             &mut || {
                 rows.line += 1;
@@ -211,7 +211,7 @@ impl FlueDgFilePerformance {
                     .ok_or_else(|| bad(rows.line, "missing DG source geometry/gas record"))?;
                 Ok::<_, FlueDgInputError>((rows.line, text.split_ascii_whitespace()))
             },
-            &gas, sources, &mut gas_records, gate,
+            &gas, sources, &mut gas_records, gate, &mut load_material,
         )?;
         row.end()?;
         let source = if rows.next_is("dg_molecular") {
@@ -365,4 +365,3 @@ impl FlueDgFilePerformance {
 
 #[cfg(test)]
 mod tests;
-

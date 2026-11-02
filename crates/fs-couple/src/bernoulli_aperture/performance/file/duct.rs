@@ -90,20 +90,42 @@ impl DuctInput {
         sources: Option<&ThermochemicalSources<'_>>,
         records: &mut Vec<GasRecord>,
     ) -> Result<Self, PlateValveInputError> {
-        Self::read_with_boundaries(r, air, gate, sources, records, false)
+        Self::read_with_material_sources(r, air, gate, sources, records, &mut |_| {
+            Err("stationary material walls require an explicit material-card loader".into())
+        })
+    }
+
+    pub fn read_with_material_sources(
+        r: &mut Reader<'_>,
+        air: &GasState,
+        gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+        records: &mut Vec<GasRecord>,
+        load_material: &mut dyn FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, PlateValveInputError> {
+        Self::read_with_boundaries(r, air, gate, sources, records, false, load_material)
     }
 
     pub(super) fn read_two_sided_with_gas_sources(
-        r: &mut Reader<'_>, air: &GasState, gate: &CancelGate,
-        sources: Option<&ThermochemicalSources<'_>>, records: &mut Vec<GasRecord>,
+        r: &mut Reader<'_>,
+        air: &GasState,
+        gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+        records: &mut Vec<GasRecord>,
     ) -> Result<Self, PlateValveInputError> {
-        Self::read_with_boundaries(r, air, gate, sources, records, true)
+        Self::read_with_boundaries(r, air, gate, sources, records, true, &mut |_| {
+            Err("two-sided graph ducts do not consume stationary material wall packs".into())
+        })
     }
 
     fn read_with_boundaries(
-        r: &mut Reader<'_>, air: &GasState, gate: &CancelGate,
-        sources: Option<&ThermochemicalSources<'_>>, records: &mut Vec<GasRecord>,
+        r: &mut Reader<'_>,
+        air: &GasState,
+        gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+        records: &mut Vec<GasRecord>,
         allow_driven: bool,
+        load_material: &mut dyn FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     ) -> Result<Self, PlateValveInputError> {
         let mut row = r.next()?;
         match row.word()? {
@@ -111,11 +133,11 @@ impl DuctInput {
                 if allow_driven {
                     return Err(bad(r.line, "a one-port DG source cannot replace either side of the material-modal two-sided network"));
                 }
-                let input = DgInput::read::<PlateValveInputError>(
+                let input = DgInput::read_with_material_sources::<PlateValveInputError>(
                     kind, row.line, &mut row.fields, &mut || {
                         let next = r.next()?;
                         Ok((next.line, next.fields))
-                    }, air, sources, records, gate,
+                    }, air, sources, records, gate, load_material,
                 )?;
                 row.finish()?;
                 Ok(Self::Dg(input))

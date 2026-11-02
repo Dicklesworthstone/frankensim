@@ -13,6 +13,7 @@ impl From<DgSourceError> for PlateValveInputError {
             DgSourceError::Gas { line, source } => Self::Gas { line, source },
             DgSourceError::SteadyGas { line, source } => Self::SteadyGas { line, source },
             DgSourceError::Material { line, source } => Self::Material { line, source },
+            DgSourceError::MaterialSource { line, source } => Self::MaterialSource { line, source },
             DgSourceError::Physics(source) => Self::Physics(source),
             DgSourceError::Radiation { line, source } => Self::Physics(
                 crate::acoustic_realize::AcousticRealizeError::Nonlinear(

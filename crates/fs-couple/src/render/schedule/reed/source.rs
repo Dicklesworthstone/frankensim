@@ -85,6 +85,30 @@ impl<S: BeatingReedSource> SourceReedPerformance<S> {
         )
     }
 
+    /// Supply stationary wall cards while preserving this same structural reed
+    /// source and admission. Material input is resolved by the shared reader.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_bytes_with_sources(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        source: S,
+        admission: S::Admission,
+        gas_sources: Option<&ThermochemicalSources<'_>>,
+        load_material: impl FnMut(&str) -> Result<fs_matdb::NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, SourceReedPerformanceError<S::Error>> {
+        Self::from_bytes_with_material_environment(
+            bytes,
+            max_block,
+            policy,
+            source,
+            admission,
+            gas_sources,
+            None,
+            load_material,
+        )
+    }
+
     /// Bind the source-derived mechanics to the same prescribed or converged
     /// axial gas field. Exact inlet gas drives the reed, and the shared field
     /// drives both duct feedback and physical terminal observation.
@@ -119,16 +143,40 @@ impl<S: BeatingReedSource> SourceReedPerformance<S> {
         gas_sources: Option<&ThermochemicalSources<'_>>,
         gas_field: Option<(AxialGasField, GasFieldResolution)>,
     ) -> Result<Self, SourceReedPerformanceError<S::Error>> {
+        Self::from_bytes_with_material_environment(
+            bytes,
+            max_block,
+            policy,
+            source,
+            admission,
+            gas_sources,
+            gas_field,
+            |_| Err("stationary material walls require an explicit material-card loader".into()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_bytes_with_material_environment(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        source: S,
+        admission: S::Admission,
+        gas_sources: Option<&ThermochemicalSources<'_>>,
+        gas_field: Option<(AxialGasField, GasFieldResolution)>,
+        mut load_material: impl FnMut(&str) -> Result<fs_matdb::NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, SourceReedPerformanceError<S::Error>> {
         let reed = source
             .compile_beating_reed(0.0, 0.0, &admission)
             .map_err(SourceReedPerformanceError::Source)?;
-        let performance = ReedPerformance::from_bytes_with_environment_and_reed(
+        let performance = ReedPerformance::from_bytes_with_material_environment(
             bytes,
             max_block,
             policy,
             gas_sources,
             gas_field,
             Some(reed),
+            &mut load_material,
         )
         .map_err(SourceReedPerformanceError::Performance)?;
         Ok(Self {

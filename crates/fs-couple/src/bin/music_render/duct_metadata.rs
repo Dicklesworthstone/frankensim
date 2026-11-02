@@ -139,6 +139,9 @@ pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> 
     let mut output = load.radiation_record().map_or_else(String::new, |record|
         format!(",\"computed_radiation\":{}", computed_baffled_provenance(record)));
     output.push_str(&dg_molecular_provenance(load.duct()));
+    if let Some(generated) = load.steady_gas() {
+        output.push_str(&steady_gas_provenance(generated));
+    }
     if !load.terminal_channels().is_empty() {
         use fs_couple::dg_port::DgTerminalChannelKind;
         let channels = load.terminal_channels().iter().map(|bound| {
@@ -540,14 +543,15 @@ fn reed_field_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance)
         "{{\"species\":{},\"species_pack\":\"{}\",\"nasa9_pack\":\"{}\",\"transport_pack\":\"{}\"}}",
         super::json_string(receipt.species.as_str()), receipt.species_pack.to_hex(),
         receipt.nasa9_pack.to_hex(), receipt.transport_pack.to_hex())).collect();
-    let steady = reed_steady_provenance(p);
+    let steady = p
+        .steady_gas()
+        .map_or_else(String::new, steady_gas_provenance);
     format!(",\"axial_gas_field\":{{\"static_pressure_pa\":{:e}{resolution},\"canonical_species\":[{}],\"stations\":[{}],\"source_packs\":[{}]{steady},\"scope\":\"{scope}\"}}",
         field.static_pressure_pa(), species.join(","),
         stations.join(","), packs.join(","))
 }
 
-fn reed_steady_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance) -> String {
-    let Some(generated) = p.steady_gas() else { return String::new(); };
+fn steady_gas_provenance(generated: &fs_couple::dg_port::input::SteadyGasPerformance) -> String {
     let problem = generated.problem();
     let solution = generated.solution();
     let controls = generated.controls();
@@ -559,7 +563,25 @@ fn reed_steady_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance
         "{{\"cell\":{},\"mass_flow_kg_s\":{:e},\"temperature_k\":{:e},\"mole_fractions\":{:?}}}",
         inlet.cell, inlet.mass_flow_kg_s, inlet.state.temperature_k,
         inlet.state.composition.fractions())).collect();
-    format!(",\"steady_generation\":{{\"model\":\"shared-advected-enthalpy-species-v1\",\"inlet_mass_flow_kg_s\":{:e},\"inlet_temperature_k\":{:e},\"inlet_mole_fractions\":{:?},\"cells\":[{}],\"injections\":[{}],\"mass_flow_kg_s\":{:?},\"cell_power_residuals_w\":{:?},\"maximum_power_residual_bound_w\":{:e},\"power_tolerance_w\":{:e},\"maximum_energy_residual_j\":{:e},\"energy_tolerance_j\":{:e},\"caloric_residual_tolerance_j_kg\":{:e},\"temperature_bracket_k\":[{:e},{:e}],\"substeps\":{},\"maximum_substeps\":{},\"relaxation_time_s\":{:e},\"maximum_mean_mach\":{:e},\"mean_mach_limit\":{:e},\"scope\":\"source-bound stationary donor-cell heat and species balance; geometry from the same unbranched bore; prescribed total wall conductance; frozen acoustic field without mean-flow correction\"}}",
+    let walls = generated.material_walls().iter().map(|wall| {
+        let source = wall.source.source();
+        let properties = source.property_names.iter().map(|name| super::json_string(name))
+            .collect::<Vec<_>>().join(",");
+        let phase = match source.phase {
+            fs_material::phase::SolidLiquidPhase::Solid => "solid",
+            fs_material::phase::SolidLiquidPhase::Liquid => "liquid",
+            fs_material::phase::SolidLiquidPhase::SolidLiquid => unreachable!("admitted pure phase"),
+        };
+        format!("{{\"cell\":{},\"source\":{},\"temperature_axis\":{},\"phase\":\"{phase}\",\"density_cp_conductivity_properties\":[{properties}],\"source_temperature_span_k\":{:?},\"caloric_interpolation_tolerance_j_kg\":{:e},\"inner_radius_m\":{:e},\"thickness_m\":{:e},\"length_m\":{:e},\"film_resistance_m2_k_w\":{:e}}}",
+            wall.cell, super::json_string(&source.material.provenance(wall.source.pack())),
+            super::json_string(&source.temperature_axis), source.temperature_span_k,
+            source.caloric_interpolation_tolerance_j_kg, wall.inner_radius_m,
+            wall.thickness_m, wall.length_m, wall.film_resistance_m2_k_w)
+    }).collect::<Vec<_>>().join(",");
+    let wall_solve = generated.wall_controls().map_or_else(|| "null".into(), |control| format!(
+        "{{\"maximum_iterations\":{},\"absolute_heat_tolerance_w\":{:e},\"relative_heat_tolerance\":{:e}}}",
+        control.max_iterations, control.absolute_heat_tolerance_w, control.relative_heat_tolerance));
+    format!(",\"steady_generation\":{{\"model\":\"shared-advected-enthalpy-species-v1\",\"inlet_mass_flow_kg_s\":{:e},\"inlet_temperature_k\":{:e},\"inlet_mole_fractions\":{:?},\"cells\":[{}],\"injections\":[{}],\"material_walls\":[{walls}],\"material_wall_solve\":{wall_solve},\"mass_flow_kg_s\":{:?},\"cell_power_residuals_w\":{:?},\"maximum_power_residual_bound_w\":{:e},\"power_tolerance_w\":{:e},\"maximum_energy_residual_j\":{:e},\"energy_tolerance_j\":{:e},\"caloric_residual_tolerance_j_kg\":{:e},\"temperature_bracket_k\":[{:e},{:e}],\"substeps\":{},\"maximum_substeps\":{},\"relaxation_time_s\":{:e},\"maximum_mean_mach\":{:e},\"mean_mach_limit\":{:e},\"scope\":\"source-bound stationary donor-cell heat and species balance; geometry from the same unbranched bore; material walls replace their cell's numeric conductance with source k(T), cylindrical geometry and explicit film resistance; other cells retain prescribed total conductance; no finite wall storage; frozen acoustic field without mean-flow correction\"}}",
         problem.inlet_mass_flow_kg_s, problem.inlet.temperature_k,
         problem.inlet.composition.fractions(), cells.join(","), injections.join(","),
         solution.mass_flow_kg_s(), solution.cell_power_residuals_w(),
@@ -585,4 +607,3 @@ pub(super) fn dg_field_provenance(field: &fs_material::gas_field::AxialGasField)
     format!(",\"axial_gas_field\":{{\"static_pressure_pa\":{:e},\"canonical_species\":[{}],\"stations\":[{}],\"source_packs\":[{}],\"scope\":\"frozen primitive temperature/composition; shared EOS and transport at original spatial quadrature; no mean-flow correction\"}}",
         field.static_pressure_pa(), species.join(","), stations.join(","), packs.join(","))
 }
-
