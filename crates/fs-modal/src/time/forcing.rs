@@ -7,6 +7,7 @@
 //! unresolved forcing between measurements.
 
 use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
+use super::heat::LinearViscousIntegral;
 
 /// Cached transition for `q'' + 2*zeta*omega*q' + omega^2*q = F(t)` with
 /// `F(t) = F_start + (F_end-F_start)*t/duration`.
@@ -21,17 +22,33 @@ use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
 /// frequency, or the separation of two poles. Undamped, critical, overdamped
 /// and explicitly free coordinates therefore share one continuous formula.
 ///
-/// This API returns motion only: it does not publish an acoustic observation,
-/// force work, viscous heat, or a certified floating-point enclosure. Exact
+/// [`Self::advance_with_energy`] also integrates force work and nonnegative
+/// physical viscous heat along that same continuous trajectory. No acoustic
+/// observation or certified floating-point enclosure is inferred. Exact
 /// refers to the linear differential equation under this forcing interpolant;
 /// finite arithmetic still contributes roundoff, including phase error for
-/// very long oscillatory intervals. Existing ZOH energy accounts are unchanged.
+/// very long oscillatory intervals.
 #[derive(Clone, Copy, Debug)]
 pub struct LinearForceTransition {
     duration_s: f64,
     angular_frequency_rad_s: f64,
     transition: DampedTransition,
     ramp_displacement: f64,
+    ramp_integral: f64,
+    viscous_integral: LinearViscousIntegral,
+}
+
+/// Endpoint and independent physical work integrals for one linear force ramp.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinearForceFrame {
+    /// Motion at the interval's endpoint in the original modal coordinates.
+    pub state: ModalAcousticState,
+    /// Integral of `F(t)*v(t)` [J], including either sign of supplied work.
+    pub input_work_j: f64,
+    /// Integral of `2*zeta*omega*v(t)^2` [J], evaluated as a sum of squares.
+    pub viscous_dissipation_j: f64,
+    /// Scale-aware floating-point allowance for the viscous integral [J].
+    pub dissipation_roundoff_tolerance_j: f64,
 }
 
 /// Cotangents of a scalar objective through one fixed oscillator interval.
@@ -91,8 +108,14 @@ impl LinearForceTransition {
             doublings += 1;
         }
         let mut transition = DampedTransition::small(angle, drag);
-        let mut ramp_displacement = small_ramp_displacement(angle, drag);
+        let (mut ramp_displacement, mut ramp_integral) = small_ramp_moments(angle, drag);
         for _ in 0..doublings {
+            // S(h)=integral_0^h R(t) dt. Its fourth scaled moment is
+            // needed by integral t*v(t), hence the physical ramp work.
+            let scaled_ramp = transition.angle * ramp_displacement;
+            ramp_integral = (2.0 * ramp_integral + 2.0 * ramp_displacement
+                - scaled_ramp * scaled_ramp
+                + transition.g * transition.g) * 0.0625;
             // R(h)=integral_0^h G(t) dt, where G is the held-force
             // displacement response. Composition of two linear-force halves:
             // R(2h)=(1+E11)*R(h)+B(h)*G(h)+h*G(h).
@@ -110,6 +133,7 @@ impl LinearForceTransition {
             transition.position_decrement,
             transition.velocity_decrement,
             ramp_displacement,
+            ramp_integral,
         ]
         .into_iter()
         .all(f64::is_finite)
@@ -118,11 +142,19 @@ impl LinearForceTransition {
                 "linear-force transition coefficients must be representable",
             ));
         }
+        let viscous_integral = LinearViscousIntegral::new(
+            angular_frequency_rad_s, damping_ratio, duration_s,
+        );
+        if !viscous_integral.is_finite() {
+            return Err(invalid("linear-force viscous integral must be representable"));
+        }
         Ok(Self {
             duration_s,
             angular_frequency_rad_s,
             transition,
             ramp_displacement,
+            ramp_integral,
+            viscous_integral,
         })
     }
 
@@ -142,6 +174,15 @@ impl LinearForceTransition {
         force_start: f64,
         force_end: f64,
     ) -> Result<ModalAcousticState, ModalAcousticTimeError> {
+        self.motion(state, force_start, force_end).map(|(next, _, _)| next)
+    }
+
+    fn motion(
+        &self,
+        state: ModalAcousticState,
+        force_start: f64,
+        force_end: f64,
+    ) -> Result<(ModalAcousticState, f64, f64), ModalAcousticTimeError> {
         let q0 = state.displacement_m_sqrt_kg;
         let v0 = state.velocity_m_sqrt_kg_per_s;
         if ![q0, v0, force_start, force_end]
@@ -186,9 +227,47 @@ impl LinearForceTransition {
                 "linear-force scaled inputs and response must be representable",
             ));
         }
-        Ok(ModalAcousticState {
+        Ok((ModalAcousticState {
             displacement_m_sqrt_kg: q,
             velocity_m_sqrt_kg_per_s: v,
+        }, residual, scaled_change))
+    }
+
+    /// Advance with independently integrated supplied work and physical heat.
+    ///
+    /// The viscous integral is a prepared positive square-root Gramian, so
+    /// high-Q heat smaller than stored-energy subtraction roundoff survives.
+    /// Exact force moments integrate the ramp's work without subtracting two
+    /// large positions. Preparation does all quadrature, composition and roots;
+    /// this call allocates nothing and uses only fixed scalar arithmetic.
+    ///
+    /// # Errors
+    /// Every refusal from [`Self::advance`], or nonfinite work/heat arithmetic.
+    pub fn advance_with_energy(
+        &self,
+        state: ModalAcousticState,
+        force_start: f64,
+        force_end: f64,
+    ) -> Result<LinearForceFrame, ModalAcousticTimeError> {
+        let (next, residual, change) = self.motion(state, force_start, force_end)?;
+        let v = state.velocity_m_sqrt_kg_per_s;
+        let flow = self.transition;
+        // Integrals of v and (t/h)*v, each divided by h. All operands are
+        // velocities; multiplying by h*F avoids overflow in the force slope.
+        let mean_velocity = flow.b * v + flow.g * residual + self.ramp_displacement * change;
+        let first_moment = (flow.b - flow.g) * v
+            + (flow.g - self.ramp_displacement) * residual
+            + (self.ramp_displacement - self.ramp_integral) * change;
+        let work = (self.duration_s * force_start) * mean_velocity + change * first_moment;
+        let (heat, allowance) = self.viscous_integral.evaluate(v, residual, change, flow.angle);
+        if ![work, heat, allowance].into_iter().all(f64::is_finite) {
+            return Err(invalid("linear-force work and viscous heat must be representable"));
+        }
+        Ok(LinearForceFrame {
+            state: next,
+            input_work_j: work,
+            viscous_dissipation_j: heat,
+            dissipation_roundoff_tolerance_j: allowance,
         })
     }
 
@@ -265,12 +344,13 @@ impl LinearForceTransition {
     }
 }
 
-fn small_ramp_displacement(angle: f64, drag: f64) -> f64 {
+fn small_ramp_moments(angle: f64, drag: f64) -> (f64, f64) {
     let stiffness = angle * angle;
     let mut previous = 0.0;
     let mut power = 1.0;
     let mut reciprocal_factorial = 1.0 / 6.0;
     let mut ramp = reciprocal_factorial;
+    let mut integral = reciprocal_factorial * 0.25;
     // The existing impulse-response series has p_j/(j+1)!. Two time
     // integrations give p_j/(j+3)! for R/h^3 on the resolved interval.
     for j in 1..=18 {
@@ -279,8 +359,9 @@ fn small_ramp_displacement(angle: f64, drag: f64) -> f64 {
         power = next;
         reciprocal_factorial /= f64::from(j + 3);
         ramp += power * reciprocal_factorial;
+        integral += power * reciprocal_factorial / f64::from(j + 4);
     }
-    ramp
+    (ramp, integral)
 }
 
 fn invalid(what: &'static str) -> ModalAcousticTimeError {

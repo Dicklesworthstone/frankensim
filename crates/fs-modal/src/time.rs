@@ -36,7 +36,7 @@ use heat::{DampedTransition, ViscousIntegral};
 
 /// Prepared exact transitions under linearly interpolated force samples.
 pub mod forcing;
-pub use forcing::{LinearForcePullback, LinearForceTransition};
+pub use forcing::{LinearForceFrame, LinearForcePullback, LinearForceTransition};
 
 /// Prepared exact motion under a continuous sinusoidal generalized force.
 pub mod harmonic;
@@ -96,7 +96,7 @@ pub struct ModalAcousticState {
     pub velocity_m_sqrt_kg_per_s: f64,
 }
 
-/// One exact zero-order-hold sample transition.
+/// One exact sample transition under the selected physical forcing law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModalAcousticFrame {
     /// Physical pressure at the observer after the transition [Pa].
@@ -105,11 +105,11 @@ pub struct ModalAcousticFrame {
     pub modal_energy_j: Vec<f64>,
     /// Sum of retained modal energies after the transition [J].
     pub total_modal_energy_j: f64,
-    /// Work done by the held generalized forces during this sample [J].
+    /// Work done by the selected generalized force trajectory during this sample [J].
     pub input_work_j: f64,
     /// Energy removed by viscous damping during this sample [J].
     ///
-    /// Independently integrates `2*zeta*omega*v(t)^2` along the exact held-force
+    /// Independently integrates `2*zeta*omega*v(t)^2` along the exact forced
     /// trajectory. This is nonnegative physical heat, including losses smaller
     /// than subtraction roundoff in the stored mechanical energy.
     pub viscous_dissipation_j: f64,
@@ -281,7 +281,7 @@ impl core::fmt::Display for ModalAcousticTimeError {
 
 impl std::error::Error for ModalAcousticTimeError {}
 
-/// Exact-ZOH runtime for independent mass-normalized modes.
+/// Exact forced runtime for independent mass-normalized modes.
 #[derive(Clone, Debug)]
 pub struct ModalAcousticTimeModel {
     sample_period_s: f64,
@@ -298,6 +298,7 @@ struct ExactZohKernel {
     half_duration_bits: u64,
     full: Box<[PreparedZohCoefficients]>,
     half: std::sync::OnceLock<Box<[PreparedZohCoefficients]>>,
+    linear: std::sync::OnceLock<Box<[LinearForceTransition]>>,
 }
 
 impl ExactZohKernel {
@@ -315,6 +316,7 @@ impl ExactZohKernel {
             half_duration_bits: half_period_s.to_bits(),
             full,
             half: std::sync::OnceLock::new(),
+            linear: std::sync::OnceLock::new(),
         }
     }
 
@@ -602,6 +604,52 @@ impl ModalAcousticTimeModel {
             force,
             self.transition_kernel.full[mode_index].transition,
         )
+    }
+
+    /// Prepare exact motion, force work and viscous heat for endpoint force
+    /// samples at the nominal clock. Call outside a real-time callback.
+    /// Immutable mechanics caches are shared by cloned models; repeated calls
+    /// return immediately. Existing held-force coefficients are unchanged.
+    ///
+    /// # Errors
+    /// Unrepresentable ramp transition or positive viscous integral. No partial
+    /// cache is published and no physical state is changed on refusal.
+    pub fn prepare_linear_forcing(&self) -> Result<(), ModalAcousticTimeError> {
+        if self.transition_kernel.linear.get().is_some() {
+            return Ok(());
+        }
+        let coefficients = self.modes.iter().map(|mode| {
+            LinearForceTransition::try_new(
+                mode.angular_frequency_rad_s, mode.damping_ratio, self.sample_period_s,
+            )
+        }).collect::<Result<Vec<_>, _>>()?.into_boxed_slice();
+        // Another clone may have completed the identical immutable cache first.
+        let _ = self.transition_kernel.linear.set(coefficients);
+        Ok(())
+    }
+
+    /// Preview one mode through the same prepared ramp used by
+    /// [`Self::step_linear_into`], without changing accepted state.
+    ///
+    /// # Errors
+    /// Missing cold preparation, an invalid mode index, or the scalar
+    /// transition's nonfinite/unrepresentable input or result.
+    pub fn advance_exact_linear_step(
+        &self,
+        mode_index: usize,
+        state: ModalAcousticState,
+        force_start: f64,
+        force_end: f64,
+    ) -> Result<ModalAcousticState, ModalAcousticTimeError> {
+        let coefficients = self.transition_kernel.linear.get().ok_or(
+            ModalAcousticTimeError::InvalidInput {
+                what: "linear-force stepping requires prepare_linear_forcing outside the callback",
+            },
+        )?;
+        let transition = coefficients.get(mode_index).ok_or(
+            ModalAcousticTimeError::InvalidInput { what: "linear-force mode index is out of range" },
+        )?;
+        transition.advance(state, force_start, force_end)
     }
 
     /// Exact zero-order-hold one-sample linear map `(qq, qv, vq, vv, bq, bv)`
@@ -914,6 +962,81 @@ impl ModalAcousticTimeModel {
         )
     }
 
+    /// Advance one nominal sample under linearly interpolated endpoint forces,
+    /// including exact input work and independently integrated viscous heat.
+    /// This convenience method performs cold preparation and allocates a frame.
+    ///
+    /// # Errors
+    /// Invalid force vectors, coefficient admission, or the same transactional
+    /// state, pressure, energy and physical balance refusals as [`Self::step`].
+    pub fn step_linear(
+        &mut self,
+        force_start: &[f64],
+        force_end: &[f64],
+    ) -> Result<ModalAcousticFrame, ModalAcousticTimeError> {
+        self.prepare_linear_forcing()?;
+        let mut workspace = ModalAcousticWorkspace::new(self);
+        self.step_linear_into(force_start, force_end, &mut workspace)?;
+        Ok(workspace.frame)
+    }
+
+    /// Allocation-free nominal sample under first-order-held force samples.
+    /// Call [`Self::prepare_linear_forcing`] before entering the callback.
+    /// All forces, motion, heat and work refer to the same continuous ramp;
+    /// the force interpolant remains the caller's physical input model.
+    ///
+    /// # Errors
+    /// Missing cold preparation, invalid endpoint force/workspace sizes or
+    /// values, and every physical budget/balance refusal from [`Self::step`].
+    /// No accepted model state changes on failure.
+    pub fn step_linear_into<'w>(
+        &mut self,
+        force_start: &[f64],
+        force_end: &[f64],
+        workspace: &'w mut ModalAcousticWorkspace,
+    ) -> Result<&'w ModalAcousticFrame, ModalAcousticTimeError> {
+        for forces in [force_start, force_end] {
+            if forces.len() != self.modes.len() {
+                return Err(ModalAcousticTimeError::ForceCountMismatch {
+                    expected: self.modes.len(),
+                    found: forces.len(),
+                });
+            }
+            if forces.iter().any(|force| !force.is_finite()) {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "linear-force endpoint forces must be finite",
+                });
+            }
+        }
+        let coefficients = self.transition_kernel.linear.get().ok_or(
+            ModalAcousticTimeError::InvalidInput {
+                what: "linear-force stepping requires prepare_linear_forcing outside the callback",
+            },
+        )?;
+        stage_modal_frame(
+            &self.modes,
+            &self.states,
+            self.budget,
+            workspace,
+            "independent viscous heat and linear-force energy balance disagree",
+            "aggregate viscous integral and linear-force energy balance disagree",
+            |index, _mode, state| {
+                let frame = coefficients[index].advance_with_energy(
+                    state, force_start[index], force_end[index],
+                )?;
+                Ok(ModalStepData {
+                    next: frame.state,
+                    work: frame.input_work_j,
+                    work_allowance: 0.0,
+                    loss: frame.viscous_dissipation_j,
+                    loss_allowance: frame.dissipation_roundoff_tolerance_j,
+                })
+            },
+        )?;
+        self.states.copy_from_slice(&workspace.candidate);
+        Ok(&workspace.frame)
+    }
+
     /// Allocation-free exact-ZOH advance for a positive caller-specified duration.
     /// Full/half samples reuse the existing cached transition coefficients;
     /// other durations retain the existing exact fallback. No new integrator or
@@ -1092,8 +1215,8 @@ struct ModalStepData {
     loss_allowance: f64,
 }
 
-// Shared state admission and independent work/heat balance for ZOH and
-// continuous harmonic loads. A forcing owner proposes motion and integrals;
+// Shared state admission and independent work/heat balance for held forces,
+// linear ramps and harmonic loads. A forcing owner proposes motion and integrals;
 // it cannot bypass the physical budgets or commit only part of a mode bank.
 #[allow(clippy::too_many_lines)] // one shared, transactional physics loop
 fn stage_modal_frame(

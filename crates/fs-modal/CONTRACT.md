@@ -148,14 +148,38 @@ overdamped and explicit free coordinates use one continuous formula without
 division by stiffness or pole separation. Scaled forcing and increments retain
 soft-mode attacks and small motions; separate retentions preserve decay tails.
 Inputs and unrepresentable scaled responses refuse without state mutation.
-This API supplies motion, not ZOH heat/work accounts or an acoustic observer.
+`advance_with_energy` returns the same motion plus independently integrated
+force work and positive viscous heat. Exact first/second force moments compute
+the ramp's work without subtracting absolute positions or dividing by a tiny
+duration. The heat owner extends its square-root Gramian to velocity, scaled
+initial force residual and constant force slope. The same resolved eight-point
+quadrature and QR doubling retain all ramp-induced damping; no stored-energy
+subtraction, loss clipping or pole decomposition enters the result. Zero loss
+and explicit free coordinates return exact zero heat. Warm calls allocate
+nothing and evaluate no transcendental functions.
+
+`ModalAcousticTimeModel::prepare_linear_forcing` cold-prepares immutable ramp
+caches shared by model clones. `step_linear_into` uses the existing workspace,
+publishes actual ramp work and per-mode heat, and enforces the same transactional
+state/pressure/energy and independent balance gates as held-force stepping.
+It refuses missing preparation instead of allocating in the callback.
+`advance_exact_linear_step` previews the identical cached motion for coupled
+observers without advancing accepted state. The allocating `step_linear`
+convenience prepares and returns an owned frame. All model ramp intervals use
+the nominal clock; standalone transitions support arbitrary positive duration.
+
 The input is the piecewise-linear force itself; interpolation error in measured
 forcing, finite-arithmetic phase error over very long intervals and a certified
 roundoff enclosure are not claimed away. G1 compares independent 100-digit
 augmented matrix exponentials, affine force balance, the free cubic limit and
 resonant growth under a sampled linear forcing interpolant. G3 checks temporal
 subdivision and replay, including both sides of critical damping and a strongly
-overdamped slow pole. Existing ZOH stepping and energy arithmetic are unchanged.
+overdamped slow pole. Independent integration of the physical power equations,
+prescribed affine motion, heat below energy-subtraction roundoff, signed work
+at large free-coordinate offsets, and additive ramp subdivision cover the new
+energy accounts. Runtime regressions cover cold preparation, exact preview,
+shared clone caches and transactional refusal. Existing ZOH stepping and energy
+arithmetic are unchanged.
 
 `time::HarmonicForceTransition` advances the same scalar oscillator under a
 continuous load `Fc cos(Omega t) + Fs sin(Omega t)`. It shares the homogeneous

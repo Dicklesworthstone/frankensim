@@ -2,7 +2,8 @@
 
 use fs_math::c64::C64;
 use fs_modal::time::{
-    LinearForceTransition, ModalAcousticMode, ModalAcousticState, advance_exact_zoh,
+    LinearForceTransition, ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget,
+    ModalAcousticTimeModel, ModalAcousticWorkspace, advance_exact_zoh,
 };
 
 fn state(q: f64, v: f64) -> ModalAcousticState {
@@ -398,4 +399,154 @@ fn g0_pullback_refuses_invalid_or_unrepresentable_cotangents() {
         step.pullback(0.4, -0.2).unwrap(),
         step.pullback(0.4, -0.2).unwrap()
     );
+}
+
+fn independent_ramp_integrals(
+    omega: f64, zeta: f64, initial: ModalAcousticState, f0: f64, f1: f64, duration: f64,
+) -> [f64; 4] {
+    // Directly integrate q/v and the physical powers c*v^2 and F(t)*v.
+    // No transition coefficient, force moment or Gramian enters this oracle.
+    let rate = |x: [f64; 4], t: f64| {
+        let force = f0 + (f1 - f0) * (t / duration);
+        let drag = 2.0 * zeta * omega;
+        [x[1], force - drag * x[1] - omega * omega * x[0],
+            drag * x[1] * x[1], force * x[1]]
+    };
+    let add = |x: [f64; 4], a: [f64; 4], h: f64| std::array::from_fn(|i| x[i] + h * a[i]);
+    let mut x = [initial.displacement_m_sqrt_kg, initial.velocity_m_sqrt_kg_per_s, 0.0, 0.0];
+    let h = duration / 4096.0;
+    for i in 0..4096 {
+        let t = f64::from(i) * h;
+        let a = rate(x, t);
+        let b = rate(add(x, a, 0.5 * h), t + 0.5 * h);
+        let c = rate(add(x, b, 0.5 * h), t + 0.5 * h);
+        let d = rate(add(x, c, h), t + h);
+        for j in 0..4 {
+            x[j] += h / 6.0 * (a[j] + 2.0 * b[j] + 2.0 * c[j] + d[j]);
+        }
+    }
+    x
+}
+
+#[test]
+fn g1_ramp_heat_and_work_match_independently_integrated_physical_powers() {
+    let initial = state(0.12, -0.4);
+    for (omega, zeta) in [
+        (0.0, 0.0), (7.0, 0.0), (7.0, 0.06), (7.0, 1.0 - 1e-9),
+        (7.0, 1.0), (7.0, 1.0 + 1e-9), (7.0, 9.0),
+    ] {
+        let step = LinearForceTransition::try_new(omega, zeta, 0.09).unwrap();
+        let frame = step.advance_with_energy(initial, -2.7, 1.9).unwrap();
+        let expected = independent_ramp_integrals(omega, zeta, initial, -2.7, 1.9, 0.09);
+        close(frame.state.displacement_m_sqrt_kg, expected[0], 1.0);
+        close(frame.state.velocity_m_sqrt_kg_per_s, expected[1], 1.0);
+        close(frame.viscous_dissipation_j, expected[2], expected[2].abs().max(1e-20));
+        close(frame.input_work_j, expected[3], 1.0);
+        assert!(frame.viscous_dissipation_j >= 0.0);
+        assert_eq!(frame.state, step.advance(initial, -2.7, 1.9).unwrap());
+        let energy = |s: ModalAcousticState| 0.5 * (s.velocity_m_sqrt_kg_per_s.powi(2)
+            + (omega * s.displacement_m_sqrt_kg).powi(2));
+        close(energy(frame.state) - energy(initial) + frame.viscous_dissipation_j,
+            frame.input_work_j, energy(initial));
+    }
+}
+
+#[test]
+fn g1_affine_motion_ramps_retain_high_q_heat_and_signed_force_work() {
+    let (omega, dt) = (21.0, 0.3);
+    let initial = state(0.03, -0.02);
+    let final_q = initial.displacement_m_sqrt_kg + dt * initial.velocity_m_sqrt_kg_per_s;
+    for zeta in [0.0, 1e-20, 0.4, 1.0, 5.0] {
+        let drag = 2.0 * zeta * omega;
+        let f0 = drag * initial.velocity_m_sqrt_kg_per_s + omega * omega * initial.displacement_m_sqrt_kg;
+        let f1 = drag * initial.velocity_m_sqrt_kg_per_s + omega * omega * final_q;
+        let frame = LinearForceTransition::try_new(omega, zeta, dt).unwrap()
+            .advance_with_energy(initial, f0, f1).unwrap();
+        let expected_heat = drag * initial.velocity_m_sqrt_kg_per_s.powi(2) * dt;
+        let expected_work = initial.velocity_m_sqrt_kg_per_s * dt * f64::midpoint(f0, f1);
+        close(frame.viscous_dissipation_j, expected_heat, expected_heat.abs().max(1e-300));
+        close(frame.input_work_j, expected_work, expected_work.abs());
+        close(frame.state.displacement_m_sqrt_kg, final_q, final_q);
+        if zeta == 1e-20 {
+            assert!(frame.viscous_dissipation_j > 1e10 * frame.dissipation_roundoff_tolerance_j);
+            assert!(frame.viscous_dissipation_j < f64::EPSILON * expected_work.abs());
+        }
+    }
+    // A free mass can move by less than the absolute-position ULP and still
+    // receive finite work. The ramp's actual velocity integral owns that work.
+    let initial = state(1e20, -0.4);
+    let frame = LinearForceTransition::try_new(0.0, 0.0, 0.125).unwrap()
+        .advance_with_energy(initial, 3.0, -5.0).unwrap();
+    let expected_v: f64 = -0.4 + 0.125 * (3.0 - 5.0) * 0.5;
+    close(frame.input_work_j, 0.5 * (expected_v * expected_v - 0.16), 0.1);
+    assert_eq!(frame.state.displacement_m_sqrt_kg, initial.displacement_m_sqrt_kg);
+    assert_eq!(frame.viscous_dissipation_j, 0.0);
+    assert_eq!(frame.dissipation_roundoff_tolerance_j, 0.0);
+}
+
+#[test]
+fn g3_ramp_work_and_positive_heat_are_additive_under_subdivision() {
+    let initial = state(0.23, -0.17);
+    let (duration, f0, f1) = (0.4, 1.3, -0.8);
+    for zeta in [0.0, 0.07, 1.0, 3.0, 1e5] {
+        let whole = LinearForceTransition::try_new(9.2, zeta, duration).unwrap()
+            .advance_with_energy(initial, f0, f1).unwrap();
+        let part = LinearForceTransition::try_new(9.2, zeta, duration / 17.0).unwrap();
+        let (mut value, mut work, mut heat) = (initial, 0.0, 0.0);
+        for i in 0..17 {
+            let left = f0 + (f1 - f0) * f64::from(i) / 17.0;
+            let right = f0 + (f1 - f0) * f64::from(i + 1) / 17.0;
+            let frame = part.advance_with_energy(value, left, right).unwrap();
+            value = frame.state;
+            work += frame.input_work_j;
+            heat += frame.viscous_dissipation_j;
+        }
+        close(value.displacement_m_sqrt_kg, whole.state.displacement_m_sqrt_kg, 1.0);
+        close(value.velocity_m_sqrt_kg_per_s, whole.state.velocity_m_sqrt_kg_per_s, 1.0);
+        close(work, whole.input_work_j, whole.input_work_j.abs().max(1e-4));
+        close(heat, whole.viscous_dissipation_j, whole.viscous_dissipation_j.abs().max(1e-20));
+    }
+}
+
+#[test]
+fn g0_prepared_ramp_runtime_shares_preview_heat_and_transactional_gates() {
+    let modes: Vec<_> = [(0.0, 0.0), (700.0, 0.03), (900.0, 1.0), (1100.0, 4.0)]
+        .into_iter().map(|(omega, zeta)| ModalAcousticMode {
+            angular_frequency_rad_s: omega, damping_ratio: zeta,
+            pressure_per_modal_velocity: C64::ZERO,
+        }).collect();
+    let mut model = ModalAcousticTimeModel::try_new_with_free_coordinates(
+        48_000, modes.clone(), ModalAcousticTimeBudget::audible_reference(),
+    ).unwrap();
+    let initial = [state(0.0, 0.1), state(0.0001, 0.03), state(-0.0002, 0.04), state(0.0003, -0.02)];
+    model.restore_states(&initial).unwrap();
+    let (start, end) = ([1.0, 2.0, -3.0, 4.0], [-2.0, 3.0, 4.0, -5.0]);
+    let mut workspace = ModalAcousticWorkspace::new(&model);
+    assert!(model.step_linear_into(&start, &end, &mut workspace).is_err());
+    assert_eq!(model.states(), &initial);
+    model.prepare_linear_forcing().unwrap();
+    model.prepare_linear_forcing().unwrap();
+    assert!(model.advance_exact_linear_step(4, initial[0], 0.0, 0.0).is_err());
+    assert!(model.step_linear_into(&start, &end[..3], &mut workspace).is_err());
+    let invalid = [1.0, 2.0, 3.0, f64::NAN];
+    assert!(model.step_linear_into(&start, &invalid, &mut workspace).is_err());
+    let enormous = [1e20; 4];
+    assert!(model.step_linear_into(&start, &enormous, &mut workspace).is_err());
+    assert_eq!(model.states(), &initial);
+    let mut clone = model.clone();
+    let mut previews = [ModalAcousticState::default(); 4];
+    let (mut heat, mut work) = (0.0, 0.0);
+    for i in 0..4 {
+        previews[i] = model.advance_exact_linear_step(i, initial[i], start[i], end[i]).unwrap();
+        let frame = LinearForceTransition::try_new(modes[i].angular_frequency_rad_s,
+            modes[i].damping_ratio, model.sample_period_s()).unwrap()
+            .advance_with_energy(initial[i], start[i], end[i]).unwrap();
+        heat += frame.viscous_dissipation_j;
+        work += frame.input_work_j;
+    }
+    let frame = model.step_linear_into(&start, &end, &mut workspace).unwrap().clone();
+    assert_eq!(model.states(), &previews);
+    assert_eq!(frame.viscous_dissipation_j, heat);
+    assert_eq!(frame.input_work_j, work);
+    assert_eq!(frame, clone.step_linear(&start, &end).unwrap());
 }

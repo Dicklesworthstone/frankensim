@@ -2,6 +2,17 @@
 use super::{ExactZohCoefficients, ModalAcousticMode, ModalAcousticState};
 use fs_math::det;
 
+const QUADRATURE: [(f64, f64); 8] = [
+    (0.019855071751231884, 0.05061426814518813),
+    (0.10166676129318664, 0.11119051722668724),
+    (0.2372337950418355, 0.15685332293894366),
+    (0.4082826787521751, 0.181341891689181),
+    (0.5917173212478248, 0.181341891689181),
+    (0.7627662049581645, 0.15685332293894366),
+    (0.8983332387068134, 0.11119051722668724),
+    (0.9801449282487681, 0.05061426814518813),
+];
+
 /// The existing entire-series transition, shared with the heat preparation.
 /// All fields are dimensionless on the current preparation interval.
 #[derive(Clone, Copy, Debug)]
@@ -126,16 +137,6 @@ impl ViscousIntegral {
         // <4.7e-23*drag*||[v,r]||^2, below f64 roundoff. Long/stiff/oscillatory
         // intervals compose this resolved integral; they are never sampled
         // by eight points over an unresolved full interval.
-        const QUADRATURE: [(f64, f64); 8] = [
-            (0.019855071751231884, 0.05061426814518813),
-            (0.10166676129318664, 0.11119051722668724),
-            (0.2372337950418355, 0.15685332293894366),
-            (0.4082826787521751, 0.181341891689181),
-            (0.5917173212478248, 0.181341891689181),
-            (0.7627662049581645, 0.15685332293894366),
-            (0.8983332387068134, 0.11119051722668724),
-            (0.9801449282487681, 0.05061426814518813),
-        ];
         for (node, weight) in QUADRATURE {
             let at = DampedTransition::small(angle * node, drag * node);
             let weight = det::sqrt(drag) * det::sqrt(weight);
@@ -201,6 +202,117 @@ impl ViscousIntegral {
         let allowance =
             self.roundoff_factor * (magnitude * magnitude + cr * cr).max(f64::MIN_POSITIVE);
         (heat, allowance)
+    }
+}
+
+/// The same positive Gramian with a retained constant force-slope coordinate.
+/// Coordinates are [v, (F-omega^2*q)/kappa, Fdot/kappa^2], with
+/// kappa=max(omega,1/dt). No division by stiffness or pole separation occurs.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct LinearViscousIntegral {
+    root: [[f64; 3]; 3],
+    roundoff_factor: f64,
+}
+
+impl LinearViscousIntegral {
+    pub fn new(omega: f64, zeta: f64, dt: f64) -> Self {
+        if zeta == 0.0 || omega == 0.0 {
+            return Self::default();
+        }
+        let original_angle = omega * dt;
+        let mut angle = original_angle;
+        let mut drag = 2.0 * (zeta * angle);
+        let ratio = original_angle.min(1.0);
+        let mut scaled_time = original_angle.max(1.0);
+        let mut doublings = 0;
+        while angle.max(drag).max(scaled_time) > 0.25 {
+            angle *= 0.5;
+            drag *= 0.5;
+            scaled_time *= 0.5;
+            doublings += 1;
+        }
+        let mut flow = DampedTransition::small(angle, drag);
+        let mut integral = Self::default();
+        // The added source coordinate preserves both induced generator norms
+        // <=1/2 on this interval. The same resolved eight-point quadrature and
+        // square-root doubling therefore integrate the full ramp trajectory.
+        for (node, weight) in QUADRATURE {
+            let at = DampedTransition::small(angle * node, drag * node);
+            let weight = det::sqrt(drag) * det::sqrt(weight);
+            let time = scaled_time * node;
+            integral.append_row([
+                weight * at.velocity_retention,
+                weight * time * at.b,
+                weight * time * (time * at.g),
+            ]);
+        }
+        for _ in 0..doublings {
+            let e01 = scaled_time * flow.b;
+            let transition = [
+                [flow.velocity_retention, e01, scaled_time * (scaled_time * flow.g)],
+                [-(ratio * ratio) * e01, flow.position_retention,
+                    scaled_time * (flow.b + flow.drag * flow.g)],
+                [0.0, 0.0, 1.0],
+            ];
+            let mut propagated = [[0.0; 3]; 3];
+            for (i, row) in propagated.iter_mut().enumerate() {
+                for (j, value) in row.iter_mut().enumerate() {
+                    for (k, transition_row) in transition.iter().enumerate().skip(i) {
+                        *value += integral.root[i][k] * transition_row[j];
+                    }
+                }
+            }
+            for row in propagated {
+                integral.append_row(row);
+            }
+            flow.double();
+            scaled_time *= 2.0;
+        }
+        integral.roundoff_factor = (384.0 + 192.0 * f64::from(doublings)) * f64::EPSILON;
+        integral
+    }
+
+    fn append_row(&mut self, mut row: [f64; 3]) {
+        for i in 0..3 {
+            let diagonal = hypot(self.root[i][i], row[i]);
+            if diagonal == 0.0 {
+                continue;
+            }
+            let cosine = self.root[i][i] / diagonal;
+            let sine = row[i] / diagonal;
+            self.root[i][i] = diagonal;
+            for (j, value) in row.iter_mut().enumerate().skip(i + 1) {
+                let residual = -sine * self.root[i][j] + cosine * *value;
+                self.root[i][j] = cosine * self.root[i][j] + sine * *value;
+                *value = residual;
+            }
+        }
+    }
+
+    pub fn is_finite(self) -> bool {
+        self.root.into_iter().flatten().all(f64::is_finite)
+    }
+
+    pub fn evaluate(self, velocity: f64, residual: f64, change: f64, angle: f64) -> (f64, f64) {
+        if self.roundoff_factor == 0.0 {
+            return (0.0, 0.0);
+        }
+        let scale = angle.max(1.0);
+        let input = [velocity, residual / scale, (change / scale) / scale];
+        let mut heat = 0.0;
+        let mut magnitude = 0.0;
+        for (i, row) in self.root.iter().enumerate() {
+            let mut value = 0.0;
+            let mut absolute = 0.0;
+            for (&coefficient, &component) in row.iter().zip(&input).skip(i) {
+                let term = coefficient * component;
+                value += term;
+                absolute += term.abs();
+            }
+            heat += value * value;
+            magnitude += absolute * absolute;
+        }
+        (heat, self.roundoff_factor * magnitude.max(f64::MIN_POSITIVE))
     }
 }
 
