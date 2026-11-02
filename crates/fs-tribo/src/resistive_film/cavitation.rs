@@ -188,6 +188,21 @@ impl CavitatingFilm {
         })
     }
 
+    /// Continue the same accepted liquid content with a viscosity per channel.
+    /// Original channel order and admission follow
+    /// `ResistiveFilm::with_channel_viscosities`. Density, rupture pressure,
+    /// reservoir and state ownership stay exact. The next conservative flux
+    /// solve consumes these coefficients without resetting existing cavities.
+    /// This transport update does not evolve temperature or infer thermal work.
+    pub fn with_channel_viscosities(&self, viscosities_pa_s: &[f64]) -> Result<Self, FilmError> {
+        Ok(Self {
+            owner: Arc::clone(&self.owner),
+            geometry: self.geometry.with_channel_viscosities(viscosities_pa_s)?,
+            liquid: self.liquid,
+            solve: self.solve,
+        })
+    }
+
     /// The original immutable pressure graph and viscosity coefficient.
     #[must_use]
     pub const fn geometry(&self) -> &ResistiveFilm {

@@ -771,6 +771,24 @@ volume/force/work balance, the finite-difference nonsymmetric tangent,
 coefficient continuation, zero-alpha identity, barriers and incompatible
 storage owners.
 
+`with_channel_viscosities` compiles one positive dynamic viscosity per original
+channel. Pressure, full mechanical tangent and physical viscous work consume
+the same per-channel conductances; the pressure solve gains no iterations or
+evaluation allocations. Each value is uniform across its passage gap. For
+fixed-aperture serial segments, the hydraulic viscosity is the length-weighted
+arithmetic mean because resistances add. A gapwise temperature profile cannot
+be replaced by a wall viscosity. A common Barus coefficient remains admissible,
+with each passage retaining its own zero-gauge viscosity. The uniform accessor
+`viscosity_pa_s()` now returns `Some(mu)` only for an exactly uniform field and
+`None` otherwise; the ordered channel accessor never invents an effective mean.
+`with_viscosity` explicitly restores a uniform field. Gas-storage and cavitating
+continuations preserve their original masses, storage/state coordinates and
+ownership while changing these same conductances. This is a frozen transport
+field, not a thermal solver or an inferred material source. G1/G3 tests recover
+independent unequal-channel network pressures, Poiseuille mass fluxes, pressure
+work and directional tangents, conserve cavitation refill/squeeze mass, and
+recover uniform coefficients bitwise. Invalid updates leave prior owners intact.
+
 The fixed limits are 64 pressure cells, 256 channels and 256 mechanical ports.
 Nonpositive channel apertures close exactly; collapsed volume cells, trapped
 pressure pockets, pressure/gap limit violations and unresolved factorizations

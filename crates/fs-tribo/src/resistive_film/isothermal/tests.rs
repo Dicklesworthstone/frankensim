@@ -150,7 +150,7 @@ fn g1_g3_viscosity_continuation_keeps_gas_storage_and_scales_transport() {
     for i in 0..2 {
         close(next_tangent[i], tangent[i] / 3.0, 1e-13);
     }
-    assert_eq!(original.geometry.viscosity_pa_s(), 1.8e-5);
+    assert_eq!(original.geometry.viscosity_pa_s(), Some(1.8e-5));
 }
 
 #[test]
@@ -177,4 +177,59 @@ fn g0_invalid_viscosity_continuation_leaves_gas_inventory_and_flow_intact() {
         power
     );
     assert_eq!(retried, flow);
+}
+
+#[test]
+fn g1_g3_channel_viscosities_preserve_gas_storage_and_control_each_mass_flux() {
+    let original = model(true);
+    let mus = [3.6e-5, 9e-6];
+    let current = original.with_channel_viscosities(&mus).unwrap();
+    let q = [0.0; 2];
+    let z = [original.scales[0] * 1.1, original.scales[1] * 0.9];
+    let before = original.observe(&q, &z).unwrap();
+    let after = current.observe(&q, &z).unwrap();
+    assert_eq!(before.mass_kg, after.mass_kg);
+    assert_eq!(before.free_energy_j, after.free_energy_j);
+    assert_eq!(before.minimum_pressure_pa, after.minimum_pressure_pa);
+    assert_eq!(before.maximum_pressure_pa, after.maximum_pressure_pa);
+    assert_eq!(original.initial_state(), current.initial_state());
+    let (mut gq, mut gz, mut flow) = ([0.0; 2], [0.0; 2], [0.0; 2]);
+    current.gradient_into(&q, &z, &mut gq, &mut gz).unwrap();
+    let power = current.flow_into(&q, &z, &gz, &mut flow).unwrap();
+    let rt = gas().temperature_k * gas().specific_gas_constant_j_kg_k;
+    let g01 = 0.04 * 0.0011_f64.powi(3) / (12.0 * mus[0] * 0.02);
+    let g0a = 0.03 * 0.001_f64.powi(3) / (12.0 * mus[1] * 0.01);
+    let m01 = g01 * (110000.0_f64.powi(2) - 90000.0_f64.powi(2)) / (2.0 * rt);
+    let m0a = g0a * (110000.0_f64.powi(2) - 100000.0_f64.powi(2)) / (2.0 * rt);
+    close(flow[0] * current.scales[0] / rt, m01 + m0a, 1e-12);
+    close(flow[1] * current.scales[1] / rt, -m01, 1e-12);
+    close((flow[0] * current.scales[0] + flow[1] * current.scales[1]) / rt, m0a, 1e-12);
+    close(power, rt * (m01 * (11.0_f64 / 9.0).ln() + m0a * 1.1_f64.ln()), 1e-12);
+    close(power, dot(&gz, &flow), 1e-12);
+
+    // The same spatial field reaches the full gap/mass/effort tangent.
+    let (dq, dz, de) = ([0.0001, 0.00004], [0.02, -0.04], [0.03, 0.02]);
+    let mut tangent = [0.0; 2];
+    current.flow_tangent_into(&q, &z, &gz, &dq, &dz, &de, &mut tangent).unwrap();
+    let epsilon = 1e-5;
+    let qa: [f64; 2] = std::array::from_fn(|i| q[i] + epsilon * dq[i]);
+    let qb: [f64; 2] = std::array::from_fn(|i| q[i] - epsilon * dq[i]);
+    let za: [f64; 2] = std::array::from_fn(|i| z[i] + epsilon * dz[i]);
+    let zb: [f64; 2] = std::array::from_fn(|i| z[i] - epsilon * dz[i]);
+    let ea: [f64; 2] = std::array::from_fn(|i| gz[i] + epsilon * de[i]);
+    let eb: [f64; 2] = std::array::from_fn(|i| gz[i] - epsilon * de[i]);
+    let (mut a, mut b) = ([0.0; 2], [0.0; 2]);
+    current.flow_into(&qa, &za, &ea, &mut a).unwrap();
+    current.flow_into(&qb, &zb, &eb, &mut b).unwrap();
+    for i in 0..2 {
+        close(tangent[i], (a[i] - b[i]) / (2.0 * epsilon), 2e-7);
+    }
+    let uniform = original.with_channel_viscosities(&[1.8e-5; 2]).unwrap();
+    let pa = original.flow_into(&q, &z, &gz, &mut a).unwrap();
+    let pb = uniform.flow_into(&q, &z, &gz, &mut b).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(pa, pb);
+    assert!(original.with_channel_viscosities(&[1e-5]).is_err());
+    assert!(original.with_channel_viscosities(&[1e-5, f64::NAN]).is_err());
+    assert_eq!(original.observe(&q, &z).unwrap().mass_kg, before.mass_kg);
 }

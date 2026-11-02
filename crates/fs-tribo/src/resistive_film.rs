@@ -9,6 +9,10 @@
 //! A caller must evaluate this port *inside* its implicit mechanical equation.
 //!
 //! Poiseuille conductance is `width * h_+^3 / (12 * viscosity * length)`.
+//! Each channel may have its own positive viscosity, held fixed during a solve.
+//! A channel coefficient is uniform across its gap; for serial segments with
+//! the same aperture it is the LENGTH-weighted arithmetic viscosity, since
+//! viscous resistance, not fluidity, adds along the passage.
 //! A nonpositive CHANNEL aperture closes that passage exactly; a collapsed
 //! VOLUME cell, disconnected trapped pocket, or exceeded validity limit refuses.
 //! There is no gap floor, pressure clipping, diagonal jitter, or hidden leakage.
@@ -103,7 +107,7 @@ pub struct ResistiveFilm {
     cells: Vec<FilmCell>,
     channels: Vec<FilmChannel>,
     factors: Vec<f64>,
-    viscosity_pa_s: f64,
+    channel_viscosities_pa_s: Vec<f64>,
     pressure_viscosity_coefficient_per_pa: f64,
     ports: usize,
     limits: FilmLimits,
@@ -174,20 +178,33 @@ impl ResistiveFilm {
         // Reference gaps need not be current gaps: attachments may be admitted
         // after motion. The mechanical owner checks its ACTUAL state on attach.
         Ok(Self {
+            channel_viscosities_pa_s: vec![viscosity_pa_s; channels.len()],
             cells,
             channels,
             factors,
-            viscosity_pa_s,
             pressure_viscosity_coefficient_per_pa: 0.0,
             ports,
             limits,
         })
     }
 
-    /// Dynamic viscosity at the zero-gauge reservoir pressure [Pa s].
+    /// Common dynamic viscosity at zero gauge pressure [Pa s], only when every
+    /// channel has exactly the same value. A heterogeneous film has no single
+    /// viscosity: this returns `None` rather than inventing an effective mean.
     #[must_use]
-    pub const fn viscosity_pa_s(&self) -> f64 {
-        self.viscosity_pa_s
+    pub fn viscosity_pa_s(&self) -> Option<f64> {
+        let first = self.channel_viscosities_pa_s[0];
+        self.channel_viscosities_pa_s
+            .iter()
+            .all(|&mu| mu == first)
+            .then_some(first)
+    }
+
+    /// Exact zero-gauge dynamic viscosities [Pa s] in original channel order.
+    /// Geometry, gap changes and pressure work use these same coefficients.
+    #[must_use]
+    pub fn channel_viscosities_pa_s(&self) -> &[f64] {
+        &self.channel_viscosities_pa_s
     }
 
     /// Exponential pressure-viscosity coefficient [1/Pa], zero for a constant law.
@@ -199,7 +216,7 @@ impl ResistiveFilm {
     /// Retain this graph with the Barus law `mu(p)=mu_0 exp(alpha*p)`.
     ///
     /// `p` is GAUGE pressure relative to every zero-gauge reservoir; the existing
-    /// viscosity is `mu_0` there. The caller supplies a nonnegative coefficient
+    /// channel viscosity is `mu_0` there. The caller supplies a nonnegative coefficient
     /// and a pressure range supporting this constitutive approximation. This
     /// does not infer a material source, elastic deformation, liquid density,
     /// cavitation or thermal evolution. It remains the classical isothermal
@@ -228,7 +245,7 @@ impl ResistiveFilm {
         Ok(result)
     }
 
-    /// Recompile the reference viscosity on this exact graph and pressure law.
+    /// Recompile a UNIFORM reference viscosity on this exact graph and pressure law.
     ///
     /// Cells, apertures, force ports, pressure-viscosity coefficient and limits
     /// remain unchanged. This stateless resistance has no stored energy to remap.
@@ -248,6 +265,48 @@ impl ResistiveFilm {
         Ok(result)
     }
 
+    /// Compile one positive dynamic viscosity [Pa s] per ORIGINAL channel.
+    ///
+    /// The coefficients are constant across each channel's gap and length at
+    /// zero gauge pressure; an existing common Barus coefficient is retained.
+    /// For a fixed aperture with viscosity varying along the flow direction,
+    /// supply the length-weighted arithmetic mean, not a harmonic mean. Gapwise
+    /// thermal profiles require their own momentum integration and are not
+    /// represented by substituting a cell or wall viscosity.
+    ///
+    /// Original geometry, limits and force ports remain exact. All conductance
+    /// factors are compiled once here; pressure, tangent and work use the same
+    /// existing solve with no added evaluation allocation or iteration. The
+    /// caller owns source/temperature admission and holds these values fixed
+    /// inside each mechanical solve. This supplies no heat or mass evolution.
+    /// Refuses a wrong count, nonpositive/nonfinite viscosity or unrepresentable
+    /// conductance without changing the original operator.
+    pub fn with_channel_viscosities(&self, viscosities_pa_s: &[f64]) -> Result<Self, FilmError> {
+        if viscosities_pa_s.len() != self.channels.len() {
+            return fail("film viscosity count must match the original channels");
+        }
+        let mut factors = Vec::with_capacity(self.channels.len());
+        for (edge, &viscosity) in self.channels.iter().zip(viscosities_pa_s) {
+            if !viscosity.is_finite() || viscosity <= 0.0 {
+                return fail("film channel viscosity must be finite and positive");
+            }
+            let factor = (edge.width_m / edge.length_m) / (12.0 * viscosity);
+            if !factor.is_finite() || factor <= 0.0 {
+                return fail("film conductance scale overflow");
+            }
+            factors.push(factor);
+        }
+        Ok(Self {
+            cells: self.cells.clone(),
+            channels: self.channels.clone(),
+            factors,
+            channel_viscosities_pa_s: viscosities_pa_s.to_vec(),
+            pressure_viscosity_coefficient_per_pa: self.pressure_viscosity_coefficient_per_pa,
+            ports: self.ports,
+            limits: self.limits,
+        })
+    }
+
     /// Number of work-conjugate mechanical coordinates.
     #[must_use]
     pub fn port_count(&self) -> usize {
@@ -257,6 +316,11 @@ impl ResistiveFilm {
     #[must_use]
     pub fn cell_count(&self) -> usize {
         self.cells.len()
+    }
+    /// Number of retained hydraulic passages, including currently shut channels.
+    #[must_use]
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
     }
 
     /// Check cell and channel gap validity without advancing or solving pressure.
@@ -324,9 +388,22 @@ impl ResistiveFilm {
                 } else {
                     -(-scaled).ln_1p() / alpha
                 };
-                let viscosity = self.viscosity_pa_s / (1.0 - scaled);
-                if !p.is_finite() || !viscosity.is_finite() || viscosity <= 0.0 {
-                    return fail("Barus film pressure or viscosity is unrepresentable");
+                if !p.is_finite() {
+                    return fail("Barus film pressure is unrepresentable");
+                }
+            }
+            // Each passage retains its own reference viscosity. Pressure is
+            // monotone along a passage, so checking both ends bounds its full
+            // Barus viscosity; do not test an unrelated cell's coefficient.
+            for (edge, &mu) in self.channels.iter().zip(&self.channel_viscosities_pa_s) {
+                for psi in [
+                    s.potential[edge.from],
+                    edge.to.map_or(0.0, |j| s.potential[j]),
+                ] {
+                    let viscosity = mu / (1.0 - alpha * psi);
+                    if !viscosity.is_finite() || viscosity <= 0.0 {
+                        return fail("Barus film viscosity is unrepresentable");
+                    }
                 }
             }
         }

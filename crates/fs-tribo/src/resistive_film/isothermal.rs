@@ -98,6 +98,19 @@ impl IsothermalFilm {
         })
     }
 
+    /// Continue the same gas inventory with one fixed viscosity per channel.
+    /// The channel order and admission follow `ResistiveFilm::with_channel_viscosities`.
+    /// Reference masses, EOS, temperature and free energy do not change. This
+    /// declares a spatial transport field only, not a nonisothermal gas model.
+    pub fn with_channel_viscosities(&self, viscosities_pa_s: &[f64]) -> Result<Self, FilmError> {
+        Ok(Self {
+            geometry: self.geometry.with_channel_viscosities(viscosities_pa_s)?,
+            gas: self.gas,
+            initial_gap: self.initial_gap.clone(),
+            scales: self.scales.clone(),
+        })
+    }
+
     /// Number of work-conjugate mechanical coordinates.
     #[must_use]
     pub fn port_count(&self)->usize {self.geometry.port_count()}

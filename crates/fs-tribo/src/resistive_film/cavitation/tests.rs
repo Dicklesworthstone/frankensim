@@ -376,7 +376,7 @@ fn g1_g3_viscosity_continuation_preserves_cavity_and_changes_refill_flux() {
     assert!(saved.liquid_fraction()[0] < 1.0);
     let continued = original.with_viscosity(0.02).unwrap();
     assert_eq!(continued.liquid(), original.liquid());
-    assert_eq!(original.geometry().viscosity_pa_s(), 0.01);
+    assert_eq!(original.geometry().viscosity_pa_s(), Some(0.01));
     let baseline = original
         .advance(&saved, &[-0.001], &[0.0], 0.01, || false)
         .unwrap();
@@ -492,4 +492,49 @@ fn g0_viscosity_continuation_keeps_state_ownership_and_refuses_invalid_values() 
         .advance(&state, &[0.0], &[0.0], 0.001, || false)
         .unwrap();
     assert_eq!(first, retry);
+}
+
+#[test]
+fn g1_g3_channel_viscosities_keep_retained_cavities_and_conserve_separate_refill_fluxes() {
+    let mut graph = geometry(false);
+    graph.channels.push(graph.channels[0].clone());
+    // Construct the complete original graph before any state acquires ownership.
+    let graph = ResistiveFilm::new(graph.cells, graph.channels, 1, 0.01, graph.limits).unwrap();
+    let original = CavitatingFilm::new(graph, liquid(), config()).unwrap();
+    let old = original.initialize(&[-0.001], &[0.2]).unwrap();
+    let saved = old.clone();
+    let current = original.with_channel_viscosities(&[0.005, 0.02]).unwrap();
+    let step = current.advance(&old, &[-0.001], &[0.0; 2], 0.01, || false).unwrap();
+    let rates = [-2e-10 * 98_000.0, -0.5e-10 * 98_000.0];
+    for (actual, expected) in step.channel_volume_flow_m3_s.iter().zip(rates) {
+        close(*actual, expected);
+    }
+    assert_eq!(step.state.pressure_pa(), &[2000.0]);
+    close(step.state.liquid_fraction()[0], 0.2 - 0.01 * (rates[0] + rates[1]) / 2e-6);
+    close(step.report.liquid_mass_before_kg, 0.0004);
+    close(step.report.boundary_mass_out_kg, 1000.0 * 0.01 * (rates[0] + rates[1]));
+    close(step.report.liquid_mass_after_kg,
+        step.report.liquid_mass_before_kg - step.report.boundary_mass_out_kg);
+    assert!(step.report.mass_residual_kg.abs() < 1e-16);
+    assert_eq!(old, saved);
+
+    // Once reformed, both different resistances share ONE pressure and their
+    // actual fluxes still sum to the volume expelled by the moving wall.
+    let full = original.initial_state(&[0.0]).unwrap();
+    let squeeze = current.advance(&full, &[0.0001], &[0.0; 2], 0.01, || false).unwrap();
+    let volume_rate = 0.001 * 0.0001 / 0.01;
+    let pressure = volume_rate / 2.5e-10;
+    close(squeeze.state.pressure_pa()[0] - liquid().ambient_pressure_pa, pressure);
+    close(squeeze.channel_volume_flow_m3_s[0], 2e-10 * pressure);
+    close(squeeze.channel_volume_flow_m3_s[1], 0.5e-10 * pressure);
+    close(squeeze.generalized_force[0], 0.001 * pressure);
+    assert!(squeeze.report.mass_residual_kg.abs() < 1e-16);
+
+    let uniform = original.with_channel_viscosities(&[0.01; 2]).unwrap();
+    let baseline = original.advance(&old, &[-0.001], &[0.0; 2], 0.01, || false).unwrap();
+    let repeated = uniform.advance(&old, &[-0.001], &[0.0; 2], 0.01, || false).unwrap();
+    assert_eq!(baseline, repeated);
+    assert!(original.with_channel_viscosities(&[0.01]).is_err());
+    assert!(original.with_channel_viscosities(&[0.01, -0.01]).is_err());
+    assert_eq!(old, saved);
 }

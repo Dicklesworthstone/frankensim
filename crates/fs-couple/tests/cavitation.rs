@@ -149,7 +149,7 @@ fn original_water_controls_film_viscosity_pressure_force_and_conserved_mass() {
         assert_eq!(film.material(), material);
         assert_eq!(
             film.film().geometry().viscosity_pa_s(),
-            material.dynamic_viscosity_pa_s()
+            Some(material.dynamic_viscosity_pa_s())
         );
         assert_eq!(
             film.film().liquid().density_kg_m3,

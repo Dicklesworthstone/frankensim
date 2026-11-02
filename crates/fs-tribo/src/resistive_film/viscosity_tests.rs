@@ -90,7 +90,7 @@ fn coefficient_recompilation_is_nonaccumulating_and_keeps_the_original_limits() 
     assert_eq!(p, [42.0]);
     for mu in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
         assert!(original.with_viscosity(mu).is_err());
-        assert_eq!(original.viscosity_pa_s(), 0.01);
+        assert_eq!(original.viscosity_pa_s(), Some(0.01));
     }
 }
 
@@ -104,7 +104,7 @@ fn barus_single_passage_matches_integrated_fluidity_and_actual_pressure_work() {
     for mu in [0.01, 0.004] {
         let current = barus.with_viscosity(mu).unwrap();
         assert_eq!(current.pressure_viscosity_coefficient_per_pa(), alpha);
-        assert_eq!(current.viscosity_pa_s(), mu);
+        assert_eq!(current.viscosity_pa_s(), Some(mu));
         for speed in [-0.001, 0.001] {
             let q = [0.00001, 0.0];
             let mut force = [0.0; 2];
@@ -196,7 +196,7 @@ fn barus_network_conserves_volume_and_heat_and_keeps_the_nonsymmetric_tangent() 
     let mut heat = 0.0;
     for edge in &law.channels {
         let h = edge.gap.reference_m - dot(&edge.gap.closure, &q);
-        let g0 = edge.width_m * h.powi(3) / (12.0 * law.viscosity_pa_s() * edge.length_m);
+        let g0 = edge.width_m * h.powi(3) / (12.0 * law.viscosity_pa_s().unwrap() * edge.length_m);
         let a = pressure[edge.from];
         let b = edge.to.map_or(0.0, |j| pressure[j]);
         let rate = g0 * ((-alpha * b).exp() - (-alpha * a).exp()) / alpha;
@@ -322,4 +322,126 @@ fn barus_pressure_law_cannot_be_silently_used_by_other_film_storage_models() {
     let constant = law.with_barus_viscosity(0.0).unwrap();
     assert!(IsothermalFilm::at_ambient(constant.clone(), &[0.0; 2], gas).is_ok());
     assert!(CavitatingFilm::new(constant, liquid, solve).is_ok());
+}
+
+#[test]
+fn g1_channel_viscosities_determine_pressure_flow_power_and_full_tangent() {
+    let viscosities = [0.003, 0.017, 0.006];
+    for alpha in [0.0, 2e-4] {
+        let law = two_cell_barus()
+            .with_barus_viscosity(alpha)
+            .unwrap()
+            .with_channel_viscosities(&viscosities)
+            .unwrap();
+        assert_eq!(law.channel_count(), 3);
+        assert_eq!(law.viscosity_pa_s(), None);
+        assert_eq!(law.channel_viscosities_pa_s(), viscosities);
+        let q = [0.00001, -0.000002];
+        let v = [0.0006, 0.0001];
+        let mut force = [0.0; 2];
+        let mut pressure = [0.0; 2];
+        let report = law
+            .evaluate_into(&q, &v, &mut force, &mut pressure)
+            .unwrap();
+
+        // Independent two-node Kirchhoff solution using actual geometry and
+        // the individual supplied viscosities, not the compiled factors.
+        let g: Vec<_> = law
+            .channels
+            .iter()
+            .zip(viscosities)
+            .map(|(edge, mu)| {
+                let h = edge.gap.reference_m - dot(&edge.gap.closure, &q);
+                edge.width_m * h.powi(3) / (12.0 * mu * edge.length_m)
+            })
+            .collect();
+        let source = [0.0001 * v[0], 0.0002 * v[1]];
+        let determinant = g[0] * g[1] + g[0] * g[2] + g[1] * g[2];
+        let psi = [
+            ((g[0] + g[1]) * source[0] + g[0] * source[1]) / determinant,
+            (g[0] * source[0] + (g[0] + g[2]) * source[1]) / determinant,
+        ];
+        let exact = psi.map(|x| {
+            if alpha == 0.0 {
+                x
+            } else {
+                -(1.0 - alpha * x).ln() / alpha
+            }
+        });
+        for i in 0..2 {
+            assert!((pressure[i] - exact[i]).abs() < 2e-11);
+            assert!((force[i] - law.cells[i].area_m2 * exact[i]).abs() < 2e-15);
+        }
+        let flux = [g[0] * (psi[0] - psi[1]), g[1] * psi[1], g[2] * psi[0]];
+        assert!((flux[0] + flux[2] - source[0]).abs() < 3e-22);
+        assert!((flux[1] - flux[0] - source[1]).abs() < 3e-22);
+        let heat = flux[0] * (exact[0] - exact[1]) + flux[1] * exact[1] + flux[2] * exact[0];
+        assert!((report.dissipated_power_w - heat).abs() < 3e-18);
+        assert!((dot(&force, &v) - heat).abs() < 3e-18);
+
+        let dq = [0.000002, -0.000001];
+        let dv = [0.0002, -0.0001];
+        let mut tangent = [0.0; 2];
+        law.tangent_into(&q, &v, &dq, &dv, &mut tangent).unwrap();
+        let epsilon = 1e-5;
+        let qp: [f64; 2] = std::array::from_fn(|i| q[i] + epsilon * dq[i]);
+        let qm: [f64; 2] = std::array::from_fn(|i| q[i] - epsilon * dq[i]);
+        let vp: [f64; 2] = std::array::from_fn(|i| v[i] + epsilon * dv[i]);
+        let vm: [f64; 2] = std::array::from_fn(|i| v[i] - epsilon * dv[i]);
+        let (mut plus, mut minus) = ([0.0; 2], [0.0; 2]);
+        law.evaluate_into(&qp, &vp, &mut plus, &mut pressure)
+            .unwrap();
+        law.evaluate_into(&qm, &vm, &mut minus, &mut pressure)
+            .unwrap();
+        for i in 0..2 {
+            let finite_difference = (plus[i] - minus[i]) / (2.0 * epsilon);
+            assert!((tangent[i] - finite_difference).abs() < 2e-9 * tangent[i].abs().max(0.01));
+        }
+    }
+}
+
+#[test]
+fn g0_g3_uniform_channel_field_is_bitwise_original_and_invalid_updates_are_atomic() {
+    let original = two_cell_barus();
+    let uniform = original.with_channel_viscosities(&[0.01; 3]).unwrap();
+    let restored = original
+        .with_channel_viscosities(&[0.002, 0.007, 0.013])
+        .unwrap()
+        .with_viscosity(0.01)
+        .unwrap();
+    for law in [uniform, restored] {
+        assert_eq!(law.viscosity_pa_s(), Some(0.01));
+        assert_eq!(law.channel_viscosities_pa_s(), &[0.01; 3]);
+        assert_eq!(law.factors, original.factors);
+        let q = [0.00001, -0.000002];
+        let v = [0.0006, 0.0001];
+        let (mut a, mut b, mut pa, mut pb) = ([0.0; 2], [0.0; 2], [0.0; 2], [0.0; 2]);
+        let ra = original.evaluate_into(&q, &v, &mut a, &mut pa).unwrap();
+        let rb = law.evaluate_into(&q, &v, &mut b, &mut pb).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(pa, pb);
+        assert_eq!(
+            ra.dissipated_power_w.to_bits(),
+            rb.dissipated_power_w.to_bits()
+        );
+        original
+            .tangent_into(&q, &v, &[1e-6, 0.0], &[1e-4, 0.0], &mut a)
+            .unwrap();
+        law.tangent_into(&q, &v, &[1e-6, 0.0], &[1e-4, 0.0], &mut b)
+            .unwrap();
+        assert_eq!(a, b);
+    }
+    for values in [
+        vec![],
+        vec![0.01; 2],
+        vec![0.01; 4],
+        vec![0.01, 0.0, 0.01],
+        vec![0.01, -0.01, 0.01],
+        vec![0.01, f64::NAN, 0.01],
+        vec![0.01, f64::INFINITY, 0.01],
+        vec![0.01, f64::MAX, 0.01],
+    ] {
+        assert!(original.with_channel_viscosities(&values).is_err());
+        assert_eq!(original.channel_viscosities_pa_s(), &[0.01; 3]);
+    }
 }

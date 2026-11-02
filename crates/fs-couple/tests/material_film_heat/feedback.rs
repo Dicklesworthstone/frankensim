@@ -155,7 +155,7 @@ fn dissipative_work_heats_the_liquid_and_changes_the_next_actual_joint_force() {
                     .squeeze_film(0)
                     .unwrap()
                     .viscosity_pa_s(),
-                expected.dynamic_viscosity_pa_s()
+                Some(expected.dynamic_viscosity_pa_s())
             );
         }
         assert!(live.sources()[0].dynamic_viscosity_pa_s() < 0.009);

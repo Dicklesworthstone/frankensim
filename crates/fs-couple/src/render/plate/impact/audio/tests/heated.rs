@@ -158,7 +158,7 @@ fn sourced_viscosity_feedback_changes_the_same_motion_and_pressure() {
         let expected = law.at_temperature(Temperature::new(temperature)).unwrap();
         assert_eq!(source.sources()[0],expected);
         assert_eq!(source.system().mechanics().squeeze_film(0).unwrap().viscosity_pa_s(),
-            expected.dynamic_viscosity_pa_s());
+            Some(expected.dynamic_viscosity_pa_s()));
         let frame = live.last_mechanical_frame().unwrap();
         assert_eq!(frame.thermal.impact.mechanical.sample,live.samples_rendered());
         assert!(frame.thermal.impact.combined_energy_residual_j.abs()<1e-12);
