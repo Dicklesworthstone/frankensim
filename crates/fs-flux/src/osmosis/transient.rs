@@ -6,6 +6,8 @@
 //! Backward Euler balances every bulk and film solute together. At each water
 //! trial, the original exponentially fitted transport coefficients form a
 //! tridiagonal M-matrix, solved by the existing `fs_la` workspace in O(n) work.
+//! Finite kinetic sites add a positive diagonal storage derivative and use
+//! bounded Newton iterations with that same prepared tridiagonal workspace.
 //! The two terminal half cells and membrane use the original polarization law;
 //! its reconstructed surface concentrations supply the osmotic driving force.
 //!
@@ -30,9 +32,11 @@
 //!
 //! This is an isothermal, neutral, ideal dilute film model with cellwise constant
 //! diffusivities and negligible film hydraulic loss. Mobile concentration is
-//! continuous across internal faces. Sorption has no saturation, kinetic lag,
-//! swelling or caloric balance; its coefficients must be supplied within that
-//! model's applicability. It does not infer crossflow, turbulence, ionic fields,
+//! continuous across internal faces. Optional finite Langmuir sites add kinetic
+//! adsorption/desorption to the independent linear pool. Site capacity is an
+//! explicit fixed number of moles, not a water-volume-dependent concentration.
+//! Neither sorption model includes swelling or caloric balance; coefficients
+//! must be supplied within that model's applicability. It does not infer crossflow, turbulence, ionic fields,
 //! concentration-dependent diffusion, or heat storage.
 //! Cell averages approximate center concentrations; spatial refinement and time
 //! refinement are separate obligations. `step` accepts one first-order implicit
@@ -52,16 +56,25 @@ use fs_material::osmosis::{
 #[path = "transient/adaptive.rs"]
 pub mod adaptive;
 pub use adaptive::{TransientAdvanceControls, TransientAdvanceReport, TransientAdvanceWorkspace};
+#[path = "transient/kinetic.rs"]
+mod kinetic;
+pub use kinetic::FilmLangmuirSite;
+use kinetic::KineticStorage;
 
 /// Maximum finite cells on each side; all species share their geometry.
 pub const MAX_TRANSIENT_FILM_CELLS: usize = 4096;
 type Result<T> = core::result::Result<T, TransientOsmosisError>;
 
-/// Original material/network refusals or a failed conservative linear solve.
+/// Original material/network refusals or a failed conservative implicit solve.
 #[derive(Debug)]
 pub enum TransientOsmosisError {
     Network(OsmoticNetworkError),
     Linear(TridiagonalError),
+    Sorption(fs_material::adsorption::competitive::sites::scalar::ScalarSiteError),
+    /// Bounded implicit mobile/site solve did not satisfy its molar equations.
+    SorptionConvergence {
+        species: usize,
+    },
     /// Residual of an original molar equation, before any clipping/correction.
     LinearResidual {
         species: usize,
@@ -145,6 +158,7 @@ pub struct TransientFilm {
     diffusivity_m2_s: Box<[f64]>,
     initial_concentrations_mol_m3: Box<[f64]>,
     total_to_mobile_ratio: Option<Box<[f64]>>,
+    kinetic_sites: Option<Box<[Option<FilmLangmuirSite>]>>,
 }
 impl TransientFilm {
     /// Uniform cells, with one diffusivity per species throughout the film.
@@ -213,6 +227,7 @@ impl TransientFilm {
             diffusivity_m2_s: diffusivity_m2_s.into_boxed_slice(),
             initial_concentrations_mol_m3: initial_concentrations_mol_m3.into_boxed_slice(),
             total_to_mobile_ratio: None,
+            kinetic_sites: None,
         })
     }
 
@@ -263,6 +278,9 @@ pub struct TransientStepControls {
     pub absolute_amount_tolerance_mol: f64,
     /// Includes the zero-transfer trial and all bracketing/refused trials.
     pub maximum_root_evaluations: usize,
+    /// Per species and water trial; unused by films without kinetic sites.
+    pub maximum_sorption_iterations: usize,
+    pub maximum_sorption_backtracks: usize,
 }
 impl Default for TransientStepControls {
     fn default() -> Self {
@@ -272,6 +290,8 @@ impl Default for TransientStepControls {
             relative_amount_tolerance: 1e-10,
             absolute_amount_tolerance_mol: 1e-18,
             maximum_root_evaluations: 128,
+            maximum_sorption_iterations: 64,
+            maximum_sorption_backtracks: 32,
         }
     }
 }
@@ -292,6 +312,8 @@ pub struct TransientStepReport {
     pub solute_balance_residual_mol: [f64; MAX_OSMOTIC_SPECIES],
     pub species_count: usize,
     pub maximum_linear_residual_mol: f64,
+    /// Original coupled mobile-plus-site equation residual; zero without sites.
+    pub maximum_sorption_residual_mol: f64,
     pub water_root_residual_m3: f64,
     pub root_evaluations: usize,
 }
@@ -326,6 +348,7 @@ struct Trial {
     faces: [[f64; MAX_OSMOTIC_SPECIES]; 2],
     balance: [f64; MAX_OSMOTIC_SPECIES],
     maximum_linear_residual: f64,
+    maximum_sorption_residual: f64,
 }
 
 /// Two finite bulks and actual finite films. Prepared stepping allocates nothing.
@@ -338,6 +361,7 @@ pub struct TransientOsmoticPair {
     films: [Option<FilmGeometry>; 2],
     membrane: PolarizedMembraneTransport,
     film_amounts: Box<[f64]>,
+    kinetic: Option<KineticStorage>,
     workspace: Workspace,
     species_count: usize,
     rows: usize,
@@ -464,6 +488,10 @@ impl TransientOsmoticPair {
             .filter_map(|film| film.total_to_mobile_ratio.as_ref())
             .map(|ratios| ratios.len())
             .sum();
+        let kinetic = definitions
+            .iter()
+            .flatten()
+            .any(|f| f.kinetic_sites.is_some());
         // Conservative owned-heap bound: accepted/trial amounts, candidate
         // bulks, five matrix/RHS arrays, the original LU workspace, and all
         // boxed membrane/film coefficients. The initial supplied profile and
@@ -474,6 +502,11 @@ impl TransientOsmoticPair {
             + film_cells * size_of::<MembraneTransport>()
             + 2 * count * size_of::<Option<FilmPermeance>>()
             + 2 * sorption_entries * size_of::<f64>()
+            + if kinetic {
+                KineticStorage::bytes(film_cells * count, rows)
+            } else {
+                0
+            }
             + size_of::<Self>();
         if workspace_bytes > maximum_workspace_bytes {
             return Err(OsmoticNetworkError::Workspace {
@@ -526,6 +559,15 @@ impl TransientOsmoticPair {
                 }
             }
         }
+        let kinetic = if kinetic {
+            let storage = KineticStorage::new(&definitions, &film_amounts, rows)?;
+            for (amount, trapped) in film_amounts.iter_mut().zip(&storage.state.trapped) {
+                *amount = finite(*amount + trapped)?;
+            }
+            Some(storage)
+        } else {
+            None
+        };
         let result = Self {
             candidate_bulks: bulks.clone(),
             bulks,
@@ -533,6 +575,7 @@ impl TransientOsmoticPair {
             films,
             membrane,
             film_amounts,
+            kinetic,
             workspace: Workspace {
                 trial_amounts: zeros(rows * count)?,
                 lower: zeros(rows - 1)?,
@@ -600,7 +643,9 @@ impl TransientOsmoticPair {
         cell: usize,
         species: usize,
     ) -> Option<f64> {
-        let amount = *self.film_solute_moles(side, cell)?.get(species)?;
+        self.film_solute_moles(side, cell)?.get(species)?;
+        let row = 1 + cell + if side == 0 { 0 } else { self.left_cells() };
+        let amount = self.equilibrium_amount(row, species);
         let film = self.films.get(side)?.as_ref()?;
         Some(amount / film.solute_capacity(cell, species, self.species_count))
     }
@@ -611,7 +656,9 @@ impl TransientOsmoticPair {
         cell: usize,
         species: usize,
     ) -> Option<f64> {
-        let amount = *self.film_solute_moles(side, cell)?.get(species)?;
+        self.film_solute_moles(side, cell)?.get(species)?;
+        let row = 1 + cell + if side == 0 { 0 } else { self.left_cells() };
+        let amount = self.equilibrium_amount(row, species);
         let film = self.films.get(side)?.as_ref()?;
         Some(
             amount
@@ -619,15 +666,17 @@ impl TransientOsmoticPair {
                     / film.solute_capacity(cell, species, self.species_count)),
         )
     }
-    /// Equilibrated immobile portion; exactly zero for the nonsorbing model.
+    /// Both immobile pools: instantaneous linear plus finite kinetic loading.
+    /// Exactly zero for the nonsorbing model.
     pub fn film_sorbed_solute_moles(
         &self,
         side: usize,
         cell: usize,
         species: usize,
     ) -> Option<f64> {
-        let amount = *self.film_solute_moles(side, cell)?.get(species)?;
-        Some(amount - self.film_mobile_solute_moles(side, cell, species)?)
+        let mobile = self.film_mobile_solute_moles(side, cell, species)?;
+        let row = 1 + cell + if side == 0 { 0 } else { self.left_cells() };
+        Some((self.equilibrium_amount(row, species) - mobile) + self.trapped_amount(row, species))
     }
     pub fn total_solvent_volume_m3(&self) -> f64 {
         self.bulks
@@ -668,6 +717,25 @@ impl TransientOsmoticPair {
     fn total_amount(&self, species: usize) -> f64 {
         (0..self.rows).map(|row| self.amount(row, species)).sum()
     }
+    fn equilibrium_amount(&self, row: usize, species: usize) -> f64 {
+        if row == 0 || row + 1 == self.rows {
+            self.amount(row, species)
+        } else {
+            self.kinetic.as_ref().map_or_else(
+                || self.amount(row, species),
+                |k| k.state.equilibrium[(row - 1) * self.species_count + species],
+            )
+        }
+    }
+    fn trapped_amount(&self, row: usize, species: usize) -> f64 {
+        if row == 0 || row + 1 == self.rows {
+            0.0
+        } else {
+            self.kinetic.as_ref().map_or(0.0, |k| {
+                k.state.trapped[(row - 1) * self.species_count + species]
+            })
+        }
+    }
     fn volume(&self, cell: usize, water: f64) -> f64 {
         if cell == 0 {
             self.bulks[0].solution().solvent_volume_m3() - water
@@ -705,6 +773,7 @@ impl TransientOsmoticPair {
     fn evaluate(
         &mut self,
         area_time: f64,
+        duration_s: f64,
         water: f64,
         controls: TransientStepControls,
         evaluations: &mut usize,
@@ -732,6 +801,7 @@ impl TransientOsmoticPair {
             faces: [[0.0; MAX_OSMOTIC_SPECIES]; 2],
             balance: [0.0; MAX_OSMOTIC_SPECIES],
             maximum_linear_residual: 0.0,
+            maximum_sorption_residual: 0.0,
         };
         for species in 0..self.species_count {
             poll(cancelled)?;
@@ -741,7 +811,11 @@ impl TransientOsmoticPair {
                     poll(cancelled)?;
                 }
                 self.workspace.diagonal[row] = 1.0;
-                self.workspace.rhs[row] = self.amount(row, species);
+                self.workspace.rhs[row] = self.equilibrium_amount(row, species);
+                let capacity = self.solute_capacity(row, species, water);
+                if let Some(kinetic) = &mut self.kinetic {
+                    kinetic.capacities[row] = capacity;
+                }
             }
             for edge in 0..self.rows - 1 {
                 if edge % 128 == 0 {
@@ -777,55 +851,69 @@ impl TransientOsmoticPair {
                 self.workspace.upper[edge] = -b;
             }
             let work = &mut self.workspace;
-            work.linear.solve_into(
-                &work.lower,
-                &work.diagonal,
-                &work.upper,
-                &work.rhs,
-                &mut work.solution,
-                &mut *cancelled,
-            )?;
-            let mut before = 0.0;
-            let mut after = 0.0;
-            for row in 0..self.rows {
-                if row % 128 == 0 {
-                    poll(cancelled)?;
+            if let Some(kinetic) = &mut self.kinetic {
+                let (residual, balance) = kinetic.solve(
+                    work,
+                    species,
+                    self.species_count,
+                    duration_s,
+                    controls,
+                    &mut *cancelled,
+                )?;
+                trial.maximum_sorption_residual = trial.maximum_sorption_residual.max(residual);
+                trial.balance[species] = balance;
+            } else {
+                work.linear.solve_into(
+                    &work.lower,
+                    &work.diagonal,
+                    &work.upper,
+                    &work.rhs,
+                    &mut work.solution,
+                    &mut *cancelled,
+                )?;
+                let mut before = 0.0;
+                let mut after = 0.0;
+                for row in 0..self.rows {
+                    if row % 128 == 0 {
+                        poll(cancelled)?;
+                    }
+                    let value = work.solution[row];
+                    if !nonnegative(value) {
+                        return Err(invalid("negative or nonfinite implicit film amount"));
+                    }
+                    let mut residual = work.diagonal[row].mul_add(value, -work.rhs[row]);
+                    if row > 0 {
+                        residual = work.lower[row - 1].mul_add(work.solution[row - 1], residual);
+                    }
+                    if row + 1 < self.rows {
+                        residual = work.upper[row].mul_add(work.solution[row + 1], residual);
+                    }
+                    let tolerance = controls.absolute_amount_tolerance_mol
+                        + controls.relative_amount_tolerance * work.rhs[row].max(value);
+                    if !residual.is_finite() || residual.abs() > tolerance {
+                        return Err(TransientOsmosisError::LinearResidual {
+                            species,
+                            cell: row,
+                            residual_mol: residual,
+                        });
+                    }
+                    trial.maximum_linear_residual =
+                        trial.maximum_linear_residual.max(residual.abs());
+                    before += work.rhs[row];
+                    after += value;
+                    work.trial_amounts[row * self.species_count + species] = value;
                 }
-                let value = work.solution[row];
-                if !nonnegative(value) {
-                    return Err(invalid("negative or nonfinite implicit film amount"));
-                }
-                let mut residual = work.diagonal[row].mul_add(value, -work.rhs[row]);
-                if row > 0 {
-                    residual = work.lower[row - 1].mul_add(work.solution[row - 1], residual);
-                }
-                if row + 1 < self.rows {
-                    residual = work.upper[row].mul_add(work.solution[row + 1], residual);
-                }
-                let tolerance = controls.absolute_amount_tolerance_mol
-                    + controls.relative_amount_tolerance * work.rhs[row].max(value);
-                if !residual.is_finite() || residual.abs() > tolerance {
-                    return Err(TransientOsmosisError::LinearResidual {
+                trial.balance[species] = after - before;
+                if !trial.balance[species].is_finite()
+                    || trial.balance[species].abs()
+                        > controls.absolute_amount_tolerance_mol
+                            + controls.relative_amount_tolerance * before
+                {
+                    return Err(TransientOsmosisError::InventoryBalance {
                         species,
-                        cell: row,
-                        residual_mol: residual,
+                        residual_mol: trial.balance[species],
                     });
                 }
-                trial.maximum_linear_residual = trial.maximum_linear_residual.max(residual.abs());
-                before += work.rhs[row];
-                after += value;
-                work.trial_amounts[row * self.species_count + species] = value;
-            }
-            trial.balance[species] = after - before;
-            if !trial.balance[species].is_finite()
-                || trial.balance[species].abs()
-                    > controls.absolute_amount_tolerance_mol
-                        + controls.relative_amount_tolerance * before
-            {
-                return Err(TransientOsmosisError::InventoryBalance {
-                    species,
-                    residual_mol: trial.balance[species],
-                });
             }
             let left =
                 self.workspace.solution[middle] / self.solute_capacity(middle, species, water);
@@ -848,6 +936,7 @@ impl TransientOsmoticPair {
     fn solve_water(
         &mut self,
         area_time: f64,
+        duration_s: f64,
         controls: TransientStepControls,
         evaluations: &mut usize,
         cancelled: &mut impl FnMut() -> bool,
@@ -857,7 +946,8 @@ impl TransientOsmoticPair {
                 <= controls.absolute_water_tolerance_m3
                     + controls.relative_root_tolerance * trial.water.abs()
         };
-        let initial = self.evaluate(area_time, 0.0, controls, evaluations, cancelled)?;
+        let initial =
+            self.evaluate(area_time, duration_s, 0.0, controls, evaluations, cancelled)?;
         if converged(&initial) {
             return Ok(initial);
         }
@@ -881,6 +971,7 @@ impl TransientOsmoticPair {
             }
             match self.evaluate(
                 area_time,
+                duration_s,
                 direction * distance,
                 controls,
                 evaluations,
@@ -923,7 +1014,14 @@ impl TransientOsmoticPair {
                     * (controls.absolute_water_tolerance_m3
                         + controls.relative_root_tolerance * midpoint.abs())
             {
-                return self.evaluate(area_time, midpoint, controls, evaluations, cancelled);
+                return self.evaluate(
+                    area_time,
+                    duration_s,
+                    midpoint,
+                    controls,
+                    evaluations,
+                    cancelled,
+                );
             }
             let fraction = -flo / (fhi - flo);
             let fraction = if fraction.is_finite() {
@@ -935,7 +1033,14 @@ impl TransientOsmoticPair {
             if water == lo || water == hi {
                 return Err(OsmoticNetworkError::NonlinearConvergence.into());
             }
-            let trial = self.evaluate(area_time, water, controls, evaluations, cancelled)?;
+            let trial = self.evaluate(
+                area_time,
+                duration_s,
+                water,
+                controls,
+                evaluations,
+                cancelled,
+            )?;
             if converged(&trial) {
                 return Ok(trial);
             }
@@ -950,8 +1055,8 @@ impl TransientOsmoticPair {
     }
 
     /// Accept one fully implicit step. Water tolerances control its residual or
-    /// sign-changing root bracket; amount tolerances check the original linear
-    /// equations and total inventories. Neither estimates temporal truncation
+    /// sign-changing root bracket; amount tolerances check the original mobile
+    /// transport/site equations and total inventories. Neither estimates temporal truncation
     /// error. Refine dt separately; the actual water residual is always reported.
     pub fn step(
         &mut self,
@@ -978,6 +1083,8 @@ impl TransientOsmoticPair {
             || controls.relative_amount_tolerance >= 1.0
             || !positive(controls.absolute_amount_tolerance_mol)
             || !(2..=4096).contains(&controls.maximum_root_evaluations)
+            || !(1..=4096).contains(&controls.maximum_sorption_iterations)
+            || !(1..=128).contains(&controls.maximum_sorption_backtracks)
         {
             return Err(invalid(
                 "invalid transient film duration or root/balance controls",
@@ -990,7 +1097,13 @@ impl TransientOsmoticPair {
         }
         let before_water = self.total_solvent_volume_m3();
         let mut evaluations = 0;
-        let trial = self.solve_water(area_time, controls, &mut evaluations, &mut cancelled);
+        let trial = self.solve_water(
+            area_time,
+            duration_s,
+            controls,
+            &mut evaluations,
+            &mut cancelled,
+        );
         // Include refused trials in an adaptive window's work account.
         *root_evaluations = root_evaluations
             .checked_add(evaluations)
@@ -1032,6 +1145,7 @@ impl TransientOsmoticPair {
             solute_balance_residual_mol: trial.balance,
             species_count: count,
             maximum_linear_residual_mol: trial.maximum_linear_residual,
+            maximum_sorption_residual_mol: trial.maximum_sorption_residual,
             water_root_residual_m3: trial.residual,
             root_evaluations: evaluations,
         };
@@ -1040,6 +1154,16 @@ impl TransientOsmoticPair {
         // refusals have completed. Prepared copies cannot fail or allocate.
         self.film_amounts
             .copy_from_slice(&self.workspace.trial_amounts[count..(self.rows - 1) * count]);
+        if let Some(kinetic) = &mut self.kinetic {
+            kinetic
+                .state
+                .equilibrium
+                .copy_from_slice(&kinetic.trial.equilibrium);
+            kinetic
+                .state
+                .trapped
+                .copy_from_slice(&kinetic.trial.trapped);
+        }
         core::mem::swap(&mut self.bulks, &mut self.candidate_bulks);
         self.time_s = end;
         Ok(report)

@@ -74,6 +74,7 @@ pub struct TransientAdvanceReport {
 struct State {
     bulks: [OsmoticCompartment; 2],
     film_amounts: Box<[f64]>,
+    kinetic: Option<kinetic::Pools>,
     time_s: f64,
 }
 impl State {
@@ -81,6 +82,11 @@ impl State {
         Ok(Self {
             bulks: pair.bulks.clone(),
             film_amounts: zeros(pair.film_amounts.len())?,
+            kinetic: pair
+                .kinetic
+                .as_ref()
+                .map(|k| kinetic::Pools::new(k.state.trapped.len()))
+                .transpose()?,
             time_s: pair.time_s,
         })
     }
@@ -92,6 +98,14 @@ impl State {
     ) -> Result<()> {
         copy_bulks(&pair.bulks, &mut self.bulks)?;
         copy_amounts(&pair.film_amounts, &mut self.film_amounts, cancelled)?;
+        if let (Some(source), Some(target)) = (&pair.kinetic, &mut self.kinetic) {
+            copy_amounts(
+                &source.state.equilibrium,
+                &mut target.equilibrium,
+                cancelled,
+            )?;
+            copy_amounts(&source.state.trapped, &mut target.trapped, cancelled)?;
+        }
         self.time_s = pair.time_s;
         Ok(())
     }
@@ -103,6 +117,14 @@ impl State {
     ) -> Result<()> {
         copy_bulks(&self.bulks, &mut pair.bulks)?;
         copy_amounts(&self.film_amounts, &mut pair.film_amounts, cancelled)?;
+        if let (Some(source), Some(target)) = (&self.kinetic, &mut pair.kinetic) {
+            copy_amounts(
+                &source.equilibrium,
+                &mut target.state.equilibrium,
+                cancelled,
+            )?;
+            copy_amounts(&source.trapped, &mut target.state.trapped, cancelled)?;
+        }
         pair.time_s = self.time_s;
         Ok(())
     }
@@ -116,12 +138,24 @@ impl State {
             self.film_amounts[(row - 1) * count + species]
         }
     }
+    fn pools(&self, row: usize, species: usize, rows: usize, count: usize) -> [f64; 2] {
+        match &self.kinetic {
+            Some(k) if row > 0 && row + 1 < rows => {
+                let index = (row - 1) * count + species;
+                [k.equilibrium[index], k.trapped[index]]
+            }
+            _ => [self.amount(row, species, rows, count), 0.0],
+        }
+    }
 
     /// Infallible, allocation-free rollback even if cancellation interrupted a
     /// trial restore or occurred after the final accepted internal substep.
     fn swap_with(&mut self, pair: &mut TransientOsmoticPair) {
         core::mem::swap(&mut self.bulks, &mut pair.bulks);
         core::mem::swap(&mut self.film_amounts, &mut pair.film_amounts);
+        if let (Some(snapshot), Some(current)) = (&mut self.kinetic, &mut pair.kinetic) {
+            core::mem::swap(snapshot, &mut current.state);
+        }
         core::mem::swap(&mut self.time_s, &mut pair.time_s);
     }
 }
@@ -163,6 +197,7 @@ impl TransientAdvanceWorkspace {
     fn compatible(&self, pair: &TransientOsmoticPair) -> bool {
         self.rows == pair.rows
             && self.species_count == pair.species_count
+            && self.original.kinetic.is_some() == pair.kinetic.is_some()
             && self.original.bulks.iter().zip(&pair.bulks).all(|(a, b)| {
                 let a = a.solution();
                 let b = b.solution();
@@ -191,6 +226,8 @@ impl TransientAdvanceControls {
             || self.step.relative_amount_tolerance >= 1.0
             || !positive(self.step.absolute_amount_tolerance_mol)
             || !(2..=4096).contains(&self.step.maximum_root_evaluations)
+            || !(1..=4096).contains(&self.step.maximum_sorption_iterations)
+            || !(1..=128).contains(&self.step.maximum_sorption_backtracks)
         {
             return Err(invalid("invalid transient adaptive controls"));
         }
@@ -236,12 +273,12 @@ impl TransientAdvanceControls {
 }
 
 #[derive(Default)]
-struct Sum {
+pub(super) struct Sum {
     value: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, value: f64) {
+    pub(super) fn add(&mut self, value: f64) {
         let next = self.value + value;
         self.correction += if self.value.abs() >= value.abs() {
             (self.value - next) + value
@@ -250,7 +287,7 @@ impl Sum {
         };
         self.value = next;
     }
-    fn total(&self) -> Result<f64> {
+    pub(super) fn total(&self) -> Result<f64> {
         finite(self.value + self.correction)
     }
 }
@@ -270,6 +307,7 @@ fn retryable(error: &TransientOsmosisError) -> bool {
                 | OsmoticNetworkError::WorkBudget
         ) | TransientOsmosisError::LinearResidual { .. }
             | TransientOsmosisError::InventoryBalance { .. }
+            | TransientOsmosisError::SorptionConvergence { .. }
     )
 }
 
@@ -282,7 +320,11 @@ impl TransientOsmoticPair {
         maximum_workspace_bytes: usize,
     ) -> Result<TransientAdvanceWorkspace> {
         let bytes = core::mem::size_of::<TransientAdvanceWorkspace>()
-            + 3 * self.rows * self.species_count * core::mem::size_of::<f64>();
+            + 3 * self.rows * self.species_count * core::mem::size_of::<f64>()
+            + self
+                .kinetic
+                .as_ref()
+                .map_or(0, |k| 6 * k.state.trapped.len() * size_of::<f64>());
         if bytes > maximum_workspace_bytes {
             return Err(OsmoticNetworkError::Workspace {
                 required_bytes: bytes,
@@ -301,7 +343,7 @@ impl TransientOsmoticPair {
     }
 
     /// Advance exactly to `time_s() + duration_s` using step doubling. Every
-    /// amount, both bulk volumes and both membrane faces enter the maximum
+    /// amount (including mobile/linear and kinetic pools separately), both bulk volumes and both membrane faces enter the maximum
     /// scaled local-error norm. Root work, accepted steps and rejections are
     /// bounded. Any refusal/cancellation restores the complete original window.
     /// No allocation or extrapolation occurs during prepared advancement.
@@ -481,9 +523,11 @@ impl TransientOsmoticPair {
             let mut difference = Sum::default();
             let mut before = Sum::default();
             for row in 0..self.rows {
-                let amount = original.amount(row, species, self.rows, self.species_count);
-                difference.add(self.amount(row, species) - amount);
-                before.add(amount);
+                let pools = original.pools(row, species, self.rows, self.species_count);
+                difference.add(self.equilibrium_amount(row, species) - pools[0]);
+                difference.add(self.trapped_amount(row, species) - pools[1]);
+                before.add(pools[0]);
+                before.add(pools[1]);
             }
             *residual = difference.total()?;
             if residual.abs()
@@ -539,6 +583,25 @@ impl TransientOsmoticPair {
                     controls.absolute_amount_tolerance_mol,
                     controls.relative_tolerance,
                 )?);
+                if self.kinetic.is_some() {
+                    let start = start.pools(row, species, self.rows, self.species_count);
+                    let coarse = coarse.pools(row, species, self.rows, self.species_count);
+                    for (index, fine) in [
+                        self.equilibrium_amount(row, species),
+                        self.trapped_amount(row, species),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        error = error.max(scaled_error(
+                            start[index],
+                            coarse[index],
+                            fine,
+                            controls.absolute_amount_tolerance_mol,
+                            controls.relative_tolerance,
+                        )?);
+                    }
+                }
             }
         }
         for side in 0..2 {

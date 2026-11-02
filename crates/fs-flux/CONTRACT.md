@@ -2339,13 +2339,14 @@ the original exponential advection fit. Storage and balance use each cell's
 own volume; `film_cell_volume_m3(side, cell)` exposes that volume. The uniform
 constructor remains available. Coefficients are positive and fixed in time;
 mobile concentration is continuous across internal faces. Optional explicit
-linear sorption below partitions total storage while preserving the same mobile
-phase. Focused regressions cover analytical resistance, both flow directions,
+linear or finite kinetic sorption below partitions total storage while preserving
+the same mobile phase. Focused regressions cover analytical resistance, both flow directions,
 high material contrast and nonuniform spatial refinement.
 
 The `step` call accepts one backward-Euler step. Original exponentially fitted donor
 coefficients form a positive implicit amount system for each species. Native
-`fs_la::tridiagonal::TridiagonalWorkspace` solves it in linear work per species;
+`fs_la::tridiagonal::TridiagonalWorkspace` solves the nonsorbing/linear case in
+linear work per species and supplies each kinetic Newton correction below;
 all storage is prepared once. Terminal half cells use the existing polarization
 composition and actual reconstructed membrane-face concentrations drive water
 flow. The finite scalar solve is bounded and safeguarded; stiff sign-changing
@@ -2387,13 +2388,51 @@ and adaptive inventory norms include both pools; separate getters expose mobile
 concentration, mobile moles and sorbed moles. R=1 retains the exact original
 calculation without an additional capacity array. Prepared stepping remains
 allocation-free and additional preparation storage is included in its budget.
-Saturation, kinetic lag, swelling and sorption heat require other owners.
+The finite kinetic option below additionally represents saturation and delayed
+release; swelling and sorption heat require other owners.
 
 Focused authored tests check exact R=1 compatibility, stationary heterogeneous
 partition without a false osmotic force, analytical finite-bath retardation,
 reduced fixed-volume chemical-potential dissipation, and mobile-only advection
 in both directions at high Peclet number. They are not measured sorption or
 filtration validation.
+
+### Finite-capacity kinetic sorption in transient films
+
+`TransientFilm::with_langmuir_sorption` accepts an optional independent
+`FilmLangmuirSite` for each cell/species: fixed capacity in moles, adsorption
+rate in m3/(mol s), desorption rate in 1/s and explicit initial trapped moles.
+Mobile concentration drives dn_trapped/dt =
+k_ads*c_mobile*(capacity-n_trapped)-k_des*n_trapped. Site capacities do not
+change during water-root trials. Aqueous, instantaneous linear and finite
+kinetic storage can coexist. Only mobile concentration enters diffusion,
+advection, membrane reconstruction and osmotic water transfer.
+
+The shared scalar-site backward-Euler owner eliminates each local trapped
+endpoint and supplies its analytic derivative. Bounded Newton/backtracking
+then uses the original tridiagonal workspaces for the remaining mobile/linear
+amount equations. Explicit sorption iteration and backtrack limits supplement
+the existing water-root work bounds. Nonsorbing and linear-only films retain
+their direct solve and allocate no kinetic arrays.
+
+Accepted and trial mobile/linear amounts and finite trapped amounts remain
+separate, avoiding subtraction of a large retained inventory to recover a tiny
+mobile pool. Independent kinetic and coupled conservation residuals must fit
+the caller's increment/flux-scaled budget; an unrepresentable uptake cannot
+silently disappear beside a large preloaded site. The shared scalar owner
+preserves exact empty and balanced-site limits without erasing the uptake
+derivative. Getters expose trapped inventory and the original site coefficients.
+Preparation accounts for all new buffers; prepared steps and adaptive windows
+allocate no storage.
+
+Adaptive snapshots, rollback and separate error norms include both stored
+pools. Failed nonlinear solves, water-root exhaustion, source refusal or late
+cancellation publish neither pools nor the clock. Authored tests compare an
+independent finite-bath quadratic, saturation/release refinement, unchanged
+osmotic equilibrium at unequal bound loading, small mobile pools, sub-ULP
+uptake refusal and transactional adaptive failures. These ideal independent
+sites do not infer competitive occupancy, swelling, sorption heat or measured
+material applicability.
 
 ### Accuracy-controlled transient osmotic films
 

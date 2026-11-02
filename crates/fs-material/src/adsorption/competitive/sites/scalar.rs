@@ -50,11 +50,12 @@ pub fn backward_euler_site(initial: f64, capacity: f64, adsorption_rate: f64,
     let change = wa * vacant0 - wd * initial;
     let occupied = if change.abs() < 0.5 * initial { initial + change }
         else { inverse * initial + wa * capacity };
-    // An empty population with no integrated adsorption remains exactly empty.
-    // Evaluating the two complementary weights separately can otherwise round
-    // vacancy one ULP above capacity. This analytical limit also keeps the
-    // nonzero derivative with respect to adsorption at zero loading.
-    let vacancy = if initial == 0.0 && qa == 0.0 { capacity }
+    // Use the same near-equilibrium update for vacancy as occupancy. Separate
+    // rounded weight sums otherwise perturb vacancy at zero net reaction and
+    // amplify that perturbation into unequal gross streams over a long step.
+    // This also preserves exactly empty sites with no adsorption, including
+    // their nonzero derivative with respect to an adsorption perturbation.
+    let vacancy = if change.abs() < 0.5 * vacant0 { vacant0 - change }
         else { inverse * vacant0 + wd * capacity };
     let incoming = qa * vacancy;
     let outgoing = qd * occupied;
@@ -129,5 +130,24 @@ mod tests {
         assert!((perturbed.occupied_moles/1e-6-empty.adsorption_rate_derivative_mol_s).abs()
             <=1e-7*empty.adsorption_rate_derivative_mol_s);
         assert_eq!(perturbed.occupied_moles+perturbed.vacancy_moles,capacity);
+    }
+    #[test]
+    fn small_finite_sites_keep_stationary_inventory_and_equal_gross_streams_over_long_steps() {
+        for capacity in [1e-5,4e-7] {
+            for duration in [1e4,1e8] {
+                let half = 0.5*capacity;
+                let step = backward_euler_site(half,capacity,0.5,0.5,duration).unwrap();
+                assert_eq!(step.occupied_moles,half);
+                assert_eq!(step.vacancy_moles,half);
+                assert_eq!(step.occupied_moles+step.vacancy_moles,capacity);
+                assert_eq!(step.occupied_change_mol,0.0);
+                assert_eq!(step.gross_adsorption_mol,step.gross_desorption_mol);
+                assert_eq!(step.maximum_balance_residual_mol,0.0);
+                let derivative = duration/(1.0+duration)*half;
+                assert!((step.adsorption_rate_derivative_mol_s-derivative).abs()
+                    <=4.0*f64::EPSILON*derivative);
+                assert!(step.adsorption_rate_derivative_mol_s>0.0);
+            }
+        }
     }
 }
