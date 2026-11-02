@@ -2,7 +2,7 @@
 
 ## Purpose and layer
 
-Layer: **L4 ASCENT** (deps: fs-bo/fs-robust L4, fs-la/fs-rand L1, fs-math L0).
+Layer: **L4 ASCENT** (deps: fs-bo/fs-robust L4, fs-la/fs-rand/fs-modal L1, fs-math L0).
 Uncertainty quantification (plan §8.8): random-field inputs,
 spectral and sampling propagation, and multilevel Monte Carlo.
 Layered at L4 deliberately: propagation WRAPS solvers the way
@@ -89,6 +89,47 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   adaptive selection may return only a candidate whose simultaneous CS lower
   bound is feasible. If none is admitted, the API returns
   `NoFeasibleChanceCandidate` rather than a penalized but uncertified design.
+
+## Exact linear seismic response
+
+`seismic::linear_sdof_response` is an additive response path for
+`u'' + 2*zeta*omega*u' + omega²*u = -a_ground`, from initial rest. The
+original `sdof_peak`, bilinear response and recorded IDA retain their Newmark
+semantics. This path calls `fs-modal::time::LinearForceTransition`: input
+samples are endpoints of piecewise-linear acceleration, and one prepared
+full-interval transition is reused throughout the record. N samples cover
+N-1 intervals; no free-decay tail, resampling, filter or ground-motion
+frequency content is invented. Empty/single-sample records have zero motion.
+
+The reported displacement peak includes intersample extrema. Under linear
+forcing, oscillator acceleration satisfies the homogeneous second-order
+equation. Its analytic zeros partition velocity into monotone pieces in
+underdamped, critical and overdamped regimes. Velocity-zero brackets on those
+pieces are bisected using the same exact transition owner. This can recover
+a full-period held-load overshoot even when both sampled displacements vanish.
+No oversampling grid is used to infer that a peak was resolved.
+
+`LinearSdofControls` declares the sample cap, acceleration-zero cap per input
+interval, total transition-evaluation cap, bisection cap and time tolerance.
+`LinearSdofResponse` returns the peak magnitude/sign/time, endpoint motion,
+original duration, actual evaluation count and largest remaining root bracket.
+The localization allowance is half the bracket width times its largest
+endpoint speed, maximized across searched extrema. It bounds only numerical
+root localization under the monotonicity model, excluding floating-point
+transition/root errors, record bandwidth and physical model error; this is
+not an interval-certified peak enclosure. The implementation retains constant
+scalar storage and polls cancellation during admission, intervals and root
+search, including immediately before returning the complete result. Typed
+refusals expose invalid/unrepresentable inputs, work exhaustion and original
+transition errors without publishing a partial peak.
+
+Six focused tests cover analytic underdamped overshoot hidden by endpoints,
+critical/overdamped held-load limits, an analytic ramp without an appended
+tail, invariance under exact linear-record subdivision (including both sides
+of critical damping), independent physical-equation RK4 references with
+separate refinement, deterministic replay, and malformed/budget/cancellation
+refusals. This API makes a same-ISA/toolchain repeatability claim, not a new
+cross-ISA or experimental seismic-accuracy claim.
 
 ## Invariants
 

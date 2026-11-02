@@ -3033,6 +3033,7 @@ dependencies = [
  "fs-evidence",
  "fs-la",
  "fs-math",
+ "fs-modal",
  "fs-rand",
  "fs-robust",
 ]

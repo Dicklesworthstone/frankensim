@@ -9,6 +9,10 @@
 //! representation with counter-based phases (caller-seeded frequency-line identities,
 //! logical identity — no thread dependence).
 
+/// Exact piecewise-linear response with bounded intersample peak localization.
+pub mod linear;
+pub use linear::{LinearSdofControls, LinearSdofError, LinearSdofResponse, linear_sdof_response};
+
 /// Recorded acceleration histories and physically normalized motion suites.
 pub mod recorded;
 pub use recorded::{
