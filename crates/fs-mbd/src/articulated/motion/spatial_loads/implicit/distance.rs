@@ -16,10 +16,10 @@
 use super::super::MaterialPoint;
 use super::super::bushing::{self, SpatialBushing};
 use super::{
-    ArticulatedModel, Cell, FallibleFiniteDifference, FiniteDifferenceError, FreeFloatingBaseState,
-    FreeFloatingMotionError, FreeFloatingMotionState, ImplicitSpatialConfig, ImplicitSpatialError,
-    MAX_FREE_FLOATING_STEP_LINKS, MidpointEquations, MidpointInitial, MomentumMap,
-    NewtonKrylovConfig, NewtonKrylovState, NewtonReport, RefCell, SpatialMotionLoads,
+    ArticulatedModel, Cell, EffortLaw, FallibleFiniteDifference, FiniteDifferenceError,
+    FreeFloatingBaseState, FreeFloatingMotionError, FreeFloatingMotionState, ImplicitSpatialConfig,
+    ImplicitSpatialError, MAX_FREE_FLOATING_STEP_LINKS, MidpointEquations, MidpointInitial,
+    MomentumMap, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, RefCell, SpatialMotionLoads,
     SpatialMotionStep, Vec3, advance, finish_midpoint, poll, validate_config,
     validate_external_wrenches, validate_forward_dynamics_header, validate_slice,
 };
@@ -417,6 +417,83 @@ pub fn step_free_floating_bilateral_loops_with_bushings(
     bushings: &[SpatialBushing],
     duration: f64,
     config: BilateralLoopConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BilateralLoopStep, BilateralLoopError> {
+    step_bilateral_evaluated(
+        model, state, loads, loops, bushings, duration, config, None, cancelled,
+    )
+}
+
+/// Advance rigid bilateral loops, finite bushings and state-dependent internal
+/// joint effort in the same simultaneous native solve.
+///
+/// The callback receives elapsed time `duration / 2`, the complete reconstructed
+/// trial midpoint, and an output slice reset to `loads.held.generalized_force`.
+/// It may add to or replace those efforts. The trial includes the current
+/// initial constraint impulse; it need not yet satisfy closure. Joint forces,
+/// rigid reactions and bushing strains/rates therefore participate in one
+/// residual and its numerical Jacobian, including the independent verification
+/// with the actual summed native initial impulse.
+///
+/// Native ABA supplies the carrier reaction. The accepted midpoint effort
+/// supplies actuator work; neither joint effort nor objective loop reaction is
+/// an external momentum source. Both native constraint impulses retain their
+/// actual work, and endpoint position, hidden-velocity and mobility admissions
+/// are unchanged. The final `state_after`, including the endpoint reaction,
+/// remains the canonical state for the next step.
+///
+/// The effort units, repeatability and trial-history requirements of
+/// [`super::step_free_floating_spatial_implicit_with_effort`] apply. In
+/// particular, callbacks must not advance accepted physical/controller history
+/// during probes. Their side effects cannot be rolled back. General effort
+/// laws need not be passive; actuator storage/loss remains caller-owned.
+/// One O(joints) output buffer is reused throughout the bounded solve.
+///
+/// The existing midpoint stability, nonlinear geometry and refinement limits
+/// remain. This does not add coupled electrical/controller state, eliminate
+/// finite-step constraint work or identify a unique nonlinear branch.
+///
+/// # Errors
+/// All original loop/motion/regularity/budget refusals, invalid or over-limit
+/// trial effort, cancellation, or a callback error. No accepted native state
+/// is published on refusal; no effort, constraint or position is clipped.
+pub fn step_free_floating_bilateral_loops_with_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    loops: &[BilateralLoop],
+    bushings: &[SpatialBushing],
+    duration: f64,
+    config: BilateralLoopConfig,
+    mut effort: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BilateralLoopStep, BilateralLoopError> {
+    step_bilateral_evaluated(
+        model,
+        state,
+        loads,
+        loops,
+        bushings,
+        duration,
+        config,
+        Some(&mut effort),
+        cancelled,
+    )
+}
+
+fn step_bilateral_evaluated(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    loops: &[BilateralLoop],
+    bushings: &[SpatialBushing],
+    duration: f64,
+    config: BilateralLoopConfig,
+    effort: Option<&mut EffortLaw<'_>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<BilateralLoopStep, BilateralLoopError> {
     poll(&mut cancelled)?;
@@ -528,6 +605,12 @@ pub fn step_free_floating_bilateral_loops_with_bushings(
     guess.resize(n + 3 + count, 0.0);
     let evaluations = Cell::new(0usize);
     let cancelled = RefCell::new(cancelled);
+    let effort_values = if effort.is_some() {
+        loads.held.generalized_force.to_vec()
+    } else {
+        Vec::new()
+    };
+    let effort = RefCell::new((effort, effort_values));
     let charge = || -> Result<(), DistanceLoopError> {
         let used = evaluations.get();
         if used >= config.nonlinear.maximum_evaluations {
@@ -559,7 +642,7 @@ pub fn step_free_floating_bilateral_loops_with_bushings(
             coordinates.angular_com_world =
                 coordinates.angular_com_world + column.angular_com_world.scale(magnitude);
         }
-        let midpoint = MidpointEquations {
+        let equations = MidpointEquations {
             model,
             state: &kicked,
             loads,
@@ -569,8 +652,20 @@ pub fn step_free_floating_bilateral_loops_with_bushings(
             scales: &scales,
             gravity_only_external,
             bushings,
-        }
-        .evaluate(&x[..n + 3], &mut *cancel)?;
+        };
+        let midpoint = {
+            let mut effort = effort.borrow_mut();
+            let (law, values) = &mut *effort;
+            if let Some(law) = law.as_deref_mut() {
+                equations.evaluate_with_effort(
+                    &x[..n + 3],
+                    Some((law, values.as_mut_slice())),
+                    &mut *cancel,
+                )?
+            } else {
+                equations.evaluate(&x[..n + 3], &mut *cancel)?
+            }
+        };
         let q = advance(
             &state.joint_position,
             &midpoint.state.joint_velocity,
@@ -642,7 +737,7 @@ pub fn step_free_floating_bilateral_loops_with_bushings(
     charge()?;
     let kicked_map = MomentumMap::new(model, &kicked, &mut *cancel)?;
     let kicked_coordinates = kicked_map.coordinates(kicked.base)?;
-    let actual_midpoint = MidpointEquations {
+    let equations = MidpointEquations {
         model,
         state: &kicked,
         loads,
@@ -652,8 +747,20 @@ pub fn step_free_floating_bilateral_loops_with_bushings(
         scales: &scales,
         gravity_only_external,
         bushings,
-    }
-    .evaluate(&solver.x[..n + 3], &mut *cancel)?;
+    };
+    let actual_midpoint = {
+        let mut effort = effort.borrow_mut();
+        let (law, values) = &mut *effort;
+        if let Some(law) = law.as_deref_mut() {
+            equations.evaluate_with_effort(
+                &solver.x[..n + 3],
+                Some((law, values.as_mut_slice())),
+                &mut *cancel,
+            )?
+        } else {
+            equations.evaluate(&solver.x[..n + 3], &mut *cancel)?
+        }
+    };
     let final_q = advance(
         &kicked.joint_position,
         &actual_midpoint.state.joint_velocity,

@@ -3048,6 +3048,31 @@ original-source checks, not a full Cargo/DSR gate, cross-platform proof,
 performance qualification or general multibody lane completion. The broader
 `frankensim-ext-mbd-core-vqqt` remains open.
 
+### Implicit actuator effort with rigid bilateral loops
+
+`step_free_floating_bilateral_loops_with_effort` composes admitted distance
+and point loops, finite bushings and repeatable state-dependent internal joint
+effort in the same native solve. Every residual/Jacobian probe and the
+independent actual summed-impulse verification evaluate the law on the
+reconstructed midpoint, including the trial initial reaction. The accepted
+effort supplies actuator work. Original free-base recoil, both impulse-work
+accounts, endpoint closure/physical tangency and mobility admission remain
+authoritative.
+
+One effort buffer is reset from held efforts and reused; existing held-effort
+paths retain their original evaluator. Trial callbacks must not commit
+controller/material history, and arbitrary active effort is not assumed
+dissipative. This extends the bounded midpoint lane without a new solver,
+coupled electrical state or stronger finite-step energy/uniqueness claim.
+
+Three focused native groups verify driven constrained sliders against an
+independent reduced mass of 1.5 kg, including both reaction impulses and
+translating-carrier recoil; simultaneous joint-spring/motor and follower-bushing
+work; and trial/final-verification faults, cancellation, limits, budget refusal
+and deterministic retry. All eight existing distance-loop and seven point-loop
+groups also pass. Full Cargo qualification remains unavailable for the
+previously reported sibling dependency gap.
+
 
 ## Hertz moving phases and physical collinear stop/restart — v0
 
