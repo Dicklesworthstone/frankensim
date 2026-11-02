@@ -24,6 +24,8 @@ use std::collections::BTreeMap;
 
 mod reciprocal;
 pub use reciprocal::ReciprocalBemObservation;
+mod molecular;
+pub use molecular::{MolecularBemObservation, MolecularObservationError};
 mod scattering;
 pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
 mod harmonic;

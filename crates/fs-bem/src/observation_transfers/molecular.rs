@@ -1,0 +1,305 @@
+//! One material compression law in both boundary reaction and receiver fields.
+//!
+//! The existing triangle CBIE and molecular exterior own the physics. This
+//! adapter supplies their complete signed source basis to the common FIR
+//! owner. No absorption filter is applied after summing the source fields.
+//! A single triangle-CBIE operator spans the declared band; frequencies above
+//! the geometry's conservative resonance-exclusion bound refuse instead of
+//! switching discretizations inside a Fourier transfer.
+
+use super::*;
+use crate::helmholtz::laplace::complex::ComplexOptions;
+use crate::helmholtz::molecular::{MolecularError, MolecularExterior, MolecularRadiation};
+use fs_material::relaxation::RelaxationState;
+use std::cell::RefCell;
+
+/// The original material/boundary refusal or shared observation refusal.
+#[derive(Debug)]
+pub enum MolecularObservationError {
+    Transfer(TransferError),
+    Molecular(MolecularError),
+}
+impl core::fmt::Display for MolecularObservationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Transfer(error) => error.fmt(f),
+            Self::Molecular(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for MolecularObservationError {}
+impl From<TransferError> for MolecularObservationError {
+    fn from(error: TransferError) -> Self {
+        Self::Transfer(error)
+    }
+}
+impl From<MolecularError> for MolecularObservationError {
+    fn from(error: MolecularError) -> Self {
+        Self::Molecular(error)
+    }
+}
+fn invalid(what: &'static str) -> MolecularObservationError {
+    TransferError::Invalid(what).into()
+}
+
+/// Source-bound finite-distance observation and work-conjugate reaction of a
+/// closed body in an arbitrary admitted relaxing gas.
+///
+/// This inherits the original molecular owner's inviscid momentum equation:
+/// molecular compression loss is present; shear viscosity, heat conduction,
+/// wall layers and mean flow are not. The gas data are evaluated independently
+/// of instrument identity. Mesh, receiver quadrature and Fourier convergence
+/// remain separate; this adapter grants no continuum-accuracy certificate.
+pub struct MolecularBemObservation<'a> {
+    boundary: BemObservation<'a>,
+    exterior: MolecularExterior,
+    limits: ComplexOptions,
+    plain_cbie_limit_rad_per_m: f64,
+}
+
+impl<'a> MolecularBemObservation<'a> {
+    /// Bind original source traces and receivers to one evaluated molecular
+    /// medium. The entire declared band must be below the same closed-geometry
+    /// Dirichlet exclusion bound used by the ordinary radiation owner.
+    /// The source's equilibrium speed provides a conservative upper bound on
+    /// |k| for positive Debye reservoirs; its frozen speed gives the earliest
+    /// physical wavefront. Neither changes the actual finite-frequency solve.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        surface: &'a SpherePanels,
+        source: RelaxationState,
+        sources: &[SourceId],
+        traces: &[Vec<f64>],
+        receivers: &[ReceiverSpec],
+        minimum_clearance_m: f64,
+        band_rad_s: [f64; 2],
+        limits: ComplexOptions,
+    ) -> Result<Self, MolecularObservationError> {
+        let exterior = MolecularExterior::new(source, band_rad_s)?;
+        let gas = exterior.source().gas();
+        let policy = GeometryPolicy::new(surface).map_err(TransferError::from)?;
+        let plain_cbie_limit_rad_per_m = policy.plain_cbie_limit();
+        if band_rad_s[1] / gas.sound_speed > plain_cbie_limit_rad_per_m {
+            return Err(invalid(
+                "molecular observation band exceeds the triangle-CBIE resonance-exclusion bound",
+            ));
+        }
+        let panels = surface.areas().len();
+        let entries = panels
+            .checked_mul(panels)
+            .ok_or_else(|| invalid("molecular observation matrix extent overflow"))?;
+        if limits.max_panels == 0
+            || limits.max_panels > helmholtz::MAX_DENSE_PANELS
+            || panels > limits.max_panels
+            || entries
+                .checked_mul(32)
+                .is_none_or(|bytes| bytes > limits.max_bytes)
+            || (entries as u64)
+                .checked_mul(512)
+                .is_none_or(|work| work > limits.max_work)
+        {
+            return Err(invalid(
+                "molecular observation exceeds its complete boundary storage or work declaration",
+            ));
+        }
+        let mut boundary = BemObservation::new_admitted(
+            surface,
+            Medium::from(gas),
+            sources,
+            traces,
+            receivers,
+            minimum_clearance_m,
+            true,
+        )?;
+        // Only the FIR's exact prefix changes. Each complex Green function
+        // already contains the complete travel and dispersive phase, once.
+        let speed_ratio = gas.sound_speed / exterior.source().frozen_sound_speed_m_s();
+        for delay in &mut boundary.clearances_s {
+            *delay *= speed_ratio;
+        }
+        Ok(Self {
+            boundary,
+            exterior,
+            limits,
+            plain_cbie_limit_rad_per_m,
+        })
+    }
+
+    pub fn source(&self) -> &RelaxationState {
+        self.exterior.source()
+    }
+    pub fn plain_cbie_limit_rad_per_m(&self) -> f64 {
+        self.plain_cbie_limit_rad_per_m
+    }
+    pub fn geometric_delays_s(&self) -> Vec<f64> {
+        self.boundary.geometric_delays_s()
+    }
+
+    /// Cache identity includes the original gas and EVERY evaluated reservoir.
+    /// Equal equilibrium rho/c with different relaxation cannot reuse a bake.
+    pub fn operator_hash(&self) -> ContentHash {
+        let mut h = DomainHasher::new("fs-bem:observation-boundary:molecular-triangle-cbie:v1");
+        h.update(&self.boundary.operator_hash().0);
+        let gas = self.source().gas();
+        for value in [
+            gas.temperature,
+            gas.pressure,
+            gas.density,
+            gas.sound_speed,
+            gas.dynamic_viscosity,
+            gas.thermal_conductivity,
+            gas.gamma,
+            gas.specific_gas_constant,
+            gas.specific_heat_cp,
+            gas.prandtl,
+            gas.characteristic_impedance,
+            gas.water_mole_fraction,
+            self.source().frozen_cv_j_kg_k(),
+        ]
+        .into_iter()
+        .chain(self.exterior.band_rad_s())
+        {
+            h.update(&value.to_bits().to_le_bytes());
+        }
+        h.update(&(self.source().processes().len() as u64).to_le_bytes());
+        for process in self.source().processes() {
+            let name = process.species.as_str();
+            h.update(&(name.len() as u64).to_le_bytes());
+            h.update(name.as_bytes());
+            h.update(&(process.index as u64).to_le_bytes());
+            h.update(&process.heat_capacity_j_kg_k.to_bits().to_le_bytes());
+            h.update(&process.relaxation_time_s.to_bits().to_le_bytes());
+        }
+        h.finalize()
+    }
+
+    fn solutions(
+        &self,
+        omega: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<MolecularRadiation>, MolecularObservationError> {
+        let mut solutions = Vec::with_capacity(self.boundary.fields.len());
+        for batch in self
+            .boundary
+            .fields
+            .chunks(helmholtz::MAX_RADIATION_FIELDS_PER_BATCH)
+        {
+            let fields: Vec<_> = batch.iter().map(Vec::as_slice).collect();
+            solutions.extend(self.exterior.solve_batch(
+                self.boundary.surface,
+                omega,
+                &fields,
+                helmholtz::Formulation::PlainCbie,
+                &self.limits,
+                &mut *cancelled,
+            )?);
+        }
+        Ok(solutions)
+    }
+
+    /// Complete exp(-i omega t) p/gradient rows from the original material
+    /// boundary solution. The Neumann datum remains i*rho*omega*v; replacing
+    /// omega with k*c would assign a different force to the same source.
+    pub fn frequency_sample(
+        &self,
+        omega: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, MolecularObservationError> {
+        if cancelled() {
+            return Err(TransferError::Cancelled.into());
+        }
+        if !omega.is_finite() || omega < 0.0 {
+            return Err(invalid("invalid molecular observation frequency"));
+        }
+        if omega == 0.0 {
+            return Ok(vec![
+                C64::ZERO;
+                4 * self.boundary.points.len()
+                    * self.boundary.fields.len()
+            ]);
+        }
+        let mut out = Vec::new();
+        for solution in self.solutions(omega, &mut cancelled)? {
+            BemObservation::flatten(
+                solution.observe(
+                    self.boundary.surface,
+                    &self.boundary.points,
+                    self.boundary.minimum_clearance_m,
+                    &mut cancelled,
+                )?,
+                &mut out,
+            );
+        }
+        Ok(out)
+    }
+
+    /// One row of the work-conjugate boundary impedance at the same frequency.
+    /// Projects each source's pressure against the original receiving trace
+    /// and panel areas, preserving mixed structural/volume-flow units.
+    /// This is the physical reaction the one-way approximation leaves out;
+    /// no sign clipping, symmetrization or fitted loss is performed.
+    pub fn impedance_row(
+        &self,
+        omega: f64,
+        receiving_source: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, MolecularObservationError> {
+        let test = self
+            .boundary
+            .fields
+            .get(receiving_source)
+            .ok_or_else(|| invalid("unknown molecular reaction receiving source"))?;
+        let solved = self.solutions(omega, &mut cancelled)?;
+        Ok(solved
+            .iter()
+            .map(|solution| {
+                solution
+                    .pressure_pa()
+                    .iter()
+                    .zip(test)
+                    .zip(self.boundary.surface.areas())
+                    .fold(C64::ZERO, |sum, ((&pressure, &trace), &area)| {
+                        sum + pressure * trace.conj().scale(area)
+                    })
+            })
+            .collect())
+    }
+
+    /// The original bounded FIR owner, including material/boundary cancellation.
+    /// The geometric prefix uses frozen sound speed; the sampled response
+    /// already contains dispersion, so there is no second propagation delay.
+    pub fn bake(
+        &self,
+        declaration: &TransferDeclaration,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ObservationTransferBake, MolecularObservationError> {
+        let band = self.exterior.band_rad_s();
+        let finest = declaration.fft_lengths.last().copied().unwrap_or(0);
+        if declaration.sources != self.boundary.sources
+            || declaration.receivers != self.boundary.receivers
+            || declaration.geometric_delays_s != self.geometric_delays_s()
+            || declaration.producer_hash != self.operator_hash()
+            || core::f64::consts::TAU * declaration.taper_stop_hz > band[1]
+            || finest == 0
+            || core::f64::consts::TAU * declaration.fs_hz / (finest as f64) < band[0]
+            || matches!(
+                declaration.producer_uncertainty,
+                ProducerUncertainty::ExactAnalytic
+            )
+        {
+            return Err(invalid(
+                "cross-wired or out-of-band molecular observation declaration",
+            ));
+        }
+        let cancel = RefCell::new(cancelled);
+        bake_observation_transfers_with_errors(
+            |omega| self.frequency_sample(omega, || (*cancel.borrow_mut())()),
+            declaration,
+            0.0,
+            || (*cancel.borrow_mut())(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests;
