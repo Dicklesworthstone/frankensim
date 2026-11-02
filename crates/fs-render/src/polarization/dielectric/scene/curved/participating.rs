@@ -38,6 +38,9 @@ use fs_geom::Point3;
 use fs_math::det;
 use fs_rand::philox::philox4x32_10;
 
+/// Scattering survival along a solved native source-to-receiver branch.
+pub mod transmittance;
+
 /// Immutable density snapshot queried only at delta-tracking candidates.
 /// Implementations must return kg/m³ for one frozen physical state.
 pub trait CurvedDensityField: Sync {

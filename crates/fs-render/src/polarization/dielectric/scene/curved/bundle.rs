@@ -361,10 +361,49 @@ impl CurvedPolarizedScene<'_> {
         settings: CurvedBundleSettings,
         continue_extinguished: bool,
         diffuse_receiver: Option<u64>,
+        branches: impl FnMut(
+            &CurvedContact,
+            &CurvedBundleBranchContext,
+        ) -> Result<DielectricEvent, CurvedBundleSceneError>,
+    ) -> Result<CurvedBundlePathResult, CurvedBundleSceneError> {
+        self.trace_bundle_with_receiver_flights(
+            cx,
+            bundle,
+            initial_medium,
+            settings,
+            continue_extinguished,
+            diffuse_receiver,
+            branches,
+            |_, _| Ok(None),
+            |_, _, _, _, _| Ok(()),
+        )
+    }
+
+    // Optional source-survival candidates share this exact augmented boundary
+    // walk. The callbacks cannot replace geometry, interfaces, or derivatives.
+    // A segment observation receives incident medium, wavelength, actual arc
+    // length, native endpoint, and whether the endpoint is a tracking candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_bundle_with_receiver_flights(
+        &self,
+        cx: &Cx<'_>,
+        bundle: PolarizedRayBundle,
+        initial_medium: usize,
+        settings: CurvedBundleSettings,
+        continue_extinguished: bool,
+        diffuse_receiver: Option<u64>,
         mut branches: impl FnMut(
             &CurvedContact,
             &CurvedBundleBranchContext,
         ) -> Result<DielectricEvent, CurvedBundleSceneError>,
+        mut flight: impl FnMut(usize, f64) -> Result<Option<f64>, CurvedBundleSceneError>,
+        mut observe_segment: impl FnMut(
+            usize,
+            f64,
+            f64,
+            Point3,
+            bool,
+        ) -> Result<(), CurvedBundleSceneError>,
     ) -> Result<CurvedBundlePathResult, CurvedBundleSceneError> {
         cx.checkpoint()?;
         settings.validate()?;
@@ -403,8 +442,10 @@ impl CurvedPolarizedScene<'_> {
         );
         let mut departure = None;
         let mut remaining_steps = settings.trace.max_total_steps;
-        for event_index in 0..settings.trace.max_surface_events {
+        let mut first_segment = true;
+        while result.surface_events < settings.trace.max_surface_events {
             cx.checkpoint()?;
+            let event_index = result.surface_events;
             let remaining_distance = settings.trace.max_distance_m
                 - result.bundle.propagation().propagation().distance_m;
             if remaining_distance <= 0.0 {
@@ -414,6 +455,16 @@ impl CurvedPolarizedScene<'_> {
             if remaining_steps == 0 {
                 return Err(GradientIndexError::StepBudgetExceeded.into());
             }
+            let wavelength = result.bundle.propagation().wavelength_nm();
+            let tracking_flight = flight(result.medium, wavelength)?;
+            if tracking_flight.is_some_and(|distance| distance.is_nan() || distance < 0.0) {
+                return Err(CurvedBundleSceneError::NumericalRange);
+            }
+            let segment_distance = tracking_flight.map_or(remaining_distance, |distance| {
+                distance.min(remaining_distance)
+            });
+            let candidate_due =
+                tracking_flight.is_some_and(|distance| distance < remaining_distance);
             let mut boundary = settings.trace.event;
             boundary.integration.max_steps = boundary.integration.max_steps.min(remaining_steps);
             let options = BundleEventOptions {
@@ -439,7 +490,7 @@ impl CurvedPolarizedScene<'_> {
                 .continue_to_boundary_with_control(
                     field,
                     &mut oracle,
-                    remaining_distance,
+                    segment_distance,
                     departure.take(),
                     options,
                     || cx.checkpoint().is_ok(),
@@ -447,7 +498,7 @@ impl CurvedPolarizedScene<'_> {
                 .map_err(|error| {
                     if let Some(geometry) = oracle.last_error() {
                         CurvedBundleSceneError::from(geometry)
-                    } else if event_index == 0
+                    } else if first_segment
                         && error == PolarizedBundleError::Bundle(BundleError::InitialSampleMismatch)
                     {
                         SceneError::InvalidInitialMedium.into()
@@ -455,6 +506,7 @@ impl CurvedPolarizedScene<'_> {
                         error.into()
                     }
                 })?;
+            first_segment = false;
             remaining_steps = remaining_steps
                 .checked_sub(segment.segment.accepted_steps)
                 .and_then(|value| value.checked_sub(segment.segment.rejected_steps))
@@ -467,12 +519,59 @@ impl CurvedPolarizedScene<'_> {
             result.max_contact_resolution_m = result
                 .max_contact_resolution_m
                 .max(segment.contact_resolution_m);
+            let endpoint = result.bundle.propagation().propagation().ray.origin;
+            if candidate_due {
+                match segment.termination {
+                    BoundaryTermination::DistanceLimit => {
+                        // A candidate inside an unresolved arrival/departure
+                        // collar cannot be ordered against the real interface.
+                        let clearance = oracle
+                            .query(endpoint)
+                            .map_err(|error| {
+                                oracle.last_error().map_or_else(
+                                    || CurvedBundleSceneError::from(error),
+                                    CurvedBundleSceneError::from,
+                                )
+                            })?
+                            .clearance_m;
+                        if clearance <= 2.0 * settings.trace.event.surface_tolerance_m {
+                            return Err(GradientIndexError::BoundaryResolutionLimit.into());
+                        }
+                        observe_segment(
+                            result.medium,
+                            wavelength,
+                            segment.segment.distance_m,
+                            endpoint,
+                            true,
+                        )?;
+                        // Continue the original launch-angle columns from the
+                        // exact endpoint; a null candidate is not a surface.
+                        continue;
+                    }
+                    BoundaryTermination::Surface(_) => {
+                        if tracking_flight.ok_or(CurvedBundleSceneError::NumericalRange)?
+                            - segment.segment.distance_m
+                            <= segment.contact_resolution_m
+                        {
+                            return Err(GradientIndexError::BoundaryResolutionLimit.into());
+                        }
+                    }
+                }
+            }
+            observe_segment(
+                result.medium,
+                wavelength,
+                segment.segment.distance_m,
+                endpoint,
+                false,
+            )?;
             let BoundaryTermination::Surface(witness) = segment.termination else {
-                result.termination = if self.straight_ray_escapes(
-                    result.medium,
-                    result.bundle.propagation().propagation().ray,
-                    settings.trace.event.surface_tolerance_m,
-                )? {
+                result.termination = if tracking_flight.is_none()
+                    && self.straight_ray_escapes(
+                        result.medium,
+                        result.bundle.propagation().propagation().ray,
+                        settings.trace.event.surface_tolerance_m,
+                    )? {
                     PathTermination::Escaped
                 } else {
                     PathTermination::DistanceLimit

@@ -347,6 +347,30 @@ differentiable lift). Pure Rust throughout.
   branch plans, visibility, finite support, medium identity, contact resolution,
   planarity, work bounds and cancellation.
 
+- With `volumes`, `curved::participating::transmittance` connects a selected
+  native source branch with its molecular scattering survival. It first solves
+  the original deterministic bundle connection, then replays the solved launch
+  once through the same differentiated geometry walk. The replay must retain
+  the original ordered branch and resolve the same actual receiver. It supplies
+  only scattering survival; the original solved bundle remains authoritative
+  for Fresnel power, true absorption, focusing and the receiving-area Jacobian.
+  Uniform scattering uses exact exponential survival over actual physical arc
+  lengths without random draws. Bounded heterogeneous density and spectral
+  molecular fields use Poisson ratio tracking on that native curved arc, with
+  logarithmic products of `1 - beta_s/majorant`. Scattering is never folded into
+  the absorption field or evaluated on an invented straight shadow segment.
+  Original source/snapshot identities and wavelength-specific rate/phase
+  admission remain binding. A zero ratio factor is a legitimate stochastic zero;
+  floating underflow of a positive weight does not establish exact darkness.
+  Candidate/contact ordering inside unresolved geometry collars refuses.
+  Independent source samples, draw/candidate bounds and native cumulative
+  integration/query limits remain explicit; connection trace budgets include
+  the final replay. Reported work includes both solving and replay. The estimator
+  does not remove native numerical trajectory error, establish branch/image
+  completeness or convert budget failures into dark samples. Six native tests
+  cover homogeneous survival, prescribed heterogeneous factors on curved paths,
+  stochastic zeros, multi-medium refraction, invalid laws and work/cancellation.
+
 - `polarization::dielectric::scene::curved::camera::CurvedCameraScene` consumes
   native curved visibility, full smooth/GGX reciprocal Fresnel/frame transport and
   Beer integrals as scalar unpolarized camera radiance. It retains the native

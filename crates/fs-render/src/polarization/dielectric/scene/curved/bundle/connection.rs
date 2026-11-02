@@ -176,7 +176,7 @@ impl Default for BundleConnectionOptions {
 }
 
 impl BundleConnectionOptions {
-    fn validate(self) -> Result<(), BundleConnectionError> {
+    pub(crate) fn validate(self) -> Result<(), BundleConnectionError> {
         self.scene.validate()?;
         if self.max_iterations == 0
             || self.max_iterations > 256
@@ -270,6 +270,27 @@ impl BundleConnection {
     }
     pub const fn query_work(&self) -> u64 {
         self.work.geometry
+    }
+
+    // Source-survival replay uses this SAME receiver admission and ordered
+    // optical history. Its stochastic subdivisions do not replace the solved
+    // connection's geometric Jacobian or physical power transfer.
+    pub(crate) fn validate_replay(
+        &self,
+        replay: CurvedBundlePathResult,
+        target: BundleConnectionTarget,
+        projection: ProjectionOptions,
+    ) -> Result<(), BundleConnectionError> {
+        if replay.branch_signature() != self.path.branch_signature() {
+            return Err(BundleConnectionError::BranchChanged);
+        }
+        let replay = arrival(replay, target, projection)?;
+        if replay.position_error > target.position_tolerance_m {
+            return Err(BundleConnectionError::ContactResolution {
+                residual_m: replay.position_error,
+            });
+        }
+        Ok(())
     }
 }
 
