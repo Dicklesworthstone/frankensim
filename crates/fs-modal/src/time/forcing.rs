@@ -34,6 +34,23 @@ pub struct LinearForceTransition {
     ramp_displacement: f64,
 }
 
+/// Cotangents of a scalar objective through one fixed oscillator interval.
+///
+/// These are derivatives, not a physical modal state. Each has the objective's
+/// units divided by the corresponding input's units; callers supply the scalar
+/// objective and any additional parameterization chain rules.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinearForcePullback {
+    /// Derivative with respect to initial displacement, dJ/dq_start.
+    pub initial_displacement: f64,
+    /// Derivative with respect to initial velocity, dJ/dv_start.
+    pub initial_velocity: f64,
+    /// Derivative with respect to the first endpoint force, dJ/dF_start.
+    pub force_start: f64,
+    /// Derivative with respect to the second endpoint force, dJ/dF_end.
+    pub force_end: f64,
+}
+
 impl LinearForceTransition {
     /// Prepare one positive-duration interval with nonnegative finite damping.
     /// A zero frequency explicitly denotes a free coordinate and requires zero
@@ -172,6 +189,78 @@ impl LinearForceTransition {
         Ok(ModalAcousticState {
             displacement_m_sqrt_kg: q,
             velocity_m_sqrt_kg_per_s: v,
+        })
+    }
+
+    /// Pull endpoint cotangents `(dJ/dq_end, dJ/dv_end)` through this linear map.
+    ///
+    /// Frequency, damping ratio and duration are fixed. The transpose reuses
+    /// the prepared flow and force moments, with no matrix, allocation,
+    /// transcendental call or differentiation through preparation iterations.
+    /// Small state corrections use the same independently stored decrements as
+    /// the forward map; long decays retain the same homogeneous tails.
+    ///
+    /// For a force sample shared by two adjacent intervals, sum this interval's
+    /// `force_end` and the next interval's `force_start`. A trajectory reverse
+    /// sweep must propagate both state cotangents. Derivatives of physical
+    /// coefficients, sample times and nonsmooth peak selection are not supplied.
+    ///
+    /// # Errors
+    /// Nonfinite endpoint cotangents or unrepresentable scaled products/results.
+    /// No input or prepared transition is mutated and no partial gradient returns.
+    pub fn pullback(
+        &self,
+        endpoint_displacement_cotangent: f64,
+        endpoint_velocity_cotangent: f64,
+    ) -> Result<LinearForcePullback, ModalAcousticTimeError> {
+        let (q_bar, v_bar) = (endpoint_displacement_cotangent, endpoint_velocity_cotangent);
+        if ![q_bar, v_bar].into_iter().all(f64::is_finite) {
+            return Err(invalid("linear-force endpoint cotangents must be finite"));
+        }
+        let flow = self.transition;
+        let h = self.duration_s;
+        let restoring_gain = self.angular_frequency_rad_s * (flow.angle * flow.b);
+        let restoring = if restoring_gain.is_finite() && restoring_gain != 0.0 {
+            restoring_gain * v_bar
+        } else {
+            // Avoid squaring omega; a finite seed can make a very large/small
+            // homogeneous gain representable after the cotangent is included.
+            self.angular_frequency_rad_s * ((flow.angle * flow.b) * v_bar)
+        };
+        let initial_displacement = if flow.position_decrement.abs() < 0.5 {
+            q_bar - (flow.position_decrement * q_bar + restoring)
+        } else {
+            flow.position_retention * q_bar - restoring
+        };
+        let scaled_q_bar = h * q_bar;
+        let initial_velocity = if flow.velocity_decrement.abs() < 0.5 {
+            v_bar + (flow.b * scaled_q_bar - flow.velocity_decrement * v_bar)
+        } else {
+            flow.b * scaled_q_bar + flow.velocity_retention * v_bar
+        };
+        let force_start =
+            h * ((flow.g - self.ramp_displacement) * scaled_q_bar + (flow.b - flow.g) * v_bar);
+        let force_end = h * (self.ramp_displacement * scaled_q_bar + flow.g * v_bar);
+        if ![
+            restoring,
+            scaled_q_bar,
+            initial_displacement,
+            initial_velocity,
+            force_start,
+            force_end,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+        {
+            return Err(invalid(
+                "linear-force scaled cotangents and pullback must be representable",
+            ));
+        }
+        Ok(LinearForcePullback {
+            initial_displacement,
+            initial_velocity,
+            force_start,
+            force_end,
         })
     }
 }

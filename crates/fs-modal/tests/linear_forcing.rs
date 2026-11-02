@@ -301,3 +301,101 @@ fn g0_invalid_parameters_and_inputs_refuse_without_mutating_state() {
     assert!(step.advance(state(0.0, f64::INFINITY), 0.0, 0.0).is_err());
     assert_eq!(initial, state(0.2, -0.3));
 }
+
+#[test]
+fn g3_pullback_is_the_transpose_in_every_damping_regime() {
+    for (omega, zeta) in [(0.0, 0.0), (7.0, 0.0), (7.0, 0.2), (7.0, 1.0), (7.0, 4.0)] {
+        for h in [1.0e-10, 0.03, 2.0] {
+            let step = LinearForceTransition::try_new(omega, zeta, h).unwrap();
+            let direction = [0.4, -0.7, 1.2, -0.8];
+            let tangent = step
+                .advance(
+                    state(direction[0], direction[1]),
+                    direction[2],
+                    direction[3],
+                )
+                .unwrap();
+            let gradient = step.pullback(-0.3, 0.9).unwrap();
+            let forward =
+                -0.3 * tangent.displacement_m_sqrt_kg + 0.9 * tangent.velocity_m_sqrt_kg_per_s;
+            let reverse = gradient.initial_displacement * direction[0]
+                + gradient.initial_velocity * direction[1]
+                + gradient.force_start * direction[2]
+                + gradient.force_end * direction[3];
+            close(reverse, forward, 1.0);
+            let seeded = step.pullback(0.0, 1.0).unwrap();
+            let q_direction = step.advance(state(1.0, 0.0), 0.0, 0.0).unwrap();
+            close(
+                seeded.initial_displacement,
+                q_direction.velocity_m_sqrt_kg_per_s,
+                q_direction.velocity_m_sqrt_kg_per_s.abs(),
+            );
+        }
+    }
+}
+
+#[test]
+fn g3_trajectory_pullback_accumulates_shared_force_samples() {
+    let step = LinearForceTransition::try_new(4.0, 0.3, 0.12).unwrap();
+    let source = [0.2, -0.1, 1.0, -0.3, 0.8, 0.4]; // q0, v0, four force samples
+    let evaluate = |x: &[f64; 6]| {
+        let mut value = state(x[0], x[1]);
+        for forces in x[2..].windows(2) {
+            value = step.advance(value, forces[0], forces[1]).unwrap();
+        }
+        0.7 * value.displacement_m_sqrt_kg * value.displacement_m_sqrt_kg
+            + 0.4 * value.velocity_m_sqrt_kg_per_s * value.velocity_m_sqrt_kg_per_s
+    };
+    let mut endpoint = state(source[0], source[1]);
+    for forces in source[2..].windows(2) {
+        endpoint = step.advance(endpoint, forces[0], forces[1]).unwrap();
+    }
+    let (mut q_bar, mut v_bar) = (
+        1.4 * endpoint.displacement_m_sqrt_kg,
+        0.8 * endpoint.velocity_m_sqrt_kg_per_s,
+    );
+    let mut derivatives = [0.0; 6];
+    for interval in (0..3).rev() {
+        let gradient = step.pullback(q_bar, v_bar).unwrap();
+        derivatives[interval + 2] += gradient.force_start;
+        derivatives[interval + 3] += gradient.force_end;
+        (q_bar, v_bar) = (gradient.initial_displacement, gradient.initial_velocity);
+    }
+    derivatives[0] = q_bar;
+    derivatives[1] = v_bar;
+    for index in 0..6 {
+        let (mut plus, mut minus) = (source, source);
+        plus[index] += 1.0e-5;
+        minus[index] -= 1.0e-5;
+        let difference = (evaluate(&plus) - evaluate(&minus)) / 2.0e-5;
+        close(derivatives[index], difference, 10.0);
+    }
+}
+
+#[test]
+fn g0_pullback_refuses_invalid_or_unrepresentable_cotangents() {
+    let step = LinearForceTransition::try_new(7.0, 0.2, 0.1).unwrap();
+    for seeds in [
+        (f64::NAN, 0.0),
+        (0.0, f64::INFINITY),
+        (f64::NEG_INFINITY, 1.0),
+    ] {
+        assert!(step.pullback(seeds.0, seeds.1).is_err());
+    }
+    let long = LinearForceTransition::try_new(0.0, 0.0, 1.0e200).unwrap();
+    assert!(long.pullback(1.0, 0.0).is_err());
+    let zero = step.pullback(0.0, 0.0).unwrap();
+    assert_eq!(
+        [
+            zero.initial_displacement,
+            zero.initial_velocity,
+            zero.force_start,
+            zero.force_end
+        ],
+        [0.0; 4]
+    );
+    assert_eq!(
+        step.pullback(0.4, -0.2).unwrap(),
+        step.pullback(0.4, -0.2).unwrap()
+    );
+}

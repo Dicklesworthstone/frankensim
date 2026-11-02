@@ -116,6 +116,22 @@ resonant growth under a sampled linear forcing interpolant. G3 checks temporal
 subdivision and replay, including both sides of critical damping and a strongly
 overdamped slow pole. Existing ZOH stepping and energy arithmetic are unchanged.
 
+`LinearForceTransition::pullback` returns `LinearForcePullback` cotangents for
+initial displacement/velocity and both endpoint forces, with frequency, damping
+and duration fixed. It transposes the same cached flow and force moments;
+near-identity corrections reuse the independent decrements, while long decays
+reuse the homogeneous retentions. It allocates nothing, evaluates no
+transcendentals and does not differentiate preparation iterations. Inputs and
+scaled results must remain finite, with no mutation or partial gradient on
+refusal. A reverse trajectory carries both state cotangents and adds both
+adjacent contributions at every shared force sample. These are derivatives of
+the caller's scalar objective, not physical state values. Parameter/time
+sensitivities and derivatives of nonsmooth peak selection are outside scope.
+G3 checks the transpose identity across free/under/critical/overdamped regimes
+and tiny/finite steps, then compares all initial-state and shared-force
+trajectory derivatives with independent finite differences. G0 covers invalid
+seeds, overflow refusal, zero cotangents and deterministic retry.
+
 `held_force_for_port_velocity` solves the exact-ZOH scalar endpoint constraint
 using free modal motion plus unit-port-force mobility, with conjugate force
 and velocity projections.

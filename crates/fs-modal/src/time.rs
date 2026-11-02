@@ -36,7 +36,7 @@ use heat::{DampedTransition, ViscousIntegral};
 
 /// Prepared exact transitions under linearly interpolated force samples.
 pub mod forcing;
-pub use forcing::LinearForceTransition;
+pub use forcing::{LinearForcePullback, LinearForceTransition};
 
 /// Maximum number of modes admitted by one runtime model.
 pub const MAX_TIME_DOMAIN_ACOUSTIC_MODES: usize = 4_096;
