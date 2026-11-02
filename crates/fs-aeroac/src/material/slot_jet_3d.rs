@@ -290,7 +290,7 @@ impl SlotJet3dForceHarmonics {
     pub fn harmonics(&self) -> &[usize] {
         &self.harmonics
     }
-    /// Known fundamental of the fit [Hz].
+    /// Fundamental used by the joint fit [Hz], supplied or locally refined.
     #[must_use]
     pub const fn fundamental_hz(&self) -> f64 {
         self.fundamental_hz
@@ -479,6 +479,41 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialSlotJet3dRun<'_, F> {
         })
     }
 
+    /// Refine one common fundamental from both recorded integrated-force axes.
+    /// Original N units, sample clock, phase origin and periodic span survive.
+    /// No absent spanwise force or isolated-source radiation is manufactured.
+    /// The shared local vector fit retains physical component weights and
+    /// explicitly budgets its transposed record and numerical workspace.
+    pub fn fit_force_harmonics_refined(
+        &self,
+        initial_fundamental_hz: f64,
+        harmonics: &[usize],
+        budget: fs_fft::harmonic::HarmonicFrequencyBudget,
+    ) -> Result<
+        (SlotJet3dForceHarmonics, super::ForceFrequencyRefinement),
+        fs_fft::harmonic::HarmonicFrequencyError,
+    > {
+        let (force_n, summary, refinement) = super::frequency::refine_force_harmonics(
+            &self.force_series_n,
+            self.timestep_s,
+            initial_fundamental_hz,
+            harmonics,
+            budget,
+        )?;
+        Ok((
+            SlotJet3dForceHarmonics {
+                acoustic: self.acoustic,
+                span_m: self.span_m,
+                harmonics: harmonics.to_vec(),
+                fundamental_hz: refinement.fundamental_hz,
+                force_n,
+                dc_force_n: summary.map(|s| s.dc),
+                residual_rms_n: summary.map(|s| s.residual_rms),
+            },
+            refinement,
+        ))
+    }
+
     /// Jointly fit arbitrary declared tones on the original physical clock.
     /// One shared L1 factorization separates DC and all tones for both force
     /// axes. Noncommensurate lines retain their true frequencies, phase from
@@ -509,6 +544,59 @@ impl MaterialSlotJet3dRun<'_, GasState> {
 mod tone_tests {
     use super::*;
     use fs_fft::harmonic::HarmonicFitBudget;
+
+    #[test]
+    fn g1_refined_harmonics_retain_periodic_span_and_integrated_newtons() {
+        let dt = 0.00025;
+        let f0 = 137.3;
+        let expected = [C64::new(0.02, -0.01), C64::new(-0.004, 0.008)];
+        let record: Vec<_> = (0..1021)
+            .map(|i| {
+                let (s, c) = (core::f64::consts::TAU * f0 * i as f64 * dt).sin_cos();
+                [
+                    0.05 + expected[0].re * c + expected[0].im * s,
+                    -0.03 + expected[1].re * c + expected[1].im * s,
+                ]
+            })
+            .collect();
+        let (force_n, summary, refinement) = super::super::frequency::refine_force_harmonics(
+            &record,
+            dt,
+            137.8,
+            &[1],
+            fs_fft::harmonic::HarmonicFrequencyBudget {
+                frequency_bounds_hz: [136.0, 139.0],
+                absolute_tolerance_hz: 1e-8,
+                max_evaluations: 24,
+                fit: HarmonicFitBudget {
+                    max_workspace_bytes: 1_000_000,
+                    min_reciprocal_condition: 1e-10,
+                },
+            },
+        )
+        .unwrap();
+        let fitted = SlotJet3dForceHarmonics {
+            acoustic: FluidAcousticState::try_new(1.2, 340.0).unwrap(),
+            span_m: 0.013,
+            harmonics: vec![1],
+            fundamental_hz: refinement.fundamental_hz,
+            force_n,
+            dc_force_n: summary.map(|s| s.dc),
+            residual_rms_n: summary.map(|s| s.residual_rms),
+        };
+        assert_eq!(fitted.span_m(), 0.013);
+        let line = fitted.force_harmonic(1).unwrap();
+        assert!((line.frequency_hz - f0).abs() < 1e-8);
+        assert!(
+            (line.acoustic_wavenumber_rad_m - core::f64::consts::TAU * f0 / 340.0).abs() < 1e-9
+        );
+        for axis in 0..2 {
+            assert!((line.force_n[axis] - expected[axis]).abs() < 1e-10);
+            assert!(fitted.residual_rms_n[axis] < 1e-10);
+        }
+        assert!((fitted.dc_force_n[0] - 0.05).abs() < 1e-10);
+        assert!((fitted.dc_force_n[1] + 0.03).abs() < 1e-10);
+    }
 
     #[test]
     fn g1_arbitrary_tones_retain_integrated_force_and_periodic_span() {

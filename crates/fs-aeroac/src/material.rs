@@ -12,8 +12,10 @@
 //! observation. The three-dimensional adapter retains periodic-cell force;
 //! it does not reinterpret that force as an isolated acoustic source.
 
+mod frequency;
 /// Same-material SI binding for the existing three-dimensional slot-jet rig.
 pub mod slot_jet_3d;
+pub use frequency::ForceFrequencyRefinement;
 pub use slot_jet_3d::{
     MaterialSlotJet3d, MaterialSlotJet3dRun, SlotJet3dForceHarmonics, SlotJet3dForceLine,
     SlotJet3dForceSpectrum, SlotJet3dForceTones, SlotJet3dSetup,
@@ -373,7 +375,7 @@ impl JetForceHarmonics {
         &self.harmonics
     }
 
-    /// Known fundamental supplied to the fit [Hz]; it is not pitch estimation.
+    /// Fundamental used by the joint fit [Hz], supplied or locally refined.
     #[must_use]
     pub const fn fundamental_hz(&self) -> f64 {
         self.fundamental_hz
@@ -581,6 +583,43 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabiumRun<'_, F> {
             dc_force_n_m: summary.map(|s| s.dc),
             residual_rms_n_m: summary.map(|s| s.residual_rms),
         })
+    }
+
+    /// Refine one common fundamental from both recorded physical force axes.
+    /// The original clock, relative component strengths, DC, phase origin and
+    /// N/m units are retained. Every candidate shares one QR across both axes;
+    /// no preferred coordinate direction or separate pitch average is chosen.
+    ///
+    /// The seed and local interval come from the caller. This does not discover
+    /// a global shedding frequency, remove aliasing, or validate compactness.
+    /// The total memory budget includes transposition of the accepted record.
+    pub fn fit_force_harmonics_refined(
+        &self,
+        initial_fundamental_hz: f64,
+        harmonics: &[usize],
+        budget: fs_fft::harmonic::HarmonicFrequencyBudget,
+    ) -> Result<
+        (JetForceHarmonics, ForceFrequencyRefinement),
+        fs_fft::harmonic::HarmonicFrequencyError,
+    > {
+        let (force_n_m, summary, refinement) = frequency::refine_force_harmonics(
+            &self.force_series_n_m,
+            self.timestep_s,
+            initial_fundamental_hz,
+            harmonics,
+            budget,
+        )?;
+        Ok((
+            JetForceHarmonics {
+                acoustic: self.acoustic,
+                harmonics: harmonics.to_vec(),
+                fundamental_hz: refinement.fundamental_hz,
+                force_n_m,
+                dc_force_n_m: summary.map(|s| s.dc),
+                residual_rms_n_m: summary.map(|s| s.residual_rms),
+            },
+            refinement,
+        ))
     }
 
     /// Fit the actual force record at declared, possibly noncommensurate tones.
