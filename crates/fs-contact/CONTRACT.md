@@ -1685,6 +1685,26 @@ probes, subdivision, reversal, one-ulp travel and applicability refusals. Native
 mobility, evolving geometry and time integration remain the mechanical owner's
 responsibility. This operator supplies elastic work, not a normal-impact law.
 
+## Original-source Archard wear on each ordered surface
+
+`interface_binding::wear::SourceArchardWear` retains dimensionless Archard
+coefficients from the same original ordered dry interface and positive
+pressure-valued indentation hardness from each original bulk material. Complete
+property keys, declared hardness test context, exact selected claims, quantity
+schemas, material roles and source authority remain with their existing owners.
+Only declared friction coordinates and each named bulk-temperature coordinate
+may evolve; other admitted external conditions stay fixed on every refresh.
+
+Given actual unsigned travel, compressive load and original solid caloric
+endpoints, `advance_candidate` refreshes pinned endpoint coefficients/hardness
+and calls native `ArchardLaw` for both volumes, `delta_V_i = k_i*N*delta_s/H_i`,
+without mutating accepted state. Endpoint k/H with held N is a time
+discretization requiring refinement under changing conditions. This supplies
+cumulative removed-volume diagnostics, not surface recession, debris/mass
+transport, energy partition or hardness-scale conversion. Native coupled
+regressions exercise curved travel, reversed sliding, zero wear, individual
+thermal hardness, fixed-condition/source refusal and complete late rollback.
+
 ## Source-bound circular junction spin resistance
 
 `SourceAdhesiveShear::{sliding_patch_jkr,sliding_patch_dmt,sliding_patch_maugis}`

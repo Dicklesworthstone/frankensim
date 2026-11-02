@@ -20879,3 +20879,25 @@ standing-wave volume integration and 1/3/11-cell partition invariance, native
 finite storage, original conduction/reservoir/authored heat, scheduled boundary
 changes and continuation, latent storage and domain/cancellation rollback,
 exact native zero-drive behavior and physical-mapping refusals.
+
+## Source-bound wear on the actual directional friction and heat trajectory
+
+`friction_heat::directional::wear::apply_source_directional_trajectory_heat_with_wear`
+advances original directional rigid recoil, source history, finite enthalpy and
+both surface Archard volumes in one transaction. The existing full-matrix
+curved sliding/arrest owner supplies actual unsigned travel, not net displacement
+or an impulse-derived distance. The accepted original friction query supplies
+wear coefficients, and each original bulk hardness is refreshed at its own
+actual caloric temperature.
+
+Body and thermal-cell budgets are checked before staging. Every source/wear
+check and final cancellation precedes joint publication; a late hardness-domain
+refusal leaves bodies, history, thermal state and both volumes unchanged. Wear
+creates no energy share or replacement heat partition, preserving the original
+mechanical/thermal energy account. Geometry, poses and normal load retain the
+original phase assumptions. Endpoint coefficient/hardness sampling requires
+time refinement; predicted volume does not infer geometry recession, debris or
+mass removal. Native roundoff slip is retained rather than silently clamped.
+Four physical test groups cover curved travel and distinct thermal hardness,
+forward/reverse sliding and arrest, zero wear, original source/role/fixed-context
+admission, unchanged heat and late atomic rollback.

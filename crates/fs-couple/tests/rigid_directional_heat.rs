@@ -43,6 +43,8 @@ mod impacts;
 mod sphere_plane;
 #[path = "rigid_directional_heat/trajectory.rs"]
 mod trajectory;
+#[path = "rigid_directional_heat/wear.rs"]
+mod wear;
 
 const CELLS: [CellId; 2] = [CellId(30), CellId(10)];
 const CAPACITY: [f64; 2] = [0.02, 0.06];

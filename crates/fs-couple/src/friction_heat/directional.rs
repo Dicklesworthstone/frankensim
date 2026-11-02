@@ -17,6 +17,8 @@
 /// Continuous directional trajectories, including finite arrest, in the same
 /// original material/finite-enthalpy transaction.
 pub mod trajectory;
+/// Actual curved sliding paths driving original per-surface Archard wear.
+pub mod wear;
 
 /// Static hold and driven directional friction with the original heat network.
 pub mod driven;

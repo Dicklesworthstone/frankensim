@@ -15,6 +15,8 @@ pub mod adhesive_shear;
 pub mod mindlin;
 /// Source-pinned Coulomb coefficients refreshed at the solved contact temperature.
 pub mod thermal_friction;
+/// Source-pinned two-surface Archard wear on accepted physical sliding paths.
+pub mod wear;
 
 use core::fmt;
 use std::collections::BTreeMap;
