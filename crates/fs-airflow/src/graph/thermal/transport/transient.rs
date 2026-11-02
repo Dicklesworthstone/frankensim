@@ -383,6 +383,7 @@ fn thermal_checkpoint(cx: &Cx<'_>) -> Result<(), DepositionError> {
 }
 
 pub mod coupled;
+pub mod implicit;
 pub mod inertial;
 
 #[cfg(test)]

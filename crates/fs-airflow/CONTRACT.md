@@ -2676,3 +2676,23 @@ solve; the independent original-law ledger describes the refreshed accepted
 physics. Regression sources distinguish these accounts and reject a sharp
 continuous drag law whose rate mismatch is tiny but whose impulse and energy
 defects are significant. A failed refresh publishes neither physical clock.
+
+### Sparse frozen-flow implicit enthalpy transport
+
+`GraphEnthalpyTransport::advance_advection_sparse_implicit` retains the original
+native backward-Euler enthalpy residual while assembling its exact upwind
+energy-increment operator with native COO/CSR storage. Native flexible GMRES
+with a diagonal preconditioner replaces the small dense solve for larger mapped
+inventories. Matrix entries include the native component-reference derivative,
+so large formation enthalpies do not become artificial heat sources. Reverse
+flows and open mass/enthalpy ports preserve the original donor orientation.
+
+Explicit limits bound cells, staged sparse entries, Krylov workspace, cycles and
+representability corrections. Native per-cell and total joule residuals remain
+the final acceptance gates; a linear-solver receipt alone cannot advance the
+thermal state. This path supports held mass rates and fixed cell sources, with
+all active cells mapped. Active conduction, Robin exchange and reservoir laws
+use the existing general endpoint interface instead. Implicit stability does
+not remove timestep or spatial-refinement requirements. Regression sources
+exercise 96-cell open and closed inventories, nonlinear caloric inversion,
+reversal, formation-datum shifts and transactional work-limit refusal.
