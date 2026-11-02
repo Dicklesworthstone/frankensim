@@ -1178,7 +1178,8 @@ pub struct TetElasticAssembly {
     pub mass: Csr,
     /// `free_dofs[i]` is the full displacement DOF represented by reduced row i.
     pub free_dofs: Vec<usize>,
-    /// Total physical mass `sum rho_e V_e` [kg].
+    /// Total physical reference mass `integral rho_0 dV_0` [kg], including
+    /// supported nodes. Nodal density is integrated before support elimination.
     pub total_mass_kg: f64,
     /// Smallest admitted element quality `abs(det(J))/h_max^3`.
     pub minimum_scaled_jacobian: f64,
@@ -2052,9 +2053,53 @@ impl TetLinearElasticProblem<'_> {
     /// Cancellation is polled before allocation and at every element
     /// boundary. No partial matrix is published on refusal.
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_reference_mass(None, cx)
+    }
+
+    /// Assemble the native stiffness/mass pencil with a positive P1 reference
+    /// density [kg/m³] at every original mesh node.
+    ///
+    /// Density is interpolated inside each tetrahedron and integrated exactly
+    /// against `N_a N_b`; replacing it by its cell mean loses inertia moments
+    /// and changes vibration frequencies. The supplied field determines mass;
+    /// the material field still determines stiffness. This is an explicit
+    /// authored reference field, not a requery of material density at a new
+    /// temperature or a claim of thermal/phase coupling. Retain the original
+    /// field when reassembling a closed body. Geometry, constraints, budgets,
+    /// cancellation and output are shared with [`Self::assemble`].
+    pub fn assemble_with_nodal_reference_density(
+        &self,
+        reference_density_kg_m3: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_reference_mass(Some(reference_density_kg_m3), cx)
+    }
+
+    fn assemble_reference_mass(
+        &self,
+        nodal_density: Option<&[f64]>,
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         self.validate_budget()?;
         self.materials.validate(self.tetrahedra.len())?;
+        if let Some(densities) = nodal_density {
+            if densities.len() != self.nodes_m.len() {
+                return Err(TetElasticError::InvalidMaterial {
+                    what: "one reference density per mesh node required",
+                });
+            }
+            for (node, &density) in densities.iter().enumerate() {
+                if node % 256 == 0 {
+                    cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+                }
+                if !density.is_finite() || density <= 0.0 {
+                    return Err(TetElasticError::InvalidMaterial {
+                        what: "nodal reference densities must be positive and finite",
+                    });
+                }
+            }
+        }
 
         let (free_dofs, reduced_of) = free_dof_map(
             self.nodes_m.len(),
@@ -2086,8 +2131,28 @@ impl TetLinearElasticProblem<'_> {
             element_volumes_m3.push(geometry.volume);
 
             let material = self.materials.at(element);
-            let (ke, me) = element_matrices(&geometry, material);
-            total_mass_kg += material.density_kg_m3 * geometry.volume;
+            let ke = element_stiffness(&geometry, material);
+            let graded_mass = nodal_density
+                .map(|density| {
+                    crate::inertia::p1_tet_nodal_mass(
+                        geometry.volume,
+                        tet.map(|node| density[node]),
+                    )
+                    .map_err(|_| TetElasticError::InvalidMaterial {
+                        what: "nodal density yields unrepresentable consistent reference mass",
+                    })
+                })
+                .transpose()?;
+            let uniform_mass_scale = p1_tet_mass_scale(geometry.volume, material.density_kg_m3);
+            total_mass_kg += graded_mass.as_ref().map_or(
+                material.density_kg_m3 * geometry.volume,
+                |local| local.mass_kg,
+            );
+            if nodal_density.is_some() && !total_mass_kg.is_finite() {
+                return Err(TetElasticError::InvalidMaterial {
+                    what: "total reference mass is unrepresentable",
+                });
+            }
             for local_row in 0..12 {
                 let full_row = 3 * tet[local_row / 3] + local_row % 3;
                 let Some(row) = reduced_of[full_row] else {
@@ -2102,7 +2167,13 @@ impl TetLinearElasticProblem<'_> {
                     if stiffness_value != 0.0 {
                         stiffness.push(row, col, stiffness_value);
                     }
-                    let mass_value = me[local_row][local_col];
+                    let mass_value = if local_row % 3 != local_col % 3 {
+                        0.0
+                    } else if let Some(local) = &graded_mass {
+                        local.coefficients[local_row / 3][local_col / 3]
+                    } else {
+                        uniform_mass_scale * if local_row == local_col { 2.0 } else { 1.0 }
+                    };
                     if mass_value != 0.0 {
                         mass.push(row, col, mass_value);
                     }
@@ -3040,6 +3111,16 @@ fn element_matrices(
     geometry: &TetGeometry,
     material: &TetElasticMaterial,
 ) -> ([[f64; 12]; 12], [[f64; 12]; 12]) {
+    (
+        element_stiffness(geometry, material),
+        p1_tet_consistent_mass(geometry.volume, material.density_kg_m3),
+    )
+}
+
+fn element_stiffness(
+    geometry: &TetGeometry,
+    material: &TetElasticMaterial,
+) -> [[f64; 12]; 12] {
     let d = material.stiffness_mandel_pa;
     let b = strain_displacement_matrix(geometry);
     let mut db = [[0.0; 12]; 6];
@@ -3060,7 +3141,7 @@ fn element_matrices(
         }
     }
 
-    (ke, p1_tet_consistent_mass(geometry.volume, material.density_kg_m3))
+    ke
 }
 
 /// Shared reference P1 inertia for elastic and inelastic tetrahedra. Geometry

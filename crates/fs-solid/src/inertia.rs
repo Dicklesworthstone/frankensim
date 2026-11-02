@@ -75,6 +75,68 @@ pub(crate) struct ReferenceMass {
 /// Preserve the original tetrahedral constructor and all existing callers.
 pub(crate) type P1ReferenceMass = ReferenceMass;
 
+/// Exact scalar P1 mass tile, shared by linear and finite-strain mechanics.
+pub(crate) struct P1DensityMass {
+    pub coefficients: [[f64; 4]; 4],
+    pub mean_density_kg_m3: f64,
+    pub mass_kg: f64,
+}
+
+/// Integrate the cubic polynomial `rho * N_a * N_b` on a reference tetrahedron.
+/// Normalize before summing density so a representable mass does not overflow
+/// merely because the four positive density samples have a large sum.
+pub(crate) fn p1_tet_nodal_mass(
+    volume_m3: f64,
+    rho: [f64; 4],
+) -> Result<P1DensityMass, InertiaError> {
+    if !volume_m3.is_finite()
+        || volume_m3 <= 0.0
+        || rho.iter().any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(invalid("positive reference volume and nodal densities required"));
+    }
+    let uniform = rho.iter().all(|value| value.to_bits() == rho[0].to_bits());
+    let scale = rho.into_iter().fold(0.0_f64, f64::max);
+    let normalized = rho.map(|value| value / scale);
+    let total: f64 = normalized.iter().sum();
+    let mean_density_kg_m3 = if uniform {
+        rho[0]
+    } else {
+        scale * (0.25 * total)
+    };
+    let mass_kg = finite(volume_m3 * mean_density_kg_m3)?;
+    if mass_kg <= 0.0 {
+        return Err(invalid(
+            "each tetrahedron needs representable positive reference mass",
+        ));
+    }
+    let fractions = normalized.map(|value| value / total);
+    let uniform_scale = crate::linear3::p1_tet_mass_scale(volume_m3, rho[0]);
+    let mut coefficients = [[0.0; 4]; 4];
+    for a in 0..4 {
+        for b in 0..4 {
+            // Diagonal: V*(sum(rho)+2*rho_a)/60.
+            // Off diagonal: V*(sum(rho)+rho_a+rho_b)/120.
+            let value = finite(if uniform {
+                uniform_scale * if a == b { 2.0 } else { 1.0 }
+            } else if a == b {
+                (mass_kg / 15.0) * (1.0 + 2.0 * fractions[a])
+            } else {
+                (mass_kg / 30.0) * (1.0 + (fractions[a] + fractions[b]))
+            })?;
+            if value <= 0.0 {
+                return Err(invalid("consistent graded-density mass underflowed"));
+            }
+            coefficients[a][b] = value;
+        }
+    }
+    Ok(P1DensityMass {
+        coefficients,
+        mean_density_kg_m3,
+        mass_kg,
+    })
+}
+
 impl ReferenceMass {
     /// The caller owns reference geometry validation and assembly budgets.
     /// Entries are original connectivity and positive reference volume;
@@ -164,45 +226,17 @@ impl ReferenceMass {
                     "valid reference connectivity and positive volume required",
                 ));
             }
-            let rho = nodes.map(|node| densities[node]);
-            let uniform = rho.iter().all(|value| value.to_bits() == rho[0].to_bits());
-            let scale = rho.into_iter().fold(0.0_f64, f64::max);
-            let normalized = rho.map(|value| value / scale);
-            let total: f64 = normalized.iter().sum();
-            let mean = if uniform {
-                rho[0]
-            } else {
-                scale * (0.25 * total)
-            };
-            let element_mass = finite(volume * mean)?;
-            if element_mass <= 0.0 {
-                return Err(invalid(
-                    "each tetrahedron needs representable positive reference mass",
-                ));
-            }
-            means.push(mean);
-            reference_mass_kg = finite(reference_mass_kg + element_mass)?;
-            let fractions = normalized.map(|value| value / total);
-            // Integral rho*N_a*N_b has degree three. Its off-diagonal entry
-            // is V*(sum(rho)+rho_a+rho_b)/120, and its diagonal entry is
-            // V*(sum(rho)+2*rho_a)/60. Normalization avoids overflowing the
-            // density sum; every entry remains strictly nonnegative.
-            let uniform_mass =
-                uniform.then(|| crate::linear3::p1_tet_consistent_mass(volume, rho[0]));
+            let local = p1_tet_nodal_mass(volume, nodes.map(|node| densities[node]))?;
+            means.push(local.mean_density_kg_m3);
+            reference_mass_kg = finite(reference_mass_kg + local.mass_kg)?;
             for a in 0..4 {
                 for b in 0..4 {
-                    let value = finite(if let Some(local) = &uniform_mass {
-                        local[3 * a][3 * b]
-                    } else if a == b {
-                        (element_mass / 15.0) * (1.0 + 2.0 * fractions[a])
-                    } else {
-                        (element_mass / 30.0) * (1.0 + (fractions[a] + fractions[b]))
-                    })?;
-                    if value <= 0.0 {
-                        return Err(invalid("consistent graded-density mass underflowed"));
-                    }
                     for component in 0..3 {
-                        matrix.push(3 * nodes[a] + component, 3 * nodes[b] + component, value);
+                        matrix.push(
+                            3 * nodes[a] + component,
+                            3 * nodes[b] + component,
+                            local.coefficients[a][b],
+                        );
                     }
                 }
             }

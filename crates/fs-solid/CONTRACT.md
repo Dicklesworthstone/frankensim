@@ -594,6 +594,21 @@ operator level, but material-card resolution of engineering/crystal constants
 and texture/orientation fields remains a separate evidence-bearing admission
 step; absence of that data is not permission to assume isotropy.
 
+`TetLinearElasticProblem::assemble_with_nodal_reference_density` admits an
+explicit positive P1 density field on the original shared nodes. It produces
+the same native sparse pencil for `fs-modal`, with exact cubic integration of
+`rho_0 N_a N_b`; a cell mean preserves total mass but not these inertia moments.
+The scalar element kernel is shared with finite-strain `P1ReferenceMass`.
+Density controls reference mass while the original material field controls
+stiffness. Uniform nodal input preserves the original mass bits; connectivity,
+support reduction, quality, budgets and cancellation share the original
+assembly path. Invalid or unrepresentable density/mass refuses before any
+pencil is returned. Total inventory includes supported nodes. The density
+field is explicit authored input, not material-source resolution or a coupled
+thermal/phase refresh; a closed body's reference field must be retained.
+Native modal regression moves density toward the free vertex at identical
+total mass/stiffness and verifies the analytic eigenvalue ratio `2/3`.
+
 `linear3::TetElasticMaterial::acoustic_response` exposes the shared
 `fs-material::elastic::acoustic` law using the exact native Mandel stiffness,
 density and material identity. Source-resolved isotropy, oriented orthotropy and
