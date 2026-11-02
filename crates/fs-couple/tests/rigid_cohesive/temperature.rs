@@ -505,7 +505,7 @@ fn thermal_transfers_consume_original_material_budget_and_do_not_freeze_friction
     assert!(matches!(
         system.step_with_temperature([RigidCohesiveLoad::ZERO; 2], &[&hot, &hot], "T"),
         Err(RigidCohesiveError::Invalid(
-            "damaged-area friction requires its own source temperature/history transfer"
+            "damaged-area friction requires paired temperature successors"
         ))
     ));
     assert_eq!(system.bodies(), &before);

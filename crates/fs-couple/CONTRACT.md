@@ -17501,8 +17501,9 @@ Ordinary steps keep source conditions fixed; explicit temperature updates are
 described below. Attachments and topology remain fixed. This is a bounded local
 branch solve over straight local constitutive paths, not a proof of global
 softening-branch uniqueness or intrastep trajectory accuracy. Rotation-chart
-and original material/rate limits remain mandatory. Bond creation, healing,
-collision discovery and damaged-area friction are outside this owner.
+and original material/rate limits remain mandatory. Bond creation, healing and
+collision discovery remain outside this owner. Optional damaged-area friction
+uses the joint original-body owner described below.
 `tests/rigid_cohesive.rs` checks an independent axial oscillator, global frame
 covariance, finite-patch peeling with separate fracture/viscous losses, full
 native free motion after failure, reclosure, gravity/external work, source and
@@ -17534,9 +17535,8 @@ Both bodies, every site/source, observations and clock publish only after the
 existing force, rotation, geometry, energy, momentum and final cancellation
 checks. Partial source staging and late failures leave accepted state unchanged;
 the thermal scratch selector resets before any Result returns. Enabled
-damaged-area friction explicitly refuses this update because its separate
-source/history temperature transfer is not implemented; its coefficients are
-never silently frozen or disabled.
+damaged-area friction requires the explicit paired-source operation below;
+the cohesive-only temperature API never silently freezes its coefficients.
 
 This is a prescribed-temperature first-order staggered composition. Thermal
 expansion, heat transport, fracture-heat partition, cure, measured thermal
@@ -17546,6 +17546,38 @@ heterogeneous-temperature midpoint oscillators, finite rotating mixed-mode
 patch work/momentum and frame covariance, source/late-body/cancellation rollback,
 material budgets and the friction boundary. Their runtime execution remains
 blocked here by the unchanged pinned executor dependency's memory requirement.
+
+`step_with_temperature_and_friction[_under_gate]` accepts one cohesive and one
+residual-friction successor for each original site. `ResidualCoulombSource`
+refresh pins its original card, ordered surfaces, complete selected claims,
+absolute-temperature convention and held coordinates, and admits the updated
+static/kinetic pair together with `0 <= mu_k <= mu_s`. Every paired cohesive and
+friction query must agree exactly. No coefficient is inferred from damage,
+cohesive strength or temperature alone.
+
+The existing rigid-Coulomb specialization stores no elastic friction energy.
+Consequently changing mu at fixed jump supplies zero friction parameter work
+and zero friction loss. The original cohesive transfer alone accounts for
+changing compression/bond stiffness and any additional fixed-jump damage;
+compression storage and fracture release are never duplicated in friction.
+The same transferred material point, retained slip coordinates, prior fracture
+history and static/kinetic occupancy enter every subsequent joint Newton trial.
+Actual moving compressed endpoints retain kinetic capture, including newly
+damaged material. The accepted law, source reference and state continue after
+publication; no pristine friction or bond is constructed during thermal refresh.
+
+Preallocated friction-temperature scratch shares the existing transaction and
+material-work budget. Exactly one constitutive temperature transfer per site
+precedes the original simultaneous body/friction solve; each final local audit
+uses that same point and the new coefficients. Source mismatch, invalid static/
+kinetic data, exhausted final-audit budget and cancellation leave original
+bodies, all sources/histories, observations and clock unchanged. Mechanical
+friction work remains the sole friction-loss account; the prescribed-temperature
+extension adds neither a thermal recipient nor an entropy/heat-partition model.
+Focused source/native regressions cover static heating/cooling with zero heat,
+analytical two-tangent sliding with separate coefficient work and friction loss,
+nonzero retained damage/slip, source identity and rollback with ordinary/thermal
+retries. Native runtime execution retains the pinned executor memory limitation.
 
 ## Molecular gas refresh on continuing DG ports
 

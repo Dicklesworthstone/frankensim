@@ -85,6 +85,78 @@ fn failed_bond_keeps_compression_and_never_rebonds() {
 }
 
 #[test]
+fn transferred_damage_and_new_compression_supply_the_same_original_friction_path() {
+    let cold = BilinearCohesive::new(1e9, 2e5, 100.0, 2e9, 0.05).unwrap();
+    let hot = BilinearCohesive::new(5e8, 8e4, 50.0, 3e9, 0.05).unwrap();
+    let partial = cold
+        .bonded_point()
+        .trial([4e-4, 0.0, 0.0], 1e-8)
+        .unwrap()
+        .point
+        .trial([-2e-4, 0.0, 0.0], 1e-8)
+        .unwrap()
+        .point;
+    near(partial.damage(), 0.625);
+    let heated = partial.transfer_temperature(&hot, 1e-8).unwrap();
+    near(heated.parameter_work_j_m2, 20.0);
+    near(heated.damage_dissipated_j_m2, 0.0);
+    let (slid, mean, pressure) = heated
+        .point
+        .trial_over_time_with_damage_weighted_compression([-2e-4, 6e-5, 8e-5], 0.01, 1e-8)
+        .unwrap();
+    assert!((pressure - 375_000.0).abs() < 1e-9);
+    assert!((mean[1] - 5625.0).abs() < 1e-9);
+    assert!((mean[2] - 7500.0).abs() < 1e-9);
+    near(0.1 * pressure * 1e-4, 3.75);
+    near(slid.equilibrium.energy.dissipated, 0.0);
+    near(
+        slid.equilibrium.point.dissipated_j_m2(),
+        partial.dissipated_j_m2(),
+    );
+    let cooled = slid
+        .equilibrium
+        .point
+        .transfer_temperature(&cold, 1e-8)
+        .unwrap();
+    near(cooled.parameter_work_j_m2, -19.0625);
+    assert!(cooled.point.damage() >= partial.damage());
+    let (continued, mean, pressure) = cooled
+        .point
+        .trial_over_time_with_damage_weighted_compression([-2e-4, 12e-5, 16e-5], 0.01, 1e-8)
+        .unwrap();
+    assert!((pressure - 250_000.0).abs() < 1e-9);
+    assert!((mean[1] - 33_750.0).abs() < 1e-9);
+    assert!((mean[2] - 45_000.0).abs() < 1e-9);
+    near(0.3 * pressure * 1e-4, 7.5);
+    near(
+        continued.equilibrium.point.dissipated_j_m2(),
+        partial.dissipated_j_m2(),
+    );
+
+    // Heating can create the first damaged area while the mechanical jump is
+    // held. The subsequent zero-motion path adds no fracture or friction work.
+    let jump = [-2e-4, 1.8e-4, 0.0];
+    let intact = cold.bonded_point().trial(jump, 1e-8).unwrap().point;
+    assert_eq!(intact.damage(), 0.0);
+    let heated = intact.transfer_temperature(&hot, 1e-8).unwrap();
+    let damage = (0.00125 / (0.00125 - 0.00016)) * (1.0 - 0.00016 / 0.00018);
+    near(heated.point.damage(), damage);
+    near(heated.parameter_work_j_m2, 11.9);
+    near(heated.damage_dissipated_j_m2, 8.1 * damage);
+    let (held, _, pressure) = heated
+        .point
+        .trial_over_time_with_damage_weighted_compression(jump, 0.01, 1e-8)
+        .unwrap();
+    assert!((pressure - 600_000.0 * damage).abs() < 1e-9);
+    near(held.equilibrium.energy.dissipated, 0.0);
+    near(held.total_work_j_m2(), 0.0);
+    near(
+        held.equilibrium.point.dissipated_j_m2(),
+        heated.damage_dissipated_j_m2,
+    );
+}
+
+#[test]
 fn temperature_transfer_refuses_changed_envelope_and_out_of_domain_without_mutation() {
     use crate::cohesive::mixed_mode::MixedModeParameters;
     let common = law(10.0, 5.0, 5.0);

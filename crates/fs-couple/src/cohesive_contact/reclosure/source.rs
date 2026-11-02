@@ -78,6 +78,106 @@ impl ResidualCoulombSource {
     pub const fn law(&self) -> &FrictionLaw {
         &self.law
     }
+
+    /// Refresh the original residual-surface coefficients at one prescribed
+    /// absolute temperature. Every selected claim, extra property, surface and
+    /// held coordinate stays bound to the same immutable interface card.
+    /// This changes no cohesive or friction history and supplies no heat.
+    pub fn at_temperature(
+        &self,
+        card: &InterfaceSystemCard,
+        temperature_axis: &str,
+        temperature_k: f64,
+    ) -> Result<Self, MaterialStatePointError> {
+        self.require_temperature_axis(temperature_axis)?;
+        if !temperature_k.is_finite() || temperature_k <= 0.0 {
+            return Err(invalid(
+                "residual friction temperature requires positive kelvin",
+            ));
+        }
+        let point = self
+            .resolved
+            .query()
+            .with(temperature_axis, temperature_k)
+            .map_err(|source| MaterialStatePointError::Query {
+                property: format!("residual friction temperature:{temperature_axis}"),
+                source,
+            })?;
+        Self::try_from_resolved(card, self.resolved.at_query_point(card, &point)?)
+    }
+
+    /// Admit a temperature successor without replacing the original source or
+    /// selecting different friction data. Numerical equality of mu is not a
+    /// substitute for the original claim and ordered-surface identity.
+    pub fn require_temperature_successor(
+        &self,
+        next: &Self,
+        temperature_axis: &str,
+    ) -> Result<(), MaterialStatePointError> {
+        self.require_temperature_axis(temperature_axis)?;
+        next.require_temperature_axis(temperature_axis)?;
+        if self.resolved.card_identity() != next.resolved.card_identity()
+            || self.surfaces != next.surfaces
+            || self.resolved.axis_quantities() != next.resolved.axis_quantities()
+        {
+            return Err(invalid(
+                "residual friction temperature successor changed source",
+            ));
+        }
+        let a = self.resolved.query_point();
+        let b = next.resolved.query_point();
+        if a.len() != b.len()
+            || a.iter().zip(b).any(|((name, value), (other, new))| {
+                name != other || (name != temperature_axis && value != new)
+            })
+        {
+            return Err(invalid(
+                "residual friction temperature successor changed a held coordinate",
+            ));
+        }
+        let a = self.resolved.properties();
+        let b = next.resolved.properties();
+        if a.len() != b.len()
+            || a.iter().zip(b).any(|(old, new)| {
+                old.requirement() != new.requirement()
+                    || old.answer().receipt.selected != new.answer().receipt.selected
+            })
+        {
+            return Err(invalid(
+                "residual friction temperature successor changed selected claims",
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_temperature_axis(&self, axis: &str) -> Result<(), MaterialStatePointError> {
+        use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+        let quantity = self.resolved.axis_quantities().get(axis).copied();
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let legacy = axis == "T"
+            && (quantity.is_none()
+                || quantity == Some(QuantitySpec::dimensional(fs_qty::Temperature::DIMS)));
+        if !(legacy || quantity == Some(absolute))
+            || !self
+                .resolved
+                .state_coordinate(axis)
+                .is_some_and(|v| v.is_finite() && v > 0.0)
+            || self
+                .resolved
+                .properties()
+                .iter()
+                .any(|p| !p.has_only_fixed_external_conditions(Some(axis), false))
+        {
+            return Err(invalid(
+                "residual friction refresh requires one original absolute-temperature axis",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn require_surface_materials(
         &self,
         receiving: [&MaterialStateId; 2],

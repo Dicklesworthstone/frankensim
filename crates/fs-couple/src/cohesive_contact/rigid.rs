@@ -527,6 +527,11 @@ impl<'a> RigidCohesiveSystem<'a> {
         )?;
         if self.staged_sites.iter().any(Option::is_none)
             || (self.thermal_active && self.staged_temperature.iter().any(Option::is_none))
+            || (self.thermal_active
+                && self
+                    .friction
+                    .as_ref()
+                    .is_some_and(|friction| !friction.temperature_complete()))
         {
             return Err(RigidCohesiveError::Invalid("incomplete staged patch"));
         }
@@ -576,7 +581,7 @@ impl<'a> RigidCohesiveSystem<'a> {
             });
         }
         if let Some(friction) = &mut self.friction {
-            friction.publish();
+            friction.publish(self.thermal_active);
         }
         self.steps = next_step;
         self.time_s = next_time;

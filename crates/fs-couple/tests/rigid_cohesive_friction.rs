@@ -1,4 +1,7 @@
 //! G1/G3/G4: original finite-rotation bodies with damaged-area tangent disks.
+#[path = "rigid_cohesive_friction/temperature.rs"]
+mod temperature;
+
 use fs_couple::cohesive_contact::frictional_damage::DamageFrictionRegime;
 use fs_couple::cohesive_contact::objective::{
     ObjectiveCohesiveConfig, ObjectiveCohesivePoint, source::SourceBoundObjectiveCohesivePoint,
@@ -22,7 +25,7 @@ use fs_qty::{Dims, Pressure};
 const AREA: f64 = 1e-6;
 const KC: f64 = 2e9;
 
-fn sources(mu: [f64; 2], viscous: bool) -> (ResolvedBilinearCohesive, ResidualCoulombSource) {
+fn source_card(mu: [f64; 2], viscous: bool, hot_mu: Option<[f64; 2]>) -> InterfaceSystemCard {
     let mut values = vec![
         (
             COHESIVE_STIFFNESS_PROPERTY,
@@ -59,13 +62,36 @@ fn sources(mu: [f64; 2], viscous: bool) -> (ResolvedBilinearCohesive, ResidualCo
     }
     let mut claims = ClaimSet::new();
     for (name, dims, value) in values {
+        let property = if let Some(hot_mu) = hot_mu {
+            let hot = match name {
+                COHESIVE_STIFFNESS_PROPERTY => 5e8,
+                COHESIVE_STRENGTH_PROPERTY => 8e4,
+                COHESIVE_FRACTURE_ENERGY_PROPERTY => 50.0,
+                COHESIVE_COMPRESSION_STIFFNESS_PROPERTY => 3e9,
+                RESIDUAL_STATIC_FRICTION_PROPERTY => hot_mu[0],
+                RESIDUAL_KINETIC_FRICTION_PROPERTY => hot_mu[1],
+                _ => 2.0 * value,
+            };
+            PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: fs_qty::Temperature::DIMS,
+                knots: vec![(280.0, value), (320.0, hot)],
+                dims,
+            }
+        } else {
+            PropertyValue::Scalar { value, dims }
+        };
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
-                value: PropertyValue::Scalar { value, dims },
+                value: property,
                 validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
                 uncertainty: UncertaintyModel::Unstated,
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                interpolation: if hot_mu.is_some() {
+                    InterpolationPolicy::LinearInside
+                } else {
+                    InterpolationPolicy::ConstantWithinValidity
+                },
                 observations: vec![],
                 provenance: Provenance {
                     source: "manufactured original rotating damaged-area fixture".into(),
@@ -84,7 +110,7 @@ fn sources(mu: [f64; 2], viscous: bool) -> (ResolvedBilinearCohesive, ResidualCo
         },
         texture_frame: name.into(),
     };
-    let card = InterfaceSystemCard::assemble(
+    InterfaceSystemCard::assemble(
         surface("A"),
         surface("B"),
         SystemContext {
@@ -96,7 +122,11 @@ fn sources(mu: [f64; 2], viscous: bool) -> (ResolvedBilinearCohesive, ResidualCo
         claims,
         vec![],
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn sources(mu: [f64; 2], viscous: bool) -> (ResolvedBilinearCohesive, ResidualCoulombSource) {
+    let card = source_card(mu, viscous, None);
     let query = QueryPoint::new().with("T", 300.0).unwrap();
     let selection = MaterialPropertySelection::SingleClaimOnly;
     let cohesive = if viscous {

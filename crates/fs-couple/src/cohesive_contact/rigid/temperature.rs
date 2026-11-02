@@ -6,6 +6,7 @@
 //! succeed. Mechanical iterations never repeat thermal damage or parameter work.
 
 use super::*;
+use crate::cohesive_contact::reclosure::ResidualCoulombSource;
 use fs_material::cohesive::source::ResolvedBilinearCohesive;
 
 impl<'a> RigidCohesiveSystem<'a> {
@@ -22,15 +23,15 @@ impl<'a> RigidCohesiveSystem<'a> {
     ///
     /// This first-order staggered model requires thermal/load step refinement;
     /// it does not supply heat transport, thermal expansion, entropy or a heat
-    /// partition. Enabled damaged-area friction refuses because its separate
-    /// source/history temperature transfer is not implemented.
+    /// partition. Enabled damaged-area friction requires the paired-source
+    /// `step_with_temperature_and_friction` operation.
     pub fn step_with_temperature(
         &mut self,
         loads: [RigidCohesiveLoad; 2],
         next_sources: &[&'a ResolvedBilinearCohesive],
         temperature_axis: &str,
     ) -> Result<&RigidCohesiveFrame, RigidCohesiveError> {
-        self.step_with_temperature_inner(loads, next_sources, temperature_axis, None)
+        self.step_with_temperature_inner(loads, next_sources, None, temperature_axis, None)
     }
 
     /// Same native temperature/mechanics transaction with bounded cancellation.
@@ -41,21 +42,80 @@ impl<'a> RigidCohesiveSystem<'a> {
         temperature_axis: &str,
         gate: &CancelGate,
     ) -> Result<&RigidCohesiveFrame, RigidCohesiveError> {
-        self.step_with_temperature_inner(loads, next_sources, temperature_axis, Some(gate))
+        self.step_with_temperature_inner(loads, next_sources, None, temperature_axis, Some(gate))
+    }
+
+    /// Advance the original damaged-area friction and cohesive bond together at
+    /// prescribed source temperatures. Both source arrays follow original site
+    /// order. Each friction successor must retain its original card/claims and
+    /// have exactly the same query as its paired cohesive successor.
+    ///
+    /// The existing rigid Coulomb specialization has no elastic friction spring
+    /// or stored slip energy. Updating mu at fixed accepted jump therefore does
+    /// zero friction work and creates zero heat. Original cohesive coefficient
+    /// work and fixed-jump damage release are counted once; only the subsequent
+    /// actual mechanical slip contributes friction loss. Static/kinetic branch
+    /// history survives, including physical motion at an accepted endpoint.
+    pub fn step_with_temperature_and_friction(
+        &mut self,
+        loads: [RigidCohesiveLoad; 2],
+        next_sources: &[&'a ResolvedBilinearCohesive],
+        next_friction_sources: &[&'a ResidualCoulombSource],
+        temperature_axis: &str,
+    ) -> Result<&RigidCohesiveFrame, RigidCohesiveError> {
+        self.step_with_temperature_inner(
+            loads,
+            next_sources,
+            Some(next_friction_sources),
+            temperature_axis,
+            None,
+        )
+    }
+
+    /// Same paired-source transaction with bounded cooperative cancellation.
+    pub fn step_with_temperature_and_friction_under_gate(
+        &mut self,
+        loads: [RigidCohesiveLoad; 2],
+        next_sources: &[&'a ResolvedBilinearCohesive],
+        next_friction_sources: &[&'a ResidualCoulombSource],
+        temperature_axis: &str,
+        gate: &CancelGate,
+    ) -> Result<&RigidCohesiveFrame, RigidCohesiveError> {
+        self.step_with_temperature_inner(
+            loads,
+            next_sources,
+            Some(next_friction_sources),
+            temperature_axis,
+            Some(gate),
+        )
     }
 
     fn step_with_temperature_inner(
         &mut self,
         loads: [RigidCohesiveLoad; 2],
         next_sources: &[&'a ResolvedBilinearCohesive],
+        next_friction_sources: Option<&[&'a ResidualCoulombSource]>,
         temperature_axis: &str,
         gate: Option<&CancelGate>,
     ) -> Result<&RigidCohesiveFrame, RigidCohesiveError> {
         poll(gate)?;
-        if self.friction.is_some() {
-            return Err(RigidCohesiveError::Invalid(
-                "damaged-area friction requires its own source temperature/history transfer",
-            ));
+        match (self.friction.is_some(), next_friction_sources) {
+            (true, None) => {
+                return Err(RigidCohesiveError::Invalid(
+                    "damaged-area friction requires paired temperature successors",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(RigidCohesiveError::Invalid(
+                    "temperature friction sources require the original enabled friction owner",
+                ));
+            }
+            (_, Some(sources)) if sources.len() != self.sites.len() => {
+                return Err(RigidCohesiveError::Invalid(
+                    "one temperature successor per original friction site required",
+                ));
+            }
+            _ => {}
         }
         if next_sources.len() != self.sites.len() {
             return Err(RigidCohesiveError::Invalid(
@@ -77,6 +137,15 @@ impl<'a> RigidCohesiveSystem<'a> {
                 temperature_axis,
                 self.config.objective,
             )?);
+        }
+        if let Some(next) = next_friction_sources {
+            // Move only the reusable owner while validating its staged source
+            // and branch history against the SAME canonical thermal points.
+            // Restore it before propagating every refusal or cancellation.
+            let mut friction = self.friction.take().expect("enabled friction checked");
+            let staged = friction.stage_temperature(self, next, temperature_axis, gate);
+            self.friction = Some(friction);
+            staged?;
         }
         poll(gate)?;
         self.thermal_active = true;

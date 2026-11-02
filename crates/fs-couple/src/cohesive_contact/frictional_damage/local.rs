@@ -83,6 +83,44 @@ impl<'a> LocalDamageFriction<'a> {
         })
     }
 
+    /// Continue the SAME rigid-friction history at an already transferred
+    /// canonical cohesive point. The native owner performs the material
+    /// temperature operation once; this helper must not repeat its damage or
+    /// coefficient work. Rigid Coulomb friction has no elastic storage, so mu(T)
+    /// changes at fixed jump produce neither work nor frictional heat.
+    pub(crate) fn adopt_temperature_successor(
+        &self,
+        previous: DamageFrictionState<'a>,
+        cohesive: &'a ResolvedBilinearCohesive,
+        friction: &'a ResidualCoulombSource,
+        point: CohesivePoint<'a>,
+        temperature_axis: &str,
+    ) -> Result<(Self, DamageFrictionState<'a>), DamageFrictionError> {
+        self.require_state(previous)?;
+        self.cohesive
+            .require_temperature_successor(cohesive, temperature_axis)?;
+        self.friction
+            .require_temperature_successor(friction, temperature_axis)?;
+        friction.require_cohesive_source(cohesive)?;
+        if !core::ptr::eq(point.law(), cohesive.law())
+            || point.jump_m() != previous.point.jump_m()
+            || point.damage() < previous.point.damage()
+            || point.dissipated_j_m2() < previous.point.dissipated_j_m2()
+        {
+            return Err(DamageFrictionError::StateMismatch);
+        }
+        let law = Self {
+            cohesive,
+            friction,
+            static_mu: friction.law().static_coefficient()?,
+            kinetic_mu: friction.law().zero_speed_kinetic_coefficient()?,
+            ..*self
+        };
+        // The original site identity and branch occupancy survive heating and
+        // cooling. No new adoption or pristine slip/damage state is constructed.
+        Ok((law, DamageFrictionState { point, ..previous }))
+    }
+
     pub(crate) fn audit(
         &self,
         previous: DamageFrictionState<'a>,

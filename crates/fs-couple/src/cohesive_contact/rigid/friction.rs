@@ -161,6 +161,7 @@ pub(super) struct Friction<'a> {
     laws: Vec<LocalDamageFriction<'a>>,
     states: Vec<DamageFrictionState<'a>>,
     staged: Vec<DamageFrictionState<'a>>,
+    temperature: Vec<Option<TemperatureStage<'a>>>,
     last_forces: [[f64; 2]; 64],
     staged_forces: [[f64; 2]; 64],
     config: RigidDamageFrictionConfig,
@@ -169,6 +170,12 @@ pub(super) struct Friction<'a> {
     jacobian: Vec<f64>,
     normal: Vec<f64>,
     linear: LuWorkspace,
+}
+
+#[derive(Clone, Copy)]
+struct TemperatureStage<'a> {
+    law: LocalDamageFriction<'a>,
+    state: DamageFrictionState<'a>,
 }
 
 #[derive(Clone, Copy)]
@@ -302,11 +309,17 @@ impl<'a> Friction<'a> {
             .try_reserve_exact(count)
             .map_err(|_| RigidCohesiveError::Budget("friction staged states allocation"))?;
         staged.extend_from_slice(&states);
+        let mut temperature = Vec::new();
+        temperature
+            .try_reserve_exact(count)
+            .map_err(|_| RigidCohesiveError::Budget("friction temperature workspace allocation"))?;
+        temperature.resize_with(count, || None);
         Ok(Self {
             sources,
             laws,
             states,
             staged,
+            temperature,
             last_forces: [[0.0; 2]; 64],
             staged_forces: [[0.0; 2]; 64],
             config,
@@ -316,6 +329,76 @@ impl<'a> Friction<'a> {
             normal: zeros(dim * dim)?,
             linear: LuWorkspace::new(dim)?,
         })
+    }
+
+    pub(super) fn stage_temperature(
+        &mut self,
+        system: &RigidCohesiveSystem<'a>,
+        next_sources: &[&'a ResidualCoulombSource],
+        temperature_axis: &str,
+        gate: Option<&CancelGate>,
+    ) -> Result<(), RigidCohesiveError> {
+        if next_sources.len() != self.laws.len() {
+            return Err(RigidCohesiveError::Invalid(
+                "one temperature successor per original friction site required",
+            ));
+        }
+        let bodies = system.bodies.each_ref().map(|body| body.state);
+        for (p, source) in next_sources.iter().enumerate() {
+            poll(gate)?;
+            if self.states[p].point() != system.sites[p].point.numerical().material() {
+                return Err(RigidCohesiveError::Invalid(
+                    "original cohesive/friction histories differ before temperature transfer",
+                ));
+            }
+            let point = system.staged_temperature[p]
+                .as_ref()
+                .ok_or(RigidCohesiveError::Invalid(
+                    "incomplete cohesive temperature stage",
+                ))?
+                .point();
+            let (law, state) = self.laws[p].adopt_temperature_successor(
+                self.states[p],
+                point.source(),
+                *source,
+                point.numerical().material(),
+                temperature_axis,
+            )?;
+            // Newly damaged compressed material can already be moving. Use the
+            // SAME resolved-velocity threshold as the original stop audit;
+            // numerical residue from an accepted static solve cannot by itself
+            // replace its retained branch. No body velocity is changed.
+            let velocity = local_slip_velocity(system, p, &bodies)?;
+            let jump = state.point().jump_m();
+            let tolerance = finite(law.jump_tolerance(jump, jump, jump)? / system.dt_s)?;
+            let state = if finite(velocity[0].hypot(velocity[1]))? > tolerance {
+                state.with_endpoint_tangential_velocity(velocity)?
+            } else {
+                state
+            };
+            self.temperature[p] = Some(TemperatureStage { law, state });
+        }
+        Ok(())
+    }
+
+    fn history_for_step(
+        &self,
+        p: usize,
+        thermal_active: bool,
+    ) -> Result<(LocalDamageFriction<'a>, DamageFrictionState<'a>), RigidCohesiveError> {
+        if thermal_active {
+            self.temperature[p]
+                .map(|s| (s.law, s.state))
+                .ok_or(RigidCohesiveError::Invalid(
+                    "incomplete friction temperature stage",
+                ))
+        } else {
+            Ok((self.laws[p], self.states[p]))
+        }
+    }
+
+    pub(super) fn temperature_complete(&self) -> bool {
+        self.temperature.iter().all(Option::is_some)
     }
 
     fn evaluate(
@@ -357,6 +440,7 @@ impl<'a> Friction<'a> {
                 * x[i].abs().max(native.expected[i].abs());
         }
         for p in 0..count {
+            let (law, state) = self.history_for_step(p, system.thermal_active)?;
             let trial = system.staged_friction[p].frame;
             let delta = trial.slip_increment_m;
             let slip = delta[0].hypot(delta[1]);
@@ -371,7 +455,7 @@ impl<'a> Friction<'a> {
             } else {
                 q
             };
-            let old = self.states[p].point().jump_m();
+            let old = state.point().jump_m();
             let jump = system.staged_sites[p]
                 .as_ref()
                 .expect("native evaluation staged every site")
@@ -379,14 +463,14 @@ impl<'a> Friction<'a> {
                 .numerical()
                 .material()
                 .jump_m();
-            let slip_tol = self.laws[p].jump_tolerance(old, jump, jump)?;
+            let slip_tol = law.jump_tolerance(old, jump, jump)?;
             value.slips[p] = slip;
             value.pressure[p] = pressure;
             value.slip_tolerance[p] = slip_tol;
             for i in 0..2 {
                 let j = 12 + 2 * p + i;
                 value.residual[j] = finite(forces[p][i] - projected[i])?;
-                let force_tol = self.laws[p].force_tolerance(forces[p][i], cap)? * 0.0625;
+                let force_tol = law.force_tolerance(forces[p][i], cap)? * 0.0625;
                 value.tolerance[j] = positive(if length <= cap || slip <= 0.25 * slip_tol {
                     force_tol.min(k * slip_tol * 0.0625)
                 } else {
@@ -416,13 +500,14 @@ impl<'a> Friction<'a> {
         let mut mu = [0.0; 64];
         let mut yielded = [false; 64];
         for p in 0..count {
+            let (law, state) = self.history_for_step(p, system.thermal_active)?;
             x[12 + 2 * p..14 + 2 * p].copy_from_slice(&self.last_forces[p]);
-            mu[p] = self.laws[p].capture_mu(self.states[p]);
-            yielded[p] = self.states[p].occupancy() == DamageFrictionRegime::Sliding;
+            mu[p] = law.capture_mu(state);
+            yielded[p] = state.occupancy() == DamageFrictionRegime::Sliding;
         }
         let mut work = Work {
             evaluations: 0,
-            material_evaluations: 0,
+            material_evaluations: if system.thermal_active { count } else { 0 },
         };
         let mut rhs = [0.0; MAX_DIM];
         let mut correction = [0.0; MAX_DIM];
@@ -438,8 +523,9 @@ impl<'a> Friction<'a> {
                         && value.slips[p] > 0.25 * value.slip_tolerance[p]
                     {
                         yielded[p] = true;
-                        if mu[p] != self.laws[p].kinetic_mu {
-                            mu[p] = self.laws[p].kinetic_mu;
+                        let (law, _) = self.history_for_step(p, system.thermal_active)?;
+                        if mu[p] != law.kinetic_mu {
+                            mu[p] = law.kinetic_mu;
                             changed = true;
                         }
                     }
@@ -589,6 +675,7 @@ impl<'a> Friction<'a> {
         let mut loss = 0.0;
         for p in 0..self.laws.len() {
             poll(gate)?;
+            let (law, state) = self.history_for_step(p, system.thermal_active)?;
             if work.material_evaluations >= system.config.maximum_material_evaluations {
                 return Err(RigidCohesiveError::Budget(
                     "original friction audit evaluations",
@@ -599,7 +686,7 @@ impl<'a> Friction<'a> {
                 .as_ref()
                 .expect("native evaluation staged every site")
                 .numerical();
-            let mut applied = point.mean_traction_pa.map(|f| f * self.laws[p].area);
+            let mut applied = point.mean_traction_pa.map(|f| f * law.area);
             for i in 0..2 {
                 applied[i + 1] += x[12 + 2 * p + i];
             }
@@ -625,8 +712,8 @@ impl<'a> Friction<'a> {
                     ));
                 }
             }
-            let audit = self.laws[p].audit(
-                self.states[p],
+            let audit = law.audit(
+                state,
                 point.point.material().jump_m(),
                 system.dt_s,
                 applied,
@@ -653,7 +740,15 @@ impl<'a> Friction<'a> {
         finite(loss)
     }
 
-    pub(super) fn publish(&mut self) {
+    pub(super) fn publish(&mut self, thermal_active: bool) {
+        if thermal_active {
+            for p in 0..self.laws.len() {
+                let stage =
+                    self.temperature[p].expect("complete friction temperature stage checked");
+                self.laws[p] = stage.law;
+                self.sources[p].source = stage.law.friction;
+            }
+        }
         self.states.copy_from_slice(&self.staged);
         self.last_forces = self.staged_forces;
     }
