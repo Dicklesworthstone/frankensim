@@ -167,6 +167,73 @@ fn material_viscosity_and_memory_match_separate_native_loss_accounts() {
 }
 
 #[test]
+fn simultaneous_source_mobilities_keep_warm_state_and_split_native_losses() {
+    let gate = CancelGate::new_clock_free();
+    let original = [
+        MaterialViscousHeatSource::from_material_region(0, 0, vec![(0, 0.3)]),
+        MaterialViscousHeatSource::from_material_region(0, 1, vec![(0, 0.5)]),
+        MaterialViscousHeatSource::from_material_region(1, 0, vec![(1, 1.2)]),
+    ];
+    let proposed = [
+        MaterialViscousHeatSource::from_material_region(0, 0, vec![(0, 0.6)]),
+        original[1].clone(), original[2].clone(),
+    ];
+    for prepared in [false, true] {
+        let mut system = network(prepared);
+        system.step_under_gate(&[0.02, -0.01], &gate).unwrap();
+        let channel = system.prepare_material_heat_with_viscosity(
+            &[0..1, 1..3], &original, budget(), &gate).unwrap();
+        let old_modes: Vec<_> = system.components().iter().flat_map(|m| m.modes()).copied().collect();
+        let accepted: Vec<_> = system.components().iter().flat_map(|m| m.states()).copied().collect();
+        let memory = system.material_memory().to_vec();
+        let clock = system.samples_rendered();
+        let held = [-0.3, 0.6];
+        system.stage_inner(&held, Some(&gate)).unwrap();
+        let staged: Vec<_> = system.candidates.iter().flat_map(|m| m.states()).copied().collect();
+        let staged_memory = system.candidate_material_memory.clone();
+        let heat_before = channel.evaluate_staged(&system, &gate).unwrap();
+        let times = [MaterialRelaxationTime { branch: 1, relaxation_time_s: 0.03 }];
+        let damping = system.material_viscosity_updates(original.iter().zip(&proposed), &gate).unwrap();
+        assert_eq!(damping.len(), 1);
+        near(2.0 * damping[0].next * 20.0, 1.1);
+        let mut change = system.prepare_staged_material_mobility(&times, &damping, &gate).unwrap();
+        // A late cache cancellation occurs AFTER both proposed mobilities are
+        // installed for preview. Neither native state nor old operator escapes.
+        let cancelled = CancelGate::new_clock_free(); cancelled.request();
+        assert!(system.preview_material_relaxation_times(&mut change, |network|
+            channel.prepare_after_material_mobility(network, &times, &damping, &proposed, &cancelled)).is_err());
+        assert!(channel.is_current(&system, &gate).unwrap());
+        assert_eq!(system.material_memory(), memory);
+        assert_eq!(system.samples_rendered(), clock);
+        assert_eq!(system.components().iter().flat_map(|m| m.states()).copied().collect::<Vec<_>>(), accepted);
+        assert_eq!(system.components().iter().flat_map(|m| m.modes()).copied().collect::<Vec<_>>(), old_modes);
+        assert_eq!(channel.evaluate_staged(&system, &gate).unwrap(), heat_before);
+        let fresh = system.preview_material_relaxation_times(&mut change, |network|
+            channel.prepare_after_material_mobility(network, &times, &damping, &proposed, &gate)).unwrap();
+        system.publish_staged();
+        let energy = system.total_energy_j().unwrap();
+        let report = system.install_material_relaxation_times(change);
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(system.samples_rendered(), clock + 1);
+        assert_eq!(system.material_memory(), staged_memory);
+        assert_eq!(system.components().iter().flat_map(|m| m.states()).copied().collect::<Vec<_>>(), staged);
+        assert_eq!(system.total_energy_j().unwrap(), energy);
+        assert_eq!(system.components()[1].modes()[0], old_modes[1]);
+        assert_eq!(system.components()[0].modes()[0].pressure_per_modal_velocity, old_modes[0].pressure_per_modal_velocity);
+        // The unchanged .5 resistance is still present alongside the new .6;
+        // no other component, joint dashpot or stored Maxwell energy is routed.
+        assert!(!channel.is_current(&system, &gate).unwrap());
+        assert!(fresh.is_current(&system, &gate).unwrap());
+        let heat = fresh.evaluate(&system, &held, &gate).unwrap();
+        let frame = system.step_under_gate(&held, &gate).unwrap();
+        near(heat[..2].iter().sum(), frame.material_dissipation_j);
+        near(heat[2..].iter().sum(), frame.component_dissipation_j);
+        near(heat[2] / heat[3], 0.6 / 0.5);
+        assert!(frame.connection_dissipation_j > 0.0);
+    }
+}
+
+#[test]
 fn stale_rate_and_spring_caches_refuse_then_reprepare_without_erasing_history() {
     let gate=CancelGate::new_clock_free();let mut system=network(false);
     let old=system.prepare_material_heat(&[0..3],budget(),&gate).unwrap();

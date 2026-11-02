@@ -21,8 +21,9 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 /// Different constitutive mechanisms may occupy disjoint native ranges; they
 /// still heat ONE material body, with its mass and caloric storage counted once.
 /// Coefficients remain source-declared constants over the receiving cell's
-/// temperature domain; a temperature-dependent stored modulus requires its
-/// own thermoelastic history continuation and is refused here.
+/// temperature domain unless their original time/viscosity selectors are bound
+/// to the joint mobility continuation. A temperature-dependent stored modulus
+/// requires its own thermoelastic history continuation and is refused here.
 pub struct MaterialRelaxationHeatDestination<'a> {
     pub cell: CellId,
     pub material: &'a MaterialCard,
@@ -46,11 +47,11 @@ impl MaterialRelaxationHeatDestination<'_> {
     /// domain before output creation. Original mechanical source identity and
     /// duplicate routing are additionally checked by the joint step.
     pub fn admit<E>(&self, thermal: &DepositionSimulation<'_>) -> Result<(), LayerThermalError<E>> {
-        self.admit_with_rates(thermal, &[])
+        self.admit_with_rates(thermal, &[], &[])
     }
 
     pub(super) fn admit_with_rates<E>(&self, thermal: &DepositionSimulation<'_>,
-        time_properties: &[&str]) -> Result<(), LayerThermalError<E>> {
+        time_properties: &[&str], viscosity_properties: &[&str]) -> Result<(), LayerThermalError<E>> {
         let bad = LayerThermalError::Invalid;
         if self.channel.as_ref().is_some_and(|channel|
             (channel.groups().is_empty() && channel.viscosity_sources().is_empty())
@@ -92,12 +93,18 @@ impl MaterialRelaxationHeatDestination<'_> {
             let claim = self.material.claims().claim(property.answer().receipt.selected)
                 .ok_or(bad("material heat source claim is absent from its original card"))?;
             let time = time_properties.contains(&property.requirement().name());
+            let viscous = viscosity_properties.contains(&property.requirement().name());
             if time && (property.requirement().quantity() != QuantitySpec::dimensional(fs_qty::Time::DIMS)
                 || !property.is_constant_at_fixed_environment()
                 || !property.value_si().is_finite() || property.value_si() <= 0.0) {
                 return Err(bad("material rate feedback needs an explicit positive source time at held external conditions"));
             }
-            if !time && claim.value.axes().any(|(_, dims)| dims == Temperature::DIMS) {
+            if viscous && (property.requirement().quantity() != QuantitySpec::dimensional(fs_qty::DynViscosity::DIMS)
+                || !property.is_constant_at_fixed_environment()
+                || !property.value_si().is_finite() || property.value_si() < 0.0) {
+                return Err(bad("viscosity feedback needs an original nonnegative source law at held external conditions"));
+            }
+            if !time && !viscous && claim.value.axes().any(|(_, dims)| dims == Temperature::DIMS) {
                 return Err(bad("temperature-dependent body coefficients need their original thermoelastic continuation"));
             }
         }
@@ -109,6 +116,7 @@ impl MaterialRelaxationHeatDestination<'_> {
             let refreshed = self.source.at_query_point(self.material, &query)?;
             if refreshed.properties().iter().zip(self.source.properties()).any(|(a, b)|
                 !time_properties.contains(&a.requirement().name())
+                    && !viscosity_properties.contains(&a.requirement().name())
                     && a.value_si().to_bits() != b.value_si().to_bits()) {
                 return Err(bad("material heat changed a fixed original constitutive coefficient"));
             }

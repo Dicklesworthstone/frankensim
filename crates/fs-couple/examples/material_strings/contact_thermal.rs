@@ -778,7 +778,7 @@ impl Prepared<'_> {
             .is_some_and(material_heat::Routes::has_temperature_rates)
         {
             eprintln!(
-                "body_material_rates=original source tau(T); fixed storage/maps; accepted interval rates, endpoint rates for next interval; first-order temperature partition"
+                "body_material_rates=original source tau(T) and string eta(T); fixed storage/geometry; accepted interval mobilities, endpoint mobilities for next interval; first-order temperature partition"
             );
         }
         eprintln!(

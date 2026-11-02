@@ -423,21 +423,24 @@ Gas drag and body/contact/radiation losses keep their separate owners.
 
 `source-temperature` uses exactly the same finite-body transaction and warm
 continuation as the fiber option below. The accepted layer temperature updates
-all of that layer's original bending and shear time properties for the next interval.
+all of that layer's original bending/shear time and viscosity properties for the next interval.
 Geometry, reference mass, moduli, prestress and material strain storage remain
-fixed; viscosity must also be fixed throughout the admitted temperature domain.
-An `eta(T)` source refuses even with this option, which only continues original
-Maxwell time properties. A body without such histories uses the plain record.
+fixed. The original section retains each viscosity property's exact name and
+annular geometry/mass factor; only its contribution to native modal resistance
+changes. Other layers and gas resistance keep their accepted coefficients.
+A purely Kelvin-Voigt body may use this option without Maxwell histories.
+Without this option, temperature-dependent viscosities still refuse.
 This is not thermal expansion or a temperature-dependent elastic pencil.
 Finite-cell conductivity can carry the actual material heat into other declared
 body/contact cells through the existing links. No temperature-dependent source
 law is invented when the material card lacks it.
 
-### Source-temperature relaxation feedback
+### Source-temperature material mobility feedback
 
 Add `source-temperature` to a selected `fiber-body` or `string-body` record to feed that
 finite cell's temperature back into its original linear Maxwell relaxation
-times. For example, the following selects an existing strip, radial layer and
+times and, for strings, its original bending/shear viscosities. For example,
+the following selects an existing strip, radial layer and
 cell; it supplies no additional constitutive number:
 
 ```text
@@ -451,18 +454,19 @@ Source identity, the whole physical volume and mass, the caloric domain, and
 current native rates are admitted before output is opened. Missing properties
 and incompatible sources or schedules refuse without advancing either clock.
 
-Accepted relaxation times govern the complete current mechanical interval.
+Accepted relaxation times and viscosities govern the complete current mechanical interval.
 The original trajectory integral deposits that interval's material heat into
-the same finite cell. Its accepted endpoint temperature selects the times for
+the same finite cell. Its accepted endpoint temperature selects the mobilities for
 the next interval. Before publication, the original owner rebuilds propagation,
 all scalar and multi-contact responses, and every attached material-heat
-integral. Stored strain, stiffness and modal state remain intact; changing a
-relaxation time contributes no parameter work. This is a **first-order
-partition in temperature** and requires time refinement, not a fully implicit
-same-step relaxation-time solve.
+integral. Simultaneous viscosity and relaxation changes publish together after
+all dependent preparations succeed. Stored strain, stiffness, displacement and
+velocity remain intact; changing these dissipative mobilities contributes no
+parameter work. This is a **first-order partition in temperature** and requires
+time refinement, not a fully implicit same-step `tau(T)` or `eta(T)` solve.
 
 This opt-in supports fixed reference density, geometry and storage moduli,
-fully solid caloric states, linear material memories, fixed contact/support
+fully solid caloric states, original linear material losses, fixed contact/support
 maps and prescribed normal loads. `bow_fiber_strain`, nonlinear storage,
 solved normal contacts/stops, and moving bow/fiber/stop programs require their
 corresponding compositions and refuse on this route. Existing fixed-map dry
@@ -470,7 +474,7 @@ footprints, retained film heat, sliding thermal counterfaces, conductive links
 and explicit series-drive heat remain connected. String omitted-mode compliance
 retains its original mechanical storage and numerical-loss account.
 
-The source material's heat capacity and relaxation-time claims now affect the
+The source material's heat capacity, relaxation-time and supported viscosity claims affect the
 same physical pressure history through temperature, material memory and contact
 reaction. They do not modify output gain or supply missing fiber/string/rosin data.
 Other body coefficient changes still require their thermomechanical owners.

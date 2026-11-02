@@ -516,6 +516,27 @@ impl ModalAcousticTimeModel {
         &self.modes
     }
 
+    /// Prepare dissipative mobility changes in the SAME admitted coordinates.
+    /// Frequency, observer transfers, states, clock and budgets are retained.
+    /// The original ZOH kernel is rebuilt; no motion or stored energy changes.
+    /// Free coordinates retain their existing zero-damping representation.
+    pub fn with_damping_ratios(&self, damping: &[f64]) -> Result<Self, ModalAcousticTimeError> {
+        if damping.len() != self.modes.len() || damping.iter().zip(&self.modes)
+            .any(|(&ratio, mode)| !ratio.is_finite() || ratio < 0.0
+                || (mode.angular_frequency_rad_s == 0.0 && ratio != 0.0)
+                || !(2.0 * ratio * mode.angular_frequency_rad_s).is_finite()) {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "modal mobility needs one representable nonnegative damping ratio per original coordinate",
+            });
+        }
+        let mut candidate = self.clone();
+        if damping.iter().zip(&self.modes).any(|(&ratio, mode)| ratio != mode.damping_ratio) {
+            for (mode, &ratio) in candidate.modes.iter_mut().zip(damping) { mode.damping_ratio = ratio; }
+            candidate.transition_kernel = Arc::new(ExactZohKernel::new(&candidate.modes, self.sample_period_s));
+        }
+        Ok(candidate)
+    }
+
     /// A copy of this model with every narrow-band pressure transfer set to zero. This read-only transfer edit changes no
     /// mechanical coefficient, cached transition or state; it exists so that a broadband receiver can own the pressure ceiling.
     #[must_use]

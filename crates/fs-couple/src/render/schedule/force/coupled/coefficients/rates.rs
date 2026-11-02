@@ -2,8 +2,13 @@
 //!
 //! A Maxwell arm stores (sqrt(k) b.q-z)^2/2, independently of tau. Changing
 //! only tau changes mobility, not energy, projection, stress or internal strain.
+//! A source viscosity changes the original diagonal resistance without changing
+//! those stored quantities. The joint thermal owner prepares both together.
 //! The surrounding source owner still owns temperature and material validity.
 use super::*;
+
+pub(crate) mod mobility;
+use mobility::ModalDampingRatio;
 
 /// Replacement relaxation time of an existing material coordinate.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,12 +39,18 @@ pub struct MaterialRelaxationTimeReport {
 /// Native preparation retained until the enclosing physical transaction accepts.
 pub(crate) struct PreparedMaterialRelaxationTimes {
     replacement: Option<(Vec<fs_phs::RelaxationBranch>, preparation::PreparedOperator)>,
+    models: Option<(Vec<ModalAcousticTimeModel>, Vec<ModalAcousticTimeModel>)>,
+    staged: bool,
     report: MaterialRelaxationTimeReport,
 }
 impl PreparedMaterialRelaxationTimes {
     pub(crate) fn changed(&self) -> bool { self.replacement.is_some() }
 
     fn exchange(&mut self, network: &mut CoupledModalSystem) {
+        if let Some((models, candidates)) = &mut self.models {
+            std::mem::swap(models, &mut network.models);
+            std::mem::swap(candidates, &mut network.candidates);
+        }
         if let Some((branches, operator)) = &mut self.replacement {
             std::mem::swap(branches, &mut network.relaxation_branches);
             std::mem::swap(&mut operator.exact, &mut network.exact);
@@ -98,6 +109,19 @@ impl CoupledModalSystem {
     fn prepare_rates(
         &self, updates: &[MaterialRelaxationTime], endpoint: CoefficientEndpoint, gate: &CancelGate,
     ) -> Result<PreparedMaterialRelaxationTimes, ModalCouplingError> {
+        self.prepare_material_mobility(updates, &[], endpoint, gate)
+    }
+
+    pub(crate) fn prepare_staged_material_mobility(
+        &self, updates: &[MaterialRelaxationTime], damping: &[ModalDampingRatio], gate: &CancelGate,
+    ) -> Result<PreparedMaterialRelaxationTimes, ModalCouplingError> {
+        self.prepare_material_mobility(updates, damping, CoefficientEndpoint::Staged, gate)
+    }
+
+    fn prepare_material_mobility(
+        &self, updates: &[MaterialRelaxationTime], damping: &[ModalDampingRatio],
+        endpoint: CoefficientEndpoint, gate: &CancelGate,
+    ) -> Result<PreparedMaterialRelaxationTimes, ModalCouplingError> {
         poll(Some(gate))?;
         if updates.len() > self.relaxation_branches.len() {
             return Err(invalid("relaxation time updates exceed original branch count"));
@@ -123,9 +147,12 @@ impl CoupledModalSystem {
                 changed += 1;
             }
         }
-        if changed == 0 {
+        let replacements = self.prepare_modal_mobility(damping, gate)?;
+        let staged = matches!(endpoint, CoefficientEndpoint::Staged);
+        if changed == 0 && replacements.is_none() {
             poll(Some(gate))?;
-            return Ok(PreparedMaterialRelaxationTimes { replacement: None, report: MaterialRelaxationTimeReport::default() });
+            return Ok(PreparedMaterialRelaxationTimes { replacement: None, models: None, staged,
+                report: MaterialRelaxationTimeReport::default() });
         }
         let (models, memory) = match endpoint {
             CoefficientEndpoint::Accepted => (&self.models, &self.material_memory),
@@ -151,22 +178,27 @@ impl CoupledModalSystem {
         // No stiffness or energy chart changes: the existing complete Nyquist
         // bound and all stored momenta/internal strains remain the same. The
         // original preparation still admits pole rates and solver resources.
-        let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
+        let operator_models = replacements.as_ref().map_or(self.models.as_slice(), |(models, _)| models.as_slice());
+        let operator = preparation::prepare(operator_models, &self.columns, &self.connections,
             self.mode_count(), self.dt, self.preparation(), &branches,
             self.radiation.as_ref(), gate)?;
         poll(Some(gate))?;
-        Ok(PreparedMaterialRelaxationTimes { replacement: Some((branches, operator)), report })
+        Ok(PreparedMaterialRelaxationTimes { replacement: Some((branches, operator)), models: replacements, staged, report })
     }
 
     // Publication is infallible and belongs immediately after joint admission.
     pub(crate) fn install_material_relaxation_times(
-        &mut self, prepared: PreparedMaterialRelaxationTimes,
+        &mut self, mut prepared: PreparedMaterialRelaxationTimes,
     ) -> MaterialRelaxationTimeReport {
-        if let Some((branches, operator)) = prepared.replacement {
-            self.exact = operator.exact;
-            self.harmonic_damping_columns = operator.harmonic_damping_columns;
-            self.relaxation_branches = branches;
+        // A staged transaction publishes motion first, swapping the two state
+        // buffers. Align the prepared coefficient copies with that same swap;
+        // neither accepted displacement/velocity nor scratch history is reset.
+        if prepared.staged {
+            if let Some((models, candidates)) = &mut prepared.models {
+                std::mem::swap(models, candidates);
+            }
         }
+        prepared.exchange(self);
         prepared.report
     }
 }

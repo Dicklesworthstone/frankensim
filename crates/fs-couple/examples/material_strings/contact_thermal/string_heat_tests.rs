@@ -223,11 +223,15 @@ fn viscous_ready(
                     };
                     property.interpolation = InterpolationPolicy::LinearInside;
                 }
-                if varying_viscosity && key == ETA {
+                if varying_viscosity && [ETA, SHEAR_ETA].contains(&key) {
                     property.value = PropertyValue::Curve {
                         abscissa: "T".into(),
                         abscissa_dims: fs_qty::Temperature::DIMS,
-                        knots: vec![(280.0, value), (320.0, value * 2.0)],
+                        knots: if key == ETA {
+                            vec![(280.0, value), (320.0, value * 2.0)]
+                        } else {
+                            vec![(280.0, value * 2.0), (320.0, value)]
+                        },
                         dims,
                     };
                     property.interpolation = InterpolationPolicy::LinearInside;
@@ -667,10 +671,11 @@ fn v4_string_heat_uses_source_viscosities_with_one_layer_inventory_and_native_hi
             assert_eq!(observations[0].2, observations[1].2);
             assert_ne!(observations[0].0, observations[1].0);
             assert_ne!(observations[0].1, observations[1].1);
+            let fixed = Profile::parse(text(false).as_bytes()).unwrap();
             let varying = viscous_ready(
                 cx,
                 gate,
-                &profile,
+                &fixed,
                 0.001,
                 true,
                 [2e9, 2e5],
@@ -678,10 +683,101 @@ fn v4_string_heat_uses_source_viscosities_with_one_layer_inventory_and_native_hi
                 true,
             );
             assert!(
-                profile.prepare(&varying, gate).is_err(),
-                "temperature-dependent viscosity requires an original native coefficient continuation"
+                fixed.prepare(&varying, gate).is_err(),
+                "temperature-dependent viscosity requires explicit source-temperature continuation"
             );
             assert_eq!(varying.performance.samples_rendered(), 0);
+        }
+    });
+}
+
+#[test]
+fn v4_source_viscosities_and_times_continue_one_warm_annulus_without_reinitializing() {
+    scoped(|cx, gate| {
+        let profile = Profile::parse(text(true).as_bytes()).unwrap();
+        for only_kelvin in [false, true] {
+            let mut outcomes = Vec::new();
+            for cp in [0.001, 0.004] {
+                let mut ready = viscous_ready(cx, gate, &profile, cp, true, [2e9, 2e5], only_kelvin, true);
+                let original_modes: Vec<_> = ready.performance.bank().system().components()
+                    .iter().flat_map(|m| m.modes()).copied().collect();
+                let original_times: Vec<_> = ready.performance.bank().system().material_relaxation_branches()
+                    .iter().map(|b| b.relaxation_time_s).collect();
+                let prepared = profile.prepare(&ready, gate).unwrap();
+                let network = prepared.network(gate).unwrap();
+                let (routes, rates) = prepared.material_routes(&ready, &network, gate).unwrap();
+                assert_eq!(rates[0].times.is_empty(), only_kelvin);
+                let original_rows = routes[0].channel.as_ref().unwrap().viscosity_sources()[0].rates_per_s().to_vec();
+                let mass = network.cells()[&CellId(30)].mass_kg;
+                let mut renderer = ready.performance.with_material_contact_thermal_network(
+                    network, vec![], vec![], routes, profile.controls, gate, |endpoint| prepared.resolve(endpoint))
+                    .unwrap().with_material_relaxation_temperature(rates).unwrap();
+                let mut pressure = [0.0; 6];
+                let mut heat = 0.0;
+                for sample in &mut pressure[..3] {
+                    renderer.block(std::slice::from_mut(sample)).unwrap();
+                    heat += renderer.last_frame().unwrap().routed_material_heat_j;
+                }
+                let (network, routes, rates) = renderer.into_thermal_with_material_rates();
+                let temperature = network.temperature_k(CellId(30)).unwrap();
+                assert!(temperature > INITIAL);
+                assert_eq!(routes[0].source.state_coordinate("T"), Some(temperature));
+                let eta_b = routes[0].source.property(ETA).unwrap().value_si();
+                let eta_s = routes[0].source.property(SHEAR_ETA).unwrap().value_si();
+                assert!((eta_b / 2e9 - (1.0 + (temperature - 280.0) / 40.0)).abs() < 1e-14);
+                assert!((eta_s / 2e5 - (2.0 - (temperature - 280.0) / 40.0)).abs() < 1e-14);
+                let rows = routes[0].channel.as_ref().unwrap().viscosity_sources()[0].rates_per_s();
+                assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), vec![5, 6, 7, 8, 9]);
+                let original_b = 2e9 * (1.0 + (INITIAL - 280.0) / 40.0);
+                let original_s = 2e5 * (2.0 - (INITIAL - 280.0) / 40.0);
+                let system = ready.performance.bank().system();
+                for (index, (mode, original)) in system.components().iter().flat_map(|m| m.modes())
+                    .zip(&original_modes).enumerate() {
+                    assert_eq!(mode.angular_frequency_rad_s, original.angular_frequency_rad_s);
+                    assert_eq!(mode.pressure_per_modal_velocity, original.pressure_per_modal_velocity);
+                    if let Some(at) = rows.iter().position(|row| row.0 == index) {
+                        let ratio = if index == 9 { eta_s / original_s } else { eta_b / original_b };
+                        assert!((rows[at].1 - original_rows[at].1 * ratio).abs() < 2e-13 * rows[at].1);
+                        // The other annulus and any gas resistance remain in
+                        // the original native coordinate with their old rates.
+                        let before = 2.0 * original.damping_ratio * original.angular_frequency_rad_s - original_rows[at].1;
+                        let after = 2.0 * mode.damping_ratio * mode.angular_frequency_rad_s - rows[at].1;
+                        assert!((before-after).abs() < 2e-12 * (1.0+before.abs()));
+                    } else { assert_eq!(mode, original); }
+                }
+                for (index, branch) in system.material_relaxation_branches().iter().enumerate() {
+                    let expected = rates[0].times.iter().find(|(i, _)| *i == index)
+                        .map_or(original_times[index], |(_, name)| routes[0].source.property(name).unwrap().value_si());
+                    assert_eq!(branch.relaxation_time_s, expected);
+                }
+                let state: Vec<_> = system.components().iter().flat_map(|m| m.states()).copied().collect();
+                let memory = system.material_memory().to_vec();
+                let clock = ready.performance.samples_rendered();
+                let mut foreign = rates.clone();
+                if only_kelvin { foreign[0].times.push((0, "invented-time".into())); }
+                else { foreign[0].times[0].1 = ETA.into(); }
+                assert!(system.admit_material_rate_thermal_feedback(&network, &routes, &foreign, gate).is_err());
+                let mut renderer = ready.performance.with_material_contact_thermal_network(
+                    network, vec![], vec![], routes, profile.controls, gate, |endpoint| prepared.resolve(endpoint))
+                    .unwrap().with_material_relaxation_temperature(rates).unwrap();
+                assert_eq!(renderer.performance().samples_rendered(), clock);
+                assert_eq!(renderer.performance().bank().system().material_memory(), memory);
+                assert_eq!(renderer.performance().bank().system().components().iter().flat_map(|m| m.states()).copied().collect::<Vec<_>>(), state);
+                for sample in &mut pressure[3..] {
+                    renderer.block(std::slice::from_mut(sample)).unwrap();
+                    let frame = renderer.last_frame().unwrap();
+                    heat += frame.routed_material_heat_j;
+                    assert!(frame.total_energy_residual_j.abs() <= profile.controls.total_energy_tolerance_j);
+                }
+                let cell = &renderer.thermal().cells()[&CellId(30)];
+                assert_eq!(cell.mass_kg, mass);
+                assert!((cell.mass_kg * cell.specific_h_j_kg - heat).abs() < 4e-12);
+                assert_eq!(renderer.performance().bank().system().material_memory().len(), if only_kelvin { 0 } else { 20 });
+                outcomes.push((pressure, renderer.thermal().temperature_k(CellId(30)).unwrap()));
+            }
+            assert!(outcomes[0].1 > outcomes[1].1);
+            assert_eq!(outcomes[0].0[0], outcomes[1].0[0]);
+            assert_ne!(outcomes[0].0, outcomes[1].0);
         }
     });
 }

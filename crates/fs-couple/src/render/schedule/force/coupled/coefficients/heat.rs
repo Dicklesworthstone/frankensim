@@ -69,6 +69,12 @@ impl Signature {
     }
     fn matches_rates(&self, network: &CoupledModalSystem,
         rates: &[super::rates::MaterialRelaxationTime], gate: &CancelGate) -> Result<bool, ModalCouplingError> {
+        self.matches_mobility(network, rates, &[], gate)
+    }
+    fn matches_mobility(&self, network: &CoupledModalSystem,
+        rates: &[super::rates::MaterialRelaxationTime],
+        damping: &[super::rates::mobility::ModalDampingRatio],
+        gate: &CancelGate) -> Result<bool, ModalCouplingError> {
         if network.radiation.is_some() || network.harmonic_only
             || network.offsets != self.offsets || network.dt.to_bits() != self.dt.to_bits()
             || network.mode_count() != self.modes.len()
@@ -76,10 +82,14 @@ impl Signature {
             || network.relaxation_branches.len() != self.branches.len() {
             return Ok(false);
         }
-        for (mode, &(omega, zeta)) in network.models.iter().flat_map(|m| m.modes()).zip(&self.modes) {
+        for (index, (mode, &(omega, zeta))) in network.models.iter().flat_map(|m| m.modes()).zip(&self.modes).enumerate() {
             poll(Some(gate))?;
+            let expected = if let Ok(at) = damping.binary_search_by_key(&index, |u| u.mode) {
+                if damping[at].previous.to_bits() != zeta.to_bits() { return Ok(false); }
+                damping[at].next
+            } else { zeta };
             if mode.angular_frequency_rad_s.to_bits() != omega.to_bits()
-                || mode.damping_ratio.to_bits() != zeta.to_bits() { return Ok(false); }
+                || mode.damping_ratio.to_bits() != expected.to_bits() { return Ok(false); }
         }
         for (i, law) in network.connections.iter().enumerate() {
             poll(Some(gate))?;
@@ -150,7 +160,8 @@ impl CoupledModalSystem {
             .and_then(|v| arms.checked_mul(2*m+5).and_then(|k| v.checked_add(k)))
             .and_then(|v| v.checked_add(self.offsets.len()))
             .and_then(|v| viscosity.iter().try_fold(v, |n, source|
-                source.rates_per_s().len().checked_mul(3)?.checked_add(n)));
+                source.property_names().try_fold(source.rates_per_s().len().checked_mul(3)?.checked_add(n)?,
+                    |words, name| words.checked_add(name.len().checked_add(6)?))));
         let bytes = d.checked_mul(d).and_then(|v| v.checked_mul(40))
             .and_then(|v| v.checked_mul(groups))
             .and_then(|v| v.checked_add(n.checked_mul(n)?.checked_mul(8)?))
@@ -255,13 +266,28 @@ impl MaterialHeatIntegral {
     pub(crate) fn prepare_after_material_rates(&self, network: &CoupledModalSystem,
         rates: &[super::rates::MaterialRelaxationTime], gate: &CancelGate)
         -> Result<Self, ModalCouplingError> {
+        self.prepare_after_material_mobility(network, rates, &[], &self.viscosity, gate)
+    }
+
+    pub(crate) fn prepare_after_material_mobility(&self, network: &CoupledModalSystem,
+        rates: &[super::rates::MaterialRelaxationTime],
+        damping: &[super::rates::mobility::ModalDampingRatio],
+        viscosity: &[MaterialViscousHeatSource], gate: &CancelGate)
+        -> Result<Self, ModalCouplingError> {
         if rates.windows(2).any(|pair| pair[0].branch >= pair[1].branch)
             || rates.iter().any(|rate| rate.branch >= self.signature.branches.len()
                 || !rate.relaxation_time_s.is_finite() || rate.relaxation_time_s <= 0.0)
-            || !self.signature.matches_rates(network, rates, gate)? {
+            || damping.windows(2).any(|pair| pair[0].mode >= pair[1].mode)
+            || damping.iter().any(|u| u.mode >= self.signature.modes.len()
+                || !u.next.is_finite() || u.next < 0.0)
+            || viscosity.len() != self.viscosity.len()
+            || viscosity.iter().zip(&self.viscosity).any(|(a,b)|
+                (a.component(), a.region()) != (b.component(), b.region())
+                || a.rates_per_s().iter().map(|r| r.0).ne(b.rates_per_s().iter().map(|r| r.0)))
+            || !self.signature.matches_mobility(network, rates, damping, gate)? {
             return Err(invalid("material heat rate refresh must retain every original non-rate coefficient"));
         }
-        network.prepare_material_heat_with_viscosity(&self.ranges, &self.viscosity, self.budget, gate)
+        network.prepare_material_heat_with_viscosity(&self.ranges, viscosity, self.budget, gate)
     }
 
     /// True only while the original complete linear coefficients remain intact.

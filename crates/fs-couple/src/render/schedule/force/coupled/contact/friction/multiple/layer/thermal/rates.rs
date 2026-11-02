@@ -1,16 +1,18 @@
-//! Source-selected relaxation times on the original finite-body/contact clock.
+//! Source-selected material mobilities on the original finite-body/contact clock.
 //!
 //! Accepted rates are held over the mechanical interval. The same staged
 //! trajectory supplies physical material heat to the original enthalpy solve;
 //! endpoint temperatures select rates for the NEXT interval. This first-order
-//! split needs time refinement. It is not fully implicit tau(T) within a step.
-//! Maxwell storage and its internal strain do not depend on tau, so changing
-//! only this mobility supplies no parameter work or reversible caloric heat.
+//! split needs time refinement. It is not fully implicit tau(T) or eta(T).
+//! Maxwell storage does not depend on tau; viscosity is purely dissipative.
+//! Updating these mobilities leaves every mechanical and material state intact
+//! and supplies no parameter work or reversible caloric heat.
 use super::*;
 use crate::render::schedule::force::coupled::coefficients::{
-    heat::MaterialHeatIntegral,
+    heat::{MaterialHeatIntegral, viscosity::MaterialViscousHeatSource},
     rates::{
         MaterialRelaxationTime, MaterialRelaxationTimeReport, PreparedMaterialRelaxationTimes,
+        mobility::ModalDampingRatio,
     },
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
@@ -19,6 +21,8 @@ use fs_material::state_point::ResolvedMaterialStatePoint;
 /// material body. `cell` names an existing MaterialRelaxationHeatDestination;
 /// `times` covers all of its original linear memory ranges in native order.
 /// The physical producer supplies these selectors, never a guessed tau name.
+/// This binding also selects the channel's original private viscosity/property
+/// rows; `times` may be empty for a purely Kelvin-Voigt material body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaterialRelaxationTemperature {
     pub cell: CellId,
@@ -39,6 +43,12 @@ pub(super) struct RateEndpoint {
     maps: Option<(Vec<f64>, Vec<f64>)>,
     sources: Vec<(usize, ResolvedMaterialStatePoint)>,
     channels: Vec<Option<MaterialHeatIntegral>>,
+}
+struct MobilityProposal {
+    times: Vec<MaterialRelaxationTime>,
+    damping: Vec<ModalDampingRatio>,
+    sources: Vec<(usize, ResolvedMaterialStatePoint)>,
+    viscosity: Vec<Vec<MaterialViscousHeatSource>>,
 }
 
 impl RateContinuation<'_> {
@@ -89,7 +99,9 @@ impl RateContinuation<'_> {
             // Native bending/twist/axial blocks need not be adjacent. The
             // original integral already admits ordered disjoint ranges; the
             // source selectors must cover their exact union, including gaps.
-            if ranges.is_empty() || ranges.iter().any(|range| range.is_empty())
+            let has_viscosity = channel.viscosity_sources().iter()
+                .any(|source| source.property_names().next().is_some());
+            if (ranges.is_empty() && !has_viscosity) || ranges.iter().any(|range| range.is_empty())
                 || binding.times.len() != ranges.iter().map(|range| range.len()).sum::<usize>()
                 || binding.times.iter().zip(ranges.iter().flat_map(|range| range.clone()))
                     .any(|((branch, name), expected)| {
@@ -99,7 +111,7 @@ impl RateContinuation<'_> {
                 })
             {
                 return Err(bad(
-                    "every original material memory needs one explicit ordered time selector",
+                    "material mobility needs original viscosity rows and/or every original memory's ordered time selector",
                 ));
             }
             if route
@@ -129,8 +141,8 @@ impl RateContinuation<'_> {
             bindings,
             publication: RefCell::new(None),
         };
-        let (updates, _) = owner.propose(routes, thermal, gate)?;
-        for update in updates {
+        let proposal = owner.propose(system, routes, thermal, gate)?;
+        for update in proposal.times {
             if system
                 .material_relaxation_branches()
                 .get(update.branch)
@@ -143,6 +155,11 @@ impl RateContinuation<'_> {
                 ));
             }
         }
+        if !proposal.damping.is_empty() || routes.iter().zip(&proposal.viscosity)
+            .any(|(route, viscosity)| route.channel.as_ref()
+                .is_some_and(|channel| channel.viscosity_sources() != viscosity.as_slice())) {
+            return Err(bad("accepted native viscosity differs from its pinned material source"));
+        }
         Ok(owner)
     }
 
@@ -151,31 +168,30 @@ impl RateContinuation<'_> {
         route: &MaterialRelaxationHeatDestination<'_>,
         thermal: &DepositionSimulation<'_>,
     ) -> Result<(), LayerThermalError<E>> {
-        let properties: Vec<_> = self
-            .bindings
-            .iter()
-            .find(|binding| binding.cell == route.cell)
+        let binding = self.bindings.iter().find(|binding| binding.cell == route.cell);
+        let properties: Vec<_> = binding
             .into_iter()
             .flat_map(|binding| binding.times.iter().map(|(_, name)| name.as_str()))
             .collect();
-        route.admit_with_rates(thermal, &properties)
+        let viscosity: Vec<_> = binding.into_iter()
+            .flat_map(|_| route.channel.iter())
+            .flat_map(|channel| channel.viscosity_sources())
+            .flat_map(|source| source.property_names()).collect();
+        route.admit_with_rates(thermal, &properties, &viscosity)
     }
 
     fn propose<E>(
         &self,
+        system: &MultiFrictionModalSystem,
         routes: &[MaterialRelaxationHeatDestination<'_>],
         thermal: &DepositionSimulation<'_>,
         gate: &CancelGate,
-    ) -> Result<
-        (
-            Vec<MaterialRelaxationTime>,
-            Vec<(usize, ResolvedMaterialStatePoint)>,
-        ),
-        LayerThermalError<E>,
-    > {
+    ) -> Result<MobilityProposal, LayerThermalError<E>> {
         let bad = LayerThermalError::Invalid;
         let mut updates = Vec::new();
         let mut sources = Vec::with_capacity(self.bindings.len());
+        let mut viscosity: Vec<Vec<_>> = routes.iter().map(|route| route.channel.as_ref()
+            .map_or_else(Vec::new, |channel| channel.viscosity_sources().to_vec())).collect();
         for binding in self.bindings {
             poll(Some(gate)).map_err(ModalFrictionError::from)?;
             let (index, route) = routes
@@ -212,10 +228,16 @@ impl RateContinuation<'_> {
                     relaxation_time_s: time,
                 });
             }
+            viscosity[index] = viscosity[index].iter().map(|row| row.at_material_source(&source))
+                .collect::<Result<_, _>>().map_err(ModalFrictionError::from)?;
             sources.push((index, source));
         }
         updates.sort_unstable_by_key(|update| update.branch);
-        Ok((updates, sources))
+        let damping = system.core.network.material_viscosity_updates(
+            routes.iter().zip(&viscosity).flat_map(|(route, proposed)| route.channel.iter()
+                .flat_map(move |channel| channel.viscosity_sources().iter().zip(proposed))), gate)
+            .map_err(ModalFrictionError::from)?;
+        Ok(MobilityProposal { times: updates, damping, sources, viscosity })
     }
 
     pub(super) fn prepare_endpoint<E>(
@@ -225,13 +247,15 @@ impl RateContinuation<'_> {
         thermal: &DepositionSimulation<'_>,
         gate: &CancelGate,
     ) -> Result<RateEndpoint, LayerThermalError<E>> {
-        let (updates, sources) = self.propose(routes, thermal, gate)?;
+        let proposal = self.propose(system, routes, thermal, gate)?;
         let mut native = system
             .core
             .network
-            .prepare_staged_material_relaxation_times(&updates, gate)
+            .prepare_staged_material_mobility(&proposal.times, &proposal.damping, gate)
             .map_err(ModalFrictionError::from)?;
-        let (maps, channels) = if native.changed() {
+        let viscosity_changed = routes.iter().zip(&proposal.viscosity).any(|(route, proposed)|
+            route.channel.as_ref().is_some_and(|channel| channel.viscosity_sources() != proposed.as_slice()));
+        let (maps, channels) = if native.changed() || viscosity_changed {
             // Use the COMPLETE retained columns: a condensed contact may have
             // string, bridge/body and fiber participants. Reconstructing only
             // the public local left/right geometry would lose bridge work.
@@ -243,8 +267,8 @@ impl RateContinuation<'_> {
             system.core.network.preview_material_relaxation_times(&mut native, |network| {
                 let maps = port_maps(network, &columns, gate,
                     "updated material rates require positive contact compliance and endpoint mobility")?;
-                let channels = routes.iter().map(|route| route.channel.as_ref().map(|channel|
-                    channel.prepare_after_material_rates(network, &updates, gate)
+                let channels = routes.iter().zip(&proposal.viscosity).map(|(route, viscosity)| route.channel.as_ref().map(|channel|
+                    channel.prepare_after_material_mobility(network, &proposal.times, &proposal.damping, viscosity, gate)
                         .map_err(ModalFrictionError::from)).transpose()).collect::<Result<Vec<_>, ModalFrictionError>>()?;
                 Ok::<_, ModalFrictionError>((Some(maps), channels))
             })?
@@ -254,7 +278,7 @@ impl RateContinuation<'_> {
         Ok(RateEndpoint {
             native,
             maps,
-            sources,
+            sources: proposal.sources,
             channels,
         })
     }
@@ -294,7 +318,7 @@ impl MultiFrictionModalSystem {
         RateContinuation::new(self, material_heat, rates, thermal, gate).map(|_| ())
     }
 
-    /// Original finite-body/contact heat with explicit source tau(T) feedback.
+    /// Original finite-body/contact heat with explicit source tau(T)/eta(T) feedback.
     /// Accepted rates drive this complete interval; endpoint rates drive the
     /// next. All propagation, contact response and source heat-integral caches
     /// prepare before mechanics, heat, source snapshots or rates publish.

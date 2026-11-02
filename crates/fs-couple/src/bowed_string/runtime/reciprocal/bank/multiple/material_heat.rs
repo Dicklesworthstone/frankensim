@@ -398,11 +398,12 @@ impl MultiBowStringBank {
         })
     }
 
-    /// The same complete material layer with its original source time roles.
+    /// The same complete material layer with its original source mobility roles.
     /// The existing accepted-rate/endpoint-temperature transaction changes only
-    /// relaxation times, retaining material strain/storage and the full coupled
+    /// relaxation times and original bending/shear viscosities, retaining material strain/storage and the full coupled
     /// state. This is the same first-order temperature partition as fiber heat;
-    /// it does not re-resolve geometry, modulus, density or prestress.
+    /// it does not re-resolve geometry, modulus, density or prestress. Purely
+    /// Kelvin-Voigt layers need no additional material-memory coordinates.
     #[allow(clippy::too_many_arguments)]
     pub fn string_material_rate_heat_destination<'a>(
         &self,
@@ -422,9 +423,9 @@ impl MultiBowStringBank {
         ReciprocalStringError,
     > {
         let source = self.string_heat_source(string, layer, gate)?;
-        if source.times.is_empty() {
+        if source.times.is_empty() && source.viscosity.iter().all(|v| v.property_names().next().is_none()) {
             return Err(invalid(
-                "source-temperature relaxation feedback needs original nonzero Maxwell histories",
+                "source-temperature mobility feedback needs original Maxwell or viscosity selectors",
             ));
         }
         let channel = self
