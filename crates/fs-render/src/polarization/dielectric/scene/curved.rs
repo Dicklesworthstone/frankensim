@@ -363,13 +363,14 @@ impl<'a> CurvedPolarizedScene<'a> {
         seed: u64,
         path_id: u64,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
-        self.trace_with_seed_mode(cx, beam, initial_medium, settings, seed, path_id, false)
+        self.trace_with_seed_mode(cx, beam, initial_medium, settings, seed, path_id, false, |_| Ok(()))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn trace_with_seed_mode(
         &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
         settings: CurvedTraceSettings, seed: u64, path_id: u64, radiance_brushing: bool,
+        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
         self.trace_with_samples_mode(cx, beam, initial_medium, settings, |event| {
             let block = philox4x32_10(
@@ -377,7 +378,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                 [seed as u32, (seed >> 32) as u32],
             );
             core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
-        }, radiance_brushing)
+        }, radiance_brushing, observe_surface)
     }
 
     /// Trace through the native clearance/event owner. The sampler is called
@@ -393,17 +394,18 @@ impl<'a> CurvedPolarizedScene<'a> {
         settings: CurvedTraceSettings,
         samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<CurvedPathResult, CurvedSceneError> {
-        self.trace_with_samples_mode(cx, beam, initial_medium, settings, samples, false)
+        self.trace_with_samples_mode(cx, beam, initial_medium, settings, samples, false, |_| Ok(()))
     }
 
     // Only reciprocal scalar cameras select the radiance shading-normal law.
     // Refraction still transports native power here; the camera applies its
-    // single endpoint index ratio after the complete curved path.
+    // local index ratio once for each source encountered along the path.
     #[allow(clippy::too_many_arguments)]
     fn trace_with_samples_mode(
         &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
         settings: CurvedTraceSettings, samples: impl FnMut(u32) -> [f64; 3],
         radiance_brushing: bool,
+        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
         self.trace_with_flights(
             cx,
@@ -412,6 +414,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             settings,
             samples,
             radiance_brushing,
+            observe_surface,
             0,
             |_, _| Ok(None),
             |_, _, _, _| Err(CurvedSceneError::NumericalRange),
@@ -431,6 +434,7 @@ impl<'a> CurvedPolarizedScene<'a> {
         settings: CurvedTraceSettings,
         mut samples: impl FnMut(u32) -> [f64; 3],
         radiance_brushing: bool,
+        mut observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
         max_volume_events: u32,
         mut flight: impl FnMut(usize, f64) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
         mut scatter: impl FnMut(
@@ -647,6 +651,10 @@ impl<'a> CurvedPolarizedScene<'a> {
             });
             let event = result.surface_events;
             result.surface_events += 1;
+            // Emission belongs to the arriving path, before this surface's
+            // reflection/transmission proposal or termination. Departure
+            // witnesses prevent the same physical encounter being counted twice.
+            observe_surface(&result)?;
             match binding.interaction {
                 Interaction::Detector { reference_axis } => {
                     result.beam = result.beam.with_reference_axis(reference_axis)?;

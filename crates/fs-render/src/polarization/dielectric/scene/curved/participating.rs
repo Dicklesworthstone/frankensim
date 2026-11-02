@@ -310,6 +310,15 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         seed: u64,
         path_id: u64,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_observed(cx, beam, initial_medium, settings, seed, path_id, |_| Ok(()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_observed(
+        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
+        settings: CurvedRayleighTraceSettings, seed: u64, path_id: u64,
+        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         let draws = |ordinal, domain| {
             let block = philox4x32_10(
                 [path_id as u32, (path_id >> 32) as u32, ordinal, domain],
@@ -325,6 +334,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             |event| draws(event, 0x706f_6c32),
             |flight| draws(flight, 0x706f_6c34),
             true,
+            observe_surface,
         )
     }
 
@@ -339,7 +349,19 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         initial_medium: usize,
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_samples_observed(cx, beam, initial_medium, settings,
+            surface_samples, flight_samples, |_| Ok(()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_with_samples_observed(
+        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut flight_samples: impl FnMut(u32) -> [f64; 3],
+        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         self.trace_with_tracking_samples_impl(
             cx,
@@ -352,6 +374,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                 [draw[0], draw[1], draw[2], 0.0]
             },
             false,
+            observe_surface,
         )
     }
 
@@ -367,6 +390,18 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         surface_samples: impl FnMut(u32) -> [f64; 3],
         flight_samples: impl FnMut(u32) -> [f64; 4],
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_tracking_samples_observed(cx, beam, initial_medium, settings,
+            surface_samples, flight_samples, |_| Ok(()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_with_tracking_samples_observed(
+        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
+        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         self.trace_with_tracking_samples_impl(
             cx,
             beam,
@@ -375,6 +410,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             surface_samples,
             flight_samples,
             true,
+            observe_surface,
         )
     }
 
@@ -388,6 +424,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         surface_samples: impl FnMut(u32) -> [f64; 3],
         mut flight_samples: impl FnMut(u32) -> [f64; 4],
         heterogeneous_samples: bool,
+        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         cx.checkpoint()?;
         if settings.max_volume_events == 0 || settings.max_volume_events > MAX_POLARIZED_PATH_EVENTS
@@ -402,6 +439,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             settings.surfaces,
             surface_samples,
             self.radiance_brushing,
+            observe_surface,
             settings.max_volume_events,
             |medium, wavelength| {
                 let Some(law) = self.media[medium] else {

@@ -17,6 +17,7 @@ use fs_exec::{CancelGate, ExecMode, StreamKey};
 use fs_geom::Point3;
 
 mod rough;
+mod emission;
 
 fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new();
@@ -416,10 +417,7 @@ fn g0_opaque_bindings_unsupported_scattering_and_infinite_absorption_are_explici
         )
         .unwrap();
         let source = [emitter(9, 1.0, EmissionSides::Both)];
-        assert!(matches!(
-            CurvedCameraScene::try_new(cx, &smooth, &source, None),
-            Err(CameraRadianceError::InvalidEmitter { object_id: 9 })
-        ));
+        assert!(CurvedCameraScene::try_new(cx, &smooth, &source, None).is_ok());
         let camera = CurvedCameraScene::try_new(cx, &smooth, &[], None).unwrap();
         gate.request();
         assert!(matches!(

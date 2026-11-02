@@ -9,8 +9,8 @@
 //! provide a general polarized camera.
 //!
 //! Radiance obeys L/n^2 along smooth isotropic lossless propagation. Consequently
-//! the sampled reciprocal power is multiplied ONCE by (n_camera/n_endpoint)^2,
-//! using the actual local phase indices. This includes continuous GRIN and
+//! each source contribution is multiplied ONCE by (n_camera/n_source)^2,
+//! using the actual local phase indices at that encounter. This includes continuous GRIN and
 //! discrete refraction together. No bundle-area Jacobian, source inverse-square
 //! factor or additional Fresnel probability belongs in this radiance estimator.
 //! Native GGX dielectric/conductor weights already include the solid-angle
@@ -31,7 +31,10 @@
 //! <https://pbr-book.org/4ed/Reflection_Models/Rough_Dielectric_BSDF>, and PBRT 3e,
 //! section 16.1.3, <https://pbr-book.org/3ed-2018/Light_Transport_III_Bidirectional_Methods/The_Path-Space_Measurement_Equation>.
 //!
-//! Finite emitters are uniform, unpolarized radiance on original opaque geometry.
+//! Finite emitters are uniform, unpolarized radiance on original native surfaces.
+//! Emission is added before the same path reflects or transmits; it does not
+//! replace the surface's optical interaction. Supplied radiance is independently
+//! calibrated: no thermal emissivity or material/source energy coupling is inferred.
 //! An environment is evaluated only after proven homogeneous escape. Nonzero
 //! homogeneous absorption over the remaining infinite path gives exactly zero;
 //! no volume emission is assumed. Numerical distance/event limits are errors,
@@ -39,7 +42,7 @@
 //! floating-point underflow and is unresolved before a positive finite source.
 //! Explicit depolarizing diffuse surfaces use their native cosine proposal and
 //! spectral reflectance while preserving the same curved path and medium.
-//! Point-light connections, emission at reflecting surfaces, moving fields,
+//! Point-light connections, moving fields,
 //! gain and nonreciprocal media remain outside this consumer.
 //! With `volumes`, `participating` adds the original reciprocal molecular
 //! scattering walk and retains this same endpoint radiometry.
@@ -54,6 +57,9 @@ use crate::polarization::dielectric::transport::{BeamMedium, PolarizationFrame, 
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use fs_exec::Cx;
 use fs_geom::Vec3;
+
+mod emission;
+use emission::SurfaceEmission;
 
 /// Physical camera and spectral pixel integration over these native paths.
 pub mod raster;
@@ -125,7 +131,10 @@ pub enum EmissionSides {
     Both,
 }
 
-/// Uniform unpolarized source on an actual native opaque object. Supplied
+/// Uniform unpolarized source on an actual native surface. Reflection or
+/// transmission continues under the original material after emission is added.
+/// No thermal emissivity is inferred from the independently calibrated spectrum.
+/// Supplied
 /// radiance applies in that object's surrounding local medium. It is not a
 /// vacuum thermal spectrum silently promoted into a dielectric medium.
 #[derive(Clone, Debug, PartialEq)]
@@ -246,7 +255,8 @@ pub enum RadianceEndpoint {
         object_id: u64,
     },
     Environment,
-    /// Exact zero from the native single-scattering microfacet proposal.
+    /// Exact zero continuation from the native single-scattering microfacet
+    /// proposal. Already encountered surface emission remains in the sample.
     /// The retained path ends at this surface with its incoming beam state.
     RejectedMicrofacet {
         object_id: u64,
@@ -254,8 +264,9 @@ pub enum RadianceEndpoint {
 }
 
 /// One spectral Monte Carlo estimate, before camera exposure or spectral/pixel
-/// integration. Surface branch probabilities are already included in its
-/// transport weight. The retained native path carries contact resolution,
+/// integration. Radiance sums emission at all encountered sources. Surface
+/// branch probabilities are already included in the terminal transport weight;
+/// that weight does not multiply earlier source contributions. The retained native path carries contact resolution,
 /// optical lengths, medium identity and the original termination. For tilted
 /// brushing, the retained reciprocal beam carries the reduced-radiance
 /// estimator's weight, not the public forward-light beam's importance weight.
@@ -335,7 +346,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
                 .map_err(|_| CameraRadianceError::InvalidEmitter {
                     object_id: emitter.object_id,
                 })?;
-            if slots[index].is_some() || scene.bindings[index].interaction != Interaction::Opaque {
+            if slots[index].is_some() {
                 return Err(CameraRadianceError::InvalidEmitter {
                     object_id: emitter.object_id,
                 });
@@ -368,10 +379,13 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         cx.checkpoint()?;
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let path = self
+        let mut emission = SurfaceEmission::new(self, initial_index);
+        let result = self
             .scene
-            .trace_with_seed_mode(cx, beam, initial_medium, settings, seed, path_id, true)?;
-        self.finish(cx, path, initial_index)
+            .trace_with_seed_mode(cx, beam, initial_medium, settings, seed, path_id, true,
+                |path| emission.observe(path));
+        let (path, emitted) = emission.finish(result)?;
+        self.finish(cx, path, initial_index, emitted)
     }
 
     /// Caller variates have the native [microfacet_u, microfacet_v, branch]
@@ -392,10 +406,13 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         cx.checkpoint()?;
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let path = self
+        let mut emission = SurfaceEmission::new(self, initial_index);
+        let result = self
             .scene
-            .trace_with_samples_mode(cx, beam, initial_medium, settings, samples, true)?;
-        self.finish(cx, path, initial_index)
+            .trace_with_samples_mode(cx, beam, initial_medium, settings, samples, true,
+                |path| emission.observe(path));
+        let (path, emitted) = emission.finish(result)?;
+        self.finish(cx, path, initial_index, emitted)
     }
 
     fn launch(
@@ -430,6 +447,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         cx: &Cx<'_>,
         path: CurvedPathResult,
         initial_index: f64,
+        surface_emission: f64,
     ) -> Result<CameraRadianceSample, CameraRadianceError> {
         cx.checkpoint()?;
         if path.termination() == PathTermination::RejectedMicrofacet {
@@ -440,7 +458,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
             // BSDF, not unknown continuation or underflow. Preserve the draw
             // in the Monte Carlo denominator instead of trying another facet.
             return Ok(CameraRadianceSample {
-                radiance_w_m2_sr_nm: 0.0,
+                radiance_w_m2_sr_nm: surface_emission,
                 transport_weight: 0.0,
                 endpoint: RadianceEndpoint::RejectedMicrofacet {
                     object_id: contact.object_id,
@@ -456,29 +474,14 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
                 let contact = path
                     .last_contact()
                     .ok_or(CameraRadianceError::NumericalRange)?;
-                let emitter = self
-                    .emitters
-                    .get(contact.witness.boundary_id)
-                    .ok_or(CameraRadianceError::NumericalRange)?;
-                let emitted = if let Some(emitter) = emitter {
-                    if emitter.object_id != contact.object_id {
-                        return Err(CameraRadianceError::NumericalRange);
-                    }
-                    if emitter.sides == EmissionSides::Both
-                        || contact.witness.normal.dot(beam.ray().dir) < 0.0
-                    {
-                        emitter.spectrum.evaluate(wavelength)?
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
+                // The arriving-surface callback already counted this terminal
+                // emitter, including an exact-black diffuse material. Count it
+                // once regardless of the interaction that stopped the walk.
                 (
                     RadianceEndpoint::Surface {
                         object_id: contact.object_id,
                     },
-                    emitted,
+                    0.0,
                 )
             }
             PathTermination::Escaped => {
@@ -513,10 +516,11 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         } else {
             finite_nonnegative(beam.power().i * (ratio * ratio))?
         };
-        let radiance_w_m2_sr_nm = finite_nonnegative(emitted * transport_weight)?;
-        if emitted > 0.0 && radiance_w_m2_sr_nm == 0.0 {
+        let endpoint_emission = finite_nonnegative(emitted * transport_weight)?;
+        if emitted > 0.0 && endpoint_emission == 0.0 {
             return Err(CameraRadianceError::NumericalRange);
         }
+        let radiance_w_m2_sr_nm = finite_nonnegative(surface_emission + endpoint_emission)?;
         cx.checkpoint()?;
         Ok(CameraRadianceSample {
             radiance_w_m2_sr_nm,

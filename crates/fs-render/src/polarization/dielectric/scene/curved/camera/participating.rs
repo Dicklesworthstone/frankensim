@@ -11,8 +11,10 @@
 //! symmetry with the native Stokes sign conventions. Keeping every intervening
 //! Q/U/V component therefore retains reciprocal scalar M00 for unpolarized
 //! emission and intensity-only reception, including multiple scattering. The
-//! actual endpoint (n_camera/n_source)² factor is applied once by the existing
-//! camera consumer. This is not a general polarized camera adjoint.
+//! local (n_camera/n_source)² factor is applied once for each encountered
+//! surface source or final environment by the existing camera consumer.
+//! Reflective emitters keep scattering along this same molecular path.
+//! This is not a general polarized camera adjoint.
 //!
 //! References and endpoint radiometry are those of [`super::CurvedCameraScene`]; the molecular
 //! matrix is owned by [`crate::volumes::transport::scattering::polarized`].
@@ -24,7 +26,7 @@
 //! sample is zero, including outside a finite grid. Only the native `Escaped`
 //! termination admits environment evaluation; unresolved tails are errors.
 
-use super::{CameraRadianceError, CameraRadianceSample, CurvedCameraScene, phase_index};
+use super::{CameraRadianceError, CameraRadianceSample, CurvedCameraScene, SurfaceEmission, phase_index};
 use crate::charts::Ray;
 use crate::polarization::dielectric::scene::SceneError;
 use crate::polarization::dielectric::scene::curved::participating::{
@@ -103,11 +105,14 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         cx.checkpoint()?;
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let path = self
+        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let result = self
             .scattering
             .for_camera()
-            .trace(cx, beam, initial_medium, settings, seed, path_id)?;
-        self.finish(cx, path, initial_index)
+            .trace_observed(cx, beam, initial_medium, settings, seed, path_id,
+                |path| emission.observe(path));
+        let (path, emitted) = emission.finish(result)?;
+        self.finish(cx, path, initial_index, emitted)
     }
 
     /// Uniform-density custom samples retain the native three-variate flight
@@ -127,15 +132,18 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         cx.checkpoint()?;
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let path = self.scattering.for_camera().trace_with_samples(
+        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let result = self.scattering.for_camera().trace_with_samples_observed(
             cx,
             beam,
             initial_medium,
             settings,
             surface_samples,
             flight_samples,
-        )?;
-        self.finish(cx, path, initial_index)
+            |path| emission.observe(path),
+        );
+        let (path, emitted) = emission.finish(result)?;
+        self.finish(cx, path, initial_index, emitted)
     }
 
     /// Uniform or heterogeneous density with native independent variates:
@@ -155,15 +163,18 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         cx.checkpoint()?;
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
-        let path = self.scattering.for_camera().trace_with_tracking_samples(
+        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let result = self.scattering.for_camera().trace_with_tracking_samples_observed(
             cx,
             beam,
             initial_medium,
             settings,
             surface_samples,
             flight_samples,
-        )?;
-        self.finish(cx, path, initial_index)
+            |path| emission.observe(path),
+        );
+        let (path, emitted) = emission.finish(result)?;
+        self.finish(cx, path, initial_index, emitted)
     }
 
     fn finish(
@@ -171,8 +182,9 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         cx: &Cx<'_>,
         path: CurvedRayleighPath,
         initial_index: f64,
+        surface_emission: f64,
     ) -> Result<RayleighCameraSample, CameraRadianceError> {
-        let radiance = self.camera.finish(cx, *path.path(), initial_index)?;
+        let radiance = self.camera.finish(cx, *path.path(), initial_index, surface_emission)?;
         Ok(RayleighCameraSample {
             radiance,
             volume_events: path.volume_events(),

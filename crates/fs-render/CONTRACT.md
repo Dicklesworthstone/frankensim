@@ -334,9 +334,18 @@ differentiable lift). Pure Rust throughout.
   native curved visibility, full smooth/GGX reciprocal Fresnel/frame transport and
   Beer integrals as scalar unpolarized camera radiance. It retains the native
   branch importance weights and applies one actual local phase-index factor
-  `(n_camera/n_endpoint)^2`. No source-distance or bundle-area factor is added.
-  Validated finite spectral radiance binds original opaque object IDs with
-  explicit emitting sides. Environment maps require caller radiometric
+  `(n_camera/n_source)^2` separately for each encountered source. No source-distance
+  or bundle-area factor is added. Validated finite spectral radiance binds
+  original native object IDs with explicit emitting sides. Emission is added
+  from the arriving beam before that surface reflects, transmits or terminates,
+  so a calibrated source can also reflect its surroundings. Each source keeps
+  its own Beer prefix and incident local index; the current surface's Fresnel,
+  cosine and sampling PDF do not multiply its own emission. Original geometric
+  normals determine emitting sides, including brushed surfaces. The private
+  callback shares the original walk and uses stack-only accumulation; public
+  forward-power APIs retain their original behavior. Source spectra remain
+  independently calibrated, with no inferred emissivity or thermal coupling.
+  Environment maps require caller radiometric
   calibration and are sampled only after proven homogeneous escape. Any
   positive absorption on the remaining infinite tail gives exact zero before
   source evaluation. Native rough dielectric/conductor and anisotropic brushing
@@ -350,13 +359,16 @@ differentiable lift). Pure Rust throughout.
   the shared surface driver. The camera's retained reciprocal beam therefore
   carries an estimator weight, not a forward-power/heat-deposition measurement.
   Decorative normals remain a shading approximation. Rejected
-  microfacets are explicit exact-zero samples without resampling; geometric
+  microfacets have explicit exact-zero continuation without resampling; any
+  earlier surface emission remains in the radiance sample. Geometric
   cosine and refractive Jacobians are not applied twice. Detector interactions
   refuse. Numerical limits and indistinguishable
   native extinction/underflow are unresolved
   errors. This covers reciprocal isotropic stationary media and intensity-only
-  endpoints, not general polarized adjoints, emission at reflecting surfaces,
-  volume emission or point-light connections.
+  endpoints, not general polarized adjoints, volume emission or point-light
+  connections. Terminal transport weight describes only the final continuation,
+  while returned radiance sums all encountered sources. Unresolved continuation,
+  overflow and cancellation still return errors without publishing a partial sum.
   `camera::raster::CurvedCameraRaster` prepares the original physical
   pinhole/thin-lens camera and traces each of four stratified wavelengths along
   its own curved path. Raster, lens, wavelength and boundary streams retain
@@ -379,6 +391,12 @@ differentiable lift). Pure Rust throughout.
   These added native integration regressions remain unexecuted in the
   implementation environment; no multiple-scattering or geometry-detail claim
   is added by admitting the existing bounded normal perturbation.
+  Six additive-emission regressions cover analytic diffuse/coated-metal and
+  refractive/GRIN sums, exact-black termination, sidedness/null proposals,
+  spectral raster and all molecular camera routes including a real collision,
+  preserved public power results, limits, overflow and late cancellation.
+  They are authored native integration regressions; dependency compilation
+  constraints still prevent execution in the implementation environment.
 
 - `transport::diffuse::DiffuseBeamSample` and
   `Interaction::DepolarizingDiffuse { medium, reflectance }` add explicit
@@ -392,10 +410,11 @@ differentiable lift). Pure Rust throughout.
   optical lengths and cumulative work/surface/distance limits continue across
   the bounce. Exact black terminates without a random draw; positive-power
   underflow refuses. The existing scalar camera, raster and molecular-volume
-  wrappers consume this same native walk and its one endpoint phase-index
-  conversion. Emitters remain bound only to original `Opaque` interactions;
-  diffuse reflection does not add emissive reflection, subsurface transport,
-  inferred material polarization, direct-light sampling or MIS. Differentiated
+  wrappers consume this same native walk and its source-local phase-index
+  conversion. Calibrated camera emitters can also bind diffuse surfaces, adding
+  emission before the diffuse interaction, including exact black. Diffuse
+  reflection does not infer thermal emission, subsurface transport, material
+  polarization, direct-light sampling or MIS. Differentiated
   ray bundles explicitly refuse the nondelta interaction. Nine regressions
   cover hemisphere power and moments, pole-safe frames, spectral diffuse
   forward detectors in both walkers, gray/white/black camera radiance, analytic
@@ -407,7 +426,8 @@ differentiable lift). Pure Rust throughout.
   `CurvedRayleighScene` surface owner, checked by pointer identity. Native
   arc-length flights, heterogeneous majorant/null tracking, complete
   Rayleigh/depolarized-Rayleigh Mueller/PDF response and absorption are reused
-  unchanged. The existing endpoint radiance conversion applies once; no
+  unchanged. The same source-local radiance conversion applies once per
+  encounter; reflective emitters use the shared arriving-surface callback. No
   duplicate scattering survival, collision rate, albedo or phase weight is
   introduced. Samples retain real collision and free-flight counters. Zero
   scattering preserves surface-camera results bit for bit. Positive-majorant
