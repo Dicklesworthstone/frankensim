@@ -22425,3 +22425,46 @@ contacts/common acceleration, original source temperatures and atomic refusal.
 The fixed-normal/frozen-geometry phase does not supply changing-footprint heat,
 thermal expansion or history transfer for varying elasticity/friction; finite
 thermal space/time discretization retains its refinement requirements.
+
+## Complete sliding-film layer heat on the impact clock
+
+`render::plate::impact::material::heating::SlidingFilmLayerHeatRoute`
+binds every retained lower-to-upper layer of one selected original sliding
+channel to an existing finite caloric reservoir. Uniform channels retain
+one implicit layer. Film indices use the separate sliding insertion order;
+normal-pressure film indices and liquid feedback bindings cannot alias
+these routes. Coverage is complete, duplicate physical-channel routes
+refuse, repeated reservoir destinations are permitted, and unselected
+channels remain mechanical losses outside the chosen thermal boundary.
+
+`HeatedImpactSystem::new_with_sliding_losses` combines these routes with
+the existing contact, normal-pressure film, stratified normal-film, and
+material-memory routes. Legacy constructors delegate with no sliding
+routes. Original wall ports, immutable layer interfaces, viscosity
+profiles, and the native force/tangent owners remain authoritative.
+
+The heat stage evaluates each selected sliding island once at the original
+midpoint configuration and discrete-gradient velocity. It consumes the
+native per-layer integral of `tau^2 / mu`, including the signed
+pressure/Couette cross term; pressure-only heat fractions cannot substitute
+for that combined physical work. Only the floating-point closure remainder
+is assigned to the current largest layer contributor. Each selected channel
+counts once against the original mechanical dissipation allowance,
+independently of its layer count. The large bounded layer report lives in a
+separate non-inlined helper, so normal-film/contact-only calls retain their
+existing stack requirements.
+
+Motion, finite enthalpy stores, thermal transport/network state, and the
+original clock publish through the existing atomic acceptance transaction.
+Cancellation, unrepresentable heat, invalid routing, or a late material-chart
+refusal leaves accepted state unchanged. This increment freezes sliding
+constitutive profiles; it does not infer a wall heat partition, additional
+thermal clock, or sliding-film source-temperature feedback.
+
+Four integration regressions cover independent two-body momentum and
+discrete-gradient work, native reference equality and both Newton images,
+the 0.8/0.2 Couette layer partition, partial selection and independent film
+indices, original-network conduction, invalid route coverage/keys/duplicates,
+and cancellation or late chart refusal with retry. Production and regression
+sources pass Rustfmt parsing and bounded independent source review. Runtime
+tests and a full crate build remain unexecuted in the full-storage environment.
