@@ -148,7 +148,7 @@ impl DiffusionStep {
 
     /// Residual against the original conservative operator. Scaled Euclidean
     /// norms avoid squaring the physical load magnitude directly.
-    fn defect(
+    pub(super) fn defect(
         &self,
         x: &[f64],
         rhs: &[f64],
@@ -186,7 +186,7 @@ impl DiffusionStep {
     /// Reuse native O(n) adjacent-pivot LU, then check the original equation.
     /// Correction attempts reuse the same factors and stay inside both work
     /// limits. A direct solve supplies no forward-error or continuum certificate.
-    fn solve_tridiagonal(
+    pub(super) fn solve_tridiagonal(
         &self,
         rhs: &[f64],
         controls: CheckedCgConfig,

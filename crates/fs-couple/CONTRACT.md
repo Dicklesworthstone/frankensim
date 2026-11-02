@@ -9446,6 +9446,38 @@ Authored regressions cover analytical dry uptake, nonlinear square-root
 steady flow, finite-emission uptake/desorption, a finite vapor reservoir,
 negative intervening source data and nonlinear work refusal.
 
+### Activity-driven transport through unlike material layers
+
+`moisture::layered::{MoistureLayer, MoistureLayeredSlab}` joins original native
+slabs with source-backed `MonotoneMoistureSorption` charts. The material card,
+complete held coordinate names/value bits and quantity semantics must match;
+only the respective owned relative-humidity and dry-basis moisture coordinates
+are excluded. Common dilute-vapor activity establishes ideal-contact equilibrium,
+so dry-basis moisture can jump between materials and transport may oppose the
+moisture-content gradient. Each layer retains its own dry skeleton, geometry,
+selected diffusivity law and accepted native slab endpoint.
+
+Internal faces in one layer use the original Kirchhoff potential secant.
+Only material joins solve a bounded 128-step common-activity balance of the two
+physical half-cell fluxes. Backward Euler uses exact sorption storage secants,
+a common shifted activity unknown and the existing O(N) tridiagonal/defect-
+correction owner. The shift preserves stiff uniform-activity equilibrium without
+cancelling large coefficients. Endpoint source support, true residuals, direct
+and stable water changes, activity maximum principle, content increments,
+work limits and cancellation precede atomic publication of the complete stack.
+
+Reports retain interface activity, the two distinct material moisture contents,
+signed interface transfers, physical boundary transfers, source identities and
+solver evidence. `layers()[i].slab()` exposes the accepted original slab to its
+existing consumers. Exterior ends may be sealed or prescribed RH. This is
+fixed-area, isothermal ideal contact; contact resistance, hysteresis, sorption
+heat, liquid flow, moving geometry and finite-reservoir adapters remain separate.
+No entropy, continuum-error or experimental-validation certificate is inferred.
+Six authored physical/source tests cover unlike-material equilibrium, transfer
+against the M gradient, nonlinear dry uptake and balanced contact flux, native
+same-material reduction, zero-D barriers, complete held-context compatibility
+and transactional work refusal.
+
 ### Source-backed finite surface moisture exchange
 
 `moisture::surface::DryBasisSurfaceTransfer` admits the canonical

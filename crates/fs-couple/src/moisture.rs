@@ -33,6 +33,8 @@ pub mod cartesian;
 mod implicit;
 /// Source-integrated nonlinear Fick fluxes, including degenerate dry fronts.
 mod kirchhoff;
+/// Conservative unlike-material layers with source-owned activity partitioning.
+pub mod layered;
 mod reservoir;
 pub mod plate;
 /// Directional swelling, compatible shape, stress and native vibration tangent.
@@ -102,6 +104,11 @@ pub enum MoistureError {
     KirchhoffSurfaceNotConverged {
         iterations: usize,
         fraction_bracket: [f64; 2],
+    },
+    /// Unlike-material half-cells did not establish a common interface activity.
+    LayeredInterfaceNotConverged {
+        iterations: usize,
+        activity_bracket: [f64; 2],
     },
     /// A valid cell endpoint exceeded the caller's numerical change limit.
     ContentIncrement {

@@ -32,6 +32,8 @@ mod implicit;
 mod kirchhoff;
 #[path = "moisture/cartesian.rs"]
 mod cartesian;
+#[path = "moisture/layered.rs"]
+mod layered;
 #[path = "moisture/adaptive.rs"]
 mod adaptive;
 

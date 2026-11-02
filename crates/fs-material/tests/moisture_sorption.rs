@@ -145,6 +145,7 @@ fn nonlinear_isotherm_inverts_and_integrates_every_storage_segment() {
     assert_eq!(s.mean_capacity(0.125, 0.75), s.mean_capacity(0.75, 0.125));
     assert_eq!(s.card_identity(), c.content_hash());
     assert_eq!(s.temperature_kelvin(), 300.0);
+    assert_eq!(s.source_point(), &point(0.0));
     assert_eq!(s.knot_count(), 4);
     assert_eq!(s, chart(&c, [0.0, 1.0]));
     assert_ne!(s.identity(), chart(&c, [0.25, 0.75]).identity());

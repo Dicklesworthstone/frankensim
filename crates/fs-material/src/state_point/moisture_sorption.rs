@@ -30,6 +30,7 @@ fn quantity(kind: QuantityKind) -> QuantitySpec {
 pub struct MonotoneMoistureSorption {
     knots: Box<[(f64, f64)]>,
     capacities: Box<[f64]>,
+    source_point: QueryPoint,
     card_identity: ContentHash,
     temperature_kelvin: f64,
     selected_claim: ClaimId,
@@ -143,6 +144,7 @@ impl MonotoneMoistureSorption {
         Ok(Self {
             knots: knots.into_boxed_slice(),
             capacities: capacities.into_boxed_slice(),
+            source_point: binding.query(),
             card_identity: card.content_hash(),
             temperature_kelvin: binding
                 .state_coordinate("temperature")
@@ -162,6 +164,12 @@ impl MonotoneMoistureSorption {
     }
     pub fn knot_count(&self) -> usize {
         self.knots.len()
+    }
+    /// Original typed preparation context. A transport consumer must match all
+    /// held coordinates, not only the card and temperature, when combining laws.
+    /// Only the canonical relative-humidity coordinate evolves in this chart.
+    pub const fn source_point(&self) -> &QueryPoint {
+        &self.source_point
     }
     pub const fn card_identity(&self) -> ContentHash {
         self.card_identity
