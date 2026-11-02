@@ -20,6 +20,9 @@ mod island;
 /// Simultaneous Hertz shear/spin and material-derived rolling on one native pair.
 pub mod hertz_rolling;
 
+/// Source-backed changing-load Hertz--Mindlin contact with native normal/shear recoil.
+pub mod mindlin;
+
 /// Source-capable directional Coulomb friction with full two-body mobility.
 pub mod directional;
 

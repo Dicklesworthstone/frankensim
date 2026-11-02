@@ -3222,6 +3222,34 @@ groups cover mixed powered motion against independent pressure integration,
 off-center nonprincipal inertia and frame covariance, exact zero-drive/common
 acceleration invariance, and atomic reversal/normal-motion/cancellation refusal.
 
+## Native simultaneous Hertz loading and retained Mindlin shear
+
+`tangential_friction::mindlin::advance_rigid_mindlin` resolves normal indentation
+and retained scalar Mindlin shear from two actual rigid-body states, their
+masses, full inertias and contact arms. A bounded monotone solve uses the
+source-owned exact Hertz mean force and analytic endpoint derivative. The same
+affine normal path then enters the original source-bound compliant Mindlin
+solve. One combined action/reaction impulse supplies both native endpoints;
+no caller-specified effective mass or replacement contact spring is accepted.
+
+Actual midpoint displacement, original normal and shear storage, irreversible
+microslip heat, native kinetic energy and world linear/angular momentum are
+checked together. Preloaded shear may return energy to the bodies. Source rate
+and native shear-speed limits apply at both actual endpoints, so cancellation
+in mean motion cannot hide an out-of-domain velocity. The immutable candidate
+contains both bodies and complete original-source contact history; any refusal
+or cancellation preserves the accepted inputs.
+
+The admitted branch has circular Hertz geometry, a common material point,
+central normal force lines and one longitudinal shear coordinate. Transverse
+slip, torsional slip, noncentral normal/shear coupling and separation-crossing
+intervals refuse. The enclosing owner still supplies initial indentation,
+material-point geometry, pose integration and physical-time refinement. G1/G3
+checks compare native recoil and work with original source responses and an
+independent Hertz ODE, including second-order time refinement. G0/G4 checks
+cover unsupported motion, source/history identity, endpoint speed limits,
+iteration bounds, cancellation and identical retry.
+
 ## Source-owned adhesive sliding and twisting on finite bodies
 
 `tangential_friction::adhesive` applies the original ordered junction-shear
