@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	malachite-handbook-mineralogy
+redistribution	permitted	Selected attributed numerical facts and original qualification notes only; no source document, prose, images or table layout is redistributed
+citation	Anthony, Bideaux, Bladh and Nichols, Handbook of Mineralogy, Malachite, version 1 (2001-2005), Physical Properties; https://www.handbookofmineralogy.org/pdfs/malachite.pdf ; unit guide https://handbookofmineralogy.org/ ; accessed 2026-11-02; source PDF SHA256 35ef1533a9da65d544b754833308090d2b77fd62521d89992d0ba90292e2490d
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	mineral-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	density_spread	density-source-parenthetical-spread	dimensional
+property	mohs_min	hardness-mohs-source-minimum	dimensional
+property	mohs_max	hardness-mohs-source-maximum	dimensional
+axis	mineral	source-mineral-malachite	dimensional
+axis	grain	mineral-reference-model	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	pressure_known	source-test-pressure-known	dimensional
+axis	bulk_ore_qualified	bulk-ore-qualified	dimensional
+axis	specimen_qualified	source-specimen-qualified	dimensional

@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	galena-handbook-mineralogy
+redistribution	permitted	Selected attributed numerical facts and original qualification notes only; no source document, prose, images or table layout is redistributed
+citation	Anthony, Bideaux, Bladh and Nichols, Handbook of Mineralogy, Galena, version 1 (2001-2005), Physical Properties; https://www.handbookofmineralogy.org/pdfs/galena.pdf ; unit guide https://handbookofmineralogy.org/ ; accessed 2026-11-02; source PDF SHA256 0f936addd4f10b98356e7a1b9ce6ddd2d6571f5ca9cac34722dab7df6d9deaeb
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	mineral-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	mohs_min	hardness-mohs-source-minimum	dimensional
+property	mohs_max	hardness-mohs-source-maximum	dimensional
+axis	mineral	source-mineral-galena	dimensional
+axis	grain	mineral-reference-model	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	pressure_known	source-test-pressure-known	dimensional
+axis	bulk_ore_qualified	bulk-ore-qualified	dimensional
+axis	specimen_qualified	source-specimen-qualified	dimensional

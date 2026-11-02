@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	sphalerite-handbook-mineralogy
+redistribution	permitted	Selected attributed numerical facts and original qualification notes only; no source document, prose, images or table layout is redistributed
+citation	Anthony, Bideaux, Bladh and Nichols, Handbook of Mineralogy, Sphalerite, version 1 (2001-2005), Physical Properties; https://www.handbookofmineralogy.org/pdfs/sphalerite.pdf ; unit guide https://handbookofmineralogy.org/ ; accessed 2026-11-02; source PDF SHA256 9876af6871c024b471b1daf5662da113cf69c9859a78a7fe5595991606b9a934
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	mineral-reference	properties.tsv	material-tsv-v1
+property	density_min	density-reported-range-minimum	dimensional
+property	density_max	density-reported-range-maximum	dimensional
+property	mohs_min	hardness-mohs-source-minimum	dimensional
+property	mohs_max	hardness-mohs-source-maximum	dimensional
+axis	mineral	source-mineral-sphalerite	dimensional
+axis	grain	mineral-reference-model	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	pressure_known	source-test-pressure-known	dimensional
+axis	bulk_ore_qualified	bulk-ore-qualified	dimensional
+axis	specimen_qualified	source-specimen-qualified	dimensional

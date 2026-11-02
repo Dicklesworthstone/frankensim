@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	mineral	Cubic galena PbS mineral reference	Handbook of Mineralogy Physical Properties, D(meas.) and hardness	The measured mineral density is 7.58 g/cm3; the separate calculated value 7.57 is not substituted. Mohs hardness endpoints 2.5 and 2.75 retain the source's ordinal range. Test temperature, pressure, shared specimen identity and statistical uncertainty are unspecified. These data do not establish the density or silver content of a galena-bearing ore, flotation recovery, comminution work or a concentrate shipping property.
+scalar	rho	mineral	density	7.58	g/cm3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	mineral	1	1	1
+validity	rho	grain	1	1	1
+validity	rho	temperature_known	0	0	1
+validity	rho	pressure_known	0	0	1
+validity	rho	bulk_ore_qualified	0	0	1
+validity	rho	specimen_qualified	0	0	1
+scalar	mohs-low	mineral	mohs_min	2.5	1	constant
+uncertainty	mohs-low	unstated	-	-	-	-
+validity	mohs-low	mineral	1	1	1
+validity	mohs-low	grain	1	1	1
+validity	mohs-low	temperature_known	0	0	1
+validity	mohs-low	pressure_known	0	0	1
+validity	mohs-low	bulk_ore_qualified	0	0	1
+validity	mohs-low	specimen_qualified	0	0	1
+scalar	mohs-high	mineral	mohs_max	2.75	1	constant
+uncertainty	mohs-high	unstated	-	-	-	-
+validity	mohs-high	mineral	1	1	1
+validity	mohs-high	grain	1	1	1
+validity	mohs-high	temperature_known	0	0	1
+validity	mohs-high	pressure_known	0	0	1
+validity	mohs-high	bulk_ore_qualified	0	0	1
+validity	mohs-high	specimen_qualified	0	0	1

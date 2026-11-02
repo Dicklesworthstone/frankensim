@@ -1,0 +1,34 @@
+frankensim.matdb-source.v1
+observation	mineral	Monoclinic malachite Cu2(CO3)(OH)2 mineral reference	Handbook of Mineralogy Physical Properties, D(meas.) and hardness	D(meas.) is printed 4.05(2) g/cm3. The central value 4.05 and parenthetical magnitude 0.02 are retained as separate quantities, without inventing a statistical confidence level. The calculated value 3.983 is not substituted. Mohs endpoints are 3.5 and 4. Test temperature, pressure and shared specimen identity are unspecified. Grain properties do not establish porous ore density, acid demand of associated gangue, leach rate, recovery or neutralization capacity of a rock mixture.
+scalar	rho	mineral	density	4.05	g/cm3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	mineral	1	1	1
+validity	rho	grain	1	1	1
+validity	rho	temperature_known	0	0	1
+validity	rho	pressure_known	0	0	1
+validity	rho	bulk_ore_qualified	0	0	1
+validity	rho	specimen_qualified	0	0	1
+scalar	rho-spread	mineral	density_spread	0.02	g/cm3	constant
+uncertainty	rho-spread	unstated	-	-	-	-
+validity	rho-spread	mineral	1	1	1
+validity	rho-spread	grain	1	1	1
+validity	rho-spread	temperature_known	0	0	1
+validity	rho-spread	pressure_known	0	0	1
+validity	rho-spread	bulk_ore_qualified	0	0	1
+validity	rho-spread	specimen_qualified	0	0	1
+scalar	mohs-low	mineral	mohs_min	3.5	1	constant
+uncertainty	mohs-low	unstated	-	-	-	-
+validity	mohs-low	mineral	1	1	1
+validity	mohs-low	grain	1	1	1
+validity	mohs-low	temperature_known	0	0	1
+validity	mohs-low	pressure_known	0	0	1
+validity	mohs-low	bulk_ore_qualified	0	0	1
+validity	mohs-low	specimen_qualified	0	0	1
+scalar	mohs-high	mineral	mohs_max	4	1	constant
+uncertainty	mohs-high	unstated	-	-	-	-
+validity	mohs-high	mineral	1	1	1
+validity	mohs-high	grain	1	1	1
+validity	mohs-high	temperature_known	0	0	1
+validity	mohs-high	pressure_known	0	0	1
+validity	mohs-high	bulk_ore_qualified	0	0	1
+validity	mohs-high	specimen_qualified	0	0	1
