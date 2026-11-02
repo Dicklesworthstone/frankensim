@@ -65,9 +65,10 @@ impl ResolvedMeltingCurve {
     /// generated-knot budget. Fusion is an exact-temperature plateau in that
     /// chart; its width must remain representable at the chosen enthalpy datum.
     ///
-    /// Density is independently sourced on each branch. The original chart
-    /// interpolates specific volume through coexistence. A consumer keeps
-    /// specimen mass invariant and handles the corresponding volume change;
+    /// Density preserves its independently sourced rho(T) law on each sensible
+    /// branch. The original chart interpolates specific volume through
+    /// coexistence. A consumer keeps specimen mass invariant and handles the
+    /// corresponding volume change;
     /// this constructor neither creates mass nor asserts fixed-volume geometry.
     pub fn try_new(
         card: &MaterialCard,
@@ -162,6 +163,7 @@ impl ResolvedMeltingCurve {
         knots.extend_from_slice(solid.curve().knots());
         knots.extend_from_slice(liquid.curve().knots());
         let mut curve = EquilibriumEnthalpyPhaseCurve::try_new(card.content_hash(), knots)?;
+        curve.retain_sensible_density_law();
         let mut receipts = solid.receipts().to_vec();
         receipts.push(melting.receipt);
         receipts.push(fusion.receipt);

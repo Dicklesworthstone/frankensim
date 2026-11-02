@@ -254,6 +254,19 @@ fn g1_sharp_melting_mobility_retains_density_through_isobaric_heat_and_cooling()
         );
         let fraction = step.state.liquid_mass_fraction();
         if fraction == 0.0 || fraction == 1.0 {
+            let original_density = source
+                .claims()
+                .query_typed(
+                    &query.density,
+                    &point(step.state.temperature_k(), Some(fraction), pressure),
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .unwrap()
+                .evidence
+                .value
+                .value;
+            near(step.state.bulk_density_kg_m3(), original_density);
+            near(step.final_volume_m3, mass / original_density);
             assert_eq!(
                 volumes.bulk_density_kg_m3.to_bits(),
                 step.state.bulk_density_kg_m3().to_bits()
@@ -304,6 +317,112 @@ fn g1_sharp_melting_mobility_retains_density_through_isobaric_heat_and_cooling()
     for h in [-1.0, 220_001.0, f64::NAN] {
         assert!(law.classify_at_specific_enthalpy(h).is_err());
     }
+}
+
+#[test]
+fn g1_sensible_density_matches_original_source_with_constant_and_variable_cp() {
+    let query = Query::new();
+    for cp in [[1000.0; 2], [1000.0, 2000.0]] {
+        let source = card_with_heat_capacities_and_densities(
+            Some(20_000.0),
+            true,
+            false,
+            cp,
+            cp,
+            [[1000.0, 500.0], [800.0, 400.0]],
+        );
+        // Coarse and refined caloric charts must preserve the same source
+        // rho(T) law at the temperature each actually publishes.
+        for tolerance in [20_000.0, 0.1] {
+            let melting =
+                ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, tolerance).unwrap();
+            for (branch, phase, fraction, offset) in [
+                (query.query().solid, SolidLiquidPhase::Solid, 0.0, 0.0),
+                (
+                    query.query().liquid,
+                    SolidLiquidPhase::Liquid,
+                    1.0,
+                    melting.plateau_enthalpy_bounds_j_kg()[1],
+                ),
+            ] {
+                let sensible =
+                    ResolvedHeatCapacityCurve::try_new(&source, branch, phase, 0.0, tolerance)
+                        .unwrap();
+                let knots = sensible.curve().knots();
+                for index in [0, (knots.len() - 2) / 2, knots.len() - 2] {
+                    let lower = knots[index].specific_enthalpy_j_kg;
+                    let upper = knots[index + 1].specific_enthalpy_j_kg;
+                    let h = lower + 0.37 * (upper - lower);
+                    let state = sensible.curve().state_at_specific_enthalpy(h).unwrap();
+                    let expected = source
+                        .claims()
+                        .query_typed(
+                            &query.density,
+                            &point(state.temperature_k(), Some(fraction), 100_000.0),
+                            SelectionPolicy::SingleClaimOnly,
+                        )
+                        .unwrap()
+                        .evidence
+                        .value
+                        .value;
+                    near(state.bulk_density_kg_m3(), expected);
+                    let joined = melting
+                        .curve()
+                        .state_at_specific_enthalpy(h + offset)
+                        .unwrap();
+                    near(joined.temperature_k(), state.temperature_k());
+                    near(joined.bulk_density_kg_m3(), expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_sensible_density_basis_is_identified_and_generic_h_charts_keep_additive_volume() {
+    use crate::phase::HeatCapacityKnot;
+
+    let source = [
+        HeatCapacityKnot {
+            temperature_k: 300.0,
+            specific_heat_capacity_j_kg_k: 1000.0,
+            bulk_density_kg_m3: 1000.0,
+        },
+        HeatCapacityKnot {
+            temperature_k: 400.0,
+            specific_heat_capacity_j_kg_k: 1000.0,
+            bulk_density_kg_m3: 500.0,
+        },
+    ];
+    let card = fs_blake3::ContentHash([0x54; 32]);
+    let sensible = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+        card,
+        SolidLiquidPhase::Solid,
+        0.0,
+        &source,
+        0.1,
+    )
+    .unwrap();
+    assert_eq!(sensible.knots().len(), 2);
+    let generic = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+        card,
+        SolidLiquidPhase::Solid,
+        sensible.knots().to_vec(),
+    )
+    .unwrap();
+    assert_ne!(sensible.identity(), generic.identity());
+    let h = 50_000.0;
+    let state = sensible.state_at_specific_enthalpy(h).unwrap();
+    assert_eq!(state.temperature_k(), 350.0);
+    assert_eq!(state.bulk_density_kg_m3(), 750.0);
+    near(
+        generic
+            .state_at_specific_enthalpy(h)
+            .unwrap()
+            .bulk_density_kg_m3(),
+        1.0 / (0.5 / 1000.0 + 0.5 / 500.0),
+    );
+    assert!(generic.advance_specific_energy(state, 0.0).is_err());
 }
 
 #[test]

@@ -526,9 +526,9 @@ pub struct HeatCapacityKnot {
     pub temperature_k: f64,
     /// Specific heat capacity [J/(kg K)].
     pub specific_heat_capacity_j_kg_k: f64,
-    /// Bulk density [kg/m3]. It is linearly interpolated in temperature only
-    /// while producing the enthalpy chart; the resulting chart retains its
-    /// existing specific-volume interpolation between generated knots.
+    /// Bulk density [kg/m3]. The generated sensible chart preserves this
+    /// piecewise-linear density law at its evaluated temperature. It does not
+    /// replace the source law with linear specific-volume interpolation.
     pub bulk_density_kg_m3: f64,
 }
 
@@ -862,6 +862,16 @@ pub struct EquilibriumEnthalpyPhaseCurve {
     knots: Vec<EnthalpyPhaseKnot>,
     identity: ContentHash,
     source_receipts: Vec<PropertyUsageReceipt>,
+    density_interpolation: PhaseDensityInterpolation,
+}
+
+/// Explicit h/rho charts retain their original specific-volume interpolation.
+/// Cp/rho(T) ingress instead preserves its sensible density law; coexistence
+/// still uses additive constituent volumes in either case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PhaseDensityInterpolation {
+    SpecificVolume,
+    LinearSensibleDensity,
 }
 
 impl EquilibriumEnthalpyPhaseCurve {
@@ -871,6 +881,7 @@ impl EquilibriumEnthalpyPhaseCurve {
     /// temperature and liquid fraction must not decrease. The first knot must
     /// be fully solid and the last fully liquid so that the curve owns both
     /// phase transitions rather than exposing a misleading partial taxonomy.
+    /// Density between supplied knots uses linear specific volume in enthalpy.
     pub fn try_new(
         material_card_identity: ContentHash,
         knots: Vec<EnthalpyPhaseKnot>,
@@ -937,9 +948,10 @@ impl EquilibriumEnthalpyPhaseCurve {
     /// subdivided until its straight enthalpy chord differs from that integral
     /// by no more than `maximum_interpolation_error_j_kg`.
     ///
-    /// The requested bound covers only this interpolation arithmetic. It does
-    /// not quantify source error, floating-point roundoff, or the density
-    /// interpolation approximation.
+    /// The resulting chart preserves the original piecewise-linear density
+    /// law at its evaluated temperature, including when constant Cp needs no
+    /// subdivision. The requested bound covers the enthalpy interpolation
+    /// arithmetic; it does not quantify source error or floating-point roundoff.
     pub fn try_from_heat_capacity(
         material_card_identity: ContentHash,
         phase: SolidLiquidPhase,
@@ -1026,7 +1038,9 @@ impl EquilibriumEnthalpyPhaseCurve {
                 enthalpy = specific_enthalpy_j_kg;
             }
         }
-        Self::try_single_phase(material_card_identity, phase, generated)
+        let mut curve = Self::try_single_phase(material_card_identity, phase, generated)?;
+        curve.retain_sensible_density_law();
+        Ok(curve)
     }
 
     fn from_valid_knots(
@@ -1038,7 +1052,19 @@ impl EquilibriumEnthalpyPhaseCurve {
             identity: phase_curve_identity(material_card_identity, &knots),
             knots,
             source_receipts: Vec::new(),
+            density_interpolation: PhaseDensityInterpolation::SpecificVolume,
         }
+    }
+
+    /// Apply only to charts constructed from affine rho(T) sensible branches.
+    /// The interpolation law is part of identity even when all densities happen
+    /// to be equal. Generic supplied h/rho charts keep their original identity.
+    fn retain_sensible_density_law(&mut self) {
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-material.sensible-density-linear-temperature.v1");
+        identity.update(self.identity.as_bytes());
+        self.identity = identity.finalize();
+        self.density_interpolation = PhaseDensityInterpolation::LinearSensibleDensity;
     }
 
     /// Material card that owns the supplied equilibrium data.
@@ -1231,19 +1257,25 @@ impl EquilibriumEnthalpyPhaseCurve {
                         upper_knot.liquid_mass_fraction,
                         alpha,
                     ),
-                    // Density is mass per volume, so interpolation on a
-                    // mass-specific enthalpy coordinate is performed in
-                    // specific volume and inverted. Linear density would
-                    // violate additive mixture volume through a two-phase
-                    // interval.
-                    // An admissible constant-density segment must retain
-                    // its mass density bit for bit: reciprocal round trips may
-                    // move even a constant value by 1 ULP. Specific volume
-                    // must still be representable, as for every other segment.
-                    bulk_density_kg_m3: if lower_knot.bulk_density_kg_m3.to_bits()
+                    // A sourced sensible segment retains affine rho(T), using
+                    // the same interpolation coordinate as T(h). Coexistence
+                    // and generic h/rho charts retain additive specific volume.
+                    bulk_density_kg_m3: if self.density_interpolation
+                        == PhaseDensityInterpolation::LinearSensibleDensity
+                        && lower_knot.liquid_mass_fraction == upper_knot.liquid_mass_fraction
+                        && (lower_knot.liquid_mass_fraction == 0.0
+                            || lower_knot.liquid_mass_fraction == 1.0)
+                    {
+                        lerp(
+                            lower_knot.bulk_density_kg_m3,
+                            upper_knot.bulk_density_kg_m3,
+                            alpha,
+                        )
+                    } else if lower_knot.bulk_density_kg_m3.to_bits()
                         == upper_knot.bulk_density_kg_m3.to_bits()
                         && lower_knot.bulk_density_kg_m3.recip().is_finite()
                     {
+                        // Avoid a reciprocal round trip changing constant rho.
                         lower_knot.bulk_density_kg_m3
                     } else {
                         lerp(
@@ -1254,7 +1286,10 @@ impl EquilibriumEnthalpyPhaseCurve {
                         .recip()
                     },
                 };
-                if !(values.bulk_density_kg_m3.is_finite() && values.bulk_density_kg_m3 > 0.0) {
+                if !(values.bulk_density_kg_m3.is_finite()
+                    && values.bulk_density_kg_m3 > 0.0
+                    && values.bulk_density_kg_m3.recip().is_finite())
+                {
                     return Err(PhaseStateError::InvalidCurve {
                         what: "interpolated bulk density is not finite and positive",
                     });

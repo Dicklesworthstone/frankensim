@@ -1286,8 +1286,12 @@ homogenization, the P2 milestone.
   strictly increasing source `Cp(T)` knots, taking its enthalpy reference at
   the first source temperature. Linear `Cp` segments are integrated exactly
   and subdivided under a caller-provided real-arithmetic chord-error bound;
-  all source endpoints remain knots. The bound excludes source uncertainty,
-  floating-point error and the linear-in-temperature density approximation.
+  all source endpoints remain knots. Sensible samples retain the source
+  piecewise-linear rho(T) at the evaluated temperature, including constant-Cp
+  spans that require no caloric subdivision. The density interpolation basis
+  is bound into chart identity. Generic supplied h/rho charts retain their
+  original specific-volume interpolation and identity. The enthalpy bound
+  excludes source uncertainty and floating-point error.
   Generated charts cap at 4096 knots before allocation. This is bounded
   numerical construction, not experimental validation or a mechanical model.
   `ResolvedHeatCapacityCurve::try_new` admits that chart directly from one
@@ -4509,9 +4513,10 @@ The existing heat-capacity owner integrates sensible heat on both branches. One
 fusion increment separates the solid/liquid endpoint enthalpies at the exact
 same temperature; independently tabulated assigned enthalpy is not also added.
 The resulting chart, its states and relative entropy remain consumable by the
-original enthalpy owners. Density retains branch-specific values and the original
-additive-specific-volume coexistence rule; specimen mass stays invariant and the
-consumer must account for the resulting volume change. Every selected Cp,
+original enthalpy owners. Density retains the original piecewise-linear rho(T)
+on each sensible branch and the additive-specific-volume coexistence rule;
+specimen mass stays invariant and the consumer must account for the resulting
+volume change. Every selected Cp,
 density, melting-temperature and fusion-energy receipt is retained and bound
 into the curve identity. The declared sensible interpolation allowance is not a
 source-uncertainty claim. This admission does not infer a phase diagram, nucleation,
