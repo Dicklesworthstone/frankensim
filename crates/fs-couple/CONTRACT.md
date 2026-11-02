@@ -1913,6 +1913,43 @@ cancellation refusals. Package execution remains blocked by the missing
 canonical dependency checkout; spherical-shell and open-cylinder validation
 remain outstanding.
 
+### Continuous tone forcing of coupled modal mechanics
+
+`coupled::tones::CoupledModalTones` advances an existing complete coupled
+network under simultaneous continuous cosine/sine generalized forces. Force
+rows retain the original modal order and N/sqrt(kg) units; coefficients refer
+to the start of each accepted sample. Its read-only owning wrapper binds the
+prepared operator to the original source, clock and histories. Recovering the
+network for a coefficient change requires preparing it again.
+
+The existing exact source assembler retains complete signed spring and
+dashpot columns, the prepared coupled-basis direction of constant-loss
+dashpots, Maxwell memories, and reciprocal acoustic coordinates. The shared
+`fs_phs::linear_exact::PreparedExactTones` integrates this full trajectory,
+original source work, component heat, every link's heat, material heat and
+radiation heat. Each original link reports its actual negative elastic-storage
+change minus its own integrated heat. Spring rest loads enter as DC and their
+work is removed from the authored-source account. All coherent cross-tone
+terms remain; exactly equal sources combine in caller order with compensated
+addition, while nearby tones retain their beats.
+
+The existing state, energy, pressure, material-domain, whole-interval force
+and port gates precede the original single publication boundary. The force
+gate uses a bound on the continuous forcing amplitude. Refusal preserves
+accepted mechanics, memories, radiation, diagnostics, clock and ports.
+Real instantaneous pressure-per-velocity maps remain usable; nonzero imaginary
+natural-mode quadrature maps refuse. Frequency-resolved broadband pressure,
+nonlinear contact and general descriptor evolution remain separate owners.
+
+The complete original and source-augmented coordinates must fit the shared
+dense capacity and explicit dimension/byte/work allowance. Original source
+setup and physical limits remain binding; nothing is dropped to fit them.
+Cold numerical preparation is cancellable. Warm propagation reuses its
+matrices and evaluates no exponentials; original transactional staging and
+port reporting retain their bounded vector allocations. This finite linear
+source path does not establish material, radiation-fit or continuum accuracy.
+
+
 ### Continuous loaded modal and cavity response
 
 `CoupledModalSystem::harmonic_response` solves the original continuous linear

@@ -13,6 +13,7 @@ use fs_phs::linear_exact::{integrated_resistance_loss, step_render};
 use fs_phs::{PortHamiltonian, QuadraticStorage, ResistanceWitness, StepRecord};
 
 pub(super) mod prepared;
+pub(super) mod tones;
 pub(super) mod dg;
 pub(super) mod linear_forcing;
 #[cfg(test)]
@@ -1629,3 +1630,4 @@ mod tests {
         }
     }
 }
+

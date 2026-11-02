@@ -24,6 +24,7 @@ mod relaxation;
 pub use relaxation::{MaterialRelaxationObservation, ModalPlaneStressPoint};
 pub(crate) mod dg;
 pub mod harmonic;
+pub mod tones;
 pub mod radiation;
 pub mod damping;
 pub mod coefficients;
