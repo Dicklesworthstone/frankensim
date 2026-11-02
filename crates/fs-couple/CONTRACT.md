@@ -1,5 +1,46 @@
 # CONTRACT: fs-couple
 
+## Implicit pressure and viscous loads driving guided rigid motion
+
+The opt-in `experimental-stokes-motion` feature exposes `GuidedStokesMotion`.
+It binds the original material `FluxSystem` to one `fs-mbd::RigidBodyState`
+with a translation guide, physical extrusion depth, spring and dashpot. Native
+mixed BDF1 Stokes solves compute zero-motion loading and the homogeneous unit
+velocity response. Their scalar Schur complement closes the body equation;
+a final native solve uses the actual representable body velocity. The response
+is solved homogeneously rather than subtracting large absolute-pressure loads.
+No fitted added mass, drag law or separate flow solver is introduced. Three
+native solves are required per step; trial fields are released after extracting
+their response. Material transport is bound once and never requeried by trials.
+
+Selected-edge pressure/viscous forces use the retained discrete reaction
+functional, explicit pressure datums, and depth conversion from N/m to N.
+Mean-zero components require an authored pressure offset; traction components
+retain their datum. External force must explicitly include any pressure on the
+body's other side. Ideal-guide transverse force and reference-COM torque are
+reported separately. Initial off-guide/rotating states are refused, strong
+normal velocity is checked, and the inherited weak SIP tangent treatment remains.
+
+Fluid history, original body momentum, translated pose and time publish together
+after force, body-work, finite-arithmetic, displacement-domain and cancellation
+gates. Spring storage uses the actual represented displacement increment.
+Dashpot loss and backward-Euler mechanical loss are separate; the latter is not
+heat. Fluid kinetic change and conjugate interface work are exposed, but the
+body-work identity is not a global fluid/body energy or passivity proof. Native
+fluid viscous and SIP terms have not acquired an independent whole-system audit.
+
+This is fixed-reference, small-displacement linear incompressible Stokes. The
+caller authors a geometrically appropriate displacement bound, and every
+endpoint enforces it. The mesh does not move; no ALE, transported volume,
+convection, finite-motion, thermal pressure-work or rheological evolution is
+claimed. Fixed source/boundary callbacks must be pure across trials. Polling
+between native solves and before publication does not make the synchronous
+native linear solve cancellable internally. Four authored G1/G3/G4 regressions
+cover exact closed-box added mass and full-box backward-Euler work, open-pressure
+driving, transient viscous back-reaction, gauges/depth, guided-state admission,
+late cancellation and rejected-step continuation. Native test execution remains
+a separate verification obligation.
+
 ## Source-backed evolving viscosity across film layers
 
 `LiquidFilmImpactSystem::new_with_layers` accepts explicit source-backed

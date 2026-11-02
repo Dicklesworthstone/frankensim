@@ -88,6 +88,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Small-displacement implicit mechanics on the original mixed Stokes operator.
+experimental-stokes-motion = ["dep:fs-flux", "fs-flux/continuum"]
 # Coherent finite-film absorption on the original spatial thermal timeline.
 layered-wave-heating = ["fs-em/plane-wave"]
 # Bounded single-bubble dynamics coupled to native compact acoustic observation.
@@ -111,3 +113,7 @@ required-features = ["cavitation"]
 [[test]]
 name = "cavitation"
 required-features = ["cavitation"]
+
+[[test]]
+name = "stokes_motion"
+required-features = ["experimental-stokes-motion"]

@@ -76,6 +76,9 @@ pub mod gesture_path;
 mod gas_field_input;
 pub mod glottis;
 pub mod iqn_ils;
+/// Implicit guided-body motion driven by original material Stokes reactions.
+#[cfg(feature = "experimental-stokes-motion")]
+pub mod stokes_motion;
 /// Declared gas chemistry, finite atmospheric heat and native moving liquid.
 pub mod liquid_gas;
 pub mod material_assembly;
