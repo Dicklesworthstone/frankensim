@@ -1380,6 +1380,31 @@ homogenization, the P2 milestone.
   HGO variants offer quadratic or log-squared
   bulk energies and separate distortional/bulk accessors. Full-invariant
   HGO's fibre accessor intentionally retains volume dependence.
+- `hyper::acoustic` prepares the original full finite-strain tangent once and
+  evaluates current-direction wave modes without repeating constitutive AD.
+  It uses the 3-D compressible law, not a plane-stress/incompressibility
+  projection or a Maxwell algorithmic tangent.
+  With `q=F^T n`, it uses `Q_ik=A_iJkL q_J q_L/J` and conserved current density
+  `rho=rho0/J`. The original Hessian already includes initial-stress effects;
+  no small-strain replacement or extra geometric term is added. The shared
+  Jacobi eigensolver returns signed squared phase speeds and polarizations;
+  negative or zero eigenvalues retain their sign and have no positive real
+  phase speed. The physical tensor, current density and eigen residual remain
+  available. Stable modes in one direction do not certify global ellipticity,
+  and phase speed is not group velocity or an attenuation/dispersion model.
+  `hyper_acoustic.rs` checks independent finite-NH formulas, the small-strain
+  limit, all four laws against rank-one work derivatives, anisotropic rotation,
+  density/modulus scaling and an admitted expanded NH state with a negative
+  longitudinal eigenvalue. The formulation follows
+  [Abiza, Destrade & Ogden (2012)](https://doi.org/10.1016/j.wavemoti.2011.12.002).
+  NH's former unconditional polyconvex declaration is restricted to the
+  sufficient domain condition `lambda=0` or
+  `3 ln(limit) <= 1+mu/lambda`; the original log-volume energy can lose
+  rank-one convexity beyond it. MR retains a sufficient certificate when
+  `c01=0`; other MR parameters return unknown, because the existing
+  `|cof F|²/J^(4/3)` term lacks that convex-perspective certificate. Unknown
+  does not assert non-polyconvexity, and near-reference random samples do not
+  establish a domain-wide certificate.
 - `hyper::plane_stress` relaxes all three entries of the transverse deformation
   column until the original law's transverse nominal tractions vanish. Thin
   planar hyperelastic consumers therefore retain thickness contraction and,

@@ -668,8 +668,8 @@ fn mt_006_admissibility_machine_checks() {
             .polyconvex,
         None
     );
-    // Polyconvexity spot test: W(F + t a⊗b) is convex in t along random
-    // rank-one directions (necessary condition, sampled).
+    // Near-reference rank-one convexity samples do not certify polyconvexity
+    // throughout the declared finite-stretch domain.
     let mut seed = 0x3A7_0006u64;
     for model in [
         HyperelasticModel::NeoHookean {
@@ -683,7 +683,7 @@ fn mt_006_admissibility_machine_checks() {
         },
     ] {
         let law = Hyperelastic::new(model, 3.0).expect("hyper");
-        assert_eq!(law.admissibility().polyconvex, Some(true));
+        assert_eq!(law.admissibility().polyconvex, None);
         for _ in 0..40 {
             let mut f = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
             for v in &mut f {

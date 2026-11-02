@@ -10,6 +10,8 @@ use crate::{MaterialAdmissibility, MaterialError};
 use fs_ad::{Dual, Dual64, Real};
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 
+/// Finite-deformation acoustic tensors and signed directional wave modes.
+pub mod acoustic;
 /// Dimensioned constitutive-model cards and graph registration.
 pub mod cards;
 /// Exact incompressibility with traction-free thickness and transverse shears.
@@ -448,10 +450,20 @@ impl Hyperelastic {
             has_stored_energy: true,
             dissipation_nonnegative: true, // elastic: zero dissipation
             polyconvex: match &self.model {
-                // Existing declarations retained. For the new laws use a
-                // sufficient convex-in-(F,cof F,J) condition, never a fit.
-                HyperelasticModel::NeoHookean { .. } | HyperelasticModel::MooneyRivlin { .. } => {
-                    Some(true)
+                // Sufficient convex-in-(F,cof F,J) conditions over the
+                // declared stretch domain, never a near-reference spot test.
+                HyperelasticModel::NeoHookean { mu, lambda } => {
+                    // W=mu/2 |F|²+g(J), with
+                    // g''(J)=[mu+lambda*(1-ln J)]/J² and J<=limit³.
+                    (*lambda == 0.0
+                        || 3.0 * fs_math::det::ln(self.stretch_limit) <= 1.0 + mu / lambda)
+                        .then_some(true)
+                }
+                HyperelasticModel::MooneyRivlin { c01, .. } => {
+                    // |F|²/J^(2/3) is a convex power perspective. The
+                    // |cof F|²/J^(4/3) term lacks that sufficient condition;
+                    // absence of this certificate is not non-polyconvexity.
+                    (*c01 == 0.0).then_some(true)
                 }
                 HyperelasticModel::Ogden { terms, volumetric } => {
                     // Schatten powers times J^-b are convex for p>=1,
