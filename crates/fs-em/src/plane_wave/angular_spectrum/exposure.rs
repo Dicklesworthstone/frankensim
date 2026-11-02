@@ -20,6 +20,12 @@ use fs_math::dd::Dd;
 mod sources;
 use sources::{ExposureLine, ExposureLines, ExposureSide};
 
+mod stress;
+pub use stress::{
+    AngularSpectrumExposureStressField, AngularSpectrumExposureStressLimits,
+    AngularSpectrumExposureStressPoint,
+};
+
 mod ensemble;
 pub use ensemble::{AngularSpectrumExposureEnsemble, AngularSpectrumExposureEnsembleLimits};
 

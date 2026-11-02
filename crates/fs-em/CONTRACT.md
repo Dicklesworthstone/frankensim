@@ -2713,3 +2713,55 @@ through actual native RC dynamics at microfarad and picofarad scales, independen
 terminal equations and recovered field energy/heat, reference and terminal
 permutation, common-voltage invariance, charged floating history, append offsets,
 physical source identity, additional-gauge refusal and cancellation replay.
+
+### Finite-window exterior Maxwell stress and surface traction
+
+The existing deterministic and proper-complex exposure owners now expose
+`stress_field` and `illumination_stress_field`. They contract the complete
+symmetric tensor
+`T_ij=epsilon<E_i E_j>+mu<H_i H_j>-delta_ij*(epsilon<E²>+mu<H²>)/2`
+from the original real Maxwell fields. Off-diagonal components retain
+polarization, oblique shear and spatial interference; counterpropagating fields
+are combined before any product. Deterministic means retain carrier and beat
+terms, while proper factors remove sum terms only through their authored zero
+pseudocovariance. Every average uses the supplied normalized shutter.
+
+Both exteriors must retain the same original homogeneous lossless material,
+with its original epsilon and mu, as for the existing cycle-mean force owner.
+This electromagnetic stress excludes mechanical medium pressure,
+electrostriction and magnetostriction. Results expose local pascals, traction
+on validated unit normals, and compensated original-grid surface quadratures
+in newtons. Products can need more spatial resolution than field reconstruction;
+the original grid is not automatically oversampled, and these quadratures
+are not exact continuous-aperture integrals or convergence certificates.
+
+`boundary_stress_resultant_n` evaluates both TOTAL exterior fields with
+outward normals, retaining one plane at a time. The signed resultant is not
+automatically a finite-window mechanical force. Even an empty vacuum region
+can have a nonzero short-window resultant as its field momentum changes.
+For a uniform vacuum shutter, mechanical force additionally requires
+`-(P_field,end-P_field,start)/duration`; a shaped shutter requires the
+corresponding weighted momentum rate. Material-filled interiors need their
+own consistent field/material momentum law. None is inferred or set to zero.
+
+The six independent dyadic components use twelve scalar products per
+point/frequency pair and retain DD arithmetic through factor accumulation,
+trace subtraction, spatial quadrature and subtraction of boundary resultants.
+Equal-frequency grouping and six-component synthesis reuse the original
+exposure owner, with no new film solve. One bank's fields are streamed at a
+time: work remains `O(sum_r(L_r*N + F_r*N*log N + F_r²*N))` and extra
+retained output/accumulation is `O(N)`. Existing work caps remain in force;
+an additional explicit stress-workspace cap admits the complete query before
+allocation. The two-face resultant performs two separately admitted plane
+queries and therefore uses twice the per-plane work, retaining only one plane
+at a time. A general normal contracts the original transverse-grid quadrature;
+it does not rotate or resample that plane. Cancellation publishes no partial
+field or resultant.
+
+Seven authored G1/G3/G4 regressions cover full tensor real-time quadrature,
+proper ensembles, Cartesian covariance, ultrashort carrier phase, joint-face
+standing waves, source-bound shear/traction, momentum-storage distinction,
+source refusal, budgets, darkness, cancellation and replay. The exact temporal
+and stress contraction plus three test definitions passed native no-codegen
+type analysis; complete-owner Rust tests await native execution. Independent
+mathematical references do not constitute execution of the Rust owner.

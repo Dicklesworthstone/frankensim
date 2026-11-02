@@ -54,7 +54,9 @@ pub use exposure::{
     AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureField,
     AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
     AngularSpectrumExposureLayerLimits, AngularSpectrumExposureLimits,
-    AngularSpectrumExposurePoint, PreparedAngularSpectrumExposureLayer,
+    AngularSpectrumExposurePoint, AngularSpectrumExposureStressField,
+    AngularSpectrumExposureStressLimits, AngularSpectrumExposureStressPoint,
+    PreparedAngularSpectrumExposureLayer,
 };
 
 /// Bounds the uninterruptible work of one existing FFT pencil.
