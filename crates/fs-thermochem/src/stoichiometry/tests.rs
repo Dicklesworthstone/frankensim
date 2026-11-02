@@ -55,6 +55,9 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         PyriteOxidationFerricHydroxide,
         MagnesiteCalcination,
         MagnetiteOxidationToHematite,
+        CuprousOxideOxidation,
+        CupricOxideCarbonMonoxideReduction,
+        CuprousOxideCarbonMonoxideReduction,
     ] {
         let first = recipe.build().unwrap();
         let second = recipe.build().unwrap();

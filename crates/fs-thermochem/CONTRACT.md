@@ -19,13 +19,14 @@ inventory resolution refuse rather than clipping or disappearing. The exact
 certificate proves the integer equation; binary64 final amounts are separately
 evaluated, with no claim of exact numerical mass conservation.
 
-`stoichiometry::minerals::MineralReaction` provides twelve explicit reference
+`stoichiometry::minerals::MineralReaction` provides fifteen explicit reference
 endpoints: lime hydration, calcite/dolomite acid neutralization to dissolved
 CO2 or retained bicarbonate, hydrated-lime neutralization, malachite acid
 leaching to dissolved copper and CO2, the net ionic Elsner gold-cyanidation
 balance, pyrite oxidation to either ferrous ions or ideal ferric hydroxide,
-magnesite calcination to crystalline MgO and gaseous CO2, and magnetite
-oxidation to hematite.
+magnesite calcination to crystalline MgO and gaseous CO2, magnetite
+oxidation to hematite, cuprous-oxide oxidation, and carbon-monoxide reduction
+of either cupric or cuprous oxide to crystalline copper and gaseous CO2.
 The bicarbonate pathways consume half as many protons per mole of carbonate
 mineral as the CO2 pathways. The equations do not assign a universal measured
 acid consumption to an ore, nor infer gas transfer or commercial reagent purity.
@@ -34,6 +35,14 @@ as written. Endpoint choice is declared, never inferred from pH, Eh, time or
 thermal phase stability. The actual JANAF source packs close carbonate and
 iron-oxide standard reaction heats at 298.15 K / 1 bar; they do not determine
 kiln duty, reaction rate or decomposition temperature.
+The copper equations separately retain oxide oxidation state, reductant and
+oxygen demand, and metal production. Their JANAF formation sources give
+−282838 J/mol for `2 Cu2O + O2 -> 4 CuO`, −126932 J/mol for
+`CuO + CO -> Cu + CO2`, and −112288 J/mol for `Cu2O + CO -> 2 Cu + CO2`.
+These are per written equation at the admitted standard state. The runnable
+`mineral_processing` example accepts the three- or four-pack source sets,
+prints each consumed/formed mass, retains independently rounded molar masses,
+and exposes their mass-sum residual instead of adjusting a source value.
 `faraday_yield` converts integrated charge, positive electron count, supplied
 molar mass and explicit current efficiency to product amount and mass.
 
@@ -50,7 +59,8 @@ already present in a total-energy formulation.
 
 G0/G1/G3 tests cover exact balances, source-backed CaO hydration through the real
 pack compiler, distinct pyrite and carbonate endpoints, acid-limited malachite
-inventory advancement, Elsner reagent ratios, Faraday copper yield,
+inventory advancement, Elsner reagent ratios, source-backed copper oxide
+redox heat/metal/reductant balances with limiting inventories, Faraday copper yield,
 unit/extent scaling and invalid/mislabelled reference states. This slice does
 not extend the ideal-gas EOS/species model, select thermodynamic pathways,
 authenticate caller species-to-pack associations, solve aqueous speciation,

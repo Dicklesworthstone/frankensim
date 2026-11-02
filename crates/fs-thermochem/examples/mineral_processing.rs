@@ -1,10 +1,11 @@
-//! Evaluate mineral reaction amounts and heat from three actual material packs.
+//! Evaluate mineral reaction amounts and heat from actual material packs.
 //!
 //! Usage: `cargo run -p fs-thermochem --example mineral_processing -- \
 //! cao.fsmatpk water.fsmatpk caoh2.fsmatpk 56.077`
 //! Select another endpoint by prefixing `--reaction magnesite-calcination` or
-//! `--reaction magnetite-oxidation`; the three pack arguments must then match
-//! that equation's explicit source identities.
+//! `--reaction magnetite-oxidation`; pack arguments must match that equation's
+//! explicit source identities. Copper oxide reduction modes take four packs.
+//! `--help` lists every supported reaction and required pack order.
 //! Or explicit malachite inventory accounting, with all four inputs in moles:
 //! `cargo run -p fs-thermochem --example mineral_processing -- \
 //! --malachite-inventory 10 12 100 3`
@@ -29,23 +30,33 @@ const REFERENCE: &str = "source-elemental-reference-janaf";
 
 struct ReactionCase {
     reaction: MineralReaction,
-    packs: [&'static str; 3],
-    species: [&'static str; 3],
-    phase_axes: [&'static str; 3],
+    packs: &'static [&'static str],
+    species: &'static [&'static str],
+    phase_axes: &'static [&'static str],
     equation: &'static str,
 }
+
+const REACTIONS: [&str; 6] = [
+    "lime-hydration",
+    "magnesite-calcination",
+    "magnetite-oxidation",
+    "cuprous-oxide-oxidation",
+    "cupric-oxide-reduction",
+    "cuprous-oxide-reduction",
+];
+const USAGE: &str = "usage: mineral_processing [--reaction NAME] PACK... REACTED_PURE_REACTANT_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
 
 fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
     Ok(match name {
         "lime-hydration" => ReactionCase {
             reaction: MineralReaction::LimeHydration,
-            packs: [
+            packs: &[
                 "calcium-oxide-solid-nist-mining",
                 "water-liquid-janaf-mining",
                 "calcium-hydroxide-solid-nist-mining",
             ],
-            species: ["CaO(s)", "H2O(l)", "Ca(OH)2(s)"],
-            phase_axes: [
+            species: &["CaO(s)", "H2O(l)", "Ca(OH)2(s)"],
+            phase_axes: &[
                 "source-phase-solid",
                 "source-phase-liquid",
                 "source-phase-solid",
@@ -54,13 +65,13 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
         },
         "magnesite-calcination" => ReactionCase {
             reaction: MineralReaction::MagnesiteCalcination,
-            packs: [
+            packs: &[
                 "magnesite-solid-janaf-mining",
                 "magnesium-oxide-solid-janaf-mining",
                 "carbon-dioxide-gas-janaf-mining",
             ],
-            species: ["MgCO3(s)", "MgO(s)", "CO2(g)"],
-            phase_axes: [
+            species: &["MgCO3(s)", "MgO(s)", "CO2(g)"],
+            phase_axes: &[
                 "source-phase-solid",
                 "source-phase-solid",
                 "source-phase-gas",
@@ -69,23 +80,69 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
         },
         "magnetite-oxidation" => ReactionCase {
             reaction: MineralReaction::MagnetiteOxidationToHematite,
-            packs: [
+            packs: &[
                 "magnetite-solid-janaf-mining",
                 "oxygen-gas-janaf-mining",
                 "hematite-solid-janaf-mining",
             ],
-            species: ["Fe3O4(s)", "O2(g)", "Fe2O3(s)"],
-            phase_axes: [
+            species: &["Fe3O4(s)", "O2(g)", "Fe2O3(s)"],
+            phase_axes: &[
                 "source-phase-solid",
                 "source-phase-gas",
                 "source-phase-solid",
             ],
             equation: "4 Fe3O4(s) + O2(g) -> 6 Fe2O3(s), hematite endpoint",
         },
-        _ => return Err(
-            "unknown reaction; use lime-hydration, magnesite-calcination or magnetite-oxidation"
-                .into(),
-        ),
+        "cuprous-oxide-oxidation" => ReactionCase {
+            reaction: MineralReaction::CuprousOxideOxidation,
+            packs: &[
+                "copper-i-oxide-solid-janaf-mining",
+                "oxygen-gas-janaf-mining",
+                "copper-ii-oxide-solid-janaf-mining",
+            ],
+            species: &["Cu2O(s)", "O2(g)", "CuO(s)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-solid",
+            ],
+            equation: "2 Cu2O(s) + O2(g) -> 4 CuO(s)",
+        },
+        "cupric-oxide-reduction" => ReactionCase {
+            reaction: MineralReaction::CupricOxideCarbonMonoxideReduction,
+            packs: &[
+                "copper-ii-oxide-solid-janaf-mining",
+                "carbon-monoxide-gas-janaf-mining",
+                "copper-solid-janaf-mining",
+                "carbon-dioxide-gas-janaf-mining",
+            ],
+            species: &["CuO(s)", "CO(g)", "Cu(s)", "CO2(g)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-solid",
+                "source-phase-gas",
+            ],
+            equation: "CuO(s) + CO(g) -> Cu(s) + CO2(g)",
+        },
+        "cuprous-oxide-reduction" => ReactionCase {
+            reaction: MineralReaction::CuprousOxideCarbonMonoxideReduction,
+            packs: &[
+                "copper-i-oxide-solid-janaf-mining",
+                "carbon-monoxide-gas-janaf-mining",
+                "copper-solid-janaf-mining",
+                "carbon-dioxide-gas-janaf-mining",
+            ],
+            species: &["Cu2O(s)", "CO(g)", "Cu(s)", "CO2(g)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-solid",
+                "source-phase-gas",
+            ],
+            equation: "Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g)",
+        },
+        _ => return Err(format!("unknown reaction {name:?}; use --help for source order").into()),
     })
 }
 
@@ -93,6 +150,9 @@ fn load(path: &Path, expected_id: &str) -> Result<NormalizedPack, Box<dyn Error>
     let bytes = std::fs::read(path)?;
     let decoded = NormalizedPack::from_bytes(&bytes)?;
     let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes)?;
+    if pack.to_bytes() != bytes {
+        return Err(format!("{} is not a canonical material pack", path.display()).into());
+    }
     // This example explicitly associates known source profiles with phases;
     // arbitrary property packs do not authenticate a chemical formula.
     if pack.pack_id() != expected_id {
@@ -174,46 +234,63 @@ fn malachite_inventory(args: &[String]) -> Result<(), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--help"] {
+        println!("{USAGE}");
+        println!("Default without --reaction: lime-hydration. Source pack order:");
+        for name in REACTIONS {
+            let selected = case(name)?;
+            println!("{name}: {}", selected.packs.join(" "));
+        }
+        return Ok(());
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "--malachite-inventory")
     {
         return malachite_inventory(&args);
     }
-    let (case, args) = if args.len() == 6 && args[0] == "--reaction" {
+    let (case, args) = if args.len() >= 2 && args[0] == "--reaction" {
         (case(&args[1])?, &args[2..])
     } else if args.len() == 4 {
         (case("lime-hydration")?, args.as_slice())
     } else {
-        return Err(
-            "usage: mineral_processing [--reaction NAME] REACTANT_PACK SECOND_PACK THIRD_PACK REACTED_PURE_REACTANT_KG".into(),
-        );
+        return Err(USAGE.into());
     };
-    let reacted_kg: f64 = args[3].parse()?;
-    let packs = [
-        load(Path::new(&args[0]), case.packs[0])?,
-        load(Path::new(&args[1]), case.packs[1])?,
-        load(Path::new(&args[2]), case.packs[2])?,
-    ];
-    let species = [
-        SpeciesId::new(case.species[0])?,
-        SpeciesId::new(case.species[1])?,
-        SpeciesId::new(case.species[2])?,
-    ];
-    let points = [
-        reference_point(case.phase_axes[0])?,
-        reference_point(case.phase_axes[1])?,
-        reference_point(case.phase_axes[2])?,
-    ];
-    let sources = std::array::from_fn::<_, 3, _>(|i| FormationEnthalpySource {
-        species: &species[i],
-        pack: &packs[i],
-        at: &points[i],
-        reference_axis: REFERENCE,
-    });
+    if args.len() != case.packs.len() + 1 {
+        return Err(format!(
+            "expected {} source packs in this order, then reacted kg: {}",
+            case.packs.len(),
+            case.packs.join(" ")
+        )
+        .into());
+    }
+    let reacted_kg: f64 = args[case.packs.len()].parse()?;
+    let packs = args
+        .iter()
+        .zip(case.packs)
+        .map(|(path, expected)| load(Path::new(path), expected))
+        .collect::<Result<Vec<_>, _>>()?;
+    let species = case
+        .species
+        .iter()
+        .map(|id| SpeciesId::new(*id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let points = case
+        .phase_axes
+        .iter()
+        .map(|phase| reference_point(phase))
+        .collect::<Result<Vec<_>, _>>()?;
+    let sources = (0..packs.len())
+        .map(|i| FormationEnthalpySource {
+            species: &species[i],
+            pack: &packs[i],
+            at: &points[i],
+            reference_axis: REFERENCE,
+        })
+        .collect::<Vec<_>>();
     let reaction = case.reaction.build()?;
     let heat = reaction.standard_enthalpy_change(&sources)?;
-    let mut molar_masses = Vec::with_capacity(3);
+    let mut molar_masses = Vec::with_capacity(packs.len());
     for (pack, point) in packs.iter().zip(&points) {
         let answer = pack.claims().query_typed(
             &PropertyKey::with_quantity(
@@ -240,6 +317,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         "reaction extent [mol of written equation]: {}",
         extent.value()
     );
+    let mut consumed_mass = 0.0;
+    let mut formed_mass = 0.0;
     for amount in &amounts {
         let index = species
             .iter()
@@ -247,8 +326,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("reaction participant lacks an associated source")?;
         let mass = MassAmountBasis::from_amount(amount.amount, molar_masses[index])?;
         let direction = if amount.term.coefficient < 0 {
+            consumed_mass += mass.mass().value();
             "consumed"
         } else {
+            formed_mass += mass.mass().value();
             "formed"
         };
         println!(
@@ -258,6 +339,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             mass.mass().value()
         );
     }
+    if !consumed_mass.is_finite() || !formed_mass.is_finite() {
+        return Err("summed source-molar-mass conversion is not representable".into());
+    }
+    println!(
+        "Source-molar-mass rounding residual, formed minus consumed [kg]: {}",
+        formed_mass - consumed_mass
+    );
+    println!(
+        "Atoms and charge close exactly; independently rounded source molar masses are retained without adjustment."
+    );
     println!(
         "standard reaction enthalpy [J/mol extent]: {}",
         heat.molar().value()

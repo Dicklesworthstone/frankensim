@@ -116,11 +116,11 @@ fn ids() -> [SpeciesId; 3] {
     ["CaO(s)", "H2O(l)", "Ca(OH)2(s)"].map(|name| SpeciesId::new(name).unwrap())
 }
 
-fn sources<'a>(
-    packs: &'a [NormalizedPack; 3],
-    ids: &'a [SpeciesId; 3],
-    points: &'a [QueryPoint; 3],
-) -> [FormationEnthalpySource<'a>; 3] {
+fn sources<'a, const N: usize>(
+    packs: &'a [NormalizedPack; N],
+    ids: &'a [SpeciesId; N],
+    points: &'a [QueryPoint; N],
+) -> [FormationEnthalpySource<'a>; N] {
     std::array::from_fn(|i| FormationEnthalpySource {
         species: &ids[i],
         pack: &packs[i],
@@ -407,6 +407,201 @@ fn g1_janaf_magnetite_oxidation_uses_four_mineral_moles_per_extent_and_real_oxyg
         .unwrap();
     assert!(!oxygen.answer.receipt.source_hashes.is_empty());
     let wrong_phase = [point(false), point(true), point(false)];
+    assert!(
+        reaction
+            .standard_enthalpy_change(&sources(&packs, &ids, &wrong_phase))
+            .is_err()
+    );
+}
+
+#[test]
+fn g1_janaf_copper_oxide_reductions_close_reductant_metal_and_heat() {
+    for (reaction, oxide, slug, expected_heat, oxide_molar_mass, copper_coefficient) in [
+        (
+            MineralReaction::CupricOxideCarbonMonoxideReduction,
+            "CuO(s)",
+            "copper-ii-oxide-solid-janaf-mining",
+            -126_932.0,
+            0.079545,
+            1.0,
+        ),
+        (
+            MineralReaction::CuprousOxideCarbonMonoxideReduction,
+            "Cu2O(s)",
+            "copper-i-oxide-solid-janaf-mining",
+            -112_288.0,
+            0.143091,
+            2.0,
+        ),
+    ] {
+        let packs = [
+            slug,
+            "carbon-monoxide-gas-janaf-mining",
+            "copper-solid-janaf-mining",
+            "carbon-dioxide-gas-janaf-mining",
+        ]
+        .map(|name| compile(name, None));
+        let ids = [oxide, "CO(g)", "Cu(s)", "CO2(g)"].map(|id| SpeciesId::new(id).unwrap());
+        let points = [
+            point(false),
+            phase_point("source-phase-gas"),
+            point(false),
+            phase_point("source-phase-gas"),
+        ];
+        let reaction = reaction.build().unwrap();
+        let heat = reaction
+            .standard_enthalpy_change(&sources(&packs, &ids, &points))
+            .unwrap();
+        // Independent JANAF rows: CO2=-393522, CO=-110527, Cu=0,
+        // CuO=-156063 or Cu2O=-170707, all J/mol at 298.15 K and 1 bar.
+        assert_eq!(heat.molar().value(), expected_heat);
+        assert_eq!(heat.terms().len(), 4);
+        for term in heat.terms() {
+            let pack = packs
+                .iter()
+                .find(|pack| pack.pack_id() == term.pack_id)
+                .unwrap();
+            pack.claims().verify_receipt(&term.answer.receipt).unwrap();
+            assert_eq!(
+                term.answer.evidence.value.uncertainty,
+                UncertaintyModel::Unstated
+            );
+            assert!(!term.answer.receipt.source_hashes.is_empty());
+        }
+        let masses = std::array::from_fn::<_, 4, _>(|i| {
+            let answer = packs[i]
+                .claims()
+                .query_typed(
+                    &PropertyKey::with_quantity(
+                        "molar-mass",
+                        QuantitySpec::dimensional(MolarMass::DIMS),
+                    ),
+                    &points[i],
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .unwrap();
+            packs[i].claims().verify_receipt(&answer.receipt).unwrap();
+            answer.evidence.value.value
+        });
+        assert!((masses[0] - oxide_molar_mass).abs() < 1e-15 * oxide_molar_mass);
+        let extent = reaction
+            .extent_from_reacted_mass(
+                &ids[0],
+                Mass::new(1000.0 * oxide_molar_mass),
+                MolarMass::new(masses[0]),
+            )
+            .unwrap();
+        assert!((extent.value() - 1000.0).abs() < 2e-12);
+        assert!((heat.at_extent(extent).unwrap().value() - 1000.0 * expected_heat).abs() < 2e-7);
+        let amounts = reaction.amounts(extent).unwrap();
+        let amount_of = |index: usize| {
+            amounts
+                .iter()
+                .find(|amount| amount.term.species == ids[index])
+                .unwrap()
+                .amount
+                .value()
+        };
+        assert!((amount_of(1) * masses[1] - 28.0101).abs() < 1e-11);
+        assert!((amount_of(2) * masses[2] - 63.546 * copper_coefficient).abs() < 1e-11);
+        assert!((amount_of(3) * masses[3] - 44.0095).abs() < 1e-11);
+
+        // Rounded published masses differ by 0.4 g per kmol extent. Preserve
+        // that visible mismatch rather than changing a source to force closure.
+        let residual = amount_of(2) * masses[2] + amount_of(3) * masses[3]
+            - amount_of(0) * masses[0]
+            - amount_of(1) * masses[1];
+        assert!((residual - 0.0004).abs() < 1e-11);
+
+        let inventory = [
+            (ids[0].clone(), Amount::new(1000.0)),
+            (ids[1].clone(), Amount::new(250.0)),
+            (ids[2].clone(), Amount::new(0.0)),
+            (ids[3].clone(), Amount::new(0.0)),
+        ];
+        let limit = reaction.limiting_extent(&inventory[..2]).unwrap();
+        assert_eq!(limit.value(), 250.0);
+        let after = reaction.advance_inventory(&inventory, limit).unwrap();
+        let remaining = |index: usize| {
+            after
+                .iter()
+                .find(|(id, _)| *id == ids[index])
+                .unwrap()
+                .1
+                .value()
+        };
+        assert_eq!(remaining(0), 750.0);
+        assert_eq!(remaining(1), 0.0);
+        assert_eq!(remaining(2), 250.0 * copper_coefficient);
+        assert_eq!(remaining(3), 250.0);
+        assert!(
+            reaction
+                .advance_inventory(&inventory, Amount::new(251.0))
+                .is_err()
+        );
+
+        // A zero elemental formation heat is still a required real source;
+        // neither omitting copper nor using a hot reference is admissible.
+        assert!(
+            reaction
+                .standard_enthalpy_change(&sources(&packs, &ids, &points)[..3])
+                .is_err()
+        );
+        let hot = points
+            .clone()
+            .map(|point| point.with("temperature", 1000.0).unwrap());
+        assert!(
+            reaction
+                .standard_enthalpy_change(&sources(&packs, &ids, &hot))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn g1_janaf_cuprous_oxidation_retains_oxygen_extent_and_standard_heat() {
+    let packs = [
+        "copper-i-oxide-solid-janaf-mining",
+        "oxygen-gas-janaf-mining",
+        "copper-ii-oxide-solid-janaf-mining",
+    ]
+    .map(|slug| compile(slug, None));
+    let ids = ["Cu2O(s)", "O2(g)", "CuO(s)"].map(|id| SpeciesId::new(id).unwrap());
+    let points = [point(false), phase_point("source-phase-gas"), point(false)];
+    let reaction = MineralReaction::CuprousOxideOxidation.build().unwrap();
+    let heat = reaction
+        .standard_enthalpy_change(&sources(&packs, &ids, &points))
+        .unwrap();
+    // 4*(-156063) - 2*(-170707) - 0, per written integer equation.
+    assert_eq!(heat.molar().value(), -282_838.0);
+    let extent = reaction
+        .limiting_extent(&[
+            (ids[0].clone(), Amount::new(1000.0)),
+            (ids[1].clone(), Amount::new(600.0)),
+        ])
+        .unwrap();
+    assert_eq!(extent.value(), 500.0);
+    let amounts = reaction.amounts(extent).unwrap();
+    for (index, expected) in [(0, 1000.0), (1, 500.0), (2, 2000.0)] {
+        assert_eq!(
+            amounts
+                .iter()
+                .find(|a| a.term.species == ids[index])
+                .unwrap()
+                .amount
+                .value(),
+            expected
+        );
+    }
+    assert_eq!(heat.at_extent(extent).unwrap().value(), -141_419_000.0);
+    for term in heat.terms() {
+        let pack = packs
+            .iter()
+            .find(|pack| pack.pack_id() == term.pack_id)
+            .unwrap();
+        pack.claims().verify_receipt(&term.answer.receipt).unwrap();
+    }
+    let wrong_phase = [point(false), point(false), point(false)];
     assert!(
         reaction
             .standard_enthalpy_change(&sources(&packs, &ids, &wrong_phase))

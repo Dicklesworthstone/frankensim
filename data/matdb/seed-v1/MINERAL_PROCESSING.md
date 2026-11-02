@@ -1,6 +1,6 @@
 # Mineral processing: public sources and callable physics
 
-These **27 source profiles and 85 property claims** provide reusable mineral
+These **31 source profiles and 97 property claims** provide reusable mineral
 and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and
 `matdb-catalog` discovery. No separate material registry or schema is required.
@@ -139,6 +139,69 @@ approximately 1000 mol extent, 44.0095 kg CO2 formed and **+116.926 MJ**.
 reaction**, or −117360.5 J per mole of magnetite consumed. Fe2O3 denotes the
 hematite endpoint. These are standard chemical-energy changes; sensible heat,
 phase stability, conversion, kinetics and kiln fuel duty need further inputs.
+
+### Copper oxide reduction and oxidation
+
+Four more profiles use the same typed JANAF standard-state convention. Each
+contains molar mass, formation enthalpy and absolute molar entropy; all are
+reference points at **298.15 K and 100000 Pa**.
+
+| Profile | Molar mass, kg/mol | Formation enthalpy, J/mol | Entropy, J/(mol K) | Source |
+| --- | ---: | ---: | ---: | --- |
+| `copper-ii-oxide-solid-janaf-mining` | 0.079545 | −156063 | 42.594 | [Cu-015](https://janaf.nist.gov/tables/Cu-015.html) |
+| `copper-i-oxide-solid-janaf-mining` | 0.143091 | −170707 | 92.360 | [Cu-019](https://janaf.nist.gov/tables/Cu-019.html) |
+| `copper-solid-janaf-mining` | 0.063546 | 0 | 33.164 | [Cu-002](https://janaf.nist.gov/tables/Cu-002.html) |
+| `carbon-monoxide-gas-janaf-mining` | 0.0280101 | −110527 | 197.653 | [C-093](https://janaf.nist.gov/tables/C-093.html) |
+
+Molar masses retain the NIST WebBook display precision cited in each manifest.
+Metallic copper has zero standard formation enthalpy and nonzero absolute
+entropy; both remain source-backed claims. Together with the existing O2/CO2
+profiles, these close three explicit reactions:
+
+| Written reaction | Standard enthalpy, J/mol of equation extent |
+| --- | ---: |
+| `2 Cu2O(s) + O2(g) -> 4 CuO(s)` | −282838 |
+| `CuO(s) + CO(g) -> Cu(s) + CO2(g)` | −126932 |
+| `Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g)` | −112288 |
+
+For 79.545 kg of pure CuO actually reacted, the reduction consumes 28.0101 kg
+CO and forms 63.546 kg Cu plus 44.0095 kg CO2, with approximately −126.932 MJ
+standard enthalpy change. The independently rounded source molar masses give
+a **+0.0004 kg products-minus-reactants residual** at that extent. The example
+prints this discrepancy; it never changes an attributed source to force a
+zero. Exact atom/charge conservation applies to the integer equation.
+This supplies reductant and metal bookkeeping for an explicit conversion,
+not a smelter operating temperature, reaction rate, conversion forecast or
+furnace fuel duty. Hot, molten or aqueous states refuse these source points.
+
+```bash
+copper_pack_dir="$(mktemp -d)"
+for pack in copper-ii-oxide-solid-janaf-mining copper-i-oxide-solid-janaf-mining copper-solid-janaf-mining carbon-monoxide-gas-janaf-mining carbon-dioxide-gas-janaf-mining oxygen-gas-janaf-mining; do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
+    --out "$copper_pack_dir/$pack.fsmatpk"
+done
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --reaction cupric-oxide-reduction \
+  "$copper_pack_dir/copper-ii-oxide-solid-janaf-mining.fsmatpk" \
+  "$copper_pack_dir/carbon-monoxide-gas-janaf-mining.fsmatpk" \
+  "$copper_pack_dir/copper-solid-janaf-mining.fsmatpk" \
+  "$copper_pack_dir/carbon-dioxide-gas-janaf-mining.fsmatpk" \
+  79.545
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --reaction cuprous-oxide-reduction \
+  "$copper_pack_dir/copper-i-oxide-solid-janaf-mining.fsmatpk" \
+  "$copper_pack_dir/carbon-monoxide-gas-janaf-mining.fsmatpk" \
+  "$copper_pack_dir/copper-solid-janaf-mining.fsmatpk" \
+  "$copper_pack_dir/carbon-dioxide-gas-janaf-mining.fsmatpk" \
+  143.091
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --reaction cuprous-oxide-oxidation \
+  "$copper_pack_dir/copper-i-oxide-solid-janaf-mining.fsmatpk" \
+  "$copper_pack_dir/oxygen-gas-janaf-mining.fsmatpk" \
+  "$copper_pack_dir/copper-ii-oxide-solid-janaf-mining.fsmatpk" \
+  286.182
+```
 
 ## Run a source-backed reaction balance
 
@@ -513,7 +576,7 @@ a fitted leach/adsorption model.
 Normal workspace commands for these slices:
 
 ```bash
-cargo test -p xtask --test mining_mineral_sources --test mining_mineral_coverage --test mining_reagent_sources --test mining_reagent_references --test mining_oxide_sources --test mining_reaction_balances
+cargo test -p xtask --test mining_mineral_sources --test mining_mineral_coverage --test mining_reagent_sources --test mining_reagent_references --test mining_oxide_sources --test mining_copper_sources --test mining_reaction_balances
 cargo test -p fs-material comminution
 cargo test -p fs-material slurry::tests
 cargo test -p fs-material recovery::

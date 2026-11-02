@@ -21,6 +21,10 @@
 //! endpoints of JANAF C-079, Mg-008, C-095, Fe-032, Fe-030 and O-029:
 //! <https://janaf.nist.gov/>. Their standard reaction heats do not determine
 //! a decomposition temperature, kiln duty, oxidation rate or phase stability.
+//! Copper oxide reduction and oxidation use explicit CuO(cr), Cu2O(cr),
+//! Cu(cr), CO(g), CO2(g) and O2(g) endpoints from the same JANAF reference.
+//! A carbon-monoxide reduction equation does not select an industrial reductant
+//! mixture, operating atmosphere, temperature, rate or metal recovery.
 //! These equations conserve atoms and charge; they do not select pH/Eh,
 //! dissolved speciation, precipitates, gas transfer, rates or conversion.
 
@@ -61,6 +65,13 @@ pub enum MineralReaction {
     /// 4 Fe3O4(s) + O2(g) -> 6 Fe2O3(s), with hematite as the product phase.
     /// One mole of reaction extent consumes four moles of magnetite.
     MagnetiteOxidationToHematite,
+    /// 2 Cu2O(s) + O2(g) -> 4 CuO(s).
+    /// One mole of reaction extent consumes two moles of cuprous oxide.
+    CuprousOxideOxidation,
+    /// CuO(s) + CO(g) -> Cu(s) + CO2(g).
+    CupricOxideCarbonMonoxideReduction,
+    /// Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g).
+    CuprousOxideCarbonMonoxideReduction,
 }
 
 // One species: stable phase/charge id, element counts, charge, signed coefficient.
@@ -198,6 +209,35 @@ impl MineralReaction {
                     ("Fe3O4(s)", &[3, 4], 0, -4),
                     ("O2(g)", &[0, 2], 0, -1),
                     ("Fe2O3(s)", &[2, 3], 0, 6),
+                ],
+            ),
+            Self::CuprousOxideOxidation => (
+                "cuprous-oxide-oxidation",
+                &["Cu", "O"],
+                &[
+                    ("Cu2O(s)", &[2, 1], 0, -2),
+                    ("O2(g)", &[0, 2], 0, -1),
+                    ("CuO(s)", &[1, 1], 0, 4),
+                ],
+            ),
+            Self::CupricOxideCarbonMonoxideReduction => (
+                "cupric-oxide-carbon-monoxide-reduction",
+                &["Cu", "C", "O"],
+                &[
+                    ("CuO(s)", &[1, 0, 1], 0, -1),
+                    ("CO(g)", &[0, 1, 1], 0, -1),
+                    ("Cu(s)", &[1, 0, 0], 0, 1),
+                    ("CO2(g)", &[0, 1, 2], 0, 1),
+                ],
+            ),
+            Self::CuprousOxideCarbonMonoxideReduction => (
+                "cuprous-oxide-carbon-monoxide-reduction",
+                &["Cu", "C", "O"],
+                &[
+                    ("Cu2O(s)", &[2, 0, 1], 0, -1),
+                    ("CO(g)", &[0, 1, 1], 0, -1),
+                    ("Cu(s)", &[1, 0, 0], 0, 2),
+                    ("CO2(g)", &[0, 1, 2], 0, 1),
                 ],
             ),
         };
