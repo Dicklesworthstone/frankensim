@@ -70,7 +70,7 @@ use fs_material::gas::{GasSpec, GasState};
 use fs_math::c64::C64;
 use fs_math::det;
 
-use crate::panel3d::SpherePanels;
+use crate::{ComplexSum, panel3d::SpherePanels};
 
 #[path = "helmholtz_laplace.rs"]
 pub mod laplace;
@@ -1248,8 +1248,7 @@ fn evaluate_radiated_power(
     areas: &[f64],
     medium: Medium,
 ) -> (f64, (f64, f64), RadiationPowerDiagnostics) {
-    let mut rounded = 0.0;
-    let mut reactive = 0.0;
+    let mut work = ComplexSum::default();
     let mut positive = 0.0;
     let mut negative = 0.0;
     let mut apparent = 0.0;
@@ -1258,8 +1257,7 @@ fn evaluate_radiated_power(
     for ((&pressure, &velocity), &area) in pressure.iter().zip(velocity).zip(areas) {
         let dot = pressure * velocity.conj();
         let real_power = 0.5 * dot.re * area;
-        rounded += real_power;
-        reactive += 0.5 * dot.im * area;
+        work.add(C64::new(real_power, 0.5 * dot.im * area));
         if real_power >= 0.0 {
             positive += real_power;
         } else {
@@ -1274,13 +1272,14 @@ fn evaluate_radiated_power(
         let panel_power = outward_scale_positive(outward_scale_positive(real_dot, 0.5), area);
         enclosure = outward_add(enclosure, panel_power);
     }
-    let raw_real = rounded;
+    let surface_power = work.finish();
+    let mut rounded = surface_power.re;
     let finite_enclosure = enclosure.0.is_finite() && enclosure.1.is_finite();
     if rounded < 0.0 && finite_enclosure && enclosure.0 <= 0.0 && enclosure.1 >= 0.0 {
         rounded = 0.0;
     }
     let diagnostics = RadiationPowerDiagnostics {
-        surface_power: C64::new(raw_real, reactive),
+        surface_power,
         positive_real_power: positive,
         negative_real_power: negative,
         apparent_power: apparent,
@@ -1390,7 +1389,7 @@ fn exterior_pressure_at_points_impl(
                 what: "evaluation points must be finite",
             });
         }
-        let mut value = C64::ZERO;
+        let mut value = ComplexSum::default();
         let mut solid_angle = 0.0;
         for j in 0..n {
             let d = sub(x, surface.centroids()[j]);
@@ -1410,14 +1409,14 @@ fn exterior_pressure_at_points_impl(
                 } else {
                     triangle_far_pressure_influence(k, x, triangles[j], surface.normals()[j])
                 };
-                value = value + (double * solution.pressure[j] - single * q);
+                value.add(double * solution.pressure[j] - single * q);
             } else {
                 let (g, gp, _) = green_radial_derivatives(k, r);
                 let dgdny = gp.scale(-normal_projection / r);
-                value = value
-                    + (dgdny * solution.pressure[j] - g * q).scale(surface.areas()[j]);
+                value.add((dgdny * solution.pressure[j] - g * q).scale(surface.areas()[j]));
             }
         }
+        let value = value.finish();
         if !solid_angle.is_finite()
             || solid_angle.abs() >= 0.5
             || !value.re.is_finite()
@@ -1807,7 +1806,7 @@ fn far_field_impl_cancellable(
     for &dir in directions {
         sh_check_cancel(cancelled)?;
         let d = far_field_unit_direction(dir);
-        let mut f = C64::ZERO;
+        let mut f = ComplexSum::default();
         for j in 0..centroids.len() {
             if j % 256 == 0 {
                 sh_check_cancel(cancelled)?;
@@ -1819,9 +1818,9 @@ fn far_field_impl_cancellable(
             } else {
                 (term * expik(-k * dot(d, centroids[j]))).scale(areas[j])
             };
-            f = f + contribution;
+            f.add(contribution);
         }
-        output.push(f.scale(1.0 / (4.0 * core::f64::consts::PI)));
+        output.push(f.finish().scale(1.0 / (4.0 * core::f64::consts::PI)));
     }
     Ok(output)
 }
@@ -2146,10 +2145,10 @@ impl DirectivityTable {
         let phi = det::atan2(direction[1], direction[0]);
         let pbar = norm_assoc_legendre(self.l_max, x);
         let idx = |l: usize, m: usize| l * (l + 1) / 2 + m;
-        let mut f = C64::ZERO;
+        let mut f = ComplexSum::default();
         for l in 0..=self.l_max {
             // m = 0 term.
-            f = f + self.coefficient(l, 0).scale(pbar[idx(l, 0)]);
+            f.add(self.coefficient(l, 0).scale(pbar[idx(l, 0)]));
             for m in 1..=l {
                 let e = expik(m as f64 * phi);
                 let y_pos = e.scale(pbar[idx(l, m)]);
@@ -2157,10 +2156,11 @@ impl DirectivityTable {
                 let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
                 let y_neg = y_pos.conj().scale(sign);
                 let ms = i64::try_from(m).expect("m bounded by MAX_SH_DEGREE");
-                f = f + self.coefficient(l, ms) * y_pos + self.coefficient(l, -ms) * y_neg;
+                f.add(self.coefficient(l, ms) * y_pos);
+                f.add(self.coefficient(l, -ms) * y_neg);
             }
         }
-        f
+        f.finish()
     }
 }
 
@@ -2895,7 +2895,7 @@ mod tests {
             evaluate_radiated_power(&cancelling_pressure, &velocity, &areas, medium);
         assert_eq!(neutral.to_bits(), 0.0_f64.to_bits());
         assert!(neutral_interval.0 <= 0.0 && neutral_interval.1 >= 0.0);
-        assert_eq!(diagnostics.surface_power, C64::from_re(-1.0));
+        assert_eq!(diagnostics.surface_power, C64::ZERO);
         assert_eq!(diagnostics.positive_real_power, 1.0e16 + 1.0);
         assert_eq!(diagnostics.negative_real_power, -1.0e16 - 1.0);
         assert_eq!(diagnostics.apparent_power, 2.0e16 + 2.0);
@@ -2908,6 +2908,97 @@ mod tests {
             evaluate_radiated_power(&[C64::from_re(-2.0)], &[C64::ONE], &[1.0], medium);
         assert_eq!(negative.to_bits(), (-1.0_f64).to_bits());
         assert!(negative_interval.1 < 0.0);
+    }
+
+    #[test]
+    fn g0_signed_surface_work_keeps_the_residual_of_large_opposing_transfers() {
+        let strong = C64::new(2.0_f64.powi(56), -2.0_f64.powi(57));
+        let quiet = C64::new(2.0, 4.0);
+        for order in [[strong, quiet, -strong], [quiet, strong, -strong], [strong, -strong, quiet]] {
+            let (power, enclosure, diagnostic) =
+                evaluate_radiated_power(&order, &[C64::ONE; 3], &[1.0; 3], Medium::air());
+            assert_eq!(power, 1.0);
+            assert_eq!(diagnostic.surface_power, C64::new(1.0, 2.0));
+            assert!(enclosure.0 <= power && power <= enclosure.1);
+        }
+    }
+
+    #[test]
+    fn g1_green_receivers_keep_a_weak_layer_between_cancelling_panels() {
+        // Six equal faces of a centroid-panel cube. The first three are at
+        // equal range and phase from the z axis. Prescribed single-layer
+        // traces isolate the observation contraction; no solve error is hidden.
+        let normals = vec![
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        let surface = SpherePanels::new(
+            normals.iter().map(|n| n.map(|v| 0.1 * v)).collect(),
+            normals,
+            vec![0.04; 6],
+        )
+        .unwrap();
+        let k = 0.8;
+        let medium = Medium::air();
+        let mut solution = solve_radiation(
+            &surface,
+            k,
+            medium,
+            &[C64::ZERO; 6],
+            Formulation::BurtonMiller,
+        )
+        .unwrap();
+        let quiet = C64::new(0.7, -0.2);
+        let strong = quiet.scale(2.0_f64.powi(56));
+        solution.velocity[..3].copy_from_slice(&[strong, quiet, -strong]);
+        let amplitude = quiet
+            * C64::new(0.0, -k * medium.sound_speed * medium.density)
+                .scale(0.04 / (4.0 * core::f64::consts::PI));
+        for value in [
+            far_field(&surface, &solution, medium, &[[0.0, 0.0, 1.0]])[0],
+            far_field_integrated_cancellable(
+                &surface,
+                &solution,
+                medium,
+                &[[0.0, 0.0, 1.0]],
+                6,
+                || false,
+            )
+            .unwrap()[0],
+        ] {
+            assert!((value - amplitude).abs() < 4e-15 * amplitude.abs());
+        }
+        let radius = (4.0_f64 + 0.01).sqrt();
+        let expected = amplitude * expik(k * radius).scale(1.0 / radius);
+        let points = [[0.0, 0.0, 2.0]];
+        for value in [
+            exterior_pressure_at_points(&surface, &solution, medium, &points).unwrap()[0],
+            exterior_pressure_at_points_integrated(&surface, &solution, medium, &points).unwrap()
+                [0],
+        ] {
+            assert!((value - expected).abs() < 4e-15 * expected.abs());
+        }
+    }
+
+    #[test]
+    fn g1_sh_dipole_node_preserves_a_weak_monopole() {
+        let quiet = C64::new(0.7, -0.2);
+        let strong = quiet.scale(2.0_f64.powi(56));
+        let table = DirectivityTable {
+            k: 0.8,
+            l_max: 1,
+            // Equal m=+/-1 coefficients cancel on the x axis (the y dipole
+            // node). The monopole remains, however large the dipole is.
+            coefficients: vec![quiet, strong, C64::ZERO, strong],
+            captured_fraction: 1.0,
+        };
+        let expected = quiet.scale(1.0 / (4.0 * core::f64::consts::PI).sqrt());
+        let actual = table.evaluate([1.0, 0.0, 0.0]);
+        assert!((actual - expected).abs() < 4e-15 * expected.abs());
     }
 
     #[test]

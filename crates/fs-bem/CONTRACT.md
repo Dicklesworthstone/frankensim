@@ -1992,3 +1992,21 @@ has a declared 5% far-field fixture tolerance; this is not a general accuracy
 certificate. Stationary inviscid nondispersive fluids, constant-panel centroid
 interaction, equivalent-disc self terms, and source-free interiors retain the
 original owner's limitations. Close-interaction accuracy requires refinement.
+
+## Cancellation in coherent field evaluation
+
+Analytic incident pressure and particle velocity, constant-panel finite and far
+BEM receiver fields, spherical-harmonic reconstruction, and signed surface work use the same
+componentwise Neumaier accumulator as prepared harmonic-source statistics.
+The low part is retained until the complete contraction finishes, preserving a
+weak field between much larger opposing contributions with constant auxiliary
+storage. Sources remain complex amplitudes until the physical quadratic
+observation; no source-power addition replaces interference.
+
+G0/G1/G3 regressions exercise all analytic source kinds and mixed illuminations,
+source ordering, a weak survivor through the prepared scattering owner, an
+analytic Green-layer receiver, a spherical-harmonic dipole node, and signed
+active/reactive surface work. Deterministic traversal is retained. Compensation
+does not certify arbitrary permutation equality, resolve kernel/phase errors,
+or bound a nearly cancelling field's relative error; the original spatial,
+quadrature, conditioning and material limitations still apply.

@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::near_field::{FirstOrder, MAX_RECEIVERS};
+pub(super) use crate::ComplexSum as Sum;
 
 pub(super) const MAX_MODES: usize = 4096;
 pub(super) const MAX_PRODUCTS: usize = 64_000_000;
@@ -77,30 +78,6 @@ pub(super) fn admit_frequency(omega: f64, medium: Medium) -> Result<(), Transfer
 
 // Neumaier summation retains weak residuals after cancellation, separately
 // for each physical component. Do not reduce absolute amplitudes instead.
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct Sum {
-    value: C64,
-    correction: C64,
-}
-impl Sum {
-    pub(super) fn add(&mut self, z: C64) {
-        fn component(sum: &mut f64, correction: &mut f64, x: f64) {
-            let next = *sum + x;
-            *correction += if sum.abs() >= x.abs() {
-                (*sum - next) + x
-            } else {
-                (x - next) + *sum
-            };
-            *sum = next;
-        }
-        component(&mut self.value.re, &mut self.correction.re, z.re);
-        component(&mut self.value.im, &mut self.correction.im, z.im);
-    }
-    pub(super) fn finish(self) -> C64 {
-        self.value + self.correction
-    }
-}
-
 #[derive(Default)]
 struct StatisticsSum {
     pressure: Sum,

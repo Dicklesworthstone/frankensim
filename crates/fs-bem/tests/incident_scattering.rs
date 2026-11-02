@@ -1,7 +1,7 @@
 //! G0/G1/G2/G3/G5: coherent finite-source scattering on the original BEM owner.
 use fs_bem::helmholtz::bc::{
-    self, Admittance, IncidentField, IncidentSource, IncidentTraces, Monopole, PlaneWave,
-    PreparedBoundary, sample_incident_sources,
+    self, Admittance, ForceDipole, IncidentField, IncidentSource, IncidentTraces, Monopole,
+    PlaneWave, PreparedBoundary, sample_incident_sources,
 };
 use fs_bem::helmholtz::{self, Formulation, Medium};
 use fs_bem::panel3d::SpherePanels;
@@ -50,6 +50,150 @@ fn monopole_retains_reactive_velocity_and_conserved_outward_power() {
         let minus = sample_incident_sources(k, MEDIUM, &[source], [0.0, 0.0, r - h]).unwrap();
         let velocity = (plus.pressure_pa - minus.pressure_pa) / C64::new(0.0, 2.0 * h * k * rho_c);
         close(velocity, value.velocity_m_s[2], 2e-8);
+    }
+}
+
+#[test]
+fn g0_g3_coherent_incidents_retain_a_weak_field_between_cancelling_sources() {
+    fn scale(source: IncidentSource, gain: f64) -> IncidentSource {
+        match source {
+            IncidentSource::PlaneWave(mut source) => {
+                source.amplitude_pa = source.amplitude_pa.scale(gain);
+                IncidentSource::PlaneWave(source)
+            }
+            IncidentSource::Monopole(mut source) => {
+                source.volume_velocity_m3_s = source.volume_velocity_m3_s.scale(gain);
+                IncidentSource::Monopole(source)
+            }
+            IncidentSource::ForceDipole(mut source) => {
+                source.force_on_fluid_n = source.force_on_fluid_n.map(|v| v.scale(gain));
+                IncidentSource::ForceDipole(source)
+            }
+        }
+    }
+    let sources = [
+        IncidentSource::PlaneWave(PlaneWave {
+            direction: [0.6, 0.0, 0.8],
+            amplitude_pa: C64::new(0.7, -0.2),
+        }),
+        IncidentSource::Monopole(Monopole {
+            position_m: [0.1, -0.2, 0.3],
+            volume_velocity_m3_s: C64::new(0.003, -0.001),
+        }),
+        IncidentSource::ForceDipole(ForceDipole {
+            position_m: [-0.1, 0.2, -0.3],
+            force_on_fluid_n: [C64::new(0.8, -0.3), C64::new(-0.4, 0.2), C64::new(0.1, 0.5)],
+        }),
+    ];
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for &strong in &sources {
+        for &quiet in &sources {
+            // An exact opposite pair must not erase another physical source.
+            // The extreme ratio isolates summation error, not model accuracy.
+            let terms = [
+                scale(strong, 2.0_f64.powi(56)),
+                quiet,
+                scale(strong, -2.0_f64.powi(56)),
+            ];
+            for point in [[0.4, 0.3, 0.2], [20.0, -10.0, 30.0]] {
+                let expected = sample_incident_sources(0.7, MEDIUM, &[quiet], point).unwrap();
+                for order in orders {
+                    let terms = order.map(|i| terms[i]);
+                    let mixed = sample_incident_sources(0.7, MEDIUM, &terms, point).unwrap();
+                    let typed = match terms {
+                        [
+                            IncidentSource::Monopole(a),
+                            IncidentSource::Monopole(b),
+                            IncidentSource::Monopole(c),
+                        ] => Some(
+                            IncidentField::Monopoles(&[a, b, c])
+                                .pressure_velocity_at(0.7, MEDIUM, point)
+                                .unwrap(),
+                        ),
+                        [
+                            IncidentSource::ForceDipole(a),
+                            IncidentSource::ForceDipole(b),
+                            IncidentSource::ForceDipole(c),
+                        ] => Some(
+                            IncidentField::ForceDipoles(&[a, b, c])
+                                .pressure_velocity_at(0.7, MEDIUM, point)
+                                .unwrap(),
+                        ),
+                        _ => None,
+                    };
+                    for actual in [Some(mixed), typed].into_iter().flatten() {
+                        close(actual.pressure_pa, expected.pressure_pa, 2e-14);
+                        for (actual, expected) in
+                            actual.velocity_m_s.into_iter().zip(expected.velocity_m_s)
+                        {
+                            close(actual, expected, 2e-14);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_weak_survivor_reaches_scattering_and_total_far_field() {
+    let surface = SpherePanels::icosphere(0.1, 0).unwrap();
+    let quiet = Monopole {
+        position_m: [0.2, 0.3, 0.4],
+        volume_velocity_m3_s: C64::new(0.001, -0.0002),
+    };
+    let strong = Monopole {
+        position_m: [-0.3, 0.2, 0.4],
+        volume_velocity_m3_s: quiet.volume_velocity_m3_s.scale(2.0_f64.powi(56)),
+    };
+    let terms = [
+        strong,
+        quiet,
+        Monopole {
+            volume_velocity_m3_s: -strong.volume_velocity_m3_s,
+            ..strong
+        },
+    ];
+    let baseline = [quiet];
+    let prepared = PreparedBoundary::new(
+        &surface,
+        0.8,
+        MEDIUM,
+        Admittance::Rigid,
+        Formulation::BurtonMiller,
+    )
+    .unwrap();
+    let expected = prepared
+        .scatter_field(IncidentField::Monopoles(&baseline), 1e-5)
+        .unwrap();
+    let actual = prepared
+        .scatter_field(IncidentField::Monopoles(&terms), 1e-5)
+        .unwrap();
+    for (&actual, &expected) in actual
+        .solution()
+        .scattered
+        .pressure
+        .iter()
+        .zip(&expected.solution().scattered.pressure)
+    {
+        close(actual, expected, 3e-13);
+    }
+    for direction in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.6, 0.0, 0.8]] {
+        let actual = actual.total_far_field(direction).unwrap();
+        let expected = expected.total_far_field(direction).unwrap();
+        close(actual, expected, 3e-13);
+        // Radiated intensity is formed from the surviving amplitude, with
+        // the physical peak-to-mean-square factor exactly once.
+        let power = actual.norm_sq() / (2.0 * MEDIUM.density * MEDIUM.sound_speed);
+        let expected_power = expected.norm_sq() / (2.0 * MEDIUM.density * MEDIUM.sound_speed);
+        assert!((power / expected_power - 1.0).abs() < 6e-13);
     }
 }
 

@@ -10,7 +10,7 @@
 //! Inputs must be disjoint, outward, non-self-intersecting closed components.
 //! Closure/winding checks are not a global intersection certificate. Quadrature
 //! discrepancies below are estimates, not bounds on the BEM or model error.
-use crate::{helmholtz::{self, HelmholtzError, Medium, RadiationSolution}, panel3d::SpherePanels};
+use crate::{ComplexSum, helmholtz::{self, HelmholtzError, Medium, RadiationSolution}, panel3d::SpherePanels};
 use fs_math::{c64::C64, det};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -388,14 +388,15 @@ impl Prepared<'_> {
         let omega_rho=self.k*self.medium.sound_speed*self.medium.density;
         let mut pressure=Vec::with_capacity(self.rows.len());let mut errors=Vec::with_capacity(self.rows.len());
         for row in &self.rows {
-            let(mut re,mut im,mut cr,mut ci,mut error)=(0.,0.,0.,0.,0.);
+            let mut sum=ComplexSum::default();let mut error=0.;
             for ((cell,&p),&v) in row.iter().zip(&solution.pressure).zip(&solution.velocity) {
                 let q=v*C64::new(0.,omega_rho);let term=cell.d*p-cell.s*q;
-                compensated(&mut re,&mut cr,term.re);compensated(&mut im,&mut ci,term.im);
+                sum.add(term);
                 error+=p.abs()*cell.error_d+q.abs()*cell.error_s;
             }
-            if ![re,im,error].iter().all(|v|v.is_finite()) {return Err(bad("nonfinite near-field pressure or error estimate"));}
-            pressure.push(C64::new(re,im));errors.push(error);
+            let value=sum.finish();
+            if ![value.re,value.im,error].iter().all(|v|v.is_finite()) {return Err(bad("nonfinite near-field pressure or error estimate"));}
+            pressure.push(value);errors.push(error);
         }
         Ok(Observation {pressure,quadrature_error_estimate_pa:errors})
     }

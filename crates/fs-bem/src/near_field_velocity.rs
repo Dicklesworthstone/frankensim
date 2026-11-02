@@ -81,16 +81,16 @@ impl Prepared<'_> {
         let inverse=C64::new(0.,-1./omega_rho);
         let mut velocities=Vec::with_capacity(self.rows.len());let mut errors=Vec::with_capacity(self.rows.len());
         for row in &self.rows {
-            let(mut re,mut im,mut cr,mut ci,mut error)=([0.;3],[0.;3],[0.;3],[0.;3],[0.;3]);
+            let mut sums=[ComplexSum::default();3];let mut error=[0.;3];
             for ((cell,&p),&v) in row.iter().zip(&solution.pressure).zip(&solution.velocity) {
                 let q=v*C64::new(0.,omega_rho);
                 for c in 0..3 {
                     let term=cell.gradient.d[c]*p-cell.gradient.s[c]*q;
-                    compensated(&mut re[c],&mut cr[c],term.re);compensated(&mut im[c],&mut ci[c],term.im);
+                    sums[c].add(term);
                     error[c]+=p.abs()*cell.gradient.error_d[c]+q.abs()*cell.gradient.error_s[c];
                 }
             }
-            let value:[C64;3]=std::array::from_fn(|c|C64::new(re[c],im[c])*inverse);
+            let value=sums.map(|sum|sum.finish()*inverse);
             let error=error.map(|e|e/omega_rho);
             if value.iter().any(|v|!v.re.is_finite()||!v.im.is_finite()) || error.iter().any(|e|!e.is_finite()) {
                 return Err(bad("nonfinite near-field particle velocity or discrepancy"));

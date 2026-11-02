@@ -16,7 +16,7 @@
 //! a fluid/solid transmission model or a calibrated anatomical HRTF.
 
 use super::*;
-use crate::near_field;
+use crate::{ComplexSum, near_field};
 use std::f64::consts::PI;
 
 #[path = "helmholtz_incident_traces.rs"]
@@ -204,6 +204,8 @@ impl IncidentField<'_> {
             }
             Self::Monopoles(sources) => {
                 let omega_rho = k * medium.sound_speed * medium.density;
+                let mut pressure = ComplexSum::default();
+                let mut velocity = [ComplexSum::default(); 3];
                 for source in sources {
                     let delta = sub(point, source.position_m);
                     let radius = norm(delta);
@@ -222,16 +224,20 @@ impl IncidentField<'_> {
                     }
                     let flow_green = source.volume_velocity_m3_s
                         * expik(k * radius).scale(1.0 / (4.0 * PI * radius));
-                    out.pressure_pa = out.pressure_pa + flow_green * C64::new(0.0, -omega_rho);
+                    pressure.add(flow_green * C64::new(0.0, -omega_rho));
                     let radial = flow_green * C64::new(1.0 / radius, -k);
-                    for (velocity, distance) in out.velocity_m_s.iter_mut().zip(delta) {
-                        *velocity = *velocity + radial.scale(distance / radius);
+                    for (component, distance) in velocity.iter_mut().zip(delta) {
+                        component.add(radial.scale(distance / radius));
                     }
                 }
+                out.pressure_pa = pressure.finish();
+                out.velocity_m_s = velocity.map(ComplexSum::finish);
             }
             Self::ForceDipoles(sources) => {
                 let inverse_momentum =
                     C64::new(0.0, -1.0 / (k * medium.sound_speed * medium.density));
+                let mut pressure = ComplexSum::default();
+                let mut velocity = [ComplexSum::default(); 3];
                 for source in sources {
                     let delta = sub(point, source.position_m);
                     let radius = norm(delta);
@@ -250,21 +256,27 @@ impl IncidentField<'_> {
                     }
                     let (_, gp, gpp) = green_radial_derivatives(k, radius);
                     let direction = delta.map(|d| d / radius);
-                    let radial_force = (0..3).fold(C64::ZERO, |sum, axis| {
-                        sum + source.force_on_fluid_n[axis].scale(direction[axis])
-                    });
-                    out.pressure_pa = out.pressure_pa - gp * radial_force;
+                    let mut radial_force = ComplexSum::default();
+                    for (force, direction) in source.force_on_fluid_n.iter().zip(direction) {
+                        radial_force.add(force.scale(direction));
+                    }
+                    let radial_force = radial_force.finish();
+                    pressure.add(-gp * radial_force);
                     // -H(G)F = -G'' n(n.F) - G'/r [F - n(n.F)].
                     // The second term is essential at a dipole pressure null.
-                    for (axis, velocity) in out.velocity_m_s.iter_mut().enumerate() {
+                    for (axis, component) in velocity.iter_mut().enumerate() {
                         let axial = radial_force.scale(direction[axis]);
                         let gradient = -gpp * axial
                             - gp.scale(1.0 / radius) * (source.force_on_fluid_n[axis] - axial);
-                        *velocity = *velocity + gradient * inverse_momentum;
+                        component.add(gradient * inverse_momentum);
                     }
                 }
+                out.pressure_pa = pressure.finish();
+                out.velocity_m_s = velocity.map(ComplexSum::finish);
             }
             Self::Sources(sources) => {
+                let mut pressure = ComplexSum::default();
+                let mut velocity = [ComplexSum::default(); 3];
                 for source in sources {
                     let sample = match source {
                         IncidentSource::PlaneWave(plane) => {
@@ -279,11 +291,13 @@ impl IncidentField<'_> {
                                 .sample(k, medium, point)?
                         }
                     };
-                    out.pressure_pa = out.pressure_pa + sample.pressure_pa;
-                    for (velocity, value) in out.velocity_m_s.iter_mut().zip(sample.velocity_m_s) {
-                        *velocity = *velocity + value;
+                    pressure.add(sample.pressure_pa);
+                    for (component, value) in velocity.iter_mut().zip(sample.velocity_m_s) {
+                        component.add(value);
                     }
                 }
+                out.pressure_pa = pressure.finish();
+                out.velocity_m_s = velocity.map(ComplexSum::finish);
             }
         }
         if !finite(out.pressure_pa) || out.velocity_m_s.iter().any(|v| !finite(*v)) {
@@ -498,7 +512,8 @@ impl ScatteredField<'_, '_> {
         // Use the same canonical direction for direct and boundary phases.
         let direction = crate::helmholtz::far_field_unit_direction(direction);
         let trace = &self.solution.scattered;
-        let mut value = far_field_integrated(self.surface, trace, trace.medium, &[direction])[0];
+        let mut sum = ComplexSum::default();
+        sum.add(far_field_integrated(self.surface, trace, trace.medium, &[direction])[0]);
         let factor = C64::new(
             0.0,
             -trace.k * trace.medium.sound_speed * trace.medium.density / (4.0 * PI),
@@ -509,17 +524,18 @@ impl ScatteredField<'_, '_> {
                     (source.position_m, factor * source.volume_velocity_m3_s)
                 }
                 IncidentSource::ForceDipole(source) => {
-                    let axial = (0..3).fold(C64::ZERO, |sum, axis| {
-                        sum + source.force_on_fluid_n[axis].scale(direction[axis])
-                    });
+                    let mut axial = ComplexSum::default();
+                    for (force, direction) in source.force_on_fluid_n.iter().zip(direction) {
+                        axial.add(force.scale(direction));
+                    }
                     (
                         source.position_m,
-                        C64::new(0.0, -trace.k / (4.0 * PI)) * axial,
+                        C64::new(0.0, -trace.k / (4.0 * PI)) * axial.finish(),
                     )
                 }
                 IncidentSource::PlaneWave(_) => unreachable!("plane waves refused above"),
             };
-            value = value + amplitude * expik(-trace.k * dot(direction, position));
+            sum.add(amplitude * expik(-trace.k * dot(direction, position)));
         };
         match self.incident {
             IncidentField::Monopoles(sources) => sources
@@ -535,6 +551,7 @@ impl ScatteredField<'_, '_> {
             }
             IncidentField::PlaneWave(_) => unreachable!("plane waves refused above"),
         }
+        let value = sum.finish();
         if !finite(value) {
             return Err(bad("total far-field amplitude overflow"));
         }

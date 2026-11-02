@@ -24,6 +24,35 @@
 use fs_fmm::FmmError;
 use fs_la::factor::FactorError;
 
+/// Componentwise Neumaier accumulation for coherent fields and signed work.
+/// Retaining the low part matters when a quiet term lies between two much
+/// larger, cancelling terms. Storage and work per term remain constant.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ComplexSum {
+    value: fs_math::c64::C64,
+    correction: fs_math::c64::C64,
+}
+
+impl ComplexSum {
+    pub(crate) fn add(&mut self, z: fs_math::c64::C64) {
+        fn component(sum: &mut f64, correction: &mut f64, x: f64) {
+            let next = *sum + x;
+            *correction += if sum.abs() >= x.abs() {
+                (*sum - next) + x
+            } else {
+                (x - next) + *sum
+            };
+            *sum = next;
+        }
+        component(&mut self.value.re, &mut self.correction.re, z.re);
+        component(&mut self.value.im, &mut self.correction.im, z.im);
+    }
+
+    pub(crate) fn finish(self) -> fs_math::c64::C64 {
+        self.value + self.correction
+    }
+}
+
 /// Invalid geometry, an inadmissible work request, or a numerical refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BemError {
