@@ -41,6 +41,22 @@ pub struct MolecularEuler3d<L> {
 }
 
 impl<L: TransportLaw> MolecularEuler3d<L> {
+    /// Apply the same physical wall to both molecular half steps. Euler keeps
+    /// its impermeable pressure boundary; wall work/heat enter the combined
+    /// conservative exchange report only through the molecular face flux.
+    pub fn with_wall(
+        mut self,
+        side: BoundarySide,
+        wall: MolecularWall3d,
+    ) -> Result<Self, MolecularError> {
+        self.molecular = self.molecular.with_wall(side, wall)?;
+        Ok(self)
+    }
+
+    pub fn wall(&self, side: BoundarySide) -> MolecularWall3d {
+        self.molecular.wall(side)
+    }
+
     /// Compose explicit subgrid stress and heat with the original Euler
     /// advection and atomic retry mechanism. Every stage CFL includes SGS.
     #[cfg(feature = "experimental-sgs")]

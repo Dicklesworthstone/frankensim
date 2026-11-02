@@ -1141,11 +1141,26 @@ physical total wall traction must use the molecular owner's report and loads.
 All accepted field, clock, history and impulses remain unchanged on failed work,
 source refusal or cancellation, including the final publication checkpoint.
 
-Stationary reflecting faces are adiabatic slip walls: normal viscous traction
-acts on the support, and tangential stress, heat and wall work vanish. Open ends
-have zero molecular flux. These are neither no-slip nor fixed-temperature
-walls. The combined normal wall traction is signed `p-tau_nn`; it may be tensile
-and cannot be treated as a positive absolute pressure or clipped to zero.
+Reflecting faces default to stationary adiabatic slip walls. Both molecular
+owners expose `with_wall(side, MolecularWall3d)` using the same wall definition
+as evolving-species flow. No-slip sides admit finite tangential wall velocity
+and either adiabatic or prescribed-temperature heat transfer. Their velocity
+ghosts mirror all components about the wall, supplying the full SGS gradient.
+Wall shear and Fourier heat use the physical half-cell distance; stress work
+uses the prescribed wall velocity. The original transport law is evaluated at
+the cell/wall mean temperature for an isothermal surface. Modeled SGS stress
+and heat vanish at impermeable faces, leaving molecular wall transport and a
+requirement to resolve the wall layer. Normal wall motion, out-of-domain
+temperature and assigning a wall to periodic/transmissive sides refuse.
+Open ends retain zero molecular flux. The combined normal wall traction is
+signed `p-tau_nn`; it may be tensile and is not clipped to positive pressure.
+
+Five wall regressions cover half-cell traction/heat/work on all six sides,
+zero transverse wall derivatives despite a nonuniform interior velocity,
+uniform co-moving flow through the coupled owner, actual heated/moving-wall
+energy and momentum exchange, and active interior SGS with unchanged molecular
+wall flux. These are conservation and stencil checks, not turbulent-channel
+validation or a coarse-grid wall function.
 
 Five focused tests check all-three-axis heat diffusion, oblique longitudinal
 and shear modes against independent discrete Fourier symbols, exact planar
@@ -1155,8 +1170,9 @@ on an anisotropic physical box are 4.45971174e-4, 1.13831840e-4 and 5.07037363e-
 giving observed orders 1.97 and 2.00. These retain source-owned Cv and all
 velocity components. They do not establish gas-specific molecular calibration,
 physical shock thickness, turbulence or experimental validity. Composition
-remains spatially uniform and frozen; 3-D species diffusion, reactions and
-radial/no-slip boundary-layer physics require their own admitted evolution.
+remains spatially uniform and frozen; evolving-species diffusion and reactions
+use their separate admitted owners. Boundary-layer accuracy requires adequate
+normal resolution and appropriate source coefficients.
 
 ### Exploratory subgrid stress and heat in the three-dimensional gas
 
@@ -1185,8 +1201,8 @@ replay. These are numerical consistency tests, not DNS/experimental turbulence
 validation. The stress/heat model follows Nicoud's 2007 course equations
 (24)-(26); no dynamic coefficient, backscatter, SGS kinetic-energy equation,
 pressure-dilatation or shock/turbulence closure, evolving-species mixing, or
-wall model is supplied. Reflecting walls remain stationary adiabatic slip
-walls. Acceptance renders refuse. This opt-in low-Mach exploration lane does
+wall function is supplied. Reflecting sides use the molecular wall treatment
+above, with zero modeled SGS flux at the face. Acceptance renders refuse. This opt-in low-Mach exploration lane does
 not change the default solver, incompressible BDM, or reacting-mixture paths.
 
 ### Evolving composition on the shared Cartesian discretization

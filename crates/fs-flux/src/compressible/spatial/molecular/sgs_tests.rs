@@ -131,6 +131,7 @@ fn g1_subgrid_heat_flux_uses_cp_prandtl_and_the_physical_filter_width() {
         &op.gas,
         &op.grid,
         op.boundaries,
+        &op.walls,
         &flow.states,
         &mut op.law,
         &mut op.work.primitive,

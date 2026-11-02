@@ -6,10 +6,12 @@
 //! internal energy without an additional heat source. These operators do not
 //! resolve a physical shock thickness without an adequate grid and source data.
 
+pub use super::mixture::molecular::MolecularWall3d;
 use super::*;
 use crate::compressible::molecular::parabolic;
 pub use crate::compressible::molecular::{MolecularControl, MolecularError, MolecularStepControl};
 use fs_gas::multicomponent::dissipation::TransportLaw;
+pub use fs_gas::multicomponent::dissipation::WallThermalCondition;
 use fs_qty::{Pressure, Temperature};
 
 mod coupled;
@@ -56,14 +58,17 @@ struct MolecularWorkspace {
 /// Prepared three-dimensional molecular operator bound to the exact gas source.
 ///
 /// Periodic faces share one flux. Reflecting faces are stationary adiabatic
-/// slip walls: normal viscous stress loads the support, while tangential stress,
-/// heat and work vanish at the wall. Transmissive ends have zero molecular
-/// flux. These conditions do not represent no-slip or prescribed-temperature
-/// surfaces. All state, gradient and face workspaces are preallocated.
+/// slip walls by default. Explicit no-slip walls prescribe tangential velocity
+/// and adiabatic or fixed-temperature heat transfer. Their stress work uses
+/// the wall velocity and their Fourier flux uses the physical half-cell
+/// distance. Modeled SGS flux vanishes at impermeable walls; wall shear and
+/// heat therefore require a resolved molecular wall layer. Transmissive ends
+/// have zero molecular flux. All workspaces are preallocated.
 pub struct MolecularTransport3d<L> {
     gas: FrozenGas,
     grid: CartesianGrid,
     boundaries: Boundaries3d,
+    walls: [MolecularWall3d; 6],
     law: L,
     boundary_impulses: Vec<BoundaryImpulse>,
     work: MolecularWorkspace,
@@ -94,6 +99,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             gas: flow.gas.clone(),
             grid: flow.grid,
             boundaries: flow.boundaries,
+            walls: [MolecularWall3d::SlipAdiabatic; 6],
             law,
             #[cfg(feature = "experimental-sgs")]
             sgs: None,
@@ -121,6 +127,51 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Original immutable material/collision source and its reusable workspace.
     pub const fn law(&self) -> &L {
         &self.law
+    }
+
+    /// Configure an impermeable physical wall. Normal wall motion requires
+    /// conservative moving geometry and is not represented by this operator.
+    pub fn with_wall(
+        mut self,
+        side: BoundarySide,
+        wall: MolecularWall3d,
+    ) -> Result<Self, MolecularError> {
+        let AxisBoundaries::Ends { lower, upper } = self.boundaries.axis(side.axis()) else {
+            return Err(MolecularError::Invalid(
+                "periodic side has no physical wall",
+            ));
+        };
+        let condition = if side.sign() < 0.0 { lower } else { upper };
+        if condition != BoundaryCondition::Reflecting {
+            return Err(MolecularError::Invalid(
+                "wall requires a reflecting Euler side",
+            ));
+        }
+        if let MolecularWall3d::NoSlip { velocity, thermal } = wall {
+            if velocity.iter().any(|v| !v.is_finite()) || velocity[side.axis()] != 0.0 {
+                return Err(MolecularError::Invalid(
+                    "wall velocity must be finite and tangential",
+                ));
+            }
+            if let WallThermalCondition::Isothermal(t) = thermal {
+                let domain = self.gas.domain();
+                if !t.value().is_finite()
+                    || !(domain.minimum_temperature..=domain.maximum_temperature)
+                        .contains(&t.value())
+                {
+                    return Err(MolecularError::Invalid(
+                        "wall temperature outside caloric domain",
+                    ));
+                }
+            }
+        }
+        self.walls[2 * side.axis() + usize::from(side.sign() > 0.0)] = wall;
+        Ok(self)
+    }
+
+    /// Authored wall condition, including the slip default on unused sides.
+    pub fn wall(&self, side: BoundarySide) -> MolecularWall3d {
+        self.walls[2 * side.axis() + usize::from(side.sign() > 0.0)]
     }
 
     /// Outward molecular transfer during the last complete accepted interval.
@@ -170,6 +221,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &self.gas,
                 &self.grid,
                 self.boundaries,
+                &self.walls,
                 &self.work.current,
                 &mut self.law,
                 &mut self.work.primitive,
@@ -211,6 +263,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &self.gas,
                             &self.grid,
                             self.boundaries,
+                            &self.walls,
                             &self.work.current,
                             &mut self.law,
                             &mut self.work.primitive,
@@ -246,6 +299,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &self.gas,
                         &self.grid,
                         self.boundaries,
+                        &self.walls,
                         &self.work.stage,
                         &mut self.law,
                         &mut self.work.primitive,
@@ -373,6 +427,7 @@ fn spatial<L: TransportLaw>(
     gas: &FrozenGas,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
+    walls: &[MolecularWall3d; 6],
     states: &[State],
     law: &mut L,
     primitive: &mut [Primitive],
@@ -407,8 +462,26 @@ fn spatial<L: TransportLaw>(
         }
         let c = grid.coordinates(cell);
         for axis in 0..3 {
-            let lower = evolve::neighbour(primitive, grid, boundaries, c, axis, false);
-            let upper = evolve::neighbour(primitive, grid, boundaries, c, axis, true);
+            let mut lower = evolve::neighbour(primitive, grid, boundaries, c, axis, false);
+            let mut upper = evolve::neighbour(primitive, grid, boundaries, c, axis, true);
+            // An admitted no-slip side is always reflecting. Mirror every
+            // component about its prescribed velocity, not just the normal
+            // component as for the original slip ghost.
+            for (outside, sample, wall) in [
+                (c[axis] == 0, &mut lower, walls[2 * axis]),
+                (
+                    c[axis] + 1 == grid.shape[axis],
+                    &mut upper,
+                    walls[2 * axis + 1],
+                ),
+            ] {
+                if outside && let MolecularWall3d::NoSlip { velocity, .. } = wall {
+                    for component in 0..3 {
+                        sample[component + 1] =
+                            2.0 * velocity[component] - primitive[cell].velocity[component];
+                    }
+                }
+            }
             for component in 0..3 {
                 derivatives[component][axis] =
                     0.5 * (upper[component + 1] - lower[component + 1]) / grid.spacing[axis];
@@ -462,7 +535,14 @@ fn spatial<L: TransportLaw>(
             let right = grid.index(right);
             let pl = primitive[left];
             let pr = primitive[right];
-            let temperature = 0.5 * pl.temperature + 0.5 * pr.temperature;
+            let wall_model = wall.then(|| walls[2 * axis + usize::from(face == count)]);
+            let temperature = match wall_model {
+                Some(MolecularWall3d::NoSlip {
+                    thermal: WallThermalCondition::Isothermal(t),
+                    ..
+                }) => 0.5 * pl.temperature + 0.5 * t.value(),
+                _ => 0.5 * pl.temperature + 0.5 * pr.temperature,
+            };
             let pressure = 0.5 * pl.pressure + 0.5 * pr.pressure;
             let coefficients = law.evaluate(
                 Temperature::new(temperature),
@@ -483,9 +563,17 @@ fn spatial<L: TransportLaw>(
                 ));
             }
             #[cfg(feature = "experimental-sgs")]
-            let (mu, conductivity) = if let Some(sgs) = subgrid.as_ref() {
+            let (mu, conductivity) = if let Some(sgs) = subgrid.as_ref().filter(|_| !wall) {
                 sgs.face_coefficients(
-                    gas, left, right, axis, index, temperature, pressure, mu, conductivity,
+                    gas,
+                    left,
+                    right,
+                    axis,
+                    index,
+                    temperature,
+                    pressure,
+                    mu,
+                    conductivity,
                 )?
             } else {
                 (mu, conductivity)
@@ -508,23 +596,53 @@ fn spatial<L: TransportLaw>(
             } else {
                 (pr.velocity[axis] - pl.velocity[axis]) / grid.spacing[axis]
             };
-            let transverse_divergence: f64 = tangential
-                .into_iter()
-                .map(|t| 0.5 * gradient[left][t][t] + 0.5 * gradient[right][t][t])
-                .sum();
+            let transverse_divergence: f64 =
+                if matches!(wall_model, Some(MolecularWall3d::NoSlip { .. })) {
+                    // This side prescribes one spatially constant wall velocity.
+                    // Its tangential derivatives at the physical wall are zero;
+                    // substituting adjacent-cell divergence creates false normal
+                    // traction in a nonuniform boundary layer.
+                    0.0
+                } else {
+                    tangential
+                        .into_iter()
+                        .map(|t| 0.5 * gradient[left][t][t] + 0.5 * gradient[right][t][t])
+                        .sum()
+                };
             let normal_stress = longitudinal * normal_derivative + cross * transverse_divergence;
             let shear_stress: [f64; 2] = std::array::from_fn(|i| {
                 let t = tangential[i];
-                if wall {
-                    0.0
+                if let Some(model) = wall_model {
+                    match model {
+                        MolecularWall3d::SlipAdiabatic => 0.0,
+                        MolecularWall3d::NoSlip { velocity, .. } => {
+                            let sign = if face == 0 { -1.0 } else { 1.0 };
+                            mu * sign * (velocity[t] - pl.velocity[t]) / (0.5 * grid.spacing[axis])
+                        }
+                    }
                 } else {
                     mu * ((pr.velocity[t] - pl.velocity[t]) / grid.spacing[axis]
                         + 0.5 * gradient[left][axis][t]
                         + 0.5 * gradient[right][axis][t])
                 }
             });
-            let energy = if wall {
-                0.0
+            let energy = if let Some(model) = wall_model {
+                match model {
+                    MolecularWall3d::SlipAdiabatic => 0.0,
+                    MolecularWall3d::NoSlip { velocity, thermal } => {
+                        let sign = if face == 0 { -1.0 } else { 1.0 };
+                        let heat = match thermal {
+                            WallThermalCondition::Adiabatic => 0.0,
+                            WallThermalCondition::Isothermal(t) => {
+                                -conductivity * sign * (t.value() - pl.temperature)
+                                    / (0.5 * grid.spacing[axis])
+                            }
+                        };
+                        -shear_stress[0] * velocity[tangential[0]]
+                            - shear_stress[1] * velocity[tangential[1]]
+                            + heat
+                    }
+                }
             } else {
                 -normal_stress * (0.5 * pl.velocity[axis] + 0.5 * pr.velocity[axis])
                     - shear_stress[0]

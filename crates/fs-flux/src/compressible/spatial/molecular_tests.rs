@@ -32,6 +32,9 @@ const WALLS: Boundaries3d = Boundaries3d {
 #[path = "molecular/sgs_tests.rs"]
 mod sgs;
 
+#[path = "molecular/wall_tests.rs"]
+mod walls;
+
 fn law(g: &FrozenGas, mu: f64, bulk: f64, conductivity: f64) -> ConstantTransport {
     let models = g.source().components().to_vec();
     let ids: Vec<_> = models.iter().map(|m| m.species().clone()).collect();
