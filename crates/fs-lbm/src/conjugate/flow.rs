@@ -26,6 +26,11 @@ pub use density_transport::{
     AdvectedMaterial, MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
     MaterialAdvectionStep, MaterialVolumeSource,
 };
+mod phase_volume;
+pub use phase_volume::{
+    CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
+    CoexistenceVolumeStep,
+};
 
 /// Mass-flow role of one domain face for flux construction and projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

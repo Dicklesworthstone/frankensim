@@ -2660,6 +2660,36 @@ electronics cooling (the wedge's second physics after steady conduction).
   material/EOS closure. It does not infer phase expansion, mixing heat,
   pressure heat or a complete Navier–Stokes/enthalpy timestep. First-order
   donor diffusion and splitting error require spatial/temporal refinement.
+- `FlowField::advance_coexistence_volume` supplies a bounded physical consumer
+  of that conservative transport: one mobile, common-velocity material mixture
+  on ONE adjacent isothermal solid/liquid coexistence interval of its original
+  `EquilibriumEnthalpyPhaseCurve`. The original chart gives affine specific
+  volume `v(h)=a+b*h` on that interval, independent of its sensible-density
+  interpolation rule. Authoritative original masses and phase states must
+  fill their cells within an explicit occupied-volume budget. Caller-prescribed
+  NET material enthalpy increments give `h_star=h+delta_H/M` and the physical
+  expansion/contraction rate `S=M*(v(h_star)-v(h))/dt`. This source enters native
+  pressure continuity with ZERO local material injection. The same projected
+  donor fluxes then carry actual mass and mass*h. Incoming/backflow densities
+  come from original-chart states in the same interval, preserving the affine
+  closure at the endpoint. Actual returned mass and chart density independently
+  pass the occupied-volume gate; tolerated initial EOS roundoff is propagated,
+  never converted into a physical volume source or repaired by renormalization.
+  Requested-versus-represented caloric increments and native transport defects
+  share an explicit enthalpy budget. The returned `dt*sum(p*S)` source pressure
+  work is an ADDITIONAL mechanical account in the native correction-pressure
+  gauge; fixed-boundary work and numerical projection loss remain separate in
+  the native projection report. The prescribed increments are not raw supplied
+  heat, and no numerical loss becomes latent or sensible heat. The caller owns
+  the thermal/work closure, momentum predictor and admissible phase mobility;
+  thermodynamic pressure, composition and source applicability remain fixed.
+  This substep does not infer pressure-dependent EOS feedback, solid mechanics,
+  mushy drag or free-surface geometry. Other charts, sensible-branch crossing,
+  incompatible sealed expansion, failed solves, budgets or cancellation refuse
+  without publishing a candidate. Native G1/G3/G4 cases check analytic melting
+  outflow and freezing inflow, continued inventories, balanced sealed transfer,
+  uniform-density parity, caloric-datum invariance, zero-input continuation with
+  admitted roundoff, independent endpoint EOS readback and atomic refusals.
 - `lbm_duct_flow` -> `LbmFlow { field, velocity_m_s, pressure_pa, report }`:
   velocity inlet on `x-min`, pressure outlet on `x-max`,
   no-slip elsewhere and on solid voxels; derives `nu_lat`/`tau` from the
