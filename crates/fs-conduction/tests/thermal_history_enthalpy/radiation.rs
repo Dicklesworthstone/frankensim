@@ -1,4 +1,6 @@
 //! Radiation changes latent storage without inventing a temperature rise.
+mod material;
+
 use super::*;
 use fs_conduction::bc::history::march::radiation::RadiationRegionHistory;
 use fs_conduction::bc::history::march::enthalpy::radiation::RadiativeEnthalpyHistoryRun;

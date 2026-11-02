@@ -3315,3 +3315,39 @@ source, with real fs_math, fs_matdb, fs_evidence, fs_qty and fs_blake3 libraries
 Only the unrelated crate ConductionError envelope is nominal. No constitutive
 substitute or alternate production thermal solver is used. This is not a full
 Cargo workspace, Clippy or DSR quality-gate run. Native rustfmt passed.
+
+## Scheduled material pointwise radiation on primary enthalpy
+
+`MaterialRadiativeEnthalpyHistoryRun` retains the original
+`EnthalpyHistoryRun` and adds original material ambient emissivity with an
+independent black-reservoir temperature schedule per trace. Construction pins
+the selected claims, checks exact caloric-object identity against storage and
+admits initial nodal source support. Every nonlinear endpoint delegates to the
+existing heterogeneous primary-h material radiation owner. Evolving epsilon(T)
+or epsilon(f), pointwise epsilon*T^4 integration, source domains and physical
+energy gates remain owned by that solver; no second phase or heat solver is
+introduced.
+
+Direct endpoints retain right-continuous schedule sampling. Event-aligned
+steps merge reservoir, boundary and source knots and use interval-end left
+limits so a short held pulse is not skipped or backdated. Adaptive proposals
+reuse the original h/T/liquid-fraction step-doubling controller. The second
+half starts from the first half's complete h state, with its own refreshed
+emissivity. Both accepted half-step reports survive; all accepted fields and
+the clock publish atomically through the original run. Refusal or cancellation
+preserves the complete accepted state and source bindings.
+
+Each sampled boundary needs one prepared material radiation owner; Newton
+reuses it within the interval. Preparation-time emissivity answers are exposed
+as references only; accepted reports contain the actual nodal source states.
+The model is stationary P1 conduction with black ambient view factor one. It
+does not add enclosure histories, spectral radiation, a finite bath, melt
+flow, remeshing, source uncertainty propagation or a global time-error bound.
+
+Four focused regression cases were added: closed-form latent heating/cooling
+under epsilon(f), enthalpy-reference invariance, held-pulse event timing and
+signed energy closure, phase-only adaptive rejection, atomic rollback/resume
+and exact chart identity. All four changed Rust files pass parser checks and
+tracked diffs pass whitespace checks. Native conduction compilation/execution
+remains unverified under the existing memory/disk constraint; these cases are
+included by the existing thermal-history CI target, not claimed as passed.
