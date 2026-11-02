@@ -277,7 +277,10 @@ fn g0_final_refresh_retains_actual_flow_sources_and_charges_the_budget() {
         limited.maximum_endpoint_evaluations = 2;
         assert!(matches!(
             run(limited),
-            Err(InertialThermalError::WorkBudget { performed: 2, maximum: 2 })
+            Err(InertialThermalError::WorkBudget {
+                performed: 2,
+                maximum: 2
+            })
         ));
         assert_eq!(calls.get(), 2);
         calls.set(0);
@@ -593,3 +596,422 @@ fn g0_direct_flow_binding_requires_real_mass_reservoirs_at_pressure_nodes() {
     });
 }
 
+// A physical two-branch ring with four distinct native pipe inventories.
+// Native CellId order deliberately differs from the positive hydraulic route.
+const ROUTED_NODES: [CellId; 2] = [CellId(0), CellId(1)];
+const ROUTED_ORDER: [CellId; 6] = [
+    CellId(0),
+    CellId(3),
+    CellId(2),
+    CellId(1),
+    CellId(5),
+    CellId(4),
+];
+
+fn routed_data() -> Vec<DepositedCell> {
+    let geometry = [
+        ([0.0, 0.0, 0.0], [0.0, 0.1, 0.0]),
+        ([2.0, 0.0, 0.0], [2.0, 0.1, 0.0]),
+        ([1.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
+        ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ([1.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+        ([2.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+    ];
+    geometry
+        .into_iter()
+        .enumerate()
+        .map(|(i, (start, end))| DepositedCell {
+            id: CellId(i as u64),
+            segment_id: i as u64,
+            body_id: 0,
+            material_id: MaterialId(1),
+            mass_kg: 1.0,
+            specific_h_j_kg: if i == 0 { 60_000.0 } else { 0.0 },
+            geometry: CellGeometry {
+                start_m: start,
+                end_m: end,
+                volume_m3: 1.0,
+                surface_area_m2: 1.0,
+            },
+            boundary: Boundary {
+                ambient_k: 300.0,
+                htc_w_m2_k: 0.0,
+                reservoir: None,
+                source_w: 0.0,
+            },
+        })
+        .collect()
+}
+
+fn routed_state<'a>(law: &'a Caloric, cells: &[DepositedCell]) -> DepositionSimulation<'a> {
+    DepositionSimulation::new(
+        cells
+            .iter()
+            .cloned()
+            .map(|cell| TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(cell),
+            })
+            .collect(),
+        &[(MaterialId(1), law as &dyn ThermalLaw)],
+        DepositionBudget {
+            max_cells: cells.len(),
+            max_links: 8,
+            max_events: cells.len() + 2,
+            max_substeps: 16,
+        },
+    )
+    .unwrap()
+    .advance_to(
+        0.0,
+        StepConfig {
+            max_dt_s: 1.0,
+            energy_tolerance_j: 1e-8,
+        },
+        || Ok(()),
+    )
+    .unwrap()
+    .0
+}
+
+fn routed_layout(
+    cx: &Cx<'_>,
+    graph: &LossGraph,
+    thermal: &DepositionSimulation<'_>,
+) -> DistributedGraphInventory {
+    DistributedGraphInventory::new(
+        cx,
+        graph,
+        Density::new(1.0),
+        &ROUTED_NODES,
+        &[vec![CellId(3), CellId(2)], vec![CellId(5), CellId(4)]],
+        thermal,
+        16,
+    )
+    .unwrap()
+}
+
+fn routed_momentum(
+    cx: &Cx<'_>,
+    graph: &LossGraph,
+    layout: &DistributedGraphInventory,
+    flow: f64,
+) -> InertialGraph {
+    let sections: Vec<_> = layout
+        .inertial_branches()
+        .iter()
+        .map(|geometry| geometry.expect("every fixture branch has physical pipe inventory"))
+        .collect();
+    InertialGraph::try_new(
+        cx,
+        graph,
+        layout.reference_density(),
+        &sections,
+        &[boundary(0, 0.0)],
+        &[flow; 2],
+        0.0,
+        16,
+    )
+    .unwrap()
+}
+
+fn routed_audits<P, T>(report: &InertialThermalReport<P, T>) {
+    let limits = controls();
+    assert!(report.maximum_cell_residual_j <= limits.cell_tolerance_j);
+    assert!(report.thermal.residual_j.abs() <= limits.total_thermal_tolerance_j);
+    assert!(report.hydraulics.maximum_impulse_residual_pa_s <= limits.impulse_tolerance_pa_s);
+    assert!(report.hydraulics.mechanical_balance_residual_j.abs() <= limits.mechanical_tolerance_j);
+    assert!(
+        report
+            .hydraulics
+            .average_flow_residual_m3_s
+            .iter()
+            .all(|r| r.abs() <= limits.average_flow_tolerance_m3_s)
+    );
+}
+
+#[test]
+fn g1_distributed_pipe_residence_and_reversal_retain_the_original_momentum_dimension() {
+    with_cx(|cx| {
+        let graph = network(2, &[(0, 1), (1, 0)], &[1.0; 2]);
+        let law = Caloric;
+        let data = routed_data();
+        let old = routed_state(&law, &data);
+        let layout = routed_layout(cx, &graph, &old);
+        let momentum = routed_momentum(cx, &graph, &layout, 1.0);
+        layout.admit_momentum(cx, &momentum).unwrap();
+        assert_eq!(layout.fluid_cell_count(), 6);
+        assert_eq!(layout.interior_connection_count(), 6);
+        assert_eq!(layout.branch_volumes_m3(), &[2.0; 2]);
+        assert_eq!(momentum.inertances_pa_s2_m3(), &[2.0; 2]);
+        let problem = InertialThermalProblem {
+            momentum: &momentum,
+            node_cells: &ROUTED_NODES,
+            maximum_connections: 16,
+        };
+        let (forward_momentum, forward, first) = advance_inertial_graph_distributed(
+            cx,
+            &problem,
+            &layout,
+            &old,
+            1.0,
+            controls(),
+            &[0.0; 6],
+            &[1.0; 2],
+            |_, _, _| Ok::<_, String>(response(&graph, &[1.0; 2])),
+            |_, _, _, h| Ok(heat(h.average_volume_flows_m3_s.clone())),
+        )
+        .unwrap();
+        // A closed six-tank BE recurrence with mdot*dt/M=1. Only the first
+        // junction starts warm: theta_i=30*(1/2)^i/(1-(1/2)^6).
+        let amplitude = 30.0 / (1.0 - 0.5_f64.powi(6));
+        for (i, id) in ROUTED_ORDER.into_iter().enumerate() {
+            near(
+                forward.temperature_k(id).unwrap(),
+                300.0 + amplitude * 0.5_f64.powi(i as i32),
+                1e-7,
+            );
+        }
+        for q in &first.hydraulics.average_volume_flows_m3_s {
+            near(*q, 1.0, 1e-10);
+        }
+        assert_eq!(first.heat, first.hydraulics.average_volume_flows_m3_s);
+        // Thermal refinement introduced no hydraulic node or impulse coordinate.
+        assert_eq!(first.hydraulics.momentum.x.len(), 3); // two impulses + one pressure
+        assert_eq!(forward_momentum.node_count(), 2);
+        assert_eq!(forward_momentum.branch_count(), 2);
+
+        let direct = routed_state(&law, &data[..2]);
+        let (_, instant, direct_report) = advance_inertial_graph(
+            cx,
+            &problem,
+            &direct,
+            1.0,
+            controls(),
+            &[0.0; 2],
+            &[1.0; 2],
+            |_, _, _| Ok::<_, String>(response(&graph, &[1.0; 2])),
+            |_, _, _, _| Ok(heat(())),
+        )
+        .unwrap();
+        assert_eq!(
+            direct_report.hydraulics.momentum.x.len(),
+            first.hydraulics.momentum.x.len()
+        );
+        near(instant.temperature_k(ROUTED_NODES[1]).unwrap(), 320.0, 1e-7);
+        assert!(forward.temperature_k(ROUTED_NODES[1]).unwrap() < 304.0);
+
+        let reversal_problem = InertialThermalProblem {
+            momentum: &forward_momentum,
+            node_cells: &ROUTED_NODES,
+            maximum_connections: 16,
+        };
+        let (back_momentum, back, reversed) = advance_inertial_graph_distributed(
+            cx,
+            &reversal_problem,
+            &layout,
+            &forward,
+            2.0,
+            controls(),
+            &[0.0; 6],
+            &[-1.0; 2],
+            |_, _, _| Ok::<_, String>(response(&graph, &[-9.0; 2])),
+            |_, _, _, h| Ok(heat(h.average_volume_flows_m3_s.clone())),
+        )
+        .unwrap();
+        // Native midpoint: (2I/dt+R)*Qavg=2I*Qold/dt+drive -> Qavg=-1,
+        // Qnew=-3. This checks the documented average-flow discretization;
+        // it does not claim to resolve the within-step zero-crossing time.
+        for edge in 0..2 {
+            near(
+                reversed.hydraulics.average_volume_flows_m3_s[edge],
+                -1.0,
+                1e-10,
+            );
+            near(reversed.hydraulics.final_flows_m3_s[edge], -3.0, 1e-10);
+        }
+        // Reverse the SAME stored spatial profile. The independent periodic
+        // recurrence now receives its donor from the next positive-route cell.
+        for (i, id) in ROUTED_ORDER.into_iter().enumerate() {
+            let weighted: f64 = (0..6)
+                .map(|k| {
+                    let donor = ROUTED_ORDER[(i + k) % 6];
+                    (forward.temperature_k(donor).unwrap() - 300.0) * 0.5_f64.powi(k as i32 + 1)
+                })
+                .sum();
+            let expected = 300.0 + weighted / (1.0 - 0.5_f64.powi(6));
+            near(back.temperature_k(id).unwrap(), expected, 1e-7);
+        }
+        assert!(back.temperature_k(CellId(4)).unwrap() > forward.temperature_k(CellId(4)).unwrap());
+        assert_eq!(reversed.hydraulics.momentum.x.len(), 3);
+        assert_eq!(
+            back_momentum.inertances_pa_s2_m3(),
+            momentum.inertances_pa_s2_m3()
+        );
+        assert_eq!(back_momentum.accepted_time_s(), 2.0);
+        assert_eq!(back.time_s(), 2.0);
+        for (&id, original) in old.cells() {
+            let retained = &back.cells()[&id];
+            assert_eq!(retained.mass_kg, original.mass_kg);
+            assert_eq!(retained.geometry, original.geometry);
+            assert_eq!(retained.material_id, original.material_id);
+        }
+        for report in [&first, &reversed] {
+            routed_audits(report);
+            near(report.thermal.external_heat_j, 0.0, 1e-12);
+            near(report.thermal.stored_energy_change_j, 0.0, 1e-6);
+        }
+        assert_eq!(old.time_s(), 0.0);
+        assert_eq!(momentum.accepted_time_s(), 0.0);
+        assert_eq!(momentum.volume_flows_m3_s(), vec![1.0; 2]);
+    });
+}
+
+#[test]
+fn g1_distributed_pipe_heat_changes_drag_at_the_accepted_native_endpoint() {
+    with_cx(|cx| {
+        let graph = network(2, &[(0, 1), (1, 0)], &[1.0; 2]);
+        let law = Caloric;
+        let mut data = routed_data();
+        data[0].specific_h_j_kg = 0.0;
+        data[3].boundary.source_w = 1000.0;
+        let old = routed_state(&law, &data);
+        let layout = routed_layout(cx, &graph, &old);
+        let momentum = routed_momentum(cx, &graph, &layout, 0.0);
+        let problem = InertialThermalProblem {
+            momentum: &momentum,
+            node_cells: &ROUTED_NODES,
+            maximum_connections: 16,
+        };
+        let (_, next, report) = advance_inertial_graph_distributed(
+            cx,
+            &problem,
+            &layout,
+            &old,
+            1.0,
+            controls(),
+            &[0.0; 6],
+            &[0.0; 2],
+            |_, candidate, _| {
+                let t = candidate
+                    .temperature_k(CellId(3))
+                    .map_err(|e| e.to_string())?;
+                let r = 1.0 + 0.1 * (t - 300.0);
+                Ok::<_, String>(ResolvedInertialGraph {
+                    graph: network(2, &[(0, 1), (1, 0)], &[r, 1.0]),
+                    pressure_boundaries: vec![boundary(0, 0.0)],
+                    driving_pressure_pa: vec![1.0; 2],
+                    payload: r,
+                })
+            },
+            |_, _, &r, _| Ok(heat(r)),
+        )
+        .unwrap();
+        // Eliminate pressure around the two-branch ring. Native inertance=2
+        // each: Q*(8 + R_hot + 1)=2. The six-cell periodic heat recurrence
+        // gives theta_hot=1/[(1+Q)*(1-(Q/(1+Q))^6)].
+        let hot = |q: f64| 1.0 / ((1.0 + q) * (1.0 - (q / (1.0 + q)).powi(6)));
+        let (mut low, mut high) = (0.0, 0.2);
+        for _ in 0..80 {
+            let q = 0.5 * (low + high);
+            if q * (10.0 + 0.1 * hot(q)) > 2.0 {
+                high = q;
+            } else {
+                low = q;
+            }
+        }
+        let q = 0.5 * (low + high);
+        near(next.temperature_k(CellId(3)).unwrap(), 300.0 + hot(q), 1e-7);
+        for rate in &report.hydraulics.average_volume_flows_m3_s {
+            near(*rate, q, 1e-9);
+        }
+        for rate in &report.hydraulics.final_flows_m3_s {
+            near(*rate, 2.0 * q, 1e-9);
+        }
+        near(report.sources, 1.0 + 0.1 * hot(q), 1e-9);
+        near(
+            report.sources,
+            1.0 + 0.1 * (next.temperature_k(CellId(3)).unwrap() - 300.0),
+            1e-12,
+        );
+        assert_eq!(report.heat, report.sources);
+        assert!(q < 0.2);
+        near(report.thermal.external_heat_j, 1000.0, 1e-8);
+        near(report.thermal.stored_energy_change_j, 1000.0, 1e-6);
+        routed_audits(&report);
+        assert_eq!(old.time_s(), 0.0);
+        assert_eq!(momentum.accepted_time_s(), 0.0);
+    });
+}
+
+#[test]
+fn g0_distributed_momentum_and_storage_mismatches_publish_neither_owner() {
+    with_cx(|cx| {
+        let graph = network(2, &[(0, 1), (1, 0)], &[1.0; 2]);
+        let law = Caloric;
+        let data = routed_data();
+        let old = routed_state(&law, &data);
+        let layout = routed_layout(cx, &graph, &old);
+        let momentum = routed_momentum(cx, &graph, &layout, 1.0);
+        let wrong = owner(cx, &graph, &[3.0; 2], &[1.0; 2]);
+        let calls = Cell::new(0usize);
+        let wrong_problem = InertialThermalProblem {
+            momentum: &wrong,
+            node_cells: &ROUTED_NODES,
+            maximum_connections: 16,
+        };
+        let result = advance_inertial_graph_distributed(
+            cx,
+            &wrong_problem,
+            &layout,
+            &old,
+            1.0,
+            controls(),
+            &[0.0; 6],
+            &[1.0; 2],
+            |_, _, _| {
+                calls.set(calls.get() + 1);
+                Ok::<_, String>(response(&graph, &[1.0; 2]))
+            },
+            |_, _, _, _| Ok(heat(())),
+        );
+        assert!(matches!(result, Err(InertialThermalError::Transport(_))));
+        assert_eq!(calls.get(), 0); // wrong physical inertia refuses before source work
+
+        let mut changed = data.clone();
+        changed[3].geometry.end_m[0] += 0.25;
+        let changed = routed_state(&law, &changed);
+        let problem = InertialThermalProblem {
+            momentum: &momentum,
+            node_cells: &ROUTED_NODES,
+            maximum_connections: 16,
+        };
+        let result = advance_inertial_graph_distributed(
+            cx,
+            &problem,
+            &layout,
+            &changed,
+            1.0,
+            controls(),
+            &[0.0; 6],
+            &[1.0; 2],
+            |_, _, _| {
+                calls.set(calls.get() + 1);
+                Ok::<_, String>(response(&graph, &[1.0; 2]))
+            },
+            |_, _, _, _| Ok(heat(())),
+        );
+        assert!(matches!(result, Err(InertialThermalError::Transport(_))));
+        assert!(calls.get() > 0); // original candidate storage admission rejected the change
+        for state in [&old, &changed] {
+            assert_eq!(state.time_s(), 0.0);
+        }
+        for owner in [&momentum, &wrong] {
+            assert_eq!(owner.accepted_time_s(), 0.0);
+            assert_eq!(owner.volume_flows_m3_s(), vec![1.0; 2]);
+        }
+        for (&id, cell) in old.cells() {
+            assert_eq!(cell.specific_h_j_kg, data[id.0 as usize].specific_h_j_kg);
+        }
+    });
+}

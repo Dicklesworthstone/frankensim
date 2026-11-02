@@ -2719,3 +2719,29 @@ use the existing general endpoint interface instead. Implicit stability does
 not remove timestep or spatial-refinement requirements. Regression sources
 exercise 96-cell open and closed inventories, nonlinear caloric inversion,
 reversal, formation-datum shifts and transactional work-limit refusal.
+
+### Distributed pipe residence on coupled graph timelines
+
+`transient::distributed::DistributedGraphInventory` binds ordered original
+thermal control volumes to each hydraulic branch. Only native mass-transfer
+connections expand; junction pressure and branch momentum dimensions stay fixed.
+Every pipe cell retains its own enthalpy through changing and reversed flow.
+Explicit cell geometry supplies volume, area and the equivalent branch inertia
+`rho0 sum(length_i / area_i)`, including nonuniform cross-sections. Inventoried
+branches must agree with the original momentum owner; empty paths supply no
+inferred volume or inertia. External streams enter only declared junctions.
+
+The distributed inertial entrypoint uses this same inventory
+at every thermal candidate and final source refresh. Original node order, branch
+identity, reference density, full cell geometry, mass and available native caloric
+identity remain bound. Returned transport bindings also reject replaced geometry
+or caloric identity. The native thermal owner still owns all cell energies,
+wall links, events and acceptance gates. No second time integrator is introduced.
+
+This is a finite-volume mixed-cell axial model. The caller authors its spatial
+resolution; nominal V/|Q| residence is a held-flow diagnostic, not a prediction
+of breakthrough under changing flow. Time and spatial refinement remain necessary.
+The distributed inventory admits at most 4096 fluid cells; original nonlinear,
+momentum and thermal work limits apply independently. Regression sources exercise
+pipe residence and spatial refinement, variable-area inertia, retained heat during
+reversal and rest, coupled timeline acceptance and transactional binding refusal.

@@ -19,6 +19,7 @@ use fs_thermal::enthalpy::backward_euler::{
 };
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
 
+use super::distributed::DistributedGraphInventory;
 use super::{GraphEnthalpyTransport, TransientTransportError, thermal_checkpoint};
 use crate::graph::inertial::{
     InertialGraph, InertialGraphControls, InertialGraphError, InertialGraphReport,
@@ -181,6 +182,96 @@ pub fn advance_inertial_graph<'m, P, T, E>(
     ),
     InertialThermalError<E>,
 > {
+    advance_inertial_graph_with_inventory(
+        cx,
+        problem,
+        None,
+        thermal,
+        target_s,
+        controls,
+        energy_guess_j,
+        average_flow_guess_m3_s,
+        resolve,
+        exchange,
+    )
+}
+
+/// Advance original branch momentum with explicitly resolved pipe storage.
+///
+/// The inventory expands only native thermal transfers; the pressure graph and
+/// its impulse coordinates remain unchanged. Each authored pipe cell keeps its
+/// own enthalpy through startup, shutdown and reversal. The inventory's geometry
+/// must imply the same branch inertance as the retained momentum owner. Native
+/// energy and source admission are repeated at every candidate and final refresh.
+/// Node cells, reference density and connection limits must match `problem`.
+///
+/// The time order, source callback contract and independent physical gates are
+/// identical to [`advance_inertial_graph`]. Callers choose the spatial inventory;
+/// the adapter never creates hidden hydraulic nodes or estimates a thermal mesh.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_inertial_graph_distributed<'m, P, T, E>(
+    cx: &Cx<'_>,
+    problem: &InertialThermalProblem<'_>,
+    inventory: &DistributedGraphInventory,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    controls: InertialThermalControls,
+    energy_guess_j: &[f64],
+    average_flow_guess_m3_s: &[f64],
+    resolve: impl Fn(&Cx<'_>, &DepositionSimulation<'m>, &[f64]) -> Result<ResolvedInertialGraph<P>, E>,
+    exchange: impl Fn(
+        &Cx<'_>,
+        &DepositionSimulation<'m>,
+        &P,
+        &InertialGraphReport,
+    ) -> Result<InertialGraphHeat<T>, E>,
+) -> Result<
+    (
+        InertialGraph,
+        DepositionSimulation<'m>,
+        InertialThermalReport<P, T>,
+    ),
+    InertialThermalError<E>,
+> {
+    advance_inertial_graph_with_inventory(
+        cx,
+        problem,
+        Some(inventory),
+        thermal,
+        target_s,
+        controls,
+        energy_guess_j,
+        average_flow_guess_m3_s,
+        resolve,
+        exchange,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_inertial_graph_with_inventory<'m, P, T, E>(
+    cx: &Cx<'_>,
+    problem: &InertialThermalProblem<'_>,
+    inventory: Option<&DistributedGraphInventory>,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    controls: InertialThermalControls,
+    energy_guess_j: &[f64],
+    average_flow_guess_m3_s: &[f64],
+    resolve: impl Fn(&Cx<'_>, &DepositionSimulation<'m>, &[f64]) -> Result<ResolvedInertialGraph<P>, E>,
+    exchange: impl Fn(
+        &Cx<'_>,
+        &DepositionSimulation<'m>,
+        &P,
+        &InertialGraphReport,
+    ) -> Result<InertialGraphHeat<T>, E>,
+) -> Result<
+    (
+        InertialGraph,
+        DepositionSimulation<'m>,
+        InertialThermalReport<P, T>,
+    ),
+    InertialThermalError<E>,
+> {
     thermal_checkpoint(cx)?;
     controls
         .solver
@@ -220,6 +311,17 @@ pub fn advance_inertial_graph<'m, P, T, E>(
         return Err(InertialThermalError::Invalid(
             "invalid synchronized timeline, inventory, scales or work limits",
         ));
+    }
+    if let Some(inventory) = inventory {
+        if inventory.node_cells() != problem.node_cells
+            || inventory.reference_density() != problem.momentum.reference_density()
+            || inventory.interior_connection_count() > problem.maximum_connections
+        {
+            return Err(InertialThermalError::Invalid(
+                "distributed inventory differs from the original node, density or connection binding",
+            ));
+        }
+        inventory.admit_momentum(cx, problem.momentum)?;
     }
     let step = BackwardEulerStep::new(thermal, target_s, || thermal_checkpoint(cx))?;
     let count = step.cell_ids().len();
@@ -275,8 +377,8 @@ pub fn advance_inertial_graph<'m, P, T, E>(
                 let source_rates = retained.as_ref().map_or(average.as_slice(), |trial| {
                     trial.report().average_volume_flows_m3_s.as_slice()
                 });
-                let response = resolve(cx, candidate, source_rates)
-                    .map_err(InertialThermalError::Resolve)?;
+                let response =
+                    resolve(cx, candidate, source_rates).map_err(InertialThermalError::Resolve)?;
                 thermal_checkpoint(cx)?;
                 let momentum = match retained {
                     Some(trial) => trial.recheck(
@@ -299,16 +401,26 @@ pub fn advance_inertial_graph<'m, P, T, E>(
                 let coefficients = exchange(cx, candidate, &response.payload, momentum.report())
                     .map_err(InertialThermalError::Exchange)?;
                 thermal_checkpoint(cx)?;
-                let binding = GraphEnthalpyTransport::from_volume_flows(
-                    cx,
-                    &response.graph,
-                    &momentum.report().average_volume_flows_m3_s,
-                    problem.momentum.reference_density(),
-                    problem.node_cells,
-                    candidate,
-                    coefficients.mass_boundaries,
-                    problem.maximum_connections,
-                )?;
+                let binding = match inventory {
+                    Some(inventory) => inventory.bind(
+                        cx,
+                        &response.graph,
+                        &momentum.report().average_volume_flows_m3_s,
+                        candidate,
+                        coefficients.mass_boundaries,
+                        problem.maximum_connections,
+                    )?,
+                    None => GraphEnthalpyTransport::from_volume_flows(
+                        cx,
+                        &response.graph,
+                        &momentum.report().average_volume_flows_m3_s,
+                        problem.momentum.reference_density(),
+                        problem.node_cells,
+                        candidate,
+                        coefficients.mass_boundaries,
+                        problem.maximum_connections,
+                    )?,
+                };
                 let advected = binding.endpoint_transport(cx, candidate)?;
                 let BoundaryStepCoefficients { bulk, boundaries } = coefficients.heat;
                 let StepCoefficients {
@@ -453,4 +565,3 @@ fn nonnegative(value: f64) -> bool {
 
 #[cfg(test)]
 mod tests;
-

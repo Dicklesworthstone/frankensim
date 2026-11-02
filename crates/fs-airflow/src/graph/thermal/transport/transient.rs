@@ -18,16 +18,16 @@ use std::collections::BTreeMap;
 
 use fs_exec::Cx;
 use fs_qty::Density;
-use fs_thermal::enthalpy::{
-    CellId, DepositionError, DepositionSimulation, EnergyAudit, MaterialId, StepConfig,
-    ThermalStorageBasis,
-};
-use fs_thermal::enthalpy::advection::{AdvectionAudit, Advected, MassBoundary, MassFlow};
+use fs_thermal::enthalpy::advection::{Advected, AdvectionAudit, MassBoundary, MassFlow};
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, TransportStepCoefficients};
+use fs_thermal::enthalpy::{
+    CellGeometry, CellId, DepositionError, DepositionSimulation, EnergyAudit, MaterialId,
+    StepConfig, ThermalStorageBasis,
+};
 
-use crate::graph::{GraphSolution, LossGraph};
-use super::{TransportError, poll};
 use super::recirculation::{MAX_RECIRCULATION_SUPPLIES, solve_feedback};
+use super::{TransportError, poll};
+use crate::graph::{GraphSolution, LossGraph};
 
 /// Existing thermal, linear-solve or explicit binding refusal. No partial
 /// timeline is returned on failure or cancellation.
@@ -38,10 +38,14 @@ pub enum TransientTransportError {
     Transport(TransportError),
 }
 impl From<DepositionError> for TransientTransportError {
-    fn from(error: DepositionError) -> Self { Self::Thermal(error) }
+    fn from(error: DepositionError) -> Self {
+        Self::Thermal(error)
+    }
 }
 impl From<TransportError> for TransientTransportError {
-    fn from(error: TransportError) -> Self { Self::Transport(error) }
+    fn from(error: TransportError) -> Self {
+        Self::Transport(error)
+    }
 }
 impl std::fmt::Display for TransientTransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,14 +55,23 @@ impl std::fmt::Display for TransientTransportError {
 impl std::error::Error for TransientTransportError {}
 
 /// Original finite-inventory transport with no implicit pressure reservoirs.
-/// Interior connection IDs are their zero-based hydraulic branch indices;
-/// caller-supplied boundary IDs must be distinct from those IDs.
+/// Interior connection IDs follow the binding's transport order: original
+/// branch indices for direct bindings, expanded branch segments for distributed
+/// pipe inventory. Caller-supplied boundary IDs must be distinct from that range.
 #[derive(Clone)]
 pub struct GraphEnthalpyTransport {
     node_cells: Vec<CellId>,
-    storage: BTreeMap<CellId, (MaterialId, f64, f64)>,
+    storage: BTreeMap<CellId, BoundTransportStorage>,
     advection: Advected<()>,
     max_connections: usize,
+}
+
+#[derive(Clone)]
+struct BoundTransportStorage {
+    material: MaterialId,
+    mass_kg: f64,
+    geometry: CellGeometry,
+    caloric_identity: Option<[u8; 32]>,
 }
 
 impl GraphEnthalpyTransport {
@@ -185,7 +198,13 @@ impl GraphEnthalpyTransport {
                 || storage
                     .insert(
                         id,
-                        (cell.material_id, cell.mass_kg, cell.geometry.volume_m3),
+                        BoundTransportStorage {
+                            material: cell.material_id,
+                            mass_kg: cell.mass_kg,
+                            geometry: cell.geometry,
+                            caloric_identity: thermal
+                                .material_caloric_identity(cell.material_id)?,
+                        },
                     )
                     .is_some()
             {
@@ -245,7 +264,9 @@ impl GraphEnthalpyTransport {
     }
 
     /// Node-to-storage mapping, in hydraulic node order.
-    pub fn node_cells(&self) -> &[CellId] { &self.node_cells }
+    pub fn node_cells(&self) -> &[CellId] {
+        &self.node_cells
+    }
 
     /// Compose with the native source/conduction observer instead of creating
     /// a parallel time owner. Its existing budgets, combined CFL restriction,
@@ -260,12 +281,17 @@ impl GraphEnthalpyTransport {
     /// in the SAME step and combined stability restriction as advection.
     /// The energy and advection audits overlap; do not add their energy twice.
     pub fn advance_to<'m>(
-        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'m>,
-        target_s: f64, config: StepConfig,
-    ) -> Result<(DepositionSimulation<'m>, EnergyAudit, AdvectionAudit), TransientTransportError> {
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        config: StepConfig,
+    ) -> Result<(DepositionSimulation<'m>, EnergyAudit, AdvectionAudit), TransientTransportError>
+    {
         self.validate_storage(cx, thermal)?;
-        let (next, advected, energy) = thermal.advance_observed(
-            &self.advection, target_s, config, || thermal_checkpoint(cx))?;
+        let (next, advected, energy) =
+            thermal
+                .advance_observed(&self.advection, target_s, config, || thermal_checkpoint(cx))?;
         self.validate_storage(cx, &next)?;
         Ok((next, energy, advected.audit()))
     }
@@ -274,10 +300,14 @@ impl GraphEnthalpyTransport {
     /// Pairwise transfers remain internal; only actual external streams enter
     /// sources. This evaluates no timestep and commits no state or history.
     pub fn endpoint_transport(
-        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
     ) -> Result<TransportStepCoefficients<()>, TransientTransportError> {
         self.validate_storage(cx, thermal)?;
-        Ok(self.advection.endpoint_transport(thermal, || thermal_checkpoint(cx))?)
+        Ok(self
+            .advection
+            .endpoint_transport(thermal, || thermal_checkpoint(cx))?)
     }
 
     /// One backward-Euler advection/fixed-source step on at most 64 cells.
@@ -291,36 +321,64 @@ impl GraphEnthalpyTransport {
     /// fixed watts are included. Geometry, inventory and caloric laws stay fixed;
     /// timestep/spatial refinement is still necessary despite implicit stability.
     pub fn advance_advection_implicit<'m>(
-        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
-        cell_tolerance_j: f64, total_tolerance_j: f64,
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        cell_tolerance_j: f64,
+        total_tolerance_j: f64,
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit), TransientTransportError> {
         self.validate_storage(cx, thermal)?;
         let n = thermal.cells().len();
-        if n != self.storage.len() || n > MAX_RECIRCULATION_SUPPLIES
+        if n != self.storage.len()
+            || n > MAX_RECIRCULATION_SUPPLIES
             || thermal.links().values().any(|l| l.conductance_w_k != 0.0)
-            || thermal.cells().values().any(|c| c.boundary.htc_w_m2_k != 0.0 || c.boundary.reservoir.is_some())
-            || !cell_tolerance_j.is_finite() || cell_tolerance_j < 0.0
-            || !total_tolerance_j.is_finite() || total_tolerance_j < 0.0
+            || thermal
+                .cells()
+                .values()
+                .any(|c| c.boundary.htc_w_m2_k != 0.0 || c.boundary.reservoir.is_some())
+            || !cell_tolerance_j.is_finite()
+            || cell_tolerance_j < 0.0
+            || !total_tolerance_j.is_finite()
+            || total_tolerance_j < 0.0
         {
-            return Err(TransientTransportError::Invalid("direct implicit advection needs at most 64 mapped cells, fixed sources and no active conduction/Robin exchange"));
+            return Err(TransientTransportError::Invalid(
+                "direct implicit advection needs at most 64 mapped cells, fixed sources and no active conduction/Robin exchange",
+            ));
         }
         let step = BackwardEulerStep::new(thermal, target_s, || thermal_checkpoint(cx))?;
-        let ids: BTreeMap<_, _> = step.cell_ids().iter().enumerate().map(|(i, &id)| (id, i)).collect();
-        let mass: Vec<_> = step.cell_ids().iter().map(|id| thermal.cells()[id].mass_kg).collect();
+        let ids: BTreeMap<_, _> = step
+            .cell_ids()
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
+        let mass: Vec<_> = step
+            .cell_ids()
+            .iter()
+            .map(|id| thermal.cells()[id].mass_kg)
+            .collect();
         let dt = target_s - thermal.time_s();
         let mut matrix = vec![vec![0.0; n]; n];
         let mut balance = vec![0.0; n];
         let mut component: Vec<_> = (0..n).collect();
-        for (i, row) in matrix.iter_mut().enumerate() { row[i] = 1.0; }
+        for (i, row) in matrix.iter_mut().enumerate() {
+            row[i] = 1.0;
+        }
         for flow in self.advection.flows().iter().filter(|f| f.kg_s != 0.0) {
             poll(cx)?;
-            let (up, down) = if flow.kg_s > 0.0 { (ids[&flow.a], ids[&flow.b]) }
-                else { (ids[&flow.b], ids[&flow.a]) };
+            let (up, down) = if flow.kg_s > 0.0 {
+                (ids[&flow.a], ids[&flow.b])
+            } else {
+                (ids[&flow.b], ids[&flow.a])
+            };
             let rate = flow.kg_s.abs();
-            matrix[up][up] += dt*rate/mass[up];
-            matrix[down][up] -= dt*rate/mass[up];
-            balance[up] -= rate; balance[down] += rate;
-            let a = root(&component, up); let b = root(&component, down);
+            matrix[up][up] += dt * rate / mass[up];
+            matrix[down][up] -= dt * rate / mass[up];
+            balance[up] -= rate;
+            balance[down] += rate;
+            let a = root(&component, up);
+            let b = root(&component, down);
             component[a.max(b)] = a.min(b);
         }
         for boundary in self.advection.boundaries() {
@@ -328,7 +386,9 @@ impl GraphEnthalpyTransport {
             match *boundary {
                 MassBoundary::Inlet { cell, kg_s, .. } => balance[ids[&cell]] += kg_s,
                 MassBoundary::Outlet { cell, kg_s, .. } => {
-                    let i = ids[&cell]; balance[i] -= kg_s; matrix[i][i] += dt*kg_s/mass[i];
+                    let i = ids[&cell];
+                    balance[i] -= kg_s;
+                    matrix[i][i] += dt * kg_s / mass[i];
                 }
             }
         }
@@ -337,36 +397,60 @@ impl GraphEnthalpyTransport {
         // mass balance, rather than multiplying a large formation enthalpy.
         for i in 0..n {
             let reference = root(&component, i);
-            matrix[i][reference] += dt*balance[i]/mass[reference];
+            matrix[i][reference] += dt * balance[i] / mass[reference];
         }
         let mut energy = vec![0.0; n];
         for attempt in 0..3 {
             poll(cx)?;
-            let trial = step.evaluate_with_transport(&energy,
-                |candidate| self.advection.endpoint_transport(candidate, || thermal_checkpoint(cx)),
-                || thermal_checkpoint(cx))?;
-            if attempt == 2 || (trial.maximum_cell_residual_j() <= cell_tolerance_j
-                && trial.audit().residual_j.abs() <= total_tolerance_j)
+            let trial = step.evaluate_with_transport(
+                &energy,
+                |candidate| {
+                    self.advection
+                        .endpoint_transport(candidate, || thermal_checkpoint(cx))
+                },
+                || thermal_checkpoint(cx),
+            )?;
+            if attempt == 2
+                || (trial.maximum_cell_residual_j() <= cell_tolerance_j
+                    && trial.audit().residual_j.abs() <= total_tolerance_j)
             {
-                let (next, (), audit) = trial.accept(cell_tolerance_j, total_tolerance_j, || thermal_checkpoint(cx))?;
+                let (next, (), audit) =
+                    trial.accept(cell_tolerance_j, total_tolerance_j, || {
+                        thermal_checkpoint(cx)
+                    })?;
                 return Ok((next, audit));
             }
             let rhs: Vec<_> = trial.residual_j().iter().map(|r| -r).collect();
             let correction = solve_feedback(cx, &matrix, &rhs, false)?;
-            for (value, delta) in energy.iter_mut().zip(correction) { *value += delta; }
+            for (value, delta) in energy.iter_mut().zip(correction) {
+                *value += delta;
+            }
             energy = step.resolvable_increments_j(&energy);
         }
         unreachable!("bounded implicit loop returns its final native acceptance")
     }
 
-    fn validate_storage(&self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>)
-        -> Result<(), TransientTransportError> {
-        for (&id, &(material, mass, volume)) in &self.storage {
+    fn validate_storage(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<(), TransientTransportError> {
+        for (&id, bound) in &self.storage {
             poll(cx)?;
-            if thermal.cells().get(&id).is_none_or(|c| {
-                c.material_id != material || c.mass_kg != mass || c.geometry.volume_m3 != volume
-            }) {
-                return Err(TransientTransportError::Invalid("bound fluid storage changed; rebuild the transport binding"));
+            let cell = thermal
+                .cells()
+                .get(&id)
+                .ok_or(TransientTransportError::Invalid(
+                    "bound fluid storage disappeared; rebuild the transport binding",
+                ))?;
+            if cell.material_id != bound.material
+                || cell.mass_kg != bound.mass_kg
+                || cell.geometry != bound.geometry
+                || thermal.material_caloric_identity(cell.material_id)? != bound.caloric_identity
+            {
+                return Err(TransientTransportError::Invalid(
+                    "bound fluid geometry, mass or caloric identity changed; rebuild the transport binding",
+                ));
             }
         }
         Ok(())
@@ -374,7 +458,9 @@ impl GraphEnthalpyTransport {
 }
 
 fn root(parents: &[usize], mut node: usize) -> usize {
-    while parents[node] != node { node = parents[node]; }
+    while parents[node] != node {
+        node = parents[node];
+    }
     node
 }
 
@@ -383,6 +469,7 @@ fn thermal_checkpoint(cx: &Cx<'_>) -> Result<(), DepositionError> {
 }
 
 pub mod coupled;
+pub mod distributed;
 pub mod implicit;
 pub mod inertial;
 
