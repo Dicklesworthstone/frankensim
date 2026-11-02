@@ -90,6 +90,37 @@ test('brass playback keeps source-rate buffers and physical duration without str
   await player.close();
 });
 
+test('authored string clocks preserve PCM length, playback rate and physical duration', async () => {
+  for (const rate of [44100, 96000, 384000]) {
+    const ctx = context(rate), player = new NativeComparisonPlayback(() => ctx);
+    const a = wave(8000, rate / 10, rate), b = wave(2000, rate / 10, rate);
+    const result = player.setPair(a, receipt(a), b, receipt(b));
+    assert.equal(result.sampleRateHz, rate); near(result.durationSeconds, 0.1);
+    await player.play(0.025);
+    for (const source of ctx.sourceNodes) {
+      assert.equal(source.buffer.sampleRate, rate); assert.equal(source.buffer.data.length, rate / 10);
+      near(source.starts[0][1], 0.025); near(source.starts[0][2], 0.075);
+    }
+    assert.equal(ctx.sourceNodes[0].buffer.data[0], 8000 / 32768);
+    assert.equal(ctx.sourceNodes[1].buffer.data[0], 2000 / 32768);
+    await player.close();
+  }
+});
+
+test('a browser refusing the native string clock leaves original samples and measurements intact', async () => {
+  const ctx = context(384000), player = new NativeComparisonPlayback(() => ctx);
+  const a = wave(8000, 3840, 384000), b = wave(2000, 3840, 384000);
+  const original = Buffer.from(a), result = player.setPair(a, receipt(a), b, receipt(b));
+  ctx.createBuffer = () => { throw new Error('unsupported sample rate'); };
+  await assert.rejects(player.play(), /native 384000 Hz clock.*Download the unchanged WAVs/);
+  assert.equal(player.playing, false); assert.equal(player.buffers, null);
+  assert.equal(ctx.sourceNodes.length, 0); assert.equal(ctx.gainNodes.length, 0);
+  assert.equal(player.data[0].length, 3840); assert.equal(player.data[0][0], 8000 / 32768);
+  near(result.durationSeconds, 0.01); near(result.rmsB / result.rmsA, 0.25);
+  assert.deepEqual(a, original);
+  await player.close();
+});
+
 test('rapid switches continue complementary crossfades rather than restarting either note', async () => {
   const {player, ctx} = setup(); await player.play();
   ctx.currentTime = 10.03; player.select('b');

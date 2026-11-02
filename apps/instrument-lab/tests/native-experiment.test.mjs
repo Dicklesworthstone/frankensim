@@ -107,6 +107,24 @@ test('complete canonical string and reed starters reach the native request with 
   }
 });
 
+test('string temporal refinement and explicit native decimation survive save and reopen with original physical sources', async () => {
+  const starters = JSON.parse(await readFile(new URL('../src/native-string-starters.json', import.meta.url), 'utf8'));
+  const name = 'material_strings/pluck-and-bow.material-strings', inputs = starters[name];
+  const original = await readOriginal('crates/fs-couple/examples/' + name);
+  const refined = original.replace('audio 48000 4096 0.01 128', 'audio 96000 8192 0.01 128');
+  assert.notEqual(refined, original);
+  assert.equal(refined.slice(refined.indexOf('state ')), original.slice(original.indexOf('state ')),
+    'only the authored mechanical rate and horizon change, at the same duration');
+  for (const decimate of [false, true]) {
+    const options = {renderer:'strings', decimate, materialManifests:inputs.materialManifests};
+    const prepared = await prepareNativeTextExperiment(refined, inputs.sources, options, readOriginal);
+    const restored = serviceInput(encode(serializeNativeExperiment(refined, prepared.attachments, prepared)), true);
+    assert.deepEqual(restored, prepared); assert.equal(restored.decimate, decimate);
+    assert.equal(decode(restored.source), refined);
+    for (const file of restored.attachments) assert.equal(decode(file.bytes), await readOriginal(inputs.sources[file.path]));
+  }
+});
+
 test('reed and wall source edits survive saving without replacing the coupled performance or other materials', async () => {
   const starters = JSON.parse(await readFile(new URL('../src/native-reed-starters.json', import.meta.url), 'utf8'));
   const name = 'material_modal_valve/paired-walls.performance', inputs = starters[name];

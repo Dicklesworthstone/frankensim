@@ -30,7 +30,7 @@ export interface NativePressureComparison {
   readonly levelDifferenceDb: number | null;
   readonly identical: boolean;
 }
-export function inspectNativeWave(bytes: Uint8Array, limit?: number, renderer?: string): NativeWaveInfo;
+export function inspectNativeWave(bytes: Uint8Array, limit?: number, renderer?: string, decimate?: boolean): NativeWaveInfo;
 export function validatePressureReceipt(value: unknown, info: NativeWaveInfo, renderer?: string): NativePressureReceipt;
 export function verifyPressureReceipt(value: unknown, bytes: Uint8Array, renderer?: string): Promise<NativePressureReceipt>;
 export function nativePcmSamples(bytes: Uint8Array): Float32Array;

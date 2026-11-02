@@ -253,6 +253,34 @@ test("selected gas sources cannot silently disappear on an older server or malfo
   }
 });
 
+test('string client preserves authored clocks and requires native 48 kHz only when decimation is selected', async () => {
+  const connected = {...status, renderers:{wind:false, strings:true}, maximumAttachments:128,
+    maximumAttachmentFileBytes:8 * 1024 * 1024, maximumAttachmentBytes:32 * 1024 * 1024,
+    maximumRequestBytes:46 * 1024 * 1024};
+  for (const rate of [44100, 96000, 384000]) {
+    const source = `frankensim-material-strings-v3\r\naudio ${rate} 2 20 128\r\n# explicit transport witness\r\n`;
+    const expected = wave(rate);
+    const receipt = {format:'frankensim-native-pressure-v1', renderer:'strings', sampleRateHz:rate,
+      samples:2, fullScalePa:20, clippedSamples:0, wavSha256:createHash('sha256').update(expected).digest('hex')};
+    const result = await renderNativePerformance(source, [], connected, {renderer:'strings'}, undefined, async (_, request) => {
+      const packet = validateInput(new TextEncoder().encode(request.body), true);
+      assert.deepEqual(packet.source, new TextEncoder().encode(source)); assert.equal(packet.decimate, false);
+      return audio(expected, {'X-Native-Pressure-Receipt':JSON.stringify(receipt)});
+    });
+    assert.deepEqual(new Uint8Array(await result.wave.arrayBuffer()), expected); assert.deepEqual(result.receipt, receipt);
+    await assert.rejects(renderNativePerformance(source, [], connected, {renderer:'strings', decimate:true}, undefined,
+      async () => audio(expected, {'X-Native-Pressure-Receipt':JSON.stringify(receipt)})), /output clock/);
+  }
+  const source = 'frankensim-material-strings-v3\naudio 96000 4 20 128\n';
+  const decimated = await renderNativePerformance(source, [], connected, {renderer:'strings', decimate:true}, undefined,
+    async (_, request) => {
+      const packet = validateInput(new TextEncoder().encode(request.body), true);
+      assert.deepEqual(packet.source, new TextEncoder().encode(source)); assert.equal(packet.decimate, true);
+      return audio(wave(48000));
+    });
+  assert.deepEqual(new Uint8Array(await decimated.wave.arrayBuffer()), wave(48000));
+});
+
 test("material strings preserve their performer, source, profiles, gas associations and native PCM", async () => {
   const connected = {...status, renderers:{wind:false, strings:true}, supportsGasSources:true, supportsCoatingStrainGuard:true,
     maximumAttachments:32, maximumAttachmentFileBytes:8388608,

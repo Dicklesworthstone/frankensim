@@ -58,7 +58,30 @@ test('lip pressure measurements retain the native source clock and refuse cross-
     const other = wave([1000, -1000], false, 48000);
     assert.throws(() => compareNativePressure(a, aReceipt, other, receipt(other)), /same native output sample rate/);
   }
-  for (const rate of [0, 7999, 192001]) assert.throws(() => inspectNativeWave(wave([1], false, rate)), /WAV/);
+  for (const rate of [0, 7999, 192001]) assert.throws(() => inspectNativeWave(wave([1], false, rate), 1024, 'lip'), /WAV/);
+});
+
+test('material strings retain authored output clocks and calibration while explicit decimation remains 48 kHz', async () => {
+  for (const rate of [1, 4000, 44100, 96000, 192000, 384000]) {
+    const a = wave([1000, -1000], false, rate), b = wave([500, -500], false, rate);
+    const aReceipt = receipt(a, {renderer:'strings'}), bReceipt = receipt(b, {renderer:'strings'});
+    assert.equal(validateWave(a, 1024, 'strings'), a);
+    assert.deepEqual(await verifyPressureReceipt(aReceipt, a, 'strings'), aReceipt);
+    assert.deepEqual([...nativePcmSamples(a)], [1000 / 32768, -1000 / 32768]);
+    const comparison = compareNativePressure(a, aReceipt, b, bReceipt);
+    assert.equal(comparison.sampleRateHz, rate); assert.equal(comparison.durationSeconds, 2 / rate);
+    close(comparison.rmsB / comparison.rmsA, 0.5);
+    assert.throws(() => validateWave(a, 1024, 'strings', true), /output clock/);
+    for (const renderer of ['wind', 'resolved', 'plate', 'voice', 'finite-gas-string']) {
+      assert.throws(() => validateWave(a, 1024, renderer), /output clock/);
+      assert.throws(() => validatePressureReceipt({...aReceipt, renderer}, inspectNativeWave(a)), /calibration/);
+    }
+    const other = wave([1000, -1000]);
+    assert.throws(() => compareNativePressure(a, aReceipt, other, receipt(other, {renderer:'strings'})), /same native output sample rate/);
+  }
+  const decimated = wave();
+  assert.equal(validateWave(decimated, 1024, 'strings', true), decimated);
+  for (const rate of [0, 384001]) assert.throws(() => validateWave(wave([1], false, rate), 1024, 'strings'), /output clock/);
 });
 
 test('service and browser share refusal of incomplete or non-native PCM', () => {

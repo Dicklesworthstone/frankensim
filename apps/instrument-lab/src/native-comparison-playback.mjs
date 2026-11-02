@@ -52,10 +52,14 @@ export class NativeComparisonPlayback {
     // Stop, a new result, or leaving the page can interrupt a pending resume.
     if (epoch !== this.epoch) return false;
     if (!this.buffers) {
-      this.buffers = this.data.map(samples => {
-        const buffer = context.createBuffer(1, samples.length, this.sampleRateHz);
-        buffer.copyToChannel(samples, 0); return buffer;
-      });
+      try {
+        this.buffers = this.data.map(samples => {
+          const buffer = context.createBuffer(1, samples.length, this.sampleRateHz);
+          buffer.copyToChannel(samples, 0); return buffer;
+        });
+      } catch (error) {
+        throw new Error(`This browser could not create playback buffers at the native ${this.sampleRateHz} Hz clock. Download the unchanged WAVs, or render again with the native performer's supported decimation option.`, {cause:error});
+      }
     }
     const master = context.createGain();
     master.gain.value = this.volume; master.connect(context.destination);

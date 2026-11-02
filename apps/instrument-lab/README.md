@@ -118,6 +118,18 @@ timestep and the existing native downsampler produces the 48 kHz WAV. The adapte
 rewrites the source clock or chooses a lower-resolution physics model.
 The Nolle starter already declares separate mechanical and output clocks,
 which its native observer handles directly.
+Material strings can also retain their original output rate: leave native
+decimation unchecked to receive the authored `audio` clock. The native string
+parser admits positive integer rates up to 384 kHz, subject to its physical
+and numerical checks. The service, pressure calibration, comparison durations
+and WAV downloads retain that rate and every original PCM sample. Explicit
+native decimation still requires a 48 kHz result; it supports the native
+integer-multiple and complete-interval requirements described in the
+[string input instructions](../../crates/fs-couple/examples/material_strings/README.md).
+Browser playback uses the original buffer rate without relabeling or JavaScript
+resampling. If a browser cannot play that rate, the unchanged WAV remains
+downloadable; a supported native decimation run is a separate user choice.
+Calibrated A/B comparisons require matching native output rates.
 Playback never peak-normalizes or retunes the native result. Original model
 limits and missing-source refusals still apply; attaching a pack does not
 qualify an instrument as measured or realistic.
@@ -814,7 +826,9 @@ refuse rather than weaken the file policy.
 
 The companion does not parse physical parameters, retune notes, change
 PCM gain, synthesize fallback audio or run a shell. Playback becomes available
-only after successful native execution and a complete 48 kHz mono PCM16 WAV.
+only after successful native execution and a complete mono PCM16 WAV on the
+selected performer's supported output clock. Material strings and brass retain
+their original clocks; the other current native routes require 48 kHz.
 Source or solver refusals remain visible; cancellation terminates the native
 child and removes that job's temporary files.
 

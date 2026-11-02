@@ -154,13 +154,13 @@ function runNativeCommand(engine, args, dir, signal, outputs, label) {
     if (signal.aborted) abort();
   });
 }
-async function readWave(output, limit, renderer) {
+async function readWave(output, limit, renderer, decimate) {
   let file;
   try {
     file = await open(output, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
     const info = await file.stat();
     if (!info.isFile() || info.size > limit) throw new NativeWindError(502, 'Native WAV exceeds the output limit or is not a regular file.');
-    return validateWave(await file.readFile(), limit, renderer);
+    return validateWave(await file.readFile(), limit, renderer, decimate);
   } catch (error) {
     if (error instanceof NativeWindError) throw error;
     throw new NativeWindError(502, 'Native renderer did not leave a readable WAV.');
@@ -299,7 +299,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
         }
         experiment = await compileMaterialManifests(materialCompiler, experiment, dir, controller.signal);
         const diagnostics = await runNative(selectedEngine, input, output, dir, controller.signal, maximumOutputBytes, experiment, maximumHistoryBytes);
-        const wave = await readWave(output, maximumOutputBytes, experiment.renderer ?? 'wind');
+        const wave = await readWave(output, maximumOutputBytes, experiment.renderer ?? 'wind', experiment.decimate);
         if (controller.signal.aborted) throw controller.signal.reason;
         let receipt;
         try { receipt = await nativePressureReceipt(experiment.renderer ?? 'wind', output, diagnostics, wave); }

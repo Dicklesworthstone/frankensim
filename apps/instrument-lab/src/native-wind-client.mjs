@@ -65,9 +65,9 @@ async function boundedResponse(response, maximumBytes, label, type) {
   return new Blob(chunks, {type});
 }
 
-async function boundedWave(response, maximumBytes, renderer) {
+async function boundedWave(response, maximumBytes, renderer, decimate) {
   const wave = await boundedResponse(response, maximumBytes, 'WAV', 'audio/wav');
-  inspectNativeWave(new Uint8Array(await wave.arrayBuffer()), maximumBytes, renderer);
+  inspectNativeWave(new Uint8Array(await wave.arrayBuffer()), maximumBytes, renderer, decimate);
   return wave;
 }
 
@@ -220,7 +220,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     await response.body?.cancel();
     throw new Error("The native renderer returned an unexpected response instead of audio.");
   }
-  const wave = await boundedWave(response, status.maximumOutputBytes, renderer);
+  const wave = await boundedWave(response, status.maximumOutputBytes, renderer, options.decimate);
   const header = response.headers.get(PRESSURE_RECEIPT_HEADER);
   let receipt = null;
   if (header !== null) {

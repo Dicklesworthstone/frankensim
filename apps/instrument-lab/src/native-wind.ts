@@ -832,7 +832,7 @@ export function createNativeWindPanel(): HTMLElement {
         }
         playback.hidden = false;
         edited();
-        showResult("Render complete. Listen above or keep this result as reference A to compare a material or atmosphere change below.");
+        showResult(`Render complete${native.receipt ? ` at ${native.receipt.sampleRateHz.toLocaleString()} Hz` : ""}. Listen above or keep this result as reference A to compare a material or atmosphere change below.`);
       } catch (error) {
         if (rendering !== controller) return;
         showResult(controller.signal.aborted
@@ -850,6 +850,9 @@ export function createNativeWindPanel(): HTMLElement {
   cancel.addEventListener("click", () => {
     rendering?.abort();
     showResult("Cancelling render…");
+  });
+  audio.addEventListener("error", () => {
+    if (previewUrl) showResult("This browser cannot play the returned native WAV. Its original download is still available. For a supported high-rate source, select native decimation and render again.", true);
   });
   check.addEventListener("click", () => void checkConnection());
   source.addEventListener("input", edited);
@@ -1206,6 +1209,7 @@ export function createNativeWindPanel(): HTMLElement {
       el("summary", {}, "About the source and local renderer"),
       sourceHelp,
       el("p", {}, "Wind and material-string descriptions use their original native loaders. Attach the exact material packs and artifacts named by the source, including subdirectory paths. Changing a pack changes its physical properties; missing data and unsupported states remain native refusals. Keep the same declared pressure scale when comparing renders."),
+      el("p", {}, "Material strings retain their authored output clock, including 44.1, 96, 192 and 384 kHz when admitted by the native solver. Leave native decimation unchecked to keep those original samples. For supported integer multiples above 48 kHz, native decimation filters the accepted pressure to 48 kHz while the mechanics keep their original timestep. Downloads and pressure measurements preserve the returned clock; browser playback support may differ."),
       el("p", {}, "Rendering uses the local music_render, material_strings or finite_gas_string executable. The heated string performer evolves its material and finite atmosphere together and returns synchronized CSV observations with the WAV. The hosted review page can show and edit the source; audio is available through the local renderer server. Wind and material-string decimation retains the original mechanics; heated strings require a declared 48 kHz clock. Brass uses an original frankensim-lip-performance-v1 file from your native render workflow and keeps its declared output rate. Voice keeps its native 48 kHz output and authored mechanics substeps. Both share the atmosphere and source-pack controls."),
       el("p", {}, "Open experiment loads a complete native source packet, including its original material files, manifest bindings, gas associations and specimen profiles. Save experiment keeps the current configuration in that same format; neither action renders sound. The material-string launcher can prepare these packets directly from a physical assembly."),
       el("p", {}, canonical,

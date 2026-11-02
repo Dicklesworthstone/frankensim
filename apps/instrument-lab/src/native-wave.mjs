@@ -4,7 +4,18 @@ export const NATIVE_WAVE_LIMIT = 16 * 1024 * 1024;
 export const PRESSURE_RECEIPT_HEADER = 'X-Native-Pressure-Receipt';
 export const PRESSURE_RECEIPT_FORMAT = 'frankensim-native-pressure-v1';
 
-export function inspectNativeWave(bytes, limit = NATIVE_WAVE_LIMIT, renderer) {
+// The unbound reader admits the union needed for inspecting retained WAVs.
+// A native response and its receipt additionally enforce their own performer:
+// material_strings owns audio RATE in 1..384000 and optionally decimates to
+// 48000; lip retains its bounded authored clock; other current routes output 48000.
+function supportedClock(rate, renderer) {
+  if (!Number.isSafeInteger(rate)) return false;
+  if (renderer === undefined || renderer === 'strings') return rate > 0 && rate <= 384000;
+  if (renderer === 'lip') return rate >= 8000 && rate <= 192000;
+  return ['wind', 'resolved', 'finite-gas-string', 'voice', 'plate'].includes(renderer) && rate === 48000;
+}
+
+export function inspectNativeWave(bytes, limit = NATIVE_WAVE_LIMIT, renderer, decimate = false) {
   const bad = () => { throw new Error('Native renderer did not produce a complete mono PCM16 WAV on its supported output clock.'); };
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 44 || bytes.byteLength > limit) bad();
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -19,8 +30,8 @@ export function inspectNativeWave(bytes, limit = NATIVE_WAVE_LIMIT, renderer) {
       if (size < 16) bad();
       sampleRateHz = view.getUint32(start + 4, true);
       if (format || size < 16 || view.getUint16(start, true) !== 1
-          || view.getUint16(start + 2, true) !== 1 || sampleRateHz < 8000 || sampleRateHz > 192000
-          || (renderer !== undefined && renderer !== 'lip' && sampleRateHz !== 48000)
+          || view.getUint16(start + 2, true) !== 1 || !supportedClock(sampleRateHz, renderer)
+          || (decimate && sampleRateHz !== 48000)
           || view.getUint32(start + 8, true) !== 2 * sampleRateHz || view.getUint16(start + 12, true) !== 2
           || view.getUint16(start + 14, true) !== 16) bad();
       format = true;
@@ -40,7 +51,7 @@ export function validatePressureReceipt(value, info, renderer) {
       || !['wind', 'strings', 'resolved', 'finite-gas-string', 'lip', 'voice', 'plate'].includes(value.renderer)
       || (renderer !== undefined && value.renderer !== renderer)
       || value.sampleRateHz !== info.sampleRateHz || value.samples !== info.samples
-      || (value.renderer !== 'lip' && info.sampleRateHz !== 48000)
+      || !supportedClock(info.sampleRateHz, value.renderer)
       || !Number.isFinite(value.fullScalePa) || value.fullScalePa <= 0
       || !Number.isSafeInteger(value.clippedSamples) || value.clippedSamples < 0
       || value.clippedSamples > info.samples

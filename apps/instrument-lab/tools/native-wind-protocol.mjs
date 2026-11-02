@@ -11,9 +11,9 @@ export const MAX_LOG_BYTES = 256 * 1024;
 export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
-export function validateWave(bytes, limit = MAX_OUTPUT_BYTES, renderer = 'wind') {
+export function validateWave(bytes, limit = MAX_OUTPUT_BYTES, renderer = 'wind', decimate = false) {
   if (bytes.length > limit) throw new NativeWindError(502, 'Native WAV exceeds the output limit.');
-  try { inspectNativeWave(bytes, limit, renderer); }
+  try { inspectNativeWave(bytes, limit, renderer, decimate); }
   catch (error) { throw new NativeWindError(502, error.message); }
   return bytes;
 }

@@ -59,6 +59,7 @@ if (['lip', 'voice', 'plate'].includes(args[0])) writeFileSync(outputPath.replac
  schema:'frankensim-music-render-provenance-v1', sample_rate_hz:wav.readUInt32LE(24), samples:2,
  full_scale_pa:args[0] === 'plate' ? 1 : 20, clipped_samples:0,
 }));
+if (!finite && offset === 0) console.error('samples=2; rate_Hz=' + wav.readUInt32LE(24) + '; clips=0; full_scale_Pa=20');
 if (finite) {
  const history = text.includes('test-history-large') ? Buffer.alloc(257, 49)
   : text.includes('test-history-invalid') ? Buffer.from([255])
@@ -127,6 +128,35 @@ test('material strings reuse the exact source packet, gas associations and expli
     assert.deepEqual(receipt.files.map(file => [file.path, file.bytes]), files.map(([path, bytes]) => [path, bytes.toString('base64')]));
     await until(async () => !(await app.status()).busy);
     assert.equal((await app.run()).status, 503, 'a configured string performer must not substitute for a missing wind performer');
+  } finally { await app.cleanup(); }
+});
+
+test('material-string HTTP output retains authored clocks and calibration without changing native source bytes', native, async () => {
+  const app = await setup({withStrings:true, engine:null});
+  try {
+    for (const rate of [44100, 96000, 384000]) {
+      const source = `frankensim-material-strings-v3\r\naudio ${rate} 2 20 128\r\n# test-native-rate ${rate}\n`;
+      const response = await app.runBundle(serializeNativeExperiment(source, [], {renderer:'strings'}));
+      assert.equal(response.status, 200);
+      const wave = Buffer.from(await response.arrayBuffer()), receipt = JSON.parse(response.headers.get('x-native-pressure-receipt'));
+      assert.equal(wave.readUInt32LE(24), rate); assert.equal(receipt.sampleRateHz, rate);
+      assert.equal(receipt.fullScalePa, 20); assert.equal(receipt.samples, 2);
+      const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+      assert.equal(record.bytes, Buffer.from(source).toString('base64'));
+      assert.deepEqual(record.args, [join(record.cwd, 'input.performance'), join(record.cwd, 'output.wav'), '--self-contained']);
+      await until(async () => !(await app.status()).busy);
+    }
+    for (const outputRate of [48000, 96000]) {
+      const source = `frankensim-material-strings-v3\naudio 96000 4 20 128\n# test-native-rate ${outputRate}\n`;
+      const response = await app.runBundle(serializeNativeExperiment(source, [], {renderer:'strings', decimate:true}));
+      assert.equal(response.status, outputRate === 48000 ? 200 : 502);
+      if (outputRate === 48000) assert.equal(Buffer.from(await response.arrayBuffer()).readUInt32LE(24), 48000);
+      else assert.match((await response.json()).error, /output clock/);
+      const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+      assert.equal(record.bytes, Buffer.from(source).toString('base64'));
+      assert.deepEqual(record.args, [join(record.cwd, 'input.performance'), join(record.cwd, 'output.wav'), '--self-contained', '--decimate']);
+      await until(async () => !(await app.status()).busy);
+    }
   } finally { await app.cleanup(); }
 });
 
