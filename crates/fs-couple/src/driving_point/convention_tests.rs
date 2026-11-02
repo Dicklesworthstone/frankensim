@@ -22,6 +22,47 @@ use super::{characteristic_line_dense, characteristic_line_response, impedance_l
 const RATE_HZ: u32 = 48_000;
 const N_FFT: usize = 8192;
 
+/// G1: peeling and restoring explicit pairs retains the supplied physical
+/// response, including complex residues and the exact held-input amplitude.
+#[test]
+fn resonance_peeling_matches_driven_physical_response() {
+    let dt = 1.0 / f64::from(RATE_HZ);
+    let n = 256;
+    let natural = core::f64::consts::TAU * 1_000.0;
+    let sigma = 200.0;
+    let residue = C64::new(2.0, -0.4);
+    let physical = |omega: f64| {
+        residue / C64::new(sigma, -omega - natural)
+            + residue.conj() / C64::new(sigma, -omega + natural)
+    };
+    let mut line = super::build_impedance_response_filter(
+        dt, n, physical(0.0).re, 0.0, &[(natural, sigma, residue)],
+        |omega| Ok(physical(omega)),
+    ).unwrap();
+    let omega = core::f64::consts::TAU * 7.0 / (n as f64 * dt);
+    let expected = physical(omega);
+    let (warmup, count) = (8_192, 8_192);
+    let mut measured = C64::ZERO;
+    for i in 0..warmup + count {
+        let phase = omega * dt * i as f64;
+        let output = line.push(phase.cos()).unwrap();
+        if i >= warmup {
+            measured = measured + C64::new(phase.cos(), phase.sin()).scale(output);
+        }
+    }
+    measured = measured.scale(2.0 / count as f64);
+    assert!((measured - expected).abs() < 2e-10 * expected.abs(),
+        "peeled playback {measured:?} != original physical response {expected:?}");
+
+    // The zero-frequency bin must be peeled too: restoring the poles must not
+    // count their static response a second time in the residual FIR.
+    let mut dc_output = 0.0;
+    for _ in 0..16_384 {
+        dc_output = line.push(1.0).unwrap();
+    }
+    assert!((dc_output - physical(0.0).re).abs() < 2e-10 * physical(0.0).abs());
+}
+
 fn air20() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("dry air at 293.15 K")
 }

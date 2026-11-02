@@ -49,8 +49,8 @@ impl DelayedFilter {
                 direct += 0.5*self.compliance_gain*dt;
             }
             for pole in &self.exact_poles {
-                history += dt*pole.state.re;
-                direct += dt*(0.5*pole.residue.re);
+                history += 2.0*(pole.mean_state_gain*pole.state).re;
+                direct += pole.mean_direct;
             }
             (direct, history)
         };

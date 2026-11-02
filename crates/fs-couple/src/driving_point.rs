@@ -1080,33 +1080,6 @@ fn extract_lightly_damped_cylinder_poles(
     Ok(poles)
 }
 
-/// Evaluate the `e^{-iωt}` frequency response of one exact ZOH resonance pole pair
-/// `(omega_m, sigma_m, residue)` at angular frequency `omega`.
-fn exact_pole_pair_response_e_minus_iwt(
-    omega: f64,
-    dt: f64,
-    omega_m: f64,
-    sigma_m: f64,
-    residue: C64,
-) -> C64 {
-    // H_m(ω) = (dt / 2) * [ r_m (1 + e^{(-σ + i(ω - ω_m))dt}) / (1 - e^{(-σ + i(ω - ω_m))dt})
-    //                     + r_m* (1 + e^{(-σ + i(ω + ω_m))dt}) / (1 - e^{(-σ + i(ω + ω_m))dt}) ]
-    let r_damp = (-sigma_m * dt).exp();
-    let term = |delta_omega: f64, res: C64| -> C64 {
-        let (s, c) = (delta_omega * dt).sin_cos();
-        let w = C64::new(r_damp * c, r_damp * s);
-        let num = C64::ONE + w;
-        let den = C64::ONE - w;
-        if den.abs() < 1.0e-15 {
-            C64::ZERO
-        } else {
-            res * num * den.recip()
-        }
-    };
-    let res_conj = C64::new(residue.re, -residue.im);
-    (term(omega - omega_m, residue) + term(omega + omega_m, res_conj)).scale(0.5 * dt)
-}
-
 /// Realize a causal driving-point impedance line with explicit `PoleState::Compliance`
 /// and `PoleState::Resonance` decomposition and [`LineRealization`] receipt.
 ///
@@ -1167,9 +1140,10 @@ pub fn realize_impedance_line(
         .next_power_of_two();
 
     // Purely lossless single-cylinder closed/ideal-open cavity: Mittag-Leffler
-    // modal decomposition (Compliance + exact ZOH Resonance poles) is complete
-    // across the Nyquist band, leaving an identically zero FIR residual with zero
-    // wrap-around echo at n_fft * dt.
+    // modal decomposition retains all poles below Nyquist with their exact
+    // held-input, interval-mean response. There is no finite-FIR wrap-around
+    // echo. This is a band-limited modal truncation, not a claim that omitted
+    // above-Nyquist modes contribute zero to the continuous impedance.
     if matches!(loss, LossModel::Lossless) && !resonance_poles.is_empty() {
         let ir = vec![0.0_f64; n_fft];
         let line = DelayedFilter::from_impulse_response(dt, ir)
@@ -1244,9 +1218,17 @@ fn build_impedance_response_filter(
     resonance_poles: &[(f64, f64, C64)],
     mut response_at: impl FnMut(f64) -> Result<C64, DuctError>,
 ) -> Result<DelayedFilter, DrivingPointError> {
+    // Prepare the SAME coefficients that the committing playback owner uses.
+    // The four zero taps merely satisfy its FIR-port shape; no output is sampled
+    // and no history is advanced while evaluating the response below.
+    let pole_response = DelayedFilter::from_impulse_response(dt, vec![0.0; 4])
+        .and_then(|f| f.with_exact_poles(0.0, resonance_poles))
+        .map_err(DrivingPointError::Discrete)?;
     let fft = Fft::new(n_fft);
     let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
-    buf[0] = FftC64::new(dc_impedance, 0.0);
+    let pole_dc = pole_response.resonance_response_e_minus_iwt(0.0)
+        .map_err(DrivingPointError::Discrete)?;
+    buf[0] = FftC64::new(dc_impedance - pole_dc.re, 0.0);
     for k in 1..=n_fft / 2 {
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
         let mut z = response_at(omega).map_err(DrivingPointError::Duct)?;
@@ -1257,10 +1239,8 @@ fn build_impedance_response_filter(
             let cot = half_theta.cos() / half_theta.sin();
             z.im -= 0.5 * compliance_gain * dt * cot;
         }
-        for &(omega_m, sigma_m, residue) in resonance_poles {
-            let z_pole = exact_pole_pair_response_e_minus_iwt(omega, dt, omega_m, sigma_m, residue);
-            z = z - z_pole;
-        }
+        z = z - pole_response.resonance_response_e_minus_iwt(omega)
+            .map_err(DrivingPointError::Discrete)?;
         // Acoustic e^{-iωt} → DFT e^{+iωt} so the IR is causal,
         // matching characteristic_line_response (DEF-01).
         buf[k] = FftC64::new(z.re, -z.im);

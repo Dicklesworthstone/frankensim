@@ -97,6 +97,33 @@ to parallel biquad sections and discrete state-space.
   a muffler, a pulse tube, and a BEM radiation load are fillings of
   that port. Music is not a special case.
 
+### Exact resonance states on FIR ports
+
+`DelayedFilter::with_exact_poles` retains conjugate Laplace pairs
+`p=-sigma+i*omega`, `r/(s-p)+conj(r)/(s-conj(p))`. A held input advances the
+physical state by `z1=exp(p*h)*z0+r*h*phi1(p*h)*u`. Its port output is the
+exact interval mean `2 Re(phi1(p*h)*z0+r*h*phi2(p*h)*u)`, sharing the entire
+phi-function owner with `MimoZoh`. These coefficients are prepared once;
+stepping and the affine boundary preview allocate nothing. The previous
+impulse injection and half-strength response are not retained.
+
+`resonance_response_e_minus_iwt` evaluates precisely that discrete pair map,
+including complex conjugate residues, for the acoustic owner's pole peeling.
+Its cancellation-free denominator retains tiny physical decay and refuses a
+true lossless pole without gain clipping or added loss. FIR, compliance,
+dispersion and bulk delay are excluded from this pair-only observation.
+Exact pairs on an IIR delay line refuse because that line has a different
+input clock. Nonfinite candidate states refuse before histories advance.
+
+For positive real residues above the diagnostic denominator floor, stored
+energy `|z|^2/r` satisfies `dE/dt=u*y-2*sigma*E`; interval-mean output makes
+held-input work `h*u*mean(y)`. Arbitrary complex residues retain their original
+transfer semantics but receive no independent passivity/storage claim.
+G0/G1 tests in `tests/exact_resonance.rs` compare continuous trajectories and
+independent quadrature, input work, driven phase/amplitude, and extremely
+narrow resonances. Source-model truncation and overall FIR passivity remain
+separate obligations.
+
 ## Invariants
 
 1. Realization parity: partial-fraction evaluation and the state-space

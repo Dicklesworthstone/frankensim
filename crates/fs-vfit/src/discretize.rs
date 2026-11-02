@@ -374,25 +374,30 @@ impl core::fmt::Display for RealizeError {
 
 impl std::error::Error for RealizeError {}
 
-/// A known bulk delay followed by a causal [`DigitalFilter`].
 /// State of one exact zero-order-hold complex-conjugate resonance pole pair
-/// `s = -sigma ± i * omega` with residue `residue` (`e^{-iωt}` convention).
+/// `p = -sigma + i * omega` with residue `residue` at `p` and its conjugate
+/// at `p.conj()`. The physical state obeys `z' = p*z + residue*u`; the
+/// conjugate-pair output is `2 Re(z)`. [`DelayedFilter::push`] returns its
+/// exact mean over the held-input interval, as for the compliance state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExactResonanceState {
     /// Positive modal angular frequency `ω` [rad/s].
     pub omega: f64,
     /// Non-negative modal decay rate `σ` [1/s].
     pub sigma: f64,
-    /// Modal residue `r` under `e^{-iωt}`.
+    /// Residue `r` at `-sigma + i*omega` in the Laplace transfer function.
     pub residue: C64,
     state: C64,
     pole_step: C64,
+    input_gain: C64,
+    mean_state_gain: C64,
+    mean_direct: f64,
     free_anchor: C64,
     free_steps: u64,
 }
 
 impl ExactResonanceState {
-    /// Current complex modal state `z_n`.
+    /// Current physical complex modal state `z_n` (not divided by the step).
     #[must_use]
     pub fn state(&self) -> C64 {
         self.state
@@ -475,11 +480,16 @@ impl DelayedFilter {
     }
 
     /// Attach an explicit `ω = 0` compliance integrator and/or lightly damped
-    /// ZOH resonance pole states `(omega, sigma, residue)` to this line.
+    /// ZOH resonance pole states `(omega, sigma, residue)` to this FIR line.
+    /// Each sample is held over one interval; the pole output is its exact
+    /// interval mean. The pair transfer is `r/(s-p) + conj(r)/(s-conj(p))`,
+    /// where `p=-sigma+i*omega`. No impulse-invariance amplitude approximation
+    /// or frequency warping is applied.
     ///
     /// # Errors
     /// Non-finite or negative `compliance_gain`, non-positive `omega`, negative
-    /// `sigma`, or non-finite `residue`.
+    /// `sigma`, non-finite coefficients, or an IIR line (which has a distinct
+    /// delayed-input convention and does not step these FIR-port states).
     pub fn with_exact_poles(
         mut self,
         compliance_gain: f64,
@@ -489,6 +499,13 @@ impl DelayedFilter {
             return Err(DiscretizeError::NonFiniteRuntimeValue {
                 field: "compliance_gain",
                 index: None,
+            });
+        }
+        if self.fir.is_empty() && (compliance_gain != 0.0 || !resonance_poles.is_empty()) {
+            return Err(DiscretizeError::InvalidRuntimeDimensions {
+                field: "exact_poles_need_fir_port",
+                expected: 4,
+                actual: 0,
             });
         }
         let dt = self.filter.t_s;
@@ -506,14 +523,36 @@ impl DelayedFilter {
                     index: Some(idx),
                 });
             }
-            let r = (-sigma * dt).exp();
-            let (sin_w, cos_w) = (omega * dt).sin_cos();
+            let argument = C64::new(-sigma * dt, omega * dt);
+            if !argument.re.is_finite() || !argument.im.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "exact_pole_step",
+                    index: Some(idx),
+                });
+            }
+            let (sin_w, cos_w) = det::sin_cos(argument.im);
+            let pole_step = C64::new(cos_w, sin_w).scale(det::exp(argument.re));
+            let (mean_state_gain, mean_input_gain) =
+                crate::mimo::zoh_mean_phi(argument, pole_step);
+            let input_gain = (residue * mean_state_gain).scale(dt);
+            let mean_direct = 2.0 * (residue * mean_input_gain).re * dt;
+            if !input_gain.re.is_finite() || !input_gain.im.is_finite()
+                || !mean_direct.is_finite()
+            {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "exact_pole_gain",
+                    index: Some(idx),
+                });
+            }
             poles.push(ExactResonanceState {
                 omega,
                 sigma,
                 residue,
                 state: C64::ZERO,
-                pole_step: C64::new(r * cos_w, r * sin_w),
+                pole_step,
+                input_gain,
+                mean_state_gain,
+                mean_direct,
                 free_anchor: C64::ZERO,
                 free_steps: 0,
             });
@@ -542,8 +581,61 @@ impl DelayedFilter {
         &self.exact_poles
     }
 
-    /// Total modal energy stored across all explicit [`ExactResonanceState`] poles:
+    /// Response of the explicit resonance pairs alone in `exp(-i*omega*t)`.
+    /// This is the same held-input, interval-mean discrete map used by
+    /// [`Self::push`], including both conjugate residues. It excludes FIR taps,
+    /// compliance, bulk delay and output dispersion. Acoustic pole peeling
+    /// can therefore remove exactly the states that playback will restore.
+    ///
+    /// A true lossless sampled pole refuses; small physical damping is retained
+    /// using `expm1` and a half-angle denominator, never replaced by a cutoff.
+    pub fn resonance_response_e_minus_iwt(&self, omega: f64) -> Result<C64, DiscretizeError> {
+        require_finite_scalar("response_frequency", omega)?;
+        let dt = self.filter.t_s;
+        let mut response = C64::ZERO;
+        for (index, pole) in self.exact_poles.iter().enumerate() {
+            if pole.residue == C64::ZERO {
+                continue;
+            }
+            let mut pair = C64::from_re(pole.mean_direct);
+            for sign in [1.0, -1.0] {
+                let phase = (omega + sign * pole.omega) * dt;
+                if !phase.is_finite() {
+                    return Err(DiscretizeError::NonFiniteRuntimeValue {
+                        field: "exact_pole_response_phase", index: Some(index),
+                    });
+                }
+                // 1-exp(-sigma*dt+i*phase), without subtracting rounded
+                // unit exponentials at a narrow resonance.
+                let (sine, _) = det::sin_cos(phase);
+                let half_sine = det::sin(0.5 * phase);
+                let decay = det::exp(-pole.sigma * dt);
+                let denominator = C64::new(
+                    -det::expm1(-pole.sigma * dt) + 2.0 * decay * half_sine * half_sine,
+                    -decay * sine,
+                );
+                if denominator == C64::ZERO {
+                    return Err(DiscretizeError::NonFiniteRuntimeValue {
+                        field: "undamped_resonance", index: Some(index),
+                    });
+                }
+                let (s, c) = det::sin_cos(omega * dt);
+                let coefficient = pole.mean_state_gain * pole.input_gain;
+                let coefficient = if sign > 0.0 { coefficient } else { coefficient.conj() };
+                pair = pair + coefficient * C64::new(c, s) / denominator;
+            }
+            response = response + pair;
+        }
+        require_finite_scalar("exact_pole_response_real", response.re)?;
+        require_finite_scalar("exact_pole_response_imaginary", response.im)?;
+        Ok(response)
+    }
+
+    /// Quadratic state magnitude across all explicit [`ExactResonanceState`] poles:
     /// `Σ_m |z_m|² / max(|r_m|, 1e-30)`.
+    /// For positive real residues above the denominator floor, this is physical
+    /// storage: `dE/dt = u*y - 2*sigma*E`. Arbitrary complex residues do not
+    /// have that passivity/storage interpretation.
     #[must_use]
     pub fn exact_modal_energy(&self) -> f64 {
         self.exact_poles
@@ -806,9 +898,18 @@ impl DelayedFilter {
             if self.compliance_gain > 0.0 {
                 acc += self.compliance_state + 0.5 * self.compliance_gain * dt * outgoing;
             }
-            for p in &self.exact_poles {
-                let direct = p.state.re + 0.5 * p.residue.re * outgoing;
-                acc += dt * direct;
+            for (index, p) in self.exact_poles.iter().enumerate() {
+                acc += 2.0 * (p.mean_state_gain * p.state).re + p.mean_direct * outgoing;
+                let candidate = p.pole_step * p.state + p.input_gain.scale(outgoing);
+                if !candidate.re.is_finite() || !candidate.im.is_finite() {
+                    return Err(DiscretizeError::NonFiniteRuntimeValue {
+                        field: "exact_pole_state", index: Some(index),
+                    });
+                }
+            }
+            if self.compliance_gain > 0.0 {
+                require_finite_scalar("compliance_state",
+                    self.compliance_state + self.compliance_gain * dt * outgoing)?;
             }
             if !acc.is_finite() {
                 return Err(DiscretizeError::NonFiniteRuntimeValue {
@@ -828,8 +929,7 @@ impl DelayedFilter {
                     let (sin_t, cos_t) = theta.sin_cos();
                     p.state = p.free_anchor * C64::new(cos_t, sin_t);
                 } else {
-                    let driven = p.state + p.residue.scale(outgoing);
-                    p.state = p.pole_step * driven;
+                    p.state = p.pole_step * p.state + p.input_gain.scale(outgoing);
                     p.free_anchor = p.state;
                     p.free_steps = 0;
                 }

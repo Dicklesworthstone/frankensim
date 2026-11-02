@@ -1603,7 +1603,7 @@ pub struct MimoZoh {
 
 // Entire phi functions. Direct subtraction loses the mean input term near zero.
 // The fixed near-zero series retains complex pairs and deterministic traversal.
-fn zoh_mean_phi(z: C64, exponential: C64) -> (C64, C64) {
+pub(crate) fn zoh_mean_phi(z: C64, exponential: C64) -> (C64, C64) {
     if z.abs() < 0.5 {
         let (mut first, mut second) = (C64::ONE, C64::from_re(0.5));
         let (mut first_term, mut second_term) = (first, second);
