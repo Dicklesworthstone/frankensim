@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	water-liquid-janaf-mining
+redistribution	permitted	Attributed numerical facts, independently converted heat capacities and original notes only; no source document, table layout or source-document license is redistributed
+citation	NIST-JANAF Thermochemical Tables, H-063, H2O liquid, reference 298.15 K and standard pressure 0.1 MPa, March 1979 1-bar evaluation; https://janaf.nist.gov/tables/H-063.html; molecular weight from NIST Chemistry WebBook SRD 69 CAS 7732-18-5 https://webbook.nist.gov/cgi/cbook.cgi?ID=C7732185; accessed 2026-11-02
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	janaf-thermochemistry	properties.tsv	material-tsv-v1
+property	molar_mass	molar-mass	dimensional
+property	hf	standard-molar-formation-enthalpy	dimensional
+property	entropy	standard-molar-entropy	dimensional
+property	cp	specific-heat-capacity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	phase	source-phase-liquid	dimensional
+axis	standard_state	source-standard-state	dimensional
+axis	reference_convention	source-elemental-reference-janaf	dimensional
+axis	purity	source-pure-species	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional

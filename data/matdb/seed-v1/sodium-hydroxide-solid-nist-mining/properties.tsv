@@ -1,0 +1,44 @@
+frankensim.matdb-source.v1
+observation	identity	Pure anhydrous solid NaOH reference; caustic-soda constituent rather than an aqueous caustic product	NIST Chemistry WebBook CAS 1310-73-2 molecular weight	HNaO; source molar mass 39.9971 g/mol. No commercial solution concentration, hydrate, moisture uptake, density, activity coefficient or pH relationship is assigned.
+observation	standard	Pure NaOH solid at 298.15 K and JANAF standard pressure 100000 Pa	Chase 1998 solid formation enthalpy and standard molar entropy; source review December 1970	Retain -425.93 kJ/mol and 64.46 J/(mol K). Formation enthalpy uses JANAF elemental reference states; entropy is absolute standard molar entropy. The separately tabulated liquid enthalpy and entropy are excluded. Solid standard-state values are not aqueous sodium/hydroxide-ion values and cannot be used as a heat of neutralization or dissolution without the missing solution data. Source uncertainty is unstated.
+observation	caloric	Pure NaOH low-temperature solid sensible heat reference	Independent Decimal50 evaluation of the first NIST solid Shomate column	For t=T/1000, Cp0=A+B*t+C*t^2+D*t^3+E/t^2 J/(mol K), with A=419.4837,B=-1717.754,C=2953.573,D=-1597.221,E=-6.046884. Divide by 0.0399971 kg/mol. Retain 298.15-500 K only, inside the first 298-572 K solid branch; the second solid branch and 596 K liquid branch are excluded. Knots at 298.15 K and every 25 K from 300 K use 15 significant digits. Linear interpolation is an authored approximation; the largest checked midpoint discrepancy is 0.117 percent, not a certified bound. No latent heat or transition model is supplied; source and interpolation uncertainties are unstated.
+scalar	mass	identity	molar_mass	39.9971	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	500	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	-425.93	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	64.46	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1
+curve	heat-capacity	identity,caloric	cp	temperature	K	J/kg/K	298.15:1488.42083729671,300:1491.77072837781,325:1527.77551540525,350:1556.09591089487,375:1586.20594875941,400:1623.58298476640,425:1671.07481090795,450:1729.75073991475,475:1799.44783146298,500:1879.13096199474	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	298.15	500	K
+validity	heat-capacity	pressure	100000	100000	Pa
+validity	heat-capacity	phase	1	1	1
+validity	heat-capacity	standard_state	1	1	1
+validity	heat-capacity	reference_convention	1	1	1
+validity	heat-capacity	purity	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	specimen	0	0	1

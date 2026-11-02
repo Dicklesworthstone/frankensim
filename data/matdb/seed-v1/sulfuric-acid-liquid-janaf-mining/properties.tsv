@@ -1,0 +1,44 @@
+frankensim.matdb-source.v1
+observation	identity	Pure liquid H2SO4 thermochemical reference; 100 percent chemical species, not 96-98 percent commercial acid or dilute leach liquor	NIST Chemistry WebBook CAS 7664-93-9 molecular weight	H2O4S; molar mass 98.078 g/mol. The pure-species flag excludes every aqueous dilution and sulfuric-acid hydrate. Density, viscosity, dissociation, ionic activity, mixing/neutralization heat, corrosion and concentration-dependent transport are not supplied.
+observation	standard	Pure liquid H2SO4 at 298.15 K and 100000 Pa standard pressure	NIST-JANAF H-075 298.15 K liquid row	Retain formation enthalpy -813.989 kJ/mol and absolute molar entropy 156.895 J/(mol K), in the JANAF elemental reference convention. The source distinguishes solid and liquid rows at 283.456 K; this pack uses only the liquid branch. The standard formation enthalpy of the pure liquid is not the formation enthalpy of aqueous sulfate/bisulfate or a heat of dilution. Source uncertainty is unstated in the HTML table; no confidence interval is inferred.
+observation	caloric	Pure liquid H2SO4 sensible heat reference	Selected literal NIST-JANAF H-075 Cp rows, divided by source molar mass	Retained source points T[K]:Cp[J/(mol K)] are 298.15:138.584,300:138.940,400:158.205. Divide by 0.098078 kg/mol with Decimal50 arithmetic and retain 15 significant digits. Linear interpolation is an authored engineering approximation, not the original table evaluator or a thermodynamically exact joint Cp/enthalpy law. Values outside 298.15-400 K, phase changes, decomposition and aqueous mixtures refuse. Source and interpolation uncertainties are unstated.
+scalar	mass	identity	molar_mass	98.078	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	400	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	-813.989	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	156.895	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1
+curve	heat-capacity	identity,caloric	cp	temperature	K	J/kg/K	298.15:1412.99781806317,300:1416.62758212851,400:1613.05287628214	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	298.15	400	K
+validity	heat-capacity	pressure	100000	100000	Pa
+validity	heat-capacity	phase	1	1	1
+validity	heat-capacity	standard_state	1	1	1
+validity	heat-capacity	reference_convention	1	1	1
+validity	heat-capacity	purity	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	specimen	0	0	1

@@ -1,0 +1,44 @@
+frankensim.matdb-source.v1
+observation	identity	Pure liquid H2O thermochemical reference; not saline process water, acid solution, slurry or water vapor	NIST Chemistry WebBook CAS 7732-18-5 molecular weight	H2O; source molar mass 18.0153 g/mol. This pack supplies the JANAF formation reference needed by chemical energy balances. The separate IAPWS water pack has a different sensible-enthalpy convention and must not be substituted for standard formation enthalpy. Source isotopic composition and specimen qualification are unspecified.
+observation	standard	Pure liquid H2O at 298.15 K and 100000 Pa standard pressure	NIST-JANAF H-063 298.15 K row	Retain formation enthalpy -285.830 kJ/mol and absolute molar entropy 69.950 J/(mol K), in the JANAF elemental reference convention. Neither value is steam thermochemistry or an aqueous ion reference. The phase-specific value permits a matched-state Hess-law sum for CaO(s)+H2O(l)=Ca(OH)2(s). Source uncertainty is unstated in the retained table; no confidence interval is inferred.
+observation	caloric	Pure liquid H2O sensible heat reference below the source boiling point	Selected literal NIST-JANAF H-063 Cp rows, divided by source molar mass	Retained source points T[K]:Cp[J/(mol K)] are 298.15:75.351,300:75.349,320:75.344,340:75.388,360:75.679. Divide by 0.0180153 kg/mol with Decimal50 arithmetic and retain 15 significant digits. Linear interpolation is an authored engineering approximation. The interval stops at 360 K before the source liquid-to-real-gas transition at 372.780 K; the table's metastable liquid continuation is excluded. No latent heat, vapor, dissolved-salt or pressure-dependent EOS is supplied. Source and interpolation uncertainties remain unstated.
+scalar	mass	identity	molar_mass	18.0153	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	360	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	-285.830	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	69.950	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1
+curve	heat-capacity	identity,caloric	cp	temperature	K	J/kg/K	298.15:4182.61144693677,300:4182.50043018989,320:4182.22288832270,340:4184.66525675398,360:4200.81819342448	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	298.15	360	K
+validity	heat-capacity	pressure	100000	100000	Pa
+validity	heat-capacity	phase	1	1	1
+validity	heat-capacity	standard_state	1	1	1
+validity	heat-capacity	reference_convention	1	1	1
+validity	heat-capacity	purity	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	specimen	0	0	1

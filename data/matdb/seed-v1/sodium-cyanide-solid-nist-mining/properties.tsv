@@ -1,0 +1,44 @@
+frankensim.matdb-source.v1
+observation	identity	Pure solid NaCN reference; sodium-cyanide reagent constituent rather than a leach solution	NIST Chemistry WebBook CAS 143-33-9 molecular weight	CNNa; source molar mass 49.0072 g/mol. No commercial purity, briquette porosity, aqueous concentration, free/WAD/total cyanide assay, pH, dissolved oxygen, gold extraction or plant dosing model is inferred.
+observation	standard	Pure NaCN solid at 298.15 K and JANAF standard pressure 100000 Pa	Chase 1998 solid formation enthalpy and standard molar entropy; source review March 1966	Retain -90.71 kJ/mol and 118.49 J/(mol K). Formation enthalpy uses JANAF elemental reference states; entropy is absolute standard molar entropy. Pure solid data must not replace aqueous CN- or Na+ thermochemistry, cyanide speciation, cyanidation kinetics or recovery. Source uncertainty is unstated.
+observation	caloric	Pure solid NaCN sensible heat reference	Independent Decimal50 evaluation of the NIST solid Shomate column	For t=T/1000, Cp0=A+B*t+C*t^2+D*t^3+E/t^2 J/(mol K), with A=68.14732,B=1.091197,C=0.010951,D=-0.010567,E=0.013628. Divide by 0.0490072 kg/mol. Retain 298.15-500 K inside the source 298-835 K solid fit; the separate liquid fit is excluded. Knots at 298.15 K and every 25 K from 300 K use 15 significant digits. Linear interpolation is an authored approximation; the largest checked midpoint discrepancy is 0.000979 percent, not a certified bound. No phase transition or solution model is supplied; source and interpolation uncertainties are unstated.
+scalar	mass	identity	molar_mass	49.0072	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	500	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	-90.71	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	118.49	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1
+curve	heat-capacity	identity,caloric	cp	temperature	K	J/kg/K	298.15:1400.33833753018,300:1400.34120707207,325:1400.44269952752,350:1400.63860753046,375:1400.90459845608,400:1401.22369104948,425:1401.58374079653,450:1401.97587446451,475:1402.39348539001,500:1402.83157117730	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	298.15	500	K
+validity	heat-capacity	pressure	100000	100000	Pa
+validity	heat-capacity	phase	1	1	1
+validity	heat-capacity	standard_state	1	1	1
+validity	heat-capacity	reference_convention	1	1	1
+validity	heat-capacity	purity	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	specimen	0	0	1

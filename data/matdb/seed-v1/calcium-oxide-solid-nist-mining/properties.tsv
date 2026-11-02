@@ -1,0 +1,44 @@
+frankensim.matdb-source.v1
+observation	identity	Pure solid CaO thermochemical reference; quicklime chemical constituent, not a commercial quicklime product	NIST Chemistry WebBook CAS 1305-78-8 molecular weight	CaO; source molar mass 56.077 g/mol. Product purity, calcination history, porosity, moisture uptake and particle-size distribution are not identified. No bulk density, solution property, grindability or plant dose is inferred.
+observation	standard	Pure CaO solid at 298.15 K and JANAF standard pressure 100000 Pa	Chase 1998 solid formation enthalpy and standard molar entropy; source review June 1973	Retain the Chase values -635.09 kJ/mol and 38.19 J/(mol K), not the separate CODATA values. Formation enthalpy uses the JANAF elemental reference states; entropy is absolute standard molar entropy. These are evaluated reference data, not specimen validation. Source uncertainty is unstated. No pressure extrapolation, reaction kinetics, phase equilibrium or aqueous solvation is supplied.
+observation	caloric	Pure CaO solid standard-state sensible heat reference	Independent Decimal50 evaluation of the NIST solid Shomate equation	For t=T/1000, Cp0=A+B*t+C*t^2+D*t^3+E/t^2 J/(mol K), with A=49.95403,B=4.887916,C=-0.352056,D=0.046187,E=-0.825097. Divide by 0.056077 kg/mol. Retained interval 298.15-1000 K is a subset of the published 298-3200 K solid fit. Knots at 298.15 K and every 25 K from 300 K use 15 significant digits. Linear interpolation is an authored approximation; source and interpolation uncertainties are unstated. The largest checked midpoint discrepancy against the equation is 0.095 percent, not a certified error bound. Cp integration gives sensible enthalpy changes; the separate 298.15 K formation value is not a temperature-dependent formation-enthalpy curve.
+scalar	mass	identity	molar_mass	56.077	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	1000	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	-635.09	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	38.19	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1
+curve	heat-capacity	identity,caloric	cp	temperature	K	J/kg/K	298.15:750.743138318435,300:752.932973671123,325:779.204184734207,350:800.473782358887,375:818.028243720842,400:832.765075842146,425:845.325867757860,450:856.179120922219,475:865.673409779451,500:874.072424969239,525:881.578626921646,550:888.349552110406,575:894.509269056491,600:900.156565452661,625:905.370890526363,650:910.216729446702,675:914.746865375509,700:919.004841065474,725:923.026836859770,750:926.843118025463,775:930.479160701138,800:933.956535504752,825:937.293606629828,850:940.506089184673,875:943.607496698377,900:946.609502851348,925:949.522235718190,950:952.354518538401,975:955.114067838882,1000:957.807657328316	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	298.15	1000	K
+validity	heat-capacity	pressure	100000	100000	Pa
+validity	heat-capacity	phase	1	1	1
+validity	heat-capacity	standard_state	1	1	1
+validity	heat-capacity	reference_convention	1	1	1
+validity	heat-capacity	purity	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	specimen	0	0	1
