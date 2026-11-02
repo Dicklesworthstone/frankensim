@@ -3847,10 +3847,22 @@ refusal without changing accepted heat or motion.
 `material::free_surface::transfer` connects the same resolved liquid scaling to
 `fs_mesh::overlap` and the native supplied-state initializer. It intersects each
 source tetrahedron with actual Cartesian cells, integrates its P1 velocity field,
-and uses the existing `fs_la` LU/Cholesky owners to reconstruct momentum.
+and uses the existing `fs_la` LU/SVD owners to reconstruct momentum.
 Mass-weighted translation and rotation corrections preserve total linear and
 angular momentum at receiving cell centres, subject to explicit error bounds.
 The final checks read actual native fill, density and Guo-corrected velocity.
+
+The angular solve uses the represented range of the receiving inertia. A
+collinear cell row can carry both transverse angular-momentum components;
+only unresolved spin about its line requires refinement. The fixed 3-by-3
+native SVD is scaled before rank detection and its result is independently
+reapplied to the original inertia with the caller's physical angular budget.
+This is the same mass-weighted least-change correction, with no null-space
+spin invented. The existing per-fragment and global projection-energy gates
+still bound either sign of numerical kinetic change. Focused tests cover
+straight and oblique rows, unsupported spin, full-rank recovery and unit
+rescaling; the thin-prism integration case independently bounds its required
+kinetic projection change and refuses a tighter budget.
 
 Source mass, first mass moment, linear/angular momentum and kinetic energy use
 analytic simplex integrals. Signed kinetic and uniform-gravity potential changes
@@ -6744,23 +6756,41 @@ solves the six-component retained-interior momentum correction implicitly throug
 the unchanged NT collision, streaming and native rigid split. Endpoint interior
 inventories come from actual streamed populations and sampled occupancy; no
 analytic rigid-fluid tensor subtraction, epsilon mass, or density-matched bypass
-is used. Only reduced-pressure gravity is permitted: source adapters apply
-`(M_s-rho_f V)g` once, with no separately imposed fluid force.
+is used. Inventories use physical Guo momentum `sum(f*c) + F/2`, including its
+endpoint-occupancy weighting. Uniform and per-cell fluid forces are admitted and
+held during each candidate solve. The correction is
+`J_c = Delta(Pi_inside) - J_inside,F`, where `J_inside,F = sum(epsilon_mid * F)`;
+angular components use the same fixed world origin. This excludes forcing of
+retained fictitious fluid from the physical body's load. The midpoint source is
+reduced once from the first native candidate's existing sampled geometry and
+cached across Newton probes, without extra quadrature or population storage.
+
+Full-pressure gravity uses the dry-body load `M_s*g` alongside the configured
+fluid source. Reduced-pressure gravity uses `(M_s-rho_f V)g` with the hydrostatic
+fluid source removed; these conventions must not be combined. An evolved force
+field uses the existing `rebind_force_field` to preserve its Guo source frame.
+The represented fluid source is full-fluid forcing minus interior forcing;
+authored body work and the solved interior-correction work remain separate.
 
 Finite-difference probes, Newton corrections and backtracking have explicit hard
 work limits and condition admission. Probes read population inventories only in
 occupied cells; independent full-grid linear and fixed-origin angular inventories
 run before and after convergence. Body and all-fluid minus interior plus body
-momentum close against authored impulse, stationary-wall exchange and periodic
-angular transport before the single publication. Failure/cancellation preserves
-populations, dry pose/momenta and topology admission; only scratch may change.
+momentum close against authored impulse, represented fluid forcing,
+stationary-wall exchange and periodic angular transport before the single
+publication. Failure/cancellation preserves populations, dry pose/momenta and
+topology admission; only scratch may change.
 
 Controls bound initial/midpoint/endpoint sampled-volume variation (default 1%,
 at most 10% per step), and refuse zero resolved interior volume. Actual interior
 mass, slip, quadrature volumes, correction work and macroscopic kinetic-energy
 changes remain explicit. These diagnostics do not certify exact no-slip, a GCL,
-complete thermodynamic energy, calibrated drag or unconditional density-ratio
-stability. The isothermal, fully immersed lane has no moving free surface.
+complete thermodynamic energy, calibrated drag, coupled temporal order or
+unconditional density-ratio stability. The isothermal, fully immersed lane has
+no moving free surface. Focused regressions cover repeated nonuniform forcing
+and torque for light, neutral and heavy bodies with periodic and stationary-wall
+boundaries, source subtraction for force confined to the fictitious interior,
+physical source-frame inventories, and forced rollback with exact retry.
 
 
 ## Integer-cell planar piston geometry epochs (MR69 foundation)

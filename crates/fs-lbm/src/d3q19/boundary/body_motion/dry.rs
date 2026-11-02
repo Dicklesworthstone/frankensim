@@ -3,9 +3,11 @@
 //! The native NT collision still retains populations inside the body. For an
 //! ordinary immersed solid, its measured reaction must therefore be corrected
 //! by the CHANGE of that retained momentum, not by an assumed rigid-fluid mass.
-//! We solve J_c = Pi_inside(new(J_c)) - Pi_inside(old) using the SAME native
-//! drift/collision/stream/drift candidate, with the original positive dry mass
-//! and tensor. Angular inventories use one fixed world origin.
+//! We solve J_c = Pi_inside(new(J_c)) - Pi_inside(old) - J_force_inside using
+//! the SAME native drift/collision/stream/drift candidate, with the original
+//! positive dry mass and tensor. Inventories use physical Guo momentum; the
+//! imposed force on retained fictitious fluid is excluded from the dry body.
+//! Angular inventories and source moments use one fixed world origin.
 //!
 //! The fictitious-fluid correction follows the momentum accounting discussed
 //! by Breugem, JCP 231 (2012), doi:10.1016/j.jcp.2012.02.026, and Lacis, Taira
@@ -15,6 +17,7 @@
 //! possible. Interior slip and sampled volume changes remain explicit. Neither
 //! exact no-slip, a GCL, nor a moving-free-surface model is asserted.
 
+use super::super::cell_force;
 use super::*;
 use crate::d3q19::{E3, Q3};
 
@@ -88,13 +91,13 @@ impl DryBodyCouplingConfig3 {
     }
 }
 
-/// Direct sum over actual population moments, with no rigid-fluid substitution.
+/// Direct sum over actual physical Guo moments, with no rigid-fluid substitution.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ImmersedMomentum3 {
     /// Population mass, weighted by occupancy for an interior inventory.
     pub mass: f64,
-    /// Linear momentum, followed by angular momentum about the requested fixed
-    /// world origin. The interior inventory uses the endpoint occupancy.
+    /// Physical momentum `sum(f*c) + F/2`, followed by its angular momentum
+    /// about the requested fixed world origin. Interior uses endpoint occupancy.
     pub momentum: [f64; 6],
     /// Macroscopic kinetic energy sum rho |u|^2/2. This excludes thermal,
     /// acoustic/compressional and non-equilibrium population energy.
@@ -118,9 +121,17 @@ pub struct DryBodyExchange3 {
     pub interior_slip_rms: [f64; 2],
     /// Solved correction impulse, linear then angular about the fixed origin.
     pub interior_correction_impulse: [f64; 6],
+    /// Imposed fluid impulse inside the collision-midpoint occupancy, excluded
+    /// from the correction because it acts on retained fictitious fluid.
+    /// Linear components precede angular components about the fixed origin.
+    pub interior_forcing_impulse: [f64; 6],
+    /// Full native fluid forcing minus `interior_forcing_impulse`: the imposed
+    /// source of the represented exterior-fluid-plus-dry-body system.
+    pub represented_fluid_forcing_impulse: [f64; 6],
     /// Authored external impulse, linear then angular about the fixed origin.
     pub physical_external_impulse: [f64; 6],
-    /// Native hydrodynamic reaction plus the MEASURED interior momentum change.
+    /// Native reaction plus the MEASURED physical interior momentum change,
+    /// minus imposed interior-fluid forcing.
     /// This is the represented corrected force, not an exact no-slip traction.
     pub corrected_hydrodynamic_impulse: [f64; 6],
     /// Actual endpoint dry-body linear and fixed-origin angular momentum change.
@@ -128,7 +139,8 @@ pub struct DryBodyExchange3 {
     /// Dry-body change minus physical external and corrected hydrodynamic input.
     pub body_momentum_residual: [f64; 6],
     /// Independently summed all-fluid minus interior plus dry-body change,
-    /// minus physical external, fixed-wall and periodic transport terms.
+    /// minus physical external, represented fluid forcing, fixed-wall and
+    /// periodic transport terms.
     pub combined_momentum_residual: [f64; 6],
     /// Work of the authored load at the native midpoint velocity.
     pub physical_external_work: f64,
@@ -154,6 +166,10 @@ struct DryStep<'a, S> {
     arm: [f64; 3],
     radius: f64,
     inside_before: ImmersedMomentum3,
+    // The first native candidate leaves its midpoint fractions in the sampler.
+    // That pose depends only on the accepted incoming state, so every Newton
+    // probe shares this source. Cache it before sampling endpoint geometry.
+    interior_forcing: Option<[f64; 6]>,
     maximum_relative_volume_change: f64,
     gate: &'a CancelGate,
 }
@@ -173,10 +189,19 @@ impl BoundaryGrid3 {
     /// light, neutral and heavy bodies; there is no density-ratio shortcut.
     ///
     /// External WORLD impulse contains linear components at the midpoint COM,
-    /// then a center couple. Use REDUCED-pressure loads: e.g. (M-rho*V)g for
-    /// gravity once, with no separately forced hydrostatic fluid column.
-    /// This bounded lane admits no uniform or per-cell fluid forcing, only
-    /// stationary walls/periodic faces and the existing BGK/low-Mach envelope.
+    /// then a center couple. Uniform and per-cell Guo fluid forces remain held
+    /// during the step. Full-pressure gravity uses the dry body's `M*g` and
+    /// the configured fluid force; reduced-pressure gravity instead uses
+    /// `(M-rho*V)*g` with the hydrostatic fluid source removed. Do not combine
+    /// both conventions. Stationary walls/periodic faces and the original
+    /// BGK/low-Mach envelope remain required.
+    ///
+    /// The correction subtracts the imposed force on the midpoint interior
+    /// from its measured PHYSICAL momentum change. Thus fictitious-fluid
+    /// forcing cannot masquerade as an additional physical body load. A force
+    /// field changed between steps must use `rebind_force_field` to preserve
+    /// the Guo source frame. Geometry-weighted source quadrature is not a
+    /// claim of full coupled temporal order or exact impermeability.
     ///
     /// Six unknown correction impulses are solved by safeguarded Newton using
     /// exact streamed candidate inventories and bounded finite-difference
@@ -204,8 +229,6 @@ impl BoundaryGrid3 {
         checkpoint(gate)?;
         config.admit()?;
         if sampler.dims != self.dimensions()
-            || self.force != [0.0; 3]
-            || self.force_field.is_some()
             || !(body.mass.is_finite() && body.mass > 0.0)
             || !external_impulse
                 .into_iter()
@@ -213,7 +236,7 @@ impl BoundaryGrid3 {
                 .all(f64::is_finite)
         {
             return Err(invalid(
-                "dry-body correction requires matching sampler, positive dry mass and unforced fluid",
+                "dry-body correction requires matching sampler, positive dry mass and finite loads",
             ));
         }
         let initial = *body;
@@ -230,7 +253,7 @@ impl BoundaryGrid3 {
             moment_origin,
             gate,
         )?;
-        let step = DryStep {
+        let mut step = DryStep {
             shape,
             initial,
             external: external_impulse,
@@ -238,6 +261,7 @@ impl BoundaryGrid3 {
             arm,
             radius,
             inside_before,
+            interior_forcing: None,
             maximum_relative_volume_change: config.maximum_relative_volume_change,
             gate,
         };
@@ -257,7 +281,7 @@ impl BoundaryGrid3 {
         let mut condition = None;
         let mut current = self.dry_candidate(
             sampler,
-            &step,
+            &mut step,
             correction,
             &mut evaluations,
             config.maximum_evaluations,
@@ -282,7 +306,7 @@ impl BoundaryGrid3 {
                 probe[column] += delta;
                 let candidate = self.dry_candidate(
                     sampler,
-                    &step,
+                    &mut step,
                     probe,
                     &mut evaluations,
                     config.maximum_evaluations,
@@ -318,7 +342,7 @@ impl BoundaryGrid3 {
                 }
                 match self.dry_candidate(
                     sampler,
-                    &step,
+                    &mut step,
                     trial,
                     &mut evaluations,
                     config.maximum_evaluations,
@@ -361,6 +385,18 @@ impl BoundaryGrid3 {
         }
         let inside_delta = difference(inside_after.momentum, inside_before.momentum);
         let fluid_delta = difference(fluid_after.momentum, fluid_before.momentum);
+        let interior_forcing = step
+            .interior_forcing
+            .ok_or_else(|| invalid("missing midpoint interior-fluid force"))?;
+        let native_forcing = current.native.coupling.forcing;
+        let represented_forcing = core::array::from_fn(|i| {
+            let total = if i < 3 {
+                native_forcing.impulse[i]
+            } else {
+                native_forcing.angular_impulse[i - 3]
+            };
+            total - interior_forcing[i]
+        });
         let correction_center = denormalize(correction, radius);
         let correction_origin = at_origin(correction_center, arm);
         let physical_external = at_origin(external_impulse, arm);
@@ -376,8 +412,10 @@ impl BoundaryGrid3 {
         let hydrodynamic: [f64; 6] = core::array::from_fn(|i| {
             if i < 3 {
                 current.native.coupling.hydrodynamic.body_impulse[i] + inside_delta[i]
+                    - interior_forcing[i]
             } else {
                 current.native.coupling.hydrodynamic.body_angular_impulse[i - 3] + inside_delta[i]
+                    - interior_forcing[i]
             }
         });
         let body_residual =
@@ -395,7 +433,10 @@ impl BoundaryGrid3 {
             }
         });
         let combined_residual = core::array::from_fn(|i| {
-            fluid_delta[i] - inside_delta[i] + body_delta[i] - physical_external[i] - boundary[i]
+            fluid_delta[i] - inside_delta[i] + body_delta[i]
+                - physical_external[i]
+                - boundary[i]
+                - represented_forcing[i]
         });
         let account_scale = [
             body_delta,
@@ -404,6 +445,8 @@ impl BoundaryGrid3 {
             inside_delta,
             fluid_delta,
             boundary,
+            represented_forcing,
+            interior_forcing,
         ]
         .into_iter()
         .map(|x| norm(normalize(x, radius)))
@@ -431,6 +474,8 @@ impl BoundaryGrid3 {
             .into_iter()
             .chain(correction_origin)
             .chain(physical_external)
+            .chain(represented_forcing)
+            .chain(interior_forcing)
             .chain(hydrodynamic)
             .chain(body_delta)
             .chain(body_residual)
@@ -447,6 +492,8 @@ impl BoundaryGrid3 {
             interior: [inside_before, inside_after],
             interior_slip_rms: [slip_before, slip_after],
             interior_correction_impulse: correction_origin,
+            interior_forcing_impulse: interior_forcing,
+            represented_fluid_forcing_impulse: represented_forcing,
             physical_external_impulse: physical_external,
             corrected_hydrodynamic_impulse: hydrodynamic,
             body_momentum_change: body_delta,
@@ -474,7 +521,7 @@ impl BoundaryGrid3 {
     fn dry_candidate(
         &mut self,
         sampler: &mut BodyFrameSampler3,
-        step: &DryStep<'_, impl BodyFrameShape3>,
+        step: &mut DryStep<'_, impl BodyFrameShape3>,
         correction: [f64; 6],
         evaluations: &mut usize,
         maximum_evaluations: usize,
@@ -507,6 +554,15 @@ impl BoundaryGrid3 {
                 "dry-body sampled volume change exceeds geometric admission",
             ));
         }
+        let forcing = match step.interior_forcing {
+            Some(forcing) => forcing,
+            None => {
+                let forcing =
+                    self.dry_interior_forcing(sampler.fractions(), step.origin, step.gate)?;
+                step.interior_forcing = Some(forcing);
+                forcing
+            }
+        };
         sampler.sample(body.center, body.orientation, step.shape, step.gate)?;
         let (_, interior, slip) = self.dry_inventory(
             true,
@@ -516,7 +572,10 @@ impl BoundaryGrid3 {
             step.origin,
             step.gate,
         )?;
-        let delta = difference(interior.momentum, step.inside_before.momentum);
+        let delta = difference(
+            difference(interior.momentum, step.inside_before.momentum),
+            forcing,
+        );
         let orbital = cross(step.arm, delta[..3].try_into().unwrap());
         let target = normalize(
             core::array::from_fn(|i| {
@@ -542,7 +601,7 @@ impl BoundaryGrid3 {
         })
     }
 
-    // Raw population inventories are independent of the native impulse receipt.
+    // Physical population inventories are independent of the native receipt.
     // Probes read populations ONLY at occupied cells. Full-field inventories
     // run once initially and once after convergence, without an all-grid copy.
     #[allow(clippy::too_many_arguments)]
@@ -585,6 +644,12 @@ impl BoundaryGrid3 {
                     momentum[0] += f64::from(E3[q].0) * population;
                     momentum[1] += f64::from(E3[q].1) * population;
                     momentum[2] += f64::from(E3[q].2) * population;
+                }
+                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                if force != [0.0; 3] {
+                    for axis in 0..3 {
+                        momentum[axis] += 0.5 * force[axis];
+                    }
                 }
                 if !(rho.is_finite() && rho > 0.0) || !momentum.into_iter().all(f64::is_finite) {
                     return Err(invalid("invalid dry-body population inventory"));
@@ -637,6 +702,46 @@ impl BoundaryGrid3 {
             ));
         }
         Ok((all, interior, slip))
+    }
+
+    // One reduction per accepted incoming state, never one per Newton probe.
+    // No population reads or extra quadrature: native motion already sampled
+    // this exact midpoint occupancy before producing the first candidate.
+    fn dry_interior_forcing(
+        &self,
+        fractions: &[f64],
+        origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<[f64; 6]> {
+        let mut total = [0.0; 6];
+        if self.force == [0.0; 3] && self.force_field.is_none() {
+            return Ok(total);
+        }
+        for tile in 0..self.f[0].len() {
+            checkpoint(gate)?;
+            for lane in 0..TILE_CELLS {
+                if self.solid[tile] & (1u64 << lane) != 0 {
+                    continue;
+                }
+                let cell = self.coords(tile, lane);
+                let epsilon = fractions[(cell[2] * self.ny + cell[1]) * self.nx + cell[0]];
+                if epsilon == 0.0 {
+                    continue;
+                }
+                let impulse = cell_force(self.force, self.force_field.as_deref(), tile, lane)
+                    .map(|force| epsilon * force);
+                let arm = core::array::from_fn(|i| cell[i] as f64 + 0.5 - origin[i]);
+                let angular = cross(arm, impulse);
+                for i in 0..3 {
+                    total[i] += impulse[i];
+                    total[i + 3] += angular[i];
+                }
+            }
+        }
+        if !total.into_iter().all(f64::is_finite) {
+            return Err(invalid("midpoint interior-fluid force overflowed"));
+        }
+        Ok(total)
     }
 }
 
