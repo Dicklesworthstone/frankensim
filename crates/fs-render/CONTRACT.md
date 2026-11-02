@@ -5632,3 +5632,51 @@ events and split continuation, global slot/law/work limits, and atomic late
 cancellation/coverage refusal. The low-level exterior tests supply independent
 thin-film amplitude and layer-depth absorption references.
 <!-- native-coating-external-bath:end -->
+
+<!-- coating-transmitting-pair:start -->
+### Coherent transmitting specimens joined by a phase-averaged radiation gap
+
+`CoatingTransmittingPairResponse` closes the four-terminal finite-band radiation
+network of two isothermal transmitting specimens and two independent exterior
+baths. The selected side of each original `CoatingThermalEmission` faces the
+gap; reversing that same authored stack supplies its exterior response. Both
+half spaces must be identically vacuum throughout their retained original law,
+not merely at selected quadrature wavelengths. Asymmetric films retain distinct
+gap-side and exterior absorptances. Empty transparent stacks exchange no heat
+while passing exterior bath radiation.
+
+At each matched vacuum wavelength, cosine and s/p polarization, solve the two
+incoherent gap-intensity equations using the original coherent reflection,
+transmission and positive absorption. Their elimination yields one reciprocal
+body/body channel, four body/bath channels and one bath/bath channel. The gap
+denominator is `(A1+T1)+(A2+T2)-(A1+T1)*(A2+T2)`, evaluated after dividing by the
+larger positive escape fraction. No rounded `1-R1*R2` residual, product of
+independently averaged spectra/polarizations or invented opaque approximation
+replaces the original matched modes. Perfectly trapped modes carry no gap
+exchange. Each edge multiplies its own stable original Planck difference and
+secant; global thermal equilibrium gives exact zero heat.
+
+Four coherent solves per spectral/angular node serve all six channels. Budgets
+admit `6*N_lambda` retained channel nodes and `4*N_lambda*N_mu` optical solves
+before allocation or solve; original per-stack 64-film limits remain. Subsequent
+temperature queries allocate nothing and preserve representable weak heat and
+conductance through the original logarithmic Planck scaling. Positive body
+temperatures and supplied bath temperatures are required even for dark ports;
+an absent bath denotes zero incoming radiance. Ordered optical identities,
+common source band, physical facing area and quadrature enter response identity.
+
+This is unit-view-factor, parallel/coextensive, specular far-field exchange;
+the caller must justify phase averaging between stacks. Interference inside
+each specimen remains coherent. Neither gap interference, evanescent transfer,
+finite edges, rough scattering, unsupported spectral tails nor nonisothermal
+internal film exchange is implied. The intensity construction follows Byrnes,
+*Multilayer optical calculations*, arXiv:1603.02720v5 section 6; emission retains
+the original local Kirchhoff owner and its source references.
+
+Six focused low-level groups check independent unreduced intensity balances,
+original asymmetric coherent infrared fields and four-terminal conservation,
+exact equilibrium and mirror reciprocity, transparent bath throughput against
+independent SI-Planck quadrature, opaque recovery of the original pairgap and
+exterior owners, weak positive work below a rounded reflectance deficit,
+full-band vacuum/source admission, budgets, cancellation and dark temperatures.
+<!-- coating-transmitting-pair:end -->

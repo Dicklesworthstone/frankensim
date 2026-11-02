@@ -56,6 +56,11 @@ pub use coating_external::{
     CoatingExternalBathBudget, CoatingExternalBathRates, CoatingExternalBathResponse,
 };
 
+mod coating_transmitting_pair;
+pub use coating_transmitting_pair::{
+    CoatingTransmittingPairBudget, CoatingTransmittingPairRates, CoatingTransmittingPairResponse,
+};
+
 /// Physical incident surface absorption on the original native thermal clock.
 #[cfg(feature = "optical-heating")]
 pub mod heating;

@@ -87,6 +87,15 @@ enum Exit {
     },
 }
 
+/// Original power fractions for one vacuum side of a transmitting stack.
+/// This is an optical result only; no Planck source is evaluated here.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReciprocalPortPower {
+    pub(super) reflected: [f64; 2],
+    pub(super) transmitted: [f64; 2],
+    pub(super) absorbed: [f64; 2],
+}
+
 impl CoatingThermalEmission {
     /// Prepare emission through films authored from vacuum to an opaque
     /// substrate. Every film and the entire emitting substrate half space has
@@ -290,6 +299,48 @@ impl CoatingThermalEmission {
         Ok(self
             .reciprocal_layer_absorption(wavelength_nm, cosine)?
             .total)
+    }
+
+    /// Certify the entire retained opposite-medium law, not just sampled
+    /// quadrature wavelengths. Only two vacuum half spaces share the same
+    /// wavelength/cosine measure and reciprocal power transmission used by a
+    /// phase-averaged transmitting-pair exchange.
+    pub(super) fn is_vacuum_transmitting(&self) -> bool {
+        match self.exit {
+            Exit::Transmitting { opposite_ior, .. } => {
+                !opposite_ior.is_dispersive()
+                    && opposite_ior.eval(self.wavelength_bounds_nm.0) == Ok(1.0)
+            }
+            Exit::Opaque { .. } => false,
+        }
+    }
+
+    /// One original coherent solve on the selected (`opposite=false`) or
+    /// other (`opposite=true`) vacuum side. Reversing incidence changes the
+    /// fields, not the authored films or their original optical laws. `None`
+    /// refuses an opaque or nonvacuum opposite medium before any solve.
+    pub(super) fn reciprocal_vacuum_port_power(
+        &self,
+        wavelength_nm: f64,
+        cosine: f64,
+        opposite: bool,
+    ) -> Result<Option<ReciprocalPortPower>, CoatingEmissionError> {
+        let Exit::Transmitting { reverse, .. } = self.exit else {
+            return Ok(None);
+        };
+        if !self.is_vacuum_transmitting() {
+            return Ok(None);
+        }
+        self.with_layers(|layers| {
+            let work =
+                DielectricCoatingStack::try_mixed_in_band(layers, self.wavelength_bounds_nm)?
+                    .layer_power_balance(wavelength_nm, reverse ^ opposite, cosine, 1.0, 1.0)?;
+            Ok(Some(ReciprocalPortPower {
+                reflected: polarized_powers(work.fresnel.reflection),
+                transmitted: polarized_powers(work.fresnel.transmission),
+                absorbed: work.absorbed,
+            }))
+        })
     }
 
     /// One original coherent solve supplies every layer's positive reciprocal

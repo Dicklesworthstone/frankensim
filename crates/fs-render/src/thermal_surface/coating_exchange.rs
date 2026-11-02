@@ -303,6 +303,8 @@ pub enum CoatingExchangeError {
     TemperatureChannels,
     /// A closed two-surface gap requires opaque half spaces on both sides.
     OpaqueRequired,
+    /// A transmitting pair requires two vacuum half spaces on each stack.
+    VacuumTransmittingRequired,
     /// The two source-supported bands have no positive-width intersection.
     WavelengthDomain,
     /// A caller checkpoint cancelled preparation or spectral evaluation.
