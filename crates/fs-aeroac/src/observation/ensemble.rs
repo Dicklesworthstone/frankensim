@@ -89,8 +89,8 @@ impl<const D: usize> WindowedAcousticEnsemble<D> {
 /// already refer to one receiver, Cartesian frame and physical source clock.
 #[derive(Clone, Debug)]
 pub struct PreparedHarmonicEnsemble<const D: usize> {
-    mean: PreparedHarmonicField<D>,
-    factors: Vec<(HarmonicFactorStatistics, PreparedHarmonicField<D>)>,
+    pub(super) mean: PreparedHarmonicField<D>,
+    pub(super) factors: Vec<(HarmonicFactorStatistics, PreparedHarmonicField<D>)>,
 }
 
 impl<const D: usize> PreparedHarmonicEnsemble<D> {

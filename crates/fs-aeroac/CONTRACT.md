@@ -867,3 +867,48 @@ tests pass one focused native Rust type analysis (31 test definitions including
 remain blocked by exhausted storage. An independent analytic versus eight-state
 real-time reference agrees within 3.22e-15 maximum absolute error for the
 nine reported fixture moments.
+
+## Time-dependent pressure/velocity product spectra
+
+The original `PreparedHarmonicField`, `PreparedProperHarmonicField` and
+`PreparedHarmonicEnsemble` owners expose `product_spectrum` and cancellable
+preparation. `AcousticFieldComponent` selects pressure or a velocity axis
+in the original Cartesian frame. The returned `AcousticProductSpectrum`
+exposes its components and shared analytic spectrum, evaluates it at a
+physical source-clock time, and observes either normalized detector profile.
+
+All adapters traverse their retained coalesced DD fields and route bilinear
+terms through the one fs-fft product-spectrum engine. No parallel temporal
+implementation or new propagation model is introduced. Deterministic means
+and real factors retain sum and difference tones; proper factors retain
+difference tones. The prepared mixed owner's declared joint second moments
+govern which factor contributions add, without inferring independence from
+unknown phase or assuming stationarity or Gaussian statistics.
+
+Pressure/pressure is in Pa^2, velocity/velocity in m^2/s^2 and either ordering
+of pressure/velocity in W/m^2. The last quantity is signed physical p*u,
+including reversible storage exchange and broadband beats; it is not a
+local heating rate or a pressure-only plane-wave estimate. Ensemble results
+are expected quadratic waveforms, not random realizations or fluctuation
+noise spectra.
+
+Before allocation, admission counts the sum of per-bank squared distinct
+line counts and the real/proper generated-term counts with checked arithmetic.
+The lazy contraction iterator avoids a second O(M^2) input array. The caller's
+workspace limit and the shared fixed term ceiling apply. Invalid axes,
+resource refusal and cancellation publish nothing and leave original owners
+reusable. Waveform and window queries allocate nothing.
+
+Four integration tests use the original public owners to check signed
+standing-wave flux and broadband p/u products against direct real fields,
+an exact eight-state mixed ensemble and its phase-locked subcycle distinction,
+Uniform/Triangular means against all three original moment owners, and
+retained weak coherent fields with budgets, cancellation and replay.
+A focused native Rust harness compiled and executed the exact shared/acoustic
+modules with the real fs_math library and only a nominal AeroacError boundary:
+all 31 tests passed, including the five new shared-spectrum tests and four
+original-owner acoustic integration tests. Independent standard-library
+reference calculations agree with the eight-state time-domain products
+within 6.67e-16 maximum absolute error; Uniform and Triangular weighted
+real-time quadrature agree within 1.32e-14 and 2.69e-14. This scoped execution
+and these references are not a full-crate build or repository quality gate.
