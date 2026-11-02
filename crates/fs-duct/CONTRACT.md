@@ -2787,3 +2787,63 @@ complementary standing-wave pressure/flow nodes, finite-window real-signal
 integration with four proper latent phases, opaque two-sided boundary layers,
 compact-hole flow removal, graph/source reindexing, budgets and cancellation.
 They are synthetic numerical/model checks, not experimental duct validation.
+
+### Native broadband interior-field interference
+
+`network::field::PreparedNetworkFieldSpectrum` prepares strictly increasing
+positive frequencies from ONE original network, gas/regional-media binding,
+ordered probe list and common source clock. Each frequency keeps its native
+source/load impedances and loss model, and all must share canonical source
+labels and coordinate units. Indexed excitation lines can only address that
+owner's retained frequency banks: matching labels cannot import fields from a
+different geometry. No propagation, source impedance or bandwidth interpolation
+is performed; frequency-specific native refusals still apply.
+
+`prepare_observation` contracts authored mean and fluctuation source vectors
+through those original p/U transfers once. Exactly equal frequencies are
+field-summed in authored order with DD components retained. Distinct frequencies
+remain distinct. Repeated `observe_window` queries retain carrier-sum and beat
+terms in deterministic means and real zero-mean unit-variance factors. Explicit
+proper-complex factors have E[z]=E[z²]=0, E[|z|²]=1, so only their difference
+terms survive. Real factors have joint E[x_r*x_s]=delta_rs; proper factors have joint
+E[z_r*conj(z_s)]=delta_rs and E[z_r*z_s]=0. Mixed real/proper second
+moments vanish. Real factors can encode a PSD covariance of stacked source
+real/imaginary coordinates. No Gaussian distribution, random phase, stationarity
+or PSD/Hz normalization is inferred.
+
+Outputs retain the original locations, source-coordinate identity and clock,
+and report real pressure/flow/section-mean-velocity means, uncentered squares,
+signed p*U power and p*u intensity. Whole coherent source fields are combined
+before any power observation. Window profiles, including Triangular, use the
+shared analytic temporal kernels. Weighted averages are not unweighted work
+when multiplied by support duration; signed local energy transport includes
+reversible storage and is not a local heat source.
+
+At most 256 native frequency solves, 4096 supplied observation lines and 256
+factors are admitted. Whole-spectrum frequency/retained-transfer budgets add
+to the existing per-frequency graph, source, probe and propagation budgets.
+Observation transfer products, probe/frequency-pair work and logical numerical
+workspace are admitted before allocation. Exact-frequency grouping lowers
+actual query work, O(probes * sum distinct-frequency-count²), without caching
+a dense frequency covariance. Temporal kernels are reused across all probes;
+queries perform no graph solve or propagation rebuild.
+
+Preparation and observation cancellation publish no partial owner or result.
+The original synchronous bounded graph factorization still does not poll
+internally; cancellation brackets each frequency preparation and its native
+polling boundaries. Original spatial resolution, scalar plane-wave, rigid-wall
+and material/model limits remain unchanged. This is not a continuous-band
+error or source-validation certificate.
+
+Five G1/G3/G4/G5 regressions cover original two-frequency cylinder fields
+against an independent eight-state real/proper time integral with uniform and
+triangular windows; close-frequency beats; short-window phase-locked versus
+proper noise; weak grouped residuals; clock translation; native source-coordinate
+and frequency refusal; capacity, darkness, cancellation and replay.
+
+Native rustfmt parsed both new files. Focused Rust 2024 no-codegen analysis
+passed for the exact new spectral implementation and five new test definitions,
+with real fs_math/shared temporal code and nominal native graph-constructor
+boundaries; this is not full duct-crate compilation or Rust test execution.
+An independent eight-case analytic cylinder/ensemble reconstruction agreed
+with real-time Simpson integration to 3.95e-15 maximum scaled discrepancy.

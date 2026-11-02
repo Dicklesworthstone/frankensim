@@ -11,6 +11,14 @@ use crate::compose::{ComposeOptions, TwoPort};
 use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, ProperHarmonicProduct};
 use fs_math::dd::Dd;
 
+mod spectrum;
+pub use spectrum::{
+    MAX_FIELD_FREQUENCIES, MAX_FIELD_SPECTRAL_LINES, NetworkFieldExposureLimits,
+    NetworkFieldFactorStatistics, NetworkFieldFrequency, NetworkFieldSpectralFactor,
+    NetworkFieldSpectralLine, NetworkFieldSpectrumBudget, NetworkFieldSpectrumRequest,
+    PreparedNetworkFieldExposure, PreparedNetworkFieldSpectrum, WindowedNetworkFieldExposure,
+};
+
 /// Maximum locations in one prepared observation bank.
 pub const MAX_FIELD_PROBES: usize = 1024;
 /// Maximum independent factors in one finite-window observation.
