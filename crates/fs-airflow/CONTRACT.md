@@ -1,5 +1,24 @@
 # CONTRACT: fs-airflow
 
+## Coupled material response in steady natural circulation
+
+natural_circulation::response::solve_circulation_with_response closes changes in
+native drag and wall coefficients around the existing density/gravity/flow/heat
+solve. The response callback receives actual branch means, declared-order segment
+means and signed flows, and retains its material/correlation owners in the result.
+Topology, exchange regions and wetted areas cannot change. Acceptance independently
+checks unrelaxed temperature and flow residuals plus fresh linear/quadratic drag
+and hA coefficients evaluated at the solved field. The inner buoyancy solve retains
+its separate unrelaxed density and hydraulic-confirmation gates.
+
+The previous integrated density profile warm-starts the next inner solve. Source
+response calls, buoyancy samples and hydraulic solves have explicit total bounds.
+Optional IQN-ILS works in caller-scaled coordinates; a direction change clears its
+history and adopts the solved state without interpolating through artificial zero
+flow. Reference density and Cp remain fixed conservation quantities. Spatial
+property resolution and correlation bulk/film conventions remain explicit; no
+transient inertia, coupled adjoint, stability or experimental-validation claim.
+
 ## Simultaneous contact and radiation in stored solid cooling
 
 `stored_solid::contact::newton` adds

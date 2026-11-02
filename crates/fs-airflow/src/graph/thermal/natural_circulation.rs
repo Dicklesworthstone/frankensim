@@ -8,8 +8,9 @@
 //!
 //! This is a steady Boussinesq model: one reference rho and Cp conserve volume
 //! and sensible heat, while only gravity uses the temperature-dependent density.
-//! Drag and hA remain frozen. No compressibility, stagnant-fluid conduction,
-//! inertial stability, coupled adjoint or experimental validation is implied.
+//! This base solve holds drag and hA fixed; [`response`] closes their material
+//! and flow dependence. No compressibility, stagnant-fluid conduction, inertial
+//! stability, coupled adjoint or experimental validation is implied.
 
 use fs_couple::iqn_ils::{IqnIls, IqnIlsConfig, IqnIlsError};
 use fs_exec::Cx;
@@ -153,6 +154,18 @@ pub fn solve_natural_circulation<M: FluidTransport>(
     config: NaturalCirculationConfig, initial_branch_temperatures_k: &[f64],
     material: impl FnMut(&Cx<'_>, usize, Temperature) -> Result<M, MaterialError>,
 ) -> Result<NaturalCirculationSolution, NaturalCirculationError> {
+    solve_with_density_seed(cx, problem, config, initial_branch_temperatures_k, None, material)
+}
+
+// Warm density is only an initial iterate, never a new material authority.
+// Reuse the last integrated physical profile when constitutive coefficients
+// change in the outer response solve.
+fn solve_with_density_seed<M: FluidTransport>(
+    cx: &Cx<'_>, problem: &NaturalCirculationProblem<'_>,
+    config: NaturalCirculationConfig, initial_branch_temperatures_k: &[f64],
+    initial_densities_kg_m3: Option<&[f64]>,
+    material: impl FnMut(&Cx<'_>, usize, Temperature) -> Result<M, MaterialError>,
+) -> Result<NaturalCirculationSolution, NaturalCirculationError> {
     poll(cx)?;
     admit(cx, problem, config, initial_branch_temperatures_k)?;
     let rho0 = problem.reference.density_kg_m3();
@@ -164,8 +177,21 @@ pub fn solve_natural_circulation<M: FluidTransport>(
         maximum_departure: problem.maximum_relative_density_departure,
         evaluations: 0, limit: config.max_material_evaluations };
     let mut densities = Vec::with_capacity(problem.branches.len());
-    for (branch, &temperature) in initial_branch_temperatures_k.iter().enumerate() {
-        densities.push(sampler.at(cx, branch, temperature)?);
+    if let Some(seed) = initial_densities_kg_m3 {
+        if seed.len() != problem.branches.len() {
+            return Err(NaturalCirculationError::InvalidInput("warm density arity mismatch"));
+        }
+        for &rho in seed {
+            poll(cx)?;
+            if !positive(rho) || ((rho-rho0)/rho0).abs() > problem.maximum_relative_density_departure {
+                return Err(NaturalCirculationError::InvalidInput("warm density exceeds the Boussinesq allowance"));
+            }
+            densities.push(rho);
+        }
+    } else {
+        for (branch, &temperature) in initial_branch_temperatures_k.iter().enumerate() {
+            densities.push(sampler.at(cx, branch, temperature)?);
+        }
     }
     let air = TransportAir { density: Density::new(rho0),
         specific_heat_j_kg_k: problem.reference.specific_heat_j_kg_k() };
@@ -440,6 +466,8 @@ fn finite(value: f64) -> Result<f64, NaturalCirculationError> {
 fn poll(cx: &Cx<'_>) -> Result<(), NaturalCirculationError> {
     cx.checkpoint().map_err(|_| NaturalCirculationError::Interrupted)
 }
+
+pub mod response;
 
 #[cfg(test)]
 mod tests;
