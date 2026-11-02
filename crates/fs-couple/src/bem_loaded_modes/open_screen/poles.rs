@@ -1,8 +1,9 @@
 //! Loaded open-shell modes in the original displacement/pressure-jump equations.
 //!
 //! The boundary's analytic cosine-plus-Gram continuation matches its original
-//! real-frequency discretization. A contour retains the full pressure block;
-//! it does not count zeros of the meromorphic impedance H^-1 G. Fixed balancing,
+//! real-frequency discretization. A contour retains the full pressure block and
+//! every original Maxwell state; neither H nor a material denominator is
+//! eliminated into a meromorphic spectral quotient. Fixed balancing,
 //! original-row audits and both nonlinear eigenvalue algorithms are shared with
 //! the existing closed-body owner. These are poles of the selected finite
 //! operator, not a continuum completeness or time-domain causality certificate.
@@ -21,7 +22,8 @@ use fs_la::nonlinear_eig::{
 pub struct OpenScreenResonanceOptions {
     /// Original H/H' assembly, both half-planes, with a centered growth bound.
     pub boundary: ScreenComplexLimits,
-    /// Includes EVERY source coordinate and interior pressure-jump unknown.
+    /// Includes EVERY source coordinate, interior pressure-jump unknown and
+    /// retained Maxwell state: d = modes + pressure_unknowns + memory_count.
     pub maximum_dimension: usize,
     /// Conservative callback/seed/audit payload:
     /// 224*d^2 + 512*d + 8*m*p + 16*vertices + 24*m bytes.
@@ -37,18 +39,20 @@ pub struct OpenScreenResonanceOptions {
     /// separately bounded evaluation when this immutable pencil is prepared.
     pub maximum_operator_evaluations: usize,
     /// Logical output ceiling, checked BEFORE native iterations: one result for
-    /// Newton, at most `probe_columns` for Beyn. Includes full nodal jump arrays,
-    /// not just the interior pressure unknowns. No partial spectrum is returned.
+    /// Newton, at most `probe_columns` for Beyn. Includes full nodal jump arrays
+    /// and every material state. No partial spectrum is returned.
     pub maximum_result_bytes: usize,
     /// Positive real [rad/s] reference for fixed two-sided balancing. Changing
     /// the spectral point never changes the balance or source coordinates.
     pub reference_angular_frequency_rad_s: f64,
-    /// Original mechanical and boundary componentwise backward error, in (0,1).
+    /// Original mechanical, boundary and memory componentwise backward error,
+    /// in (0,1).
     pub physical_residual_tolerance: f64,
 }
 
-/// Source-bound full operator on [modal displacement, interior pressure jump].
-/// The source, surface quadrature, full K/C and exact P1 work pairing are fixed.
+/// Source-bound operator on [modal displacement, interior pressure jump, memory].
+/// The source, full K/C, original Maxwell arms, surface quadrature and exact P1
+/// work pairing are fixed. Equal-time material histories are never merged.
 pub struct OpenScreenResonancePencil<'p, 's> {
     prepared: &'p PreparedOpenScreenModes<'s>,
     /// Mode-major exact weak rows G_mode[pressure_unknown].
@@ -68,8 +72,12 @@ pub struct OpenScreenModePole {
     pub modal_displacement: Vec<C64>,
     /// Complete original acoustic vertex order, including exact free-edge zeros.
     pub pressure_jump_pa: Vec<C64>,
+    /// Original arm order, e_j = c_j.q - z_j [sqrt(J)]. The corresponding
+    /// real-state spring energy is e_j^2/2; complex pole amplitudes are arbitrary.
+    pub elastic_memory_sqrt_j: Vec<C64>,
     pub mechanical_residual: f64,
     pub boundary_residual: f64,
+    pub memory_residual: f64,
     /// Final native Newton scaled correction and iteration count.
     pub relative_step: f64,
     pub iterations: usize,
@@ -118,14 +126,10 @@ impl<'s> PreparedOpenScreenModes<'s> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<OpenScreenResonancePencil<'p, 's>, BemModesError> {
         poll(&mut cancelled)?;
-        if self.source.memory_count() != 0 {
-            return Err(bad(
-                "open-screen resonance requires retention of all attached material states",
-            ));
-        }
         let (m, p) = (self.source.mode_count(), self.screen.unknowns());
         let d = m
             .checked_add(p)
+            .and_then(|d| d.checked_add(self.source.memory_count()))
             .ok_or_else(|| bad("open resonance dimension overflow"))?;
         let vertices = self.source.surface.vertices().len();
         let bytes = 224 * (d as u128).pow(2)
@@ -195,8 +199,11 @@ impl OpenScreenResonancePencil<'_, '_> {
     pub fn pressure_unknowns(&self) -> usize {
         self.prepared.screen.unknowns()
     }
+    pub fn memory_count(&self) -> usize {
+        self.source().memory_count()
+    }
     pub fn dimension(&self) -> usize {
-        self.mode_count() + self.pressure_unknowns()
+        self.mode_count() + self.pressure_unknowns() + self.memory_count()
     }
     /// Original mode-major exact P1 work rows G, including signed cross terms.
     pub fn velocity_pressure_pairing(&self) -> &[Vec<f64>] {
@@ -286,6 +293,15 @@ impl OpenScreenResonancePencil<'_, '_> {
                 envelope[at] = boundary.matrix[i * p + j].abs();
             }
         }
+        source.memory.add_to_pencil(
+            omega,
+            m,
+            p,
+            &mut matrix,
+            &mut derivative,
+            &mut envelope,
+            cancelled,
+        )?;
         if matrix.iter().chain(&derivative).any(|&z| !finite(z))
             || envelope.iter().any(|v| !v.is_finite())
         {
@@ -311,7 +327,9 @@ impl OpenScreenResonancePencil<'_, '_> {
     }
 
     /// Unscaled SI-coordinate matrix and analytic d/domega, in the complete
-    /// [displacement, interior jump] order. Fixed balancing is not applied.
+    /// [displacement, interior jump, elastic memory] order. Fixed balancing is
+    /// not applied. The full pencil is analytic at bare material rates, which
+    /// may still be genuine eigenvalues for mechanically cancelling histories.
     pub fn original_pencil(
         &self,
         omega: C64,
@@ -331,8 +349,11 @@ impl OpenScreenResonancePencil<'_, '_> {
     }
 
     fn admit_result_storage(&self, modes: usize) -> Result<(), BemModesError> {
-        let one =
-            16 * (self.mode_count() as u128 + self.source().surface.vertices().len() as u128) + 256;
+        let one = 16
+            * (self.mode_count() as u128
+                + self.source().surface.vertices().len() as u128
+                + self.memory_count() as u128)
+            + 256;
         let bytes = modes as u128 * (one + 16) + 512;
         if bytes > self.settings.maximum_result_bytes as u128 {
             return Err(bad(
@@ -349,7 +370,7 @@ impl OpenScreenResonancePencil<'_, '_> {
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<OpenScreenModePole, BemModesError> {
         let m = self.mode_count();
-        let mut vector = physical_eigenstate(&pole, &self.column_scales, m)?;
+        let vector = physical_eigenstate(&pole, &self.column_scales, m)?;
         let raw = self.assemble(pole.value, evaluations, cancelled)?;
         let residuals = raw.physical_residuals(
             m,
@@ -364,7 +385,8 @@ impl OpenScreenResonancePencil<'_, '_> {
                 angular_frequency_rad_s: pole.value,
             });
         }
-        let interior = vector.split_off(m);
+        let memory = vector[m + self.pressure_unknowns()..].to_vec();
+        let interior = &vector[m..m + self.pressure_unknowns()];
         let mut jump = Vec::with_capacity(self.pressure_dof_map().len());
         for (vertex, &dof) in self.pressure_dof_map().iter().enumerate() {
             if vertex % 256 == 0 {
@@ -375,19 +397,23 @@ impl OpenScreenResonancePencil<'_, '_> {
         poll(cancelled)?;
         Ok(OpenScreenModePole {
             angular_frequency_rad_s: pole.value,
-            modal_displacement: vector,
+            modal_displacement: vector[..m].to_vec(),
             pressure_jump_pa: jump,
+            elastic_memory_sqrt_j: memory,
             mechanical_residual: residuals[0],
             boundary_residual: residuals[1],
+            memory_residual: residuals[2],
             relative_step: pole.relative_step,
             iterations: pole.iterations,
         })
     }
 
     /// Local simple-pole refinement by the existing bordered Newton owner.
-    /// Only the initializer eliminates H to construct pressure from the supplied
-    /// modal seed. A singular isolated H refuses this initializer; contour
-    /// discovery below retains H and needs no isolated boundary inverse.
+    /// Only the initializer eliminates H and the scalar material equations to
+    /// seed the full state from the supplied motion. A singular isolated H or
+    /// exact bare material rate refuses this initializer. Contour discovery
+    /// retains all states and needs neither inverse; it also admits modes with
+    /// zero motion and nonzero mechanically cancelling material histories.
     pub fn resonance_pole(
         &self,
         omega0: C64,
@@ -427,8 +453,13 @@ impl OpenScreenResonancePencil<'_, '_> {
             .map_err(BemModesError::SeedSolve)?;
         lu.solve_with_cancel(&mut pressure, &mut cancelled)
             .map_err(BemModesError::SeedSolve)?;
+        let memory = self
+            .source()
+            .memory
+            .seed(omega0, modal_seed, &mut cancelled)?;
         let mut seed = modal_seed.to_vec();
         seed.extend(pressure);
+        seed.extend(memory);
         for (value, &scale) in seed.iter_mut().zip(&self.column_scales) {
             *value = divide(*value, scale);
         }
@@ -459,10 +490,12 @@ impl OpenScreenResonancePencil<'_, '_> {
         )
     }
 
-    /// Discover roots of the complete holomorphic pressure/structure pencil.
+    /// Discover roots of the complete holomorphic pressure/structure/material pencil.
     /// The ENTIRE ellipse and its interior must fit the original complex band
     /// and centered growth chart, using conservative geometric bounds before
-    /// any contour solve. No pressure DOF or zero-opening mode is discarded.
+    /// any contour solve. No pressure DOF, zero-opening mode or material
+    /// history is discarded. Crossing a bare Maxwell rate does not subtract a
+    /// meromorphic pole from the argument count.
     ///
     /// Native nested moments, argument count, conditioning and final original
     /// physical-row checks remain separate evidence. Physical identification
