@@ -20,8 +20,9 @@
 //! thresholds and slot maps ARE fold structures, so continuation is
 //! the product, not a luxury.
 //!
-//! Determinism: fixed sample grids, fixed iteration caps, direct
-//! trigonometric AFT sums through `fs_math::det`, no RNG, canonical
+//! Determinism: bounded deterministic sample-grid refinement, fixed
+//! iteration caps, prepared trigonometric AFT sums through `fs_math::det`,
+//! no RNG, canonical
 //! unknown ordering (DC, then per-harmonic Re/Im pairs, state-major).
 //! Quasi-periodic drift (torus birth) is a NAMED refusal in v1, never
 //! a wrong answer.
@@ -32,6 +33,11 @@ use fs_math::c64::C64;
 use fs_math::det;
 
 const TAU: f64 = core::f64::consts::TAU;
+
+// Four successively finer quadratures bound sampling work independently of
+// Newton's iteration cap. The last grid is a verification grid, not an
+// unchecked fallback.
+const MAX_AFT_REFINEMENTS: usize = 4;
 
 /// Typed refusals.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +56,16 @@ pub enum OrbitError {
         iterations: usize,
         /// Per-iteration residual norms.
         trace: Vec<f64>,
+    },
+    /// The retained nonlinear Fourier balance remains sampling-dependent
+    /// after the bounded AFT refinement ladder.
+    SamplingUnresolved {
+        /// Samples on the finest evaluated grid.
+        samples: usize,
+        /// Residual norm on that grid.
+        residual: f64,
+        /// Norm of the change in retained balance coefficients.
+        defect: f64,
     },
     /// The HB/shooting Jacobian became singular.
     SingularJacobian,
@@ -85,6 +101,14 @@ impl core::fmt::Display for OrbitError {
             } => write!(
                 f,
                 "FS-ORBIT-STALL: residual {residual:.3e} after {iterations} iterations"
+            ),
+            OrbitError::SamplingUnresolved {
+                samples,
+                residual,
+                defect,
+            } => write!(
+                f,
+                "FS-ORBIT-SAMPLING: {samples} samples, residual {residual:.3e}, defect {defect:.3e}"
             ),
             OrbitError::SingularJacobian => write!(f, "FS-ORBIT-SINGULAR: Jacobian factorization"),
             OrbitError::ContinuationExhausted { steps } => {
@@ -165,7 +189,10 @@ pub enum HbAnchor {
 /// Fixed solver budgets (deterministic; exhaustion is a typed refusal).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HbBudget {
-    /// Harmonic truncation `N` (DC + N complex harmonics).
+    /// Harmonic truncation `N` (DC + N complex harmonics). Sampling starts
+    /// at `(4N+4).next_power_of_two()` and checks successively finer
+    /// `2m+1` grids, with at most four refinements. Harmonic truncation
+    /// stays fixed; unresolved quadrature returns `SamplingUnresolved`.
     pub harmonics: usize,
     /// Newton iteration cap.
     pub max_newton: usize,
@@ -199,10 +226,17 @@ pub struct HbOrbit {
     /// Coefficients: `coeffs[k][n]` is `X_n` of state `k` (`n = 0` is
     /// DC, real part only meaningful there).
     pub coeffs: Vec<Vec<C64>>,
-    /// Per-iteration residual norms (the disclosed log).
+    /// Per-iteration residual norms; the accepted final entry is measured
+    /// on the finer verification grid.
     pub residual_trace: Vec<f64>,
-    /// Final residual norm.
+    /// Final residual norm on the finer verification grid, including the
+    /// anchor/corrector equation when present.
     pub residual: f64,
+    /// Number of AFT samples used for the final independent grid check.
+    pub aft_samples: usize,
+    /// Measured norm of the retained balance's change between the solving
+    /// and verification grids. This is not a rigorous aliasing bound.
+    pub sampling_defect: f64,
 }
 
 impl HbOrbit {
@@ -274,53 +308,119 @@ impl Packing {
     }
 }
 
-/// The HB residual: for each harmonic `n`, `P(i n omega) X_n - G_n`,
-/// with `G` the AFT transform of the island over `m` samples.
+/// Prepared quadrature and reusable state/RHS storage for AFT. The basis
+/// depends only on phase, so even an unknown omega does not invalidate it.
+struct AftWorkspace {
+    samples: usize,
+    refinement: usize,
+    cosine: Vec<f64>,
+    sine: Vec<f64>,
+    xs: Vec<f64>,
+    gs: Vec<f64>,
+    island: Vec<f64>,
+}
+
+impl AftWorkspace {
+    fn new(pack: &Packing) -> Result<Self, OrbitError> {
+        let samples = pack
+            .n_harm
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(4))
+            .and_then(usize::checked_next_power_of_two)
+            .ok_or(OrbitError::BadParameter {
+                what: "AFT sample count overflows",
+            })?;
+        Self::with_samples(pack, samples, 0)
+    }
+
+    fn with_samples(pack: &Packing, samples: usize, refinement: usize) -> Result<Self, OrbitError> {
+        let basis_len = samples
+            .checked_mul(pack.n_harm)
+            .ok_or(OrbitError::BadParameter {
+                what: "AFT basis size overflows",
+            })?;
+        let state_len = samples
+            .checked_mul(pack.d)
+            .ok_or(OrbitError::BadParameter {
+                what: "AFT state size overflows",
+            })?;
+        let mut cosine = Vec::with_capacity(basis_len);
+        let mut sine = Vec::with_capacity(basis_len);
+        for j in 0..samples {
+            let theta = TAU * j as f64 / samples as f64;
+            for n in 1..=pack.n_harm {
+                let (s, c) = det::sin_cos(n as f64 * theta);
+                cosine.push(c);
+                sine.push(s);
+            }
+        }
+        Ok(Self {
+            samples,
+            refinement,
+            cosine,
+            sine,
+            xs: vec![0.0; state_len],
+            gs: vec![0.0; state_len],
+            island: vec![0.0; pack.d],
+        })
+    }
+
+    fn finer(&self, pack: &Packing) -> Result<Self, OrbitError> {
+        // An odd grid avoids sharing every alias of the power-of-two grid.
+        // Agreement of finite grids is still only a measured convergence check.
+        let samples = self
+            .samples
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1))
+            .ok_or(OrbitError::BadParameter {
+                what: "AFT refinement size overflows",
+            })?;
+        Self::with_samples(pack, samples, self.refinement + 1)
+    }
+}
+
+/// The HB residual: for each harmonic n, P(i n omega) X_n - G_n.
+/// Basis tables and sample buffers are reused across Newton/Jacobian calls.
 fn hb_residual<P: OrbitProblem>(
     problem: &P,
     pack: &Packing,
     u: &[f64],
     omega_fixed: f64,
+    aft: &mut AftWorkspace,
     out: &mut [f64],
 ) {
     let d = pack.d;
     let n_harm = pack.n_harm;
     let omega = pack.omega_slot.map_or(omega_fixed, |s| u[s]);
-    let m = (4 * n_harm + 4).next_power_of_two();
-    // Synthesize samples.
-    let mut xs = vec![0.0f64; m * d];
+    let m = aft.samples;
     for j in 0..m {
-        let theta = TAU * j as f64 / m as f64;
         for k in 0..d {
             let mut x = u[pack.re_index(0, k)];
             for n in 1..=n_harm {
-                let a = n as f64 * theta;
+                let i = j * n_harm + n - 1;
                 x += 2.0
-                    * (u[pack.re_index(n, k)] * det::cos(a) - u[pack.im_index(n, k)] * det::sin(a));
+                    * (u[pack.re_index(n, k)] * aft.cosine[i]
+                        - u[pack.im_index(n, k)] * aft.sine[i]);
             }
-            xs[j * d + k] = x;
+            aft.xs[j * d + k] = x;
         }
     }
-    // Island evaluation per sample.
-    let mut gs = vec![0.0f64; m * d];
-    let mut buf = vec![0.0f64; d];
     let period = if omega > 0.0 { TAU / omega } else { f64::NAN };
+    aft.island.fill(0.0);
     for j in 0..m {
         let t = period * j as f64 / m as f64;
-        problem.island(t, &xs[j * d..(j + 1) * d], &mut buf);
-        gs[j * d..(j + 1) * d].copy_from_slice(&buf);
+        problem.island(t, &aft.xs[j * d..(j + 1) * d], &mut aft.island);
+        aft.gs[j * d..(j + 1) * d].copy_from_slice(&aft.island);
     }
-    // Analysis: G_n = (1/m) sum_j g_j e^{-i n theta_j}.
-    // Balance rows in the canonical packing order.
+    // P(0) is shared by all state rows. Rebuild once per residual because
+    // continuation is allowed to change the problem's physical parameter.
+    let p0 = problem.port(C64::new(0.0, 0.0));
     for k in 0..d {
-        // DC row.
         let mut g0 = 0.0;
         for j in 0..m {
-            g0 += gs[j * d + k];
+            g0 += aft.gs[j * d + k];
         }
         g0 /= m as f64;
-        // P(0) X_0 - G_0 (real part; the DC port row).
-        let p0 = problem.port(C64::new(0.0, 0.0));
         let mut px = C64::new(0.0, 0.0);
         for kk in 0..d {
             px = px + p0[k * d + kk].scale(u[pack.re_index(0, kk)]);
@@ -328,13 +428,12 @@ fn hb_residual<P: OrbitProblem>(
         out[pack.re_index(0, k)] = px.re - g0;
     }
     for n in 1..=n_harm {
-        let s = C64::new(0.0, n as f64 * omega);
-        let p = problem.port(s);
+        let p = problem.port(C64::new(0.0, n as f64 * omega));
         for k in 0..d {
             let mut gn = C64::new(0.0, 0.0);
             for j in 0..m {
-                let a = n as f64 * TAU * j as f64 / m as f64;
-                gn = gn + C64::new(det::cos(a), -det::sin(a)).scale(gs[j * d + k]);
+                let i = j * n_harm + n - 1;
+                gn = gn + C64::new(aft.cosine[i], -aft.sine[i]).scale(aft.gs[j * d + k]);
             }
             gn = gn.scale(1.0 / m as f64);
             let mut px = C64::new(0.0, 0.0);
@@ -346,6 +445,28 @@ fn hb_residual<P: OrbitProblem>(
             out[pack.im_index(n, k)] = px.im - gn.im;
         }
     }
+}
+
+/// Compare the retained balance with a separately sampled, finer quadrature.
+fn check_sampling<P: OrbitProblem>(
+    problem: &P,
+    pack: &Packing,
+    u: &[f64],
+    omega_fixed: f64,
+    aft: &AftWorkspace,
+    residual: &[f64],
+) -> Result<(AftWorkspace, Vec<f64>, f64), OrbitError> {
+    let mut finer = aft.finer(pack)?;
+    let mut checked = vec![0.0; pack.coeff_len()];
+    hb_residual(problem, pack, u, omega_fixed, &mut finer, &mut checked);
+    let defect = det::sqrt(
+        checked
+            .iter()
+            .zip(residual)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>(),
+    );
+    Ok((finer, checked, defect))
 }
 
 fn norm(v: &[f64]) -> f64 {
@@ -496,6 +617,7 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         });
     }
     let nn = free.len();
+    let mut aft = AftWorkspace::new(&pack)?;
     let mut res = vec![0.0f64; pack.coeff_len()];
     let mut trace = Vec::new();
     let oscillatory_norm = |u: &[f64]| norm(&u[d..pack.coeff_len()]);
@@ -521,7 +643,7 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         })
     };
     for iter in 0..budget.max_newton {
-        hb_residual(problem, &pack, &u, omega_fixed, &mut res);
+        hb_residual(problem, &pack, &u, omega_fixed, &mut aft, &mut res);
         let mut r: Vec<f64> = kept.iter().map(|&i| res[i]).collect();
         if amplitude_row.is_some() {
             r.push(amp_residual(&u));
@@ -534,6 +656,27 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         // ~1600 stretched the scale).
         let scale = norm(&u[..pack.coeff_len()]).max(1.0);
         if rn < budget.tolerance * scale {
+            let (finer, checked, sampling_defect) =
+                check_sampling(problem, &pack, &u, omega_fixed, &aft, &res)?;
+            let mut checked_sq: f64 = kept.iter().map(|&i| checked[i] * checked[i]).sum();
+            if amplitude_row.is_some() {
+                let ar = amp_residual(&u);
+                checked_sq += ar * ar;
+            }
+            let checked_norm = det::sqrt(checked_sq);
+            if !(checked_norm < budget.tolerance * scale
+                && sampling_defect < budget.tolerance * scale)
+            {
+                if finer.refinement >= MAX_AFT_REFINEMENTS {
+                    return Err(OrbitError::SamplingUnresolved {
+                        samples: finer.samples,
+                        residual: checked_norm,
+                        defect: sampling_defect,
+                    });
+                }
+                aft = finer;
+                continue;
+            }
             // Only an unknown-period solve must exclude equilibrium:
             // a forced response can be DC, small, or contain no fundamental.
             // Count every non-DC harmonic when detecting autonomous collapse.
@@ -546,11 +689,14 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
             } else {
                 omega_fixed
             };
+            *trace.last_mut().expect("current iteration") = checked_norm;
             return Ok(HbOrbit {
                 omega,
                 coeffs,
                 residual_trace: trace,
-                residual: rn,
+                residual: checked_norm,
+                aft_samples: finer.samples,
+                sampling_defect,
             });
         }
         // Forward-difference Jacobian over the free unknowns.
@@ -562,7 +708,7 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
             let h = 1.0e-7 * u[ui].abs().max(1.0);
             let saved = u[ui];
             u[ui] = saved + h;
-            hb_residual(problem, &pack, &u, omega_fixed, &mut res2);
+            hb_residual(problem, &pack, &u, omega_fixed, &mut aft, &mut res2);
             let m1 = deflate(&u);
             if amplitude_row.is_some() {
                 jac[kept.len() * nn + col] = (amp_residual(&u) - amp0) / h;
@@ -604,7 +750,7 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
             for (col, &ui) in free.iter().enumerate() {
                 u_try[ui] -= alpha * step[col];
             }
-            hb_residual(problem, &pack, &u_try, omega_fixed, &mut trial);
+            hb_residual(problem, &pack, &u_try, omega_fixed, &mut aft, &mut trial);
             let mut tn: f64 = kept.iter().map(|&i| trial[i] * trial[i]).sum();
             if amplitude_row.is_some() {
                 let ar = amp_residual(&u_try);
@@ -950,9 +1096,10 @@ pub fn continue_branch<P: ContinuableProblem>(
     tangent[nc] = dir;
     let mut step = budget.initial_step;
     let mut residual = vec![0.0f64; nc];
-    let eval = |problem: &mut P, z: &[f64], out: &mut [f64]| {
+    let mut aft = AftWorkspace::new(&pack)?;
+    let eval = |problem: &mut P, z: &[f64], aft: &mut AftWorkspace, out: &mut [f64]| {
         problem.set_parameter(z[nc]);
-        hb_residual(problem, &pack, &z[..nc], omega_of(z[nc]), out);
+        hb_residual(problem, &pack, &z[..nc], omega_of(z[nc]), aft, out);
     };
     for _ in 0..budget.max_steps {
         // Reached the far end of the parameter window?
@@ -963,9 +1110,10 @@ pub fn continue_branch<P: ContinuableProblem>(
         // Predictor.
         let mut zp: Vec<f64> = z.iter().zip(&tangent).map(|(a, t)| a + step * t).collect();
         // Corrector: bordered Newton.
-        let mut converged = false;
+        let mut converged = None;
+        let mut residual_trace = Vec::new();
         for _ in 0..budget.hb.max_newton {
-            eval(problem, &zp, &mut residual);
+            eval(problem, &zp, &mut aft, &mut residual);
             let mut r = residual.clone();
             let arc: f64 = zp
                 .iter()
@@ -976,10 +1124,29 @@ pub fn continue_branch<P: ContinuableProblem>(
                 - step;
             r.push(arc);
             let rn = norm(&r);
+            residual_trace.push(rn);
             let scale = norm(&zp[..nc]).max(1.0);
             if rn < budget.hb.tolerance * scale {
-                converged = true;
-                break;
+                let (finer, checked, defect) =
+                    check_sampling(problem, &pack, &zp[..nc], omega_of(zp[nc]), &aft, &residual)?;
+                let checked_norm =
+                    det::sqrt(checked.iter().map(|v| v * v).sum::<f64>() + arc * arc);
+                if checked_norm < budget.hb.tolerance * scale
+                    && defect < budget.hb.tolerance * scale
+                {
+                    *residual_trace.last_mut().expect("current corrector") = checked_norm;
+                    converged = Some((checked_norm, finer.samples, defect));
+                    break;
+                }
+                if finer.refinement >= MAX_AFT_REFINEMENTS {
+                    return Err(OrbitError::SamplingUnresolved {
+                        samples: finer.samples,
+                        residual: checked_norm,
+                        defect,
+                    });
+                }
+                aft = finer;
+                continue;
             }
             let mut jac = vec![0.0f64; nz * nz];
             let mut r2 = vec![0.0f64; nc];
@@ -987,14 +1154,14 @@ pub fn continue_branch<P: ContinuableProblem>(
                 let h = 1.0e-7 * zp[col].abs().max(1.0);
                 let saved = zp[col];
                 zp[col] = saved + h;
-                eval(problem, &zp, &mut r2);
+                eval(problem, &zp, &mut aft, &mut r2);
                 zp[col] = saved;
                 for row in 0..nc {
                     jac[row * nz + col] = (r2[row] - residual[row]) / h;
                 }
                 jac[nc * nz + col] = tangent[col];
             }
-            eval(problem, &zp, &mut residual);
+            eval(problem, &zp, &mut aft, &mut residual);
             let Ok(factorized) = lu(&jac, nz) else {
                 return Err(OrbitError::SingularJacobian);
             };
@@ -1004,7 +1171,7 @@ pub fn continue_branch<P: ContinuableProblem>(
                 zp[col] -= delta[col];
             }
         }
-        if converged {
+        if let Some((final_residual, aft_samples, sampling_defect)) = converged {
             let new_tangent: Vec<f64> = {
                 let diff: Vec<f64> = zp.iter().zip(z.iter()).map(|(a, b)| a - b).collect();
                 let nrm = norm(&diff).max(1.0e-300);
@@ -1018,8 +1185,10 @@ pub fn continue_branch<P: ContinuableProblem>(
                 orbit: HbOrbit {
                     omega: omega_of(z[nc]),
                     coeffs,
-                    residual_trace: vec![],
-                    residual: 0.0,
+                    residual_trace,
+                    residual: final_residual,
+                    aft_samples,
+                    sampling_defect,
                 },
                 step,
             });

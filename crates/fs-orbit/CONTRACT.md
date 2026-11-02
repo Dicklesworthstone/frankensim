@@ -26,7 +26,8 @@ API — never instrument-shaped.
   enforced and the phase stays free, so `omega` is
   phase-independent).
 - `HbBudget` / `solve_hb` / `solve_hb_seeded` -> `HbOrbit` (omega,
-  canonical coefficients, per-iteration residual trace).
+  canonical coefficients, per-iteration residual trace, verified residual,
+  final verification sample count, measured sampling defect).
 - `ShootBudget` / `solve_shooting` -> `ShootOrbit` (period, orbit
   point, Floquet multipliers from the forward-differenced monodromy
   through the fs-la complex eigensolver).
@@ -37,10 +38,23 @@ API — never instrument-shaped.
 
 ## Invariants
 
-- Harmonic truncation `N` is fixed, disclosed structure (X-Struct);
-  AFT uses `(4N+4).next_power_of_two()` samples via direct
-  det-routed trigonometric sums (convention-proof, no FFT scaling
-  ambiguity).
+- Harmonic truncation `N` is fixed, disclosed structure (X-Struct).
+  AFT starts with `m = (4N+4).next_power_of_two()` samples and uses
+  prepared det-routed trigonometric sums. Basis tables and state/RHS
+  buffers are reused through Newton and finite-difference Jacobian
+  evaluations; the DC port is evaluated once per residual.
+- A converged candidate is re-evaluated on a finer `2m+1` grid.
+  Both its residual and the norm of the change in retained balance
+  coefficients must meet the same tolerance and coefficient scaling.
+  Otherwise Newton resumes on the finer grid. There are at most four
+  refinements; the fourth is a verification grid. Persistent disagreement
+  returns `SamplingUnresolved`, and refinements also consume the existing
+  Newton iteration budget.
+- This sampling gate also applies to every continuation corrector.
+  Accepted points retain their actual residual trace and final verified
+  residual (including the arclength equation), never a fabricated zero.
+  `aft_samples` records the final verification grid and
+  `sampling_defect` records the measured retained-coefficient change.
 - Canonical unknown ordering: DC block, then per-harmonic
   `Re`/`Im` blocks, state-major; the packing is the seed format.
 - A converged residual below the relative tolerance is the ONLY
@@ -59,7 +73,8 @@ API — never instrument-shaped.
 ## Error model
 
 Typed `OrbitError`: `BadParameter`, `NewtonStalled` (with the full
-per-iteration residual trace), `SingularJacobian`,
+per-iteration residual trace), `SamplingUnresolved` (finest sample count,
+residual and measured defect), `SingularJacobian`,
 `ContinuationExhausted`, `TrivialCollapse`, `TorusSuspected` (a
 non-trivial unit-circle Floquet pair with nonzero angle:
 quasi-periodic drift is a NAMED no-claim in v1, never a wrong
@@ -67,7 +82,7 @@ answer), forwarded `Eigen`.
 
 ## Determinism class
 
-Deterministic: fixed grids, fixed iteration caps and step policies,
+Deterministic: bounded deterministic grid refinement, fixed iteration caps and step policies,
 det-routed transcendentals, no RNG, no time dependence; bitwise
 repeatability is a conformance case.
 
@@ -105,7 +120,12 @@ incommensurate two-center fixture; bitwise determinism.
 The G1/G3 analytic regressions in `tests/harmonic_balance.rs` compare
 higher-harmonic forced oscillator coefficients (including their phase and
 velocity) with the closed-form transfer function, exercise small and DC
-forced responses, and retain autonomous-equilibrium refusal.
+forced responses, and retain autonomous-equilibrium refusal. A seventh-order
+nonlinear spring exposes the old eight-point alias (0.9968112456 amplitude
+instead of the retained Galerkin answer 1.0); an independent shifted
+65-point quadrature checks the corrected coefficients. Further regressions
+verify truthful continuation residuals against the analytic scalar balance
+and a bounded named refusal for persistently unresolved forcing.
 
 ## No-claim boundaries
 
@@ -115,8 +135,14 @@ forced responses, and retain autonomous-equilibrium refusal.
   successor.
 - Collocation is described by the I09 slot but not implemented here;
   shooting is the second method.
-- No a-priori truncation-error bound: `N` is disclosed structure and
-  the shooting cross-check is the truncation's falsifier.
+- No a-priori truncation-error bound: `N` remains disclosed structure.
+  Sampling refinement improves the retained Galerkin balance, not the
+  number of harmonics or the continuum model. Agreement between finite
+  grids is a measured convergence check, not a rigorous universal aliasing
+  bound: sufficiently high frequencies can alias on both grids. Explicit
+  input bandwidth must be admitted by domain adapters; shooting is an
+  independent cross-check only for problems with an equivalent time-domain
+  formulation.
 - The monodromy is forward-differenced, not a consistent tangent;
   the I09 lattice's consistent-tangent element is a successor.
 - Grazing/hybrid (non-smooth) islands are out of scope in v1.
