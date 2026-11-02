@@ -596,9 +596,70 @@ impl SpatialConductionThermalNetwork<'_> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialConductionCircuitEnthalpyCandidate<'t, C>, Error> {
         let cancel = RefCell::new(cancelled);
-        check(&cancel)?;
+        self.admit_circuit_step(
+            thermal,
+            target_s,
+            circuit,
+            material_resistors.len(),
+            assembly,
+            controls,
+            initial_energy_increments_j,
+            &cancel,
+        )?;
+        let network = MaterialNetwork {
+            cells: self.cells,
+            resistors: material_resistors,
+            links: self.links,
+        };
+        let bases = circuit
+            .material_resistors
+            .iter()
+            .map(|resistor| (resistor.branch, resistor.conductor.source_basis()))
+            .collect::<Vec<_>>();
+        let prepared = network
+            .prepare_with_bases(thermal, &bases, || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        let destinations = material_resistors
+            .iter()
+            .map(|resistor| resistor.destination)
+            .collect::<Vec<_>>();
+        self.step_circuit_resolved_candidate(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            &destinations,
+            contact_bindings,
+            response,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            |trial| {
+                prepared
+                    .resolve(trial, || (*cancel.borrow_mut())())
+                    .map_err(material)
+            },
+            |sample| sample,
+            &cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_circuit_step<C: SpatialConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        target_s: f64,
+        circuit: &SpatialConductionCircuit<C>,
+        resistor_count: usize,
+        assembly: WeightedAssemblyLimits,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<(), Error> {
+        check(cancel)?;
         if thermal.time_s() != circuit.time_s
-            || material_resistors.len() != circuit.material_resistors.len()
+            || resistor_count != circuit.material_resistors.len()
             || !controls.circuit.energy_tolerance_j.is_finite()
             || controls.circuit.energy_tolerance_j <= 0.0
             || !controls.circuit.power_tolerance_w.is_finite()
@@ -616,30 +677,57 @@ impl SpatialConductionThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
         )?;
-        let network = MaterialNetwork {
-            cells: self.cells,
-            resistors: material_resistors,
-            links: self.links,
-        };
-        let bases = circuit
-            .material_resistors
-            .iter()
-            .map(|resistor| (resistor.branch, resistor.conductor.source_basis()))
-            .collect::<Vec<_>>();
-        let prepared = network
-            .prepare_with_bases(thermal, &bases, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        if !material_resistors.is_empty() {
-            let accepted = prepared
-                .resolve(thermal, || (*cancel.borrow_mut())())
-                .map_err(material)?;
+        Ok(())
+    }
+
+    // Bare Fourier and complete heat assemblies share the same native circuit
+    // proposal, accepted source checks and exactly-once local heat routing.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::circuit_enthalpy::conduction) fn step_circuit_resolved_candidate<
+        't,
+        C: SpatialConductorMaterial,
+        S,
+        E: From<ConductionThermalError>,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &SpatialConductionCircuit<C>,
+        ports: &[f64],
+        destinations: &[crate::circuit_enthalpy::ResistorCell],
+        contact_bindings: &[ConductionContactThermal<'_>],
+        response: SpatialConductanceControls,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'t>,
+        ) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<SpatialConductionCircuitEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
+        self.admit_circuit_step(
+            thermal,
+            target_s,
+            circuit,
+            destinations.len(),
+            assembly,
+            controls,
+            initial_energy_increments_j,
+            cancel,
+        )
+        .map_err(map_conduction_error)?;
+        if !destinations.is_empty() {
+            let accepted = resolve(thermal)?;
             for original in &circuit.material_resistors {
-                check(&cancel)?;
+                check(cancel).map_err(map_conduction_error)?;
                 let next = accepted
                     .resistors
                     .iter()
                     .find(|resistor| resistor.branch == original.branch)
-                    .ok_or_else(|| invalid("accepted material-resistor branch is absent"))?;
+                    .ok_or_else(|| invalid("accepted material-resistor branch is absent"))
+                    .map_err(map_conduction_error)?;
                 let (a, b) = (&original.conductor, &next.conductor);
                 if a.source_basis() != b.source_basis()
                     || a.source_key() != b.source_key()
@@ -647,16 +735,12 @@ impl SpatialConductionThermalNetwork<'_> {
                     || a.area_m2().to_bits() != b.area_m2().to_bits()
                     || !same_material(a.material(), b.material())
                 {
-                    return Err(invalid(
+                    return Err(map_conduction_error(invalid(
                         "accepted graph-resistor geometry and sources must match its actual caloric state",
-                    ));
+                    )));
                 }
             }
         }
-        let destinations = material_resistors
-            .iter()
-            .map(|resistor| resistor.destination)
-            .collect::<Vec<_>>();
         let (thermal, circuit, report) = self.step_driver_candidate_with_geometry(
             thermal,
             target_s,
@@ -665,33 +749,31 @@ impl SpatialConductionThermalNetwork<'_> {
             assembly,
             controls,
             initial_energy_increments_j,
-            |trial| {
-                prepared
-                    .resolve(trial, || (*cancel.borrow_mut())())
-                    .map_err(material)
-            },
-            |sample| sample,
+            resolve,
+            sample,
             None,
             |_| Ok(None),
             &[],
             |_| Ok(Vec::new()),
-            &destinations,
+            destinations,
             |problem, resistors, contacts, remaining| {
-                circuit.trial(
-                    problem,
-                    resistors,
-                    target_s,
-                    ports,
-                    response,
-                    field_controls,
-                    controls.circuit,
-                    contacts,
-                    remaining,
-                    &cancel,
-                )
+                circuit
+                    .trial(
+                        problem,
+                        resistors,
+                        target_s,
+                        ports,
+                        response,
+                        field_controls,
+                        controls.circuit,
+                        contacts,
+                        remaining,
+                        cancel,
+                    )
+                    .map_err(map_conduction_error)
             },
             |candidate| &candidate.step.spatial,
-            &cancel,
+            cancel,
         )?;
         Ok(SpatialConductionCircuitEnthalpyCandidate {
             thermal,

@@ -492,3 +492,6 @@ fn refused_surface_trials_and_cancellation_keep_field_and_enthalpy_unchanged() {
         },
     );
 }
+
+#[path = "heat/circuit.rs"]
+mod circuit;

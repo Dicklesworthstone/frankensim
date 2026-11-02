@@ -132,6 +132,106 @@ pub fn step_spatial_conduction_candidate<
     Ok(next)
 }
 
+/// Evolve the full multi-electrode tetrahedral conductor, native fixed C/L
+/// history and complete heat assembly at one finite-enthalpy endpoint.
+///
+/// Original scalar or principal conductivity, electrical contacts and ordinary
+/// graph resistors refresh from the SAME proposed material temperature/phase
+/// as thermal interfaces, layers, baths, finite links and enclosure radiation.
+/// Each native midpoint field/contact/branch loss enters its original receiving
+/// volume once. Every trial starts from the accepted charges and fluxes.
+///
+/// Graph-resistor heat routes belong to the prepared assembly and must remain
+/// disjoint from the field's receiving volumes. Spatial contacts retain their
+/// explicit two-sided sources and heat partition. Graph series contacts refuse
+/// because this circuit has no owner for their additional work. Source-dependent
+/// C/L still requires the original reversible field-storage owner.
+///
+/// The complete typed heat sample and failures are retained. Reciprocal finite
+/// links and enclosure radiation remain internal: external non-electrical heat
+/// is `report.non_electrical_heat_j - dt * report.source.as_ref().radiation_net_power_w()`.
+/// Original closed-enclosure balance, source domains, budgets, event cuts and
+/// cancellation apply before either history is published. Geometry is fixed,
+/// phase support remains confined to admitted charts, thermal boundary sources
+/// must be field-independent, and temporal/spatial refinement is still required.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn step_spatial_conduction_circuit_candidate<
+    't,
+    A: HeatAssembly + ?Sized,
+    C: SpatialConductorMaterial,
+>(
+    heat: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    circuit: &SpatialConductionCircuit<C>,
+    ports: &[f64],
+    contacts: &[contacts::ConductionContactThermal<'_>],
+    regions: &[SpatialConductionRegion],
+    volume_tolerance_m3: f64,
+    response: SpatialConductanceControls,
+    assembly: WeightedAssemblyLimits,
+    field_controls: ConductionControls,
+    controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+) -> Result<
+    SpatialConductionCircuitEnthalpyCandidate<'t, C, A::Sample>,
+    CircuitEnthalpyError<ConductionHeatError<A::Error>>,
+> {
+    let cancel = RefCell::new(|| cx.checkpoint().is_err());
+    check(&cancel).map_err(map_conduction_error)?;
+    let prepared = heat.prepared_heat_network();
+    let bulk = prepared
+        .field_material_network()
+        .map_err(assembly_heat_error)?;
+    prepared
+        .admit_field_independent_boundaries(cx, &[])
+        .map_err(assembly_heat_error)?;
+    let layout = SpatialConductionThermalNetwork {
+        cells: bulk.cells,
+        links: bulk.links,
+        regions,
+        volume_tolerance_m3,
+    };
+    let destinations = prepared.resistor_destinations();
+    let next = layout.step_circuit_resolved_candidate(
+        thermal,
+        target_s,
+        circuit,
+        ports,
+        &destinations,
+        contacts,
+        response,
+        assembly,
+        field_controls,
+        controls,
+        initial_energy_increments_j,
+        |trial| {
+            let coefficients = heat
+                .resolve_heat(cx, trial)
+                .map_err(|error| error.map_source(ConductionHeatError::Heat))?;
+            if !coefficients.contacts.is_empty() {
+                return Err(map_conduction_error(invalid(
+                    "3D finite circuit cannot omit graph series electrical-contact work",
+                )));
+            }
+            Ok(coefficients.bulk)
+        },
+        |sample: &A::Sample| &sample.as_ref().material,
+        &cancel,
+    )?;
+    let report = next.report();
+    closed_balance(
+        target_s - thermal.time_s(),
+        report.total_energy_residual_j,
+        report.source.as_ref(),
+        controls.total_energy_tolerance_j,
+    )
+    .map_err(assembly_heat_error)?;
+    check(&cancel).map_err(map_conduction_error)?;
+    Ok(next)
+}
+
 /// Evolve distributed nonlinear current, native electrical contacts, source
 /// R(T)/C(T)/L(T) and finite caloric storage with any complete [`HeatAssembly`].
 ///

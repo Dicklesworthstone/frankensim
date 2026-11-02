@@ -6,6 +6,7 @@
 mod assembly;
 pub use assembly::{
     ConductionHeatError, step_response_field_circuit_candidate, step_spatial_conduction_candidate,
+    step_spatial_conduction_circuit_candidate,
 };
 
 use super::circuit::response::{
@@ -16,6 +17,7 @@ use super::response::ConductionResponseEnthalpyCandidate;
 use super::spatial::{
     SpatialConductionDrive, SpatialConductionEnthalpyCandidate, SpatialConductionRegion,
     SpatialConductionThermalNetwork,
+    circuit::{SpatialConductionCircuit, SpatialConductionCircuitEnthalpyCandidate},
 };
 use super::*;
 use crate::circuit_enthalpy::contacts::heat::{
@@ -23,7 +25,7 @@ use crate::circuit_enthalpy::contacts::heat::{
 };
 use crate::circuit_enthalpy::{ResistorCell, field_storage::FieldThermalBinding};
 use fs_em::conduction::response::{ConductionResponseControls, PlanarConductionResponse};
-use fs_em::spatial::conduction::SpatialConduction;
+use fs_em::spatial::conduction::{SpatialConductanceControls, SpatialConduction};
 use fs_exec::Cx;
 use fs_material::conductor::spatial::SpatialConductorMaterial;
 
@@ -128,6 +130,57 @@ impl PreparedHeatNetwork<'_, '_> {
             contacts,
             regions,
             volume_tolerance_m3,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+        )
+        .map_err(|error| {
+            error.map_source(|source| match source {
+                ConductionHeatError::Conduction(error) => error,
+                ConductionHeatError::Heat(error) => ConductionThermalError::Heat(error),
+            })
+        })
+    }
+
+    /// Couple this complete thermal-contact/layer/radiation assembly to the
+    /// full multi-electrode field, fixed native C/L and original graph resistors.
+    /// Each material source sees the same proposed enthalpy endpoint; native
+    /// field/contact/branch Joule work is deposited once. Prepared resistor
+    /// destinations remain separate from field volumes and spatial electrical
+    /// contacts require explicit source/heat bindings.
+    ///
+    /// All source, topology, confined phase and first-order accuracy limits of
+    /// [`step_spatial_conduction_circuit_candidate`] apply. Closed-enclosure
+    /// radiation remains internal, and failed trials publish neither history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_spatial_conduction_circuit_candidate<'t, C: SpatialConductorMaterial>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &SpatialConductionCircuit<C>,
+        ports: &[f64],
+        contacts: &[contacts::ConductionContactThermal<'_>],
+        regions: &[SpatialConductionRegion],
+        volume_tolerance_m3: f64,
+        response: SpatialConductanceControls,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<SpatialConductionCircuitEnthalpyCandidate<'t, C, HeatNetworkSample>, Error> {
+        step_spatial_conduction_circuit_candidate(
+            self,
+            cx,
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            contacts,
+            regions,
+            volume_tolerance_m3,
+            response,
             assembly,
             field_controls,
             controls,

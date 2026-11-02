@@ -1,5 +1,28 @@
 # CONTRACT: fs-couple
 
+## Full spatial circuits coupled to complete heat assemblies
+
+`conduction::heat::step_spatial_conduction_circuit_candidate` and the
+`PreparedHeatNetwork` method of the same name connect the native multi-electrode
+circuit descriptor, fixed capacitors/inductors, and original material graph
+resistors to a complete `HeatAssembly` at one finite-enthalpy endpoint. The
+shared spatial trial driver retains the original material, electrical-contact,
+thermal-interface, layer, radiation, bath, and reciprocal finite-link owners.
+Every trial starts from the accepted charge and flux state.
+
+Bulk, contact, and graph-resistor Joule work enter their declared destinations
+once; whole-cell graph-resistor receivers must be disjoint from spatial field
+volumes. The assembly's original `closed_balance` accounts for enclosure
+radiation internally and distinguishes external bath work. The returned sample
+retains the full assembly state.
+
+Source, geometry, domain, budget, or cancellation failure leaves both accepted
+histories unchanged. This route retains the existing fixed-geometry,
+field-independent thermal-boundary, confined-phase, and fixed authored
+capacitor/inductor restrictions. Graph series contacts and source-dependent
+electrical storage remain unsupported and refuse explicitly. The first-order
+coupled update requires temporal and spatial refinement for accuracy.
+
 ## Implicit pressure and viscous loads driving guided rigid motion
 
 The opt-in `experimental-stokes-motion` feature exposes `GuidedStokesMotion`.
