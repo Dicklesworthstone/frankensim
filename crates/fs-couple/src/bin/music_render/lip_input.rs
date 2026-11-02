@@ -188,7 +188,7 @@ fn bore_json(bore: &LipBoreInfo) -> String {
                 "\"reflectance_line\":{{\"taps\":{},\"round_trip_samples\":{},\"peak_reflectance\":{},\"rungs_tried\":{},\"tail_energy\":{},\"peak_shift_cents\":{},\
                  \"image_peaks\":{},\"image_worst_cents\":{},\"image_worst_db\":{}}},\
                  \"mouth_flow_line\":{{\"taps\":{},\"rungs\":{},\"tail_tol\":{},\"ladder\":[{}]}},\
-                 \"model_scope\":\"one held bore; 1-DOF outward-striking lip island; plane-mode multimodal reflectance line; plane-mode mouth-flow transfer; baffled-disk Rayleigh radiation at the declared point; no valve or slide motion, no bore wall vibration, no breath heating, no nonlinear propagation; the declared band is the resolved band of the radiation quadrature and the clock's flanged-radiation ceiling\"",
+                 \"model_scope\":\"one held bore; 1-DOF outward-striking lip island; plane-source multimodal reflectance and total mouth flow from the same retained modal bore; uniform baffled-disk Rayleigh radiation at the declared point with higher mouth-mode directivity unresolved; no valve or slide motion, no bore wall vibration, no breath heating, no nonlinear propagation; the declared band is the resolved band of the radiation quadrature and the clock's flanged-radiation ceiling\"",
                 line.n_fft,
                 number(line.round_trip_samples),
                 number(line.peak_reflectance),

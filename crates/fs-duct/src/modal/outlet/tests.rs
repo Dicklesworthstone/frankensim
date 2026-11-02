@@ -67,6 +67,16 @@ fn direct(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: usize,
     ideal: Option<Termination>)
     -> (Vec<C64>,Vec<C64>)
 {
+    direct_source(duct, gas, omega, loss, n, ideal, None)
+}
+
+// `Some((references, plane_only))` prescribes real-reference incident waves
+// instead of inlet flows. The global physical equations then remain finite
+// when the inlet itself is a pressure antinode.
+fn direct_source(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: usize,
+    ideal: Option<Termination>, source: Option<(&[f64], bool)>)
+    -> (Vec<C64>,Vec<C64>)
+{
     let stations = stations_of(duct,1).unwrap();
     let gammas = j1_roots(n-1).unwrap();
     let waves: Vec<_> = stations.iter().map(|s|
@@ -90,6 +100,15 @@ fn direct(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: usize,
     let (pout,uout) = endpoint(stations.len()-1,false);
     let mut a = vec![C64::ZERO;dimension*dimension];
     a[..n*dimension].copy_from_slice(&uin);
+    if let Some((references, plane_only)) = source {
+        for mode in 0..n {
+            if plane_only && mode > 0 { continue; }
+            for col in 0..dimension {
+                a[mode*dimension+col] = pin[mode*dimension+col]
+                    + uin[mode*dimension+col].scale(references[mode]);
+            }
+        }
+    }
     let mut row = n;
     for station in 0..stations.len()-1 {
         let (p,u) = endpoint(station,false);
@@ -135,7 +154,9 @@ fn direct(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: usize,
     let mut transfer = zin.clone();
     for col in 0..n {
         let mut x = vec![C64::ZERO;dimension];
-        x[col] = C64::from_re(1.0/scales[col]);
+        if !source.is_some_and(|(_, plane_only)| plane_only && col > 0) {
+            x[col] = C64::from_re(if source.is_some() { 2.0/scales[col] } else { 1.0/scales[col] });
+        }
         lu.solve(&mut x);
         for mode in 0..n {
             for k in 0..dimension {
@@ -145,6 +166,111 @@ fn direct(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: usize,
         }
     }
     (zin,transfer)
+}
+
+#[test]
+fn native_quarter_wave_mouth_flow_survives_an_exact_input_impedance_pole() {
+    // Exact pressure-release quarter-wave cylinder with native Zc=2:
+    // R_in=+1, H=2 exp(i*pi/2)/Zc=i. Input flow vanishes while the
+    // mouth still moves; converting either Z_in or U_mouth/U_in must fail.
+    let mut waves = MouthWaveResponse {
+        input: ModalReflectionResponse { omega: 1.0, n_modes: 1,
+            reflection_matrix: vec![C64::ONE], characteristic_impedances: vec![C64::from_re(2.0)],
+            min_shear_number: f64::INFINITY, mouth_ka: 0.1,
+            cutoffs_at_throat_hz: vec![], steps_used: 1 },
+        inlet_radius_m: 0.01, mouth_radius_m: 0.01,
+        native_flow_map: vec![C64::new(0.0, 1.0)],
+    };
+    assert!(matches!(impedance_from_reflection(&waves.input.reflection_matrix,
+        &waves.input.characteristic_impedances, 1), Err(DuctError::Singular)));
+    for reference in [0.5, 2.0, 7.0] {
+        assert_eq!(waves.per_incident_plane_pressure(reference).unwrap(), vec![C64::new(0.0, 1.0)]);
+        let incident = C64::new(0.4, -0.7);
+        let result = waves.excite(&[reference], &[incident]).unwrap();
+        close(result.reflected_pressure[0], incident, 1.0);
+        close(result.mouth_flow[0], C64::new(0.0, 1.0)*incident, 1.0);
+    }
+    assert!(waves.excite(&[2.0], &[]).is_err());
+    assert!(waves.excite(&[0.0], &[C64::ONE]).is_err());
+    assert!(waves.excite(&[2.0], &[C64::new(f64::NAN, 0.0)]).is_err());
+    waves.native_flow_map = vec![];
+    assert!(waves.per_incident_plane_pressure(2.0).is_err());
+}
+
+#[test]
+fn native_mouth_source_closures_match_independent_global_wave_equations() {
+    let gas = air();
+    let n = 3;
+    let incident = [C64::new(1.0, 0.2), C64::new(-0.3, 0.4), C64::new(0.1, -0.5)];
+    for radii in [[0.006, 0.009, 0.007], [0.012, 0.008, 0.010]] {
+        let duct = cylinders(&radii);
+        let geometry = PreparedModalDuct::new(&duct, n, 1).unwrap();
+        let z0 = gas.density*gas.sound_speed/(core::f64::consts::PI*radii[0]*radii[0]);
+        let load = C64::from_re(0.7*gas.density*gas.sound_speed/(core::f64::consts::PI*radii[2]*radii[2]));
+        let references: Vec<_> = (0..n).map(|i| z0*(1.0+0.35*i as f64)).collect();
+        for omega in [2400.0, 126_000.0] {
+            for loss in [LossModel::Lossless, LossModel::Bessel] {
+                let waves = geometry.mouth_waves_load(&gas, omega, loss, load).unwrap();
+                let actual = waves.excite(&references, &incident).unwrap();
+                let (pressure, flow) = direct_source(&duct, &gas, omega, loss, n, None,
+                    Some((&references, false)));
+                for row in 0..n {
+                    let p = (0..n).fold(C64::ZERO, |sum, col| sum+pressure[row*n+col]*incident[col]);
+                    let u = (0..n).fold(C64::ZERO, |sum, col| sum+flow[row*n+col]*incident[col]);
+                    close(actual.reflected_pressure[row], p-incident[row], 1.0);
+                    close(actual.mouth_flow[row], u, 1.0/z0);
+                }
+                let (_, flow) = direct_source(&duct, &gas, omega, loss, n, None,
+                    Some((&references, true)));
+                for (row, u) in waves.per_incident_plane_pressure(z0).unwrap().iter().enumerate() {
+                    close(*u, flow[row*n], 1.0/z0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn coherent_flanged_excitation_preserves_mouth_phase_and_radiated_work() {
+    let gas = air();
+    let exterior = GasState::try_new_moist_air(303.15, gas.pressure, 0.7).unwrap();
+    let (radius, length, n) = (0.04, 0.03, 3);
+    let duct = Duct { segments: vec![Segment::Cylinder { radius, length }] };
+    let geometry = PreparedModalDuct::new(&duct, n, 1).unwrap();
+    let z0 = gas.density*gas.sound_speed/(core::f64::consts::PI*radius*radius);
+    let references = [z0, 0.7*z0, 1.4*z0];
+    let incident = [C64::new(1.0, 0.2), C64::new(-0.3, 0.4), C64::new(0.1, -0.2)];
+    for ka in [0.6, 4.6, 7.8] {
+        let omega = ka*gas.sound_speed/radius;
+        let waves = geometry.mouth_waves_flanged(&gas, &exterior, omega, LossModel::Lossless).unwrap();
+        let result = waves.excite(&references, &incident).unwrap();
+        let radiation = crate::flanged::flanged_modal_impedance(&exterior, radius, omega, n).unwrap();
+        let load = ModalMouthImpedance::new(omega, radius, exterior, ModeCount(n), radiation.clone()).unwrap();
+        let matrix_result = geometry.mouth_waves_matrix(&gas, omega, LossModel::Lossless, &load)
+            .unwrap().excite(&references, &incident).unwrap();
+        assert_eq!(matrix_result.reflected_pressure, result.reflected_pressure);
+        assert_eq!(matrix_result.mouth_flow, result.mouth_flow);
+        let wave = modal_wave(&gas, radius, omega, LossModel::Lossless, &j1_roots(n-1).unwrap()).unwrap();
+        let mut radiation_power = 0.0;
+        for row in 0..n {
+            let u = result.mouth_flow[row];
+            let p = (0..n).fold(C64::ZERO, |sum, col| sum+radiation[row*n+col]*result.mouth_flow[col]);
+            radiation_power += 0.5*(p*u.conj()).re;
+            // Independent physical pressure/flow propagation back to the inlet.
+            let forward = crate::exp_i(wave.k[row].scale(length));
+            let backward = crate::exp_i(wave.k[row].scale(-length));
+            let cosine = (forward+backward).scale(0.5);
+            let minus_i_sine = (backward-forward).scale(0.5);
+            let pin = cosine*p + minus_i_sine*wave.zc[row]*u;
+            let uin = minus_i_sine*p/wave.zc[row] + cosine*u;
+            close(pin, incident[row]+result.reflected_pressure[row], 1.0);
+            close(uin, (incident[row]-result.reflected_pressure[row]).scale(1.0/references[row]), 1.0/z0);
+        }
+        let input_power: f64 = incident.iter().zip(&result.reflected_pressure).zip(references)
+            .map(|((&a,&b),z)| 0.5*(a.abs().powi(2)-b.abs().powi(2))/z).sum();
+        assert!(radiation_power > 0.0);
+        assert!((input_power-radiation_power).abs() < 5e-9*radiation_power);
+    }
 }
 
 #[test]

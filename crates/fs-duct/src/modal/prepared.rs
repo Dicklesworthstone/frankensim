@@ -229,6 +229,73 @@ impl<'a> PreparedModalDuct<'a> {
         mm_reflection_prepared(self, gas, omega, loss, MmLoad::Matrix(load), false)
             .map(|response| response.input)
     }
+
+    /// Native input reflection and mouth-flow observation from one loaded
+    /// solve. Geometry, roots and junction projections are reused across bins.
+    ///
+    /// # Errors
+    /// Original wave/load admissions; no final input-impedance inverse.
+    pub fn mouth_waves(
+        &self, gas: &GasState, omega: f64, loss: LossModel, termination: Termination,
+    ) -> Result<outlet::MouthWaveResponse, DuctError> {
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Analytic(termination), true)
+            .and_then(outlet::wave_response)
+    }
+
+    /// [`Self::mouth_waves`] with a strict table bound to the original mouth
+    /// plane, radius and gas. Higher mouth modes retain the matched closure.
+    ///
+    /// # Errors
+    /// Table reference/support mismatch or the original wave admissions.
+    pub fn mouth_waves_tabulated(
+        &self, gas: &GasState, omega: f64, loss: LossModel, table: &crate::TabulatedLoad,
+    ) -> Result<outlet::MouthWaveResponse, DuctError> {
+        let radius = self.source.segments.last().ok_or(DuctError::EmptyDuct)?.outlet_radius();
+        table.validate_mouth(self.source.segments.iter().map(Segment::axial_length).sum(), radius, gas)?;
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Tabulated(table), true)
+            .and_then(outlet::wave_response)
+    }
+
+    /// [`Self::mouth_waves`] with a finite passive plane-mouth impedance,
+    /// including an independently declared static load at a quasi-static probe.
+    ///
+    /// # Errors
+    /// Invalid waves or a nonfinite/negative-resistance mouth impedance.
+    pub fn mouth_waves_load(
+        &self, gas: &GasState, omega: f64, loss: LossModel, impedance: C64,
+    ) -> Result<outlet::MouthWaveResponse, DuctError> {
+        if !impedance.re.is_finite() || !impedance.im.is_finite() || impedance.re < 0.0 {
+            return Err(DuctError::BadParameter {
+                what: "modal mouth impedance must be finite with nonnegative resistance",
+            });
+        }
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Impedance(impedance), true)
+            .and_then(outlet::wave_response)
+    }
+
+    /// [`Self::mouth_waves`] with the full coupled flanged radiation matrix
+    /// and original interior/exterior gases at their common static pressure.
+    ///
+    /// # Errors
+    /// The same physical admissions as [`Self::input_reflection_flanged`].
+    pub fn mouth_waves_flanged(
+        &self, gas: &GasState, exterior: &GasState, omega: f64, loss: LossModel,
+    ) -> Result<outlet::MouthWaveResponse, DuctError> {
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Flanged(exterior), true)
+            .and_then(outlet::wave_response)
+    }
+
+    /// [`Self::mouth_waves`] with an original complete physical mouth matrix,
+    /// including geometry-derived exterior loads on every retained mode.
+    ///
+    /// # Errors
+    /// The same physical admissions as [`Self::input_reflection_matrix`].
+    pub fn mouth_waves_matrix(
+        &self, gas: &GasState, omega: f64, loss: LossModel, load: &ModalMouthImpedance,
+    ) -> Result<outlet::MouthWaveResponse, DuctError> {
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Matrix(load), true)
+            .and_then(outlet::wave_response)
+    }
 }
 
 #[cfg(test)]

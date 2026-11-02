@@ -43,6 +43,22 @@ impl ModalReflectionResponse {
     /// Invalid shapes/references or a singular wave conversion. Modal cutoff,
     /// load and staircase validity limits are unchanged.
     pub fn at_references(&self, references: &[f64]) -> Result<Vec<C64>, DuctError> {
+        let (a, mut reflected, _) = self.reference_maps(references)?;
+        let n = self.n_modes;
+        let lu = lu_complex(&transpose(&a, n), n).map_err(|_| DuctError::Singular)?;
+        for row in reflected.chunks_exact_mut(n) {
+            lu.solve(row);
+        }
+        finite_waves(&reflected)?;
+        Ok(reflected)
+    }
+
+    // Return twice the incident/reflected real-reference waves, together with
+    // the native incident-basis scale used in BOTH maps. Observers reuse this
+    // same boundary solve rather than reconstructing a native wave through Z.
+    fn reference_maps(&self, references: &[f64])
+        -> Result<(Vec<C64>, Vec<C64>, Vec<f64>), DuctError>
+    {
         let (p, q) = self.pressure_and_scaled_flow(references)?;
         let n = self.n_modes;
         // The factor 1/2 cancels between B and A. Solving A^T x = B_row^T
@@ -54,6 +70,7 @@ impl ModalReflectionResponse {
         // Re-scale the native incident basis in both maps. This leaves B A^-1
         // unchanged and keeps quasi-static evanescent ports from setting the
         // entire factorization's scale through their very small native Zc.
+        let mut scales = Vec::with_capacity(n);
         for j in 0..n {
             let scale = (0..n).map(|i| a[i * n + j].abs()).fold(0.0, f64::max);
             if scale == 0.0 {
@@ -63,13 +80,34 @@ impl ModalReflectionResponse {
                 a[i * n + j] = a[i * n + j] / C64::from_re(scale);
                 reflected[i * n + j] = reflected[i * n + j] / C64::from_re(scale);
             }
+            scales.push(scale);
         }
-        let lu = lu_complex(&transpose(&a, n), n).map_err(|_| DuctError::Singular)?;
-        for row in reflected.chunks_exact_mut(n) {
-            lu.solve(row);
+        Ok((a, reflected, scales))
+    }
+
+    // One coherent incident vector: retain the solved native amplitudes for
+    // mouth observation while returning the reflected real-reference waves.
+    pub(super) fn excitation(&self, references: &[f64], incident: &[C64])
+        -> Result<(Vec<C64>, Vec<C64>), DuctError>
+    {
+        let (a, b, scales) = self.reference_maps(references)?;
+        let n = scales.len();
+        if incident.len() != n {
+            return Err(DuctError::BadParameter { what: "modal incident pressure must cover every retained mode" });
         }
+        finite_waves(incident)?;
+        let lu = lu_complex(&a, n).map_err(|_| DuctError::Singular)?;
+        let mut native: Vec<_> = incident.iter().map(|value| value.scale(2.0)).collect();
+        finite_waves(&native)?;
+        lu.solve(&mut native);
+        let reflected: Vec<_> = (0..n).map(|i| (0..n)
+            .fold(C64::ZERO, |sum, j| sum + b[i*n+j]*native[j]).scale(0.5)).collect();
+        for (value, scale) in native.iter_mut().zip(scales) {
+            *value = *value / C64::from_re(scale);
+        }
+        finite_waves(&native)?;
         finite_waves(&reflected)?;
-        Ok(reflected)
+        Ok((reflected, native))
     }
 
     /// Plane-source reflection with zero higher-mode inlet volume flow.
@@ -84,6 +122,12 @@ impl ModalReflectionResponse {
     /// # Errors
     /// Invalid response/reference or a singular source-boundary solve.
     pub fn plane_reflection(&self, reference: f64) -> Result<C64, DuctError> {
+        self.plane_excitation(reference).map(|(reflected, _)| reflected)
+    }
+
+    pub(super) fn plane_excitation(&self, reference: f64)
+        -> Result<(C64, Vec<C64>), DuctError>
+    {
         let n = self.n_modes;
         let references = [reference; MAX_MODES];
         let references = references.get(..n).ok_or(DuctError::BadParameter {
@@ -105,7 +149,8 @@ impl ModalReflectionResponse {
             .fold(C64::ZERO, |sum, j| sum + (p[j] - q[j]) * outgoing[j])
             .scale(0.5);
         finite_waves(&[reflected])?;
-        Ok(reflected)
+        finite_waves(&outgoing)?;
+        Ok((reflected, outgoing))
     }
 
     fn pressure_and_scaled_flow(&self, references: &[f64]) -> Result<(Vec<C64>, Vec<C64>), DuctError> {

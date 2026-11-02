@@ -492,6 +492,15 @@ pipe `Z_in = +i Zc cot(kL)`.
   closure, rather than matching those incident ports. Both avoid an `I-R`
   inverse at inlet flow nodes. Existing impedance queries retain their true
   poles, and load, cutoff, staircase and loss-model admissions remain intact.
+  `PreparedModalDuct::mouth_waves{,_tabulated,_load,_flanged,_matrix}` also retains
+  the native mouth map `U_mouth=H a_native` from that same recurrence.
+  `MouthWaveResponse::excite` resolves arbitrary coherent incident modal
+  pressures at positive real references with one source-boundary solve for
+  both reflection and mouth flow. Its plane-source observation keeps zero
+  higher inlet flows. Neither forms `Z_in` or `U_mouth/U_in`, so a moving
+  mouth can remain observable at an inlet flow node. Strict tables retain
+  their original mouth reference and support; existing impedance APIs and
+  their physical poles are unchanged.
   `Closed` imposes zero normal volume flow on every retained mode, and
   `IdealOpen` imposes zero pressure on every mode. Their terminal pressure
   reflection matrices are respectively `+I` and `-I`, including evanescent

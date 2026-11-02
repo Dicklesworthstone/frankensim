@@ -42,6 +42,87 @@ impl MouthResponse {
         Ok(out)
     }
 }
+
+/// Input reflection and mouth flow in the original native incident waves.
+///
+/// The mouth map is retained before input-impedance conversion. Its unit
+/// incident-pressure responses remain finite at inlet flow nodes even when
+/// `U_mouth / U_inlet` and the input impedance have genuine poles.
+#[derive(Debug, Clone)]
+pub struct MouthWaveResponse {
+    /// Same native input reflection as the corresponding prepared query.
+    pub input: ModalReflectionResponse,
+    /// Actual first staircase-station radius [m].
+    pub inlet_radius_m: f64,
+    /// Actual last staircase-station radius [m].
+    pub mouth_radius_m: f64,
+    /// Row-major N x N map `U_mouth = H a_native`, in m^3/(Pa s).
+    /// Positive mouth flow points out of the duct. Modes use the original
+    /// signed wall-normalized radial basis, including evanescent modes.
+    pub native_flow_map: Vec<C64>,
+}
+
+/// One coherent modal source and its observed physical mouth flows.
+#[derive(Debug, Clone)]
+pub struct MouthExcitation {
+    /// Reflected inlet pressure waves [Pa] at the supplied real references.
+    pub reflected_pressure: Vec<C64>,
+    /// Outward mouth modal volume flows [m^3/s] from that same source solve.
+    pub mouth_flow: Vec<C64>,
+}
+
+impl MouthWaveResponse {
+    /// Mouth flows per unit incident plane pressure, with all higher inlet
+    /// volume flows zero. This is the original `Z00` source closure; no input
+    /// impedance or mouth/inlet-flow ratio is formed.
+    ///
+    /// # Errors
+    /// Invalid wave references/maps or a singular plane-source boundary.
+    pub fn per_incident_plane_pressure(&self, reference: f64) -> Result<Vec<C64>, DuctError> {
+        let (_, native) = self.input.plane_excitation(reference)?;
+        self.observe(&native)
+    }
+
+    /// Excite every retained incident port coherently at positive real
+    /// per-mode reference impedances [Pa s/m^3]. A zero incident higher-mode
+    /// entry matches that source port, rather than forcing its flow to zero.
+    ///
+    /// The one native-wave solve supplies both reflection and mouth flow;
+    /// interference and mutual radiation terms retain their complex phases.
+    /// Input mean power is `sum((|a|^2-|b|^2)/reference)/2` for peak phasors.
+    ///
+    /// # Errors
+    /// Invalid reference/incident/map dimensions, nonfinite data or a singular
+    /// source boundary. The original load and propagation limits still apply.
+    pub fn excite(&self, references: &[f64], incident_pressure: &[C64])
+        -> Result<MouthExcitation, DuctError>
+    {
+        let (reflected_pressure, native) = self.input.excitation(references, incident_pressure)?;
+        Ok(MouthExcitation { reflected_pressure, mouth_flow: self.observe(&native)? })
+    }
+
+    fn observe(&self, native: &[C64]) -> Result<Vec<C64>, DuctError> {
+        // The shared input solve already admitted n in 1..=MAX_MODES.
+        let n = native.len();
+        if self.native_flow_map.len() != n*n || self.native_flow_map.iter().any(|&v| !finite(v)) {
+            return Err(bad("native mouth observation needs a finite complete modal map"));
+        }
+        let flow: Vec<_> = self.native_flow_map.chunks_exact(n).map(|row|
+            row.iter().zip(native).fold(C64::ZERO, |sum, (&h, &a)| sum+h*a)).collect();
+        if flow.iter().any(|&v| !finite(v)) { return Err(DuctError::Singular); }
+        Ok(flow)
+    }
+}
+
+pub(super) fn wave_response(response: super::ModalWaveResponse) -> Result<MouthWaveResponse, DuctError> {
+    Ok(MouthWaveResponse {
+        input: response.input,
+        inlet_radius_m: response.inlet_radius_m,
+        mouth_radius_m: response.mouth_radius_m,
+        native_flow_map: response.mouth_flow.ok_or_else(|| bad("native mouth map was not requested"))?,
+    })
+}
+
 fn bad(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
 fn finite(z: C64) -> bool { z.re.is_finite() && z.im.is_finite() }
 

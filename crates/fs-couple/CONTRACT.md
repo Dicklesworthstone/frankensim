@@ -4946,6 +4946,17 @@ None.
   positive real reference for every incident port. Those are distinct source
   closures. Existing source coverage, passivity and FIR convergence gates
   still apply after this conversion.
+  `BrassMouthSequence` and the `LipPerformance` WAV renderer likewise use
+  the native modal mouth-transfer map against the same actual outgoing
+  pressure history. The output FIR keeps finite mouth motion at inlet flow nodes
+  without multiplying a divergent mouth/inlet-flow ratio by vanishing inlet
+  flow. One immutable prepared geometry serves each path's entire output
+  sweep; analytic, strict table, declared-DC and full flanged loading remain
+  live. Output mode/tail/prefix gates, valve-history handling and original
+  source mechanics retain their existing meaning. The lip microphone now
+  receives mode-zero mouth flow from the same retained modal bore as its
+  feedback, using that staircase's actual aperture radius. Its existing
+  uniform-disk receiver still does not resolve higher mouth-mode directivity.
   `MouthLoad::Matched` refuses explicitly on these staircase time-domain lines.
   The existing FIR Nyquist rolloff and precursor folding remain in effect;
   full-band source coverage is not a new high-band realization-error claim.

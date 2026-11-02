@@ -7,9 +7,9 @@
 //! radiated sound is the retarded derivative of the bore's MOUTH VOLUME FLOW
 //! at a baffled point, never the mouthpiece pressure:
 //!
-//! `p+` (wave sent into the bore) -> [`mouth_flow_line`] (the transfer-matrix
-//! duct's `U_mouth / p+`) -> [`BaffledPressure`] (Rayleigh integral of the
-//! actual outlet disk).
+//! `p+` (wave sent into the bore) -> [`plane_flow_line`] (the same multimodal
+//! bore's total `U_mouth / p+`) -> [`BaffledPressure`] (Rayleigh integral of
+//! the actual discrete outlet disk).
 //!
 //! ```text
 //! frankensim-lip-performance-v1
@@ -58,8 +58,9 @@
 //! sample taking `gas_steps_per_mechanics` fixed gas steps; the microphone
 //! receives every mechanics sample's bell volume flow.
 //!
-//! Limits, not hidden: one held bore (no valve or slide motion), a plane-mode
-//! mouth-flow transfer, a baffled-disk radiation integral, and the fs-duct
+//! Limits, not hidden: one held bore (no valve or slide motion), total mouth
+//! flow from its full retained modal response, a uniform baffled-disk receiver
+//! (higher mouth-mode directivity is not resolved), and the fs-duct
 //! flanged-radiation ceiling (`ka <= 20` at the Nyquist frequency of the
 //! declared clock at the mouth radius), which sets the highest usable clock.
 
@@ -76,8 +77,8 @@ use fs_vfit::discretize::DelayedFilter;
 
 use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland};
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::brass_sequence::mouth::{MouthFlowConfig, plane_flow_line};
 use crate::driving_point::LineLadder;
-use crate::driving_point::outlet::mouth_flow_line;
 use crate::mm_line::{MmComboReceipt, MmLineConfig, MmLoad};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use crate::pcm_wav::observation::PressureRenderer;
@@ -757,18 +758,14 @@ impl LipDescription {
     /// receiver's resolved-band admission.
     pub fn build(&self) -> Result<LipPerformance, String> {
         let gas = self.ambient_gas();
-        let mouth_radius_m = self
-            .duct
-            .segments
-            .last()
-            .map(Segment::outlet_radius)
-            .ok_or_else(|| "empty bore".to_string())?;
         let medium = RayleighMedium {
             density: gas.density,
             sound_speed: gas.sound_speed,
         };
         #[cfg(feature = "nonlinear-brass")]
         if let Some((record, model)) = &self.nonlinear {
+            let mouth_radius_m = self.duct.segments.last().map(Segment::outlet_radius)
+                .ok_or_else(|| "empty bore".to_string())?;
             return self.build_nonlinear(*record, model, mouth_radius_m, medium);
         }
         let config = MmLineConfig {
@@ -793,19 +790,20 @@ impl LipDescription {
             .first()
             .cloned()
             .ok_or_else(|| "the bank realized no line".to_string())?;
-        let (mouth, mouth_receipt) = mouth_flow_line(
+        let (mouth, mouth_receipt) = plane_flow_line(
             &self.duct,
             gas,
-            self.termination,
-            self.rate_hz,
+            load,
+            &config,
             voice.port_impedance(),
-            None,
-            &LineLadder {
-                tail_tol: self.mouth_flow_tail_tol,
-                ..LineLadder::default()
+            MouthFlowConfig {
+                tail_tolerance: self.mouth_flow_tail_tol,
+                tap_change_tolerance: self.mouth_flow_tail_tol.sqrt(),
+                ..MouthFlowConfig::default()
             },
         )
         .map_err(|e| format!("mouth-flow line refused: {e}"))?;
+        let mouth_radius_m = mouth_receipt.mouth_radius_m;
         let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
             mouth_radius_m,
             self.rate_hz,
@@ -821,7 +819,7 @@ impl LipDescription {
             mouth_flow_ladder: mouth_receipt
                 .rungs
                 .iter()
-                .map(|r| (r.n_fft, r.tail_energy, r.tap_change))
+                .map(|r| (r.n_fft, r.tail_energy[0], r.tap_change[0]))
                 .collect(),
         });
         Ok(self.performance(
@@ -1047,7 +1045,7 @@ pub struct LipInfo {
 /// The realized bore of a performance.
 #[derive(Debug, Clone)]
 pub enum LipBoreInfo {
-    /// The multimodal reflectance line and the plane-mode mouth-flow line.
+    /// The multimodal reflectance and its total-mouth-flow observation.
     Linear(LinearBoreInfo),
     /// The shared nonlinear gas bore.
     Nonlinear(NonlinearBoreInfo),
@@ -1099,7 +1097,7 @@ pub struct BoreResponse {
     pub frequency_hz: f64,
     /// Multimodal plane-mode input impedance `[re, im]` [Pa s/m^3]: what the playing loop's reflectance is built from.
     pub impedance_multimodal: [f64; 2],
-    /// Plane-wave (scalar transfer-matrix) input impedance `[re, im]` [Pa s/m^3]: what the radiation observer's mouth flow uses.
+    /// Plane-wave (scalar transfer-matrix) input impedance `[re, im]` [Pa s/m^3], retained as a comparison to the modal bore.
     pub impedance_scalar: [f64; 2],
     /// Mouth volume flow over input volume flow `[re, im]` (scalar chain).
     pub mouth_over_input_flow: [f64; 2],
@@ -1775,6 +1773,43 @@ mod tests {
             panic!("a file without a bore record realizes the lines");
         };
         assert!(lines.mouth_flow_taps >= 256);
+        // The microphone is fed by the same retained modal bore as the lip,
+        // not a separately propagated scalar flow through this flare.
+        {
+            use fs_math::c64::C64;
+            let (voice, mouth) = match &performance.engine {
+                Engine::Linear { voice, mouth } => (voice, mouth),
+                #[cfg(feature = "nonlinear-brass")]
+                Engine::Nonlinear(_) => panic!("linear fixture"),
+            };
+            let reference = voice.port_impedance();
+            let gas = description.ambient_gas();
+            let geometry = fs_duct::modal::PreparedModalDuct::new(
+                &description.duct, description.modes, description.extra_slices,
+            ).unwrap();
+            let (_, taps) = mouth.quiescent_fir().unwrap();
+            let (mut scale, mut error, mut scalar_difference) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for frequency in [310.0, 1013.0, 2207.0, 5119.0] {
+                let omega = core::f64::consts::TAU*frequency;
+                let waves = geometry.mouth_waves(gas, omega, LossModel::Bessel,
+                    description.termination).unwrap();
+                let expected = waves.per_incident_plane_pressure(reference).unwrap()[0];
+                assert_eq!(performance.info().mouth_radius_m, waves.mouth_radius_m);
+                let realized = taps.iter().enumerate().fold(C64::ZERO, |sum, (sample, &h)| {
+                    let phase = omega*sample as f64/f64::from(description.rate_hz);
+                    sum+C64::new(phase.cos(), phase.sin()).scale(h)
+                });
+                let scalar = crate::driving_point::outlet::mouth_flow_per_incident_pressure(
+                    &description.duct, gas, omega, description.termination, None, reference,
+                ).unwrap();
+                scale = scale.max(expected.abs());
+                error = error.max((realized-expected).abs());
+                scalar_difference = scalar_difference.max((scalar-expected).abs());
+            }
+            assert!(error < 1e-3*scale, "modal mouth FIR error {error:e}, scale {scale:e}");
+            assert!(scalar_difference > 20.0*error,
+                "modal/scalar distinction {scalar_difference:e} must exceed realization error {error:e}");
+        }
         assert!(performance.validate_sample_rate(48_000).is_err());
         assert!(performance.validate_sample_rate(24_000).is_ok());
         assert!(performance.validate_sample_count(2401).is_err());

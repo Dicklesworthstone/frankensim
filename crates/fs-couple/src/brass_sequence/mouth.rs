@@ -33,6 +33,20 @@ impl Default for MouthFlowConfig {
     }
 }
 
+/// Observe total mouth flow of the original multimodal bore for a plane-driven
+/// source. The microphone consumer retains its existing uniform-disk receiver;
+/// every retained interior mode still participates in this mode-zero transfer.
+pub(crate) fn plane_flow_line(duct: &Duct, gas: &GasState, load: MmLoad<'_>,
+    line: &MmLineConfig, reference: f64, output: MouthFlowConfig)
+    -> Result<(DelayedFilter, MouthFlowReceipt), RenderError>
+{
+    realize::admit(core::slice::from_ref(duct), &["held"], gas,
+        MmBankLoad::Shared(load), line, output)?;
+    let (filters, receipt) = realize::path(duct, "held", gas, load, line, reference, output, 1)?;
+    let filter = filters.into_iter().next().ok_or_else(|| invalid("modal mouth output is empty"))?;
+    Ok((filter, receipt))
+}
+
 /// Observed time-image convergence; not a continuum or source-validity bound.
 #[derive(Clone, Debug)]
 pub struct MouthFlowRung {

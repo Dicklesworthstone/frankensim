@@ -1,6 +1,6 @@
 //! Bounded modal output FIRs using the original frequency and time-image owners.
 use super::*;
-use fs_duct::{DuctError, modal::outlet::{self, MouthResponse}};
+use fs_duct::{DuctError, modal::{PreparedModalDuct, outlet::MouthWaveResponse}};
 use fs_math::c64::C64;
 
 pub(super) fn load_at<'a>(loads: MmBankLoad<'a>, combo: usize) -> MmLoad<'a> {
@@ -69,25 +69,21 @@ pub(super) fn admit(ducts: &[Duct], labels: &[&str], gas: &GasState,
     Ok(())
 }
 
-fn response(duct: &Duct, gas: &GasState, load: MmLoad<'_>, line: &MmLineConfig,
-    omega: f64, dc: bool) -> Result<MouthResponse, RenderError>
+fn response(geometry: &PreparedModalDuct<'_>, gas: &GasState, load: MmLoad<'_>, line: &MmLineConfig,
+    omega: f64, dc: bool) -> Result<MouthWaveResponse, RenderError>
 {
     let evaluate = |loss| match load {
-        MmLoad::Analytic(termination) => outlet::mouth_response(
-            duct, gas, omega, loss, termination, line.n_modes, line.extra_slices),
+        MmLoad::Analytic(termination) => geometry.mouth_waves(gas, omega, loss, termination),
         MmLoad::Tabulated(table) if dc => {
             let mouth = table.mouth().ok_or(DuctError::BadParameter {
                 what: "strict modal output needs an explicit static mouth load",
             })?;
-            outlet::mouth_response_load(duct, gas, omega, loss,
-                C64::from_re(mouth.dc_impedance), line.n_modes, line.extra_slices)
+            geometry.mouth_waves_load(gas, omega, loss, C64::from_re(mouth.dc_impedance))
         }
-        MmLoad::Tabulated(table) => outlet::mouth_response_tabulated(
-            duct, gas, omega, loss, table, line.n_modes, line.extra_slices),
+        MmLoad::Tabulated(table) => geometry.mouth_waves_tabulated(gas, omega, loss, table),
         // Same coupled matrix as the input bank (mm_line::resolve_load), including its quasi-static
         // probe: no scalar fallback at DC, so `dc` needs no separate arm.
-        MmLoad::FlangedModal(exterior) => outlet::mouth_response_flanged(
-            duct, gas, exterior, omega, loss, line.n_modes, line.extra_slices),
+        MmLoad::FlangedModal(exterior) => geometry.mouth_waves_flanged(gas, exterior, omega, loss),
         _ => Err(DuctError::BadParameter { what: "unsupported modal output load" }),
     };
     // This is the original input bank's loss admission, not an analytic
@@ -135,9 +131,10 @@ pub(super) fn path(duct: &Duct, label: &str, gas: &GasState, load: MmLoad<'_>,
     let transit = length / gas.sound_speed / dt;
     let mut n_fft = ((4.0 * transit).ceil() as usize).max(256).next_power_of_two()
         .min(output.max_taps / 2);
+    let geometry = PreparedModalDuct::new(duct, line.n_modes, line.extra_slices).map_err(physical)?;
     // Same quasi-static probe as the input bank. A strict table's explicit
     // static impedance is independent of its positive-frequency support.
-    let dc = response(duct, gas, load, line, 1e-3, true)?;
+    let dc = response(&geometry, gas, load, line, 1e-3, true)?;
     let radius = dc.mouth_radius_m;
     let static_flow = dc.per_incident_plane_pressure(reference).map_err(physical)?;
     let mut spectra: Vec<Vec<C64>> = Vec::new();
@@ -154,7 +151,7 @@ pub(super) fn path(duct: &Duct, label: &str, gas: &GasState, load: MmLoad<'_>,
         for k in 1..=half {
             if !spectra.is_empty() && k % 2 == 0 { continue; }
             let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-            let flow = response(duct, gas, load, line, omega, false)?
+            let flow = response(&geometry, gas, load, line, omega, false)?
                 .per_incident_plane_pressure(reference).map_err(physical)?;
             for (mode, &value) in next.iter_mut().zip(&flow) { mode[k] = value; }
         }
@@ -192,7 +189,7 @@ pub(super) fn path(duct: &Duct, label: &str, gas: &GasState, load: MmLoad<'_>,
 
 #[cfg(test)]
 mod tests {
-    use super::metrics;
+    use super::*;
     #[test]
     fn convergence_is_scale_invariant_and_does_not_silence_weak_modes() {
         let ir = [0.0, 1.0, 0.5, 0.0, 0.0, 0.0, 1e-6, 0.0];
@@ -208,5 +205,54 @@ mod tests {
         assert_eq!(metrics(&[0.0; 8], &[0.0; 4]), (0.0, 0.0));
         assert!(metrics(&[0.0; 8], &[]).1.is_infinite());
         assert!(metrics(&[0.0; 8], &[1e-200; 4]).1.is_infinite());
+    }
+
+    #[test]
+    fn pressure_release_mouth_fir_retains_flow_at_input_pressure_antinodes() {
+        use fs_duct::{TabulatedLoad, TabulatedMouth, Termination};
+        use fs_material::gas::GasSpec;
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+        let line = MmLineConfig { sample_rate_hz: 48_000, n_modes: 3,
+            extra_slices: 1, loss: LossModel::Lossless };
+        let dt = 1.0/f64::from(line.sample_rate_hz);
+        let radius = 0.002;
+        let length = 8.0*gas.sound_speed*dt;
+        let duct = Duct { segments: vec![Segment::Cylinder { radius, length }] };
+        let geometry = PreparedModalDuct::new(&duct, line.n_modes, 1).unwrap();
+        let reference = gas.density*gas.sound_speed/(core::f64::consts::PI*radius*radius);
+        let table = TabulatedLoad::try_new(
+            vec![core::f64::consts::TAU/(65_536.0*dt), core::f64::consts::PI/dt],
+            vec![C64::ZERO; 2], "exact pressure-release mouth control", 0.0,
+        ).unwrap().with_mouth(TabulatedMouth { axial_position_m: length, radius_m: radius,
+            gas, dc_impedance: 0.0 }).unwrap();
+        assert!(table.z_at(1e-3).is_err(), "static load must not extrapolate the table");
+        for load in [MmLoad::Analytic(Termination::IdealOpen), MmLoad::Tabulated(&table)] {
+            for bin in [1, 8, 16, 64, 128] {
+                let omega = core::f64::consts::TAU*bin as f64/(256.0*dt);
+                let waves = response(&geometry, &gas, load, &line, omega, false).unwrap();
+                let flow = waves.per_incident_plane_pressure(reference).unwrap();
+                let phase = omega*length/gas.sound_speed;
+                let expected = C64::new(phase.cos(), phase.sin()).scale(2.0/reference);
+                assert!((flow[0]-expected).abs() < 2e-12/reference);
+                assert!(flow[1..].iter().all(|u| *u == C64::ZERO));
+                if bin == 8 {
+                    assert!((waves.input.plane_reflection(reference).unwrap()-C64::ONE).abs() < 2e-13);
+                    assert!(flow[0].abs() > 1.9/reference, "the mouth still moves at an input flow node");
+                }
+            }
+            let dc = response(&geometry, &gas, load, &line, 1e-3, true).unwrap()
+                .per_incident_plane_pressure(reference).unwrap();
+            assert!((dc[0].re-2.0/reference).abs() < 1e-12/reference);
+        }
+        let (filters, receipt) = path(&duct, "pressure release", &gas,
+            MmLoad::Analytic(Termination::IdealOpen), &line, reference,
+            MouthFlowConfig::default(), line.n_modes).unwrap();
+        assert!(receipt.rungs.len() >= 2);
+        let (_, plane) = filters[0].quiescent_fir().unwrap();
+        assert!((plane.iter().sum::<f64>()-2.0/reference).abs() < 2e-10/reference);
+        assert!(plane.iter().any(|h| h.abs() > 1.0/reference));
+        for higher in &filters[1..] {
+            assert!(higher.quiescent_fir().unwrap().1.iter().all(|h| *h == 0.0));
+        }
     }
 }
