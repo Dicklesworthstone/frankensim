@@ -14,7 +14,7 @@ use fs_flyer::replayenv::{
 };
 use fs_flyer::simloop::{
     CATAPULT_1904_V1, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut, SpatialWindSpec,
-    dec17_scenario,
+    SpatialWindSpectrum, dec17_scenario,
 };
 use fs_math::det;
 
@@ -199,8 +199,10 @@ fn spatial_wind() -> SpatialWindSpec {
             reference_height_m: 2.4,
             reference_speed_mps: 11.0,
         },
-        sigma_mps: 0.3,
-        length_m: 20.0,
+        spectrum: SpatialWindSpectrum::Analytic {
+            sigma_mps: 0.3,
+            length_m: 20.0,
+        },
         advection_mps: 11.0,
         correlation_times_s: vec![1.8; 8],
     }

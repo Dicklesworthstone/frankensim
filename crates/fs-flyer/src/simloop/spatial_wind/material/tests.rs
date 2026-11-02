@@ -3,7 +3,7 @@ use crate::replayenv::{
     ReplayEnvelope, record_replay_with_material_distributed_spatial_wind,
     record_replay_with_material_spatial_wind,
 };
-use crate::simloop::{Phase, PilotMode, dec17_scenario};
+use crate::simloop::{Phase, PilotMode, SpatialWindSpectrum, dec17_scenario};
 use fs_atmo::FlatSiteLogLaw;
 use fs_material::gas::GasSpec;
 
@@ -15,8 +15,10 @@ fn wind() -> SpatialWindSpec {
             reference_height_m: 2.4,
             reference_speed_mps: 11.0,
         },
-        sigma_mps: 0.3,
-        length_m: 20.0,
+        spectrum: SpatialWindSpectrum::Analytic {
+            sigma_mps: 0.3,
+            length_m: 20.0,
+        },
         advection_mps: 11.0,
         correlation_times_s: vec![1.8; 8],
     }

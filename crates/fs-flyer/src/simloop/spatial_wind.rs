@@ -6,6 +6,8 @@ use super::{SimLoop, map_atmo, motion};
 use crate::Refusal;
 use crate::atmosphere::MaterialAirProfile;
 use fs_atmo::evolving::{EvolvingTurbulenceCheckpoint, EvolvingTurbulenceField};
+use fs_atmo::fit::{FittedAmplitudes, build_fitted_field, fit_amplitudes};
+use fs_atmo::mann::MannParams;
 use fs_atmo::ou::OuCheckpoint;
 use fs_atmo::{FlatSiteLogLaw, FlowSample, MAX_MODES, TurbulenceField};
 use fs_blake3::hash_domain;
@@ -14,6 +16,29 @@ use fs_math::det;
 
 pub(super) mod material;
 pub use material::MaterialAirSample;
+
+/// Spatial amplitude model on the shared wall-compatible solenoidal basis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpatialWindSpectrum {
+    /// Original analytic envelope; `sigma_mps` is a strength parameter, not
+    /// a certified RMS. This preserves the original spatial-wind realization.
+    Analytic {
+        /// Spatial builder's velocity-strength parameter [m/s].
+        sigma_mps: f64,
+        /// Spatial builder's length-scale parameter [m].
+        length_m: f64,
+    },
+    /// Fit the three velocity variances and streamwise/vertical stress to a
+    /// neutral Mann target at one height. The finite-basis residual is exposed
+    /// by [`SimLoop::spatial_wind_stress_fit`]. This is a one-point stress
+    /// calibration, not validation of spectra, coherence or historical gusts.
+    MannStress {
+        /// Spectral level, length and neutral shear-distortion target.
+        parameters: MannParams,
+        /// Height [m] at which the one-point stresses are calibrated.
+        reference_height_m: f64,
+    },
+}
 
 /// Explicit synthetic wind model for [`SimLoop::init_with_spatial_wind`].
 /// All lengths are metres, speeds m/s, and correlation times seconds. The
@@ -26,10 +51,8 @@ pub struct SpatialWindSpec {
     /// Neutral log-law mean. Its reference speed must equal the scenario's
     /// declared headwind; its reference height is explicit.
     pub mean: FlatSiteLogLaw,
-    /// Spatial builder's velocity-strength parameter (not a certified RMS).
-    pub sigma_mps: f64,
-    /// Spatial builder's length-scale parameter.
-    pub length_m: f64,
+    /// Explicit analytic or Mann-stress-calibrated spatial amplitude model.
+    pub spectrum: SpatialWindSpectrum,
     /// Downwind phase-convection speed, independently specified.
     pub advection_mps: f64,
     /// One positive finite decorrelation time per spatial mode (1..=256).
@@ -39,6 +62,8 @@ pub struct SpatialWindSpec {
 pub(super) struct SpatialWindState {
     pub spec: SpatialWindSpec,
     pub field: EvolvingTurbulenceField,
+    /// Present only for the Mann-stress model; fixed at initialization.
+    pub stress_fit: Option<FittedAmplitudes>,
     pub distributed: bool,
     pub material_gas: Option<GasState>,
     pub material_profile: Option<MaterialAirProfile>,
@@ -57,20 +82,34 @@ pub(super) struct SampledFlightLoads {
 impl SpatialWindState {
     fn new(spec: SpatialWindSpec, seed: u64) -> Result<Self, Refusal> {
         spec.mean.admit().map_err(map_atmo)?;
-        let basis = TurbulenceField::build(
-            seed,
-            spec.correlation_times_s.len(),
-            spec.sigma_mps,
-            spec.length_m,
-            spec.advection_mps,
-        )
-        .map_err(map_atmo)?;
+        let count = spec.correlation_times_s.len();
+        let (basis, stress_fit) = match spec.spectrum {
+            SpatialWindSpectrum::Analytic {
+                sigma_mps,
+                length_m,
+            } => (
+                TurbulenceField::build(seed, count, sigma_mps, length_m, spec.advection_mps)
+                    .map_err(map_atmo)?,
+                None,
+            ),
+            SpatialWindSpectrum::MannStress {
+                parameters,
+                reference_height_m,
+            } => {
+                let fit = fit_amplitudes(seed, count, &parameters, reference_height_m)
+                    .map_err(map_atmo)?;
+                let basis = build_fitted_field(seed, &fit, &parameters, spec.advection_mps)
+                    .map_err(map_atmo)?;
+                (basis, Some(fit))
+            }
+        };
         let field =
             EvolvingTurbulenceField::at_anchor(basis, seed, spec.correlation_times_s.clone())
                 .map_err(map_atmo)?;
         Ok(Self {
             spec,
             field,
+            stress_fit,
             distributed: false,
             material_gas: None,
             material_profile: None,
@@ -101,12 +140,36 @@ impl SpatialWindState {
             mean.displacement_height_m,
             mean.reference_height_m,
             mean.reference_speed_mps,
-            self.spec.sigma_mps,
-            self.spec.length_m,
-            self.spec.advection_mps,
         ] {
             bytes.extend_from_slice(&value.to_bits().to_le_bytes());
         }
+        // The analytic path keeps its original V3–V6 byte layout and identity.
+        // V7 identifies the Mann-stress model and stores every target input.
+        match self.spec.spectrum {
+            SpatialWindSpectrum::Analytic {
+                sigma_mps,
+                length_m,
+            } => {
+                for value in [sigma_mps, length_m] {
+                    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+            }
+            SpatialWindSpectrum::MannStress {
+                parameters,
+                reference_height_m,
+            } => {
+                bytes.extend_from_slice(b"mann-stress-v1\0");
+                for value in [
+                    parameters.alpha_eps23,
+                    parameters.length_m,
+                    parameters.gamma,
+                    reference_height_m,
+                ] {
+                    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+            }
+        }
+        bytes.extend_from_slice(&self.spec.advection_mps.to_bits().to_le_bytes());
         bytes.extend_from_slice(&(self.spec.correlation_times_s.len() as u32).to_le_bytes());
         for value in &self.spec.correlation_times_s {
             bytes.extend_from_slice(&value.to_bits().to_le_bytes());
@@ -129,7 +192,12 @@ impl SpatialWindState {
         bytes.extend_from_slice(run_intent_id.as_bytes()); // fixed 64-byte hex
     }
 
-    pub fn decode(bytes: &[u8], seed: u64, tick: u64) -> Result<(Self, String), Refusal> {
+    pub fn decode(
+        bytes: &[u8],
+        seed: u64,
+        tick: u64,
+        mann_stress: bool,
+    ) -> Result<(Self, String), Refusal> {
         let bad = || invalid("malformed spatial-wind checkpoint");
         let mut pos = 0;
         let mut take = |n: usize| {
@@ -137,10 +205,33 @@ impl SpatialWindState {
             pos += n;
             Ok::<_, Refusal>(slice)
         };
-        let mut f = [0.0; 7];
+        let mut f = [0.0; 4];
         for value in &mut f {
             *value = f64::from_le_bytes(take(8)?.try_into().expect("8"));
         }
+        let spectrum = if mann_stress {
+            if take(15)? != b"mann-stress-v1\0" {
+                return Err(bad());
+            }
+            let mut target = [0.0; 4];
+            for value in &mut target {
+                *value = f64::from_le_bytes(take(8)?.try_into().expect("8"));
+            }
+            SpatialWindSpectrum::MannStress {
+                parameters: MannParams {
+                    alpha_eps23: target[0],
+                    length_m: target[1],
+                    gamma: target[2],
+                },
+                reference_height_m: target[3],
+            }
+        } else {
+            SpatialWindSpectrum::Analytic {
+                sigma_mps: f64::from_le_bytes(take(8)?.try_into().expect("8")),
+                length_m: f64::from_le_bytes(take(8)?.try_into().expect("8")),
+            }
+        };
+        let advection_mps = f64::from_le_bytes(take(8)?.try_into().expect("8"));
         let count = u32::from_le_bytes(take(4)?.try_into().expect("4")) as usize;
         if !(1..=MAX_MODES).contains(&count) {
             return Err(bad());
@@ -181,9 +272,8 @@ impl SpatialWindState {
                     reference_height_m: f[2],
                     reference_speed_mps: f[3],
                 },
-                sigma_mps: f[4],
-                length_m: f[5],
-                advection_mps: f[6],
+                spectrum,
+                advection_mps,
                 correlation_times_s: times,
             },
             seed,
@@ -210,6 +300,15 @@ impl SpatialWindState {
 }
 
 impl SimLoop {
+    /// Achieved one-point stress calibration for the current spatial model.
+    /// Errors apply to the seed-specific finite-basis ensemble, not to each
+    /// random realization or to a complete atmospheric spectral tensor. The
+    /// analytic model and legacy scalar-gust path return `None`.
+    #[must_use]
+    pub fn spatial_wind_stress_fit(&self) -> Option<&FittedAmplitudes> {
+        self.spatial_wind.as_ref()?.stress_fit.as_ref()
+    }
+
     /// Opt into local wing/canard strip and separate propeller disk inflow.
     /// Uses the same evolving field, time convention, and inertial ground
     /// state as [`Self::init_with_spatial_wind`], but local incident velocity
@@ -730,3 +829,6 @@ mod tests;
 
 #[cfg(test)]
 mod lateral_tests;
+
+#[cfg(test)]
+mod mann_tests;

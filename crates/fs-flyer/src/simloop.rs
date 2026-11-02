@@ -49,7 +49,7 @@ use fs_math::det;
 pub(crate) mod motion;
 mod spatial_wind;
 use spatial_wind::SpatialWindState;
-pub use spatial_wind::{MaterialAirSample, SpatialWindSpec};
+pub use spatial_wind::{MaterialAirSample, SpatialWindSpec, SpatialWindSpectrum};
 
 /// Tick cap (absurd-input guard; 10 minutes at 120 Hz).
 pub const MAX_TICKS: u64 = 72_000;
@@ -485,6 +485,8 @@ impl SimLoop {
     /// Material-bound wind emits V5 with its sampling mode and complete gas.
     /// Prescribed material profiles emit V6 with the immutable source definition
     /// and geometric ground datum, so altitude changes survive restoration.
+    /// Mann-stress-calibrated wind emits V7, retaining the target, reference
+    /// height, modal time scales, material choice and sampling mode.
     /// Legacy V2 reconstructs its OU state by
     /// replaying the canonical prehistory through the saved tick.
     ///
@@ -501,6 +503,9 @@ impl SimLoop {
         }
         let mut b = Vec::new();
         let version = match &self.spatial_wind {
+            Some(wind) if matches!(wind.spec.spectrum, SpatialWindSpectrum::MannStress { .. }) => {
+                7u32
+            }
             Some(wind) if wind.material_profile.is_some() => 6u32,
             Some(wind) if wind.material_gas.is_some() => 5u32,
             Some(wind) if wind.distributed => 4u32,
@@ -558,16 +563,31 @@ impl SimLoop {
             None => b.push(0),
         }
         if let Some(wind) = &self.spatial_wind {
-            if let Some(profile) = &wind.material_profile {
+            if version == 7 {
                 b.push(u8::from(wind.distributed));
+                b.push(if wind.material_profile.is_some() {
+                    2
+                } else if wind.material_gas.is_some() {
+                    1
+                } else {
+                    0
+                });
+            }
+            if let Some(profile) = &wind.material_profile {
+                if version != 7 {
+                    b.push(u8::from(wind.distributed));
+                }
                 spatial_wind::material::profile::encode_profile(profile, &mut b);
             } else if let Some(gas) = &wind.material_gas {
-                b.push(u8::from(wind.distributed));
+                if version != 7 {
+                    b.push(u8::from(wind.distributed));
+                }
                 spatial_wind::material::encode_gas(gas, &mut b);
             }
             wind.encode(&self.run_intent_id, &mut b);
         }
         let domain = match version {
+            7 => "org.frankensim.wf.checkpoint-state.v7",
             6 => "org.frankensim.wf.checkpoint-state.v6",
             5 => "org.frankensim.wf.checkpoint-state.v5",
             4 => "org.frankensim.wf.checkpoint-state.v4",
@@ -613,13 +633,22 @@ impl SimLoop {
         let digest_v4 = hash_domain("org.frankensim.wf.checkpoint-state.v4", body);
         let digest_v5 = hash_domain("org.frankensim.wf.checkpoint-state.v5", body);
         let digest_v6 = hash_domain("org.frankensim.wf.checkpoint-state.v6", body);
+        let digest_v7 = hash_domain("org.frankensim.wf.checkpoint-state.v7", body);
         let matches_v1 = digest_v1.as_bytes() == tail;
         let matches_v2 = digest_v2.as_bytes() == tail;
         let matches_v3 = digest_v3.as_bytes() == tail;
         let matches_v4 = digest_v4.as_bytes() == tail;
         let matches_v5 = digest_v5.as_bytes() == tail;
         let matches_v6 = digest_v6.as_bytes() == tail;
-        if !matches_v1 && !matches_v2 && !matches_v3 && !matches_v4 && !matches_v5 && !matches_v6 {
+        let matches_v7 = digest_v7.as_bytes() == tail;
+        if !matches_v1
+            && !matches_v2
+            && !matches_v3
+            && !matches_v4
+            && !matches_v5
+            && !matches_v6
+            && !matches_v7
+        {
             return Err(Refusal {
                 code: "checkpoint-tampered",
                 message: "embedded digest mismatch".into(),
@@ -633,13 +662,15 @@ impl SimLoop {
             .ok_or_else(|| bad("missing version"))?;
         match (
             version, matches_v1, matches_v2, matches_v3, matches_v4, matches_v5, matches_v6,
+            matches_v7,
         ) {
-            (2, _, true, _, _, _, _)
-            | (3, _, _, true, _, _, _)
-            | (4, _, _, _, true, _, _)
-            | (5, _, _, _, _, true, _)
-            | (6, _, _, _, _, _, true) => {}
-            (1, true, _, _, _, _, _) => {
+            (2, _, true, _, _, _, _, _)
+            | (3, _, _, true, _, _, _, _)
+            | (4, _, _, _, true, _, _, _)
+            | (5, _, _, _, _, true, _, _)
+            | (6, _, _, _, _, _, true, _)
+            | (7, _, _, _, _, _, _, true) => {}
+            (1, true, _, _, _, _, _, _) => {
                 return Err(Refusal {
                     code: "checkpoint-version-unsupported",
                     message: "CheckpointStateV1 lacks lateral state and cannot exact-resume v2"
@@ -698,12 +729,23 @@ impl SimLoop {
             if tick > spec.max_ticks || !f.iter().all(|v| v.is_finite()) || f[1] < 0.0 {
                 return Err(bad("invalid spatial lifecycle state"));
             }
-            let (distributed, material_gas, material_profile) = if version == 6 {
+            let (distributed, material_kind) = if version >= 5 {
                 let mode = take(&mut pos, 1)?[0];
                 if mode > 1 {
-                    return Err(bad("unknown profile wind sampling mode"));
+                    return Err(bad("unknown spatial wind sampling mode"));
                 }
-                let (profile, used) = spatial_wind::material::profile::decode_profile(&body[pos..])?;
+                let kind = match version {
+                    7 => take(&mut pos, 1)?[0],
+                    6 => 2,
+                    _ => 1,
+                };
+                (mode == 1, kind)
+            } else {
+                (version == 4, 0)
+            };
+            let (material_gas, material_profile) = if material_kind == 2 {
+                let (profile, used) =
+                    spatial_wind::material::profile::decode_profile(&body[pos..])?;
                 pos += used;
                 let rail_gas = profile.gas_at_height(RAIL_HEIGHT_M)?;
                 if rail_gas.density.to_bits() != spec.rho_kg_m3.to_bits() {
@@ -713,23 +755,22 @@ impl SimLoop {
                 }
                 // Reject an invalid restored location before publishing state.
                 profile.gas_at_height(f[1])?;
-                (mode == 1, None, Some(profile))
-            } else if version == 5 {
-                let mode = take(&mut pos, 1)?[0];
-                if mode > 1 {
-                    return Err(bad("unknown material wind sampling mode"));
-                }
+                (None, Some(profile))
+            } else if material_kind == 1 {
                 let gas = spatial_wind::material::decode_gas(take(&mut pos, 96)?)?;
                 if gas.density.to_bits() != spec.rho_kg_m3.to_bits() {
                     return Err(bad(
                         "scenario density disagrees with the retained material gas",
                     ));
                 }
-                (mode == 1, Some(gas), None)
+                (Some(gas), None)
+            } else if material_kind == 0 {
+                (None, None)
             } else {
-                (version == 4, None, None)
+                return Err(bad("unknown spatial wind material kind"));
             };
-            let (mut wind, intent) = SpatialWindState::decode(&body[pos..], spec.seed, tick)?;
+            let (mut wind, intent) =
+                SpatialWindState::decode(&body[pos..], spec.seed, tick, version == 7)?;
             wind.distributed = distributed;
             wind.material_gas = material_gas;
             wind.material_profile = material_profile;

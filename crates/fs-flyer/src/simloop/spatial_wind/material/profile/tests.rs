@@ -3,7 +3,7 @@ use crate::replayenv::{
     ReplayEnvelope, record_replay_with_profile_distributed_spatial_wind,
     record_replay_with_profile_spatial_wind,
 };
-use crate::simloop::{ControlInput, Phase, PilotMode, dec17_scenario, motion};
+use crate::simloop::{ControlInput, Phase, PilotMode, SpatialWindSpectrum, dec17_scenario, motion};
 use fs_atmo::FlatSiteLogLaw;
 use fs_math::det;
 
@@ -15,8 +15,10 @@ fn wind(sigma_mps: f64) -> SpatialWindSpec {
             reference_height_m: RAIL_HEIGHT_M,
             reference_speed_mps: 11.0,
         },
-        sigma_mps,
-        length_m: 20.0,
+        spectrum: SpatialWindSpectrum::Analytic {
+            sigma_mps,
+            length_m: 20.0,
+        },
         advection_mps: 11.0,
         correlation_times_s: vec![1.8; 8],
     }

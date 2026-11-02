@@ -736,6 +736,26 @@ with `mech-step-non-finite` and `mech-step-unresolved`, respectively.
 
 ## Spatial wind in the flight lifecycle
 
+`SpatialWindSpec::spectrum` explicitly selects `Analytic { sigma_mps,
+length_m }` or `MannStress { parameters, reference_height_m }`. The latter
+fits the existing wall-compatible basis to the target's u²/v²/w²/uw at one
+height, then evolves the same paired OU quadratures used by every spatial
+constructor. The calibrated velocity reaches the CG or actual wing/canard
+strips and propeller disks, including distributed roll/yaw loads. Fitting and
+Mann quadrature occur at initialization; per-tick sampling uses the original
+allocation-free modal evaluation. `spatial_wind_stress_fit()` exposes the
+achieved finite-basis residuals. This is one-point stress calibration, not a
+complete spectral/coherence fit or a recovered historical gust trace.
+
+Calibrated runs use V7 checkpoints, retaining the target parameters, reference
+height, mode count, time scales, mean, advection, both OU states, sampling
+mode and optional material gas/profile. Restoration rebuilds the exact
+seed-specific fit and checks run identity before accepting the state. The
+original analytic model retains its V3–V6 bytes and realization. G0/G3/G5
+tests in `simloop/spatial_wind/mann_tests.rs` cover the exact atmosphere-to-
+flight field, actual rotor/ground/lateral response, all six sampling/material
+combinations, model-substitution refusal and self-contained replay.
+
 Ordinary, CG spatial-wind and distributed-wind airborne paths share one coupled
 longitudinal/rotor midpoint step. The first native aerodynamic solve predicts
 midpoint velocity, pitch attitude/rate and rotor speed. A second solve evaluates

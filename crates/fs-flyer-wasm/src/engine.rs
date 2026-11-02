@@ -23,7 +23,7 @@ use fs_flyer::assist::ASSIST_V1;
 use fs_flyer::simloop::CATAPULT_1904_V1;
 use fs_flyer::simloop::{
     ControlInput, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut, SpatialWindSpec,
-    TerminalEvent,
+    SpatialWindSpectrum, TerminalEvent,
 };
 use fs_material::gas::GasState;
 
@@ -81,8 +81,10 @@ fn spatial_wind(
             reference_height_m,
             reference_speed_mps: headwind_mps,
         },
-        sigma_mps,
-        length_m,
+        spectrum: SpatialWindSpectrum::Analytic {
+            sigma_mps,
+            length_m,
+        },
         advection_mps,
         correlation_times_s: correlation_times_s.to_vec(),
     })

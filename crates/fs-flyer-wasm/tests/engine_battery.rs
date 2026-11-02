@@ -5,7 +5,7 @@
 //! bit-identically; envelopes are well-formed for ok AND refusal.
 //! Repro: cd crates/fs-flyer-wasm && cargo test --test engine_battery
 
-use fs_flyer::simloop::{PilotMode, ScenarioSpec, SimLoop, SpatialWindSpec};
+use fs_flyer::simloop::{PilotMode, ScenarioSpec, SimLoop, SpatialWindSpec, SpatialWindSpectrum};
 use fs_flyer_wasm::engine::{EngineSlot, MODE_FIXED, MODE_HISTORICAL, MODE_HUMAN};
 
 fn jlog(case: &str, payload: &str) {
@@ -27,8 +27,10 @@ fn explicit_wind() -> SpatialWindSpec {
             reference_height_m: 2.6,
             reference_speed_mps: 11.0,
         },
-        sigma_mps: 0.08,
-        length_m: 18.0,
+        spectrum: SpatialWindSpectrum::Analytic {
+            sigma_mps: 0.08,
+            length_m: 18.0,
+        },
         advection_mps: 9.5,
         correlation_times_s: vec![0.8, 1.1, 1.7, 2.4, 3.0, 3.5, 4.0, 4.8],
     }
@@ -36,6 +38,13 @@ fn explicit_wind() -> SpatialWindSpec {
 
 fn init_spatial(slot: &mut EngineSlot, distributed: bool, wind: &SpatialWindSpec) -> String {
     let (rho, headwind, rail, ticks) = DEC17;
+    let SpatialWindSpectrum::Analytic {
+        sigma_mps,
+        length_m,
+    } = wind.spectrum
+    else {
+        panic!("analytic fixture")
+    };
     slot.init_with_spatial_wind(
         1903,
         rho,
@@ -50,8 +59,8 @@ fn init_spatial(slot: &mut EngineSlot, distributed: bool, wind: &SpatialWindSpec
         wind.mean.scenario_effective_z0_m,
         wind.mean.displacement_height_m,
         wind.mean.reference_height_m,
-        wind.sigma_mps,
-        wind.length_m,
+        sigma_mps,
+        length_m,
         wind.advection_mps,
         &wind.correlation_times_s,
     )
@@ -66,6 +75,13 @@ fn init_material(
     times: &[f64],
 ) -> String {
     let wind = explicit_wind();
+    let SpatialWindSpectrum::Analytic {
+        sigma_mps,
+        length_m,
+    } = wind.spectrum
+    else {
+        panic!("analytic fixture")
+    };
     slot.init_with_material_air(
         1903,
         temperature,
@@ -82,8 +98,8 @@ fn init_material(
         wind.mean.scenario_effective_z0_m,
         wind.mean.displacement_height_m,
         wind.mean.reference_height_m,
-        wind.sigma_mps,
-        wind.length_m,
+        sigma_mps,
+        length_m,
         wind.advection_mps,
         times,
     )
@@ -238,7 +254,10 @@ fn spatial_admission_refuses_without_legacy_fallback_or_stale_run() {
                 "ou-params-invalid"
             }
             3 => {
-                wind.sigma_mps = f64::NAN;
+                wind.spectrum = SpatialWindSpectrum::Analytic {
+                    sigma_mps: f64::NAN,
+                    length_m: 18.0,
+                };
                 "non-finite-input"
             }
             4 => {
@@ -246,7 +265,10 @@ fn spatial_admission_refuses_without_legacy_fallback_or_stale_run() {
                 "mode-count-invalid"
             }
             _ => {
-                wind.length_m = -1.0;
+                wind.spectrum = SpatialWindSpectrum::Analytic {
+                    sigma_mps: 0.08,
+                    length_m: -1.0,
+                };
                 "turbulence-params-invalid"
             }
         };

@@ -10,8 +10,10 @@ fn simulation(distributed: bool) -> SimLoop {
             reference_height_m: 2.4,
             reference_speed_mps: 11.0,
         },
-        sigma_mps: 0.3,
-        length_m: 20.0,
+        spectrum: SpatialWindSpectrum::Analytic {
+            sigma_mps: 0.3,
+            length_m: 20.0,
+        },
         advection_mps: 11.0,
         correlation_times_s: vec![1.8; 8],
     };
