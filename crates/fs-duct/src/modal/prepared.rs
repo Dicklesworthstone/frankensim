@@ -105,6 +105,13 @@ impl<'a> PreparedModalDuct<'a> {
     #[must_use]
     pub const fn n_modes(&self) -> usize { self.n_modes }
 
+    /// Actual last discrete station's mouth radius [m]. For a sliced cone this
+    /// is the last midpoint radius, where this staircase attaches its load.
+    #[must_use]
+    pub fn mouth_radius_m(&self) -> f64 {
+        self.stations.last().expect("admitted nonempty modal duct").radius
+    }
+
     /// [`mm_input_impedance`] using this exact prepared geometry.
     pub fn input_impedance(
         &self, gas: &GasState, omega: f64, loss: LossModel, termination: Termination,
@@ -139,6 +146,14 @@ impl<'a> PreparedModalDuct<'a> {
         &self, gas: &GasState, exterior: &GasState, omega: f64, loss: LossModel,
     ) -> Result<ModalResponse, DuctError> {
         mm_evaluate_prepared(self, gas, omega, loss, MmLoad::Flanged(exterior), false)
+            .map(|response| response.input)
+    }
+
+    /// [`mm_input_impedance_matrix`] on this exact prepared geometry and basis.
+    pub fn input_impedance_matrix(
+        &self, gas: &GasState, omega: f64, loss: LossModel, load: &ModalMouthImpedance,
+    ) -> Result<ModalResponse, DuctError> {
+        mm_evaluate_prepared(self, gas, omega, loss, MmLoad::Matrix(load), false)
             .map(|response| response.input)
     }
 
@@ -198,6 +213,20 @@ impl<'a> PreparedModalDuct<'a> {
         &self, gas: &GasState, exterior: &GasState, omega: f64, loss: LossModel,
     ) -> Result<ModalReflectionResponse, DuctError> {
         mm_reflection_prepared(self, gas, omega, loss, MmLoad::Flanged(exterior), false)
+            .map(|response| response.input)
+    }
+
+    /// Native reflected waves with the same full physical matrix as
+    /// [`Self::input_impedance_matrix`]. An inlet impedance pole alone does not
+    /// make these wave coordinates singular.
+    ///
+    /// # Errors
+    /// Matrix declaration or native wave refusals, without final conversion to
+    /// input impedance.
+    pub fn input_reflection_matrix(
+        &self, gas: &GasState, omega: f64, loss: LossModel, load: &ModalMouthImpedance,
+    ) -> Result<ModalReflectionResponse, DuctError> {
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Matrix(load), false)
             .map(|response| response.input)
     }
 }

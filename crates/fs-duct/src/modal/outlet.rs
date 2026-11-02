@@ -87,6 +87,16 @@ pub fn mouth_response_flanged(duct: &Duct, gas: &GasState, exterior: &GasState,
     super::mm_evaluate(duct, gas, omega, loss, MmLoad::Flanged(exterior), modes, extra_slices, true)
 }
 
+/// Complete physical mouth matrix with every original signed modal flow.
+/// The input impedance and mouth map use the same coupled boundary. The load
+/// must match the exact frequency, retained modes and actual station radius.
+pub fn mouth_response_matrix(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel,
+    load: &ModalMouthImpedance, modes: usize, extra_slices: usize)
+    -> Result<MouthResponse, DuctError>
+{
+    super::mm_evaluate(duct, gas, omega, loss, MmLoad::Matrix(load), modes, extra_slices, true)
+}
+
 /// U = Zc^-1 (I-R) a at the terminal plane.
 pub(super) fn terminal_flow(r: &[C64], zc: &[C64], n: usize) -> Vec<C64> {
     let mut map = r.iter().map(|r| -*r).collect::<Vec<_>>();

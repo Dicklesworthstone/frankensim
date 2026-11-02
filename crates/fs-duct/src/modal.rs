@@ -71,11 +71,15 @@ pub use prepared::PreparedModalDuct;
 mod reflection;
 pub use reflection::ModalReflectionResponse;
 
+mod load;
+pub use load::{AxisymmetricMouthBasis, ModalMouthImpedance};
+
 /// Continuous multimodal propagation on smooth profiles (M2.1-W3b).
 mod riccati;
 pub use riccati::{
     BESSEL_CERTIFIED_X, MAX_EVANESCENT_STEP, ModalField, ModeCount, MouthLoad, certified_mode_cap,
-    mm_profile_field, mm_profile_field_flanged, mm_profile_impedance, mm_profile_impedance_flanged,
+    mm_profile_field, mm_profile_field_flanged, mm_profile_field_matrix,
+    mm_profile_impedance, mm_profile_impedance_flanged, mm_profile_impedance_matrix,
 };
 
 /// `J0(x)` by the staircase's legacy power series, kept bit-identical
@@ -565,6 +569,7 @@ enum MmLoad<'a> {
     Tabulated(&'a crate::TabulatedLoad),
     Impedance(C64),
     Flanged(&'a GasState),
+    Matrix(&'a ModalMouthImpedance),
 }
 
 /// Multimodal input impedance against a TABULATED plane-mode mouth load
@@ -654,6 +659,22 @@ pub fn mm_input_impedance_flanged(
     extra_slices: usize,
 ) -> Result<ModalResponse, DuctError> {
     mm_core(duct, state, omega, loss, MmLoad::Flanged(exterior), n_modes, extra_slices)
+}
+
+/// Multimodal input impedance with an original full physical mouth matrix.
+///
+/// All retained modes and mutual loads participate. The sample must match this
+/// frequency, mode count and actual last staircase-station radius; obtain that
+/// radius from [`PreparedModalDuct::mouth_radius_m`] when preparing a cone.
+/// The exterior may differ from the bore gas at the same static pressure.
+///
+/// # Errors
+/// As [`mm_input_impedance`], or a mismatched matrix declaration.
+pub fn mm_input_impedance_matrix(
+    duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
+    load: &ModalMouthImpedance, n_modes: usize, extra_slices: usize,
+) -> Result<ModalResponse, DuctError> {
+    mm_core(duct, state, omega, loss, MmLoad::Matrix(load), n_modes, extra_slices)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -774,6 +795,10 @@ fn mm_reflection_prepared(
             crate::exterior::admit(state, exterior)?;
             (None, omega * mouth / exterior.sound_speed)
         }
+        MmLoad::Matrix(matrix) => {
+            matrix.admit(state, omega, mouth, n)?;
+            (None, omega * mouth / matrix.exterior().sound_speed)
+        }
     };
     let mouth_wave = modal_wave(state, mouth, omega, loss, gammas)?;
     let mut min_shear = mouth_wave.shear_number;
@@ -783,6 +808,8 @@ fn mm_reflection_prepared(
     let r_load: Vec<C64> = if let MmLoad::Flanged(exterior) = load {
         let matrix = crate::flanged::flanged_modal_impedance(exterior, mouth, omega, n)?;
         reflection_from_impedance(&matrix, &mouth_wave.zc, n)?
+    } else if let MmLoad::Matrix(matrix) = load {
+        reflection_from_impedance(matrix.impedance(), &mouth_wave.zc, n)?
     } else {
         let mut r = vec![C64::ZERO; n * n];
         match zl_plane {

@@ -2149,6 +2149,44 @@ propagators, full field work conservation, cutoff continuity and a 1/2/4-mode
 resonance-frequency/linewidth ladder. Mode and axial refinement remain
 separate convergence axes; a single retained order is not continuum truth.
 
+## Full physical modal mouth matrices
+
+`modal::ModalMouthImpedance` admits one original row-major boundary matrix
+`P = Z U_outward` [Pa s/m³] at an exact positive frequency, circular mouth
+radius, coherent exterior gas and retained radial basis. The public
+`AxisymmetricMouthBasis` exposes the same certified J1 roots and signed
+`psi_n = J0(gamma_n r/R)/|J0(gamma_n)|` shapes through the continuous mode cap.
+With `P_n = integral(p psi_n)/S` and `U_n = integral(v psi_n)`, a unit modal
+flow trace for an exterior solve is `psi_n/S`. Higher modes have zero net
+volume flow; dividing their loads by individual net-flow gains is invalid.
+
+The complete Hermitian resistance, including imaginary mutual entries, must
+be positive semidefinite within `512 eps N` of its largest component. The
+native symmetric eigensolve also checks its normalized residual. Resistance
+sets the admission scale independently of reactance; no clipping, matrix
+repair or reciprocity assumption changes the supplied physical entries.
+This is single-frequency passivity, not a causal fit or a source-validity
+certificate. The caller retains the source geometry and frequency band.
+
+`mm_input_impedance_matrix`, prepared `input_impedance_matrix` and
+`input_reflection_matrix`, and `outlet::mouth_response_matrix` use the same
+staircase wave recursion with all mutual mouth loads. The prepared object's
+`mouth_radius_m` identifies its actual last discrete station: a sliced cone
+ends at its last midpoint radius. Continuous `mm_profile_impedance_matrix`
+and `mm_profile_field_matrix` attach the same full matrix at the physical
+profile outlet and remain finite at bare transverse cutoffs. Their half-order
+indicator uses the matrix's leading principal block, a Galerkin truncation
+with omitted modal flows set to zero. Exact frequency/mode binding, radius
+agreement within `128 eps`, common interior/exterior static pressure and
+existing mode/axial-step bounds are mandatory.
+
+`modal/load/tests.rs` checks 12-mode signed area orthogonality and zero higher
+net flow, full complex passivity, independent cylinder pressure/flow transfer,
+work conservation with evanescent modes, exact native flanged-route parity,
+cutoff fields, and physical resonance frequency/linewidth movement when
+mutual radiation is retained. The matrix interface adds neither azimuthal
+modes nor independent higher-mode viscothermal loss laws.
+
 ## Finite-amplitude manifold consumer
 
 `NonlinearDuct::into_solver` transfers the exact original geometric mesh,

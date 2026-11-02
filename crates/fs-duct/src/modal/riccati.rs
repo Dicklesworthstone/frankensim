@@ -72,7 +72,7 @@
 //! tests certify `bessel_j0_certified` and `J1` against an independent
 //! quadrature. (The staircase's legacy `bessel_j0` is not used here.)
 
-use super::{ModalResponse, bessel_j0_certified, j1_roots_unchecked, mat_inv, modal_wave};
+use super::{ModalMouthImpedance, ModalResponse, bessel_j0_certified, j1_roots_unchecked, mat_inv, modal_wave};
 use crate::profile::{RadiusProfile, RiccatiSteps};
 use crate::{
     DuctError, LossModel, TabulatedLoad, Termination, segment_wave, termination_impedance,
@@ -152,6 +152,7 @@ pub enum MouthLoad<'a> {
 enum ProfileLoad<'a> {
     Scalar(MouthLoad<'a>),
     Flanged(&'a GasState),
+    Matrix(&'a ModalMouthImpedance),
 }
 
 impl<'a> From<MouthLoad<'a>> for ProfileLoad<'a> {
@@ -458,6 +459,18 @@ fn propagate<'a>(
             // original generator stay regular at a bare modal cutoff.
             omega * r_mouth / exterior.sound_speed
         }
+        ProfileLoad::Matrix(matrix) => {
+            matrix.admit_prefix(state, omega, r_mouth, n)?;
+            let declared = matrix.modes().0;
+            for i in 0..n {
+                for j in 0..n {
+                    x_blk[i*n+j] = matrix.impedance()[i*declared+j].scale(1.0 / zref);
+                    if !finite(x_blk[i*n+j]) { return Err(DuctError::Singular); }
+                }
+                y_blk[i*n+i] = C64::ONE;
+            }
+            omega * r_mouth / matrix.exterior().sound_speed
+        }
     };
     normalize_wave_chart(&mut x_blk, &mut y_blk, n)?;
     let mut stations = track_flow.then(|| Stations {
@@ -579,6 +592,25 @@ pub fn mm_profile_impedance_flanged(
     profile_impedance_with_load(profile, state, omega, loss, ProfileLoad::Flanged(exterior), modes, steps)
 }
 
+/// Continuous multimodal response with an original full physical mouth matrix.
+///
+/// The load belongs to this exact frequency, outlet radius and retained mode
+/// count. Its full signed mutual coupling acts on the native pressure/flow
+/// propagation, including evanescent modes and bare transverse cutoffs. The
+/// `N/2` tail comparison uses the leading principal submatrix: omitted modal
+/// flows are zero, a Galerkin truncation of this same declared boundary.
+/// This is a convergence estimate, not a certified error bound.
+///
+/// # Errors
+/// As [`mm_profile_impedance`], or an incompatible matrix declaration.
+pub fn mm_profile_impedance_matrix(
+    profile: &RadiusProfile, state: &GasState, omega: f64, loss: LossModel,
+    load: &ModalMouthImpedance, modes: ModeCount, steps: RiccatiSteps,
+) -> Result<ModalResponse, DuctError> {
+    load.admit(state, omega, profile.radius(profile.length())?, modes.0)?;
+    profile_impedance_with_load(profile, state, omega, loss, ProfileLoad::Matrix(load), modes, steps)
+}
+
 fn profile_impedance_with_load(
     profile: &RadiusProfile,
     state: &GasState,
@@ -681,6 +713,21 @@ pub fn mm_profile_field_flanged(
     inlet_flow: &[C64],
 ) -> Result<ModalField, DuctError> {
     profile_field_with_load(profile, state, omega, loss, ProfileLoad::Flanged(exterior), modes, steps, inlet_flow)
+}
+
+/// Continuous physical fields with the same full matrix as
+/// [`mm_profile_impedance_matrix`]. The mouth obeys `P = Z U_outward`; the
+/// original signed modal flows retain the work pairing `Re(U^H P)/2`.
+///
+/// # Errors
+/// As [`mm_profile_field`] and [`mm_profile_impedance_matrix`].
+#[allow(clippy::too_many_arguments)]
+pub fn mm_profile_field_matrix(
+    profile: &RadiusProfile, state: &GasState, omega: f64, loss: LossModel,
+    load: &ModalMouthImpedance, modes: ModeCount, steps: RiccatiSteps, inlet_flow: &[C64],
+) -> Result<ModalField, DuctError> {
+    load.admit(state, omega, profile.radius(profile.length())?, modes.0)?;
+    profile_field_with_load(profile, state, omega, loss, ProfileLoad::Matrix(load), modes, steps, inlet_flow)
 }
 
 #[allow(clippy::too_many_arguments)]
