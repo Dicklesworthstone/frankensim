@@ -1833,6 +1833,46 @@ source accuracy. The original centroid/disc Burton–Miller and triangle-CBIE
 accuracy limits remain. No passivity repair or BEM discretization-error bound
 is introduced, and receiver near-field convergence still requires refinement.
 
+### Adaptive molecular receivers on the original boundary traces
+
+`MolecularRadiation::prepare_near_field` and `observe_near_field` extend the
+original retained-triangle receiver to passive complex wavenumbers. The real
+and molecular routes share quadrature rules, subdivision and componentwise
+pressure/gradient discrepancy tests. Complex |k| resolves phase and attenuation
+on each tile; physical velocity still uses the original real rho*omega.
+Real-k kernel arithmetic and the existing P1 receiver consumer are retained.
+Geometry winding/clearance, maximum depth, complete-array kernel work and
+explicit retained-row bytes are admitted. Cancellation reaches integration
+tiles and contractions; exhaustion returns no partial field or centroid fallback.
+
+`PreparedMolecularNearField` binds original source ownership, surface,
+frequency and receiver positions. One integrated row bank serves all source
+columns. It returns paired pressure/particle velocity and propagated absolute
+quadrature discrepancy estimates. These estimates cover integration of the
+fixed solved traces only, excluding boundary discretization, material/source
+error and cancellation-conditioned relative error. Receiver positions/output,
+geometry scratch, allocator metadata and stacks remain outside the row-byte cap.
+
+Coherent molecular scattering adds the original analytic incident field once
+at the prepared positions. Its prepared-row query reuses quadrature across an
+incident batch. Aperture-flow observation coherently combines the original
+loaded traces before one adaptive contraction. `MolecularBemObservation::
+with_near_field` selects the same receiver machinery for harmonic/FIR samples
+and matched source responses; controls enter the operator hash. The source
+bank retains unit-source discrepancy estimates and actual integration count,
+and propagates estimates with absolute source-rate weights. Boundary loads,
+wall/exterior work and material laws are unchanged. Adaptive source responses
+reserve another `2*s*r` complex-entry equivalents for four real discrepancy
+components per source/receiver, in addition to their separate row-storage cap.
+
+G1 source/core regressions cover independent complex Green derivatives and
+refined triangle integration near faces/edges, native real-k recovery, coherent
+row reuse, original momentum, source/frequency/geometry binding, budgets and
+late cancellation/replay. A source-bank case checks unchanged loading and
+shared-row discrepancy propagation. They are authored and syntax checked;
+native execution remains pending the dependency/resource blocker. Scalar
+oracle checks qualify only their reference formulas, not production BEM passes.
+
 ### Material walls and matched molecular source response
 
 `MolecularBemObservation::with_local_boundary` attaches the existing immutable
@@ -2170,6 +2210,26 @@ mode-order and 20/80/320-panel-per-body ladder for paired fields and interface
 work. The continuum oracle also compares inward work with the original
 caloric bulk heat. These definitions passed syntax/formatting checks; native
 compilation and BEM test execution remain blocked in the authoring environment.
+
+### Adaptive molecular transmission receivers
+
+Single and multiple molecular transmission fields expose explicit adaptive
+scattered, total and interior pressure/velocity queries. They reuse the shared
+complex receiver rows and preserve every propagated discrepancy component.
+Interior integration reverses the Green sign once with the original interior
+rho*omega. Exterior multiple-body integration uses local outgoing coefficients;
+using complete scattered traces there would count neighboring fields repeatedly.
+A transparent body's interior admits its selected component and the combined
+surface, then integrates one global outgoing row bank plus the incident field.
+All-panel work/row caps therefore remain effective. Fully transparent fields
+retain exact incident values and zero quadrature discrepancy.
+
+Five G0/G1/G3 cases cover the native limit, independent refined integration of
+fixed traces on both sides, single/multiple parity, transparent neighbors,
+resource/source/geometry admission and cancellation/replay. These adaptive
+queries improve integration of existing traces; they do not refine the boundary
+solution or certify close-body interaction accuracy. Native tests are authored
+but unexecuted in the current environment.
 
 ## Cancellation in coherent field evaluation
 

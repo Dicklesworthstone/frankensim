@@ -11,6 +11,9 @@
 use super::*;
 use crate::helmholtz::transmission::multiple::engine;
 
+#[path = "multiple/near_field.rs"]
+mod adaptive;
+
 /// One original closed body and its actual molecular caloric source.
 #[derive(Clone, Copy)]
 pub struct Body<'a> {

@@ -5,7 +5,10 @@
 //! separately; the observation bank reads those same solutions. This is a
 //! sampled physical load, not a fitted or certified passive realization.
 
-use super::{MolecularBemObservation, MolecularObservationError, invalid};
+use super::{
+    MolecularBemObservation, MolecularObservationError, MolecularReceiverError,
+    MolecularReceiverQuadrature, invalid,
+};
 use crate::helmholtz::molecular::MolecularRadiation;
 use crate::observation_transfers::{
     MAX_OBSERVATION_ENTRIES, PreparedHarmonicObservation, SourceId, TransferError, cap, finite,
@@ -21,7 +24,9 @@ pub struct MolecularResponseLimits {
     /// Maximum live complex entries outside the original BEM assembly. The
     /// conservative reservation is `3*s*s + 2*s*p + 8*s*r`: three source-work
     /// matrices, the pressure/velocity solution bank, and simultaneous raw and
-    /// converted receiver banks. Here s/p/r are sources/panels/receivers.
+    /// converted receiver banks. Adaptive receivers add `2*s*r` for four real
+    /// discrepancy components per source/receiver; their row storage has a
+    /// separate MolecularNearFieldOptions cap. Here s/p/r are sources/panels/receivers.
     pub maximum_retained_entries: usize,
     /// Three weighted products per source pair and panel, including the wall
     /// work projection. Receiver work retains its original owner's admission.
@@ -51,6 +56,7 @@ pub struct PreparedMolecularResponse {
     // The already-admitted 2*s*p source bank also supplies exact coherent
     // boundary traces for incident/motion interference and interface work.
     boundary_solutions: Vec<MolecularRadiation>,
+    receiver_quadrature: Option<MolecularReceiverQuadrature>,
     impedance: Vec<C64>,
     exterior_work: Vec<C64>,
     wall_work: Vec<C64>,
@@ -104,6 +110,13 @@ impl MolecularBemObservation<'_> {
                     .and_then(|p| v.checked_add(p))
             })
             .and_then(|v| samples.checked_mul(2).and_then(|s| v.checked_add(s)))
+            .and_then(|v| {
+                v.checked_add(if self.near_field_options.is_some() {
+                    samples / 2
+                } else {
+                    0
+                })
+            })
             .ok_or_else(|| invalid("molecular source response storage overflow"))?;
         cap(
             live_entries,
@@ -148,19 +161,7 @@ impl MolecularBemObservation<'_> {
                 wall_work[index] = values[2];
             }
         }
-        let mut fields = Vec::with_capacity(samples);
-        for solution in &solved {
-            poll(&mut cancelled)?;
-            super::BemObservation::flatten(
-                solution.observe(
-                    self.boundary.surface,
-                    &self.boundary.points,
-                    self.boundary.minimum_clearance_m,
-                    &mut cancelled,
-                )?,
-                &mut fields,
-            );
-        }
+        let (fields, receiver_quadrature) = self.observation_samples(&solved, &mut cancelled)?;
         let harmonic = PreparedHarmonicObservation::from_samples(
             omega,
             self.boundary.medium,
@@ -174,6 +175,7 @@ impl MolecularBemObservation<'_> {
             source: self.source().clone(),
             harmonic,
             boundary_solutions: solved,
+            receiver_quadrature,
             impedance,
             exterior_work,
             wall_work,
@@ -182,6 +184,53 @@ impl MolecularBemObservation<'_> {
 }
 
 impl PreparedMolecularResponse {
+    /// Source-column quadrature diagnostics, present only for adaptive rows.
+    pub fn receiver_quadrature(&self) -> Option<&MolecularReceiverQuadrature> {
+        self.receiver_quadrature.as_ref()
+    }
+
+    /// Sum absolute source-rate-weighted quadrature estimates in receiver order.
+    /// Coherent field amplitudes still come from the original harmonic bank;
+    /// these positive discrepancy estimates do not become field/power terms.
+    pub fn receiver_quadrature_for_rates(
+        &self,
+        rates: &[C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Option<Vec<MolecularReceiverError>>, MolecularObservationError> {
+        poll(&mut cancelled)?;
+        self.admit_rates(rates)?;
+        let Some(quadrature) = &self.receiver_quadrature else {
+            return Ok(None);
+        };
+        let receivers = self.harmonic.receivers().len();
+        let mut output = Vec::with_capacity(receivers);
+        for receiver in 0..receivers {
+            poll(&mut cancelled)?;
+            let mut sums = [Sum::default(); 4];
+            for (source, &rate) in rates.iter().enumerate() {
+                if source % 128 == 0 {
+                    poll(&mut cancelled)?;
+                }
+                let error = quadrature.source_fields[source * receivers + receiver];
+                let magnitude = rate.abs();
+                sums[0].add(C64::from_re(magnitude * error.pressure_pa));
+                for axis in 0..3 {
+                    sums[axis + 1].add(C64::from_re(magnitude * error.particle_velocity_m_s[axis]));
+                }
+            }
+            let errors = sums.map(|sum| sum.finish().re);
+            if errors.iter().any(|value| !value.is_finite()) {
+                return Err(invalid("molecular coherent receiver discrepancy overflow"));
+            }
+            output.push(MolecularReceiverError {
+                pressure_pa: errors[0],
+                particle_velocity_m_s: [errors[1], errors[2], errors[3]],
+            });
+        }
+        poll(&mut cancelled)?;
+        Ok(Some(output))
+    }
+
     pub fn source(&self) -> &RelaxationState {
         &self.source
     }

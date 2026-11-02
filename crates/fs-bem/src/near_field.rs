@@ -20,6 +20,8 @@ pub use velocity::{FirstOrder, VectorObservation};
 // The same near-field kernels, with three linearly interpolated source values.
 // Only the reciprocal owner binds these rows to its P1/P0 solution identity.
 pub(crate) mod linear;
+// Original adaptive rows for a source-bound absorbing/dispersive field.
+pub(crate) mod complex;
 
 const MAX_PANELS: usize = helmholtz::MAX_DENSE_PANELS;
 /// Receiver cardinality shared by near-field geometry and harmonic callers.
@@ -289,23 +291,56 @@ impl Integral {
         self.error_s+=b.error_s;self.error_d+=b.error_d;
         self.gradient.add(b.gradient);
     }
-    fn accumulate(&mut self,sample:&Kernel,jac:f64,with_velocity:bool)->Result<(),HelmholtzError> {
+    fn accumulate<K:ReceiverWave>(&mut self,sample:&Kernel<K>,jac:f64,with_velocity:bool)->Result<(),HelmholtzError> {
         self.s=self.s+sample.g.scale(jac);self.d=self.d+sample.dg.scale(jac);
         if with_velocity {self.gradient.accumulate(sample.k,sample.g,sample.delta,
             sample.r,sample.normal,jac)?;}
-        self.abs_s+=jac/(FOUR_PI*sample.r);
-        self.abs_d+=jac/(FOUR_PI*sample.r)*(1./sample.r).hypot(sample.k)*sample.projection.abs();
+        let (abs_s,abs_d)=sample.k.absolute_moments(sample.r,sample.projection,jac);
+        self.abs_s+=abs_s;
+        self.abs_d+=abs_d;
         Ok(())
     }
 }
 // One kernel calculation serves either the original P0 moment or all three
 // P1 moments. Weighting a density must not change the Green-field convention.
-struct Kernel { k:f64,g:C64,dg:C64,delta:Point,r:f64,normal:Point,projection:f64 }
-fn kernel(k:f64,delta:Point,normal:Point)->Result<Kernel,HelmholtzError> {
+// The real implementation keeps its original arithmetic. Only the analytic
+// outgoing scalar and radial derivatives vary for a molecular wavenumber.
+trait ReceiverWave:helmholtz::WaveNumber {
+    fn normal_factor(self,r:f64)->C64;
+    fn radial_difference(self,inv:f64)->C64;
+    fn absolute_moments(self,r:f64,projection:f64,jac:f64)->(f64,f64);
+    fn variation_per_m(self)->f64;
+}
+impl ReceiverWave for f64 {
+    fn normal_factor(self,r:f64)->C64 {C64::new(1./r,-self)}
+    fn radial_difference(self,inv:f64)->C64 {C64::new(3.*inv*inv-self*self,-3.*self*inv)}
+    fn absolute_moments(self,r:f64,projection:f64,jac:f64)->(f64,f64) {
+        (jac/(FOUR_PI*r),jac/(FOUR_PI*r)*(1./r).hypot(self)*projection.abs())
+    }
+    fn variation_per_m(self)->f64 {self}
+}
+impl ReceiverWave for helmholtz::laplace::DampedWaveNumber {
+    fn normal_factor(self,r:f64)->C64 {C64::new(1./r+self.k.im,-self.k.re)}
+    fn radial_difference(self,inv:f64)->C64 {
+        if self.k.im==0. {return self.k.re.radial_difference(inv);}
+        // (G''-G'/r)/G = 3/r² - 3ik/r - k².
+        C64::new(3.*inv*inv+self.k.im*(3.*inv+self.k.im)-self.k.re*self.k.re,
+            -self.k.re*(3.*inv+2.*self.k.im))
+    }
+    fn absolute_moments(self,r:f64,projection:f64,jac:f64)->(f64,f64) {
+        if self.k.im==0. {return self.k.re.absolute_moments(r,projection,jac);}
+        let amplitude=det::exp(-self.k.im*(r-self.phase_origin_m));
+        let single=jac/(FOUR_PI*r)*amplitude;
+        (single,single*(1./r+self.k.im).hypot(self.k.re)*projection.abs())
+    }
+    fn variation_per_m(self)->f64 {self.k.abs()}
+}
+struct Kernel<K:ReceiverWave> { k:K,g:C64,dg:C64,delta:Point,r:f64,normal:Point,projection:f64 }
+fn kernel<K:ReceiverWave>(k:K,delta:Point,normal:Point)->Result<Kernel<K>,HelmholtzError> {
     let r=norm(delta);
     if !r.is_finite() || r<=0. {return Err(bad("unresolved near-field integration point"));}
-    let phase=k*r;let g=C64::new(det::cos(phase),det::sin(phase)).scale(1./(FOUR_PI*r));
-    let projection=dot(normal,delta)/r;let dg=g*C64::new(1./r,-k).scale(projection);
+    let g=k.outgoing(r).scale(1./(FOUR_PI*r));
+    let projection=dot(normal,delta)/r;let dg=g*k.normal_factor(r).scale(projection);
     Ok(Kernel{k,g,dg,delta,r,normal,projection})
 }
 struct Work { options:Options, evaluations:usize }
@@ -315,7 +350,7 @@ const X8:[f64;8]=[0.019855071751231884,0.10166676129318664,0.2372337950418355,0.
     0.5917173212478249,0.7627662049581645,0.8983332387068134,0.9801449282487681];
 const W8:[f64;8]=[0.05061426814518813,0.11119051722668724,0.15685332293894366,0.181341891689181,
     0.181341891689181,0.15685332293894366,0.11119051722668724,0.05061426814518813];
-fn rule(k:f64,x:Point,t:Triangle,normal:Point,nodes:&[f64],weights:&[f64],work:&mut Work,with_velocity:bool) -> Result<Integral,HelmholtzError> {
+fn rule<K:ReceiverWave>(k:K,x:Point,t:Triangle,normal:Point,nodes:&[f64],weights:&[f64],work:&mut Work,with_velocity:bool) -> Result<Integral,HelmholtzError> {
     let count=nodes.len()*nodes.len();
     work.evaluations=work.evaluations.checked_add(count).filter(|n|*n<=work.options.maximum_kernel_evaluations)
         .ok_or_else(||bad("near-field kernel-evaluation budget exhausted"))?;
@@ -344,11 +379,16 @@ fn integrate_fields(k:f64,x:Point,t:Triangle,normal:Point,depth:usize,work:&mut 
 }
 fn integrate_fields_controlled(k:f64,x:Point,t:Triangle,normal:Point,depth:usize,work:&mut Work,with_velocity:bool,
     gate:Option<&fs_exec::CancelGate>) -> Result<Integral,HelmholtzError> {
-    poll_receiver(gate)?;
+    integrate_fields_cancellable(k,x,t,normal,depth,work,with_velocity,
+        &mut ||gate.is_some_and(fs_exec::CancelGate::is_requested))
+}
+fn integrate_fields_cancellable<K:ReceiverWave>(k:K,x:Point,t:Triangle,normal:Point,depth:usize,work:&mut Work,
+    with_velocity:bool,cancelled:&mut impl FnMut()->bool) -> Result<Integral,HelmholtzError> {
+    if cancelled() {return Err(HelmholtzError::Cancelled);}
     let coarse=rule(k,x,t,normal,&X4,&W4,work,with_velocity)?;let mut fine=rule(k,x,t,normal,&X8,&W8,work,with_velocity)?;
     fine.error_s=(fine.s-coarse.s).abs();fine.error_d=(fine.d-coarse.d).abs();
     let size=[norm(sub(t[1],t[0])),norm(sub(t[2],t[1])),norm(sub(t[0],t[2]))].into_iter().fold(0.0_f64,f64::max);
-    let separated=size<=2.*distance(x,t) && k*size<=3.;
+    let separated=size<=2.*distance(x,t) && k.variation_per_m()*size<=3.;
     let tol=work.options.relative_tolerance;
     // The geometric/phase condition prevents two rules from jointly missing
     // a sharp nearby peak or an under-sampled oscillation.
@@ -356,7 +396,7 @@ fn integrate_fields_controlled(k:f64,x:Point,t:Triangle,normal:Point,depth:usize
     if separated && fine.error_s<=tol*fine.abs_s && fine.error_d<=tol*fine.abs_d && gradient_ok {return Ok(fine);}
     if depth==work.options.maximum_depth {return Err(bad("near-field triangle refinement depth exhausted"));}
     let mut sum=Integral::default();
-    for child in children(t) {sum.add(integrate_fields_controlled(k,x,child,normal,depth+1,work,with_velocity,gate)?);}
+    for child in children(t) {sum.add(integrate_fields_cancellable(k,x,child,normal,depth+1,work,with_velocity,cancelled)?);}
     Ok(sum)
 }
 

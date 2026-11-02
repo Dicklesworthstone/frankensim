@@ -12,7 +12,8 @@ use super::*;
 use crate::helmholtz::bc::Admittance;
 use crate::helmholtz::laplace::complex::ComplexOptions;
 use crate::helmholtz::molecular::{
-    MolecularBoundarySolution, MolecularError, MolecularExterior, MolecularRadiation,
+    MolecularBoundarySolution, MolecularError, MolecularExterior, MolecularNearFieldOptions,
+    MolecularRadiation,
 };
 use fs_material::relaxation::RelaxationState;
 use std::cell::RefCell;
@@ -20,6 +21,10 @@ use std::cell::RefCell;
 /// A single solved source bank for both reaction and finite receivers.
 pub mod prepared;
 pub use prepared::{MolecularResponseLimits, MolecularResponsePower, PreparedMolecularResponse};
+
+#[path = "molecular/near_field.rs"]
+mod adaptive;
+pub use adaptive::{MolecularReceiverError, MolecularReceiverQuadrature};
 
 /// The original material/boundary refusal or shared observation refusal.
 #[derive(Debug)]
@@ -101,6 +106,7 @@ pub struct MolecularBemObservation<'a> {
     limits: ComplexOptions,
     plain_cbie_limit_rad_per_m: f64,
     local_boundary: Option<LocalBoundary>,
+    near_field_options: Option<MolecularNearFieldOptions>,
 }
 
 impl<'a> MolecularBemObservation<'a> {
@@ -203,6 +209,7 @@ impl<'a> MolecularBemObservation<'a> {
             limits,
             plain_cbie_limit_rad_per_m,
             local_boundary: None,
+            near_field_options: None,
         })
     }
 
@@ -313,6 +320,23 @@ impl<'a> MolecularBemObservation<'a> {
             h.update(b"original-local-boundary-v1");
             h.update(boundary.content_hash().as_bytes());
         }
+        if let Some(options) = self.near_field_options {
+            h.update(b"original-adaptive-molecular-receivers-v1");
+            h.update(
+                &options
+                    .quadrature
+                    .relative_tolerance
+                    .to_bits()
+                    .to_le_bytes(),
+            );
+            for value in [
+                options.quadrature.maximum_depth,
+                options.quadrature.maximum_kernel_evaluations,
+                options.maximum_row_bytes,
+            ] {
+                h.update(&(value as u64).to_le_bytes());
+            }
+        }
         h.finalize()
     }
 
@@ -395,19 +419,8 @@ impl<'a> MolecularBemObservation<'a> {
                     * self.boundary.fields.len()
             ]);
         }
-        let mut out = Vec::new();
-        for solution in self.solutions(omega, &mut cancelled)? {
-            BemObservation::flatten(
-                solution.observe(
-                    self.boundary.surface,
-                    &self.boundary.points,
-                    self.boundary.minimum_clearance_m,
-                    &mut cancelled,
-                )?,
-                &mut out,
-            );
-        }
-        Ok(out)
+        let solved = self.solutions(omega, &mut cancelled)?;
+        Ok(self.observation_samples(&solved, &mut cancelled)?.0)
     }
 
     /// Prepare material-bound pressure and particle velocity for coherent

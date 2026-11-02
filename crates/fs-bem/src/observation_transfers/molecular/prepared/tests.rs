@@ -64,6 +64,117 @@ fn close(a: f64, b: f64, scale: f64) {
 }
 
 #[test]
+fn adaptive_source_bank_reuses_rows_preserves_loading_and_carries_coherent_discrepancies() {
+    use crate::helmholtz::molecular::MolecularNearFieldOptions;
+    let surface = SpherePanels::icosphere(0.1, 0).unwrap();
+    let source = material();
+    let ids = [
+        SourceId::StructuralMode("radial".into()),
+        SourceId::StructuralMode("axial".into()),
+    ];
+    let traces = [
+        vec![1.0; surface.areas().len()],
+        surface.normals().iter().map(|normal| normal[2]).collect(),
+    ];
+    let centroid = observer(&surface, source, &ids, &traces);
+    let omega = 600.0;
+    let original = centroid
+        .prepare_response(omega, limits(&centroid), || false)
+        .unwrap();
+    let old_hash = centroid.operator_hash();
+    let options = MolecularNearFieldOptions::default();
+    let model = centroid.with_near_field(options).unwrap();
+    assert_ne!(model.operator_hash(), old_hash);
+    let mut admitted = limits(&model);
+    let mut calls = 0;
+    assert!(
+        model
+            .prepare_response(omega, admitted, || {
+                calls += 1;
+                false
+            })
+            .is_err()
+    );
+    assert_eq!(
+        calls, 1,
+        "discrepancy storage must be admitted before BEM work"
+    );
+    admitted.maximum_retained_entries += 2 * ids.len() * model.boundary.receivers.len();
+    let response = model.prepare_response(omega, admitted, || false).unwrap();
+    assert_eq!(response.impedance(), original.impedance());
+    assert_eq!(
+        response.exterior_work_matrix(),
+        original.exterior_work_matrix()
+    );
+    assert_eq!(response.wall_work_matrix(), original.wall_work_matrix());
+    let direct = response.boundary_solutions[0]
+        .prepare_near_field(
+            &surface,
+            &model.boundary.points,
+            model.boundary.minimum_clearance_m,
+            options,
+            || false,
+        )
+        .unwrap();
+    let quadrature = response.receiver_quadrature().unwrap();
+    assert_eq!(quadrature.kernel_evaluations, direct.kernel_evaluations());
+    assert_eq!(quadrature.source_fields.len(), ids.len());
+    let rates = [C64::new(0.5, -0.2), C64::new(-0.3, 0.1)];
+    let mut expected = HarmonicField::default();
+    for (solution, &rate) in response.boundary_solutions.iter().zip(&rates) {
+        let observed = direct.evaluate(solution, || false).unwrap();
+        expected.pressure_pa = expected.pressure_pa + observed.scalar.pressure[0] * rate;
+        for axis in 0..3 {
+            expected.particle_velocity_m_s[axis] = expected.particle_velocity_m_s[axis]
+                + observed.particle_velocity_m_s[0][axis] * rate;
+        }
+    }
+    let mut actual = [HarmonicField::default()];
+    response
+        .harmonic()
+        .evaluate_coherent(&rates, &mut actual, || false)
+        .unwrap();
+    assert!(
+        (actual[0].pressure_pa - expected.pressure_pa).abs() < 1e-12 * expected.pressure_pa.abs()
+    );
+    let velocity_scale = expected
+        .particle_velocity_m_s
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    for axis in 0..3 {
+        assert!(
+            (actual[0].particle_velocity_m_s[axis] - expected.particle_velocity_m_s[axis]).abs()
+                < 1e-12 * velocity_scale.max(f64::MIN_POSITIVE)
+        );
+    }
+    let errors = response
+        .receiver_quadrature_for_rates(&rates, || false)
+        .unwrap()
+        .unwrap();
+    let expected_error: f64 = rates
+        .iter()
+        .zip(&quadrature.source_fields)
+        .map(|(&rate, error)| rate.abs() * error.pressure_pa)
+        .sum();
+    close(errors[0].pressure_pa, expected_error, expected_error);
+    assert!(errors[0].pressure_pa > 0.0);
+    assert_eq!(
+        response
+            .receiver_quadrature_for_rates(&[C64::ZERO; 2], || false)
+            .unwrap()
+            .unwrap(),
+        vec![MolecularReceiverError::default()]
+    );
+    assert!(
+        original
+            .receiver_quadrature_for_rates(&rates, || false)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn loaded_spherical_oscillator_and_receiver_converge_to_independent_solution() {
     // G1: physical mechanical impedance plus the analytic pulsating-sphere
     // fluid impedance. The same computed velocity drives the receiver and

@@ -29,6 +29,10 @@ pub use scattering::{
     MolecularScatteredField, MolecularScatteringOptions, MolecularScatteringSolution,
 };
 
+#[path = "helmholtz_molecular/near_field.rs"]
+mod adaptive;
+pub use adaptive::{MolecularNearFieldOptions, PreparedMolecularNearField};
+
 /// Material, geometric, work-envelope, solve or cancellation refusal.
 #[derive(Debug)]
 pub enum MolecularError {
@@ -517,6 +521,15 @@ impl MolecularApertureResponse {
         minimum_clearance_m: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<PointField>, MolecularError> {
+        self.combined_volume_flows(volume_flows, &mut cancelled)?
+            .observe(surface, points, minimum_clearance_m, cancelled)
+    }
+
+    fn combined_volume_flows(
+        &self,
+        volume_flows: &[C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularRadiation, MolecularError> {
         poll(&mut cancelled)?;
         if volume_flows.len() != self.solutions.len()
             || volume_flows.iter().any(|&v| !finite(v))
@@ -561,7 +574,8 @@ impl MolecularApertureResponse {
                 }
             }
         }
-        combined.observe(surface, points, minimum_clearance_m, cancelled)
+        poll(&mut cancelled)?;
+        Ok(combined)
     }
 }
 

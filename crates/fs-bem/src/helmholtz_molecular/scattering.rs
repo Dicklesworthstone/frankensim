@@ -312,6 +312,95 @@ impl MolecularScatteredField<'_, '_> {
         &self.solution
     }
 
+    /// Total incident plus scattered pressure/particle velocity using the
+    /// original adaptive triangle receiver. Analytic incident fields are added
+    /// once at the same physical points. Returned componentwise discrepancies
+    /// cover scattered-field quadrature only, not solve or material error.
+    pub fn total_pressure_velocity_adaptive_at(
+        &self,
+        points_m: &[[f64; 3]],
+        minimum_receiver_clearance_m: f64,
+        options: MolecularNearFieldOptions,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::near_field::VectorObservation, MolecularError> {
+        let incident = self.near_field_incident(points_m, &mut cancelled)?;
+        let prepared = self.solution.scattered.prepare_near_field(
+            self.surface,
+            points_m,
+            minimum_receiver_clearance_m,
+            options,
+            &mut cancelled,
+        )?;
+        self.combine_near_field(&prepared, incident, &mut cancelled)
+    }
+
+    /// Reuse one source-bound adaptive row bank across a coherent incident
+    /// batch. Its retained receiver positions determine both scattered and
+    /// analytic fields; callers cannot supply mismatched observation points.
+    pub fn total_pressure_velocity_with_near_field(
+        &self,
+        prepared: &PreparedMolecularNearField<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::near_field::VectorObservation, MolecularError> {
+        let incident = self.near_field_incident(prepared.points_m(), &mut cancelled)?;
+        self.combine_near_field(prepared, incident, &mut cancelled)
+    }
+
+    fn near_field_incident(
+        &self,
+        points: &[[f64; 3]],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<IncidentSample>, MolecularError> {
+        poll(cancelled)?;
+        if points.is_empty() || points.len() > crate::near_field::MAX_RECEIVERS {
+            return Err(bad(
+                "molecular adaptive receiver array exceeds its cardinality limit",
+            ));
+        }
+        admit_source_work(
+            self.incident.source_count(),
+            points.len(),
+            self.maximum_source_point_products,
+        )?;
+        let radiation = &self.solution.scattered;
+        let wave = DampedWaveNumber {
+            k: radiation.k,
+            phase_origin_m: 0.0,
+        };
+        let momentum = radiation.source.gas().density * radiation.omega;
+        points
+            .iter()
+            .map(|&point| {
+                self.incident
+                    .sample_wave(wave, momentum, None, point, cancelled)
+                    .map_err(MolecularError::from)
+            })
+            .collect()
+    }
+
+    fn combine_near_field(
+        &self,
+        prepared: &PreparedMolecularNearField<'_>,
+        incident: Vec<IncidentSample>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<crate::near_field::VectorObservation, MolecularError> {
+        let mut output = prepared.evaluate(&self.solution.scattered, &mut *cancelled)?;
+        for (i, source) in incident.into_iter().enumerate() {
+            poll(cancelled)?;
+            let pressure = output.scalar.pressure[i] + source.pressure_pa;
+            let velocity = std::array::from_fn(|axis| {
+                output.particle_velocity_m_s[i][axis] + source.velocity_m_s[axis]
+            });
+            if !finite(pressure) || velocity.iter().any(|&v| !finite(v)) {
+                return Err(bad("nonfinite adaptive molecular total receiver"));
+            }
+            output.scalar.pressure[i] = pressure;
+            output.particle_velocity_m_s[i] = velocity;
+        }
+        poll(cancelled)?;
+        Ok(output)
+    }
+
     /// Coherent total p [Pa] and u [m/s] at finite exterior points. The incident
     /// analytic gradient and the original scattered Green derivative both enter
     /// inviscid momentum. Retains angular/near-field force-source velocity even

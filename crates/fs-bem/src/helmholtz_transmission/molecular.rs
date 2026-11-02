@@ -18,6 +18,8 @@ use crate::helmholtz::bc::incident::IncidentSample;
 use crate::helmholtz::laplace::{DampedWaveNumber, fields_from_traces};
 use fs_material::relaxation::RelaxationState;
 
+#[path = "molecular/near_field.rs"]
+mod adaptive;
 #[path = "molecular/kernels.rs"]
 mod kernels;
 /// All mutual reflections among source-owned molecular gas bodies.

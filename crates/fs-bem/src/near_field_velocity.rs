@@ -11,10 +11,10 @@ pub(super) struct Derivative {
     pub(super) error_s:[f64;3], pub(super) error_d:[f64;3],
 }
 impl Derivative {
-    pub(super) fn accumulate(&mut self,k:f64,g:C64,delta:Point,r:f64,normal:Point,jac:f64) -> Result<(),HelmholtzError> {
+    pub(super) fn accumulate<K:ReceiverWave>(&mut self,k:K,g:C64,delta:Point,r:f64,normal:Point,jac:f64) -> Result<(),HelmholtzError> {
         let u=delta.map(|v|v/r);let a=dot(normal,u);let inv=1./r;
-        let first=g*C64::new(-inv,k);
-        let radial=g*C64::new(3.*inv*inv-k*k,-3.*k*inv);
+        let first=g*k.radial_factor(r);
+        let radial=g*k.radial_difference(inv);
         let tangent=first.scale(inv);
         for c in 0..3 {
             let ds=first.scale(u[c]);let dd=-(radial.scale(a*u[c])+tangent.scale(normal[c]));
