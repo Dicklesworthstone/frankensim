@@ -12,8 +12,8 @@ use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, ConductionLink,
     ConductionRegion, ConductionThermalError, ConductionThermalNetwork, DrivenCoefficients,
     DriverAccount, Error, MaterialCell, MaterialNetwork, MaterialNetworkError,
-    MaterialNetworkSample, ThermalDriver, cell_driver_candidate, check, finite, invalid, material,
-    same_material,
+    MaterialNetworkSample, ThermalDriver, cell_driver_candidate, check, finite, invalid,
+    map_conduction_error, material, same_material,
 };
 use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use fs_em::{
@@ -271,7 +271,12 @@ impl SpatialConductionThermalNetwork<'_> {
     /// field/enthalpy residual. Every source evaluation observes the SAME trial
     /// endpoint; no additional field or thermal time integrator is introduced.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn step_resolved_candidate<'t, C: SpatialConductorMaterial, S>(
+    pub(super) fn step_resolved_candidate<
+        't,
+        C: SpatialConductorMaterial,
+        S,
+        E: From<ConductionThermalError>,
+    >(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
@@ -282,23 +287,27 @@ impl SpatialConductionThermalNetwork<'_> {
         field_controls: ConductionControls,
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
-        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error>,
+        resolve: impl Fn(
+            &DepositionSimulation<'t>,
+        ) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, S>, Error> {
-        check(cancel)?;
-        let dt = self.admit_step(
-            thermal,
-            target_s,
-            problem,
-            assembly,
-            controls,
-            initial_energy_increments_j,
-        )?;
+    ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(map_conduction_error)?;
+        let dt = self
+            .admit_step(
+                thermal,
+                target_s,
+                problem,
+                assembly,
+                controls,
+                initial_energy_increments_j,
+            )
+            .map_err(map_conduction_error)?;
         if contact_bindings.len() != problem.contacts().len() {
-            return Err(invalid(
+            return Err(map_conduction_error(invalid(
                 "every tetrahedral electrical contact needs explicit source and heat ownership",
-            ));
+            )));
         }
         // The existing geometry-independent inventory and heat routing owner
         // consumes the actual tetrahedral volumes. No surrogate planar mesh is
@@ -324,8 +333,11 @@ impl SpatialConductionThermalNetwork<'_> {
                     .cell_volume_m3(cell)
                     .ok_or_else(|| invalid("original tetrahedral volume is missing"))
             })
-            .collect::<Result<Vec<_>, Error>>()?;
-        let routes = route_owner.admit_volume_routes(thermal, &volumes, cancel)?;
+            .collect::<Result<Vec<_>, Error>>()
+            .map_err(map_conduction_error)?;
+        let routes = route_owner
+            .admit_volume_routes(thermal, &volumes, cancel)
+            .map_err(map_conduction_error)?;
         let bindings: BTreeMap<_, _> = self.cells.iter().map(|c| (c.cell, c)).collect();
         let refresh = |sample: &MaterialNetworkSample| -> Result<Vec<C>, Error> {
             let phases: BTreeMap<_, _> = sample.cells.iter().map(|c| (c.cell, c.phase)).collect();
@@ -357,17 +369,17 @@ impl SpatialConductionThermalNetwork<'_> {
         };
         let accepted = resolve(thermal)?;
         if !accepted.resistors.is_empty() {
-            return Err(invalid(
+            return Err(map_conduction_error(invalid(
                 "3D current cannot silently omit graph electrical work",
-            ));
+            )));
         }
-        let initial = refresh(sample(&accepted.source))?;
+        let initial = refresh(sample(&accepted.source)).map_err(map_conduction_error)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b) || !same_material(a.material(), b.material())
         }) {
-            return Err(invalid(
+            return Err(map_conduction_error(invalid(
                 "accepted tetrahedral conductor differs from its actual thermal state",
-            ));
+            )));
         }
         let contact_sources = problem
             .contacts()
@@ -383,25 +395,24 @@ impl SpatialConductionThermalNetwork<'_> {
             &routes,
             sample(&accepted.source),
             cancel,
-        )?;
+        )
+        .map_err(map_conduction_error)?;
         let (thermal, problem, report) = cell_driver_candidate(
             thermal,
             target_s,
             controls,
             initial_energy_increments_j,
             |trial, _| {
-                check(cancel)?;
+                check(cancel).map_err(map_conduction_error)?;
                 let coefficients = resolve(trial)?;
                 if !coefficients.resistors.is_empty() {
-                    return Err(invalid(
+                    return Err(map_conduction_error(invalid(
                         "3D current cannot silently omit graph electrical work",
-                    ));
+                    )));
                 }
-                let refreshed_contacts = contact_owner.refresh_sources(
-                    &contact_sources,
-                    sample(&coefficients.source),
-                    cancel,
-                )?;
+                let refreshed_contacts = contact_owner
+                    .refresh_sources(&contact_sources, sample(&coefficients.source), cancel)
+                    .map_err(map_conduction_error)?;
                 let refreshed_contacts = problem
                     .contacts()
                     .iter()
@@ -414,25 +425,29 @@ impl SpatialConductionThermalNetwork<'_> {
                     .collect();
                 let next = problem
                     .with_conductors_and_contacts(
-                        refresh(sample(&coefficients.source))?,
+                        refresh(sample(&coefficients.source)).map_err(map_conduction_error)?,
                         refreshed_contacts,
                         assembly,
                         &mut || (*cancel.borrow_mut())(),
                     )
-                    .map_err(field_error)?;
+                    .map_err(field_error)
+                    .map_err(map_conduction_error)?;
                 let field = next
                     .solve(boundary, field_controls, &mut || (*cancel.borrow_mut())())
-                    .map_err(field_error)?;
+                    .map_err(field_error)
+                    .map_err(map_conduction_error)?;
                 let heat_j = finite(dt * field.power_w)?;
                 let supplied_work_j = finite(dt * field.supplied_power_w)?;
                 if (field.power_w > 0.0 && heat_j == 0.0)
                     || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {
-                    return Err(invalid(
+                    return Err(map_conduction_error(invalid(
                         "3D Joule heat and independently supplied terminal work do not close",
-                    ));
+                    )));
                 }
-                let contacts = contact_owner.heat(&field.contacts)?;
+                let contacts = contact_owner
+                    .heat(&field.contacts)
+                    .map_err(map_conduction_error)?;
                 Ok(DrivenCoefficients {
                     circuit: Candidate {
                         problem: next,
@@ -452,11 +467,9 @@ impl SpatialConductionThermalNetwork<'_> {
                 })
             },
             |candidate, _dt, checkpoint| {
-                let mut powers = route_owner.deposit_power(
-                    &candidate.step.field.cell_power_w,
-                    &routes,
-                    checkpoint,
-                )?;
+                let mut powers = route_owner
+                    .deposit_power(&candidate.step.field.cell_power_w, &routes, checkpoint)
+                    .map_err(map_conduction_error)?;
                 for contact in &candidate.step.contacts {
                     checkpoint()?;
                     contacts::deposit_partition(
@@ -464,13 +477,14 @@ impl SpatialConductionThermalNetwork<'_> {
                         contact.heat_fraction_to_first,
                         contact.response.power_w,
                         &mut powers,
-                    )?;
+                    )
+                    .map_err(map_conduction_error)?;
                 }
                 Ok(powers)
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(cancel)?;
+        check(cancel).map_err(map_conduction_error)?;
         Ok(SpatialConductionEnthalpyCandidate {
             thermal,
             problem,

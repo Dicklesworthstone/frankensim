@@ -17,6 +17,8 @@ mod graph;
 mod hysteretic;
 #[path = "finite_links/spatial_induction.rs"]
 mod spatial_induction;
+#[path = "finite_links/spatial_conduction.rs"]
+mod spatial_conduction;
 #[path = "finite_links/magnetostrictive.rs"]
 mod magnetostrictive;
 #[path = "finite_links/frame.rs"]

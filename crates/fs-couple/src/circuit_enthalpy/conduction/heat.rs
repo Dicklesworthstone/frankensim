@@ -4,7 +4,9 @@
 //! the original spatial electrical solve alone supplies Joule dissipation.
 
 mod assembly;
-pub use assembly::{ConductionHeatError, step_response_field_circuit_candidate};
+pub use assembly::{
+    ConductionHeatError, step_response_field_circuit_candidate, step_spatial_conduction_candidate,
+};
 
 use super::circuit::response::{
     ConductionResponseCircuit, ConductionResponseCircuitEnthalpyCandidate,
@@ -112,49 +114,27 @@ impl PreparedHeatNetwork<'_, '_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, HeatNetworkSample>, Error> {
-        let cancel = RefCell::new(|| cx.checkpoint().is_err());
-        check(&cancel)?;
-        let bulk = self.thermal_material_network().map_err(heat_error)?;
-        self.admit_field_independent_boundaries(cx, &[])
-            .map_err(heat_error)?;
-        let layout = SpatialConductionThermalNetwork {
-            cells: bulk.cells,
-            links: bulk.links,
-            regions,
-            volume_tolerance_m3,
-        };
-        let next = layout.step_resolved_candidate(
+        step_spatial_conduction_candidate(
+            self,
+            cx,
             thermal,
             target_s,
             problem,
             boundary,
             contacts,
+            regions,
+            volume_tolerance_m3,
             assembly,
             field_controls,
             controls,
             initial_energy_increments_j,
-            |trial| {
-                let coefficients = self.resolve(cx, trial).map_err(heat_error)?;
-                if !coefficients.contacts.is_empty() || !coefficients.bulk.resistors.is_empty() {
-                    return Err(invalid(
-                        "3D current cannot silently omit graph electrical work",
-                    ));
-                }
-                Ok(coefficients.bulk)
-            },
-            |sample| &sample.material,
-            &cancel,
-        )?;
-        let report = next.report();
-        closed_balance(
-            target_s - thermal.time_s(),
-            report.total_energy_residual_j,
-            &report.source,
-            controls.total_energy_tolerance_j,
         )
-        .map_err(heat_error)?;
-        check(&cancel)?;
-        Ok(next)
+        .map_err(|error| {
+            error.map_source(|source| match source {
+                ConductionHeatError::Conduction(error) => error,
+                ConductionHeatError::Heat(error) => ConductionThermalError::Heat(error),
+            })
+        })
     }
 
     /// Advance nonlinear spatial current, native electrical contacts and sourced
