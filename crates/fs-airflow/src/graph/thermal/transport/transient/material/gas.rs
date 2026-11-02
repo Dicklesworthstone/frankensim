@@ -142,7 +142,40 @@ impl<'a> GasGraphSources<'a> {
         sources: &GraphSourceState<ResolvedThermochemicalGasState>,
         report: &InertialGraphReport,
     ) -> Result<GraphSourceAdmission, SourceGraphError> {
-        let admission = self.core.admit_actual(cx, thermal, sources, report)?;
+        self.admit_flow(cx, thermal, sources, GraphFlow::Inertial(report))
+    }
+
+    /// Admit a native quasi-steady endpoint with its actual thermal duration.
+    /// The rate is held for this interval; no momentum history is inferred.
+    /// Original section Reynolds, gas Mach, source identity and non-cancelling
+    /// local work caps all apply before its heat coefficients can be accepted.
+    pub fn admit_quasi_steady(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+    ) -> Result<GraphSourceAdmission, SourceGraphError> {
+        self.admit_flow(
+            cx,
+            thermal,
+            sources,
+            GraphFlow::QuasiSteady {
+                hydraulics,
+                duration_s,
+            },
+        )
+    }
+
+    fn admit_flow(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        flow: GraphFlow<'_>,
+    ) -> Result<GraphSourceAdmission, SourceGraphError> {
+        let admission = self.core.admit_flow(cx, thermal, sources, flow)?;
         self.admit_mach(cx, sources, &admission.speed_envelope_m3_s)?;
         Ok(admission)
     }
@@ -159,14 +192,61 @@ impl<'a> GasGraphSources<'a> {
         bindings: &[GraphConvectiveLink],
         maximum_links: usize,
     ) -> Result<GraphSourceHeat<ResolvedThermochemicalGasState>, GraphConvectionError> {
+        self.evaluate_link_flow(
+            cx,
+            thermal,
+            sources,
+            GraphFlow::Inertial(report),
+            bindings,
+            maximum_links,
+        )
+    }
+
+    /// Source-retaining reciprocal wall heat at a solved quasi-steady endpoint.
+    /// The original gas pressure, composition, caloric object and source claims
+    /// remain fixed while local temperatures and flow change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_quasi_steady_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+        bindings: &[GraphConvectiveLink],
+        maximum_links: usize,
+    ) -> Result<GraphSourceHeat<ResolvedThermochemicalGasState>, GraphConvectionError> {
+        self.evaluate_link_flow(
+            cx,
+            thermal,
+            sources,
+            GraphFlow::QuasiSteady {
+                hydraulics,
+                duration_s,
+            },
+            bindings,
+            maximum_links,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_link_flow(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        flow: GraphFlow<'_>,
+        bindings: &[GraphConvectiveLink],
+        maximum_links: usize,
+    ) -> Result<GraphSourceHeat<ResolvedThermochemicalGasState>, GraphConvectionError> {
         let admission = self
-            .admit_actual(cx, thermal, sources, report)
+            .admit_flow(cx, thermal, sources, flow)
             .map_err(GraphConvectionError::Source)?;
         let convection = convection::evaluate_links(
             &self.core,
             cx,
             thermal,
-            report,
+            flow,
             bindings,
             maximum_links,
             |t| resolve_gas(self.source, t),

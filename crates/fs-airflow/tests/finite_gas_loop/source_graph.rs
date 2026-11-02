@@ -450,3 +450,6 @@ fn stagnant_gas_has_sourced_natural_wall_exchange_without_a_forced_speed_floor()
         );
     });
 }
+#[path = "source_graph/quasi_steady.rs"]
+mod quasi_steady;
+

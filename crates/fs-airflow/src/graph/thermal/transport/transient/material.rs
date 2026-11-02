@@ -5,10 +5,11 @@
 //! continuity and inertia retain rho0. Existing PHS and thermal owners still
 //! solve momentum, junction mixing, pipe residence time and reciprocal wall heat.
 //!
-//! Every hydraulic branch needs a nonempty, straight, monotone native pipe path.
-//! Its length-weighted density then represents the integrated head exactly for
-//! held section states. Curved paths refuse; unresolved buoyancy is never
-//! disguised as an external pressure drive.
+//! Every hydraulic branch retains its nonempty original pipe-cell path. Each
+//! local material density supplies its own gravity line-integral section, so
+//! bends and hot/cold legs remain visible even at equal-height endpoints. The
+//! native hydraulic owner caches this integral in its hydrostatic reference
+//! frame; no effective branch density or external pressure drive replaces it.
 //!
 //! Low-Eckert admission independently sums ABSOLUTE local anomalous-gravity work
 //! and hydraulic dissipation at the old/new/average speed envelope. A branch-head
@@ -17,8 +18,10 @@
 //! continuous-time temperature extrema.
 
 pub mod convection;
+mod flow;
 pub mod gas;
 pub mod liquid;
+use flow::GraphFlow;
 pub use gas::GasGraphSources;
 pub use liquid::LiquidGraphSources;
 
@@ -36,6 +39,7 @@ use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_qty::{MassFlowRate, Temperature};
 
 use super::{TransientTransportError, distributed::DistributedGraphInventory};
+use crate::graph::gravity::GraphGravitySection;
 use crate::graph::inertial::InertialGraphReport;
 use crate::graph::thermal::medium::series::MAX_MATERIAL_FLOW_SECTIONS;
 use crate::graph::thermal::medium::series::enthalpy::LiquidEnthalpyError;
@@ -49,7 +53,7 @@ use crate::graph::thermal::natural_circulation::{
     },
     material_response::MaterialBranchLaw,
 };
-use crate::graph::{GraphError, LossGraph};
+use crate::graph::{GraphError, GraphSolution, LossGraph};
 
 /// Same native geometry and declared section order as the distributed inventory.
 /// Each law belongs to exactly one pipe cell and must have an empty exchange:
@@ -124,8 +128,8 @@ impl core::fmt::Display for SourceGraphError {
 }
 impl std::error::Error for SourceGraphError {}
 
-/// Move sources into the inertial driver's payload and pass that same payload
-/// back to admit_actual before evaluating heat.
+/// Retain sources in the native driver's payload and admit that same payload
+/// at its actual solved flow before evaluating reciprocal wall heat.
 #[derive(Debug)]
 pub struct ResolvedSourceGraph<M> {
     pub graph: LossGraph,
@@ -154,7 +158,8 @@ impl<M> GraphSourceState<M> {
     pub fn sections(&self) -> &[Vec<DistributedMaterialSection<M>>] {
         &self.sections
     }
-    /// Length-weighted numbers used ONLY to bind straight-branch gravity.
+    /// Length-weighted density diagnostics. Gravity uses every original local
+    /// section and its orientation, never these branch averages.
     pub fn branch_densities_kg_m3(&self) -> &[f64] {
         &self.branch_densities_kg_m3
     }
@@ -167,7 +172,7 @@ impl<M> GraphSourceState<M> {
     }
 }
 
-/// Independent source admission at the ACTUAL PHS average and speed envelope.
+/// Independent source admission at the actual native flow and speed envelope.
 /// No mechanical work here is silently deposited into native thermal storage.
 #[derive(Debug)]
 pub struct GraphSourceAdmission {
@@ -284,17 +289,6 @@ impl<'a> BoundGraphCore<'a> {
                     "one bounded, nonempty law sequence per native pipe path required",
                 ));
             }
-            let edge = &graph.branches()[branch];
-            let delta =
-                std::array::from_fn::<_, 3, _>(|a| positions[edge.to][a] - positions[edge.from][a]);
-            let total_length = norm(delta);
-            if !positive(total_length) {
-                return Err(SourceGraphError::Section {
-                    branch,
-                    section: 0,
-                    reason: "straight pipe endpoints must differ",
-                });
-            }
             let mut branch_lengths = Vec::with_capacity(path.len());
             let mut branch_areas = Vec::with_capacity(path.len());
             let mut branch_work = Vec::with_capacity(path.len());
@@ -309,21 +303,17 @@ impl<'a> BoundGraphCore<'a> {
                 });
                 let length = norm(dx);
                 let area = cell.geometry.volume_m3 / length;
-                // Parallel AND same orientation. Bent gravity is not silently
-                // averaged or attributed to an external drive.
+                // The native inventory already owns path continuity and endpoint
+                // identity. Each actual local length determines its own area.
                 if !positive(length)
                     || !positive(area)
                     || !law.exchange.is_empty()
                     || !near_positive(area, law.resistance.flow_area().value())
-                    || (0..3).any(|a| {
-                        (dx[a] - delta[a] * (length / total_length)).abs()
-                            > 256.0 * f64::EPSILON * length
-                    })
                 {
                     return Err(SourceGraphError::Section {
                         branch,
                         section,
-                        reason: "native area, adiabatic drag law and straight monotone path required",
+                        reason: "native local area and an adiabatic section drag law required",
                     });
                 }
                 let work: f64 = dx
@@ -483,20 +473,23 @@ impl<'a> BoundGraphCore<'a> {
         .map_err(SourceGraphError::Compiler)?;
         let mut branch_densities = Vec::with_capacity(self.laws.len());
         let mut heads = Vec::with_capacity(self.laws.len());
-        let mut branch_snapshots = Vec::with_capacity(self.laws.len());
+        let mut gravity_sections = Vec::with_capacity(self.laws.len());
+        let mut section_count = 0_usize;
         for (branch, sections) in compiled.sections.iter().enumerate() {
             poll(cx)?;
             let total: f64 = self.section_lengths[branch].iter().sum();
             if !positive(total) {
                 return Err(SourceGraphError::Invalid(
-                    "native straight branch length is unrepresentable",
+                    "native pipe path length is unrepresentable",
                 ));
             }
             let mut departure = 0.0;
             let mut local_heads = Vec::with_capacity(sections.len());
+            let mut local_gravity = Vec::with_capacity(sections.len());
             for (section, source) in sections.iter().enumerate() {
                 poll(cx)?;
-                let rho = source.momentum.evaluation.transport.density_kg_m3();
+                let transport = source.momentum.evaluation.transport;
+                let rho = transport.density_kg_m3();
                 let delta = rho - self.reference.density_kg_m3();
                 departure += delta * (self.section_lengths[branch][section] / total);
                 let head = delta * self.specific_gravity_work[branch][section];
@@ -506,30 +499,33 @@ impl<'a> BoundGraphCore<'a> {
                     ));
                 }
                 local_heads.push(head);
+                let id = self.inventory.branch_cells()[branch][section];
+                let cell = thermal.cells().get(&id).ok_or(SourceGraphError::Cell {
+                    cell: id,
+                    reason: "original source pipe cell is no longer active",
+                })?;
+                local_gravity.push(GraphGravitySection {
+                    start_m: cell.geometry.start_m,
+                    end_m: cell.geometry.end_m,
+                    transport,
+                });
             }
             let rho = self.reference.density_kg_m3() + departure;
-            // Numerical gravity-only tuple. Original material owners remain
-            // authoritative; this tuple never supplies calorics or drag.
-            branch_snapshots.push(
-                FluidTransportState::try_new(
-                    rho,
-                    self.reference.specific_heat_j_kg_k(),
-                    self.reference.thermal_conductivity_w_m_k(),
-                    self.reference.dynamic_viscosity_pa_s(),
-                )
-                .map_err(SourceGraphError::Material)?,
-            );
+            // The bound inventory already limits the total section count.
+            section_count += local_gravity.len();
+            gravity_sections.push(local_gravity);
             branch_densities.push(rho);
             heads.push(local_heads);
         }
         let graph = compiled
             .graph
-            .with_boussinesq_gravity(
+            .with_distributed_boussinesq_gravity(
                 &self.reference,
-                &branch_snapshots,
+                &gravity_sections,
                 &self.positions,
                 self.acceleration,
                 self.limits.maximum_relative_density_departure,
+                section_count,
                 cx,
             )
             .map_err(SourceGraphError::Graph)?;
@@ -552,12 +548,12 @@ impl<'a> BoundGraphCore<'a> {
         })
     }
 
-    fn admit_actual<M>(
+    fn admit_flow<M>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
         sources: &GraphSourceState<M>,
-        report: &InertialGraphReport,
+        flow: GraphFlow<'_>,
     ) -> Result<GraphSourceAdmission, SourceGraphError> {
         let temperatures = self.temperatures(cx, thermal)?;
         if !Arc::ptr_eq(&self.binding, &sources.binding) || temperatures != sources.temperatures_k {
@@ -566,22 +562,7 @@ impl<'a> BoundGraphCore<'a> {
             ));
         }
         let count = self.laws.len();
-        if !positive(report.duration_s)
-            || [
-                report.average_volume_flows_m3_s.len(),
-                report.initial_flows_m3_s.len(),
-                report.final_flows_m3_s.len(),
-                report.speed_envelope_m3_s.len(),
-                report.dissipative_pressure_drops_pa.len(),
-                report.gravity_pressure_heads_pa.len(),
-            ]
-            .iter()
-            .any(|&n| n != count)
-        {
-            return Err(SourceGraphError::Invalid(
-                "complete native inertial report and positive duration required",
-            ));
-        }
+        flow.admit(cx, self)?;
         let mut actual_losses = Vec::with_capacity(count);
         let mut envelope_losses = Vec::with_capacity(count);
         let mut speed_envelope = Vec::with_capacity(count);
@@ -589,19 +570,19 @@ impl<'a> BoundGraphCore<'a> {
         let mut buoyancy_power = 0.0;
         for branch in 0..count {
             poll(cx)?;
-            let actual = report.average_volume_flows_m3_s[branch];
-            let initial = report.initial_flows_m3_s[branch];
-            let final_flow = report.final_flows_m3_s[branch];
+            let actual = flow.average(branch);
+            let initial = flow.initial(branch);
+            let final_flow = flow.final_flow(branch);
             if [actual, initial, final_flow].iter().any(|v| !v.is_finite()) {
                 return Err(SourceGraphError::Invalid(
                     "nonfinite actual native momentum flow",
                 ));
             }
             let envelope = actual.abs().max(initial.abs()).max(final_flow.abs());
-            if !roundoff_equal(envelope, report.speed_envelope_m3_s[branch], 1)
+            if !roundoff_equal(envelope, flow.envelope(branch), 1)
                 || !roundoff_equal(
                     sources.gravity_heads_pa[branch],
-                    report.gravity_pressure_heads_pa[branch],
+                    flow.gravity_head(branch),
                     1,
                 )
             {
@@ -641,11 +622,7 @@ impl<'a> BoundGraphCore<'a> {
                 actual_branch.push(actual_loss);
                 envelope_branch.push(envelope_loss);
             }
-            if !roundoff_equal(
-                drop,
-                report.dissipative_pressure_drops_pa[branch],
-                self.laws[branch].len(),
-            ) {
+            if !roundoff_equal(drop, flow.pressure_drop(branch), self.laws[branch].len()) {
                 return Err(SourceGraphError::Invalid(
                     "actual native drag differs from retained original section laws",
                 ));
@@ -655,9 +632,9 @@ impl<'a> BoundGraphCore<'a> {
             speed_envelope.push(envelope);
         }
         let power = hydraulic_power + buoyancy_power;
-        let hydraulic_energy = report.duration_s * hydraulic_power;
-        let buoyancy_energy = report.duration_s * buoyancy_power;
-        let energy = report.duration_s * power;
+        let hydraulic_energy = flow.duration_s() * hydraulic_power;
+        let buoyancy_energy = flow.duration_s() * buoyancy_power;
+        let energy = flow.duration_s() * power;
         if [
             hydraulic_power,
             buoyancy_power,

@@ -2759,9 +2759,10 @@ expanded connection budgets are admitted before source callbacks. Each actual
 solved gravity chart is checked against the inventory as well as the original
 graph template. Native thermal energy, source support and work budgets retain
 the existing acceptance rules. Hydraulic momentum is still quasi-steady; the
-inertial entrypoint owns retained branch impulses. The branch work ledger cannot
-resolve cancelling within-branch density contributions, so material callbacks
-retain responsibility for non-cancelling local section work before aggregation.
+inertial entrypoint owns retained branch impulses. Explicit distributed gravity
+retains absolute local anomalous heads before branch cancellation; the native
+work ledger uses that sum. Original source callbacks independently admit section
+drag, gas Mach and local mechanical work at the actual solved rates.
 
 Regression sources couple temperature-dependent source viscosity to finite pipe
 residence and reverse flushing, checking an independent ordered cell recurrence
@@ -2780,13 +2781,23 @@ local density departure owns Boussinesq gravity. This remains a bounded low-Mach
 low-Eckert approximation with explicit original source support.
 
 Each hydraulic branch has one original adiabatic resistance law per pipe cell.
-The source adapter currently requires straight, monotone branch paths, for which
-length-weighted density represents the held integrated body head. Bent paths
-refuse. Construct retained momentum from the initially resolved source graph,
+The source adapter retains every actual pipe-cell start/end and material sample.
+Bent branches use the sum of `(rho_i-rho0) g.dx_i`; equal-height endpoints and
+cancelled diagnostic mean density cannot erase a hot/cold circulation head.
+Length-weighted branch densities are diagnostics only. Construct retained
+momentum from the initially resolved source graph,
 using the distributed inventory's equivalent geometry, so its reference density,
 gravity chart and admission cap are already fixed before the first coupled step.
 The source payload belongs in the inertial driver's resolve result; its exchange
 callback calls `admit_actual` or `evaluate_links` before returning coefficients.
+
+The same source owners expose `admit_quasi_steady` and
+`evaluate_quasi_steady_links` for an actual native `GraphSolution` and its
+positive thermal interval duration. A shared borrowed flow view retains the
+native solution instead of manufacturing an inertial report. Quasi-steady rates
+are held over that thermal interval; local power times that duration supplies
+the omitted-energy bound. Original topology, gravity frame, exact pipe path,
+reference mass, source identity, Reynolds support and gas Mach remain admitted.
 
 Actual-flow admission rechecks original section laws at native old, new and
 average rates, including zero-crossing support. Maximum speed independently
@@ -2802,11 +2813,59 @@ Bulk/film rho, mu, k and Cp come from the same original source and correlation.
 Support is re-admitted at both endpoint speeds and any signed crossing; an
 admissible average or maximum alone cannot establish a lower Reynolds limit.
 Samples are associated by native link identity regardless of caller ordering.
-Pure natural cards require a quiescent bulk-flow envelope; moving mixed
-convection requires a separately supported relation. Apply returned conductances
-to the native link map once, without duplicating their heat as cell sources.
+Pure natural cards require a quiescent bulk-flow envelope. The explicit
+`GraphConvectionLaw::AidingVerticalPlate` uses the existing Manning-Qureshi
+unconfined laminar relation, actual signed cell-tangent velocity, original film
+properties and sourced thermal expansion. `AidingVerticalPlateFrame` admits the
+authored upward plate axis against actual gravity and relative flow; inclined
+plates, crossflow and opposing buoyancy cannot borrow the aiding relation.
+Pure limits and resting thermal equilibrium reuse the existing finite-cell
+owner. Old/new rates and zero crossings must satisfy that same original law.
+Apply returned conductances to the native link map once, without duplicating
+their heat as cell sources.
 
 Regression sources cover spatial viscosity, original EOS/calorics, source and
 payload identity, non-cancelling local work, endpoint Reynolds/Mach support,
 reciprocal wall exchange and native coupled operation. No new experimental
 coverage or material/correlation claim is inferred by the adapter.
+
+### Distributed gravity on original hydraulic and momentum owners
+
+`LossGraph::with_distributed_boussinesq_gravity` retains a nonempty ordered
+`GraphGravitySection` path for each original branch. Sections must be finite,
+continuous, positively sized and terminate at the original graph nodes. Every
+local density, including horizontal sections, obeys the explicit Boussinesq cap.
+An explicit total section budget is retained with the path. Source refresh may
+change material samples but cannot change a retained momentum owner's path,
+partition or section budget. Distributed thermal inventory additionally binds
+one gravity section to each stored pipe cell's exact geometry.
+
+Binding caches both signed anomalous line integrals and sums of absolute local
+anomalous heads. Existing steady and inertial solvers consume those caches;
+there is no added hydraulic mesh, invented effective density, external drive or
+replacement momentum solver. The existing hydrostatic reference frame preserves
+uniform-density rest. Absolute local heads feed both native quasi-steady and
+inertial omitted-work gates, even when their signed branch sums vanish.
+
+### Bounded native time resolution through flow reversal
+
+`transient::inertial::adaptive::advance_inertial_graph_resolved` compares one
+original coupled step with two native half steps, then retains only the two
+independently admitted fine steps. It supports original junction storage and
+explicit distributed pipe inventory. Every active cell energy and every branch
+flow participates in the local estimate. Relative thermal tolerances scale
+energy changes, preserving independence from the formation-energy datum.
+
+Accepted substeps also obey explicit limits on sign-changing interval duration
+and the cancelling counterflow volume of their affine momentum trajectory.
+Thus a nearly zero average rate cannot silently erase both directions of
+transport. Native/source callback budgets count discarded comparisons as well
+as retained steps. Source, correlation and physical refusals remain terminal;
+the entire requested window returns synchronized owners or leaves both input
+owners unchanged, including after a locally accepted prefix.
+
+These controls estimate local discretization error and resolve sampled reversal
+trajectories; they do not certify global error or locate events exactly. The
+caller still authors spatial resolution, maximum interval and scheduled-event
+splits. All thermal conservation, source support and momentum work gates remain
+on the original native reports.

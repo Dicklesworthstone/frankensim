@@ -24,6 +24,110 @@ pub struct AidingVerticalPlateSettings {
     pub maximum_relative_density_departure: f64,
 }
 
+/// An explicitly authored vertical plate axis in the flow/gravity world frame.
+///
+/// Nonzero gravity must point opposite `plate_up`. A moving free stream must be
+/// parallel to that axis. This frame refuses inclined plates and crossflow;
+/// projecting their speed onto a vertical axis would not admit their physics.
+/// It admits either axial flow direction: the original mixed relation then
+/// checks aiding alignment using signed expansion and wall/bulk temperature.
+/// Zero gravity and zero speed retain the original relation's pure limits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AidingVerticalPlateFrame {
+    plate_up: [f64; 3],
+    gravity_m_s2: f64,
+}
+
+// Only floating-point normalization error is tolerated. This is not an
+// empirical angular range or an approximation for inclined mixed convection.
+const ALIGNMENT_ROUNDOFF: f64 = 64.0 * f64::EPSILON;
+
+fn direction(vector: [f64; 3]) -> Result<([f64; 3], f64), MaterialConvectionError> {
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(invalid("mixed-convection frame vectors must be finite"));
+    }
+    let scale = vector.iter().fold(0.0_f64, |a, value| a.max(value.abs()));
+    if scale == 0.0 {
+        return Err(invalid("mixed-convection direction must be nonzero"));
+    }
+    let scaled = vector.map(|value| value / scale);
+    let length = fs_math::det::sqrt(scaled.iter().map(|value| value * value).sum());
+    Ok((scaled.map(|value| value / length), scale * length))
+}
+
+fn aligned(actual: [f64; 3], expected: [f64; 3]) -> bool {
+    actual
+        .into_iter()
+        .zip(expected)
+        .all(|(a, b)| (a - b).abs() <= ALIGNMENT_ROUNDOFF)
+}
+
+impl AidingVerticalPlateFrame {
+    /// Normalize an authored upward plate axis and verify actual gravity.
+    ///
+    /// # Errors
+    /// Refuses a zero/nonfinite axis, nonfinite or unrepresentable gravity,
+    /// and any nonzero gravity not antiparallel to the plate's upward axis.
+    pub fn try_new(
+        plate_up: [f64; 3],
+        gravity_m_s2: [f64; 3],
+    ) -> Result<Self, MaterialConvectionError> {
+        let (plate_up, _) = direction(plate_up)?;
+        let gravity_m_s2 = if gravity_m_s2 == [0.0; 3] {
+            0.0
+        } else {
+            let (down, magnitude) = direction(gravity_m_s2)?;
+            if !magnitude.is_finite() || !aligned(down, plate_up.map(|value| -value)) {
+                return Err(invalid(
+                    "aiding vertical-plate gravity must be representable and opposite the authored plate-up axis",
+                ));
+            }
+            magnitude
+        };
+        Ok(Self {
+            plate_up,
+            gravity_m_s2,
+        })
+    }
+
+    /// Admit actual relative flow and preserve its signed vertical speed.
+    ///
+    /// # Errors
+    /// Refuses nonfinite/unrepresentable flow, crossflow, or an invalid declared
+    /// density-departure bound. Opposing buoyant alignment is subsequently
+    /// refused by the original relation using the retained material snapshot.
+    pub fn settings(
+        self,
+        relative_velocity_m_s: [f64; 3],
+        maximum_relative_density_departure: f64,
+    ) -> Result<AidingVerticalPlateSettings, MaterialConvectionError> {
+        let speed_up_m_s = if relative_velocity_m_s == [0.0; 3] {
+            0.0
+        } else {
+            let (flow, magnitude) = direction(relative_velocity_m_s)?;
+            let projection: f64 = flow
+                .into_iter()
+                .zip(self.plate_up)
+                .map(|(a, b)| a * b)
+                .sum();
+            let sign = if projection < 0.0 { -1.0 } else { 1.0 };
+            if !magnitude.is_finite() || !aligned(flow, self.plate_up.map(|value| sign * value)) {
+                return Err(invalid(
+                    "aiding vertical-plate relative flow must be representable and parallel to the authored plate axis",
+                ));
+            }
+            sign * magnitude
+        };
+        let settings = AidingVerticalPlateSettings {
+            speed_up_m_s,
+            gravity_m_s2: self.gravity_m_s2,
+            maximum_relative_density_departure,
+        };
+        settings.validate()?;
+        Ok(settings)
+    }
+}
+
 fn invalid(what: &str) -> MaterialConvectionError {
     MaterialError::Parameters { what: what.into() }.into()
 }

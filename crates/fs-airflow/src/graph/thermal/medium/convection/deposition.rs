@@ -293,7 +293,7 @@ fn evaluate_bound_cells<'a>(
 
 // All finite-cell boundaries and internal fluid links use this same correlation
 // admission, actual thermal direction and exact-equilibrium convention.
-fn evaluate_convection_state(
+pub(crate) fn evaluate_convection_state(
     transport: &FluidTransportState, wall: f64, reference: Temperature,
     length: Length, law: CellConvectionLaw,
 ) -> Result<Option<CellConvectionEvaluation>, MaterialConvectionError> {

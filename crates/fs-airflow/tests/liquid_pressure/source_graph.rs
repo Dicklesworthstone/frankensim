@@ -436,9 +436,9 @@ fn cancelling_section_buoyancy_cannot_hide_local_omitted_work() {
             [1e-4, 0.0, 1e-4],
             0.1,
         );
-        // Native aggregated branch buoyancy cancels; local work is .00981 W,
-        // and the two circulating branches dissipate another .002 W.
-        near(report.neglected_buoyancy_energy_bound_j, 0.0);
+        // Net branch buoyancy cancels. Native and source ledgers both retain
+        // .00981 W of local work, plus .002 W of dissipative power.
+        near(report.neglected_buoyancy_energy_bound_j, 0.000981);
         match owner.admit_actual(cx, &initial, &resolved.sources, &report) {
             Err(SourceGraphError::NeglectedWork { power_w, energy_j }) => {
                 near(power_w, 0.01181);
@@ -574,45 +574,102 @@ fn exact_caloric_owner_source_domain_and_stale_candidates_are_not_substituted() 
 }
 
 #[test]
-fn source_rung_refuses_bent_density_profiles_even_when_inventory_is_valid() {
+fn bent_original_source_path_drives_circulation_that_an_endpoint_mean_would_erase() {
     context(|cx| {
-        let card = card(false, 1.0);
+        let card = buoyant_card();
         let (law, caloric) = source_pair(&card);
-        let initial = thermal(&caloric, [300.0; 6], None, true);
+        let initial = thermal(
+            &caloric,
+            [300.0, 300.0, 320.0, 280.0, 300.0, 300.0],
+            None,
+            true,
+        );
         let graph = graph();
         let inventory = bind_inventory(cx, &graph, &initial);
         let mut laws = laws(2300.0);
-        // Match the bent cell's actual V/length so the refusal concerns its
-        // unsupported gravity profile, not a deliberately inconsistent area.
-        let length = 0.5_f64.hypot(0.2);
-        for law in &mut laws[0] {
-            law.resistance = MaterialFlowResistance::try_new(
+        let cells = paths();
+        for (section, id) in laws[0].iter_mut().zip(&cells[0]) {
+            let cell = &initial.cells()[id];
+            let delta: [f64; 3] = core::array::from_fn(|axis| {
+                cell.geometry.end_m[axis] - cell.geometry.start_m[axis]
+            });
+            let length = fs_math::det::sqrt(delta.iter().map(|d| d * d).sum());
+            near(cell.mass_kg, 1000.0 * cell.geometry.volume_m3);
+            section.resistance = MaterialFlowResistance::try_new(
                 A * 0.5,
                 0.0,
-                Area::new(PIPE_AREA * 0.5 / length),
+                Area::new(cell.geometry.volume_m3 / length),
                 Length::new(0.03),
                 (0.0, 2300.0),
             )
             .unwrap();
         }
-        assert!(matches!(
-            LiquidGraphSources::try_new(
-                cx,
-                &law,
-                &caloric,
-                &initial,
-                SourceGraphBinding {
-                    graph: &graph,
-                    inventory: &inventory,
-                    laws: &laws,
-                    acceleration_m_s2: [0.0, 0.0, -9.81]
+        let owner = LiquidGraphSources::try_new(
+            cx,
+            &law,
+            &caloric,
+            &initial,
+            SourceGraphBinding {
+                graph: &graph,
+                inventory: &inventory,
+                laws: &laws,
+                acceleration_m_s2: [2.0, 0.0, -9.81],
+            },
+            caps(),
+        )
+        .unwrap();
+        let resolved = owner.resolve(cx, &initial, &[0.0; 3]).unwrap();
+        let gravity = resolved.graph.gravity().unwrap();
+        let sections = gravity.branch_sections().unwrap();
+        for (section, id) in sections[0].iter().zip(&cells[0]) {
+            assert_eq!(section.start_m, initial.cells()[id].geometry.start_m);
+            assert_eq!(section.end_m, initial.cells()[id].geometry.end_m);
+        }
+        // Equal section lengths give a diagnostic mean of rho0. The actual
+        // path has heads (-10)*(-4.505) + (+10)*(-5.305) = -8 Pa.
+        near(resolved.sources.branch_densities_kg_m3()[0], 1000.0);
+        near(resolved.sources.section_anomalous_heads_pa()[0][0], 45.05);
+        near(resolved.sources.section_anomalous_heads_pa()[0][1], -53.05);
+        near(gravity.departure_heads_pa()[0], -8.0);
+        near(gravity.absolute_departure_heads_pa()[0], 98.1);
+        let solved = resolved
+            .graph
+            .solve(
+                &[FixedPressure {
+                    node: 0,
+                    pressure: Pressure::new(0.0),
+                }],
+                GraphSolveConfig {
+                    max_sweeps: 128,
+                    max_node_iterations: 96,
+                    absolute_flow_tolerance: VolumetricFlowRate::new(1e-15),
+                    relative_flow_tolerance: 1e-13,
                 },
-                caps()
-            ),
-            Err(SourceGraphError::Section { branch: 0, .. })
-        ));
+                cx,
+            )
+            .unwrap();
+        // Three equal native linear resistances close the original graph;
+        // the sole fixed pressure is a datum, with no imposed pressure drop.
+        for (branch, expected) in
+            solved
+                .branches
+                .iter()
+                .zip([-16.0 / 300000.0, 8.0 / 300000.0, -8.0 / 300000.0])
+        {
+            near(branch.flow.value(), expected);
+        }
+        let admitted = owner
+            .admit_quasi_steady(cx, &initial, &resolved.sources, &solved, 0.1)
+            .unwrap();
+        assert!(admitted.neglected_buoyancy_power_w > 0.0);
+        assert_eq!(initial.time_s(), 0.0);
     });
 }
+
+#[path = "source_graph/mixed.rs"]
+mod mixed;
+#[path = "source_graph/quasi_steady.rs"]
+mod quasi_steady;
 
 #[test]
 fn actual_flow_film_source_and_native_link_account_for_wall_heat_once() {

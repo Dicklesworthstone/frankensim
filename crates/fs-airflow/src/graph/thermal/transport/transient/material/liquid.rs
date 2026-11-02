@@ -73,7 +73,34 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
         sources: &GraphSourceState<ResolvedLiquidState>,
         report: &InertialGraphReport,
     ) -> Result<GraphSourceAdmission, SourceGraphError> {
-        self.core.admit_actual(cx, thermal, sources, report)
+        self.core
+            .admit_flow(cx, thermal, sources, GraphFlow::Inertial(report))
+    }
+
+    /// Admit the original source laws at a solved quasi-steady endpoint.
+    ///
+    /// Supply the actual native thermal interval duration. This model holds
+    /// the endpoint flow over that interval; it carries no momentum history.
+    /// Local section work is bounded before gravity contributions can cancel
+    /// in the hydraulic branch ledger. The source graph, caloric binding and
+    /// candidate temperatures must match the actual solved endpoint.
+    pub fn admit_quasi_steady(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+    ) -> Result<GraphSourceAdmission, SourceGraphError> {
+        self.core.admit_flow(
+            cx,
+            thermal,
+            sources,
+            GraphFlow::QuasiSteady {
+                hydraulics,
+                duration_s,
+            },
+        )
     }
 
     /// Admit actual/envelope hydraulics, then evaluate reciprocal finite-cell
@@ -88,14 +115,62 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
         bindings: &[GraphConvectiveLink],
         maximum_links: usize,
     ) -> Result<GraphSourceHeat<ResolvedLiquidState>, GraphConvectionError> {
+        self.evaluate_link_flow(
+            cx,
+            thermal,
+            sources,
+            GraphFlow::Inertial(report),
+            bindings,
+            maximum_links,
+        )
+    }
+
+    /// Original reciprocal wall exchange at a solved quasi-steady endpoint.
+    /// Apply its conductance map inside the original thermal residual once.
+    /// The duration is the actual backward-Euler interval, for local work caps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_quasi_steady_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+        bindings: &[GraphConvectiveLink],
+        maximum_links: usize,
+    ) -> Result<GraphSourceHeat<ResolvedLiquidState>, GraphConvectionError> {
+        self.evaluate_link_flow(
+            cx,
+            thermal,
+            sources,
+            GraphFlow::QuasiSteady {
+                hydraulics,
+                duration_s,
+            },
+            bindings,
+            maximum_links,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_link_flow(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        flow: GraphFlow<'_>,
+        bindings: &[GraphConvectiveLink],
+        maximum_links: usize,
+    ) -> Result<GraphSourceHeat<ResolvedLiquidState>, GraphConvectionError> {
         let admission = self
-            .admit_actual(cx, thermal, sources, report)
+            .core
+            .admit_flow(cx, thermal, sources, flow)
             .map_err(GraphConvectionError::Source)?;
         let convection = convection::evaluate_links(
             &self.core,
             cx,
             thermal,
-            report,
+            flow,
             bindings,
             maximum_links,
             |t| self.law.at_temperature(t).map_err(SourceGraphError::Liquid),

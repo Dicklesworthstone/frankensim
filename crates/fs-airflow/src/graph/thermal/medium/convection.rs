@@ -20,7 +20,10 @@ pub use fs_convection::{HorizontalPlateFacing, NaturalConvectionGeometry};
 
 /// Source-consistent laminar aiding natural/forced vertical-plate convection.
 pub mod mixed;
-pub use mixed::{AidingVerticalPlateSettings, evaluate_aiding_vertical_plate_from_material};
+pub use mixed::{
+    AidingVerticalPlateFrame, AidingVerticalPlateSettings,
+    evaluate_aiding_vertical_plate_from_material,
+};
 
 /// Geometry and heat-flow direction required by the selected forced correlation.
 #[derive(Clone, Copy, Debug, Default)]
