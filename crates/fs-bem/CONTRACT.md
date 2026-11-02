@@ -87,15 +87,21 @@ bead has no render-producing default or separate e2e framework.
 `helmholtz::molecular::MolecularExterior` to the same signed structural and
 unit-volume-flow source basis, finite receivers and bounded Fourier owner.
 One evaluated `RelaxationState` supplies the complex wavenumber to both the
-triangle-CBIE boundary solve and the receiver Green representation. Neumann
+selected boundary solve and the receiver Green representation. Neumann
 data remain `i rho omega v`; `impedance_row` projects those same solved pressures
 against the original receiving trace and panel areas. Thus an omitted-load
 receipt and a microphone cannot silently use different material compression.
 
-The whole declared frequency band must lie below the geometry's conservative
-CBIE resonance-exclusion bound, using equilibrium sound speed as a conservative
-bound on wavenumber for positive reservoirs. No representation switches within
-a bake. Source batches, dense storage, triangle assembly work, wavelength and
+The default `TriangleCbie` formulation requires the whole band below the
+geometry's conservative CBIE resonance-exclusion bound, using equilibrium sound
+speed as a conservative bound on wavenumber for positive reservoirs.
+`new_with_formulation` also accepts explicit `CentroidBurtonMiller`, retaining
+the original complex centroid/disc combined equation throughout the entire
+band, including low frequencies. That arm crosses the CBIE exclusion bound
+without switching to or from triangle quadrature. Its low-frequency resistance
+can be spatially biased; no passivity or spatial-accuracy certificate follows.
+The original assembly reserves respectively 512 or 8 kernel terms per panel
+pair. Source batches, dense storage, declared assembly work, wavelength and
 receiver-clearance admission remain bounded by the original owners. Material,
 boundary, LU and Fourier cancellation refusals are preserved. The FIR prefix
 uses geometric clearance divided by frozen sound speed; sampled fields already
@@ -103,14 +109,17 @@ contain the complete dispersive propagation phase, without a second delay.
 
 Operator identity includes the original gas, frozen heat capacity and every
 evaluated species/reservoir capacity and relaxation time, as well as boundary
-geometry, signed traces and declared band. Different molecular rates cannot
-reuse a bake merely because equilibrium density and sound speed match.
+geometry, signed traces, fixed formulation and declared band. Different molecular
+rates cannot reuse a bake merely because equilibrium density and sound speed match.
 This is relaxing compression with inviscid momentum, not exterior shear or
 thermal diffusion, and does not extend the reciprocal Galerkin reaction owner.
 The existing centroid receiver representation and numerical FIR convergence
 carry no new spatial or measured-instrument accuracy claim. Focused regressions
 in `observation_transfers/molecular/tests.rs` compare reaction, distance phase,
 pressure changes, empty-reservoir recovery, causal prefixes and admission.
+An independent pulsating-sphere case spans low frequency and the first
+interior Dirichlet resonance under one combined operator; formulation changes
+also invalidate a cached transfer while retaining the same material and arrival.
 
 ## Partially coherent harmonic observations and microphone arrays
 

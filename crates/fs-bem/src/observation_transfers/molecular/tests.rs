@@ -20,8 +20,22 @@ fn material(pressure: f64, time_scale: f64, relaxing: bool) -> RelaxationState {
 }
 
 fn observer(surface: &SpherePanels, state: RelaxationState) -> MolecularBemObservation<'_> {
+    observer_with_formulation(
+        surface,
+        state,
+        MolecularObservationFormulation::TriangleCbie,
+        [1.0, 3_000.0],
+    )
+}
+
+fn observer_with_formulation(
+    surface: &SpherePanels,
+    state: RelaxationState,
+    formulation: MolecularObservationFormulation,
+    band: [f64; 2],
+) -> MolecularBemObservation<'_> {
     let n = surface.areas().len();
-    MolecularBemObservation::new(
+    MolecularBemObservation::new_with_formulation(
         surface,
         state,
         &[SourceId::StructuralMode("radial velocity [m/s]".into())],
@@ -37,14 +51,82 @@ fn observer(surface: &SpherePanels, state: RelaxationState) -> MolecularBemObser
             },
         ],
         0.01,
-        [1.0, 3_000.0],
+        band,
+        formulation,
         ComplexOptions {
             max_panels: n,
             max_bytes: 32 * n * n,
-            max_work: 512 * (n * n) as u64,
+            max_work: formulation.kernel_terms_per_pair() * (n * n) as u64,
         },
     )
     .unwrap()
+}
+
+#[test]
+fn fixed_burton_miller_band_crosses_cbie_limit_and_keeps_physical_sphere_response() {
+    // The same original BM operator is used below and through the sphere's
+    // first interior Dirichlet resonance. No material loss hides that resonance.
+    let radius = 0.1;
+    let surface = SpherePanels::icosphere(radius, 2).unwrap();
+    let state = material(101_325.0, 1.0, false);
+    let gas = *state.gas();
+    let band = [1.0, 3.25 * gas.sound_speed / radius];
+    let model = observer_with_formulation(
+        &surface,
+        state,
+        MolecularObservationFormulation::CentroidBurtonMiller,
+        band,
+    );
+    assert_eq!(
+        model.formulation(),
+        MolecularObservationFormulation::CentroidBurtonMiller
+    );
+    assert!(band[1] / gas.sound_speed > model.plain_cbie_limit_rad_per_m());
+    let area: f64 = surface.areas().iter().sum();
+    for ka in [0.2, 1.0, core::f64::consts::PI] {
+        let omega = ka * gas.sound_speed / radius;
+        let k = model.source().relaxing_wavenumber(omega).unwrap();
+        let q = C64::new(0.0, gas.density * omega);
+        let exact_surface = q / C64::new(-1.0 / radius - k.im, k.re);
+        let phase = k.scale(1.0 - radius);
+        let exact_receiver = exact_surface
+            * C64::new(det::cos(phase.re), det::sin(phase.re)).scale(radius * det::exp(-phase.im));
+        let reaction = model.impedance_row(omega, 0, || false).unwrap()[0].scale(1.0 / area);
+        let field = model.frequency_sample(omega, || false).unwrap();
+        assert!(reaction.re > 0.0);
+        assert!(
+            (reaction - exact_surface).abs() < 0.08 * exact_surface.abs(),
+            "ka={ka}: {reaction:?} vs {exact_surface:?}"
+        );
+        assert!(
+            (field[0] - exact_receiver).abs() < 0.12 * exact_receiver.abs(),
+            "ka={ka}: {:?} vs {exact_receiver:?}",
+            field[0]
+        );
+    }
+}
+
+#[test]
+fn formulation_changes_cache_identity_without_changing_material_or_earliest_arrival() {
+    let surface = SpherePanels::icosphere(0.1, 1).unwrap();
+    let state = material(101_325.0, 1.0, true);
+    let triangle = observer(&surface, state.clone());
+    let combined = observer_with_formulation(
+        &surface,
+        state,
+        MolecularObservationFormulation::CentroidBurtonMiller,
+        [1.0, 3_000.0],
+    );
+    assert_eq!(triangle.source(), combined.source());
+    assert_eq!(triangle.geometric_delays_s(), combined.geometric_delays_s());
+    assert_ne!(triangle.operator_hash(), combined.operator_hash());
+    assert!(matches!(
+        combined.frequency_sample(500.0, || true),
+        Err(MolecularObservationError::Transfer(
+            TransferError::Cancelled
+        ))
+    ));
+    assert!(combined.frequency_sample(3_001.0, || false).is_err());
 }
 
 #[test]

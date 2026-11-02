@@ -1,11 +1,12 @@
 //! One material compression law in both boundary reaction and receiver fields.
 //!
-//! The existing triangle CBIE and molecular exterior own the physics. This
+//! The existing complex boundary solvers and molecular exterior own the physics. This
 //! adapter supplies their complete signed source basis to the common FIR
 //! owner. No absorption filter is applied after summing the source fields.
-//! A single triangle-CBIE operator spans the declared band; frequencies above
-//! the geometry's conservative resonance-exclusion bound refuse instead of
-//! switching discretizations inside a Fourier transfer.
+//! One explicitly selected boundary formulation spans the declared band. The
+//! triangle-CBIE arm retains its geometric resonance-exclusion bound; the
+//! centroid/disc Burton--Miller arm retains the original combined operator.
+//! Neither switches discretizations inside a Fourier transfer.
 
 use super::*;
 use crate::helmholtz::laplace::complex::ComplexOptions;
@@ -42,6 +43,42 @@ fn invalid(what: &'static str) -> MolecularObservationError {
     TransferError::Invalid(what).into()
 }
 
+/// One original spatial discretization, fixed for the entire frequency band.
+/// This choice does not certify spatial convergence or mechanical passivity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MolecularObservationFormulation {
+    /// Original triangle integration below the geometric CBIE exclusion bound.
+    TriangleCbie,
+    /// Original centroid/disc combined equation, including its low-frequency
+    /// discretization error. No triangle quadrature is implied by this arm.
+    CentroidBurtonMiller,
+}
+
+impl MolecularObservationFormulation {
+    /// Conservative kernel-evaluation reservation of the original assembler.
+    pub const fn kernel_terms_per_pair(self) -> u64 {
+        match self {
+            Self::TriangleCbie => 512,
+            Self::CentroidBurtonMiller => 8,
+        }
+    }
+
+    /// Stable physical/numerical description shared by observer reports.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TriangleCbie => "molecular_triangle_cbie",
+            Self::CentroidBurtonMiller => "molecular_centroid_burton_miller",
+        }
+    }
+
+    const fn boundary_formulation(self) -> helmholtz::Formulation {
+        match self {
+            Self::TriangleCbie => helmholtz::Formulation::PlainCbie,
+            Self::CentroidBurtonMiller => helmholtz::Formulation::BurtonMiller,
+        }
+    }
+}
+
 /// Source-bound finite-distance observation and work-conjugate reaction of a
 /// closed body in an arbitrary admitted relaxing gas.
 ///
@@ -53,6 +90,7 @@ fn invalid(what: &'static str) -> MolecularObservationError {
 pub struct MolecularBemObservation<'a> {
     boundary: BemObservation<'a>,
     exterior: MolecularExterior,
+    formulation: MolecularObservationFormulation,
     limits: ComplexOptions,
     plain_cbie_limit_rad_per_m: f64,
 }
@@ -75,11 +113,44 @@ impl<'a> MolecularBemObservation<'a> {
         band_rad_s: [f64; 2],
         limits: ComplexOptions,
     ) -> Result<Self, MolecularObservationError> {
+        Self::new_with_formulation(
+            surface,
+            source,
+            sources,
+            traces,
+            receivers,
+            minimum_clearance_m,
+            band_rad_s,
+            MolecularObservationFormulation::TriangleCbie,
+            limits,
+        )
+    }
+
+    /// Select one original boundary formulation for the entire band, including
+    /// reaction estimates and receiver queries below the CBIE exclusion bound.
+    /// Burton--Miller permits bands crossing that bound while retaining the
+    /// same wavelength, storage and work admission at every actual frequency.
+    /// Its low-frequency resistance can be spatially biased; the Fourier
+    /// convergence check does not establish boundary-quadrature accuracy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_formulation(
+        surface: &'a SpherePanels,
+        source: RelaxationState,
+        sources: &[SourceId],
+        traces: &[Vec<f64>],
+        receivers: &[ReceiverSpec],
+        minimum_clearance_m: f64,
+        band_rad_s: [f64; 2],
+        formulation: MolecularObservationFormulation,
+        limits: ComplexOptions,
+    ) -> Result<Self, MolecularObservationError> {
         let exterior = MolecularExterior::new(source, band_rad_s)?;
         let gas = exterior.source().gas();
         let policy = GeometryPolicy::new(surface).map_err(TransferError::from)?;
         let plain_cbie_limit_rad_per_m = policy.plain_cbie_limit();
-        if band_rad_s[1] / gas.sound_speed > plain_cbie_limit_rad_per_m {
+        if formulation == MolecularObservationFormulation::TriangleCbie
+            && band_rad_s[1] / gas.sound_speed > plain_cbie_limit_rad_per_m
+        {
             return Err(invalid(
                 "molecular observation band exceeds the triangle-CBIE resonance-exclusion bound",
             ));
@@ -95,7 +166,7 @@ impl<'a> MolecularBemObservation<'a> {
                 .checked_mul(32)
                 .is_none_or(|bytes| bytes > limits.max_bytes)
             || (entries as u64)
-                .checked_mul(512)
+                .checked_mul(formulation.kernel_terms_per_pair())
                 .is_none_or(|work| work > limits.max_work)
         {
             return Err(invalid(
@@ -120,6 +191,7 @@ impl<'a> MolecularBemObservation<'a> {
         Ok(Self {
             boundary,
             exterior,
+            formulation,
             limits,
             plain_cbie_limit_rad_per_m,
         })
@@ -128,6 +200,10 @@ impl<'a> MolecularBemObservation<'a> {
     pub fn source(&self) -> &RelaxationState {
         self.exterior.source()
     }
+    pub const fn formulation(&self) -> MolecularObservationFormulation {
+        self.formulation
+    }
+    /// Geometry diagnostic; this is not a band cap on the Burton--Miller arm.
     pub fn plain_cbie_limit_rad_per_m(&self) -> f64 {
         self.plain_cbie_limit_rad_per_m
     }
@@ -138,7 +214,8 @@ impl<'a> MolecularBemObservation<'a> {
     /// Cache identity includes the original gas and EVERY evaluated reservoir.
     /// Equal equilibrium rho/c with different relaxation cannot reuse a bake.
     pub fn operator_hash(&self) -> ContentHash {
-        let mut h = DomainHasher::new("fs-bem:observation-boundary:molecular-triangle-cbie:v1");
+        let mut h = DomainHasher::new("fs-bem:observation-boundary:molecular:v2");
+        h.update(self.formulation.label().as_bytes());
         h.update(&self.boundary.operator_hash().0);
         let gas = self.source().gas();
         for value in [
@@ -189,7 +266,7 @@ impl<'a> MolecularBemObservation<'a> {
                 self.boundary.surface,
                 omega,
                 &fields,
-                helmholtz::Formulation::PlainCbie,
+                self.formulation.boundary_formulation(),
                 &self.limits,
                 &mut *cancelled,
             )?);
