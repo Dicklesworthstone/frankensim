@@ -442,6 +442,22 @@ differentiable lift). Pure Rust throughout.
   polarization-dependent multiple collisions, null tracking, owner identity,
   zero-scattering pixel equivalence, conditional Beer weights and refusals.
 
+- With `volumes`, `CurvedRayleighScene::try_new_with_fields` additionally binds
+  local spectral molecular rates and depolarization to the exact original GRIN
+  snapshot identity, optionally alongside unchanged density-scaled laws.
+  Immutable wavelength majorants drive the same native curved-arc delta tracking;
+  local rates and phases are validated, accepted events reuse native Mueller/PDF
+  response, and null events retain beam weight. One stack cache reuses the last
+  field medium's sampled majorant without allocating per-path tables. Positive
+  field majorants require an independent fourth tracking variate; exact zero
+  consumes no flight RNG. Existing camera/raster owners inherit the field law
+  with original local source radiometry, geometry, absorption, cancellation and
+  cumulative budgets. Local vacuum never proves escape under a positive global
+  majorant. Eight regressions cover analytic arcs, changing local phases through
+  actual camera radiance, nulls/cache reuse, legacy bits, source identity, invalid
+  inputs and native limits. No particle-polarization inference, volume emission,
+  extra extinction weight, direct-light estimator or MIS is added.
+
 - `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
   absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
   nanometres, strict inclusive 380--780 nm support, deterministic linear
@@ -3369,13 +3385,30 @@ arithmetic. Source-supported Cauchy fits permit chromatic refraction and
 focusing at fixed total density without fitting renderer coefficients or
 averaging constituent group indices. True absorption remains zero.
 Source mismatches and provider/numerical failures refuse. No EOS
-reconstruction, cell smoothing, chemical-species inference or scattered-radiance
-integration is supplied. Focused regressions cover spatial derivatives in both
+reconstruction, cell smoothing or chemical-species inference is supplied. Focused regressions cover spatial derivatives in both
 density bases, constant-total-density bending and Snell invariance, analytic
 on-axis focusing/defocusing, neighboring rays, detector irradiance, vacuum and
 invalid/source/missing-row refusals. Two additional spectral regressions cover
 blue/red bending, spatial Hessians, analytic lens focusing and homogeneous
 and curved group-delay accumulation under the same explicit optical sources.
+
+`MaterialGasCompositionRefractiveField::bind_scattering_field` borrows that exact
+refractive model, provider, density basis and snapshot for native curved molecular
+transport. A stack-owned componentwise upper-density vector must satisfy the
+original dilute material law at the source endpoints; exact-wavelength evaluation
+of the nonnegative ordered molecular sum supplies its tracking majorant. Local
+candidates query the original partial-density reconstruction and refuse unwritten
+or nonfinite rows, negative densities, changed source/units and exceeded component
+bounds. The material owner supplies both the dispersive rate and the effective
+depolarization, including the complete scattering-weighted Mueller response.
+Native attachment uses the original GRIN source identity; a distinct adapter
+content identity additionally binds its bounds. Bounds are caller-declared global
+envelopes, not certification of unsampled field values, including a zero envelope.
+Preparation and queries allocate no heap memory and retain the original component
+limit. No wavelength fit, gray phase, independent gas law, absorption or thermal
+emission is introduced. Seven focused regressions cover spectral/spatial variation,
+all Mueller entries, density bases, source/bound identities, envelope/row/domain
+refusals, vacuum and a real native curved collision with the original snapshot.
 
 `MaterialGasScatteringBinding::bind_cell_grid` borrows accepted gas states and
 their exact density buffer in the native `VolumeGrid` cell order. Temperature

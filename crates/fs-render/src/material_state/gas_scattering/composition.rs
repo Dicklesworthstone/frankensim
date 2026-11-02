@@ -13,6 +13,9 @@ use fs_material::gas_scattering::composition::{
     PartialDensityBasis,
 };
 
+mod scattering;
+pub use scattering::{GasCompositionScatteringError, MaterialGasCompositionScatteringField};
+
 /// One component's partial density and spatial gradient in the declared basis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GasPartialDensitySample {
@@ -71,8 +74,9 @@ pub trait GasCompositionSecondOrderField: GasCompositionGradientField {
 /// The material's dilute visible-band model and explicit spectral sources apply.
 /// Local composition is supplied, not inferred by another equation of state.
 /// Phase controls bending; group index uses the full molecular spectral
-/// derivative when dispersion is attached. True absorption is zero. Molecular
-/// scattering remains separate and is not integrated along these curved paths.
+/// derivative when dispersion is attached. True absorption is zero. Bind the
+/// same reconstruction with [`Self::bind_scattering_field`] to supply elastic
+/// molecular collisions to the native curved participating-medium transport.
 pub struct MaterialGasCompositionRefractiveField<'a, F: GasCompositionGradientField + ?Sized> {
     model: &'a MolecularRefractionModel,
     field: &'a F,

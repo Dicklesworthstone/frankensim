@@ -11,8 +11,9 @@ mod refraction;
 pub use refraction::{GasDensityJet, GasDensitySecondOrderField};
 mod composition;
 pub use composition::{
-    GasCompositionGradientField, GasCompositionSecondOrderField, GasPartialDensityJet,
-    GasPartialDensitySample, MaterialGasCompositionRefractiveField,
+    GasCompositionGradientField, GasCompositionScatteringError, GasCompositionSecondOrderField,
+    GasPartialDensityJet, GasPartialDensitySample, MaterialGasCompositionRefractiveField,
+    MaterialGasCompositionScatteringField,
 };
 
 use fs_blake3::{ContentHash, DomainHasher};

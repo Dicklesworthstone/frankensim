@@ -1,8 +1,8 @@
 //! Molecular multiple scattering along actual curved physical paths.
 //!
-//! Each declared medium has a spatially uniform mass-scattering spectrum and
-//! density. Its original phase-index field may vary, and that original field
-//! continues to own absorption and group delay. An exponential scattering-only
+//! Each declared medium supplies either a mass-scattering spectrum with density
+//! or an explicitly bounded local spectral molecular law. Its original phase-
+//! index field continues to own absorption and group delay. A scattering-only
 //! flight is measured in arc length, not endpoint separation or a tangent ray.
 //! Native geometry decides whether a surface interrupts that flight. At a
 //! collision the original Rayleigh Mueller/PDF sampler acts on the locally
@@ -15,20 +15,23 @@
 //! factor. A volume collision may redirect a ray toward a previously missed
 //! detector; an active scattering medium cannot use a straight escape proof.
 //!
-//! This owner does not turn a heterogeneous density grid into constant cells or
-//! trace its chords. Spatially varying scattering requires a curved optical-
-//! depth event owner. Only molecular Rayleigh/depolarized-Rayleigh phase laws
-//! have the requisite native Stokes response; scalar particle laws refuse.
-//! The medium snapshot must remain immutable for the complete path.
+//! Heterogeneous laws use majorant thinning on that same curved arc, never grid
+//! chords. A local spectral law can vary both scattering rate and molecular
+//! depolarization with composition and wavelength. Only molecular Rayleigh/
+//! depolarized-Rayleigh laws have the requisite native Stokes response; scalar
+//! particle laws refuse. All source snapshots and majorants remain immutable
+//! for the complete path; local vacuum cannot prove escape from a positive
+//! global majorant.
 
 use super::{
     CurvedPathResult, CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings,
-    CurvedVolumeFlight, MAX_POLARIZED_PATH_EVENTS, PolarizedBeam, SceneError,
+    CurvedVolumeFlight, MAX_POLARIZED_PATH_EVENTS, PolarizedBeam, SceneError, SceneMedium,
 };
 use crate::volumes::VolumeGrid;
 use crate::volumes::transport::VolumeTransportError;
 use crate::volumes::transport::scattering::polarized::PolarizedScatteringError;
 use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
+use core::cell::Cell;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::Point3;
@@ -51,6 +54,133 @@ impl CurvedDensityField for VolumeGrid<'_> {
             return Err(VolumeTransportError::Density { index: 0 });
         }
         Ok(density)
+    }
+}
+
+/// Local molecular scattering, with a rate per metre of physical ray arc.
+/// The depolarization ratio is the unpolarized 90-degree parallel/perpendicular
+/// intensity ratio used by the native Rayleigh Mueller and phase samplers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurvedRayleighSample {
+    pub scattering_per_m: f64,
+    pub depolarization_ratio: f64,
+}
+
+/// Immutable molecular optics of the SAME source-bound refractive snapshot.
+///
+/// The majorant must bound the local scattering rate over the entire field at
+/// each admitted vacuum wavelength. A zero majorant certifies zero scattering
+/// everywhere at that wavelength. Implementations must refuse unrepresentable
+/// positive rates rather than rounding them to vacuum. The local phase may vary
+/// with composition and wavelength; no independent density or phase inference
+/// is made by this owner. Absorption remains in the original refractive field.
+pub trait CurvedRayleighField: Sync {
+    fn source_field_identity(&self) -> ContentHash;
+
+    fn scattering_majorant_per_m(&self, wavelength_nm: f64) -> Result<f64, VolumeTransportError>;
+
+    fn sample_scattering(
+        &self,
+        position: Point3,
+        wavelength_nm: f64,
+    ) -> Result<CurvedRayleighSample, VolumeTransportError>;
+}
+
+/// Borrow either the original density-scaled law or a local spectral molecular
+/// field. Mixed tables retain the original arithmetic and random stream for
+/// every density-scaled entry.
+#[derive(Clone, Copy)]
+pub enum CurvedRayleighBinding<'a> {
+    Density(CurvedRayleighMedium<'a>),
+    Field(&'a dyn CurvedRayleighField),
+}
+
+impl CurvedRayleighBinding<'_> {
+    fn scattering_per_m(&self, wavelength_nm: f64) -> Result<f64, CurvedSceneError> {
+        match self {
+            Self::Density(law) => law.scattering_per_m(wavelength_nm),
+            Self::Field(field) => {
+                let rate = field
+                    .scattering_majorant_per_m(wavelength_nm)
+                    .map_err(volume_error)?;
+                if !rate.is_finite() || rate < 0.0 {
+                    return Err(volume_error(VolumeTransportError::ScatteringSpectrum));
+                }
+                Ok(rate)
+            }
+        }
+    }
+
+    fn scatter_candidate(
+        &self,
+        beam: PolarizedBeam,
+        samples: [f64; 2],
+        acceptance_sample: f64,
+        sampled_majorant: Option<f64>,
+    ) -> Result<Option<PolarizedBeam>, CurvedSceneError> {
+        match self {
+            Self::Density(law) => {
+                if !law.accepts_candidate(beam.ray().origin, acceptance_sample)? {
+                    return Ok(None);
+                }
+                Ok(Some(
+                    law.phase
+                        .sample_polarized(beam, samples)
+                        .map_err(scattering_error)?
+                        .beam,
+                ))
+            }
+            Self::Field(field) => {
+                if !acceptance_sample.is_finite() || !(0.0..1.0).contains(&acceptance_sample) {
+                    return Err(volume_error(VolumeTransportError::Sample));
+                }
+                let majorant = sampled_majorant.ok_or(CurvedSceneError::NumericalRange)?;
+                let local = field
+                    .sample_scattering(beam.ray().origin, beam.wavelength_nm())
+                    .map_err(volume_error)?;
+                if !local.scattering_per_m.is_finite()
+                    || local.scattering_per_m < 0.0
+                    || local.scattering_per_m > majorant
+                {
+                    return Err(volume_error(VolumeTransportError::ScatteringSpectrum));
+                }
+                // Validate the declared phase even at a null candidate: invalid
+                // molecular optics are not an absent collision.
+                let phase = PhaseFunction::rayleigh_depolarized(local.depolarization_ratio)
+                    .map_err(volume_error)?;
+                if local.scattering_per_m == 0.0 {
+                    return Ok(None);
+                }
+                let probability = local.scattering_per_m / majorant;
+                if !probability.is_finite() || probability <= 0.0 {
+                    return Err(volume_error(VolumeTransportError::Unrepresentable));
+                }
+                if acceptance_sample >= probability {
+                    return Ok(None);
+                }
+                Ok(Some(
+                    phase
+                        .sample_polarized(beam, samples)
+                        .map_err(scattering_error)?
+                        .beam,
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CurvedRayleighBindings<'a, 'optics> {
+    Density(&'a [Option<CurvedRayleighMedium<'optics>>]),
+    Fields(&'a [Option<CurvedRayleighBinding<'optics>>]),
+}
+
+impl<'optics> CurvedRayleighBindings<'_, 'optics> {
+    fn get(&self, index: usize) -> Option<CurvedRayleighBinding<'optics>> {
+        match self {
+            Self::Density(media) => media[index].map(CurvedRayleighBinding::Density),
+            Self::Fields(media) => media[index],
+        }
     }
 }
 
@@ -270,7 +400,7 @@ impl CurvedRayleighPath {
 /// Binding and tracing allocate no heap workspace or copied optical tables.
 pub struct CurvedRayleighScene<'a, 'scene, 'optics> {
     scene: &'a CurvedPolarizedScene<'scene>,
-    media: &'a [Option<CurvedRayleighMedium<'optics>>],
+    media: CurvedRayleighBindings<'a, 'optics>,
     radiance_brushing: bool,
 }
 impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
@@ -283,7 +413,48 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         if media.len() != scene.media.len() {
             return Err(SceneError::InvalidBindings.into());
         }
-        Ok(Self { scene, media, radiance_brushing: false })
+        Ok(Self {
+            scene,
+            media: CurvedRayleighBindings::Density(media),
+            radiance_brushing: false,
+        })
+    }
+
+    /// Bind local spectral molecular fields to their exact original GRIN
+    /// source/snapshot identities. An equal index at one point cannot substitute
+    /// for that identity; homogeneous media cannot stand in for source fields.
+    /// Spectral rate and phase admission occurs at the queried wavelength.
+    pub fn try_new_with_fields(
+        cx: &Cx<'_>,
+        scene: &'a CurvedPolarizedScene<'scene>,
+        media: &'a [Option<CurvedRayleighBinding<'optics>>],
+    ) -> Result<Self, CurvedSceneError> {
+        cx.checkpoint()?;
+        if media.len() != scene.media.len() {
+            return Err(SceneError::InvalidBindings.into());
+        }
+        for (index, (law, medium)) in media.iter().zip(scene.media).enumerate() {
+            if index % 1024 == 0 {
+                cx.checkpoint()?;
+            }
+            if let Some(CurvedRayleighBinding::Field(field)) = law {
+                let source_identity = field.source_field_identity();
+                if source_identity == ContentHash([0; 32]) {
+                    return Err(CurvedSceneError::MissingFieldIdentity);
+                }
+                match medium {
+                    SceneMedium::GradientIndex { identity, .. }
+                    | SceneMedium::Differentiable { identity, .. }
+                        if *identity == source_identity => {}
+                    _ => return Err(SceneError::InvalidBindings.into()),
+                }
+            }
+        }
+        Ok(Self {
+            scene,
+            media: CurvedRayleighBindings::Fields(media),
+            radiance_brushing: false,
+        })
     }
 
     pub const fn surface_scene(&self) -> &'a CurvedPolarizedScene<'scene> {
@@ -293,7 +464,11 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
     // A stack-only borrowed view; original power paths and material/field
     // identities remain unchanged. All three sampling APIs share this mode.
     pub(super) fn for_camera(&self) -> Self {
-        Self { scene: self.scene, media: self.media, radiance_brushing: true }
+        Self {
+            scene: self.scene,
+            media: self.media,
+            radiance_brushing: true,
+        }
     }
 
     /// Surface draws keep the native domain and surface ordinal. Flights use a
@@ -310,13 +485,26 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         seed: u64,
         path_id: u64,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
-        self.trace_observed(cx, beam, initial_medium, settings, seed, path_id, |_| Ok(()))
+        self.trace_observed(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            seed,
+            path_id,
+            |_| Ok(()),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn trace_observed(
-        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
-        settings: CurvedRayleighTraceSettings, seed: u64, path_id: u64,
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        path_id: u64,
         observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         let draws = |ordinal, domain| {
@@ -339,8 +527,9 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
     }
 
     /// Deterministic custom sampler for the original uniform-density path.
-    /// Heterogeneous density needs an independent fourth acceptance variate
-    /// and therefore refuses here rather than correlating acceptance and phase.
+    /// Heterogeneous density and positive local-field majorants need an
+    /// independent fourth acceptance variate and refuse here. A local field's
+    /// exact zero majorant consumes no flight sample and needs no acceptance.
     #[allow(clippy::too_many_arguments)]
     pub fn trace_with_samples(
         &self,
@@ -351,13 +540,23 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         surface_samples: impl FnMut(u32) -> [f64; 3],
         flight_samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
-        self.trace_with_samples_observed(cx, beam, initial_medium, settings,
-            surface_samples, flight_samples, |_| Ok(()))
+        self.trace_with_samples_observed(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            flight_samples,
+            |_| Ok(()),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn trace_with_samples_observed(
-        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
         mut flight_samples: impl FnMut(u32) -> [f64; 3],
@@ -390,13 +589,23 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         surface_samples: impl FnMut(u32) -> [f64; 3],
         flight_samples: impl FnMut(u32) -> [f64; 4],
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
-        self.trace_with_tracking_samples_observed(cx, beam, initial_medium, settings,
-            surface_samples, flight_samples, |_| Ok(()))
+        self.trace_with_tracking_samples_observed(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            flight_samples,
+            |_| Ok(()),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn trace_with_tracking_samples_observed(
-        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
         flight_samples: impl FnMut(u32) -> [f64; 4],
@@ -432,6 +641,11 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             return Err(SceneError::InvalidSettings.into());
         }
         let mut free_flight_draws = 0_u32;
+        // A path keeps its vacuum wavelength. Reuse the last spectral field's
+        // majorant, including across null candidates, and thin against the
+        // exact rate used to sample that flight. Density-scaled laws retain
+        // their original evaluation and arithmetic. No per-medium workspace.
+        let field_majorant: Cell<Option<(usize, f64)>> = Cell::new(None);
         let (path, volume_events) = self.scene.trace_with_flights(
             cx,
             beam,
@@ -442,15 +656,32 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             observe_surface,
             settings.max_volume_events,
             |medium, wavelength| {
-                let Some(law) = self.media[medium] else {
+                let Some(law) = self.media.get(medium) else {
                     return Ok(None);
                 };
-                if law.is_heterogeneous() && !heterogeneous_samples {
+                if matches!(law, CurvedRayleighBinding::Density(law) if law.is_heterogeneous())
+                    && !heterogeneous_samples
+                {
                     return Err(volume_error(VolumeTransportError::Sample));
                 }
-                let rate = law.scattering_per_m(wavelength)?;
+                let rate = if matches!(law, CurvedRayleighBinding::Field(_)) {
+                    if let Some((cached_medium, rate)) = field_majorant.get()
+                        && cached_medium == medium
+                    {
+                        rate
+                    } else {
+                        let rate = law.scattering_per_m(wavelength)?;
+                        field_majorant.set(Some((medium, rate)));
+                        rate
+                    }
+                } else {
+                    law.scattering_per_m(wavelength)?
+                };
                 if rate == 0.0 {
                     return Ok(None);
+                }
+                if matches!(law, CurvedRayleighBinding::Field(_)) && !heterogeneous_samples {
+                    return Err(volume_error(VolumeTransportError::Sample));
                 }
                 let draws = flight_samples(free_flight_draws);
                 free_flight_draws = free_flight_draws
@@ -481,11 +712,15 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                 }))
             },
             |medium, beam, samples, acceptance_sample| {
-                let law = self.media[medium].ok_or(CurvedSceneError::NumericalRange)?;
-                if !law.accepts_candidate(beam.ray().origin, acceptance_sample)? {
-                    return Ok(None);
-                }
-                Ok(Some(law.phase.sample_polarized(beam, samples).map_err(scattering_error)?.beam))
+                let law = self
+                    .media
+                    .get(medium)
+                    .ok_or(CurvedSceneError::NumericalRange)?;
+                let sampled_majorant = field_majorant
+                    .get()
+                    .filter(|(cached_medium, _)| *cached_medium == medium)
+                    .map(|(_, rate)| rate);
+                law.scatter_candidate(beam, samples, acceptance_sample, sampled_majorant)
             },
         )?;
         cx.checkpoint()?;
@@ -507,6 +742,8 @@ fn volume_error(error: VolumeTransportError) -> CurvedSceneError {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod spectral_field_tests;
 
 #[cfg(test)]
 mod grid_binding_tests {
@@ -515,12 +752,7 @@ mod grid_binding_tests {
     #[test]
     fn zero_copy_grid_derives_majorant_identity_and_null_collision_probability() {
         let cells = [0.5, 1.5];
-        let grid = VolumeGrid::new(
-            [1, 1, 2],
-            &cells,
-            [-1.0, -1.0, 0.0],
-            [2.0, 2.0, 0.5],
-        );
+        let grid = VolumeGrid::new([1, 1, 2], &cells, [-1.0, -1.0, 0.0], [2.0, 2.0, 0.5]);
         let spectrum = MassScatteringSpectrum::constant(1.0).unwrap();
         let phase = PhaseFunction::Rayleigh;
         let medium =
@@ -528,23 +760,24 @@ mod grid_binding_tests {
         assert_eq!(medium.density_kg_m3(), 1.5);
         assert!(medium.is_heterogeneous());
         assert_ne!(medium.density_identity(), Some(ContentHash([0; 32])));
-        assert!(!medium
-            .accepts_candidate(Point3::new(0.0, 0.0, 0.25), 0.8)
-            .unwrap());
-        assert!(medium
-            .accepts_candidate(Point3::new(0.0, 0.0, 0.75), 0.9)
-            .unwrap());
-        assert!(!medium
-            .accepts_candidate(Point3::new(0.0, 0.0, 2.0), 0.0)
-            .unwrap());
+        assert!(
+            !medium
+                .accepts_candidate(Point3::new(0.0, 0.0, 0.25), 0.8)
+                .unwrap()
+        );
+        assert!(
+            medium
+                .accepts_candidate(Point3::new(0.0, 0.0, 0.75), 0.9)
+                .unwrap()
+        );
+        assert!(
+            !medium
+                .accepts_candidate(Point3::new(0.0, 0.0, 2.0), 0.0)
+                .unwrap()
+        );
 
         let changed = [0.5, 1.4];
-        let changed_grid = VolumeGrid::new(
-            [1, 1, 2],
-            &changed,
-            [-1.0, -1.0, 0.0],
-            [2.0, 2.0, 0.5],
-        );
+        let changed_grid = VolumeGrid::new([1, 1, 2], &changed, [-1.0, -1.0, 0.0], [2.0, 2.0, 0.5]);
         let changed_medium =
             CurvedRayleighMedium::try_new_volume_grid(&spectrum, &changed_grid, &phase, 2).unwrap();
         assert_ne!(medium.density_identity(), changed_medium.density_identity());
