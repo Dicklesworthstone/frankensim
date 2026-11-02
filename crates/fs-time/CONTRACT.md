@@ -63,8 +63,15 @@ where claimed below.
   composition of exact axis Hamiltonian flows preserves `R L` to roundoff
   and is second order and reversible for fixed `h`. Zero `h` delegates
   exactly to the rigid-body drift; a stationary carrier remains stationary
-  for any stored rotor momentum. There are at most five elementary rotations,
-  no allocation and no nonlinear iteration. `driven_step` composes internal
+  for any stored rotor momentum. Spherical carriers and exactly axisymmetric
+  carriers with rotor momentum on their symmetry axis use commuting exact
+  Hamiltonian flows: at most two exponentials preserve their continuous free
+  trajectory and kinetic energy to roundoff. Only exact stored inertia/axis
+  equalities select that specialization; near symmetry keeps the original
+  general model. Pure axial motion avoids cancellation between large rotor
+  phases, and exact carrier rest is preserved bitwise. General gyrostats need
+  at most five elementary rotations, no allocation and no nonlinear iteration.
+  `driven_step` composes internal
   rotor transfers with the drift and endpoint external torque half-kicks;
   motor reaction changes carrier momentum without creating external impulse.
   Body-held versus spatially held torques are explicit. This map is second
@@ -72,8 +79,10 @@ where claimed below.
   changing load laws need a coupled stage. `tests/gyrostat.rs` checks analytic
   precession/refinement, rotor spin-up recoil, spatial impulse, frame
   covariance, reversibility, replay, rest, rigid reduction and admission.
-  No exact-energy, arbitrary-step accuracy, gimbaled-rotor, rotor-flexibility,
-  changing-inertia, or discrete-adjoint claim is made for this extension.
+  General asymmetric or misaligned gyrostats retain the finite-step splitting
+  and its measured kinetic defect; exact-energy or arbitrary-step trajectory
+  accuracy is not claimed for that general case. Gimbaled rotors, flexibility,
+  changing inertia and a discrete adjoint remain outside this extension.
 - `lie::gyrostat::InertiaTensor3` admits a full symmetric positive-definite
   inertia in the caller's fixed body frame. `new(Mat3)` uses the existing
   native 3-by-3 Jacobi eigensolver once and checks the principal-frame
@@ -91,6 +100,36 @@ where claimed below.
   and its reconstruction residual are numerical, not an interval eigenvalue
   certificate or geometric realizability proof. The tensor must remain fixed;
   this does not supply changing-mass, deforming-body or gimbaled-axis transport.
+- `lie::gyrostat::rotors::RotorBank<N>` binds up to 32 balanced axisymmetric
+  rotors with fixed body axes and complete reduced inertia. `from_locked`
+  removes only `sum_i J_i a_i a_i^T` from the original complete locked tensor;
+  transverse rotor inertia remains. Its canonical state stores total body
+  momentum, absolute axial rotor momenta and unwrapped relative shaft angles.
+  `apply_impulse` applies all internal shaft and external body impulses
+  simultaneously, retaining full-tensor cross-axis carrier recoil. Internal
+  transfers preserve total momentum. Complete kinetic energy is
+  `T = omega.I_reduced.omega/2 + sum_i p_i^2/(2 J_i)`; shaft power uses the
+  relative rate `p_i/J_i - a_i.omega`, including the carrier's axial motion.
+  Actual rounded momentum changes and polarized quadratic increments give
+  individual signed shaft/brake work, external work and a visible balance
+  residual without subtracting large endpoint energies. An independent
+  compensated transfer balance checks the actual carrier recoil before work
+  accounting; its allowance uses carrier/transfer scale so a large stored
+  rotor cannot hide a lost or materially distorted shaft transfer.
+  `step` composes two held-torque half-kicks with one native gyrostat drift.
+  Relative phase uses the same second-order relative-speed quadrature as
+  shaft work; representable held torque times angle change agrees with that
+  work to rounding. Body/space torque frames remain explicit. The native
+  drift's kinetic defect is reported separately and is never labeled motor
+  loss or heat. Stepping is O(N), allocation-free and has no new iterative
+  solve. Invalid or completely unresolved nonzero impulses/phase increments
+  refuse without partial state. Seven rotor-bank regressions cover independent
+  locked energy, multiple-axis recoil, analytic spin-up/braking and 3D changing
+  spin precession, relative phase/work, external impulse frames, reversal,
+  generic refinement, empty-bank reduction and refusal. With nine principal
+  gyrostat and seven full-tensor tests, all 23 focused native groups pass.
+  Fixed axes, inertia and held torques are required: moving gimbals, electrical
+  states and variable-speed bearing/bending dynamics are not supplied.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored

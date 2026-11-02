@@ -53,6 +53,12 @@ normal restitution with unchanged controls.
 
 ## Linear rotor-bearing operating points
 
+The public `fs_mbd::rotordynamics` module exposes the original operating-point,
+rigid-rotor and transient owners described here. Finite internal shaft actuation
+and relative rotor phase are available separately in
+`fs_time::lie::gyrostat::rotors`; that fixed-axis angular model does not change
+this bearing/bending lane's constant-speed physical assumptions.
+
 `rotordynamics::RotorBearingModel` admits 1–32 original generalized coordinates
 with full mass M, bearing velocity operator C, tangent stiffness K and the
 skew gyroscopic coefficient G. M must be symmetric and numerically SPD; C/K

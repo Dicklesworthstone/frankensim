@@ -14,7 +14,9 @@
 //! The symmetric x/2, y/2, z, y/2, x/2 composition is second order. Every
 //! subflow preserves `R L`, so total spatial angular momentum is preserved
 //! to roundoff even when carrier and rotors exchange angular momentum.
-//! This is a finite-step approximation, not an exact kinetic-energy claim.
+//! Spherical carriers, and exactly axisymmetric carriers whose stored momentum
+//! lies on the symmetry axis, use commuting exact subflows instead. General
+//! gyrostats retain the finite-step splitting and its kinetic-energy defect.
 
 use super::{
     LieStepError, momentum_from_velocity, rigid_body_momentum_step, torque_kick,
@@ -25,6 +27,13 @@ use fs_ga::{So3, So3Tangent, Vec3};
 #[path = "gyrostat/tensor.rs"]
 mod tensor;
 pub use tensor::InertiaTensor3;
+
+#[path = "gyrostat/symmetric.rs"]
+mod symmetric;
+
+/// Finite shaft actuation, carrier recoil and relative rotor phase.
+#[path = "gyrostat/rotors.rs"]
+pub mod rotors;
 
 /// Frame in which the externally applied torque is held over the step.
 /// Internal motor torques belong in the rotor momentum change, not here.
@@ -56,7 +65,10 @@ fn admit_rotor(momentum: Vec3) -> Result<(), LieStepError> {
 /// `rotor_momentum` is held constant in the body frame. With zero stored
 /// momentum, this uses the existing rigid-body map exactly, including its
 /// exact symmetric-top special case. Nonzero rotors require at most five
-/// elementary rotations, no allocation and no iterative solve. A carrier
+/// elementary rotations, no allocation and no iterative solve. Spherical and
+/// exactly aligned axisymmetric gyrostats use at most two exponentials and
+/// preserve the continuous free trajectory and kinetic energy to roundoff.
+/// Near symmetry/alignment does not select an approximate symmetric model. A carrier
 /// at rest (`momentum == rotor_momentum`) stays at rest exactly.
 ///
 /// # Errors
@@ -90,6 +102,9 @@ pub fn momentum_step(
         return Err(LieStepError::InvalidParameter {
             context: "gyrostat total momentum",
         });
+    }
+    if let Some(state) = symmetric::step(rotation, momentum, inertia, rotor_momentum, h)? {
+        return Ok(state);
     }
     let moments = [inertia.x, inertia.y, inertia.z];
     let stored = [rotor_momentum.x, rotor_momentum.y, rotor_momentum.z];

@@ -44,7 +44,7 @@ fn g0_total_momentum_and_bounded_energy_during_free_precession() {
 }
 
 #[test]
-fn g1_spherical_gyrostat_converges_to_exact_noncommuting_attitude() {
+fn g1_spherical_gyrostat_has_exact_noncommuting_attitude() {
     let inertia = v(2.0, 2.0, 2.0);
     let l0 = v(1.2, -0.4, 0.8);
     let stored = v(-0.3, 0.7, 0.6);
@@ -61,11 +61,60 @@ fn g1_spherical_gyrostat_converges_to_exact_noncommuting_attitude() {
         }
         r.body_minus(exact_r).unwrap().angular.norm() + (l - exact_l).norm()
     };
-    let errors = [run(40), run(80), run(160)];
+    let errors = [run(1), run(40), run(160)];
     println!("gyrostat analytic errors {errors:?}");
-    assert!(errors[2] < 5e-5);
-    assert!((3.8..4.2).contains(&(errors[0] / errors[1])));
-    assert!((3.8..4.2).contains(&(errors[1] / errors[2])));
+    assert!(errors.into_iter().all(|error| error < 2e-12));
+}
+
+#[test]
+fn g1_aligned_axisymmetric_gyrostat_matches_euler_solution_on_every_axis() {
+    let r0 = So3::exp(So3Tangent::new(v(-0.3, 0.2, 0.4))).unwrap();
+    let l0 = v(1.2, -0.4, 0.8);
+    let world = r0.rotate(l0).unwrap();
+    for axis in 0..3 {
+        for axial in [0.7, 5.0] {
+            let mut i = [2.0; 3];
+            i[axis] = axial;
+            let inertia = v(i[0], i[1], i[2]);
+            let mut h = [0.0; 3];
+            h[axis] = 0.6;
+            let stored = v(h[0], h[1], h[2]);
+            let component = [l0.x, l0.y, l0.z][axis];
+            let rate = ((axial - 2.0) * component + 2.0 * h[axis]) / (2.0 * axial);
+            for duration in [-1.3, 0.7, 2.0] {
+                let mut angle = [0.0; 3];
+                angle[axis] = -duration * rate;
+                let body = So3::exp(So3Tangent::new(v(angle[0], angle[1], angle[2]))).unwrap();
+                let spatial = So3::exp(So3Tangent::new(world.scale(duration / 2.0))).unwrap();
+                let exact = spatial.compose(r0).unwrap().compose(body).unwrap();
+                let (r, l) = momentum_step(r0, l0, inertia, stored, duration).unwrap();
+                assert!(r.body_minus(exact).unwrap().angular.norm() < 3e-14);
+                // Euler's transverse body-momentum components rotate by +rate*t.
+                assert!((l - body.inverse().rotate(l0).unwrap()).norm() < 3e-14);
+                assert!((r.rotate(l).unwrap() - world).norm() < 3e-14);
+                assert!((energy(l, stored, inertia) - energy(l0, stored, inertia)).abs() < 3e-14);
+                let reversed = momentum_step(r, l, inertia, stored, -duration).unwrap();
+                assert!(reversed.0.body_minus(r0).unwrap().angular.norm() < 3e-14);
+                assert!((reversed.1 - l0).norm() < 3e-14);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_symmetric_rest_and_large_axial_rotor_do_not_cancel_large_phases() {
+    let r0 = So3::exp(So3Tangent::new(v(-0.3, 0.2, 0.4))).unwrap();
+    let inertia = v(2.0, 2.0, 5.0);
+    let stored = v(0.0, 0.0, 1e12);
+    assert_eq!(
+        momentum_step(r0, stored, inertia, stored, 2.0).unwrap(),
+        (r0, stored)
+    );
+    let l = v(0.0, 0.0, stored.z + 1.0);
+    let expected = r0.body_plus(So3Tangent::new(v(0.0, 0.0, 0.4))).unwrap();
+    let actual = momentum_step(r0, l, inertia, stored, 2.0).unwrap();
+    assert_eq!(actual.1, l);
+    assert!(actual.0.body_minus(expected).unwrap().angular.norm() < 2e-15);
 }
 
 #[test]

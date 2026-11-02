@@ -41,6 +41,8 @@ pub mod robot_models;
 pub mod rigid_rattle;
 pub mod rocket;
 pub mod roomba;
+/// Full-mass rotor-bearing spectra, forced response and momentum-aware trajectories.
+pub mod rotordynamics;
 pub mod salisbury;
 /// World-held torques and forces at rotating material points.
 pub mod spatial_loads;
