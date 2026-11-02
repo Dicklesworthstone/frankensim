@@ -26,7 +26,7 @@ pub(super) fn expansion(name: &str, material: &ResolvedMaterialStatePoint, catal
         &point, &current, Pick::SingleClaimOnly)?)
 }
 
-// Both homogeneous and bonded strings bind the original selected loss owner.
+// Homogeneous strings, bonded sections and wound cores bind the same loss owner.
 // Excess is selected explicitly from the SAME section before thermal lowering;
 // no material lookup, missing-loss fallback or viscosity conversion occurs here.
 fn modal_bending_section(elastic: ConcentricElasticSection, loss: &input::BendingLoss)
@@ -53,11 +53,6 @@ impl input::Wire {
         poll(gate)?;
         if matches!(&self.section, input::WireSection::Measured { .. }) {
             return measured::resolve(self, catalog, loader, spec, gate);
-        }
-        if matches!(&self.section, input::WireSection::CloseWound { .. })
-            && matches!(&self.bending_loss, input::BendingLoss::LossAngle { .. }
-                | input::BendingLoss::Thermoelastic { .. }) {
-            return Err("close-wound core loss-angle and thermoelastic bending are not supported by the original winding owner".into());
         }
         let thermal = match self.thermal_reference_kelvin {
             Some(reference) => {
@@ -91,7 +86,7 @@ impl input::Wire {
                         },
                     ])?.into(),
                     input::BendingLoss::LossAngle { .. } | input::BendingLoss::Thermoelastic { .. } =>
-                        return Err("close-wound core requires the original Kelvin-Voigt or Prony bending owner".into()),
+                        modal_bending_section(elastic, &self.bending_loss)?.into(),
                 };
                 // The wrap's spring law needs density and G, not an invented
                 // flexural viscosity or the core's Young modulus.

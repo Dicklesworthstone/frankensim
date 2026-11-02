@@ -882,9 +882,10 @@ impl Spec {
                 row.count(fs_vfit::observation::MAX_OBSERVATION_ENTRIES)?;
             let maximum_replay_terms = row.parse()?;
             let panel_rule = match row.word()? {
+                "centroid" => fs_bem::helmholtz::PanelRule::Centroid,
                 "triangle-near" => fs_bem::helmholtz::PanelRule::TriangleNear { max_pairs: row.parse()? },
                 "triangle" => fs_bem::helmholtz::PanelRule::Triangle { max_pairs: row.parse()? },
-                _ => return Err("one_way_observer panel rule must be triangle-near MAX_PAIRS or triangle MAX_PAIRS".into()),
+                _ => return Err("one_way_observer panel rule must be centroid, triangle-near MAX_PAIRS or triangle MAX_PAIRS".into()),
             };
             let maximum_skin_panels = row.count(fs_bem::helmholtz::MAX_DENSE_PANELS)?;
             let maximum_anchor_distance_m = row.positive()?;
@@ -1348,7 +1349,12 @@ impl Spec {
             }
         }
         if let Some(observer) = &self.one_way_observer {
-            observer.validate(self.rate)?;
+            if matches!(observer.panel_rule, fs_bem::helmholtz::PanelRule::Centroid)
+                && self.observer_molecular.is_none() {
+                return Err("a centroid one_way_observer requires its explicit observer_molecular boundary owner".into());
+            }
+            if self.observer_molecular.is_some() { observer.validate_molecular(self.rate)?; }
+            else { observer.validate(self.rate)?; }
             // The skin's own two-way load is observed through the same skin.
             if matches!(self.body_radiation, Some(BodyRadiation::Rayleigh(_) | BodyRadiation::ShellBem(_)))
                 || self.shell_observer.is_some() {
@@ -1374,8 +1380,8 @@ impl Spec {
         for wire in &self.strings {
             wire.bending_loss.validate()?;
             if matches!(&wire.bending_loss, BendingLoss::LossAngle { .. } | BendingLoss::Thermoelastic { .. })
-                && matches!(&wire.section, WireSection::Measured { .. } | WireSection::CloseWound { .. }) {
-                return Err("modal bending loss requires an original homogeneous or bonded material section".into());
+                && matches!(&wire.section, WireSection::Measured { .. }) {
+                return Err("modal bending loss requires an original material section, not whole-string measurements".into());
             }
             if let BendingLoss::Prony { properties } = &wire.bending_loss {
                 let layers = match &wire.section {

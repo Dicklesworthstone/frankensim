@@ -4,6 +4,9 @@ use super::*;
 #[path = "wound/stretching_memory.rs"]
 mod stretching_memory;
 
+#[path = "wound/modal_loss.rs"]
+mod modal_loss;
+
 fn wound_spec() -> input::Spec {
     input::Spec::parse(include_str!("../wound-pluck.material-strings")
         .replace("48000 4096 0.01 128", "48000 256 0.01 128").as_bytes()).unwrap()

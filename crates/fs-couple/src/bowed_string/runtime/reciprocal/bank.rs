@@ -115,6 +115,7 @@ impl MaterialStringSource {
         match self {
             Self::WithPolarizations(p) => p.source().modal_bending_loss(),
             Self::WithTorsion(t) => t.bending().modal_bending_loss(),
+            Self::Wound(s) => s.section().core().modal_loss(),
             Self::ConcentricModalLoss { section, .. } => Some(section),
             _ => None,
         }

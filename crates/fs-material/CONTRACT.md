@@ -827,11 +827,15 @@ homogenization, the P2 milestone.
   distinct round-wire winding. Exact helical length gives winding line mass;
   the close-coiled spring law gives its axial rigidity with core and winding
   constrained to share end displacement while slipping along the span.
-  `WoundCoreSection` retains either the core's sourced Kelvin–Voigt bending
-  viscosity or its independent per-layer Prony histories, with common-state
-  and intersected core/wrap source-band admission. The consumer projects core
-  bending arms using total winding-plus-core modal mass; the wrapping material
-  never inherits a bending spectrum or becomes an extra bonded bending layer.
+  `WoundCoreSection` retains the core's sourced Kelvin–Voigt bending viscosity,
+  independent per-layer Prony histories, or original `ConcentricModalLossSection`
+  loss-angle/thermoelastic law, with common-state and intersected core/wrap
+  source-band admission. The consumer projects core bending arms and evaluates
+  modal loss using total winding-plus-core dynamic mass and actual frequency;
+  the wrapping material never inherits a bending spectrum or becomes an extra
+  bonded bending layer. Circular thermoelastic core loss explicitly retains the
+  insulated homogeneous-core thermal boundary and original core radius. It
+  supplies no core/wrap heat transfer or thermal bending law for the winding.
   Geometric closest-turn separation rejects interpenetration. Thin wire,
   small helix angle and long wavelengths are explicit approximation domains.
   The consumer propagates these coefficients through the existing string/body

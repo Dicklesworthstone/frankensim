@@ -50,10 +50,16 @@ impl ResolvedWoundStringSpecimen {
                     source_properties: None,
                 });
             }
+            // The original section supplies H(omega), not a Kelvin-Voigt
+            // coefficient or new hereditary arms. Its mode owner evaluates
+            // it using this specimen's complete helix-loaded mass/frequency.
+            WoundCoreSection::ModalLoss(_) => {}
         }
         Ok(Self { string, section, prestress })
     }
     /// Ordinary generic string coefficients; source data stay on this specimen.
+    /// A selected modal loss remains on `section().core().modal_loss()` and
+    /// must be consumed by the modal material lowering, not discarded here.
     #[must_use] pub fn string(&self) -> PrestressedString { self.string.clone() }
     /// Original core, winding geometry and independent material identities.
     #[must_use] pub const fn section(&self) -> &CloseWoundSection { &self.section }

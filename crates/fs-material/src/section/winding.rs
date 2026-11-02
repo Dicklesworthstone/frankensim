@@ -16,8 +16,12 @@
 //! not an acoustically qualified replacement for a measured wound specimen.
 //! Both materials and geometry survive compilation. Small wire/coil ratio,
 //! small helix angle and wavelengths long compared with the pitch are required.
+//! Selecting circular thermoelastic core loss additionally uses that owner's
+//! thermally insulated core boundary: no core/wrap heat transfer or thermal
+//! bending of the winding is inferred from the mechanical sliding reduction.
 
 use super::{ConcentricElasticSection, ConcentricKelvinVoigtSection, invalid, positive};
+use super::modal_loss::ConcentricModalLossSection;
 use super::relaxation::ConcentricPronySection;
 use crate::state_point::{DENSITY_PROPERTY, MaterialStatePointError, ResolvedMaterialStatePoint};
 use fs_qty::{Density, Pressure, QuantitySpec};
@@ -42,17 +46,29 @@ pub struct RoundWireWinding {
 pub enum WoundCoreSection {
     KelvinVoigt(ConcentricKelvinVoigtSection),
     Prony(ConcentricPronySection),
+    /// Source loss-angle or circular thermoelastic core loss, evaluated at
+    /// each actual mode with the COMPLETE dynamic core-plus-winding mass.
+    /// This is cycle-equivalent modal dissipation, not a new memory spectrum.
+    ModalLoss(ConcentricModalLossSection),
 }
 impl WoundCoreSection {
     /// Common source geometry and equilibrium section integrals.
     #[must_use]
     pub const fn elastic(&self) -> &ConcentricElasticSection {
-        match self { Self::KelvinVoigt(s) => s.elastic(), Self::Prony(s) => s.elastic() }
+        match self { Self::KelvinVoigt(s) => s.elastic(), Self::Prony(s) => s.elastic(),
+            Self::ModalLoss(s) => s.elastic() }
     }
     /// Complete support of the selected core law, before wrapping coefficients.
     #[must_use]
     pub const fn omega_band_rad_s(&self) -> (f64, f64) {
-        match self { Self::KelvinVoigt(s) => s.omega_band_rad_s(), Self::Prony(s) => s.omega_band_rad_s() }
+        match self { Self::KelvinVoigt(s) => s.omega_band_rad_s(), Self::Prony(s) => s.omega_band_rad_s(),
+            Self::ModalLoss(s) => s.omega_band_rad_s() }
+    }
+    /// Original per-mode constitutive owner. Gas loading must reevaluate this
+    /// source at the loaded frequency/mass instead of retaining a dry rate.
+    #[must_use]
+    pub const fn modal_loss(&self) -> Option<&ConcentricModalLossSection> {
+        match self { Self::ModalLoss(section) => Some(section), _ => None }
     }
 }
 impl From<ConcentricKelvinVoigtSection> for WoundCoreSection {
@@ -60,6 +76,9 @@ impl From<ConcentricKelvinVoigtSection> for WoundCoreSection {
 }
 impl From<ConcentricPronySection> for WoundCoreSection {
     fn from(section: ConcentricPronySection) -> Self { Self::Prony(section) }
+}
+impl From<ConcentricModalLossSection> for WoundCoreSection {
+    fn from(section: ConcentricModalLossSection) -> Self { Self::ModalLoss(section) }
 }
 
 /// Source-retaining close-coiled spring winding and core-dominated flexure.
@@ -211,6 +230,7 @@ mod tests {
         let mut required = Vec::new();
         for (name, value, dims) in [("density", rho, Density::DIMS), ("young_modulus", 200e9, Pressure::DIMS),
             ("shear_modulus", shear, Pressure::DIMS), ("eta", 10.0, DynViscosity::DIMS),
+            ("bending_loss_tangent", 0.004, fs_qty::Dims::NONE),
             ("relaxing_shear_modulus", 0.25*shear, Pressure::DIMS),
             ("shear_relaxation_time", 0.002, fs_qty::Time::DIMS)] {
             claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
@@ -235,6 +255,22 @@ mod tests {
     fn section(rho: f64, shear: f64) -> CloseWoundSection {
         CloseWoundSection::try_new(core(), RoundWireWinding { wire_radius_m: 0.00005, pitch_m: 0.000101 },
             material(rho, shear, 293.15, 100_000.0), "shear_modulus").unwrap()
+    }
+    #[test]
+    fn selected_core_modal_loss_preserves_original_helix_mechanics_and_wrapping_band() {
+        let original = section(8900.0, 76e9);
+        let loss = ConcentricModalLossSection::from_loss_angle(
+            core().elastic().clone().with_loss_angle_bending("bending_loss_tangent").unwrap());
+        let wound = CloseWoundSection::try_new(loss.clone(), original.winding(),
+            original.winding_material().clone(), original.shear_property()).unwrap();
+        assert_eq!(wound.core().modal_loss(), Some(&loss));
+        assert_eq!(wound.core().elastic(), original.core().elastic());
+        assert_eq!(wound.line_density_kg_m(), original.line_density_kg_m());
+        assert_eq!(wound.axial_stiffness_n(), original.axial_stiffness_n());
+        assert_eq!(wound.winding_material(), original.winding_material());
+        assert_eq!(wound.outer_radius_m(), original.outer_radius_m());
+        assert_eq!(wound.core().omega_band_rad_s(), (0.0, 200_000.0));
+        assert_eq!(wound.omega_band_rad_s(), (0.0, 100_000.0));
     }
     #[test]
     fn winding_shear_memory_uses_original_spring_geometry_without_changing_equilibrium_or_mass() {

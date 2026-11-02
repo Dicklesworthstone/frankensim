@@ -483,7 +483,7 @@ fn missing_invalid_or_out_of_band_intrinsic_sources_refuse_without_fallback() {
 }
 
 #[test]
-fn malformed_native_loss_and_unsupported_winding_selections_refuse() {
+fn malformed_native_loss_and_duplicate_memory_selections_refuse() {
     let text = String::from_utf8(selected().bytes).unwrap();
     for invalid in ["bending-loss loss-angle", "bending-loss loss-angle phi ignored",
         "bending-loss thermoelastic ignored", "bending-loss thermoelastic excess",
@@ -502,31 +502,6 @@ fn malformed_native_loss_and_unsupported_winding_selections_refuse() {
         assert!(input::Spec::parse(duplicate.as_bytes()).is_err(),
             "another bending spectrum must not replace or duplicate selected modal loss");
     }
-    scoped(|cx, gate| {
-        let mut wound = modal_spec("bending-loss kelvin-voigt");
-        wound.strings[0].twist_modes = 0;
-        wound.strings[0].section = input::WireSection::CloseWound {
-            core_radius_m: 0.0002, pack: "wrap.fsmatpk".into(),
-            wire_radius_m: 0.00005, pitch_m: 0.000101,
-        };
-        assert!(wound.clone().compile(cx, gate, |name|
-            Ok(pack(name, 7800.0, 200_000.0, None))).is_ok(),
-            "comparison winding geometry must be independently admitted");
-        for selection in [
-            input::BendingLoss::LossAngle { property: INTRINSIC.into() },
-            input::BendingLoss::Thermoelastic { excess_property: None },
-            input::BendingLoss::Thermoelastic { excess_property: Some(INTRINSIC.into()) },
-        ] {
-            let mut selected = wound.clone();
-            selected.strings[0].bending_loss = selection;
-            let error = selected.compile(cx, gate, |name|
-                Ok(modal_pack(name, 0.003, Dims::NONE, 100_000.0, None)))
-                .err().expect("a close-wound core needs its own retained loss model");
-            assert!(error.to_string().contains(
-                "modal bending loss requires an original homogeneous or bonded material section"),
-                "{error}");
-        }
-    });
 }
 
 #[path = "relaxation/layered.rs"]

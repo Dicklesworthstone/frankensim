@@ -57,11 +57,26 @@ impl BowedStringCard {
 
     /// Compile the admitted close-coiled material winding through the same
     /// string dispersion, gas drag, bridge shear and source-band checks.
+    /// Core loss-angle/TED uses total core-plus-wrap inertia and actual mode
+    /// frequencies; the winding retains its independent mass/spring source.
     pub fn from_wound_material_specimen(
         cx: &Cx<'_>, specimen: &crate::material_assembly::wound::ResolvedWoundStringSpecimen,
         gas: &GasState, sample_rate_hz: u32,
     ) -> Result<Self, AcousticRealizeError> {
-        lower(cx, &specimen.string(), gas, sample_rate_hz)
+        let string = specimen.string();
+        if let Some(loss) = specimen.section().core().modal_loss() {
+            validate_incremental_string(&string)?;
+            let card = lower_backbone_with_modal_loss(cx, &string, gas, sample_rate_hz, 0.0, Some(loss))?;
+            let (lower, upper) = specimen.section().omega_band_rad_s();
+            for mode in 1..=card.mode_count {
+                poll(cx)?;
+                let omega = card.mode_omega_rad_s(mode);
+                if omega < lower || omega > upper {
+                    return Err(invalid("wound modal bending frequency exceeds the original core or wrapping material band"));
+                }
+            }
+            Ok(card)
+        } else { lower(cx, &string, gas, sample_rate_hz) }
     }
 
     // Only the joint bank may lower a core with memory; the public card path

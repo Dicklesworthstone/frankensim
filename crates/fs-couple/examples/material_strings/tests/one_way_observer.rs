@@ -146,6 +146,54 @@ fn molecular_skin_data_reaches_playback_harmonic_receiver_and_omitted_reaction_t
 }
 
 #[test]
+fn molecular_centroid_skin_keeps_playback_reaction_and_harmonic_formulation_together() {
+    use fs_bem::observation_transfers::MolecularObservationFormulation;
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::harmonic::{
+        ShellHarmonicReceiver, ShellHarmonicReceiverSelection,
+    };
+    use fs_math::c64::C64;
+    scoped(|cx, gate| {
+        let text = molecular_source(101.325);
+        let skin_text = coarse_skin();
+        let mut triangle = compiled(&text, &skin_text, cx, gate);
+        let mut combined = compiled(&text.replace("triangle 1048576", "centroid"), &skin_text, cx, gate);
+        let a = triangle.performance.one_way_shell_observer().unwrap().clone();
+        let b = combined.performance.one_way_shell_observer().unwrap().clone();
+        assert_eq!(a.molecular, b.molecular);
+        assert_eq!(a.transfer().geometric_delays_s, b.transfer().geometric_delays_s);
+        assert_eq!(b.molecular_formulation(), Some(MolecularObservationFormulation::CentroidBurtonMiller));
+        assert_ne!(a.setup_key, b.setup_key);
+        assert!(b.boundary_terms < a.boundary_terms);
+        let skin = combined.body_profile.as_ref().unwrap().acoustic_skin(&combined.spec).unwrap();
+        let receiver = ShellHarmonicReceiver::new(combined.performance.bank(),
+            ShellHarmonicReceiverSelection::MolecularSkin {
+                options: combined.spec.one_way_observer.as_ref().unwrap(), skin: &skin,
+                molecular: combined.spec.observer_molecular.as_ref().unwrap(),
+            }, 1, gate).unwrap();
+        let prepared = receiver.prepare(gate).unwrap();
+        assert_eq!(prepared.report().formulation, "molecular_centroid_burton_miller");
+        let p = prepared.bridge_harmonic_response(core::f64::consts::TAU*60.0, 0,
+            C64::ONE, 500_000_000_000, gate).unwrap().receiver_pressure_pa;
+        assert!(p.re.is_finite() && p.im.is_finite() && p.abs() > 0.0);
+        drop(prepared);
+        drop(receiver);
+        let mut heard = Vec::new();
+        for _ in 0..combined.spec.samples {
+            let mut pa = [0.0];
+            let mut pb = [0.0];
+            triangle.performance.block(&mut pa).unwrap();
+            combined.performance.block(&mut pb).unwrap();
+            heard.push(pb[0]);
+        }
+        assert!(heard.iter().all(|p| p.is_finite()) && heard.iter().any(|p| p.abs() > 1e-14));
+        for (a,b) in triangle.performance.bank().system().components().iter()
+            .zip(combined.performance.bank().system().components()) {
+            assert_eq!(a.states(),b.states(),"an observer formulation cannot change accepted mechanics");
+        }
+    });
+}
+
+#[test]
 fn molecular_skin_refuses_missing_species_stale_gas_and_unsupported_reciprocal_load() {
     let source = molecular_source(101.325);
     let mut spec = input::Spec::parse(source.as_bytes()).unwrap();
@@ -161,6 +209,22 @@ fn molecular_skin_refuses_missing_species_stale_gas_and_unsupported_reciprocal_l
     }
     spec.gas = input::Spec::parse(source.replace("101325", "202650").as_bytes()).unwrap().gas;
     assert!(spec.validate_shell_observer().is_err());
+}
+
+#[test]
+fn native_centroid_skin_requires_the_explicit_molecular_boundary_owner() {
+    let text = molecular_source(101.325).replace("triangle 1048576", "centroid");
+    let spec = input::Spec::parse(text.as_bytes()).unwrap();
+    assert!(matches!(spec.one_way_observer.as_ref().unwrap().panel_rule,
+        fs_bem::helmholtz::PanelRule::Centroid));
+    assert!(spec.observer_molecular.is_some());
+    let ordinary = source("").replace("triangle 1048576", "centroid");
+    let error = input::Spec::parse(ordinary.as_bytes()).err().expect("missing molecular owner");
+    assert!(error.to_string().contains("requires its explicit observer_molecular"));
+    assert!(input::Spec::parse(text.replace("centroid", "centroid 1048576").as_bytes()).is_err());
+    let mut stale = spec;
+    stale.observer_molecular = None;
+    assert!(stale.validate_shell_observer().is_err());
 }
 
 #[test]

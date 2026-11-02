@@ -801,10 +801,17 @@ length determines its mass; close-coiled spring mechanics determine its
 axial stiffness. The core and wrap share end displacement, with sliding allowed
 along their interface. A free-ended wrap needs a different axial boundary law.
 The core supplies bending stiffness and its explicitly selected Kelvin–Voigt
-viscosity or generalized-Maxwell relaxation spectrum. The latter uses the same
+viscosity, generalized-Maxwell relaxation spectrum, source loss angle or circular
+thermoelastic loss. The relaxation spectrum uses the same
 `bending-loss prony` record as a homogeneous string and requires no viscosity
 claim. Each original core arm remains an internal strain in the joint
 string/body/cavity solver, projected with the **total core-plus-wrap mass**.
+Loss-angle and thermoelastic selections use the same modal bending owner as
+homogeneous strings and the piano. They are evaluated at each wound string
+mode's actual frequency and total moving mass, including added gas inertia
+when selected. Circular thermoelastic loss uses the core's own radius and an
+explicitly insulated core thermal boundary; it does not infer heat transfer
+into the winding or a thermal diffusion time from the finished radius.
 Without the explicit winding-memory selection below, the wrap remains elastic;
 it never inherits the core's relaxation or counts as a bonded bending layer.
 Replacing the winding's pack therefore changes mass, tension under
@@ -990,13 +997,19 @@ bending-loss thermoelastic excess anelastic_loss_tangent
 
 These are alternative records, not three simultaneous mechanisms. The named
 tangent is a nonnegative dimensionless property of each original material
-state. Homogeneous strings and perfectly bonded concentric layers can select
-loss angle; each layer keeps its own property, radius and source support.
+state. Homogeneous strings, perfectly bonded concentric layers and close-wound
+cores can select loss angle; each core/layer keeps its own property, radius and
+source support. A wound member's wrapping retains its separate helix mass and
+axial spring; it does not inherit core loss or become a bonded bending layer.
 Thermoelastic bending uses the original homogeneous solid circular section and
 requires `linear_thermal_expansion_coefficient`, `specific_heat_capacity`,
 `thermal_conductivity`, density and Young's modulus, together with exactly one
 semantically typed absolute-temperature axis. Distinct-material layers and
 hollow sections require a different heat-flow law and refuse this selection.
+For a close-wound member, this explicitly selects circular diffusion in the
+homogeneous core with an insulated core boundary. Core/wrap thermal contact,
+winding heat flow and wrapping contributions to bending loss are not supplied
+by this model. No thermal properties are invented for the wrapping material.
 
 The thermal law computes the circular diffusion response from those properties.
 An optional excess tangent must describe additional anelastic loss from exactly
@@ -1014,8 +1027,8 @@ selected source bands; selected excess is never dropped to admit a mode.
 
 This is cycle-equivalent modal dissipation evaluated at the retained linear
 modes. It is not a causal broadband thermal or material-history model.
-Close-wound and measured whole-string constructions refuse these selections;
-their independent construction laws are not replaced by a solid-wire analogy.
+Measured whole-string constructions refuse these selections; their independent
+measurements do not establish a homogeneous material or core thermal model.
 A second bending-memory selection on the same string also refuses, preventing
 duplicate bending loss. Torsional and axial laws remain independently selected.
 
@@ -2820,8 +2833,10 @@ one_way_observer ID X Y Z CLEARANCE_M PASS_HZ STOP_HZ LATENCY N_FFT FFT... TAIL_
 
 The receiver, band, latency, FFT ladder, tolerances and replay allowance mean
 what they mean for `shell_observer`. `RULE` is the panel quadrature,
-`triangle-near MAX_PAIRS` or `triangle MAX_PAIRS`. The transfer is baked on one
-ruled Burton-Miller operator at every frequency: the geometry-routed owner's
+`triangle-near MAX_PAIRS` or `triangle MAX_PAIRS`. An explicitly bound
+`observer_molecular` also accepts `centroid` without a `MAX_PAIRS` argument,
+as described below. Without that molecular declaration, the transfer is baked
+on one ruled Burton-Miller operator at every frequency: the geometry-routed owner's
 switch from plain CBIE at the skin's box bound is a step in every transfer, and
 a bake across it fails its DFT ladder. The mode receipt keeps the routed owner,
 plain CBIE below the bound, at each mode's own frequency.
@@ -2886,7 +2901,7 @@ correlation for helium, carbon dioxide or an arbitrary mixture. Legacy `gas air`
 has no species authority and refuses this record. These are exterior data;
 `cavity_molecular` continues to describe the independently declared interior.
 
-This selects the existing complex triangle-CBIE molecular owner. Its complex
+This selects the existing complex molecular boundary owner. Its complex
 wavenumber changes the skin pressure, finite receiver pressure and gradient,
 and every mode's omitted-reaction receipt together. The Neumann source stays
 `i rho omega v`; no extra absorption filter or travel delay is applied after
@@ -2896,15 +2911,23 @@ owner, without the playback reconstruction latency or taper. Changing reservoir
 capacities or collision rates invalidates a kept setup even if equilibrium
 density and sound speed are unchanged.
 
-The entire taper band **and** every body-mode receipt frequency must be below
-the geometry's conservative triangle-CBIE resonance-exclusion bound. A wider
-band refuses; no boundary formulation is switched inside a Fourier transfer.
-This path uses the original triangle-CBIE integration rule and its explicit
-512-kernel-terms-per-panel-pair reservation. The dense work allowance also
-includes each source batch's factorization and every right-hand side. The
-`MAX_PAIRS` allowance conservatively reserves all panel pairs on this path. The
-receiver retains the molecular owner's existing centroid Green evaluation;
-the FIR ladder does not certify its spatial accuracy. This is inviscid momentum
+The selected `RULE` fixes one formulation for the entire taper band **and**
+every body-mode receipt frequency. `triangle` and `triangle-near` retain the
+original triangle-CBIE rule: that complete band must remain below the geometry's
+conservative resonance-exclusion bound. They reserve 512 kernel terms per panel
+pair, and `MAX_PAIRS` conservatively reserves all pairs.
+
+`centroid`, with no pair argument, selects the original complex centroid/disc
+Burton-Miller equation throughout the band. It admits bands crossing the CBIE
+bound without switching discretizations at any frequency. Its assembly reserves
+8 kernel terms per pair. Both choices retain the source-batch factorizations
+and right-hand sides in the dense work allowance. The formulation enters the
+setup identity and is shared by playback, the omitted-load receipt and raw
+harmonic queries. Centroid/disc low-frequency resistance can be spatially
+biased; this choice does not establish mechanical passivity or spatial
+convergence. Both choices retain the molecular owner's existing centroid Green
+evaluation, and the FIR ladder does not certify spatial accuracy.
+This is inviscid momentum
 with relaxing compression; exterior shear diffusion, thermal diffusion, mean
 flow and wall boundary layers are outside its scope.
 

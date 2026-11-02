@@ -186,7 +186,12 @@ fn section(source: &MaterialStringSource) -> Result<ConcentricElasticSection, Re
         MaterialStringSource::ConcentricProny { section, .. } => Ok(section.elastic().clone()),
         MaterialStringSource::ConcentricModalLoss { .. } =>
             Err(invalid("modal loss-angle or thermoelastic bending cannot be replaced by another bending spectrum")),
-        MaterialStringSource::Wound(s) => Ok(s.section().core().elastic().clone()),
+        MaterialStringSource::Wound(s) => {
+            if s.section().core().modal_loss().is_some() {
+                return Err(invalid("wound-core modal loss cannot be replaced or duplicated by another bending spectrum"));
+            }
+            Ok(s.section().core().elastic().clone())
+        }
         MaterialStringSource::Measured(_) => Err(invalid("whole-string bending measurements do not resolve material layers or their relaxation spectra")),
     }
 }

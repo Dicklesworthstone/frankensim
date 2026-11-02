@@ -165,7 +165,8 @@ impl<'a> ShellHarmonicReceiver<'a> {
             }
             ShellHarmonicReceiverSelection::Skin {options,skin}
             | ShellHarmonicReceiverSelection::MolecularSkin {options,skin,..} => {
-                options.validate(source.options().sample_rate_hz)?;
+                if molecular.is_some() { options.validate_molecular(source.options().sample_rate_hz)?; }
+                else { options.validate(source.options().sample_rate_hz)?; }
                 if source.spatial_cavity().is_some() {
                     return Err(invalid("skin harmonic receiver has no spatial cavity mouth binding"));
                 }
@@ -195,7 +196,7 @@ impl<'a> ShellHarmonicReceiver<'a> {
                 let (sources,addresses,fields) = one_way::observation_inputs(
                     source,components,body_modes,skin,&traces)?;
                 let frequency_work = if molecular.is_some() {
-                    one_way::molecular_frequency_terms(traces.surface.areas().len(), sources.len())
+                    one_way::molecular_frequency_terms(traces.surface.areas().len(), sources.len(), options.panel_rule)
                 } else { one_way::frequency_terms(traces.surface.areas().len(), sources.len()) };
                 let work = frequency_work
                     .and_then(|w|w.checked_mul(frequency_samples as u64))
@@ -203,7 +204,7 @@ impl<'a> ShellHarmonicReceiver<'a> {
                 if work>options.maximum_boundary_terms {
                     return Err(invalid("harmonic skin sweep exceeds its original boundary allowance"));
                 }
-                let formulation = if molecular.is_some() { "molecular_triangle_cbie" }
+                let formulation = if molecular.is_some() { one_way::molecular_formulation(options.panel_rule).label() }
                     else { "ruled_burton_miller" };
                 (traces.surface,fields,sources,addresses,Kind::Skin(options.clone(),molecular.clone()),
                     options.receiver.clone(),options.pass_band_upper_hz,
@@ -255,7 +256,7 @@ impl<'a> ShellHarmonicReceiver<'a> {
                 let omega: Vec<_> = body.modes().iter().map(|m| m.angular_frequency_rad_s).collect();
                 let owner = one_way::molecular_owner(&self.surface, material, &self.sources,
                     &self.fields, options, self.bank.source().bank().options().sample_rate_hz, &omega)?;
-                let work = one_way::molecular_frequency_terms(self.surface.areas().len(),self.sources.len())
+                let work = one_way::molecular_frequency_terms(self.surface.areas().len(),self.sources.len(),options.panel_rule)
                     .ok_or_else(|| invalid("molecular harmonic skin receiver work overflow"))?;
                 report.operator_identity = owner.operator_hash();
                 (FrequencyOwner::Molecular(owner, options.workers), work)

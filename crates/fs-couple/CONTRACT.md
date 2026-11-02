@@ -6702,6 +6702,22 @@ Syntax and whitespace checks passed; native compilation and execution remain
 required. Frozen small-curvature bending does not establish axial/torsional
 creep, interlayer slip, measured wound-string behavior or instrument fidelity.
 
+Close-wound members also retain an explicitly selected original
+`ConcentricModalLossSection` on `WoundCoreSection::ModalLoss`. Native
+`bending-loss loss-angle` and `bending-loss thermoelastic` therefore reach the
+same modal constitutive owner used by homogeneous and bonded strings. Its
+`H(omega)` is evaluated at each actual modal frequency using the complete
+core-plus-helix moving mass; cylinder gas loading reevaluates it with the added
+fluid mass and loaded frequency. The winding's independent mass, axial spring,
+source identity, outer drag radius and source band survive. Both core and wrap
+source bands remain binding, and a second bending-memory selection refuses.
+No equivalent viscosity, replacement spectrum or winding bending loss is
+introduced. Circular thermoelastic selection retains the original insulated
+homogeneous-core boundary, core radius and core thermal coefficients; no
+core/wrap heat transfer is inferred. Focused native regressions cover material
+loss changes reaching shared pressure, thermal/core versus gas/outer radii,
+loaded inertia and source/duplicate refusals; they remain unexecuted here.
+
 `SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` extends
 that same support owner with material-solid axial inertia and selected
 longitudinal sine modes. Actual 3D span endpoints, a declared transverse frame
@@ -7366,6 +7382,14 @@ The FIR's exact travel-time prefix uses the frozen sound speed; harmonic queries
 retain physical complex phase without FIR latency. The original triangle CBIE
 is admitted only when the entire observation band lies below its geometric
 resonance-exclusion bound, with existing boundary-pair/work limits enforced.
+An explicit molecular `centroid` rule instead keeps the original complex
+centroid/disc Burton-Miller operator over the entire band, including below that
+bound. No frequency switches spatial formulations. Cache identity, harmonic
+reports and dense work admission retain the choice, including the original
+512 versus 8 kernel terms per panel pair. Its low-frequency resistance may be
+spatially biased; neither the FIR ladder nor this selection certifies spatial
+accuracy or passivity. Ordinary nonmolecular skin observation still requires
+its original triangle rule.
 Reciprocal loaded-shell observation is not extended by this one-way owner, and
 an incompatible loaded selection refuses. The native `observer_molecular`
 record binds the same source in ordinary playback and loaded body-response

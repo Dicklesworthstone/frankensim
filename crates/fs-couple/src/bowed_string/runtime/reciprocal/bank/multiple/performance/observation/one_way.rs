@@ -22,9 +22,10 @@
 //! below the bound, where Burton--Miller overstates low-ka resistance); they
 //! are estimates on that skin, not a convergence certificate.
 //!
-//! An explicitly supplied molecular medium instead uses the original complex
-//! triangle-CBIE owner for BOTH observation and the omitted-reaction receipt.
-//! Its full band must lie below the geometry's conservative CBIE bound. The
+//! An explicitly supplied molecular medium uses one original complex boundary
+//! formulation for observation and the omitted-reaction receipt over the entire
+//! band. Triangle rules retain the conservative CBIE bound; an explicit centroid
+//! rule selects the original centroid/disc Burton--Miller formulation. The
 //! reciprocal Galerkin load has no such material extension and cannot be
 //! combined with this declaration.
 //!
@@ -36,7 +37,8 @@ use super::super::MultiBowPerformance;
 use super::{BoundReport, BoundShellObserver, ShellObserverError, invalid, poll};
 use fs_bem::helmholtz::{self, Medium, PanelRule};
 use fs_bem::observation_transfers::{
-    BemObservation, MAX_OBSERVATION_RUNGS, MolecularBemObservation, ObservationTransferBake, ProducerUncertainty,
+    BemObservation, MAX_OBSERVATION_RUNGS, MolecularBemObservation, MolecularObservationFormulation,
+    ObservationTransferBake, ProducerUncertainty,
     ReceiverSpec, SourceId, TransferDeclaration, TransferError,
 };
 use fs_bem::panel3d::SpherePanels;
@@ -149,9 +151,9 @@ pub struct OneWayShellObserverOptions {
     pub maximum_frequency_entries: usize,
     /// Retained FIR multiply-add terms per accepted sample, all four outputs.
     pub maximum_replay_terms: u64,
-    /// Boundary quadrature of the transfer and the receipt; it must integrate triangles.
-    /// The molecular triangle-CBIE path conservatively reserves all panel pairs
-    /// against this rule's pair allowance.
+    /// Boundary quadrature of the transfer and the receipt. Molecular centroid
+    /// observation uses the fixed combined operator; molecular triangle-CBIE
+    /// reserves all panel pairs against this rule's pair allowance.
     pub panel_rule: PanelRule,
     pub maximum_skin_panels: usize,
     /// Largest admitted distance from a skin vertex to its anchored point [m].
@@ -195,7 +197,8 @@ pub struct OneWayShellObserverReport {
     pub apertures: usize,
     pub surface_panels: usize,
     pub largest_anchor_distance_m: f64,
-    /// Below this wavenumber the receipt uses plain CBIE [rad/m].
+    /// Geometric CBIE exclusion bound [rad/m]. Molecular centroid observation
+    /// uses its fixed Burton--Miller formulation on both sides of this bound.
     pub plain_cbie_limit_rad_per_m: f64,
     pub boundary_terms: u64,
     pub replay_terms: u64,
@@ -213,6 +216,11 @@ pub struct OneWayShellObserverReport {
     transfer: ObservationTransferBake,
 }
 impl OneWayShellObserverReport {
+    /// Original molecular boundary formulation, shared by playback and reaction.
+    pub fn molecular_formulation(&self) -> Option<MolecularObservationFormulation> {
+        self.molecular.as_ref().map(|_| molecular_formulation(self.options.panel_rule))
+    }
+
     pub const fn transfer(&self) -> &ObservationTransferBake {
         &self.transfer
     }
@@ -230,6 +238,16 @@ impl OneWayShellObserverReport {
 impl OneWayShellObserverOptions {
     /// Numerical declaration admission, before any skin, shell or pack work.
     pub fn validate(&self, rate: u32) -> Result<(), ShellObserverError> {
+        self.validate_declaration(rate, false)
+    }
+
+    /// Numerical admission for an explicitly bound molecular source. Centroid
+    /// selects the existing complex combined equation over the complete band.
+    pub fn validate_molecular(&self, rate: u32) -> Result<(), ShellObserverError> {
+        self.validate_declaration(rate, true)
+    }
+
+    fn validate_declaration(&self, rate: u32, molecular: bool) -> Result<(), ShellObserverError> {
         let finite_positive = |x: f64| x.is_finite() && x > 0.0;
         let fraction = |x: f64| x.is_finite() && x >= 0.0;
         if rate == 0
@@ -246,10 +264,10 @@ impl OneWayShellObserverOptions {
             || !(1..=256).contains(&self.workers)
             || !fraction(self.rule.maximum_loss_fraction)
             || !fraction(self.rule.maximum_shift_fraction)
+            || (!molecular && matches!(self.panel_rule, PanelRule::Centroid))
             || matches!(
                 self.panel_rule,
-                PanelRule::Centroid
-                    | PanelRule::TriangleNear { max_pairs: 0 }
+                PanelRule::TriangleNear { max_pairs: 0 }
                     | PanelRule::Triangle { max_pairs: 0 }
             )
         {
@@ -629,13 +647,23 @@ pub(super) fn frequency_terms(panels: usize, sources: usize) -> Option<u64> {
         .checked_mul(p.checked_add(1)?.checked_mul(batches)?.checked_add(sources as u64)?)
 }
 
-/// Triangle-CBIE's conservative 512 kernel terms per panel pair, plus each
-/// original capped source batch's factorization and every right-hand side.
-pub(super) fn molecular_frequency_terms(panels: usize, sources: usize) -> Option<u64> {
+/// One explicit spatial rule for the entire molecular observation band.
+pub(super) fn molecular_formulation(rule: PanelRule) -> MolecularObservationFormulation {
+    match rule {
+        PanelRule::Centroid => MolecularObservationFormulation::CentroidBurtonMiller,
+        PanelRule::Triangle { .. } | PanelRule::TriangleNear { .. } =>
+            MolecularObservationFormulation::TriangleCbie,
+    }
+}
+
+/// Original assembly kernel terms, each capped source batch's factorization,
+/// and every right-hand side. The reservation follows the selected rule.
+pub(super) fn molecular_frequency_terms(panels: usize, sources: usize, rule: PanelRule) -> Option<u64> {
     let p = panels as u64;
     let batches = sources.div_ceil(helmholtz::MAX_RADIATION_FIELDS_PER_BATCH) as u64;
     p.checked_mul(p)?
-        .checked_mul(p.checked_add(512)?.checked_mul(batches)?.checked_add(sources as u64)?)
+        .checked_mul(p.checked_add(molecular_formulation(rule).kernel_terms_per_pair())?
+            .checked_mul(batches)?.checked_add(sources as u64)?)
 }
 
 /// One molecular source/band admission shared by time playback and harmonic
@@ -653,22 +681,21 @@ pub(super) fn molecular_owner<'a>(
     for &w in omega { lower = lower.min(w); upper = upper.max(w); }
     let n = surface.areas().len();
     let pairs = n.checked_mul(n).ok_or_else(|| invalid("molecular skin extent overflow"))?;
-    let pair_allowance = match options.panel_rule {
-        PanelRule::Triangle { max_pairs } | PanelRule::TriangleNear { max_pairs } => max_pairs,
-        PanelRule::Centroid => return Err(invalid("molecular skin requires triangle integration")),
-    };
-    if pairs > pair_allowance {
-        return Err(invalid("molecular triangle-CBIE exceeds its complete panel-pair allowance"));
+    let formulation = molecular_formulation(options.panel_rule);
+    if let PanelRule::Triangle { max_pairs } | PanelRule::TriangleNear { max_pairs } = options.panel_rule {
+        if pairs > max_pairs {
+            return Err(invalid("molecular triangle-CBIE exceeds its complete panel-pair allowance"));
+        }
     }
     let limits = helmholtz::laplace::complex::ComplexOptions {
         max_panels: options.maximum_skin_panels,
         max_bytes: pairs.checked_mul(32).ok_or_else(|| invalid("molecular skin storage overflow"))?,
-        max_work: (pairs as u64).checked_mul(512)
+        max_work: (pairs as u64).checked_mul(formulation.kernel_terms_per_pair())
             .ok_or_else(|| invalid("molecular skin assembly work overflow"))?,
     };
-    Ok(MolecularBemObservation::new(surface, molecular.clone(), sources, fields,
+    Ok(MolecularBemObservation::new_with_formulation(surface, molecular.clone(), sources, fields,
         core::slice::from_ref(&options.receiver), options.minimum_clearance_m,
-        [lower, upper], limits)?)
+        [lower, upper], formulation, limits)?)
 }
 
 enum SkinObservation<'a> {
@@ -771,7 +798,8 @@ impl MultiBowPerformance {
         }
         let source = self.bank.source.bank();
         let rate = source.options().sample_rate_hz;
-        options.validate(rate)?;
+        if molecular.is_some() { options.validate_molecular(rate)?; }
+        else { options.validate(rate)?; }
         if molecular.as_ref().is_some_and(|m| m.gas() != source.gas()) {
             return Err(invalid("molecular observer must retain the original exterior gas"));
         }
@@ -871,7 +899,7 @@ impl MultiBowPerformance {
         let frequency_samples =
             (options.taper_stop_hz * finest as f64 / f64::from(rate)).ceil() as usize;
         let per_frequency = if molecular.is_some() {
-            molecular_frequency_terms(surface_panels, source_count)
+            molecular_frequency_terms(surface_panels, source_count, options.panel_rule)
         } else { frequency_terms(surface_panels, source_count) };
         let boundary_terms = per_frequency
             .and_then(|t| t.checked_mul((frequency_samples + mode_count) as u64))

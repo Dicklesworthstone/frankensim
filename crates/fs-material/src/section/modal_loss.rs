@@ -68,7 +68,7 @@ impl ConcentricModalLossSection {
 
     /// Original section, including each layer's geometry and source receipts.
     #[must_use]
-    pub fn elastic(&self) -> &ConcentricElasticSection {
+    pub const fn elastic(&self) -> &ConcentricElasticSection {
         match &self.law {
             ModalBendingLoss::LossAngle(section) => section.elastic(),
             ModalBendingLoss::Thermoelastic { thermal, .. } => thermal.elastic(),
