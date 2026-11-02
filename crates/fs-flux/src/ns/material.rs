@@ -13,6 +13,8 @@
 //! snapshot. Its rheological BDF1 and mixed Stokes entries resolve cellwise
 //! material responses at the evolving strain, retaining their exact owners.
 //! Neither entry infers gas compressibility, phase validity or thermal evolution.
+//! Force and boundary callbacks must be pure and fixed during admission and
+//! solution. Prescribed boundary velocities must have zero net outward flux.
 
 use std::cell::Cell;
 
@@ -20,6 +22,7 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_sparse::Csr;
 
+use crate::ns::boundary::StokesBoundaryError;
 use crate::ns::{FluxParams, FluxRheologyError, FluxSolution, FluxSystem};
 
 #[path = "material/mixed.rs"]
@@ -76,7 +79,7 @@ pub enum MaterialFluxError {
     },
     /// The fully implicit constitutive/momentum step refused its candidate.
     Rheology(FluxRheologyError),
-    /// Mixed-boundary admission or a checked constitutive flow solve refused.
+    /// Boundary admission or a checked constitutive flow solve refused.
     Boundary(crate::ns::boundary::StokesBoundaryError),
 }
 
@@ -467,6 +470,58 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
         boundary: &dyn Fn([f64; 2]) -> [f64; 2],
         run: impl FnOnce(&dyn Fn([f64; 2]) -> [f64; 2], &dyn Fn([f64; 2]) -> [f64; 2]) -> T,
     ) -> Result<T, MaterialFluxError> {
+        // Pinning p_0 removes cell zero's continuity equation. A small residual
+        // of that matrix cannot establish mass conservation unless the actual
+        // prescribed BDM boundary moments sum to zero. Check before querying
+        // forces or entering any solve, using the assembly's quadrature.
+        let mut net_flux = 0.0;
+        let mut compensation = 0.0;
+        let mut absolute_flux = 0.0_f64;
+        for (index, edge) in self.system.mesh.edges.iter().enumerate() {
+            if edge.tris.1 != usize::MAX {
+                continue;
+            }
+            let vertices = &self.system.mesh.verts;
+            for (point, weight) in
+                crate::bdm::edge_gauss_pub(vertices[edge.verts.0], vertices[edge.verts.1])
+            {
+                let velocity = boundary(point);
+                let contributions = [
+                    weight * velocity[0] * edge.normal[0],
+                    weight * velocity[1] * edge.normal[1],
+                ];
+                if velocity
+                    .iter()
+                    .chain(&contributions)
+                    .any(|v| !v.is_finite())
+                {
+                    return Err(MaterialFluxError::Boundary(
+                        StokesBoundaryError::NonFiniteBoundary { edge: index },
+                    ));
+                }
+                for value in contributions {
+                    let corrected = value - compensation;
+                    let sum = net_flux + corrected;
+                    compensation = (sum - net_flux) - corrected;
+                    net_flux = sum;
+                    absolute_flux += value.abs();
+                }
+            }
+        }
+        if !net_flux.is_finite() || !absolute_flux.is_finite() {
+            return Err(MaterialFluxError::Boundary(
+                StokesBoundaryError::InvalidInput("boundary flux overflow"),
+            ));
+        }
+        let tolerance = 256.0 * f64::EPSILON * absolute_flux.max(f64::MIN_POSITIVE);
+        if net_flux.abs() > tolerance {
+            return Err(MaterialFluxError::Boundary(
+                StokesBoundaryError::IncompatibleFlux {
+                    net_flux,
+                    tolerance,
+                },
+            ));
+        }
         let invalid = Cell::new(false);
         let density = self.transport.density_kg_m3();
         let acceleration = |point| {

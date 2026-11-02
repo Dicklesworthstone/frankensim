@@ -2,7 +2,7 @@
 
 use fs_flux::{
     FluxRheologyError, FluxSystem, MaterialFluxError, MaterialFluxNumerics,
-    MaterialFluxRheologyPoint, MaterialFluxSystem, TriMesh,
+    MaterialFluxRheologyPoint, MaterialFluxSystem, StokesBoundaryError, TriMesh,
 };
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
@@ -146,6 +146,69 @@ fn g3_picard_retains_the_same_material_and_creeping_flow_limit() {
         near(*n, *s, 1e-13);
     }
     assert_eq!(navier_stokes.transport(), &material);
+}
+
+// G0: a pressure pin cannot replace the closed-domain mass constraint.
+#[test]
+fn incompatible_boundary_flux_is_refused_before_force_evaluation() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let material = transport(1.2, 0.03);
+    let flow =
+        MaterialFluxSystem::new(&system, &material, MaterialFluxNumerics::default()).unwrap();
+    let previous = vec![0.125; system.n_u];
+    let retained = previous.clone();
+    let force_calls = Cell::new(0usize);
+    let force = |_| {
+        force_calls.set(force_calls.get() + 1);
+        [0.0; 2]
+    };
+    for sign in [1.0, -1.0] {
+        let boundary = |point: [f64; 2]| [sign * point[0], 0.0];
+        for entry in 0..4 {
+            let result = match entry {
+                0 => flow.assemble_stokes(&force, &boundary).map(|_| ()),
+                1 => flow.solve_stokes(&force, &boundary).map(|_| ()),
+                2 => flow.solve_picard(&force, &boundary, 12, 1e-9).map(|_| ()),
+                _ => flow
+                    .bdf1_step(&force, &boundary, &previous, 0.1)
+                    .map(|_| ()),
+            };
+            assert_eq!(
+                force_calls.get(),
+                0,
+                "entry {entry} queried a force before refusal"
+            );
+            let Err(MaterialFluxError::Boundary(StokesBoundaryError::IncompatibleFlux {
+                net_flux,
+                tolerance,
+            })) = result
+            else {
+                panic!("entry {entry} did not refuse incompatible flux: {result:?}");
+            };
+            near(net_flux, sign, 1e-14);
+            assert!(net_flux.abs() > tolerance && tolerance > 0.0);
+            assert_eq!(previous, retained);
+        }
+    }
+}
+
+// G1: balance is integral, not a blanket refusal of nonzero boundary flow.
+#[test]
+fn balanced_translation_and_affine_strain_preserve_incompressible_pressure() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let material = transport(1.2, 0.03);
+    let flow =
+        MaterialFluxSystem::new(&system, &material, MaterialFluxNumerics::default()).unwrap();
+    for strain in [0.0, 0.1] {
+        let boundary = |point: [f64; 2]| [0.3 + strain * point[0], -0.2 - strain * point[1]];
+        let solution = flow.solve_stokes(&zero_force, &boundary).unwrap();
+        let (error, divergence) = system.velocity_error(&solution.discrete().x, &boundary);
+        assert!(error < 1e-11, "affine velocity error {error}");
+        assert!(divergence < 1e-11, "affine divergence {divergence}");
+        assert!(solution.pressure_pa().iter().all(|p| p.abs() < 1e-10));
+    }
 }
 
 #[test]
