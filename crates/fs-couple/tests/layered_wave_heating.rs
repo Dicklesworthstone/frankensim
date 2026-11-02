@@ -2,6 +2,9 @@
 //! Authored constitutive cards and independent optical/caloric oracles.
 //! These tests establish implementation behavior, not material qualification.
 
+#[path = "layered_wave_heating/thermo_optical.rs"]
+mod thermo_optical;
+
 use fs_couple::layered_wave_heating::{
     LayeredWaveDrive, LayeredWaveHeating, LayeredWaveHeatingError,
 };

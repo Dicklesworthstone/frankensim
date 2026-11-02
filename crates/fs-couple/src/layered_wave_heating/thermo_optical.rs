@@ -1,0 +1,210 @@
+//! Source-pinned optical feedback from the original accepted cell temperatures.
+//!
+//! Every cell refreshes the original n/k/permeability snapshot at its own
+//! thermal temperature. The original coherent film solver then integrates its
+//! absorbed work, and the original implicit heat solver advances that work once.
+//! Optical coefficients are held during each interval. This is an explicit
+//! quasi-steady thermo-optic split; time-step convergence remains caller-owned.
+//! It supplies no implicit optical tangent, changing-geometry work, transient
+//! electromagnetic storage, thermal emission or phase-change law.
+
+use super::*;
+use fs_em::plane_wave::OpticalConductorResponse;
+use fs_matdb::MaterialCard;
+use fs_material::state_point::VisibleConductorStatePoint;
+
+/// One original optical model and the immutable card that owns its selected
+/// claims. The complete snapshot includes the same-state magnetic permeability.
+#[derive(Clone, Copy, Debug)]
+pub struct ThermoOpticalLayer<'m> {
+    pub source: &'m VisibleConductorStatePoint,
+    pub card: &'m MaterialCard,
+}
+
+/// Fixed physical geometry, spectral drive and original source selections.
+/// Cell temperatures always come from the accepted native thermal state; a
+/// caller cannot supply a separate optical temperature or averaged layer state.
+pub struct ThermoOpticalWaveHeating<'b, 'a, 'm> {
+    thermal: &'b BoundLayeredThermalBody<'a>,
+    incident: &'m ResolvedMaterialStatePoint,
+    exit: DielectricResponse<'m>,
+    omega_rad_s: f64,
+    incidence_cosine: f64,
+    polarization: Polarization,
+    sources: Vec<ThermoOpticalLayer<'m>>,
+}
+
+/// One jointly admitted thermal endpoint and its optical source states.
+/// Both state vectors are in the original thermal CellId/thickness order.
+/// Applied states generated this interval's heat; endpoint states describe the
+/// returned temperature and are not a second heat credit or an implicit solve.
+pub struct ThermoOpticalWaveStep<'t> {
+    pub step: LayeredWaveStep<'t>,
+    pub applied_optical_states: Vec<VisibleConductorStatePoint>,
+    pub endpoint_optical_states: Vec<VisibleConductorStatePoint>,
+}
+
+impl<'b, 'a, 'm> ThermoOpticalWaveHeating<'b, 'a, 'm> {
+    /// Bind one original visible optical source per original thermal layer.
+    /// Source cards, shared fixed conditions and temperature-axis conventions
+    /// must agree with the existing conductivity/capacity owners. Exterior
+    /// media, frequency, incidence and polarization remain held between steps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        thermal: &'b BoundLayeredThermalBody<'a>,
+        incident: &'m ResolvedMaterialStatePoint,
+        exit: DielectricResponse<'m>,
+        omega_rad_s: f64,
+        incidence_cosine: f64,
+        polarization: Polarization,
+        sources: &[ThermoOpticalLayer<'m>],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LayeredWaveHeatingError> {
+        poll(&mut cancelled)?;
+        let body = thermal.prepared_body();
+        let layers = body.conduction().layers();
+        if body.cell_count() > MAX_LAYERS || sources.len() != layers.len() {
+            return Err(LayeredWaveHeatingError::Invalid(
+                "thermo-optical heating needs one original source per layer and at most 64 cells",
+            ));
+        }
+        let mut responses = Vec::with_capacity(sources.len());
+        for (source, layer) in sources.iter().zip(layers) {
+            poll(&mut cancelled)?;
+            let material = source.source.resolved();
+            if source.card.content_hash() != material.card_identity()
+                || material
+                    .state_coordinate(layer.temperature_axis())
+                    .is_none()
+            {
+                return Err(LayeredWaveHeatingError::Invalid(
+                    "optical refresh requires its original card and the original thermal temperature coordinate",
+                ));
+            }
+            responses.push(DielectricResponse::OpticalConductor(
+                OpticalConductorResponse::try_new(source.source)?,
+            ));
+        }
+        // Reuse the original geometry/source and propagating-port admission.
+        let original = LayeredWaveHeating::try_new(
+            thermal,
+            incident,
+            exit,
+            omega_rad_s,
+            &responses,
+            &mut cancelled,
+        )?;
+        original.prepare(incidence_cosine, polarization, &mut cancelled)?;
+        Ok(Self {
+            thermal,
+            incident,
+            exit,
+            omega_rad_s,
+            incidence_cosine,
+            polarization,
+            sources: sources.to_vec(),
+        })
+    }
+
+    pub const fn thermal_body(&self) -> &'b BoundLayeredThermalBody<'a> {
+        self.thermal
+    }
+
+    pub fn sources(&self) -> &[ThermoOpticalLayer<'m>] {
+        &self.sources
+    }
+
+    fn refresh_sources(
+        &self,
+        state: &DepositionSimulation<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<VisibleConductorStatePoint>, LayeredWaveHeatingError> {
+        let temperatures = self
+            .thermal
+            .cell_temperatures(state, || checkpoint(cancelled))?;
+        let body = self.thermal.prepared_body();
+        let mut refreshed = Vec::with_capacity(temperatures.len());
+        for (i, (source, layer)) in self
+            .sources
+            .iter()
+            .zip(body.conduction().layers())
+            .enumerate()
+        {
+            for _ in 0..body.layer_cell_counts()[i] {
+                poll(cancelled)?;
+                let query = source
+                    .source
+                    .resolved()
+                    .query()
+                    .with(layer.temperature_axis(), temperatures[refreshed.len()])
+                    .map_err(|_| {
+                        LayeredWaveHeatingError::Invalid(
+                            "native cell temperature violates the original optical coordinate",
+                        )
+                    })?;
+                // Re-evaluation pins every original selected claim and all
+                // remaining query coordinates, including any source-bound mu.
+                let next = source.source.at_query_point(source.card, &query)?;
+                OpticalConductorResponse::try_new(&next)?.permittivity_f_m(self.omega_rad_s)?;
+                refreshed.push(next);
+            }
+        }
+        poll(cancelled)?;
+        Ok(refreshed)
+    }
+
+    /// Refresh the optics at the actual accepted temperatures, then advance
+    /// the original heat owner with those held coherent cell powers. Finally
+    /// refresh all endpoint optical states BEFORE publishing the joint result.
+    /// An optical domain exit, thermal refusal or cancellation leaves initial
+    /// unchanged; no partial optical or thermal update is returned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to<'t>(
+        &self,
+        initial: &DepositionSimulation<'t>,
+        target_s: f64,
+        drive: LayeredWaveDrive<'_>,
+        conduction: LayerConductionConfig,
+        controls: LayeredThermalSolveControls,
+        workspace: &mut LayeredThermalWorkspace,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ThermoOpticalWaveStep<'t>, LayeredWaveHeatingError> {
+        poll(&mut cancelled)?;
+        let applied_optical_states = self.refresh_sources(initial, &mut cancelled)?;
+        let step = {
+            let responses = applied_optical_states
+                .iter()
+                .map(|state| {
+                    OpticalConductorResponse::try_new(state)
+                        .map(DielectricResponse::OpticalConductor)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let owner = LayeredWaveHeating::try_new_cellwise(
+                self.thermal,
+                self.incident,
+                self.exit,
+                self.omega_rad_s,
+                &responses,
+                &mut cancelled,
+            )?;
+            let prepared =
+                owner.prepare(self.incidence_cosine, self.polarization, &mut cancelled)?;
+            prepared.advance_to(
+                initial,
+                target_s,
+                drive,
+                conduction,
+                controls,
+                workspace,
+                &mut cancelled,
+            )?
+        };
+        let endpoint_optical_states = self.refresh_sources(&step.thermal, &mut cancelled)?;
+        poll(&mut cancelled)?;
+        Ok(ThermoOpticalWaveStep {
+            step,
+            applied_optical_states,
+            endpoint_optical_states,
+        })
+    }
+}

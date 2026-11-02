@@ -9,10 +9,11 @@
 //! Optical coefficients, geometry and two-face source statistics are held over
 //! the explicit physical interval. The native heat owner retains nonlinear
 //! capacity/conduction, contacts, reservoirs, authored sources and acceptance.
-//! This is a frozen-optical-coefficient approximation, not an implicit
-//! thermo-optic solve. Refreshing optical sources after temperature/material
-//! change is the caller's responsibility. No coherent thermal emission,
-//! broadband emissivity, phase change, or mechanical energy feedback is inferred.
+//! The base owner holds the supplied optical coefficients. The thermo_optical
+//! wrapper refreshes each original source at its native cell temperature before
+//! each interval and admits its endpoint state before publishing the result.
+//! Neither owner supplies an implicit thermo-optic solve, coherent thermal
+//! emission, broadband emissivity, phase change, or mechanical energy feedback.
 
 use fs_em::plane_wave::{
     DielectricResponse, Polarization, ReflectionError,
@@ -38,6 +39,10 @@ use fs_material::{
 use fs_math::{c64::C64, dd::Dd};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 
+/// Accepted-temperature optical refresh on the same spatial thermal timeline.
+pub mod thermo_optical;
+pub use thermo_optical::{ThermoOpticalLayer, ThermoOpticalWaveHeating, ThermoOpticalWaveStep};
+
 /// One monochromatic two-face drive in peak tangential E [V/m]. Both sources
 /// share frequency, transverse wavevector, polarization and exp(+i omega t).
 #[derive(Clone, Copy, Debug)]
@@ -57,6 +62,7 @@ pub enum LayeredWaveDrive<'a> {
 pub enum LayeredWaveHeatingError {
     Invalid(&'static str),
     Electromagnetic(ReflectionError),
+    Material(fs_material::state_point::MaterialStatePointError),
     Thermal(DepositionError),
     Solve(LayeredThermalSolveError),
     Cancelled,
@@ -70,6 +76,11 @@ impl std::error::Error for LayeredWaveHeatingError {}
 impl From<ReflectionError> for LayeredWaveHeatingError {
     fn from(value: ReflectionError) -> Self {
         Self::Electromagnetic(value)
+    }
+}
+impl From<fs_material::state_point::MaterialStatePointError> for LayeredWaveHeatingError {
+    fn from(value: fs_material::state_point::MaterialStatePointError) -> Self {
+        Self::Material(value)
     }
 }
 impl From<DepositionError> for LayeredWaveHeatingError {
@@ -173,45 +184,99 @@ impl<'b, 'a, 'm> LayeredWaveHeating<'b, 'a, 'm> {
         exit: DielectricResponse<'m>,
         omega_rad_s: f64,
         responses: &[DielectricResponse<'m>],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LayeredWaveHeatingError> {
+        Self::from_responses(
+            thermal,
+            incident,
+            exit,
+            omega_rad_s,
+            responses,
+            false,
+            cancelled,
+        )
+    }
+
+    /// Bind one held source response per ORIGINAL thermal cell, in thickness
+    /// order. This resolves a spatial optical state without replacing the
+    /// thermal geometry or averaging different cell temperatures into one film.
+    /// Each response must retain its own layer's material card and fixed context.
+    pub fn try_new_cellwise(
+        thermal: &'b BoundLayeredThermalBody<'a>,
+        incident: &'m ResolvedMaterialStatePoint,
+        exit: DielectricResponse<'m>,
+        omega_rad_s: f64,
+        responses: &[DielectricResponse<'m>],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LayeredWaveHeatingError> {
+        Self::from_responses(
+            thermal,
+            incident,
+            exit,
+            omega_rad_s,
+            responses,
+            true,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_responses(
+        thermal: &'b BoundLayeredThermalBody<'a>,
+        incident: &'m ResolvedMaterialStatePoint,
+        exit: DielectricResponse<'m>,
+        omega_rad_s: f64,
+        responses: &[DielectricResponse<'m>],
+        cellwise: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LayeredWaveHeatingError> {
         poll(&mut cancelled)?;
         let body = thermal.prepared_body();
         let layers = body.conduction().layers();
-        if body.cell_count() > MAX_LAYERS || responses.len() != layers.len() {
+        let expected = if cellwise {
+            body.cell_count()
+        } else {
+            layers.len()
+        };
+        if body.cell_count() > MAX_LAYERS || responses.len() != expected {
             return Err(LayeredWaveHeatingError::Invalid(
-                "one response per original layer and at most 64 thermal cells required",
+                "the selected original layer/cell response count and at most 64 thermal cells are required",
             ));
         }
         let mut films = Vec::with_capacity(body.cell_count());
-        for (i, (&response, layer)) in responses.iter().zip(layers).enumerate() {
-            poll(&mut cancelled)?;
-            let material = response.material();
-            if material.card_identity() != layer.material_card_identity() {
-                return Err(LayeredWaveHeatingError::Invalid(
-                    "optical and thermal layer must retain the same original material card",
-                ));
-            }
-            admit_context(
-                material,
-                &layer.query_endpoints()[0],
-                layer.temperature_axis(),
-            )?;
-            for component in body.storages()[i].components() {
-                if material.card_identity() != component.material_card_identity() {
-                    return Err(LayeredWaveHeatingError::Invalid(
-                        "optical and thermal capacity material cards differ",
-                    ));
-                }
-                admit_context(
-                    material,
-                    &component.query_endpoints()[0],
-                    component.temperature_axis(),
-                )?;
-            }
+        for (i, layer) in layers.iter().enumerate() {
             let count = body.layer_cell_counts()[i];
             let thickness_m = layer.thickness_m() / count as f64;
-            for _ in 0..count {
+            for local in 0..count {
+                poll(&mut cancelled)?;
+                let response = responses[if cellwise { films.len() } else { i }];
+                // A uniform layer needs one source admission. Spatial optical
+                // states retain their separate source/condition checks.
+                if cellwise || local == 0 {
+                    let material = response.material();
+                    if material.card_identity() != layer.material_card_identity() {
+                        return Err(LayeredWaveHeatingError::Invalid(
+                            "optical and thermal layer must retain the same original material card",
+                        ));
+                    }
+                    admit_context(
+                        material,
+                        &layer.query_endpoints()[0],
+                        layer.temperature_axis(),
+                    )?;
+                    for component in body.storages()[i].components() {
+                        if material.card_identity() != component.material_card_identity() {
+                            return Err(LayeredWaveHeatingError::Invalid(
+                                "optical and thermal capacity material cards differ",
+                            ));
+                        }
+                        admit_context(
+                            material,
+                            &component.query_endpoints()[0],
+                            component.temperature_axis(),
+                        )?;
+                    }
+                }
                 films.push(DielectricLayer {
                     response,
                     thickness_m,

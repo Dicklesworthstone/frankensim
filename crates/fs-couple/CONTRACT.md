@@ -20865,9 +20865,12 @@ identity and agree on shared fixed query coordinates and quantity conventions.
 The original optical state and selected constitutive laws remain accessible.
 Matching cards do not establish an experimentally matched specimen.
 
-Each optical layer is divided at the original thermal cell faces with the SAME
-epsilon, mu and Debye response in each subdivision. These equal-medium
-interfaces are identities. The original positive even/odd slab loss modes
+The original layer constructor divides each optical layer at the original
+thermal cell faces with the SAME source response in each subdivision. These
+equal-medium interfaces are identities. `try_new_cellwise` instead admits one
+source response per original thermal cell, preserving each layer's card and
+fixed query context while resolving spatially differing optical states. The
+original positive even/odd slab loss modes
 integrate absorption in each whole control volume, including the standing-wave
 cross terms. No depth quadrature, uniform partition of whole-layer heat,
 diagonal source-power approximation, or incoming-minus-outgoing heat estimate
@@ -20898,14 +20901,47 @@ the accepted thermal history unchanged.
 
 Optical coefficients and illumination statistics are held over each explicitly
 requested interval. This is a fixed-geometry, frozen-optical-coefficient
-approximation: temperature-dependent optical refresh remains caller-owned;
-implicit thermo-optic feedback, phase change, thermal emission, broadband
-emissivity, mechanical feedback and measured-material accuracy are not claimed.
+approximation: the base owner retains its supplied optical state. The
+`ThermoOpticalWaveHeating` wrapper below provides accepted-temperature source
+refresh. Implicit thermo-optic feedback, phase change, thermal emission,
+broadband emissivity, mechanical feedback and measured-material accuracy are
+not claimed.
 Five focused test groups in `tests/layered_wave_heating.rs` cover split/unsplit
 film agreement, full source coherence, independent analytical weak-loss cell
 integrals, actual native enthalpy/temperature with authored heating, reversal
 and area scaling, opaque two-face heating, and transactional source/work/timeline
 refusals. Numerical execution is a separate validation step.
+
+### Thermo-optic feedback from the accepted spatial temperature
+
+`ThermoOpticalWaveHeating` binds one original `VisibleConductorStatePoint` and
+its immutable `MaterialCard` per thermal layer. The complete source includes
+the same-state magnetic permeability; no DC loss, substitute spectrum or
+nonmagnetic default is added. Its temperature coordinate and shared fixed
+conditions must agree with the original conductivity/capacity owners. Each
+step obtains actual cell temperatures from the accepted native enthalpy state,
+then refreshes every cell's original selected n/k/mu claims at that temperature.
+The other query coordinates and source pins remain fixed. No layer-average
+temperature or separate optical temperature input replaces the spatial state.
+
+The original coherent film owner treats these cells as distinct physical
+sublayers, and the existing implicit thermal owner advances their absorbed
+energy once. Before returning, every optical source is readmitted at its
+proposed thermal endpoint. If the endpoint leaves the original optical source
+support, fails passivity/representability, or is cancelled, no joint endpoint
+is returned and the accepted thermal history is unchanged. Results expose the
+applied and endpoint source snapshots in original cell order; refreshing the
+endpoint is not a second heat credit. The next interval uses its accepted
+temperature and therefore closes the explicit optical-to-heat-to-optical loop.
+
+Optics are held during each requested interval. This is a fixed-geometry,
+quasi-steady explicit split; algebraic heat acceptance does not certify its
+temporal accuracy. Callers retain step-refinement responsibility. The wrapper
+does not infer implicit optical tangents, transient electromagnetic storage,
+geometry-change work, broadband thermal emissivity or a phase-change law.
+Focused tests compare nonuniform feedback with direct source refresh and an
+independent two-cell caloric solution, exercise successive accepted steps,
+and verify late-cancellation, source-substitution and endpoint-domain rollback.
 
 ## Coherent porous acoustic absorption on native thermal cells
 
