@@ -179,11 +179,8 @@ fn g0_dynamic_favre_viscosity_drives_the_original_stress_heat_and_conservative_u
 #[test]
 fn g0_dynamic_grid_budget_and_coefficient_admission_refuse_without_publishing() {
     let settings = config(DynamicAveraging::LocalBox);
-    for (shape, spacing, boundary) in [
-        ([2, 4, 4], [0.25; 3], PERIODIC),
-        ([4; 3], [0.25, 0.5, 0.25], PERIODIC),
-        ([4; 3], [0.25; 3], WALLS),
-    ] {
+    for (shape, spacing, boundary) in [([2, 4, 4], [0.25; 3], PERIODIC), ([4; 3], [0.25; 3], WALLS)]
+    {
         let [nx, ny, nz] = shape;
         let [dx, dy, dz] = spacing;
         let flow = field(
@@ -569,5 +566,166 @@ fn g4_g5_dynamic_heat_coupled_cancellation_replays_the_original_transaction() {
             report
         );
         assert_eq!(flow.flow().states(), reference.flow().states());
+    }
+}
+
+#[test]
+fn g1_cartesian_dynamic_stress_and_heat_use_physical_faces_and_conserve() {
+    use fs_lbm::sgs3::dynamic::scalar::PeriodicDynamicScalar;
+
+    let shape = [5, 6, 7];
+    let spacing = [0.2, 0.25, 0.125];
+    let cells = shape.iter().product::<usize>();
+    let lengths: [f64; 3] = std::array::from_fn(|a| shape[a] as f64 * spacing[a]);
+    for independent_heat in [false, true] {
+        let mut flow = field(
+            gas(0.0),
+            CartesianGrid::new(
+                shape[0], shape[1], shape[2], spacing[0], spacing[1], spacing[2],
+            )
+            .unwrap(),
+            PERIODIC,
+            |p| mixed(std::array::from_fn(|a| p[a] / lengths[a])),
+        );
+        let fixed = config(DynamicAveraging::LocalBox);
+        let thermal = thermal_config();
+        let source = law(flow.gas(), 0.002, 0.0, 0.004);
+        let mut active = if independent_heat {
+            let bytes = MolecularTransport3d::<ConstantTransport>::required_dynamic_thermal_sgs_workspace_bytes(&flow).unwrap();
+            assert_eq!(bytes, 256 * cells);
+            MolecularTransport3d::with_dynamic_thermal_sgs(&flow, source, thermal, bytes, || false)
+                .unwrap()
+        } else {
+            let bytes =
+                MolecularTransport3d::<ConstantTransport>::required_dynamic_sgs_workspace_bytes(
+                    &flow,
+                )
+                .unwrap();
+            assert_eq!(bytes, 176 * cells);
+            MolecularTransport3d::with_dynamic_sgs(&flow, source, fixed, bytes, || false).unwrap()
+        };
+        let mut molecular =
+            MolecularTransport3d::new(&flow, law(flow.gas(), 0.002, 0.0, 0.004), || false).unwrap();
+        let molecular_rate = prepare(&mut molecular, &flow);
+        let dynamic_rate = prepare(&mut active, &flow);
+        let rho: Vec<_> = active.work.primitive.iter().map(|p| p.density).collect();
+        let velocity: Vec<_> = active.work.primitive.iter().map(|p| p.velocity).collect();
+        let temperature: Vec<_> = active
+            .work
+            .primitive
+            .iter()
+            .map(|p| p.temperature)
+            .collect();
+        let mut core = PeriodicDynamicSgs::new_cartesian(shape, spacing, usize::MAX).unwrap();
+        let mut heat = PeriodicDynamicScalar::new(shape, usize::MAX).unwrap();
+        if independent_heat {
+            let (_, report) = core
+                .prepare_with_scalar(
+                    thermal.momentum,
+                    thermal.heat,
+                    &rho,
+                    &velocity,
+                    &temperature,
+                    &mut heat,
+                    || false,
+                )
+                .unwrap();
+            assert!(report.maximum_diffusivity > 0.0);
+        } else {
+            core.prepare(fixed.model, &rho, &velocity, || false)
+                .unwrap();
+        }
+        assert!(core.viscosities().iter().any(|&nu| nu > 0.0));
+        assert!(dynamic_rate > molecular_rate);
+        let minimum_density = rho.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut maximum_diffusivity: f64 = 0.0;
+        for axis in 0..3 {
+            let tangential = tangents(axis);
+            let mut active_faces = 0;
+            for i in 0..cells {
+                let c = flow.grid.coordinates(i);
+                let mut left = c;
+                left[axis] = (c[axis] + shape[axis] - 1) % shape[axis];
+                let left = flow.grid.index(left);
+                let mu_t = 0.5 * rho[left] * core.viscosities()[left]
+                    + 0.5 * rho[i] * core.viscosities()[i];
+                let k_t = if independent_heat {
+                    3.5 * (0.5 * rho[left] * heat.diffusivities()[left]
+                        + 0.5 * rho[i] * heat.diffusivities()[i])
+                } else {
+                    3.5 * mu_t / fixed.turbulent_prandtl
+                };
+                let face = flow.grid.cell_face(axis, c);
+                let a = active.work.flux[axis][face];
+                let b = molecular.work.flux[axis][face];
+                let mean: [f64; 3] =
+                    std::array::from_fn(|k| 0.5 * (velocity[left][k] + velocity[i][k]));
+                let heat_flux = |f: SpatialFaceFlux| {
+                    f.energy
+                        - mean[axis] * f.normal_momentum
+                        - mean[tangential[0]] * f.transverse_momentum[0]
+                        - mean[tangential[1]] * f.transverse_momentum[1]
+                };
+                close(
+                    heat_flux(a) - heat_flux(b),
+                    -k_t * (temperature[i] - temperature[left]) / spacing[axis],
+                    2e-14,
+                );
+                let transverse_divergence: f64 = tangential
+                    .iter()
+                    .map(|&t| {
+                        0.5 * active.work.gradient[left][t][t] + 0.5 * active.work.gradient[i][t][t]
+                    })
+                    .sum();
+                close(
+                    a.normal_momentum - b.normal_momentum,
+                    -mu_t
+                        * ((4.0 / 3.0) * (velocity[i][axis] - velocity[left][axis])
+                            / spacing[axis]
+                            - (2.0 / 3.0) * transverse_divergence),
+                    2e-14,
+                );
+                for (j, &t) in tangential.iter().enumerate() {
+                    close(
+                        a.transverse_momentum[j] - b.transverse_momentum[j],
+                        -mu_t
+                            * ((velocity[i][t] - velocity[left][t]) / spacing[axis]
+                                + 0.5 * active.work.gradient[left][axis][t]
+                                + 0.5 * active.work.gradient[i][axis][t]),
+                        2e-14,
+                    );
+                }
+                maximum_diffusivity = maximum_diffusivity.max(
+                    ((20.0 / 3.0) * (0.002 + mu_t) / minimum_density)
+                        .max((0.004 + k_t) / (2.5 * minimum_density)),
+                );
+                active_faces += usize::from(mu_t > 0.0 || k_t > 0.0);
+            }
+            assert!(active_faces > 0);
+        }
+        close(
+            dynamic_rate,
+            4.0 * maximum_diffusivity * spacing.into_iter().map(|h| h.recip().powi(2)).sum::<f64>(),
+            2e-13,
+        );
+        let before = flow.totals();
+        let (kinetic0, internal0) = partition(&flow);
+        let report = active
+            .advance(
+                &mut flow,
+                Time::new(0.41 / dynamic_rate),
+                MolecularControl::default(),
+                || false,
+            )
+            .unwrap();
+        let (kinetic1, internal1) = partition(&flow);
+        assert!(kinetic1 < kinetic0);
+        close(internal1 - internal0, kinetic0 - kinetic1, 3e-13);
+        close(flow.totals().energy, before.energy, 3e-13);
+        for residual in report.conservation_residual.array() {
+            close(residual, 0.0, 3e-13);
+        }
+        assert!(report.accepted_steps >= 2);
+        assert!(report.maximum_parabolic_number <= 0.40000000000001);
     }
 }

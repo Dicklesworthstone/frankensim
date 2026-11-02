@@ -4,9 +4,11 @@
 //! the original face stress, stress work, source-owned Cp heat flux and total
 //! parabolic estimate consume it exactly as they consume a local closure.
 //! This is the nonnegative deviatoric closure from `fs-lbm::sgs3::dynamic`,
-//! with its explicit 3h test filter and caller-selected coefficient averaging.
+//! with its explicit three-cell-per-axis test filter and caller-selected
+//! coefficient averaging. Physical derivatives use each Cartesian cell width;
+//! the eddy-viscosity filter width is the cube root of cell volume.
 //! Isotropic SGS energy, backscatter, dynamic heat-flux fitting and wall/shock
-//! treatment are absent. Only fully periodic, isotropic Cartesian grids with
+//! treatment are absent. Only fully periodic, uniform Cartesian grids with
 //! at least three cells per axis are admitted. No DNS accuracy is implied.
 
 use super::*;
@@ -88,11 +90,9 @@ pub(super) fn admit_bytes(required: usize, maximum: usize) -> Result<(), Molecul
 pub(super) fn admit_domain(flow: &Euler3d) -> Result<(), MolecularError> {
     if (0..3).any(|axis| flow.boundaries.axis(axis) != AxisBoundaries::Periodic)
         || flow.grid.shape.iter().any(|&n| n < 3)
-        || flow.grid.spacing[1] != flow.grid.spacing[0]
-        || flow.grid.spacing[2] != flow.grid.spacing[0]
     {
         return Err(MolecularError::Invalid(
-            "dynamic SGS requires a periodic isotropic grid with at least three cells per axis",
+            "dynamic SGS requires a periodic Cartesian grid with at least three cells per axis",
         ));
     }
     Ok(())
@@ -117,7 +117,11 @@ impl SubgridTransport {
         admit_bytes(required_bytes(n)?, maximum_bytes)?;
         let dynamic = DynamicTransport {
             config,
-            filter: PeriodicDynamicSgs::new(flow.grid.shape, flow.grid.spacing[0], maximum_bytes)?,
+            filter: PeriodicDynamicSgs::new_cartesian(
+                flow.grid.shape,
+                flow.grid.spacing,
+                maximum_bytes,
+            )?,
             density: allocated(n, 0.0)?,
             velocity: allocated(n, [0.0; 3])?,
         };

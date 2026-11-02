@@ -8,7 +8,9 @@
 //! source is introduced. The existing total-energy flux and stability estimate
 //! consume the resulting conductivity. This remains a low-Mach temperature
 //! gradient-diffusion closure; compressible pressure-dilatation and SGS energy
-//! transport are not supplied. The original periodic/isotropic domain applies.
+//! transport are not supplied. Fully periodic, uniform Cartesian grids with
+//! at least three cells per axis are required; each physical cell width enters
+//! both fits, the conservative flux and the directional stability estimate.
 
 use super::*;
 use fs_lbm::sgs3::dynamic::PeriodicDynamicSgs;
@@ -105,9 +107,9 @@ impl SubgridTransport {
         dynamic::admit_bytes(required_bytes(n)?, maximum_bytes)?;
         let closure = DynamicThermalTransport {
             config,
-            momentum: PeriodicDynamicSgs::new(
+            momentum: PeriodicDynamicSgs::new_cartesian(
                 flow.grid.shape,
-                flow.grid.spacing[0],
+                flow.grid.spacing,
                 maximum_bytes,
             )?,
             heat: PeriodicDynamicScalar::new(flow.grid.shape, maximum_bytes)?,

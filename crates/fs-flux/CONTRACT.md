@@ -1313,16 +1313,21 @@ not change the default solver, incompressible BDM, or reacting-mixture paths.
 
 Both frozen-gas molecular owners also expose `with_dynamic_sgs`, which consumes
 the original `fs-lbm::sgs3::dynamic::PeriodicDynamicSgs` Favre--Germano fit at
-every SSP stage and retry. Its 27-cell test box has width `3h`; domain or local
-box averaging operates on the numerator and denominator separately. Negative
+every SSP stage and retry. Its 27-cell test box has physical widths
+`[3hx, 3hy, 3hz]`; domain or local box averaging operates on the numerator and
+denominator separately. Negative
 fits follow the core's explicit zero-backscatter policy; positive coefficient
 and eddy/molecular-ratio bounds refuse. Density and momentum-derived physical
 velocity feed the filter, and `rho*nu_t` feeds the same conservative stress,
 stress-work, source-owned Cp heat and total parabolic estimate described above.
 The turbulent Prandtl number remains authored rather than dynamically fitted.
 
-Dynamic admission requires fully periodic, isotropic Cartesian spacing and at
-least three cells per axis. The caller budgets all added array capacities,
+Dynamic admission requires fully periodic, uniform Cartesian spacing and at
+least three cells per axis. Independent `hx`, `hy` and `hz` enter the shared
+core's physical directional derivatives, with the cube root of cell volume
+as its equivalent filter length. Actual face geometry and directional
+parabolic bounds remain those of the original finite-volume operator. Equal
+spacings retain the previous cubic-grid arithmetic. The caller budgets all added array capacities,
 including density/velocity staging, the filter and face-viscosity cache; the
 nominal numerical payload is 176 bytes/cell, excluding the existing molecular
 and Euler workspaces and fixed-size/allocator metadata. Arrays are reused
@@ -1348,8 +1353,10 @@ refuses this finite ratio bound. Zero modeled heat preserves original
 molecular arithmetic. The complete additional SGS payload is nominally
 256 bytes/cell, including the reusable scalar filter and thermal staging.
 Existing local and fixed-Prandtl dynamic constructors retain their semantics.
-This remains a periodic low-Mach gradient-diffusion exploration model; it
-does not close all filtered compressible energy terms or qualify turbulence.
+Both dynamic constructors support the same rectangular cells without extra
+per-cell storage. This remains a periodic low-Mach gradient-diffusion
+exploration model; it does not close all filtered compressible energy terms
+or qualify arbitrary cell aspect ratios or turbulent DNS agreement.
 
 ### Evolving composition on the shared Cartesian discretization
 
