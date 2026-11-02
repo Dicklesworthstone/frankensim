@@ -8,7 +8,7 @@
 
 use fs_blake3::{ContentHash, DomainHasher};
 
-use super::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
+use super::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, melting::ResolvedMeltingCurve};
 use crate::MaterialError;
 
 /// Phase volumes per unit mixture mass, converted with constituent densities.
@@ -91,9 +91,20 @@ pub struct MushyPhaseLaw<'a> {
     curve: &'a EquilibriumEnthalpyPhaseCurve,
     solid_density_kg_m3: f64,
     liquid_density_kg_m3: f64,
+    density_basis: PhaseDensityBasis,
     permeability_scale_m2: f64,
     minimum_liquid_volume_fraction: f64,
     identity: ContentHash,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PhaseDensityBasis {
+    ConstantConstituents,
+    /// Only coexistence uses the two transition densities. Pure phases retain
+    /// their original chart density at the actual thermal state.
+    SharpMelting {
+        temperature_k: f64,
+    },
 }
 
 /// Same accepted phase state with its declared volume and mobility response.
@@ -177,6 +188,7 @@ impl<'a> MushyPhaseLaw<'a> {
             curve,
             solid_density_kg_m3,
             liquid_density_kg_m3,
+            PhaseDensityBasis::ConstantConstituents,
             permeability_scale_m2,
             minimum_liquid_volume_fraction,
         )
@@ -204,6 +216,53 @@ impl<'a> MushyPhaseLaw<'a> {
             curve,
             solid_density_kg_m3,
             liquid_density_kg_m3,
+            PhaseDensityBasis::ConstantConstituents,
+            permeability_scale_m2,
+            0.0,
+        )
+    }
+
+    /// Use the original source-backed sharp-melting chart, including thermal
+    /// expansion of its solid and liquid sensible branches.
+    ///
+    /// The two densities at the isothermal fusion endpoints define additive
+    /// phase volumes ONLY on that plateau. Pure solid and pure liquid use the
+    /// actual chart density; neither an absent phase density nor a temperature
+    /// extrapolation is needed. Solid material has the exact immobile branch,
+    /// liquid has zero Darcy drag, and coexistence uses the same declared
+    /// Carman–Kozeny closure as the constant-constituent constructors.
+    ///
+    /// This does not hold volume fixed: a consuming mass/geometry owner must
+    /// account for the original density change. `fixed_density_kg_m3` still
+    /// refuses every variable-density chart, even if the fusion endpoints
+    /// happen to have equal density. Source-pressure/composition support and
+    /// the sharp equilibrium/no-hysteresis assumptions stay with `melting`.
+    pub fn try_from_melting_curve(
+        melting: &'a ResolvedMeltingCurve,
+        permeability_scale_m2: f64,
+    ) -> Result<Self, MaterialError> {
+        if !permeability_scale_m2.is_finite() || permeability_scale_m2 <= 0.0 {
+            return Err(invalid(
+                "mushy permeability scale must be positive and finite",
+            ));
+        }
+        let curve = melting.curve();
+        let [solid_h, liquid_h] = melting.plateau_enthalpy_bounds_j_kg();
+        let endpoint_density = |h| {
+            curve
+                .values_at_specific_enthalpy(h)
+                .map(|state| state.bulk_density_kg_m3)
+                .map_err(|error| MaterialError::State {
+                    what: error.to_string(),
+                })
+        };
+        Self::build(
+            curve,
+            endpoint_density(solid_h)?,
+            endpoint_density(liquid_h)?,
+            PhaseDensityBasis::SharpMelting {
+                temperature_k: melting.melting_temperature_k(),
+            },
             permeability_scale_m2,
             0.0,
         )
@@ -213,6 +272,7 @@ impl<'a> MushyPhaseLaw<'a> {
         curve: &'a EquilibriumEnthalpyPhaseCurve,
         solid_density_kg_m3: f64,
         liquid_density_kg_m3: f64,
+        density_basis: PhaseDensityBasis,
         permeability_scale_m2: f64,
         minimum_liquid_volume_fraction: f64,
     ) -> Result<Self, MaterialError> {
@@ -222,9 +282,21 @@ impl<'a> MushyPhaseLaw<'a> {
                 .map_err(|error| MaterialError::State {
                     what: error.to_string(),
                 })?;
-            PhaseVolumeFractions::try_new(state, solid_density_kg_m3, liquid_density_kg_m3)?;
+            phase_volumes(
+                state,
+                solid_density_kg_m3,
+                liquid_density_kg_m3,
+                density_basis,
+            )?;
         }
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.mushy-carman-kozeny.v1");
+        let mut hash = DomainHasher::new(match density_basis {
+            PhaseDensityBasis::ConstantConstituents => {
+                "org.frankensim.fs-material.mushy-carman-kozeny.v1"
+            }
+            PhaseDensityBasis::SharpMelting { .. } => {
+                "org.frankensim.fs-material.sharp-melting-carman-kozeny.v1"
+            }
+        });
         hash.update(curve.identity().as_bytes());
         for value in [
             solid_density_kg_m3,
@@ -234,10 +306,14 @@ impl<'a> MushyPhaseLaw<'a> {
         ] {
             hash.update(&value.to_bits().to_le_bytes());
         }
+        if let PhaseDensityBasis::SharpMelting { temperature_k } = density_basis {
+            hash.update(&temperature_k.to_bits().to_le_bytes());
+        }
         let law = Self {
             curve,
             solid_density_kg_m3,
             liquid_density_kg_m3,
+            density_basis,
             permeability_scale_m2,
             minimum_liquid_volume_fraction,
             identity: hash.finalize(),
@@ -296,10 +372,11 @@ impl<'a> MushyPhaseLaw<'a> {
                 .map_err(|error| MaterialError::State {
                     what: error.to_string(),
                 })?;
-        let volumes = PhaseVolumeFractions::try_new(
+        let volumes = phase_volumes(
             phase,
             self.solid_density_kg_m3,
             self.liquid_density_kg_m3,
+            self.density_basis,
         )?;
         if volumes.liquid == 0.0 && self.minimum_liquid_volume_fraction == 0.0 {
             return Ok(PhaseMobility::ImmobileSolid {
@@ -342,6 +419,34 @@ impl<'a> MushyPhaseLaw<'a> {
         }
         Ok(inverse)
     }
+}
+
+fn phase_volumes(
+    state: EquilibriumPhaseState,
+    solid_density_kg_m3: f64,
+    liquid_density_kg_m3: f64,
+    basis: PhaseDensityBasis,
+) -> Result<PhaseVolumeFractions, MaterialError> {
+    if let PhaseDensityBasis::SharpMelting { temperature_k } = basis {
+        let liquid = state.liquid_mass_fraction();
+        if liquid == 0.0 || liquid == 1.0 {
+            // There is no absent constituent in a pure-phase inventory. In
+            // particular, a hot liquid does not retain its fusion density.
+            let rho = state.bulk_density_kg_m3();
+            if !rho.recip().is_finite() {
+                return Err(invalid("mixture specific volume is not representable"));
+            }
+            return Ok(PhaseVolumeFractions {
+                solid: 1.0 - liquid,
+                liquid,
+                bulk_density_kg_m3: rho,
+            });
+        }
+        if state.temperature_k() != temperature_k {
+            return Err(invalid("sharp-melting coexistence must remain isothermal"));
+        }
+    }
+    PhaseVolumeFractions::try_new(state, solid_density_kg_m3, liquid_density_kg_m3)
 }
 
 fn invalid(what: &str) -> MaterialError {

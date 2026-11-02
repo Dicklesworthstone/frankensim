@@ -44,6 +44,24 @@ fn card_with_heat_capacities(
     solid_cp: [f64; 2],
     liquid_cp: [f64; 2],
 ) -> MaterialCard {
+    card_with_heat_capacities_and_densities(
+        latent,
+        liquid_density,
+        discrete,
+        solid_cp,
+        liquid_cp,
+        [[1000.0, 1000.0], [800.0, 800.0]],
+    )
+}
+
+fn card_with_heat_capacities_and_densities(
+    latent: Option<f64>,
+    liquid_density: bool,
+    discrete: bool,
+    solid_cp: [f64; 2],
+    liquid_cp: [f64; 2],
+    densities: [[f64; 2]; 2],
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     let pressure = || {
         ValidityDomain::unconstrained().with_quantity(
@@ -54,13 +72,10 @@ fn card_with_heat_capacities(
         )
     };
     for (phase, start, end, cp, rho) in [
-        (0.0, 300.0, 400.0, solid_cp, 1000.0),
-        (1.0, 400.0, 500.0, liquid_cp, 800.0),
+        (0.0, 300.0, 400.0, solid_cp, densities[0]),
+        (1.0, 400.0, 500.0, liquid_cp, densities[1]),
     ] {
-        for (name, dims, values) in [
-            ("specific-heat-capacity", CP, cp),
-            ("density", RHO, [rho, rho]),
-        ] {
+        for (name, dims, values) in [("specific-heat-capacity", CP, cp), ("density", RHO, rho)] {
             if phase == 1.0 && name == "density" && !liquid_density {
                 continue;
             }
@@ -188,6 +203,153 @@ fn near(actual: f64, expected: f64) {
         (actual - expected).abs() <= 1e-9 * expected.abs().max(1.0),
         "{actual} != {expected}"
     );
+}
+
+#[test]
+fn g1_sharp_melting_mobility_retains_density_through_isobaric_heat_and_cooling() {
+    use crate::phase::mushy::{MushyPhaseLaw, PhaseMobility};
+
+    let source = card_with_heat_capacities_and_densities(
+        Some(20_000.0),
+        true,
+        false,
+        [1000.0; 2],
+        [1000.0; 2],
+        [[1000.0, 900.0], [800.0, 700.0]],
+    );
+    let query = Query::new();
+    let melting = ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, 0.1).unwrap();
+    let curve = melting.curve();
+    // Freezing the fusion densities over both sensible branches refuses this
+    // real density history. The new admission keeps the original chart instead.
+    assert!(MushyPhaseLaw::try_new_with_immobile_solid(curve, 900.0, 800.0, 1e-8).is_err());
+    let law = MushyPhaseLaw::try_from_melting_curve(&melting, 1e-8).unwrap();
+    assert!(std::ptr::eq(law.curve(), curve));
+    assert!(law.admits_immobile_solid());
+    assert_eq!(law.fixed_density_kg_m3(), None);
+
+    let mass = 0.25;
+    let pressure = 100_000.0;
+    let initial = curve.state_at_specific_enthalpy(0.0).unwrap();
+    let mut current = initial;
+    // Sensible solid, both fusion endpoints, coexistence, sensible liquid and
+    // cooling all pass through the existing mass-conserving caloric consumer.
+    for h in [
+        0.0, 50_000.0, 100_000.0, 110_000.0, 120_000.0, 170_000.0, 220_000.0, 110_000.0, 0.0,
+    ] {
+        let heat = mass * (h - current.specific_enthalpy_j_kg());
+        let step = curve
+            .advance_isobaric_heat(current, mass, pressure, heat)
+            .unwrap();
+        let mobility = law
+            .classify_at_specific_enthalpy(step.state.specific_enthalpy_j_kg())
+            .unwrap();
+        assert_eq!(mobility.phase(), step.state);
+        let volumes = mobility.volumes();
+        near(volumes.solid + volumes.liquid, 1.0);
+        near(volumes.bulk_density_kg_m3 * step.final_volume_m3, mass);
+        near(
+            step.internal_energy_change_j + step.boundary_work_j,
+            step.enthalpy_change_j,
+        );
+        let fraction = step.state.liquid_mass_fraction();
+        if fraction == 0.0 || fraction == 1.0 {
+            assert_eq!(
+                volumes.bulk_density_kg_m3.to_bits(),
+                step.state.bulk_density_kg_m3().to_bits()
+            );
+            assert_eq!(volumes.liquid, fraction);
+            if fraction == 0.0 {
+                assert!(matches!(mobility, PhaseMobility::ImmobileSolid { .. }));
+            } else {
+                assert_eq!(mobility.mobile().unwrap().inverse_permeability_per_m2, 0.0);
+            }
+        } else {
+            assert_eq!(step.state.temperature_k(), melting.melting_temperature_k());
+            let v_s = mass * (1.0 - fraction) / 900.0;
+            let v_l = mass * fraction / 800.0;
+            near(step.final_volume_m3, v_s + v_l);
+            near(volumes.liquid, v_l / (v_s + v_l));
+            near(
+                volumes.solid * step.final_volume_m3 * 900.0,
+                mass * (1.0 - fraction),
+            );
+            near(
+                volumes.liquid * step.final_volume_m3 * 800.0,
+                mass * fraction,
+            );
+            let phi = v_l / (v_s + v_l);
+            near(
+                mobility.mobile().unwrap().inverse_permeability_per_m2,
+                (1.0 - phi).powi(2) / (1e-8 * phi.powi(3)),
+            );
+        }
+        current = step.state;
+    }
+    assert_eq!(current, initial);
+    assert_eq!(
+        law.classify_at_specific_enthalpy(0.0)
+            .unwrap()
+            .volumes()
+            .bulk_density_kg_m3,
+        1000.0
+    );
+    assert_eq!(
+        law.at_specific_enthalpy(220_000.0)
+            .unwrap()
+            .volumes
+            .bulk_density_kg_m3,
+        700.0
+    );
+    for h in [-1.0, 220_001.0, f64::NAN] {
+        assert!(law.classify_at_specific_enthalpy(h).is_err());
+    }
+}
+
+#[test]
+fn g0_equal_fusion_densities_do_not_hide_sensible_expansion() {
+    use crate::phase::mushy::MushyPhaseLaw;
+
+    let query = Query::new();
+    for (densities, fixed) in [
+        ([[1000.0, 900.0], [900.0, 800.0]], None),
+        ([[900.0; 2]; 2], Some(900.0)),
+    ] {
+        let source = card_with_heat_capacities_and_densities(
+            Some(20_000.0),
+            true,
+            false,
+            [1000.0; 2],
+            [1000.0; 2],
+            densities,
+        );
+        let melting = ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, 0.1).unwrap();
+        let law = MushyPhaseLaw::try_from_melting_curve(&melting, 1e-8).unwrap();
+        assert_eq!(law.fixed_density_kg_m3(), fixed);
+        for h in [0.0, 110_000.0, 220_000.0] {
+            let state = law.classify_at_specific_enthalpy(h).unwrap();
+            assert_eq!(state.volumes().liquid, state.phase().liquid_mass_fraction());
+        }
+        for k in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(MushyPhaseLaw::try_from_melting_curve(&melting, k).is_err());
+        }
+        if fixed.is_some() {
+            let legacy =
+                MushyPhaseLaw::try_new_with_immobile_solid(melting.curve(), 900.0, 900.0, 1e-8)
+                    .unwrap();
+            assert_ne!(law.identity(), legacy.identity());
+            for h in [0.0, 50_000.0, 110_000.0, 170_000.0, 220_000.0] {
+                let new = law.classify_at_specific_enthalpy(h).unwrap();
+                let old = legacy.classify_at_specific_enthalpy(h).unwrap();
+                assert_eq!(new.phase(), old.phase());
+                assert_eq!(new.volumes(), old.volumes());
+                assert_eq!(
+                    new.mobile().map(|x| x.inverse_permeability_per_m2),
+                    old.mobile().map(|x| x.inverse_permeability_per_m2)
+                );
+            }
+        }
+    }
 }
 
 #[test]

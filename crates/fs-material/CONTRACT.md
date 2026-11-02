@@ -3115,6 +3115,19 @@ fixed-volume consumers. Separate constituent velocities, elastic skeleton
 response, pressure/composition evolution and moving boundaries remain outside
 this closure.
 
+`MushyPhaseLaw::try_from_melting_curve` consumes the original source-backed
+sharp-melting chart without freezing its pure-phase densities at the fusion
+temperature. Solid and liquid sensible states retain the chart's actual density;
+only isothermal coexistence uses the original two endpoint densities to convert
+mass fractions to additive phase volumes. The same stationary-solid branch and
+Carman–Kozeny response apply. A fixed-volume consumer still requires an exactly
+constant density over the entire chart, even when the fusion densities match.
+G0/G1 regressions drive heating, fusion and cooling through the existing
+isobaric heat owner, checking conserved mass, pressure work, phase-volume
+fractions, density-dependent mobility and constant-density compatibility. This
+constitutive extension supplies no moving mesh, density transport equation,
+phase kinetics or experimental qualification.
+
 ### Source surfaces in hereditary thermal materials
 
 `thermovisco::source::ResolvedThermoMaxwell` lowers the canonical typed
