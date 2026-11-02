@@ -5416,3 +5416,45 @@ latent-enthalpy feedback at 310 K. The pre-existing visible native paths remain
 in the same focused regression suite.
 
 <!-- source-band-thermal-exchange:end -->
+
+<!-- coating-gap-exchange:start -->
+### Mutual coating exchange preserves directional spectral absorption
+
+`CoatingGapResponse::from_emitters` prepares the facing vacuum ports of two
+opaque, internally isothermal coherent stacks. The bodies may have different
+temperatures. The geometry is the parallel, coextensive-plate approximation
+with unit view factor: each emitted/reflected mode reaches the opposite face
+at the same wavelength, cosine and s/p polarization. Gap-crossing phases are
+averaged, while the films inside each body remain fully coherent. This is an
+explicit far-field/phase-averaged approximation, with no inferred applicability
+from a gap distance, evanescent transfer, gap interference or finite-edge escape.
+
+The original owners supply positive reciprocal absorptances A1 and A2 for
+each matched mode. Summing repeated reflected powers gives
+`A1*A2/(A1+A2-A1*A2)`. Its scaled evaluation avoids both an underflowed numerator
+and subtraction from nearly unit reflectances. Each polarization retains this
+nonlinear exchange factor before the angular integration; averaging the two
+surface absorptances first is physically different. The classic specular plate
+limit is Howell and Siegel, NASA SP-164, volume II (1969), section 4.3.1,
+equation (4-1), with spectral/directional treatment in sections 5.3 and 5.6:
+<https://ntrs.nasa.gov/citations/19690020939>.
+
+The two emitters' common positive-width source band constrains all integration.
+Both original opaque and isothermal admissions remain binding; neither surface
+is silently replaced by a black bath. The shared `CoatingExchangeResponse`
+preparation owns quadrature, physical-area/solid-angle factors, conditioned
+spectral scales and stable Planck differences/secants. Preparation charges two
+original optical solves per node and checks cancellation between them; immutable
+temperature queries perform no optical solves or allocation. Ordered original
+optical identities distinguish the two physical sides and exclude temperature
+for fixed-optics reuse. Positive watts flow from the first side to the second;
+a native conservative owner must apply that same transfer to both receivers.
+
+Four focused G1/G4 groups cover independent repeated-ray gray limits, positive
+weak exchange with representable watts and W/K despite underflowed intermediate
+products, the infrared blackbody integral and spectral refinement, coherent
+spectral/polarized fields against independent bounce histories, temperature
+reversal/equilibrium/cache identities, and opaque/isothermal/domain/work-budget/
+late-cancellation refusals. No bolometric continuation of finite source data or
+internal exchange between independently heated films is claimed.
+<!-- coating-gap-exchange:end -->

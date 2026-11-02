@@ -104,23 +104,42 @@ impl CoatingExchangeResponse {
         area_m2: f64,
         quadrature: CoatingExchangeQuadrature,
         budget: CoatingExchangeBudget,
-        mut checkpoint: impl FnMut() -> Result<(), CoatingExchangeError>,
+        checkpoint: impl FnMut() -> Result<(), CoatingExchangeError>,
     ) -> Result<Self, CoatingExchangeError> {
-        let optical_evaluations = admit(quadrature, budget, area_m2)?;
-        let common_temperature = emitter
-            .substrate_temperature_k()
-            .or_else(|| emitter.film_temperature_k(0));
-        for index in 0..emitter.film_count() {
-            if emitter.film_temperature_k(index) != common_temperature {
-                return Err(CoatingExchangeError::Nonisothermal);
-            }
-        }
+        let optical_evaluations = admit(quadrature, budget, area_m2, 1)?;
+        validate_isothermal(emitter)?;
+        Self::from_absorptance(
+            emitter.wavelength_bounds_nm(),
+            emitter.optical_identity(),
+            area_m2,
+            quadrature,
+            optical_evaluations,
+            checkpoint,
+            |wavelength, cosine, _| Ok(emitter.reciprocal_absorbed_fraction(wavelength, cosine)?),
+        )
+    }
+
+    // The bath and two-surface gap owners differ only in their positive
+    // matched-mode exchange fractions. Keep spectral/angular integration,
+    // scale conditioning and Planck evaluation in this original owner.
+    pub(super) fn from_absorptance(
+        wavelength_bounds_nm: (f64, f64),
+        optical_identity: ContentHash,
+        area_m2: f64,
+        quadrature: CoatingExchangeQuadrature,
+        optical_evaluations: usize,
+        mut checkpoint: impl FnMut() -> Result<(), CoatingExchangeError>,
+        mut absorptance: impl FnMut(
+            f64,
+            f64,
+            &mut dyn FnMut() -> Result<(), CoatingExchangeError>,
+        ) -> Result<[f64; 2], CoatingExchangeError>,
+    ) -> Result<Self, CoatingExchangeError> {
         checkpoint()?;
         let mut nodes = Vec::new();
         nodes
             .try_reserve_exact(quadrature.wavelength_bins)
             .map_err(|_| CoatingExchangeError::Allocation)?;
-        let wavelength_bounds_nm = emitter.wavelength_bounds_nm();
         let wavelength_width =
             (wavelength_bounds_nm.1 - wavelength_bounds_nm.0) / quadrature.wavelength_bins as f64;
         if !wavelength_width.is_finite() || wavelength_width <= 0.0 {
@@ -128,7 +147,7 @@ impl CoatingExchangeResponse {
         }
         let cosine_count = quadrature.cosine_bins as f64;
         let mut hash = DomainHasher::new("org.frankensim.render.coating-exchange-response.v1");
-        hash.update(emitter.optical_identity().as_bytes());
+        hash.update(optical_identity.as_bytes());
         hash.update(&area_m2.to_bits().to_le_bytes());
         for count in [quadrature.wavelength_bins, quadrature.cosine_bins] {
             hash.update(&(count as u64).to_le_bytes());
@@ -140,7 +159,7 @@ impl CoatingExchangeResponse {
             for cosine_index in 0..quadrature.cosine_bins {
                 checkpoint()?;
                 let cosine = (cosine_index as f64 + 0.5) / cosine_count;
-                let [s, p] = emitter.reciprocal_absorbed_fraction(wavelength_nm, cosine)?;
+                let [s, p] = absorptance(wavelength_nm, cosine, &mut checkpoint)?;
                 // Keep the polarization sum before halving: dividing tiny
                 // positive absorptances separately can erase a real source.
                 // 2*pi and 1/2 combine to pi below, after the positive sum.
@@ -168,7 +187,7 @@ impl CoatingExchangeResponse {
             area_m2,
             quadrature,
             optical_evaluations,
-            optical_identity: emitter.optical_identity(),
+            optical_identity,
             identity: hash.finalize(),
             wavelength_bounds_nm,
         })
@@ -280,6 +299,10 @@ pub enum CoatingExchangeError {
     Area,
     /// Independent film/substrate temperatures need an internal-exchange model.
     Nonisothermal,
+    /// A closed two-surface gap requires opaque half spaces on both sides.
+    OpaqueRequired,
+    /// The two source-supported bands have no positive-width intersection.
+    WavelengthDomain,
     /// A caller checkpoint cancelled preparation or spectral evaluation.
     Cancelled,
     /// Original reciprocal optical or emitted-state admission.
@@ -304,10 +327,11 @@ impl core::fmt::Display for CoatingExchangeError {
 }
 impl core::error::Error for CoatingExchangeError {}
 
-fn admit(
+pub(super) fn admit(
     quadrature: CoatingExchangeQuadrature,
     budget: CoatingExchangeBudget,
     area_m2: f64,
+    optical_solves_per_node: usize,
 ) -> Result<usize, CoatingExchangeError> {
     if !area_m2.is_finite() || area_m2 <= 0.0 {
         return Err(CoatingExchangeError::Area);
@@ -318,6 +342,7 @@ fn admit(
     let evaluations = quadrature
         .wavelength_bins
         .checked_mul(quadrature.cosine_bins)
+        .and_then(|count| count.checked_mul(optical_solves_per_node))
         .ok_or(CoatingExchangeError::Quadrature)?;
     if quadrature.wavelength_bins > budget.max_spectral_nodes
         || evaluations > budget.max_optical_evaluations
@@ -325,6 +350,20 @@ fn admit(
         return Err(CoatingExchangeError::Budget);
     }
     Ok(evaluations)
+}
+
+pub(super) fn validate_isothermal(
+    emitter: &CoatingThermalEmission,
+) -> Result<(), CoatingExchangeError> {
+    let common_temperature = emitter
+        .substrate_temperature_k()
+        .or_else(|| emitter.film_temperature_k(0));
+    for index in 0..emitter.film_count() {
+        if emitter.film_temperature_k(index) != common_temperature {
+            return Err(CoatingExchangeError::Nonisothermal);
+        }
+    }
+    Ok(())
 }
 
 fn positive_product(first: f64, second: f64) -> Result<f64, ThermalSurfaceError> {

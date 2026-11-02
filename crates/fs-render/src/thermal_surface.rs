@@ -48,6 +48,9 @@ pub use coating_exchange::{
     CoatingExchangeRates, CoatingExchangeResponse,
 };
 
+mod coating_gap;
+pub use coating_gap::CoatingGapResponse;
+
 /// Physical incident surface absorption on the original native thermal clock.
 #[cfg(feature = "optical-heating")]
 pub mod heating;
