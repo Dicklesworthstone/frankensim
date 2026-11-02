@@ -9,6 +9,12 @@ use fs_material::{
 };
 use fs_mbd::{UnitQuaternion, Vec3};
 
+/// Original source temperature changes composed with finite-rotation bond work.
+pub mod temperature;
+pub use temperature::{
+    SourceBoundObjectiveCohesiveTemperatureStep, SourceBoundObjectiveCohesiveThermalStep,
+};
+
 /// Source identity or numerical transport refusal; no original history changes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SourceBoundObjectiveCohesiveError {

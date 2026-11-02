@@ -15784,6 +15784,27 @@ Fixed source conditions and caller-supplied attachment/frame geometry remain
 explicit. Numerical and source refusals leave accepted history unchanged;
 fracture work and viscous loss keep their original separate accounts.
 
+The explicit `transfer_temperature` operation retains the accepted frame,
+reference offset, actual world separation and original bonded area bit-for-bit.
+It admits only a temperature successor of the same ordered source and model
+family, then invokes the original common- or mixed-mode material history
+transfer. Signed parameter work and fixed-separation damage release are scaled
+by the original area and independently balanced against extensive storage.
+The thermal stage has no mechanical displacement work or viscous rate.
+
+`trial_with_temperature` composes that stage with the original three-component
+finite-rotation physical trial. The original force pair and balancing frame
+couple still supply spatial mechanical work. Its complete old-to-new balance
+includes coefficient work, both thermal and mechanical fracture increments,
+and the original timed viscosity; it never treats their numerical residual as
+heat. Source, frame, separation and irreversible history remain unchanged if
+either stage refuses. This is a prescribed-temperature staggered update;
+continuous temperature paths, thermal transport, cure and fracture-heat
+partition remain outside it. Source integration regressions exercise held
+geometry, anisotropic work, finite-rotation covariance, rupture/reclosure and
+source/model/late-mechanical refusal. Their full runtime execution remains
+blocked in this worker by the pinned executor dependency's memory requirement.
+
 ## Reciprocal cavity loading of complete nonlinear plates
 
 `VkBody::with_cavity_load` connects the original `HelmholtzModalCavity`
