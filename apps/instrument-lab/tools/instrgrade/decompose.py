@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from descriptors import GraderRefusalError, fit_stiff_string_law, track_partials  # noqa: E402
 from instrgrade import GRADER_VERSION, SR, describe, distance, highpass, hz_of, load, midi_of, name_of, write_wav  # noqa: E402
 
-DECOMPOSE_VERSION = "decompose-3"
+DECOMPOSE_VERSION = "decompose-4"
 PREROLL_S = 0.010  # both signals are cut this long before the detected onset
 MAX_S = 3.0
 ALIGN_TOL_MS = 1.5
@@ -86,6 +86,13 @@ def floor_of(y):
         return -120.0
     ms = np.mean(y[: n * hop].reshape(n, hop) ** 2, axis=1)
     return float(max(-120.0, 10 * np.log10(np.percentile(ms, 5) + 1e-18)))
+
+
+def floor_corner_hz(f0_hz):
+    """The corner of the note-aware high-pass that floor_of_file() applies, which is all of the note that the floor depends on: highpass() puts it at min(50 Hz, f0 / 2).
+    Every note of 100 Hz and up has the same corner, so the same floor; a lower note has its own. decompose-4: Refs.aligned() keys its per-file floor on this corner; decompose-3 keyed it on
+    the file alone, so the floor a note was aligned with was that of whichever note of its file a worker asked for first."""
+    return min(50.0, 0.5 * float(f0_hz))
 
 
 def floor_of_file(x, f0_hz, block=1 << 18):
@@ -783,7 +790,7 @@ class Refs:
         """(aligned samples, alignment info) of library entry `e`, in the file's own time."""
         f0 = hz_of(e["note"])
         x = self.raw(e["file"])
-        fkey = (e["file"], self.band_hz)
+        fkey = (e["file"], self.band_hz, floor_corner_hz(f0))  # the floor of a file is a function of the high-pass corner, so of f0 only below 100 Hz: keyed on the corner, not on whichever note asked first
         if fkey not in self._floor:
             self._floor[fkey] = floor_of_file(x, f0)
         a = max(0, int((e["start"] - 2.0) * SR))

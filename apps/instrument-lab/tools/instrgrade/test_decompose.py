@@ -1235,5 +1235,87 @@ class BandDeadZoneTests(unittest.TestCase):
             self.assertLess(np.abs(dc.band_limit(y, self.BAND) - y).max(), 1e-12)  # idempotent
 
 
+class FileFloorOrderTests(unittest.TestCase):
+    """The noise floor of a recording file does not depend on which of its notes is asked for first (bead frankensim-tgc2z).
+
+    Refs.aligned() used to cache floor_of_file(x, f0) under (file, band) with the f0 of the first note asked, so a later note was aligned with another note's floor. floor_of_file()
+    reads the note only through the corner of the note-aware high-pass, min(50 Hz, f0 / 2): every note of 100 Hz and up has the same floor, a lower note has its own. The file here
+    holds A3 (220 Hz), A4 (440 Hz) and C2 (65.4 Hz) on a bed of noise and a 40 Hz hum: the hum passes the C2 corner (32.7 Hz) and is halved by the 50 Hz one, so the two floors differ by
+    about 6 dB, and a hum is what a real recording has below its notes."""
+
+    NOTES = (("hi", 57, 220.0), ("hi2", 69, 440.0), ("lo", 36, 65.406))
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        cls.tmp = Path(tempfile.mkdtemp())
+        wav = cls.tmp / "wav"
+        wav.mkdir()
+        from instrgrade import write_wav
+        parts = [np.zeros(SR)]
+        for _, _, f in cls.NOTES:
+            parts += [tone(f0=f, dur=2.0, lead=0.0, attack=0.04), np.zeros(SR)]
+        x = np.concatenate(parts)
+        t = np.arange(len(x)) / SR
+        x = x + np.random.default_rng(11).standard_normal(len(x)) * 10 ** (-70 / 20) + 10 ** (-45 / 20) * np.sin(2 * np.pi * 40.0 * t)
+        write_wav(wav / "Syn.mf.C2A4.wav", x)
+        lib = []
+        for k, (_, m, _) in enumerate(cls.NOTES):
+            t0 = 1.0 + 3.0 * k
+            lib.append(dict(file="Syn.mf.C2A4.wav", start=t0 - 0.005, end=t0 + 2.2, note=m, name=dc.name_of(m), kind="sustained", inst="syn", art="", dyn="mf", sul="", mallet="",
+                            range="C2A4", desc={}))
+        (cls.tmp / "lib.json").write_text(json.dumps(lib))
+        (cls.tmp / "refs.json").write_text(json.dumps({"files": [dict(path="x/Syn.mf.C2A4.aiff", page="p.html", chain="c", id="syn-mf")]}))
+        cls.wav = wav
+
+    def refs(self):
+        return dc.Refs(self.tmp / "lib.json", self.wav, self.tmp / "refs.json")
+
+    def graded(self, order):
+        """A fresh Refs (a fresh worker), the notes asked in this order: {name: (y, info)}."""
+        refs = self.refs()
+        by = {n: refs.find("syn", m, "mf")[0] for n, m, _ in self.NOTES}
+        return {n: refs.aligned(by[n]) for n in order}
+
+    def test_a_note_is_aligned_the_same_whichever_note_of_its_file_was_asked_first(self):
+        first_hi, first_lo = self.graded(["hi", "hi2", "lo"]), self.graded(["lo", "hi", "hi2"])
+        for n, _, _ in self.NOTES:
+            (ya, ia), (yb, ib) = first_hi[n], first_lo[n]
+            self.assertEqual(ia, ib, f"{n}: alignment info depends on the order")
+            self.assertTrue(np.array_equal(ya, yb), f"{n}: the cut depends on the order")
+        # the control: the floors of the two corners really differ, so the test can fail
+        self.assertGreater(abs(first_hi["hi"][1]["floor_db"] - first_hi["lo"][1]["floor_db"]), 3.0)
+
+    def test_notes_with_one_corner_share_one_floor_and_a_lower_note_has_its_own(self):
+        from unittest import mock
+        calls = []
+        real = dc.floor_of_file
+
+        def counting(x, f0, **kw):
+            calls.append(f0)
+            return real(x, f0, **kw)
+        refs = self.refs()
+        by = {n: refs.find("syn", m, "mf")[0] for n, m, _ in self.NOTES}
+        with mock.patch.object(dc, "floor_of_file", counting):
+            refs.aligned(by["hi"])
+            refs.aligned(by["hi2"])
+            self.assertEqual(len(calls), 1, "two notes of 100 Hz and up share one floor computation")
+            refs.aligned(by["lo"])
+            self.assertEqual(len(calls), 2, "a note below 100 Hz has its own")
+            refs.aligned(by["lo"])
+            refs.aligned(by["hi"])
+            self.assertEqual(len(calls), 2, "and neither is computed twice")
+
+    def test_the_corner_is_the_one_the_high_pass_uses(self):
+        x = np.random.default_rng(5).standard_normal(SR)
+        ref = dc.highpass(x, 220.0)
+        for f0 in (100.0, 150.0, 440.0, 1000.0):
+            self.assertEqual(dc.floor_corner_hz(f0), 50.0)
+            self.assertTrue(np.array_equal(dc.highpass(x, f0), ref), f"highpass differs at {f0} Hz")
+        for f0 in (98.0, 65.406, 41.2):
+            self.assertEqual(dc.floor_corner_hz(f0), 0.5 * f0)
+            self.assertFalse(np.array_equal(dc.highpass(x, f0), ref), f"highpass is the same at {f0} Hz")
+
+
 if __name__ == "__main__":
     unittest.main()
