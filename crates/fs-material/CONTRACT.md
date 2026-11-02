@@ -3323,6 +3323,30 @@ or establish a continuum-error or experimental-validation claim. Authored
 tests cover analytic dry-front potential, table segments, narrow intervals,
 constant impermeability, surface cuts and support/negative-source refusals.
 
+## Source-backed invertible moisture sorption
+
+`state_point::MonotoneMoistureSorption` prepares a selected dry-basis isotherm
+M(a) on a positive-width, closed relative-humidity interval in [0,1] at fixed
+absolute temperature. In this dilute-vapor convention a is water activity.
+The original immutable card, claim, typed source coordinates and complete
+continuous path remain pinned. Original curve segments and triangulated surface
+cuts supply the interpolation; source holes, negative moisture, flat/decreasing
+branches, nonfinite capacities and extrapolation refuse. This single-valued
+isotherm does not infer a hysteresis branch or a wet/dry basis conversion.
+
+The chart supplies forward/inverse evaluation, one-sided positive storage
+capacity, exact piecewise-affine secant capacity and signed local moisture
+change. Interval changes integrate source slopes directly, avoiding subtraction
+of large moisture datums. Preparation inherits the source owner's 4096-knot
+limit. Point/inverse lookup is logarithmic, interval evaluation visits crossed
+segments, and all prepared evaluations allocate nothing. Material, temperature,
+claim and path identities let heterogeneous transport consumers preserve their
+original sources. Equal activity can imply unequal material-local moisture;
+this local equilibrium relation neither advances a field nor invents diffusion,
+contact resistance, swelling or sorption heat. Authored tests cover nonlinear
+inverse/storage values, heterogeneous partition, narrow changes, typed-domain
+refusals, fixed-temperature surface cuts and unsupported gaps.
+
 ## Source-backed permanent-magnet recoil
 
 `field_storage::permanent::ResolvedRecoilMaterial` binds the reversible isotropic law `B = mu_recoil H + Br n` at one complete fixed material state. Required source properties are `recoil_magnetic_permeability` [H/m], `remanent_flux_density` [T], signed `recoil_minimum_parallel_field_strength` and `recoil_maximum_parallel_field_strength` [A/m], and `recoil_maximum_transverse_field_strength` [A/m]. The parallel interval must contain zero; all values retain their original units, selected claims, card identity, query coordinates and receipts. Generic permeability, coercivity and energy-product-derived model coefficients cannot substitute for recoil data. All coefficients and limits must be static at the selected external conditions; field/frequency dependence cannot be frozen into this linear law.
