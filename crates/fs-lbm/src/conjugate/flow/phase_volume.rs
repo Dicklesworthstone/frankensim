@@ -1,6 +1,8 @@
-//! Isothermal phase-volume evolution on the original conservative flux owner.
+//! Original-chart thermal volume evolution on the conservative flux owner.
 
-use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
+use fs_material::phase::{
+    EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseIntervalDensityLaw,
+};
 
 use super::density_transport::{admit, advect_projected_material};
 use super::{
@@ -21,7 +23,7 @@ pub struct CoexistenceVolumeInput<'a> {
     /// Solid grid cells require exactly zero.
     pub net_enthalpy_increment_j: &'a [f64],
     /// Incoming/backflow states on x-, x+, y-, y+, z-, z+ boundaries.
-    /// Their density is obtained from the same original coexistence chart.
+    /// Their density is obtained from the same original chart interval.
     pub boundary_inflow: [Option<EquilibriumPhaseState>; 6],
 }
 
@@ -76,7 +78,73 @@ pub struct CoexistenceVolumeStep {
     pub report: CoexistenceVolumeReport,
 }
 
+/// Budgets for sensible or latent expansion on one original chart interval.
+#[derive(Clone, Copy, Debug)]
+pub struct ThermalVolumeControls {
+    /// Existing pressure, mass, enthalpy and actual occupied-volume budgets.
+    pub volume: CoexistenceVolumeControls,
+    /// Maximum complete pressure/mass/enthalpy trials. All trials start from
+    /// the same original inventory; the caloric increment is applied once.
+    pub max_volume_iterations: usize,
+    /// Relaxation in (0, 1] for the nonlinear mixing-volume source update.
+    /// This changes convergence only, not the accepted EOS or energy budget.
+    pub source_relaxation: f64,
+}
+
+/// Original-chart thermal volume result with its nonlinear closure evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThermalVolumeStep {
+    /// Accepted native flow, material inventories, chart states and work.
+    pub volume: CoexistenceVolumeStep,
+    /// Number of complete source trials, including the accepted trial.
+    pub source_iterations: usize,
+    /// Additional source actually applied for conservative enthalpy mixing
+    /// [m3/s]. Zero on affine-specific-volume intervals. This is not heat.
+    pub mixing_volume_source_m3_s: Vec<f64>,
+}
+
 impl FlowField {
+    /// Expand or contract an explicitly mobile material on one original
+    /// caloric interval, including sourced sensible rho(T) and latent volume.
+    /// Uses the same inventory carrier as [`Self::advance_coexistence_volume`].
+    ///
+    /// The chart owns its density interpolation. An affine specific-volume
+    /// interval closes in one native transport solve. When rho(h) is affine,
+    /// conservative enthalpy mixing has an additional nonlinear volume change.
+    /// For receiver density rho_r and donor density rho_d, each original or
+    /// incoming mass m contributes the exact concave mixing remainder
+    /// `-m/rho_d * ((rho_d-rho_r)/rho_r)^2`. It follows from mass and enthalpy
+    /// balance, not from a density fit, volume renormalization or heat source.
+    ///
+    /// Iteration updates ONLY the continuity source, reusing the original
+    /// flow, mass, prescribed net caloric increment and boundary states. Each
+    /// trial uses the original paired donor transfers; no trial is a physical
+    /// timestep. The actual returned M/rho(h), M and M*h independently pass
+    /// their budgets. Only the accepted trial's pressure work is reported.
+    /// An admitted initial volume residual never becomes a physical source.
+    ///
+    /// All material states must remain on the selected adjacent interval.
+    /// Nonlinear iteration is bounded and may refuse; it does not infer EOS
+    /// pressure feedback to make a sealed incompatible component admissible.
+    /// Mixing follows first-order donor transport and requires refinement.
+    /// The caller still owns thermal/work closure, momentum prediction and
+    /// admitted mobility. This method supplies no solid stress or free surface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_thermal_volume(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        lower_knot: usize,
+        input: CoexistenceVolumeInput<'_>,
+        controls: ThermalVolumeControls,
+        gate: &CancelGate,
+    ) -> Result<ThermalVolumeStep, ChtError> {
+        self.advance_chart_volume(
+            domain, faces, curve, lower_knot, input, controls, false, gate,
+        )
+    }
+
     /// Evolve a common-velocity isothermal coexistence mixture on one original
     /// adjacent knot interval, retaining its mass, enthalpy and occupied volume.
     ///
@@ -123,7 +191,46 @@ impl FlowField {
         controls: CoexistenceVolumeControls,
         gate: &CancelGate,
     ) -> Result<CoexistenceVolumeStep, ChtError> {
+        self.advance_chart_volume(
+            domain,
+            faces,
+            curve,
+            lower_knot,
+            input,
+            ThermalVolumeControls {
+                volume: controls,
+                max_volume_iterations: 1,
+                source_relaxation: 1.0,
+            },
+            true,
+            gate,
+        )
+        .map(|step| step.volume)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_chart_volume(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        lower_knot: usize,
+        input: CoexistenceVolumeInput<'_>,
+        thermal_controls: ThermalVolumeControls,
+        coexistence_only: bool,
+        gate: &CancelGate,
+    ) -> Result<ThermalVolumeStep, ChtError> {
         poll(gate)?;
+        if thermal_controls.max_volume_iterations == 0
+            || !thermal_controls.source_relaxation.is_finite()
+            || thermal_controls.source_relaxation <= 0.0
+            || thermal_controls.source_relaxation > 1.0
+        {
+            return Err(refuse(
+                "invalid thermal-volume iteration budget or relaxation",
+            ));
+        }
+        let controls = thermal_controls.volume;
         let n = domain.cell_count();
         if n > controls.transport.max_cells
             || input.mass_kg.len() != n
@@ -146,11 +253,15 @@ impl FlowField {
             .get(lower_knot)
             .zip(curve.knots().get(upper_knot))
             .ok_or_else(|| refuse("one adjacent original knot interval required"))?;
-        if lower.temperature_k != upper.temperature_k
-            || lower.liquid_mass_fraction >= upper.liquid_mass_fraction
+        if coexistence_only
+            && (lower.temperature_k != upper.temperature_k
+                || lower.liquid_mass_fraction >= upper.liquid_mass_fraction)
         {
             return Err(refuse("selected interval must be isothermal coexistence"));
         }
+        let density_law = curve
+            .density_law_on_interval(lower_knot)
+            .map_err(|error| refuse(error.to_string()))?;
         let bounds = [lower.specific_enthalpy_j_kg, upper.specific_enthalpy_j_kg];
         finite_positive("flow.coexistence_enthalpy_span", bounds[1] - bounds[0])?;
         let mut boundary_inflow = [None; 6];
@@ -165,6 +276,7 @@ impl FlowField {
         }
         let sources = vec![MaterialVolumeSource::None; n];
         let mut h_star = vec![0.0; n];
+        let mut rho_star = vec![0.0; n];
         let mut volume_source = vec![0.0; n];
         let mut requested = Sum::default();
         let mut represented = Sum::default();
@@ -221,6 +333,7 @@ impl FlowField {
             represented.add(accepted_delta_h);
             increment_defect.add((delta_h_total - accepted_delta_h).abs());
             h_star[c] = next.specific_enthalpy_j_kg();
+            rho_star[c] = next.bulk_density_kg_m3();
             let next_volume = mass / next.bulk_density_kg_m3();
             finite_positive("flow.coexistence_source_volume", next_volume)?;
             // Stable M*(1/rho_star-1/rho_old), retaining small phase changes.
@@ -251,77 +364,154 @@ impl FlowField {
             boundary_inflow,
         };
         let density = admit(domain, transport_input, controls.transport, gate)?;
-        let projected = self.project_density_volume_source(
-            domain,
-            faces,
-            &density,
-            &volume_source,
-            controls.transport.projection,
-            gate,
-        )?;
-        let transport = advect_projected_material(
-            domain,
-            projected,
-            transport_input,
-            controls.transport,
-            gate,
-        )?;
-        let mut phase_states = vec![None; n];
-        let mut final_defect = 0.0_f64;
-        for c in 0..n {
-            poll_every(gate, c)?;
-            if !domain.is_fluid(c) {
-                continue;
+        let caloric_source = volume_source.clone();
+        let mut mixing_source = vec![0.0; n];
+        let mut endpoint_density = vec![0.0; n];
+        for source_iterations in 1..=thermal_controls.max_volume_iterations {
+            poll(gate)?;
+            let projected = self.project_density_volume_source(
+                domain,
+                faces,
+                &density,
+                &volume_source,
+                controls.transport.projection,
+                gate,
+            )?;
+            let transport = advect_projected_material(
+                domain,
+                projected,
+                transport_input,
+                controls.transport,
+                gate,
+            )?;
+            let mut final_defect = 0.0_f64;
+            for c in 0..n {
+                poll_every(gate, c)?;
+                if !domain.is_fluid(c) {
+                    continue;
+                }
+                let h = transport.specific_enthalpy_j_kg[c];
+                if h < bounds[0] || h > bounds[1] {
+                    return Err(refuse(
+                        "transported enthalpy left the original chart interval",
+                    ));
+                }
+                // Trial EOS queries allocate and hash nothing. Construct the
+                // identity-bearing phase states only for the accepted trial.
+                let value = curve
+                    .values_at_specific_enthalpy(h)
+                    .map_err(|error| refuse(error.to_string()))?;
+                endpoint_density[c] = value.bulk_density_kg_m3;
+                let volume = transport.mass_kg[c] / value.bulk_density_kg_m3;
+                finite_positive("flow.coexistence_final_volume", volume)?;
+                let defect = volume - domain.volume(c);
+                finite("flow.coexistence_final_volume_defect", defect)?;
+                final_defect = final_defect.max(defect.abs());
             }
-            let state = curve
-                .state_at_specific_enthalpy(transport.specific_enthalpy_j_kg[c])
-                .map_err(|error| refuse(error.to_string()))?;
-            admit_phase(curve, bounds, state)?;
-            let volume = transport.mass_kg[c] / state.bulk_density_kg_m3();
-            finite_positive("flow.coexistence_final_volume", volume)?;
-            let defect = volume - domain.volume(c);
-            finite("flow.coexistence_final_volume_defect", defect)?;
-            final_defect = final_defect.max(defect.abs());
-            if defect.abs() > volume_budget {
+            let absolute_enthalpy_defect_j =
+                increment_defect.value + transport.report.absolute_enthalpy_defect_j;
+            finite(
+                "flow.coexistence_total_enthalpy_defect",
+                absolute_enthalpy_defect_j,
+            )?;
+            if absolute_enthalpy_defect_j > controls.transport.maximum_enthalpy_defect_j {
+                return Err(refuse(
+                    "caloric source and transport exceed the combined enthalpy-defect budget",
+                ));
+            }
+            if final_defect <= volume_budget {
+                let mut phase_states = vec![None; n];
+                for c in 0..n {
+                    poll_every(gate, c)?;
+                    if domain.is_fluid(c) {
+                        phase_states[c] = Some(
+                            curve
+                                .state_at_specific_enthalpy(transport.specific_enthalpy_j_kg[c])
+                                .map_err(|error| refuse(error.to_string()))?,
+                        );
+                    }
+                }
+                let material_enthalpy_change_j =
+                    represented.value + transport.report.enthalpy_change_j;
+                finite(
+                    "flow.coexistence_enthalpy_change",
+                    material_enthalpy_change_j,
+                )?;
+                let report = CoexistenceVolumeReport {
+                    requested_enthalpy_increment_j: requested.value,
+                    represented_enthalpy_increment_j: represented.value,
+                    enthalpy_increment_defect_j: increment_defect.value,
+                    material_enthalpy_change_j,
+                    absolute_enthalpy_defect_j,
+                    maximum_initial_volume_defect_m3: initial_defect,
+                    maximum_final_volume_defect_m3: final_defect,
+                    required_source_pressure_work_j: transport
+                        .projection
+                        .report
+                        .pressure_source_work_j,
+                };
+                poll(gate)?;
+                return Ok(ThermalVolumeStep {
+                    volume: CoexistenceVolumeStep {
+                        transport,
+                        phase_states,
+                        volume_source_m3_s: volume_source,
+                        report,
+                    },
+                    source_iterations,
+                    mixing_volume_source_m3_s: mixing_source,
+                });
+            }
+            if density_law == PhaseIntervalDensityLaw::AffineSpecificVolume {
                 return Err(refuse(
                     "transported mass and phase density exceed the cell-volume defect budget",
                 ));
             }
-            phase_states[c] = Some(state);
+            if source_iterations == thermal_controls.max_volume_iterations {
+                return Err(refuse(
+                    "nonlinear thermal-volume iteration budget exhausted",
+                ));
+            }
+
+            // Original inventory plus incoming exact native donor masses are
+            // the convex enthalpy-mixing weights. Outgoing material has the
+            // receiver's own endpoint h and therefore zero Taylor remainder.
+            let stencil = transport.accepted_mass_transport(gate)?;
+            let mut mixed_volume = vec![Sum::default(); n];
+            for (row, &c) in stencil.cells.iter().enumerate() {
+                poll_every(gate, row)?;
+                mixed_volume[c].add(mixing_volume(
+                    stencil.initial_mass_kg[row],
+                    rho_star[c],
+                    endpoint_density[c],
+                )?);
+            }
+            for (index, route) in stencil.routes.iter().enumerate() {
+                poll_every(gate, index)?;
+                if let Some(to) = route.to {
+                    let c = stencil.cells[to];
+                    let donor_density = route.from.map_or_else(
+                        || route.inlet.expect("native admitted inlet").density_kg_m3,
+                        |from| endpoint_density[stencil.cells[from]],
+                    );
+                    mixed_volume[c].add(mixing_volume(
+                        route.mass,
+                        donor_density,
+                        endpoint_density[c],
+                    )?);
+                }
+            }
+            for c in 0..n {
+                poll_every(gate, c)?;
+                let target = mixed_volume[c].value / dt;
+                finite("flow.thermal_mixing_volume_source", target)?;
+                mixing_source[c] +=
+                    thermal_controls.source_relaxation * (target - mixing_source[c]);
+                volume_source[c] = caloric_source[c] + mixing_source[c];
+                finite("flow.thermal_total_volume_source", volume_source[c])?;
+            }
         }
-        let absolute_enthalpy_defect_j =
-            increment_defect.value + transport.report.absolute_enthalpy_defect_j;
-        finite(
-            "flow.coexistence_total_enthalpy_defect",
-            absolute_enthalpy_defect_j,
-        )?;
-        if absolute_enthalpy_defect_j > controls.transport.maximum_enthalpy_defect_j {
-            return Err(refuse(
-                "caloric source and transport exceed the combined enthalpy-defect budget",
-            ));
-        }
-        let material_enthalpy_change_j = represented.value + transport.report.enthalpy_change_j;
-        finite(
-            "flow.coexistence_enthalpy_change",
-            material_enthalpy_change_j,
-        )?;
-        let report = CoexistenceVolumeReport {
-            requested_enthalpy_increment_j: requested.value,
-            represented_enthalpy_increment_j: represented.value,
-            enthalpy_increment_defect_j: increment_defect.value,
-            material_enthalpy_change_j,
-            absolute_enthalpy_defect_j,
-            maximum_initial_volume_defect_m3: initial_defect,
-            maximum_final_volume_defect_m3: final_defect,
-            required_source_pressure_work_j: transport.projection.report.pressure_source_work_j,
-        };
-        poll(gate)?;
-        Ok(CoexistenceVolumeStep {
-            transport,
-            phase_states,
-            volume_source_m3_s: volume_source,
-            report,
-        })
+        unreachable!("positive bounded source loop returns its final trial or refusal")
     }
 }
 
@@ -337,13 +527,25 @@ fn admit_phase(
         || h > bounds[1]
     {
         return Err(refuse(
-            "phase state must retain the original chart and selected coexistence interval",
+            "phase state must retain the original chart and selected interval",
         ));
     }
     Ok(())
 }
 
-#[derive(Default)]
+/// Negative first-order Taylor remainder of v(h)=1/(a+b*h), evaluated
+/// without subtracting nearly equal enthalpies or reciprocal densities.
+fn mixing_volume(mass: f64, donor_density: f64, receiver_density: f64) -> Result<f64, ChtError> {
+    let relative = (donor_density - receiver_density) / receiver_density;
+    let volume = -((mass / donor_density) * relative) * relative;
+    finite("flow.thermal_mixing_volume", volume)?;
+    if donor_density != receiver_density && volume == 0.0 {
+        return Err(refuse("nonlinear mixing-volume increment underflowed"));
+    }
+    Ok(volume)
+}
+
+#[derive(Clone, Copy, Default)]
 struct Sum {
     value: f64,
     compensation: f64,

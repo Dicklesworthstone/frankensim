@@ -874,6 +874,17 @@ enum PhaseDensityInterpolation {
     LinearSensibleDensity,
 }
 
+/// Exact density law on one adjacent enthalpy interval of an admitted chart.
+/// This describes the original interpolation; it does not fit a new EOS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhaseIntervalDensityLaw {
+    /// Specific volume `1/rho` is affine in specific enthalpy.
+    AffineSpecificVolume,
+    /// Density is affine in specific enthalpy; its reciprocal is nonlinear.
+    /// Used by sourced sensible branches to preserve their original rho(T).
+    AffineDensity,
+}
+
 impl EquilibriumEnthalpyPhaseCurve {
     /// Admit a bounded, monotone solid-liquid enthalpy curve.
     ///
@@ -1096,6 +1107,35 @@ impl EquilibriumEnthalpyPhaseCurve {
     #[must_use]
     pub fn knots(&self) -> &[EnthalpyPhaseKnot] {
         &self.knots
+    }
+
+    /// Return the original density law on `[lower_knot, lower_knot + 1]`.
+    ///
+    /// Generic h/rho charts and coexistence intervals use additive specific
+    /// volume. Cp/rho(T) ingress retains affine density on its single-phase
+    /// sensible intervals. A consumer must not treat those two laws as
+    /// interchangeable when conserving enthalpy while mixing material.
+    /// The result includes neither extrapolation nor a change of chart identity.
+    pub fn density_law_on_interval(
+        &self,
+        lower_knot: usize,
+    ) -> Result<PhaseIntervalDensityLaw, PhaseStateError> {
+        let pair = lower_knot
+            .checked_add(1)
+            .and_then(|upper| self.knots.get(lower_knot).zip(self.knots.get(upper)))
+            .ok_or(PhaseStateError::InvalidCurve {
+                what: "density-law interval is outside the original chart",
+            })?;
+        Ok(
+            if self.density_interpolation == PhaseDensityInterpolation::LinearSensibleDensity
+                && pair.0.liquid_mass_fraction == pair.1.liquid_mass_fraction
+                && (pair.0.liquid_mass_fraction == 0.0 || pair.0.liquid_mass_fraction == 1.0)
+            {
+                PhaseIntervalDensityLaw::AffineDensity
+            } else {
+                PhaseIntervalDensityLaw::AffineSpecificVolume
+            },
+        )
     }
 
     /// Piecewise-linear temperature derivative `dT/dh` [K/(J/kg)] on this

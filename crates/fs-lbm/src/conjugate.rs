@@ -134,7 +134,8 @@ pub use flow::{
     FlowFace, FlowField, LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport,
     MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
     MaterialAdvectionStep, MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport,
-    MaterialMomentumStep, MaterialVolumeSource, ProjectionReport, lbm_duct_flow,
+    MaterialMomentumStep, MaterialVolumeSource, ProjectionReport, ThermalVolumeControls,
+    ThermalVolumeStep, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{

@@ -2710,6 +2710,29 @@ electronics cooling (the wedge's second physics after steady conduction).
   outflow and freezing inflow, continued inventories, balanced sealed transfer,
   uniform-density parity, caloric-datum invariance, zero-input continuation with
   admitted roundoff, independent endpoint EOS readback and atomic refusals.
+- `FlowField::advance_thermal_volume` extends the same native owner to sensible
+  heating/cooling on one adjacent original chart interval. The chart's explicit
+  density-law query distinguishes affine specific volume from sourced affine
+  sensible density. Affine-volume intervals retain the original one-pass
+  closure, including exact coexistence parity. For affine density, conservative
+  enthalpy mixing changes occupied volume: each original/incoming donor mass
+  contributes `-m/rho_d*((rho_d-rho_r)/rho_r)^2` at its receiver. The exact
+  accepted native mass routes supply these weights. Bounded relaxed iteration
+  updates only the continuity source; original mass, flow, boundary states and
+  prescribed net enthalpy increments remain fixed, with the caloric increment
+  applied once. Independent endpoint mass, enthalpy and EOS-volume budgets
+  admit the result. Trial EOS queries allocate/hash no new phase identities;
+  only the accepted endpoint receives original-chart phase states and pressure
+  work. The mixing source is not heat, and initial EOS roundoff is never an
+  expansion source. Fixed thermodynamic pressure and one original interval
+  remain explicit limits: incompatible sealed volume, interval crossing,
+  exhausted iterations, numerical budgets or cancellation refuse atomically.
+  Thermal/work closure, momentum prediction, phase mobility and free-surface
+  geometry remain with their existing owners. Native G1/G3/G4 tests include
+  an independent nonlinear inflow quadratic solution, graded internal mixing,
+  sensible heating/cooling on every axis, continuation, affine parity,
+  caloric-datum/relaxation invariance and bounded refusals. First-order donor
+  mixing still requires spatial and temporal refinement.
 - `lbm_duct_flow` -> `LbmFlow { field, velocity_m_s, pressure_pa, report }`:
   velocity inlet on `x-min`, pressure outlet on `x-max`,
   no-slip elsewhere and on solid voxels; derives `nu_lat`/`tau` from the

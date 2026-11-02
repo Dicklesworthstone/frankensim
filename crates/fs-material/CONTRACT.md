@@ -1326,6 +1326,12 @@ homogenization, the P2 milestone.
   is bound into chart identity. Generic supplied h/rho charts retain their
   original specific-volume interpolation and identity. The enthalpy bound
   excludes source uncertainty and floating-point error.
+  `density_law_on_interval` exposes that original interpolation through
+  `PhaseIntervalDensityLaw`: affine specific volume for generic/coexistence
+  intervals, or affine density for sourced sensible branches. The query uses
+  one adjacent original interval and refuses invalid indices; it neither fits
+  a replacement EOS nor changes chart identity. Conservative thermal-volume
+  consumers use this distinction to account for nonlinear mixing volume.
   Generated charts cap at 4096 knots before allocation. This is bounded
   numerical construction, not experimental validation or a mechanical model.
   `ResolvedHeatCapacityCurve::try_new` admits that chart directly from one
