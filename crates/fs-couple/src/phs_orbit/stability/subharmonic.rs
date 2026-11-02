@@ -5,9 +5,11 @@
 //! changing any physical forcing frequency, phase, DC value or port amplitude.
 
 use crate::phs_orbit::{
-    MAX_INPUT_HARMONICS, PeriodicPortInput, PhsOrbitError, bad, forced_problem,
+    MAX_INPUT_HARMONICS, PeriodicPortInput, PhsFloquetControls, PhsForcedStability,
+    PhsOrbitAudit, PhsOrbitError, analyze_forced_orbit_stability, audit_forced_orbit,
+    bad, forced_problem,
 };
-use fs_math::c64::C64;
+use fs_math::{c64::C64, det};
 use fs_orbit::{
     AdaptiveHbOrbit, HbAnchor, HbBudget, HbOrbit, HbRefinementBudget,
     solve_hb_adaptive_seeded, solve_hb_seeded,
@@ -111,6 +113,75 @@ impl PeriodicPortInput {
         }
         result.map_err(PhsOrbitError::Orbit)
     }
+
+
+    /// Refuse a purported period-m response indistinguishable from a shorter
+    /// forcing-synchronized cycle at the declared ORIGINAL-state RMS tolerances.
+    ///
+    /// For every proper divisor r of m, compare x(t+r*T_drive) with x(t) using
+    /// Parseval on the complete retained Fourier waveform. At least one original
+    /// state must distinguish each shorter repeat. All material-memory states
+    /// count; a displacement node does not erase a genuine internal oscillation.
+    /// DC/preload does not rescale the tolerances and tiny numerical tails below
+    /// those tolerances do not establish a longer period. No phase alignment or
+    /// extra sampling grid can hide a shorter cycle.
+    ///
+    /// Call this on the original drive, not its over_periods chart. Its nonzero
+    /// AC harmonic indices must have gcd 1 so the authored drive period is not
+    /// itself an artificially padded period. This is retained-waveform separation,
+    /// NOT an existence proof, a bound on omitted harmonics, or a proof of the
+    /// fundamental period among every possible nonsynchronized time shift.
+    pub fn require_subharmonic_separation(
+        &self,
+        system: &PortHamiltonian,
+        periods: usize,
+        candidate: &HbOrbit,
+        state_rms_tolerances: &[f64],
+    ) -> Result<(), PhsOrbitError> {
+        admit_subharmonic(self, system, periods, candidate, state_rms_tolerances).map(|_| ())
+    }
+
+    /// Audit physical work over the complete response cycle m*T_drive.
+    /// Original source amplitudes/phases, storage and resistance are unchanged.
+    /// Shorter synchronized repeats must first be resolved in the complete state.
+    /// As with audit_forced_orbit, repeat the quadrature at a finer sample count;
+    /// one finite quadrature is not a broadband or omitted-harmonic certificate.
+    pub fn audit_subharmonic_orbit(
+        &self,
+        system: &PortHamiltonian,
+        periods: usize,
+        candidate: &HbOrbit,
+        state_rms_tolerances: &[f64],
+        samples: usize,
+    ) -> Result<PhsOrbitAudit, PhsOrbitError> {
+        let chart = admit_subharmonic(self, system, periods, candidate, state_rms_tolerances)?;
+        audit_forced_orbit(system, &chart, candidate, samples)
+    }
+
+    /// Shoot the complete subharmonic cycle on the original physical ODE.
+    /// All three grids and returned multipliers span m*T_drive; the controls'
+    /// steps_per_period is therefore steps per RESPONSE cycle, and the reported
+    /// growth rate divides by that full physical duration. The orbit is forced:
+    /// no autonomous phase multiplier is removed. A single drive-period map is
+    /// not exponentiated as a substitute for integrating the actual full orbit.
+    ///
+    /// Separate RMS tolerances admit the candidate's period; the existing
+    /// Floquet controls independently limit shooting corrections, time-grid
+    /// disagreement and the guarded unit circle. This establishes numerical
+    /// stability only under the existing native shooting limitations. It does
+    /// not certify that a corrected trajectory has a mathematically primitive
+    /// period, identify a period-doubling bifurcation, or cover hybrid events.
+    pub fn analyze_subharmonic_orbit_stability(
+        &self,
+        system: &PortHamiltonian,
+        periods: usize,
+        candidate: &HbOrbit,
+        state_rms_tolerances: &[f64],
+        controls: &PhsFloquetControls,
+    ) -> Result<PhsForcedStability, PhsOrbitError> {
+        let chart = admit_subharmonic(self, system, periods, candidate, state_rms_tolerances)?;
+        analyze_forced_orbit_stability(system, &chart, candidate, controls)
+    }
 }
 
 fn admit_waveform(
@@ -161,6 +232,72 @@ fn admit_seed(
         return Err(bad("seed harmonic count must equal the declared starting order"));
     }
     Ok(())
+}
+
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 { let remainder = a % b; a = b; b = remainder; }
+    a
+}
+
+fn admit_subharmonic(
+    drive: &PeriodicPortInput,
+    system: &PortHamiltonian,
+    periods: usize,
+    candidate: &HbOrbit,
+    tolerances: &[f64],
+) -> Result<PeriodicPortInput, PhsOrbitError> {
+    let chart = drive.over_periods(periods)?;
+    admit_waveform(&chart, system.state_dim(), candidate)?;
+    if drive.port_count() != system.port_dim()
+        || tolerances.len() != system.state_dim()
+        || tolerances.iter().any(|v| !v.is_finite() || *v <= 0.0)
+    {
+        return Err(bad("subharmonic separation needs every port and positive RMS tolerances per original state"));
+    }
+    let mut common = 0;
+    for row in &drive.coefficients {
+        for (n, value) in row.iter().enumerate().skip(1) {
+            if value.re != 0.0 || value.im != 0.0 { common = gcd(common, n); }
+        }
+    }
+    if common != 1 {
+        return Err(bad("subharmonic order requires a nonconstant primitive authored drive clock"));
+    }
+    for repeat in 1..periods {
+        if periods % repeat != 0 { continue; }
+        let mut separated = false;
+        for (row, &tolerance) in candidate.coeffs.iter().zip(tolerances) {
+            if repeat_rms(row, periods, repeat)? > tolerance {
+                separated = true;
+                break;
+            }
+        }
+        if !separated {
+            return Err(bad("candidate is unresolved from a shorter forcing-synchronized cycle"));
+        }
+    }
+    Ok(chart)
+}
+
+// ||x(theta+2*pi*r/m)-x(theta)||_RMS^2
+// = 8 sum_{n>0} |X_n|^2 sin^2(pi*n*r/m). Exact integer remainders
+// keep commensurate harmonics EXACTLY zero instead of sin(k*pi) roundoff.
+// Stable hypotenuse accumulation avoids squaring physical state amplitudes.
+fn repeat_rms(row: &[C64], periods: usize, repeat: usize) -> Result<f64, PhsOrbitError> {
+    let mut norm = 0.0;
+    for (n, coefficient) in row.iter().enumerate().skip(1) {
+        let phase = ((n % periods) * repeat) % periods;
+        if phase == 0 { continue; }
+        let factor = 2.0 * core::f64::consts::SQRT_2
+            * det::sin(core::f64::consts::PI * phase as f64 / periods as f64).abs();
+        let value = factor * det::hypot(coefficient.re, coefficient.im);
+        norm = det::hypot(norm, value);
+        if !norm.is_finite() {
+            return Err(bad("subharmonic waveform separation is not representable"));
+        }
+    }
+    Ok(norm)
 }
 
 #[cfg(test)]

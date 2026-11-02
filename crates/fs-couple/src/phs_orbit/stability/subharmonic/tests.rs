@@ -175,3 +175,135 @@ fn malformed_full_seeds_refuse_before_any_original_storage_evaluation() {
     }
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn shorter_cycles_and_numerical_tails_cannot_masquerade_as_period_six() {
+    let drive = third_harmonic_drive();
+    let system = duffing(0.005);
+    let mut waveform = seed(0.5, rows(6)); // six cycles of the 3 rad/s drive
+    waveform.coeffs[0][3] = C64::from_re(0.5); // really a period-two response
+    waveform.coeffs[1][3] = C64::new(0.0, 0.75);
+    assert!(drive.require_subharmonic_separation(&system, 6, &waveform, &[1e-8; 2]).is_err());
+    waveform.coeffs = rows(6);
+    waveform.coeffs[0][2] = C64::from_re(0.5); // really a period-three response
+    waveform.coeffs[1][2] = C64::new(0.0, 0.5);
+    assert!(drive.require_subharmonic_separation(&system, 6, &waveform, &[1e-8; 2]).is_err());
+    waveform.coeffs = rows(6);
+    waveform.coeffs[0][6] = C64::from_re(0.5); // ordinary drive-periodic response
+    waveform.coeffs[0][1] = C64::new(1e-14, -1e-14); // numerical tail, not a new branch
+    assert!(drive.require_subharmonic_separation(&system, 6, &waveform, &[1e-8; 2]).is_err());
+    waveform.coeffs[0][1] = C64::new(1e-4, -1e-4);
+    waveform.coeffs[0][0] = C64::from_re(1e100); // no tolerance dilution by preload
+    drive.require_subharmonic_separation(&system, 6, &waveform, &[1e-8; 2]).unwrap();
+}
+
+#[test]
+fn original_memory_can_resolve_period_even_at_a_structural_observation_node() {
+    let drive = third_harmonic_drive();
+    let system = duffing(0.005).with_relaxation_branches(vec![fs_phs::RelaxationBranch {
+        projection: vec![1.0, 0.0], stiffness: 0.3, relaxation_time_s: 2.0,
+    }]).unwrap();
+    // This test isolates waveform admission, not the equations of an orbit.
+    let mut waveform = seed(0.5, vec![vec![C64::ZERO; 7]; 3]);
+    waveform.coeffs[0][6] = C64::from_re(0.5);
+    assert!(drive.require_subharmonic_separation(&system, 6, &waveform, &[1e-8; 3]).is_err());
+    waveform.coeffs[2][1] = C64::new(0.01, -0.03);
+    drive.require_subharmonic_separation(&system, 6, &waveform, &[1e-8; 3]).unwrap();
+    // Changing phase cannot change the RMS repeat distance.
+    let before = repeat_rms(&waveform.coeffs[2], 6, 3).unwrap();
+    for (n, coefficient) in waveform.coeffs[2].iter_mut().enumerate().skip(1) {
+        let phase = n as f64 * 0.73;
+        *coefficient = *coefficient * C64::new(det::cos(phase), det::sin(phase));
+    }
+    let after = repeat_rms(&waveform.coeffs[2], 6, 3).unwrap();
+    assert!((before - after).abs() < 1e-14);
+    drive.require_subharmonic_separation(&system, 6, &waveform, &[1e-8; 3]).unwrap();
+}
+
+#[test]
+fn parseval_repeat_distance_matches_direct_waveform_quadrature() {
+    let mut coefficients = vec![C64::ZERO; 10];
+    coefficients[0] = C64::from_re(0.3);
+    for n in 1..10 { coefficients[n] = C64::new(0.2 / n as f64, -0.1 / (n * n) as f64); }
+    let waveform = seed(1.0, vec![coefficients.clone()]);
+    for periods in [2, 3, 4, 6, 12] {
+        for repeat in 1..periods {
+            if periods % repeat != 0 { continue; }
+            let shift = core::f64::consts::TAU * repeat as f64 / periods as f64;
+            let mean_square = (0..4096).map(|j| {
+                let phase = core::f64::consts::TAU * j as f64 / 4096.0;
+                (waveform.sample(0, phase + shift) - waveform.sample(0, phase)).powi(2)
+            }).sum::<f64>() / 4096.0;
+            assert!((repeat_rms(&coefficients, periods, repeat).unwrap() - det::sqrt(mean_square)).abs() < 1e-12);
+        }
+    }
+    let mut commensurate = vec![C64::ZERO; 13];
+    commensurate[6] = C64::new(1e100, -1e100);
+    commensurate[12] = C64::new(-1e100, 1e100);
+    assert_eq!(repeat_rms(&commensurate, 6, 1).unwrap(), 0.0);
+}
+
+#[test]
+fn ambiguous_drive_clocks_and_wrong_state_tolerances_refuse() {
+    let system = duffing(0.005);
+    let mut waveform = seed(1.5, rows(4));
+    waveform.coeffs[0][1] = C64::from_re(0.5);
+    for coefficients in [
+        vec![C64::ONE],
+        vec![C64::ZERO, C64::ZERO, C64::ONE],
+    ] {
+        let drive = PeriodicPortInput::new(3.0, vec![coefficients]).unwrap();
+        assert!(drive.require_subharmonic_separation(&system, 2, &waveform, &[1e-8; 2]).is_err());
+    }
+    let drive = third_harmonic_drive();
+    assert!(drive.require_subharmonic_separation(&system, 2, &waveform, &[1e-8]).is_err());
+    assert!(drive.require_subharmonic_separation(&system, 2, &waveform, &[0.0; 2]).is_err());
+    assert!(drive.require_subharmonic_separation(&system, 2, &waveform, &[f64::NAN; 2]).is_err());
+    waveform.omega = 3.0;
+    assert!(drive.require_subharmonic_separation(&system, 2, &waveform, &[1e-8; 2]).is_err());
+}
+
+#[test]
+fn damped_period_three_power_and_floquet_map_use_the_whole_response_cycle() {
+    use crate::phs_orbit::PhsNumericalStability;
+    use fs_orbit::ShootBudget;
+    let drive = third_harmonic_drive();
+    let chart = drive.over_periods(3).unwrap();
+    let system = duffing(0.005);
+    let mut coefficients = rows(13);
+    coefficients[0][1] = C64::new(0.47, -0.16);
+    coefficients[1][1] = C64::new(0.16, 0.47);
+    coefficients[0][3] = C64::new(-0.0035, -0.0066);
+    coefficients[1][3] = C64::new(0.0198, -0.0105);
+    let initial = seed(1.0, coefficients);
+    let orbit = chart.solve_harmonic_balance_seeded(&system, &initial, &hb(13)).unwrap();
+    let tolerances = [1e-6; 2];
+    drive.require_subharmonic_separation(&system, 3, &orbit, &tolerances).unwrap();
+    // Independent high-accuracy ODE shooting of the explicit Duffing equation:
+    // integrate T=2*pi from (q0,p0), solve endpoint-initial=0, then integrate
+    // its analytical variational matrix [[0,1],[-.625-1.5*q*q,-.005]].
+    assert!((orbit.sample(0, 0.0) - 0.938_957_088_939_154).abs() < 2e-7);
+    assert!((orbit.sample(1, 0.0) - 0.352_519_600_812_236).abs() < 2e-7);
+    assert!((orbit.sample(0, core::f64::consts::TAU / 3.0) - orbit.sample(0, 0.0)).abs() > 0.1);
+    let a = drive.audit_subharmonic_orbit(&system, 3, &orbit, &tolerances, 512).unwrap();
+    let b = drive.audit_subharmonic_orbit(&system, 3, &orbit, &tolerances, 1024).unwrap();
+    assert!(a.relative_power_residual < 1e-7);
+    assert!((a.mean_resistance_loss_w - 0.002_487_010_550_273).abs() < 2e-9);
+    assert!((a.mean_supplied_power_w - b.mean_supplied_power_w).abs() < 1e-11);
+    let controls = PhsFloquetControls {
+        shooting: ShootBudget { steps_per_period: 512, max_newton: 30, tolerance: 1e-10 },
+        state_tolerances: vec![1e-5; 2], spectral_radius_tolerance: 2e-5,
+        unit_circle_guard: 1e-3,
+    };
+    let stability = drive.analyze_subharmonic_orbit_stability(
+        &system, 3, &orbit, &tolerances, &controls,
+    ).unwrap();
+    assert_eq!(stability.classification, PhsNumericalStability::Stable);
+    for level in &stability.levels {
+        assert!((level.orbit.period - core::f64::consts::TAU).abs() < 1e-13);
+        assert_eq!(level.orbit.multipliers.len(), 2); // forced; delete no phase direction
+        // Complex-conjugate multipliers have modulus sqrt(exp(-damping*T)).
+        assert!((level.spectral_radius - det::exp(-0.005 * level.orbit.period / 2.0)).abs() < 2e-5);
+    }
+    assert!((stability.dominant_growth_rate_per_s.unwrap() + 0.0025).abs() < 1e-5);
+}
