@@ -234,6 +234,11 @@ impl<'b, 'a, 'm> LayeredWaveHeating<'b, 'a, 'm> {
     ) -> Result<Self, LayeredWaveHeatingError> {
         poll(&mut cancelled)?;
         let body = thermal.prepared_body();
+        if !body.conduction().geometry().is_planar() {
+            return Err(LayeredWaveHeatingError::Invalid(
+                "this planar coupling requires a planar distributed thermal body",
+            ));
+        }
         let layers = body.conduction().layers();
         let expected = if cellwise {
             body.cell_count()

@@ -1,13 +1,14 @@
-//! Source-backed planar control volumes with independent cell temperatures.
+//! Source-backed planar or radial control volumes with independent temperatures.
 //!
-//! Preparation subdivides each homogeneous layer uniformly. Storage comes from
+//! Preparation subdivides each homogeneous layer into equal physical volumes.
+//! Radial temperatures live at each shell's volume centroid. Storage comes from
 //! its original capacity source; a face conducts through the two incident half
 //! cells and an explicit interlayer contact. The original thermal timeline owns
 //! all evolution and energy/entropy accounts. Recompute `step_coefficients` on
 //! EVERY implicit candidate; initial event conductances are only initial values.
 //!
 //! Spatial and temporal resolution remain independent caller choices. Only the
-//! two axial faces are represented; lateral surfaces are insulated. Fixed mass,
+//! two axial or radial faces are represented; cylinder endcaps are insulated. Fixed mass,
 //! geometry, composition and caloric constraints are required. No phase change,
 //! moisture evolution, expansion work or automatic coupon matching is inferred.
 
@@ -15,9 +16,9 @@
 #[path = "transient/implicit.rs"]
 pub mod implicit;
 
-use super::{LayerStackSourceQuery, PreparedLayerStackConduction};
+use super::{LayerStackGeometry, LayerStackSourceQuery, PreparedLayerStackConduction};
 use crate::thermal::{
-    conduction::{LayerConductionConfig, LayerConductionResponse, TwoLayerConduction},
+    conduction::{LayerConductionConfig, LayerConductionResponse, LayerGeometry},
     transport::{
         ThermalTransportError,
         storage::{
@@ -39,7 +40,7 @@ pub const MAX_LAYERED_THERMAL_CELLS: usize = 512;
 /// Whole-layer physical inputs; capacity amount is divided among equal cells.
 ///
 /// A mass capacity must name the supplied whole-layer mass. A volume capacity
-/// must name area times whole-layer thickness. Mass remains independently
+/// must name the actual whole-layer planar or shell volume. Mass remains independently
 /// supplied for volumetric storage; it is never manufactured from nominal data.
 /// The caller admits compatibility of the caloric and conductivity populations
 /// and work constraints. A common card and context do not prove a common coupon.
@@ -55,6 +56,7 @@ pub struct TransientLayerSourceQuery<'a> {
 struct Cell {
     layer: usize,
     width: f64,
+    centroid: f64,
     geometry: CellGeometry,
 }
 
@@ -69,6 +71,7 @@ pub struct PreparedLayeredThermalBody {
     masses: Vec<f64>,
     counts: Vec<usize>,
     cells: Vec<Cell>,
+    links: Vec<LayerGeometry>,
     datum: f64,
     span: [f64; 2],
     total_mass: f64,
@@ -83,6 +86,25 @@ impl PreparedLayeredThermalBody {
         area_m2: f64,
         datum_temperature_k: f64,
     ) -> Result<Self, ThermalTransportError> {
+        Self::try_new_geometric(
+            queries,
+            contact_resistances_m2_k_w,
+            LayerStackGeometry::Planar { area_m2 },
+            datum_temperature_k,
+        )
+    }
+
+    /// Fixed reference geometry with equal-volume cells in each original layer.
+    /// Radial masses and capacities divide the true shell inventory uniformly;
+    /// widths vary and temperature traces use physical volume centroids. This
+    /// is a finite-volume approximation requiring spatial/time refinement,
+    /// not an exact transient shell solution or an implicit phase-change law.
+    pub fn try_new_geometric(
+        queries: &[TransientLayerSourceQuery<'_>],
+        contact_resistances_m2_k_w: &[f64],
+        geometry: LayerStackGeometry,
+        datum_temperature_k: f64,
+    ) -> Result<Self, ThermalTransportError> {
         let count = queries.iter().try_fold(0usize, |n, q| {
             if q.cell_count == 0 {
                 return Err(invalid("each thermal layer needs at least one cell"));
@@ -91,11 +113,12 @@ impl PreparedLayeredThermalBody {
                 .filter(|&v| v <= MAX_LAYERED_THERMAL_CELLS)
                 .ok_or_else(|| invalid("layered thermal body exceeds its 512-cell budget"))
         })?;
-        let conduction = PreparedLayerStackConduction::try_new(
+        let conduction = PreparedLayerStackConduction::try_new_geometric(
             &queries.iter().map(|q| q.conduction).collect::<Vec<_>>(),
             contact_resistances_m2_k_w,
-            area_m2,
+            geometry,
         )?;
+        let area_m2 = conduction.area_m2();
         let mut storages = Vec::with_capacity(queries.len());
         let mut masses = Vec::with_capacity(queries.len());
         let mut counts = Vec::with_capacity(queries.len());
@@ -105,9 +128,14 @@ impl PreparedLayeredThermalBody {
         let mut total_volume = 0.0;
         let mut mass_correction = 0.0;
         let mut volume_correction = 0.0;
-        let mut x = 0.0;
+        let mut x = geometry.start_m();
         for (layer, q) in queries.iter().enumerate() {
-            let volume = area_m2 * q.conduction.thickness_m;
+            let bounds = conduction.layer_bounds[layer];
+            let volume = if geometry.is_planar() {
+                area_m2 * q.conduction.thickness_m
+            } else {
+                geometry.volume_m3(bounds).map_err(invalid)?
+            };
             if !positive(q.mass_kg) || !positive(volume) {
                 return Err(invalid("layer mass and volume must be positive and finite"));
             }
@@ -153,30 +181,45 @@ impl PreparedLayeredThermalBody {
             let mass = q.mass_kg / q.cell_count as f64;
             let width = q.conduction.thickness_m / q.cell_count as f64;
             let cell_volume = volume / q.cell_count as f64;
-            if !positive(mass)
-                || !positive(width)
-                || !positive(cell_volume)
-                || !positive(2.0 * area_m2)
-            {
+            if !positive(mass) || !positive(width) || !positive(cell_volume) {
                 return Err(invalid("layer subdivision is not representable"));
             }
             // Validate the exact original storage/mass conversion now, including
             // finite enthalpy range and the thermal owner's slope requirement.
             HeatStorageThermalLaw::try_new(&storage, mass, datum_temperature_k)?;
-            for _ in 0..q.cell_count {
-                let end = x + width;
+            for local in 0..q.cell_count {
+                let end = if geometry.is_planar() {
+                    x + width
+                } else {
+                    geometry
+                        .volume_fraction_position_m(
+                            bounds,
+                            (local + 1) as f64 / q.cell_count as f64,
+                        )
+                        .map_err(invalid)?
+                };
                 if !end.is_finite() || end <= x {
                     return Err(invalid("cell position is not representable"));
                 }
+                let centroid = if geometry.is_planar() {
+                    x + 0.5 * width
+                } else {
+                    geometry.centroid_m([x, end]).map_err(invalid)?
+                };
+                let surface_area = geometry.cell_surface_area_m2([x, end]).map_err(invalid)?;
+                if !positive(surface_area) {
+                    return Err(invalid("cell surface area is not representable"));
+                }
                 cells.push(Cell {
                     layer,
-                    width,
+                    width: if geometry.is_planar() { width } else { end - x },
+                    centroid,
                     geometry: CellGeometry {
                         start_m: [x, 0.0, 0.0],
                         end_m: [end, 0.0, 0.0],
                         volume_m3: cell_volume,
-                        // The planar model exposes axial faces only.
-                        surface_area_m2: 2.0 * area_m2,
+                        // Endcaps/lateral faces are insulated in this 1-D model.
+                        surface_area_m2: surface_area,
                     },
                 });
                 x = end;
@@ -196,6 +239,23 @@ impl PreparedLayeredThermalBody {
                 "layered storage and conduction need a common interval containing the datum",
             ));
         }
+        let mut links = Vec::with_capacity(cells.len() - 1);
+        for pair in cells.windows(2) {
+            let [a, b] = [&pair[0], &pair[1]];
+            let interface = a.geometry.end_m[0];
+            let traces = [a.centroid, b.centroid];
+            let link = match geometry {
+                LayerStackGeometry::Planar { area_m2 } => {
+                    LayerGeometry::planar([0.5 * a.width, 0.5 * b.width], area_m2)
+                }
+                LayerStackGeometry::Cylindrical { length_m, .. } => {
+                    LayerGeometry::cylindrical(traces, interface, length_m)
+                }
+                LayerStackGeometry::Spherical { .. } => LayerGeometry::spherical(traces, interface),
+            }
+            .map_err(|_| invalid("cell-to-face conduction geometry is not representable"))?;
+            links.push(link);
+        }
         let mut hash = DomainHasher::new("org.frankensim.fs-material.layered-thermal-body.v1");
         hash.update(conduction.identity().as_bytes());
         hash.update(&datum_temperature_k.to_bits().to_le_bytes());
@@ -210,6 +270,7 @@ impl PreparedLayeredThermalBody {
             masses,
             counts,
             cells,
+            links,
             datum: datum_temperature_k,
             span,
             total_mass,
@@ -230,6 +291,20 @@ impl PreparedLayeredThermalBody {
     }
     pub fn cell_count(&self) -> usize {
         self.cells.len()
+    }
+    /// Original physical cells in layer order. Radial positions are radii;
+    /// volumes and exposed/contact surface areas are physical shell measures.
+    pub fn cell_geometries(&self) -> impl ExactSizeIterator<Item = &CellGeometry> {
+        self.cells.iter().map(|cell| &cell.geometry)
+    }
+    /// Finite-volume temperature coordinates: planar midpoints or radial volume
+    /// centroids. These do not prescribe the internal transient temperature field.
+    pub fn cell_temperature_positions_m(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.cells.iter().map(|cell| cell.centroid)
+    }
+    /// Actual center-to-interface radial or planar metrics in original order.
+    pub fn link_geometries(&self) -> &[LayerGeometry] {
+        &self.links
     }
     pub fn layer_cell_counts(&self) -> &[usize] {
         &self.counts
@@ -414,7 +489,7 @@ impl BoundLayeredThermalBody<'_> {
                     id: self.ids.first_link + i as u64,
                     a: self.cell_id(i),
                     b: self.cell_id(i + 1),
-                    area_m2: self.body.conduction.area,
+                    area_m2: self.body.links[i].contact_area_m2(),
                     conductance_w_k: response.conductance_w_k,
                 }),
             });
@@ -462,7 +537,7 @@ impl BoundLayeredThermalBody<'_> {
                 .ok_or_else(|| bad("layered body contact is not active"))?;
             if link.a != self.cell_id(i)
                 || link.b != self.cell_id(i + 1)
-                || link.area_m2 != self.body.conduction.area
+                || link.area_m2 != self.body.links[i].contact_area_m2()
             {
                 return Err(bad(
                     "timeline contact differs from the prepared physical ordering or area",
@@ -540,13 +615,11 @@ impl BoundLayeredThermalBody<'_> {
             } else {
                 self.body.conduction.contacts[a.layer]
             };
-            let edge = TwoLayerConduction::new(
+            let edge = self.body.links[i].conduction(
                 [
                     &self.body.conduction.curves[a.layer],
                     &self.body.conduction.curves[b.layer],
                 ],
-                [0.5 * a.width, 0.5 * b.width],
-                self.body.conduction.area,
                 contact,
             )?;
             responses.push(edge.evaluate(

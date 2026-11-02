@@ -190,6 +190,11 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
     ) -> Result<Self, LaminateShellError> {
         poll(&mut cancelled)?;
         let body = thermal.prepared_body();
+        if !body.conduction().geometry().is_planar() {
+            return Err(LaminateShellError::Invalid(
+                "this planar coupling requires a planar distributed thermal body",
+            ));
+        }
         if body.cell_count() > MAX_LAMINA_LAYERS {
             return Err(LaminateShellError::Invalid(
                 "thermal resolution exceeds native laminate layer budget",

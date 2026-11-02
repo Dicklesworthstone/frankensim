@@ -6233,6 +6233,39 @@ Source density claims, reference thermal geometry and fixed-mass caloric
 storage retain their original owners. No mechanical work, moving thermal
 boundary areas or constrained deformation is inferred from the new binding.
 
+## Radial distributed heat storage on the original timeline
+
+`thermal::transport::stack::LayerStackGeometry` opts
+`PreparedLayerStackConduction::try_new_geometric` and
+`PreparedLayeredThermalBody::try_new_geometric` into fixed cylindrical or
+spherical shells. Existing constructors retain planar geometry and identity.
+Physical thicknesses, original conductivity/capacity sources and areal contact
+resistances stay distinct from resistance coordinates. Steady source-integrated
+flux uses A_ref integral(dr/A(r)) and R'' A_ref/A_interface on the original
+Kirchhoff/contact kernel. The inner face defines A_ref; actual ordered face areas
+are exposed separately, and radial callers must not use `area_m2()` as inventory.
+
+Each homogeneous layer is divided into equal physical-volume cells with
+volume-centroid temperature radii. Actual shell volumes, fixed supplied masses,
+radial interface areas and surface coverage feed the original thermal cells,
+source deposition, integrated two-leg fluxes, sparse energy-coordinate Newton
+and adaptive backward-Euler owner. A contact transfers the same signed joules
+on both sides. Face-area sums round outward by at most one ulp only where needed
+to avoid false overcoverage during original sequential subtraction.
+
+Boundary exchange retains the original terminal-cell temperature semantics;
+no exact surface temperature or extra half-cell reservoir resistance is
+inferred. Radial symmetry, positive inner radius, fixed geometry and sensible
+storage are required; cylinder endcaps are insulated. Spatial and time
+refinement remain independent requirements. This path does not establish latent
+heat, solid-centre symmetry, moving boundaries or fluid transport. Existing
+planar laminate and plane-wave heating consumers explicitly refuse radial bodies.
+
+`tests/radial_layered_storage.rs` covers analytic/contact power, nonlinear
+integrals, physical inventory, native surfaces, finite-difference tangents,
+implicit conservation, source/boundary energy, adaptive evolution, manufactured
+spatial refinement, planar compatibility and source/geometry refusal.
+
 ## Spatial heat storage inside sourced layers (2026-10-29)
 
 `thermal::transport::stack::transient::PreparedLayeredThermalBody` prepares
