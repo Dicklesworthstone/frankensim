@@ -1299,6 +1299,45 @@ tests cover original real-axis bits and work projection, full analytic matrix
 derivatives, domain/resource refusal and cancellation/replay; these are authored
 but have not run with the unavailable pinned package dependencies.
 
+### Molecular gas loading and receivers on two-sided open screens
+
+`PreparedScreen::solve_molecular_velocity_ports` binds the original evaluated
+`MolecularExterior` to the existing P1 pressure-jump screen. The original
+material supplies complex k at a real physical frequency; the weak drive is
+`H(k)*jump = i*rho*omega*G^T*rate`. The real physical `rho*omega` is preserved,
+and the same exact P1 G supplies every self/mutual resisting effort. Both faces
+already belong to this one jump, with no duplicated wet area or closing wall.
+
+`complex_matrix` is a values-only specialization of the original centered
+cosine/antipodal continuation. `ScreenComplexValueLimits` counts one H; the
+unchanged `ScreenComplexLimits` counts H and its derivative. The new path forms
+no derivative matrix or derivative pair moments. One H/LU serves every source
+column. Whole-batch work includes assembly, factorization, solves, residuals
+and full work projection. Source and solve payloads, original geometry limits,
+material band, spatial resolution and centered exponential-growth chart all
+remain explicit. These are logical admission bounds, not timing/RSS claims.
+
+The retained `MolecularScreenVelocityPortSolution` exposes the complete matrix,
+original jump columns and signed coherent boundary work. That work includes
+exterior molecular heat and outgoing energy; it is not distant-sphere flux.
+No repair or whole-half-plane passivity/causality certificate is introduced.
+The medium is stationary with inviscid momentum and molecular compression;
+viscothermal boundary layers, independent face coatings and cavity backing
+remain outside this owner.
+
+`prepare_receivers` borrows that exact immutable solution and integrates
+reusable complex P1 pressure/gradient rows. It keeps exact retained triangles,
+both screen sides, independent componentwise quadrature gates, clearance and
+row/work/depth limits. Applying actual complex rates combines the original
+jumps before observing pressure and Euler velocity, retaining interference
+without another solve or kernel integration. Error estimates cover integration
+of fixed solved jumps, not boundary mesh/material error or relative accuracy
+near coherent cancellation. Six focused source/receiver regressions cover
+native lossless recovery, independent P1 work, physical molecular forcing,
+absorbing P1 field/gradient references, coherence and admission/cancellation.
+They are authored and syntax checked; native execution remains pending the
+existing missing dependency and unavailable build-runner blockers.
+
 `reciprocal_radiation::pipe_end` (IRP .100, RULING (2)) measures the open
 end of a thin unflanged pipe on this owner, in Levine and Schwinger's own
 geometry.

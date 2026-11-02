@@ -6,6 +6,15 @@ use fs_math::{c64::C64, det};
 /// The coincident value and derivative are both zero. The series retains k²r
 /// without forming a tiny (kr)² and then dividing it by a tiny r.
 pub(crate) fn cosine_remainder(k: C64, r: f64) -> (C64, C64) {
+    cosine_remainder_impl::<true>(k, r)
+}
+
+/// The same scalar value without forming the unused derivative.
+pub(crate) fn cosine_remainder_value(k: C64, r: f64) -> C64 {
+    cosine_remainder_impl::<false>(k, r).0
+}
+
+fn cosine_remainder_impl<const DERIVATIVE: bool>(k: C64, r: f64) -> (C64, C64) {
     if r == 0.0 {
         return (C64::ZERO, C64::ZERO);
     }
@@ -20,9 +29,11 @@ pub(crate) fn cosine_remainder(k: C64, r: f64) -> (C64, C64) {
         for n in 2..=16 {
             let twice = f64::from(2 * n);
             cosine_term = (cosine_term * minus_z2).scale(1.0 / ((twice - 1.0) * twice));
-            sine_term = (sine_term * minus_z2).scale(1.0 / ((twice - 2.0) * (twice - 1.0)));
             cosine = cosine + cosine_term;
-            sine = sine + sine_term;
+            if DERIVATIVE {
+                sine_term = (sine_term * minus_z2).scale(1.0 / ((twice - 2.0) * (twice - 1.0)));
+                sine = sine + sine_term;
+            }
         }
         return (cosine.scale(scale), sine.scale(-scale));
     }
@@ -40,7 +51,11 @@ pub(crate) fn cosine_remainder(k: C64, r: f64) -> (C64, C64) {
         (-2.0 * sin_half * sin_half) * cosh + cosh_minus_one,
         -sin_x * sinh,
     );
-    let derivative = C64::new(-sin_x * cosh, -cos_x * sinh).scale(scale);
+    let derivative = if DERIVATIVE {
+        C64::new(-sin_x * cosh, -cos_x * sinh).scale(scale)
+    } else {
+        C64::ZERO
+    };
     (cosine_minus_one.scale(scale / r), derivative)
 }
 
@@ -48,6 +63,15 @@ pub(crate) fn cosine_remainder(k: C64, r: f64) -> (C64, C64) {
 /// Here u=d.(x-origin) for one FIXED geometric origin. No conjugation appears
 /// in this analytic extension; both signs are evaluated at the same complex k.
 pub(crate) fn plane_factors(k: C64, u: f64, normal_dot: f64) -> [C64; 4] {
+    plane_factors_impl::<true>(k, u, normal_dot)
+}
+
+pub(crate) fn plane_values(k: C64, u: f64, normal_dot: f64) -> [C64; 2] {
+    let values = plane_factors_impl::<false>(k, u, normal_dot);
+    [values[0], values[1]]
+}
+
+fn plane_factors_impl<const DERIVATIVE: bool>(k: C64, u: f64, normal_dot: f64) -> [C64; 4] {
     let (sine, cosine) = det::sin_cos(k.re * u);
     let forward_phase = C64::new(cosine, -sine).scale(det::exp(k.im * u));
     let backward_phase = C64::new(cosine, sine).scale(det::exp(-k.im * u));
@@ -58,8 +82,16 @@ pub(crate) fn plane_factors(k: C64, u: f64, normal_dot: f64) -> [C64; 4] {
     [
         forward,
         backward,
-        forward_base + forward * C64::new(0.0, -u),
-        backward_base + backward * C64::new(0.0, u),
+        if DERIVATIVE {
+            forward_base + forward * C64::new(0.0, -u)
+        } else {
+            C64::ZERO
+        },
+        if DERIVATIVE {
+            backward_base + backward * C64::new(0.0, u)
+        } else {
+            C64::ZERO
+        },
     ]
 }
 

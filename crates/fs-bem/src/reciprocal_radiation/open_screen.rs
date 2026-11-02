@@ -16,7 +16,12 @@ use std::collections::{BTreeMap, BTreeSet};
 mod ports;
 pub use ports::{ScreenPortLimits, ScreenVelocityPortSolution};
 mod complex;
-pub use complex::{ScreenComplexLimits, ScreenComplexOperator};
+pub use complex::{ScreenComplexLimits, ScreenComplexOperator, ScreenComplexValueLimits};
+mod molecular;
+pub use molecular::{
+    MolecularScreenPortLimits, MolecularScreenVelocityPortSolution,
+    PreparedMolecularScreenReceivers,
+};
 
 /// A conforming indexed, oriented open two-manifold. Every component must have
 /// a free edge. No closure, thickness or orientation repair is synthesized.

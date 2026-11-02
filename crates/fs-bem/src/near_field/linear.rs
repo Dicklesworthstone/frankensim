@@ -7,6 +7,8 @@
 //! phase resolution and quadrature rules all belong to the parent owner.
 use super::*;
 
+pub(crate) mod open;
+
 type Moments = [Integral; 3];
 
 /// Generic open-screen double-layer evaluation. Geometry admission belongs to
@@ -78,8 +80,8 @@ pub(crate) fn open_pressure(
     Ok(out)
 }
 
-fn rule_linear(
-    k: f64,
+fn rule_linear<K: ReceiverWave>(
+    k: K,
     x: Point,
     t: Triangle,
     normal: Point,
@@ -121,8 +123,8 @@ fn rule_linear(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn integrate_linear(
-    k: f64,
+fn integrate_linear<K: ReceiverWave>(
+    k: K,
     x: Point,
     t: Triangle,
     normal: Point,
@@ -144,7 +146,7 @@ fn integrate_linear(
     ]
     .into_iter()
     .fold(0.0_f64, f64::max);
-    let mut accepted = size <= 2. * distance(x, t) && k * size <= 3.;
+    let mut accepted = size <= 2. * distance(x, t) && k.variation_per_m() * size <= 3.;
     let tol = work.options.relative_tolerance;
     for (f, c) in fine.iter_mut().zip(&coarse) {
         f.error_s = (f.s - c.s).abs();
