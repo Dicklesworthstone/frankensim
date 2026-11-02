@@ -454,3 +454,45 @@ An independent standard-library Python reconstruction of four deterministic
 fixtures and their four-phase ensembles agreed with weighted real-time Simpson
 integration to maximum absolute errors 4.45e-15 and 2.23e-16 respectively.
 Those are reference calculations, not executed Rust results.
+
+## Time-dependent quadratic product spectra
+
+`harmonic_window::PreparedHarmonicProductSpectrum` prepares a finite analytic
+line spectrum from explicit `HarmonicProductInput` bilinear contractions.
+Peak amplitudes use exp(-i omega t); signed input frequencies are supported.
+For `HarmonicProductLaw::Real`, each product retains one half of A*conj(B)
+at the difference frequency and one half of A*B at the sum frequency. Real
+also describes the expected product sharing a zero-mean real unit-variance
+coefficient. ProperComplex assumes a shared coefficient with E[z]=E[z^2]=0
+and E[|z|^2]=1 and retains only the difference term. Cross-factor products
+may be omitted only when the caller's authored joint moments make them zero.
+
+Output consists of a DD DC value and positive-frequency peak tones.
+Negative-frequency terms are conjugated. Frequencies retain the DD sum or
+difference of the supplied f64 Hz values, including low sum-frequency bits.
+Exactly equal DD frequencies coalesce in authored order with DD amplitude
+sums; no frequency tolerance or amplitude threshold drops physical beats.
+Callers must combine coherent source fields before forming products.
+Preparation takes O(K log K) work and O(K) storage for K generated terms.
+
+Explicit limits cover supplied products, pre-coalescing generated terms and
+the logical vector payload at its admitted capacity; inputs, iterator state,
+stack and allocator overhead are excluded. A fixed 131072 generated-term
+ceiling bounds the synchronous sort, with cancellation before and after it.
+Iteration and coalescing poll cancellation. Domain, budget, allocation or
+cancellation refusal publishes no partial spectrum.
+
+Scalar-time evaluation and Uniform/Triangular detector-window means allocate
+nothing and cost O(distinct output tones). They preserve the source clock,
+DD frequency and amplitude parts and the existing shared detector kernel.
+The result is an actual deterministic or expected quadratic waveform,
+not PSD/Hz, a sampled FFT, detector bandwidth, random realizations or the
+fourth-moment noise spectrum of the observable. No null-relative certificate
+or stronger source/propagation accuracy is claimed.
+
+Five focused tests cover direct real-time products, the exact four-phase
+proper ensemble, both detector profiles, signed frequencies, retained
+high-carrier sum bits, weak amplitudes, admission and cancellation.
+The exact shared window and spectrum modules passed all 27 of their tests
+in a focused native Rust harness using the real fs_math library. This scoped
+execution does not substitute for the full repository build and quality gate.

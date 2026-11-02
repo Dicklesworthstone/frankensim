@@ -11,6 +11,12 @@
 
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod spectrum;
+pub use spectrum::{
+    HarmonicProductInput, HarmonicProductLaw, HarmonicProductSpectrumLimits, HarmonicProductTone,
+    MAX_PRODUCT_SPECTRUM_TERMS, PreparedHarmonicProductSpectrum, ProductSpectrumError,
+};
+
 /// A rejected observation window or unrepresentable moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowError {
