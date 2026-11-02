@@ -471,8 +471,10 @@ impl PreparedMicrophoneArray<'_> {
 
 mod exposure;
 pub use exposure::{
-    HarmonicExposureLimits, HarmonicExposureLine, HarmonicExposureMoments,
-    PreparedHarmonicExposure, WindowedHarmonicExposure,
+    HarmonicAveragedField, HarmonicExposureLimits, HarmonicExposureLine, HarmonicExposureMoments,
+    HarmonicReadoutCovariance, HarmonicReadoutLimits, HarmonicReceiverPair,
+    MAX_READOUT_RECEIVER_PAIRS, PreparedHarmonicExposure, WindowedHarmonicExposure,
+    WindowedHarmonicReadout,
 };
 
 #[cfg(test)]

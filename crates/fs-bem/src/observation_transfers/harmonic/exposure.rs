@@ -13,6 +13,12 @@ use fs_fft::harmonic_window::{
 };
 use fs_math::{c64::C64, dd::Dd};
 
+mod readout;
+pub use readout::{
+    HarmonicAveragedField, HarmonicReadoutCovariance, HarmonicReadoutLimits,
+    HarmonicReceiverPair, MAX_READOUT_RECEIVER_PAIRS, WindowedHarmonicReadout,
+};
+
 /// Bounds the deterministic in-place sort used for frequency grouping.
 pub const MAX_EXPOSURE_LINES: usize = 4096;
 /// Empty factors count too: an authored factor bank must be bounded.

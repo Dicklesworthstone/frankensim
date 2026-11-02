@@ -2380,3 +2380,57 @@ proper-factor fixture agreed with direct Simpson integration over its exact
 references give -0.001546695268142812 W/m^2 standing-wave flux and
 1.378634354255046e-25 Pa^2 for the weak proper beat; these are reference
 calculations, not executed Rust results.
+
+## Joint uncertainty of averaged acoustic sensor readouts
+
+`PreparedHarmonicExposure::observe_readout[_cancellable]` observes a linear
+sensor that reports its normalized window-averaged pressure and Cartesian
+particle velocity. It returns ensemble means for the original receiver array
+and centered covariance blocks for explicitly requested ordered receiver pairs.
+Pressure/pressure, both pressure/velocity blocks and the complete velocity
+cross tensor retain their physical units. Reversing a receiver pair transposes
+the block; correlations between different receivers can have either sign.
+
+Each proper source factor is integrated coherently across ALL its frequencies
+before its outer product is formed. Thus this result is
+Cov(average(field at receiver A), average(field at receiver B)), rather than
+average of the instantaneous field covariance. A full-period linear pressure
+readout can have negligible variance while the acoustic mean-square pressure
+remains nonzero. Pressure/velocity readout covariance has intensity units but
+is not an energy flux. Deterministic fields contribute to the means only;
+the centered covariance is formed directly from fluctuations without
+subtracting a large squared deterministic mean.
+
+The original source factors, transfers, geometry, medium and common clock are
+retained. There is no additional BEM solve or propagation approximation.
+Each complex integrated factor retains DD components using the shared unit-DC
+real-product contraction for both its real and imaginary parts. Receiver
+covariance then uses the proper zero-frequency contraction with its physical
+one-half normalization. The selected normalized window profile is honored:
+a triangular detector has a sinc-squared linear response and a sinc-to-the-
+fourth single-factor readout variance. Its physical field is weighted once
+before a readout is squared.
+
+These pair covariances support caller-authored real microphone combinations:
+mean = w^T m and variance = w^T C w when all needed pairs are requested.
+Neither detector electronics/noise, calibration, source fidelity, Gaussian
+statistics nor a sampling-bandwidth model is inferred. Original producer
+uncertainty remains unresolved.
+
+Per-query work is O(receivers * retained lines + requested pairs * factors),
+without a quadratic frequency-pair loop. Explicit product and logical
+workspace budgets precede allocation; requested receiver indices and the
+65,536-pair hard cap are admitted first. The existing source/frequency/receiver
+preparation caps still apply. Cancellation or refusal returns no partial
+observation and leaves the immutable prepared owner reusable.
+
+Six authored regressions cover finite-ensemble real-time readout integration
+and all covariance blocks; full-period averaging versus nonzero acoustic
+energy; common-noise differential cancellation beside a large deterministic
+mean; weak grouped factors and clock translation; pairs, budgets, cancellation
+and dark scope; and triangular weighted integration. Native formatting and
+focused Rust type analysis passed for the exact production modules and six
+new tests with the shared 22-test temporal module. This is not a full BEM
+crate build or executed Rust tests. An independent triangular four-phase
+reference agreed with weighted real-time integration to 5.30e-14 maximum
+absolute discrepancy.

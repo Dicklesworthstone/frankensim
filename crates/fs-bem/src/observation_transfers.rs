@@ -33,9 +33,11 @@ mod scattering;
 pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
 mod harmonic;
 pub use harmonic::{
-    HarmonicExposureLimits, HarmonicExposureLine, HarmonicExposureMoments, HarmonicField,
-    HarmonicFieldStatistics, HarmonicWorkBudget, PreparedHarmonicExposure,
-    PreparedHarmonicObservation, PreparedMicrophoneArray, WindowedHarmonicExposure,
+    HarmonicAveragedField, HarmonicExposureLimits, HarmonicExposureLine, HarmonicExposureMoments,
+    HarmonicField, HarmonicFieldStatistics, HarmonicReadoutCovariance, HarmonicReadoutLimits,
+    HarmonicReceiverPair, HarmonicWorkBudget, MAX_READOUT_RECEIVER_PAIRS,
+    PreparedHarmonicExposure, PreparedHarmonicObservation, PreparedMicrophoneArray,
+    WindowedHarmonicExposure, WindowedHarmonicReadout,
 };
 mod radiation;
 pub use radiation::{PreparedRadiationObservation, PreparedRadiationOptions, RadiatedPowerMoments};
