@@ -12,6 +12,9 @@
 /// Source-paired sharp melting and phase-specific isotropic conductivity.
 pub mod melting;
 
+/// Original multiaxis k(T,f) integrated over the P1 enthalpy field.
+pub mod phase;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MatDbError, MaterialAnswer, MaterialCard, PropertyKey, QueryPoint};
 use fs_material::phase::{

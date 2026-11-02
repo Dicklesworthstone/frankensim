@@ -20,7 +20,23 @@ fn scalar(
     nodal: [f64; 4],
     with_derivatives: bool,
 ) -> Result<moments::ScalarMoments, ConductionError> {
-    moments::integrate_table(nodal, table.knots(), with_derivatives, |interval| {
+    let (average, derivatives) = integrate_scalar_path(cx, table.knots(), nodal, with_derivatives)?;
+    Ok(moments::ScalarMoments {
+        average,
+        derivatives,
+    })
+}
+
+/// Integrate a positive piecewise-linear scalar law over a P1 coordinate.
+/// The coordinate may be temperature or specific enthalpy; units and complete
+/// source support are owned by the caller. No temperature table is synthesized.
+pub(crate) fn integrate_scalar_path(
+    cx: Option<&Cx<'_>>,
+    knots: &[(f64, f64)],
+    nodal: [f64; 4],
+    with_derivatives: bool,
+) -> Result<(f64, [f64; 4]), ConductionError> {
+    moments::integrate_table(nodal, knots, with_derivatives, |interval| {
         if let Some(cx) = cx {
             cx.checkpoint().map_err(|_| ConductionError::Cancelled {
                 stage: "integrate-conductivity-knots",
@@ -29,6 +45,7 @@ fn scalar(
         }
         Ok(())
     })
+    .map(|moments| (moments.average, moments.derivatives))
     .map_err(|error| match error {
         moments::MomentError::Interrupted(error) => error,
         moments::MomentError::Numerical(what) => {

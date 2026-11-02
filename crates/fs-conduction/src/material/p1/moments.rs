@@ -1,9 +1,10 @@
 //! Scalar moments of an admitted piecewise-linear law over a P1 tetrahedron.
 //!
-//! For uniform barycentric coordinates, the density of `T = sum(lambda_i T_i)`
-//! is `3 B_2(T) / (max(T_i) - min(T_i))`, where B_2 has the four sorted nodal
-//! temperatures as knots. Weighting by lambda_i duplicates knot T_i: the
-//! weighted density is `B_3(T) / (max(T_i) - min(T_i))`, because multiplying a
+//! The coordinate u may be temperature, specific enthalpy or another admitted
+//! scalar. For uniform barycentric coordinates, the density of
+//! `u = sum(lambda_i u_i)` is `3 B_2(u) / (max(u_i) - min(u_i))`, where B_2 has
+//! the four sorted nodal coordinates as knots. Weighting by lambda_i duplicates
+//! knot u_i: the weighted density is `B_3(u) / (max(u_i) - min(u_i))`, because multiplying a
 //! Dirichlet(1,1,1,1) density by lambda_i gives one quarter of the density with
 //! its i-th parameter raised to two. The duplicate knot is that integer
 //! parameter. For the simplex interpretation and spline normalization, see
@@ -16,7 +17,7 @@
 //! material knot: both integrands have degree at most three. Exact here refers
 //! to the polynomial rule, not a floating-point or spatial error certificate.
 //! No geometric subdivision, heap allocation or ill-conditioned divided
-//! differences are required. Repeated temperatures are ordinary spline knots.
+//! differences are required. Repeated coordinates are ordinary spline knots.
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScalarMoments {
@@ -65,8 +66,8 @@ fn checked<E>(average: f64, derivatives: [f64; 4]) -> Result<ScalarMoments, Mome
 }
 
 // An interior Gauss point is represented by its interval and fractional
-// coordinate. Forming its absolute temperature can round to an endpoint when
-// two nodal temperatures are adjacent floats; this representation cannot.
+// coordinate. Forming its absolute value can round to an endpoint when two
+// nodal coordinates are adjacent floats; this representation cannot.
 fn bspline(knots: &[f64], lo: f64, hi: f64, alpha: f64) -> f64 {
     let mut basis = [0.0; 4];
     for i in 0..knots.len() - 1 {
@@ -95,15 +96,15 @@ fn bspline(knots: &[f64], lo: f64, hi: f64, alpha: f64) -> f64 {
     basis[0]
 }
 
-fn segment(knots: &[(f64, f64)], temperature: f64) -> usize {
+fn segment(knots: &[(f64, f64)], coordinate: f64) -> usize {
     knots
-        .partition_point(|&(t, _)| t <= temperature)
+        .partition_point(|&(x, _)| x <= coordinate)
         .saturating_sub(1)
         .min(knots.len() - 2)
 }
 
 /// Inputs are a validated positive table and four supported finite nodal
-/// temperatures. Cancellation is checked every 128 crossed intervals. A
+/// coordinates. Cancellation is checked every 128 crossed intervals. A
 /// uniform field at a material kink uses the table's right-segment derivative;
 /// this is a semismooth choice, not a unique two-sided classical derivative.
 pub(crate) fn integrate_table<E>(
@@ -133,7 +134,7 @@ pub(crate) fn integrate_table<E>(
     if high <= knots[piece + 1].0 {
         // Constant/uniform/one-segment fast path retains the production mean
         // interpolation arithmetic. Quartering first is only needed if the
-        // sum of four finite, supported temperatures overflows.
+        // sum of four finite, supported coordinates overflows.
         let sum: f64 = nodal.iter().sum();
         let mean = if sum.is_finite() {
             sum / 4.0
@@ -142,7 +143,19 @@ pub(crate) fn integrate_table<E>(
         };
         let (t0, k0) = knots[piece];
         let (t1, k1) = knots[piece + 1];
-        let average = ((mean - t0) / (t1 - t0)).mul_add(k1 - k0, k0);
+        // Preserve exact source endpoints and interpolate from the nearer
+        // end, as in the multi-interval rule below. Starting at k0 can erase
+        // a small positive k1 when a descending source has strong contrast.
+        let fraction = (mean - t0) / (t1 - t0);
+        let average = if mean == t0 {
+            k0
+        } else if mean == t1 {
+            k1
+        } else if fraction <= 0.5 {
+            fraction.mul_add(k1 - k0, k0)
+        } else {
+            (1.0 - fraction).mul_add(k0 - k1, k1)
+        };
         let slope = if with_derivatives {
             (k1 - k0) / (t1 - t0) / 4.0
         } else {
@@ -152,7 +165,7 @@ pub(crate) fn integrate_table<E>(
     }
     let range = high - low;
     if !range.is_finite() || range <= 0.0 {
-        return Err(MomentError::Numerical("invalid P1 temperature range"));
+        return Err(MomentError::Numerical("invalid P1 scalar coordinate range"));
     }
     let mut duplicated = [[0.0; 5]; 4];
     if with_derivatives {

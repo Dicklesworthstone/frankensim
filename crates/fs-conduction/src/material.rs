@@ -35,7 +35,7 @@ use fs_qty::{Dims, QuantitySpec};
 use crate::ConductionError;
 
 mod p1;
-pub(crate) use p1::ElementConductivity;
+pub(crate) use p1::{ElementConductivity, integrate_scalar_path};
 
 /// SI exponents (m, kg, s, K, A, mol) of a thermal conductivity,
 /// W/(m·K) = kg·m·s⁻³·K⁻¹.

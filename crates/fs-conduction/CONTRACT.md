@@ -1,5 +1,46 @@
 # CONTRACT: fs-conduction
 
+## Original source-bound phase conductivity on spatial enthalpy fields
+
+`transient::enthalpy::material::phase::MaterialPhaseTransport` binds an original
+`PreparedPhaseConductivity` to the existing 3D enthalpy FEM owner. The caller
+explicitly declares the scalar source isotropic and supplies a positive fixed
+reference density. The adapter retains the exact prepared source and its
+borrowed caloric chart, including original source paths, selected claims, fixed
+coordinates and enthalpy support.
+
+Each element uses the volume-normalized integral of `k(h_h)` over its P1
+enthalpy field, with consistent nodal derivatives given by the integral of
+`N_j dk/dh`. The shared scalar moment leaf splits at crossed source and nodal
+knots and integrates the retained piecewise-linear law without geometric
+subdivision or reinterpreting enthalpy as temperature. Residual-only evaluation
+skips derivative moments; a Newton stage computes values and derivatives
+together. Exact source endpoints and interpolation from the nearer endpoint
+preserve positive conductivity across large source contrasts.
+
+Temperature remains the native P1 interpolation of nodal chart temperatures.
+Storage remains the original fixed-reference nodal mass times specific-enthalpy
+change; latent heat is not counted again. Existing sparse assembly, nonlinear
+acceptance, endpoint energy accounting, boundary/contact owners, adaptive
+stepping and heat-source/history adjoints remain authoritative. Physical
+element-average heat flux is exposed through the adapter and uses the same
+original conductivity moments; it is not a face-conservative recovery.
+
+The source requires strictly positive conductivity throughout its prepared
+support. Unsupported initial and direct endpoint enthalpies, replacement
+numerical bases, element material overrides and additional phase multipliers
+are refused. A finite Newton trial leaving the source enthalpy interval is a
+dedicated recoverable domain refusal in the existing line search; nonfinite
+values remain fatal. Classical adjoint admission conservatively rejects source
+domain endpoints and a uniform element exactly at a true source slope corner;
+nonuniform elements may cross internal source knots. Existing caloric-chart
+differentiability guards remain active.
+
+This bounded adapter supports one original scalar source and caloric chart
+with an explicit isotropic interpretation. Existing tensor, sharp-melting,
+heterogeneous and declared-multiplier paths remain available through their
+original owners.
+
 ## Enthalpy-dependent spatial enclosure emissivity
 
 `MaterialPointwiseEnclosureRadiation` binds original material/card/claim

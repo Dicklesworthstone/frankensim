@@ -78,7 +78,8 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
                 EnthalpyError::Phase {
                     source: PhaseStateError::OutsideEnthalpyDomain { .. },
                     ..
-                } | EnthalpyError::Conduction(ConductionError::OutsideTemperatureSpan { .. })
+                } | EnthalpyError::SourceEnthalpyOutsideDomain { .. }
+                    | EnthalpyError::Conduction(ConductionError::OutsideTemperatureSpan { .. })
             ) || matches!(
                 &error,
                 EnthalpyError::Conduction(ConductionError::MaterialQuery { property, .. })

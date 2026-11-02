@@ -148,6 +148,18 @@ pub enum EnthalpyError {
         /// Original constitutive refusal.
         source: PhaseStateError,
     },
+    /// A finite nodal enthalpy leaves the original conductivity source support.
+    /// Newton trial proposals may backtrack; initial/direct states are refused.
+    SourceEnthalpyOutsideDomain {
+        /// Vertex whose source cannot resolve this enthalpy.
+        vertex: usize,
+        /// Unsupported specific enthalpy, J/kg.
+        specific_enthalpy_j_kg: f64,
+        /// Lower original source bound, J/kg.
+        lower_j_kg: f64,
+        /// Upper original source bound, J/kg.
+        upper_j_kg: f64,
+    },
     /// Shared Newton configuration or finite-residual admission failed.
     Newton(NewtonError),
     /// Shared Newton/Krylov work or globalization failed to converge.
@@ -201,6 +213,12 @@ impl fmt::Display for EnthalpyError {
             Self::Phase { vertex, source } => {
                 write!(formatter, "enthalpy vertex {vertex}: {source}")
             }
+            Self::SourceEnthalpyOutsideDomain {
+                vertex, specific_enthalpy_j_kg, lower_j_kg, upper_j_kg,
+            } => write!(
+                formatter,
+                "enthalpy vertex {vertex}: {specific_enthalpy_j_kg} J/kg is outside the conductivity source [{lower_j_kg}, {upper_j_kg}] J/kg"
+            ),
             Self::Newton(error) => error.fmt(formatter),
             Self::NotConverged(report) => write!(
                 formatter,
@@ -291,6 +309,8 @@ pub struct EnthalpyBackwardEuler<'m, 'c> {
     // A source-bound melting adapter supplies nodal k(h), using the existing
     // element-scale assembly with its retained unit tensor as numerical basis.
     sourced_melting: Option<&'c material::melting::MaterialMeltingTransport>,
+    // Original multiaxis source integrated over P1 h, with no inferred phase mix.
+    sourced_phase: Option<&'c material::phase::MaterialPhaseTransport<'c>>,
 }
 
 #[derive(Debug)]
@@ -455,6 +475,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             masses,
             phase_conductivity: None,
             sourced_melting: None,
+            sourced_phase: None,
         })
     }
 
@@ -473,9 +494,9 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         element_laws: Vec<LiquidMassFractionConductivity>,
     ) -> Result<Self, EnthalpyError> {
         poll(cx, 0)?;
-        if self.sourced_melting.is_some() {
+        if self.sourced_melting.is_some() || self.sourced_phase.is_some() {
             return Err(EnthalpyError::InvalidInput(
-                "source-bound melting already owns the complete conductivity law",
+                "source-bound phase transport already owns the complete conductivity law",
             ));
         }
         if element_laws.len() != self.mesh.element_count() {
@@ -762,6 +783,14 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                 ));
             }
         }
+        if let Some(source) = self.sourced_phase {
+            if !source.matches_numerical_basis(problem) {
+                return Err(EnthalpyError::InvalidInput(
+                    "phase source requires its original problem tensor and no element override",
+                ));
+            }
+            source.admit_enthalpies(cx, old_specific_h)?;
+        }
         validate_work(self.masses.len(), dt_s, config)?;
         for condition in problem.boundary.conditions() {
             condition.validate(self.masses.len())?;
@@ -929,6 +958,10 @@ impl StepContext<'_, '_, '_, '_> {
     }
 
     fn phase_scales(&self, h: &[f64]) -> Result<Option<Vec<f64>>, EnthalpyError> {
+        if let Some(source) = self.storage.sourced_phase {
+            return source.assemble(self.cx, self.storage.mesh, h, false)
+                .map(|(values, _)| Some(values));
+        }
         if let Some(source) = self.storage.sourced_melting {
             let mut nodal = Vec::with_capacity(h.len());
             for (vertex, &value) in h.iter().enumerate() {
@@ -1074,7 +1107,14 @@ impl StepContext<'_, '_, '_, '_> {
         let temperature = self.temperatures(h)?;
         let radiation = self.pointwise_radiation
             .map(|radiation| radiation.assemble(self.cx, &temperature, h)).transpose()?;
-        let phase_scales = self.phase_scales(h)?;
+        // The exact source moment pass returns values and derivatives together;
+        // do not walk crossed source knots twice during a Newton linearization.
+        let (phase_scales, phase_derivatives) = if let Some(source) = self.storage.sourced_phase {
+            let (values, derivatives) = source.assemble(self.cx, self.storage.mesh, h, true)?;
+            (Some(values), derivatives)
+        } else {
+            (self.phase_scales(h)?, self.phase_scale_derivatives(h)?)
+        };
         let picard = self.assemble(&temperature, phase_scales.as_deref())?;
         let mut slope = Vec::with_capacity(h.len());
         let mut inverse = Vec::with_capacity(h.len());
@@ -1105,7 +1145,6 @@ impl StepContext<'_, '_, '_, '_> {
             slope.push(derivative);
             inverse.push(finite(1.0 / diagonal)?);
         }
-        let phase_derivatives = self.phase_scale_derivatives(h)?;
         let tangent = assemble_enthalpy_jacobian_with_optional_interfaces(
             self.cx,
             self.storage.mesh,
@@ -1308,7 +1347,8 @@ impl NonlinearProblem for NewtonStage<'_, '_, '_, '_, '_> {
                     EnthalpyError::Phase {
                         source: PhaseStateError::OutsideEnthalpyDomain { .. },
                         ..
-                    } | EnthalpyError::Conduction(ConductionError::OutsideTemperatureSpan { .. })
+                    } | EnthalpyError::SourceEnthalpyOutsideDomain { .. }
+                        | EnthalpyError::Conduction(ConductionError::OutsideTemperatureSpan { .. })
                 ) || matches!(
                     &error,
                     EnthalpyError::Conduction(ConductionError::MaterialQuery { property, .. })
