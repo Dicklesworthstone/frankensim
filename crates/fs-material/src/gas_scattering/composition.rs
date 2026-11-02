@@ -18,6 +18,8 @@ pub mod dispersion;
 pub use dispersion::{
     MolecularCauchyDispersion, MolecularRefractionCoefficient, MolecularRefractionWavelength,
 };
+pub mod scattering;
+pub use scattering::CompositionRayleighScattering;
 
 /// Units of every partial density and its spatial derivatives in one field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

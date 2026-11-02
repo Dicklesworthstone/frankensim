@@ -7155,14 +7155,33 @@ fits preserve constant-law results. Extrapolation and unrepresentable values
 refuse. Three material regressions cover reference anchoring, frozen constant
 bits, density-basis equivalence, independent spectral differentiation and
 source/order/domain boundaries. This declared normal-dispersion fit adds no gas
-presets, measured accuracy, anomalous/resonant dispersion, dense-gas correction,
-absorption or changed molecular-scattering law.
+presets, measured accuracy, anomalous/resonant dispersion, dense-gas correction
+or absorption.
 
-Preparation is bounded by the original 128-component gas limit; spectral and
-phase evaluation are allocation-free constant work. The exact lambda^-4 law
-assumes constant molecular polarizability on 380–780 nm. This scattering law
-adds no dispersion, resonance, Raman shift, dense-gas correction, Stokes transport, absorption or
-thermal-emission claim is made. The original gas owner still owns phase and
+`MolecularRefractionWavelength::scattering` derives elastic molecular scattering
+from the same source-bound molecular volumes prepared for phase/group refraction.
+Original component order, density basis, molar masses, source support and full
+dilute/representability admission remain binding. Independent King-corrected
+species cross sections add as `beta_s = sum_i N_i sigma_i`; the coherent mixture
+polarizability is never squared to obtain scattering. The result retains physical
+mass density and the scattering-weighted depolarization matching the molecular
+angular law. Relative species dispersion therefore changes the effective phase
+with wavelength. Evaluation uses bounded stack storage and preserves original
+molecular arithmetic for absent or zero-shape dispersion. Nonnegative componentwise
+density bounds conservatively bound the collision rate at each prepared wavelength.
+Vacuum has zero rate/depolarization; optically inert components still contribute
+mass. Positive underflow refuses. Four G1/G2 regressions cover an independent
+electric-dipole/phase-mixture oracle, density-basis and original-law parity,
+vacuum/inert mass/refusals and componentwise majorants. Species anisotropy
+dispersion, correlated scattering, absorption and emission remain outside scope.
+
+Preparation is bounded by the original 128-component gas limit. The original
+`MolecularRayleighMixture`/`RayleighGasState` spectral and phase queries retain
+allocation-free constant work and their exact lambda^-4 law under constant
+molecular polarizability on 380–780 nm. The composition-prepared extension above
+uses bounded linear work for explicit dispersive sources. Neither law adds
+resonance, Raman shift, dense-gas correction, Stokes transport, absorption or
+thermal emission. The original gas owner still owns phase and
 thermodynamic validity. Source hashes retain caller input identity, not
 measurement authority. `bind_gas_state` checks complete numerical coherence;
 the caller must retain composition identity because a bare `GasState` has none.

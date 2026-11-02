@@ -138,9 +138,12 @@ impl MolecularRefractionCoefficient {
 }
 
 /// Reusable stack-owned spectral preparation; no per-evaluation allocation.
-/// Scalar phase/group, gradients and Hessians consume these same coefficients.
+/// Scalar phase/group, gradients, Hessians and molecular scattering consume
+/// the same spectral preparation. Scattering retains the original molecular
+/// volumes before mass conversion, avoiding a lossy round trip through `K_i`.
 pub struct MolecularRefractionWavelength<'a> {
-    model: &'a MolecularRefractionModel,
+    pub(super) model: &'a MolecularRefractionModel,
+    pub(super) molecular_volumes_m3: [f64; MAX_GAS_MIXTURE_COMPONENTS],
     coefficients: [MolecularRefractionCoefficient; MAX_GAS_MIXTURE_COMPONENTS],
     wavelength_nm: f64,
     basis: PartialDensityBasis,
@@ -195,7 +198,8 @@ impl MolecularRefractionModel {
         let inverse_square = 1.0 / (lambda * lambda);
         let inverse_fourth = inverse_square * inverse_square;
         let mut coefficients = [MolecularRefractionCoefficient::ZERO; MAX_GAS_MIXTURE_COMPONENTS];
-        for (out, component) in coefficients.iter_mut().zip(&self.components) {
+        let mut molecular_volumes_m3 = [0.0; MAX_GAS_MIXTURE_COMPONENTS];
+        for (i, (out, component)) in coefficients.iter_mut().zip(&self.components).enumerate() {
             let Some(shape) = component
                 .dispersion
                 .filter(|s| s.b_um2 != 0.0 || s.c_um4 != 0.0)
@@ -204,9 +208,11 @@ impl MolecularRefractionModel {
                     coefficient: component.coefficient(basis),
                     log_wavelength_derivative: 0.0,
                 };
+                molecular_volumes_m3[i] = component.number_coefficient;
                 continue;
             };
             let volume = shape.volume(inverse_square, inverse_fourth)?;
+            molecular_volumes_m3[i] = volume.coefficient;
             *out = match basis {
                 PartialDensityBasis::MoleculesPerM3 => volume,
                 PartialDensityBasis::MassKgPerM3 => MolecularRefractionCoefficient {
@@ -227,6 +233,7 @@ impl MolecularRefractionModel {
         }
         Ok(MolecularRefractionWavelength {
             model: self,
+            molecular_volumes_m3,
             coefficients,
             wavelength_nm,
             basis,
