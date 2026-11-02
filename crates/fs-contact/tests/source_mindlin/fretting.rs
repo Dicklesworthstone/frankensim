@@ -5,6 +5,9 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::state_point::{ResolvedMaterialStatePoint, resolve_material_state_point};
 use fs_tribo::WearState;
 
+#[path = "fretting/loading.rs"]
+mod loading;
+
 const COEFFICIENTS: [f64; 2] = [2e-6, 7e-6];
 const HARDNESS: [f64; 2] = [1e9, 4e8];
 fn coefficient_keys() -> [PropertyKey; 2] {

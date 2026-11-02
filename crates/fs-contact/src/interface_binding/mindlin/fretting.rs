@@ -18,6 +18,10 @@ use fs_qty::semantic::{QuantityKind, ValueForm};
 use fs_tribo::mindlin::surface::sliding::{MindlinSurfaceAdvance, MindlinSurfaceSliding};
 use fs_tribo::{ArchardLaw, WearAdvance, WearState};
 
+/// Simultaneous changing normal load, shear history and original surface wear.
+#[path = "fretting/loading.rs"]
+pub mod loading;
+
 /// A single admitted source step, retaining its exact native sliding path.
 /// The borrowed original state prevents an observation from silently spanning
 /// several reversals; consume this receipt to obtain the source-bound candidate.
@@ -71,6 +75,7 @@ impl SourceMindlinSurfaceAdvance<'_> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SourceFrettingError {
     Source(SourceMindlinError),
+    Path(super::loading::path::SourceMindlinPathError),
     Cancelled,
 }
 impl From<SourceMindlinError> for SourceFrettingError {
@@ -81,6 +86,17 @@ impl From<SourceMindlinError> for SourceFrettingError {
 impl From<TriboError> for SourceFrettingError {
     fn from(error: TriboError) -> Self {
         Self::Source(SourceMindlinError::Tribo(error))
+    }
+}
+impl From<super::loading::path::SourceMindlinPathError> for SourceFrettingError {
+    fn from(error: super::loading::path::SourceMindlinPathError) -> Self {
+        use super::loading::path::SourceMindlinPathError;
+        use fs_tribo::mindlin::loading::path::MindlinPathError;
+        match error {
+            SourceMindlinPathError::Source(error) => Self::Source(error),
+            SourceMindlinPathError::Path(MindlinPathError::Cancelled) => Self::Cancelled,
+            error => Self::Path(error),
+        }
     }
 }
 impl fmt::Display for SourceFrettingError {
@@ -289,28 +305,8 @@ impl SourceMindlinWear {
             .contact
             .advance_with_surface_sliding(&state.contact, input)?;
         let measure = phase.pressure_weighted_sliding_j();
-        let interface = self
-            .contact
-            .normal
-            .model()
-            .normal_state()
-            .elastic()
-            .interface()
-            .interface();
-        let mut volumes = state.volumes;
         poll(cancelled)?;
-        let first = self.laws[0].advance_pressure_weighted_sliding(
-            interface,
-            &mut volumes[0],
-            measure,
-            self.hardness_pa[0],
-        )?;
-        let second = self.laws[1].advance_pressure_weighted_sliding(
-            interface,
-            &mut volumes[1],
-            measure,
-            self.hardness_pa[1],
-        )?;
+        let (volumes, wear) = self.advance_volumes(state.volumes, measure)?;
         let candidate = phase.into_tangential_step();
         poll(cancelled)?;
         Ok(SourceMindlinWearAdvance {
@@ -329,9 +325,40 @@ impl SourceMindlinWear {
                 compatibility_residual_m: candidate.compatibility_residual_m,
                 iterations: candidate.iterations,
             },
-            wear: [first, second],
+            wear,
             pressure_weighted_sliding_j: measure,
         })
+    }
+
+    // Both fixed and changing-load owners pass an admitted physical sliding
+    // integral. This common leaf keeps source roles and cumulative arithmetic
+    // identical, without performing a second constitutive solve or material query.
+    fn advance_volumes(
+        &self,
+        mut volumes: [WearState; 2],
+        measure: f64,
+    ) -> Result<([WearState; 2], [WearAdvance; 2]), SourceFrettingError> {
+        let interface = self
+            .contact
+            .normal
+            .model()
+            .normal_state()
+            .elastic()
+            .interface()
+            .interface();
+        let first = self.laws[0].advance_pressure_weighted_sliding(
+            interface,
+            &mut volumes[0],
+            measure,
+            self.hardness_pa[0],
+        )?;
+        let second = self.laws[1].advance_pressure_weighted_sliding(
+            interface,
+            &mut volumes[1],
+            measure,
+            self.hardness_pa[1],
+        )?;
+        Ok((volumes, [first, second]))
     }
 }
 

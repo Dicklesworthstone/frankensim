@@ -1,4 +1,7 @@
 //! G1/G3/G4: original source admission reaches simultaneous body-coupled shear.
+
+#[path = "path/sliding.rs"]
+mod sliding;
 use super::*;
 use fs_contact::interface_binding::mindlin::loading::path::{
     SourceMindlinPathError, SourceMindlinPathInput,

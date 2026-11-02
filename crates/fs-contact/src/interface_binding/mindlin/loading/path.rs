@@ -6,10 +6,14 @@
 //! normal-force override. Temperature and all admitted source conditions remain
 //! those of the immutable isothermal contact.
 
+/// Pressure-weighted irreversible sliding on this same original admitted path.
+#[path = "path/sliding.rs"]
+pub mod sliding;
+
 use super::{SourceHertzMindlinContact, SourceHertzMindlinState, invalid, match_original};
 use crate::interface_binding::mindlin::SourceMindlinError;
 use crate::normal_patch::PointNormalPatchReceipt;
-use fs_tribo::mindlin::loading::path::MindlinPathError;
+use fs_tribo::mindlin::loading::path::{MindlinPathError, MindlinPathStep};
 use fs_tribo::{TangentialSolveConfig, TangentialStep, TangentialStepInput};
 
 /// One affine indentation path and released scalar tangential body increment.
@@ -86,6 +90,20 @@ impl SourceHertzMindlinContact {
         input: &SourceMindlinPathInput,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SourceMindlinPathStep, SourceMindlinPathError> {
+        let (response, native_input) = self.admit_coupled_path(state, input, cancelled)?;
+        let path = self
+            .law
+            .advance_coupled_path(&state.constitutive, &native_input, cancelled)?;
+        self.bind_coupled_path(state, input, response, path, cancelled)
+    }
+
+    // Shared source admission and native inputs; neither entry repeats a solve.
+    fn admit_coupled_path(
+        &self,
+        state: &SourceHertzMindlinState,
+        input: &SourceMindlinPathInput,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(PointNormalPatchReceipt, TangentialStepInput), SourceMindlinPathError> {
         if cancelled() {
             return Err(MindlinPathError::Cancelled.into());
         }
@@ -110,19 +128,26 @@ impl SourceHertzMindlinContact {
                 input.dt_s,
             )
             .map_err(SourceMindlinError::from)?;
-        let path = self.law.advance_coupled_path(
-            &state.constitutive,
-            &TangentialStepInput {
-                normal_n: response.normal_force_n,
-                slip_increment_m: [input.free_slip_increment_m, 0.0],
-                dt_s: input.dt_s,
-                contact_temperature_k: Some(self.temperature_kelvin()),
-                nominal_pressure_pa: None,
-                compliance_m_per_n: input.compliance_m_per_n,
-                solve: input.solve,
-            },
-            cancelled,
-        )?;
+        let native_input = TangentialStepInput {
+            normal_n: response.normal_force_n,
+            slip_increment_m: [input.free_slip_increment_m, 0.0],
+            dt_s: input.dt_s,
+            contact_temperature_k: Some(self.temperature_kelvin()),
+            nominal_pressure_pa: None,
+            compliance_m_per_n: input.compliance_m_per_n,
+            solve: input.solve,
+        };
+        Ok((response, native_input))
+    }
+
+    fn bind_coupled_path(
+        &self,
+        state: &SourceHertzMindlinState,
+        input: &SourceMindlinPathInput,
+        response: PointNormalPatchReceipt,
+        path: MindlinPathStep,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SourceMindlinPathStep, SourceMindlinPathError> {
         match_original(&path.tangential.state, &response)?;
         if cancelled() {
             return Err(MindlinPathError::Cancelled.into());

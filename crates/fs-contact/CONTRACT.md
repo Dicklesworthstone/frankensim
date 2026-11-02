@@ -1831,3 +1831,37 @@ the established gross-sliding and explicit frictionless Archard limits with
 unequal A/B k/H, actual compliant unloading from zero offered displacement, and
 original-source/role/query refusal plus second-surface overflow and late
 cancellation without partial state. All 26 source Mindlin integration tests pass.
+
+## Original-source fretting during changing normal load
+
+`SourceHertzMindlinContact::advance_coupled_path_with_sliding` shares original
+source admission and final binding with `advance_coupled_path`. The native
+normal/shear history is solved once; the opaque receipt preserves that exact
+candidate and its integrated pressure-weighted irreversible sliding. Positive
+constant mu uses original native dissipation divided by mu. At zero mu the
+original normal source supplies its exact nonlinear Hertz mean force, multiplied
+by actual solved shear travel. Endpoint-load arithmetic cannot replace this
+integral during first contact, unloading or separation. Source identity, normal
+rate/duration/pressure limits, authority and uncertainty remain with the original
+owner, and normal potential work stays distinct from shear heat.
+
+`mindlin::fretting::loading::SourceHertzMindlinWear` admits an existing original
+`SourceMindlinWear` material binding for simultaneous Hertz loading and scalar
+shear. It retains both ordered k/H claims, queries and selected property contexts.
+Temperature and coefficients remain fixed; changing-load admission refuses
+pressure-, footprint- or rate-dependent material queries. The shared native
+Archard leaf applies `delta_V_i=k_i*I/H_i` to both cumulative inventories without
+a second constitutive solve, source refresh or local pressure mesh. Contact
+history, normal work, shear storage/heat and both wear results return together.
+
+Unloading can increase wear at zero imposed tangential travel, and lift-off may
+finish a finite wear increment despite zero final load. Fully open motion adds
+no wear; recontact begins without abandoned shear memory and retains the declared
+wear inventories. These are small-removal volume diagnostics within the scalar,
+isothermal Hertz--Mindlin approximation, without wear-induced geometry, mass or
+debris transport, coefficient evolution, or an invented extra energy sink.
+
+Eight new G1/G3/G4 source groups verify exact native-path preservation, original
+nonlinear pressure means, fixed-load reduction, compliant recoil, unload/lift-off
+fretting, two independent A/B inventories, source/rate refusal, second-surface
+overflow and last-poll cancellation with complete rollback and identical retry.
