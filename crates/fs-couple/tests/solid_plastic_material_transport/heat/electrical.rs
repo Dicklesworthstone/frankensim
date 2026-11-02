@@ -3,6 +3,8 @@
 mod dynamics;
 #[path = "electrical/geometry.rs"]
 mod geometry;
+#[path = "electrical/spatial.rs"]
+mod spatial;
 use super::*;
 use fs_couple::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpySolve, ResistorCell};
 use fs_couple::circuit_enthalpy::material::CellResistor;

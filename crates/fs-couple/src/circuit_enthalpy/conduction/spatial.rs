@@ -293,6 +293,41 @@ impl SpatialConductionThermalNetwork<'_> {
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
+        self.step_resolved_candidate_with_geometry(
+            thermal, target_s, problem, boundary, contact_bindings, assembly,
+            field_controls, controls, initial_energy_increments_j, resolve, sample,
+            None, |_| Ok(None), cancel,
+        )
+    }
+
+    // A native mechanical owner may supply current positions while caloric
+    // inventory remains on its original reference volumes. Source resolution,
+    // actual field work, heat routes and the one enthalpy residual stay here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_resolved_candidate_with_geometry<
+        't,
+        C: SpatialConductorMaterial,
+        S,
+        E: From<ConductionThermalError>,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &SpatialConduction<C>,
+        boundary: &SpatialConductionBoundary,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'t>,
+        ) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        reference_volumes_m3: Option<&[f64]>,
+        trial_positions: impl Fn(&S) -> Result<Option<Vec<[f64; 3]>>, CircuitEnthalpyError<E>>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
         check(cancel).map_err(map_conduction_error)?;
         let dt = self
             .admit_step(
@@ -304,6 +339,13 @@ impl SpatialConductionThermalNetwork<'_> {
                 initial_energy_increments_j,
             )
             .map_err(map_conduction_error)?;
+        if reference_volumes_m3.is_some()
+            && (!problem.contacts().is_empty() || !contact_bindings.is_empty())
+        {
+            return Err(map_conduction_error(invalid(
+                "deforming current geometry requires its own moving electrical-interface owner",
+            )));
+        }
         if contact_bindings.len() != problem.contacts().len() {
             return Err(map_conduction_error(invalid(
                 "every tetrahedral electrical contact needs explicit source and heat ownership",
@@ -326,7 +368,17 @@ impl SpatialConductionThermalNetwork<'_> {
             regions: &regions,
             volume_tolerance_m3: self.volume_tolerance_m3,
         };
-        let volumes = (0..problem.mesh().tets.len())
+        let volumes = if let Some(volumes) = reference_volumes_m3 {
+            if volumes.len() != problem.mesh().tets.len()
+                || volumes.iter().any(|v| !v.is_finite() || *v <= 0.0)
+            {
+                return Err(map_conduction_error(invalid(
+                    "deforming current requires every original positive reference volume",
+                )));
+            }
+            volumes.to_vec()
+        } else {
+            (0..problem.mesh().tets.len())
             .map(|cell| {
                 check(cancel)?;
                 problem
@@ -334,7 +386,8 @@ impl SpatialConductionThermalNetwork<'_> {
                     .ok_or_else(|| invalid("original tetrahedral volume is missing"))
             })
             .collect::<Result<Vec<_>, Error>>()
-            .map_err(map_conduction_error)?;
+            .map_err(map_conduction_error)?
+        };
         let routes = route_owner
             .admit_volume_routes(thermal, &volumes, cancel)
             .map_err(map_conduction_error)?;
@@ -423,15 +476,27 @@ impl SpatialConductionThermalNetwork<'_> {
                         source,
                     })
                     .collect();
-                let next = problem
-                    .with_conductors_and_contacts(
-                        refresh(sample(&coefficients.source)).map_err(map_conduction_error)?,
-                        refreshed_contacts,
-                        assembly,
+                let conductors = refresh(sample(&coefficients.source))
+                    .map_err(map_conduction_error)?;
+                let positions = trial_positions(&coefficients.source)?;
+                if positions.is_some() != reference_volumes_m3.is_some() {
+                    return Err(map_conduction_error(invalid(
+                        "current geometry and original caloric reference must have one owner",
+                    )));
+                }
+                let next = if let Some(positions) = positions {
+                    SpatialConduction::new(
+                        positions, problem.mesh().tets.clone(), conductors, assembly,
                         &mut || (*cancel.borrow_mut())(),
                     )
-                    .map_err(field_error)
-                    .map_err(map_conduction_error)?;
+                } else {
+                    problem.with_conductors_and_contacts(
+                        conductors, refreshed_contacts, assembly,
+                        &mut || (*cancel.borrow_mut())(),
+                    )
+                }
+                .map_err(field_error)
+                .map_err(map_conduction_error)?;
                 let field = next
                     .solve(boundary, field_controls, &mut || (*cancel.borrow_mut())())
                     .map_err(field_error)

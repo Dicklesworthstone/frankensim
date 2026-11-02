@@ -4,6 +4,8 @@
 //! hardening storage and backward-Euler loss retain their original accounts.
 /// Affine deformation of explicitly bound bulk current paths.
 pub mod geometry;
+/// Full tetrahedral current on the actual native solid configuration.
+pub mod spatial;
 use super::*;
 use super::contact::{ContactError, ContactSample, ThermalSupportContact};
 use std::cell::Cell;
@@ -110,11 +112,19 @@ pub enum ElectricalSolidSourceError<E = HeatNetworkError> {
     Heat(E),
     ElectricalSupport(fs_material::state_point::MaterialStatePointError),
     Circuit(crate::material_circuit::MaterialCircuitError),
+    Spatial(crate::circuit_enthalpy::conduction::ConductionThermalError),
     Mechanical(ThermoplasticError),
     Support(ContactError<Infallible>),
     Thermal(DepositionError),
     Invalid(&'static str),
     MechanicalBudget,
+}
+impl<E> From<crate::circuit_enthalpy::conduction::ConductionThermalError>
+    for ElectricalSolidSourceError<E>
+{
+    fn from(error: crate::circuit_enthalpy::conduction::ConductionThermalError) -> Self {
+        Self::Spatial(error)
+    }
 }
 impl<E> From<DepositionError> for ElectricalSolidSourceError<E> {
     fn from(error: DepositionError) -> Self { Self::Thermal(error) }
@@ -144,10 +154,13 @@ impl<E: core::fmt::Debug> core::fmt::Display for ElectricalSolidError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for ElectricalSolidError<E> {}
 
 /// Original source/electrical/thermal reports and independent closed-system work.
-pub struct ElectricalSolidReport<S = HeatNetworkSample> {
+pub struct ElectricalSolidReport<
+    S = HeatNetworkSample,
+    D = crate::material_circuit::MaterialCircuitStep,
+> {
     /// This subsystem report treats mechanical heat and radiative net roundoff
     /// as callback supply. The CLOSED account below removes those internal terms.
-    pub circuit_thermal: CircuitEnthalpyReport<ContactThermalSample<S>>,
+    pub circuit_thermal: CircuitEnthalpyReport<ContactThermalSample<S>, D>,
     /// Solved-pressure thermal interfaces, including their original bulk
     /// conductance and actual series heat. Not added again as source power.
     pub support_contacts: Vec<ContactSample>,
@@ -544,22 +557,8 @@ impl<'m> ThermoplasticSolid<'m> {
                 let radiation_net_j = number(dt * coefficients.source.as_ref().radiation_net_power_w())?;
                 let external_heat_j = number(number(dt * endpoint.external_step_power_w(
                     &coefficients.sources_w, &coefficients.conductances_w_k, checkpoint)?)? - radiation_net_j)?;
-                let mut applied_heat_j = 0.0;
-                for (bound, heat) in self.cells.iter().zip(&mechanical.heat_j) {
-                    checkpoint()?;
-                    let watts = number(*heat / dt)?;
-                    let previous = coefficients.sources_w.get(&bound.accepted.id).copied().unwrap_or(0.0);
-                    let combined = number(previous + watts)?;
-                    if *heat != 0.0 && (watts == 0.0 || combined == previous) {
-                        return Err(ElectricalSolidSourceError::Invalid("mechanical heat disappeared from its receiving cell"));
-                    }
-                    if watts != 0.0 { coefficients.sources_w.insert(bound.accepted.id, combined); }
-                    applied_heat_j = number(applied_heat_j + number(dt * watts)?)?;
-                }
-                let heat_error = number(applied_heat_j - mechanical.physical_heat_j - mechanical.reversible_heat_j)?;
-                if heat_error.abs() > tolerance {
-                    return Err(ElectricalSolidSourceError::Invalid("native caloric heat and deposited mechanical heat disagree"));
-                }
+                let applied_heat_j = self.deposit_mechanical_heat(
+                    &mechanical, &mut coefficients.sources_w, dt, tolerance, cx)?;
                 checkpoint()?;
                 Ok(ContactThermalCoefficients { contacts, bulk: CircuitThermalCoefficients {
                     resistors: coefficients.resistors, sources_w: coefficients.sources_w,
@@ -629,21 +628,8 @@ impl<'m> ThermoplasticSolid<'m> {
         &self, thermal: &DepositionSimulation<'_>, sample: &HeatNetworkSample,
         resistors: &[MaterialResistor], routes: &BTreeMap<usize, CellId>, cx: &Cx<'_>,
     ) -> Result<(), ElectricalSolidSourceError<E>> {
-        let admit = |id: CellId, state: &ResolvedMaterialStatePoint| -> Result<(), ElectricalSolidSourceError<E>> {
-            let Some(bound) = self.cells.iter().find(|b| b.accepted.id == id) else { return Ok(()); };
-            let material = bound.source.thermal_material_point().material;
-            let h = thermal.cells()[&id].specific_h_j_kg;
-            for property in state.properties() {
-                poll::<Infallible>(cx).map_err(ElectricalSolidSourceError::Mechanical)?;
-                let selected = property.answer().receipt.selected;
-                let claim = material.claims().claim(selected)
-                    .ok_or(ElectricalSolidSourceError::Invalid("transport claim is not part of this structural material"))?;
-                bound.source.pin_thermal_transport(h, &claim.key,
-                    MaterialPropertySelection::PinnedByProperty(vec![(claim.key.name().to_owned(), selected)]))
-                    .map_err(|error| ElectricalSolidSourceError::Mechanical(ThermoplasticError::Material(error)))?;
-            }
-            Ok(())
-        };
+        let admit = |id: CellId, state: &ResolvedMaterialStatePoint|
+            self.admit_transport_state::<E>(thermal, id, state, cx);
         for cell in &sample.material.cells {
             if let Some(state) = &cell.conductivity { admit(cell.cell, state)?; }
         }
@@ -656,5 +642,55 @@ impl<'m> ThermoplasticSolid<'m> {
             admit(cell, resistor.conductor.material())?;
         }
         Ok(())
+    }
+
+
+    // All powered native solid consumers retain the same pinned transport
+    // source admission; none may freeze a changing mechanical coordinate.
+    fn admit_transport_state<E>(
+        &self, thermal: &DepositionSimulation<'_>, id: CellId,
+        state: &ResolvedMaterialStatePoint, cx: &Cx<'_>,
+    ) -> Result<(), ElectricalSolidSourceError<E>> {
+        let Some(bound) = self.cells.iter().find(|b| b.accepted.id == id) else { return Ok(()); };
+        let material = bound.source.thermal_material_point().material;
+        let h = thermal.cells()[&id].specific_h_j_kg;
+        for property in state.properties() {
+            poll::<Infallible>(cx).map_err(ElectricalSolidSourceError::Mechanical)?;
+            let selected = property.answer().receipt.selected;
+            let claim = material.claims().claim(selected)
+                .ok_or(ElectricalSolidSourceError::Invalid("transport claim is not part of this structural material"))?;
+            bound.source.pin_thermal_transport(h, &claim.key,
+                MaterialPropertySelection::PinnedByProperty(vec![(claim.key.name().to_owned(), selected)]))
+                .map_err(|error| ElectricalSolidSourceError::Mechanical(ThermoplasticError::Material(error)))?;
+        }
+        Ok(())
+    }
+
+    // Deposit the original physical and reversible mechanical heat only.
+    // Field/graph Joule heat stays with its native electrical driver.
+    fn deposit_mechanical_heat<E>(
+        &self, mechanical: &MechanicalProposal, sources_w: &mut BTreeMap<CellId, f64>,
+        dt: f64, tolerance: f64, cx: &Cx<'_>,
+    ) -> Result<f64, ElectricalSolidSourceError<E>> {
+        let mut applied_heat_j = 0.0;
+        for (bound, heat) in self.cells.iter().zip(&mechanical.heat_j) {
+            cx.checkpoint().map_err(|_| DepositionError::Cancelled)?;
+            let watts = number(*heat / dt)?;
+            let previous = sources_w.get(&bound.accepted.id).copied().unwrap_or(0.0);
+            let combined = number(previous + watts)?;
+            if *heat != 0.0 && (watts == 0.0 || combined == previous) {
+                return Err(ElectricalSolidSourceError::Invalid(
+                    "mechanical heat disappeared from its receiving cell"));
+            }
+            if watts != 0.0 { sources_w.insert(bound.accepted.id, combined); }
+            applied_heat_j = number(applied_heat_j + number(dt * watts)?)?;
+        }
+        let defect = number(applied_heat_j
+            - mechanical.physical_heat_j - mechanical.reversible_heat_j)?;
+        if defect.abs() > tolerance {
+            return Err(ElectricalSolidSourceError::Invalid(
+                "native caloric heat and deposited mechanical heat disagree"));
+        }
+        Ok(applied_heat_j)
     }
 }
