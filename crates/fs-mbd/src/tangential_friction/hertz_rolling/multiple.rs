@@ -6,6 +6,8 @@
 //! participating body receives one summed impulse. Each original rolling
 //! history is advanced once, from its captured accepted state and the actual
 //! shared-body endpoint. Surface and sphere bulk heat remain separate.
+//! Held external COM forces/body torques enter the same coupled solve. Each
+//! body's external resultant and physical work occur once across all patches.
 //!
 //! This retains the parent's normal/shear decoupling approximation. Independent
 //! normal patch fields and their non-overlapping physical ownership are supplied
@@ -25,7 +27,7 @@ use crate::tangential_friction::rolling::RigidRollingHistory;
 use crate::tangential_friction::{
     RigidContactBinding, RigidFrictionError, components, magnitude, poll, totals,
 };
-use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
+use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_exec::CancelGate;
 use fs_tribo::TriboError;
 use fs_tribo::partial_slip::TangentFrame;
@@ -37,6 +39,10 @@ use fs_tribo::sliding_patch::contact::multiple::rolling::{
 };
 use fs_tribo::sliding_patch::contact::{HertzWrenchContact, HertzWrenchMode, HertzWrenchStep};
 use fs_tribo::sliding_patch::{HertzSlidingPatch, HertzSlidingPatchParameters};
+
+#[path = "multiple/driven.rs"]
+mod driven;
+use driven::HeldIslandDrive;
 
 /// A uniquely identified original patch and its accepted rolling checkpoint.
 #[derive(Clone, Copy, Debug)]
@@ -135,6 +141,7 @@ pub struct RigidHertzRollingIslandContactReport {
     pub rolling_excitation_frequency_hz: f64,
     pub scaled_rates_before_m_s: [f64; 5],
     pub scaled_rates_after_m_s: [f64; 5],
+    pub scaled_driving_acceleration_m_s2: [f64; 5],
     pub actual_midpoint_coordinates_m: [f64; 5],
     pub normal_velocity_before_m_s: f64,
     pub normal_velocity_after_m_s: f64,
@@ -168,11 +175,17 @@ pub struct RigidHertzRollingIslandReport {
     pub kinetic_after_j: f64,
     pub surface_heat_j: f64,
     pub bulk_heat_j: f64,
+    /// Contact work only; each body's external wrench has its own work port.
     pub midpoint_impulse_work_j: f64,
+    pub external_work_j: f64,
     pub work_energy_residual_j: f64,
     pub total_energy_residual_j: f64,
     pub linear_momentum_change_ns: Vec3,
     pub angular_momentum_change_nms: Vec3,
+    pub external_linear_impulse_ns: Vec3,
+    pub external_angular_impulse_nms: Vec3,
+    pub linear_momentum_residual_ns: Vec3,
+    pub angular_momentum_residual_nms: Vec3,
 }
 
 /// Complete immutable proposal. No body or history is accepted separately.
@@ -193,6 +206,7 @@ struct PatchMechanics<'a> {
     axes: [Vec3; 3],
     before: [PointKinematics; 2],
     rates_before: [f64; 5],
+    driving_acceleration: [f64; 5],
 }
 
 /// Reusable held geometry, full inertia, original histories and rolling factor.
@@ -208,6 +222,7 @@ pub struct PreparedRigidHertzRollingIsland<'a> {
     controls: RigidHertzRollingIslandControls,
     mobility: Vec<f64>,
     native: PreparedHertzRollingContacts,
+    drive: HeldIslandDrive,
 }
 
 #[derive(Debug)]
@@ -283,6 +298,53 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
         controls: RigidHertzRollingIslandControls,
         gate: &CancelGate,
     ) -> Result<Self, RigidHertzRollingIslandError> {
+        Self::prepare(bodies, properties, contacts, None, dt_s, controls, gate)
+    }
+
+    /// Prepare coupled surface/rolling recoil with held forces and free torques.
+    ///
+    /// `external` follows the ORIGINAL whole-body ordering and must match its
+    /// length. Each force acts at its body's COM in world coordinates; each
+    /// torque is in that body's frame. Entries for nonparticipating bodies must
+    /// be zero because this owner advances only the original contact assembly.
+    /// All contact free coordinates receive the same shared native acceleration;
+    /// original accepted rates still select each friction phase. External work
+    /// is evaluated once per body from its actual common endpoint.
+    ///
+    /// Geometry, inertia, normal loads and wrenches are held. The existing
+    /// unresolved-normal and endpoint-assisting gates still require refinement;
+    /// this does not add a moving-geometry or multidimensional arrest integrator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_driven(
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        contacts: &[RigidHertzRollingIslandContact<'a>],
+        external: &[Wrench],
+        dt_s: f64,
+        controls: RigidHertzRollingIslandControls,
+        gate: &CancelGate,
+    ) -> Result<Self, RigidHertzRollingIslandError> {
+        Self::prepare(
+            bodies,
+            properties,
+            contacts,
+            Some(external),
+            dt_s,
+            controls,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn prepare(
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        contacts: &[RigidHertzRollingIslandContact<'a>],
+        external: Option<&[Wrench]>,
+        dt_s: f64,
+        controls: RigidHertzRollingIslandControls,
+        gate: &CancelGate,
+    ) -> Result<Self, RigidHertzRollingIslandError> {
         poll(gate)?;
         controls.validate()?;
         let count = contacts.len();
@@ -329,6 +391,14 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
         }
         let before: Vec<_> = body_indices.iter().map(|&i| bodies[i]).collect();
         let captured_properties: Vec<_> = body_indices.iter().map(|&i| properties[i]).collect();
+        let drive = HeldIslandDrive::new(
+            bodies.len(),
+            &body_indices,
+            &before,
+            &captured_properties,
+            external,
+            gate,
+        )?;
         let mut patches: Vec<RigidHertzRollingIslandPatch> = Vec::with_capacity(count);
         let mut mechanics: Vec<PatchMechanics<'a>> = Vec::with_capacity(count);
         let mut factors = Vec::with_capacity(count);
@@ -472,6 +542,13 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
                 axes: core.axes,
                 before: core.points_before,
                 rates_before: prepared.rate_before,
+                driving_acceleration: drive.patch_acceleration(
+                    local,
+                    core.points_before,
+                    core.axes,
+                    hertz_radius,
+                    radius,
+                )?,
             });
         }
         let mut mobility = vec![0.0; terms];
@@ -521,6 +598,7 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
             controls,
             mobility,
             native,
+            drive,
         })
     }
 
@@ -603,9 +681,17 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
                     self.dt_s,
                 )?,
             )?;
+            let mut free = m.rates_before.map(|v| self.dt_s * v);
+            if self.drive.is_active() {
+                let half_dt_squared = finite(0.5 * self.dt_s * self.dt_s)?;
+                for axis in 0..5 {
+                    free[axis] =
+                        finite(free[axis] + half_dt_squared * m.driving_acceleration[axis])?;
+                }
+            }
             inputs.push(HertzRollingContactInput {
                 law: keyed.law,
-                free_coordinates_m: m.rates_before.map(|v| self.dt_s * v),
+                free_coordinates_m: free,
             });
         }
         let phases: Vec<_> = self
@@ -648,6 +734,8 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
                     .add(body_couple);
             }
         }
+        self.drive
+            .add_impulses(&mut linear, &mut angular, self.dt_s, gate)?;
         let mut after = Vec::with_capacity(self.before.len());
         for (i, b) in self.before.iter().enumerate() {
             poll(gate)?;
@@ -803,6 +891,7 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
                 rolling_excitation_frequency_hz: c.excitation_frequency_hz,
                 scaled_rates_before_m_s: m.rates_before,
                 scaled_rates_after_m_s: after_rates,
+                scaled_driving_acceleration_m_s2: m.driving_acceleration,
                 actual_midpoint_coordinates_m: actual,
                 normal_velocity_before_m_s: point_before.dot(m.axes[2]),
                 normal_velocity_after_m_s: point_after.dot(m.axes[2]),
@@ -856,6 +945,15 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
             .iter()
             .map(|r| r.surface_midpoint_work_j + r.rolling_midpoint_work_j)
             .sum::<f64>();
+        let (external_work, external_linear, external_angular) = self.drive.work_and_impulses(
+            &self.before,
+            &after,
+            &self.properties,
+            self.dt_s,
+            gate,
+        )?;
+        let linear_change = linear_after.sub(linear_before);
+        let angular_change = angular_after.sub(angular_before);
         let report = RigidHertzRollingIslandReport {
             contacts: reports,
             native,
@@ -864,10 +962,16 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
             surface_heat_j: surface_heat,
             bulk_heat_j: bulk_heat,
             midpoint_impulse_work_j: work,
-            work_energy_residual_j: energy_after - energy_before - work,
-            total_energy_residual_j: energy_after - energy_before + surface_heat + bulk_heat,
-            linear_momentum_change_ns: linear_after.sub(linear_before),
-            angular_momentum_change_nms: angular_after.sub(angular_before),
+            external_work_j: external_work,
+            work_energy_residual_j: energy_after - energy_before - work - external_work,
+            total_energy_residual_j: energy_after - energy_before + surface_heat + bulk_heat
+                - external_work,
+            linear_momentum_change_ns: linear_change,
+            angular_momentum_change_nms: angular_change,
+            external_linear_impulse_ns: external_linear,
+            external_angular_impulse_nms: external_angular,
+            linear_momentum_residual_ns: linear_change.sub(external_linear),
+            angular_momentum_residual_nms: angular_change.sub(external_angular),
         };
         let m = self.controls.mechanical.mechanical;
         if [
@@ -882,15 +986,18 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
                 energy_before,
                 energy_after,
                 work,
+                external_work,
                 magnitude(report.linear_momentum_change_ns),
                 magnitude(report.angular_momentum_change_nms),
+                magnitude(report.linear_momentum_residual_ns),
+                magnitude(report.angular_momentum_residual_nms),
             ]
             .into_iter()
             .any(|v| !v.is_finite())
             || surface_heat < 0.0
             || bulk_heat < 0.0
-            || magnitude(report.linear_momentum_change_ns) > m.linear_momentum_tolerance_ns
-            || magnitude(report.angular_momentum_change_nms) > m.angular_momentum_tolerance_nms
+            || magnitude(report.linear_momentum_residual_ns) > m.linear_momentum_tolerance_ns
+            || magnitude(report.angular_momentum_residual_nms) > m.angular_momentum_tolerance_nms
         {
             return Err(RigidHertzRollingIslandError::Audit(Box::new(report)));
         }

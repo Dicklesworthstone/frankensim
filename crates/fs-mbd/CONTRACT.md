@@ -3431,3 +3431,27 @@ branch. Four focused groups in `tests/adhesive_trajectory.rs` cover finite suppo
 recoil through pure-spin arrest at zero/tensile load, a full-mobility coupled rim
 ray, tangent-gauge covariance, gap detachment, curved-path refusal, cancellation,
 late native angular-momentum refusal and deterministic retry.
+
+## Powered shared-body Hertz shear, spin and rolling assemblies
+
+`PreparedRigidHertzRollingIsland::new_driven` admits held world COM forces and
+body-frame torques in complete original body order; nonparticipating entries
+must be zero. Each body's acceleration is captured once and supplies every
+attached patch's released five-coordinate displacement before the original
+full cross-contact mobility, rolling Schur elimination and surface solve.
+All patch impulses and that body's external resultant are summed before one
+native state update.
+
+Independent midpoint external work and commanded world momentum transfer count
+each shared body once and remain separate from surface and material rolling
+heat. Original source identities, patch separation, material-temperature
+agreement, native normal-motion and endpoint-assisting-work gates, immutable
+trials and exact zero-drive behavior remain. Geometry and normal loads are
+held; general multidimensional arrest, pose evolution and gyroscopic motion
+retain their surrounding owners.
+
+Four new native groups check independently solved coupled rolling equations
+including dependent two-pad support, nonprincipal full-inertia mixed motion and
+common acceleration, original body indexing/patch permutation/singleton limits,
+and atomic invalid-drive/normal/slip-event/cancellation refusal. All eleven
+native multi-contact Hertz/rolling tests pass.

@@ -1,6 +1,9 @@
 //! Independent finite-body checks for simultaneous surface and material bulk loss.
 //! Synthetic material data test the declared model, not experimental validation.
 
+#[path = "hertz_rolling_multiple/driven.rs"]
+mod driven;
+
 use core::f64::consts::PI;
 use fs_exec::CancelGate;
 use fs_mbd::tangential_friction::RigidContactBinding;
