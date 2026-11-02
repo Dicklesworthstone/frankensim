@@ -1,0 +1,9 @@
+frankensim.matdb-source.v1
+observation	identity	Magnetite mineral reference, Fe3O4	https://handbookofmineralogy.org/pdfs/magnetite.pdf, Physical Properties and Chemistry	The formula is the mixed-valence iron oxide Fe(II)Fe(III)2O4. It is not hematite, maghemite, a titanomagnetite solid solution or a magnetic-separation feed specification.
+observation	density	Magnetite mineral reference, Fe3O4	Handbook D(meas.) entry	The reported measured density is 5.175 g/cm3; the separately calculated 5.20 is excluded. Test temperature, pressure, method and uncertainty are unstated. The source's qualitative magnetism supplies no susceptibility or field-dependent magnetization curve. Explicit reference and unknown-condition selectors are required; no bulk-ore density, porosity, magnetic recovery, grinding work index or oxidation kinetics is inferred.
+scalar	density	identity,density	density	5.175	g/cm3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	reference	1	1	1
+validity	density	temperature_known	0	0	1
+validity	density	pressure_known	0	0	1
+validity	density	bulk_ore	0	0	1

@@ -1,0 +1,15 @@
+frankensim.matdb-source.v1
+observation	identity	Chalcopyrite mineral reference, CuFeS2	https://handbookofmineralogy.org/pdfs/chalcopyrite.pdf, heading and Physical Properties	The formula identifies tetragonal chalcopyrite. The density entry is not a site ore, a composite assay or the separately listed electron-microprobe specimen.
+observation	density-range	Chalcopyrite mineral reference, CuFeS2	Handbook D(meas.) entry	The reported measured-density range is 4.1-4.3 g/cm3. Both endpoints are retained as distinct properties; there is no nominal midpoint, probability distribution or uncertainty interval. The calculated 4.283 value is excluded. Test temperature, pressure, method and statistical uncertainty are unstated. Explicit reference and unknown-condition selectors are required. This pack supplies no bulk-ore density, porosity, work index, liberation, leach or flotation law.
+scalar	density-minimum	identity,density-range	density_min	4.1	g/cm3	constant
+uncertainty	density-minimum	unstated	-	-	-	-
+validity	density-minimum	reference	1	1	1
+validity	density-minimum	temperature_known	0	0	1
+validity	density-minimum	pressure_known	0	0	1
+validity	density-minimum	bulk_ore	0	0	1
+scalar	density-maximum	identity,density-range	density_max	4.3	g/cm3	constant
+uncertainty	density-maximum	unstated	-	-	-	-
+validity	density-maximum	reference	1	1	1
+validity	density-maximum	temperature_known	0	0	1
+validity	density-maximum	pressure_known	0	0	1
+validity	density-maximum	bulk_ore	0	0	1

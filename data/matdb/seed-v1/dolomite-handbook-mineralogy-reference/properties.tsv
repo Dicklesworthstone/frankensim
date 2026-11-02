@@ -1,0 +1,9 @@
+frankensim.matdb-source.v1
+observation	identity	Dolomite mineral reference, CaMg(CO3)2	https://handbookofmineralogy.org/pdfs/dolomite.pdf, heading and Physical Properties	The formula identifies the carbonate mineral; it does not identify a dolostone, limestone aggregate, mixed gangue or a calcined dolime product.
+observation	density	Dolomite mineral reference, CaMg(CO3)2	Handbook D(meas.) entry	The reported measured density is 2.86 g/cm3. The calculated 2.876 value is not substituted. Test temperature, pressure, method and statistical uncertainty are unstated. Explicit mineral-reference and unknown-condition selectors are required. No ore bulk density, porosity, compressive strength, Bond index, acid-neutralization rate or calcination model is inferred from this mineral value.
+scalar	density	identity,density	density	2.86	g/cm3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	reference	1	1	1
+validity	density	temperature_known	0	0	1
+validity	density	pressure_known	0	0	1
+validity	density	bulk_ore	0	0	1

@@ -1,0 +1,9 @@
+frankensim.matdb-source.v1
+observation	identity	Pyrite mineral reference, FeS2	https://handbookofmineralogy.org/pdfs/pyrite.pdf, heading and Physical Properties	The formula identifies cubic pyrite, not its marcasite polymorph or a site ore. No sample-specific composition, porosity, moisture or grain-size distribution is supplied for the density entry.
+observation	density	Pyrite mineral reference, FeS2	Handbook D(meas.) entry	The reported measured density is 5.018 g/cm3. The separately calculated 5.013 value is not substituted. Test temperature, pressure, method and statistical uncertainty are unstated. This reference requires mineral-reference-model=1, source-test-temperature-known=0, source-test-pressure-known=0 and bulk-ore-qualified=0. It supplies no thermal expansion, ore bulk density, Bond work index, flotation response or oxidation rate.
+scalar	density	identity,density	density	5.018	g/cm3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	reference	1	1	1
+validity	density	temperature_known	0	0	1
+validity	density	pressure_known	0	0	1
+validity	density	bulk_ore	0	0	1

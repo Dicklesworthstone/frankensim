@@ -1,0 +1,15 @@
+frankensim.matdb-source.v1
+observation	identity	Cassiterite mineral reference, SnO2	https://rruff.geo.arizona.edu/doclib/hom/cassiterite.pdf, heading and Physical Properties	The formula identifies tetragonal cassiterite. It is not a tin-ore assay, placer bulk density or stannite substitute; source specimen composition and density are not asserted to be a matched pair.
+observation	density-range	Cassiterite mineral reference, SnO2	Handbook D(meas.) entry	The reported measured-density range is 6.98-7.01 g/cm3. Endpoints remain separate properties without a fabricated midpoint, confidence level or distribution. The calculated 6.993 value is excluded. Test temperature, pressure and statistical uncertainty are unstated; explicit unknown-condition and mineral-reference selectors are required. No gravity-separator recovery, particle-size response, slurry density, porosity, hardness-to-work-index conversion or grinding model is supplied.
+scalar	density-minimum	identity,density-range	density_min	6.98	g/cm3	constant
+uncertainty	density-minimum	unstated	-	-	-	-
+validity	density-minimum	reference	1	1	1
+validity	density-minimum	temperature_known	0	0	1
+validity	density-minimum	pressure_known	0	0	1
+validity	density-minimum	bulk_ore	0	0	1
+scalar	density-maximum	identity,density-range	density_max	7.01	g/cm3	constant
+uncertainty	density-maximum	unstated	-	-	-	-
+validity	density-maximum	reference	1	1	1
+validity	density-maximum	temperature_known	0	0	1
+validity	density-maximum	pressure_known	0	0	1
+validity	density-maximum	bulk_ore	0	0	1

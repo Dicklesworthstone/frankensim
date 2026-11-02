@@ -1,0 +1,15 @@
+frankensim.matdb-source.v1
+observation	identity	Chalcocite mineral reference, Cu2S	https://handbookofmineralogy.org/pdfs/chalcocite.pdf, heading and Physical Properties	The record identifies monoclinic low chalcocite; it does not assign the same density to high-temperature phases, djurleite, covellite or a copper-ore mixture.
+observation	density-range	Chalcocite mineral reference, Cu2S	Handbook D(meas.) entry	The reported measured-density range is 5.5-5.8 g/cm3. These endpoints are distinct source-range properties, not a midpoint or a statistical uncertainty. The separately calculated 5.80 is excluded. The density entry does not specify its test temperature, pressure, measurement method or individual specimen. Reference and unknown-condition selectors are required. No site bulk density, porosity, work index, acid consumption or reaction kinetics is inferred.
+scalar	density-minimum	identity,density-range	density_min	5.5	g/cm3	constant
+uncertainty	density-minimum	unstated	-	-	-	-
+validity	density-minimum	reference	1	1	1
+validity	density-minimum	temperature_known	0	0	1
+validity	density-minimum	pressure_known	0	0	1
+validity	density-minimum	bulk_ore	0	0	1
+scalar	density-maximum	identity,density-range	density_max	5.8	g/cm3	constant
+uncertainty	density-maximum	unstated	-	-	-	-
+validity	density-maximum	reference	1	1	1
+validity	density-maximum	temperature_known	0	0	1
+validity	density-maximum	pressure_known	0	0	1
+validity	density-maximum	bulk_ore	0	0	1
