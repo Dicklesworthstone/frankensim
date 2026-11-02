@@ -330,6 +330,23 @@ differentiable lift). Pure Rust throughout.
   refusal before interface sampling. Their receiving geometry and optical
   lengths use independent analytic references.
 
+- `curved::bundle::connection::BundleConnectionTarget::try_diffuse_receiver`
+  selects an original native planar depolarizing diffuse surface as an incident
+  power receiver. The same differentiated scene walk and bounded local Newton
+  shooting retain actual finite geometry, source and medium identities, optical
+  branch plans, unsnapped endpoint resolution and the receiving-area Jacobian.
+  The selected contact stops before reflectance or BSDF sampling. A dedicated
+  result marker and branch-signature tag distinguish it from an opaque blocker;
+  the declared arriving medium and complete prescribed branch plan are checked.
+  Other diffuse or rough encounters remain unsupported. Missing, blocked,
+  caustic and unresolved connections refuse; this local solver does not discover
+  every optical image. Existing detector targets retain their original result.
+  Incident point-source irradiance includes native Fresnel power, Beer loss and
+  the Jacobian once, independently of the receiver's reflectance. Four native
+  regression groups cover detector parity, an off-axis absorbing ball lens,
+  branch plans, visibility, finite support, medium identity, contact resolution,
+  planarity, work bounds and cancellation.
+
 - `polarization::dielectric::scene::curved::camera::CurvedCameraScene` consumes
   native curved visibility, full smooth/GGX reciprocal Fresnel/frame transport and
   Beer integrals as scalar unpolarized camera radiance. It retains the native
@@ -415,7 +432,7 @@ differentiable lift). Pure Rust throughout.
   emission before the diffuse interaction, including exact black. Diffuse
   reflection does not infer thermal emission, subsurface transport, material
   polarization, direct-light sampling or MIS. Differentiated
-  ray bundles explicitly refuse the nondelta interaction. Nine regressions
+  ray bundles explicitly refuse continuation through the nondelta interaction. Nine regressions
   cover hemisphere power and moments, pole-safe frames, spectral diffuse
   forward detectors in both walkers, gray/white/black camera radiance, analytic
   curved finite-emitter visibility with Beer and group delay, table/medium

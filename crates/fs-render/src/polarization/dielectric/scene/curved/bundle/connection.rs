@@ -1,11 +1,11 @@
-//! Bounded local shooting from a point source to an actual planar detector.
+//! Bounded local shooting from a point source to an actual planar receiver.
 //!
 //! Each trial uses the native scene's one-pass differentiated path. The two
 //! analytic arrival columns give a Newton correction in launch solid angle;
 //! bounded steps and backtracking retain the original ordered optical branch.
 //! No finite-difference retraces or prescribed interface positions are used.
 //!
-//! The initial direction must already reach the selected finite detector on a
+//! The initial direction must already reach the selected finite receiver on a
 //! regular branch. This is a local connection solver, not a global search for
 //! all images. Blockers, missing detector support, changed features or media,
 //! caustics and numerical contact resolution can prevent convergence. Success
@@ -50,11 +50,11 @@ pub enum BundleBranchPolicy<'a> {
     /// Exactly one decision per encountered dielectric boundary, including
     /// coherent films and authored multilayers. Conductors always reflect and
     /// do not consume decisions. The whole sequence must be consumed when the
-    /// detector is reached. Empty sequences admit paths with no dielectric hit.
+    /// receiver is reached. Empty sequences admit paths with no dielectric hit.
     Sequence(&'a [DielectricEvent]),
 }
 
-/// Target point on a named native planar detector, with a normal toward light.
+/// Target point on a named native planar receiver, with a normal toward light.
 /// Position tolerance is a numerical endpoint allowance, not an aperture or an
 /// error bound on irradiance. The scene still supplies the finite aperture.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -64,9 +64,18 @@ pub struct BundleConnectionTarget {
     normal: Vec3,
     basis: [Vec3; 2],
     position_tolerance_m: f64,
+    kind: ReceiverKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiverKind {
+    Detector,
+    Diffuse,
 }
 
 impl BundleConnectionTarget {
+    /// An original `Interaction::Detector`; ordinary opaque or diffuse
+    /// surfaces cannot replace this receiving endpoint.
     pub fn try_new(
         object_id: u64,
         position_m: Point3,
@@ -96,7 +105,24 @@ impl BundleConnectionTarget {
             normal,
             basis: [first, cross(normal, first)],
             position_tolerance_m,
+            kind: ReceiverKind::Detector,
         })
+    }
+
+    /// Receive incident power at one original planar depolarizing diffuse
+    /// surface, before applying its reflectance or sampling a reflected ray.
+    /// The native walk validates the arriving medium and finite geometry. Only
+    /// this selected object is a receiving endpoint; other diffuse encounters
+    /// remain unsupported. Detector targets keep their original semantics.
+    pub fn try_diffuse_receiver(
+        object_id: u64,
+        position_m: Point3,
+        normal: Vec3,
+        position_tolerance_m: f64,
+    ) -> Result<Self, BundleConnectionError> {
+        let mut result = Self::try_new(object_id, position_m, normal, position_tolerance_m)?;
+        result.kind = ReceiverKind::Diffuse;
+        Ok(result)
     }
 
     pub const fn object_id(self) -> u64 {
@@ -110,6 +136,15 @@ impl BundleConnectionTarget {
     }
     pub const fn position_tolerance_m(self) -> f64 {
         self.position_tolerance_m
+    }
+
+    /// This target receives incident power at a selected diffuse surface.
+    pub const fn is_diffuse_receiver(self) -> bool {
+        matches!(self.kind, ReceiverKind::Diffuse)
+    }
+
+    fn diffuse_receiver_id(self) -> Option<u64> {
+        self.is_diffuse_receiver().then_some(self.object_id)
     }
 }
 
@@ -258,7 +293,7 @@ impl CurvedPolarizedScene<'_> {
     /// Solve the local branch that transmits at dielectric interfaces and
     /// reflects under total internal reflection (and at smooth conductors).
     /// Source origin, wavelength, media and authored polarization law are fixed.
-    /// The first direction must reach the selected detector; every accepted
+    /// The first direction must reach the selected receiver; every accepted
     /// iterate retains its ordered native geometry/feature/branch signature.
     /// Failure returns no partially connected optical result.
     pub fn connect_bundle_transmitted(
@@ -284,7 +319,7 @@ impl CurvedPolarizedScene<'_> {
     /// This shares the transmitted connector's local-basin, visibility,
     /// numerical-resolution and bounded-work requirements.
     /// Exactly dark branches retain zero power while geometric continuation
-    /// validates the remaining interfaces and actual detector; they are not
+    /// validates the remaining interfaces and actual receiver; they are not
     /// confused with missing, blocked or numerically unresolved connections.
     pub fn connect_bundle_with_policy(
         &self,
@@ -322,7 +357,7 @@ impl CurvedPolarizedScene<'_> {
         {
             return Err(BundleConnectionError::InvalidBranchPlan);
         }
-        let first = self.connection_trial(cx, launch, options, policy, work)?;
+        let first = self.connection_trial(cx, launch, target, options, policy, work)?;
         let signature = first.branch_signature();
         let mut current = arrival(first, target, options.projection)?;
         for iteration in 0..=options.max_iterations {
@@ -370,7 +405,8 @@ impl CurvedPolarizedScene<'_> {
                     },
                     ..launch
                 };
-                let path = self.connection_trial(cx, trial_launch, options, policy, work)?;
+                let path =
+                    self.connection_trial(cx, trial_launch, target, options, policy, work)?;
                 // A changed visibility/topology cannot use the current smooth
                 // Jacobian. Smaller trials may remain in the admitted basin.
                 if path.branch_signature() == signature {
@@ -411,6 +447,7 @@ impl CurvedPolarizedScene<'_> {
         &self,
         cx: &Cx<'_>,
         launch: BundleConnectionLaunch,
+        target: BundleConnectionTarget,
         options: BundleConnectionOptions,
         policy: BundleBranchPolicy<'_>,
         work: &mut Work,
@@ -430,12 +467,13 @@ impl CurvedPolarizedScene<'_> {
         )?;
         let (path, branch_plan) = match policy {
             BundleBranchPolicy::TransmitOrReflectTir => (
-                self.trace_bundle_with_checked_branches(
+                self.trace_bundle_with_checked_branches_to_receiver(
                     cx,
                     bundle,
                     launch.initial_medium,
                     options.scene,
                     true,
+                    target.diffuse_receiver_id(),
                     |_, context| {
                         Ok(if context.total_internal_reflection {
                             DielectricEvent::Reflection
@@ -448,12 +486,13 @@ impl CurvedPolarizedScene<'_> {
             ),
             BundleBranchPolicy::Sequence(events) => {
                 let mut consumed = 0;
-                let path = self.trace_bundle_with_checked_branches(
+                let path = self.trace_bundle_with_checked_branches_to_receiver(
                     cx,
                     bundle,
                     launch.initial_medium,
                     options.scene,
                     true,
+                    target.diffuse_receiver_id(),
                     |_, _| {
                         let event = events.get(consumed).copied().ok_or(
                             CurvedBundleSceneError::BranchPlanExhausted {
@@ -476,7 +515,9 @@ impl CurvedPolarizedScene<'_> {
             .checked_add(path.query_work())
             .ok_or(BundleConnectionError::NumericalRange)?;
         if let Some((planned, consumed)) = branch_plan {
-            if path.termination() == PathTermination::Detected && consumed != planned {
+            if (path.termination() == PathTermination::Detected || path.is_diffuse_receiver())
+                && consumed != planned
+            {
                 return Err(BundleConnectionError::BranchPlanNotConsumed { planned, consumed });
             }
         }
@@ -489,7 +530,13 @@ fn arrival(
     target: BundleConnectionTarget,
     options: ProjectionOptions,
 ) -> Result<Arrival, BundleConnectionError> {
-    if path.termination() != PathTermination::Detected {
+    let reached = match target.kind {
+        ReceiverKind::Detector => path.termination() == PathTermination::Detected,
+        ReceiverKind::Diffuse => {
+            path.termination() == PathTermination::Opaque && path.is_diffuse_receiver()
+        }
+    };
+    if !reached {
         return Err(BundleConnectionError::ReceiverNotReached(
             path.termination(),
         ));
@@ -591,3 +638,6 @@ fn cross(a: Vec3, b: Vec3) -> Vec3 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod diffuse_tests;

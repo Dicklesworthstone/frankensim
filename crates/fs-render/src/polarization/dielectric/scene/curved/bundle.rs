@@ -27,7 +27,7 @@ use crate::polarization::dielectric::transport::bundle::{
     PolarizedBundleError, PolarizedRayBundle,
 };
 
-/// Bounded local source-to-detector connections through these native paths.
+/// Bounded local source-to-receiver connections through these native paths.
 pub mod connection;
 
 /// One central integration envelope and two additional derivative tolerances.
@@ -107,6 +107,7 @@ pub struct CurvedBundlePathResult {
     medium: usize,
     medium_identity: Option<ContentHash>,
     termination: PathTermination,
+    diffuse_receiver: bool,
     surface_events: u32,
     last_contact: Option<CurvedContact>,
     detector_reference_axis: Option<Vec3>,
@@ -129,6 +130,12 @@ impl CurvedBundlePathResult {
     }
     pub const fn termination(&self) -> PathTermination {
         self.termination
+    }
+    /// The selected native diffuse receiver was reached with its incoming
+    /// bundle intact. No reflectance, BSDF continuation or detector frame was
+    /// applied. An ordinary opaque blocker never sets this marker.
+    pub const fn is_diffuse_receiver(&self) -> bool {
+        self.diffuse_receiver
     }
     pub const fn surface_events(&self) -> u32 {
         self.surface_events
@@ -327,6 +334,33 @@ impl CurvedPolarizedScene<'_> {
         initial_medium: usize,
         settings: CurvedBundleSettings,
         continue_extinguished: bool,
+        branches: impl FnMut(
+            &CurvedContact,
+            &CurvedBundleBranchContext,
+        ) -> Result<DielectricEvent, CurvedBundleSceneError>,
+    ) -> Result<CurvedBundlePathResult, CurvedBundleSceneError> {
+        self.trace_bundle_with_checked_branches_to_receiver(
+            cx,
+            bundle,
+            initial_medium,
+            settings,
+            continue_extinguished,
+            None,
+            branches,
+        )
+    }
+
+    // The connector may receive incident power at one original diffuse surface.
+    // All other contacts retain the same native event and interaction policy.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_bundle_with_checked_branches_to_receiver(
+        &self,
+        cx: &Cx<'_>,
+        bundle: PolarizedRayBundle,
+        initial_medium: usize,
+        settings: CurvedBundleSettings,
+        continue_extinguished: bool,
+        diffuse_receiver: Option<u64>,
         mut branches: impl FnMut(
             &CurvedContact,
             &CurvedBundleBranchContext,
@@ -352,6 +386,7 @@ impl CurvedPolarizedScene<'_> {
             medium: initial_medium,
             medium_identity: self.medium_identity(initial_medium),
             termination: PathTermination::SurfaceLimit,
+            diffuse_receiver: false,
             surface_events: 0,
             last_contact: None,
             detector_reference_axis: None,
@@ -477,6 +512,14 @@ impl CurvedPolarizedScene<'_> {
                 Interaction::Opaque => {
                     result.termination = PathTermination::Opaque;
                     1
+                }
+                Interaction::DepolarizingDiffuse { medium, .. }
+                    if diffuse_receiver == Some(instance.object_id()) =>
+                {
+                    require_medium(instance.object_id(), result.medium, medium)?;
+                    result.termination = PathTermination::Opaque;
+                    result.diffuse_receiver = true;
+                    5
                 }
                 Interaction::SmoothConductor { optics, medium } => {
                     require_medium(instance.object_id(), result.medium, medium)?;
