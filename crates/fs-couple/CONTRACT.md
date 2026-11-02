@@ -21132,6 +21132,43 @@ finite storage, original conduction/reservoir/authored heat, scheduled boundary
 changes and continuation, latent storage and domain/cancellation rollback,
 exact native zero-drive behavior and physical-mapping refusals.
 
+## Adhesive body islands with source-resolved finite thermal transport
+
+`friction_heat::adhesive::propose_rigid_adhesive_island_heat` couples original
+JKR/DMT/Maugis solid-contact disks to the existing simultaneous native body
+island and finite enthalpy network. Each attached patch has its own solved face
+temperature, original absolute-temperature axis and selected junction-strength
+claims. Zero or tensile net normal load does not remove its real solid area.
+Detached disks cannot acquire a conducting face through this entry; the normal
+and topology owners must first remove or replace that physical thermal route.
+
+The prepared full body response is reused at every thermal trial. Canonical
+mechanical IDs and independent thermal-link IDs preserve the mapping into shared
+bodies and cells. Actual combined sliding/spin dissipation enters one heat owner
+per patch. The original series-conduction link is replaced within the private
+thermal trial, so conduction is counted once. Per-side endpoint conductivity
+and original geometry determine k*A/d; the thermal face must match the actual
+solid disk's centre, normal and area. Signed heat may leave a hot body even while
+the adhesive junction dissipates. No prescribed heat fraction or added thermal
+store supplies the interface temperature.
+
+Complete native impulses, source receipts and caloric endpoints are returned
+only after local work gates, the original thermal gates, cancellation, and both
+an independent `delta K + delta U - outside heat` check and summed audit check.
+Invalid source support, route identity/geometry, work budgets or late cancellation
+leave accepted state unchanged. The heat callback owns other transport only.
+
+This is explicitly a frozen-normal and frozen-geometry thermal split: junction
+strengths refresh, while normal elastic/surface-energy coefficients, contact area
+and poses remain with their existing owners. The perfect-face orthogonal-cell
+backward-Euler approximation needs spatial/time refinement; convergence does not
+establish uniqueness or validation. Event-resolved stopping, thermal expansion,
+normal thermal feedback and evolving attachment topology are not supplied here.
+Three G1/G3/G4 groups in `tests/adhesive_friction_heat.rs` compare shared-inertia
+pure-spin work and a two-face/three-cell heat solve with independent analytical
+elimination, including zero/tensile load, source feedback, signed ordinary
+conduction, permutation and domain/geometry/cancellation rollback.
+
 ## Source-bound wear on the actual directional friction and heat trajectory
 
 `friction_heat::directional::wear::apply_source_directional_trajectory_heat_with_wear`

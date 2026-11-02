@@ -132,15 +132,20 @@ impl<'a> SourceAdhesiveSlidingPatch<'a> {
                 "junction refresh requires one original absolute-temperature axis",
             ));
         }
-        let point = original
-            .query()
-            .with(temperature_axis, temperature_k)
-            .map_err(|source| MaterialStatePointError::Query {
-                property: format!("adhesive junction temperature:{temperature_axis}"),
-                source,
-            })?;
-        let source =
-            original.at_query_point(self.normal_state().elastic().interface().card(), &point)?;
+        let source = if original.state_coordinate(temperature_axis) == Some(temperature_k) {
+            // Retain the original receipt policy as well as its exact values
+            // when no source coordinate changed, as the thermal Coulomb owner does.
+            original.clone()
+        } else {
+            let point = original
+                .query()
+                .with(temperature_axis, temperature_k)
+                .map_err(|source| MaterialStatePointError::Query {
+                    property: format!("adhesive junction temperature:{temperature_axis}"),
+                    source,
+                })?;
+            original.at_query_point(self.normal_state().elastic().interface().card(), &point)?
+        };
         let strength = |name| {
             source.property(name).map(|p| p.value_si()).ok_or(
                 SourceThermalAdhesivePatchError::Invalid(
