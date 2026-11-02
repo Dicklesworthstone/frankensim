@@ -20,6 +20,9 @@ use fs_orbit::{
 };
 use fs_phs::PortHamiltonian;
 
+mod continuation;
+pub use continuation::{PhsFrequencyResponsePoint, continue_forced_frequency_response};
+
 const MAX_INPUT_HARMONICS: usize = 256;
 
 /// Why a periodic regime was not produced.
@@ -91,13 +94,18 @@ impl PeriodicPortInput {
         ).max().unwrap_or(0)
     }
     fn sample_into(&self, time_s: f64, out: &mut [f64]) -> bool {
-        if out.len() != self.coefficients.len() || !time_s.is_finite() { return false; }
+        self.sample_at_frequency_into(time_s, self.omega_rad_s, out)
+    }
+    fn sample_at_frequency_into(&self, time_s: f64, omega_rad_s: f64, out: &mut [f64]) -> bool {
+        if out.len() != self.coefficients.len() || !time_s.is_finite()
+            || !omega_rad_s.is_finite() || omega_rad_s <= 0.0
+        { return false; }
         for (port, row) in self.coefficients.iter().enumerate() {
             let mut value = row[0].re;
             let mut correction = 0.0;
             for (n, &coefficient) in row.iter().enumerate().skip(1) {
                 if coefficient.re == 0.0 && coefficient.im == 0.0 { continue; }
-                let phase = n as f64 * self.omega_rad_s * time_s;
+                let phase = n as f64 * omega_rad_s * time_s;
                 let term = 2.0 * (coefficient.re * det::cos(phase)
                     - coefficient.im * det::sin(phase));
                 let adjusted = term - correction;
@@ -122,7 +130,7 @@ struct PhsOrbitProblem<'a> {
     source_refused: Cell<bool>,
 }
 enum InputKind<'a> {
-    Forced(&'a PeriodicPortInput),
+    Forced { periodic: &'a PeriodicPortInput, omega_rad_s: f64 },
     Constant(&'a [f64]),
 }
 impl PhsOrbitProblem<'_> {
@@ -149,7 +157,8 @@ impl OrbitProblem for PhsOrbitProblem<'_> {
 
         let mut input = self.ports.borrow_mut();
         let ok = match self.input {
-            InputKind::Forced(periodic) => periodic.sample_into(t, &mut input),
+            InputKind::Forced { periodic, omega_rad_s } =>
+                periodic.sample_at_frequency_into(t, omega_rad_s, &mut input),
             InputKind::Constant(bias) => {
                 if bias.len() != m || bias.iter().any(|v| !v.is_finite()) { false }
                 else { input.copy_from_slice(bias); true }
@@ -188,7 +197,7 @@ fn forced_problem<'a>(
         return Err(bad("periodic input must cover every original physical port"));
     }
     Ok(PhsOrbitProblem {
-        system, input: InputKind::Forced(input),
+        system, input: InputKind::Forced { periodic: input, omega_rad_s: input.omega_rad_s() },
         effort: RefCell::new(vec![0.0; system.state_dim()]),
         ports: RefCell::new(vec![0.0; system.port_dim()]),
         source_refused: Cell::new(false),
