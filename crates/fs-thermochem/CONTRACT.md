@@ -1,5 +1,43 @@
 # CONTRACT: fs-thermochem
 
+## Mixed-phase stoichiometric and standard-enthalpy balances
+
+`stoichiometry::ConservedReaction` admits one equation through the existing
+`fs-qty` exact elemental and charge matrices/certificate. It computes consumed
+and formed molar amounts, converts a caller-specified reacted mass to extent,
+and bounds extent from explicit reactant inventories. Canonical species order,
+bounded layouts and exactly convertible coefficients make the calculation
+deterministic; missing/duplicate species, nonfinite inputs, imbalance and
+unrepresentable nonzero arithmetic refuse. It owns no evolving reactor state.
+
+`stoichiometry::minerals::MineralReaction` provides five explicit reference
+endpoints: lime hydration, calcite/dolomite acid neutralization to dissolved
+CO2, and pyrite oxidation to either ferrous ions or ideal ferric hydroxide.
+Pyrite equations use integer multiples of two/four FeS2; extent is per equation
+as written. Endpoint choice is declared, never inferred from pH, Eh or time.
+`faraday_yield` converts integrated charge, positive electron count, supplied
+molar mass and explicit current efficiency to product amount and mass.
+
+`standard_enthalpy_change` consumes a source pack/query for every active species,
+using `standard-molar-formation-enthalpy` in J/mol. It requires the selected
+claims themselves to declare a common typed temperature and pressure, an
+explicit elemental-reference flag, standard-state identity and phase. Caller
+query flags alone cannot supply missing source authority. Selection and receipt
+verification stay in `fs-matdb`; the result retains every original evidence
+sample/uncertainty and source receipt. Products-minus-reactants enthalpy is
+negative for exothermic constant-pressure conversion. No derived uncertainty
+band is asserted. Multiplying by extent must not double-count chemical energy
+already present in a total-energy formulation.
+
+G0/G1/G3 tests cover exact balances, source-backed CaO hydration through the real
+pack compiler, distinct pyrite endpoints, inventories, Faraday copper yield,
+unit/extent scaling and invalid/mislabelled reference states. This slice does
+not extend the ideal-gas EOS/species model, select thermodynamic pathways,
+authenticate caller species-to-pack associations, solve aqueous speciation,
+predict reaction rates/recovery/current efficiency, or supply heat of dilution.
+Independently rounded source molar masses need not sum bit-exactly even when
+elemental conservation is exact; they are not a new mass-conservation proof.
+
 ## Prepared fixed-pressure reaction calorics
 
 `IdealGasKineticsV1::reaction_enthalpies_at` evaluates canonical reaction

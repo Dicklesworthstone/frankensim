@@ -4,6 +4,16 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Mineral processing
+
+The [mineral-processing guide](MINERAL_PROCESSING.md) covers 12 source profiles
+and 33 claims for ore/gangue constituents and processing reagents, with an
+executable source-backed lime-hydration example. Shared physics now provide
+typed Bond milling energy/throughput, ideal ball-mill critical speed, exact
+reaction amounts, standard reaction enthalpy and Faraday product yield.
+Mineral/reference data retain their own conditions; site work indices,
+conversion, recovery and process calibration remain explicit inputs.
+
 ## Violin varnish and historical finish layers
 
 The [violin-varnish source guide](VIOLIN_VARNISHES.md) documents seven packs:
