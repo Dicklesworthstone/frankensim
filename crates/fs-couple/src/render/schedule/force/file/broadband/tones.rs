@@ -1,5 +1,6 @@
 //! Prescribed continuous physical forces through the existing signed ports.
 use super::super::Reader;
+use super::super::tone_record::PhysicalTone;
 use crate::modal_acoustic_time::broadband::{BroadbandModalObserver, PreparedBroadbandTones};
 use fs_modal::time::{MAX_HARMONIC_TONES, ModalToneBudget};
 
@@ -85,32 +86,18 @@ impl ToneProgram {
         }
         let mut records = vec![Vec::new(); columns.len()];
         for _ in 0..count {
-            let mut row = reader.row("tone").map_err(|e| e.to_string())?;
-            let voice: usize = row.parse().map_err(|e| e.to_string())?;
-            let port: usize = row.parse().map_err(|e| e.to_string())?;
-            let omega = row.scalar().map_err(|e| e.to_string())?;
-            let cosine = row.scalar().map_err(|e| e.to_string())?;
-            let sine = row.scalar().map_err(|e| e.to_string())?;
-            row.finish().map_err(|e| e.to_string())?;
-            let shapes = columns
-                .get(voice)
-                .and_then(|ports| ports.get(port))
-                .ok_or("continuous tone requires an existing voice and physical port")?;
-            if omega <= 0.0 || omega >= core::f64::consts::PI * f64::from(sample_rate_hz) {
-                return Err("continuous force frequency must be positive and below the original clock's Nyquist limit".into());
-            }
+            let PhysicalTone {
+                voice,
+                port,
+                omega,
+                cosine,
+                sine,
+            } = PhysicalTone::read(&mut reader, columns, sample_rate_hz, projection_terms)?;
             if records[voice].len() + 2 > budget.maximum_tones {
                 return Err(
                     "continuous tones plus held DC exceed the voice's explicit capacity".into(),
                 );
             }
-            let terms = shapes
-                .len()
-                .checked_mul(2)
-                .ok_or("tone projection size overflow")?;
-            *projection_terms = projection_terms
-                .checked_sub(terms)
-                .ok_or("continuous physical force projection exceeds compile_limits")?;
             records[voice].push((port, omega, cosine, sine));
         }
         if reader.lines.next().is_some() {

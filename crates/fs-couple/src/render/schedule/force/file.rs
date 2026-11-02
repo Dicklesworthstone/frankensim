@@ -59,6 +59,10 @@ mod friction;
 pub mod design;
 /// Explicit broadband receiver block over the same parser and force compiler.
 pub mod broadband;
+/// Continuous physical tones over the complete version-2 coupled mechanics.
+pub mod coupled_tones;
+// Shared signed physical tone rows; mechanical schemas keep their own parser.
+mod tone_record;
 /// Observer transfers from declared modal geometry and the surrounding gas.
 pub mod radiation;
 

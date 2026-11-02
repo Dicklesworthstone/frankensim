@@ -1,5 +1,27 @@
 # CONTRACT: fs-couple
 
+## Continuous physical tones in coupled performance files
+
+Continuous coupled force files (`render::schedule::force::file::coupled_tones`):
+  a trailing `coupled_tone_limits`/`tones` section on the original v2 mechanical
+  schema projects physical cosine/sine newtons through its unchanged signed
+  actuator columns. The existing parser, held-force compiler, complete spring
+  preload and `CoupledModalTones` owner supply one coupled trajectory, exact
+  continuous force work and independent original heat channels. Held events
+  remain interval DC; source phase starts at performance time zero and advances
+  only with an accepted network sample. Rejected steps retain accepted phase,
+  event cursor, state and work/heat. File-wide source payload and all phase arrays
+  are reserved before the remaining dense byte budget is admitted; projection,
+  clock, guard-frequency and original physical limits remain binding. The
+  initial CLI path observes only real instantaneous pressure/velocity maps;
+  imaginary natural-mode quadrature, contact/friction schemas and receiver
+  extensions explicitly refuse. This is an authored reduced assembly path,
+  not a radiation or instrument-validation claim. `coupled_tones/tests.rs`
+  compares actual file callbacks with an independent coupled normal-coordinate
+  solution, exact preload, physical work/heat and partition-invariant phase,
+  and checks transactional and admission refusals. See
+  `examples/COUPLED_CONTINUOUS_FORCES.md` for units, limits and a complete file.
+
 ## Continuous physical tones in modal performance files
 
 The v1 broadband performance-file path now accepts optional `tone_limits`,

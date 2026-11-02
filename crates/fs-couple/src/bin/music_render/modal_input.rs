@@ -11,6 +11,8 @@ use fs_couple::render::schedule::force::file::{
 use super::{RATE, create_outputs, json_string, stream_output};
 #[path = "modal_broadband.rs"]
 mod broadband;
+#[path = "modal_coupled_tones.rs"]
+mod coupled_tones;
 
 fn options(args: &[String]) -> Result<(&str, &str, usize, bool), String> {
     let mut paths = Vec::new();
@@ -56,6 +58,9 @@ pub(super) fn run_with_gas_sources(
     let mut bytes = Vec::new();
     input.take((MAX_MODAL_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("modal input read failed: {e}"))?;
+    if fs_couple::render::schedule::force::file::coupled_tones::CoupledTonePerformance::has_section(&bytes) {
+        return coupled_tones::run(&bytes, output, &sidecar, block, decimate);
+    }
     if fs_couple::render::schedule::force::file::broadband::BroadbandModalPerformance::has_section(
         &bytes,
     ) {
