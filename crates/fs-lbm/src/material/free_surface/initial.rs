@@ -39,11 +39,92 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         self.free_surface3_from_cells_inner(domain, initial, cx)
     }
 
+    /// Initialize liquid fill and velocity with a physical pressure field [Pa].
+    ///
+    /// Requires [`Self::with_pressure_reference`]. `pressure_pa` supplies the
+    /// positive absolute LIQUID pressure at each occupied cell center [m],
+    /// including any hydrostatic or capillary jump. The field is sampled once
+    /// per supplied cell; it is not retained or imposed during later steps.
+    /// Subsequent gas loading uses [`MaterialFreeSurface3::step_with_gas_pressure`]
+    /// and the same fixed reference. A common shift of both reference and
+    /// pressure leaves the dimensionless initial state unchanged.
+    ///
+    /// Density is `1 + (p - p_reference)/(rho_source*(dx/dt)^2*cs^2)`.
+    /// Its excursion from one must not exceed the caller's finite bound in
+    /// `(0,1)`. Native mass is therefore `fill*density*rho_source*dx^3`,
+    /// including the weakly compressible numerical density perturbation;
+    /// this is not a physical liquid equation of state or a mass-preserving
+    /// pressure projection. The source properties stay frozen. The caller
+    /// owns initial pressure/boundary compatibility and grid/time convergence;
+    /// equilibrium population initialization is not exactly well-balanced.
+    ///
+    /// # Errors
+    /// The ordinary initial-state and source gates apply. Missing reference,
+    /// nonpositive/nonfinite pressure, unrepresentable coordinates/conversion,
+    /// excessive density excursion, or cancellation refuse the whole candidate.
+    pub fn free_surface3_from_cells_with_pressure(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        initial: &[MaterialFreeSurfaceInitialCell3],
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn([f64; 3]) -> f64,
+        cx: &Cx<'_>,
+    ) -> Result<MaterialFreeSurface3<'a>, MaterialLbmError> {
+        cx.checkpoint()
+            .map_err(|_| crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled)?;
+        self.require_frozen_source()?;
+        let reference = self.reference_pressure_pa.ok_or(MaterialLbmError::Invalid(
+            "initial absolute liquid pressure requires an explicit fixed pressure reference",
+        ))?;
+        if !maximum_density_excursion.is_finite()
+            || maximum_density_excursion <= 0.0
+            || maximum_density_excursion >= 1.0
+        {
+            return Err(MaterialLbmError::Invalid(
+                "initial density-excursion bound must be finite and in (0,1)",
+            ));
+        }
+        let dx = self.cell_size_m;
+        let pressure_unit = self.pressure_unit_pa;
+        self.free_surface3_from_cells_with_density(domain, initial, cx, |coordinates| {
+            let position = coordinates.map(|c| (c as f64 + 0.5) * dx);
+            let absolute = pressure_pa(position);
+            let perturbation = (absolute - reference) / pressure_unit;
+            let density = 1.0 + perturbation / CS2;
+            if position.iter().any(|x| !x.is_finite())
+                || !absolute.is_finite()
+                || absolute <= 0.0
+                || !density.is_finite()
+                || density <= 0.0
+                || (density - 1.0).abs() > maximum_density_excursion
+            {
+                return Err(
+                    crate::d3q19::freesurface3::FreeSurfaceError3::InvalidInitialState {
+                        coordinates: Some(coordinates),
+                        reason: "initial liquid pressure or its density excursion is inadmissible",
+                    }
+                    .into(),
+                );
+            }
+            Ok(density)
+        })
+    }
+
     pub(super) fn free_surface3_from_cells_inner(
         self,
         domain: MaterialFreeSurfaceDomain3<'_>,
         initial: &[MaterialFreeSurfaceInitialCell3],
         cx: &Cx<'_>,
+    ) -> Result<MaterialFreeSurface3<'a>, MaterialLbmError> {
+        self.free_surface3_from_cells_with_density(domain, initial, cx, |_| Ok(1.0))
+    }
+
+    fn free_surface3_from_cells_with_density(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        initial: &[MaterialFreeSurfaceInitialCell3],
+        cx: &Cx<'_>,
+        density: impl Fn([usize; 3]) -> Result<f64, MaterialLbmError>,
     ) -> Result<MaterialFreeSurface3<'a>, MaterialLbmError> {
         cx.checkpoint()
             .map_err(|_| crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled)?;
@@ -79,7 +160,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             native.push(FreeSurfaceInitialCell3 {
                 coordinates: cell.coordinates,
                 fill_fraction: cell.fill_fraction,
-                density: 1.0,
+                density: density(cell.coordinates)?,
                 velocity,
             });
         }
