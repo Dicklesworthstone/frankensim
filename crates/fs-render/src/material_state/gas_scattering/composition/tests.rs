@@ -25,6 +25,27 @@ fn model() -> MolecularRefractionModel {
     .unwrap()
 }
 
+fn dispersive_model() -> MolecularRefractionModel {
+    use fs_material::gas_scattering::composition::MolecularCauchyDispersion;
+    let reference = model();
+    let shapes: Vec<_> = reference
+        .components()
+        .iter()
+        .enumerate()
+        .map(|(i, component)| {
+            MolecularCauchyDispersion::try_new(
+                component.optical(),
+                [2.0e-6, 8.0e-6][i],
+                [1.0e-7, 3.0e-7][i],
+                [380.0, 780.0],
+                ContentHash([i as u8 + 3; 32]),
+            )
+            .unwrap()
+        })
+        .collect();
+    reference.with_dispersion(&shapes).unwrap()
+}
+
 // Two opposite partial-density quadratics: TOTAL mass density is constant.
 struct CompositionField {
     identity: ContentHash,
@@ -397,4 +418,142 @@ fn g0_composition_binding_and_queries_refuse_missing_nonphysical_or_foreign_data
     .unwrap();
     close(result.ray.origin.x, 1.0, 1.0e-14);
     assert_eq!(result.ray.dir, ray().dir);
+}
+
+#[test]
+fn g1_molecular_dispersion_bends_chromatically_and_tracks_true_group_delay() {
+    let model = dispersive_model();
+    for basis in [
+        PartialDensityBasis::MassKgPerM3,
+        PartialDensityBasis::MoleculesPerM3,
+    ] {
+        let mut provider = CompositionField::new(&model, basis);
+        provider.gradient = [0.0, 0.5, 0.0];
+        let field = bind(&model, &provider);
+        let colors = [380.0, 780.0].map(|lambda| {
+            let start = field.sample(ray().origin, lambda).unwrap();
+            assert!(start.group_index().unwrap() > start.phase_index());
+            let result = propagate(
+                &field,
+                ray(),
+                Vec3::new(0.0, 0.0, 1.0),
+                lambda,
+                20.0,
+                options(),
+            )
+            .unwrap();
+            assert!(result.group_optical_path_length_m.unwrap() > result.optical_path_length_m);
+            let end = field.sample(result.ray.origin, lambda).unwrap();
+            close(
+                end.phase_index() * result.ray.dir.x,
+                start.phase_index(),
+                2.0e-11,
+            );
+            result
+        });
+        assert!(
+            colors[0].ray.dir.y.abs() > 1.03 * colors[1].ray.dir.y.abs(),
+            "blue composition refraction must respond to the sourced dispersion"
+        );
+        provider.gradient = [0.0; 3];
+        let field = bind(&model, &provider);
+        let index = field.sample(ray().origin, 500.0).unwrap();
+        let result = propagate(
+            &field,
+            ray(),
+            Vec3::new(0.0, 1.0, 0.0),
+            500.0,
+            37.0,
+            options(),
+        )
+        .unwrap();
+        close(
+            result.optical_path_length_m,
+            37.0 * index.phase_index(),
+            2.0e-12,
+        );
+        close(
+            result.group_optical_path_length_m.unwrap(),
+            37.0 * index.group_index().unwrap(),
+            2.0e-12,
+        );
+    }
+}
+
+#[test]
+fn g1_spectral_composition_hessian_and_bundle_focusing_use_the_same_phase_law() {
+    let model = dispersive_model();
+    let basis = PartialDensityBasis::MassKgPerM3;
+    let mut provider = CompositionField::new(&model, basis);
+    provider.diagonal = [0.0, 0.5, 0.5];
+    let field = bind(&model, &provider);
+    for lambda in [380.0, 780.0] {
+        let p = Point3::new(0.0, 0.2, -0.1);
+        let jet = field.sample_second_order(p, lambda).unwrap();
+        assert_eq!(jet.optical(), field.sample(p, lambda).unwrap());
+        let [xx, yy, zz] = jet.hessian().diagonal();
+        let [xy, xz, yz] = jet.hessian().off_diagonal();
+        for (axis, expected) in [[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]]
+            .into_iter()
+            .enumerate()
+        {
+            let mut a = [p.x, p.y, p.z];
+            let mut b = a;
+            let h = 0.01;
+            a[axis] -= h;
+            b[axis] += h;
+            let ga = field
+                .sample(Point3::new(a[0], a[1], a[2]), lambda)
+                .unwrap()
+                .phase_gradient_per_m();
+            let gb = field
+                .sample(Point3::new(b[0], b[1], b[2]), lambda)
+                .unwrap()
+                .phase_gradient_per_m();
+            for ((a, b), expected) in [ga.x, ga.y, ga.z]
+                .into_iter()
+                .zip([gb.x, gb.y, gb.z])
+                .zip(expected)
+            {
+                close(
+                    (b - a) / (2.0 * h),
+                    expected,
+                    2.0e-8 * expected.abs() + 2.0e-15,
+                );
+            }
+        }
+        let spectral = model.at_wavelength(lambda, basis).unwrap();
+        let index = spectral.refractive_index(&[1.0, 1.0]).unwrap();
+        let k = spectral.coefficients();
+        let q = index.derivative_lorentz_lorenz * (k[0].coefficient - k[1].coefficient) * 0.5
+            / index.phase_index;
+        assert!(q < 0.0);
+        let rate = (-q).sqrt();
+        let expected = (40.0 * rate).sin() / rate;
+        let bundle = propagate_bundle(
+            &field,
+            ray(),
+            Vec3::new(0.0, 1.0, 0.0),
+            lambda,
+            40.0,
+            BundleOptions {
+                integration: options(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let projection = bundle
+            .project_at_endpoint(ray().dir, ProjectionOptions::default())
+            .unwrap();
+        close(
+            projection.area_per_solid_angle_m2(),
+            expected * expected,
+            2.0e-8,
+        );
+        close(
+            bundle.propagation().group_optical_path_length_m.unwrap(),
+            40.0 * index.group_index,
+            2.0e-11,
+        );
+    }
 }

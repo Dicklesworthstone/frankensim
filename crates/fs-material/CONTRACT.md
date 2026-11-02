@@ -7070,16 +7070,37 @@ unrepresentable positive contributions and out-of-band/dilute-domain queries
 refuse. Preparation retains the original 128-component bound; evaluation uses
 bounded linear work and allocates no memory. The identity binds original
 model sources, component optics, masses and order. Varying concentrations do
-not establish new thermodynamic acceptance, dispersion, absorption or new
-species; the existing constant-polarizability domain applies. G1/G3 fixtures
+not establish new thermodynamic acceptance, absorption or new species.
+Constant polarizability remains the default; explicit dispersion sources may
+be attached as described below. G1/G3 fixtures
 cover original ideal/NASA state recovery, mass/number basis equivalence,
 composition sensitivity at fixed total density and analytic nonlinear
 derivatives.
 
+`composition::MolecularCauchyDispersion` supplies an explicitly sourced Cauchy
+refractivity law anchored at each original molecular reference number density:
+`r(lambda)=r_ref+B(lambda_um^-2-lambda_ref_um^-2)+C(lambda_um^-4-lambda_ref_um^-4)`.
+Finite nonnegative shape coefficients, nonzero source identity and an explicit
+source interval inside 380–780 nm containing the reference are required.
+Monotone endpoint admission covers the dilute domain throughout that interval.
+`with_dispersion` requires original-reference/order/count agreement, intersects
+source support and binds sources and coefficients independently of attachment
+history. `at_wavelength` prepares additive coefficients and analytic
+`lambda dK_i/dlambda` once, sharing reciprocal powers across species and keeping
+original molar masses. Phase and spatial derivatives use the full Lorentz–Lorenz
+sum; group index is `n_g=n-n_L sum_i density_i lambda dK_i/dlambda`, with a
+separately retained cancellation-safe group refractivity. Vacuum and zero-shape
+fits preserve constant-law results. Extrapolation and unrepresentable values
+refuse. Three material regressions cover reference anchoring, frozen constant
+bits, density-basis equivalence, independent spectral differentiation and
+source/order/domain boundaries. This declared normal-dispersion fit adds no gas
+presets, measured accuracy, anomalous/resonant dispersion, dense-gas correction,
+absorption or changed molecular-scattering law.
+
 Preparation is bounded by the original 128-component gas limit; spectral and
 phase evaluation are allocation-free constant work. The exact lambda^-4 law
-assumes constant molecular polarizability on 380–780 nm. No dispersion,
-resonance, Raman shift, dense-gas correction, Stokes transport, absorption or
+assumes constant molecular polarizability on 380–780 nm. This scattering law
+adds no dispersion, resonance, Raman shift, dense-gas correction, Stokes transport, absorption or
 thermal-emission claim is made. The original gas owner still owns phase and
 thermodynamic validity. Source hashes retain caller input identity, not
 measurement authority. `bind_gas_state` checks complete numerical coherence;

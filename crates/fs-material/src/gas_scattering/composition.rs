@@ -5,13 +5,19 @@
 //! Partial densities include concentration variations without differentiating
 //! normalized fractions or dividing by a vanishing total density. Scattering
 //! still has its independent molecular cross-section owner. The same dilute,
-//! constant-polarizability approximation as the parent applies; no gas equation
-//! of state, optical dispersion, absorption or chemical species is inferred.
+//! constant-polarizability approximation as the parent is the default. Explicit
+//! [`MolecularCauchyDispersion`] sources may supply molecular dispersion; no gas
+//! equation of state, absorption or chemical species is inferred.
 //! Mixture convention: Shevchenko et al. (2021), §3.3.1,
 //! <https://doi.org/10.1016/j.ces.2020.116433>.
 
 use super::thermochemical::ThermochemicalRayleighState;
 use super::*;
+
+pub mod dispersion;
+pub use dispersion::{
+    MolecularCauchyDispersion, MolecularRefractionCoefficient, MolecularRefractionWavelength,
+};
 
 /// Units of every partial density and its spatial derivatives in one field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +36,7 @@ pub struct MolecularRefractionComponent {
     molar_mass_kg_mol: f64,
     number_coefficient: f64,
     mass_coefficient: f64,
+    dispersion: Option<MolecularCauchyDispersion>,
 }
 
 impl MolecularRefractionComponent {
@@ -43,12 +50,16 @@ impl MolecularRefractionComponent {
     pub const fn molar_mass_kg_mol(&self) -> f64 {
         self.molar_mass_kg_mol
     }
-    /// `v_i` [m³/molecule] or `K_i` [m³/kg], prepared once from original inputs.
+    /// Original-reference `v_i` [m³/molecule] or `K_i` [m³/kg]. For an attached
+    /// dispersion law use [`MolecularRefractionModel::at_wavelength`] instead.
     pub const fn coefficient(&self, basis: PartialDensityBasis) -> f64 {
         match basis {
             PartialDensityBasis::MassKgPerM3 => self.mass_coefficient,
             PartialDensityBasis::MoleculesPerM3 => self.number_coefficient,
         }
+    }
+    pub const fn dispersion(&self) -> Option<&MolecularCauchyDispersion> {
+        self.dispersion.as_ref()
     }
 }
 
@@ -57,6 +68,8 @@ impl MolecularRefractionComponent {
 pub struct MolecularRefractionModel {
     components: Vec<MolecularRefractionComponent>,
     identity: ContentHash,
+    reference_identity: ContentHash,
+    wavelength_range_nm: [f64; 2],
 }
 
 impl MolecularRefractionModel {
@@ -140,15 +153,19 @@ impl MolecularRefractionModel {
                 molar_mass_kg_mol: mass,
                 number_coefficient,
                 mass_coefficient,
+                dispersion: None,
             });
         }
         if components.is_empty() {
             return Err(GasScatteringError::Components);
         }
         hash.update(&(components.len() as u64).to_le_bytes());
+        let identity = hash.finalize();
         Ok(Self {
             components,
-            identity: hash.finalize(),
+            identity,
+            reference_identity: identity,
+            wavelength_range_nm: [380.0, 780.0],
         })
     }
 
@@ -159,6 +176,10 @@ impl MolecularRefractionModel {
     }
     pub const fn content_identity(&self) -> ContentHash {
         self.identity
+    }
+    /// Intersection of all explicitly declared spectral source bands.
+    pub const fn wavelength_range_nm(&self) -> [f64; 2] {
+        self.wavelength_range_nm
     }
 
     /// Evaluate supplied nonnegative partial densities in the declared basis.
@@ -171,32 +192,8 @@ impl MolecularRefractionModel {
         basis: PartialDensityBasis,
         wavelength_nm: f64,
     ) -> Result<CompositionRefractiveIndex, GasScatteringError> {
-        wavelength(wavelength_nm)?;
-        if partial_densities.len() != self.components.len() {
-            return Err(GasScatteringError::Components);
-        }
-        let mut l = 0.0;
-        for (&density, component) in partial_densities.iter().zip(&self.components) {
-            if !density.is_finite() || density < 0.0 {
-                return Err(GasScatteringError::RefractivityDomain);
-            }
-            let coefficient = component.coefficient(basis);
-            let term = density * coefficient;
-            if density > 0.0 && coefficient > 0.0 && term == 0.0 {
-                return Err(GasScatteringError::Unrepresentable);
-            }
-            l += term;
-        }
-        let (phase_index, refractivity, denominator) = phase_from_lorentz_lorenz(l)?;
-        let first = 1.5 / (phase_index * denominator * denominator);
-        let second = first * (first * (1.0 + 8.0 * l) / (3.0 * phase_index));
-        Ok(CompositionRefractiveIndex {
-            phase_index,
-            refractivity,
-            lorentz_lorenz: l,
-            derivative_lorentz_lorenz: first,
-            second_derivative_lorentz_lorenz: second,
-        })
+        self.at_wavelength(wavelength_nm, basis)?
+            .refractive_index(partial_densities)
     }
 }
 
@@ -207,6 +204,10 @@ impl MolecularRefractionModel {
 pub struct CompositionRefractiveIndex {
     pub phase_index: f64,
     pub refractivity: f64,
+    /// Narrowband group index from the full mixture's spectral derivative.
+    pub group_index: f64,
+    /// Cancellation-safe `n_g - 1`, independently retained like refractivity.
+    pub group_refractivity: f64,
     pub lorentz_lorenz: f64,
     pub derivative_lorentz_lorenz: f64,
     pub second_derivative_lorentz_lorenz: f64,

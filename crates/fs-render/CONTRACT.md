@@ -3304,15 +3304,22 @@ unwritten entries refuse. The adapter computes
 composition changes bend rays even at constant total mass density.
 `GasCompositionSecondOrderField` supplies actual component Hessians, retaining
 both terms `Hess(n) = n_L sum_i K_i Hess(rho_i) + n_LL grad(L) grad(L)^T`.
-Queries use bounded stack storage without heap allocation. Native curved rays
-and angular bundles consume the resulting field directly, with phase/group
-equality under the declared nondispersive model and zero true absorption.
+Queries use bounded stack storage without heap allocation and reuse one
+material wavelength preparation for phase/group, gradient and Hessian. Native
+curved rays and angular bundles bend and focus with phase index, while group
+optical path uses the separately differentiated full-mixture group index.
+Constant-polarizability fields retain phase/group equality and existing
+arithmetic. Source-supported Cauchy fits permit chromatic refraction and
+focusing at fixed total density without fitting renderer coefficients or
+averaging constituent group indices. True absorption remains zero.
 Source mismatches and provider/numerical failures refuse. No EOS
 reconstruction, cell smoothing, chemical-species inference or scattered-radiance
 integration is supplied. Focused regressions cover spatial derivatives in both
 density bases, constant-total-density bending and Snell invariance, analytic
 on-axis focusing/defocusing, neighboring rays, detector irradiance, vacuum and
-invalid/source/missing-row refusals.
+invalid/source/missing-row refusals. Two additional spectral regressions cover
+blue/red bending, spatial Hessians, analytic lens focusing and homogeneous
+and curved group-delay accumulation under the same explicit optical sources.
 
 `MaterialGasScatteringBinding::bind_cell_grid` borrows accepted gas states and
 their exact density buffer in the native `VolumeGrid` cell order. Temperature

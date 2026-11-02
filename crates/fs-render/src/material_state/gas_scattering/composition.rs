@@ -9,7 +9,8 @@ use super::*;
 use crate::gradient_index::bundle::{IndexHessian, IndexJet, SecondOrderIndexField};
 use fs_material::gas_mixture::MAX_GAS_MIXTURE_COMPONENTS;
 use fs_material::gas_scattering::composition::{
-    CompositionRefractiveIndex, MolecularRefractionModel, PartialDensityBasis,
+    CompositionRefractiveIndex, MolecularRefractionModel, MolecularRefractionWavelength,
+    PartialDensityBasis,
 };
 
 /// One component's partial density and spatial gradient in the declared basis.
@@ -67,10 +68,11 @@ pub trait GasCompositionSecondOrderField: GasCompositionGradientField {
 }
 
 /// Allocation-free native GRIN field tied to original species and a snapshot.
-/// The material's dilute, constant-polarizability visible-band model applies.
+/// The material's dilute visible-band model and explicit spectral sources apply.
 /// Local composition is supplied, not inferred by another equation of state.
-/// Phase/group indices coincide; true absorption is zero. Molecular scattering
-/// remains separate and is not integrated along these curved paths.
+/// Phase controls bending; group index uses the full molecular spectral
+/// derivative when dispersion is attached. True absorption is zero. Molecular
+/// scattering remains separate and is not integrated along these curved paths.
 pub struct MaterialGasCompositionRefractiveField<'a, F: GasCompositionGradientField + ?Sized> {
     model: &'a MolecularRefractionModel,
     field: &'a F,
@@ -133,19 +135,23 @@ impl<'a, F: GasCompositionGradientField + ?Sized> MaterialGasCompositionRefracti
         self.field
             .sample_partial_densities(position_m, samples)
             .map_err(GasRefractiveFieldError::Field)?;
-        self.optics(samples.iter(), wavelength_nm)
+        let spectral = self
+            .model
+            .at_wavelength(wavelength_nm, self.basis)
+            .map_err(GasRefractiveFieldError::Gas)?;
+        self.optics(samples.iter(), &spectral)
             .map(|(optical, _, _)| optical)
     }
 
     fn optics<'b>(
         &self,
         samples: impl Iterator<Item = &'b GasPartialDensitySample>,
-        wavelength_nm: f64,
+        spectral: &MolecularRefractionWavelength<'_>,
     ) -> Result<(GradientIndexSample, CompositionRefractiveIndex, [f64; 3]), GasRefractiveFieldError>
     {
         let mut densities = [0.0; MAX_GAS_MIXTURE_COMPONENTS];
         let mut gradient_l = [0.0; 3];
-        for (i, (sample, component)) in samples.zip(self.model.components()).enumerate() {
+        for (i, (sample, coefficient)) in samples.zip(spectral.coefficients()).enumerate() {
             densities[i] = sample.density;
             let g = [
                 sample.gradient_per_m.x,
@@ -158,23 +164,18 @@ impl<'a, F: GasCompositionGradientField + ?Sized> MaterialGasCompositionRefracti
                 ));
             }
             for j in 0..3 {
-                gradient_l[j] += component.coefficient(self.basis) * g[j];
+                gradient_l[j] += coefficient.coefficient * g[j];
             }
         }
-        let index = self
-            .model
-            .refractive_index(
-                &densities[..self.model.components().len()],
-                self.basis,
-                wavelength_nm,
-            )
+        let index = spectral
+            .refractive_index(&densities[..self.model.components().len()])
             .map_err(GasRefractiveFieldError::Gas)?;
         let optical = GradientIndexSample::try_new(
             index.phase_index,
             Vec3::new(gradient_l[0], gradient_l[1], gradient_l[2])
                 .scale(index.derivative_lorentz_lorenz),
             0.0,
-            Some(index.phase_index),
+            Some(index.group_index),
         )
         .map_err(GasRefractiveFieldError::Field)?;
         Ok((optical, index, gradient_l))
@@ -195,11 +196,14 @@ impl<F: GasCompositionSecondOrderField + ?Sized> MaterialGasCompositionRefractiv
         self.field
             .sample_partial_density_jets(position_m, samples)
             .map_err(GasRefractiveFieldError::Field)?;
-        let (optical, index, g) =
-            self.optics(samples.iter().map(|jet| &jet.sample), wavelength_nm)?;
+        let spectral = self
+            .model
+            .at_wavelength(wavelength_nm, self.basis)
+            .map_err(GasRefractiveFieldError::Gas)?;
+        let (optical, index, g) = self.optics(samples.iter().map(|jet| &jet.sample), &spectral)?;
         let mut diagonal = [0.0; 3];
         let mut off_diagonal = [0.0; 3];
-        for (jet, component) in samples.iter().zip(self.model.components()) {
+        for (jet, coefficient) in samples.iter().zip(spectral.coefficients()) {
             if jet
                 .hessian_diagonal_per_m2
                 .into_iter()
@@ -210,7 +214,7 @@ impl<F: GasCompositionSecondOrderField + ?Sized> MaterialGasCompositionRefractiv
                     GradientIndexError::InvalidSample,
                 ));
             }
-            let k = component.coefficient(self.basis);
+            let k = coefficient.coefficient;
             for i in 0..3 {
                 diagonal[i] += k * jet.hessian_diagonal_per_m2[i];
                 off_diagonal[i] += k * jet.hessian_off_diagonal_per_m2[i];
