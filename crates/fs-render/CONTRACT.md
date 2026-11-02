@@ -4673,3 +4673,24 @@ Fresnel rebuilds during dark cooling. The example's authored interpolation and
 fixed geometry/coating assumptions are explicit; these are not measured metal
 or phase-mixture data. Run with
 `cargo run -p fs-render --example phase_surface_optical_heating --no-default-features --features optical-heating,material-state`.
+
+
+### Native-state diffuse absorptivity
+
+`thermal_surface::heating::diffuse_feedback::SurfaceDiffuseLaw` binds the
+existing visible-band spectral emissivity/absorptivity law to either native
+temperature or the original specific-enthalpy coordinate. Enthalpy binding
+requires the exact caloric identity and enthalpy storage basis, so two states on
+one isothermal latent plateau may retain different absorptivity. Every state row
+shares one authored wavelength grid; interpolation occurs in the declared state
+coordinate before the existing wavelength interpolation. No RGB conversion,
+solid/liquid mixture rule, infrared continuation or measured-data authority is
+invented.
+
+`SurfaceOpticalHeating::try_new_with_stateful_diffuse` reuses the existing
+pulse schedule, receiver, compensated energy and transactional thermal owners.
+Distinct receiver/law pairs resolve once per accepted interval and invalidate
+compiled spectral responses only when emissivity values change. Constant rows
+retain fixed-response parity; dark intervals continue to validate source domains
+without rebuilding optical packets. This coupling is start-state explicit and
+therefore retains the existing temporal-refinement requirement.

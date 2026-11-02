@@ -20,6 +20,11 @@ mod state;
 use state::SurfaceFeedbackState;
 pub use state::{StatefulSurfaceIlluminationSource, SurfaceIncidence};
 
+pub mod diffuse_feedback;
+mod diffuse_state;
+use diffuse_state::SurfaceDiffuseFeedbackState;
+pub use diffuse_state::StatefulDiffuseSurfaceIlluminationSource;
+
 use super::ThermalSurfaceError;
 use crate::conductor::ConductorError;
 use crate::dielectric::DielectricError;
@@ -202,6 +207,7 @@ struct Pending<const N: usize> {
 pub struct SurfaceOpticalHeating<const N: usize> {
     model: Arc<Model<N>>,
     feedback: Option<SurfaceFeedbackState<N>>,
+    diffuse_feedback: Option<SurfaceDiffuseFeedbackState<N>>,
     time_s: f64,
     evaluations: usize,
     response_evaluations: usize,
@@ -326,6 +332,7 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
                 tolerance,
             }),
             feedback: None,
+            diffuse_feedback: None,
             time_s: thermal.time_s(),
             evaluations: 0,
             response_evaluations: 0,
@@ -401,6 +408,9 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
         if let Some(feedback) = &self.feedback {
             feedback.validate(thermal, checkpoint)?;
         }
+        if let Some(feedback) = &self.diffuse_feedback {
+            feedback.validate(thermal, checkpoint)?;
+        }
         Ok(())
     }
 }
@@ -465,6 +475,9 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
         if let Some(feedback) = &mut self.feedback {
             feedback.refresh(thermal, checkpoint)?;
         }
+        if let Some(feedback) = &mut self.diffuse_feedback {
+            feedback.refresh(thermal, checkpoint)?;
+        }
         let mut sums = self.sums.clone();
         let mut receiving = BTreeMap::<CellId, CheckedSum>::new();
         let mut absorbed = CheckedSum::default();
@@ -473,16 +486,38 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
             let mean = source
                 .power
                 .mean_power_w(start_s, duration_s, end_s, &mut *checkpoint)?;
-            let response = match &mut self.feedback {
-                Some(feedback) => feedback
-                    .response(
-                        index,
-                        mean.iter().any(|watts| *watts > 0.0),
-                        &mut self.response_evaluations,
-                        checkpoint,
-                    )?
-                    .unwrap_or(source.response),
-                None => source.response,
+            let illuminated = mean.iter().any(|watts| *watts > 0.0);
+            let response = match &mut self.diffuse_feedback {
+                Some(feedback) => match feedback.response(
+                    index,
+                    illuminated,
+                    &mut self.response_evaluations,
+                    checkpoint,
+                )? {
+                    Some(response) => response,
+                    None => match &mut self.feedback {
+                        Some(feedback) => feedback
+                            .response(
+                                index,
+                                illuminated,
+                                &mut self.response_evaluations,
+                                checkpoint,
+                            )?
+                            .unwrap_or(source.response),
+                        None => source.response,
+                    },
+                },
+                None => match &mut self.feedback {
+                    Some(feedback) => feedback
+                        .response(
+                            index,
+                            illuminated,
+                            &mut self.response_evaluations,
+                            checkpoint,
+                        )?
+                        .unwrap_or(source.response),
+                    None => source.response,
+                },
             };
             for lane in 0..N {
                 let incident = mean[lane];

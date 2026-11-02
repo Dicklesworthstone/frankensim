@@ -7,9 +7,12 @@ use fs_render::conductor::{
     ConductorSource,
 };
 use fs_render::dielectric::CauchyIor;
+use fs_render::thermal_surface::heating::diffuse_feedback::SurfaceDiffuseLaw;
 use fs_render::thermal_surface::heating::feedback::SurfaceConductorLaw;
+use fs_render::thermal_surface::SpectralEmissivity;
 use fs_render::thermal_surface::heating::{
-    StatefulSurfaceIlluminationSource, SurfaceHeatingBudget, SurfaceHeatingError,
+    StatefulDiffuseSurfaceIlluminationSource, StatefulSurfaceIlluminationSource,
+    SurfaceHeatingBudget, SurfaceHeatingError,
     SurfaceHeatingTolerance, SurfaceIlluminationSource, SurfaceIncidence, SurfaceOpticalHeating,
     SurfacePowerResponse,
 };
@@ -591,4 +594,160 @@ fn shared_stateful_sources_are_canonical_across_split_advances_and_cancellation(
     assert_eq!(input.time_s(), 0.0);
     assert_eq!(input.energy().thermal_input_j, 0.0);
     assert_eq!(input.response_evaluations(), 0);
+}
+
+
+#[test]
+fn diffuse_enthalpy_feedback_changes_absorption_inside_one_isothermal_melt_plateau() {
+    let law = Arc::new(
+        SurfaceDiffuseLaw::try_enthalpy(
+            ContentHash([215; 32]),
+            ContentHash([202; 32]),
+            (300.0, 500.0),
+            &[
+                (0.0, SpectralEmissivity::constant(0.2).unwrap()),
+                (10.0, SpectralEmissivity::constant(0.2).unwrap()),
+                (110.0, SpectralEmissivity::constant(0.8).unwrap()),
+                (200.0, SpectralEmissivity::constant(0.8).unwrap()),
+            ],
+            4,
+        )
+        .unwrap(),
+    );
+    let mut cells = vec![cell(11, 1.0, 1.0, 0.0), cell(12, 1.0, 1.0, 0.0)];
+    cells[0].specific_h_j_kg = 30.0;
+    cells[1].specific_h_j_kg = 90.0;
+    let original = thermal(cells, &IDENTIFIED_LATENT, vec![]);
+    assert_eq!(original.temperature_k(CellId(11)).unwrap(), 310.0);
+    assert_eq!(original.temperature_k(CellId(12)).unwrap(), 310.0);
+
+    let sources: Vec<_> = [CellId(11), CellId(12)]
+        .into_iter()
+        .map(|id| StatefulDiffuseSurfaceIlluminationSource {
+            source_id: id.0,
+            thermal_cell: id,
+            material_id: MaterialId(7),
+            temperature_bounds_k: (300.0, 500.0),
+            wavelengths_nm: [580.0],
+            optics: Arc::clone(&law),
+            power: SpectralPowerSchedule::try_new(
+                &[segment(0.0, 0.25, [5.0], [5.0])],
+                1,
+            )
+            .unwrap(),
+        })
+        .collect();
+    let input = SurfaceOpticalHeating::try_new_with_stateful_diffuse(
+        &[],
+        &sources,
+        &original,
+        budget(),
+        4,
+        tolerance(),
+        || Ok(()),
+    )
+    .unwrap();
+
+    let emissivity = |h: f64| 0.2 + 0.6 * (h - 10.0) / 100.0;
+    let (first, accepted, _) = original
+        .advance_observed(&input, 0.125, config(0.125), || Ok(()))
+        .unwrap();
+    for (id, initial) in [(CellId(11), 30.0), (CellId(12), 90.0)] {
+        close(
+            first.cells()[&id].specific_h_j_kg,
+            initial + 0.625 * emissivity(initial),
+        );
+        close(first.temperature_k(id).unwrap(), 310.0);
+    }
+    let (second, updated, audit) = first
+        .advance_observed(&accepted, 0.25, config(0.125), || Ok(()))
+        .unwrap();
+    for id in [CellId(11), CellId(12)] {
+        let h = first.cells()[&id].specific_h_j_kg;
+        close(
+            second.cells()[&id].specific_h_j_kg,
+            h + 0.625 * emissivity(h),
+        );
+        close(second.temperature_k(id).unwrap(), 310.0);
+    }
+    assert!(updated.response_evaluations() > 0);
+    close(
+        second.energy_j() - original.energy_j(),
+        updated.energy().thermal_input_j,
+    );
+    close(
+        audit.external_heat_j,
+        updated.energy().thermal_input_j - accepted.energy().thermal_input_j,
+    );
+    close(
+        updated.energy().reflected_j[0] + updated.energy().absorbed_j[0],
+        updated.energy().incident_j[0],
+    );
+}
+
+#[test]
+fn constant_diffuse_state_rows_match_the_fixed_spectral_response_and_cache_it() {
+    let emissivity = SpectralEmissivity::table(&[
+        (380.0, 0.25),
+        (580.0, 0.6),
+        (780.0, 0.4),
+    ])
+    .unwrap();
+    let law = Arc::new(
+        SurfaceDiffuseLaw::try_temperature(
+            ContentHash([216; 32]),
+            &[(300.0, emissivity), (600.0, emissivity)],
+            2,
+        )
+        .unwrap(),
+    );
+    let original = thermal(vec![cell(11, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
+    let stateful = StatefulDiffuseSurfaceIlluminationSource {
+        source_id: 1,
+        thermal_cell: CellId(11),
+        material_id: MaterialId(7),
+        temperature_bounds_k: (300.0, 600.0),
+        wavelengths_nm: [480.0, 680.0],
+        optics: law,
+        power: SpectralPowerSchedule::try_new(
+            &[segment(0.0, 1.0, [8.0, 4.0], [8.0, 4.0])],
+            1,
+        )
+        .unwrap(),
+    };
+    let fixed = SurfaceIlluminationSource {
+        source_id: 1,
+        thermal_cell: CellId(11),
+        material_id: MaterialId(7),
+        temperature_bounds_k: (300.0, 600.0),
+        response: SurfacePowerResponse::from_spectral_diffuse(
+            [480.0, 680.0],
+            &emissivity,
+            ContentHash([216; 32]),
+        )
+        .unwrap(),
+        power: stateful.power.clone(),
+    };
+    let frozen =
+        SurfaceOpticalHeating::try_new(&[fixed], &original, budget(), tolerance(), || Ok(()))
+            .unwrap();
+    let dynamic = SurfaceOpticalHeating::try_new_with_stateful_diffuse(
+        &[],
+        &[stateful],
+        &original,
+        budget(),
+        2,
+        tolerance(),
+        || Ok(()),
+    )
+    .unwrap();
+    let (fixed_state, fixed_history, _) = original
+        .advance_observed(&frozen, 1.0, config(0.125), || Ok(()))
+        .unwrap();
+    let (dynamic_state, dynamic_history, _) = original
+        .advance_observed(&dynamic, 1.0, config(0.125), || Ok(()))
+        .unwrap();
+    assert_eq!(fixed_state.cells(), dynamic_state.cells());
+    assert_eq!(fixed_history.energy(), dynamic_history.energy());
+    assert_eq!(dynamic_history.response_evaluations(), 0);
 }
