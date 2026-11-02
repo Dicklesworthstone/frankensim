@@ -3534,3 +3534,49 @@ checks, not a general finite-strain trajectory or spatial-convergence certificat
 `cargo run -p fs-solid --example viscoelastic_creep -- --dynamic` releases a
 synthetic initially stretched coupon and reports displacement, velocity,
 physical storage/kinetic energy, viscous loss and both numerical work terms.
+
+## Finite-strain Taylor–Hood displacement/pressure solids
+
+`hyper3::mixed::MixedUpProblem` solves P2 Tet10 displacements with one continuous
+P1 pressure per original corner vertex. Uniform, per-element and per-quadrature
+mixed material fields retain their original laws; the material owner supplies
+all four consistent saddle-point tangent blocks. Exact incompressibility is
+weakly imposed in that pressure space. Original finite-bulk mode preserves the
+material's admitted volume/pressure dual, including its domain restrictions.
+
+The original Tet10 topology/map and explicit Duffy rules prepare shared immutable
+reference geometry. Four through twelve points per collapsed direction are
+admitted: the nonlinear pressure constraint needs the quartic rule, not the
+linear-stiffness minimum. Curved geometry and nonlinear energies still require
+quadrature refinement. Tangents are accumulated as 34×34 element blocks and
+scattered once per element; repeated Newton actions reuse the assembled matrix,
+its original sparse LDL factor, and one symbolic analysis for the fixed pattern.
+The previous numeric factor is released before its replacement is allocated.
+
+The native Newton–Krylov owner supplies residual Armijo globalization. Required
+length and stress scales define positive work-conjugate congruence scaling;
+force [N] and constraint-volume [m³] residuals are not directly mixed. The same
+physical force and complete pressure residuals are checked at acceptance.
+Native LDL uses 2×2 pivots and requires inertia (n_free_u positive, n_free_p negative),
+including for an initially equilibrated or zero-iteration endpoint. An unstable
+or singular candidate refuses. Numeric factor payload, sparse assembly payload,
+mesh/free-DOF counts and quadrature-point count have explicit caller caps.
+Cancellation is checked during assembly and around the bounded native factor.
+
+Pressure normally follows traction equilibrium. An optional exact-mode pressure
+pin is accepted only when the selected component's constant-pressure field is a
+true null mode on free displacement rows; the omitted constraint is also checked
+at the accepted endpoint. Finite-bulk pins and physically overconstraining pins
+refuse. The public raw evaluation retains constrained rows, reactions, physical
+residuals, the full tangent and mixed saddle potential. That potential is not
+silently interpreted as viscous stored energy.
+
+`tests/mixed_up.rs` verifies independent uniaxial traction/stretch/pressure,
+original bulk/shear ratios 1 through 1e8, full tangent derivatives and objectivity,
+quartic constraint integration, pressure gauges, budget/cancellation boundaries,
+and rejection of an already equilibrated unstable compressed bar. A non-affine
+Cook panel has a three-rung refinement diagnostic and compares bulk/shear 1e6
+against exact incompressibility. This bounded evidence is not the complete
+Treloar/MMS/inf-sup campaign or a universal locking-free certificate; bead
+`frankensim-irp-v5-instrument-realism-pexfp.61` remains open. The displacement-only
+P1 hyper3 path retains its original volumetric-locking limitation.

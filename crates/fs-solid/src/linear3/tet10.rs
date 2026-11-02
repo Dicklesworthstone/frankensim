@@ -66,6 +66,50 @@ pub struct QuadraticTetProblem<'a> {
     pub quadrature: TetQuadrature,
 }
 
+/// Shared topology admission for quadratic displacement consumers. Returns the
+/// canonical set of corner vertices, also the nodes of a continuous P1 field.
+/// Coordinate, quadrature and allocation budgets remain with the caller.
+pub(crate) fn validate_tet10_topology(
+    nodes_count: usize,
+    elements: &[[usize; 10]],
+    cx: &Cx<'_>,
+) -> Result<BTreeSet<usize>, TetElasticError> {
+    let mut incident = vec![false; nodes_count];
+    let mut edges = BTreeMap::new();
+    let mut midsides = BTreeMap::new();
+    let mut vertices = BTreeSet::new();
+    for tet in elements {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        vertices.extend(tet[..4].iter().copied());
+    }
+    for (element, tet) in elements.iter().enumerate() {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        for (a, &node) in tet.iter().enumerate() {
+            if node >= nodes_count {
+                return Err(TetElasticError::NodeIndexOutOfRange { element, node });
+            }
+            if tet[..a].contains(&node) {
+                return Err(TetElasticError::RepeatedTetNode { element });
+            }
+            incident[node] = true;
+        }
+        for (edge, &[a, b]) in TET10_EDGES.iter().enumerate() {
+            let key = sorted_edge(tet[a], tet[b]);
+            let mid = tet[4 + edge];
+            if vertices.contains(&mid)
+                || edges.insert(key, mid).is_some_and(|old| old != mid)
+                || midsides.insert(mid, key).is_some_and(|old| old != key)
+            {
+                return Err(TetElasticError::MidsideMismatch { element, edge });
+            }
+        }
+    }
+    if let Some(node) = incident.iter().position(|seen| !seen) {
+        return Err(TetElasticError::UnreferencedNode { node });
+    }
+    Ok(vertices)
+}
+
 /// Reference shape functions and derivatives with respect to `(λ1,λ2,λ3)`.
 /// The caller supplies barycentric coordinates summing to one.
 #[must_use]
@@ -226,39 +270,7 @@ impl QuadraticTetProblem<'_> {
             }
         }
         self.materials.validate(self.elements.len())?;
-        let mut incident = vec![false; self.nodes_m.len()];
-        let mut edges = BTreeMap::new();
-        let mut midsides = BTreeMap::new();
-        let mut vertices = BTreeSet::new();
-        for tet in self.elements {
-            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-            vertices.extend(tet[..4].iter().copied());
-        }
-        for (element, tet) in self.elements.iter().enumerate() {
-            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-            for (a, &node) in tet.iter().enumerate() {
-                if node >= self.nodes_m.len() {
-                    return Err(TetElasticError::NodeIndexOutOfRange { element, node });
-                }
-                if tet[..a].contains(&node) {
-                    return Err(TetElasticError::RepeatedTetNode { element });
-                }
-                incident[node] = true;
-            }
-            for (edge, &[a, b]) in TET10_EDGES.iter().enumerate() {
-                let key = sorted_edge(tet[a], tet[b]);
-                let mid = tet[4 + edge];
-                if vertices.contains(&mid)
-                    || edges.insert(key, mid).is_some_and(|old| old != mid)
-                    || midsides.insert(mid, key).is_some_and(|old| old != key)
-                {
-                    return Err(TetElasticError::MidsideMismatch { element, edge });
-                }
-            }
-        }
-        if let Some(node) = incident.iter().position(|seen| !seen) {
-            return Err(TetElasticError::UnreferencedNode { node });
-        }
+        validate_tet10_topology(self.nodes_m.len(), self.elements, cx)?;
         Ok(())
     }
 

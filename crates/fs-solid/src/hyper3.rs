@@ -92,6 +92,9 @@ pub mod plastic;
 /// Retained finite-strain Maxwell histories on the same native equilibrium solver.
 pub mod visco;
 
+/// Taylor–Hood finite-strain solids with an independent continuous pressure field.
+pub mod mixed;
+
 /// Newton / load-stepping controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HyperTetSettings {
