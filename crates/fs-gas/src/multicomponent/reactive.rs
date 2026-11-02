@@ -23,7 +23,10 @@ pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 mod cell;
 pub use cell::CellChemistry;
 mod piston;
-pub use piston::ReactivePistonStep;
+pub use piston::{
+    PistonThermalEnds, PistonThermalReport, ReactivePistonStep, SplitPistonThermalReport,
+    ThermalReactiveStepReport,
+};
 
 /// Transport stability and bounded retries of the complete coupled step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -128,6 +131,8 @@ pub enum ReactiveError {
     Dissipation(DissipationError),
     /// The original resolved pressure/piston owner refused a coupled trial.
     Piston(crate::dynamics::piston::PistonError),
+    /// Original end-wall heat storage or thermal exchange refused.
+    Wall(super::wall_exchange::WallExchangeError),
     /// One original-source finite-rate cell solve refused.
     Chemistry {
         /// Zero-based physical cell index.
@@ -181,6 +186,14 @@ impl From<crate::dynamics::piston::PistonError> for ReactiveError {
         match value {
             crate::dynamics::piston::PistonError::Cancelled => Self::Cancelled,
             other => Self::Piston(other),
+        }
+    }
+}
+impl From<super::wall_exchange::WallExchangeError> for ReactiveError {
+    fn from(value: super::wall_exchange::WallExchangeError) -> Self {
+        match value {
+            super::wall_exchange::WallExchangeError::Cancelled => Self::Cancelled,
+            other => Self::Wall(other),
         }
     }
 }

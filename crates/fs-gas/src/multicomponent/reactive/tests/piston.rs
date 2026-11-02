@@ -3,6 +3,7 @@ use crate::dynamics::piston::{Piston, PistonControl, PistonLoad};
 use crate::multicomponent::Boundary;
 
 mod molecular;
+mod thermal;
 
 const AREA: f64 = 0.1;
 

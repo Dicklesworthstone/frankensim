@@ -248,6 +248,30 @@ impl<'law> MaterialWallCaloric<'law> {
         }
     }
 
+    /// Actual finite-store endpoint difference in this original source's h/u
+    /// coordinate. A mechanical composing owner must admit its work convention
+    /// before using the result as internal energy. Energy gauges cancel here.
+    pub(crate) fn energy_change_j(
+        &self,
+        before: WallContact,
+        after: WallContact,
+    ) -> Result<f64, WallExchangeError> {
+        match &self.storage {
+            Storage::Energy(source) => {
+                let (initial, _) = source.state(before)?;
+                let (final_energy, _) = source.state(after)?;
+                Ok(source.initial.mass_kg * (final_energy - initial))
+            }
+            #[cfg(feature = "material")]
+            Storage::Capacity(source) => source
+                .energy_change_j(
+                    self.temperature_k(before.thermal)?,
+                    self.temperature_k(after.thermal)?,
+                )
+                .map_err(WallExchangeError::from),
+        }
+    }
+
     /// Signed heat into gas that reaches each end of the wall source domain.
     pub(crate) fn heat_limits(
         &self,

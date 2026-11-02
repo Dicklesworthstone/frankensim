@@ -9,8 +9,20 @@ use crate::dynamics::piston::{
     validate,
 };
 use crate::multicomponent::dissipation::{DissipationControl, DissipationOperator, TransportLaw};
-use crate::multicomponent::{Boundaries, Boundary};
+use crate::multicomponent::wall_exchange::WallControl;
+use crate::multicomponent::{Boundaries, Boundary, Totals};
 use fs_qty::Time;
+
+use super::thermal::{PistonThermalEnds, SplitPistonThermalReport};
+
+/// Private common-root result; public entries expose their original report.
+pub(super) struct MolecularPistonReport {
+    pub flow: ReactiveStepReport,
+    pub before: Totals,
+    pub after: Totals,
+    pub heat: Option<SplitPistonThermalReport>,
+    pub gas_energy_change_j: f64,
+}
 
 impl ReactingEuler1d {
     /// Advance chemistry, molecular transport and pressure-driven piston motion.
@@ -57,8 +69,36 @@ impl ReactingEuler1d {
         dissipation_controls: DissipationControl,
         load: PistonLoad,
         piston_controls: PistonControl,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep<ReactiveStepReport>, ReactiveError> {
+        self.step_with_piston_molecular(
+            operator,
+            None,
+            piston,
+            maximum_duration,
+            controls,
+            dissipation_controls,
+            load,
+            piston_controls,
+            cancelled,
+        )
+        .map(|report| report.map_gas(|gas| gas.flow))
+    }
+
+    /// One original pressure/stress root, with optional original heat halves.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_with_piston_molecular<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        mut thermal: Option<(&mut PistonThermalEnds<'_>, WallControl)>,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        load: PistonLoad,
+        piston_controls: PistonControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PistonStep<MolecularPistonReport>, ReactiveError> {
         poll(&mut cancelled)?;
         validate(
             *piston,
@@ -79,6 +119,10 @@ impl ReactingEuler1d {
             return Err(ReactiveError::Invalid(
                 "molecular reacting piston requires bounded retries and a constant-area closed interval",
             ));
+        }
+        if let Some((walls, wall_controls)) = thermal.as_ref() {
+            wall_controls.validate()?;
+            walls.admit(&self.accepted)?;
         }
         operator.admit_motion(&self.accepted, &mut cancelled)?;
         let original_piston = *piston;
@@ -128,6 +172,22 @@ impl ReactingEuler1d {
                 gas_trials += 1;
                 self.trial
                     .copy_physical_with_motion_from(&self.accepted, &mut cancelled)?;
+                let first_heat = if let Some((walls, wall_controls)) = thermal.as_mut() {
+                    walls.begin_trial();
+                    Some(walls.advance_trial(
+                        &mut self.trial,
+                        Time::new(0.5 * duration),
+                        *wall_controls,
+                        &mut cancelled,
+                    )?)
+                } else {
+                    None
+                };
+                let middle_before = if first_heat.is_some() {
+                    self.trial.totals()
+                } else {
+                    before
+                };
                 let first = operator.advance_moving_trial(
                     &mut self.trial,
                     Time::new(0.5 * duration),
@@ -171,6 +231,21 @@ impl ReactingEuler1d {
                     [0.0, speed],
                     &mut cancelled,
                 )?;
+                let middle_after = self.trial.totals();
+                let heat = if let Some((walls, wall_controls)) = thermal.as_mut() {
+                    let second_heat = walls.advance_trial(
+                        &mut self.trial,
+                        Time::new(0.5 * duration),
+                        *wall_controls,
+                        &mut cancelled,
+                    )?;
+                    Some(walls.complete(
+                        first_heat.expect("both heat halves share one thermal owner"),
+                        second_heat,
+                    )?)
+                } else {
+                    None
+                };
                 let interval = self.reactor.controls();
                 for i in 0..self.trial.cell_count() {
                     let primitive = self.trial.gas().primitive(
@@ -185,11 +260,15 @@ impl ReactingEuler1d {
                         ));
                     }
                 }
-                let after = self.trial.totals();
+                let after = if heat.is_some() {
+                    self.trial.totals()
+                } else {
+                    middle_after
+                };
                 let complete = coupled_report(
                     &self.trial.gas,
-                    before,
-                    after,
+                    middle_before,
+                    middle_after,
                     transport,
                     chemistry,
                     Some(SplitDissipationReport { first, second }),
@@ -205,7 +284,16 @@ impl ReactingEuler1d {
                 let exchange = MechanicalExchange {
                     duration_s: duration,
                     momentum_change: after.momentum - before.momentum,
-                    energy_change: physical_energy_change,
+                    // Heat is never part of stress work. Finite storage is
+                    // internal; only prescribed reservoir heat is external.
+                    energy_change: match heat {
+                        Some(heat) => sum([
+                            physical_energy_change,
+                            heat.wall_energy_change_j,
+                            -heat.external_heat_to_gas_j,
+                        ]),
+                        None => physical_energy_change,
+                    },
                     left_impulse: transport.left_boundary_change.momentum
                         + first.left_boundary_change.momentum
                         + second.left_boundary_change.momentum,
@@ -219,7 +307,13 @@ impl ReactingEuler1d {
                 let displacement =
                     self.trial.mesh.positions()[right] - self.accepted.mesh.positions()[right];
                 mechanical_report(
-                    complete,
+                    MolecularPistonReport {
+                        flow: complete,
+                        before,
+                        after,
+                        heat,
+                        gas_energy_change_j: physical_energy_change,
+                    },
                     exchange,
                     original_piston,
                     load,
@@ -235,6 +329,9 @@ impl ReactingEuler1d {
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.accepted, &mut self.trial);
                     operator.publish_motion();
+                    if let Some((walls, _)) = thermal.as_mut() {
+                        walls.publish(report.gas.heat.expect("accepted thermal piston heat"));
+                    }
                     piston.accept(&report);
                     return Ok(report);
                 }

@@ -992,6 +992,61 @@ source, chemistry/splitting and unequal-caloric-contact limits remain; no
 experimental combustion, general second-order, entropy or FSI-stability claim
 is made.
 
+### Finite end-wall heat driving reacting piston pressure
+
+`ReactingEuler1d::step_with_piston_dissipation_and_heat` adds the original
+caloric heat exchange around the same molecular/reacting midpoint-speed root:
+`H(dt/2), D(dt/2), C(dt/2), A(dt), C(dt/2), D(dt/2), H(dt/2)`.
+`PistonThermalEnds` retains two distinct finite wall stores or prescribed
+thermal reservoirs, their original caloric bindings and accepted gas geometry.
+Every velocity proposal resets both stores from accepted values; its first
+heat half uses old end-cell volumes and its last uses the moved volumes.
+Heat therefore changes the actual caloric state used by pressure fluxes and
+continuing motion. End order is left then right, including when both ends
+contact the same gas cell. Only A advances geometry and time.
+
+Pressure and longitudinal viscous stress remain the only gas-side mechanical
+impulse/work terms. Conductive heat never enters the stress-work ledger. The
+independent complete energy admission is
+`Delta E_gas + Delta U_finite_walls + Delta K_piston + P_ext*A*Delta x
+- F_ext*Delta x - Q_prescribed_reservoir = 0`.
+Gas chemical energy includes actual endpoint species-reference changes once.
+Finite-wall storage is reconstructed from accepted endpoints using the original
+energy difference or nonlinear capacity integral; a cached capacity tangent is
+not multiplied by the whole temperature change. Arbitrary wall energy datums
+cancel in differences. Prescribed reservoir heat is external, whereas heat
+exchanged with a finite store remains internal to this energy balance.
+
+`ThermalReactiveStepReport` retains complete gas endpoints and heat transfers
+alongside the original middle D/C/A/C/D report. That middle report's balances
+exclude the outer heat halves. `PistonStep::total_energy_residual_j` includes
+the finite stores and subtracts external reservoir heat on this entry;
+`mechanical_energy_residual_j` continues to contain mechanical work alone.
+The end owner's last report, contacts and accepted geometry publish atomically
+with gas, clock, piston and molecular geometry after the final cancellation
+poll. Acoustic shortening restarts all seven stages and the whole root.
+Two small contact arrays and a prepared candidate mesh are reused; no thermal
+source tables or complete fields are cloned per velocity proposal.
+
+Source-backed storage must have an explicit internal-energy or admitted
+negligible-expansion solid convention. Bare source enthalpy refuses because
+its pressure/deformation work has no owner in this rigid-body balance. Radial
+drag also refuses, avoiding a duplicate or stationary-wall momentum sink on
+the moving piston. End conductance is caller-prescribed hA; finite thermal
+masses represent distinct fixed amounts and do not add a second inertial mass.
+Thermal expansion, axial wall conduction, latent material work not represented
+by the admitted source, changing area and a fully implicit conjugate thermal
+solution are outside this entry. Backward-Euler heat halves do not establish
+global second-order accuracy or an entropy/combustion-validity theorem.
+
+Four authored regressions cover an independent two-body heat oracle and hot/
+cold finite-wall pressure response with full storage/work balance; nonlinear
+original wall storage with simultaneous chemical and wall energy-gauge shifts
+and a separately counted external reservoir; final cancellation after prior
+motion, exact replay and original source-interval refusal; and admission of
+the rigid thermal-work/drag convention. These tests are unexecuted under this
+session's worker resource limit; no native build or solver result is claimed.
+
 ## Characteristic compact-reservoir boundaries
 
 Frozen Euler `Boundary::Reservoir` retains a stationary conservative state in

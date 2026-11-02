@@ -6,7 +6,7 @@ use crate::multicomponent::dissipation::{
 use fs_qty::DynViscosity;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
-fn molecular(flow: &MixtureEuler1d) -> DissipationOperator<ConstantTransport> {
+pub(super) fn molecular(flow: &MixtureEuler1d) -> DissipationOperator<ConstantTransport> {
     let law = ConstantTransport::new(
         flow.gas().source().clone(),
         "moving-molecular-piston-fixture",

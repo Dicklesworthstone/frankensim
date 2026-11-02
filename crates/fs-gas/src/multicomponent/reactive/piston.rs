@@ -9,6 +9,10 @@ use crate::multicomponent::{Boundaries, Boundary};
 use fs_qty::Time;
 
 mod molecular;
+mod thermal;
+pub use thermal::{
+    PistonThermalEnds, PistonThermalReport, SplitPistonThermalReport, ThermalReactiveStepReport,
+};
 
 /// One atomic chemistry/pressure-wave/piston step on moving physical volumes.
 #[derive(Clone, Copy, Debug, PartialEq)]

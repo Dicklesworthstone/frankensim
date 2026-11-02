@@ -213,7 +213,10 @@ pub struct PistonStep<R = StepReport> {
     /// and negative additional-force work [J].
     pub mechanical_energy_residual_j: f64,
     /// Actual gas-energy change plus wall kinetic change and exterior work,
-    /// minus additional-force work [J]. No artificial energy correction.
+    /// minus additional-force work [J]. A thermal composing owner also includes
+    /// its finite-wall storage change and subtracts prescribed-reservoir heat;
+    /// the accompanying `gas` report retains those separate source quantities.
+    /// No artificial energy correction is applied.
     pub total_energy_residual_j: f64,
     /// Interior scalar proposals in the accepted coupled attempt.
     pub iterations: usize,
@@ -222,6 +225,28 @@ pub struct PistonStep<R = StepReport> {
 }
 
 impl<R> PistonStep<R> {
+    /// Preserve the accepted mechanical ledger while exposing a composing
+    /// owner's original field report. No physical arithmetic is repeated.
+    pub(crate) fn map_gas<S>(self, map: impl FnOnce(R) -> S) -> PistonStep<S> {
+        PistonStep {
+            gas: map(self.gas),
+            velocity_m_s: self.velocity_m_s,
+            midpoint_velocity_m_s: self.midpoint_velocity_m_s,
+            displacement_m: self.displacement_m,
+            gas_impulse_n_s: self.gas_impulse_n_s,
+            fixed_wall_impulse_n_s: self.fixed_wall_impulse_n_s,
+            kinetic_energy_change_j: self.kinetic_energy_change_j,
+            external_force_work_j: self.external_force_work_j,
+            exterior_pressure_work_j: self.exterior_pressure_work_j,
+            momentum_residual_n_s: self.momentum_residual_n_s,
+            combined_momentum_residual_n_s: self.combined_momentum_residual_n_s,
+            mechanical_energy_residual_j: self.mechanical_energy_residual_j,
+            total_energy_residual_j: self.total_energy_residual_j,
+            iterations: self.iterations,
+            gas_trials: self.gas_trials,
+        }
+    }
+
     pub(crate) fn admitted(&self, controls: PistonControl) -> bool {
         self.momentum_residual_n_s
             .abs()
