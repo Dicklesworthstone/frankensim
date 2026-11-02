@@ -44,8 +44,9 @@ struct Cell {
 }
 
 /// Equal-volume phase control volumes with original source laws shared by layer.
-/// The two physical faces are represented; planar lateral surfaces and cylinder
-/// endcaps are insulated. Pressure/composition and geometry remain fixed. This
+/// Physical faces are represented; explicit solid radial constructors retain a
+/// zero-area regular centre with no inner bath. Planar lateral surfaces and
+/// cylinder endcaps are insulated. Pressure/composition and geometry stay fixed. This
 /// is reference-mass transport, not expansion work, advection or phase kinetics.
 #[derive(Clone, Debug)]
 pub struct PreparedPhaseLayeredThermalBody<'a> {
@@ -60,10 +61,67 @@ pub struct PreparedPhaseLayeredThermalBody<'a> {
 }
 
 impl<'a> PreparedPhaseLayeredThermalBody<'a> {
+    /// Prepare a planar stack or a hollow radial stack. A regular solid centre
+    /// is admitted through the explicit solid constructors below.
     pub fn try_new(
         layers: &[PhaseLayerSource<'a>],
         contact_resistances_m2_k_w: &[f64],
         geometry: LayerStackGeometry,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::prepare(
+            layers,
+            contact_resistances_m2_k_w,
+            geometry,
+            false,
+            checkpoint,
+        )
+    }
+
+    /// A solid cylinder followed by optional concentric shells. The first layer
+    /// starts on the symmetry axis; its thickness is its outer radius. Endcaps
+    /// are insulated. Reference mass is still supplied independently per layer.
+    pub fn try_new_solid_cylindrical(
+        layers: &[PhaseLayerSource<'a>],
+        contact_resistances_m2_k_w: &[f64],
+        length_m: f64,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::prepare(
+            layers,
+            contact_resistances_m2_k_w,
+            LayerStackGeometry::Cylindrical {
+                inner_radius_m: 0.0,
+                length_m,
+            },
+            true,
+            checkpoint,
+        )
+    }
+
+    /// A solid sphere followed by optional concentric shells. The first layer
+    /// starts at the regular centre; there is no finite-area inner reservoir.
+    pub fn try_new_solid_spherical(
+        layers: &[PhaseLayerSource<'a>],
+        contact_resistances_m2_k_w: &[f64],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::prepare(
+            layers,
+            contact_resistances_m2_k_w,
+            LayerStackGeometry::Spherical {
+                inner_radius_m: 0.0,
+            },
+            true,
+            checkpoint,
+        )
+    }
+
+    fn prepare(
+        layers: &[PhaseLayerSource<'a>],
+        contact_resistances_m2_k_w: &[f64],
+        geometry: LayerStackGeometry,
+        solid_center: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
@@ -76,7 +134,18 @@ impl<'a> PreparedPhaseLayeredThermalBody<'a> {
                 "one bounded ordered phase stack and one nonnegative contact per interface required",
             ));
         }
-        geometry.reference_area_m2().map_err(bad)?;
+        if solid_center {
+            match geometry {
+                LayerStackGeometry::Cylindrical {
+                    inner_radius_m,
+                    length_m,
+                } if inner_radius_m == 0.0 && positive(length_m) => {}
+                LayerStackGeometry::Spherical { inner_radius_m } if inner_radius_m == 0.0 => {}
+                _ => return Err(bad("regular radial centre needs valid solid geometry")),
+            }
+        } else {
+            geometry.reference_area_m2().map_err(bad)?;
+        }
         let count = layers.iter().try_fold(0usize, |n, layer| {
             if layer.cell_count == 0 || !positive(layer.thickness_m) || !positive(layer.mass_kg) {
                 return Err(bad(
@@ -208,6 +277,10 @@ impl<'a> PreparedPhaseLayeredThermalBody<'a> {
     pub const fn geometry(&self) -> LayerStackGeometry {
         self.geometry
     }
+    /// A zero-area centre enforces zero radial heat flow by regular symmetry.
+    pub const fn has_solid_center(&self) -> bool {
+        !self.geometry.is_planar() && self.geometry.start_m() == 0.0
+    }
     pub fn layers(&self) -> &[PhaseLayerSource<'a>] {
         &self.layers
     }
@@ -260,6 +333,9 @@ impl<'a> PreparedPhaseLayeredThermalBody<'a> {
         {
             return Err(bad("nonnegative physical face resistances required"));
         }
+        if self.has_solid_center() && end_surface_resistances_m2_k_w[0].is_some() {
+            return Err(bad("a regular solid centre has no physical inner bath"));
+        }
         let mut reservoirs = [None; 2];
         for side in 0..2 {
             if let Some(resistance) = end_surface_resistances_m2_k_w[side] {
@@ -273,12 +349,13 @@ impl<'a> PreparedPhaseLayeredThermalBody<'a> {
                 let area = self.geometry.face_area_m2(face).map_err(bad)?;
                 // Same original metric leaf; these resistance coordinates
                 // never replace physical width, mass or volume.
-                let distance = finite(
-                    self.geometry
-                        .resistance_length_m([face.min(cell.centroid), face.max(cell.centroid)])
-                        .map_err(bad)?
-                        * finite(area / self.geometry.reference_area_m2().map_err(bad)?)?,
-                )?;
+                let distance = self
+                    .geometry
+                    .resistance_length_at_radius_m(
+                        [face.min(cell.centroid), face.max(cell.centroid)],
+                        face,
+                    )
+                    .map_err(bad)?;
                 if !positive(distance) {
                     return Err(bad(
                         "phase boundary half-cell resistance is not representable",

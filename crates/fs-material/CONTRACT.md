@@ -6352,11 +6352,23 @@ Source-domain, original-law, inventory, topology and cancellation failures
 refuse without publishing a changed timeline. This bounded MR19 transport
 increment does not establish empirical source qualification or phase kinetics.
 
-Seven integration regressions cover latent inventory, nonlinear multi-material
+The explicit solid-cylinder and solid-sphere constructors admit a regular
+zero-area centre followed by optional concentric material shells. Equal-volume
+cells retain their physical volume centroids, supplied reference masses and
+original phase conductivity. The centre has zero radial heat flow and refuses
+an inner bath. Outer half-cell resistance is normalized at its actual physical
+face; no zero-radius reference area or artificial inner surface enters the law.
+The existing explicit and implicit/adaptive enthalpy owners retain all evolution,
+generation, contact and energy/entropy accounting.
+
+Ten integration regressions cover latent inventory, nonlinear multi-material
 contact balances in all three geometries, physical face heating, a computed
 Stefan front with spatial/time refinement, transactional refusal, source-varying
 two-bath latent transport, and equal-opposite bath heat with positive conduction
-entropy under explicit and adaptive evolution. Formatting,
+entropy under explicit and adaptive evolution. Solid-centre regressions add
+physical inventory/symmetry admission, nonlinear latent heating through an
+outer finite film, and a computed generated-heat melt front with radial
+temperature/front refinement and a single sensible-plus-latent heat account. Formatting,
 parsing and independent scalar oracle checks passed. Native integration execution,
 including the Stefan convergence thresholds, remains unverified because the
 shared workspace's dependency build exceeded its memory/storage capacity.

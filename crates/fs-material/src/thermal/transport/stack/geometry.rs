@@ -7,8 +7,9 @@
 /// One-dimensional planar or radially symmetric shell geometry. All layers are
 /// ordered from the inner face outward. Thicknesses remain physical lengths.
 /// Cylinders have insulated endcaps and spheres cover the full solid angle.
-/// Positive inner radius is required: a solid centre needs a separate symmetry
-/// boundary condition, not a fictitious finite-area inner reservoir.
+/// General stack constructors require a positive inner radius. Explicit phase
+/// body solid constructors admit radius zero with a regular symmetry boundary;
+/// that zero-area centre has no physical reservoir.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LayerStackGeometry {
     Planar { area_m2: f64 },
@@ -50,6 +51,17 @@ impl LayerStackGeometry {
 
     pub(super) fn face_area_m2(self, coordinate_m: f64) -> Result<f64, &'static str> {
         let pi = core::f64::consts::PI;
+        if !self.is_planar() {
+            if !coordinate_m.is_finite() || coordinate_m < 0.0 {
+                return Err("radial face coordinate must be finite and nonnegative");
+            }
+            if let Self::Cylindrical { length_m, .. } = self {
+                checked(length_m)?;
+            }
+            if coordinate_m == 0.0 {
+                return Ok(0.0);
+            }
+        }
         checked(match self {
             Self::Planar { area_m2 } => area_m2,
             Self::Cylindrical { length_m, .. } => (2.0 * pi * coordinate_m) * length_m,
@@ -87,13 +99,24 @@ impl LayerStackGeometry {
 
     /// A_reference integral(ds / A(s)); this is not a physical layer width.
     pub(super) fn resistance_length_m(self, bounds_m: [f64; 2]) -> Result<f64, &'static str> {
+        self.resistance_length_at_radius_m(bounds_m, self.start_m())
+    }
+
+    /// A(face) integral(ds/A(s)): the native half-cell distance for a physical
+    /// radial face. The integration bounds must stay away from the solid centre;
+    /// its zero-area symmetry boundary carries no flux or thermal resistance.
+    pub(super) fn resistance_length_at_radius_m(
+        self,
+        bounds_m: [f64; 2],
+        face_m: f64,
+    ) -> Result<f64, &'static str> {
         let [a, b] = bounds_m;
         let width = checked(b - a)?;
         checked(match self {
             Self::Planar { .. } => width,
-            Self::Cylindrical { inner_radius_m, .. } => inner_radius_m * (width / a).ln_1p(),
-            Self::Spherical { inner_radius_m } => {
-                (inner_radius_m / a) * (inner_radius_m / b) * width
+            Self::Cylindrical { .. } => checked(face_m)? * (width / checked(a)?).ln_1p(),
+            Self::Spherical { .. } => {
+                (checked(face_m)? / checked(a)?) * (face_m / checked(b)?) * width
             }
         })
     }

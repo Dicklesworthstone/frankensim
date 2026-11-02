@@ -549,3 +549,6 @@ fn source_domain_binding_and_cancellation_refuse_without_changing_phase_history(
 
 #[path = "phase_layered_transport/boundaries.rs"]
 mod boundaries;
+
+#[path = "phase_layered_transport/solid.rs"]
+mod solid;
