@@ -15,7 +15,7 @@ use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,
     contacts::{
         ContactThermalCoefficients,
-        heat::{HeatAssembly, PreparedHeatNetwork, ThermalContactPressure},
+        heat::{HeatAssembly, PreparedHeatNetwork, ThermalContactPressure, ThermalLinkMetric},
     },
 };
 use fs_exec::Cx;
@@ -70,7 +70,17 @@ where
         thermal: &DepositionSimulation<'_>,
         pressures: &[ThermalContactPressure<'_>],
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
-        self.resolve_combined::<F, F, E>(cx, thermal, None, pressures)
+        self.resolve_heat_with_contact_metrics(cx, thermal, pressures, &[])
+    }
+
+    fn resolve_heat_with_contact_metrics(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+        metrics: &[ThermalLinkMetric],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        self.resolve_combined::<F, F, E>(cx, thermal, None, pressures, metrics)
             .map_err(circuit_error)
     }
 }
@@ -81,6 +91,9 @@ where
 /// their separate external heat account. The original heat sample, all fluid
 /// evaluations and their source identities survive in the accepted driver report.
 /// Keep the same view, source models and bindings for continued physical steps.
+/// Current internal-contact metrics may accompany disjoint fluid boundaries.
+/// A mapped coolant endpoint refuses without its own transformed exchange area
+/// and characteristic length; reference fluid geometry is never silently held.
 pub struct SourceConvectionHeatAssembly<'s, 'l, N, Q> {
     network: &'s N,
     links: &'l [SourceConvectiveLink],
@@ -162,14 +175,25 @@ where
         thermal: &DepositionSimulation<'_>,
         pressures: &[ThermalContactPressure<'_>],
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        self.resolve_heat_with_contact_metrics(cx, thermal, pressures, &[])
+    }
+
+    fn resolve_heat_with_contact_metrics(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+        metrics: &[ThermalLinkMetric],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
         self.network
-            .resolve_with_links_and_contact_pressures(
+            .resolve_with_links_and_contact_metrics(
                 cx,
                 thermal,
                 self.links,
                 self.maximum_links,
                 &self.resolve_links,
                 pressures,
+                metrics,
             )
             .map_err(circuit_error)
     }

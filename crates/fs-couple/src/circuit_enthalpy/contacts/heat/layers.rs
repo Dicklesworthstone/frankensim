@@ -10,7 +10,7 @@ use fs_material::thermal::conduction::{
 use std::collections::BTreeMap;
 
 pub(super) struct IntegratedConduction<'n, 'a> {
-    model: &'n PreparedLayerConduction<'n, 'a>,
+    pub(super) model: &'n PreparedLayerConduction<'n, 'a>,
     controls: LayerConductionConfig,
 }
 

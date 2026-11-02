@@ -56,6 +56,31 @@ pub struct ThermalContactPressure<'a> {
     pub pressure_pa: f64,
 }
 
+/// Current geometry of one original planar, two-half-cell thermal path.
+/// A mechanical owner supplies both distances and the common interface area;
+/// these values never change the reference caloric inventory or source context.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThermalLinkMetric {
+    /// Original native thermal-link identity, retaining its A/B order.
+    pub link: u64,
+    /// Current positive interface area [m2].
+    pub area_m2: f64,
+    /// Current positive Fourier distances in original A/B order [m].
+    pub distances_m: [f64; 2],
+}
+
+impl ThermalLinkMetric {
+    /// Admit a finite, noncollapsed path. The supplying mechanical owner must
+    /// separately establish correspondence and applicability of the reduction.
+    pub fn validate(&self) -> Result<(), ConductionError> {
+        if !self.area_m2.is_finite() || self.area_m2 <= 0.0
+            || self.distances_m.iter().any(|d| !d.is_finite() || *d <= 0.0) {
+            return Err(invalid("current thermal area and both half-paths must be positive finite values"));
+        }
+        Ok(())
+    }
+}
+
 /// Complete contact result for one trial, retained with its bulk source payload.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContactLinkSample {
@@ -128,11 +153,24 @@ pub fn apply_material_contacts(
 pub fn apply_material_contacts_with_pressures(
     thermal: &DepositionSimulation<'_>, contacts: &[MaterialContactLink<'_>],
     pressures: &[ThermalContactPressure<'_>],
+    bulk_conductances: &mut BTreeMap<u64, f64>, cancelled: impl FnMut() -> bool,
+) -> Result<Vec<ContactLinkSample>, ConductionError> {
+    apply_material_contacts_with_metrics(thermal, contacts, pressures, &[], bulk_conductances, cancelled)
+}
+
+/// The same series law on current mechanically owned thermal paths.
+/// Bulk conductances MUST already use these same metrics and fresh original
+/// conductivities. This owner applies R''/A once, with the identical current A.
+/// Noncontact path metrics are admitted but receive no interface correction.
+/// No area is inferred from electrical resistance, and no cell mass is changed.
+pub fn apply_material_contacts_with_metrics(
+    thermal: &DepositionSimulation<'_>, contacts: &[MaterialContactLink<'_>],
+    pressures: &[ThermalContactPressure<'_>], metrics: &[ThermalLinkMetric],
     bulk_conductances: &mut BTreeMap<u64, f64>, mut cancelled: impl FnMut() -> bool,
 ) -> Result<Vec<ContactLinkSample>, ConductionError> {
     check(&mut cancelled)?;
     if contacts.len() > MAX_MATERIAL_NETWORK_CONTACTS || contacts.len() > thermal.links().len()
-        || pressures.len() > contacts.len() {
+        || pressures.len() > contacts.len() || metrics.len() > thermal.links().len() {
         return Err(invalid("complete bounded active contact bindings required"));
     }
     let mut ordered: Vec<_> = contacts.iter().collect();
@@ -145,14 +183,26 @@ pub fn apply_material_contacts_with_pressures(
             return Err(invalid("mechanical pressure must name each selected original thermal contact once"));
         }
     }
+    let mut metric_by_link = BTreeMap::new();
+    for metric in metrics {
+        check(&mut cancelled)?;
+        metric.validate()?;
+        if !thermal.links().contains_key(&metric.link)
+            || metric_by_link.insert(metric.link, metric).is_some() {
+            return Err(invalid("current thermal metrics must name unique original active links"));
+        }
+    }
     let mut samples = Vec::with_capacity(ordered.len());
     for (index, binding) in ordered.iter().enumerate() {
         check(&mut cancelled)?;
         if index > 0 && ordered[index-1].link == binding.link {
             return Err(invalid("a physical link cannot receive duplicate contact resistance"));
         }
-        let source = resolve_contact_at_pressure(
+        let mut source = resolve_contact_at_pressure(
             thermal, binding, pressure_by_link.get(&binding.link).copied())?;
+        if let Some(metric) = metric_by_link.get(&binding.link) {
+            source.area_m2 = metric.area_m2;
+        }
         let bulk = *bulk_conductances.get(&binding.link).ok_or_else(|| invalid("contact lacks explicit bulk conductance"))?;
         if !bulk.is_finite() || bulk < 0.0 || !source.area_m2.is_finite() || source.area_m2 < 0.0 {
             return Err(invalid("finite nonnegative bulk conductance and contact area required"));

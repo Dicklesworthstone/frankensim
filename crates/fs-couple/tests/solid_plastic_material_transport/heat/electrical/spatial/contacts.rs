@@ -1,5 +1,7 @@
 //! Matching electrical traces on prescribed native solid kinematics, not a
 //! mechanical contact/tie solver. All material/interface laws are manufactured.
+#[path = "contacts/geometry.rs"]
+mod geometry;
 #[path = "contacts/pressure.rs"]
 mod pressure;
 #[path = "contacts/thermal.rs"]
@@ -168,6 +170,22 @@ fn with_contact_fixture<R>(
         &[Vec<usize>; 2],
     ) -> R,
 ) -> R {
+    with_contact_fixture_paths(fixture, [L / 4.0; 2], run)
+}
+
+fn with_contact_fixture_paths<R>(
+    fixture: ContactFixture,
+    half_distances_m: [f64; 2],
+    run: impl FnOnce(
+        &Cx<'_>,
+        &DepositionSimulation<'_>,
+        &ThermoplasticSolid<'_>,
+        &SpatialConduction,
+        &PreparedHeatNetwork<'_, '_>,
+        &[ConductionContactThermal<'_>],
+        &[Vec<usize>; 2],
+    ) -> R,
+) -> R {
     let ContactFixture {
         material: f,
         interface,
@@ -241,8 +259,8 @@ fn with_contact_fixture<R>(
             .iter()
             .map(|link| ConductionLink {
                 link: link.id,
-                distance_a_m: L / 4.0,
-                distance_b_m: L / 4.0,
+                distance_a_m: half_distances_m[0],
+                distance_b_m: half_distances_m[1],
             })
             .collect();
         let contacts: Vec<_> = links

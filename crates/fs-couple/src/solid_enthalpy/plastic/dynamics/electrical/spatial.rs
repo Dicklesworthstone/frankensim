@@ -17,7 +17,7 @@ use crate::solid_enthalpy::plastic::electrical::{
     ElectricalSolidError, ElectricalSolidReport,
     spatial::{
         SpatialElectricalContactPressure, SpatialElectricalSolidSolve,
-        SpatialElectricalThermalContact,
+        SpatialElectricalThermalContact, SpatialThermalGeometrySolve,
     },
 };
 use fs_em::spatial::conduction::SpatialConduction;
@@ -192,6 +192,105 @@ impl<'m> ThermoplasticDynamics<'m> {
         cx: &Cx<'_>,
     ) -> Result<DynamicSpatialElectricalCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
     {
+        self.advance_spatial_electrothermal_with_geometry_candidate(
+            thermal,
+            problem,
+            assembly,
+            drive,
+            contact_bindings,
+            pressure_bindings,
+            thermal_contact_bindings,
+            None,
+            target_s,
+            prescribed_m,
+            nodal_forces_n,
+            settings,
+            controls,
+            guess_j,
+            cx,
+        )
+    }
+
+    /// Use the same inertial mechanical endpoint for native current AND the
+    /// original scalar thermal bulk/contact geometry. Paired triangle area and
+    /// both centroid-to-face paths follow the original P1 deformation; normals
+    /// must remain principal stretch directions within the explicit bounds.
+    /// Original caloric mass stays fixed, conductive exchange stays internal,
+    /// and kinetic change/numerical loss retain their independent accounts.
+    ///
+    /// The same mapped-interface identity, complete incident-path ownership,
+    /// isotropic-only geometry and atomic refusal rules as
+    /// [`crate::solid_enthalpy::plastic::ThermoplasticSolid::advance_spatial_electrothermal_geometry_candidate`]
+    /// apply. This adds no mechanical contact force or finite-strain law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_spatial_electrothermal_geometry_candidate<
+        't,
+        'd,
+        'p,
+        A: HeatAssembly + ?Sized,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        problem: &SpatialConduction,
+        assembly: &A,
+        drive: impl Into<SpatialConductionDrive<'d>>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        pressure_bindings: &[SpatialElectricalContactPressure<'p>],
+        thermal_contact_bindings: &[SpatialElectricalThermalContact],
+        geometry: SpatialThermalGeometrySolve,
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: SpatialElectricalSolidSolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<DynamicSpatialElectricalCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
+    {
+        self.advance_spatial_electrothermal_with_geometry_candidate(
+            thermal,
+            problem,
+            assembly,
+            drive,
+            contact_bindings,
+            pressure_bindings,
+            thermal_contact_bindings,
+            Some(geometry),
+            target_s,
+            prescribed_m,
+            nodal_forces_n,
+            settings,
+            controls,
+            guess_j,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_spatial_electrothermal_with_geometry_candidate<
+        't,
+        'd,
+        'p,
+        A: HeatAssembly + ?Sized,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        problem: &SpatialConduction,
+        assembly: &A,
+        drive: impl Into<SpatialConductionDrive<'d>>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        pressure_bindings: &[SpatialElectricalContactPressure<'p>],
+        thermal_contact_bindings: &[SpatialElectricalThermalContact],
+        thermal_geometry: Option<SpatialThermalGeometrySolve>,
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: SpatialElectricalSolidSolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<DynamicSpatialElectricalCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
+    {
         let (candidate, motion) = self
             .solid
             .advance_spatial_electrical_with_motion_candidate(
@@ -202,6 +301,7 @@ impl<'m> ThermoplasticDynamics<'m> {
                 contact_bindings,
                 pressure_bindings,
                 thermal_contact_bindings,
+                thermal_geometry,
                 target_s,
                 prescribed_m,
                 nodal_forces_n,

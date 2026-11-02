@@ -11,8 +11,8 @@ use crate::circuit_enthalpy::material::{DirectionalConductionLink, MaterialNetwo
 use fs_conduction::ConductionError;
 use fs_conduction::transient::deposition::contact::{
     ContactLinkSample, MaterialContactLink, apply_material_contacts,
-    apply_material_contacts_with_pressures};
-pub use fs_conduction::transient::deposition::contact::ThermalContactPressure;
+    apply_material_contacts_with_metrics};
+pub use fs_conduction::transient::deposition::contact::{ThermalContactPressure, ThermalLinkMetric};
 use fs_conduction::transient::deposition::radiation::{
     MaterialRadiation, RadiatingCell, RadiationCellError, RadiationCellSources};
 use fs_exec::Cx;
@@ -25,6 +25,7 @@ pub use assembly::HeatAssembly;
 mod extension;
 mod observer;
 mod layers;
+mod metrics;
 pub use observer::{MaterialHeatObserver, AssemblyHeatObserver, HeatSourceObserver,
     HeatAssemblyAdvanceError, observe_heat_assembly};
 pub mod solid;
@@ -443,18 +444,23 @@ impl PreparedHeatNetwork<'_, '_> {
         additional_links: Option<&BTreeMap<u64, f64>>,
         pressures: &[ThermalContactPressure<'_>],
     ) -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError> {
+        self.resolve_with_optional_link_metrics(cx, thermal, additional_links, pressures, &[])
+    }
+
+    fn resolve_with_optional_link_metrics(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
+        pressures: &[ThermalContactPressure<'_>], metrics: &[ThermalLinkMetric],
+    ) -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError> {
         check(cx)?;
         admit_additional_contact_links(&self.thermal_contacts, additional_links)?;
-        let mut coefficients = match additional_links {
-            Some(links) => self.electrical.resolve_with_link_conductances(
-                thermal, links, || cx.checkpoint().is_err(),
-            ),
-            None => self.electrical.resolve(thermal, || cx.checkpoint().is_err()),
-        }?;
+        self.admit_contact_metrics(cx, thermal, additional_links, metrics)?;
+        let mut coefficients = self.electrical.resolve_with_link_metrics(
+            thermal, additional_links, metrics, || cx.checkpoint().is_err())?;
         let integrated_conduction = self.resolve_integrated_conduction(cx, thermal,
             &mut coefficients.bulk.conductances_w_k, &mut coefficients.bulk.source)?;
-        let thermal_contacts = apply_material_contacts_with_pressures(
-            thermal, &self.thermal_contacts, pressures,
+        let thermal_contacts = apply_material_contacts_with_metrics(
+            thermal, &self.thermal_contacts, pressures, metrics,
             &mut coefficients.bulk.conductances_w_k, || cx.checkpoint().is_err())?;
         let radiation = if let Some(original) = self.network.radiation {
             let source = MaterialRadiation { enclosure: original.enclosure, cells: &self.radiating_cells,

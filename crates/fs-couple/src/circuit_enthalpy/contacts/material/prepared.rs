@@ -2,6 +2,7 @@
 //! Values remain live: no temperature, resistance or conductivity is cached.
 use super::*;
 use crate::circuit_enthalpy::material::{DirectionalConductionLink, PreparedMaterialNetwork};
+use fs_conduction::transient::deposition::contact::ThermalLinkMetric;
 
 mod extension;
 mod field_storage;
@@ -56,6 +57,42 @@ impl PreparedElectricalContactNetwork<'_,'_> {
         self.admit_geometry(thermal, &mut cancelled)?;
         let bulk = self.bulk.resolve_with_link_conductances(thermal, additional_links, &mut cancelled)
             .map_err(ElectricalContactNetworkError::Bulk)?;
+        self.network.resolve_contacts(thermal, bulk, Some(&self.pins), cancelled)
+    }
+
+    /// The same source/series owner with explicitly current scalar thermal
+    /// paths. Whole-cell electrical contacts on affected cells need their own
+    /// current electrical geometry and are refused here; spatial field consumers
+    /// supply that geometry through their original, separate field owner.
+    pub fn resolve_with_link_metrics(
+        &self, thermal: &DepositionSimulation<'_>,
+        additional_links: Option<&BTreeMap<u64, f64>>, metrics: &[ThermalLinkMetric],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ContactThermalCoefficients<MaterialNetworkSample>, ElectricalContactNetworkError> {
+        use ElectricalContactNetworkError as Error;
+        if cancelled() { return Err(Error::Thermal(DepositionError::Cancelled)); }
+        self.admit_geometry(thermal, &mut cancelled)?;
+        if !metrics.is_empty() {
+            let mut cells = std::collections::BTreeSet::new();
+            if metrics.len() > thermal.links().len() {
+                return Err(Error::Invalid("current thermal metrics exceed active link owners"));
+            }
+            for metric in metrics {
+                if cancelled() { return Err(Error::Thermal(DepositionError::Cancelled)); }
+                let link = thermal.links().get(&metric.link)
+                    .ok_or(Error::Invalid("current thermal metric names an inactive link"))?;
+                cells.extend([link.a, link.b]);
+            }
+            for (sides, _) in self.geometry.values() {
+                if cancelled() { return Err(Error::Thermal(DepositionError::Cancelled)); }
+                if sides.iter().any(|id| cells.contains(id)) {
+                    return Err(Error::Invalid(
+                        "deformed thermal cells require current electrical contact geometry"));
+                }
+            }
+        }
+        let bulk = self.bulk.resolve_with_link_metrics(
+            thermal, additional_links, metrics, &mut cancelled).map_err(Error::Bulk)?;
         self.network.resolve_contacts(thermal, bulk, Some(&self.pins), cancelled)
     }
 }

@@ -1,7 +1,7 @@
 //! One complete heat evaluation shared by native coupled physical owners.
 use super::{
     CircuitEnthalpyError, ContactThermalCoefficients, DepositionSimulation, HeatNetworkError,
-    HeatNetworkSample, PreparedHeatNetwork, ThermalContactPressure, as_circuit_error,
+    HeatNetworkSample, PreparedHeatNetwork, ThermalContactPressure, ThermalLinkMetric, as_circuit_error,
 };
 use fs_exec::Cx;
 
@@ -98,6 +98,24 @@ pub trait HeatAssembly {
             ).into()))
         }
     }
+
+    /// Resolve one complete heat assembly at mechanically supplied contact
+    /// pressures and current scalar planar path metrics. Providers must forward
+    /// both to their original bulk/contact owner and admit all affected exterior
+    /// and finite-link geometry. Unsupported providers refuse nonempty metrics.
+    fn resolve_heat_with_contact_metrics(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>], metrics: &[ThermalLinkMetric],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
+        if metrics.is_empty() {
+            self.resolve_heat_with_contact_pressures(cx, thermal, pressures)
+        } else {
+            Err(CircuitEnthalpyError::Source(HeatNetworkError::Invalid(
+                "heat assembly does not own current contact-path geometry",
+            ).into()))
+        }
+    }
 }
 
 impl AsRef<HeatNetworkSample> for HeatNetworkSample {
@@ -149,6 +167,14 @@ impl HeatAssembly for PreparedHeatNetwork<'_, '_> {
         pressures: &[ThermalContactPressure<'_>],
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
         PreparedHeatNetwork::resolve_heat_with_contact_pressures(self, cx, thermal, pressures)
+            .map_err(as_circuit_error)
+    }
+
+    fn resolve_heat_with_contact_metrics(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>], metrics: &[ThermalLinkMetric],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        PreparedHeatNetwork::resolve_heat_with_contact_metrics(self, cx, thermal, pressures, metrics)
             .map_err(as_circuit_error)
     }
 }

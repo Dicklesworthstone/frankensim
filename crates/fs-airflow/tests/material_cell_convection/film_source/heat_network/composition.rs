@@ -6,7 +6,7 @@ use fs_airflow::graph::thermal::medium::convection::deposition::source::{
 };
 use fs_couple::circuit_enthalpy::contacts::{
     ContactThermalCoefficients,
-    heat::{HeatAssembly, HeatNetworkError, PreparedHeatNetwork, ThermalContactPressure,
+    heat::{HeatAssembly, HeatNetworkError, PreparedHeatNetwork, ThermalContactPressure, ThermalLinkMetric,
         observe_heat_assembly},
 };
 use fs_conduction::transient::deposition::contact::{ContactCell, MaterialContactLink};
@@ -19,6 +19,8 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 const FLUID: CellId = CellId(72);
+const CONTACT_A: CellId = CellId(73);
+const CONTACT_B: CellId = CellId(74);
 const LINK: u64 = 17;
 const PRESSURE_LINK: u64 = 18;
 const FLUID_CP: f64 = 4000.0;
@@ -64,8 +66,17 @@ impl<A: HeatAssembly + ?Sized> HeatAssembly for Counted<'_, A> {
         thermal: &DepositionSimulation<'_>,
         pressures: &[ThermalContactPressure<'_>],
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        self.resolve_heat_with_contact_metrics(cx, thermal, pressures, &[])
+    }
+    fn resolve_heat_with_contact_metrics(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+        metrics: &[ThermalLinkMetric],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
         self.resolves.set(self.resolves.get() + 1);
-        self.inner.resolve_heat_with_contact_pressures(cx, thermal, pressures)
+        self.inner.resolve_heat_with_contact_metrics(cx, thermal, pressures, metrics)
     }
 }
 
@@ -159,7 +170,20 @@ fn initial_with_pressure_contact<'a>(
     fluid: &'a ResolvedHeatCapacityCurve,
     pressure_contact: bool,
 ) -> DepositionSimulation<'a> {
-    let mut events = [(BODY, 0, CP * 30.0), (FLUID, 1, FLUID_CP * 10.0)]
+    initial_with_contact_geometry(body, fluid, pressure_contact, false)
+}
+fn initial_with_contact_geometry<'a>(
+    body: &'a ResolvedHeatCapacityCurve,
+    fluid: &'a ResolvedHeatCapacityCurve,
+    pressure_contact: bool,
+    separate_contact: bool,
+) -> DepositionSimulation<'a> {
+    let mut inventories = vec![(BODY, 0, CP * 30.0), (FLUID, 1, FLUID_CP * 10.0)];
+    if separate_contact {
+        inventories.extend([(CONTACT_A, 2, CP * 30.0), (CONTACT_B, 3, FLUID_CP * 10.0)]);
+    }
+    let mut events = inventories
+        .into_iter()
         .map(|(id, material, specific_h_j_kg)| TimedEvent {
             time_s: 0.0,
             event: Event::Birth(DepositedCell {
@@ -183,7 +207,7 @@ fn initial_with_pressure_contact<'a>(
                 },
             }),
         })
-        .to_vec();
+        .collect::<Vec<_>>();
     events.push(TimedEvent {
         time_s: 0.0,
         event: Event::Contact(ThermalLink {
@@ -199,8 +223,8 @@ fn initial_with_pressure_contact<'a>(
             time_s: 0.0,
             event: Event::Contact(ThermalLink {
                 id: PRESSURE_LINK,
-                a: BODY,
-                b: FLUID,
+                a: if separate_contact { CONTACT_A } else { BODY },
+                b: if separate_contact { CONTACT_B } else { FLUID },
                 area_m2: 0.5 * SURFACE,
                 conductance_w_k: 0.0,
             }),
@@ -211,11 +235,13 @@ fn initial_with_pressure_contact<'a>(
         &[
             (MaterialId(0), body.curve() as &dyn ThermalLaw),
             (MaterialId(1), fluid.curve() as &dyn ThermalLaw),
+            (MaterialId(2), body.curve() as &dyn ThermalLaw),
+            (MaterialId(3), fluid.curve() as &dyn ThermalLaw),
         ],
         DepositionBudget {
-            max_cells: 2,
+            max_cells: if separate_contact { 4 } else { 2 },
             max_links: if pressure_contact { 2 } else { 1 },
-            max_events: if pressure_contact { 4 } else { 3 },
+            max_events: 3 + usize::from(pressure_contact) + if separate_contact { 2 } else { 0 },
             max_substeps: 100,
         },
     )
@@ -542,14 +568,37 @@ fn nested_complete_sources_share_one_native_timeline_and_retain_both_error_types
 
 #[test]
 fn contact_pressure_reaches_nested_coolant_without_repeating_heat_sources() {
+    check_composed_contact(false);
+}
+
+#[test]
+fn contact_metric_reaches_nested_heat_without_changing_disjoint_coolant_or_reservoirs() {
+    check_composed_contact(true);
+}
+
+fn check_composed_contact(separate_contact: bool) {
     // Two original finite liquid cells; separate patches carry Fourier/contact
-    // exchange and finite convection. Remaining area sees prescribed reservoirs.
+    // exchange and finite convection. For moving internal geometry, two further
+    // cells keep the mapped contact disjoint from untransformed fluid boundaries.
     let (card, curve) = coolant();
-    let thermal = initial_with_pressure_contact(&curve, &curve, true);
+    let thermal = initial_with_contact_geometry(&curve, &curve, true, separate_contact);
     let saved_cells = thermal.cells().clone();
     let saved_links = thermal.links().clone();
     let temperatures = [BODY, FLUID].map(|cell| thermal.temperature_k(cell).unwrap());
-    let contexts = temperatures.map(fluid_point);
+    let contact_cells = if separate_contact {
+        [CONTACT_A, CONTACT_B]
+    } else {
+        [BODY, FLUID]
+    };
+    let contact_temperatures = contact_cells.map(|cell| thermal.temperature_k(cell).unwrap());
+    let mut all_cells = vec![BODY, FLUID];
+    if separate_contact {
+        all_cells.extend(contact_cells);
+    }
+    let contexts = all_cells
+        .iter()
+        .map(|&cell| fluid_point(thermal.temperature_k(cell).unwrap()))
+        .collect::<Vec<_>>();
     let conductivity = PropertyKey::with_quantity(
         THERMAL_CONDUCTIVITY_PROPERTY,
         QuantitySpec::semantic(SemanticType::new(
@@ -557,8 +606,9 @@ fn contact_pressure_reaches_nested_coolant_without_repeating_heat_sources() {
             ValueForm::Static,
         )),
     );
-    let cells = [BODY, FLUID]
-        .into_iter()
+    let cells = all_cells
+        .iter()
+        .copied()
         .enumerate()
         .map(|(i, cell)| MaterialCell {
             cell,
@@ -637,9 +687,9 @@ fn contact_pressure_reaches_nested_coolant_without_repeating_heat_sources() {
     )
     .unwrap();
     let context = QueryPoint::new()
-        .with_quantity("Ta", temperature_quantity(), temperatures[0])
+        .with_quantity("Ta", temperature_quantity(), contact_temperatures[0])
         .unwrap()
-        .with_quantity("Tb", temperature_quantity(), temperatures[1])
+        .with_quantity("Tb", temperature_quantity(), contact_temperatures[1])
         .unwrap()
         .with_quantity("normal_pressure", pressure_quantity, 100000.0)
         .unwrap()
@@ -648,8 +698,8 @@ fn contact_pressure_reaches_nested_coolant_without_repeating_heat_sources() {
     let contacts = [MaterialContactLink {
         link: PRESSURE_LINK,
         sides: [0, 1].map(|i| ContactCell {
-            cell: [BODY, FLUID][i],
-            material_id: MaterialId(i as u64),
+            cell: contact_cells[i],
+            material_id: MaterialId((i + if separate_contact { 2 } else { 0 }) as u64),
             curve: curve.curve(),
         }),
         point: ThermalInterfacePoint {
@@ -724,22 +774,40 @@ fn contact_pressure_reaches_nested_coolant_without_repeating_heat_sources() {
                 fluid.at_temperature(t)
             },
         };
-        let k = temperatures.map(|t| 0.5 + 0.002 * (t - 300.0));
+        let k = contact_temperatures.map(|t| 0.5 + 0.002 * (t - 300.0));
         let area = 0.5 * SURFACE;
-        let bulk_g = area / (0.05 / k[0] + 0.05 / k[1]);
-        let expected_reservoir_g = temperatures.map(|t| 0.5 * conductance(0.5 * (t + 300.0)));
-        for (index, (pressure_pa, resistance)) in
-            [(100000.0, 0.02), (200000.0, 0.01)].into_iter().enumerate()
-        {
+        let exposed = if separate_contact { 1.0 } else { 0.5 };
+        let expected_reservoir_g = temperatures.map(|t| exposed * conductance(0.5 * (t + 300.0)));
+        let geometries = if separate_contact {
+            vec![(area, [0.05, 0.05]), (1.5 * area, [0.04, 0.03])]
+        } else {
+            vec![(area, [0.05, 0.05])]
+        };
+        let mut calls = 0;
+        for (area, distances) in geometries {
+            let bulk_g = area / (distances[0] / k[0] + distances[1] / k[1]);
+            let metrics = if separate_contact {
+                vec![ThermalLinkMetric {
+                    link: PRESSURE_LINK,
+                    area_m2: area,
+                    distances_m: distances,
+                }]
+            } else {
+                Vec::new()
+            };
+            for (pressure_pa, resistance) in [(100000.0, 0.02), (200000.0, 0.01)] {
             let pressures = [ThermalContactPressure {
                 link: PRESSURE_LINK,
                 pressure_axis: "normal_pressure",
                 pressure_pa,
             }];
-            let resolved = layer
-                .resolve_heat_with_contact_pressures(&cx, &thermal, &pressures)
-                .unwrap();
-            assert_eq!(counted.resolves.get(), index + 1);
+            let resolved = if separate_contact {
+                layer.resolve_heat_with_contact_metrics(&cx, &thermal, &pressures, &metrics)
+            } else {
+                layer.resolve_heat_with_contact_pressures(&cx, &thermal, &pressures)
+            }.unwrap();
+            calls += 1;
+            assert_eq!(counted.resolves.get(), calls);
             near(
                 resolved.bulk.conductances_w_k[&PRESSURE_LINK],
                 1.0 / (1.0 / bulk_g + resistance / area),
@@ -759,12 +827,12 @@ fn contact_pressure_reaches_nested_coolant_without_repeating_heat_sources() {
                 );
             }
             let sample = &resolved.bulk.source.heat.heat.thermal_contacts[0];
-            assert_eq!(sample.cells, [BODY, FLUID]);
+            assert_eq!(sample.cells, contact_cells);
             assert_eq!(sample.interface.receipt().selected, pin);
             for (axis, expected) in [
                 ("normal_pressure", pressure_pa),
-                ("Ta", temperatures[0]),
-                ("Tb", temperatures[1]),
+                ("Ta", contact_temperatures[0]),
+                ("Tb", contact_temperatures[1]),
                 ("lot", 7.0),
             ] {
                 assert_eq!(
@@ -781,6 +849,12 @@ fn contact_pressure_reaches_nested_coolant_without_repeating_heat_sources() {
             }
             near(sample.interface.value_m2_k_per_w(), resistance, 1e-12);
             near(sample.bulk_conductance_w_k, bulk_g, 1e-12);
+            near(sample.area_m2, area, 1e-12);
+            if separate_contact {
+                for cell in contact_cells {
+                    assert_eq!(resolved.bulk.sources_w.get(&cell).copied().unwrap_or(0.0), 0.0);
+                }
+            }
             let inner = &resolved.bulk.source.heat;
             assert_eq!(inner.finite_convection.as_ref().unwrap().samples().len(), 1);
             assert_eq!(inner.convection.materials()[0].cell, FLUID);
@@ -788,10 +862,62 @@ fn contact_pressure_reaches_nested_coolant_without_repeating_heat_sources() {
             let bounds = layer
                 .explicit_source_conductance_bounds_w_k(&resolved.bulk.source, &mut || Ok(()))
                 .unwrap();
-            assert_eq!(counted.resolves.get(), index + 1);
+            assert_eq!(counted.resolves.get(), calls);
             for (i, cell) in [BODY, FLUID].into_iter().enumerate() {
                 near(bounds[&cell], expected_reservoir_g[i], 1e-12);
             }
+            }
+        }
+        let metrics = [ThermalLinkMetric {
+            link: PRESSURE_LINK, area_m2: 1.5 * area, distances_m: [0.04, 0.03],
+        }];
+        let pressures = [ThermalContactPressure {
+            link: PRESSURE_LINK, pressure_axis: "normal_pressure", pressure_pa: 100000.0,
+        }];
+        if separate_contact {
+            // Neither a generic exterior layer nor the specialized provider
+            // may silently keep reference boundary area on a mapped cell.
+            let overlapping = [reservoir(CONTACT_A)];
+            let source_calls = Cell::new(0);
+            let overlap = SourceConvectionHeatLayer {
+                inner: &finite, cells: &overlapping, maximum_cells: 1,
+                resolve_fluid: |_: &SourceConvectiveCell, _: &DepositionSimulation<'_>, t| {
+                    source_calls.set(source_calls.get() + 1);
+                    fluid.at_temperature(t)
+                },
+            };
+            let error = overlap.resolve_heat_with_contact_metrics(&cx, &thermal, &pressures, &metrics)
+                .err().unwrap();
+            assert!(format!("{error:?}").contains("transformed reservoir boundary geometry"));
+            let overlap = SourceConvectionHeatNetwork {
+                heat: &prepared, cells: &overlapping, maximum_cells: 1,
+                resolve_fluid: |_: &SourceConvectiveCell, _: &DepositionSimulation<'_>, t| {
+                    source_calls.set(source_calls.get() + 1);
+                    fluid.at_temperature(t)
+                },
+            };
+            let error = overlap.resolve_heat_with_contact_metrics(&cx, &thermal, &pressures, &metrics)
+                .err().unwrap();
+            assert!(format!("{error:?}").contains("transformed reservoir boundary geometry"));
+            assert_eq!(source_calls.get(), 0);
+        } else {
+            // The separate finite-fluid patch still lacks transformed area and
+            // characteristic length when either of its original cells moves.
+            let source_calls = Cell::new(0);
+            let no_reservoir = SourceConvectionHeatNetwork {
+                heat: &prepared, cells: &[], maximum_cells: 0,
+                resolve_fluid: |_: &SourceConvectiveCell, _: &DepositionSimulation<'_>, t| {
+                    fluid.at_temperature(t)
+                },
+            };
+            let overlap = no_reservoir.with_links(&links, 1, |_, _, t| {
+                source_calls.set(source_calls.get() + 1);
+                fluid.at_temperature(t)
+            });
+            let error = overlap.resolve_heat_with_contact_metrics(&cx, &thermal, &pressures, &metrics)
+                .err().unwrap();
+            assert!(format!("{error:?}").contains("transformed finite-coolant exchange geometry"));
+            assert_eq!(source_calls.get(), 0);
         }
         let invalid = [ThermalContactPressure {
             link: PRESSURE_LINK,

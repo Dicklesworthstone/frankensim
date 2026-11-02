@@ -63,6 +63,22 @@ impl PreparedMaterialNetwork<'_, '_> {
         )
     }
 
+    /// Resolve original pinned scalar conductivities on complete, explicitly
+    /// supplied current planar paths. The native bulk series law consumes both
+    /// half-distances and area before any interface resistance is composed.
+    /// Reference cells, masses, caloric charts and material contexts stay fixed.
+    /// Unowned incident paths, exterior coverage and tensor rotations refuse.
+    pub fn resolve_with_link_metrics(
+        &self, thermal: &DepositionSimulation<'_>,
+        additional_links: Option<&BTreeMap<u64, f64>>, metrics: &[ThermalLinkMetric],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
+        self.network.resolve_bound_with_link_metrics(
+            thermal, &self.bases, Some(&self.pins), None, additional_links,
+            self.directional.as_ref(), metrics, cancelled,
+        )
+    }
+
     /// Retained physical gradient directions and principal material roles.
     /// Actual values/claim receipts remain in the same resolved cell snapshots.
     pub fn directional_conduction(&self) -> impl Iterator<Item = &DirectionalConductionLink> {

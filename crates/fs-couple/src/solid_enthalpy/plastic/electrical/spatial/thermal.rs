@@ -1,12 +1,16 @@
 //! One solved matching-interface pressure shared with original thermal links.
+pub mod geometry;
+pub use geometry::SpatialThermalGeometrySolve;
+
 use super::*;
 use crate::circuit_enthalpy::conduction::contacts::SolvedContactPressure;
 use crate::circuit_enthalpy::contacts::heat::{PreparedHeatNetwork, ThermalContactPressure};
 use std::collections::BTreeSet;
 
 /// Explicit correspondence between one native electrical interface and the
-/// SAME original material thermal contact. Heat retains its reference face
-/// area and authored bulk half-paths; only its source pressure evolves here.
+/// SAME original material thermal contact. The pressure-only entrypoint retains
+/// reference heat geometry. The explicit geometry entrypoint additionally
+/// admits the original planar half-cell paths against the native solid mesh.
 #[derive(Clone, Copy, Debug)]
 pub struct SpatialElectricalThermalContact {
     pub contact: usize,

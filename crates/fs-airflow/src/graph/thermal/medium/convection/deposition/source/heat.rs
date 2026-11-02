@@ -25,7 +25,8 @@ use fs_couple::circuit_enthalpy::{
     CircuitThermalCoefficients,
     contacts::{
         self, ContactThermalCoefficients, ContactThermalSample,
-        heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, ThermalContactPressure},
+        heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, ThermalContactPressure,
+            ThermalLinkMetric},
     },
 };
 use fs_couple::material_circuit::MaterialCircuit;
@@ -166,7 +167,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
     where
         R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
     {
-        self.resolve_combined::<F, F, E>(cx, thermal, None, &[])
+        self.resolve_combined::<F, F, E>(cx, thermal, None, &[], &[])
     }
 
     /// Resolve finite fluid links AND prescribed fluid reservoirs on the same
@@ -194,14 +195,14 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
     where
         R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
     {
-        self.resolve_with_links_and_contact_pressures(
-            cx, thermal, links, maximum_links, resolve_links, &[],
+        self.resolve_with_links_and_contact_metrics(
+            cx, thermal, links, maximum_links, resolve_links, &[], &[],
         )
     }
 
-    // Shared by the ordinary entry and the pressure-aware HeatAssembly view.
+    // Shared by ordinary, pressure and metric-aware HeatAssembly views.
     // Finite links and reservoir sources are each evaluated and added once.
-    fn resolve_with_links_and_contact_pressures<F: ThermalFluidTransport, L: ThermalFluidTransport, E>(
+    fn resolve_with_links_and_contact_metrics<F: ThermalFluidTransport, L: ThermalFluidTransport, E>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
@@ -211,15 +212,17 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
             &SourceConvectiveLink, &DepositionSimulation<'_>, Temperature,
         ) -> Result<L, E>,
         pressures: &[ThermalContactPressure<'_>],
+        metrics: &[ThermalLinkMetric],
     ) -> Result<ContactThermalCoefficients<ConvectionHeatSample<F, L>>, ConvectionHeatError<E>>
     where
         R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
     {
         cx.checkpoint().map_err(|_| ConvectionHeatError::Cancelled)?;
+        composition::admit_reference_convection_geometry(cx, thermal, self.cells, links, metrics)?;
         let finite = evaluate_source_link_convection(
             thermal, links, maximum_links, resolve_links, || cx.checkpoint().is_err(),
         )?;
-        self.resolve_combined(cx, thermal, Some(finite), pressures)
+        self.resolve_combined(cx, thermal, Some(finite), pressures, metrics)
     }
 
     fn resolve_combined<F: ThermalFluidTransport, L, E>(
@@ -228,17 +231,19 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
         thermal: &DepositionSimulation<'_>,
         finite_convection: Option<ResolvedLinkConvection<L>>,
         pressures: &[ThermalContactPressure<'_>],
+        metrics: &[ThermalLinkMetric],
     ) -> Result<ContactThermalCoefficients<ConvectionHeatSample<F, L>>, ConvectionHeatError<E>>
     where
         R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
     {
         cx.checkpoint()
             .map_err(|_| ConvectionHeatError::Cancelled)?;
+        composition::admit_reference_convection_geometry(cx, thermal, self.cells, &[], metrics)?;
         let mut coefficients = match &finite_convection {
-            Some(finite) => self.heat.resolve_with_link_conductances_and_contact_pressures(
-                cx, thermal, finite.conductances_w_k(), pressures,
+            Some(finite) => self.heat.resolve_with_link_conductances_and_contact_metrics(
+                cx, thermal, finite.conductances_w_k(), pressures, metrics,
             ),
-            None => self.heat.resolve_heat_with_contact_pressures(cx, thermal, pressures),
+            None => self.heat.resolve_heat_with_contact_metrics(cx, thermal, pressures, metrics),
         }?;
         let convection = evaluate_source_cell_convection(
             thermal,

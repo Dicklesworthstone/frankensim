@@ -139,6 +139,35 @@ fn solved_pressure_refreshes_the_pinned_contact_once_and_refusal_preserves_the_m
     assert_eq!(context.axes()["pressure"], 200000.0);
     assert_eq!(context.axes()["lot"], 7.0);
 
+    // The upstream bulk owner used A=2, d=[1/4,3/4], k=[2,4], so G_bulk=6.4.
+    // This owner adds only R''/A=1/2; the complete independent resistance is
+    // (1/8 + 3/16 + 1)/2. Reference thermal geometry and masses stay untouched.
+    let metric = ThermalLinkMetric { link: 7, area_m2: 2.0, distances_m: [0.25, 0.75] };
+    let current_bulk = BTreeMap::from([(7, 6.4), (99, 123.0)]);
+    let mut current = current_bulk.clone();
+    let sample = apply_material_contacts_with_metrics(
+        &thermal, &contacts, &[pressure], &[metric], &mut current, || false,
+    ).unwrap();
+    assert!((current[&7] - 32.0 / 21.0).abs() < 1e-14);
+    assert_eq!(current[&99], 123.0);
+    assert_eq!(sample[0].area_m2, 2.0);
+    assert_eq!(sample[0].bulk_conductance_w_k, 6.4);
+    assert_eq!(sample[0].series.as_ref().unwrap().terms().len(), 2);
+    assert_eq!(sample[0].interface.receipt().selected, pin);
+    assert_eq!(thermal.links()[&7].area_m2, 1.0);
+    assert_eq!(thermal.cells()[&CellId(30)].mass_kg, 1.0);
+    for bad in [
+        ThermalLinkMetric { area_m2: 0.0, ..metric },
+        ThermalLinkMetric { distances_m: [0.25, f64::NAN], ..metric },
+        ThermalLinkMetric { link: 8, ..metric },
+    ] {
+        let mut candidate = current_bulk.clone();
+        assert!(apply_material_contacts_with_metrics(
+            &thermal, &contacts, &[pressure], &[bad], &mut candidate, || false,
+        ).is_err());
+        assert_eq!(candidate, current_bulk);
+    }
+
     for bad in [
         ThermalContactPressure { pressure_pa: 400000.0, ..pressure },
         ThermalContactPressure { link: 8, ..pressure },

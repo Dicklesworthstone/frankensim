@@ -7,7 +7,7 @@
 pub mod pressure;
 pub use pressure::SpatialElectricalContactPressure;
 pub mod thermal;
-pub use thermal::SpatialElectricalThermalContact;
+pub use thermal::{SpatialElectricalThermalContact, SpatialThermalGeometrySolve};
 
 use super::*;
 use crate::circuit_enthalpy::conduction::contacts::ConductionContactThermal;
@@ -327,6 +327,74 @@ impl<'m> ThermoplasticSolid<'m> {
             contact_bindings,
             pressure_bindings,
             thermal_contact_bindings,
+            None,
+            target_s,
+            prescribed_m,
+            nodal_forces_n,
+            settings,
+            controls,
+            guess_j,
+            None,
+            cx,
+        )
+        .map(|(candidate, _)| candidate)
+    }
+
+    /// Evolve BOTH the actual electrical trace and the original isotropic
+    /// thermal bulk/contact path on the same native mechanical endpoint.
+    /// Each selected half-path must begin at its adjacent tetrahedron's centroid
+    /// and end normally on the original matching face. For F = I + grad(u),
+    /// the reference normal must be a principal stretch direction: its path
+    /// length becomes |F N| d0 and its area is the actual paired triangle area,
+    /// independently checked against J A0 / |F N| on BOTH sides.
+    ///
+    /// The complete heat provider uses those metrics before its original
+    /// k(T), bulk-series and source R''(Ta,Tb,p) composition. The SAME solved
+    /// reference-normal pressure feeds both electrical and thermal laws. No
+    /// area-only rescaling or second heat source is introduced. Original mass,
+    /// reference caloric volume and native mechanical energy accounts stay fixed.
+    ///
+    /// This is an explicit small-strain, isotropic planar-path reduction.
+    /// Nonprincipal shear, tensor/integrated/additional thermal paths and
+    /// unowned exterior heat geometry refuse. Every Fourier link incident to
+    /// a mapped cell must have a metric; disjoint unmapped components retain
+    /// their original geometry. It adds no mechanical contact force, opening,
+    /// sliding or finite-deformation constitutive law. The paired-face and
+    /// atomic-candidate guarantees of the pressure-only entrypoint still apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_spatial_electrothermal_geometry_candidate<
+        't,
+        'd,
+        'p,
+        A: HeatAssembly + ?Sized,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        problem: &SpatialConduction<ResolvedConductorState>,
+        assembly: &A,
+        drive: impl Into<SpatialConductionDrive<'d>>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        pressure_bindings: &[SpatialElectricalContactPressure<'p>],
+        thermal_contact_bindings: &[SpatialElectricalThermalContact],
+        geometry: SpatialThermalGeometrySolve,
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: SpatialElectricalSolidSolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SpatialElectricalSolidCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
+    {
+        self.advance_spatial_electrical_with_motion_candidate(
+            thermal,
+            problem,
+            assembly,
+            drive,
+            contact_bindings,
+            pressure_bindings,
+            thermal_contact_bindings,
+            Some(geometry),
             target_s,
             prescribed_m,
             nodal_forces_n,
@@ -357,6 +425,7 @@ impl<'m> ThermoplasticSolid<'m> {
         contact_bindings: &[ConductionContactThermal<'_>],
         pressure_bindings: &[SpatialElectricalContactPressure<'p>],
         thermal_contact_bindings: &[SpatialElectricalThermalContact],
+        thermal_geometry: Option<SpatialThermalGeometrySolve>,
         target_s: f64,
         prescribed_m: &[(usize, f64)],
         nodal_forces_n: &[(usize, f64)],
@@ -441,11 +510,34 @@ impl<'m> ThermoplasticSolid<'m> {
             thermal::values::<A::Error>(&thermal_routes, &accepted_pressures, cx)
                 .map_err(source_error)?;
         let bulk = prepared.thermal_material_network().map_err(heat_error)?;
+        let thermal_metrics = thermal::geometry::routes::<A::Error>(
+            self,
+            problem,
+            &thermal_routes,
+            bulk.links,
+            thermal_geometry,
+            cx,
+        )
+        .map_err(source_error)?;
+        let accepted_metrics = thermal::geometry::accepted::<A::Error>(
+            self,
+            &thermal_metrics,
+            &accepted_positions,
+            prescribed_m,
+            settings,
+            cx,
+        )
+        .map_err(source_error)?;
         prepared
             .admit_field_independent_boundaries(cx, &[])
             .map_err(heat_error)?;
         let initial = assembly
-            .resolve_heat_with_contact_pressures(cx, thermal, &accepted_thermal_pressures)
+            .resolve_heat_with_contact_metrics(
+                cx,
+                thermal,
+                &accepted_thermal_pressures,
+                &accepted_metrics,
+            )
             .map_err(|e| match e {
                 CircuitEnthalpyError::Cancelled => ElectricalSolidError::Cancelled,
                 other => ElectricalSolidError::Coupled(
@@ -548,11 +640,29 @@ impl<'m> ThermoplasticSolid<'m> {
                 let thermal_pressures =
                     thermal::values::<A::Error>(&thermal_routes, &pressures, cx)
                         .map_err(CircuitEnthalpyError::Source)?;
+                let metrics = if thermal_metrics.is_empty() {
+                    Vec::new()
+                } else {
+                    let positions = deformed_positions::<A::Error>(
+                        self.nodes_m,
+                        &mechanical.solution.displacement_m,
+                        cx,
+                    )
+                    .map_err(CircuitEnthalpyError::Source)?;
+                    thermal::geometry::sample::<A::Error>(
+                        self,
+                        &thermal_metrics,
+                        &positions,
+                        &mechanical.displacement_gradients,
+                        cx,
+                    )
+                    .map_err(CircuitEnthalpyError::Source)?
+                };
                 let ContactThermalCoefficients {
                     bulk: mut coefficients,
                     contacts,
                 } = assembly
-                    .resolve_heat_with_contact_pressures(cx, endpoint, &thermal_pressures)
+                    .resolve_heat_with_contact_metrics(cx, endpoint, &thermal_pressures, &metrics)
                     .map_err(|e| e.map_source(ElectricalSolidSourceError::Heat))?;
                 if !contacts.is_empty() || !coefficients.resistors.is_empty() {
                     return Err(CircuitEnthalpyError::Invalid(

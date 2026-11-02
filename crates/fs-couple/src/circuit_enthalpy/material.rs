@@ -24,6 +24,7 @@ use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, P
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point};
 use fs_matdb::PropertyKey;
+use fs_conduction::transient::deposition::contact::ThermalLinkMetric;
 use fs_qty::{QuantitySpec, semantic::{QuantityKind, SemanticType, ValueForm}};
 use fs_thermal::enthalpy::{MaterialId, ThermalLaw};
 
@@ -113,6 +114,10 @@ pub struct LinkMaterialSample {
     pub link: u64,
     /// Endpoints in original link order, not sorted circuit branch order.
     pub cells: [CellId;2],
+    /// Actual transfer area used by the original series law [m2].
+    pub area_m2: f64,
+    /// Actual A/B Fourier half-paths used by that law [m].
+    pub distances_m: [f64; 2],
     /// Actual scalar or n^T K n pair [W/(m K)] at those endpoint phase states.
     pub conductivity_w_m_k: [f64;2],
     /// Resulting total conductance [W/K].
@@ -191,6 +196,21 @@ impl MaterialNetwork<'_> {
         electrical_axes: Option<&ElectricalAxes>,
         additional_links: Option<&BTreeMap<u64, f64>>,
         directional: Option<&directional::DirectionalPlan>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
+        self.resolve_bound_with_link_metrics(thermal, bases, pinned, electrical_axes,
+            additional_links, directional, &[], cancelled)
+    }
+
+    fn resolve_bound_with_link_metrics(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        bases: &BTreeMap<usize, ElectricalPropertyBasis>,
+        pinned: Option<&BTreeMap<CellId, MaterialPropertySelection>>,
+        electrical_axes: Option<&ElectricalAxes>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
+        directional: Option<&directional::DirectionalPlan>,
+        metrics: &[ThermalLinkMetric],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
         let invalid=MaterialNetworkError::Invalid;
@@ -318,7 +338,8 @@ impl MaterialNetwork<'_> {
                 .map_err(MaterialNetworkError::Conductor)?;
             resistors.push(MaterialResistor {branch:d.branch,conductor});
         }
-        let (mut conductances, links) = self.resolve_links(thermal, &bindings, &samples, directional, &mut check)?;
+        let (mut conductances, links) = self.resolve_links_with_metrics(
+            thermal, &bindings, &samples, directional, metrics, &mut check)?;
         if let Some(additional) = additional_links {
             for (&id, &conductance) in additional {
                 check()?;
@@ -348,7 +369,20 @@ impl MaterialNetwork<'_> {
         directional: Option<&directional::DirectionalPlan>,
         check: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(BTreeMap<u64, f64>, Vec<LinkMaterialSample>), MaterialNetworkError> {
+        self.resolve_links_with_metrics(thermal, bindings, samples, directional, &[], check)
+    }
+
+    fn resolve_links_with_metrics(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        bindings: &BTreeMap<CellId, &MaterialCell<'_>>,
+        samples: &BTreeMap<CellId, CellMaterialSample>,
+        directional: Option<&directional::DirectionalPlan>,
+        metrics: &[ThermalLinkMetric],
+        check: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(BTreeMap<u64, f64>, Vec<LinkMaterialSample>), MaterialNetworkError> {
         let invalid = MaterialNetworkError::Invalid;
+        let metrics = self.admit_link_metrics(thermal, directional, metrics, check)?;
         let mut conductances = BTreeMap::new();
         let mut links = BTreeMap::new();
         for source in self.links {
@@ -388,17 +422,18 @@ impl MaterialNetwork<'_> {
                     .ok_or(invalid("linked conductivity key is absent"))?
                     .value_si();
             }
-            let g = fs_thermal::enthalpy::series_conductance_w_k(
-                link.area_m2,
-                [source.distance_a_m, source.distance_b_m],
-                k,
-            )?;
+            let (area_m2, distances_m) = metrics.get(&source.link)
+                .map_or((link.area_m2, [source.distance_a_m, source.distance_b_m]),
+                    |metric| (metric.area_m2, metric.distances_m));
+            let g = fs_thermal::enthalpy::series_conductance_w_k(area_m2, distances_m, k)?;
             conductances.insert(source.link, g);
             links.insert(
                 source.link,
                 LinkMaterialSample {
                     link: source.link,
                     cells: [link.a, link.b],
+                    area_m2,
+                    distances_m,
                     conductivity_w_m_k: k,
                     conductance_w_k: g,
                 },
@@ -406,6 +441,66 @@ impl MaterialNetwork<'_> {
         }
         check()?;
         Ok((conductances, links.into_values().collect()))
+    }
+
+    // Geometry belongs to the supplying mechanical owner. This finite-cell
+    // lowering can admit only a complete scalar planar component: no frozen
+    // incident path, tensor orientation, exterior coverage or whole-cell
+    // electrical path may silently survive deformation of its receiving cells.
+    fn admit_link_metrics<'g>(
+        &self, thermal: &DepositionSimulation<'_>,
+        directional: Option<&directional::DirectionalPlan>, metrics: &'g [ThermalLinkMetric],
+        check: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<u64, &'g ThermalLinkMetric>, MaterialNetworkError> {
+        use std::collections::BTreeSet;
+        let invalid = MaterialNetworkError::Invalid;
+        let mut selected = BTreeMap::new();
+        if metrics.is_empty() { return Ok(selected); }
+        if metrics.len() > self.links.len() {
+            return Err(invalid("current thermal metrics require original Fourier link owners"));
+        }
+        let mut original = BTreeSet::new();
+        for link in self.links { check()?; original.insert(link.link); }
+        let mut oriented = BTreeSet::new();
+        if let Some(plan) = directional {
+            for link in plan.bindings() { check()?; oriented.insert(link.link); }
+        }
+        let mut cells = BTreeSet::new();
+        for metric in metrics {
+            check()?;
+            metric.validate().map_err(|_| invalid(
+                "current thermal area and half-paths must be positive finite values"))?;
+            let link = thermal.links().get(&metric.link)
+                .ok_or(invalid("current thermal metric names an inactive link"))?;
+            if !original.contains(&metric.link) || oriented.contains(&metric.link)
+                || selected.insert(metric.link, metric).is_some() {
+                return Err(invalid("current thermal metrics require unique scalar Fourier paths"));
+            }
+            cells.extend([link.a, link.b]);
+        }
+        for link in thermal.links().values() {
+            check()?;
+            if (cells.contains(&link.a) || cells.contains(&link.b))
+                && !selected.contains_key(&link.id) {
+                return Err(invalid("every path incident to a deformed thermal cell needs its current metric owner"));
+            }
+        }
+        for id in &cells {
+            check()?;
+            let cell = thermal.cells().get(id)
+                .ok_or(invalid("current thermal metric has no active receiving cell"))?;
+            if cell.boundary.htc_w_m2_k != 0.0 || cell.boundary.reservoir.is_some() {
+                return Err(invalid("deformed thermal cells require current exterior boundary geometry"));
+            }
+        }
+        for resistor in self.resistors {
+            check()?;
+            if cells.contains(&resistor.destination.cell) {
+                return Err(invalid("deformed thermal cells require current electrical path geometry"));
+            }
+        }
+        check()?;
+        Ok(selected)
     }
 
     /// Data-only network advance. External authored cell boundaries remain active;

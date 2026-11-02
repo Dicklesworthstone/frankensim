@@ -4,12 +4,14 @@ use super::{
     SourceCellConvectionError, SourceConvectiveCell, add_convection_bounds, circuit_error,
     evaluate_source_cell_convection,
 };
+use super::super::links::SourceConvectiveLink;
 use fs_conduction::transient::deposition::{DepositionError, DepositionSimulation};
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitThermalCoefficients,
     contacts::{
         ContactThermalCoefficients,
-        heat::{HeatAssembly, HeatNetworkError, PreparedHeatNetwork, ThermalContactPressure},
+        heat::{HeatAssembly, HeatNetworkError, PreparedHeatNetwork, ThermalContactPressure,
+            ThermalLinkMetric},
     },
 };
 use fs_exec::Cx;
@@ -39,6 +41,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Generic transport alone cannot establish that identity for the caller.
 /// Rate bounds delegate to the inner owner and add this layer once; an inner
 /// refusal to declare explicit bounds remains a refusal of explicit evolution.
+/// Native contact pressures and internal link metrics pass to the same inner
+/// owner. A metric on a reservoir cell refuses: it supplies neither transformed
+/// exposed area nor the correlation's current characteristic length.
 pub struct SourceConvectionHeatLayer<'p, 'b, A: ?Sized, R> {
     pub inner: &'p A,
     pub cells: &'b [SourceConvectiveCell],
@@ -58,6 +63,56 @@ pub(super) fn admit_disjoint_reservoirs(
         if additional.contains(&binding.cell) {
             return Err(HeatNetworkError::Invalid(
                 "prescribed reservoir convection already owns this cell's exposed boundary",
+            ));
+        }
+    }
+    cx.checkpoint().map_err(|_| HeatNetworkError::Cancelled)
+}
+
+// A selected internal metric supplies no transformed exterior surface or
+// characteristic length. Reference reservoirs and finite-fluid links must be
+// disjoint from mapped cells, even when their present heat flux is zero.
+pub(super) fn admit_reference_convection_geometry(
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'_>,
+    cells: &[SourceConvectiveCell],
+    links: &[SourceConvectiveLink],
+    metrics: &[ThermalLinkMetric],
+) -> Result<(), HeatNetworkError> {
+    cx.checkpoint().map_err(|_| HeatNetworkError::Cancelled)?;
+    if metrics.is_empty() {
+        return Ok(());
+    }
+    if metrics.len() > thermal.links().len() {
+        return Err(HeatNetworkError::Invalid(
+            "contact metric count exceeds original thermal links",
+        ));
+    }
+    let mut mapped = BTreeSet::new();
+    for metric in metrics {
+        cx.checkpoint().map_err(|_| HeatNetworkError::Cancelled)?;
+        let link = thermal.links().get(&metric.link).ok_or(HeatNetworkError::Invalid(
+            "contact metric names no original thermal link",
+        ))?;
+        mapped.insert(link.a);
+        mapped.insert(link.b);
+    }
+    for binding in cells {
+        cx.checkpoint().map_err(|_| HeatNetworkError::Cancelled)?;
+        if mapped.contains(&binding.cell) {
+            return Err(HeatNetworkError::Invalid(
+                "contact metric cannot infer transformed reservoir boundary geometry",
+            ));
+        }
+    }
+    for binding in links {
+        cx.checkpoint().map_err(|_| HeatNetworkError::Cancelled)?;
+        let link = thermal.links().get(&binding.link).ok_or(HeatNetworkError::Invalid(
+            "finite convection names no original thermal link",
+        ))?;
+        if mapped.contains(&link.a) || mapped.contains(&link.b) {
+            return Err(HeatNetworkError::Invalid(
+                "contact metric cannot infer transformed finite-coolant exchange geometry",
             ));
         }
     }
@@ -118,6 +173,16 @@ where
         thermal: &DepositionSimulation<'_>,
         pressures: &[ThermalContactPressure<'_>],
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        self.resolve_heat_with_contact_metrics(cx, thermal, pressures, &[])
+    }
+
+    fn resolve_heat_with_contact_metrics(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+        metrics: &[ThermalLinkMetric],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
         cx.checkpoint()
             .map_err(|_| CircuitEnthalpyError::Cancelled)?;
         if self.cells.len() > self.maximum_cells || self.cells.len() > thermal.cells().len() {
@@ -137,12 +202,15 @@ where
                 ));
             }
         }
+        admit_reference_convection_geometry(cx, thermal, self.cells, &[], metrics)
+            .map_err(Self::Error::from)
+            .map_err(circuit_error)?;
         self.inner
             .admit_additional_reservoir_convection(cx, &ids)
             .map_err(|error| error.map_source(ConvectionHeatError::Heat))?;
         let mut coefficients = self
             .inner
-            .resolve_heat_with_contact_pressures(cx, thermal, pressures)
+            .resolve_heat_with_contact_metrics(cx, thermal, pressures, metrics)
             .map_err(|error| error.map_source(ConvectionHeatError::Heat))?;
         let convection: ResolvedCellConvectionSources<F> = evaluate_source_cell_convection(
             thermal,

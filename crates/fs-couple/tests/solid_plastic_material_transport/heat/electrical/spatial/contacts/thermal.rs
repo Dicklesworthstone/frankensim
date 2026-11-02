@@ -3,23 +3,24 @@
 //! electrical resistance uses the actual prescribed X+u interface metric.
 use super::*;
 
-const R0: f64 = 0.001;
-const T_SLOPE: f64 = 0.01;
-const P_SLOPE: f64 = 1e-6;
+pub(super) const R0: f64 = 0.001;
+pub(super) const T_SLOPE: f64 = 0.01;
+pub(super) const P_SLOPE: f64 = 1e-6;
 const COMPRESSION: f64 = 1e-4;
 const THREE_BULK: f64 = 2e9;
-const PRESSURE: [SpatialElectricalContactPressure<'static>; 1] =
+pub(super) const PRESSURE: [SpatialElectricalContactPressure<'static>; 1] =
     [SpatialElectricalContactPressure {
         contact: 0,
         pressure_axis: "p",
         agreement_tolerance_pa: 1.0,
     }];
-const THERMAL: [SpatialElectricalThermalContact; 1] = [SpatialElectricalThermalContact {
-    contact: 0,
-    thermal_link: CONTACT_LINK,
-}];
+pub(super) const THERMAL: [SpatialElectricalThermalContact; 1] =
+    [SpatialElectricalThermalContact {
+        contact: 0,
+        thermal_link: CONTACT_LINK,
+    }];
 
-fn fixture(thermal_r0: f64, area: f64) -> ContactFixture {
+pub(super) fn fixture(thermal_r0: f64, area: f64) -> ContactFixture {
     let material = fixture_with_property(
         EMISSIVITY,
         Some(scalar(
