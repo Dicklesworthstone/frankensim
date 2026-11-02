@@ -17,7 +17,7 @@ cavitation = ["dep:fs-material", "dep:fs-la"]
 quarter-wave = []
 experimental-compressible = ["dep:fs-gas", "dep:fs-qty"]
 # Reuse the same authored local closures as LBM and conjugate finite volumes.
-experimental-sgs = ["experimental-compressible", "dep:fs-lbm"]
+experimental-sgs = ["experimental-compressible", "dep:fs-lbm", "dep:fs-thermochem"]
 
 [dependencies]
 fs-tribo = { path = "../fs-tribo" }
@@ -30,6 +30,7 @@ fs-time = { path = "../fs-time", optional = true }
 fs-gas = { path = "../fs-gas", optional = true, features = ["experimental-euler"] }
 fs-qty = { path = "../fs-qty", optional = true }
 fs-lbm = { path = "../fs-lbm", optional = true }
+fs-thermochem = { path = "../fs-thermochem", optional = true }
 
 [dev-dependencies]
 fs-matdb = { path = "../fs-matdb" }

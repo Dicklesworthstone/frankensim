@@ -20,6 +20,11 @@ pub use fs_gas::multicomponent::dissipation::{
 use fs_gas::multicomponent::{MixtureGas, SpatialPrimitive};
 use fs_qty::Time;
 
+#[cfg(feature = "experimental-sgs")]
+pub mod sgs;
+#[cfg(feature = "experimental-sgs")]
+use sgs::SubgridTransport;
+
 /// Molecular behavior of one physical reflecting wall.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MolecularWall3d {
@@ -98,6 +103,8 @@ pub struct MolecularTransport3d<L: TransportLaw> {
     boundary_impulses: Vec<f64>,
     last_step: Option<MolecularReport>,
     work: Workspace,
+    #[cfg(feature = "experimental-sgs")]
+    sgs: Option<SubgridTransport>,
 }
 impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Combined numerical bytes for the supplied flow and prepared operator.
@@ -184,6 +191,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             maximum_workspace_bytes,
             boundary_impulses: allocated(boundary, 0.0)?,
             last_step: None,
+            #[cfg(feature = "experimental-sgs")]
+            sgs: None,
             work: Workspace {
                 current: allocated(count, 0.0)?,
                 stage: allocated(count, 0.0)?,
@@ -262,7 +271,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     }
     /// Actual owned numerical capacities; external flow/provider data excluded.
     pub fn workspace_bytes(&self) -> usize {
-        self.source.workspace_bytes()
+        let bytes = self.source.workspace_bytes()
             + (self.boundary_impulses.capacity()
                 + self.work.current.capacity()
                 + self.work.stage.capacity()
@@ -273,7 +282,14 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 + self.work.boundary_correction.capacity())
                 * size_of::<f64>()
             + self.work.primitive.capacity() * size_of::<Primitive>()
-            + self.work.gradient.capacity() * size_of::<[[f64; 3]; 3]>()
+            + self.work.gradient.capacity() * size_of::<[[f64; 3]; 3]>();
+        #[cfg(feature = "experimental-sgs")]
+        let bytes = bytes
+            + self
+                .sgs
+                .as_ref()
+                .map_or(0, SubgridTransport::workspace_bytes);
+        bytes
     }
     /// Last completely published requested-duration interval.
     pub const fn last_step(&self) -> Option<&MolecularReport> {
@@ -376,6 +392,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &mut self.work.primitive,
                             &mut self.work.gradient,
                             &mut self.work.flux,
+                            #[cfg(feature = "experimental-sgs")]
+                            self.sgs.as_mut(),
                             controls,
                             cancelled,
                         );
@@ -394,6 +412,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut self.work.primitive,
                         &mut self.work.gradient,
                         &mut self.work.flux,
+                        #[cfg(feature = "experimental-sgs")]
+                        self.sgs.as_mut(),
                         controls,
                         cancelled,
                     )?,
@@ -431,6 +451,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     &mut self.work.primitive,
                     &mut self.work.gradient,
                     &mut self.work.flux,
+                    #[cfg(feature = "experimental-sgs")]
+                    self.sgs.as_mut(),
                     controls,
                     cancelled,
                 )?;
@@ -525,6 +547,7 @@ fn spatial<L: TransportLaw>(
     primitive: &mut [Primitive],
     gradient: &mut [[[f64; 3]; 3]],
     fluxes: &mut [Vec<f64>; 3],
+    #[cfg(feature = "experimental-sgs")] mut sgs: Option<&mut SubgridTransport>,
     controls: DissipationControl,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, DissipationError> {
@@ -566,6 +589,10 @@ fn spatial<L: TransportLaw>(
             }
         }
     }
+    #[cfg(feature = "experimental-sgs")]
+    if let Some(sgs) = sgs.as_mut() {
+        sgs.prepare(source.gas(), states, primitive, gradient, cancelled)?;
+    }
     let normal = |index: usize, axis: usize| {
         let [a, b] = tangents(axis);
         SpatialPrimitive {
@@ -593,7 +620,7 @@ fn spatial<L: TransportLaw>(
                             + 0.5 * gradient[right][derivative][component]
                     })
                 });
-                source.face_from_primitives(
+                let receipt = source.face_from_primitives(
                     normal(left, axis),
                     normal(right, axis),
                     grid.spacing[axis],
@@ -601,7 +628,27 @@ fn spatial<L: TransportLaw>(
                     controls.diffusion,
                     output,
                     &mut *cancelled,
-                )?
+                )?;
+                #[cfg(feature = "experimental-sgs")]
+                let receipt = if let Some(sgs) = sgs.as_ref() {
+                    sgs.add_face(
+                        source.gas(),
+                        states,
+                        primitive,
+                        gradient,
+                        left,
+                        right,
+                        axis,
+                        grid.spacing[axis],
+                        receipt,
+                        controls.diffusion,
+                        output,
+                        cancelled,
+                    )?
+                } else {
+                    receipt
+                };
+                receipt
             }
             cartesian::FaceKind::Boundary {
                 cell,
@@ -617,21 +664,22 @@ fn spatial<L: TransportLaw>(
                         output,
                         &mut *cancelled,
                     )?,
-                    MolecularWall3d::NoSlip { velocity, thermal } => {
-                        source.no_slip_wall_from_primitive(
+                    MolecularWall3d::NoSlip { velocity, thermal } => source
+                        .no_slip_wall_from_primitive(
                             normal(cell, axis),
                             0.5 * grid.spacing[axis],
                             sign,
                             [velocity[a], velocity[b]],
                             thermal,
                             -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
-                            [gradient[cell][a][a], gradient[cell][b][b]],
+                            // One constant prescribed wall velocity has zero
+                            // tangential divergence at the physical face.
+                            [0.0; 2],
                             output,
                             &mut *cancelled,
-                        )?
-                    }
+                        )?,
                 }
-            },
+            }
             cartesian::FaceKind::Boundary { .. } => {
                 return Err(DissipationError::Invalid("unbound molecular reservoir"));
             }
@@ -702,8 +750,7 @@ fn wall_velocity_sample(
     let side = side_for(axis, upper);
     match walls[side_index(side)] {
         MolecularWall3d::SlipAdiabatic => {
-            primitive[cell].velocity[component]
-                * if component == axis { -1.0 } else { 1.0 }
+            primitive[cell].velocity[component] * if component == axis { -1.0 } else { 1.0 }
         }
         MolecularWall3d::NoSlip { velocity, .. } => {
             2.0 * velocity[component] - primitive[cell].velocity[component]

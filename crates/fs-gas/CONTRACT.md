@@ -2075,6 +2075,9 @@ species conversion, caloric reference or constitutive law is duplicated.
 Three-dimensional conservative inputs remove all kinetic components through
 the original source inversion. Primitive inputs use the original complete
 three-momentum admission without repeating the temperature solve.
+Every face receipt retains `dynamic_viscosity_pa_s` from that original law
+evaluation. A composing SGS owner can check its eddy/molecular ratio against
+the actual face coefficient without querying a stateful source a second time.
 
 Each face supplies its positive normal separation and both tangential rows of
 the velocity gradient in the original orthonormal face frame. The Newtonian

@@ -287,8 +287,9 @@ counts); chunked Cx polling belongs to the fs-exec driver layer.
   features and select `quarter-wave`, avoiding unrelated continuum solvers and
   runtime infrastructure without copying the equation.
 - `experimental-sgs`: includes `experimental-compressible` and the shared
-  `fs-lbm` local closures. Only an explicit `with_sgs` constructor activates
-  subgrid stress and heat on the frozen-composition three-dimensional gas.
+  `fs-lbm` local closures and original thermochemical source types. Only an
+  explicit `with_sgs` constructor activates subgrid transport on frozen or
+  evolving-species three-dimensional gas.
 
 ## Conformance tests
 
@@ -1472,6 +1473,47 @@ This stationary inviscid species owner does
 not itself integrate chemistry or molecular species diffusion, preserve
 pressure exactly at moving unequal-caloric contacts, move the geometry, or
 establish an entropy/invariant-domain or experimental combustion claim.
+
+### Exploratory turbulent mixing on evolving-species three-dimensional gas
+
+With `experimental-sgs`, the existing spatial mixture molecular owner admits
+`sgs::MixtureSubgridConfig { transport: SubgridConfig, turbulent_schmidt }`
+through `MolecularTransport3d::with_sgs`. Every SSP stage/retry evaluates shared
+Smagorinsky, WALE or Vreman from the complete Favre-velocity gradient. The
+derivative-first cache is transposed to the shared component-first convention;
+Vreman retains directional filter widths. Both Prandtl and Schmidt numbers
+are explicitly authored positive finite values.
+
+Original Maxwell--Stefan transport, including its Soret/Dufour terms, remains
+unchanged. Each interior face adds deviatoric stress/work, `mu_t*cp(T)/Pr_t`
+heat, and `j_i = -(mu_t/Sc_t)*grad(Y_i)` species flux. A present-species pivot
+closes modeled mass flux to zero while retaining exactly absent species.
+Matching original referenced partial enthalpies enter the same total-energy
+flux; their source energy differences avoid cancellation of large formation
+offsets. No separate chemical or viscous heating source is added. The original
+face receipt now exposes its actual molecular `dynamic_viscosity_pa_s`, so
+the eddy/molecular ratio is checked without evaluating a stateful law twice.
+
+Physical walls keep molecular transport with zero modeled wall flux. A
+prescribed constant no-slip wall uses zero physical tangential derivatives
+in its normal traction, even when adjacent-cell divergence is nonzero. This
+requires a resolved wall layer and supplies no wall function. The existing
+`ReactingEuler3d::step_with_dissipation` composes this transport with its
+unchanged chemistry; no turbulent reaction-rate or flame-wrinkling closure
+is inferred.
+
+The owner adds molecular and modeled parabolic scales, including species/
+enthalpy coupling, and checks both SSP states. Two reusable scalar arrays add
+16 bytes per cell to the numerical budget, exposed by
+`required_workspace_bytes_with_sgs`. Hot loops allocate no numerical scratch;
+zero model coefficients preserve molecular arithmetic and source calls.
+Source, ratio, work, byte-budget and cancellation refusals retain the existing
+atomic field/report/boundary publication. Eight focused tests cover independent
+full stress/heat/species/energy formulas, gradient orientation, separate Pr/Sc,
+zero controls, species/energy conservation and formation-reference invariance,
+physical wall fluxes, small-Schmidt stability and refusal behavior, and actual
+reactive split-step mixing. This is an algebraic exploration model, without
+SGS kinetic energy, backscatter, pressure dilatation or shock/turbulence closure.
 
 ### Finite-rate reactions coupled to three-dimensional compressive waves
 

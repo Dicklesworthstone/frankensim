@@ -72,6 +72,94 @@ fn molecular_loads(molecular: &MolecularTransport3d<ConstantTransport>) -> Vec<[
         .collect()
 }
 
+#[cfg(feature = "experimental-sgs")]
+#[test]
+fn sgs_mixture_reactive_split_uses_explicit_turbulent_mixing_and_conserves_energy() {
+    use crate::compressible::spatial::mixture::molecular::sgs::{
+        MixtureSubgridConfig, SgsModel, SgsUse, SubgridConfig,
+    };
+    let make = || {
+        let (gas, source) = mechanism(0.0, 2.0, 0.0);
+        coupled(
+            field(
+                gas,
+                CartesianGrid::new(6, 2, 2, 1.0 / 6.0, 0.3, 0.4).unwrap(),
+                PERIODIC,
+                |x| {
+                    let phase = 2.0 * std::f64::consts::PI * x[0];
+                    let first = 0.5 + 0.2 * phase.sin();
+                    (
+                        [first, 1.0 - first],
+                        [0.0, 0.2 * phase.sin(), 0.2 * phase.cos()],
+                        1.0,
+                    )
+                },
+            ),
+            source,
+        )
+    };
+    let mut baseline = make();
+    let mut base_op = operator(baseline.flow(), 0.02);
+    let mut flow = make();
+    let source =
+        SpatialTransport::new(flow.flow().gas().clone(), base_op.law().clone(), || false).unwrap();
+    let required =
+        MolecularTransport3d::required_workspace_bytes_with_sgs(flow.flow(), &source).unwrap();
+    let mut op = MolecularTransport3d::with_sgs(
+        flow.flow(),
+        source,
+        MixtureSubgridConfig {
+            transport: SubgridConfig {
+                model: SgsModel::Smagorinsky { cs: 0.25 },
+                filter_width_factor: 1.0,
+                turbulent_prandtl: 0.7,
+                maximum_eddy_to_molecular: 100.0,
+                usage: SgsUse::Exploration,
+            },
+            turbulent_schmidt: 0.6,
+        },
+        required,
+        || false,
+    )
+    .unwrap();
+    let bytes = budget(&flow, &op);
+    let base_bytes = budget(&baseline, &base_op);
+    let report = flow
+        .step_with_dissipation(
+            &mut op,
+            Time::new(0.002),
+            ReactiveStepControl::default(),
+            DissipationControl::default(),
+            bytes,
+            || false,
+        )
+        .unwrap();
+    let base_report = baseline
+        .step_with_dissipation(
+            &mut base_op,
+            Time::new(0.002),
+            ReactiveStepControl::default(),
+            DissipationControl::default(),
+            base_bytes,
+            || false,
+        )
+        .unwrap();
+    balance(&report);
+    assert_eq!(report.elapsed, base_report.elapsed);
+    assert_eq!(flow.flow().time(), report.elapsed);
+    assert_eq!(budget(&flow, &op), bytes);
+    let split = report.dissipation.unwrap();
+    assert_eq!(split.first.elapsed.value(), 0.5 * report.elapsed.value());
+    assert_eq!(split.second.elapsed, split.first.elapsed);
+    assert_eq!(op.last_step(), Some(&split.second));
+    let variance = |flow: &ReactingEuler3d| {
+        (0..flow.flow().cell_count())
+            .map(|i| (flow.flow().cell(i).unwrap().partial_densities[0] - 0.5).powi(2))
+            .sum::<f64>()
+    };
+    assert!(variance(&flow) < variance(&baseline));
+}
+
 #[test]
 fn g3_uniform_reacting_molecular_field_retains_chemistry_and_heat_driven_cfl_restarts() {
     let mut reference = uniform();
