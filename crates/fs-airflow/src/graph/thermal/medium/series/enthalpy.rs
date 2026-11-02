@@ -299,7 +299,7 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), LiquidEnthalpyError> {
 }
 fn positive(value: f64) -> bool { value.is_finite() && value > 0.0 }
 
-fn admit_dissipative_density(source: &ResolvedHeatCapacityCurve, density: f64) -> Result<(), LiquidEnthalpyError> {
+pub(crate) fn admit_dissipative_density(source: &ResolvedHeatCapacityCurve, density: f64) -> Result<(), LiquidEnthalpyError> {
     if source.curve().knots().iter().any(|k| k.bulk_density_kg_m3 != density) {
         return Err(LiquidEnthalpyError::Invalid("hydraulic heating requires constant source density over the caloric span"));
     }

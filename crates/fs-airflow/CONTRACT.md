@@ -2931,3 +2931,50 @@ first order in time. Spatial/time refinement, including reversal resolution,
 remains necessary; no measured throughput or unconditional nonlinear convergence
 is claimed.
 
+## Actual liquid graph dissipation as local fluid heat
+
+`LiquidGraphSources::dissipative_heating` binds an opt-in heat owner to the
+original distributed pipe inventory and liquid caloric source. The original
+constant-density dissipation admission qualifies the whole caloric source
+span. Actual node and section source densities must still equal the retained
+reference density at evaluation. Variable-density liquids and gas sources do
+not inherit this pressure-work closure.
+
+`LiquidGraphHeating::evaluate_inertial` and `evaluate_quasi_steady` first use
+the existing source/flow admission, retaining source identities, exact pipe-cell
+paths, original resistance support at old/new/average and crossing flow, and
+all local source and native mechanical-work limits. Each original section's
+actual dissipated power is deposited in its own fluid cell. The source graph's
+conservative maximum-speed envelope remains an applicability bound; it is not
+the heat supplied to the fluid.
+
+The resolved receipt retains original source sections by shared ownership,
+per-section watts and joules, the native source admission, mechanical debit,
+thermal credit and transfer residual. Both the native sum of branch pressure
+drop times actual average flow and the local heat sum must agree with the
+inertial report's hydraulic-loss debit within a roundoff bound. Quasi-steady
+evaluation uses the corresponding original solved-branch power over the
+declared interval. A changed debit, stale source endpoint, nonfinite or
+unrepresentable transfer refuses the entire receipt.
+
+`ResolvedLiquidGraphHeating::apply_to` adds this field to the native additional
+cell-source map only after checking every ownership conflict and cancellation.
+Zero-power samples remain diagnostic but claim no additional-source slot.
+Original authored cell heat is retained by the native thermal owner. Callers
+can compose the receipt in the existing inertial or quasi-steady thermal
+exchange callback, so original enthalpy storage, finite pipe residence,
+advection and reciprocal wall heat share the same solve and accepted clock.
+No second integrator or synthetic resistance is introduced.
+
+Each modeled hydraulic section is assumed to deposit its entire irreversible
+loss into its represented liquid cell. A porous skeleton or separate body
+receiving a share requires an explicit partition model. Kinetic storage,
+pressure-port supply, anomalous-gravity work, pump inefficiency and numerical
+dissipation are not thermal sources in this adapter. Existing low-Eckert and
+source/native work ceilings remain conservative admission limits.
+
+Regression sources cover independent local losses with viscosity variation and
+flow reversal; an unforced closed loop's coupled kinetic-to-thermal transfer;
+and source-density, stale-epoch, duplicate-owner, native-debit and work-limit
+refusal. Compilation and native numerical execution were unavailable in the
+delivery environment.

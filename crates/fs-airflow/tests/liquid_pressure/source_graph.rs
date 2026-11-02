@@ -1201,3 +1201,5 @@ fn original_liquid_source_advances_distributed_momentum_and_reciprocal_wall_heat
 #[path = "source_graph/axial_conduction.rs"]
 mod axial_conduction;
 
+#[path = "source_graph/dissipation.rs"]
+mod dissipation;

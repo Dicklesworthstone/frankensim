@@ -21,6 +21,7 @@ pub mod conduction;
 pub mod convection;
 mod flow;
 pub mod gas;
+pub mod heating;
 pub mod liquid;
 use flow::GraphFlow;
 pub use gas::GasGraphSources;

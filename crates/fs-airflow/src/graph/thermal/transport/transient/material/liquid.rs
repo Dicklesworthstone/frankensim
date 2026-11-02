@@ -2,6 +2,7 @@
 
 use super::conduction::{GraphConductionError, GraphConductiveLink, ResolvedGraphConduction};
 use super::convection::{GraphConvectionError, GraphConvectiveLink, GraphSourceHeat};
+use super::heating::{GraphHeatingError, LiquidGraphHeating};
 use super::*;
 use crate::graph::thermal::medium::series::enthalpy::admit_liquid_caloric_source;
 use fs_material::liquid::ResolvedLiquidState;
@@ -46,6 +47,17 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
     }
     pub fn inventory(&self) -> &'a DistributedGraphInventory {
         self.core.inventory
+    }
+
+    /// Opt in to depositing each actual section's hydraulic loss in its fluid
+    /// cell. The original source density must be constant over the caloric
+    /// span; pressure/gravity work and kinetic storage remain separate. The
+    /// native source and mechanical-work applicability caps are preserved.
+    pub fn dissipative_heating<'s>(
+        &'s self,
+        cx: &Cx<'_>,
+    ) -> Result<LiquidGraphHeating<'s, 'a>, GraphHeatingError> {
+        LiquidGraphHeating::new(cx, &self.core, self.caloric)
     }
 
     /// Re-evaluate every native junction and pipe temperature through the
