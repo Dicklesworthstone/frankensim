@@ -2198,6 +2198,39 @@ exact source binding, work limits and cancellation. This is a monochromatic
 spatial ensemble; finite bandwidth, temporal beats, source-coherence inference,
 temperature evolution and isolated-aperture convergence remain outside it.
 
+### Finite exposures of prescribed spectral lines
+
+`angular_spectrum::AngularSpectrumExposure` borrows the original prepared
+vector beams at their authored frequencies. Every line must retain identical
+original incident/exit/film material owners, layer order, thicknesses and
+transverse grid. Each line includes its physical peak amplitude and phase at
+time zero; neither a bandwidth nor a spectral-density normalization is inferred.
+The material/film responses remain individually resolved at each frequency.
+
+The shared `fs-fft::harmonic_window` integrates real E/H products over an
+explicit rectangular time window, retaining both beat and sum frequencies.
+Short shutters preserve carrier phase; long shutters suppress resolved beats
+according to the actual window. Equal-frequency lines combine with compensated
+field accumulation before powers and share one six-component FFT synthesis.
+An in-place O(L log L) preparation groups source indices by frequency while
+preserving their original order within each group; subsequent queries visit
+each source exactly once. All reserved index/offset storage is budgeted.
+Temporal kernels are cached per distinct frequency pair. For L lines, F distinct
+frequencies and N spatial samples, query work is O(L*N + F*N*log N + F²*N),
+with explicit line, modal, pair, FFT and numerical-storage budgets. This is an
+operation count, not measured throughput. Cancellation returns no partial field.
+
+Results contain real componentwise mean-square E/H, signed mean Poynting flux
+and integrated mean normal watts over the original periodic cell. They do not
+assign a monochromatic reactive flux or infer transient dielectric heating from
+these quantities. Dispersive storage/heat evolution, source switch-on, stochastic
+coherence inference and nonlinear Maxwell dynamics remain outside this
+prescribed linear spectral-line model. Source-bound G1/G3 regressions compare
+against independent real-time quadrature after a Debye film, and cover beats,
+subcycle shutters, polarization, signed reflection, exact cancellation and
+small residuals among large equal-frequency fields. G4 checks source identity,
+budget boundaries, cancellation and replay.
+
 ### Two-sided coherent illumination and layer heating
 
 `PlanarDielectricLayers::prepare_illumination` retains the same source-bound

@@ -40,6 +40,12 @@ pub use coherence::{
     PreparedAngularSpectrumCoherenceLayer,
 };
 
+mod exposure;
+pub use exposure::{
+    AngularSpectrumExposure, AngularSpectrumExposureField, AngularSpectrumExposureLimits,
+    AngularSpectrumExposurePoint,
+};
+
 /// Bounds the uninterruptible work of one existing FFT pencil.
 pub const MAX_AXIS_POINTS: usize = 4096;
 
@@ -388,6 +394,19 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         distance_from_face_m: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AngularSpectrumField, AngularSpectrumError> {
+        let (electric, magnetic) = self.modal_field(side, distance_from_face_m, &mut cancelled)?;
+        self.synthesize(electric, magnetic, &mut cancelled)
+    }
+
+    // The exposure owner combines equal-frequency sources here, before a
+    // single shared six-component synthesis. Ordinary field queries keep the
+    // same reconstruction and FFT path.
+    fn modal_field(
+        &self,
+        side: AngularSpectrumSide,
+        distance_from_face_m: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(Vec<[C64; 3]>, Vec<[C64; 3]>), AngularSpectrumError> {
         poll(&mut cancelled)?;
         if !distance_from_face_m.is_finite() || distance_from_face_m < 0.0 {
             return Err(bad("field distance must be finite and nonnegative"));
@@ -453,7 +472,7 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             electric.push(e);
             magnetic.push(h);
         }
-        self.synthesize(electric, magnetic, &mut cancelled)
+        Ok((electric, magnetic))
     }
 
     // All exterior and internal planes use these same six transforms and

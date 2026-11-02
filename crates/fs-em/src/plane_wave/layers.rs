@@ -159,6 +159,39 @@ impl<'a> PlanarDielectricLayers<'a> {
         self.layers.get(index).map(|layer| layer.wave.epsilon_f_m)
     }
 
+    // A polychromatic field must use the same physical stack at every
+    // frequency. Equal fitted constants do not establish source identity;
+    // retain the original constitutive models and authored layer geometry.
+    pub(super) fn same_sources_and_geometry(&self, other: &Self) -> bool {
+        let same_response = |a, b| match (a, b) {
+            (DielectricResponse::Lossless(a), DielectricResponse::Lossless(b)) => {
+                core::ptr::eq(a, b)
+            }
+            (DielectricResponse::Debye(a), DielectricResponse::Debye(b)) => core::ptr::eq(a, b),
+            (DielectricResponse::Ohmic(a), DielectricResponse::Ohmic(b)) => core::ptr::eq(a, b),
+            (
+                DielectricResponse::DebyeWithOhmic {
+                    dielectric: a_dielectric,
+                    conductor: a_conductor,
+                },
+                DielectricResponse::DebyeWithOhmic {
+                    dielectric: b_dielectric,
+                    conductor: b_conductor,
+                },
+            ) => {
+                core::ptr::eq(a_dielectric, b_dielectric) && core::ptr::eq(a_conductor, b_conductor)
+            }
+            _ => false,
+        };
+        core::ptr::eq(self.incident, other.incident)
+            && same_response(self.exit, other.exit)
+            && self.layers.len() == other.layers.len()
+            && self.layers.iter().zip(&other.layers).all(|(a, b)| {
+                a.source.thickness_m == b.source.thickness_m
+                    && same_response(a.source.response, b.source.response)
+            })
+    }
+
     /// Coherent TE/TM scattering, including evanescent tunnelling and film loss.
     /// Exact grazing has zero incoming normal power and is explicitly refused.
     pub fn response(

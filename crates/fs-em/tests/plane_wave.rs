@@ -29,12 +29,14 @@ mod angular_spectrum;
 #[path = "plane_wave/layer_fields.rs"]
 mod layer_fields;
 
+#[path = "plane_wave/coherence.rs"]
+mod coherence;
+#[path = "plane_wave/exposure.rs"]
+mod exposure;
 #[path = "plane_wave/illumination.rs"]
 mod illumination;
 #[path = "plane_wave/interior.rs"]
 mod interior;
-#[path = "plane_wave/coherence.rs"]
-mod coherence;
 
 #[path = "plane_wave/ohmic.rs"]
 mod ohmic;
@@ -347,7 +349,12 @@ mod finite_layers {
     use fs_math::det;
     use std::f64::consts::PI;
 
-    pub(super) fn debye(epsilon_inf: f64, delta: f64, area: f64, gap: f64) -> ResolvedDebyeCapacitor {
+    pub(super) fn debye(
+        epsilon_inf: f64,
+        delta: f64,
+        area: f64,
+        gap: f64,
+    ) -> ResolvedDebyeCapacitor {
         let state = source(
             &[
                 (EPS_NAME, EPS, epsilon_inf),
