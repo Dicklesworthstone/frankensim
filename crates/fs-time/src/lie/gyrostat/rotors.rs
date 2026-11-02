@@ -17,6 +17,10 @@ use super::{HeldTorque, InertiaTensor3, LieStepError};
 use fs_ga::{Mat3, So3, Vec3};
 use fs_math::dd::Dd;
 
+#[path = "rotors/viscous.rs"]
+mod viscous;
+pub use viscous::{ViscousRotorStep, ViscousRotorStepper};
+
 /// Maximum fixed-axis rotors in this allocation-free stepping lane.
 pub const MAX_AXIAL_ROTORS: usize = 32;
 
@@ -404,8 +408,19 @@ impl<const N: usize> RotorBank<N> {
             self.rotor_momentum(&drifted.axial_momentum_nms)?,
             duration_s,
         )?;
-        let drift_defect = self.energy_change(&first.state_after, &drifted)?;
         let second = self.apply_impulse(&drifted, shaft_impulse, impulse_at(drifted.rotation)?)?;
+        self.finish_step(state, &first, &drifted, &second, duration_s)
+    }
+
+    fn finish_step(
+        &self,
+        state: &RotorState<N>,
+        first: &RotorImpulse<N>,
+        drifted: &RotorState<N>,
+        second: &RotorImpulse<N>,
+        duration_s: f64,
+    ) -> Result<RotorStep<N>, LieStepError> {
+        let drift_defect = self.energy_change(&first.state_after, drifted)?;
         let mut after = second.state_after;
         let mut shaft_work = [0.0; N];
         let mut axial_change = [0.0; N];

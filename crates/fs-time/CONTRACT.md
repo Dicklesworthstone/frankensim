@@ -130,6 +130,28 @@ where claimed below.
   gyrostat and seven full-tensor tests, all 23 focused native groups pass.
   Fixed axes, inertia and held torques are required: moving gimbals, electrical
   states and variable-speed bearing/bending dynamics are not supplied.
+- `RotorBank::viscous_stepper(damping, duration)` prepares the physical
+  relative-shaft law `tau_i = drive_i - damping_i * relative_speed_i` for
+  nonnegative damping and a positive fixed interval. Two coupled implicit
+  midpoint shaft stages surround the existing native gyrostat drift. Diagonal
+  elimination caches one native 3x3 Cholesky factor; each step is O(N) and
+  allocation-free, with full carrier recoil, nonorthogonal rotor axes and
+  simultaneous external torque. Signed drive work, nonnegative viscous heat,
+  external work and the native drift defect remain separate. The actual
+  rounded midpoint impulse law and complete stage work are checked at local
+  transfer/work scales; large background spin cannot hide a work discrepancy.
+  `viscous_relaxation_rate_bound` exposes a PSD trace bound for the coupled
+  carrier/rotor dissipative mobility. Preparation refuses a half-stage
+  relaxation number above two to prevent unresolved midpoint sign reversal.
+  Accuracy still requires refinement; this is not an L-stable or arbitrary
+  stiff-step decay claim. All-zero damping delegates exactly to the existing
+  held-torque motion and work path, including its explicit accepted-impulse
+  rounding. Five focused native groups cover closed exponential/phase/heat
+  refinement, independent full-tensor Euler dynamics, resolved stiff drag,
+  signed braking and drive/heat balance, zero-drag equivalence, atomic
+  refusals and a reproduced large-carrier work-loss counterexample. They and
+  the seven existing rotor-bank groups pass; the full Cargo target remains
+  unexecuted where the constellation runtime dependency closure is absent.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
