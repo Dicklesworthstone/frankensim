@@ -2344,7 +2344,7 @@ electronics cooling (the wedge's second physics after steady conduction).
 - `solve_energy`: every face flux is `J = d T_P - a T_N - r`; interior
   faces use the harmonic face conductivity (exact series resistance of two
   half cells, so temperature and normal flux are continuous across any
-  fluid/solid or solid/solid contrast) and Patankar power-law (or upwind)
+  fluid/solid or solid/solid contrast) and power-law, exponential, or upwind
   convection in conservative form. `ThermalFace` rules: `Adiabatic`,
   `Temperature`, `HeatFlux` (into the domain), `Convective { h, ambient }`,
   `Inflow { temperature }`, `Outflow { backflow_temperature }`; solid cells
@@ -2352,6 +2352,15 @@ electronics cooling (the wedge's second physics after steady conduction).
   cell, `add_uniform_power`) and fixed-temperature cells. The M-matrix is
   solved by ILU(0)-right-preconditioned BiCGStab on the Jacobi-scaled
   system; acceptance is the RECOMPUTED true residual.
+- `ConvectionScheme::Exponential` uses the same conservative face assembly in
+  both energy and staggered momentum, with `A(P) = |P| / expm1(|P|)`. It
+  reproduces source-free constant-coefficient 1-D profiles across graded
+  centre distances and boundary half cells. Stable small/large-Peclet
+  evaluation retains nonnegative coefficients without exponential overflow or
+  premature underflow. Power-law remains the cheaper default; exponential
+  fitting makes no multidimensional higher-order or turbulence claim. The
+  numerical-leaf tests check exact face fluxes and limiting coefficients;
+  `exponential_convection` checks the original CHT boundary-value solve.
 - `EnergyBalance` is computed from boundary and fixed-cell fluxes alone:
   `source + fixed_injection - boundary_outflow` closes to roundoff because
   the face fluxes telescope; `EnergySolution` adds `bulk_temperature_x`,
@@ -2548,7 +2557,7 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
   Focused G1/G3 `pressure_opening` tests cover planar Poiseuille refinement,
   pressure datum/offset invariance, reversed flow on all axes, source-viscosity
   scaling, the existing backflow heat transport, and transient start-up.
-- Momentum uses power-law (or upwind) coefficients with `a_P / alpha`
+- Momentum uses shared power-law, exponential, or upwind coefficients with `a_P / alpha`
   under-relaxation (alpha in (0, 1); SIMPLEC's `d` degenerates at 1). Closed
   components of the pressure correction are pinned.
 - Convergence is two steady residuals of the same iterate: the largest cell

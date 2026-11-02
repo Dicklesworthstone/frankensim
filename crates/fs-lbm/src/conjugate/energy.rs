@@ -34,6 +34,8 @@ mod face_contact;
 pub use face_contact::FaceContactResistance;
 mod source_contact;
 pub use source_contact::{SourceContactControls, SourceContactState, SourceFaceContact};
+mod scheme;
+pub use scheme::ConvectionScheme;
 
 /// Thermal rule on one domain face.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -256,17 +258,6 @@ impl ThermalSetup {
         }
         cells.len()
     }
-}
-
-/// Convection discretization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ConvectionScheme {
-    /// Patankar's power-law scheme: `A(P) = max(0, (1 - 0.1 |P|)^5)`;
-    /// close to the exact 1-D exponential profile at any cell Péclet number.
-    #[default]
-    PowerLaw,
-    /// First-order upwind: `A(P) = 1`.
-    Upwind,
 }
 
 /// Energy solve configuration.
@@ -551,14 +542,7 @@ impl Context<'_> {
     }
 
     fn weight(&self, peclet: f64) -> f64 {
-        match self.scheme {
-            ConvectionScheme::Upwind => 1.0,
-            ConvectionScheme::PowerLaw => {
-                let t = 0.1f64.mul_add(-peclet.abs(), 1.0).max(0.0);
-                let t2 = t * t;
-                t2 * t2 * t
-            }
-        }
+        self.scheme.weight(peclet)
     }
 
     fn enthalpy_boundary(&self, c: usize, f: usize) -> FaceTerm {

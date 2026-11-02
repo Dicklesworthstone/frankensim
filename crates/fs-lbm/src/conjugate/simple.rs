@@ -10,8 +10,8 @@
 //! lives on cells. Each face velocity has a cell-sized staggered control
 //! volume: convective fluxes through its sides interpolate the neighbouring
 //! face velocities, diffusion is `mu A / dx` (`2 mu A / dx` to a no-slip wall
-//! half a cell away), and convection uses Patankar's power-law (or upwind)
-//! coefficients. Faces touching a solid voxel are blocked (zero velocity);
+//! half a cell away), and convection uses the shared power-law, exponential,
+//! or upwind coefficients. Faces touching a solid voxel are blocked (zero velocity);
 //! a blocked transverse neighbour is a no-slip wall half a cell away
 //! (staircase geometry).
 //!
@@ -1651,14 +1651,7 @@ impl<'a> Solver<'a> {
     }
 
     fn weight(&self, peclet: f64) -> f64 {
-        match self.config.scheme {
-            ConvectionScheme::Upwind => 1.0,
-            ConvectionScheme::PowerLaw => {
-                let t = 0.1f64.mul_add(-peclet.abs(), 1.0).max(0.0);
-                let t2 = t * t;
-                t2 * t2 * t
-            }
-        }
+        self.config.scheme.weight(peclet)
     }
 
     /// Face of component `d` on side `s` of cell `c` (`s = 1`: plus side).
