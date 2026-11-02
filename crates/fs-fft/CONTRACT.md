@@ -7,6 +7,26 @@ transform path fs-cheb builds on). Layer: **L1 BEDROCK**. Depends on fs-math
 (strict-mode twiddles) and fs-simd (resolved exact-move/stage capsules).
 Plan §6.3.
 
+`harmonic_window` supplies analytic rectangular-window means and real-product
+moments for peak phasors `Re(a exp(-i omega t))`. Positive-time consumers
+conjugate their amplitudes. `HarmonicWindow` retains start and duration
+separately; `HarmonicProduct` caches each frequency pair's midpoint rotations
+and centered cosine/sine Gram weights for allocation-free reuse at every
+spatial point and component. Both beat and sum-frequency terms are retained,
+including DC, signed frequencies and subperiod exposures. Short-window sine
+energy is evaluated with a `sinc-1` series rather than subtracting rounded
+numbers near one. Strict trigonometry and double-double phase/products retain
+small physical terms without changing any FFT transform bits.
+
+G0/G1/G3 in-module tests compare real-signal quadrature, complete-cycle peak
+normalization, subperiod energy/flux, near-DC products, clock offsets and typed
+refusals. Input clocks, amplitude units, geometry, and source coherence remain
+the domain caller's responsibility. Invalid/nonfinite and unrepresentable
+inputs return `WindowError`; no sampling-rate assumption, inferred coherence,
+interval certificate, or relative-accuracy guarantee near arbitrary nulls is
+claimed. Each cached scalar contraction is bounded constant work; callers own
+the line-count/pair-work budgets and cancellation of larger field batches.
+
 v1 was correctness-first radix-2; the 27d3 perf lane has since extended it
 with the r2c **inverse** (c2r), **N-dimensional** (2D/3D) separable pencil
 transforms, **mixed radix-8/4/2 Stockham** stages (three log₂ bits per

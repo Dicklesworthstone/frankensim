@@ -28,6 +28,8 @@
 
 use fs_math::det;
 
+pub mod harmonic_window;
+
 mod simd_view;
 
 /// Crate version, re-exported for provenance stamping.
