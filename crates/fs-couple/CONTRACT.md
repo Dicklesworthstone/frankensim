@@ -3730,8 +3730,12 @@ Poiseuille 1.5 once the layers have met (see OPT-IN FORCED JET; pexfp.135.5). A
 windway the law refuses never reaches them, and a transfer attached before this
 windway is refused. Price's jet gain 0.145 was fitted on a Poiseuille jet and is
 applied to this exit's centre speed unchanged; the transit and gain follow the
-held ratio, so the attack and release are not covered. Otherwise the island's
-card reads only the bulk speed unless `jet_speed card-centreline` is named. A
+held ratio, so the attack and release are not covered. Behind either jet the
+island's card speed (the onset seed, the Mach admission and the reported Reynolds
+number) is that jet's centre speed at the held ratio, while the flux keeps the bulk
+speed; the low-Mach domain therefore binds the centre speed, and a uniform exit's
+ratio is exactly 1. Without a jet transfer the card reads only the bulk speed
+unless `jet_speed card-centreline` is named. A
 converging windway declared as its
 exit-height slit most likely overstates the loss.
 

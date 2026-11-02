@@ -873,9 +873,11 @@ impl FlueVoice {
     }
 
     /// The jet card's speed `U` at the accepted state: the bulk speed, or with
-    /// [`FlueVoice::with_card_centreline_speed`] the exit's centre speed. It sets the convection
-    /// `c_p = (c_p/U) U`, the growth band, the onset seed and the card Reynolds number. The bulk
-    /// speed alone sets the jet's flux.
+    /// [`FlueVoice::with_card_centreline_speed`] the exit's centre speed, or behind a forced Bickley
+    /// jet or the Nolle/Price transfer (which own the exit) that jet's centre speed `U0 = (U0/u) u` at
+    /// the ratio held at attachment (pexfp.135.5). It sets the convection `c_p = (c_p/U) U`, the
+    /// growth band, the onset seed, the Mach admission and the card Reynolds number. The bulk speed
+    /// alone sets the jet's flux.
     #[must_use]
     pub fn card_speed_m_s(&self) -> f64 {
         if self.card_centreline.is_some() {
@@ -886,10 +888,20 @@ impl FlueVoice {
         self.card_speed_at(self.blow_pa, self.jet_speed_m_s)
     }
 
-    // A uniform exit's bulk speed is its centre speed. A slit's Poiseuille profile has its centre
-    // at 1.5 times the bulk speed. A developing slit keeps the inviscid core `sqrt(2P/rho)` until
-    // the layers meet, and the Poiseuille centre after that.
+    // A jet that owns the exit (the forced Bickley jet or the Nolle/Price transfer; the opt-in card
+    // centreline speed refuses both) runs on its own centre speed `U0 = (U0/u) u` at the ratio held
+    // at attachment: the card reads that, not the bulk speed, for the seed, the Mach admission and
+    // the Reynolds number. A uniform exit's ratio is exactly 1.
+    // Otherwise a uniform exit's bulk speed is its centre speed. A slit's Poiseuille profile has its
+    // centre at 1.5 times the bulk speed. A developing slit keeps the inviscid core `sqrt(2P/rho)`
+    // until the layers meet, and the Poiseuille centre after that.
     fn card_speed_at(&self, pressure_pa: f64, bulk_m_s: f64) -> f64 {
+        if let Some(kernel) = &self.forced {
+            return kernel.centre_over_bulk() * bulk_m_s;
+        }
+        if let Some(jet) = &self.nolle {
+            return jet.centre_over_bulk() * bulk_m_s;
+        }
         if self.card_centreline.is_none() {
             return bulk_m_s;
         }
@@ -2424,6 +2436,31 @@ mod convection_tests {
     }
 
     #[test]
+    fn g3_nolle_mach_admission_reads_the_centre_speed_behind_a_slit() {
+        use nolle_jet::{ChannelClass, NolleSpec};
+        let air = gas(101_325.0);
+        let g = FlueGeometry { cut_up_m: 0.004, ..geometry() };
+        let spec = NolleSpec::price_2015(ChannelClass::Short, 0.0007).unwrap();
+        let cap = 0.3 * air.sound_speed; // the fixture voice declares maximum_jet_mach 0.3
+        // Premise: at 4100 Pa the fully developed slit holds a bulk speed under the cap whose Poiseuille
+        // centre (1.5 x bulk, the speed the transfer runs on) is over it.
+        let mut bare = voice(air, g, 1.0).with_viscous_windway(0.015).unwrap();
+        bare.apply(FlueControl::SetBlowingPressure(4100.0)).unwrap();
+        let bulk = bare.jet_speed_m_s();
+        assert!(bulk < cap && nolle_jet::POISEUILLE_CENTRE_OVER_BULK * bulk > cap,
+            "premise: bulk {bulk} m/s, cap {cap} m/s");
+        // With the transfer attached the admission binds the centre speed: a pressure whose centre speed
+        // is inside the domain is admitted, 4100 Pa is refused and leaves the accepted input intact.
+        let mut v = voice(air, g, 1.0).with_viscous_windway(0.015).unwrap().with_nolle_jet(spec).unwrap();
+        v.apply(FlueControl::SetBlowingPressure(2300.0)).unwrap();
+        assert!(v.card_speed_m_s() < cap);
+        let accepted = (v.jet_speed_m_s(), v.card_speed_m_s());
+        assert!(matches!(v.apply(FlueControl::SetBlowingPressure(4100.0)),
+            Err(FlueError::Invalid { what }) if what.contains("low-Mach")));
+        assert_eq!((v.jet_speed_m_s(), v.card_speed_m_s()), accepted);
+    }
+
+    #[test]
     fn g3_card_centreline_speed_feeds_the_card_the_exit_centre_and_keeps_the_flux() {
         use nolle_jet::{ChannelClass, NolleSpec};
         let (air, g) = (gas(101_325.0), geometry());
@@ -2652,6 +2689,49 @@ mod forced_jet_tests {
         let v = bare_voice(air, g, 48_000, 4096).with_developing_windway(0.005, 100.0).unwrap();
         assert!(matches!(v.with_forced_jet(PLUMBING, 3000.0),
             Err(FlueError::Invalid { what }) if what.contains("x+")));
+    }
+
+    #[test]
+    fn g3_forced_jet_card_speed_is_the_exit_centre_speed_for_seed_mach_and_reynolds() {
+        // The same planted exit as above: a 5 mm slit at 100 Pa, u_c/U near 1.27. The card's speed
+        // (the onset seed, the Mach admission and the Reynolds number all read it in advance_block)
+        // is the jet's centre speed, not the bulk speed that carries the flux. The seed has no
+        // reading of its own; it is tested through this shared value.
+        let (air, g) = (gas(101_325.0), geometry(CUT_UP_M));
+        let held = DevelopingSlit::from_gas(&air, 0.005).unwrap()
+            .held(g.flue_width_m, g.flue_height_m, 100.0).unwrap();
+        let ratio = held.core_speed_m_s / held.bulk_speed_m_s;
+        assert!(ratio > 1.1 && ratio < 1.4, "planted core over bulk {ratio}");
+        let mut v = bare_voice(air, g, 48_000, 4096).with_developing_windway(0.005, 100.0)
+            .unwrap().with_forced_jet(PLUMBING, 100.0).unwrap();
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        assert_eq!(v.jet_speed_m_s(), held.bulk_speed_m_s);
+        let centre = ratio * held.bulk_speed_m_s;
+        assert_eq!(v.card_speed_m_s(), centre);
+        assert!(v.card_speed_m_s() > v.jet_speed_m_s());
+        assert_eq!(v.reynolds(), centre * g.flue_height_m / v.nu);
+        let mut out = [0.0; 257];
+        v.step_block(&mut out).unwrap();
+        let expected = centre * g.flue_height_m / v.nu;
+        let (lo, hi) = v.diagnostics().last().unwrap().reynolds_range;
+        assert!((lo - expected).abs() <= 1e-9 * expected && (hi - expected).abs() <= 1e-9 * expected,
+            "per-sample Reynolds range ({lo}, {hi}) against {expected}");
+        assert_work(&v);
+    }
+
+    #[test]
+    fn g3_card_speed_stays_the_bulk_speed_where_no_jet_owns_a_non_uniform_exit() {
+        // The relay chain, with and without a slit windway (pexfp.135.5 D, untouched here), and a forced
+        // jet on a uniform exit (ratio exactly 1): the card's speed is the bulk speed bit for bit.
+        let (air, g) = (gas(101_325.0), geometry(CUT_UP_M));
+        for mut v in [
+            bare_voice(air, g, 48_000, 4096),
+            bare_voice(air, g, 48_000, 4096).with_viscous_windway(0.015).unwrap(),
+            bare_voice(air, g, 48_000, 4096).with_forced_jet(PLUMBING, 100.0).unwrap(),
+        ] {
+            v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+            assert_eq!(v.card_speed_m_s(), v.jet_speed_m_s());
+        }
     }
 
     #[test]

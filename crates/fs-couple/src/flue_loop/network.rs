@@ -580,6 +580,12 @@ impl FlueVoice {
         }
         let speed = self.speed_at_pressure(pressure_pa)?;
         self.line.validate_jet_speed(speed)?;
+        if self.forced.is_some() || self.nolle.is_some() {
+            // A jet that owns the exit runs at its centre speed, so the low-Mach domain binds that speed
+            // and not the bulk speed (pexfp.135.5). Only the Mach cap: the windway law's own bulk speed is
+            // not re-bounded by sqrt(2P/rho) here, as the opt-in card centreline speed does for its own.
+            self.line.validate_jet_speed(self.card_speed_at(pressure_pa, speed))?;
+        }
         if self.card_centreline.is_some() {
             // Flux retains the windway's bulk speed, but convection, growth and Reynolds
             // validity use its centre speed. Preflight must use the proposed pressure,
