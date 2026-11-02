@@ -19,7 +19,7 @@ pub use thin_film::{CoherentDielectricCoating, MAX_COHERENT_COATING_THICKNESS_M}
 mod absorbing_film;
 pub use absorbing_film::{CoatingIorSample, CoherentAbsorbingCoating};
 mod absorption;
-pub use absorption::ConductorPowerBalance;
+pub use absorption::{ConductorLayerPowerBalance, ConductorPowerBalance};
 mod multilayer;
 pub(crate) use multilayer::{CoherentTransmission, lossless_stack_transmission};
 pub use multilayer::{

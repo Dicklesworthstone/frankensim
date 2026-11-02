@@ -154,3 +154,199 @@ fn g0_invalid_surface_queries_refuse_before_any_power_account() {
     }
     assert!(ConductorIorSample::try_new(550.0, 1.0, 0.0).is_err());
 }
+
+#[test]
+fn g1_layer_partition_matches_independent_coherent_boundary_fluxes() {
+    let bare = substrate(0.17, 3.1);
+    let front = film(2.1, 0.2, 45.0);
+    let spacer =
+        CoherentDielectricCoating::try_new(CauchyIor::try_constant(1.45).unwrap(), 90e-9, source())
+            .unwrap();
+    let rear = film(2.5, 0.3, 20.0);
+    let layers = [
+        CoatingLayer::Absorbing(&front),
+        CoatingLayer::Dielectric(&spacer),
+        CoatingLayer::Absorbing(&rear),
+    ];
+    let stack = CoherentCoatingStack::try_new(&layers).unwrap();
+    // Independent complex transfer-matrix calculation, evaluating Re(F G*)
+    // at every boundary and taking differences only for this well-resolved
+    // reference. It does not use the production parity-loss decomposition.
+    for (cosine, expected) in [
+        (
+            1.0,
+            [
+                [0.06026676419637683, 0.06026676419637683],
+                [0.0, 0.0],
+                [0.2082861767910632, 0.2082861767910632],
+                [0.06102448605625804, 0.06102448605625803],
+            ],
+        ),
+        (
+            0.83,
+            [
+                [0.08589362081265703, 0.09561433052793228],
+                [0.0, 0.0],
+                [0.14781280428087143, 0.21570843260721173],
+                [0.04202627781241183, 0.06449362266648333],
+            ],
+        ),
+    ] {
+        let result = stack
+            .layer_power_balance(&bare, 550.0, 1.0, cosine)
+            .unwrap();
+        assert_eq!(
+            result.total,
+            stack.power_balance(&bare, 550.0, 1.0, cosine).unwrap()
+        );
+        assert_eq!(result.layer_absorbed()[1], [0.0; 2]);
+        for (actual, expected) in result
+            .layer_absorbed()
+            .iter()
+            .chain(core::iter::once(&result.substrate_absorbed))
+            .zip(expected)
+        {
+            for pol in 0..2 {
+                close(actual[pol], expected[pol], 2e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_substrate_matched_films_follow_beer_lambert_and_keep_authored_order() {
+    let bare = substrate(1.5, 0.3);
+    let first = film(1.5, 0.3, 80.0);
+    let second = film(1.5, 0.3, 120.0);
+    let zero = film(2.1, 0.6, 0.0);
+    let layers = [
+        CoatingLayer::Absorbing(&first),
+        CoatingLayer::Absorbing(&zero),
+        CoatingLayer::Absorbing(&second),
+    ];
+    let result = CoherentCoatingStack::try_new(&layers)
+        .unwrap()
+        .layer_power_balance(&bare, 550.0, 1.0, 1.0)
+        .unwrap();
+    let entrance = 4.0 * 1.5 / ((1.0_f64 + 1.5).powi(2) + 0.3_f64.powi(2));
+    let tau = 4.0 * core::f64::consts::PI * 0.3 / 550.0;
+    let t1 = (-tau * 80.0).exp();
+    let t2 = (-tau * 120.0).exp();
+    let expected = [
+        entrance * -(-tau * 80.0).exp_m1(),
+        0.0,
+        entrance * t1 * -(-tau * 120.0).exp_m1(),
+    ];
+    for (layer, value) in result.layer_absorbed().iter().zip(expected) {
+        close(layer[0], value, 3e-14);
+        assert_eq!(layer[0], layer[1]);
+    }
+    close(result.substrate_absorbed[0], entrance * t1 * t2, 3e-14);
+    assert_eq!(result.total, bare.power_balance(550.0, 1.0, 1.0).unwrap());
+    let one = bare
+        .with_absorbing_coating(first)
+        .layer_power_balance(550.0, 1.0, 1.0)
+        .unwrap();
+    close(one.layer_absorbed()[0][0], expected[0], 3e-14);
+}
+
+#[test]
+fn g1_weak_film_heat_survives_rounded_equal_boundary_powers() {
+    let bare = substrate(0.17, 3.1);
+    let coating = film(2.1, 1e-12, 1e-6);
+    let result = bare
+        .with_absorbing_coating(coating)
+        .layer_power_balance(550.0, 1.0, 1.0)
+        .unwrap();
+    // Infinitesimal-film integral k0 Im(n²) d |E_boundary|² / Y_inc.
+    // Its O(d) relative correction is below 1e-7 at this thickness.
+    let expected = (4.0 * core::f64::consts::PI * 2.1 * 1e-12 * 1e-6 / 550.0)
+        * (4.0 / ((1.0_f64 + 0.17).powi(2) + 3.1_f64.powi(2)));
+    assert!(result.layer_absorbed()[0][0] > 0.0);
+    close(result.layer_absorbed()[0][0], expected, 1e-7 * expected);
+    assert!(result.layer_absorbed()[0][0] < f64::EPSILON * result.total.absorbed[0]);
+}
+
+#[test]
+fn g3_periodic_expansion_and_thick_loss_retain_positive_layer_heat() {
+    let bare = substrate(0.17, 3.1);
+    let first = film(2.1, 0.2, 45.0);
+    let second = film(1.45, 0.0, 90.0);
+    let unit = [
+        CauchyCoatingLayer::try_new(CauchyIor::try_constant(2.1).unwrap(), 0.2, 45e-9).unwrap(),
+        CauchyCoatingLayer::try_new(CauchyIor::try_constant(1.45).unwrap(), 0.0, 90e-9).unwrap(),
+    ];
+    let periodic = CoherentPeriodicCoating::try_new(&unit, 3, source()).unwrap();
+    let explicit = [
+        CoatingLayer::Absorbing(&first),
+        CoatingLayer::Absorbing(&second),
+        CoatingLayer::Absorbing(&first),
+        CoatingLayer::Absorbing(&second),
+        CoatingLayer::Absorbing(&first),
+        CoatingLayer::Absorbing(&second),
+    ];
+    for cosine in [0.17, 0.83, 1.0] {
+        let compact = bare
+            .with_periodic_coating(periodic)
+            .layer_power_balance(550.0, 1.0, cosine)
+            .unwrap();
+        let borrowed = CoherentCoatingStack::try_new(&explicit)
+            .unwrap()
+            .layer_power_balance(&bare, 550.0, 1.0, cosine)
+            .unwrap();
+        for (a, b) in compact
+            .layer_absorbed()
+            .iter()
+            .zip(borrowed.layer_absorbed())
+        {
+            for pol in 0..2 {
+                close(a[pol], b[pol], 2e-13);
+            }
+        }
+    }
+    let opaque = film(2.1, 3.0, 100_000.0);
+    let hidden = [
+        CoatingLayer::Absorbing(&opaque),
+        CoatingLayer::Absorbing(&first),
+    ];
+    let result = CoherentCoatingStack::try_new(&hidden)
+        .unwrap()
+        .layer_power_balance(&bare, 550.0, 1.0, 0.83)
+        .unwrap();
+    assert_eq!(result.layer_absorbed()[1], [0.0; 2]);
+    assert_eq!(result.substrate_absorbed, [0.0; 2]);
+    for pol in 0..2 {
+        close(
+            result.layer_absorbed()[0][pol],
+            result.total.absorbed[pol],
+            2e-13,
+        );
+    }
+}
+
+#[test]
+fn g0_g1_lossless_critical_grazing_and_query_refusals_keep_their_meaning() {
+    let bare = substrate(0.17, 3.1);
+    let lossless =
+        CoherentDielectricCoating::try_new(CauchyIor::try_constant(1.0).unwrap(), 90e-9, source())
+            .unwrap();
+    let coated = bare.with_coating(lossless);
+    for cosine in [0.0, 0.5, (1.0_f64 - 1.0 / 2.25).sqrt(), 1.0] {
+        let result = coated.layer_power_balance(550.0, 1.5, cosine).unwrap();
+        assert_eq!(result.layer_absorbed(), &[[0.0; 2]]);
+        for pol in 0..2 {
+            close(
+                result.substrate_absorbed[pol],
+                result.total.absorbed[pol],
+                2e-13,
+            );
+        }
+    }
+    let empty = bare.layer_power_balance(550.0, 1.0, 0.83).unwrap();
+    assert!(empty.layer_absorbed().is_empty());
+    assert_eq!(empty.substrate_absorbed, empty.total.absorbed);
+    for (wavelength, eta, cosine) in [(379.0, 1.0, 0.5), (550.0, 0.0, 0.5), (550.0, 1.0, f64::NAN)]
+    {
+        assert!(coated.layer_power_balance(wavelength, eta, cosine).is_err());
+    }
+}

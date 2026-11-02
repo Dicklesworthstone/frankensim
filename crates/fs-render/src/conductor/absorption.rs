@@ -6,6 +6,7 @@
 
 use super::{
     CoatingLayer, CoherentCoating, CoherentCoatingStack, Complex, ConductorError, ConductorOptics,
+    MAX_COHERENT_STACK_LAYERS,
 };
 
 /// Fractions of incident ray power at a smooth opaque surface, ordered s, p.
@@ -18,7 +19,69 @@ pub struct ConductorPowerBalance {
     pub absorbed: [f64; 2],
 }
 
+/// Positive absorbed fractions resolved over the original physical films and
+/// opaque substrate. Fractions are ordered s, p and refer to incident ray power.
+/// The substrate receives the flux crossing its first face; no penetration
+/// depth or thermal control volume is inferred from that semi-infinite law.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConductorLayerPowerBalance {
+    /// Original reflected and aggregate absorbed fractions.
+    pub total: ConductorPowerBalance,
+    /// Absorption in the opaque half space after all finite coating layers.
+    pub substrate_absorbed: [f64; 2],
+    pub(super) layers: [[f64; 2]; MAX_COHERENT_STACK_LAYERS],
+    pub(super) layer_count: usize,
+}
+
+impl ConductorLayerPowerBalance {
+    /// Absorption in authored incident-to-substrate order, including explicit
+    /// zero-thickness and lossless films. A periodic coating expands its repeats
+    /// in that same order. Entries plus substrate absorption equal the original
+    /// aggregate absorption to floating-point rounding.
+    #[must_use]
+    pub fn layer_absorbed(&self) -> &[[f64; 2]] {
+        &self.layers[..self.layer_count]
+    }
+}
+
 impl ConductorOptics {
+    /// Resolve where coherent surface absorption occurs before assigning heat
+    /// to thermal cells. The original field solve retains interference, local
+    /// incidence, spectral laws and source support. Positive dissipative modes
+    /// preserve thin-film loss without subtracting nearly equal power fluxes.
+    ///
+    /// Work/storage are bounded by 64 physical layers, with no heap allocation.
+    /// Existing scalar and Mueller reflection paths perform no extra work.
+    pub fn layer_power_balance(
+        &self,
+        wavelength_nm: f64,
+        incident_eta: f64,
+        incidence_cosine: f64,
+    ) -> Result<ConductorLayerPowerBalance, ConductorError> {
+        match &self.coating {
+            Some(CoherentCoating::Dielectric(film)) => {
+                CoherentCoatingStack::try_new(&[CoatingLayer::Dielectric(film)])?
+                    .layer_power_balance(self, wavelength_nm, incident_eta, incidence_cosine)
+            }
+            Some(CoherentCoating::Absorbing(film)) => {
+                CoherentCoatingStack::try_new(&[CoatingLayer::Absorbing(film)])?
+                    .layer_power_balance(self, wavelength_nm, incident_eta, incidence_cosine)
+            }
+            Some(CoherentCoating::Periodic(coating)) => coating.layer_power_balance(
+                wavelength_nm,
+                incident_eta,
+                self.complex_ior(wavelength_nm)?,
+                incidence_cosine,
+            ),
+            None => CoherentCoatingStack::try_new(&[])?.layer_power_balance(
+                self,
+                wavelength_nm,
+                incident_eta,
+                incidence_cosine,
+            ),
+        }
+    }
+
     /// Resolve reflected and absorbed fractions from the original scaled
     /// boundary fields, including the explicitly attached coherent coating.
     ///

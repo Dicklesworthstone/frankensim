@@ -4707,3 +4707,29 @@ compiled spectral responses only when emissivity values change. Constant rows
 retain fixed-response parity; dark intervals continue to validate source domains
 without rebuilding optical packets. This coupling is start-state explicit and
 therefore retains the existing temporal-refinement requirement.
+
+### Coherent coating and substrate absorption
+
+`ConductorOptics::layer_power_balance` and
+`CoherentCoatingStack::layer_power_balance` retain the original boundary-flux
+total and separately return each authored film's absorbed s/p incident-power
+fraction plus the opaque substrate's fraction. Zero-thickness and lossless
+films retain their positions with zero heat; compact periodic coatings expand
+in physical incident-to-substrate order. The native 64-layer bound remains.
+
+The query reuses the original scaled coherent field solution and its source,
+wavelength, incidence and passive-index admission. Positive symmetric and
+antisymmetric slab-loss integrals retain standing-wave interference and weak
+absorption without subtracting nearly equal interface powers. Small-depth
+series preserve the thin-film loss; logarithmic field-scale recovery avoids
+growing propagation exponentials in opaque stacks. Output and intermediate
+history use bounded stack storage. Existing reflection and aggregate-power
+queries do not retain the new boundary history.
+
+Per-film and substrate absorption must independently close the original total
+within the declared floating-point allowance; unresolved or nonpassive
+arithmetic refuses. These are whole-film powers, not a penetration-depth mesh,
+thermal-emission model, rough-film/scattering law, broadband continuation, or
+experimental validation of representative optical data. G1/G3 regressions
+exercise independent matched-index Beer-Lambert layers, weak/zero loss,
+oblique-polarization power closure, opaque shielding and periodic order.

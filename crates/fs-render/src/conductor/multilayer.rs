@@ -19,6 +19,8 @@ use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::det;
 
+mod absorption;
+
 /// Maximum physical layers, after expanding all repeats. No amplitude-based
 /// truncation is used: even weak returning waves can control a coherent null.
 pub const MAX_COHERENT_STACK_LAYERS: usize = 64;
@@ -252,6 +254,30 @@ impl CoherentPeriodicCoating {
         )
     }
 
+    pub(super) fn layer_power_balance(
+        &self,
+        wavelength_nm: f64,
+        incident_eta: f64,
+        substrate: ComplexIor,
+        cosine: f64,
+    ) -> Result<super::ConductorLayerPowerBalance, ConductorError> {
+        let geometry = Geometry::new(wavelength_nm, incident_eta, substrate, cosine)?;
+        let mut prepared = [absorption::Layer::IDENTITY; MAX_COHERENT_UNIT_CELL_LAYERS];
+        for (slot, layer) in prepared.iter_mut().zip(self.unit_cell()) {
+            *slot = absorption::Layer::new(
+                ComplexIor {
+                    eta: layer.ior.eval_unchecked(wavelength_nm),
+                    k: layer.extinction_k,
+                },
+                layer.thickness_m,
+                geometry,
+            )?;
+        }
+        absorption::partition(geometry, self.layer_count(), |index| {
+            Ok(prepared[index % self.cell_len as usize])
+        })
+    }
+
     fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
         &self,
         geometry: Geometry,
@@ -430,6 +456,28 @@ impl<'a> CoherentCoatingStack<'a> {
         response_as::<false, AbsorbedPower>(geometry, self.layers.len(), |index| {
             let (ior, thickness) = self.layer(index, wavelength_nm)?;
             Ok(LayerTransfer::new::<false>(ior, thickness, geometry))
+        })
+    }
+
+    /// Resolve positive absorption in each authored film and in the opaque
+    /// substrate from the original coherent boundary fields. This explicit
+    /// ordered stack replaces any coating attached to the supplied substrate.
+    pub fn layer_power_balance(
+        self,
+        substrate: &ConductorOptics,
+        wavelength_nm: f64,
+        incident_eta: f64,
+        cosine: f64,
+    ) -> Result<super::ConductorLayerPowerBalance, ConductorError> {
+        let geometry = Geometry::new(
+            wavelength_nm,
+            incident_eta,
+            substrate.complex_ior(wavelength_nm)?,
+            cosine,
+        )?;
+        absorption::partition(geometry, self.layers.len(), |index| {
+            let (ior, thickness) = self.layer(index, wavelength_nm)?;
+            absorption::Layer::new(ior, thickness, geometry)
         })
     }
 
@@ -619,28 +667,54 @@ struct Reflection {
 // retain normal flux from the SAME scaled field solve.
 trait ResponseKind {
     type Output;
+    type History;
+    const BOUNDARY_SCALES: bool = false;
+    fn history(layer_count: usize) -> Self::History;
+    fn record(_: &mut Self::History, _: usize, _: [Complex; 2], _: [Complex; 2], _: [f64; 2]) {}
     fn finish(
         geometry: Geometry,
         reflected: Reflection,
         field: [Complex; 2],
         flux: [Complex; 2],
+        history: Self::History,
     ) -> Result<Self::Output, ConductorError>;
 }
 struct ReflectionOnly;
 impl ResponseKind for ReflectionOnly {
     type Output = Reflection;
-    fn finish(_: Geometry, reflected: Reflection, _: [Complex; 2], _: [Complex; 2])
-        -> Result<Self::Output, ConductorError> { Ok(reflected) }
+    type History = ();
+    fn history(_: usize) {}
+    fn finish(
+        _: Geometry,
+        reflected: Reflection,
+        _: [Complex; 2],
+        _: [Complex; 2],
+        _: (),
+    ) -> Result<Self::Output, ConductorError> {
+        Ok(reflected)
+    }
 }
 struct AbsorbedPower;
 impl ResponseKind for AbsorbedPower {
     type Output = ConductorPowerBalance;
-    fn finish(geometry: Geometry, reflected: Reflection, field: [Complex; 2], flux: [Complex; 2])
-        -> Result<Self::Output, ConductorError> {
+    type History = ();
+    fn history(_: usize) {}
+    fn finish(
+        geometry: Geometry,
+        reflected: Reflection,
+        field: [Complex; 2],
+        flux: [Complex; 2],
+        _: (),
+    ) -> Result<Self::Output, ConductorError> {
         ConductorPowerBalance::from_boundary(
             geometry.cosine,
-            [geometry.incident_eta * geometry.cosine, geometry.cosine / geometry.incident_eta],
-            field, flux, reflected.amplitudes,
+            [
+                geometry.incident_eta * geometry.cosine,
+                geometry.cosine / geometry.incident_eta,
+            ],
+            field,
+            flux,
+            reflected.amplitudes,
         )
     }
 }
@@ -693,12 +767,19 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
     layer_count: usize,
     mut layer: impl FnMut(usize) -> Result<LayerTransfer, ConductorError>,
 ) -> Result<Kind::Output, ConductorError> {
+    let mut history = Kind::history(layer_count);
     if geometry.cosine == 0.0 {
-        return Kind::finish(geometry, Reflection {
-            amplitudes: [Complex::new(-1.0, 0.0); 2],
-            bare_equivalent: true,
-            transmission: [Complex::new(0.0, 0.0); 2],
-        }, [Complex::new(1.0, 0.0); 2], [Complex::new(0.0, 0.0); 2]);
+        return Kind::finish(
+            geometry,
+            Reflection {
+                amplitudes: [Complex::new(-1.0, 0.0); 2],
+                bare_equivalent: true,
+                transmission: [Complex::new(0.0, 0.0); 2],
+            },
+            [Complex::new(1.0, 0.0); 2],
+            [Complex::new(0.0, 0.0); 2],
+            history,
+        );
     }
     let n_squared = Complex::new(geometry.substrate.eta, geometry.substrate.k).square();
     let q = geometry.exit_normal.unwrap_or_else(|| {
@@ -741,9 +822,11 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
     let mut logarithmic_scale = [0.0; 2];
     let mut bare_equivalent = true;
     let mut inside_incident = false;
+    Kind::record(&mut history, layer_count, field, flux, [0.0; 2]);
     for index in (0..layer_count).rev() {
         let transfer = layer(index)?;
         if transfer.inactive {
+            Kind::record(&mut history, index, field, flux, [0.0; 2]);
             continue;
         }
         // Incident-matched prefixes and substrate-matched suffixes alter only
@@ -754,6 +837,7 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
         } else if !transfer.substrate_match || inside_incident {
             bare_equivalent = false;
         }
+        let mut boundary_scale = [0.0; 2];
         for pol in 0..2 {
             let (next_field, next_flux) = if TRANSMISSION {
                 let diagonal = (transfer.upper[pol] * incident[pol]
@@ -778,27 +862,39 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
             // inverted into infinity before normalizing the projective fields.
             field[pol] = Complex::new(next_field.re / scale, next_field.im / scale);
             flux[pol] = Complex::new(next_flux.re / scale, next_flux.im / scale);
-            if TRANSMISSION {
+            if TRANSMISSION || Kind::BOUNDARY_SCALES {
                 // The reflected ratio forgets this common scale; transmitted
                 // flux must retain it. Log scaling also covers thick evanescent
                 // barriers without constructing a growing exponential.
-                logarithmic_scale[pol] += det::ln(scale) + transfer.propagation_log_scale;
+                boundary_scale[pol] = det::ln(scale) + transfer.propagation_log_scale;
+                if TRANSMISSION {
+                    logarithmic_scale[pol] += boundary_scale[pol];
+                }
             }
         }
+        Kind::record(&mut history, index, field, flux, boundary_scale);
     }
     if bare_equivalent && !TRANSMISSION {
-        return Kind::finish(geometry, Reflection {
-            amplitudes: super::thin_film::polarization::bare_amplitudes(
-                geometry.incident_eta,
-                geometry.substrate,
-                geometry.cosine,
-            ),
-            bare_equivalent,
-            transmission: [Complex::new(0.0, 0.0); 2],
-        }, [Complex::new(1.0, 0.0); 2], exit);
+        return Kind::finish(
+            geometry,
+            Reflection {
+                amplitudes: super::thin_film::polarization::bare_amplitudes(
+                    geometry.incident_eta,
+                    geometry.substrate,
+                    geometry.cosine,
+                ),
+                bare_equivalent,
+                transmission: [Complex::new(0.0, 0.0); 2],
+            },
+            [Complex::new(1.0, 0.0); 2],
+            exit,
+            history,
+        );
     }
     let mut amplitudes = core::array::from_fn(|pol| {
-        if TRANSMISSION { flux[pol] / field[pol] } else {
+        if TRANSMISSION {
+            flux[pol] / field[pol]
+        } else {
             (field[pol] * incident[pol] - flux[pol]) / (field[pol] * incident[pol] + flux[pol])
         }
     });
@@ -815,11 +911,17 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
             transmission[1] = transmission[0];
         }
     }
-    Kind::finish(geometry, Reflection {
-        amplitudes,
-        bare_equivalent,
-        transmission,
-    }, field, flux)
+    Kind::finish(
+        geometry,
+        Reflection {
+            amplitudes,
+            bare_equivalent,
+            transmission,
+        },
+        field,
+        flux,
+        history,
+    )
 }
 
 #[cfg(test)]
