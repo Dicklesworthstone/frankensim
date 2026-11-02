@@ -230,6 +230,41 @@ impl BoundaryGrid3 {
         T,
         Vec<PlaneLubricationExchange3>,
     )> {
+        self.partial_saturation_resistance_transition(
+            fractions,
+            bodies,
+            external,
+            origin,
+            gate,
+            lubrication,
+            true,
+            finish,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in crate::d3q19::boundary) fn partial_saturation_resistance_transition<
+        const N: usize,
+        T,
+    >(
+        &mut self,
+        fractions: [&[f64]; N],
+        bodies: &mut [PartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        lubrication: Option<(SphereLubrication3, [f64; N], &[LubricationPlane3])>,
+        publish: bool,
+        finish: impl FnOnce(
+            &Self,
+            &[PartialSaturationBody3; N],
+            &PartialSaturationBodiesExchange3<N>,
+        ) -> Result<T>,
+    ) -> Result<(
+        PartialSaturationBodiesExchange3<N>,
+        T,
+        Vec<PlaneLubricationExchange3>,
+    )> {
         checkpoint(gate)?;
         if N == 0 {
             return Err(invalid("immersed assembly must contain at least one body"));
@@ -241,12 +276,13 @@ impl BoundaryGrid3 {
         if N == 1 && lubrication.is_none_or(|(_, _, planes)| planes.is_empty()) {
             let mut proposed = *bodies;
             let mut single = proposed[0];
-            let (_, (receipt, value)) = self.step_with_partial_saturation_body_checked(
+            let (_, (receipt, value)) = self.partial_saturation_body_transition(
                 fractions[0],
                 &mut single,
                 external[0],
                 origin,
                 gate,
+                publish,
                 |grid, after, exchange| {
                     proposed[0] = *after;
                     let receipt = PartialSaturationBodiesExchange3 {
@@ -625,9 +661,11 @@ impl BoundaryGrid3 {
             self.next = Some(next);
             return Err(error);
         }
-        core::mem::swap(&mut self.f, &mut next);
+        if publish {
+            core::mem::swap(&mut self.f, &mut next);
+            self.topology_locked = true;
+        }
         self.next = Some(next);
-        self.topology_locked = true;
         *bodies = proposed;
         Ok((report, value, plane_reports))
     }

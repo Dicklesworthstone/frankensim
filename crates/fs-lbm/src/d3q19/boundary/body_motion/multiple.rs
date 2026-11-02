@@ -164,6 +164,32 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
         lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
     ) -> Result<MovingLubricatedPlanesExchange3<N>> {
+        self.moving_partial_saturation_resistance_transition(
+            samplers,
+            shapes,
+            bodies,
+            external,
+            origin,
+            gate,
+            lubrication,
+            true,
+        )
+    }
+
+    // The dry-assembly owner must evaluate one simultaneous streamed candidate
+    // without publishing any body or fluid. Its caller owns the final swap.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn moving_partial_saturation_resistance_transition<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        shapes: [&dyn BodyFrameShape3; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
+        publish: bool,
+    ) -> Result<MovingLubricatedPlanesExchange3<N>> {
         checkpoint(gate)?;
         if N == 0 || !origin.into_iter().all(f64::is_finite) {
             return Err(invalid(
@@ -262,145 +288,141 @@ impl BoundaryGrid3 {
         admit_plane_positions(planes, midpoint.map(|b| b.center), radii, 0.5, gate)?;
         let frozen_before = frozen;
         let fields = core::array::from_fn(|a| samplers[a].fractions.as_slice());
-        let (_, (accepted, report), planes) = self
-            .step_with_partial_saturation_resistance_checked(
-                fields,
-                &mut frozen,
-                external,
-                origin,
-                gate,
-                lubrication.map(|(model, _)| (model, radii, midpoint_planes.as_slice())),
-                |grid, exchanged, coupling| {
-                    let mut accepted = initial;
-                    let mut reports = [None; N];
-                    for a in 0..N {
-                        checkpoint(gate)?;
-                        let body = initial[a];
-                        let mid = midpoint[a];
-                        let response = coupling.bodies[a];
-                        let dw = core::array::from_fn(|i| {
-                            exchanged[a].angular_velocity[i] - frozen_before[a].angular_velocity[i]
-                        });
-                        let spin_impulse = frozen_before[a].inertia_world.map(|row| dot(row, dw));
-                        let after_exchange_momentum = mid.angular_momentum_body
-                            + native(mid.orientation.inverse().rotate(vector(spin_impulse)))?;
-                        let (orientation, angular_momentum_body) =
-                            native(body.inertia.momentum_step(
-                                mid.orientation,
-                                after_exchange_momentum,
-                                Vec3::new(0.0, 0.0, 0.0),
-                                0.5,
-                            ))?;
-                        accepted[a] = MovingPartialSaturationBody3 {
-                            center: core::array::from_fn(|i| {
-                                mid.center[i] + 0.5 * exchanged[a].velocity[i]
-                            }),
-                            orientation,
-                            velocity: exchanged[a].velocity,
-                            angular_momentum_body,
-                            ..body
-                        };
-                        admit_sweep(grid, mid.center, accepted[a].center, radii[a], gate)?;
-                        volumes[a][2] = sample_geometry(
-                            samplers[a].dims,
-                            samplers[a].samples_per_axis,
-                            accepted[a].center,
-                            orientation,
-                            shapes[a],
-                            Some((accepted[a].velocity, accepted[a].angular_velocity_world()?)),
-                            None,
-                            gate,
-                        )?;
-                        let arm = core::array::from_fn(|i| mid.center[i] - origin[i]);
-                        let orbital = cross(arm, external[a][..3].try_into().unwrap());
-                        let external_angular_impulse =
-                            core::array::from_fn(|i| external[a][i + 3] + orbital[i]);
-                        let before_h = total_angular_momentum(body, origin)?;
-                        let after_h = total_angular_momentum(accepted[a], origin)?;
-                        let momentum_residual = core::array::from_fn(|i| {
-                            if i < 3 {
-                                body.mass * (accepted[a].velocity[i] - body.velocity[i])
-                                    - external[a][i]
-                                    - response.hydrodynamic.body_impulse[i]
-                                    - coupling.lubrication.body_impulses[a][i]
-                            } else {
-                                after_h[i - 3]
-                                    - before_h[i - 3]
-                                    - external_angular_impulse[i - 3]
-                                    - response.hydrodynamic.body_angular_impulse[i - 3]
-                                    - coupling.lubrication.body_angular_impulses[a][i - 3]
-                            }
-                        });
-                        let spin_before =
-                            rotational_energy(body.inertia, body.angular_momentum_body)?;
-                        let spin_midpoint =
-                            rotational_energy(body.inertia, mid.angular_momentum_body)?;
-                        let spin_exchanged =
-                            rotational_energy(body.inertia, after_exchange_momentum)?;
-                        let spin_after = rotational_energy(body.inertia, angular_momentum_body)?;
-                        let kinetic_energy_change = 0.5
-                            * body.mass
-                            * (dot(accepted[a].velocity, accepted[a].velocity)
-                                - dot(body.velocity, body.velocity))
-                            + spin_after
-                            - spin_before;
-                        let free_rotation_energy_change =
-                            (spin_midpoint - spin_before) + (spin_after - spin_exchanged);
-                        let work_residual = kinetic_energy_change
-                            - response.external_work
-                            - response.hydrodynamic.body_work
-                            - coupling.lubrication.body_work[a]
-                            - free_rotation_energy_change;
-                        if !volumes[a]
-                            .into_iter()
-                            .chain(external_angular_impulse)
-                            .chain(momentum_residual)
-                            .chain([
-                                kinetic_energy_change,
-                                free_rotation_energy_change,
-                                work_residual,
-                            ])
-                            .all(f64::is_finite)
-                        {
-                            return Err(invalid("moving assembly endpoint account overflowed"));
+        let (_, (accepted, report), planes) = self.partial_saturation_resistance_transition(
+            fields,
+            &mut frozen,
+            external,
+            origin,
+            gate,
+            lubrication.map(|(model, _)| (model, radii, midpoint_planes.as_slice())),
+            publish,
+            |grid, exchanged, coupling| {
+                let mut accepted = initial;
+                let mut reports = [None; N];
+                for a in 0..N {
+                    checkpoint(gate)?;
+                    let body = initial[a];
+                    let mid = midpoint[a];
+                    let response = coupling.bodies[a];
+                    let dw = core::array::from_fn(|i| {
+                        exchanged[a].angular_velocity[i] - frozen_before[a].angular_velocity[i]
+                    });
+                    let spin_impulse = frozen_before[a].inertia_world.map(|row| dot(row, dw));
+                    let after_exchange_momentum = mid.angular_momentum_body
+                        + native(mid.orientation.inverse().rotate(vector(spin_impulse)))?;
+                    let (orientation, angular_momentum_body) = native(body.inertia.momentum_step(
+                        mid.orientation,
+                        after_exchange_momentum,
+                        Vec3::new(0.0, 0.0, 0.0),
+                        0.5,
+                    ))?;
+                    accepted[a] = MovingPartialSaturationBody3 {
+                        center: core::array::from_fn(|i| {
+                            mid.center[i] + 0.5 * exchanged[a].velocity[i]
+                        }),
+                        orientation,
+                        velocity: exchanged[a].velocity,
+                        angular_momentum_body,
+                        ..body
+                    };
+                    admit_sweep(grid, mid.center, accepted[a].center, radii[a], gate)?;
+                    volumes[a][2] = sample_geometry(
+                        samplers[a].dims,
+                        samplers[a].samples_per_axis,
+                        accepted[a].center,
+                        orientation,
+                        shapes[a],
+                        Some((accepted[a].velocity, accepted[a].angular_velocity_world()?)),
+                        None,
+                        gate,
+                    )?;
+                    let arm = core::array::from_fn(|i| mid.center[i] - origin[i]);
+                    let orbital = cross(arm, external[a][..3].try_into().unwrap());
+                    let external_angular_impulse =
+                        core::array::from_fn(|i| external[a][i + 3] + orbital[i]);
+                    let before_h = total_angular_momentum(body, origin)?;
+                    let after_h = total_angular_momentum(accepted[a], origin)?;
+                    let momentum_residual = core::array::from_fn(|i| {
+                        if i < 3 {
+                            body.mass * (accepted[a].velocity[i] - body.velocity[i])
+                                - external[a][i]
+                                - response.hydrodynamic.body_impulse[i]
+                                - coupling.lubrication.body_impulses[a][i]
+                        } else {
+                            after_h[i - 3]
+                                - before_h[i - 3]
+                                - external_angular_impulse[i - 3]
+                                - response.hydrodynamic.body_angular_impulse[i - 3]
+                                - coupling.lubrication.body_angular_impulses[a][i - 3]
                         }
-                        reports[a] = Some(MovingPartialSaturationExchange3 {
-                            coupling: PartialSaturationBodyExchange3 {
-                                hydrodynamic: response.hydrodynamic,
-                                walls: super::super::WallMomentumExchange3::default(),
-                                periodic: super::super::PeriodicMomentumTransport3::default(),
-                                forcing: super::super::PartialSaturationForcing3::default(),
-                                velocity_midpoint: response.velocity_midpoint,
-                                angular_velocity_midpoint: response.angular_velocity_midpoint,
-                                kinetic_energy_change: response.kinetic_energy_change,
-                                external_work: response.external_work,
-                                momentum_residual: response.momentum_residual,
-                            },
-                            midpoint_center: mid.center,
-                            midpoint_orientation: mid.orientation,
-                            sampled_solid_volume: volumes[a],
-                            external_angular_impulse,
-                            momentum_residual,
+                    });
+                    let spin_before = rotational_energy(body.inertia, body.angular_momentum_body)?;
+                    let spin_midpoint = rotational_energy(body.inertia, mid.angular_momentum_body)?;
+                    let spin_exchanged = rotational_energy(body.inertia, after_exchange_momentum)?;
+                    let spin_after = rotational_energy(body.inertia, angular_momentum_body)?;
+                    let kinetic_energy_change = 0.5
+                        * body.mass
+                        * (dot(accepted[a].velocity, accepted[a].velocity)
+                            - dot(body.velocity, body.velocity))
+                        + spin_after
+                        - spin_before;
+                    let free_rotation_energy_change =
+                        (spin_midpoint - spin_before) + (spin_after - spin_exchanged);
+                    let work_residual = kinetic_energy_change
+                        - response.external_work
+                        - response.hydrodynamic.body_work
+                        - coupling.lubrication.body_work[a]
+                        - free_rotation_energy_change;
+                    if !volumes[a]
+                        .into_iter()
+                        .chain(external_angular_impulse)
+                        .chain(momentum_residual)
+                        .chain([
                             kinetic_energy_change,
                             free_rotation_energy_change,
                             work_residual,
-                        });
+                        ])
+                        .all(f64::is_finite)
+                    {
+                        return Err(invalid("moving assembly endpoint account overflowed"));
                     }
-                    admit_pairs(
-                        midpoint.map(|b| b.center),
-                        accepted.map(|b| b.center),
-                        radii,
-                        gate,
-                    )?;
-                    admit_plane_positions(planes, accepted.map(|b| b.center), radii, 1.0, gate)?;
-                    let report = MovingPartialSaturationBodiesExchange3 {
-                        coupling: *coupling,
-                        bodies: reports
-                            .map(|report| report.expect("every assembly body was finalized")),
-                    };
-                    Ok((accepted, report))
-                },
-            )?;
+                    reports[a] = Some(MovingPartialSaturationExchange3 {
+                        coupling: PartialSaturationBodyExchange3 {
+                            hydrodynamic: response.hydrodynamic,
+                            walls: super::super::WallMomentumExchange3::default(),
+                            periodic: super::super::PeriodicMomentumTransport3::default(),
+                            forcing: super::super::PartialSaturationForcing3::default(),
+                            velocity_midpoint: response.velocity_midpoint,
+                            angular_velocity_midpoint: response.angular_velocity_midpoint,
+                            kinetic_energy_change: response.kinetic_energy_change,
+                            external_work: response.external_work,
+                            momentum_residual: response.momentum_residual,
+                        },
+                        midpoint_center: mid.center,
+                        midpoint_orientation: mid.orientation,
+                        sampled_solid_volume: volumes[a],
+                        external_angular_impulse,
+                        momentum_residual,
+                        kinetic_energy_change,
+                        free_rotation_energy_change,
+                        work_residual,
+                    });
+                }
+                admit_pairs(
+                    midpoint.map(|b| b.center),
+                    accepted.map(|b| b.center),
+                    radii,
+                    gate,
+                )?;
+                admit_plane_positions(planes, accepted.map(|b| b.center), radii, 1.0, gate)?;
+                let report = MovingPartialSaturationBodiesExchange3 {
+                    coupling: *coupling,
+                    bodies: reports
+                        .map(|report| report.expect("every assembly body was finalized")),
+                };
+                Ok((accepted, report))
+            },
+        )?;
         *bodies = accepted;
         Ok(MovingLubricatedPlanesExchange3 {
             motion: report,

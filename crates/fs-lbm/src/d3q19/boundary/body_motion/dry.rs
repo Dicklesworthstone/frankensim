@@ -21,6 +21,9 @@ use super::super::cell_force;
 use super::*;
 use crate::d3q19::{E3, Q3};
 
+mod multiple;
+pub use multiple::DryBodiesExchange3;
+
 /// Numerical admission for one implicit dry-body/retained-fluid correction.
 /// All impulses are lattice units. Angular residuals are divided by the shape's
 /// enclosing radius before comparison with the linear-impulse tolerance.
@@ -43,7 +46,7 @@ pub struct DryBodyCouplingConfig3 {
     pub maximum_relative_volume_change: f64,
     /// Relative forward-difference step, in [1e-8, 1e-2].
     pub jacobian_step: f64,
-    /// Maximum estimated 1-norm condition number of the scaled 6x6 Jacobian.
+    /// Maximum estimated 1-norm condition number of the scaled correction Jacobian.
     pub maximum_condition_number: f64,
 }
 

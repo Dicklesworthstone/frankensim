@@ -34,10 +34,10 @@ pub use partial_saturation::{
 };
 mod body_motion;
 pub use body_motion::{
-    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, MovingLubricatedPlanesExchange3,
+    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, DryBodiesExchange3,
+    DryBodyCouplingConfig3, DryBodyExchange3, ImmersedMomentum3, MovingLubricatedPlanesExchange3,
     MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3,
-    MovingPartialSaturationExchange3, DryBodyCouplingConfig3, DryBodyExchange3,
-    ImmersedMomentum3,
+    MovingPartialSaturationExchange3,
 };
 
 /// Bit-semantics version for the D3Q19 boundary surface.

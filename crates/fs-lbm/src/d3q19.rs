@@ -33,15 +33,16 @@ pub(crate) use fma::collision_kernel3;
 pub use boundary::{
     BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryGrid3, BoundaryLink3,
     BoundaryProfileError3, BoundarySgsError3, BoundarySgsReport3, BoundarySpec3,
-    BoundaryStepError3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, Face3, FaceBoundary3,
-    FiniteMassWall3, FiniteMassWallReceipt3, InletFlux3, LinkMaskTile3, LubricatedPlanesExchange3,
-    LubricationPlane3, MovingLubricatedPlanesExchange3, MovingPartialSaturationBodiesExchange3,
-    MovingPartialSaturationBody3, MovingPartialSaturationExchange3, DryBodyCouplingConfig3,
-    DryBodyExchange3, ImmersedMomentum3,
-    PartialSaturationBodiesExchange3, PartialSaturationBody3, PartialSaturationBodyExchange3,
-    PartialSaturationBodyResponse3, PartialSaturationError3, PartialSaturationExchange3,
-    PartialSaturationForcing3, PeriodicMomentumTransport3, PlaneLubricationExchange3,
-    SphereLubrication3, SphereLubricationExchange3, VelocityProfileReport3, WallMomentumExchange3,
+    BoundaryStepError3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, DryBodiesExchange3,
+    DryBodyCouplingConfig3, DryBodyExchange3, Face3, FaceBoundary3, FiniteMassWall3,
+    FiniteMassWallReceipt3, ImmersedMomentum3, InletFlux3, LinkMaskTile3,
+    LubricatedPlanesExchange3, LubricationPlane3, MovingLubricatedPlanesExchange3,
+    MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3,
+    MovingPartialSaturationExchange3, PartialSaturationBodiesExchange3, PartialSaturationBody3,
+    PartialSaturationBodyExchange3, PartialSaturationBodyResponse3, PartialSaturationError3,
+    PartialSaturationExchange3, PartialSaturationForcing3, PeriodicMomentumTransport3,
+    PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,
+    VelocityProfileReport3, WallMomentumExchange3,
 };
 pub(crate) use coupled::force_corrected_shear_rate3;
 pub use coupled::{

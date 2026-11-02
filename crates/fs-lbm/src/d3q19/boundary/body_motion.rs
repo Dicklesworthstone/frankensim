@@ -19,7 +19,7 @@ type Result<T> = core::result::Result<T, PartialSaturationError3>;
 mod multiple;
 pub use multiple::{MovingLubricatedPlanesExchange3, MovingPartialSaturationBodiesExchange3};
 mod dry;
-pub use dry::{DryBodyCouplingConfig3, DryBodyExchange3, ImmersedMomentum3};
+pub use dry::{DryBodiesExchange3, DryBodyCouplingConfig3, DryBodyExchange3, ImmersedMomentum3};
 
 /// Fixed geometry expressed relative to the body's center in BODY axes.
 ///
@@ -254,7 +254,13 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
     ) -> Result<MovingPartialSaturationExchange3> {
         self.moving_partial_saturation_transition(
-            sampler, shape, body, external_impulse, moment_origin, gate, true,
+            sampler,
+            shape,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            true,
         )
     }
 

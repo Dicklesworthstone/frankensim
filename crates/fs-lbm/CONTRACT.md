@@ -6875,6 +6875,39 @@ and torque for light, neutral and heavy bodies with periodic and stationary-wall
 boundaries, source subtraction for force confined to the fictitious interior,
 physical source-frame inventories, and forced rollback with exact retry.
 
+### Simultaneous physical dry-body assemblies
+
+`step_with_dry_partial_saturation_bodies` advances one to eight bodies with
+their original positive dry masses and complete inertia tensors. The one-body
+case delegates exactly to the existing dry-body path. For multiple bodies, one
+native simultaneous collision/streaming candidate supplies the full coupled
+`6N` interior-momentum correction; off-diagonal derivatives retain interaction
+through shared streamed fluid. Bodies are not advanced by sequential fluid
+steps. Physical Guo inventories and each body's collision-midpoint interior
+source retain the one-body convention. Each fictitious interior source is
+subtracted once from the represented exterior-fluid source.
+
+Correction convergence is checked in both body-COM and fixed-world-origin
+coordinates, so a long moment arm cannot hide an angular defect. Independent
+body and combined exterior-fluid-plus-dry-body momentum inventories gate a
+single publication of all bodies and populations. Failed probes, exhausted
+budgets, ill conditioning and late cancellation leave accepted state and
+topology admission unchanged. Shared wall, forcing and periodic receipts belong
+to the assembly, rather than being duplicated in each nested body receipt.
+
+The bounded lane requires disjoint swept enclosing spheres, nonoverlapping
+sampled ownership, resolved interiors and the existing volume-variation limits.
+Each Newton iteration uses `6N` full assembly probes plus trial/backtracking
+evaluations, bounded by the candidate budget; at most a 48-by-48 correction
+Jacobian is retained. Existing population scratch is reused without cloning the
+grid. Contact/lubrication, a moving free surface, exact GCL, calibrated drag and
+unconditional added-mass stability remain outside this increment.
+
+Nine focused native regressions cover same-candidate cross-body transmission,
+forced full-tensor dynamics at a translated origin, distinct source subtraction,
+permutation covariance, three-body translation, exact singleton delegation and
+atomic refusal/retry. All six existing single-dry regressions also pass.
+
 
 ## Integer-cell planar piston geometry epochs (MR69 foundation)
 
