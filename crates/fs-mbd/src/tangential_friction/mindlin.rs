@@ -32,6 +32,8 @@ use fs_tribo::{TangentialLaw, TangentialSolveConfig, partial_slip::TangentFrame}
 
 #[path = "mindlin/driven.rs"]
 mod driven;
+#[path = "mindlin/multiple.rs"]
+pub mod multiple;
 #[path = "mindlin/normal.rs"]
 mod normal;
 

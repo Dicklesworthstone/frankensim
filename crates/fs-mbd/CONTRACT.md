@@ -3529,3 +3529,41 @@ groups in `tests/adhesive_transient.rs` exercise full-mobility curved recoil,
 actual per-body impulses and work, tangent covariance, eventual rest with finite
 common motion, source gap detachment and atomic normal-path/cancellation/budget
 refusal and retry.
+
+## Shared-body assemblies with retained Mindlin partial-slip histories
+
+`tangential_friction::mindlin::multiple::PreparedRigidMindlinIsland` resolves
+multiple original source-bound scalar Mindlin histories on shared native bodies.
+Preparation canonicalizes unique contact IDs while retaining original A/B
+material order and whole-array body indices. Actual masses, full inertia tensors,
+orientations and contact arms determine every cross-site response. The complete
+physical two-tangent Gram mobility remains available for inspection. Its actual
+longitudinal subspace enters the existing bounded simultaneous tangential owner;
+the second bookkeeping coordinate is exactly inactive, without regularization.
+Patches sharing a native body must have attachment separation greater than their
+summed original footprint radii and geometry tolerance. This conservative gate
+refuses overlapping or duplicate patches without inventing a contact locator.
+
+`new_driven` includes held world COM forces and body-frame torques in released
+contact motion. Every body receives one summed contact/external resultant, and
+its independent midpoint external work and commanded world momentum count once.
+Each original constitutive evaluation starts from the same accepted checkpoint;
+nonlinear sweeps do not advance time, wear or heat repeatedly. Contact storage
+and microslip/gross-sliding dissipation retain their original physical owners.
+
+Actual native endpoints must satisfy the scalar phase's normal, lateral and
+torsional motion gates. Actual midpoint displacement must match each solved
+longitudinal increment and leave excluded coordinates within their dimensional
+limits. Per-contact work/storage/heat, complete native kinetic energy and world
+linear/angular momentum close before all body and history candidates return
+together. Foreign source history, unsupported physical recoil, exhausted budgets
+or late cancellation leave the accepted assembly unchanged.
+
+The phase holds original normal loads, material conditions and geometry fixed.
+Normal prestress/equilibration, independent patch ownership, pose integration
+and history transport remain with the caller; no normal impulse/work, rolling
+memory or inter-patch bulk elastic field is inferred. G1/G3/G4 tests compare a
+three-body/two-contact load line with independent mass/inertia algebra, classical
+virgin and reversal Mindlin work, retained partial/gross/reversal histories,
+products of inertia, common acceleration and world/local frame covariance,
+canonical contact/global body indexing, and physical recoil/transactional refusal.
