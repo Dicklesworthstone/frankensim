@@ -5753,6 +5753,49 @@ through changing occupied cells, separate fluid and body work, bitwise replay,
 and late-endpoint rollback with scratch recovery. The broad moving-boundary
 bead remains open.
 
+### Physical dry-disk momentum on the native D2Q9 operator
+
+`core2::moving_disk::DryDisk2` retains original positive physical dry mass and
+polar inertia at light, neutral and heavy density. It reuses analytic circle
+fractions, the native finite-inertia BGK/Guo collision and its two free
+half-drifts around collision and streaming. A bounded three-impulse solve
+closes `J_c = Delta Pi_inside,physical - J_inside,F` using actual candidate
+populations and endpoint geometry. No nominal rigid-interior mass or inertia
+is subtracted from the body.
+
+D2 acceleration is density dependent: `F = rho*g + fext`. Full-fluid and
+collision-midpoint-occupancy source accounts therefore use
+`(F_old + F_streamed)/2`, recomputed inside every correction candidate.
+Authored body impulse/couple work, fictitious-fluid correction work, native
+held-source work, wall reaction and periodic angular transport remain distinct.
+Both center and requested fixed-origin correction residuals must converge;
+independent dry-body and exterior-fluid momentum balances also gate acceptance.
+
+A shared native stationary pull observes streaming without allocating a second
+fluid grid and preserves existing pull/reflection arithmetic. Fluid, dry body
+and angle publish together after final checks. Refused calls may change private
+scratch, which a retry rebuilds. New geometry, numerical, evaluation-budget and
+cancellation refusals are typed errors. Inherited low-Mach, numerical-inertia
+and population assertions remain prepublication panics. Default work is capped
+at 96 actual native collision evaluations; each numerical Jacobian costs three
+additional probes, followed by bounded backtracking.
+
+Seven new physical groups and the six existing moving-disk/eight existing
+finite-inertia PSM groups pass against the actual native source closure.
+They cover symmetric translation at density ratios 0.15/1/3, rising and
+sedimenting disks, spin/orbital transfer about a translated origin, an
+independently integrated density-dependent endpoint source, interior-only
+forcing, wall/exterior bounce and rollback/exact retry after actual probes.
+Full Cargo remains unexecuted where the constellation runtime closure is absent.
+
+Fractional angular inventory remains located at native lattice cell centers.
+Oblique subcell motion need not preserve its geometric first moment exactly;
+no exact arbitrary free-stream or geometric-conservation claim is made.
+One fixed-radius disk, lattice dx=dt=1 and a fluid-only swept interior domain
+are required. Multiple disks, body seam crossing, contact and free surfaces
+remain outside this owner. The existing `MovingDisk2` retains its explicit
+additional-inertia interpretation.
+
 ### Electrically insulating interfaces in moving conductors
 
 `ElectricSetup::solve_with_cell_motion_topology` and

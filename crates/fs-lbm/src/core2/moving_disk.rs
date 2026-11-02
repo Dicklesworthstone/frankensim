@@ -10,6 +10,11 @@ use super::{Cell, Grid, PartialSaturationBody2, PartialSaturationBodyExchange2};
 use crate::Q;
 use fs_math::det;
 
+mod dry;
+pub use dry::{
+    DryDisk2, DryDiskCouplingConfig2, DryDiskError2, DryDiskExchange2, ImmersedMomentum2,
+};
+
 /// One moving disk and reusable geometry/collision scratch, in lattice units.
 ///
 /// `body.mass` and `body.inertia` describe the **additional solid degree of

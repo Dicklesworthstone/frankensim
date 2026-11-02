@@ -2010,6 +2010,22 @@ impl Grid {
         }
     }
 
+    // The dry-body correction observes the identical nonpublishing pull.
+    // `source` is supplied by the native owner to avoid a second lookup.
+    fn stationary_pull_population(
+        &self,
+        post: &[[f64; Q]],
+        index: usize,
+        q: usize,
+        source: Option<usize>,
+    ) -> f64 {
+        match source {
+            Some(s) if matches!(self.flags[s], Cell::Wall | Cell::Gas) => post[index][OPP[q]],
+            Some(s) => post[s][q],
+            None => post[index][OPP[q]],
+        }
+    }
+
     fn stream_from_inner(
         &mut self,
         post: &[[f64; Q]],
@@ -2023,25 +2039,20 @@ impl Grid {
                     continue;
                 }
                 for q in 0..Q {
-                    let pulled = match self.source(x, y, q) {
-                        Some(s) if matches!(self.flags[s], Cell::Wall | Cell::Gas) => {
-                            let reflected = post[i][OPP[q]];
-                            if self.flags[s] == Cell::Wall
-                                && measured_walls.is_some_and(|mask| mask[s])
-                            {
-                                // Pull direction q points from the wall back into
-                                // the fluid. The fluid momentum change is
-                                // +2 f_post c_q, so the opposite impulse delivered
-                                // to the stationary wall is -2 f_post c_q.
-                                receipt.wall_impulse[0] -= 2.0 * reflected * f64::from(E[q].0);
-                                receipt.wall_impulse[1] -= 2.0 * reflected * f64::from(E[q].1);
-                                receipt.measured_links += 1;
-                            }
-                            reflected
+                    let source = self.source(x, y, q);
+                    let pulled = self.stationary_pull_population(post, i, q, source);
+                    if let Some(s) = source {
+                        if self.flags[s] == Cell::Wall && measured_walls.is_some_and(|mask| mask[s])
+                        {
+                            // Pull direction q points from the wall back into
+                            // the fluid. The fluid momentum change is
+                            // +2 f_post c_q, so the opposite impulse delivered
+                            // to the stationary wall is -2 f_post c_q.
+                            receipt.wall_impulse[0] -= 2.0 * pulled * f64::from(E[q].0);
+                            receipt.wall_impulse[1] -= 2.0 * pulled * f64::from(E[q].1);
+                            receipt.measured_links += 1;
                         }
-                        Some(s) => post[s][q],
-                        None => post[i][OPP[q]],
-                    };
+                    }
                     self.f[i][q] = pulled;
                 }
             }
