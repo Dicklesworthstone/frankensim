@@ -2898,6 +2898,37 @@ gradients, spatial moment/virtual-work identities, large common rigid motion,
 analytic stiff translational/torsional recoil, combined-tree refinement and
 late-cancellation/retry fixtures exercise the actual public consumers.
 
+### State-dependent internal effort in implicit motion
+
+`step_free_floating_spatial_implicit_with_effort` and
+`bushing::step_free_floating_bushings_implicit_with_effort` evaluate internal
+joint effort at the actual reconstructed midpoint in every native Newton
+residual and directional-Jacobian probe. Each callback starts with the held
+effort vector and may add to or replace it. The accepted midpoint effort also
+supplies actuator work. Original ABA and locked-inertia reconstruction retain
+carrier recoil; internal effort contributes no external spatial impulse.
+
+Smooth joint springs, dampers and feedback therefore participate in the same
+solve as all spatial connections. One O(joints) effort buffer is reused across
+evaluations; held-effort calls allocate no additional buffer. Existing work
+budgets, physical limits, cancellation, and final residual acceptance remain.
+The linear midpoint stability limit still requires timestep refinement for
+response accuracy, and arbitrary active effort is not assumed passive.
+Constitutive storage and loss interpretation belong to the supplied law.
+
+Callbacks must return the same effort for the same inputs and may not advance
+accepted controller/material history during probes. Their side effects cannot
+be rolled back. They run at elapsed time h/2 in solver-dependent order, with
+cancellation checks before and after each call.
+
+Five focused tests cover stiff reaction-wheel damping and carrier recoil,
+inertial-frame speed feedback with analytic second-order refinement,
+simultaneous joint/bushing spring-damper work, positive active work, and
+callback/domain/limit/cancellation/budget refusals. The 27 existing focused
+implicit-connection, bushing, distance-loop and explicit-effort tests also pass.
+These selected-source native runs use the original numerical owners; full
+Cargo/DSR qualification and the broader multibody bead remain outstanding.
+
 ## Rigid bilateral distance-loop motion with native reactions
 
 `articulated::motion::spatial_loads::implicit::distance` advances freely moving

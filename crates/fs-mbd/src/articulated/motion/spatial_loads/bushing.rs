@@ -223,6 +223,49 @@ pub fn step_free_floating_bushings_implicit(
     super::implicit::step_with_bushings(model, state, loads, bushings, duration, config, cancelled)
 }
 
+/// Simultaneously implicit finite bushings and state-dependent joint actuators.
+///
+/// Bushing strain/rate and the callback's effort use the same actual trial
+/// midpoint, including free-carrier recoil. The accepted midpoint effort owns
+/// actuator work; bushing storage and damping remain separately accounted.
+/// The callback is evaluated on every nonlinear/Jacobian probe at elapsed
+/// `duration / 2`, with its output reset to `loads.held.generalized_force`.
+///
+/// The repeatability, trial-history, effort-unit, cancellation and timestep
+/// requirements of
+/// [`super::implicit::step_free_floating_spatial_implicit_with_effort`] apply.
+/// Native inputs remain unchanged on error; callback side effects are not
+/// rolled back. A general actuator law does not imply passivity or damping.
+///
+/// # Errors
+/// Original implicit, motion and bushing refusals, invalid or over-limit trial
+/// effort, cancellation, or a callback error. No trial effort is clipped.
+pub fn step_free_floating_bushings_implicit_with_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[SpatialBushing],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    mut effort: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
+    super::implicit::step_with_bushings_and_effort(
+        model,
+        state,
+        loads,
+        bushings,
+        duration,
+        config,
+        Some(&mut effort),
+        cancelled,
+    )
+}
+
 pub(super) fn admit(
     model: &ArticulatedModel,
     loads: SpatialMotionLoads<'_>,

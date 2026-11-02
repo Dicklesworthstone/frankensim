@@ -19,7 +19,7 @@
 pub mod distance;
 
 use super::super::{
-    ArticulatedModel, EvaluatedStep, FreeFloatingBaseState, FreeFloatingMotionError,
+    ArticulatedModel, EffortLaw, EvaluatedStep, FreeFloatingBaseState, FreeFloatingMotionError,
     FreeFloatingMotionState, FreeFloatingMotionStep, MAX_FREE_FLOATING_STEP_LINKS,
     MomentumCoordinates, MomentumMap, Se3, StageLoad, Vec3, advance,
     free_floating_forward_dynamics, free_floating_momentum, poll, rotate,
@@ -170,6 +170,61 @@ pub fn step_free_floating_spatial_implicit(
     step_with_bushings(model, state, loads, &[], duration, config, cancelled)
 }
 
+/// Advance spatial loads and state-dependent internal joint efforts in one
+/// simultaneous implicit Lie-midpoint solve.
+///
+/// Every residual and numerical-Jacobian probe evaluates `effort` at elapsed
+/// time `duration / 2` and the complete reconstructed trial midpoint state.
+/// Its output is reset to `loads.held.generalized_force` before every call;
+/// the callback may add to or replace those efforts. Revolute/helical efforts
+/// are torques in N m and prismatic efforts are forces in N. Native ABA gives
+/// the equal/opposite carrier reaction. Internal effort is never included in
+/// external spatial impulse, and the independently verified accepted midpoint
+/// effort supplies the returned actuator-work quadrature.
+///
+/// This makes smooth torque-speed, joint spring/damper and feedback laws part
+/// of the implicit equations, rather than holding their starting torque over
+/// the step. The linear implicit-midpoint limit is A-stable but not L-stable:
+/// a coarse stable step can retain unresolved oscillation or alternate a
+/// stiff decaying mode. Refine to resolve response and geometry. An arbitrary
+/// effort law is not assumed passive; its storage and dissipation are owned
+/// by the caller, separately from the spatial connections' accounts.
+///
+/// The law must be repeatable for identical inputs throughout the solve and
+/// must not advance accepted constitutive or controller history during trial
+/// evaluations. Callback order/count are solver-dependent, including probes
+/// and final verification. Native inputs remain immutable on any refusal;
+/// caller-owned callback side effects cannot be rolled back. Cancellation is
+/// polled before and after each call; long-running callbacks own their checks.
+///
+/// # Errors
+/// Original implicit/motion/load refusals, invalid or over-limit trial effort,
+/// cancellation, or a callback error. A forbidden trial is refused, not clipped.
+pub fn step_free_floating_spatial_implicit_with_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    mut effort: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
+    step_with_bushings_and_effort(
+        model,
+        state,
+        loads,
+        &[],
+        duration,
+        config,
+        Some(&mut effort),
+        cancelled,
+    )
+}
+
 pub(super) fn step_with_bushings(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
@@ -177,6 +232,21 @@ pub(super) fn step_with_bushings(
     bushings: &[bushing::SpatialBushing],
     duration: f64,
     config: ImplicitSpatialConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
+    step_with_bushings_and_effort(
+        model, state, loads, bushings, duration, config, None, cancelled,
+    )
+}
+
+pub(super) fn step_with_bushings_and_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[bushing::SpatialBushing],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    effort: Option<&mut EffortLaw<'_>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
     poll(&mut cancelled)?;
@@ -247,6 +317,14 @@ pub(super) fn step_with_bushings(
     };
     let evaluations = Cell::new(0usize);
     let cancelled = RefCell::new(cancelled);
+    // One O(joints) output buffer is reused across all nonlinear and stencil
+    // evaluations. The held-effort entry points need no extra allocation.
+    let effort_values = if effort.is_some() {
+        loads.held.generalized_force.to_vec()
+    } else {
+        Vec::new()
+    };
+    let effort = RefCell::new((effort, effort_values));
     let evaluate_stage = |x: &[f64]| {
         let mut cancel = cancelled.borrow_mut();
         poll(&mut *cancel)?;
@@ -258,7 +336,10 @@ pub(super) fn step_with_bushings(
             });
         }
         evaluations.set(used + 1);
-        equations.evaluate(x, &mut *cancel)
+        let mut effort = effort.borrow_mut();
+        let (law, values) = &mut *effort;
+        let stage_effort = law.as_deref_mut().map(|law| (law, values.as_mut_slice()));
+        equations.evaluate_with_effort(x, stage_effort, &mut *cancel)
     };
     let problem = FallibleFiniteDifference::new(n + 3, config.difference_step, |x: &[f64]| {
         evaluate_stage(x).map(|stage| stage.residual)
@@ -408,14 +489,7 @@ fn finish_midpoint(
         &state_after.joint_position,
         &state_after.joint_velocity,
     )?;
-    let actuator_work = duration
-        * loads
-            .held
-            .generalized_force
-            .iter()
-            .zip(&midpoint.state.joint_velocity)
-            .map(|(a, b)| a * b)
-            .sum::<f64>();
+    let actuator_work = duration * midpoint.actuator_power;
     let external_work = duration * load.body_wrench_power
         + initial_map.mass()
             * loads
@@ -483,6 +557,7 @@ struct MidpointEvaluation {
     coordinates: MomentumCoordinates,
     trial_angular: Vec3,
     load: StageLoad,
+    actuator_power: f64,
     residual: Vec<f64>,
 }
 
@@ -490,6 +565,15 @@ impl MidpointEquations<'_> {
     fn evaluate(
         &self,
         x: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MidpointEvaluation, ImplicitSpatialError> {
+        self.evaluate_with_effort(x, None, cancelled)
+    }
+
+    fn evaluate_with_effort(
+        &self,
+        x: &[f64],
+        effort: Option<(&mut EffortLaw<'_>, &mut [f64])>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MidpointEvaluation, ImplicitSpatialError> {
         let n = self.model.dof_count();
@@ -539,12 +623,20 @@ impl MidpointEquations<'_> {
         state.base = map.reconstruct(rotation, coordinates)?;
         let stage = bushing::evaluate(&map, state.base, self.loads, self.bushings, cancelled)?;
         poll(cancelled)?;
+        let generalized_force = if let Some((law, values)) = effort {
+            values.copy_from_slice(self.loads.held.generalized_force);
+            law(half, &state, values)?;
+            poll(cancelled)?;
+            &*values
+        } else {
+            self.loads.held.generalized_force
+        };
         let dynamics = free_floating_forward_dynamics(
             self.model,
             state.base,
             &state.joint_position,
             &state.joint_velocity,
-            self.loads.held.generalized_force,
+            generalized_force,
             self.loads.held.gravity_world,
             &stage.body_wrench,
         )?;
@@ -559,12 +651,19 @@ impl MidpointEquations<'_> {
         let angular = (omega - state.base.twist_body.angular).scale(1.0 / self.scales[n]);
         residual.extend([angular.x, angular.y, angular.z]);
         validate_slice(&residual, "implicit_spatial.equations")?;
+        let actuator_power = generalized_force
+            .iter()
+            .zip(&state.joint_velocity)
+            .map(|(effort, rate)| effort * rate)
+            .sum::<f64>();
+        validate_slice(&[actuator_power], "implicit_spatial.actuator_power")?;
         poll(cancelled)?;
         Ok(MidpointEvaluation {
             state,
             coordinates,
             trial_angular: omega,
             load: stage.load,
+            actuator_power,
             residual,
         })
     }
