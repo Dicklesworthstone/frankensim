@@ -5,10 +5,10 @@
 use super::{SimLoop, map_atmo, motion};
 use crate::Refusal;
 use crate::atmosphere::MaterialAirProfile;
-use fs_atmo::evolving::{EvolvingTurbulenceCheckpoint, EvolvingTurbulenceField};
+use fs_atmo::evolving::EvolvingTurbulenceField;
 use fs_atmo::fit::{FittedAmplitudes, build_fitted_field, fit_amplitudes};
 use fs_atmo::mann::MannParams;
-use fs_atmo::ou::OuCheckpoint;
+use fs_atmo::mann_field::{HomogeneousMannField, MannQuadrature, MannSpectralModel};
 use fs_atmo::{FlatSiteLogLaw, FlowSample, MAX_MODES, TurbulenceField};
 use fs_blake3::hash_domain;
 use fs_material::gas::GasState;
@@ -16,8 +16,14 @@ use fs_math::det;
 
 pub(super) mod material;
 pub use material::MaterialAirSample;
+mod field;
+use field::WindField;
+mod rollback;
 
-/// Spatial amplitude model on the shared wall-compatible solenoidal basis.
+const HOMOGENEOUS_MARKER: &[u8] = b"mann-homogeneous-above-v1\0";
+pub(super) const APPLICABILITY_REFUSAL: &str = "spatial-wind-applicability";
+
+/// Explicit wall-compatible or restricted homogeneous solenoidal wind model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SpatialWindSpectrum {
     /// Original analytic envelope; `sigma_mps` is a strength parameter, not
@@ -38,6 +44,20 @@ pub enum SpatialWindSpectrum {
         /// Height [m] at which the one-point stresses are calibrated.
         reference_height_m: f64,
     },
+    /// Full finite-band homogeneous Mann tensor, restricted to queries at or
+    /// above an explicitly authored height. No wall projection is applied.
+    /// The height is an applicability restriction for exploration; it does
+    /// not prove that physical ground effects are negligible above it.
+    MannHomogeneousAbove {
+        /// Spatial tensor target; all auto- and cross-components are retained.
+        parameters: MannParams,
+        /// Lowest resolved dimensionless wavenumber |k| L.
+        min_kl: f64,
+        /// Highest resolved dimensionless wavenumber |k| L.
+        max_kl: f64,
+        /// Positive lower admitted height [m] for every CG/strip/disk query.
+        minimum_height_m: f64,
+    },
 }
 
 /// Explicit synthetic wind model for [`SimLoop::init_with_spatial_wind`].
@@ -51,7 +71,7 @@ pub struct SpatialWindSpec {
     /// Neutral log-law mean. Its reference speed must equal the scenario's
     /// declared headwind; its reference height is explicit.
     pub mean: FlatSiteLogLaw,
-    /// Explicit analytic or Mann-stress-calibrated spatial amplitude model.
+    /// Explicit spatial model, including its wall/applicability semantics.
     pub spectrum: SpatialWindSpectrum,
     /// Downwind phase-convection speed, independently specified.
     pub advection_mps: f64,
@@ -61,7 +81,7 @@ pub struct SpatialWindSpec {
 
 pub(super) struct SpatialWindState {
     pub spec: SpatialWindSpec,
-    pub field: EvolvingTurbulenceField,
+    pub field: WindField,
     /// Present only for the Mann-stress model; fixed at initialization.
     pub stress_fit: Option<FittedAmplitudes>,
     pub distributed: bool,
@@ -69,6 +89,8 @@ pub(super) struct SpatialWindState {
     pub material_profile: Option<MaterialAirProfile>,
     /// Ground velocity in flight-line-forward / vertical-up coordinates.
     pub ground_mps: [f64; 2],
+    /// Allocated once for the homogeneous mode; reused for refused-step rollback.
+    rollback: Option<Box<rollback::Rollback>>,
 }
 
 pub(super) struct SampledFlightLoads {
@@ -83,13 +105,20 @@ impl SpatialWindState {
     fn new(spec: SpatialWindSpec, seed: u64) -> Result<Self, Refusal> {
         spec.mean.admit().map_err(map_atmo)?;
         let count = spec.correlation_times_s.len();
-        let (basis, stress_fit) = match spec.spectrum {
+        let wall_field = |basis| {
+            EvolvingTurbulenceField::at_anchor(basis, seed, spec.correlation_times_s.clone())
+                .map(WindField::Wall)
+                .map_err(map_atmo)
+        };
+        let (field, stress_fit) = match spec.spectrum {
             SpatialWindSpectrum::Analytic {
                 sigma_mps,
                 length_m,
             } => (
-                TurbulenceField::build(seed, count, sigma_mps, length_m, spec.advection_mps)
-                    .map_err(map_atmo)?,
+                wall_field(
+                    TurbulenceField::build(seed, count, sigma_mps, length_m, spec.advection_mps)
+                        .map_err(map_atmo)?,
+                )?,
                 None,
             ),
             SpatialWindSpectrum::MannStress {
@@ -100,12 +129,36 @@ impl SpatialWindState {
                     .map_err(map_atmo)?;
                 let basis = build_fitted_field(seed, &fit, &parameters, spec.advection_mps)
                     .map_err(map_atmo)?;
-                (basis, Some(fit))
+                (wall_field(basis)?, Some(fit))
+            }
+            SpatialWindSpectrum::MannHomogeneousAbove {
+                parameters,
+                min_kl,
+                max_kl,
+                minimum_height_m,
+            } => {
+                if !minimum_height_m.is_finite() || minimum_height_m <= 0.0 {
+                    return Err(invalid(
+                        "homogeneous wind requires a positive finite applicability height",
+                    ));
+                }
+                let model = MannSpectralModel::build(
+                    seed,
+                    parameters,
+                    MannQuadrature {
+                        n_modes: count,
+                        min_kl,
+                        max_kl,
+                    },
+                    [spec.advection_mps, 0.0, 0.0],
+                )
+                .map_err(map_atmo)?;
+                let field =
+                    HomogeneousMannField::at_anchor(model, seed, spec.correlation_times_s.clone())
+                        .map_err(map_atmo)?;
+                (WindField::Homogeneous(field), None)
             }
         };
-        let field =
-            EvolvingTurbulenceField::at_anchor(basis, seed, spec.correlation_times_s.clone())
-                .map_err(map_atmo)?;
         Ok(Self {
             spec,
             field,
@@ -114,12 +167,14 @@ impl SpatialWindState {
             material_gas: None,
             material_profile: None,
             ground_mps: [0.0; 2],
+            rollback: None,
         })
     }
 
     /// Flight-frame X is upwind, Y right, H up: x_atmo = -X. Transform
     /// both velocity and derivative coordinates, including mean shear.
     pub fn sample(&self, [x, y, h]: [f64; 3]) -> Result<FlowSample, Refusal> {
+        self.admit_height(h)?;
         let mut sample = self.field.sample(-x, y, h).map_err(map_atmo)?;
         sample.u[0] += self.spec.mean.speed(h);
         sample.grad[0][2] += self.spec.mean.dspeed_dh(h);
@@ -131,6 +186,28 @@ impl SpatialWindState {
             }
         }
         Ok(sample)
+    }
+
+    fn minimum_height(&self) -> Option<f64> {
+        match self.spec.spectrum {
+            SpatialWindSpectrum::MannHomogeneousAbove {
+                minimum_height_m, ..
+            } => Some(minimum_height_m),
+            _ => None,
+        }
+    }
+
+    fn admit_height(&self, height: f64) -> Result<(), Refusal> {
+        if let Some(minimum) = self.minimum_height()
+            && (!height.is_finite() || height < minimum)
+        {
+            return Err(Refusal {
+                code: APPLICABILITY_REFUSAL,
+                message: format!("query height {height:?} m is outside homogeneous wind's admitted h >= {minimum} m"),
+                ranked_repairs: vec!["use a wall-compatible model or keep every load sample inside the authored homogeneous domain".into()],
+            });
+        }
+        Ok(())
     }
 
     fn model_bytes(&self, bytes: &mut Vec<u8>) {
@@ -168,6 +245,24 @@ impl SpatialWindState {
                     bytes.extend_from_slice(&value.to_bits().to_le_bytes());
                 }
             }
+            SpatialWindSpectrum::MannHomogeneousAbove {
+                parameters,
+                min_kl,
+                max_kl,
+                minimum_height_m,
+            } => {
+                bytes.extend_from_slice(HOMOGENEOUS_MARKER);
+                for value in [
+                    parameters.alpha_eps23,
+                    parameters.length_m,
+                    parameters.gamma,
+                    min_kl,
+                    max_kl,
+                    minimum_height_m,
+                ] {
+                    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+            }
         }
         bytes.extend_from_slice(&self.spec.advection_mps.to_bits().to_le_bytes());
         bytes.extend_from_slice(&(self.spec.correlation_times_s.len() as u32).to_le_bytes());
@@ -179,13 +274,12 @@ impl SpatialWindState {
     pub fn encode(&self, run_intent_id: &str, bytes: &mut Vec<u8>) {
         self.model_bytes(bytes);
         let cp = self.field.checkpoint();
-        bytes.extend_from_slice(&cp.cosine.seed.to_le_bytes());
-        bytes.extend_from_slice(&cp.cosine.tick.to_le_bytes());
+        bytes.extend_from_slice(&cp.seed().to_le_bytes());
+        bytes.extend_from_slice(&cp.tick().to_le_bytes());
         for value in self
             .ground_mps
             .iter()
-            .chain(&cp.cosine.amplitudes)
-            .chain(&cp.sine.amplitudes)
+            .chain(cp.paths().flat_map(|path| &path.amplitudes))
         {
             bytes.extend_from_slice(&value.to_bits().to_le_bytes());
         }
@@ -196,7 +290,7 @@ impl SpatialWindState {
         bytes: &[u8],
         seed: u64,
         tick: u64,
-        mann_stress: bool,
+        version: u32,
     ) -> Result<(Self, String), Refusal> {
         let bad = || invalid("malformed spatial-wind checkpoint");
         let mut pos = 0;
@@ -209,7 +303,25 @@ impl SpatialWindState {
         for value in &mut f {
             *value = f64::from_le_bytes(take(8)?.try_into().expect("8"));
         }
-        let spectrum = if mann_stress {
+        let spectrum = if version == 8 {
+            if take(HOMOGENEOUS_MARKER.len())? != HOMOGENEOUS_MARKER {
+                return Err(bad());
+            }
+            let mut target = [0.0; 6];
+            for value in &mut target {
+                *value = f64::from_le_bytes(take(8)?.try_into().expect("8"));
+            }
+            SpatialWindSpectrum::MannHomogeneousAbove {
+                parameters: MannParams {
+                    alpha_eps23: target[0],
+                    length_m: target[1],
+                    gamma: target[2],
+                },
+                min_kl: target[3],
+                max_kl: target[4],
+                minimum_height_m: target[5],
+            }
+        } else if version == 7 {
             if take(15)? != b"mann-stress-v1\0" {
                 return Err(bad());
             }
@@ -252,7 +364,9 @@ impl SpatialWindState {
         if !ground_mps.iter().all(|v| v.is_finite()) {
             return Err(bad());
         }
-        let mut amplitudes = [Vec::with_capacity(count), Vec::with_capacity(count)];
+        let mut amplitudes: Vec<Vec<f64>> = (0..if version == 8 { 4 } else { 2 })
+            .map(|_| Vec::with_capacity(count))
+            .collect();
         for quadrature in &mut amplitudes {
             for _ in 0..count {
                 quadrature.push(f64::from_le_bytes(take(8)?.try_into().expect("8")));
@@ -278,22 +392,12 @@ impl SpatialWindState {
             },
             seed,
         )?;
-        let model = state.field.checkpoint();
-        let [cosine, sine] = amplitudes;
-        state.field = EvolvingTurbulenceField::resume(EvolvingTurbulenceCheckpoint {
-            cosine: OuCheckpoint {
-                seed: model.cosine.seed,
-                tick: stored_tick,
-                amplitudes: cosine,
-            },
-            sine: OuCheckpoint {
-                seed: model.sine.seed,
-                tick: stored_tick,
-                amplitudes: sine,
-            },
-            ..model
-        })
-        .map_err(map_atmo)?;
+        let mut model = state.field.checkpoint();
+        for (path, amplitudes) in model.paths_mut().zip(amplitudes) {
+            path.tick = stored_tick;
+            path.amplitudes = amplitudes;
+        }
+        state.field = WindField::resume(model).map_err(map_atmo)?;
         state.ground_mps = ground_mps;
         Ok((state, run_intent_id))
     }
@@ -307,6 +411,39 @@ impl SimLoop {
     #[must_use]
     pub fn spatial_wind_stress_fit(&self) -> Option<&FittedAmplitudes> {
         self.spatial_wind.as_ref()?.stress_fit.as_ref()
+    }
+
+    /// Represented homogeneous turbulence covariance between two admitted
+    /// positions, with the second observation `lag_s` after the first. Mean
+    /// wind is excluded. All components and positions use the flight frame.
+    /// The result includes the declared finite-band and OU effects; it is not
+    /// a convergence or near-ground validity certificate.
+    pub fn homogeneous_wind_covariance(
+        &self,
+        first_m: [f64; 3],
+        second_m: [f64; 3],
+        lag_s: f64,
+    ) -> Result<[[f64; 3]; 3], Refusal> {
+        let wind = self
+            .spatial_wind
+            .as_ref()
+            .ok_or_else(|| invalid("homogeneous spatial wind is disabled"))?;
+        wind.admit_height(first_m[2])?;
+        wind.admit_height(second_m[2])?;
+        let WindField::Homogeneous(field) = &wind.field else {
+            return Err(invalid(
+                "covariance query requires the homogeneous Mann model",
+            ));
+        };
+        let signs = [-1.0, 1.0, 1.0];
+        let separation = core::array::from_fn(|i| signs[i] * (second_m[i] - first_m[i]));
+        let mut covariance = field.covariance(separation, lag_s).map_err(map_atmo)?;
+        for i in 0..3 {
+            for j in 0..3 {
+                covariance[i][j] *= signs[i] * signs[j];
+            }
+        }
+        Ok(covariance)
     }
 
     /// Opt into local wing/canard strip and separate propeller disk inflow.
@@ -373,8 +510,10 @@ impl SimLoop {
         sim.tick0.digest =
             hash_domain("org.frankensim.wf.spatial-wind-tick0.v1", &initial).to_hex();
         let cp = state.field.checkpoint();
-        sim.tick0.ou_amplitudes = cp.cosine.amplitudes;
-        sim.tick0.ou_amplitudes.extend(cp.sine.amplitudes);
+        sim.tick0.ou_amplitudes = cp
+            .paths()
+            .flat_map(|p| p.amplitudes.iter().copied())
+            .collect();
         let mut intent = sim.run_intent_id.as_bytes().to_vec();
         intent.extend_from_slice(sim.tick0.digest.as_bytes());
         intent.extend_from_slice(&sim.spec.max_ticks.to_le_bytes());
@@ -706,6 +845,9 @@ impl SimLoop {
         // Admit the profile at the accepted endpoint before publishing motion.
         // A valid midpoint must not commit an out-of-domain atmospheric state.
         self.air_density_at_height(next.longitudinal.position_m[1])?;
+        if let Some(wind) = &self.spatial_wind {
+            wind.admit_height(next.longitudinal.position_m[1])?;
+        }
         if ground_contact {
             self.phase = super::Phase::Ended(super::TerminalEvent::GroundContact);
         }
@@ -752,6 +894,10 @@ impl SimLoop {
             if matches!(self.phase, super::Phase::Ended(_)) && self.h_m < 0.0 {
                 self.h_m = 0.0;
             }
+            // The authored homogeneous-domain boundary is not a wall. Refuse
+            // before consuming OU innovations; the step owner restores all
+            // mutable controls and motion if any stage leaves that domain.
+            wind.admit_height(self.h_m)?;
             wind.field.advance_to(self.tick as i64).map_err(map_atmo)?;
             Ok(Some(self.sync_spatial_air_velocity()?))
         } else {
@@ -832,3 +978,6 @@ mod lateral_tests;
 
 #[cfg(test)]
 mod mann_tests;
+
+#[cfg(test)]
+mod homogeneous_tests;

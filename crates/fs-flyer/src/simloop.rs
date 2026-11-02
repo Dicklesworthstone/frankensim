@@ -487,6 +487,8 @@ impl SimLoop {
     /// and geometric ground datum, so altitude changes survive restoration.
     /// Mann-stress-calibrated wind emits V7, retaining the target, reference
     /// height, modal time scales, material choice and sampling mode.
+    /// Restricted homogeneous Mann wind emits V8 with its finite-band target,
+    /// applicability height and all four sequential OU quadratures.
     /// Legacy V2 reconstructs its OU state by
     /// replaying the canonical prehistory through the saved tick.
     ///
@@ -503,6 +505,14 @@ impl SimLoop {
         }
         let mut b = Vec::new();
         let version = match &self.spatial_wind {
+            Some(wind)
+                if matches!(
+                    wind.spec.spectrum,
+                    SpatialWindSpectrum::MannHomogeneousAbove { .. }
+                ) =>
+            {
+                8u32
+            }
             Some(wind) if matches!(wind.spec.spectrum, SpatialWindSpectrum::MannStress { .. }) => {
                 7u32
             }
@@ -563,7 +573,7 @@ impl SimLoop {
             None => b.push(0),
         }
         if let Some(wind) = &self.spatial_wind {
-            if version == 7 {
+            if version >= 7 {
                 b.push(u8::from(wind.distributed));
                 b.push(if wind.material_profile.is_some() {
                     2
@@ -574,12 +584,12 @@ impl SimLoop {
                 });
             }
             if let Some(profile) = &wind.material_profile {
-                if version != 7 {
+                if version < 7 {
                     b.push(u8::from(wind.distributed));
                 }
                 spatial_wind::material::profile::encode_profile(profile, &mut b);
             } else if let Some(gas) = &wind.material_gas {
-                if version != 7 {
+                if version < 7 {
                     b.push(u8::from(wind.distributed));
                 }
                 spatial_wind::material::encode_gas(gas, &mut b);
@@ -587,6 +597,7 @@ impl SimLoop {
             wind.encode(&self.run_intent_id, &mut b);
         }
         let domain = match version {
+            8 => "org.frankensim.wf.checkpoint-state.v8",
             7 => "org.frankensim.wf.checkpoint-state.v7",
             6 => "org.frankensim.wf.checkpoint-state.v6",
             5 => "org.frankensim.wf.checkpoint-state.v5",
@@ -634,6 +645,7 @@ impl SimLoop {
         let digest_v5 = hash_domain("org.frankensim.wf.checkpoint-state.v5", body);
         let digest_v6 = hash_domain("org.frankensim.wf.checkpoint-state.v6", body);
         let digest_v7 = hash_domain("org.frankensim.wf.checkpoint-state.v7", body);
+        let digest_v8 = hash_domain("org.frankensim.wf.checkpoint-state.v8", body);
         let matches_v1 = digest_v1.as_bytes() == tail;
         let matches_v2 = digest_v2.as_bytes() == tail;
         let matches_v3 = digest_v3.as_bytes() == tail;
@@ -641,6 +653,7 @@ impl SimLoop {
         let matches_v5 = digest_v5.as_bytes() == tail;
         let matches_v6 = digest_v6.as_bytes() == tail;
         let matches_v7 = digest_v7.as_bytes() == tail;
+        let matches_v8 = digest_v8.as_bytes() == tail;
         if !matches_v1
             && !matches_v2
             && !matches_v3
@@ -648,6 +661,7 @@ impl SimLoop {
             && !matches_v5
             && !matches_v6
             && !matches_v7
+            && !matches_v8
         {
             return Err(Refusal {
                 code: "checkpoint-tampered",
@@ -662,15 +676,16 @@ impl SimLoop {
             .ok_or_else(|| bad("missing version"))?;
         match (
             version, matches_v1, matches_v2, matches_v3, matches_v4, matches_v5, matches_v6,
-            matches_v7,
+            matches_v7, matches_v8,
         ) {
-            (2, _, true, _, _, _, _, _)
-            | (3, _, _, true, _, _, _, _)
-            | (4, _, _, _, true, _, _, _)
-            | (5, _, _, _, _, true, _, _)
-            | (6, _, _, _, _, _, true, _)
-            | (7, _, _, _, _, _, _, true) => {}
-            (1, true, _, _, _, _, _, _) => {
+            (2, _, true, _, _, _, _, _, _)
+            | (3, _, _, true, _, _, _, _, _)
+            | (4, _, _, _, true, _, _, _, _)
+            | (5, _, _, _, _, true, _, _, _)
+            | (6, _, _, _, _, _, true, _, _)
+            | (7, _, _, _, _, _, _, true, _)
+            | (8, _, _, _, _, _, _, _, true) => {}
+            (1, true, _, _, _, _, _, _, _) => {
                 return Err(Refusal {
                     code: "checkpoint-version-unsupported",
                     message: "CheckpointStateV1 lacks lateral state and cannot exact-resume v2"
@@ -735,7 +750,7 @@ impl SimLoop {
                     return Err(bad("unknown spatial wind sampling mode"));
                 }
                 let kind = match version {
-                    7 => take(&mut pos, 1)?[0],
+                    7 | 8 => take(&mut pos, 1)?[0],
                     6 => 2,
                     _ => 1,
                 };
@@ -770,7 +785,7 @@ impl SimLoop {
                 return Err(bad("unknown spatial wind material kind"));
             };
             let (mut wind, intent) =
-                SpatialWindState::decode(&body[pos..], spec.seed, tick, version == 7)?;
+                SpatialWindState::decode(&body[pos..], spec.seed, tick, version)?;
             wind.distributed = distributed;
             wind.material_gas = material_gas;
             wind.material_profile = material_profile;
@@ -869,6 +884,18 @@ impl SimLoop {
     /// `control-input-invalid` (Human mode with a non-finite input);
     /// physics refusals pass through.
     pub fn step(&mut self, input: Option<ControlInput>) -> Result<SimStateOut, Refusal> {
+        if self.spatial_wind.as_ref().is_some_and(|wind| {
+            matches!(
+                wind.spec.spectrum,
+                SpatialWindSpectrum::MannHomogeneousAbove { .. }
+            )
+        }) {
+            return self.step_with_wind_domain(input);
+        }
+        self.step_inner(input)
+    }
+
+    fn step_inner(&mut self, input: Option<ControlInput>) -> Result<SimStateOut, Refusal> {
         if let Phase::Ended(_) = self.phase {
             return Err(Refusal {
                 code: "run-ended",
@@ -996,6 +1023,9 @@ impl SimLoop {
         let initial_loads = match self.sampled_loads_current_wind(v_air, alpha_clamped, dc_eff) {
             Ok(b) => b,
             Err(refusal) => {
+                if refusal.code == spatial_wind::APPLICABILITY_REFUSAL {
+                    return Err(refusal);
+                }
                 // The flight left the certified aero envelope (a wild
                 // enough state that the coupled/wing solve refuses). The
                 // RUN ends with a typed terminal event and the refusal
@@ -1036,6 +1066,9 @@ impl SimLoop {
             Phase::Airborne => {
                 match self.advance_airborne_motion(&b, alpha_clamped, dc_eff, gust_w, dt) {
                     Err(refusal) => {
+                        if refusal.code == spatial_wind::APPLICABILITY_REFUSAL {
+                            return Err(refusal);
+                        }
                         // A midpoint outside the native load envelope publishes
                         // no predicted motion or warm start. The common endpoint
                         // path below advances the wind exactly once.

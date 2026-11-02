@@ -348,3 +348,68 @@ fn checkpoints_resume_exactly_and_invalid_models_or_advances_refuse() {
         assert!(MannSpectralModel::build(1, MANN_TARGET_V1, q, [0.0; 3]).is_err());
     }
 }
+
+#[test]
+fn temporal_state_copy_reuses_storage_and_refuses_different_model_inputs_atomically() {
+    let model = model(3.9, 16);
+    let mut source = HomogeneousMannField::at_anchor(model.clone(), 51, vec![0.7; 16]).unwrap();
+    let mut target = source.clone();
+    let pointers = target.paths.each_ref().map(|p| p.amplitudes().as_ptr());
+    let geometry = target.model.modes.as_ptr();
+    for tick in [STATIONARY_ANCHOR_TICK + 3, STATIONARY_ANCHOR_TICK + 19] {
+        source.advance_to(tick).unwrap();
+        target.copy_temporal_state_from(&source).unwrap();
+        assert_eq!(target, source);
+        assert_eq!(
+            target.paths.each_ref().map(|p| p.amplitudes().as_ptr()),
+            pointers
+        );
+        assert_eq!(target.model.modes.as_ptr(), geometry);
+    }
+    let before = target.checkpoint();
+    let mut alternatives = vec![
+        HomogeneousMannField::at_anchor(model.clone(), 52, vec![0.7; 16]).unwrap(),
+        HomogeneousMannField::at_anchor(model.clone(), 51, vec![0.8; 16]).unwrap(),
+    ];
+    for changed in [
+        MannSpectralModel::build(
+            42,
+            model.parameters(),
+            model.quadrature(),
+            model.advection_mps,
+        )
+        .unwrap(),
+        MannSpectralModel::build(41, model.parameters(), model.quadrature(), [6.0, -0.5, 0.2])
+            .unwrap(),
+        MannSpectralModel::build(
+            41,
+            MannParams {
+                gamma: 2.0,
+                ..model.parameters()
+            },
+            model.quadrature(),
+            model.advection_mps,
+        )
+        .unwrap(),
+        MannSpectralModel::build(
+            41,
+            model.parameters(),
+            MannQuadrature {
+                max_kl: 40.0,
+                ..model.quadrature()
+            },
+            model.advection_mps,
+        )
+        .unwrap(),
+    ] {
+        alternatives.push(HomogeneousMannField::at_anchor(changed, 51, vec![0.7; 16]).unwrap());
+    }
+    for alternative in alternatives {
+        assert!(target.copy_temporal_state_from(&alternative).is_err());
+        assert_eq!(target.checkpoint(), before);
+        assert_eq!(
+            target.paths.each_ref().map(|p| p.amplitudes().as_ptr()),
+            pointers
+        );
+    }
+}

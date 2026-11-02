@@ -756,6 +756,27 @@ tests in `simloop/spatial_wind/mann_tests.rs` cover the exact atmosphere-to-
 flight field, actual rotor/ground/lateral response, all six sampling/material
 combinations, model-substitution refusal and self-contained replay.
 
+`MannHomogeneousAbove { parameters, min_kl, max_kl, minimum_height_m }`
+connects the complete finite-band homogeneous Mann field to the same native
+CG, wing/canard strip, propeller and distributed lateral load owners. Every
+wind query requires height at least the positive authored minimum. This is an
+applicability restriction for exploration, **not proof that ground effects
+vanish above that height**; the model has no wall projection or surface blocking.
+Its mode count comes from the explicit correlation-time vector, and omitted
+wavenumber bands are not renormalized. `homogeneous_wind_covariance` reports
+the represented turbulence-only space-time tensor in flight coordinates.
+
+Homogeneous runs use V8 checkpoints with target, cutoffs, applicability height,
+all four OU quadratures, material choice and sampling mode. Tick-zero identity
+contains every quadrature; restoration rebuilds and checks the same model.
+The V3–V7 paths retain their bytes and behavior. A domain refusal at a CG,
+strip, disk, midpoint or accepted endpoint returns without consuming flight,
+pilot/perception or random-path state. An opt-in rollback buffer is allocated
+once and reuses control rings and OU arrays on subsequent steps; immutable
+spectral factors are not rebuilt or copied each tick. The homogeneous replay,
+load, covariance, model-substitution and atomic-refusal regressions are in
+`simloop/spatial_wind/homogeneous_tests.rs`.
+
 Ordinary, CG spatial-wind and distributed-wind airborne paths share one coupled
 longitudinal/rotor midpoint step. The first native aerodynamic solve predicts
 midpoint velocity, pitch attitude/rate and rotor speed. A second solve evaluates

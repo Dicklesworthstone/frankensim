@@ -152,6 +152,15 @@ impl StationaryOuPath {
         &self.amplitudes
     }
 
+    // The field owner admits identical immutable models before copying any
+    // path. Reuse amplitude storage for staged integration and rollback.
+    pub(crate) fn copy_temporal_state_from(&mut self, source: &Self) {
+        debug_assert_eq!(self.seed, source.seed);
+        debug_assert_eq!(self.modes, source.modes);
+        self.amplitudes.copy_from_slice(&source.amplitudes);
+        self.tick = source.tick;
+    }
+
     /// Advance the sequential state to `target_tick` (exact transition per
     /// tick; queries between ticks do not exist — the tick IS the clock).
     ///

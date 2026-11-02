@@ -93,6 +93,13 @@ pub struct PerceptionState {
 }
 
 impl PerceptionState {
+    /// Reuse delay-ring storage when staging an atomic simulation step.
+    pub(crate) fn copy_state_from(&mut self, source: &Self) {
+        self.rings.clone_from(&source.rings);
+        self.filters = source.filters;
+        self.tick = source.tick;
+    }
+
     /// Canonical checkpoint bytes (E6.1-i; bit-exact).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {

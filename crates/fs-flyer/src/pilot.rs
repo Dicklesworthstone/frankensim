@@ -151,6 +151,15 @@ pub struct PilotState {
 }
 
 impl PilotState {
+    /// Reuse delay-ring storage when staging an atomic simulation step.
+    pub(crate) fn copy_state_from(&mut self, source: &Self) {
+        self.ring_long.clone_from(&source.ring_long);
+        self.ring_lat.clone_from(&source.ring_lat);
+        self.nm_long = source.nm_long;
+        self.nm_lat = source.nm_lat;
+        self.tick = source.tick;
+    }
+
     /// Canonical checkpoint bytes (E6.1-i; bit-exact).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {

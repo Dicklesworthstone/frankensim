@@ -373,6 +373,28 @@ impl HomogeneousMannField {
         self.paths[0].tick()
     }
 
+    /// Copy only the evolving state from an identical model, reusing all
+    /// storage. Useful for accepted/trial fields and atomic consumer steps;
+    /// spectral coefficients are neither cloned nor recomputed.
+    ///
+    /// # Errors
+    /// `mann-field-invalid` if geometry, target, cutoffs, advection, amplitude
+    /// seed or any OU correlation time differs. Refusal leaves `self` intact.
+    pub fn copy_temporal_state_from(&mut self, source: &Self) -> Result<(), Refusal> {
+        if self.model != source.model
+            || self.evolution_seed != source.evolution_seed
+            || self.correlation_times_s != source.correlation_times_s
+        {
+            return Err(invalid(
+                "temporal state belongs to a different spatial or OU model",
+            ));
+        }
+        for (target, source) in self.paths.iter_mut().zip(&source.paths) {
+            target.copy_temporal_state_from(source);
+        }
+        Ok(())
+    }
+
     /// Advance all quadratures together. Backward or excessive requests
     /// refuse before changing any path; samples never advance the clock.
     pub fn advance_to(&mut self, target_tick: i64) -> Result<(), Refusal> {

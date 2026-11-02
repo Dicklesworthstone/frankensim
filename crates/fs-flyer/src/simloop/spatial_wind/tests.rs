@@ -98,7 +98,7 @@ fn unloaded_rail_takes_one_free_flight_interval_without_tow() {
         let mut expected_field = sim
             .spatial_wind
             .as_ref()
-            .map(|w| EvolvingTurbulenceField::resume(w.field.checkpoint()).unwrap());
+            .map(|w| WindField::resume(w.field.checkpoint()).unwrap());
         if let Some(field) = &mut expected_field {
             field.advance_to(1).unwrap();
         }
@@ -650,7 +650,7 @@ fn actual_ground_crossing_uses_terminal_branch_and_one_endpoint_wind_advance() {
         let mut expected = sim
             .spatial_wind
             .as_ref()
-            .map(|w| EvolvingTurbulenceField::resume(w.field.checkpoint()).unwrap());
+            .map(|w| WindField::resume(w.field.checkpoint()).unwrap());
         if let Some(field) = &mut expected {
             field.advance_to(1).unwrap();
         }
