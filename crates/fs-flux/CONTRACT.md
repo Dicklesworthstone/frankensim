@@ -390,9 +390,10 @@ geometry and must never be labelled as volts or discharge reach.
   fixtures. `linearize_rheology` supplies constitutive/convection state
   Jacobians for prescribed-velocity boundaries. Mixed-boundary nonlinear
   Jacobians and time-dependent adjoint checkpointing remain outside that API.
-- Nonlinear convection/backflow at open boundaries. Steady generalized-Newtonian
-  Stokes and linear BDF1 Stokes velocity/total-traction boundaries are provided
-  by the APIs below; transient nonlinear open-boundary Navier–Stokes is not.
+- Mixed-boundary Newton Jacobians, nonlinear adjoints and high-Re open-boundary
+  qualification remain absent. Linear and nonlinear BDF1 velocity/traction
+  flow, with explicitly selected natural or dissipative backflow, are provided
+  by the APIs below.
 - The affine-triangle GCL receipt does not remap fields, assemble or
   advance ALE Navier–Stokes, generate mesh motion, support curved faces
   or 3-D cells, couple FSI, or certify the continuum solver. It carries
@@ -626,6 +627,59 @@ pressure, dynamic-viscosity traction, inertia and energy in an affine shear.
 This is fixed-mesh, constant-density linear unsteady Stokes, without nonlinear
 open-boundary/backflow conditions, variable-density storage, thermal evolution,
 BDF2+, continuum error bounds or new cancellation/throughput claims.
+
+## Nonlinear pressure-driven flow with explicit backflow behavior
+
+`bdf1_navier_stokes_mixed_step` advances constant-density incompressible
+Navier–Stokes with backward Euler and endpoint convection. Its frozen spatial
+viscosity counterpart admits `nu(cell, point)` without changing the physical
+density. Both reuse the original BDM1/P0 mass, symmetric one-sided SIP stress,
+conservative cell advection and upwind interior faces. Reversing affine face
+fluxes use the existing split quadrature. The separate Oseen assembly entries
+expose this same operator with an explicit frozen advecting velocity; solving
+one such linear system is not claimed to solve the nonlinear endpoint.
+
+Every `NavierStokesBoundary` edge owns prescribed velocity or open traction
+and an explicit `OpenBoundaryPolicy`. `NaturalTraction` imposes the supplied
+total stress literally, using the interior convected velocity on either flow
+sign. Backflow may bring kinetic energy into that domain. In contrast,
+`DissipativeBackflow` imposes, in kinematic units,
+`(2 nu D(u)-p I)n = t + min(u.n,0)u`. Its added inflow resistance is a declared
+change to the boundary law, not the same physical traction with a hidden
+numerical fix. In physical units that resistance is multiplied by the same
+source density. It is relative to the specified fixed frame.
+The conservative boundary momentum flux becomes `max(u.n,0)u`. For a
+divergence-free advecting field, its open-boundary contribution to kinetic
+energy loss is `|u.n||u|²/2`, in addition to interior DG jump dissipation and
+separate imposed-traction work. Natural traction instead has the signed
+`(u.n)|u|²/2` contribution. This is a statement about the declared convective
+operator, not an unconditional whole-scheme theorem. For related modified
+traction and backflow analysis see Dong and Shen (2015), JCP 291, 254–278,
+<https://doi.org/10.1016/j.jcp.2015.03.012>; their pressure-correction algorithm
+is not implemented here.
+
+The existing bounded mixed Picard loop is shared with constitutive Stokes.
+Boundary samples are admitted once, every iteration uses the same old mass
+history, and acceptance requires the unrelaxed correction and independently
+reassembled original and row-scaled endpoint residuals. Under-relaxation never
+changes the timestep or physical loads. Exhausted work or any invalid input
+returns no endpoint. Inertia anchors entirely open components; closed
+components retain independent pressure gauges and flux compatibility.
+`NavierStokesStep` retains each open edge's selected policy with the nonlinear
+work and residuals. The SI `MaterialFluxSystem` entry binds the same source
+density to inertia, convection, `mu/rho`, force, traction, added resistance,
+reported pressure and kinetic energy, retaining the material snapshot.
+
+The focused regressions use an exact affine mixed flow with nonzero history,
+variable viscosity and live convection, a pressure-datum shift, a
+convection-omitted falsifier, independently integrated natural/backflow matrix
+work including a reversing boundary face, exact original all-velocity operator
+identity, invalid/exhausted nonlinear steps, and two actual gas-source states
+with coherent SI stress and energy. They were added but not executed in the
+resource-limited implementation session. This remains fixed-mesh 2-D flow with
+frozen viscosity; no new implicit rheology, variable-density storage, thermal
+or turbulent closure, nonlinear adjoint, whole-scheme stability, scalable
+throughput or synchronous cancellation claim is made.
 
 ## Horizontal capillary meniscus transport
 

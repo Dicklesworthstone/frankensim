@@ -12,6 +12,9 @@ use fs_solid::Mesh2;
 use std::cell::Cell;
 use std::rc::Rc;
 
+#[path = "material_flow/navier_stokes.rs"]
+mod navier_stokes;
+
 fn mesh() -> TriMesh {
     TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3))
 }

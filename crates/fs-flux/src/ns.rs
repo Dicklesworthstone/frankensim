@@ -659,7 +659,7 @@ impl<'m> FluxSystem<'m> {
         }
         // --- Convection (Picard): −∫(u⊗w):∇v + face upwinding.
         if let Some(wfield) = advect {
-            self.add_convection(&mut coo, &mut rhs, wfield, g, &con);
+            self.add_convection(&mut coo, &mut rhs, wfield, g, &con, boundary);
         }
         // Constrained rows last: identity diagonal, prescribed value.
         for (d, c) in con.iter().enumerate() {
@@ -679,6 +679,7 @@ impl<'m> FluxSystem<'m> {
         wfield: &[f64],
         g: &dyn Fn([f64; 2]) -> [f64; 2],
         con: &[Option<f64>],
+        boundary: Option<&boundary::AdmittedBoundary>,
     ) {
         let mesh = self.mesh;
         let w_at = |t: usize, x: [f64; 2]| -> [f64; 2] {
@@ -717,8 +718,13 @@ impl<'m> FluxSystem<'m> {
             let (t0, t1) = edge.tris;
             let n = edge.normal;
             let (va, vb) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
-            let prescribed = (t1 == usize::MAX)
-                .then(|| crate::bdm::edge_gauss_pub(va, vb).map(|(point, _)| g(point)));
+            let open_policy = boundary.and_then(|data| data.open_policy(edge_id));
+            let prescribed = (t1 == usize::MAX && open_policy.is_none()).then(|| {
+                let points = crate::bdm::edge_gauss_pub(va, vb);
+                core::array::from_fn(|q| {
+                    boundary.map_or_else(|| g(points[q].0), |data| data.velocity(edge_id, q))
+                })
+            });
             for (gx, wq, fraction) in
                 convection_edge_quadrature(va, vb, [wfield[2 * edge_id], wfield[2 * edge_id + 1]])
             {
@@ -733,11 +739,19 @@ impl<'m> FluxSystem<'m> {
                         if con[gi].is_some() {
                             continue;
                         }
-                        if wn >= 0.0 {
+                        if wn >= 0.0 || open_policy.is_some() {
+                            // Natural traction uses the interior trace even
+                            // during inflow. The explicit dissipative policy
+                            // adds -min(w.n,0) u to this conservative flux,
+                            // equivalent to stress t + min(w.n,0) u.
+                            let normal_flux = match open_policy {
+                                Some(boundary::OpenBoundaryPolicy::DissipativeBackflow) => wn.max(0.0),
+                                _ => wn,
+                            };
                             for j in 0..6 {
                                 let gj = self.dof(t0, j);
                                 let uj = eval_basis(&self.bases[t0], j, gx);
-                                coo.push(gi, gj, wq * wn * (uj[0] * vi[0] + uj[1] * vi[1]));
+                                coo.push(gi, gj, wq * normal_flux * (uj[0] * vi[0] + uj[1] * vi[1]));
                             }
                         } else {
                             let gval = convection_boundary_trace(
@@ -1394,6 +1408,7 @@ mod convection_tests {
             &advecting,
             &|_| [0.0; 2],
             &vec![None; system.n],
+            None,
         );
         let mut residual = vec![0.0; system.n];
         operator.assemble().spmv(&transported, &mut residual);

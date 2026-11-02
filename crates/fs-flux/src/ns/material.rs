@@ -27,11 +27,14 @@ use crate::ns::{FluxParams, FluxRheologyError, FluxSolution, FluxSystem};
 
 #[path = "material/mixed.rs"]
 pub mod mixed;
+#[path = "material/navier_stokes.rs"]
+mod navier_stokes;
 #[path = "material/porous.rs"]
 mod porous;
 #[path = "material/rheology.rs"]
 mod rheology;
 pub use mixed::{MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution};
+pub use navier_stokes::{MaterialNavierStokesBoundary, MaterialNavierStokesStep};
 pub use porous::MaterialBrinkmanSolution;
 
 /// Numerical choices, separate from the material's physical viscosity.

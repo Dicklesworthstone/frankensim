@@ -14,8 +14,13 @@ use std::cell::Cell;
 #[path = "boundary/rheology.rs"]
 mod rheology;
 pub use rheology::{StokesRheologyControls, StokesRheologySolution};
+#[path = "boundary/navier_stokes.rs"]
+mod navier_stokes;
 #[path = "boundary/transient.rs"]
 mod transient;
+pub use navier_stokes::{
+    NavierStokesBoundary, NavierStokesControls, NavierStokesStep, OpenBoundaryPolicy,
+};
 
 /// Exactly one condition must own each boundary edge of the supplied mesh.
 /// Interior edges cannot be assigned. Callbacks must be pure.
@@ -127,9 +132,16 @@ enum Samples {
 pub(super) struct AdmittedBoundary {
     samples: Vec<Option<Samples>>,
     pub(super) has_traction: Vec<bool>,
+    open_policies: Option<Vec<Option<OpenBoundaryPolicy>>>,
 }
 
 impl AdmittedBoundary {
+    pub(super) fn open_policy(&self, edge: usize) -> Option<OpenBoundaryPolicy> {
+        self.open_policies
+            .as_ref()
+            .and_then(|policies| policies[edge])
+    }
+
     pub(super) fn is_traction(&self, edge: usize) -> bool {
         matches!(self.samples[edge], Some(Samples::Traction(_)))
     }
@@ -149,8 +161,8 @@ impl AdmittedBoundary {
     }
 }
 
-/// A linear Stokes operator bound to its mesh and pressure interpretation.
-/// For BDF1 assembly it includes the mass term and immutable history load.
+/// A linear mixed-flow operator bound to its mesh and pressure interpretation.
+/// BDF1 includes mass/history; the Oseen entry also freezes convection.
 /// The read-only matrix/RHS can also feed the existing discrete transpose solve.
 pub struct StokesAssembly<'a, 'm> {
     system: &'a FluxSystem<'m>,
@@ -334,7 +346,9 @@ impl<'m> FluxSystem<'m> {
         admitted: &AdmittedBoundary,
         darcy: Option<&[super::porous::DarcyDrag]>,
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
-        self.assemble_stokes_admitted_operator(params, viscosity, force, admitted, darcy, 0.0, None)
+        self.assemble_stokes_admitted_operator(
+            params, viscosity, force, admitted, darcy, 0.0, None, None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -347,6 +361,7 @@ impl<'m> FluxSystem<'m> {
         darcy: Option<&[super::porous::DarcyDrag]>,
         inv_dt: f64,
         previous_velocity: Option<&[f64]>,
+        advecting_velocity: Option<&[f64]>,
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
         let bad_viscosity = Cell::new(None);
         let checked_viscosity = |cell, point| {
@@ -378,7 +393,7 @@ impl<'m> FluxSystem<'m> {
             Some(&checked_viscosity),
             &checked_force,
             &|_| [0.0; 2],
-            None,
+            advecting_velocity,
             inv_dt,
             previous_velocity,
             Some(admitted),
@@ -551,6 +566,7 @@ impl<'m> FluxSystem<'m> {
         Ok(AdmittedBoundary {
             samples,
             has_traction,
+            open_policies: None,
         })
     }
 }

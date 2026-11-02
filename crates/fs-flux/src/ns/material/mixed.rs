@@ -217,6 +217,15 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 timestep_s,
             )
             .map_err(MaterialFluxError::Boundary)?;
+        self.material_stokes_solution(flow)
+    }
+
+    // One SI recovery for linear and nonlinear mixed-boundary endpoints.
+    pub(super) fn material_stokes_solution(
+        &self,
+        flow: StokesSolution,
+    ) -> Result<MaterialStokesSolution, MaterialFluxError> {
+        let density = self.transport.density_kg_m3();
         let pressure_pa: Vec<_> = flow.pressure.iter().map(|p| density * p).collect();
         let kinetic_energy_j_per_m = density * self.system.kinetic_energy(&flow.field.x);
         if pressure_pa.iter().any(|value| !value.is_finite()) || !kinetic_energy_j_per_m.is_finite()

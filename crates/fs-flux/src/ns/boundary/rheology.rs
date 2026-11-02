@@ -1,9 +1,11 @@
 //! Checked generalized-Newtonian Stokes flow with open traction boundaries.
 
-use super::{FluxParams, FluxSystem, StokesBoundary, StokesBoundaryError, StokesSolution};
+use super::{
+    FluxParams, FluxSystem, StokesAssembly, StokesBoundary, StokesBoundaryError, StokesSolution,
+};
 use crate::ns::FluxRheologyError;
 
-/// Controls for a frozen-load, steady constitutive solve.
+/// Controls for frozen-load mixed constitutive or convective Picard solves.
 #[derive(Clone, Copy, Debug)]
 pub struct StokesRheologyControls {
     /// Maximum number of actual linearized flow solves.
@@ -11,8 +13,8 @@ pub struct StokesRheologyControls {
     /// Required relative velocity correction AND both nonlinear residuals.
     pub relative_tolerance: f64,
     /// Fraction of each correction used after the first admissible flow.
-    /// Must lie in (0,1]. Under-relaxation can stabilize shear-thickening laws;
-    /// it is not a convergence guarantee for an arbitrary constitutive law.
+    /// Must lie in (0,1]. Under-relaxation can stabilize Picard corrections;
+    /// it is not a convergence guarantee for arbitrary laws or flow data.
     pub relaxation: f64,
 }
 
@@ -124,6 +126,18 @@ impl<'m> FluxSystem<'m> {
                 &admitted,
             )
         };
+        self.solve_mixed_picard(initial_velocity, controls, &assemble, source_is_valid)
+    }
+
+    // Shared bounded iteration and endpoint acceptance for constitutive Stokes
+    // and convective mixed-boundary flow. Admission precedes this private loop.
+    pub(super) fn solve_mixed_picard<'a>(
+        &'a self,
+        initial_velocity: &[f64],
+        controls: StokesRheologyControls,
+        assemble: &dyn Fn(&[f64]) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError>,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<StokesRheologySolution, StokesBoundaryError> {
         let mut current = vec![0.0; self.n];
         current[..self.n_u].copy_from_slice(initial_velocity);
         for iteration in 1..=controls.maximum_iterations {
