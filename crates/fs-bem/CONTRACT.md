@@ -2331,13 +2331,18 @@ Matching receiver names alone cannot authorize mixing different physical
 operators. The common emission clock is explicitly declared, not reconstructed
 from unrelated phase data.
 
-An optional deterministic mean and explicitly joint proper-complex factor
-banks retain all source, incident/scattered and cross-frequency interference.
-The factors obey E[xi_r]=0, E[xi_r conj(xi_s)]=delta_rs,
-E[xi_r xi_s]=0. Different factors and the mean add second moments; frequencies
-within a factor do not become independent. Factor amplitudes carry peak source
-units and any square-root statistical weights. No Gaussian distribution,
-stationarity or PSD-bin normalization is inferred.
+An optional deterministic mean and explicitly authored real/proper-complex
+factor banks retain all source, incident/scattered and cross-frequency
+interference. Every factor is zero mean. Real coordinates have E[xi^2]=1;
+proper coordinates have E[|xi|^2]=1 and E[xi^2]=0. Distinct factors have zero
+conjugate AND unconjugated cross moments, including mixed real/proper pairs.
+Different factors and the mean add second moments; frequencies within a
+factor do not become independent. Complex source coefficients on real factors
+represent general nonproper covariance through a real square root of the
+stacked real/imaginary source covariance. Factor amplitudes carry peak source
+units and square-root weights. No Gaussian distribution, stationarity or
+PSD-bin normalization is inferred. Existing constructors retain all-proper
+semantics; explicit mixed statistics use new_with_statistics[_cancellable].
 
 Preparation contracts retained p/u rows in double-double arithmetic, without
 another BEM solve, then coalesces exactly equal frequencies in authored order.
@@ -2391,8 +2396,8 @@ Pressure/pressure, both pressure/velocity blocks and the complete velocity
 cross tensor retain their physical units. Reversing a receiver pair transposes
 the block; correlations between different receivers can have either sign.
 
-Each proper source factor is integrated coherently across ALL its frequencies
-before its outer product is formed. Thus this result is
+Each source factor is integrated coherently across ALL its frequencies
+before its authored real/proper contraction is formed. Thus this result is
 Cov(average(field at receiver A), average(field at receiver B)), rather than
 average of the instantaneous field covariance. A full-period linear pressure
 readout can have negligible variance while the acoustic mean-square pressure
@@ -2405,10 +2410,12 @@ The original source factors, transfers, geometry, medium and common clock are
 retained. There is no additional BEM solve or propagation approximation.
 Each complex integrated factor retains DD components using the shared unit-DC
 real-product contraction for both its real and imaginary parts. Receiver
-covariance then uses the proper zero-frequency contraction with its physical
-one-half normalization. The selected normalized window profile is honored:
-a triangular detector has a sinc-squared linear response and a sinc-to-the-
-fourth single-factor readout variance. Its physical field is weighted once
+covariance then uses Re(A)*Re(B) for a real coordinate and
+Re(A*conj(B))/2 for a proper coordinate, preserving the former's
+pseudocovariance. Both contractions use the shared DD zero-frequency kernel.
+The selected normalized window profile is honored: a triangular detector has
+a sinc-squared linear-response envelope, and covariance multiplies integrated
+amplitudes with the original factor law. Its physical field is weighted once
 before a readout is squared.
 
 These pair covariances support caller-authored real microphone combinations:
@@ -2449,7 +2456,7 @@ channel; zero channels yield an empty observation.
 Under the original exp(-i omega t) convention, delay uses
 exp(+i omega delay). The original propagated pressure fields are summed with
 these complex gains BEFORE any product. Coherence across receivers, sources,
-frequencies and the deterministic mean/proper-factor decomposition survives.
+frequencies and the deterministic mean/real/proper-factor decomposition survives.
 Delay phases are prepared once per distinct frequency across all banks, with
 DD products, near-unit cosine decrements and DD tap accumulation. Repeated
 window queries require no BEM solve, spatial reconstruction or delay-phase
@@ -2466,10 +2473,14 @@ microphone calibration, electronic noise or source bandwidth.
 Every query returns per-channel E[average(y)] and E[average(y²)], plus the
 full real symmetric centered Cov(average(y_a),average(y_b)) matrix. Mean-square
 pressure and variance of an averaged pressure are distinct quantities.
-Covariance integrates each complete proper factor before its outer product;
-deterministic means never contaminate a small covariance through subtraction
-of a large squared mean. The original jointly proper second moments apply;
-no independent-microphone, stationary-source or Gaussian assumption is added.
+Covariance integrates each complete factor before applying its original
+real/proper contraction. Deterministic means never contaminate a small
+covariance through subtraction of a large squared mean. The copied factor
+laws survive after the source exposure is dropped. Real factors preserve
+carrier-sum interference in channel mean squares and pseudocovariance in
+averaged-channel covariance; proper factors retain their physical one-half
+normalization. No independent-microphone, stationary-source or Gaussian
+assumption is added.
 Uniform and Triangular normalized detector sensitivities are supported.
 
 With C channels, T total taps, K unique frequencies, B banks and L retained
@@ -2492,3 +2503,49 @@ module (28 test definitions). This is not a full BEM crate build or executed
 Rust tests. Independent Python delayed-signal quadrature agrees with the
 analytical moments to 2.00e-14 maximum absolute discrepancy for Uniform and
 2.10e-14 for Triangular across means, mean squares and readout covariance.
+
+## Mixed real/proper BEM source statistics
+
+`HarmonicExposureFactorStatistics::{Real, ProperComplex}` declares the
+unit second moments of each fluctuation coordinate. The new explicit
+statistics constructors require one law per supplied factor, including empty
+factors, and copy that law into the original frequency bank and every prepared
+delay-and-sum bank. Ordered factor-statistics iterators expose the retained
+declaration. Legacy constructors still make every fluctuation factor proper.
+
+For a factor carrying amplitudes A and B at angular frequencies a and b,
+the windowed product contains
+`Re(A*conj(B)*Phi(a-b) + kappa*A*B*Phi(a+b))/2`,
+where Phi is the normalized negative-time window transform and kappa is one
+for Real and zero for ProperComplex. Thus real uncertainty about a coherent
+source retains carrier-sum interference; it must not be silently circularized.
+This law is used consistently for pressure, all velocity components, signed
+p/u flux, physical receiver readouts and delayed processed pressure channels.
+The complete-cycle monochromatic observers continue to depend only on the
+conjugate source covariance.
+
+The shared temporal kernels and original DD transfer contractions are reused.
+There is no additional source/receiver covariance matrix, propagation solve,
+sampling, geometry approximation or frequency discretization. Arithmetic
+complexity and existing hard work caps are unchanged. Logical heap admission
+includes the enlarged bank headers that own the factor laws. A malformed
+statistics count, budget refusal or cancellation publishes no partial result.
+
+Six focused regressions cover the real-versus-proper subperiod p/u distinction,
+an exact eight-state real/proper ensemble against direct delayed real-time
+quadrature under Uniform and Triangular shutters, proper-to-two-real
+quadrature equivalence, real orthogonal basis rotations and mixed-factor
+permutations, physical clock-epoch covariance, and all-proper compatibility,
+identity, workspace admission, darkness and cancellation. The numerical
+fixture exercises the actual prepared-observer algebra with synthetic original
+transfer rows; it does not claim to validate a boundary solve.
+
+All six new mixed-statistics regressions compiled, linked and executed in a
+native Rust executable with the real fs_math library: 6 passed, 0 failed.
+The exact exposure/readout/array implementation and current shared window
+source were included. The bounded harness supplies nominal outer
+source/receiver/medium/hash declarations, the original prepared-observation
+layout/admission and the three used error variants; it omits the unused
+product-spectrum export and does not compile or solve the complete BEM crate.
+The 22 shared window tests were filtered from this run. Native rustfmt and
+focused Rust no-codegen analysis also passed.

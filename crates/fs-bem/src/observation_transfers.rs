@@ -34,14 +34,14 @@ mod scattering;
 pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
 mod harmonic;
 pub use harmonic::{
+    HarmonicAveragedField, HarmonicExposureFactorStatistics, HarmonicExposureLimits,
+    HarmonicExposureLine, HarmonicExposureMoments, HarmonicField, HarmonicFieldStatistics,
     HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
-    HarmonicPressureTap, MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS,
-    PreparedHarmonicPressureArray, WindowedHarmonicPressureArray,
-    HarmonicAveragedField, HarmonicExposureLimits, HarmonicExposureLine, HarmonicExposureMoments,
-    HarmonicField, HarmonicFieldStatistics, HarmonicReadoutCovariance, HarmonicReadoutLimits,
-    HarmonicReceiverPair, HarmonicWorkBudget, MAX_READOUT_RECEIVER_PAIRS,
-    PreparedHarmonicExposure, PreparedHarmonicObservation, PreparedMicrophoneArray,
-    WindowedHarmonicExposure, WindowedHarmonicReadout,
+    HarmonicPressureTap, HarmonicReadoutCovariance, HarmonicReadoutLimits, HarmonicReceiverPair,
+    HarmonicWorkBudget, MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS,
+    MAX_READOUT_RECEIVER_PAIRS, PreparedHarmonicExposure, PreparedHarmonicObservation,
+    PreparedHarmonicPressureArray, PreparedMicrophoneArray, WindowedHarmonicExposure,
+    WindowedHarmonicPressureArray, WindowedHarmonicReadout,
 };
 mod radiation;
 pub use radiation::{PreparedRadiationObservation, PreparedRadiationOptions, RadiatedPowerMoments};
@@ -134,7 +134,10 @@ pub enum TransferError {
     Material(fs_material::MaterialError),
     Mechanical(fs_phs::PhsError),
     Fir(FirError),
-    Cap { requested: usize, cap: usize },
+    Cap {
+        requested: usize,
+        cap: usize,
+    },
     /// The finest rung missed a gate: `tail` (energy from n/4), `wrap` (energy
     /// from n/2) or `dtft` (the change from the rung before). Each fraction is
     /// its worst quantity. With the arrival at index L, `tail` splits exactly
@@ -506,7 +509,13 @@ fn observation_transition_low(t: f64) -> f64 {
 /// `P^(j)(0)` for j = 5..=9, with P the C4 transition polynomial
 /// `P(x) = x^5 (126 - 420x + 540x^2 - 315x^3 + 70x^4)`. Since `P(x) + P(1-x) = 1`,
 /// `P^(j)(1) = (-1)^(j+1) P^(j)(0)`. For j <= 4, `P^(j)` vanishes at both ends.
-const C4_JUMPS: [f64; 5] = [15_120.0, -302_400.0, 2_721_600.0, -12_700_800.0, 25_401_600.0];
+const C4_JUMPS: [f64; 5] = [
+    15_120.0,
+    -302_400.0,
+    2_721_600.0,
+    -12_700_800.0,
+    25_401_600.0,
+];
 /// `∫_0^1 P(x)^2 dx = 38251/92378`, exactly.
 const C4_SQUARE_INTEGRAL: f64 = 38_251.0 / 92_378.0;
 /// Window samples summed explicitly: eight times the largest admissible
@@ -601,7 +610,8 @@ fn observation_window_containment(
         let magnitude = 4.0 / omega
             * r5
             * (magnitudes[0]
-                + r * (magnitudes[1] + r * (magnitudes[2] + r * (magnitudes[3] + r * magnitudes[4]))));
+                + r * (magnitudes[1]
+                    + r * (magnitudes[2] + r * (magnitudes[3] + r * magnitudes[4]))));
         let slack = magnitude * U * (5.0 * core::f64::consts::PI * m as f64 + 64.0);
         sum += (value.abs() + slack) * (value.abs() + slack);
         let upper = bound(sum); // the bound at latency m - 1
@@ -803,7 +813,10 @@ fn bake_observation_transfers_with_errors<E: From<TransferError>>(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ObservationTransferBake, E> {
     if lower_pass_hz <= 0.0
-        && decl.sources.iter().any(|s| matches!(s, SourceId::PointForce(_)))
+        && decl
+            .sources
+            .iter()
+            .any(|s| matches!(s, SourceId::PointForce(_)))
     {
         return Err(TransferError::Invalid(
             "force-source FIR requires the declared lower-window observation owner",
@@ -1075,8 +1088,10 @@ impl<'a> BemObservation<'a> {
             if iterative.is_some_and(fs_exec::CancelGate::is_requested) {
                 return Err(TransferError::Cancelled);
             }
-            if matches!(source, SourceId::PointVolumeFlow(_) | SourceId::PointForce(_))
-                || source.name().is_empty()
+            if matches!(
+                source,
+                SourceId::PointVolumeFlow(_) | SourceId::PointForce(_)
+            ) || source.name().is_empty()
                 || trace.len() != surface.areas().len()
                 || trace.iter().any(|v| !v.is_finite())
                 || (trace.iter().all(|&v| v == 0.0)
@@ -1340,7 +1355,12 @@ impl<'a> BemObservation<'a> {
             return Err(TransferError::Cancelled);
         }
         PreparedHarmonicObservation::from_samples(
-            omega, self.medium, &self.sources, &self.receivers, self.operator_hash(), samples,
+            omega,
+            self.medium,
+            &self.sources,
+            &self.receivers,
+            self.operator_hash(),
+            samples,
         )
     }
     /// Observe the original retained radiation solutions without another

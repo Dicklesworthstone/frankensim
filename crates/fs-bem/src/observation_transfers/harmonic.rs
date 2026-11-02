@@ -6,10 +6,14 @@
 //! cross-source interference survive, without assembling a dense source C.
 //! All physical averages contain the peak-to-mean-square factor 1/2. These
 //! are spectral-line quantities, not a silently normalized power density.
+//!
+//! These complete-cycle moments depend on the conjugate source covariance for
+//! both real and proper fluctuations. Finite-window pseudocovariance and
+//! mixed source laws are handled explicitly by [`PreparedHarmonicExposure`].
 
 use super::*;
-use crate::near_field::{FirstOrder, MAX_RECEIVERS};
 pub(super) use crate::ComplexSum as Sum;
+use crate::near_field::{FirstOrder, MAX_RECEIVERS};
 
 pub(super) const MAX_MODES: usize = 4096;
 pub(super) const MAX_PRODUCTS: usize = 64_000_000;
@@ -471,13 +475,13 @@ impl PreparedMicrophoneArray<'_> {
 
 mod exposure;
 pub use exposure::{
-    HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
-    HarmonicPressureTap, MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS,
-    PreparedHarmonicPressureArray, WindowedHarmonicPressureArray,
-    HarmonicAveragedField, HarmonicExposureLimits, HarmonicExposureLine, HarmonicExposureMoments,
+    HarmonicAveragedField, HarmonicExposureFactorStatistics, HarmonicExposureLimits,
+    HarmonicExposureLine, HarmonicExposureMoments, HarmonicPressureArrayLimits,
+    HarmonicPressureChannel, HarmonicPressureChannelMoments, HarmonicPressureTap,
     HarmonicReadoutCovariance, HarmonicReadoutLimits, HarmonicReceiverPair,
-    MAX_READOUT_RECEIVER_PAIRS, PreparedHarmonicExposure, WindowedHarmonicExposure,
-    WindowedHarmonicReadout,
+    MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS, MAX_READOUT_RECEIVER_PAIRS,
+    PreparedHarmonicExposure, PreparedHarmonicPressureArray, WindowedHarmonicExposure,
+    WindowedHarmonicPressureArray, WindowedHarmonicReadout,
 };
 
 #[cfg(test)]

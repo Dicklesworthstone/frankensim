@@ -2,8 +2,9 @@
 //!
 //! Averaging a fluctuating field precedes the covariance here. This is
 //! different from averaging instantaneous field products (energy/intensity).
-//! A coherent proper factor is integrated across all frequencies before its
-//! outer product, retaining cross-frequency and cross-receiver interference.
+//! Each coherent factor is integrated across all frequencies before applying
+//! its authored real/proper law, retaining cross-frequency, cross-receiver and
+//! nonproper pseudocovariance interference.
 
 use super::*;
 
@@ -22,7 +23,7 @@ pub struct HarmonicReceiverPair {
 pub struct HarmonicReadoutLimits {
     pub maximum_receiver_pairs: usize,
     /// Eight DD real contractions per retained receiver/frequency and sixteen
-    /// proper covariance contractions per requested pair/factor.
+    /// real/proper covariance contractions per requested pair/factor.
     pub maximum_products: usize,
     /// Logical heap payload of the temporary integrated factor, covariance
     /// accumulators, returned means and returned pair covariances.
@@ -41,7 +42,7 @@ pub struct HarmonicAveragedField {
 /// The two pressure/velocity blocks need not agree at different receivers.
 /// Their units equal intensity units, but these are NOT energy fluxes:
 /// Cov(average(p), average(u)) differs from average(p*u). Deterministic fields
-/// contribute to the means only; proper fluctuation factors determine these
+/// contribute to the means only; authored fluctuation factors determine these
 /// covariances without subtracting a large squared deterministic mean.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HarmonicReadoutCovariance {
@@ -97,7 +98,7 @@ impl PreparedHarmonicExposure<'_> {
     /// the normalized window average. A long observation can cancel the
     /// readout variance even while the instantaneous acoustic energy is nonzero.
     ///
-    /// The existing explicitly proper source-factor assumptions apply. No
+    /// The prepared real/proper joint source-factor assumptions apply. No
     /// Gaussian law, detector electronics/noise, calibration or sampling
     /// bandwidth is invented. The receiver correlations support authored real
     /// array combinations: a pressure readout with weights w has mean w^T m
@@ -184,13 +185,12 @@ impl PreparedHarmonicExposure<'_> {
         }
         let mut sums = storage(pairs.len())?;
         sums.resize(pairs.len(), [Dd::ZERO; 16]);
-        // Once integrated, each factor is a single proper complex amplitude at
-        // each receiver. The zero-frequency kernel supplies the physical 1/2.
-        let covariance = window
-            .proper_product_kernel(0.0, 0.0)
-            .map_err(window_error)?;
+        // Integrate first, then apply the original law. A real coordinate gives
+        // Re(A) Re(B); a proper coordinate gives Re(A conj(B))/2. The real DC
+        // kernel intentionally excludes imaginary readout amplitudes.
         for bank in &self.factors {
             poll(&mut cancelled)?;
+            let covariance = bank.statistics.kernel(window, 0.0, 0.0)?;
             integrated.fill([Dd::ZERO; 8]);
             integrate_bank(bank, window, &mut integrated, &mut cancelled)?;
             for (pair, sum) in pairs.iter().zip(&mut sums) {
@@ -200,9 +200,7 @@ impl PreparedHarmonicExposure<'_> {
                 for row in 0..4 {
                     for col in 0..4 {
                         sum[4 * row + col] = sum[4 * row + col]
-                            + covariance
-                                .mean_real_product_parts_dd(component(a, row), component(b, col))
-                                .map_err(window_error)?;
+                            + covariance.product(component(a, row), component(b, col))?;
                     }
                 }
             }

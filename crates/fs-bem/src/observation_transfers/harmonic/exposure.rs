@@ -1,9 +1,10 @@
 //! Finite-window p/u observations of the original prepared BEM transfers.
 //!
-//! Source phasors retain the common exp(-i omega t) clock. Deterministic
-//! fields include sum- and difference-frequency terms; explicitly proper
-//! fluctuation factors include their cross-frequency coherence. No new
-//! propagation solve, plane-wave approximation or source statistics are inferred.
+//! Source phasors retain the common exp(-i omega t) clock. Deterministic and
+//! real-coordinate fields retain sum- and difference-frequency terms; proper
+//! complex factors retain their conjugate cross-frequency coherence. Mixed
+//! statistics are explicitly authored. No propagation solve, plane-wave
+//! approximation or source statistics are inferred.
 
 use super::super::{ProducerUncertainty, ReceiverSpec, SourceId, TransferError};
 use super::{MAX_PRODUCTS, PreparedHarmonicObservation};
@@ -22,8 +23,8 @@ pub use array::{
 
 mod readout;
 pub use readout::{
-    HarmonicAveragedField, HarmonicReadoutCovariance, HarmonicReadoutLimits,
-    HarmonicReceiverPair, MAX_READOUT_RECEIVER_PAIRS, WindowedHarmonicReadout,
+    HarmonicAveragedField, HarmonicReadoutCovariance, HarmonicReadoutLimits, HarmonicReceiverPair,
+    MAX_READOUT_RECEIVER_PAIRS, WindowedHarmonicReadout,
 };
 
 /// Bounds the deterministic in-place sort used for frequency grouping.
@@ -38,6 +39,35 @@ pub const MAX_EXPOSURE_FACTORS: usize = 256;
 pub struct HarmonicExposureLine<'a> {
     pub observation: &'a PreparedHarmonicObservation,
     pub coefficients: &'a [C64],
+}
+
+/// Authored second moments of one zero-mean fluctuation coordinate.
+///
+/// A real coordinate has E[xi²] = 1. A proper complex coordinate has
+/// E[|xi|²] = 1 and E[xi²] = 0. Distinct coordinates have zero conjugate AND
+/// unconjugated cross moments, including real/proper pairs. This is a joint
+/// second-moment contract; independence, Gaussianity and stationarity are not
+/// required. Each coordinate multiplies its entire source/frequency bank.
+///
+/// Real coordinates may have complex-valued source coefficients. A real square
+/// root of the stacked real/imaginary source covariance can therefore represent
+/// general nonproper fluctuations, including arbitrary pseudocovariance,
+/// without forming a dense covariance in this observer. The proper variant is
+/// a compact representation for circular second moments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HarmonicExposureFactorStatistics {
+    Real,
+    ProperComplex,
+}
+
+impl HarmonicExposureFactorStatistics {
+    fn kernel(self, window: HarmonicWindow, a: f64, b: f64) -> Result<Kernel, TransferError> {
+        match self {
+            Self::Real => window.product_kernel(a, b).map(Kernel::Deterministic),
+            Self::ProperComplex => window.proper_product_kernel(a, b).map(Kernel::Proper),
+        }
+        .map_err(window_error)
+    }
 }
 
 /// Whole-preparation and per-window admission. Counts include supplied lines
@@ -79,12 +109,18 @@ struct Line {
 
 struct Bank {
     lines: Vec<Line>,
+    // The deterministic mean uses the real kernel but never contributes to
+    // centered readout covariance. Factor laws survive every prepared adapter.
+    statistics: HarmonicExposureFactorStatistics,
 }
 
-/// Prepared fields for a deterministic mean and explicitly joint proper
-/// fluctuation factors: E[xi_r]=0, E[xi_r conj(xi_s)]=delta_rs,
-/// E[xi_r xi_s]=0. A factor spans ALL its frequencies and source coordinates.
-/// Factors add second moments; mean/fluctuation cross terms vanish.
+/// Prepared fields for a deterministic mean and explicitly authored zero-mean
+/// real/proper fluctuation factors. The joint laws are declared by
+/// [`HarmonicExposureFactorStatistics`]. Each factor spans ALL its frequencies,
+/// sources and receivers. Factors add second moments; mean/fluctuation cross
+/// terms vanish. Real factors preserve their nonzero pseudocovariance, including
+/// carrier-sum interference in subperiod windows. Existing constructors retain
+/// their all-proper meaning.
 /// Weights belong in the peak amplitudes, not in an unscaled PSD/Hz array.
 /// No Gaussian distribution or stationarity is required or inferred.
 ///
@@ -144,6 +180,8 @@ impl WindowedHarmonicExposure<'_> {
 }
 
 impl<'a> PreparedHarmonicExposure<'a> {
+    /// Backward-compatible constructor: every fluctuation factor is proper
+    /// complex with unit conjugate variance and zero pseudocovariance.
     pub fn new(
         reference: &'a PreparedHarmonicObservation,
         source_clock: &'a str,
@@ -161,15 +199,78 @@ impl<'a> PreparedHarmonicExposure<'a> {
         )
     }
 
-    /// No partial prepared object is published after cancellation or refusal.
-    /// The canonical owner also supplies physical scope for an explicitly dark
-    /// field, so no geometry or medium needs to be invented for an empty bank.
-    #[allow(clippy::too_many_lines)] // Atomic admission, identity checks and preparation.
+    /// All-proper construction with bounded cancellation.
     pub fn new_cancellable(
         reference: &'a PreparedHarmonicObservation,
         source_clock: &'a str,
         mean: &[HarmonicExposureLine<'_>],
         proper_factors: &[&[HarmonicExposureLine<'_>]],
+        limits: HarmonicExposureLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, TransferError> {
+        Self::prepare(
+            reference,
+            source_clock,
+            mean,
+            proper_factors,
+            None,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Explicit real/proper law for every fluctuation factor, in authored order.
+    /// Empty factors still need a law and count against the factor limit.
+    /// The joint second-moment contract is on [`HarmonicExposureFactorStatistics`].
+    pub fn new_with_statistics(
+        reference: &'a PreparedHarmonicObservation,
+        source_clock: &'a str,
+        mean: &[HarmonicExposureLine<'_>],
+        factors: &[&[HarmonicExposureLine<'_>]],
+        statistics: &[HarmonicExposureFactorStatistics],
+        limits: HarmonicExposureLimits,
+    ) -> Result<Self, TransferError> {
+        Self::new_with_statistics_cancellable(
+            reference,
+            source_clock,
+            mean,
+            factors,
+            statistics,
+            limits,
+            || false,
+        )
+    }
+
+    /// No partial object is published after cancellation or refusal. The
+    /// canonical owner supplies physical scope even for a completely dark bank.
+    /// Statistics are copied into each bank; the input slice is not retained.
+    pub fn new_with_statistics_cancellable(
+        reference: &'a PreparedHarmonicObservation,
+        source_clock: &'a str,
+        mean: &[HarmonicExposureLine<'_>],
+        factors: &[&[HarmonicExposureLine<'_>]],
+        statistics: &[HarmonicExposureFactorStatistics],
+        limits: HarmonicExposureLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, TransferError> {
+        Self::prepare(
+            reference,
+            source_clock,
+            mean,
+            factors,
+            Some(statistics),
+            limits,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // Atomic admission, identity checks and preparation.
+    fn prepare(
+        reference: &'a PreparedHarmonicObservation,
+        source_clock: &'a str,
+        mean: &[HarmonicExposureLine<'_>],
+        input_factors: &[&[HarmonicExposureLine<'_>]],
+        statistics: Option<&[HarmonicExposureFactorStatistics]>,
         limits: HarmonicExposureLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, TransferError> {
@@ -177,12 +278,15 @@ impl<'a> PreparedHarmonicExposure<'a> {
         if source_clock.trim().is_empty() {
             return Err(bad("BEM exposure needs an explicit common source clock"));
         }
-        admit(proper_factors.len(), MAX_EXPOSURE_FACTORS)?;
-        admit(proper_factors.len(), limits.maximum_factors)?;
+        if statistics.is_some_and(|laws| laws.len() != input_factors.len()) {
+            return Err(bad("BEM exposure needs one statistics law per factor"));
+        }
+        admit(input_factors.len(), MAX_EXPOSURE_FACTORS)?;
+        admit(input_factors.len(), limits.maximum_factors)?;
         let mut lines = 0usize;
         let mut pairs = 0usize;
         let mut largest = 0usize;
-        for bank in core::iter::once(mean).chain(proper_factors.iter().copied()) {
+        for bank in core::iter::once(mean).chain(input_factors.iter().copied()) {
             lines = lines.checked_add(bank.len()).ok_or_else(overflow)?;
             pairs = bank
                 .len()
@@ -212,7 +316,7 @@ impl<'a> PreparedHarmonicExposure<'a> {
             .checked_mul(per_line)
             .and_then(|bytes| {
                 bytes.checked_add(
-                    proper_factors
+                    input_factors
                         .len()
                         .checked_mul(core::mem::size_of::<Bank>())?,
                 )
@@ -229,7 +333,7 @@ impl<'a> PreparedHarmonicExposure<'a> {
             .ok_or_else(overflow)?;
         admit(workspace_bytes, limits.maximum_workspace_bytes)?;
 
-        for bank in core::iter::once(mean).chain(proper_factors.iter().copied()) {
+        for bank in core::iter::once(mean).chain(input_factors.iter().copied()) {
             for line in bank {
                 poll(&mut cancelled)?;
                 let owner = line.observation;
@@ -246,10 +350,18 @@ impl<'a> PreparedHarmonicExposure<'a> {
                 owner.factors(line.coefficients, 1)?;
             }
         }
-        let mean = prepare_bank(mean, receivers, &mut cancelled)?;
-        let mut factors = storage(proper_factors.len())?;
-        for bank in proper_factors {
-            factors.push(prepare_bank(bank, receivers, &mut cancelled)?);
+        let mean = prepare_bank(
+            mean,
+            HarmonicExposureFactorStatistics::Real,
+            receivers,
+            &mut cancelled,
+        )?;
+        let mut factors = storage(input_factors.len())?;
+        for (index, bank) in input_factors.iter().enumerate() {
+            let law = statistics.map_or(HarmonicExposureFactorStatistics::ProperComplex, |laws| {
+                laws[index]
+            });
+            factors.push(prepare_bank(bank, law, receivers, &mut cancelled)?);
         }
         let actual_pairs = core::iter::once(&mean)
             .chain(factors.iter())
@@ -277,6 +389,12 @@ impl<'a> PreparedHarmonicExposure<'a> {
     }
     pub fn factor_count(&self) -> usize {
         self.factors.len()
+    }
+    /// Copied laws in original factor order, including explicitly empty banks.
+    pub fn factor_statistics(
+        &self,
+    ) -> impl ExactSizeIterator<Item = HarmonicExposureFactorStatistics> + '_ {
+        self.factors.iter().map(|bank| bank.statistics)
     }
     /// Actual receiver/frequency work after exact-frequency grouping.
     pub fn receiver_frequency_pairs(&self) -> usize {
@@ -317,27 +435,12 @@ impl<'a> PreparedHarmonicExposure<'a> {
                 }
             }
         }
-        for (bank_index, bank) in core::iter::once(&self.mean)
-            .chain(self.factors.iter())
-            .enumerate()
-        {
+        for bank in core::iter::once(&self.mean).chain(self.factors.iter()) {
             poll(&mut cancelled)?;
             for (i, a) in bank.lines.iter().enumerate() {
                 for (j, b) in bank.lines[..=i].iter().enumerate() {
                     poll(&mut cancelled)?;
-                    let kernel = if bank_index == 0 {
-                        Kernel::Deterministic(
-                            window
-                                .product_kernel(a.omega, b.omega)
-                                .map_err(window_error)?,
-                        )
-                    } else {
-                        Kernel::Proper(
-                            window
-                                .proper_product_kernel(a.omega, b.omega)
-                                .map_err(window_error)?,
-                        )
-                    };
+                    let kernel = bank.statistics.kernel(window, a.omega, b.omega)?;
                     for ((sum, af), bf) in sums.iter_mut().zip(&a.fields).zip(&b.fields) {
                         let mut index = 4;
                         for row in 0..4 {
@@ -407,6 +510,7 @@ impl<'a> PreparedHarmonicExposure<'a> {
 
 fn prepare_bank(
     input: &[HarmonicExposureLine<'_>],
+    statistics: HarmonicExposureFactorStatistics,
     receivers: usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Bank, TransferError> {
@@ -464,7 +568,7 @@ fn prepare_bank(
     {
         return Err(bad("BEM exposure coherent field is unrepresentable"));
     }
-    Ok(Bank { lines })
+    Ok(Bank { lines, statistics })
 }
 
 #[derive(Clone, Copy)]
@@ -529,3 +633,6 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), TransferError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod mixed_tests;

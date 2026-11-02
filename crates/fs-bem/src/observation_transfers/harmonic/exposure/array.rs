@@ -64,15 +64,17 @@ struct PressureLine {
 }
 struct PressureBank {
     lines: Vec<PressureLine>,
+    statistics: HarmonicExposureFactorStatistics,
 }
 
 /// Prepared channel phasors, retaining original physical receiver provenance.
 ///
-/// The optional deterministic mean and proper-complex factors come from the
-/// original exposure owner. Each factor spans all receivers AND frequencies.
-/// No independent-microphone, stationary or Gaussian approximation is made.
-/// Queries retain carrier sum terms for the deterministic mean and the
-/// difference-frequency coherence of proper factors.
+/// The deterministic mean and authored real/proper factors come from the
+/// original exposure owner. Each factor spans all receivers AND frequencies;
+/// its statistics survive the delay-and-sum transformation. No independent-
+/// microphone, stationary or Gaussian approximation is made. Queries retain
+/// carrier sum terms for the mean and real factors, and difference-frequency
+/// coherence for every factor.
 ///
 /// Delay phases and all receiver/tap contractions are prepared once. Repeated
 /// observations perform no BEM solve, delay trigonometry or spatial field
@@ -280,7 +282,10 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                     amplitudes,
                 });
             }
-            banks.push(PressureBank { lines: prepared });
+            banks.push(PressureBank {
+                lines: prepared,
+                statistics: bank.statistics,
+            });
         }
         frequencies.sort_unstable_by(f64::total_cmp);
         frequencies.dedup_by(|a, b| a.to_bits() == b.to_bits());
@@ -356,6 +361,12 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
     pub fn query_products(&self) -> usize {
         self.query_products
     }
+    /// Original factor laws; the prepared channel bank owns these copies.
+    pub fn factor_statistics(
+        &self,
+    ) -> impl ExactSizeIterator<Item = HarmonicExposureFactorStatistics> + '_ {
+        self.banks.iter().skip(1).map(|bank| bank.statistics)
+    }
 
     pub fn observe_window(
         &self,
@@ -390,9 +401,6 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         integrated.resize(n, [Dd::ZERO; 2]);
         let mut covariance = storage(n * n)?;
         covariance.resize(n * n, Dd::ZERO);
-        let zero = window
-            .proper_product_kernel(0.0, 0.0)
-            .map_err(window_error)?;
         for (bank_index, bank) in self.banks.iter().enumerate() {
             poll(&mut cancelled)?;
             integrated.fill([Dd::ZERO; 2]);
@@ -415,32 +423,19 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                     sum[0] = value[0];
                 }
             } else {
+                let zero = bank.statistics.kernel(window, 0.0, 0.0)?;
                 for row in 0..n {
                     poll(&mut cancelled)?;
                     for col in row..n {
                         covariance[row * n + col] = covariance[row * n + col]
-                            + zero
-                                .mean_real_product_parts_dd(integrated[row], integrated[col])
-                                .map_err(window_error)?;
+                            + zero.product(integrated[row], integrated[col])?;
                     }
                 }
             }
             for (i, a) in bank.lines.iter().enumerate() {
                 for (j, b) in bank.lines[..=i].iter().enumerate() {
                     poll(&mut cancelled)?;
-                    let kernel = if bank_index == 0 {
-                        Kernel::Deterministic(
-                            window
-                                .product_kernel(a.omega, b.omega)
-                                .map_err(window_error)?,
-                        )
-                    } else {
-                        Kernel::Proper(
-                            window
-                                .proper_product_kernel(a.omega, b.omega)
-                                .map_err(window_error)?,
-                        )
-                    };
+                    let kernel = bank.statistics.kernel(window, a.omega, b.omega)?;
                     let multiplicity = Dd::from_f64(if i == j { 1.0 } else { 2.0 });
                     for ((sum, &a), &b) in sums.iter_mut().zip(&a.amplitudes).zip(&b.amplitudes) {
                         sum[1] = sum[1] + multiplicity * kernel.product(a, b)?;
