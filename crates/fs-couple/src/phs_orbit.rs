@@ -14,7 +14,10 @@
 
 use core::cell::{Cell, RefCell};
 use fs_math::{c64::C64, det};
-use fs_orbit::{HbAnchor, HbBudget, HbOrbit, OrbitError, OrbitProblem, solve_hb};
+use fs_orbit::{
+    AdaptiveHbOrbit, HbAnchor, HbBudget, HbOrbit, HbRefinementBudget, OrbitError,
+    OrbitProblem, solve_hb, solve_hb_adaptive,
+};
 use fs_phs::PortHamiltonian;
 
 const MAX_INPUT_HARMONICS: usize = 256;
@@ -78,6 +81,14 @@ impl PeriodicPortInput {
     /// Declared harmonics per port, excluding the DC term, including zero padding.
     pub fn harmonic_count(&self) -> usize {
         self.coefficients.first().map_or(0, |row| row.len().saturating_sub(1))
+    }
+    /// Highest harmonic with a nonzero coefficient on any physical port.
+    /// Exact-zero padding does not increase this bandwidth; DC-only and zero
+    /// inputs both return zero. No amplitude threshold is applied.
+    pub fn highest_nonzero_harmonic(&self) -> usize {
+        self.coefficients.iter().map(|row|
+            row.iter().rposition(|c| c.re != 0.0 || c.im != 0.0).unwrap_or(0)
+        ).max().unwrap_or(0)
     }
     fn sample_into(&self, time_s: f64, out: &mut [f64]) -> bool {
         if out.len() != self.coefficients.len() || !time_s.is_finite() { return false; }
@@ -204,7 +215,8 @@ fn autonomous_problem<'a>(
 /// Every nonzero input harmonic must fit the retained HB truncation. Admission
 /// precedes storage/source evaluation, so unresolved forcing cannot alias into a
 /// lower harmonic. Trailing zero coefficients do not consume this bandwidth.
-/// Nonlinear response harmonics still require the caller's truncation refinement.
+/// Nonlinear response harmonics still require truncation refinement; use
+/// [`solve_forced_harmonic_balance_adaptive`] to request automatic refinement.
 pub fn solve_forced_harmonic_balance(
     system: &PortHamiltonian, input: &PeriodicPortInput,
     guess_amplitude: f64, budget: &HbBudget,
@@ -212,9 +224,7 @@ pub fn solve_forced_harmonic_balance(
     if !guess_amplitude.is_finite() || guess_amplitude <= 0.0 {
         return Err(bad("positive finite first-state seed amplitude required"));
     }
-    if input.coefficients.iter().any(|row| row.iter().enumerate().any(|(n, c)|
-        n > budget.harmonics && (c.re != 0.0 || c.im != 0.0)))
-    {
+    if input.highest_nonzero_harmonic() > budget.harmonics {
         return Err(bad("nonzero forcing harmonic exceeds the retained HB truncation"));
     }
     let problem = forced_problem(system, input)?;
@@ -260,6 +270,83 @@ pub fn solve_backbone_harmonic_balance(
     result.map_err(PhsOrbitError::Orbit)
 }
 
+
+/// Forced pHS response with automatic retained-harmonic refinement.
+///
+/// The first solve retains at least the highest nonzero authored input harmonic.
+/// The maximum order must leave room for a second, larger solve; unresolved
+/// forcing is refused before storage evaluation. Zero padding does not change
+/// either the starting order or the result. State tolerances use the original
+/// pHS coordinates (for example displacement and momentum, including memory);
+/// residual tolerances use their time-derivative units for this ODE adapter.
+///
+/// The returned evidence checks finite spectral bands and successive solutions,
+/// not an infinite-spectrum bound or a proof of periodic-orbit existence.
+pub fn solve_forced_harmonic_balance_adaptive(
+    system: &PortHamiltonian, input: &PeriodicPortInput,
+    guess_amplitude: f64, budget: &HbBudget, refinement: &HbRefinementBudget,
+) -> Result<AdaptiveHbOrbit, PhsOrbitError> {
+    if !guess_amplitude.is_finite() || guess_amplitude <= 0.0 {
+        return Err(bad("positive finite first-state seed amplitude required"));
+    }
+    if budget.harmonics == 0 {
+        return Err(bad("initial harmonic count must be positive"));
+    }
+    let mut initial = *budget;
+    initial.harmonics = initial.harmonics.max(input.highest_nonzero_harmonic());
+    if initial.harmonics >= refinement.max_harmonics {
+        return Err(bad("adaptive maximum must exceed the starting and forcing harmonic orders"));
+    }
+    let problem = forced_problem(system, input)?;
+    let result = solve_hb_adaptive(&problem,
+        HbAnchor::Forced { omega: input.omega_rad_s() },
+        guess_amplitude, &initial, refinement);
+    if problem.source_refused() { return Err(PhsOrbitError::SourceRefused); }
+    result.map_err(PhsOrbitError::Orbit)
+}
+
+/// Autonomous pHS orbit with retained-harmonic, waveform, and frequency checks.
+///
+/// Uses the original storage, dissipation, physical bias, and memory coordinates.
+/// Per-coordinate tolerances have the units described by
+/// [`solve_forced_harmonic_balance_adaptive`]. A non-isolated conservative family
+/// should instead be given an explicit amplitude through the backbone entry.
+pub fn solve_autonomous_harmonic_balance_adaptive(
+    system: &PortHamiltonian, bias: &[f64], omega_guess: f64,
+    guess_amplitude: f64, budget: &HbBudget, refinement: &HbRefinementBudget,
+) -> Result<AdaptiveHbOrbit, PhsOrbitError> {
+    if !omega_guess.is_finite() || omega_guess <= 0.0
+        || !guess_amplitude.is_finite() || guess_amplitude <= 0.0
+    {
+        return Err(bad("positive finite frequency and seed amplitude required"));
+    }
+    let problem = autonomous_problem(system, bias)?;
+    let result = solve_hb_adaptive(&problem,
+        HbAnchor::Autonomous { omega_guess }, guess_amplitude, budget, refinement);
+    if problem.source_refused() { return Err(PhsOrbitError::SourceRefused); }
+    result.map_err(PhsOrbitError::Orbit)
+}
+
+/// Amplitude-constrained pHS backbone with automatic harmonic refinement.
+///
+/// The pinned quantity remains the first-state fundamental amplitude. Nonlinear
+/// storage can generate higher harmonics and change the physical turning point.
+/// Every original balance row remains enforced; no loss or memory law is removed.
+pub fn solve_backbone_harmonic_balance_adaptive(
+    system: &PortHamiltonian, bias: &[f64], amplitude: f64, omega_guess: f64,
+    budget: &HbBudget, refinement: &HbRefinementBudget,
+) -> Result<AdaptiveHbOrbit, PhsOrbitError> {
+    if !amplitude.is_finite() || amplitude <= 0.0
+        || !omega_guess.is_finite() || omega_guess <= 0.0
+    {
+        return Err(bad("positive finite backbone amplitude and frequency required"));
+    }
+    let problem = autonomous_problem(system, bias)?;
+    let result = solve_hb_adaptive(&problem,
+        HbAnchor::Backbone { amplitude, omega_guess }, amplitude, budget, refinement);
+    if problem.source_refused() { return Err(PhsOrbitError::SourceRefused); }
+    result.map_err(PhsOrbitError::Orbit)
+}
 
 /// Physical whole-cycle observation of an HB orbit against the ORIGINAL pHS.
 /// This is an independent quadrature audit, not part of fs-orbit's Newton
@@ -349,6 +436,15 @@ mod tests {
         HbBudget { harmonics:n, max_newton:60, tolerance:1e-11, deflate_equilibrium:false }
     }
 
+    fn refinement(dimension: usize, max_harmonics: usize) -> HbRefinementBudget {
+        HbRefinementBudget {
+            max_harmonics,
+            residual_tolerances: vec![1e-8; dimension],
+            state_tolerances: vec![1e-7; dimension],
+            frequency_tolerance: 1e-9,
+        }
+    }
+
 
     #[test]
     fn forced_cycle_audit_closes_original_source_and_resistance_work() {
@@ -429,6 +525,15 @@ mod tests {
                 },
             );
             assert_eq!(calls.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                solve_forced_harmonic_balance_adaptive(
+                    &system, &input, 1.0, &hb(1), &refinement(1, 7),
+                ).unwrap_err(),
+                PhsOrbitError::Invalid {
+                    what: "adaptive maximum must exceed the starting and forcing harmonic orders",
+                },
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
         }
     }
 
@@ -472,6 +577,87 @@ mod tests {
         let audit = audit_forced_orbit(&system, &input, &orbit, 256).unwrap();
         assert!((audit.mean_resistance_loss_w - expected_loss).abs() < 1e-9 * expected_loss);
         assert!(audit.relative_power_residual < 1e-9);
+    }
+
+    #[test]
+    fn adaptive_forcing_resolves_authored_bandwidth_and_ignores_zero_padding() {
+        let (m, k, d, w) = (2.0, 1000.0, 4.0, 15.0);
+        let system = fs_phs::mass_spring_damper(m, k, d).unwrap();
+        let coefficients = vec![C64::from_re(2.0), C64::ZERO,
+            C64::new(1.5, -0.75), C64::ZERO, C64::new(-0.4, 0.3)];
+        let input = PeriodicPortInput::new(w, vec![coefficients.clone()]).unwrap();
+        let mut padded = coefficients.clone();
+        padded.resize(MAX_INPUT_HARMONICS + 1, C64::new(-0.0, 0.0));
+        let padded = PeriodicPortInput::new(w, vec![padded]).unwrap();
+        assert_eq!(input.highest_nonzero_harmonic(), 4);
+        assert_eq!(padded.highest_nonzero_harmonic(), 4);
+        assert_eq!(padded.harmonic_count(), MAX_INPUT_HARMONICS);
+        // N=1 is deliberately below the authored fourth harmonic. The adaptive
+        // wrapper admits its bandwidth, then independently solves a larger order.
+        let result = solve_forced_harmonic_balance_adaptive(
+            &system, &input, 0.01, &hb(1), &refinement(2, 17),
+        ).unwrap();
+        let repeated = solve_forced_harmonic_balance_adaptive(
+            &system, &padded, 0.01, &hb(1), &refinement(2, 17),
+        ).unwrap();
+        let orbit = &result.orbit;
+        assert!(orbit.coeffs[0].len() > coefficients.len());
+        assert_eq!(orbit.coeffs, repeated.orbit.coeffs);
+        assert_eq!(orbit.residual_trace, repeated.orbit.residual_trace);
+        assert_eq!(orbit.omega.to_bits(), repeated.orbit.omega.to_bits());
+        for (n, force) in coefficients.iter().enumerate() {
+            let wn = n as f64 * w;
+            let displacement = *force / C64::new(k - m * wn * wn, d * wn);
+            let momentum = displacement * C64::new(0.0, m * wn);
+            assert!((orbit.coeffs[0][n] - displacement).abs() < 1e-12);
+            assert!((orbit.coeffs[1][n] - momentum).abs() < 1e-11);
+        }
+        let audit = audit_forced_orbit(&system, &input, orbit, 512).unwrap();
+        assert!(audit.relative_power_residual < 1e-9);
+    }
+
+    #[test]
+    fn adaptive_backbone_matches_independent_energy_period_integral() {
+        let (k, alpha, mass, amplitude) = (4.0, 10.0, 2.0, 0.6);
+        let system = PortHamiltonian::new(
+            2, 0, vec![0.0, 1.0, -1.0, 0.0], vec![0.0; 4], vec![],
+            Box::new(Duffing { k, alpha, inv_mass: 1.0 / mass }),
+        ).unwrap();
+        let omega_guess = det::sqrt((k + 0.75 * alpha * amplitude * amplitude) / mass);
+        let result = solve_backbone_harmonic_balance_adaptive(
+            &system, &[], amplitude, omega_guess, &hb(1), &refinement(2, 31),
+        ).unwrap();
+        let orbit = &result.orbit;
+        assert!(orbit.coeffs[0].len() > 4);
+        assert!(orbit.coeffs[0][3].abs() > 1e-4);
+        assert!((orbit.first_harmonic_amplitude(0) - amplitude).abs() < 1e-9);
+        let initial = [orbit.sample(0, 0.0), orbit.sample(1, 0.0)];
+        let energy = system.hamiltonian(&initial);
+        let mut energy_defect: f64 = 0.0;
+        for j in 0..256 {
+            let phase = core::f64::consts::TAU * j as f64 / 256.0;
+            let state = [orbit.sample(0, phase), orbit.sample(1, phase)];
+            energy_defect = energy_defect.max((system.hamiltonian(&state) - energy).abs());
+        }
+        assert!(energy_defect < 1e-7 * energy, "energy defect {energy_defect}");
+        // Independent quadrature of dt = sqrt(m) dphi /
+        // sqrt(k + alpha*A^2*(1 + sin(phi)^2)/2), with A inferred from
+        // the conserved energy rather than equated to the fundamental amplitude.
+        let turning_squared = 4.0 * energy
+            / (k + det::sqrt(k * k + 4.0 * alpha * energy));
+        let panels = 4096;
+        let step = core::f64::consts::FRAC_PI_2 / panels as f64;
+        let mut integral = 0.0;
+        for j in 0..=panels {
+            let sine = det::sin(j as f64 * step);
+            let value = 1.0 / det::sqrt(k + 0.5 * alpha * turning_squared * (1.0 + sine * sine));
+            let weight = if j == 0 || j == panels { 1.0 }
+                else if j % 2 == 0 { 2.0 } else { 4.0 };
+            integral += weight * value;
+        }
+        let period = 4.0 * det::sqrt(mass) * step * integral / 3.0;
+        let reference_omega = core::f64::consts::TAU / period;
+        assert!((orbit.omega - reference_omega).abs() / reference_omega < 1e-8);
     }
 
     #[test]
