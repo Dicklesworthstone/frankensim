@@ -27,6 +27,8 @@ use fs_thermochem::SpeciesId;
 pub mod slab;
 mod surface;
 mod adaptive;
+/// Original Langmuir source binding for finite immobile membrane traps.
+pub mod trapping;
 /// Finite original gas parcels coupled to sorbed storage at a fixed temperature.
 pub mod reservoir;
 /// Independent source-qualified species permeation between finite gas mixtures.

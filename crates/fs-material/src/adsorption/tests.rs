@@ -1,5 +1,7 @@
 //! G0/G1/G3 synthetic Langmuir kinetics and conservative finite-gas coupling.
 //! These fixtures prove the equations and accounting, not a named adsorbent.
+#[path="tests/membrane_trapping.rs"]
+mod membrane_trapping;
 use super::*;
 use crate::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};
 use crate::thermochemical_gas::energy::GasEnergySolve;

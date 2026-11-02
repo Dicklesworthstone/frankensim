@@ -8077,6 +8077,30 @@ quadratic solutions, the native Henry limit, finite nonlinear equilibrium,
 saturation-delayed breakthrough, preload/desorption history, seals and atomic
 nonlinear/cancellation refusal; these are not measured polymer validation.
 
+### Original-source binding for finite membrane traps
+
+`membrane::transient::trapping::ResolvedTrappingMembraneDiffusion` attaches
+original `LangmuirAdsorbent` sources to the original prescribed-pressure Henry
+membrane. Explicit dry-skeleton density converts the original mol/kg capacity
+to trap mol/m3 of the complete layer. Distinct material cards explicitly declare
+composite constituents; no porosity or mobile transport coefficient is inferred.
+
+Each candidate requalifies original mobile D/S, ordered interfaces and trap
+capacity, affinity and kinetics across actual old/new cell and layer-face
+pressure envelopes. Complete typed physical contexts must match. Unowned
+composition/concentration coordinates refuse in this pure-permeant bridge.
+Original source identities and both families of receipts remain retained.
+Source failure or cancellation publishes neither inventory, clock nor receipts.
+This fixed-temperature binding adds no sorption heat or finite-gas EOS closure.
+
+Langmuir source-property evaluation admits pressure zero only when its original
+selected material domain covers it; actual gas-parcel pressure admission is
+unchanged. Three authored source-stack regressions cover source-qualified vacuum,
+native/source-bound trajectory equivalence with source rejection, and mismatched
+humidity or unowned mixture context. These integration regressions were not
+executed in the focused local dependency build; the raw coupled solver's executed
+physical tests remain a separate verification claim.
+
 ### Accuracy-controlled transient membrane windows
 
 `membrane::transient::slab::adaptive` supplies bounded backward-Euler

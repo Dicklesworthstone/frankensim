@@ -415,12 +415,14 @@ impl LangmuirAdsorbent {
             * self.molar_mass())
     }
     /// Temperature-dependent affinity from the SAME caloric and reference data.
+    /// Zero gas pressure is admissible only when the selected material claims
+    /// cover it. This evaluates a source law, not a finite gas parcel or EOS.
     pub fn properties(
         &self,
         temperature_k: f64,
         total_pressure_pa: f64,
     ) -> Result<LangmuirProperties> {
-        if !positive(total_pressure_pa)
+        if !nonnegative(total_pressure_pa)
             || temperature_k < self.temperature_range_k[0]
             || temperature_k > self.temperature_range_k[1]
             || !positive(temperature_k)
