@@ -12,6 +12,9 @@ pub mod gap;
 /// Layer-resolved exchange with explicitly authored exterior radiation baths.
 pub mod external;
 
+/// Mutual radiation and two exterior baths for vacuum-facing transmitting bodies.
+pub mod transmitting_pair;
+
 use super::{
     CoatingOpticsModel, NativeCoatingEmission, NativeCoatingEmissionError, StatefulCoatingLayer,
     SubstrateOpticsModel, SurfaceHeatingError, SurfaceHeatingReceiver,

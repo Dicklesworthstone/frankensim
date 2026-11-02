@@ -5680,3 +5680,58 @@ independent SI-Planck quadrature, opaque recovery of the original pairgap and
 exterior owners, weak positive work below a rounded reflectance deficit,
 full-band vacuum/source admission, budgets, cancellation and dark temperatures.
 <!-- coating-transmitting-pair:end -->
+
+<!-- native-coating-transmitting-pair:start -->
+### Complete native radiation for two transmitting bodies and two baths
+
+`heating::coating_exchange::transmitting_pair::NativeCoatingTransmittingExchange`
+connects two independently stored isothermal coating specimens across an
+explicit phase-averaged far-field vacuum gap. The original coherent optical
+stacks determine both their gap-facing and opposite exterior responses. Their
+common supported source band, matched wavelength/cosine/polarization, unit view
+factor and parallel/coextensive geometry remain binding assumptions. Each
+`CoatingTransmittingPair` declares two gap-facing transmitting stacks, one common
+physical face area and two independent exterior baths. Both half spaces of each
+stack must be vacuum throughout its retained band. Each body may have its own
+temperature/enthalpy optical laws and native caloric/storage identity.
+
+The six-channel `CoatingTransmittingPairResponse` owns all repeated optical
+reflections. One equal-and-opposite native `HeatTransfer` carries the body pair
+exchange. Four signed body/bath channels enter native external heat exactly
+once. A bath can reach either body through the other transmitting specimen;
+`NativeAmbient` follows the original boundary outside its corresponding body.
+Direct bath-to-bath throughput is an exterior diagnostic only, never a thermal
+source or a subtraction from either body's positive absorption. Transparent
+bodies therefore retain zero heat even with nonzero bath throughput.
+
+Both physical faces belong to this owner: each body is charged `2 * area_m2`
+against its CURRENT native exposed area. Native contact/reservoir events can
+therefore invalidate coverage, including at an advance endpoint. Distinct pairs
+declare disjoint patches; scalar area cannot prove non-overlap or detect another
+owner on the same physical ports and wavelength band. No conductive contact,
+finite-edge view factor, gap interference, near-field transfer or bolometric
+tail is inferred. Internal radiation between nonisothermal films remains outside
+this internally isothermal specimen model.
+
+Preparation bounds pair count, shared original-law rows, retained six-channel
+spectral storage, source resolutions and four coherent solves per angular/
+spectral node. Each body caches both native T and h. Changed original optical
+identities rebuild the common response; fixed optics reuse it as temperatures
+change, and unchanged states/baths reuse their Planck rates. The native source
+hook prepares both external sources and internal transfers once for the same
+accepted start state. Positive frozen-optics secants from pair and bath channels
+combine with the original conductive/source timestep limit. Nonlinear optical
+state laws and time accuracy still require timestep refinement.
+
+Accepted-start watts and actual accepted duration own the interval before
+endpoint refresh. Per-pair and per-cell energy maps report that same applied
+heat, with exterior throughput separate and internal cancellation explicit.
+Clones share immutable laws/responses and keep candidate state/energy private;
+domain, work, coverage or late-cancellation refusal leaves both accepted owners
+unchanged. The native tests include an independent unreduced gap-intensity and
+SI-Planck reference with two asymmetric evolving film stacks, unequal caloric
+masses, ordinary conduction and three timestep refinements against RK4. Further
+focused checks cover transparent throughput, two-face coverage and contact
+events, original ambient events, split continuation, fixed-optics reuse, shared
+enthalpy laws on a latent plateau, canonical pairs and atomic refusal.
+<!-- native-coating-transmitting-pair:end -->

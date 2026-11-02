@@ -17,6 +17,8 @@ use std::sync::Arc;
 mod external;
 mod gap;
 mod infrared;
+mod transmitting_pair;
+mod transmitting_pair_states;
 
 struct Hot;
 impl ThermalLaw for Hot {
