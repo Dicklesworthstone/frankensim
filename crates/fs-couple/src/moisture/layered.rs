@@ -7,8 +7,9 @@
 //!
 //! Backward Euler evolves the actual water inventory. Positive source storage
 //! secants and symmetric face conductances retain the existing tridiagonal
-//! solver. This ideal-contact reduction has no interface store or resistance,
-//! hysteresis, sorption heat, liquid flow, moving geometry or entropy certificate.
+//! solver. Explicit surface and interface activity conductances may add transfer
+//! resistance without an interface store. Hysteresis, sorption heat, liquid flow,
+//! moving geometry and an entropy certificate remain outside this reduction.
 
 use super::*;
 use fs_la::tridiagonal::TridiagonalWorkspace;
@@ -96,6 +97,32 @@ pub enum MoistureLayeredFace {
     PrescribedRelativeHumidity(f64),
 }
 
+/// Transfer law per physical area at a surface or between two materials.
+/// The finite law is j_water = h * (a_left - a_right), in kg/(m² s).
+/// Its coefficient is explicit; a gas-side velocity or dry-basis moisture
+/// coefficient cannot be substituted without the corresponding conversion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MoistureActivityTransfer {
+    IdealContact,
+    Sealed,
+    ConductanceKgM2S(f64),
+}
+
+impl MoistureActivityTransfer {
+    fn conductance(self, area: f64) -> Result<Option<f64>, MoistureError> {
+        match self {
+            Self::IdealContact => Ok(None),
+            Self::Sealed => Ok(Some(0.0)),
+            Self::ConductanceKgM2S(h) if positive(h) => {
+                Ok(Some(kirchhoff::scaled_diffusivity(area, h)?))
+            }
+            Self::ConductanceKgM2S(_) => Err(MoistureError::Invalid(
+                "activity transfer needs a finite positive area-specific conductance",
+            )),
+        }
+    }
+}
+
 /// Ordered material layers with a common area, temperature and accepted time.
 #[derive(Clone, Debug)]
 pub struct MoistureLayeredSlab {
@@ -103,14 +130,19 @@ pub struct MoistureLayeredSlab {
     layer_for_cell: Vec<usize>,
     activity: Vec<f64>,
     activity_bounds: [f64; 2],
+    exterior_transfer: [MoistureActivityTransfer; 2],
+    interface_transfer: Vec<MoistureActivityTransfer>,
     identity: ContentHash,
 }
 
-/// Ideal-contact interface: one activity, two material-specific water contents.
+/// Two material-specific surfaces with equal/opposite water transfer.
 #[derive(Clone, Debug)]
 pub struct MoistureLayerInterfaceReport {
     pub layers: [usize; 2],
+    /// Left material's activity; also the common activity at ideal contact.
     pub relative_activity: f64,
+    /// Right material's activity. A finite resistance permits a physical jump.
+    pub right_relative_activity: f64,
     pub moisture: [f64; 2],
     /// Positive from the left layer into the right; debited/credited once.
     pub water_left_to_right_kg: f64,
@@ -121,6 +153,8 @@ pub struct MoistureLayerInterfaceReport {
 pub struct MoistureLayeredReport {
     pub interval_s: [f64; 2],
     pub boundary_water_kg: [f64; 2],
+    /// Actual solid surface activities, which may differ from reservoir RH.
+    pub surface_activities: [Option<f64>; 2],
     pub interfaces: Vec<MoistureLayerInterfaceReport>,
     pub stored_water_kg: [f64; 2],
     pub water_balance_residual_kg: f64,
@@ -186,11 +220,14 @@ impl MoistureLayeredSlab {
                 "all layers need a common supported activity interval containing their initial state",
             ));
         }
+        let interface_transfer = vec![MoistureActivityTransfer::IdealContact; layers.len() - 1];
         let stack = Self {
             layers,
             layer_for_cell,
             activity,
             activity_bounds: bounds,
+            exterior_transfer: [MoistureActivityTransfer::IdealContact; 2],
+            interface_transfer,
             identity: hash.finalize(),
         };
         if !positive(stack.dry_mass_kg()) || !positive(stack.wet_mass_kg()) {
@@ -199,6 +236,49 @@ impl MoistureLayeredSlab {
             ));
         }
         Ok(stack)
+    }
+
+    /// Pin explicit transfer laws to the original geometry. The existing
+    /// constructor selects ideal contact; all exposed finite-atmosphere ends
+    /// automatically use these same exterior laws. There is no interface water
+    /// store and changing a law does not alter the accepted physical inventory.
+    pub fn with_transfer(
+        mut self,
+        exterior: [MoistureActivityTransfer; 2],
+        interfaces: Vec<MoistureActivityTransfer>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        poll(cx)?;
+        if interfaces.len() != self.layers.len() - 1 {
+            return Err(MoistureError::Invalid(
+                "one activity-transfer law is required for each material join",
+            ));
+        }
+        let area = self.layers[0].slab.geometry.cross_section_m2;
+        let mut hash = DomainHasher::new("org.frankensim.fs-couple.moisture-layered-transfer.v1");
+        hash.update(self.identity.as_bytes());
+        for transfer in exterior.iter().chain(&interfaces) {
+            poll(cx)?;
+            let g = transfer.conductance(area)?;
+            match g {
+                None => hash.update(&[0]),
+                Some(g) => {
+                    hash.update(&[1]);
+                    hash.update(&g.to_bits().to_le_bytes());
+                }
+            }
+        }
+        self.exterior_transfer = exterior;
+        self.interface_transfer = interfaces;
+        self.identity = hash.finalize();
+        Ok(self)
+    }
+
+    pub const fn exterior_transfer(&self) -> &[MoistureActivityTransfer; 2] {
+        &self.exterior_transfer
+    }
+    pub fn interface_transfer(&self) -> &[MoistureActivityTransfer] {
+        &self.interface_transfer
     }
 
     pub fn layers(&self) -> &[MoistureLayer] {
@@ -249,7 +329,8 @@ impl MoistureLayeredSlab {
                 "representable forward layered interval and positive limits required",
             ));
         }
-        let reservoir = faces.map(|face| match face {
+        let reservoir = std::array::from_fn(|side| match faces[side] {
+            _ if self.exterior_transfer[side] == MoistureActivityTransfer::Sealed => None,
             MoistureLayeredFace::Sealed => None,
             MoistureLayeredFace::PrescribedRelativeHumidity(a) => Some(a),
         });
@@ -385,6 +466,7 @@ impl MoistureLayeredSlab {
                 let report = MoistureLayeredReport {
                     interval_s: [self.time_s(), end],
                     boundary_water_kg: boundary,
+                    surface_activities: endpoint.surfaces,
                     interfaces: endpoint.interfaces,
                     stored_water_kg: [self.water_mass_kg(), water_after],
                     water_balance_residual_kg: balance,
@@ -449,6 +531,7 @@ impl MoistureLayeredSlab {
             },
             rhs: Vec::with_capacity(n),
             boundary: [0.0; 2],
+            surfaces: [None; 2],
             interfaces: Vec::new(),
         };
         for i in 0..n {
@@ -486,18 +569,21 @@ impl MoistureLayeredSlab {
                     )?,
                 )?
             } else {
-                let (g, a) = interface::join(
+                let (g, a) = interface::transfer_join(
                     [&self.layers[left], &self.layers[right]],
                     [&profiles[left], &profiles[right]],
                     [activity[i], activity[i + 1]],
+                    self.interface_transfer[left]
+                        .conductance(self.layers[left].slab.geometry.cross_section_m2)?,
                     cx,
                 )?;
                 system.interfaces.push(MoistureLayerInterfaceReport {
                     layers: [left, right],
-                    relative_activity: a,
+                    relative_activity: a[0],
+                    right_relative_activity: a[1],
                     moisture: [
-                        self.layers[left].sorption.moisture(a)?,
-                        self.layers[right].sorption.moisture(a)?,
+                        self.layers[left].sorption.moisture(a[0])?,
+                        self.layers[right].sorption.moisture(a[1])?,
                     ],
                     water_left_to_right_kg: dt * g * (activity[i] - activity[i + 1]),
                 });
@@ -512,10 +598,17 @@ impl MoistureLayeredSlab {
             poll(cx)?;
             if let Some(a) = reservoir[side] {
                 let k = self.layer_for_cell[cell];
-                let g =
-                    interface::half_conductance(&self.layers[k], &profiles[k], activity[cell], a)?;
+                let (g, surface) = interface::surface(
+                    &self.layers[k],
+                    &profiles[k],
+                    [activity[cell], a],
+                    self.exterior_transfer[side]
+                        .conductance(self.layers[k].slab.geometry.cross_section_m2)?,
+                    cx,
+                )?;
                 let coefficient = kirchhoff::scaled_diffusivity(dt, g)?;
                 system.boundary[side] = coefficient;
+                system.surfaces[side] = Some(surface);
                 system.operator.diagonal[cell] += coefficient;
                 system.rhs[cell] += coefficient * (a - reference);
             }
@@ -537,5 +630,6 @@ struct LayeredSystem {
     operator: DiffusionStep,
     rhs: Vec<f64>,
     boundary: [f64; 2],
+    surfaces: [Option<f64>; 2],
     interfaces: Vec<MoistureLayerInterfaceReport>,
 }

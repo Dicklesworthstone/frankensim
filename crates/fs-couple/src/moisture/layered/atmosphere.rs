@@ -4,8 +4,9 @@
 //! from the accepted layered fields; internal material interfaces retain their
 //! own source partition. The original atmosphere owner alone reconstructs gas
 //! composition/pressure and accepts vapor, carrier and total mass conservation.
-//! This is isothermal, fixed-volume ideal contact, without sorption heat or
+//! This is isothermal, fixed-volume transport, without sorption heat or
 //! condensation. Source dependence on changing gas pressure/composition refuses.
+//! Each stack's explicit exterior transfer laws are retained during every trial.
 
 use super::*;
 use crate::moisture::atmosphere::{
@@ -47,7 +48,7 @@ fn water_change(old: &MoistureLayeredSlab, next: &MoistureLayeredSlab) -> f64 {
     )
 }
 
-/// Resolve the same pinned source at accepted RH for the existing gas-step
+/// Resolve the same pinned source at actual solid surface RH for the gas-step
 /// report. This does not replace or refit the layer's prepared isotherm.
 fn endpoint_sorption(
     layer: &MoistureLayer,
@@ -115,11 +116,8 @@ impl FiniteMoistureAtmosphere {
         let mut sorption = [None, None];
         for (side, layer) in [0, moisture.layers.len() - 1].into_iter().enumerate() {
             poll(cx)?;
-            if exposed[side] {
-                sorption[side] = Some(endpoint_sorption(
-                    &moisture.layers[layer],
-                    shared.relative_humidity[1],
-                )?);
+            if let Some(activity) = solid.transport.surface_activities[side] {
+                sorption[side] = Some(endpoint_sorption(&moisture.layers[layer], activity)?);
             }
         }
         let step = AtmosphereMoistureStep {
@@ -183,7 +181,7 @@ impl FiniteMoistureAtmosphere {
                     "layered stacks need the same accepted clock and gas temperature",
                 ));
             }
-            if body.exposed.iter().any(|&face| face) {
+            if effective_exposure(body).into_iter().any(|face| face) {
                 let supported = body.moisture.activity_bounds;
                 if controls.relative_humidity_bracket[0] < supported[0]
                     || controls.relative_humidity_bracket[1] > supported[1]
@@ -200,12 +198,14 @@ impl FiniteMoistureAtmosphere {
                 }
             }
         }
-        let all_sealed = ordered.iter().all(|body| body.exposed == [false; 2]);
+        let all_sealed = ordered
+            .iter()
+            .all(|body| effective_exposure(body) == [false; 2]);
         let evaluate = |rh| -> Result<_, AtmosphereMoistureError> {
             let mut solids = Vec::with_capacity(ordered.len());
             for body in &ordered {
                 poll(cx)?;
-                let boundary = body.exposed.map(|exposed| {
+                let boundary = effective_exposure(body).map(|exposed| {
                     if exposed {
                         MoistureLayeredFace::PrescribedRelativeHumidity(rh)
                     } else {
@@ -236,4 +236,11 @@ impl FiniteMoistureAtmosphere {
             atmosphere, solids, step,
         ))
     }
+}
+
+fn effective_exposure(body: &LayeredMoistureParticipant<'_>) -> [bool; 2] {
+    std::array::from_fn(|side| {
+        body.exposed[side]
+            && body.moisture.exterior_transfer[side] != MoistureActivityTransfer::Sealed
+    })
 }

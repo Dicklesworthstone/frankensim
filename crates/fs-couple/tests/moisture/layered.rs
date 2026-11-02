@@ -9,6 +9,8 @@ use fs_material::state_point::{
 
 #[path = "layered/atmosphere.rs"]
 mod atmosphere;
+#[path = "layered/transfer.rs"]
+mod transfer;
 
 fn nonlinear() -> MoistureNonlinearConfig {
     MoistureNonlinearConfig {
@@ -18,6 +20,9 @@ fn nonlinear() -> MoistureNonlinearConfig {
     }
 }
 fn material(rho: f64, sorption: Vec<(f64, f64)>, diffusion: [f64; 2]) -> MaterialCard {
+    material_profile(rho, sorption, vec![(0.0, diffusion[0]), (0.6, diffusion[1])])
+}
+fn material_profile(rho: f64, sorption: Vec<(f64, f64)>, diffusion: Vec<(f64, f64)>) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (key, axis, axis_quantity, knots, lo, hi) in [
         (
@@ -32,7 +37,7 @@ fn material(rho: f64, sorption: Vec<(f64, f64)>, diffusion: [f64; 2]) -> Materia
             PropertyKey::new("moisture_diffusivity", MOISTURE_DIFFUSIVITY_DIMS),
             "moisture_content",
             qty(QuantityKind::Moisture(MoistureBasis::DryMass)),
-            vec![(0.0, diffusion[0]), (0.6, diffusion[1])],
+            diffusion,
             0.0,
             0.6,
         ),

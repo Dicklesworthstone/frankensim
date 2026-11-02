@@ -10524,8 +10524,8 @@ Reports retain interface activity, the two distinct material moisture contents,
 signed interface transfers, physical boundary transfers, source identities and
 solver evidence. `layers()[i].slab()` exposes the accepted original slab to its
 existing consumers. Exterior ends may be sealed or prescribed RH. This is
-fixed-area, isothermal ideal contact; contact resistance, hysteresis, sorption
-heat, liquid flow and moving geometry remain separate. Finite-atmosphere
+fixed-area and isothermal; explicit contact resistance is available below.
+Hysteresis, sorption heat, liquid flow and moving geometry remain separate. Finite-atmosphere
 exchange uses the explicit adapter below.
 No entropy, continuum-error or experimental-validation certificate is inferred.
 Six authored physical/source tests cover unlike-material equilibrium, transfer
@@ -10552,8 +10552,8 @@ stable participant-ID order; a sealed stack may redistribute water internally
 without changing the gas. Each exposed surface receipt pins the original
 prepared sorption claim, rather than replacing the material's isotherm.
 
-The model requires fixed temperature/volume, source-supported RH brackets and
-ideal exterior contact. Exposed layers with unowned changing pressure or
+The model requires fixed temperature/volume and source-supported RH brackets.
+Exterior contact follows the stack's explicit transfer law. Exposed layers with unowned changing pressure or
 composition source conditions refuse. Bound-water caloric storage, sorption
 heat, condensation and a closed thermal-energy balance are not inferred.
 Focused G0/G1/G3 checks cover an independent coupled two-material/finite-gas
@@ -10563,6 +10563,33 @@ or source-context refusal. Existing ordinary and Kirchhoff finite-vapor cases
 also run against the actual thermochemical and original gas-parcel owners.
 These tests do not establish measured specimen validation or full fs-exec
 application integration.
+
+### Finite activity transfer at material surfaces and joins
+
+`MoistureLayeredSlab::with_transfer` supplies explicit exterior and interlayer
+`MoistureActivityTransfer` laws: ideal contact, sealed contact, or finite water
+conductance in kg/(m2 s unit activity). Original geometry supplies the physical
+area. These declared coefficients are not inferred from gas velocity or a
+dry-basis moisture-emission coefficient.
+
+Original Kirchhoff half-cell integrals and finite contact jumps carry one
+equal/opposite water transfer without interface storage. A bounded monotone
+scalar elimination with analytic differential conductances retains the native
+tridiagonal mesh solve. Stable series arithmetic retains large resistance
+contrasts; a zero-diffusivity trial half-path uses its exact limiting resistance
+so a valid wetting root beyond a dry plateau remains reachable.
+
+Reports expose distinct left/right material interface activities and actual
+exterior solid-surface activities. Original finite-atmosphere trials retain the
+same laws and resolve sorption receipts at those actual surfaces. Configured
+sealed faces remain sealed even when exposed to the atmosphere. Fixed
+temperature/reference geometry and original source support remain explicit.
+
+Focused regressions compare independent finite-resistance balances in both
+directions, ideal/sealed limits, nonlinear dry fronts including a zero-D plateau,
+strong resistance contrasts, and actual finite-vapor conservation and surface
+source receipts. No interface storage, sorption heat, hysteresis or measured
+transfer coefficient is inferred.
 
 ### Source-backed finite surface moisture exchange
 
