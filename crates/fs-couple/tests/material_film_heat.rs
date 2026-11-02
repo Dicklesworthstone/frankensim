@@ -9,7 +9,9 @@ use fs_couple::render::plate::impact::material::heating::{
 };
 use fs_couple::render::plate::impact::material::heating::network::ReservoirCell;
 use fs_couple::render::plate::impact::squeeze::{FilmCell, FilmChannel, FilmLimits, GapPort};
-use fs_couple::render::plate::impact::squeeze::material::MaterialSqueezeFilm;
+use fs_couple::render::plate::impact::squeeze::material::{
+    MaterialChannelSqueezeFilm, MaterialSqueezeFilm,
+};
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
@@ -121,6 +123,107 @@ fn source_card_viscosity_drives_analytic_pressure_force_work_and_retains_the_que
     }
     assert!(sb.state()[3]>sa.state()[3]);
     assert!(sb.stored_energy_j()<sa.stored_energy_j());
+}
+
+#[test]
+fn channel_material_sources_drive_one_joint_pressure_and_mechanical_work() {
+    let cold = liquid(0.04, 0.2);
+    let warm = liquid(0.01, 0.2);
+    let run = |sources: &[&dyn FluidTransport]| {
+        let (a, wa) = ImpactBody::free_mass(0.2, 0.0, 0.001).unwrap();
+        let (b, wb) = ImpactBody::free_mass(0.4, 0.0, 0.0).unwrap();
+        let gap = GapPort { reference_m: GAP, closure: vec![wa, -wb] };
+        let channels = [LENGTH, 2.0 * LENGTH]
+            .into_iter()
+            .map(|length_m| FilmChannel {
+                from: 0, to: None, width_m: WIDTH, length_m, gap: gap.clone(),
+            })
+            .collect();
+        let binding = MaterialChannelSqueezeFilm::new(
+            sources,
+            vec![FilmCell { area_m2: AREA, gap }],
+            channels,
+            2,
+            FilmLimits {
+                minimum_cell_gap_m: 1e-5, maximum_gap_m: 5e-4,
+                maximum_pressure_pa: 10000.0,
+            },
+        ).unwrap();
+        assert!(std::ptr::eq(binding.sources().as_ptr(), sources.as_ptr()));
+        let mu: Vec<_> = sources.iter().map(|source| {
+            source.transport_state().unwrap().dynamic_viscosity_pa_s()
+        }).collect();
+        assert_eq!(binding.film().channel_viscosities_pa_s(), mu);
+        for (snapshot, source) in binding.transport().iter().zip(sources) {
+            assert_eq!(*snapshot, source.transport_state().unwrap());
+        }
+        // Independently add the two parallel Poiseuille conductances. An
+        // arithmetic island viscosity would fail for these unequal lengths.
+        let conductance = WIDTH * GAP.powi(3) / (12.0 * LENGTH)
+            * (1.0 / mu[0] + 0.5 / mu[1]);
+        let expected_pressure = AREA * 0.001 / conductance;
+        let mut force = [0.0; 2];
+        let mut pressure = [0.0];
+        let report = binding.film().evaluate_into(
+            &[0.0; 2], &[0.001 * 0.2_f64.sqrt(), 0.0],
+            &mut force, &mut pressure,
+        ).unwrap();
+        near(pressure[0], expected_pressure, 1e-10);
+        near(force[0] * 0.2_f64.sqrt(), AREA * expected_pressure, 1e-14);
+        near(force[1] * 0.4_f64.sqrt(), -AREA * expected_pressure, 1e-14);
+        near(report.dissipated_power_w, AREA * 0.001 * expected_pressure, 1e-16);
+        let system = ImpactSystem::new(
+            vec![a, b], vec![], vec![], vec![],
+            ImpactConfig {
+                dt_s: DT, max_steps: 512, maximum_energy_j: 1.0,
+                energy_absolute_tolerance_j: 1e-14,
+                energy_relative_tolerance: 1e-7, maximum_generalized_force: 1.0,
+            },
+        ).unwrap();
+        let (system, index) = binding.attach(system).unwrap();
+        assert_eq!(index, 0);
+        let mut prepared = system.prepare_analytic().unwrap();
+        let initial = prepared.stored_energy_j();
+        let mut loss = 0.0;
+        for _ in 0..64 {
+            loss += prepared.step(&[0.0; 2], &CancelGate::new_clock_free())
+                .unwrap().dissipated_energy_j;
+        }
+        near(prepared.stored_energy_j() + loss, initial, 1e-13);
+        (prepared.state().to_vec(), prepared.stored_energy_j())
+    };
+    let mixed = run(&[&warm, &cold]);
+    let uniform = run(&[&warm, &warm]);
+    assert!(mixed.0[3] > uniform.0[3]);
+    assert!(mixed.1 < uniform.1);
+}
+
+#[test]
+fn channel_material_binding_requires_complete_coherent_sources() {
+    let source = liquid(0.01, 0.2);
+    let mut invalid_gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100000.0).unwrap();
+    invalid_gas.dynamic_viscosity = -1.0;
+    let make = |sources: &[&dyn FluidTransport]| {
+        let gap = GapPort { reference_m: GAP, closure: vec![1.0] };
+        MaterialChannelSqueezeFilm::new(
+            sources,
+            vec![FilmCell { area_m2: AREA, gap: gap.clone() }],
+            (0..2).map(|_| FilmChannel {
+                from: 0, to: None, width_m: WIDTH, length_m: LENGTH,
+                gap: gap.clone(),
+            }).collect(),
+            1,
+            FilmLimits {
+                minimum_cell_gap_m: 1e-5, maximum_gap_m: 5e-4,
+                maximum_pressure_pa: 10000.0,
+            },
+        ).is_err()
+    };
+    assert!(make(&[]));
+    assert!(make(&[&source]));
+    assert!(make(&[&source, &source, &source]));
+    assert!(make(&[&source, &invalid_gas]));
+    assert!(!make(&[&source, &source]));
 }
 
 #[test]

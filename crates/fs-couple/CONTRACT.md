@@ -7126,6 +7126,19 @@ does not add condensation, transient gas evolution or branching mean flow.
 
 `render::plate::impact::squeeze::material::MaterialSqueezeFilm` resolves the same `FluidTransport` snapshot used by flow and heat, retains the concrete source and its receipts, and compiles viscosity into the original `fs-tribo::ResistiveFilm`. Its pressure and analytic tangent remain inside the existing joint mechanical equation. `HeatedImpactSystem::new_with_films` routes selected contact and incompressible-film work to the same finite caloric stores. Film heat is evaluated by the original pressure owner at the actual discrete-gradient velocity and midpoint geometry, then deposited once before mechanical acceptance. Existing thermal-network subcycling, conduction, external sources and rollback apply unchanged. Network reports distinguish `deposited_heat_j` from true combined-system `external_heat_j`.
 
+`MaterialChannelSqueezeFilm` retains one original `FluidTransport` owner and
+checked snapshot per hydraulic passage, in exact channel order. It compiles
+those dynamic viscosities through the same `ResistiveFilm` channel field and
+attaches the resulting pressure, full tangent and viscous-work operator to
+the existing joint mechanics. Every passage, including a closed one, requires
+a coherent source; no island-average viscosity or nominal fallback is inferred.
+Sources remain inspectable while the mechanical sample uses its frozen
+coefficients. Existing film heat routes can consume the resulting work, but
+this binding supplies no mixing, species transport, gapwise thermal profile or
+live viscosity-temperature evolution. Focused regressions recover unequal-channel
+Poiseuille pressure and work, retain source identity, close the coupled
+mechanical energy balance, and refuse incomplete or incoherent source sets.
+
 The film is frozen, incompressible, Newtonian, no-slip and quasistatic. Caller-declared thin-gap, pressure and applicable inertia/cavitation/rarefaction restrictions remain; no continuous viscosity-temperature feedback, added fluid inertia, phase-changing geometry or implicit wall/fluid heat partition is inferred. Compressible-film free-energy loss and unrelated mechanical/acoustic losses are not relabelled finite heat. The source binding remains inspectable while mechanics owns its immutable compiled pressure operator. Regression sources cover data-only liquid viscosity/caloric swaps, analytic pressure/work, unchanged mechanical stepping, finite temperature and network conduction, and atomic refusals. Native execution was unavailable in this session; the independent numerical reduction is not a Rust test pass.
 
 ### Material relaxation through finite heat and transport
