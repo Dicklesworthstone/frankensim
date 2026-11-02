@@ -332,7 +332,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
 
 // Reservoir zero is the original conductor; subsequent indices are its
 // original Debye poles. A zero-conductivity Ohmic channel is exactly dark.
-fn reservoir_range(
+pub(super) fn reservoir_range(
     channel: AngularSpectrumExposureHeatChannel,
     sigma: f64,
     poles: usize,
@@ -381,7 +381,7 @@ fn prepare_products(
         .map_err(spectrum_error)
 }
 
-fn nonnegative_heat(value: f64) -> Result<f64, AngularSpectrumError> {
+pub(super) fn nonnegative_heat(value: f64) -> Result<f64, AngularSpectrumError> {
     if value < 0.0 {
         Err(bad(
             "irreversible heat spectrum lost numerical nonnegativity",
@@ -391,7 +391,7 @@ fn nonnegative_heat(value: f64) -> Result<f64, AngularSpectrumError> {
     }
 }
 
-fn spectrum_error(error: ProductSpectrumError) -> AngularSpectrumError {
+pub(super) fn spectrum_error(error: ProductSpectrumError) -> AngularSpectrumError {
     match error {
         ProductSpectrumError::Cancelled => AngularSpectrumError::Cancelled,
         _ => bad("heat spectrum is outside its work/storage or numerical domain"),

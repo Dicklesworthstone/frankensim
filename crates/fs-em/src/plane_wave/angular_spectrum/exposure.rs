@@ -36,8 +36,10 @@ mod layer;
 pub use layer::{
     AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
     AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
-    AngularSpectrumExposureLayerHeatSpectrum, AngularSpectrumExposureLayerLimits,
-    PreparedAngularSpectrumExposureLayer,
+    AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumExposureLayerHeatSpectrum,
+    AngularSpectrumExposureLayerLimits, AngularSpectrumHeatAreaQuadrature,
+    AngularSpectrumHeatDepthSample, AngularSpectrumHeatVolumeQuadrature,
+    AngularSpectrumIntegratedHeatLimits, PreparedAngularSpectrumExposureLayer,
 };
 
 /// Whole-line-bank bounds for a query. Pair work counts N*F² for N spatial

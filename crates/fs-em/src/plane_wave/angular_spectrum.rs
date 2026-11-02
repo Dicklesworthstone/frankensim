@@ -54,11 +54,13 @@ pub use exposure::{
     AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureField,
     AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
     AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
-    AngularSpectrumExposureLayerHeatSpectrum, AngularSpectrumExposureLayerLimits,
-    AngularSpectrumExposureLimits, AngularSpectrumExposurePoint,
-    AngularSpectrumExposureStressField, AngularSpectrumExposureStressLimits,
-    AngularSpectrumExposureStressPoint, AngularSpectrumFactorStatistics,
-    PreparedAngularSpectrumExposureLayer,
+    AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumExposureLayerHeatSpectrum,
+    AngularSpectrumExposureLayerLimits, AngularSpectrumExposureLimits,
+    AngularSpectrumExposurePoint, AngularSpectrumExposureStressField,
+    AngularSpectrumExposureStressLimits, AngularSpectrumExposureStressPoint,
+    AngularSpectrumFactorStatistics, AngularSpectrumHeatAreaQuadrature,
+    AngularSpectrumHeatDepthSample, AngularSpectrumHeatVolumeQuadrature,
+    AngularSpectrumIntegratedHeatLimits, PreparedAngularSpectrumExposureLayer,
 };
 
 /// Bounds the uninterruptible work of one existing FFT pencil.

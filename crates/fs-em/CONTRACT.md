@@ -2888,3 +2888,104 @@ actual film-owner integration tests are authored and formatted but were not
 executed or fully typechecked with the complete EM dependency graph here.
 This evidence is scoped to reservoir/filter/product mathematics, not a full
 Maxwell solve, temperature-feedback integration or repository quality gate.
+
+### Physically integrated film heat-load spectra
+
+`PreparedAngularSpectrumExposureLayer::integrated_heat_spectrum` integrates
+actual coherent internal fields into watts. The returned
+`AngularSpectrumExposureLayerHeatLoadSpectrum` borrows the original prepared
+layer and the complete authored volume quadrature. It exposes the selected
+Ohmic/Debye channel, original grid, declared support, actual DD sums of cell
+areas/depth weights and represented volume, together with the shared analytic
+spectrum. This spectrum is ALREADY in W; a thermal consumer must not multiply
+it by volume again or debit overlapping local/integrated absorption.
+
+`AngularSpectrumHeatVolumeQuadrature` names an explicit depth span within the
+original film and positive `AngularSpectrumHeatDepthSample` weights in metres.
+Every node lies in the declared span. The weight sum must match its length
+within 32*f64::EPSILON relative allowance. Actual authored weights are retained
+and used unchanged; no normalization forces agreement.
+`AngularSpectrumHeatAreaQuadrature::PeriodicCell` uses original dx*dy for each
+row-major cell. `CellAreasM2` supplies one finite area in [0,dx*dy] per original
+cell; zero masks a cell and positive fractions describe partial cells without
+relocating field samples. An all-zero mask is an explicitly empty support.
+
+For every source bank, each original frequency plane is reconstructed once
+per depth through the existing coherent field owner and retained only for that
+depth. The spatial DD contractions are the volume quadratures of
+E_f dot conj(E_g) and E_f dot E_g. Original cached reservoir-transfer products
+are summed once per frequency pair, outside the spatial/depth loops:
+sigma plus sum H_rf*conj(H_rg), or sigma plus sum H_rf*H_rg.
+This avoids repeating spatial work for every selected Debye pole.
+The original PoleTransfer remains the sole constitutive response owner.
+
+Spatial and reservoir real/imaginary accumulators each carry a DD mantissa
+and separate binary exponent. Exact power-of-two decomposition keeps tiny
+field squares or tiny reservoir-response squares from underflowing before
+large balancing physical coefficients are applied; the inverse large-square
+cases also avoid premature overflow. Area/depth weights participate in this
+same arithmetic. Physical watt amplitudes are restored only after spatial,
+reservoir and diagonal scales meet. Nonzero final tones outside the DD
+amplitude range explicitly refuse instead of becoming a dark spectrum.
+This extends dynamic range, not DD precision or arbitrary-null accuracy.
+The enlarged actual pair-cache type is included in workspace admission.
+
+The heat is a symmetric sum of squared real fields. Upper frequency pairs
+combine their symmetric counterparts: diagonal terms retain factor 1/2 and
+off-diagonal terms receive factor 1. Real factors and deterministic means
+emit sum and difference tones; proper factors emit differences only.
+Complete positive-time EM coefficients are conjugated into the shared
+negative-time convention, retaining DD native angular frequencies.
+Spatial/depth contraction precedes emission: adding samples does not multiply
+the number of retained tones. Reversible electromagnetic/polarization storage,
+boundary momentum work and parameter work are excluded from deposited heat.
+
+`AngularSpectrumIntegratedHeatLimits` separately admits depth sample count,
+repeated original point/source-line and FFT work, spatial point/frequency-pair
+work, reservoir/frequency-pair work, generated tones and conservative peak
+workspace. The shared hard term ceiling still applies. With Z depth samples,
+N original grid points, F_r frequencies per bank, R selected reservoirs and K
+generated terms, added work is O(Z*N*sum F_r^2 + R*sum F_r^2 + K log K), besides
+Z original field reconstructions. Additional retained storage is
+O(max_r(N*F_r + F_r^2) + K), including both contracted raw terms and shared
+tone preparation. The conservative bound also includes the original complete
+prepared-layer workspace. Borrowed inputs and allocator overhead are excluded.
+Cancellation/refusal publishes no partial load and leaves the original owner
+reusable. Scalar/window observations allocate nothing; negative rounded heat
+refuses rather than being clipped.
+
+This is an explicit physical-volume numerical quadrature. It is not an
+arbitrary point-density times a free volume parameter, nor an exact continuous
+aperture/depth integral. Original transverse sampling can alias field PRODUCTS
+even when fields are resolved; depth samples must resolve interference,
+standing waves and attenuation. The caller owns support and refinement.
+No quadrature error enclosure, isolated-aperture convergence, switch-on state
+or material-temperature feedback is inferred.
+
+Five focused G1/G3/G4 regressions compiled, linked and executed natively with
+real fs_math: 5 passed, 0 failed. They exercise exact new spatial contraction
+and volume admission, original PoleTransfer and shared spectral preparation.
+Independent positive-time original-ODE currents and the exact eight mixed
+real/proper states agree across two poles, vector fields, partial/full cells
+and both shutter profiles. Tests verify one frequency-plane callback per
+bank/frequency/depth independent of reservoir count, fixed spectral term
+count when depth sampling doubles, preserved authored weights, invalid support,
+cancellation and malformed-plane refusal. Extreme-scale regressions retain
+finite heat for sigma=1e200 with E=1e-200, tiny original Debye responses with
+large fields, large original Debye responses with tiny fields, and large
+fields integrated over tiny physical areas, for real and proper laws.
+Independent references filter or balance physical operands before their
+products, matching the existing local-owner convention. Truly unrepresentable
+nonzero final watt tones refuse; genuinely zero fields remain dark.
+Upstream Maxwell propagation and material source admission are explicit nominal boundaries in this focused
+executable; those boundary methods are not executed.
+
+Two additional original-owner integration tests are authored and formatted:
+a partial-cell mask retains a proper-source beat that cancels over the full
+periodic cell, with original finite-window heat comparisons; depth refinement
+converges to original monochromatic absorbed watts, with exact budget and
+cancellation/replay checks. Those full-owner tests were not executed or fully
+typechecked against the complete EM dependency graph here. An independent
+normal-incidence film reference confirms the latter fixture's 19.7507815275 W
+absorption and Simpson errors 2.89e-3, 1.02e-5 and 6.34e-7 W for 8,32,64
+intervals; this separate reference is not execution of the Rust film owner.

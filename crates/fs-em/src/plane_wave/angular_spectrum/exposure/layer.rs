@@ -11,6 +11,13 @@ use crate::plane_wave::layers::{FIELD_PREPARATION_WORKSPACE_BYTES, PreparedLayer
 mod reservoir;
 use reservoir::{LossLaw, PoleTransfer};
 
+mod integrated_heat;
+pub use integrated_heat::{
+    AngularSpectrumExposureLayerHeatLoadSpectrum, AngularSpectrumHeatAreaQuadrature,
+    AngularSpectrumHeatDepthSample, AngularSpectrumHeatVolumeQuadrature,
+    AngularSpectrumIntegratedHeatLimits,
+};
+
 mod heat_spectrum;
 pub use heat_spectrum::{
     AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
