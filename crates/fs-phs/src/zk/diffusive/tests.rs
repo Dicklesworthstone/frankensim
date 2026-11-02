@@ -108,3 +108,35 @@ fn invalid_or_unresolved_diffusion_never_becomes_lossless() {
     assert!(model.response_at(f64::NAN).is_err());
     assert!(ZkDiffusive::new(1.0, 1.0, 1.0, 1.4, 0.71, 16, [1e-18, 1e-15], 0.1).is_err()); // existing exact-Bessel shear domain
 }
+
+// frankensim-986oi: a pole count too small for the band is a resolution refusal, not a definiteness
+// failure, and its text must not claim one. Planted negative: a one-pole measure whose Jacobi
+// matrix is [-1] has a negative eigenvalue and still reports NotPsd; a non-finite entry does not.
+#[test]
+fn band_refusal_is_unadmitted_and_only_a_negative_jacobi_eigenvalue_is_not_psd() {
+    let refused = model(4, 1e-4).unwrap_err();
+    assert_eq!(
+        refused,
+        PhsError::Unadmitted {
+            what: "ZK diffusive pole count does not resolve the declared band"
+        }
+    );
+    let text = refused.to_string();
+    assert_eq!(
+        text,
+        "refused: ZK diffusive pole count does not resolve the declared band"
+    );
+    assert!(!text.contains("positive semidefinite") && !text.contains("NotPsd"));
+    assert_eq!(
+        measure(-1.0, 1).unwrap_err(),
+        PhsError::NotPsd {
+            what: "ZK diffusive Jacobi matrix"
+        }
+    );
+    assert_eq!(
+        measure(f64::NAN, 1).unwrap_err(),
+        PhsError::Unadmitted {
+            what: "ZK diffusive spectral measure is not strictly positive"
+        }
+    );
+}

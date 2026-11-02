@@ -112,8 +112,10 @@ impl ZkDiffusiveBasis {
     }
 }
 
+// No refusal here is a definiteness claim except the measure's negative eigenvalue below
+// (bead frankensim-986oi), so the helper does not say "is not positive semidefinite".
 fn invalid(what: &'static str) -> PhsError {
-    PhsError::NotPsd { what }
+    PhsError::Unadmitted { what }
 }
 
 /// Positive Jacobi spectral measure of
@@ -142,6 +144,13 @@ fn measure(a0: f64, n: usize) -> Result<Vec<(f64, f64)>, PhsError> {
     for k in 0..n {
         let lambda = values[k];
         let weight = vectors[k] * vectors[k];
+        // A finite negative eigenvalue is the one definiteness failure; a zero or
+        // non-finite eigenvalue or weight is not.
+        if lambda.is_finite() && lambda < 0.0 {
+            return Err(PhsError::NotPsd {
+                what: "ZK diffusive Jacobi matrix",
+            });
+        }
         if !lambda.is_finite() || lambda <= 0.0 || !weight.is_finite() || weight <= 0.0 {
             return Err(invalid(
                 "ZK diffusive spectral measure is not strictly positive",

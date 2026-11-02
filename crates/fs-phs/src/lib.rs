@@ -465,6 +465,11 @@ pub enum PhsError {
         /// Which matrix.
         what: &'static str,
     },
+    /// A named domain, resolution or convergence refusal. Not a statement about definiteness.
+    Unadmitted {
+        /// What was refused, in full.
+        what: &'static str,
+    },
     /// Dimension mismatch between parts.
     Dimension {
         /// What disagreed.
@@ -507,6 +512,7 @@ impl core::fmt::Display for PhsError {
             PhsError::LinearSplitBudget { what } => write!(f, "linear split refused: {what}"),
             PhsError::NotSymmetric { what } => write!(f, "{what} violates its symmetry class"),
             PhsError::NotPsd { what } => write!(f, "{what} is not positive semidefinite"),
+            PhsError::Unadmitted { what } => write!(f, "refused: {what}"),
             PhsError::Dimension { what } => write!(f, "dimension mismatch: {what}"),
             PhsError::DescriptorDomain { what } => write!(f, "descriptor domain refused: {what}"),
             PhsError::RelaxationParameters => write!(

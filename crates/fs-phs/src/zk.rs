@@ -87,7 +87,7 @@ fn admit(rv: f64) -> Result<(), PhsError> {
     if rv.is_finite() && (ZK_MIN_SHEAR..=ZK_MAX_SHEAR).contains(&rv) {
         Ok(())
     } else {
-        Err(PhsError::NotPsd {
+        Err(PhsError::Unadmitted {
             what: "Zwikker–Kosten rv outside [1e-6, 1e6]",
         })
     }
@@ -124,7 +124,7 @@ fn checked_series(rv: f64) -> Result<(C64, C64), PhsError> {
             .iter()
             .all(|v| v.is_finite())
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "Zwikker–Kosten defining series unresolved",
         });
     }
@@ -159,7 +159,7 @@ fn continued_fraction(rv: f64) -> Result<C64, PhsError> {
             return Ok(f.scale(2.0) / w);
         }
     }
-    Err(PhsError::NotPsd {
+    Err(PhsError::Unadmitted {
         what: "Zwikker–Kosten continued fraction exhausted",
     })
 }
@@ -290,12 +290,34 @@ mod tests {
         ] {
             assert!(matches!(
                 zwikker_kosten_f(rv),
-                Err(PhsError::NotPsd {
+                Err(PhsError::Unadmitted {
                     what: "Zwikker–Kosten rv outside [1e-6, 1e6]"
                 })
             ));
             assert!(zk_one_minus_f(rv).is_err());
         }
+    }
+
+    /// frankensim-986oi: the domain refusal is not a definiteness failure, so its text must not
+    /// claim one. Planted negative: an indefinite `Q` is one, and still reports `NotPsd`.
+    #[test]
+    fn zk_domain_refusal_is_unadmitted_and_an_indefinite_q_stays_not_psd() {
+        let refused = zwikker_kosten_f(0.0).unwrap_err();
+        assert_eq!(
+            refused,
+            PhsError::Unadmitted {
+                what: "Zwikker–Kosten rv outside [1e-6, 1e6]"
+            }
+        );
+        let text = refused.to_string();
+        assert_eq!(text, "refused: Zwikker–Kosten rv outside [1e-6, 1e6]");
+        assert!(!text.contains("positive semidefinite") && !text.contains("NotPsd"));
+        let indefinite = crate::QuadraticStorage::new(vec![1.0, 0.0, 0.0, -1.0], 2).err();
+        assert_eq!(indefinite, Some(PhsError::NotPsd { what: "Q" }));
+        assert_eq!(
+            indefinite.unwrap().to_string(),
+            "Q is not positive semidefinite"
+        );
     }
 
     /// G0/G2: a pin keeps both quadratures of the exact telegraph law.

@@ -531,8 +531,14 @@ targets 1e-12 agreement against a dd backward fraction on 400 log points,
 `zk_one_minus_f_small_rv_no_cancellation` targets 1e-14; domain/cap tests
 also certify the extended endpoints. `zk_pin_keeps_positive_resistance_and_thermal_compliance`
 checks both series/shunt quadratures and refusals. These new tests await
-central native qualification. PhsError has no domain variant, so named
-NotPsd refusals are retained for this item; the enum label is historical.
+central native qualification. The refusals of `zk.rs` and
+`zk/diffusive.rs` are `PhsError::Unadmitted`, displayed as
+`refused: {what}`: domain, resolution and convergence refusals that claim
+nothing about definiteness (frankensim-986oi). There is one exception. A
+negative eigenvalue of the `ZkDiffusive` Jacobi measure is
+`PhsError::NotPsd`, the variant that means a negative eigenvalue. Domain
+refusals elsewhere in fs-phs that still return NotPsd are not moved by
+this change.
 
 1. Admission rejects non-skew `J`, asymmetric or non-PSD `R`, non-PSD
    `Q`, and bad dimensions by name.
