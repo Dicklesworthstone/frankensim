@@ -76,6 +76,43 @@ fn zero(model: &MaterialFluidFrame<'_,FluidTransportState>) -> Vec<f64> {
     model.state_from_motion(&vec![ModalAcousticState::default();model.basis().modes().len()],
         &vec![0.0;model.memory_masses_kg().len()]).unwrap()
 }
+/// Polynomials in s = x/L, ascending coefficients; integrals over the unit interval are exact term by term.
+fn poly_mul(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; a.len()+b.len()-1];
+    for (i,x) in a.iter().enumerate() { for (j,y) in b.iter().enumerate() { out[i+j] += x*y; } }
+    out
+}
+fn unit_integral(p: &[f64]) -> f64 { p.iter().enumerate().map(|(k,c)| c/(k as f64+1.0)).sum() }
+/// `frame(.., false)` is one member with node 0 clamped and node 1 free in y with its rotation held, so its only
+/// transverse shape is the cubic Hermite w = y1 N(s), N = 3 s^2 - 2 s^3, and the integrals are taken from these
+/// coefficients, not from the solver.
+const GUIDED_N: [f64; 4] = [0.0, 0.0, 3.0, -2.0];
+const GUIDED_DN: [f64; 3] = [0.0, 6.0, -6.0];
+fn guided_n2() -> f64 { unit_integral(&poly_mul(&GUIDED_N,&GUIDED_N)) }
+/// The dry kinetic energy of that mode is rho A L y1^2 int N^2 (member translation, the Hermite inertia the exterior
+/// fluid shares) plus rho I y1^2/L int N'^2 (the sectional rotary inertia the frame has carried since fs-solid
+/// 271837977). Returns the second over the first for a HOMOGENEOUS section (rho I = line density * I/A).
+fn guided_rotary_share(section: &ConcentricElasticSection, length: f64) -> f64 {
+    let spin = section.line_density_kg_m()*section.second_moment_m4()/section.area_m2();
+    spin/(section.line_density_kg_m()*length*length)*unit_integral(&poly_mul(&GUIDED_DN,&GUIDED_DN))/guided_n2()
+}
+/// Added fluid mass per length over the member's line density: pi r^2 rho_f / (rho_s A) from the section's own radius.
+fn guided_added_ratio(section: &ConcentricElasticSection, fluid_density: f64) -> f64 {
+    core::f64::consts::PI*section.outer_radius_m().powi(2)*fluid_density/section.line_density_kg_m()
+}
+/// The same member as `frame(.., false)` through the RAW centerline-only path (no sectional rotary inertia).
+fn raw_guided_frame(section: &ConcentricElasticSection) -> Frame2d {
+    let (ea,ei) = (section.axial_stiffness_n(),section.bending_stiffness_n_m2());
+    let mut raw = Frame2d::with_mass_formulation(Geometry::Linear,FrameMassFormulation::ConsistentReference);
+    raw.add_node(0.0,0.0); raw.add_node(1.0,0.0);
+    raw.fix(0,[true;3]); raw.fix(1,[true,false,true]);
+    raw.add_element(0,1,3,section.line_density_kg_m(),&|| SectionModel::Elastic { ea, ei }).unwrap();
+    raw
+}
+/// The transverse nodal component (dof 4) of the single mass-normalised dry mode.
+fn guided_phi(frame: &Frame2d) -> f64 {
+    FrameVibrationBasis::from_frame(frame,1,frame_budget(),|| false).unwrap().modes()[0].displacement[4]
+}
 
 #[test]
 fn original_material_geometry_drives_all_added_inertia_and_fluid_sources_survive() {
@@ -85,9 +122,23 @@ fn original_material_geometry_drives_all_added_inertia_and_fluid_sources_survive
     assert_eq!(sim.members()[0].element(),0);
     assert_eq!(sim.members()[0].flow().radius_m(),frame.material_section(0).unwrap().outer_radius_m());
     assert_eq!(sim.members()[0].flow().fluid(),&fluid(400.0,0.1));
-    // All transverse mass comes from one homogeneous circular member. Fluid
-    // and solid have the SAME Hermite spatial inertia, so the ratio is exact.
-    near(sim.modal_mass_matrix()[0],1.0+400.0/1000.0,2e-10);
+    // All transverse mass comes from one homogeneous circular member. The fluid and the solid's TRANSLATION share the
+    // same Hermite spatial inertia; the solid also carries sectional rotary inertia (fs-solid 271837977), which the
+    // exterior fluid does not, so M = 1 + (rho_f/rho_s)/(1+share). The test asserted M = 1 + rho_f/rho_s = 1.4 before
+    // that change; the share is derived here from the section's own I and A and the exact Hermite integrals.
+    let member = frame.material_section(0).unwrap();
+    let share = guided_rotary_share(member,1.0);
+    let ratio = guided_added_ratio(member,400.0);
+    near(ratio,0.4,1e-14);
+    near(sim.modal_mass_matrix()[0],1.0+ratio/(1.0+share),2e-10);
+    assert!((sim.modal_mass_matrix()[0]-1.4).abs() > 1e-4,"the centerline-only premise no longer describes this member");
+    // Dry normalisation carries the rotary term; the RAW centerline-only member has none and gives exactly 1 + ratio.
+    let phi = guided_phi(&frame);
+    near(phi*phi*member.line_density_kg_m()*guided_n2()*(1.0+share),1.0,1e-12);
+    let raw = raw_guided_frame(member);
+    let phi_raw = guided_phi(&raw);
+    near(phi_raw*phi_raw*member.line_density_kg_m()*guided_n2(),1.0,1e-12);
+    near(1.0+core::f64::consts::PI*member.outer_radius_m().powi(2)*400.0*phi_raw*phi_raw*guided_n2(),1.4,1e-12);
     assert_eq!(sim.memory_masses_kg().len(),12);
     assert_eq!(sim.system().state_dim(),14);
     assert!(sim.mass_inverse_residual() < 1e-12);

@@ -320,8 +320,42 @@ fn g3_non_affine_and_incomplete_support_refuse_even_with_equal_endpoints() {
     }
     // Same material label does not authorize a different source card.
     assert!(ThermalFieldStorage::capacitor(&kinked, &original, "T", [250.0, 450.0]).is_err());
-    let untyped = capacitor(&affine, &QueryPoint::new().with("T", 300.0).unwrap());
-    assert!(ThermalFieldStorage::capacitor(&affine, &untyped, "T", [250.0, 450.0]).is_err());
+    // An untyped coordinate never reaches the thermal law: the original capacitor cannot even be resolved at it
+    // (AxisQuantityMismatch, the card declares T absolute). This line used to unwrap that resolution through
+    // `capacitor()`, which panicked before the law's assertion could run (the test was red from its first commit).
+    assert!(
+        ResolvedCapacitor::resolve(
+            &affine,
+            &QueryPoint::new().with("T", 300.0).unwrap(),
+            MaterialPropertySelection::SingleClaimOnly,
+            0.02,
+            0.001,
+        )
+        .is_err()
+    );
+    // The law's OWN guard (affine_source_path): a card and a query that agree on a coordinate typed only by its
+    // dimensions (a temperature, not declared ABSOLUTE) resolve together, and the thermal law still refuses it.
+    let dimensional_spec = QuantitySpec::dimensional(Temperature::DIMS);
+    let dimensional_card = card(
+        ELECTRIC_PERMITTIVITY_PROPERTY,
+        dims,
+        PropertyValue::Curve {
+            abscissa: "T".into(),
+            abscissa_dims: Temperature::DIMS,
+            knots: vec![(250.0, 4e-11), (450.0, 8e-11)],
+            dims,
+        },
+        ValidityDomain::unconstrained().with_quantity("T", dimensional_spec, 200.0, 500.0),
+    );
+    let dimensional = QueryPoint::new()
+        .with_quantity("T", dimensional_spec, 300.0)
+        .unwrap();
+    let original = capacitor(&dimensional_card, &dimensional);
+    let refusal = ThermalFieldStorage::capacitor(&dimensional_card, &original, "T", [250.0, 450.0])
+        .err()
+        .map(|error| format!("{error:?}"))
+        .expect("a dimensional-only thermal coordinate must be refused");
+    assert!(refusal.contains("absolute-temperature semantics"), "{refusal}");
 }
 
 #[test]

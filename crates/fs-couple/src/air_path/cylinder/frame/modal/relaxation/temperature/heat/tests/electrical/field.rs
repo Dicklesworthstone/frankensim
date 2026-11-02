@@ -7,6 +7,38 @@ use fs_material::field_storage::{ResolvedCapacitor, ResolvedInductor,
     ELECTRIC_PERMITTIVITY_DIMS, ELECTRIC_PERMITTIVITY_PROPERTY,
     MAGNETIC_PERMEABILITY_DIMS, MAGNETIC_PERMEABILITY_PROPERTY,
     thermal::ThermalFieldStorage};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+// fs-material's field laws (ThermalFieldStorage::capacitor/inductor, affine_source_path) accept a thermal coordinate only
+// when the query declares it as ABSOLUTE temperature, and a claim is evaluated only through an axis whose declared
+// quantity is EXACTLY the query's (fs-evidence ValidityDomain::axis_quantity_mismatch). The shared heat fixture in
+// ../../tests.rs declares T as a dimensional temperature, which fs-couple's own temperature_query accepts for its
+// 27 tests, so the field cards, the query points and the frame are typed here and the shared fixture is left alone.
+fn kelvin() -> QuantitySpec { QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature, ValueForm::Static)) }
+fn field_point(t: f64) -> QueryPoint {
+    QueryPoint::new().with_quantity("T",kelvin(),t).unwrap().with("omega",1.0).unwrap()
+}
+/// The same claim with its validity's T axis declared as absolute temperature; every bound and other axis is kept.
+fn absolute_t(claim: &PropertyClaim) -> PropertyClaim {
+    let mut validity = ValidityDomain::unconstrained();
+    for (axis,&(lo,hi)) in claim.validity.bounds() {
+        validity = if axis == "T" { validity.with_quantity("T",kelvin(),lo,hi) }
+            else if let Some(&quantity) = claim.validity.axis_quantities().get(axis) { validity.with_quantity(axis.clone(),quantity,lo,hi) }
+            else { validity.with(axis.clone(),lo,hi) };
+    }
+    PropertyClaim { validity, ..claim.clone() }
+}
+/// `frame()` of ../../tests.rs, resolved at the absolute-temperature point.
+fn field_frame(cards: &[MaterialCard;2]) -> Frame2d {
+    let requirements=[("density",Density::DIMS),("young_modulus",Pressure::DIMS),("equilibrium",Pressure::DIMS),
+        ("increment",Pressure::DIMS),("time",Time::DIMS)].map(|(n,d)|ScalarPropertyRequirement::try_new(n,d,ScalarAdmissibility::Finite).unwrap());
+    let section=ConcentricElasticSection::try_new(0.0,cards.iter().enumerate().map(|(layer,card)|ConcentricMaterialLayer {
+        outer_radius_m:RADII[layer],material:resolve_material_state_point(card,&field_point(300.0),&requirements,
+            MaterialPropertySelection::SingleClaimOnly).unwrap()}).collect()).unwrap();
+    let mut f=Frame2d::with_mass_formulation(Geometry::Linear,FrameMassFormulation::ConsistentReference);
+    f.add_node(0.0,0.0);f.add_node(1.0,0.0);f.fix(0,[true;3]);f.fix(1,[true,false,true]);
+    f.add_material_element(0,1,3,section).unwrap();f
+}
 
 #[derive(Clone, Copy)]
 struct Spec { magnetic: bool, slope: f64 }
@@ -23,7 +55,7 @@ fn physical(s: Spec, t: f64, z: f64) -> (f64, f64, f64) {
 fn source(layer: usize, s: Spec) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let (card, _) = powered_source(layer,1.0,false);
     let mut claims = ClaimSet::new();
-    for (_, claim) in card.claims().claims_ordered() { claims.insert_claim(claim.clone()).unwrap(); }
+    for (_, claim) in card.claims().claims_ordered() { claims.insert_claim(absolute_t(claim)).unwrap(); }
     let (name,dims) = if s.magnetic { (MAGNETIC_PERMEABILITY_PROPERTY,MAGNETIC_PERMEABILITY_DIMS) }
         else { (ELECTRIC_PERMITTIVITY_PROPERTY,ELECTRIC_PERMITTIVITY_DIMS) };
     let value = coefficient(s,300.0)/area(layer); // Original area and 1 m gap/path.
@@ -31,7 +63,7 @@ fn source(layer: usize, s: Spec) -> (MaterialCard, ResolvedHeatCapacityCurve) {
         value:if s.slope==0.0 {PropertyValue::Scalar {value,dims}} else {
             PropertyValue::Curve {abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
                 knots:vec![(290.0,value*(1.0-10.0*s.slope)),(340.0,value*(1.0+40.0*s.slope))],dims}},
-        validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),290.0,340.0),
+        validity:ValidityDomain::unconstrained().with_quantity("T",kelvin(),290.0,340.0),
         interpolation:if s.slope==0.0 {InterpolationPolicy::ConstantWithinValidity} else {InterpolationPolicy::LinearInside},
         uncertainty:UncertaintyModel::Unstated,observations:vec![],provenance:Provenance {
             source:"manufactured field/relaxation specimen".into(),license:"test-only".into(),artifact:None},
@@ -40,7 +72,7 @@ fn source(layer: usize, s: Spec) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let curve=ResolvedHeatCapacityCurve::try_new(&card,HeatCapacitySourceQuery {
         heat_capacity:&PropertyKey::new("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS),
         density:&PropertyKey::new("density",Density::DIMS),temperature_axis:"T",
-        lower:&point(290.0),upper:&point(340.0),selection:SelectionPolicy::SingleClaimOnly},
+        lower:&field_point(290.0),upper:&field_point(340.0),selection:SelectionPolicy::SingleClaimOnly},
         SolidLiquidPhase::Solid,0.0,1e-6).unwrap();
     (card,curve)
 }
@@ -48,7 +80,7 @@ fn fixture<R>(s:Spec,run:impl FnOnce(&MaterialFluidFrame<'_,FluidTransportState>
     &MaterialNetwork<'_>,&MaterialNetwork<'_>,DepositionSimulation<'_>,
     &[(usize,ElectricalPropertyBasis)],MaterialCircuit,Vec<FieldThermalBinding>)->R)->R {
     let (a,ac)=source(0,s);let (b,bc)=source(1,s);let cards=[a,b];let curves=[ac,bc];
-    let f=frame(&cards);let m=model(&f);let query=point(300.0);let heat=thermal(&curves,1.0);
+    let f=field_frame(&cards);let m=model(&f);let query=field_point(300.0);let heat=thermal(&curves,1.0);
     let cells:[_;2]=core::array::from_fn(|i|MaterialCell {cell:CellId(i as u64),material_id:MaterialId(i as u64),
         curve:curves[i].curve(),point:ThermalMaterialPoint {material:&cards[i],context:&query,
             temperature_axis:"T",liquid_fraction_axis:None},conductivity:None});

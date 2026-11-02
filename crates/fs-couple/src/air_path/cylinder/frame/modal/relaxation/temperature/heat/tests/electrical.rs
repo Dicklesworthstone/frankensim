@@ -67,7 +67,10 @@ fn circuit(source: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'_>,
         .resolve(thermal,||false).unwrap().resistors;
     let mut branches = vec![(1,0,Branch::Capacitor { farads: CAPACITANCE }),
         (1,2,Branch::Resistor { ohms: 999.0 }), (2,0,Branch::Resistor { ohms: 999.0 })];
-    if current.is_some() { branches.push((0,1,Branch::CurrentSource { port: 0 })); }
+    // fs-phs circuit.rs: a CurrentSource (a,b) injects +u at node a and -u at node b, and its port output is v_a - v_b.
+    // The source must therefore be (1,0) to charge the capacitor at node 1 and to supply +u*V; (0,1) drew current OUT
+    // of node 1 and made `native.supplied` negative.
+    if current.is_some() { branches.push((1,0,Branch::CurrentSource { port: 0 })); }
     MaterialCircuit::new(CircuitGraph { node_count: 3, branches, transformers: vec![] },
         resistors, vec![], vec![INITIAL_CHARGE], &current.into_iter().collect::<Vec<_>>()).unwrap()
 }

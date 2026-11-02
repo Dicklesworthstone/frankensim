@@ -74,13 +74,21 @@ fn density_intervention_has_independent_scalar_kinetic_work_and_is_reversible() 
     let mut sim = model(&frame, 1, 0, 400.0, 0.13);
     let state = awake(&sim);
     let memory = sim.memory_masses_kg().to_vec();
-    // The identical Hermite solid/fluid mass shape gives M=1+rho_fluid/rho_solid.
-    let expected = 0.5*state[1]*state[1]*(1.0/1.8-1.0/1.4)
+    // The fluid's Hermite translation inertia over the solid's translation plus its sectional rotary inertia (fs-solid
+    // 271837977) gives M = 1 + (rho_f/rho_s)/(1+share): derived from the section's own I and A and the exact Hermite
+    // integrals (see guided_rotary_share), not the 1.4 and 1.8 of the centerline-only premise this test used to assert.
+    let member = frame.material_section(0).unwrap();
+    let share = guided_rotary_share(member, 1.0);
+    let before = 1.0+guided_added_ratio(member, 400.0)/(1.0+share);
+    let after = 1.0+guided_added_ratio(member, 800.0)/(1.0+share);
+    assert!((before-1.4).abs() > 1e-4 && (after-1.8).abs() > 1e-4);
+    near(sim.modal_mass_matrix()[0], before, 2e-10);
+    let expected = 0.5*state[1]*state[1]*(1.0/after-1.0/before)
         +state[2..].iter().zip(&memory)
             .map(|(p,m)| 0.5*p*p*(1.0/(2.0*m)-1.0/m)).sum::<f64>();
     let gate = CancelGate::new_clock_free();
     let update = sim.rebind_fluids(&state, vec![fluid(800.0, 0.13)], 1.0, &gate).unwrap();
-    near(sim.modal_mass_matrix()[0], 1.8, 2e-10);
+    near(sim.modal_mass_matrix()[0], after, 2e-10);
     assert!(update.parameter_work_j < 0.0);
     assert!((update.parameter_work_j-expected).abs() < 1e-9*expected.abs());
     for (old, new) in memory.iter().zip(sim.memory_masses_kg()) {

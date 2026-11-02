@@ -148,7 +148,13 @@ fn source_only_temperature_dependence_reaches_motion_in_the_same_accepted_interv
         // modal projection or native solver used above. Source Bessel rounding
         // and nonlinear tolerances are allowed explicitly in these comparisons.
         near(thermal.temperature_k(CELL).unwrap(),311.79062998,2e-7);
-        let expected=if alpha==0.0 {0.005645025955270403} else {0.005644968621268697};
+        // End displacement after 30 intervals from a one-mode fluid-loaded
+        // frame port (dense NumPy, midpoint on the Stokes memory branches) whose
+        // dry modal mass includes the sectional rotary inertia rho*I (the 10-31
+        // frame mass), each interval's bending viscosity set by 1+alpha(T-300)
+        // at that interval's accepted temperature. The alpha=0.05 value is the
+        // port run directly, not a difference of two ports.
+        let expected=if alpha==0.0 {0.005645193298726280} else {0.005645135973519982};
         near(u,expected,2e-9);
     }
     assert!(outputs[0]-outputs[1]>1e-9);
