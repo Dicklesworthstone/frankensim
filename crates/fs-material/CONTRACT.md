@@ -1368,6 +1368,26 @@ homogenization, the P2 milestone.
   HGO variants offer quadratic or log-squared
   bulk energies and separate distortional/bulk accessors. Full-invariant
   HGO's fibre accessor intentionally retains volume dependence.
+- `hyper::plane_stress` relaxes all three entries of the transverse deformation
+  column until the original law's transverse nominal tractions vanish. Thin
+  planar hyperelastic consumers therefore retain thickness contraction and,
+  for tilted anisotropic fibres, transverse shear relaxation. The original
+  reference-volume energy and in-plane Piola stress remain work conjugate;
+  the consistent tangent eliminates the transverse block by its Schur
+  complement. Bounded Newton/backtracking uses the original principal-stretch
+  domain and refuses nonpositive transverse stiffness or exhausted budgets.
+  Traction normalization uses inverse transverse-compliance trace, so a large
+  bulk penalty cannot hide a shear-scale residual. The energy/stress-only path
+  forms only a three-direction local AD Hessian; the full path forms the native
+  9x9 Hessian once after convergence. The tests in `hyper_plane_stress.rs`
+  cover analytic isotropic plane stress, all four original energy models,
+  tilted fibres, work/tangent finite differences, frame and modulus scaling,
+  near-incompressible traction closure, and domain/budget refusals. This is a
+  local stable plane-stress branch; no unique global minimum, shell bending,
+  wrinkling, exactly incompressible law, or locking-free volume formulation is
+  claimed. The formulation follows the quadrature-local elimination of
+  [Ahmadi et al. (2025)](https://doi.org/10.1007/s00707-025-04310-z), extended
+  here to the complete transverse column by differentiating `P[:,2]=0`.
 - `hyper::cards` instantiates strict, dimensioned `ConstitutiveModelCard`s
   for `neo-hookean-log`, `mooney-rivlin-decoupled`, `ogden-decoupled` and
   `hgo-dispersed` v1 and registers the real

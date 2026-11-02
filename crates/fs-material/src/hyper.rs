@@ -12,6 +12,8 @@ use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 
 /// Dimensioned constitutive-model cards and graph registration.
 pub mod cards;
+/// Traction-free finite-strain thickness and transverse-shear relaxation.
+pub mod plane_stress;
 mod spectral;
 
 /// Maximum number of independently supplied Ogden terms.
