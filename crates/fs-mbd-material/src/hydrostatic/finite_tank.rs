@@ -27,6 +27,7 @@ mod bodies;
 mod density_change;
 mod solve;
 pub use bodies::{FiniteTankBodiesLoad, FiniteTankBodiesStep, FiniteTankBody, MAX_TANK_BODIES};
+pub(super) use bodies::step_bodies_with;
 pub use density_change::FiniteTankDensityChange;
 pub use solve::FiniteTankSurface;
 

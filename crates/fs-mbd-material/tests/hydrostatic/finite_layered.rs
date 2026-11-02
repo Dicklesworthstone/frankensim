@@ -1,6 +1,8 @@
 //! Conserved immiscible inventories reaching actual native rigid-body motion.
 #[path = "finite_layered/density_change.rs"]
 mod density_change;
+#[path = "finite_layered/bodies.rs"]
+mod bodies;
 use super::*;
 use fs_mbd_material::hydrostatic::{
     FiniteHydrostaticLayer, FiniteHydrostaticTank, FiniteLayeredHydrostaticTank,

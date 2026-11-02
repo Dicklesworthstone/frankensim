@@ -16,7 +16,9 @@ use fs_ga::{Se3, Vec3};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_mbd::{Gravity, RigidBodyState};
 
+mod bodies;
 mod density_change;
+pub use bodies::FiniteTankBodiesInterface;
 pub use density_change::{FiniteLayerDensityChange, FiniteLayeredTankDensityChange};
 
 /// One conserved immiscible liquid, supplied in bottom-to-top order.

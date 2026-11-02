@@ -935,8 +935,8 @@ and finite-bath potentials. This yields density-weighted buoyancy and torque
 whose pose derivatives match the actual liquid stack's gravitational-storage
 change from the same empty-tank inventories. It avoids subtracting nearly equal
 thin-layer cut moments. The existing native endpoint-load Verlet step consumes
-that potential and recomputes moving interfaces at both endpoints. Load and
-step evaluation allocate nothing after construction; uniform-density stacks
+that potential and recomputes moving interfaces at both endpoints. Single-body
+load and step evaluation allocate nothing after construction; uniform-density stacks
 reuse the exact original total-inventory load. The explicit interface query
 returns at most 32 geometry records, with original volume defects and work counts.
 
@@ -947,6 +947,23 @@ applicability remain caller obligations; no fluid inertia, mixing, entrainment,
 capillarity, phase change or compressible EOS is inferred. Focused regressions
 check independent two-liquid mass/energy integrals, force and torque gradients,
 native interfacial heave, uniform identity and source/rollback behavior.
+
+`FiniteLayeredHydrostaticTank::{interfaces_at_bodies, load_bodies, step_bodies}`
+retain every immiscible inventory while all body envelopes share each cumulative
+interface. Nonnegative density jumps combine original per-body displaced mass
+moments and one complete stack gravitational potential, including cross-body
+displacement terms. Geometry admission and transforms are prepared once; one
+cuts buffer is reused across all roots and final wrenches are assembled once.
+The existing native batch Verlet owner advances every body against the same
+endpoint interfaces and applies one complete mechanical-energy gate.
+Uniform-density stacks delegate exactly to the total-inventory tank. Storage
+is bounded by the existing 32-layer, 64-body and total-cell limits; overflow,
+invalid geometry or cancellation publishes no partial batch. Sources stay
+frozen and envelopes must remain disjoint. The quasistatic model does not
+resolve mixing, waves, fluid inertia or contact. Focused native cases check
+independent layer volumes, buoyancy centers and liquid energy, twelve force
+and torque derivatives, density-contrast collective modes, exact singleton
+and uniform parity, and atomic refusal.
 
 `FiniteLayeredHydrostaticTank::rebind_sources_at_pose` updates one externally
 supplied source state per retained liquid at a held body pose. Each individual
