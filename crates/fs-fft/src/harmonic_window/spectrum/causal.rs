@@ -1,0 +1,249 @@
+//! Causal integration of analytic interference products for linear dynamics.
+//!
+//! This is an unnormalized physical time integral, not another detector
+//! profile. It retains the source clock and duration separately, so a short
+//! accepted step need not be representable as start + duration in one f64.
+
+use super::*;
+
+/// Two integrals over the same accepted interval, in observable-units * s.
+///
+/// For f(t), source start t0, duration h and nonnegative decay lambda:
+/// integral = integral_0^h f(t0+s) ds;
+/// weighted = integral_0^h exp(-lambda*(h-s)) f(t0+s) ds.
+///
+/// A thermal RC node, for example, uses weighted/C in its temperature
+/// response. The caller owns physical units and whether f represents heat,
+/// force or another applied quantity. A general product is not dissipation.
+#[derive(Clone, Copy, Debug)]
+pub struct HarmonicCausalIntegral {
+    integral: Dd,
+    weighted_integral: Dd,
+    decay: Dd,
+    one_minus_decay: Dd,
+}
+
+impl HarmonicCausalIntegral {
+    /// Unweighted signed input integral, retaining low components.
+    pub const fn integral_dd(self) -> Dd {
+        self.integral
+    }
+
+    /// Causal exponential convolution, retaining low components.
+    pub const fn weighted_integral_dd(self) -> Dd {
+        self.weighted_integral
+    }
+
+    /// exp(-lambda*h), with a retained low component near unity.
+    pub const fn decay_dd(self) -> Dd {
+        self.decay
+    }
+
+    /// 1-exp(-lambda*h), evaluated without a near-unity subtraction.
+    pub const fn one_minus_decay_dd(self) -> Dd {
+        self.one_minus_decay
+    }
+}
+
+impl PreparedHarmonicProductSpectrum {
+    /// Integrate the complete spectrum and its causal exponential response.
+    ///
+    /// All arguments must be finite; duration and decay must be nonnegative.
+    /// The zero-duration result is exactly zero with unit decay. Zero decay
+    /// makes both integrals identical. Work is O(distinct tones), with no
+    /// allocation, time grid, Nyquist assumption or dropped carrier terms.
+    ///
+    /// Closed forms and local divided-difference series avoid subtraction of
+    /// nearly equal exponentials and phases. DD algebra retains weak residuals
+    /// within its finite dynamic range; transcendental accuracy remains that
+    /// of fs_math::det. This is not an interval or null-relative certificate.
+    pub fn causal_integral(
+        &self,
+        start_s: f64,
+        duration_s: f64,
+        decay_rate_per_s: f64,
+    ) -> Result<HarmonicCausalIntegral, ProductSpectrumError> {
+        self.causal_integral_cancellable(start_s, duration_s, decay_rate_per_s, || false)
+    }
+
+    pub fn causal_integral_cancellable(
+        &self,
+        start_s: f64,
+        duration_s: f64,
+        decay_rate_per_s: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<HarmonicCausalIntegral, ProductSpectrumError> {
+        spectrum_poll(&mut cancelled)?;
+        if !start_s.is_finite()
+            || !duration_s.is_finite()
+            || duration_s < 0.0
+            || !decay_rate_per_s.is_finite()
+            || decay_rate_per_s < 0.0
+        {
+            return Err(WindowError::InvalidWindow.into());
+        }
+        if duration_s == 0.0 {
+            return Ok(HarmonicCausalIntegral {
+                integral: Dd::ZERO,
+                weighted_integral: Dd::ZERO,
+                decay: Dd::ONE,
+                one_minus_decay: Dd::ZERO,
+            });
+        }
+        let duration = Dd::from_f64(duration_s);
+        let alpha = checked(Dd::from_f64(decay_rate_per_s) * duration)?;
+        if decay_rate_per_s > 0.0 && is_zero(alpha) {
+            return Err(WindowError::Unrepresentable.into());
+        }
+        let (decay, one_minus_decay) = decay_parts(alpha)?;
+        let zero_decay = decay_rate_per_s == 0.0;
+        let dc_gain = if zero_decay {
+            duration
+        } else {
+            checked(duration * checked(one_minus_decay / alpha)?)?
+        };
+        let mut integral = checked(self.dc * duration)?;
+        let mut weighted_integral = checked(self.dc * dc_gain)?;
+        for (index, tone) in self.tones.iter().enumerate() {
+            if index % 32 == 0 {
+                spectrum_poll(&mut cancelled)?;
+            }
+            let omega = tone.angular_frequency_dd();
+            let phase_start = checked(omega * Dd::from_f64(start_s))?;
+            let beta = checked(omega * duration)?;
+            let (real, imaginary) = proper_phase(phase_start);
+            let amplitude = [
+                checked(tone.amplitude[0] * real - tone.amplitude[1] * imaginary)?,
+                checked(tone.amplitude[0] * imaginary + tone.amplitude[1] * real)?,
+            ];
+            let (plain, weighted) = integration_kernels(alpha, beta, one_minus_decay)?;
+            integral = checked(
+                integral
+                    + checked(
+                        duration * checked(amplitude[0] * plain[0] - amplitude[1] * plain[1])?,
+                    )?,
+            )?;
+            if !zero_decay {
+                weighted_integral = checked(
+                    weighted_integral
+                        + checked(
+                            duration
+                                * checked(amplitude[0] * weighted[0] - amplitude[1] * weighted[1])?,
+                        )?,
+                )?;
+            }
+        }
+        spectrum_poll(&mut cancelled)?;
+        if zero_decay {
+            weighted_integral = integral;
+        }
+        Ok(HarmonicCausalIntegral {
+            integral,
+            weighted_integral,
+            decay,
+            one_minus_decay,
+        })
+    }
+}
+
+// Both returned components describe the SAME decay, including its decrement
+// below one. The small-argument series keeps alpha² terms lost by f64 expm1.
+fn decay_parts(alpha: Dd) -> Result<(Dd, Dd), WindowError> {
+    if is_zero(alpha) {
+        return Ok((Dd::ONE, Dd::ZERO));
+    }
+    if alpha.hi <= 0.5 {
+        let mut term = -alpha;
+        let mut minus_one = term;
+        for n in 2..=32 {
+            term = checked(term * (-alpha) / Dd::from_f64(f64::from(n)))?;
+            minus_one = checked(minus_one + term)?;
+        }
+        return Ok((checked(Dd::ONE + minus_one)?, -minus_one));
+    }
+    // Beyond this point the exponential is below the f64 dynamic range.
+    // Do not form exp(-alpha.lo) if a huge alpha has a huge low component.
+    if alpha.hi > 746.0 {
+        return Ok((Dd::ZERO, Dd::ONE));
+    }
+    let high = Dd::from_f64(det::exp(-alpha.hi));
+    let decay = checked(high * checked(Dd::ONE + Dd::from_f64(det::expm1(-alpha.lo)))?)?;
+    Ok((decay, checked(Dd::ONE - decay)?))
+}
+
+// Kernels normalized by duration:
+// plain = integral_0^1 exp(-i beta u) du
+// weighted = integral_0^1 exp[-alpha(1-u)-i beta u] du.
+fn integration_kernels(
+    alpha: Dd,
+    beta: Dd,
+    one_minus_decay: Dd,
+) -> Result<([Dd; 2], [Dd; 2]), WindowError> {
+    if alpha.hi <= 0.5 && beta.hi.abs() <= 0.5 {
+        // The exponential divided difference has no singularity at alpha=0
+        // or beta=0. Expand complete homogeneous powers directly:
+        // sum_{n>=0} sum_{k=0}^n (-alpha)^(n-k)(-i beta)^k/(n+1)!.
+        // 32 terms suffice well below DD roundoff over this bounded square.
+        let mut power = [Dd::ONE, Dd::ZERO];
+        let mut term = power;
+        let mut plain = power;
+        let mut weighted = power;
+        for n in 1..=32 {
+            let divisor = Dd::from_f64(f64::from(n + 1));
+            power = [
+                checked(power[1] * beta / divisor)?,
+                checked(-power[0] * beta / divisor)?,
+            ];
+            term = [
+                checked(-alpha * term[0] / divisor + power[0])?,
+                checked(-alpha * term[1] / divisor + power[1])?,
+            ];
+            plain = [checked(plain[0] + power[0])?, checked(plain[1] + power[1])?];
+            weighted = [
+                checked(weighted[0] + term[0])?,
+                checked(weighted[1] + term[1])?,
+            ];
+        }
+        return Ok((plain, weighted));
+    }
+    let half_beta = beta * Dd::from_f64(0.5);
+    let (half_real, half_imaginary) = proper_phase(half_beta);
+    let sinc_half = sinc(half_beta);
+    let plain = [
+        checked(half_real * sinc_half)?,
+        checked(half_imaginary * sinc_half)?,
+    ];
+    if is_zero(alpha) {
+        return Ok((plain, plain));
+    }
+    let (phase_real, phase_imaginary) = proper_phase(beta);
+    // exp(-i beta)-exp(-alpha), without losing either near-unit decrement.
+    let numerator = [
+        checked(checked(phase_real - Dd::ONE)? + one_minus_decay)?,
+        phase_imaginary,
+    ];
+    // Divide by alpha-i beta using a scaled quotient, never alpha²+beta².
+    let weighted = if alpha.hi >= beta.hi.abs() {
+        let ratio = checked(beta / alpha)?;
+        let denominator = checked(Dd::ONE + ratio * ratio)?;
+        let real = checked(numerator[0] / alpha)?;
+        let imaginary = checked(numerator[1] / alpha)?;
+        [
+            checked(checked(real - ratio * imaginary)? / denominator)?,
+            checked(checked(imaginary + ratio * real)? / denominator)?,
+        ]
+    } else {
+        let ratio = checked(alpha / beta)?;
+        let denominator = checked(Dd::ONE + ratio * ratio)?;
+        let real = checked(numerator[0] / beta)?;
+        let imaginary = checked(numerator[1] / beta)?;
+        [
+            checked(checked(ratio * real - imaginary)? / denominator)?,
+            checked(checked(ratio * imaginary + real)? / denominator)?,
+        ]
+    };
+    Ok((plain, weighted))
+}
+
+#[cfg(test)]
+mod tests;

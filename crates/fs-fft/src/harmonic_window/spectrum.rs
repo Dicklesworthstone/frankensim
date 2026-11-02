@@ -6,6 +6,9 @@
 
 use super::*;
 
+mod causal;
+pub use causal::HarmonicCausalIntegral;
+
 /// Hard bound on generated tones BEFORE frequency coalescing.
 pub const MAX_PRODUCT_SPECTRUM_TERMS: usize = 131_072;
 
@@ -36,6 +39,52 @@ pub struct HarmonicProductInput {
     pub law: HarmonicProductLaw,
 }
 
+/// One contraction whose source frequencies are authored in radians/second.
+///
+/// This retains the original angular clock without first rounding omega/TAU
+/// to one f64 Hz value. Amplitudes and the negative-time convention have the
+/// same meaning as in [`HarmonicProductInput`].
+#[derive(Clone, Copy, Debug)]
+pub struct AngularHarmonicProductInput {
+    pub left_angular_frequency_rad_s: f64,
+    pub right_angular_frequency_rad_s: f64,
+    pub left_amplitude: [Dd; 2],
+    pub right_amplitude: [Dd; 2],
+    pub law: HarmonicProductLaw,
+}
+
+struct NativeHarmonicProductInput {
+    left_frequency: f64,
+    right_frequency: f64,
+    left_amplitude: [Dd; 2],
+    right_amplitude: [Dd; 2],
+    law: HarmonicProductLaw,
+}
+
+impl From<HarmonicProductInput> for NativeHarmonicProductInput {
+    fn from(value: HarmonicProductInput) -> Self {
+        Self {
+            left_frequency: value.left_frequency_hz,
+            right_frequency: value.right_frequency_hz,
+            left_amplitude: value.left_amplitude,
+            right_amplitude: value.right_amplitude,
+            law: value.law,
+        }
+    }
+}
+
+impl From<AngularHarmonicProductInput> for NativeHarmonicProductInput {
+    fn from(value: AngularHarmonicProductInput) -> Self {
+        Self {
+            left_frequency: value.left_angular_frequency_rad_s,
+            right_frequency: value.right_angular_frequency_rad_s,
+            left_amplitude: value.left_amplitude,
+            right_amplitude: value.right_amplitude,
+            law: value.law,
+        }
+    }
+}
+
 /// Admission bounds including the temporary unsimplified line spectrum.
 #[derive(Clone, Copy, Debug)]
 pub struct HarmonicProductSpectrumLimits {
@@ -50,6 +99,7 @@ pub struct HarmonicProductSpectrumLimits {
 #[derive(Clone, Copy, Debug)]
 pub struct HarmonicProductTone {
     frequency_hz: Dd,
+    angular_frequency_rad_s: Dd,
     amplitude: [Dd; 2],
     order: usize,
 }
@@ -59,6 +109,11 @@ impl HarmonicProductTone {
     /// not itself be exactly representable as one f64.
     pub const fn frequency_hz_dd(self) -> Dd {
         self.frequency_hz
+    }
+    /// Original angular frequency [rad/s] used by temporal kernels. Angular
+    /// inputs retain their exact DD sum/difference without a round trip via Hz.
+    pub const fn angular_frequency_dd(self) -> Dd {
+        self.angular_frequency_rad_s
     }
     /// Real/imaginary peak amplitude in the product of the operand units.
     pub const fn peak_amplitude_dd(self) -> [Dd; 2] {
@@ -98,8 +153,8 @@ impl From<WindowError> for ProductSpectrumError {
 ///
 /// Real products retain both sums and differences; proper products retain
 /// only differences. Negative output frequencies are conjugated exactly.
-/// Equal DD frequencies coalesce in authored order, with no tolerance-based
-/// merging or amplitude cutoff. Preparation uses O(K log K) work and O(K)
+/// Equal DD frequencies in the authored unit coalesce in input order, with no
+/// tolerance-based merging or amplitude cutoff. Preparation uses O(K log K) work and O(K)
 /// storage for generated K terms; scalar/window queries are allocation-free
 /// O(distinct output tones). No sampled time grid or aliasing is introduced.
 ///
@@ -126,6 +181,42 @@ impl PreparedHarmonicProductSpectrum {
     pub fn new_cancellable(
         products: impl IntoIterator<Item = HarmonicProductInput>,
         limits: HarmonicProductSpectrumLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ProductSpectrumError> {
+        Self::prepare(
+            products.into_iter().map(NativeHarmonicProductInput::from),
+            false,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare source-authored angular frequencies without converting each
+    /// carrier to f64 Hz. Coalescing compares exact DD angular sums/differences.
+    pub fn from_angular_frequencies(
+        products: impl IntoIterator<Item = AngularHarmonicProductInput>,
+        limits: HarmonicProductSpectrumLimits,
+    ) -> Result<Self, ProductSpectrumError> {
+        Self::from_angular_frequencies_cancellable(products, limits, || false)
+    }
+
+    pub fn from_angular_frequencies_cancellable(
+        products: impl IntoIterator<Item = AngularHarmonicProductInput>,
+        limits: HarmonicProductSpectrumLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ProductSpectrumError> {
+        Self::prepare(
+            products.into_iter().map(NativeHarmonicProductInput::from),
+            true,
+            limits,
+            cancelled,
+        )
+    }
+
+    fn prepare(
+        products: impl Iterator<Item = NativeHarmonicProductInput>,
+        angular: bool,
+        limits: HarmonicProductSpectrumLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ProductSpectrumError> {
         spectrum_poll(&mut cancelled)?;
@@ -142,7 +233,7 @@ impl PreparedHarmonicProductSpectrum {
         tones
             .try_reserve_exact(capacity)
             .map_err(|_| ProductSpectrumError::Allocation)?;
-        for (index, input) in products.into_iter().enumerate() {
+        for (index, input) in products.enumerate() {
             spectrum_poll(&mut cancelled)?;
             let required = match input.law {
                 HarmonicProductLaw::Real => 2,
@@ -151,7 +242,7 @@ impl PreparedHarmonicProductSpectrum {
             if index >= limits.maximum_products || required > capacity - tones.len() {
                 return Err(ProductSpectrumError::Budget);
             }
-            if !input.left_frequency_hz.is_finite() || !input.right_frequency_hz.is_finite() {
+            if !input.left_frequency.is_finite() || !input.right_frequency.is_finite() {
                 return Err(WindowError::InvalidFrequency.into());
             }
             let a = input.left_amplitude;
@@ -159,28 +250,29 @@ impl PreparedHarmonicProductSpectrum {
             for value in a.into_iter().chain(b) {
                 check_amplitude(value)?;
             }
-            let fa = Dd::from_f64(input.left_frequency_hz);
-            let fb = Dd::from_f64(input.right_frequency_hz);
+            let fa = Dd::from_f64(input.left_frequency);
+            let fb = Dd::from_f64(input.right_frequency);
             let half = Dd::from_f64(0.5);
             let difference = [
                 checked(half * checked(a[0] * b[0] + a[1] * b[1])?)?,
                 checked(half * checked(a[1] * b[0] - a[0] * b[1])?)?,
             ];
             let order = tones.len();
-            tones.push(tone(checked(fa - fb)?, difference, order));
+            tones.push(tone(checked(fa - fb)?, difference, order, angular)?);
             if input.law == HarmonicProductLaw::Real {
                 let sum = [
                     checked(half * checked(a[0] * b[0] - a[1] * b[1])?)?,
                     checked(half * checked(a[0] * b[1] + a[1] * b[0])?)?,
                 ];
                 let order = tones.len();
-                tones.push(tone(checked(fa + fb)?, sum, order));
+                tones.push(tone(checked(fa + fb)?, sum, order, angular)?);
             }
         }
         spectrum_poll(&mut cancelled)?;
         // The fixed generated-term ceiling bounds this synchronous sort.
         tones.sort_unstable_by(|a, b| {
-            frequency_order(a.frequency_hz, b.frequency_hz).then_with(|| a.order.cmp(&b.order))
+            frequency_order(native_frequency(*a, angular), native_frequency(*b, angular))
+                .then_with(|| a.order.cmp(&b.order))
         });
         spectrum_poll(&mut cancelled)?;
         let mut dc = Dd::ZERO;
@@ -190,10 +282,14 @@ impl PreparedHarmonicProductSpectrum {
                 spectrum_poll(&mut cancelled)?;
             }
             let next = tones[index];
-            if is_zero(next.frequency_hz) {
+            if is_zero(native_frequency(next, angular)) {
                 dc = checked(dc + next.amplitude[0])?;
             } else if written > 0
-                && frequency_order(tones[written - 1].frequency_hz, next.frequency_hz).is_eq()
+                && frequency_order(
+                    native_frequency(tones[written - 1], angular),
+                    native_frequency(next, angular),
+                )
+                .is_eq()
             {
                 let previous = &mut tones[written - 1];
                 previous.amplitude[0] = checked(previous.amplitude[0] + next.amplitude[0])?;
@@ -236,7 +332,7 @@ impl PreparedHarmonicProductSpectrum {
             if index % 64 == 0 {
                 spectrum_poll(&mut cancelled)?;
             }
-            let omega = checked(tone.frequency_hz * Dd::from_f64(core::f64::consts::TAU))?;
+            let omega = tone.angular_frequency_rad_s;
             let angle = checked(omega * Dd::from_f64(time_s))?;
             let (real, imaginary) = proper_phase(angle);
             sum =
@@ -263,7 +359,7 @@ impl PreparedHarmonicProductSpectrum {
             if index % 64 == 0 {
                 spectrum_poll(&mut cancelled)?;
             }
-            let omega = checked(tone.frequency_hz * Dd::from_f64(core::f64::consts::TAU))?;
+            let omega = tone.angular_frequency_rad_s;
             let kernel = window.product_kernel_extended(omega, Dd::ZERO)?;
             sum = checked(
                 sum + kernel.mean_real_product_parts_dd(tone.amplitude, [Dd::ONE, Dd::ZERO])?,
@@ -274,21 +370,43 @@ impl PreparedHarmonicProductSpectrum {
     }
 }
 
-fn tone(mut frequency_hz: Dd, mut amplitude: [Dd; 2], order: usize) -> HarmonicProductTone {
-    if frequency_hz.hi < 0.0 || (frequency_hz.hi == 0.0 && frequency_hz.lo < 0.0) {
-        frequency_hz = -frequency_hz;
+fn tone(
+    mut frequency: Dd,
+    mut amplitude: [Dd; 2],
+    order: usize,
+    angular: bool,
+) -> Result<HarmonicProductTone, ProductSpectrumError> {
+    if frequency.hi < 0.0 || (frequency.hi == 0.0 && frequency.lo < 0.0) {
+        frequency = -frequency;
         amplitude[1] = -amplitude[1];
     }
-    if is_zero(frequency_hz) {
-        frequency_hz = Dd::ZERO;
+    if is_zero(frequency) {
+        frequency = Dd::ZERO;
     }
-    if frequency_hz.lo == 0.0 {
-        frequency_hz.lo = 0.0;
+    if frequency.lo == 0.0 {
+        frequency.lo = 0.0;
     }
-    HarmonicProductTone {
+    let tau = Dd::from_f64(core::f64::consts::TAU);
+    let (frequency_hz, angular_frequency_rad_s) = if angular {
+        (checked(frequency / tau)?, frequency)
+    } else {
+        (frequency, checked(frequency * tau)?)
+    };
+    Ok(HarmonicProductTone {
         frequency_hz,
+        angular_frequency_rad_s,
         amplitude,
         order,
+    })
+}
+
+// Each preparation has one authored unit. Equality is established before
+// its display conversion, preserving distinct low-frequency carrier beats.
+fn native_frequency(tone: HarmonicProductTone, angular: bool) -> Dd {
+    if angular {
+        tone.angular_frequency_rad_s
+    } else {
+        tone.frequency_hz
     }
 }
 

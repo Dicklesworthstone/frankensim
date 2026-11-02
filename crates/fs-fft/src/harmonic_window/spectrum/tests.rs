@@ -225,3 +225,91 @@ fn retained_amplitudes_budgets_darkness_and_cancellation_are_explicit() {
         Err(ProductSpectrumError::Window(WindowError::InvalidFrequency))
     ));
 }
+
+#[test]
+fn angular_carriers_keep_the_original_slow_beat_without_hz_rounding() {
+    let carrier = 2.0_f64.powi(50);
+    let (a, b) = (carrier + 2.0, carrier + 2.25);
+    let q = PreparedHarmonicProductSpectrum::from_angular_frequencies(
+        [AngularHarmonicProductInput {
+            left_angular_frequency_rad_s: a,
+            right_angular_frequency_rad_s: b,
+            left_amplitude: [Dd::ONE, Dd::ZERO],
+            right_amplitude: [Dd::ZERO, Dd::ONE],
+            law: HarmonicProductLaw::ProperComplex,
+        }],
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(q.tones().len(), 1);
+    assert_eq!(q.tones()[0].angular_frequency_dd().to_f64(), 0.25);
+    assert!(
+        (((b / core::f64::consts::TAU) - (a / core::f64::consts::TAU)) * core::f64::consts::TAU
+            - 0.25)
+            .abs()
+            > 0.01
+    );
+    for t in [-3.0, -0.17, 0.0, 0.23, 7.0] {
+        close(q.evaluate(t).unwrap(), 0.5 * (0.25_f64 * t).sin(), 3e-16);
+    }
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        let window = HarmonicWindow::with_profile(0.17, 0.43, profile).unwrap();
+        let expected = window
+            .proper_product_kernel(a, b)
+            .unwrap()
+            .mean_real_product(C64::ONE, C64::new(0.0, 1.0))
+            .unwrap();
+        close(q.mean(window).unwrap(), expected, 3e-16);
+    }
+}
+
+#[test]
+fn angular_products_keep_sum_low_bits_and_the_negative_time_convention() {
+    let carrier = 2.0_f64.powi(48);
+    let make = |a, b, x: C64, y: C64| AngularHarmonicProductInput {
+        left_angular_frequency_rad_s: a,
+        right_angular_frequency_rad_s: b,
+        left_amplitude: [Dd::from_f64(x.re), Dd::from_f64(x.im)],
+        right_amplitude: [Dd::from_f64(y.re), Dd::from_f64(y.im)],
+        law: HarmonicProductLaw::Real,
+    };
+    let q = PreparedHarmonicProductSpectrum::from_angular_frequencies(
+        [make(carrier, carrier + 0.0625, C64::ONE, C64::ONE)],
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(q.tones()[0].angular_frequency_dd().to_f64(), 0.0625);
+    let sum = q.tones()[1].angular_frequency_dd();
+    assert_eq!(sum.hi, 2.0 * carrier);
+    assert_eq!(sum.lo, 0.0625);
+    let (a, b) = (C64::new(0.7, -0.3), C64::new(-0.2, 0.9));
+    let q = PreparedHarmonicProductSpectrum::from_angular_frequencies(
+        [make(1.3, -2.1, a, b)],
+        limits(),
+    )
+    .unwrap();
+    for k in 0..31 {
+        let t = -0.3 + k as f64 * 0.07;
+        let x = a.re * (1.3 * t).cos() + a.im * (1.3 * t).sin();
+        let y = b.re * (-2.1 * t).cos() + b.im * (-2.1 * t).sin();
+        close(q.evaluate(t).unwrap(), x * y, 8e-16);
+    }
+    assert!(matches!(
+        PreparedHarmonicProductSpectrum::from_angular_frequencies(
+            [make(f64::NAN, 1.0, a, b)],
+            limits()
+        ),
+        Err(ProductSpectrumError::Window(WindowError::InvalidFrequency))
+    ));
+    assert!(matches!(
+        PreparedHarmonicProductSpectrum::from_angular_frequencies_cancellable(
+            [make(1.0, 1.0, a, b)],
+            limits(),
+            || true
+        ),
+        Err(ProductSpectrumError::Cancelled)
+    ));
+}

@@ -496,3 +496,39 @@ high-carrier sum bits, weak amplitudes, admission and cancellation.
 The exact shared window and spectrum modules passed all 27 of their tests
 in a focused native Rust harness using the real fs_math library. This scoped
 execution does not substitute for the full repository build and quality gate.
+
+### Original angular clocks in quadratic spectra
+
+AngularHarmonicProductInput and from_angular_frequencies retain source-authored radians/second without rounding each carrier through f64 Hz. The original Hz constructors remain available. One shared preparation forms DD sum/difference frequencies and coalesces exactly in the authored unit. Each tone retains DD Hz and angular frequency; angular_frequency_dd exposes the value used directly by temporal kernels. The logical tone payload therefore includes both frequency coordinates. This preserves narrow beats and sum-frequency low parts on large angular carriers. Both frequency coordinates must remain representable. Two regressions cover an original 0.25 rad/s beat at a 2^50 rad/s carrier, a half-ULP angular sum, signed frequencies, both detector profiles and cancellation/domain refusal.
+
+
+## Causal integration of interference loads
+
+The prepared quadratic spectrum exposes `causal_integral` and a cancellable
+variant. For start t0, duration h and nonnegative decay lambda they return
+both integral_0^h f(t0+s) ds and
+integral_0^h exp[-lambda*(h-s)] f(t0+s) ds in observable-units * seconds.
+The result also retains exp(-lambda*h) and its one-minus decrement in DD.
+The domain adapter supplies physical units, initial state and relaxation;
+the generic kernel does not infer heat from a signed acoustic or EM flux.
+
+Source start and duration remain separate. Native angular frequencies and
+their DD low components survive phase construction, including an interval
+too short to change the rounded absolute endpoint. All DC, sum and beat terms
+participate. Zero decay makes the two integrals identical; zero duration
+returns zero input with unit decay. A bounded local divided-difference series
+retains small time/frequency/decay corrections; scaled complex quotients avoid
+squaring large frequencies. No sampled time step, aliasing cutoff or per-tone
+allocation is introduced. Cost is O(distinct tones), with cancellation at
+bounded blocks and explicit refusal for invalid or unrepresentable arithmetic.
+The result inherits fs_math deterministic transcendental accuracy and finite
+DD dynamic range; it is not an interval or relative-error certificate at nulls.
+
+Six new causal regressions cover constant loads and stiff/short decay,
+independent real-time product quadrature, accepted-interval composition,
+weak sine energy beside cancelling DC/carrier terms, native angular beats
+and clocks with unrepresentable rounded endpoints, and transactional refusal.
+Together with the two new angular-admission regressions and existing
+temporal/spectrum tests, all 35 definitions compiled, linked and ran in a
+focused native Rust executable using the real fs_math library, with no
+nominal physics boundaries. This is not the full workspace quality gate.
