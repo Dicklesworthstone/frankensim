@@ -701,3 +701,6 @@ fn g3_radial_capacity_refuses_planar_proxy_volume_and_unresolved_shell_cells() {
         );
     }
 }
+
+#[path = "radial_layered_storage/surface_boundaries.rs"]
+mod surface_boundaries;

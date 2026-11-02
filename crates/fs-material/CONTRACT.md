@@ -6266,6 +6266,41 @@ integrals, physical inventory, native surfaces, finite-difference tangents,
 implicit conservation, source/boundary energy, adaptive evolution, manufactured
 spatial refinement, planar compatibility and source/geometry refusal.
 
+## Physical terminal-face conduction on the layered thermal timeline
+
+`LayeredThermalStep::with_surface_boundaries` maps selected original ambient
+or reservoir channels to the actual inner/outer faces of a sensible layered
+body. Planar, cylindrical and spherical face-to-volume-centroid conduction
+uses the existing `ReservoirLayerGeometry` conductivity-integral/film solver.
+The response retains the material-face temperature, signed outward heat, secant
+conductance and exact derivatives in [cell temperature, bath temperature] order.
+Conductivity is integrated across its original chart, not frozen at a trace.
+
+At most four explicit face/channel patches are prepared once. Each selected
+original channel must be completely covered, and patches cannot exceed a
+physical face. Partial areas represent independent normal streamtubes or angular
+sectors, with no inferred lateral spreading. The original film, bath, area,
+source and caloric inventories remain authored inputs; zero film conductance is
+exact insulation. Unselected channels retain their original cell-temperature
+semantics, and an empty map restores the original step path.
+
+The existing boundary-coefficient ingress replaces each selected channel's
+conductance. The native residual and energy/entropy owners account for its heat
+once; the tridiagonal Jacobian uses the actual outward dQ/dTcell. Source support
+is required throughout the material profile. A bath outside the conductivity
+chart is legal only when the solved material face stays supported; perfect
+contact still requires the prescribed face itself to be supported. The existing
+strict all-endpoint reservoir evaluator retains its original policy.
+
+The extension shares the original bounded scalar solver, source-integral inverse
+and cancellation checks. It supplies no new convection correlation, boundary
+layer model or lateral spreading law. Three unit regressions and four integration
+regressions cover geometry, partial areas, nonlinear flux/tangents, source support,
+native conservation and transactional refusal. Pinned formatting, source/API
+review and independent scalar oracles passed. Native compilation and execution
+of these new regressions remain unverified under the existing shared-memory and
+storage limits.
+
 ## Distributed phase-changing layers on the original enthalpy timeline
 
 `thermal::transport::stack::phase_transient` binds explicitly declared reference

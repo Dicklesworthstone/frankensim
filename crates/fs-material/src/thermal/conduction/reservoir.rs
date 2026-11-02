@@ -49,6 +49,56 @@ impl ReservoirLayerGeometry {
         )
     }
 
+    /// Either exposed face of an annular cylinder and its interior trace.
+    /// Both radii are physical; heat sign is selected by the endpoint order.
+    pub fn cylindrical_face(
+        surface_radius_m: f64,
+        trace_radius_m: f64,
+        length_m: f64,
+    ) -> Result<Self, DepositionError> {
+        let geometry = Self::cylindrical(
+            surface_radius_m.min(trace_radius_m),
+            surface_radius_m.max(trace_radius_m),
+            length_m,
+        )?;
+        Self::new(
+            geometry.multiplier_m,
+            (core::f64::consts::TAU * length_m) * surface_radius_m,
+        )
+    }
+
+    /// Either face of a full spherical shell and its positive interior trace.
+    pub fn spherical_face(
+        surface_radius_m: f64,
+        trace_radius_m: f64,
+    ) -> Result<Self, DepositionError> {
+        if !positive(surface_radius_m)
+            || !positive(trace_radius_m)
+            || surface_radius_m == trace_radius_m
+        {
+            return Err(invalid(
+                "spherical conduction needs distinct positive face and trace radii",
+            ));
+        }
+        let inner = surface_radius_m.min(trace_radius_m);
+        let outer = surface_radius_m.max(trace_radius_m);
+        let multiplier = (4.0 * core::f64::consts::PI * inner) * (outer / (outer - inner));
+        let area = (4.0 * core::f64::consts::PI * surface_radius_m) * surface_radius_m;
+        Self::new(multiplier, area)
+    }
+
+    /// An explicitly represented area fraction with the same normal profile.
+    /// Radial fractions are angular sectors; lateral spreading is not inferred.
+    pub fn with_area_fraction(self, fraction: f64) -> Result<Self, DepositionError> {
+        if !positive(fraction) || fraction > 1.0 {
+            return Err(invalid("conducting surface fraction must lie in (0, 1]"));
+        }
+        Self::new(
+            self.multiplier_m * fraction,
+            self.surface_area_m2 * fraction,
+        )
+    }
+
     fn new(multiplier_m: f64, surface_area_m2: f64) -> Result<Self, DepositionError> {
         if !positive(multiplier_m) || !positive(surface_area_m2) {
             return Err(DepositionError::Arithmetic);
@@ -81,10 +131,66 @@ impl ReservoirLayerGeometry {
         config: LayerConductionConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ReservoirLayerResponse, DepositionError> {
+        self.evaluate_inner(
+            curve,
+            temperatures_k,
+            film_resistance_k_w,
+            config,
+            false,
+            &mut checkpoint,
+        )
+    }
+
+    /// Heat from an interior material trace through its physical face and film
+    /// to the bath: endpoints are [T_material, T_bath], and positive heat leaves
+    /// the material. This reverses the SAME original material/film flux owner.
+    /// Only actual material temperatures require conductivity support. A bath
+    /// outside that chart is admitted only when the solved material face stays
+    /// supported. Zero film still requires the prescribed face to be supported.
+    pub fn evaluate_material_to_bath(
+        self,
+        curve: &ConductivityCurve,
+        temperatures_k: [f64; 2],
+        film_resistance_k_w: f64,
+        config: LayerConductionConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ReservoirLayerResponse, DepositionError> {
+        let mut response = self.evaluate_inner(
+            curve,
+            [temperatures_k[1], temperatures_k[0]],
+            film_resistance_k_w,
+            config,
+            true,
+            &mut checkpoint,
+        )?;
+        response.power_to_reservoir_w = -response.power_to_reservoir_w;
+        response.heat_residual_w = -response.heat_residual_w;
+        let [bulk, material] = response.endpoint_derivative_w_k;
+        response.endpoint_derivative_w_k = [-material, -bulk];
+        Ok(response)
+    }
+
+    fn evaluate_inner(
+        self,
+        curve: &ConductivityCurve,
+        temperatures_k: [f64; 2],
+        film_resistance_k_w: f64,
+        config: LayerConductionConfig,
+        admit_bath_outside_chart: bool,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ReservoirLayerResponse, DepositionError> {
         checkpoint()?;
         let [bulk, reservoir] = temperatures_k;
-        let kb = curve.conductivity_w_m_k(bulk)?;
+        if !positive(bulk) || !positive(reservoir) {
+            return Err(DepositionError::MaterialDomain);
+        }
         let kr = curve.conductivity_w_m_k(reservoir)?;
+        let kb = if !admit_bath_outside_chart || film_resistance_k_w == 0.0 {
+            curve.conductivity_w_m_k(bulk)?
+        } else {
+            // Used only at equilibrium; there bulk equals the material trace.
+            kr
+        };
         if !film_resistance_k_w.is_finite()
             || film_resistance_k_w < 0.0
             || config.max_iterations == 0
@@ -110,7 +216,17 @@ impl ReservoirLayerGeometry {
                 iterations: 0,
             });
         }
-        let signed_wall_power = self.multiplier_m * curve.integral_w_m(reservoir, bulk)?;
+        let span = curve.temperature_range_k();
+        let material_limit = if admit_bath_outside_chart {
+            bulk.clamp(span[0], span[1])
+        } else {
+            bulk
+        };
+        let signed_wall_power =
+            self.multiplier_m * curve.integral_w_m(reservoir, material_limit)?;
+        if admit_bath_outside_chart && signed_wall_power == 0.0 {
+            return Err(DepositionError::MaterialDomain);
+        }
         if !signed_wall_power.is_finite() || signed_wall_power == 0.0 {
             return Err(DepositionError::Arithmetic);
         }
@@ -131,13 +247,22 @@ impl ReservoirLayerGeometry {
             });
         }
         let sign = delta.signum();
-        let mut low = 0.0;
+        // If the bath is outside source support, the film must carry at least
+        // this much heat before its material face enters the measured chart.
+        let mut low = if material_limit != bulk {
+            (bulk - material_limit).abs() / film_resistance_k_w
+        } else {
+            0.0
+        };
         // Either the material or film alone gives a rigorous upper flux bound.
         let mut high = signed_wall_power
             .abs()
             .min(delta.abs() / film_resistance_k_w);
-        if !positive(high) {
+        if !positive(high) || !low.is_finite() {
             return Err(DepositionError::Arithmetic);
+        }
+        if low > high {
+            return Err(DepositionError::MaterialDomain);
         }
         // Evaluate the residual across the larger series resistance. When the
         // film dominates, reconstructing Q from the rounded absolute face
@@ -146,7 +271,7 @@ impl ReservoirLayerGeometry {
         // mismatch. Both residuals increase with Q with derivative >= 1, so
         // their absolute value bounds the remaining flux error in watts.
         let invert_material = film_resistance_k_w >= delta.abs() / signed_wall_power.abs();
-        let mut power = 0.5 * high;
+        let mut power = low + 0.5 * (high - low);
         for iteration in 0..config.max_iterations {
             checkpoint()?;
             let (face, kface, other_power, inverse_derivative) = if invert_material {
@@ -233,13 +358,13 @@ impl ReservoirLayerGeometry {
 /// Flux and exact local tangent of the accepted material/film series law.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReservoirLayerResponse {
-    /// Signed heat leaving the bulk and entering the prescribed reservoir [W].
+    /// Signed heat from the first endpoint to the second endpoint [W].
     pub power_to_reservoir_w: f64,
-    /// Positive Q/(T_bulk - T_reservoir), with its equilibrium limit [W/K].
+    /// Positive Q/(T_first - T_second), with its equilibrium limit [W/K].
     pub conductance_w_k: f64,
-    /// dQ/d[T_bulk,T_reservoir] [W/K], at fixed material and geometry.
+    /// dQ/d[T_first,T_second] [W/K], in the selected evaluator's endpoint order.
     pub endpoint_derivative_w_k: [f64; 2],
-    /// Material temperature after the gas/contact film [K].
+    /// Actual material-face temperature adjacent to the bath/film [K].
     pub material_face_temperature_k: f64,
     /// Signed residual of the selected monotone flux equation [W]. Its absolute
     /// value bounds the flux error; either the film or the original material
@@ -456,5 +581,196 @@ mod tests {
             )),
             Err(DepositionError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn material_to_bath_flux_supports_only_the_actual_material_profile() {
+        // k(T)=0.01*T crosses its original knot. The manufactured material
+        // profile is wholly supported even though the bath lies outside it.
+        let conductivity =
+            ConductivityCurve::new(vec![[400.0, 4.0], [500.0, 5.0], [600.0, 6.0]]).unwrap();
+        let geometry = ReservoirLayerGeometry::planar(0.02, 0.04).unwrap();
+        for (material, bath, face, power) in
+            [(550.0, 250.0, 450.0, 250.0), (450.0, 750.0, 550.0, -250.0)]
+        {
+            let response = geometry
+                .evaluate_material_to_bath(
+                    &conductivity,
+                    [material, bath],
+                    0.8,
+                    config(),
+                    || Ok(()),
+                )
+                .unwrap();
+            close(response.power_to_reservoir_w, power, 1e-8);
+            close(response.material_face_temperature_k, face, 1e-8);
+            close(response.conductance_w_k, power / (material - bath), 1e-10);
+            let denominator = 1.0 + 0.8 * 0.5 * 0.01 * face;
+            close(
+                response.endpoint_derivative_w_k[0],
+                0.5 * 0.01 * material / denominator,
+                1e-10,
+            );
+            close(
+                response.endpoint_derivative_w_k[1],
+                -0.5 * 0.01 * face / denominator,
+                1e-10,
+            );
+            for endpoint in 0..2 {
+                let mut plus = [material, bath];
+                let mut minus = plus;
+                plus[endpoint] += 1e-3;
+                minus[endpoint] -= 1e-3;
+                let q_plus = geometry
+                    .evaluate_material_to_bath(&conductivity, plus, 0.8, config(), || Ok(()))
+                    .unwrap()
+                    .power_to_reservoir_w;
+                let q_minus = geometry
+                    .evaluate_material_to_bath(&conductivity, minus, 0.8, config(), || Ok(()))
+                    .unwrap()
+                    .power_to_reservoir_w;
+                close(
+                    (q_plus - q_minus) / 2e-3,
+                    response.endpoint_derivative_w_k[endpoint],
+                    3e-7,
+                );
+            }
+            // Existing callers retain their original all-endpoint source gate.
+            assert!(matches!(
+                geometry.evaluate(&conductivity, [bath, material], 0.8, config(), || Ok(())),
+                Err(DepositionError::MaterialDomain)
+            ));
+        }
+        for endpoints in [[550.0, 250.0], [450.0, 750.0]] {
+            // Too little film puts the actual face outside the measured chart.
+            for film in [0.0, 0.01] {
+                assert!(matches!(
+                    geometry.evaluate_material_to_bath(
+                        &conductivity,
+                        endpoints,
+                        film,
+                        config(),
+                        || Ok(()),
+                    ),
+                    Err(DepositionError::MaterialDomain)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn actual_radial_face_and_area_fraction_preserve_series_resistance() {
+        let conductivity = ConductivityCurve::new(vec![[200.0, 4.0], [800.0, 4.0]]).unwrap();
+        let pi = core::f64::consts::PI;
+        let mut geometries = vec![(
+            ReservoirLayerGeometry::planar(2.0, 0.4).unwrap(),
+            2.0,
+            0.4 / (2.0 * 4.0),
+        )];
+        for surface in [1.0_f64, 1.8] {
+            let trace = 1.4_f64;
+            let inner = surface.min(trace);
+            let outer = surface.max(trace);
+            geometries.push((
+                ReservoirLayerGeometry::cylindrical_face(surface, trace, 0.7).unwrap(),
+                2.0 * pi * surface * 0.7,
+                (outer / inner).ln() / (2.0 * pi * 0.7 * 4.0),
+            ));
+            geometries.push((
+                ReservoirLayerGeometry::spherical_face(surface, trace).unwrap(),
+                4.0 * pi * surface * surface,
+                (1.0 / inner - 1.0 / outer) / (4.0 * pi * 4.0),
+            ));
+        }
+        for (full, area, resistance) in geometries {
+            for fraction in [1.0, 0.3] {
+                let geometry = full.with_area_fraction(fraction).unwrap();
+                close(geometry.surface_area_m2(), fraction * area, 1e-13);
+                let material_resistance = resistance / fraction;
+                let film = 1.0 / (5.0 * area * fraction);
+                let expected_g = 1.0 / (material_resistance + film);
+                for temperatures in [[650.0, 350.0], [350.0, 650.0], [500.0, 500.0]] {
+                    let response = geometry
+                        .evaluate_material_to_bath(
+                            &conductivity,
+                            temperatures,
+                            film,
+                            config(),
+                            || Ok(()),
+                        )
+                        .unwrap();
+                    let power = expected_g * (temperatures[0] - temperatures[1]);
+                    close(response.power_to_reservoir_w, power, 1e-7);
+                    close(
+                        response.material_face_temperature_k,
+                        temperatures[0] - power * material_resistance,
+                        1e-8,
+                    );
+                    close(response.endpoint_derivative_w_k[0], expected_g, 1e-10);
+                    close(response.endpoint_derivative_w_k[1], -expected_g, 1e-10);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn material_face_geometry_support_and_cancellation_refuse_without_fallback() {
+        let conductivity = ConductivityCurve::new(vec![[400.0, 4.0], [600.0, 6.0]]).unwrap();
+        let geometry = ReservoirLayerGeometry::planar(0.02, 0.04).unwrap();
+        for fraction in [0.0, -0.1, 1.1, f64::NAN, f64::INFINITY] {
+            assert!(geometry.with_area_fraction(fraction).is_err());
+        }
+        assert!(ReservoirLayerGeometry::cylindrical_face(1.0, 1.0, 0.7).is_err());
+        assert!(ReservoirLayerGeometry::cylindrical_face(1.0, f64::NAN, 0.7).is_err());
+        assert!(ReservoirLayerGeometry::spherical_face(0.0, 1.0).is_err());
+        assert!(ReservoirLayerGeometry::spherical_face(1.0, 1.0).is_err());
+        assert!(matches!(
+            geometry.evaluate_material_to_bath(
+                &conductivity,
+                [399.0, 450.0],
+                0.8,
+                config(),
+                || Ok(()),
+            ),
+            Err(DepositionError::MaterialDomain)
+        ));
+        assert!(matches!(
+            geometry.evaluate_material_to_bath(
+                &conductivity,
+                [550.0, 250.0],
+                0.8,
+                config(),
+                || Err(DepositionError::Cancelled),
+            ),
+            Err(DepositionError::Cancelled)
+        ));
+        for endpoints in [[550.0, 450.0], [450.0, 550.0], [500.0, 500.0]] {
+            for film in [0.0, 0.8] {
+                let response = geometry
+                    .evaluate_material_to_bath(&conductivity, endpoints, film, config(), || Ok(()))
+                    .unwrap();
+                let reverse = geometry
+                    .evaluate(
+                        &conductivity,
+                        [endpoints[1], endpoints[0]],
+                        film,
+                        config(),
+                        || Ok(()),
+                    )
+                    .unwrap();
+                assert_eq!(response.power_to_reservoir_w, -reverse.power_to_reservoir_w);
+                assert_eq!(
+                    response.endpoint_derivative_w_k,
+                    [
+                        -reverse.endpoint_derivative_w_k[1],
+                        -reverse.endpoint_derivative_w_k[0]
+                    ]
+                );
+                assert_eq!(
+                    response.material_face_temperature_k,
+                    reverse.material_face_temperature_k
+                );
+            }
+        }
     }
 }

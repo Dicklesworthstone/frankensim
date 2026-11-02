@@ -13,11 +13,17 @@
 //! complete Jacobian assembly. A tangent is local to one exact candidate; a
 //! transpose action alone does not supply a trajectory adjoint or error bound.
 
-use super::BoundLayeredThermalBody;
+use super::{
+    BoundLayeredThermalBody, LayeredSurfacePatch, LayeredSurfaceResponse,
+    boundary::{ResolvedSurfaceBoundaries, SurfaceBoundaries},
+};
 use crate::thermal::conduction::{LayerConductionConfig, LayerConductionResponse};
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionSimulation,
-    backward_euler::{BackwardEulerStep, BackwardEulerTrial, StepCoefficients},
+    backward_euler::{
+        BackwardEulerStep, BackwardEulerTrial, BoundaryConductances, BoundaryStepCoefficients,
+        StepCoefficients,
+    },
 };
 use std::cell::RefCell;
 
@@ -43,7 +49,8 @@ pub struct LayeredThermalStep<'s, 'm, 'a> {
     step: BackwardEulerStep<'s, 'm>,
     initial: &'s DepositionSimulation<'m>,
     binding: &'s BoundLayeredThermalBody<'a>,
-    external_conductances: Vec<f64>,
+    external_conductances: Vec<[f64; 2]>,
+    surface_boundaries: SurfaceBoundaries,
     additional_sources_w: Vec<f64>,
     config: LayerConductionConfig,
 }
@@ -74,12 +81,13 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
             // Use the original owner's actual exposed area, including authored
             // contact patches and reservoir coverage. Boundary events within
             // this interval are refused by BackwardEulerStep::new.
-            let g = initial.exposed_area_m2(id)? * boundary.htc_w_m2_k
-                + boundary.reservoir.map_or(0.0, |r| r.conductance_w_k);
+            let ambient = initial.exposed_area_m2(id)? * boundary.htc_w_m2_k;
+            let reservoir = boundary.reservoir.map_or(0.0, |r| r.conductance_w_k);
+            let g = ambient + reservoir;
             if !g.is_finite() || g < 0.0 {
                 return Err(DepositionError::Arithmetic);
             }
-            external_conductances.push(g);
+            external_conductances.push([ambient, reservoir]);
         }
         checkpoint()?;
         Ok(Self {
@@ -87,9 +95,27 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
             initial,
             binding,
             external_conductances,
+            surface_boundaries: SurfaceBoundaries::default(),
             additional_sources_w: vec![0.0; n],
             config,
         })
+    }
+
+    /// Apply selected existing bath channels at their physical material faces.
+    /// Each selected channel's entire original area must be explicitly mapped;
+    /// unselected channels retain their authored cell-temperature semantics.
+    /// Half-cell conduction and the original film share one source-integral
+    /// flux owner. Calling again replaces the map; an empty map restores the
+    /// original behavior. Geometry, baths, sources and accepted history stay
+    /// under the original thermal owner.
+    pub fn with_surface_boundaries(
+        mut self,
+        patches: &[LayeredSurfacePatch],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        self.surface_boundaries =
+            SurfaceBoundaries::new(self.binding, self.initial, patches, checkpoint)?;
+        Ok(self)
     }
 
     /// Add signed, interval-only cell energies supplied by an external coupled
@@ -105,7 +131,9 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
         if energy_j.len() != self.cell_ids().len() {
-            return Err(bad("one additional energy per original thermal cell required"));
+            return Err(bad(
+                "one additional energy per original thermal cell required",
+            ));
         }
         let dt = self.duration_s();
         for (power, &energy) in self.additional_sources_w.iter_mut().zip(energy_j) {
@@ -175,20 +203,38 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
                     }
                 }
             }
+            let ResolvedSurfaceBoundaries {
+                boundaries,
+                derivatives,
+                responses,
+            } = self
+                .surface_boundaries
+                .resolve(self.binding, candidate, self.config, || {
+                    (*checkpoint.borrow_mut())()
+                })?;
             let linearization =
-                self.linearize(candidate, links, || (*checkpoint.borrow_mut())())?;
-            Ok(StepCoefficients {
-                sources_w,
-                conductances_w_k,
-                payload: linearization,
+                self.linearize(candidate, links, &derivatives, responses, || {
+                    (*checkpoint.borrow_mut())()
+                })?;
+            Ok(BoundaryStepCoefficients {
+                bulk: StepCoefficients {
+                    sources_w,
+                    conductances_w_k,
+                    payload: linearization,
+                },
+                boundaries,
             })
         };
         let poll = || (*checkpoint.borrow_mut())();
         if with_entropy {
-            self.step
-                .evaluate_with_entropy(energy_increments_j, resolve, poll)
+            self.step.evaluate_with_boundary_conductances_and_entropy(
+                energy_increments_j,
+                resolve,
+                poll,
+            )
         } else {
-            self.step.evaluate(energy_increments_j, resolve, poll)
+            self.step
+                .evaluate_with_boundary_conductances(energy_increments_j, resolve, poll)
         }
     }
 
@@ -196,6 +242,8 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
         &self,
         candidate: &DepositionSimulation<'_>,
         links: Vec<LayerConductionResponse>,
+        boundary_derivatives: &BoundaryConductances,
+        surfaces: Vec<LayeredSurfaceResponse>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<LayeredThermalLinearization, DepositionError> {
         let n = self.cell_ids().len();
@@ -213,7 +261,20 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
             if !capacity.is_finite() || capacity <= 0.0 {
                 return Err(DepositionError::Arithmetic);
             }
-            let boundary = nonnegative(dt * (self.external_conductances[i] / capacity))?;
+            // Differentiate the actual outward material/film heat, not its
+            // endpoint secant G. Keep unselected original channels unchanged.
+            let [ambient, reservoir] = self.external_conductances[i];
+            let derivative = boundary_derivatives
+                .ambient_w_k
+                .get(&id)
+                .copied()
+                .unwrap_or(ambient)
+                + boundary_derivatives
+                    .reservoir_w_k
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(reservoir);
+            let boundary = nonnegative(dt * (derivative / capacity))?;
             diagonal.push(positive(1.0 + boundary)?);
             temperatures.push(t);
             capacities.push(capacity);
@@ -240,6 +301,7 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
             temperatures,
             capacities,
             links,
+            surfaces,
         })
     }
 }
@@ -257,6 +319,7 @@ pub struct LayeredThermalLinearization {
     temperatures: Vec<f64>,
     capacities: Vec<f64>,
     links: Vec<LayerConductionResponse>,
+    surfaces: Vec<LayeredSurfaceResponse>,
 }
 
 #[derive(Clone, Copy)]
@@ -287,6 +350,11 @@ impl LayeredThermalLinearization {
     }
     pub fn link_responses(&self) -> &[LayerConductionResponse] {
         &self.links
+    }
+
+    /// Selected physical face responses, in canonical (face, channel) order.
+    pub fn surface_responses(&self) -> &[LayeredSurfaceResponse] {
+        &self.surfaces
     }
 
     pub fn apply_into(

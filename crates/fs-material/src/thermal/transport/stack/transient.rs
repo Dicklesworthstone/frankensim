@@ -16,6 +16,13 @@
 #[path = "transient/implicit.rs"]
 pub mod implicit;
 
+/// Original prescribed boundaries applied at physical terminal material faces.
+#[path = "transient/boundary.rs"]
+pub mod boundary;
+pub use boundary::{
+    LayeredBoundaryChannel, LayeredFace, LayeredSurfacePatch, LayeredSurfaceResponse,
+};
+
 use super::{LayerStackGeometry, LayerStackSourceQuery, PreparedLayerStackConduction};
 use crate::thermal::{
     conduction::{LayerConductionConfig, LayerConductionResponse, LayerGeometry},
