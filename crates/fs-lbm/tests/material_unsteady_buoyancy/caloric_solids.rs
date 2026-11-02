@@ -125,6 +125,101 @@ fn shear_transport(source: &SolidThermalLaw<'_>, t: f64) -> Result<FluidTranspor
 }
 
 #[test]
+fn source_caloric_sgs_uses_endpoint_cp_in_reciprocal_heat_flux() {
+    use fs_lbm::conjugate::AffineSpecificEnthalpy;
+    use fs_lbm::material::conjugate::buoyant::enthalpy::ConvectionCaloricLaw;
+
+    // Exact synthetic h=2 theta+.025 theta^2, Cp=2+.05 theta. The two
+    // closed MAC cells have zero volume flow; their moving top wall supplies
+    // the same analytic SGS shear gradient, independent of thermal iteration.
+    struct Caloric;
+    impl ConvectionCaloricLaw for Caloric {
+        fn tangent_at_temperature(&self, reference: f64, t: f64)
+            -> Result<AffineSpecificEnthalpy, MaterialError> {
+            Ok(AffineSpecificEnthalpy {
+                temperature_k: t,
+                enthalpy_j_kg: (t - reference) * (2.0 + 0.025 * (t + reference - 600.0)),
+                heat_capacity_j_kg_k: 2.0 + 0.05 * (t - 300.0),
+            })
+        }
+    }
+    let transport = |t| FluidTransportState::try_new(
+        1.0, 2.0 + 0.05 * (t - 300.0), 0.002, 0.01,
+    );
+    let reference = transport(300.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&reference).unwrap();
+    let domain = VoxelDomain::new(2, 1, 1, 0.25).unwrap();
+    let mut faces = [FvBoundary::wall(); 6];
+    faces[3] = FvBoundary::Wall { velocity: [0.05, 0.0, 0.0] };
+    faces[4] = FvBoundary::Symmetry;
+    faces[5] = FvBoundary::Symmetry;
+    let flow = SimpleConfig::new(faces);
+    let mut thermal = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    thermal.fixed_temperature = vec![(0, 320.0)];
+    thermal.power_w = vec![0.0, 0.02];
+    let initial = [300.0, 300.0];
+    let mut limits = bounds();
+    limits.max_relative_specific_heat_departure = 0.9;
+    let mut unsteady = UnsteadyConfig::new(0.5, 1);
+    unsteady.scheme = TimeScheme::BackwardEuler;
+    unsteady.inner_iterations = 1000;
+    unsteady.inner_tolerance = 1e-11;
+    let caloric = Caloric;
+    let gate = CancelGate::new();
+    let run = |config| bound.march_natural_convection_with_enthalpy_and_sgs(
+        &domain, &[], &flow, &thermal, &energy(), &initial, limits,
+        &caloric, config, &unsteady, sgs(0.5), |_| 1.0, |_| 1.0,
+        None, &gate, |_, t, _| transport(t),
+    );
+    // Deliberately loosen every other nonlinear gate. A stale SGS Cp still
+    // must refuse through its own physical face/cell heat-defect condition.
+    let mut one_pass = controls();
+    one_pass.maximum_passes_per_step = 1;
+    one_pass.temperature_tolerance_k = 100.0;
+    one_pass.maximum_storage_defect_w = 100.0;
+    one_pass.maximum_energy_closure_j = 100.0;
+    assert!(matches!(run(one_pass),
+        Err(MaterialBuoyancyError::SgsHeatNotConverged { maximum_flux_defect_w, .. })
+        if maximum_flux_defect_w > 1e-4));
+    let result = run(controls()).unwrap();
+    let march = &result.convection.march;
+    let nu_t = (0.5_f64 * 0.25).powi(2) * (0.05 / 0.25);
+    for &actual in &march.flow.flow.eddy_viscosity_m2_s { close(actual, nu_t, 1e-12); }
+    let cp = |t: f64| 2.0 + 0.05 * (t - 300.0);
+    let h = |t: f64| { let theta = t - 300.0; 2.0 * theta + 0.025 * theta * theta };
+    let heat = |t: f64| {
+        let hot_k = 0.002 + cp(320.0) * nu_t / 0.9;
+        let cold_k = 0.002 + cp(t) * nu_t / 0.9;
+        let g = 0.0625 / (0.125 / hot_k + 0.125 / cold_k);
+        g * (320.0 - t)
+    };
+    // Independent nonlinear two-half-cell flux plus true source storage.
+    let mut bracket = [300.0, 320.0];
+    for _ in 0..80 {
+        let t = 0.5 * (bracket[0] + bracket[1]);
+        if domain.volume(1) * h(t) / unsteady.time_step_s > heat(t) + 0.02 {
+            bracket[1] = t;
+        } else { bracket[0] = t; }
+    }
+    let t = march.temperature[1];
+    assert!((t - 0.5 * (bracket[0] + bracket[1])).abs() < 1e-7);
+    let stored_rate = domain.volume(1) * h(t) / unsteady.time_step_s;
+    close(stored_rate - 0.02, heat(t), 1e-8);
+    let reference_cp_heat = (0.002 + 2.0 * nu_t / 0.9) * 0.25 * (320.0 - t);
+    assert!((heat(t) - reference_cp_heat).abs() > 1e-4,
+        "reference-Cp conversion must fail this independent flux oracle");
+    let record = &march.energy_records[0];
+    let true_storage = domain.volume(0) * h(320.0) + domain.volume(1) * h(t);
+    close(record.stored_energy_change_j, true_storage, 1e-9);
+    close(true_storage + record.boundary_outflow_j, record.source_j, 1e-8);
+    assert!(result.records[0].maximum_sgs_heat_flux_defect_w
+        <= controls().caloric.maximum_flux_defect_w);
+    assert!(result.records[0].passes > 1);
+    assert_eq!(initial, [300.0, 300.0]);
+    assert_eq!(bound.transport(), &reference);
+}
+
+#[test]
 fn sgs_joint_source_calorimetry_preserves_material_refresh_and_total_heat() {
     let fluid_card = card(0.004, 0.0);
     let fluid_source = law(&fluid_card, [290.0, 400.0]);
@@ -184,6 +279,7 @@ fn sgs_joint_source_calorimetry_preserves_material_refresh_and_total_heat() {
         assert_eq!(fluid_record.time_s, solid_record.time_s);
         assert_eq!(fluid_record.passes, solid_record.iterations);
         assert!(fluid_record.maximum_storage_defect_w <= controls().maximum_storage_defect_w);
+        assert!(fluid_record.maximum_sgs_heat_flux_defect_w <= controls().caloric.maximum_flux_defect_w);
     }
     for heat in &march.energy_records { assert!(heat.closure_j.abs() <= 1e-8); }
     for sample in active.fluid.convection.applied.iter().chain(&active.fluid.convection.endpoint) {

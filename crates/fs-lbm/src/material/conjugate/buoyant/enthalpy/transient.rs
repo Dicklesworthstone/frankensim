@@ -15,7 +15,8 @@ use super::{
 };
 use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep};
 use crate::conjugate::{
-    AdvectiveEnthalpyField, ChtError, EnergyConfig, FvSgsConfig, RadiationConfig, SimpleConfig, SolidMaterial,
+    AdvectiveEnthalpyField, AffineSpecificEnthalpy, ChtError, EnergyConfig, EnergySolution,
+    FvSgsConfig, RadiationConfig, SimpleConfig, SolidMaterial,
     ThermalSetup, TransientRecord, UnsteadyConfig, VoxelDomain,
 };
 use crate::material::transport::boussinesq::BoussinesqConfig;
@@ -28,7 +29,7 @@ use fs_material::{
 /// Finite nonlinear and work controls for the native source-caloric march.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialEnthalpyTransientConfig {
-    /// Common datum and local advective face/cell heat tolerances.
+    /// Common datum and local advective and source-SGS diffusive heat tolerance.
     pub caloric: MaterialEnthalpyConfig,
     /// Maximum caloric linearizations for each accepted thermal time step.
     pub maximum_passes_per_step: usize,
@@ -60,6 +61,9 @@ pub struct MaterialEnthalpyStepReport {
     pub maximum_storage_defect_w: f64,
     /// Independent local source-enthalpy face/cell heat defects.
     pub advection: MaterialEnthalpyReport,
+    /// Largest endpoint-minus-applied SGS heat defect on any native face or
+    /// net cell/junction row, W. Zero when no source-caloric SGS is active.
+    pub maximum_sgs_heat_flux_defect_w: f64,
 }
 
 /// Original momentum/material/thermal histories with full source-law storage.
@@ -98,6 +102,67 @@ impl MaterialEnthalpyTransientConfig {
             ));
         }
         Ok(())
+    }
+}
+
+
+/// Trial-local source-Cp conversion of one immutable accepted SGS field.
+/// Original molecular conductivity and the reference SGS field are never
+/// overwritten. Repeated caloric trials recompute, rather than multiply, k_t.
+struct SourceSgsHeat {
+    thermal: Option<ThermalSetup>,
+    net_defects_w: Vec<f64>,
+}
+
+impl SourceSgsHeat {
+    fn new(step: &MaterialHeatStep<'_>) -> Self {
+        Self {
+            thermal: step.setup.eddy_conductivity_w_m_k.iter().any(|&k| k != 0.0)
+                .then(|| step.setup.clone()),
+            net_defects_w: Vec::new(),
+        }
+    }
+
+    fn refresh(
+        &mut self,
+        step: &MaterialHeatStep<'_>,
+        reference: &FluidTransportState,
+        tangents: &[Option<AffineSpecificEnthalpy>],
+        gate: &CancelGate,
+    ) -> Result<(), MaterialBuoyancyError> {
+        let Some(thermal) = &mut self.thermal else { return Ok(()); };
+        let cp_reference = reference.specific_heat_j_kg_k();
+        for (cell, ((eddy, &base), tangent)) in thermal.eddy_conductivity_w_m_k.iter_mut()
+            .zip(&step.setup.eddy_conductivity_w_m_k).zip(tangents).enumerate()
+        {
+            if cell.is_multiple_of(256) { poll(gate)?; }
+            *eddy = if step.domain.is_fluid(cell) {
+                let cp = tangent.ok_or(MaterialBuoyancyError::Invalid(
+                    "source SGS heat requires the original fluid caloric tangent",
+                ))?.heat_capacity_j_kg_k;
+                if cp == cp_reference { base } else { base * (cp / cp_reference) }
+            } else { 0.0 };
+            if !eddy.is_finite() || *eddy < 0.0 || (base > 0.0 && *eddy == 0.0) {
+                return Err(MaterialBuoyancyError::Invalid(
+                    "local source-Cp SGS conductivity is unrepresentable",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn setup<'a>(&'a self, step: &'a MaterialHeatStep<'_>) -> &'a ThermalSetup {
+        self.thermal.as_ref().unwrap_or(step.setup)
+    }
+
+    fn endpoint_defect(
+        &mut self,
+        step: &MaterialHeatStep<'_>,
+        molecular_w_m_k: &[[f64; 3]],
+        solution: &EnergySolution,
+    ) -> Result<(f64, f64), MaterialBuoyancyError> {
+        let Some(thermal) = &self.thermal else { return Ok((0.0, 0.0)); };
+        Ok(step.conductivity_flux_defect(solution, molecular_w_m_k, thermal, &mut self.net_defects_w)?)
     }
 }
 
@@ -187,6 +252,7 @@ fn energy_step(
     let mut stored = Vec::with_capacity(domain.cell_count());
     let mut storage_w_k = Vec::with_capacity(step.reference_capacity_j_k.len());
     let mut cell_defects = vec![0.0; domain.cell_count()];
+    let mut sgs_heat = SourceSgsHeat::new(step);
     stored_change(
         caloric,
         domain,
@@ -212,6 +278,7 @@ fn energy_step(
         temperature_defect_k: f64::INFINITY,
         maximum_storage_defect_w: f64::INFINITY,
         advection: MaterialEnthalpyReport::default(),
+        maximum_sgs_heat_flux_defect_w: 0.0,
     };
     let mut closure_j = f64::INFINITY;
     for pass in 1..=controls.maximum_passes_per_step {
@@ -249,6 +316,7 @@ fn energy_step(
             storage_w_k.push(coefficient);
         }
         step.append_junction_storage(&mut storage_w_k)?;
+        sgs_heat.refresh(step, reference, &applied, gate)?;
         let (mut next, radiated_w, radiation_correction_w) = step.solve_with_enthalpy(
             &storage_w_k,
             conductivity_w_m_k,
@@ -256,6 +324,7 @@ fn energy_step(
                 cells: &applied,
                 boundary_j_kg,
             },
+            sgs_heat.setup(step),
             remaining_solves,
         )?;
         total_iterations = total_iterations.saturating_add(next.report.iterations);
@@ -287,9 +356,14 @@ fn energy_step(
             &mut cell_defects,
             gate,
         )?;
+        sgs_heat.refresh(step, reference, &endpoint, gate)?;
+        let (maximum_sgs_heat_flux_defect_w, sgs_outflow_correction_w) =
+            sgs_heat.endpoint_defect(step, conductivity_w_m_k, &next)?;
         let mut temperature_defect_k = 0.0f64;
         let mut maximum_storage_defect_w = 0.0f64;
-        let mut outflow_correction_w = radiation_correction_w;
+        let mut outflow_correction_w = if sgs_outflow_correction_w == 0.0 {
+            radiation_correction_w
+        } else { radiation_correction_w + sgs_outflow_correction_w };
         for cell in 0..domain.cell_count() {
             poll(gate)?;
             temperature_defect_k =
@@ -319,11 +393,13 @@ fn energy_step(
             temperature_defect_k,
             maximum_storage_defect_w,
             advection,
+            maximum_sgs_heat_flux_defect_w,
         };
         if temperature_defect_k <= controls.temperature_tolerance_k
             && maximum_storage_defect_w <= controls.maximum_storage_defect_w
             && advection.maximum_face_flux_defect_w <= caloric.config.maximum_flux_defect_w
             && advection.maximum_cell_flux_defect_w <= caloric.config.maximum_flux_defect_w
+            && maximum_sgs_heat_flux_defect_w <= caloric.config.maximum_flux_defect_w
             && closure_j.abs() <= controls.maximum_energy_closure_j
         {
             poll(gate)?;
@@ -366,6 +442,13 @@ fn energy_step(
                 )?;
             }
         }
+    }
+    if report.maximum_sgs_heat_flux_defect_w > caloric.config.maximum_flux_defect_w {
+        return Err(MaterialBuoyancyError::SgsHeatNotConverged {
+            time_s: step.time_s,
+            passes: report.passes,
+            maximum_flux_defect_w: report.maximum_sgs_heat_flux_defect_w,
+        });
     }
     Err(MaterialBuoyancyError::EnthalpyStepNotConverged {
         time_s: step.time_s,
@@ -440,17 +523,20 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// conservative donor-enthalpy transport.
     ///
     /// The native momentum step uses local source mu(T) plus rho*nu_t and its
-    /// original local eddy/molecular cap. One accepted nu_t field supplies
-    /// gradient heat diffusion with reference rho*Cp and Pr_t=0.9. Caloric
-    /// trials retain that same field, projected flow and old temperature;
-    /// they neither advance momentum nor compound eddy conductivity. Actual
+    /// original local eddy/molecular cap. Each caloric trial converts that
+    /// immutable accepted nu_t to k_t=rho0*Cp_source(T_trial)*nu_t/0.9 using
+    /// the same original h(T) derivative that supplies advection. Native face
+    /// and cell/junction diffusive defects must meet the caloric flux tolerance
+    /// at the accepted endpoint, including boundary/thermostat heat correction.
+    /// Trials retain the same flow and old temperature; they neither advance
+    /// momentum nor compound eddy conductivity. Actual
     /// storage and advected heat still use source h(T), including thermostats,
     /// open-boundary enthalpy and all existing local nonlinear acceptance tests.
     /// A zero SGS coefficient recovers the original caloric march exactly.
     ///
-    /// This is exploratory, first-order material coupling. Reference Cp is
-    /// only the declared turbulent thermal-diffusivity conversion, not a
-    /// replacement for source calorimetry. No molecular/SGS dissipation heat
+    /// This is exploratory, first-order material coupling. Local source Cp
+    /// controls turbulent heat diffusion; actual source h(T) controls storage.
+    /// No molecular/SGS dissipation heat
     /// or thermal wall model is selected by this entry.
     ///
     /// # Errors

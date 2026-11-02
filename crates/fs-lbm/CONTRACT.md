@@ -1862,14 +1862,37 @@ through every nonlinear thermal trial; momentum is not stepped again. Eddy
 conductivity is added only to fluid cells, once, and never enters molecular
 snapshots or source storage. Fluid h(T) owns actual storage and conservative
 donor heat; solid source integrals, contacts, reservoirs, radiation, local
-nonlinear gates, work bounds and atomic refusal remain in force. The declared
-gradient-diffusion closure retains reference rho*Cp and Pr_t=0.9, separately
-from source calorimetry. These entries select no new dissipation-heating or
+nonlinear gates, work bounds and atomic refusal remain in force. In the source-enthalpy
+entries, gradient diffusion uses the current source caloric derivative and
+Pr_t=0.9. The linear-Cp fluid entry retains its declared reference conversion. These entries select no new dissipation-heating or
 wall model. First-order feedback and exploratory SGS restrictions apply;
 zero SGS recovers the corresponding original march. The caloric-solids
 regressions specify joint source-mu(T) momentum/heat response, independent
 enthalpy conservation, constant-Cp reductions and late source refusal; these
 new whole-crate tests remain unexecuted under the current host memory limit.
+
+For the explicit source-enthalpy SGS marches, each native caloric trial
+rebuilds `k_t = rho0 * Cp_source(T_trial) * nu_t / 0.9` from the immutable
+accepted eddy field. It never compounds a prior thermal trial's conductivity.
+Only fluid cells receive this conversion; original h(T) continues to own
+storage and donor-cell advective heat. After each candidate, native individual
+face and net cell/junction conductive defects compare applied and endpoint
+source Cp against the existing `maximum_flux_defect_w` tolerance. Both sides
+reuse the actually accepted fixed/source contact resistances and original
+compact-link laws. The signed boundary/thermostat correction enters the same
+heat ledger exactly once. A globally small energy residual cannot hide a large
+local heat-flux mismatch.
+
+`maximum_sgs_heat_flux_defect_w` records the admitted local defect;
+`SgsHeatNotConverged` refuses an exhausted endpoint without publishing state.
+No SGS and matching constant source/reference Cp retain their original
+reductions. An independent moving-wall two-cell regression checks analytic
+SGS shear, true variable-Cp enthalpy storage, harmonic half-cell heat flux,
+thermostat accounting and the explicit one-pass flux refusal. Both source
+fluid-only and joint fluid/solid caloric owners use this closure. First-order
+coupling, exploratory SGS scope and separate dissipation/wall-model selection
+remain unchanged. All changed sources pass syntax parsing; full native
+integration execution remains unverified under the host resource limits.
 
 ## Compressible Navier-Stokes-Fourier hybrid (IRP M3.2-W3a, `nsf3`)
 

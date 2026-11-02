@@ -4,11 +4,12 @@
 //! MaterialHeatStep callback. Fluid h(T), solid integral Cp(T), solid k(T),
 //! radiation, thermostats and conservative advection therefore see one trial
 //! temperature and one physical energy ledger. No secondary thermal clock or
-//! operator splitting is introduced. Explicit SGS holds its one accepted
-//! fluid eddy heat field fixed throughout that common endpoint iteration.
+//! operator splitting is introduced. Explicit SGS holds the accepted eddy
+//! viscosity fixed and converts it through the current source Cp at each
+//! trial, with the same endpoint heat-flux acceptance and energy accounting.
 
 use super::{
-    MaterialEnthalpyMarch, MaterialEnthalpyStepReport, MaterialEnthalpyTransientConfig,
+    MaterialEnthalpyMarch, MaterialEnthalpyStepReport, MaterialEnthalpyTransientConfig, SourceSgsHeat,
 };
 use super::super::{
     CaloricCoupling, ConvectionCaloricLaw, MaterialEnthalpyConfig, MaterialEnthalpyReport,
@@ -196,6 +197,7 @@ fn joint_energy_step(
     let mut stored = Vec::with_capacity(domain.cell_count());
     let mut storage_w_k = Vec::with_capacity(step.reference_capacity_j_k.len());
     let mut cell_defects = vec![0.0; domain.cell_count()];
+    let mut sgs_heat = SourceSgsHeat::new(step);
     stored_change(
         caloric,
         solid_sources,
@@ -228,6 +230,7 @@ fn joint_energy_step(
         temperature_defect_k: f64::INFINITY,
         maximum_storage_defect_w: f64::INFINITY,
         advection: MaterialEnthalpyReport::default(),
+        maximum_sgs_heat_flux_defect_w: 0.0,
     };
     let mut solid_report = SolidThermalRecord {
         time_s: step.time_s,
@@ -293,6 +296,7 @@ fn joint_energy_step(
             storage_w_k.push(coefficient);
         }
         step.append_junction_storage(&mut storage_w_k)?;
+        sgs_heat.refresh(step, reference, &applied, gate)?;
 
         let (mut next, radiated_w, radiation_correction_w) = step.solve_with_enthalpy(
             &storage_w_k,
@@ -301,6 +305,7 @@ fn joint_energy_step(
                 cells: &applied,
                 boundary_j_kg,
             },
+            sgs_heat.setup(step),
             remaining_solves,
         )?;
         total_iterations = total_iterations.saturating_add(next.report.iterations);
@@ -335,6 +340,9 @@ fn joint_energy_step(
             gate,
         )?;
 
+        sgs_heat.refresh(step, reference, &endpoint, gate)?;
+        let (maximum_sgs_heat_flux_defect_w, sgs_outflow_correction_w) =
+            sgs_heat.endpoint_defect(step, &fields.conductivity_w_m_k, &next)?;
         let mut temperature_defect_k = 0.0_f64;
         let mut largest_temperature = 0.0_f64;
         let mut maximum_fluid_storage_defect_w = 0.0_f64;
@@ -342,7 +350,9 @@ fn joint_energy_step(
         let mut solid_stored_energy_change_j = 0.0_f64;
         let mut solid_roundoff_j = 0.0_f64;
         let mut solid_storage_ok = true;
-        let mut outflow_correction_w = radiation_correction_w;
+        let mut outflow_correction_w = if sgs_outflow_correction_w == 0.0 {
+            radiation_correction_w
+        } else { radiation_correction_w + sgs_outflow_correction_w };
         for cell in 0..domain.cell_count() {
             poll(gate)?;
             let old = step.previous_temperature_k[cell];
@@ -422,6 +432,7 @@ fn joint_energy_step(
             temperature_defect_k,
             maximum_storage_defect_w: maximum_fluid_storage_defect_w,
             advection,
+            maximum_sgs_heat_flux_defect_w,
         };
         solid_report = SolidThermalRecord {
             time_s: step.time_s,
@@ -442,6 +453,7 @@ fn joint_energy_step(
                 <= caloric.config.maximum_flux_defect_w
             && advection.maximum_cell_flux_defect_w
                 <= caloric.config.maximum_flux_defect_w
+            && maximum_sgs_heat_flux_defect_w <= caloric.config.maximum_flux_defect_w
             && closure_j.abs() <= fluid_controls.maximum_energy_closure_j;
         let solid_ok = temperature_defect_k
             <= solid_controls.temperature_tolerance_k + temperature_roundoff
@@ -500,6 +512,13 @@ fn joint_energy_step(
         }
     }
 
+    if fluid_report.maximum_sgs_heat_flux_defect_w > caloric.config.maximum_flux_defect_w {
+        return Err(MaterialBuoyancyError::SgsHeatNotConverged {
+            time_s: step.time_s,
+            passes: fluid_report.passes,
+            maximum_flux_defect_w: fluid_report.maximum_sgs_heat_flux_defect_w,
+        });
+    }
     if solid_report.temperature_defect_k > solid_controls.temperature_tolerance_k
         || solid_report.conductivity_relative_defect
             > solid_controls.conductivity_relative_tolerance
@@ -573,17 +592,19 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// endpoint evolution on the original native time step.
     ///
     /// Source mu(T) and the independently recomputed nu_t drive the same
-    /// reciprocal momentum stress. The accepted eddy field contributes exactly
-    /// one fluid gradient heat flux with reference rho*Cp and Pr_t=0.9 to every
-    /// joint trial. Original fluid h(T), solid integral Cp(T), solid k(T),
+    /// reciprocal momentum stress. Each joint trial converts the immutable
+    /// accepted nu_t into k_t=rho0*Cp_source(T_trial)*nu_t/0.9, once and only
+    /// in fluid cells. Native face and cell/junction flux defects must satisfy
+    /// the caloric tolerance at the endpoint; boundary and thermostat heat
+    /// corrections enter the same ledger. Original fluid h(T), solid integral Cp(T), solid k(T),
     /// contacts, radiation and thermostats still share one accepted temperature
     /// and heat ledger. Neither caloric iteration nor source refresh advances
     /// the SGS clock or adds eddy transport to a molecular material snapshot.
     /// Zero SGS recovers the original joint march exactly.
     ///
     /// The closure remains exploratory with first-order material feedback;
-    /// its reference-Cp thermal conversion does not replace actual source
-    /// calorimetry. This entry does not enable molecular/SGS dissipation heat
+    /// local source Cp controls turbulent diffusion while actual h(T) controls
+    /// storage. This entry does not enable molecular/SGS dissipation heat
     /// or the separately owned native viscous-heating model.
     ///
     /// # Errors

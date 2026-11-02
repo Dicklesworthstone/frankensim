@@ -599,11 +599,25 @@ impl MaterialHeatStep<'_> {
         storage_w_k: &[f64],
         conductivity_w_m_k: &[[f64; 3]],
         enthalpy: AdvectiveEnthalpyField<'_>,
+        thermal: &ThermalSetup,
         remaining_solves: &mut usize,
     ) -> Result<(EnergySolution, f64, f64), ChtError> {
         solve_step_with_fields(self.domain, self.fluid, self.solids, self.flow,
-            self.setup, self.energy, storage_w_k, self.previous_temperature_k, self.time_step_s, self.radiation,
+            thermal, self.energy, storage_w_k, self.previous_temperature_k, self.time_step_s, self.radiation,
             Some(conductivity_w_m_k), Some(enthalpy), Some(remaining_solves), self.gate)
+    }
+
+    /// Endpoint source-Cp SGS conductivity on the SAME native face/link laws.
+    /// This observes a candidate only; it neither solves nor advances time.
+    pub(crate) fn conductivity_flux_defect(
+        &self,
+        solution: &EnergySolution,
+        molecular_w_m_k: &[[f64; 3]],
+        thermal: &ThermalSetup,
+        net_defects_w: &mut Vec<f64>,
+    ) -> Result<(f64, f64), ChtError> {
+        solution.conductivity_flux_defect(self.domain, self.solids, self.flow,
+            thermal, molecular_w_m_k, net_defects_w, self.gate)
     }
 
     /// Actual constitutive storage with the original boundary/reservoir ledger.

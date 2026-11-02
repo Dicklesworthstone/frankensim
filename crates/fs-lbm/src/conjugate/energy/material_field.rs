@@ -327,6 +327,129 @@ impl EnergyConfig {
     }
 }
 
+
+impl EnergySolution {
+    /// Re-evaluate ONLY a resolved conductivity change on this temperature
+    /// field, using the native face/contact/boundary and compact-link laws.
+    /// Returns the largest individual-face or net cell/junction heat defect,
+    /// and the signed correction to physical outflow minus thermostat supply.
+    /// No energy solve or time advance occurs. Source contact resistances stay
+    /// those already admitted at this trial endpoint by their original owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn conductivity_flux_defect(
+        &self,
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        flow: &FlowField,
+        setup: &ThermalSetup,
+        molecular_w_m_k: &[[f64; 3]],
+        net_defects_w: &mut Vec<f64>,
+        gate: &CancelGate,
+    ) -> Result<(f64, f64), ChtError> {
+        let cells = domain.cell_count();
+        let parts = setup.compact_components.len();
+        if molecular_w_m_k.len() != cells || self.conductivity.len() != cells
+            || self.temperature.len() != cells || self.junctions.len() != parts
+            || setup.eddy_conductivity_w_m_k.len() != cells
+        {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.conductivity_defect",
+                reason: "resolved heat audit needs the original complete fields and junctions".into(),
+            });
+        }
+        net_defects_w.resize(cells + parts, 0.0);
+        net_defects_w.fill(0.0);
+        let mut endpoint = molecular_w_m_k.to_vec();
+        for (cell, axes) in endpoint.iter_mut().enumerate() {
+            if cell.is_multiple_of(256) { super::super::poll(gate)?; }
+            if domain.is_fluid(cell) {
+                for k in axes {
+                    *k += setup.eddy_conductivity_w_m_k[cell];
+                    super::finite_positive("thermal.total_conductivity", *k)?;
+                }
+            }
+        }
+        // Exact constant-Cp/zero-change recovery also avoids the flux walk.
+        if endpoint == self.conductivity { return Ok((0.0, 0.0)); }
+        let context = |k| super::Context {
+            domain, flow, solids, conductivity_temperature: None,
+            faces: setup.faces, k,
+            contacts: setup.contacts.iter().map(|contact| {
+                let (a, b) = contact.materials;
+                ((a.min(b), a.max(b)), contact.resistance_m2_k_w)
+            }).collect(),
+            face_contacts: self.face_contact_resistance_m2_k_w.clone(),
+            // Isolate diffusion without subtracting large advective terms.
+            rho_c: 0.0, density: 0.0, enthalpy: None,
+            scheme: super::ConvectionScheme::Upwind,
+        };
+        let before = context(self.conductivity.clone());
+        let after = context(endpoint);
+        let owners = super::compact_owners(domain, &setup.compact_components, gate)?;
+        let old_compact = super::Compact::new(domain, solids, &before.k, setup, None,
+            owners.clone(), gate)?;
+        let new_compact = super::Compact::new(domain, solids, &after.k, setup, None,
+            owners, gate)?;
+        let mut maximum = 0.0_f64;
+        for cell in 0..cells {
+            if cell.is_multiple_of(256) { super::super::poll(gate)?; }
+            if old_compact.owner(cell).is_some() { continue; }
+            for face in 0..6 {
+                if old_compact.toward_component(cell, face) { continue; }
+                let defect = if let Some(other) = domain.neighbor(cell, face) {
+                    if cell > other { continue; }
+                    let delta_g = after.diffusive_conductance(cell, other, face / 2)
+                        - before.diffusive_conductance(cell, other, face / 2);
+                    let defect = delta_g * (self.temperature[cell] - self.temperature[other]);
+                    net_defects_w[other] -= defect;
+                    defect
+                } else {
+                    let boundary = match setup.faces[face] {
+                        super::ThermalFace::Temperature(t) => Some(t),
+                        super::ThermalFace::Convective { ambient, .. } => Some(ambient),
+                        super::ThermalFace::Inflow { temperature } if domain.is_fluid(cell) =>
+                            Some(temperature),
+                        _ => None,
+                    };
+                    if let Some(t) = boundary {
+                        let delta_g = after.checked_term(cell, face)?.diag
+                            - before.checked_term(cell, face)?.diag;
+                        delta_g * (self.temperature[cell] - t)
+                    } else { 0.0 }
+                };
+                super::finite("thermal.conductivity_flux_defect", defect)?;
+                maximum = maximum.max(defect.abs());
+                net_defects_w[cell] += defect;
+            }
+        }
+        for (j, (old, new)) in old_compact.links.iter().zip(&new_compact.links).enumerate() {
+            super::super::poll(gate)?;
+            for (&(cell, old_g, _), &(other, new_g, _)) in old.iter().zip(new) {
+                debug_assert_eq!(cell, other);
+                let defect = (new_g - old_g)
+                    * (self.temperature[cell] - self.junctions[j].temperature_k);
+                super::finite("thermal.junction_conductivity_defect", defect)?;
+                maximum = maximum.max(defect.abs());
+                net_defects_w[cell] += defect;
+                net_defects_w[cells + j] -= defect;
+            }
+        }
+        let mut fixed = vec![false; cells];
+        for &(cell, _) in &setup.fixed_temperature { fixed[cell] = true; }
+        let mut outflow_correction_w = 0.0;
+        for (index, &defect) in net_defects_w.iter().enumerate() {
+            if index.is_multiple_of(256) { super::super::poll(gate)?; }
+            super::finite("thermal.net_conductivity_defect", defect)?;
+            maximum = maximum.max(defect.abs());
+            // Interior faces/links cancel; excluding fixed cells retains their
+            // opposite thermostat injection in the same boundary ledger.
+            if index >= cells || !fixed[index] { outflow_correction_w += defect; }
+        }
+        super::finite("thermal.conductivity_outflow_correction", outflow_correction_w)?;
+        Ok((maximum, outflow_correction_w))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

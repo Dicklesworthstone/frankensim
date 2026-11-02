@@ -135,6 +135,15 @@ pub enum MaterialBuoyancyError {
         material: MaterialBuoyancyReport,
         enthalpy: MaterialEnthalpyReport,
     },
+    /// Local source-Cp SGS heat fluxes did not close inside the same step.
+    SgsHeatNotConverged {
+        /// Candidate physical time, s; no endpoint was published.
+        time_s: f64,
+        /// Caloric linearizations completed for this candidate.
+        passes: usize,
+        /// Largest endpoint-minus-applied native heat-flux defect, W.
+        maximum_flux_defect_w: f64,
+    },
     /// A source-caloric transient exhausted its per-step nonlinear budget.
     EnthalpyStepNotConverged {
         /// Candidate physical time, s; no endpoint was published.
