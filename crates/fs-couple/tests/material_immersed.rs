@@ -4,6 +4,8 @@
 mod dry;
 #[path = "material_immersed/assembly.rs"]
 mod dry_assembly;
+#[path = "material_immersed/flow.rs"]
+mod flow;
 use fs_couple::material_immersed::{
     AdditionalMaterialSphere, FilmGeometry, ImmersedDomain, MaterialImmersedError,
     RetainedFluidSpheres, SphereStateSi,

@@ -1,0 +1,96 @@
+//! SI initial flow and held fluid loads on the original material-scaled owner.
+
+use super::*;
+
+impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, F, N, S> {
+    /// Prepare unit-reference-density fluid with a uniform physical velocity [m/s].
+    ///
+    /// Available only before the first accepted fluid/body interval. This is an
+    /// initial condition, not an impulse applied to an evolved fluid. Body pose,
+    /// velocity and momentum remain their authored initial values. A mismatch
+    /// with body motion or stationary walls creates a physical startup transient;
+    /// it is not a solved steady flow or a no-slip interior prescription.
+    ///
+    /// The source-owned scaling admits the speed. The native initializer uses
+    /// the current Guo force frame, so a previously selected fluid force cannot
+    /// add an unwanted half-force velocity. Cancellation changes no accepted state.
+    pub fn initialize_uniform_flow_si(
+        &mut self,
+        velocity_m_s: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        if self.accepted_steps != 0 {
+            return Err(Error::Invalid(
+                "fluid initialization requires the initial accepted time",
+            ));
+        }
+        let velocity_m_s = convert(velocity_m_s, 1.0)?;
+        let speed = velocity_m_s[0]
+            .hypot(velocity_m_s[1])
+            .hypot(velocity_m_s[2]);
+        if speed > self.maximum_speed_m_s {
+            return Err(Error::Invalid(
+                "initial flow exceeds the source-scaled scenario speed bound",
+            ));
+        }
+        let velocity = convert(
+            velocity_m_s,
+            self.scaling.timestep_s() / self.scaling.cell_size_m(),
+        )?;
+        self.grid
+            .initialize_uniform_equilibrium(1.0, velocity, gate)
+            .map_err(Error::Flow)
+    }
+
+    /// Replace an externally authored uniform fluid volume force [N/m^3].
+    ///
+    /// This is a force on represented fluid only. The load is held for
+    /// following native intervals; a rebind itself advances no time and applies
+    /// no impulse or work. Original Guo rebinding preserves actual fluid mass,
+    /// momentum and force-corrected stress. Body states, material units, viscosity
+    /// and accepted clocks stay intact. An unchanged force preserves populations.
+    ///
+    /// Conversion is F_lattice = f_SI dt^2/(rho_reference dx), using the same
+    /// source density as all fluid/body momentum conversions. Native dry-body
+    /// correction already removes the force on fictitious interior fluid. Do not
+    /// apply that subtraction or the fluid impulse again as an authored body load.
+    /// The reference hydrostatic pressure is already removed by dry-body reduced
+    /// gravity; do not add that gravity a second time through this external port.
+    ///
+    /// A reduced affine-pressure scenario needs a distinct solid traction too:
+    /// for `p = p_periodic - f.x`, author `V_original * f` as the dry body's
+    /// center force as well as supplying `f` here. Periodic pressure perturbations
+    /// do not recover that affine traction. This physical solid load is separate
+    /// from the fictitious-fluid subtraction and is not a duplicate fluid deposit.
+    ///
+    /// This supplies a piecewise-held forcing history. It does not implement an
+    /// inlet/outlet pressure boundary, variable-density flow, or a closed finite
+    /// reservoir. The native step still enforces its actual Mach and balance gates.
+    pub fn rebind_uniform_fluid_force_si(
+        &mut self,
+        force_density_n_m3: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        let force = convert(force_density_n_m3, self.fluid_force_scale()?)?;
+        self.grid
+            .rebind_uniform_force(force, gate)
+            .map_err(Error::Flow)
+    }
+
+    /// Observe the held external fluid volume force [N/m^3].
+    pub fn uniform_fluid_force_density_n_m3(&self) -> Result<[f64; 3], Error> {
+        convert(
+            self.grid.uniform_force_density(),
+            1.0 / self.fluid_force_scale()?,
+        )
+    }
+
+    fn fluid_force_scale(&self) -> Result<f64, Error> {
+        let dt = self.scaling.timestep_s();
+        positive(
+            (dt / self.scaling.cell_size_m()) * (dt / self.scaling.transport().density_kg_m3()),
+        )
+    }
+}

@@ -187,6 +187,33 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
     pub const fn grid(&self) -> &BoundaryGrid3 {
         self.native.grid()
     }
+
+    /// Prepare physical initial fluid flow [m/s] before the first accepted step.
+    /// Original dry-body initial momenta and poses remain intact.
+    pub fn initialize_uniform_flow_si(
+        &mut self,
+        velocity_m_s: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.native.initialize_uniform_flow_si(velocity_m_s, gate)
+    }
+
+    /// Hold an external fluid volume force [N/m^3] without an instantaneous
+    /// momentum/stress jump. The simultaneous native dry correction owns each
+    /// interior-fluid force subtraction; do not repeat it in authored solid loads.
+    pub fn rebind_uniform_fluid_force_si(
+        &mut self,
+        force_density_n_m3: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.native
+            .rebind_uniform_fluid_force_si(force_density_n_m3, gate)
+    }
+
+    /// Held external fluid volume force [N/m^3].
+    pub fn uniform_fluid_force_density_n_m3(&self) -> Result<[f64; 3], Error> {
+        self.native.uniform_fluid_force_density_n_m3()
+    }
     /// Original dry inertia and accepted body kinematics in lattice units.
     pub const fn bodies_lattice(&self) -> &[MovingPartialSaturationBody3; N] {
         self.native.bodies_lattice()

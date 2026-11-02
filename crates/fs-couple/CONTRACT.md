@@ -21645,6 +21645,51 @@ statically reviewed; pinned formatting passes. The public target remains
 uncompiled and unexecuted because the constellation preflight finds missing
 siblings and Cargo fails on asupersync before Rust compilation.
 
+### Physical initial flow and external fluid loads on material bodies
+
+`RetainedFluidBodies`, `ResolvedImmersedBody`,
+`ResolvedImmersedBodies` and `ResolvedImmersedPlanes` expose the original
+native uniform-flow and held-force owners in SI units. The shared source-scaled
+container performs all conversions; the dry/plane wrappers retain their existing
+body/film solver, original dry inertia, material identity and accepted clock.
+
+`initialize_uniform_flow_si` prepares reference-density physical fluid velocity
+only before the first accepted interval. It leaves authored body momentum and
+prescribed plane motion intact and checks the source-scaled scenario speed bound.
+The original equilibrium is transformed into the CURRENT Guo forcing frame.
+A body/wall velocity mismatch is a startup transient, not a solved steady flow
+or exact rigid interior. Initial fluid preparation is not an evolved-state
+impulse and is refused once time has advanced.
+
+`rebind_uniform_fluid_force_si` accepts an external fluid-only volume force in N/m^3.
+Conversion is
+`F_lattice = f_SI dt^2/(rho_reference dx)`, using the same retained source
+density as body/fluid momentum units. The native uniform-force reframe preserves
+physical mass, momentum and force-corrected stress without advancing time or
+supplying work. Subsequent original steps apply the held force. Dry-body
+interior-fluid correction already removes the fictitious interior source;
+callers must not repeat it in solid loads or add the removed reference gravity.
+The original native receipt owns external-fluid impulse/torque and its declared
+local work account. Viscosity rebind retains the held force and mechanical state.
+An affine pressure `p=p_periodic-f.x` additionally requires the separately
+authored dry-body traction `V_original*f`; periodic perturbation pressure cannot
+recover it. That physical solid force is distinct from the fictitious-fluid
+subtraction and is not a duplicate fluid deposit.
+
+There is no mutable grid escape hatch, extra lattice-sized force allocation,
+pressure-inlet/outlet closure, variable-density law or finite driving reservoir.
+The older excess-inertia settling approximation retains its quiescent-release
+scope; these arbitrary-flow ports are not added to that approximation without
+a corresponding interior-momentum derivation.
+
+Three public regression groups cover independent SI fluid-plus-additional-body
+momentum under an applied load, initialization at nonzero held forcing,
+momentum-preserving source switches, source-viscosity updates, dry/spherical/plane
+forwarding and initial-time/invalid/cancellation refusal. Pinned formatting and
+static review pass. They remain uncompiled and unexecuted as a complete public
+target: the local constellation preflight finds missing siblings and Cargo
+refuses the absent asupersync manifest before Rust compilation.
+
 ### Continuous modal reflection on the complete exact flow
 
 `mm_line::continuous::ContinuousModalLine` is a full-state lossless

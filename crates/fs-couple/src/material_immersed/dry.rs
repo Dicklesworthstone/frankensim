@@ -188,6 +188,34 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
         self.native.rebind_fluid(fluid, gate)
     }
 
+    /// Prepare physical initial fluid flow [m/s] before the first accepted step.
+    /// The original dry-body state remains intact; native force-frame admission
+    /// and the material scenario speed bound apply.
+    pub fn initialize_uniform_flow_si(
+        &mut self,
+        velocity_m_s: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.native.initialize_uniform_flow_si(velocity_m_s, gate)
+    }
+
+    /// Hold an external fluid volume force [N/m^3] with no rebind impulse/work.
+    /// The original dry correction removes fictitious interior-fluid forcing;
+    /// reduced gravity and authored solid forces must not include it again.
+    pub fn rebind_uniform_fluid_force_si(
+        &mut self,
+        force_density_n_m3: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.native
+            .rebind_uniform_fluid_force_si(force_density_n_m3, gate)
+    }
+
+    /// Held external fluid volume force [N/m^3], observed in original source units.
+    pub fn uniform_fluid_force_density_n_m3(&self) -> Result<[f64; 3], Error> {
+        self.native.uniform_fluid_force_density_n_m3()
+    }
+
     /// Advance authored WORLD forces [N] and center couples [N m], with reduced
     /// gravity added once. Do not include weight or buoyancy again in authored.
     ///

@@ -9,9 +9,9 @@
 
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{
-    BodyFrameSampler3, BodyFrameShape3, BoundaryGrid3, BoundarySpec3, CollisionError3,
-    FaceBoundary3, MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3,
-    PartialSaturationError3, SphereLubrication3, TILE,
+    BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3, BoundarySpec3,
+    CollisionError3, FaceBoundary3, MovingPartialSaturationBodiesExchange3,
+    MovingPartialSaturationBody3, PartialSaturationError3, SphereLubrication3, TILE,
 };
 use fs_lbm::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_material};
 use fs_material::fluid_transport::FluidTransport;
@@ -19,11 +19,12 @@ use fs_mbd_material::{MaterialInertiaError, ResolvedBody, VolumeMoments};
 use fs_time::lie::gyrostat::InertiaTensor3;
 use fs_time::{So3, Vec3};
 
-mod ellipsoid;
-/// Ordinary heavy solids with source-derived displaced-fluid inertia and gravity.
-pub mod settling;
 /// Ordinary light, neutral or heavy solids with measured interior-fluid correction.
 pub mod dry;
+mod ellipsoid;
+mod flow;
+/// Ordinary heavy solids with source-derived displaced-fluid inertia and gravity.
+pub mod settling;
 use ellipsoid::NativeEllipsoid3;
 pub use ellipsoid::{AdditionalMaterialEllipsoid, RetainedFluidEllipsoids};
 
@@ -40,6 +41,8 @@ pub enum MaterialImmersedError {
     Native(PartialSaturationError3),
     /// Existing collision owner refused a live viscous-relaxation update.
     Relaxation(CollisionError3),
+    /// Original physical flow preparation or conservative Guo force rebinding refused.
+    Flow(BoundaryForcingError3),
 }
 impl core::fmt::Display for MaterialImmersedError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

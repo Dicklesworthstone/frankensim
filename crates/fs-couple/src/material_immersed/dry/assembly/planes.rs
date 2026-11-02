@@ -142,6 +142,32 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedPlanes<'a, 
         self.assembly.rebind_fluid(fluid, gate)
     }
 
+    /// Prepare physical fluid flow [m/s] at the initial accepted time, retaining
+    /// original dry-body states and prescribed plane geometry/rates.
+    pub fn initialize_uniform_flow_si(
+        &mut self,
+        velocity_m_s: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.assembly.initialize_uniform_flow_si(velocity_m_s, gate)
+    }
+
+    /// Hold an external fluid volume force [N/m^3] with no immediate impulse or
+    /// work. Original fluid/body/plane history and its common clock are retained.
+    pub fn rebind_uniform_fluid_force_si(
+        &mut self,
+        force_density_n_m3: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        self.assembly
+            .rebind_uniform_fluid_force_si(force_density_n_m3, gate)
+    }
+
+    /// Held external fluid volume force [N/m^3].
+    pub fn uniform_fluid_force_density_n_m3(&self) -> Result<[f64; 3], Error> {
+        self.assembly.uniform_fluid_force_density_n_m3()
+    }
+
     /// Advance physical dry spheres, actual fluid and prescribed planes together.
     /// Authored WORLD center forces/couples use N and N m. The original reduced
     /// weight is added once by the same load owner as the sphere-only entry.
