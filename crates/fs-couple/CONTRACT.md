@@ -1526,6 +1526,50 @@ error gates passed at 96/192/384 kHz against a 1.536 MHz fixed-spatial reference
 This is fixture convergence evidence, not a universal timestep certificate or
 a continuum validation.
 
+### Molecular exterior loading of original structural motion
+
+`BemLoadedModes::prepare_molecular_harmonic` binds the model's original solid
+or finite-thickness shell skin to `MolecularExterior` and optional original
+`LocalBoundary` laws. The equilibrium gas density and sound speed must match
+the source model. Every original mass-normalized structural coordinate, full
+modal viscosity and Maxwell memory branch is retained. Driven panels remain
+explicitly rigid under the wall owner's admission; other patches may absorb.
+
+The complete unit-source boundary bank gives the discrete acoustic load Z and
+matched finite-distance pressure/particle-velocity transfers. The mechanical
+block is `K - omega^2 I - i*omega*(C + Z)` under `exp(-i*omega*t)`, with the
+unchanged Maxwell rows appended. Only the boundary variables are eliminated;
+this is the exact Schur complement of the selected discrete source equations,
+not a fitted impedance or additional source-mode truncation. The original
+boundary bank and one balanced mechanical/memory LU are reused across all
+admitted coherent force cases. No independent receiver solve or absorption
+filter is added.
+
+`PreparedMolecularLoadedModes::harmonic_response_batch` returns force-scaled
+displacement, velocity, complete elastic memory, fluid reaction `-Z*v`, matched
+receiver fields, and original unscaled mechanical/memory residuals. Cycle work
+separately reports input, full Kelvin heat, Maxwell heat, exterior work and
+wall absorption. Exterior work includes eventual molecular heat and outgoing
+flux; it is not distant acoustic flux alone. All cross terms and raw signed
+channels remain, with no passivity repair or duplicate gas-loss debit.
+
+The source owns geometry and mechanics throughout preparation and replay.
+Positive frequency, the original material band/formulation, nonempty physical
+receivers, and separate boundary, source-bank, mechanical scratch, output and
+work budgets remain explicit. Cancellation or a refused force case publishes
+no partial response and leaves the cached preparation reusable. This is a
+stationary homogeneous molecular harmonic response, not a time-domain material
+realization, complex resonance continuation, mean heating or boundary-layer
+model. Original spatial discretization limits still apply.
+
+Five focused regressions cover an actual FE-derived shell with full damping
+and material memory, loaded-motion and receiver agreement with the existing
+full pressure-state solve, coherent forcing and passive wall work, a physical
+mass/Kelvin/Maxwell breathing sphere on three meshes with an independent
+complex-wave analytic solution, empty-reservoir recovery, and budget/source/
+cancellation refusal. These test definitions are not native execution evidence;
+native validation remains pending the shared dependency/resource blocker.
+
 ### Open-shell forced response with two-sided diffraction reaction
 
 `bem_loaded_modes::open_screen::OpenScreenLoadedModes::from_shell` binds the

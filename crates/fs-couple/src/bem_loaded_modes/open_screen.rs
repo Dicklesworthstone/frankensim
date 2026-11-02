@@ -606,4 +606,4 @@ impl<'p, 's> OpenScreenHarmonicBatch<'p, 's> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

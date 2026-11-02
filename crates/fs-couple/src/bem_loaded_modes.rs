@@ -38,8 +38,11 @@ use fs_math::{c64::C64, det};
 mod shell;
 mod memory;
 mod harmonic;
+mod molecular;
 mod pencil;
 pub use harmonic::{BemHarmonicOptions, BemHarmonicPower, BemHarmonicResponse};
+pub use molecular::{MolecularLoadedResponse, MolecularModesError, MolecularModesPower,
+    PreparedMolecularLoadedModes};
 /// Source-owned open-shell reaction and two-sided forced radiation.
 pub mod open_screen;
 

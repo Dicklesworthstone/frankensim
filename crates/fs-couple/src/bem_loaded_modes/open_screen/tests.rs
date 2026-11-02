@@ -4,7 +4,7 @@ use fs_plate::shell::reduction::ReductionBudget;
 use fs_plate::shell::{ShellMesh, ShellSupport, assemble_shell_sections};
 use fs_plate::{ModePair, PlateSection};
 
-fn shell() -> ShellReduction {
+pub(in crate::bem_loaded_modes) fn shell() -> ShellReduction {
     let mesh = ShellMesh::new(
         vec![
             [0., 0., 0.],
