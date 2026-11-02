@@ -75,7 +75,7 @@ impl PeriodicPortInput {
     pub fn omega_rad_s(&self) -> f64 { self.omega_rad_s }
     /// Number of driven ports (Fourier rows).
     pub fn port_count(&self) -> usize { self.coefficients.len() }
-    /// Retained harmonics per port, excluding the DC term.
+    /// Declared harmonics per port, excluding the DC term, including zero padding.
     pub fn harmonic_count(&self) -> usize {
         self.coefficients.first().map_or(0, |row| row.len().saturating_sub(1))
     }
@@ -85,6 +85,7 @@ impl PeriodicPortInput {
             let mut value = row[0].re;
             let mut correction = 0.0;
             for (n, &coefficient) in row.iter().enumerate().skip(1) {
+                if coefficient.re == 0.0 && coefficient.im == 0.0 { continue; }
                 let phase = n as f64 * self.omega_rad_s * time_s;
                 let term = 2.0 * (coefficient.re * det::cos(phase)
                     - coefficient.im * det::sin(phase));
@@ -200,12 +201,21 @@ fn autonomous_problem<'a>(
 
 /// Forced finite-amplitude harmonic balance using the original nonlinear pHS.
 /// The forcing frequency is taken from input, preventing an inconsistent anchor.
+/// Every nonzero input harmonic must fit the retained HB truncation. Admission
+/// precedes storage/source evaluation, so unresolved forcing cannot alias into a
+/// lower harmonic. Trailing zero coefficients do not consume this bandwidth.
+/// Nonlinear response harmonics still require the caller's truncation refinement.
 pub fn solve_forced_harmonic_balance(
     system: &PortHamiltonian, input: &PeriodicPortInput,
     guess_amplitude: f64, budget: &HbBudget,
 ) -> Result<HbOrbit, PhsOrbitError> {
     if !guess_amplitude.is_finite() || guess_amplitude <= 0.0 {
         return Err(bad("positive finite first-state seed amplitude required"));
+    }
+    if input.coefficients.iter().any(|row| row.iter().enumerate().any(|(n, c)|
+        n > budget.harmonics && (c.re != 0.0 || c.im != 0.0)))
+    {
+        return Err(bad("nonzero forcing harmonic exceeds the retained HB truncation"));
     }
     let problem = forced_problem(system, input)?;
     let result = solve_hb(&problem, HbAnchor::Forced { omega: input.omega_rad_s() },
@@ -379,6 +389,89 @@ mod tests {
         assert!((orbit.first_harmonic_amplitude(0)-expected).abs() < 2e-10*expected);
         assert!((orbit.first_harmonic_amplitude(1)-w*expected*m).abs() < 2e-10*w*expected*m);
         assert!(orbit.coeffs.iter().all(|row| row.iter().skip(2).all(|z|z.abs()<1e-10)));
+    }
+
+    #[test]
+    fn g0_unresolved_forcing_refuses_before_storage_evaluation() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+        struct CountedStorage(Arc<AtomicUsize>);
+        impl Storage for CountedStorage {
+            fn hamiltonian(&self, x: &[f64]) -> f64 {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                0.5 * x[0] * x[0]
+            }
+            fn gradient(&self, x: &[f64], out: &mut [f64]) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                out[0] = x[0];
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let system = PortHamiltonian::new(1, 2, vec![0.0], vec![1.0], vec![1.0, 1.0],
+            Box::new(CountedStorage(calls.clone()))).unwrap();
+        calls.store(0, Ordering::Relaxed);
+        // At N=1 the former eight-point AFT grid folded harmonics 7 and 9
+        // into the fundamental. Check every port and both complex components;
+        // even a subnormal authored coefficient must not be silently removed.
+        for (harmonic, coefficient) in [
+            (7, C64::from_re(0.5)),
+            (9, C64::new(0.0, -0.5)),
+            (MAX_INPUT_HARMONICS, C64::from_re(f64::from_bits(1))),
+        ] {
+            let mut second = vec![C64::ZERO; harmonic + 1];
+            second[harmonic] = coefficient;
+            let input = PeriodicPortInput::new(1.0,
+                vec![vec![C64::ZERO; harmonic + 1], second]).unwrap();
+            assert_eq!(
+                solve_forced_harmonic_balance(&system, &input, 1.0, &hb(1)).unwrap_err(),
+                PhsOrbitError::Invalid {
+                    what: "nonzero forcing harmonic exceeds the retained HB truncation",
+                },
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn g3_zero_padding_preserves_the_same_forced_solution() {
+        let system = fs_phs::mass_spring_damper(2.0, 1000.0, 4.0).unwrap();
+        let compact = vec![C64::from_re(2.0), C64::new(1.5, -0.5)];
+        let mut padded = compact.clone();
+        padded.resize(MAX_INPUT_HARMONICS + 1, C64::new(-0.0, 0.0));
+        let a = PeriodicPortInput::new(15.0, vec![compact]).unwrap();
+        let b = PeriodicPortInput::new(15.0, vec![padded]).unwrap();
+        assert_eq!(b.harmonic_count(), MAX_INPUT_HARMONICS);
+        let a = solve_forced_harmonic_balance(&system, &a, 0.01, &hb(1)).unwrap();
+        let b = solve_forced_harmonic_balance(&system, &b, 0.01, &hb(1)).unwrap();
+        assert_eq!(a.coeffs, b.coeffs);
+        assert_eq!(a.residual_trace, b.residual_trace);
+        assert_eq!(a.omega.to_bits(), b.omega.to_bits());
+    }
+
+    #[test]
+    fn g1_dc_and_higher_harmonics_match_each_analytic_phasor_and_power() {
+        let (m, k, d, w) = (2.0, 1000.0, 4.0, 15.0);
+        let system = fs_phs::mass_spring_damper(m, k, d).unwrap();
+        // No fundamental: the real response contains a static displacement,
+        // second and fourth harmonics with independently authored phases.
+        let coefficients = vec![C64::from_re(2.0), C64::ZERO,
+            C64::new(1.5, -0.75), C64::ZERO, C64::new(-0.4, 0.3)];
+        let input = PeriodicPortInput::new(w, vec![coefficients.clone()]).unwrap();
+        let orbit = solve_forced_harmonic_balance(&system, &input, 0.01, &hb(4)).unwrap();
+        let mut expected_loss = 0.0;
+        for (n, force) in coefficients.iter().enumerate() {
+            let wn = n as f64 * w;
+            let displacement = *force / C64::new(k - m * wn * wn, d * wn);
+            let momentum = displacement * C64::new(0.0, m * wn);
+            assert!((orbit.coeffs[0][n] - displacement).abs()
+                < 1e-10 * displacement.abs().max(1e-4));
+            assert!((orbit.coeffs[1][n] - momentum).abs()
+                < 1e-10 * momentum.abs().max(1e-4));
+            if n > 0 { expected_loss += 2.0 * d * wn * wn * displacement.abs().powi(2); }
+        }
+        let audit = audit_forced_orbit(&system, &input, &orbit, 256).unwrap();
+        assert!((audit.mean_resistance_loss_w - expected_loss).abs() < 1e-9 * expected_loss);
+        assert!(audit.relative_power_residual < 1e-9);
     }
 
     #[test]
