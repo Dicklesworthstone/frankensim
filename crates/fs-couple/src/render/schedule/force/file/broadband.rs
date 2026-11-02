@@ -30,6 +30,8 @@ pub struct BroadbandModalPerformance {
     tones: Vec<Option<tones::ToneDriver>>,
     tone_count: usize,
     envelope_count: usize,
+    frequency_sweep_count: usize,
+    maximum_sweep_force_error_bound_n: f64,
     next_event: usize,
     completed: u64,
     max_block: usize,
@@ -54,6 +56,9 @@ impl BroadbandModalPerformance {
     /// `gain SAMPLE GAIN` rows after the tones prescribe piecewise-linear force
     /// gains on that same clock. The continuous affine envelope is integrated
     /// inside each interval; it is not sampled into held amplitude steps.
+    /// Optional `frequency_sweeps`, `sweep`, and `omega` rows after envelopes
+    /// prescribe phase-continuous source sweeps under an explicit physical
+    /// force reconstruction error bound. Modal properties remain fixed.
     /// Static preload still uses the pre-window held loads. Tone limits include
     /// a DC column and share storage/work across affected voices conservatively.
     /// Coupled/nonlinear performances refuse: their within-step trajectories
@@ -86,6 +91,7 @@ impl BroadbandModalPerformance {
                     &columns,
                     parsed.info.sample_rate_hz,
                     parsed.info.samples,
+                    parsed.voices[0].model.budget().nyquist_guard_fraction,
                     &mut parsed.force_config.max_projection_terms,
                 )
             })
@@ -146,6 +152,12 @@ impl BroadbandModalPerformance {
         let envelope_count = source_program
             .as_ref()
             .map_or(0, |program| program.envelope_count);
+        let frequency_sweep_count = source_program
+            .as_ref()
+            .map_or(0, |program| program.frequency_sweep_count);
+        let maximum_sweep_force_error_bound_n = source_program
+            .as_ref()
+            .map_or(0.0, |program| program.maximum_sweep_force_error_bound_n);
         let tone_drivers = match source_program {
             Some(program) => program
                 .sources
@@ -168,6 +180,8 @@ impl BroadbandModalPerformance {
             tones: tone_drivers,
             tone_count,
             envelope_count,
+            frequency_sweep_count,
+            maximum_sweep_force_error_bound_n,
             next_event: 0,
             completed: 0,
             max_block,
@@ -190,6 +204,15 @@ impl BroadbandModalPerformance {
     /// Authored physical-force envelopes; acoustic output is never scaled here.
     pub const fn envelope_count(&self) -> usize {
         self.envelope_count
+    }
+    /// Authored source-frequency curves; the structural modes are unchanged.
+    pub const fn frequency_sweep_count(&self) -> usize {
+        self.frequency_sweep_count
+    }
+    /// Largest admitted per-source physical force reconstruction bound [N].
+    /// This does not bound the resulting displacement or receiver error.
+    pub const fn maximum_sweep_force_error_bound_n(&self) -> f64 {
+        self.maximum_sweep_force_error_bound_n
     }
 }
 
@@ -421,3 +444,7 @@ mod tests {
 #[cfg(test)]
 #[path = "broadband/envelope_tests.rs"]
 mod envelope_tests;
+
+#[cfg(test)]
+#[path = "broadband/frequency_tests.rs"]
+mod frequency_tests;

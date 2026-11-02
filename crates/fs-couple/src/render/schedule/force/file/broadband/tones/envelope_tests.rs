@@ -134,7 +134,7 @@ fn original_tone_indices_survive_voice_grouping_and_endpoint_buffers_are_budgete
         "{LIMITS}tones 2\ntone 1 0 {DRIVE} 0.03 -0.01\ntone 0 0 {DRIVE} 0.03 -0.01\nenvelopes 1\nenvelope 0 2\ngain 0 0\ngain 8 1\n"
     );
     let ports = [vec![-2.0]];
-    let program = ToneProgram::read(&text, 0, &[&ports, &ports], RATE, 32, &mut 1000).unwrap();
+    let program = ToneProgram::read(&text, 0, &[&ports, &ports], RATE, 32, 0.9, &mut 1000).unwrap();
     assert_eq!(program.envelope_count, 1);
     assert!(program.sources[0].as_ref().unwrap().envelopes.is_none());
     assert!(program.sources[1].as_ref().unwrap().envelopes.is_some());
@@ -142,6 +142,6 @@ fn original_tone_indices_survive_voice_grouping_and_endpoint_buffers_are_budgete
         text.replace("1048576", "1000"),
         text.replace("100000\n", "8\n"),
     ] {
-        assert!(ToneProgram::read(&bad, 0, &[&ports, &ports], RATE, 32, &mut 1000).is_err());
+        assert!(ToneProgram::read(&bad, 0, &[&ports, &ports], RATE, 32, 0.9, &mut 1000).is_err());
     }
 }

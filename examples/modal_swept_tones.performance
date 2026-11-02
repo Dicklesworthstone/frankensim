@@ -1,0 +1,60 @@
+frankensim-modal-performance-v1
+sample_rate_hz 48000
+samples 4800
+full_scale_pa 0.002
+limits 0.9 1 100000 1000000000 10000000
+compile_limits 32 100000
+voices 1
+voice retain-state 1 2
+mode 3141.592653589793 0.01 0 0 0 0
+port 0 1
+port 0 -0.25
+events 2
+force 0 0 0 0.05
+force 2400 0 0 0
+tone_limits 8 1048576 10000000 100000
+tones 3
+tone 0 0 3141.592653589793 0.01 -0.003
+tone 0 1 3204.424506661589 0.008 0.002
+tone 0 0 6283.185307179586 0.0005 0.0001
+envelopes 3
+envelope 0 7
+gain 0 0
+gain 240 1
+gain 960 0
+gain 1440 0
+gain 2400 0.8
+gain 4000 0
+gain 4800 0
+envelope 1 5
+gain 0 0
+gain 480 0.8
+gain 1800 -0.4
+gain 3200 0
+gain 4800 0
+envelope 2 4
+gain 0 0
+gain 360 1
+gain 2800 0
+gain 4800 0
+frequency_sweeps 3
+sweep 0 5 0.00001
+omega 0 2827.433388230814
+omega 1600 3455.7519189487725
+omega 2400 3455.7519189487725
+omega 4000 2984.5130209103032
+omega 4800 3141.592653589793
+sweep 1 4 0.00001
+omega 0 2890.2652413026095
+omega 1600 3518.583772020568
+omega 3200 3047.344873982099
+omega 4800 3204.424506661589
+sweep 2 3 0.00001
+omega 0 5654.866776461628
+omega 2400 6911.503837897545
+omega 4800 6283.185307179586
+broadband 1
+transfer example:instantaneous-velocity-gain 0 0 1 4 1 0.000001 2 1
+frequency 100 2 0
+frequency 30000 2 0
+withheld 10000 2 0

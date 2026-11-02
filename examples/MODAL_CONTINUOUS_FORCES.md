@@ -22,7 +22,7 @@ tones COUNT
 tone VOICE_INDEX PORT_INDEX OMEGA_RAD_S COSINE_N SINE_N
 ```
 
-Each row prescribes
+Without modulation, each row prescribes
 
 `F(t) = COSINE_N*cos(OMEGA_RAD_S*t) + SINE_N*sin(OMEGA_RAD_S*t)`
 
@@ -87,3 +87,53 @@ are never replaced with held samples to fit the budget. Only accepted samples
 advance carrier phase and envelope cursors. Files with no envelopes keep the
 existing constant-amplitude propagation path. The sidecar records
 `physical_force_envelopes` and identifies continuous affine-envelope integration.
+
+## Phase-continuous source frequency sweeps
+
+`examples/modal_swept_tones.performance` drives the same physical system with
+frequency sweeps, gain releases, and re-attacks. Run it with:
+
+```sh
+music_render modal examples/modal_swept_tones.performance swept.wav --block 37
+```
+
+After the optional gain envelopes and before `broadband`, add:
+
+```text
+frequency_sweeps COUNT
+sweep TONE_INDEX POINT_COUNT MAX_FORCE_ERROR_N
+omega SAMPLE RAD_S
+```
+
+Tone IDs again refer to the original physical rows. Each curve begins at sample
+zero, uses strictly increasing sample indices within the declared horizon, and
+holds its final frequency. Frequency varies linearly between knots; values must
+be finite, nonnegative and strictly below the original mechanical clock's
+guarded Nyquist frequency. The `tone` row's frequency remains the fixed carrier
+used to prepare the existing integrator. The `omega` rows specify the actual
+instantaneous source frequency, without changing structural modes or materials.
+
+The unscaled source phase advances by the integral of that instantaneous
+frequency over each accepted interval. Its current gain has no effect on the
+phase clock: silence, signed gain changes, and re-attacks all preserve the
+intended phase. Held-force events and receiver histories keep their existing
+meanings. Rejected steps publish neither phase nor envelope/sweep cursors.
+
+The requested sweep is reconstructed as linearly varying sine/cosine
+coefficients around the prepared carrier. The existing affine integrator then
+propagates that reconstructed physical force, mechanical work, heat and the
+causal receiver together. This reconstruction is an approximation to a chirp,
+with a conservative per-tone absolute force error bound in newtons. Complete
+frequency and gain curves are admitted against `MAX_FORCE_ERROR_N` before
+rendering. A tighter allowance may require a higher mechanics rate or a carrier
+closer to the sweep; the renderer never silently drops tones or changes the
+requested clock. The force bound does not bound displacement or pressure error.
+
+Sweep state and modulation work consume the original `tone_limits` allowances.
+One phase/modulation plan is evaluated per swept physical tone per sample and
+reused across its modal projections; prepared mechanical/receiver operators
+stay cached. Files without sweeps retain their existing source paths. The
+sidecar exposes `physical_force_frequency_sweeps` and
+`maximum_tone_force_reconstruction_error_n`. Sharp envelope corners and abrupt
+changes in sweep slope can introduce additional bandwidth, so carrier/target
+Nyquist admission alone is not a general anti-aliasing certificate.

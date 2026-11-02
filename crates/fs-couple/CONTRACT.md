@@ -22168,3 +22168,59 @@ and atomic refusals, plus two-frequency temperature/energy refinement against
 an independent direct-owner RK4 reference. Existing fixed and single-frequency
 thermal tests retain their original source and arithmetic.
 <!-- porous-spectrum-feedback:end -->
+
+## Prescribed source-frequency sweeps in modal performances
+
+The shared physical-tone schedule accepts optional `frequency_sweeps COUNT`,
+`sweep TONE_INDEX POINT_COUNT MAX_FORCE_ERROR_N`, and `omega SAMPLE RAD_S`
+records after gain envelopes. Indices refer to original physical tone rows.
+Knots begin at sample zero, increase strictly within the declared horizon,
+remain below the original guarded Nyquist limit, interpolate linearly, and
+hold the final frequency. A zero target frequency is a stopped prescribed
+phase, not a change to resonator stiffness or a string-tension control.
+
+The schedule admits a conservative whole-curve bound on complex-envelope
+interpolation error scaled by the original force quadrature magnitude in
+newtons. For a sample of duration h, fixed carrier wc, gain extrema G and
+maximum gain change per sample Dg, detuning D=max|w-wc|h, and maximum frequency
+change per sample Dw, the bound is |F|[2 Dg D + G(Dw h + D²)]/8. It is checked
+against the explicitly declared per-tone force-error allowance. Independent
+gain/frequency extrema may overestimate the bound; the report is the largest
+admitted per-tone bound, not a total across unrelated ports or a pressure
+bound. This floating-point evaluation is not an interval certificate including
+accumulated phase roundoff or an assertion of bandlimited modulation sidebands.
+
+Knot and metadata storage is reserved before allocation, with at most 65,536
+aggregate frequency knots. Candidate interval queries allocate nothing and do
+not advance the accepted clock. Cursors publish only after physical and causal
+observation acceptance. Focused tests cover original-row addressing, exact
+integrated phase through silence and zero-frequency turns, held tails,
+force-unit and signed-gain error admission, malformed knots, storage and
+guarded-clock refusals, and repeated/rejected candidate queries.
+
+### Phase-continuous physical source frequency sweeps
+
+The independent broadband performance path accepts optional `frequency_sweeps`,
+`sweep TONE_INDEX POINT_COUNT MAX_FORCE_ERROR_N`, and `omega SAMPLE RAD_S` rows
+after gain envelopes. Original physical tone indices survive voice grouping.
+The shared parser admits the complete target-frequency and gain curves against
+the original guarded clock and explicit absolute physical force error allowance.
+The carrier frequency used for prepared propagation remains fixed; these are
+source gestures, not changes to structural modes or materials.
+
+One immutable modulation plan per swept tone/sample generates both endpoint
+quadratures in the same interval-start carrier basis and advances the unscaled
+phase by the integrated target frequency. Signed gains, silence, and re-attacks
+retain that phase. The existing affine source/receiver owners propagate the
+reconstructed force together with physical work and heat. This is a bounded
+force reconstruction of a chirp, not an exact chirp solution or an acoustic-error
+certificate. Original mechanics, receiver and resource gates remain active.
+Sweep state and additional per-tone/per-mode modulation work consume the
+existing source budgets. Curves and phase publish only after accepted steps.
+
+The v1 sidecar exposes `physical_force_frequency_sweeps` and
+`maximum_tone_force_reconstruction_error_n`; the example is
+`modal_swept_tones.performance`. Focused checks compare against an independent
+physical chirp ODE, the analytic integrated phase across silence, signed modal
+projection, callback equality, source-free ringdown, explicit admission, and
+warm rejected-step retry. Empty sweep sections preserve existing envelope bits.

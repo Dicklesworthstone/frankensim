@@ -111,6 +111,19 @@ impl ToneEnvelopePlan {
         self.curves[tone].is_some()
     }
 
+    /// Whole-curve amplitude and change-per-sample bounds, independent of the
+    /// accepted cursor. Used to admit frequency reconstruction before rendering.
+    pub(super) fn bounds(&self, tone: usize) -> Result<[f64; 2], String> {
+        match self
+            .curves
+            .get(tone)
+            .ok_or("envelope tone index is outside its original source")?
+        {
+            Some(curve) => curve.bounds(),
+            None => Ok([1.0, 0.0]),
+        }
+    }
+
     /// Gains at this sample's start and end. Both multiply coefficients in the
     /// SAME interval-start carrier basis; the end gain does not rotate phase.
     pub(super) fn endpoints(&self, tone: usize, sample: u64) -> Result<[f64; 2], String> {
@@ -138,6 +151,26 @@ impl ToneEnvelopePlan {
 }
 
 impl GainEnvelope {
+    pub(super) fn bounds(&self) -> Result<[f64; 2], String> {
+        let maximum_gain = self
+            .points
+            .iter()
+            .map(|point| point.gain.abs())
+            .fold(0.0, f64::max);
+        let mut maximum_change = 0.0_f64;
+        for pair in self.points.windows(2) {
+            let samples = (pair[1].sample - pair[0].sample) as f64;
+            // Divide before subtracting so widely separated opposite finite
+            // gains can have a representable per-sample change.
+            let change = (pair[1].gain / samples - pair[0].gain / samples).abs();
+            if !change.is_finite() {
+                return Err("physical gain change per sample is not representable".into());
+            }
+            maximum_change = maximum_change.max(change);
+        }
+        Ok([maximum_gain, maximum_change])
+    }
+
     pub(super) fn endpoints(&self, sample: u64) -> Result<[f64; 2], String> {
         let end = sample
             .checked_add(1)

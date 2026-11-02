@@ -65,6 +65,8 @@ pub mod coupled_tones;
 mod tone_record;
 // Piecewise-affine physical source gains shared by independent/coupled paths.
 mod tone_envelope;
+// Phase-continuous source-frequency curves over the same prepared carriers.
+mod tone_frequency;
 /// Observer transfers from declared modal geometry and the surrounding gas.
 pub mod radiation;
 
