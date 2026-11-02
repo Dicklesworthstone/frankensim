@@ -9735,3 +9735,43 @@ full-invariant fibres, refusals, and a discriminating `kappa=1e308, F=3I` case:
 the full bulk energy overflows while the remainder endpoint stays finite and
 matches `kappa=1e3` bit for bit. These are isothermal material accounts; neither
 the incremental potential nor a signed numerical work defect is heat.
+
+## Objective discrete-gradient elastic work
+
+`hyper::discrete_gradient::DiscreteGradientPoint` freezes an accepted deformation
+and evaluates a two-state elastic response using the original hyperelastic
+energy. `EnergyPart::Full` retains the complete Neo-Hookean, Mooney-Rivlin,
+Ogden, or HGO energy; `Remainder` uses the existing mixed split without evaluating
+an unused bulk modulus. Full-invariant fibres retain their actual volume
+dependence.
+
+The Gonzalez correction is applied in Mandel coordinates of
+`C = F^T F`, around `(C_before + C_after)/2`. A Cholesky representative feeds
+the original scalar energy and native automatic differentiation. The returned
+algorithmic Piola stress satisfies `P_alg : (F_after - F_before) = Delta W`
+within the caller's explicit local work allowance. Its material moment
+`P_alg F_mid^T` is symmetric, which supports angular-momentum preservation
+when paired with centered reference inertia. The endpoint derivative is the
+true, generally nonsymmetric Jacobian of this two-state stress; it is not a
+symmetric elastic Hessian or an endpoint potential. The full C-chain derivative
+also applies when equal endpoint strains are related by a finite rotation.
+
+`DiscreteGradientSettings` explicitly supplies the small-increment switch,
+absolute work tolerance in Pa, and relative work tolerance. The midpoint limit
+reports its actual work defect and refuses an insufficient allowance.
+`volume_state` and `volume_response` separately expose the objective discrete
+cofactor, its endpoint Jacobian, and the endpoint cofactor. These local volume
+identities do not establish a global pressure gauge or supply a complete mixed
+time integrator.
+
+G0/G3 evidence in `tests/hyper_discrete_gradient.rs` covers original-energy
+work, all nine endpoint tangent columns, volume work and derivatives, moment
+symmetry, frame covariance, equal-strain finite rotations, small-increment
+refusal, invalid domains, and unused-bulk independence. The focused native-source
+lane passed all five tests; its worst normalized material finite-difference
+tangent discrepancy was `2.74e-10`. This is local constitutive evidence, not
+a long-horizon or frequency-matching claim for a solid integrator.
+
+Reference: O. Gonzalez, *Exact energy and momentum conserving algorithms for
+general models in nonlinear elasticity*, CMAME 190 (2000), 1763-1783,
+doi:10.1016/S0045-7825(00)00189-4.

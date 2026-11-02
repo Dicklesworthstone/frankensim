@@ -14,6 +14,8 @@ use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 pub mod acoustic;
 /// Dimensioned constitutive-model cards and graph registration.
 pub mod cards;
+/// Objective two-state elastic work and consistent discrete-gradient tangents.
+pub mod discrete_gradient;
 /// Exact incompressibility with traction-free thickness and transverse shears.
 pub mod incompressible_plane_stress;
 /// Original decoupled energies in a mixed displacement/pressure potential.
