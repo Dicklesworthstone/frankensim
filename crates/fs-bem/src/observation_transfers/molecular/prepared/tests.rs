@@ -197,6 +197,39 @@ fn mixed_source_work_keeps_wall_absorption_and_coherent_mutual_loading() {
         .unwrap()
         .remove(0);
     let power = response.power_w(&rates, || false).unwrap();
+    assert_eq!(response.panel_count(), surface.areas().len());
+    let mut boundary_pressure = vec![C64::ZERO; response.panel_count()];
+    let mut boundary_velocity = boundary_pressure.clone();
+    response
+        .evaluate_boundary_coherent(
+            &rates,
+            &mut boundary_pressure,
+            &mut boundary_velocity,
+            || false,
+        )
+        .unwrap();
+    let pressure_scale = direct
+        .radiation
+        .pressure_pa()
+        .iter()
+        .map(|p| p.abs())
+        .fold(0.0, f64::max);
+    let velocity_scale = direct
+        .radiation
+        .velocity_m_s()
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0, f64::max);
+    for panel in 0..response.panel_count() {
+        assert!(
+            (boundary_pressure[panel] - direct.radiation.pressure_pa()[panel]).abs()
+                < 2e-11 * pressure_scale
+        );
+        assert!(
+            (boundary_velocity[panel] - direct.radiation.velocity_m_s()[panel]).abs()
+                < 2e-11 * velocity_scale
+        );
+    }
     let scale = direct.driving_power_w.abs();
     close(power.driving_power_w, direct.driving_power_w, scale);
     close(power.absorbed_wall_power_w, direct.absorbed_power_w, scale);
@@ -308,4 +341,47 @@ fn preparation_limits_source_units_and_cancellation_refuse_without_new_solves() 
             .is_err()
     );
     assert_eq!(output, [C64::new(4.0, 5.0)]);
+    let marker = C64::new(4.0, 5.0);
+    let mut pressure = vec![marker; response.panel_count()];
+    let mut velocity = pressure.clone();
+    assert!(
+        response
+            .evaluate_boundary_coherent(&[C64::ONE], &mut pressure[..1], &mut velocity, || false)
+            .is_err()
+    );
+    assert!(
+        response
+            .evaluate_boundary_coherent(&[], &mut pressure, &mut velocity, || false)
+            .is_err()
+    );
+    assert!(
+        response
+            .evaluate_boundary_coherent(&[C64::ONE], &mut pressure, &mut velocity, || true)
+            .is_err()
+    );
+    assert!(
+        pressure
+            .iter()
+            .chain(&velocity)
+            .all(|&value| value == marker)
+    );
+    response
+        .evaluate_boundary_coherent(&[C64::ONE], &mut pressure, &mut velocity, || false)
+        .unwrap();
+    let expected_pressure = pressure.clone();
+    let expected_velocity = velocity.clone();
+    let mut polls = 0;
+    assert!(
+        response
+            .evaluate_boundary_coherent(&[C64::ONE], &mut pressure, &mut velocity, || {
+                polls += 1;
+                polls == 5
+            })
+            .is_err()
+    );
+    response
+        .evaluate_boundary_coherent(&[C64::ONE], &mut pressure, &mut velocity, || false)
+        .unwrap();
+    assert_eq!(pressure, expected_pressure);
+    assert_eq!(velocity, expected_velocity);
 }

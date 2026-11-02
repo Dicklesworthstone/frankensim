@@ -6,6 +6,7 @@
 //! sampled physical load, not a fitted or certified passive realization.
 
 use super::{MolecularBemObservation, MolecularObservationError, invalid};
+use crate::helmholtz::molecular::MolecularRadiation;
 use crate::observation_transfers::{
     MAX_OBSERVATION_ENTRIES, PreparedHarmonicObservation, SourceId, TransferError, cap, finite,
     harmonic::{self, Sum},
@@ -47,6 +48,9 @@ pub struct MolecularResponsePower {
 pub struct PreparedMolecularResponse {
     source: RelaxationState,
     harmonic: PreparedHarmonicObservation,
+    // The already-admitted 2*s*p source bank also supplies exact coherent
+    // boundary traces for incident/motion interference and interface work.
+    boundary_solutions: Vec<MolecularRadiation>,
     impedance: Vec<C64>,
     exterior_work: Vec<C64>,
     wall_work: Vec<C64>,
@@ -169,6 +173,7 @@ impl MolecularBemObservation<'_> {
         Ok(PreparedMolecularResponse {
             source: self.source().clone(),
             harmonic,
+            boundary_solutions: solved,
             impedance,
             exterior_work,
             wall_work,
@@ -190,6 +195,62 @@ impl PreparedMolecularResponse {
     /// Evaluation never repeats a boundary solve or attenuation correction.
     pub fn harmonic(&self) -> &PreparedHarmonicObservation {
         &self.harmonic
+    }
+
+    /// Number of original boundary panels, in the original surface order.
+    pub fn panel_count(&self) -> usize {
+        self.boundary_solutions
+            .first()
+            .map_or(0, |solution| solution.pressure_pa().len())
+    }
+
+    /// Combine the retained original pressure and ACTUAL normal-velocity
+    /// traces for coherent source rates. The latter includes any passive wall
+    /// response; it is not reconstructed from the prescribed drive alone.
+    ///
+    /// This allocation-free query performs 2*s*p complex products, bounded by
+    /// the already-admitted source bank and its cold projection-work ceiling.
+    /// No additional assembly, solve, attenuation or pressure-to-velocity
+    /// approximation occurs. It preserves the boundary fields needed to form
+    /// incident/motion interference directly instead of subtracting powers.
+    /// Discard both output buffers on refusal: a late cancellation or overflow
+    /// may leave a partial traversal, but never mutates the prepared bank.
+    pub fn evaluate_boundary_coherent(
+        &self,
+        rates: &[C64],
+        pressure_pa: &mut [C64],
+        normal_velocity_m_s: &mut [C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), MolecularObservationError> {
+        poll(&mut cancelled)?;
+        self.admit_rates(rates)?;
+        let panels = self.panel_count();
+        if pressure_pa.len() != panels || normal_velocity_m_s.len() != panels {
+            return Err(invalid(
+                "molecular boundary output must retain original panel order and extent",
+            ));
+        }
+        for panel in 0..panels {
+            poll(&mut cancelled)?;
+            let mut pressure = Sum::default();
+            let mut velocity = Sum::default();
+            for (source, (&rate, solution)) in
+                rates.iter().zip(&self.boundary_solutions).enumerate()
+            {
+                if source % 128 == 0 {
+                    poll(&mut cancelled)?;
+                }
+                pressure.add(solution.pressure_pa()[panel] * rate);
+                velocity.add(solution.velocity_m_s()[panel] * rate);
+            }
+            let (p, v) = (pressure.finish(), velocity.finish());
+            if !finite(p) || !finite(v) {
+                return Err(invalid("nonfinite coherent molecular boundary trace"));
+            }
+            pressure_pa[panel] = p;
+            normal_velocity_m_s[panel] = v;
+        }
+        poll(&mut cancelled)
     }
 
     /// Complete row-major resisting-effort/source-rate matrix. The force ON a

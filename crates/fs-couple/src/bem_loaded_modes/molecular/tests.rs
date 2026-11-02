@@ -9,7 +9,7 @@ use fs_material::{
 use fs_phs::{RelaxationBranch, WallPin};
 use fs_plate::shell::reduction::radiation::RadiationSurfaceBudget;
 
-fn exterior(relaxing: bool) -> MolecularExterior {
+pub(super) fn exterior(relaxing: bool) -> MolecularExterior {
     let data = if relaxing {
         "declared 1 synthetic 1 vibration 1 100 1 power 101.325 293.15 0 200 500"
     } else {
@@ -38,7 +38,7 @@ fn settings() -> BemModesOptions {
         max_projection_work: 20_000_000,
     }
 }
-fn options() -> BemHarmonicOptions {
+pub(super) fn options() -> BemHarmonicOptions {
     BemHarmonicOptions {
         max_load_cases: 8,
         max_response_bytes: 1_000_000,
@@ -46,13 +46,13 @@ fn options() -> BemHarmonicOptions {
         power_relative_tolerance: 1e-9,
     }
 }
-fn limits() -> MolecularResponseLimits {
+pub(super) fn limits() -> MolecularResponseLimits {
     MolecularResponseLimits {
         maximum_retained_entries: 100_000,
         maximum_panel_products: 1_000_000,
     }
 }
-fn receivers() -> Vec<ReceiverSpec> {
+pub(super) fn receivers() -> Vec<ReceiverSpec> {
     vec![ReceiverSpec {
         id: "fixed physical receiver".into(),
         position_m: [0.1, 0.05, 0.5],
@@ -186,7 +186,7 @@ fn actual_shell_source_matches_original_full_boundary_memory_solve() {
     }
 }
 
-fn partly_driven(exterior: &MolecularExterior) -> (BemLoadedModes, LocalBoundary) {
+pub(super) fn partly_driven(exterior: &MolecularExterior) -> (BemLoadedModes, LocalBoundary) {
     let surface = SpherePanels::icosphere(0.1, 0).unwrap();
     let medium = Medium::from(exterior.source().gas());
     let walls: Vec<_> = surface

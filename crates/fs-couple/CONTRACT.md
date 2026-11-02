@@ -1652,6 +1652,38 @@ complex-wave analytic solution, empty-reservoir recovery, and budget/source/
 cancellation refusal. These test definitions are not native execution evidence;
 native validation remains pending the shared dependency/resource blocker.
 
+`PreparedMolecularLoadedModes::harmonic_incident_response_batch` extends that
+same source to incoming plane waves, finite monopoles, force dipoles and mixed
+coherent fields. It projects the stationary illuminated body's total pressure,
+including diffraction, into blocked acoustic force on every original mode.
+This force and the supplied external mechanical force share the cached loaded
+mechanical/memory solve. One additional blocked-body BEM assembly/LU serves the
+incident batch; the earlier motion boundary bank is reused without another
+motion-field solve. The original gas, wall laws, formulation, source modes and
+receiver declarations remain fixed by preparation.
+
+The response exposes actual motion, independently projected total fluid
+traction, total boundary pressure/normal velocity, and total receiver pressure/
+particle velocity. Blocked, motion, interference and total exterior/wall work
+are separately contracted from their physical traces. In particular, total
+outward boundary work is signed under illumination: sound-only excitation can
+make it negative while structural or wall heat is positive. The balance is
+external mechanical input = Kelvin heat + Maxwell heat + total exterior work
++ total wall absorption. Incident/motion cross work is neither omitted nor
+recovered by subtracting large powers; the existing motion-only response and
+its effective-force ledger remain explicitly distinct from these total fields.
+
+`MolecularIncidentLimits` adds source clearance, analytic source-point work,
+projection/observation work and conservative live-payload caps. These and the
+inherited force-batch limits run before the blocked solve. Failed batches
+publish no partial response and leave the prepared owner reusable. G0/G1/G3
+regressions cover finite-source coherence with original Robin walls, direct
+combined-drive field parity, exact acoustic/mechanical force cancellation,
+resource/cancellation refusal, and an independent three-mesh compliant-sphere
+oracle for blocked force, material-memory motion, paired fields and signed
+total work. They are authored but remain unexecuted natively under the same
+dependency/resource blocker; no new continuum or performance claim is made.
+
 ### Open-shell forced response with two-sided diffraction reaction
 
 `bem_loaded_modes::open_screen::OpenScreenLoadedModes::from_shell` binds the

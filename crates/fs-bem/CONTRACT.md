@@ -1861,6 +1861,15 @@ source bank exposes its pressure/volume-flow impedance in the original source
 order for a duct multiport closure; mixed mechanical coordinates refuse that
 conversion. The reaction on a driven structure is opposite to resisting effort.
 
+The same already-admitted source bank now retains its original pressure and
+actual normal-velocity traces. `evaluate_boundary_coherent` reconstructs both
+in original panel order with compensated sums and no allocation or additional
+solve. Its `2*s*p` complex products remain within the source-bank reservation;
+the retained velocity includes the original passive wall response. Consumers
+can therefore contract incident/motion interference directly at the boundary.
+Output shapes and rates are admitted before writes; a late cancellation or
+overflow requires discarding the output buffers and leaves the bank reusable.
+
 Additional explicit caps admit `3*s² + 2*s*p + 8*s*r` live complex entries
 outside assembly and `3*s²*p` projection products, for s sources, p panels and
 r receivers. Cancellation reaches source solves, projection rows/panel tiles

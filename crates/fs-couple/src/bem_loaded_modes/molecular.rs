@@ -6,7 +6,7 @@
 //! fields and wall/exterior work use the same molecular source-solution bank.
 use super::*;
 use fs_bem::{
-    helmholtz::molecular::MolecularExterior,
+    helmholtz::molecular::{MolecularError, MolecularExterior},
     observation_transfers::{
         HarmonicField, LocalBoundary, MolecularBemObservation, MolecularObservationError,
         MolecularObservationFormulation, MolecularResponseLimits, PreparedMolecularResponse,
@@ -14,6 +14,9 @@ use fs_bem::{
     },
 };
 use fs_la::eigen_complex::LuComplex;
+
+mod incident;
+pub use incident::{MolecularIncidentLimits, MolecularIncidentPower, MolecularIncidentResponse};
 
 /// Original mechanics/solve refusal or original material/boundary observation
 /// refusal. No source error is replaced with a generic successful response.
@@ -30,6 +33,11 @@ impl From<BemModesError> for MolecularModesError {
 impl From<MolecularObservationError> for MolecularModesError {
     fn from(value: MolecularObservationError) -> Self {
         Self::Observation(value)
+    }
+}
+impl From<MolecularError> for MolecularModesError {
+    fn from(value: MolecularError) -> Self {
+        Self::Observation(value.into())
     }
 }
 impl From<TransferError> for MolecularModesError {
@@ -85,6 +93,9 @@ pub struct MolecularLoadedResponse {
 /// no holomorphic pole continuation or time-domain realization is asserted.
 pub struct PreparedMolecularLoadedModes<'s> {
     source: &'s BemLoadedModes,
+    exterior: MolecularExterior,
+    boundary: Option<LocalBoundary>,
+    minimum_clearance_m: f64,
     radiation: PreparedMolecularResponse,
     raw: PhysicalPencil,
     lu: LuComplex,
@@ -169,8 +180,8 @@ impl BemLoadedModes {
             formulation,
             self.settings.boundary,
         )?;
-        if let Some(boundary) = boundary {
-            observer = observer.with_local_boundary(boundary)?;
+        if let Some(boundary) = &boundary {
+            observer = observer.with_local_boundary(boundary.clone())?;
         }
         let radiation = observer.prepare_response(omega, response_limits, &mut cancelled)?;
         let z = radiation.impedance();
@@ -232,6 +243,9 @@ impl BemLoadedModes {
         poll(&mut cancelled)?;
         Ok(PreparedMolecularLoadedModes {
             source: self,
+            exterior: exterior.clone(),
+            boundary,
+            minimum_clearance_m,
             radiation,
             raw,
             lu,
@@ -250,22 +264,7 @@ impl PreparedMolecularLoadedModes<'_> {
         &self.radiation
     }
 
-    /// Solve complete coherent force columns against the cached operator, then
-    /// use each ACTUAL loaded velocity for the matched receiver and power bank.
-    /// All Maxwell arms survive, including mechanically cancelling histories.
-    /// Failed batches publish no partial responses; preparation is immutable.
-    ///
-    /// Work admission is 32*d³+128*cases*d²+64*cases*modes*(receivers+1),
-    /// including matched receiver evaluation and retaining the conservative
-    /// factorization allowance already paid during preparation. Response bytes
-    /// additionally include source reactions and all receivers; original model
-    /// payload admission bounds the temporary solve/audit buffers separately.
-    pub fn harmonic_response_batch(
-        &self,
-        forces: &[&[C64]],
-        mut cancelled: impl FnMut() -> bool,
-    ) -> Result<Vec<MolecularLoadedResponse>, MolecularModesError> {
-        poll(&mut cancelled)?;
+    fn admit_force_batch(&self, forces: &[&[C64]]) -> Result<(), MolecularModesError> {
         let (m, n) = (self.source.mode_count(), self.rows.len());
         let r = self.radiation.harmonic().receivers().len();
         let cases = forces.len();
@@ -283,6 +282,29 @@ impl PreparedMolecularLoadedModes<'_> {
         {
             return Err(bad("molecular loaded response needs a complete finite force batch within output/work limits").into());
         }
+        Ok(())
+    }
+
+    /// Solve complete coherent force columns against the cached operator, then
+    /// use each ACTUAL loaded velocity for the matched receiver and power bank.
+    /// All Maxwell arms survive, including mechanically cancelling histories.
+    /// Failed batches publish no partial responses; preparation is immutable.
+    ///
+    /// Work admission is 32*d³+128*cases*d²+64*cases*modes*(receivers+1),
+    /// including matched receiver evaluation and retaining the conservative
+    /// factorization allowance already paid during preparation. Response bytes
+    /// additionally include source reactions and all receivers; original model
+    /// payload admission bounds the temporary solve/audit buffers separately.
+    pub fn harmonic_response_batch(
+        &self,
+        forces: &[&[C64]],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<MolecularLoadedResponse>, MolecularModesError> {
+        poll(&mut cancelled)?;
+        self.admit_force_batch(forces)?;
+        let (m, n) = (self.source.mode_count(), self.rows.len());
+        let r = self.radiation.harmonic().receivers().len();
+        let cases = forces.len();
         let omega = self.radiation.harmonic().angular_frequency_rad_s();
         let mut output = Vec::with_capacity(cases);
         for &force in forces {
