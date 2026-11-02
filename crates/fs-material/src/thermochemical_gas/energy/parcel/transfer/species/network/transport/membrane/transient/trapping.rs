@@ -107,7 +107,7 @@ impl<'a> ResolvedTrappingMembraneCandidate<'a> {
     }
 }
 
-fn admit_traps(
+pub(super) fn admit_traps(
     species: &SpeciesId,
     temperature: f64,
     traps: &[Option<LangmuirMembraneTrapSource>],

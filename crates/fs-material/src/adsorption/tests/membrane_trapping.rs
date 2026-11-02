@@ -4,6 +4,8 @@ use super::*;
 mod adaptive;
 #[path = "membrane_trapping/reservoir.rs"]
 mod reservoir;
+#[path = "membrane_trapping/mixture.rs"]
+mod mixture;
 use crate::thermochemical_gas::energy::parcel::transfer::species::network::transport::membrane::{
     MEMBRANE_DIFFUSIVITY_DIMS, MOLAR_HENRY_SOLUBILITY_DIMS, MembranePermeabilityMaterial,
     transient::{

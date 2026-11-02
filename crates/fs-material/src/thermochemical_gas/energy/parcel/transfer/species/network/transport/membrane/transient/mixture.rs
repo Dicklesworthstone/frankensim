@@ -24,6 +24,8 @@
 
 /// Complete-duration accuracy and accepted-only finite-mixture accounts.
 pub mod adaptive;
+/// Source-qualified shared-site displacement coupled to the actual gas mixtures.
+pub mod competitive;
 
 use std::sync::Arc;
 use super::{Bindings,ResolvedMembraneDiffusion,MembraneDiffusionLayerSource,
@@ -155,14 +157,20 @@ impl PressureSample {
     fn collect(states:&[&FiniteMembraneDiffusionState],boundary_totals:[f64;2],
         cancelled:&mut impl FnMut()->bool)->Result<Self,Error>
     {
-        let count=states[0].membrane().model().cell_count();
+        let mobile:Vec<_>=states.iter().map(|s|(s.membrane(),s.reservoir_pressures_pa())).collect();
+        Self::collect_mobile(&mobile,boundary_totals,cancelled)
+    }
+    fn collect_mobile(states:&[(&super::slab::MembraneDiffusionState,[f64;2])],boundary_totals:[f64;2],
+        cancelled:&mut impl FnMut()->bool)->Result<Self,Error>
+    {
+        let count=states[0].0.model().cell_count();
         let mut cells:Vec<Sum>=(0..count).map(|_|Sum::default()).collect();
         let mut faces:Vec<[Sum;2]>=(0..=count).map(|_|[Sum::default(),Sum::default()]).collect();
         let mut known=vec![[true;2];count+1];
-        for state in states {
+        for &(state,pressures) in states {
             poll(cancelled)?;
-            let flux=state.membrane().sample_fluxes(state.reservoir_pressures_pa(),&mut *cancelled)?;
-            for (i,&q) in state.membrane().partial_pressures_pa().iter().enumerate() {
+            let flux=state.sample_fluxes(pressures,&mut *cancelled)?;
+            for (i,&q) in state.partial_pressures_pa().iter().enumerate() {
                 if i%128==0 {poll(cancelled)?;}cells[i].add(q)?;
             }
             for (i,trace) in flux.face_partial_pressures_pa.iter().enumerate() {
@@ -182,10 +190,10 @@ impl PressureSample {
         // contact on every species retains the exact original EOS on both sides.
         faces[0][0]=Some(boundary_totals[0]);
         faces[count][1]=Some(boundary_totals[1]);
-        if states.iter().all(|s|s.membrane().model().surface_permeances_mol_m2_s_pa()[0].is_none()) {
+        if states.iter().all(|s|s.0.model().surface_permeances_mol_m2_s_pa()[0].is_none()) {
             faces[0][1]=Some(boundary_totals[0]);
         }
-        if states.iter().all(|s|s.membrane().model().surface_permeances_mol_m2_s_pa()[1].is_none()) {
+        if states.iter().all(|s|s.0.model().surface_permeances_mol_m2_s_pa()[1].is_none()) {
             faces[count][0]=Some(boundary_totals[1]);
         }
         Ok(Self {cells:cells.into_iter().map(|sum|sum.value).collect(),faces})

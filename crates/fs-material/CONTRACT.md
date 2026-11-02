@@ -10144,3 +10144,37 @@ Focused G1/G3 tests compare competitive loading with an independent Riccati
 solution, finite-bath evolution with continuous-time eigenmodes, nonfirst
 species error control, competitive displacement and original face balances.
 Late work/cancellation refusal preserves the original state and clock.
+
+## Competitive membrane diffusion against actual finite gas mixtures
+
+`transient::mixture::competitive` attaches one explicit original
+`CompetitiveAdsorbent` lattice per layer to an existing source-qualified
+`IsothermalGasMembraneMixture`. `with_competitive_sites` requires an explicit
+trapped profile for every canonical gas species, including zeros for species
+without a site law. The original competitive owner checks common capacity,
+dry-skeleton calorics and reference temperature; independent capacities are
+never summed. Every lattice species must exist in the original gas/mobile
+roster and retain its original gas-source identity.
+
+`IsothermalCompetitiveGasMembrane::step_candidate` advances mobile Henry/Fick
+storage, competing finite sites and both finite reservoirs simultaneously.
+The prepared numerical owner retains its bounded nonlinear/linear work and
+workspace byte ceiling. One original source-relative gas reconstruction per
+endpoint accepts all species streams together. Actual EOS partial pressures
+become the next reservoir coordinates only after pressure-to-mass closure.
+Separate species accounts include mobile and trapped storage, both actual gas
+inventories, signed stream enthalpy and explicit gas thermostats; aggregate
+mass conservation cannot conceal species conversion.
+
+Original mobile/interface and adsorption source bindings are re-admitted
+across old, numerical and actual endpoint envelopes. Partial pressures drive
+transport and adsorption, while summed polymer pressures and actual gas EOS
+totals qualify source applicability. Finite-resistance polymer traces remain
+distinct from gas traces. Unowned composition, humidity and concentration
+dependence refuses; this adapter does not promote pure-species measurements
+to mixed-gas evidence. Failure or cancellation publishes no physical endpoint.
+
+The model is isothermal in a rigid, stationary membrane frame. Gas enthalpy
+and thermostat reports exclude an unrepresented mobile/trapped caloric store.
+No heat of sorption, swelling feedback, Maxwell–Stefan gas-frame diffusion,
+cross diffusion or unrestricted mixed-gas validity is inferred.
