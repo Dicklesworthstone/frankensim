@@ -2358,6 +2358,39 @@ port reporting retain their bounded vector allocations. This finite linear
 source path does not establish material, radiation-fit or continuum accuracy.
 
 
+### Affine tone envelopes through complete coupled mechanics
+
+`CoupledModalTones::new_affine` prepares the original coupled source for
+piecewise-affine cosine/sine coefficient envelopes. `step_affine` and its
+cancellable variant accept complete mode-major start/end arrays in the same
+interval-start carrier basis. The existing phase helper rotates endpoint
+coefficients for continuation. Constant preparation keeps its smaller path;
+using the wrong step family refuses.
+
+The same source assembler retains original springs/rest lengths, dashpots,
+Maxwell branches and reciprocal acoustic coordinates. Start and end duplicates
+coalesce independently; rest loads are identical at both ends and their work
+is removed from authored forcing as before. Each original heat channel and
+signed force work uses the continuous envelope trajectory. The force guard
+uses the maximum endpoint coefficient norm per distinct tone, a conservative
+bound throughout its affine segment. Additional endpoint buffers and the
+four-coordinate source generator count against explicit byte/dimension/work
+allowances before preparation.
+
+`BroadbandCoupledModalTones::step_affine` observes this source through the
+existing exact observer and shared fitted transfer/delay. It uses the same
+stage/material check/observer preview/pressure gate/publication boundary.
+Release preserves physical and acoustic histories; it does not zero the
+output or reset resonant state. Refusal retains accepted mechanics, work,
+heat, ports, filter history, delay and last pressure.
+
+Focused native checks compare a two-body attack/release and its signed rational
+receiver against an independently written RK4 force/filter/power ODE; verify
+complete material/radiation/source work and heat under subdivision; preserve
+bitwise physical accounts when adding observation; and check rollback/retry
+and explicit affine-family/capacity admission. This extends prescribed force
+reconstruction, not a chirp or a constitutive excitation model.
+
 ### Causal broadband pressure from complete coupled tone motion
 
 `coupled::tones::broadband::BroadbandCoupledModalTones` owns one causal

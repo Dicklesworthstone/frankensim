@@ -56,6 +56,30 @@ impl CoupledModalTones {
         Ok(Self { network, prepared })
     }
 
+    /// Prepare continuous tones with affine cosine/sine coefficient envelopes
+    /// over each interval. Both endpoint pairs supplied to `step_affine` use
+    /// the interval-start carrier basis. This retains the complete original
+    /// source and every heat channel; envelope coordinates add no storage.
+    ///
+    /// Four source coordinates per distinct mode/tone are admitted explicitly.
+    /// Use `new` for constant coefficients and its smaller preparation.
+    pub fn new_affine(
+        network: CoupledModalSystem,
+        angular_frequencies_rad_s: &[f64],
+        budget: CoupledToneBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        let prepared =
+            PreparedJointTones::new_affine(&network, angular_frequencies_rad_s, budget, gate)?;
+        Ok(Self { network, prepared })
+    }
+
+    /// Whether this owner was prepared for affine coefficient endpoints.
+    #[must_use]
+    pub fn is_affine(&self) -> bool {
+        self.prepared.is_affine()
+    }
+
     /// The original accepted mechanical/material/radiation owner.
     #[must_use]
     pub const fn network(&self) -> &CoupledModalSystem {
@@ -111,6 +135,47 @@ impl CoupledModalTones {
         self.step_inner(cosine_forces, sine_forces, Some(gate))
     }
 
+    /// Advance with `(C0 + (C1-C0)*t/h)*cos(Omega*t)` plus the analogous
+    /// sine term. Arrays have the original mode-major/tone-major ordering.
+    /// Both endpoint pairs share the interval-start carrier basis; rotate the
+    /// end pair only after acceptance when continuing the same source phase.
+    /// Requires `new_affine`. Every physical account uses this actual force.
+    pub fn step_affine(
+        &mut self,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+    ) -> Result<&CoupledModalFrame, ModalCouplingError> {
+        self.step_affine_inner(cosine_start, sine_start, cosine_end, sine_end, None)
+    }
+
+    /// Cancellable affine step with the original atomic publication boundary.
+    pub fn step_affine_under_gate(
+        &mut self,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        gate: &CancelGate,
+    ) -> Result<&CoupledModalFrame, ModalCouplingError> {
+        self.step_affine_inner(cosine_start, sine_start, cosine_end, sine_end, Some(gate))
+    }
+
+    fn step_affine_inner(
+        &mut self,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        gate: Option<&CancelGate>,
+    ) -> Result<&CoupledModalFrame, ModalCouplingError> {
+        self.stage_affine(cosine_start, sine_start, cosine_end, sine_end, gate)?;
+        poll(gate)?;
+        self.network.publish_staged();
+        Ok(&self.network.frame)
+    }
+
     fn step_inner(
         &mut self,
         cosine_forces: &[f64],
@@ -136,7 +201,31 @@ impl CoupledModalTones {
         self.network.validate_staged_material_points(gate)?;
         Ok(())
     }
+
+    fn stage_affine(
+        &mut self,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        gate: Option<&CancelGate>,
+    ) -> Result<(), ModalCouplingError> {
+        self.prepared.stage_affine(
+            &mut self.network,
+            cosine_start,
+            sine_start,
+            cosine_end,
+            sine_end,
+            gate,
+        )?;
+        self.network.validate_staged_material_points(gate)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "tones/affine_tests.rs"]
+mod affine_tests;

@@ -285,6 +285,52 @@ impl BroadbandCoupledModalTones {
         gate: Option<&CancelGate>,
     ) -> Result<f64, BroadbandCoupledModalError> {
         self.source.stage(cosine, sine, gate)?;
+        self.finish_staged(gate)
+    }
+
+    /// Observe an affine physical tone envelope along the same complete
+    /// continuous trajectory. Both endpoint pairs use the interval-start
+    /// carrier basis and the source must have been prepared with `new_affine`.
+    /// A release retains source, filter and delay histories for ringdown.
+    pub fn step_affine(
+        &mut self,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+    ) -> Result<f64, BroadbandCoupledModalError> {
+        self.step_affine_inner(cosine_start, sine_start, cosine_end, sine_end, None)
+    }
+
+    /// Cancellable affine source/filter/delay transaction.
+    pub fn step_affine_under_gate(
+        &mut self,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        gate: &CancelGate,
+    ) -> Result<f64, BroadbandCoupledModalError> {
+        self.step_affine_inner(cosine_start, sine_start, cosine_end, sine_end, Some(gate))
+    }
+
+    fn step_affine_inner(
+        &mut self,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        gate: Option<&CancelGate>,
+    ) -> Result<f64, BroadbandCoupledModalError> {
+        self.source
+            .stage_affine(cosine_start, sine_start, cosine_end, sine_end, gate)?;
+        self.finish_staged(gate)
+    }
+
+    fn finish_staged(
+        &mut self,
+        gate: Option<&CancelGate>,
+    ) -> Result<f64, BroadbandCoupledModalError> {
         self.source.prepared.preview_observer(
             &mut self.observation,
             &self.state,

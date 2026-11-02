@@ -18,6 +18,8 @@ pub(crate) struct PreparedJointTones {
     endpoint: Vec<f64>,
     cosine: Vec<f64>,
     sine: Vec<f64>,
+    cosine_end: Vec<f64>,
+    sine_end: Vec<f64>,
     mean_velocity: Vec<f64>,
     channel_heat: Vec<f64>,
     endpoint_external: Vec<f64>,
@@ -30,6 +32,25 @@ impl PreparedJointTones {
         frequencies: &[f64],
         budget: DenseExponentialBudget,
         gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::prepare(network, frequencies, budget, gate, false)
+    }
+
+    pub(crate) fn new_affine(
+        network: &CoupledModalSystem,
+        frequencies: &[f64],
+        budget: DenseExponentialBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::prepare(network, frequencies, budget, gate, true)
+    }
+
+    fn prepare(
+        network: &CoupledModalSystem,
+        frequencies: &[f64],
+        budget: DenseExponentialBudget,
+        gate: &CancelGate,
+        affine: bool,
     ) -> Result<Self, ModalCouplingError> {
         poll(Some(gate))?;
         network.require_time_domain()?;
@@ -92,7 +113,7 @@ impl PreparedJointTones {
             .checked_mul(unique.len())
             .ok_or_else(|| invalid("complete coupled tone force extent"))?;
         let force_coordinates = coefficients
-            .checked_mul(2)
+            .checked_mul(if affine { 4 } else { 2 })
             .ok_or_else(|| invalid("complete coupled tone quadrature extent"))?;
         let augmented = n
             .checked_add(force_coordinates)
@@ -120,6 +141,13 @@ impl PreparedJointTones {
         let source_bytes = square
             .checked_mul(16 + 2 * channels)
             .and_then(|v| v.checked_mul(core::mem::size_of::<f64>()))
+            .and_then(|v| {
+                v.checked_add(if affine {
+                    coefficients.checked_mul(2 * core::mem::size_of::<f64>())?
+                } else {
+                    0
+                })
+            })
             .ok_or_else(|| invalid("coupled tone source byte extent"))?;
         let source_work = (n as u64)
             .checked_pow(3)
@@ -219,22 +247,36 @@ impl PreparedJointTones {
             });
         }
         let rest_force = base.rest_force;
-        let flow = PreparedExactTones::new_owned_with_resistance_channels_controlled(
-            base.system,
-            &unique,
-            network.dt,
-            LinearSplitBudget {
-                max_modes: n,
-                max_omega_dt: core::f64::consts::PI,
-            },
-            DenseExponentialBudget {
-                max_dense_bytes: budget.max_dense_bytes - source_bytes,
-                max_multiply_terms: budget.max_multiply_terms - source_work,
-                ..budget
-            },
-            &witnesses,
-            || gate.is_requested(),
-        )
+        let split_budget = LinearSplitBudget {
+            max_modes: n,
+            max_omega_dt: core::f64::consts::PI,
+        };
+        let dense_budget = DenseExponentialBudget {
+            max_dense_bytes: budget.max_dense_bytes - source_bytes,
+            max_multiply_terms: budget.max_multiply_terms - source_work,
+            ..budget
+        };
+        let flow = if affine {
+            PreparedExactTones::new_owned_affine_with_resistance_channels_controlled(
+                base.system,
+                &unique,
+                network.dt,
+                split_budget,
+                dense_budget,
+                &witnesses,
+                || gate.is_requested(),
+            )
+        } else {
+            PreparedExactTones::new_owned_with_resistance_channels_controlled(
+                base.system,
+                &unique,
+                network.dt,
+                split_budget,
+                dense_budget,
+                &witnesses,
+                || gate.is_requested(),
+            )
+        }
         .map_err(|error| match error {
             fs_phs::PreparedStepError::Cancelled => ModalCouplingError::Cancelled,
             fs_phs::PreparedStepError::Solver(source) => ModalCouplingError::Propagation(source),
@@ -252,6 +294,8 @@ impl PreparedJointTones {
             endpoint: vec![0.0; n],
             cosine: vec![0.0; coefficients],
             sine: vec![0.0; coefficients],
+            cosine_end: vec![0.0; if affine { coefficients } else { 0 }],
+            sine_end: vec![0.0; if affine { coefficients } else { 0 }],
             mean_velocity: vec![0.0; count],
             channel_heat: vec![0.0; channels],
             endpoint_external: vec![0.0; count],
@@ -261,6 +305,10 @@ impl PreparedJointTones {
 
     pub(crate) fn angular_frequencies_rad_s(&self) -> &[f64] {
         &self.frequencies
+    }
+
+    pub(crate) fn is_affine(&self) -> bool {
+        self.flow.is_affine()
     }
 
     /// A causal observer uses the exact same original source and grouping.
@@ -302,8 +350,21 @@ impl PreparedJointTones {
         output: &mut [f64],
         gate: Option<&CancelGate>,
     ) -> Result<(), ModalCouplingError> {
-        observer
-            .preview_into_controlled(
+        let result = if self.flow.is_affine() {
+            observer.preview_affine_into_controlled(
+                &self.flow,
+                &self.initial,
+                initial,
+                &self.cosine,
+                &self.sine,
+                &self.cosine_end,
+                &self.sine_end,
+                next,
+                output,
+                || gate.is_some_and(CancelGate::is_requested),
+            )
+        } else {
+            observer.preview_into_controlled(
                 &self.flow,
                 &self.initial,
                 initial,
@@ -313,12 +374,11 @@ impl PreparedJointTones {
                 output,
                 || gate.is_some_and(CancelGate::is_requested),
             )
-            .map_err(|error| match error {
-                fs_phs::PreparedStepError::Cancelled => ModalCouplingError::Cancelled,
-                fs_phs::PreparedStepError::Solver(source) => {
-                    ModalCouplingError::Propagation(source)
-                }
-            })
+        };
+        result.map_err(|error| match error {
+            fs_phs::PreparedStepError::Cancelled => ModalCouplingError::Cancelled,
+            fs_phs::PreparedStepError::Solver(source) => ModalCouplingError::Propagation(source),
+        })
     }
 
     pub(crate) fn advance_force_phase(
@@ -343,6 +403,35 @@ impl PreparedJointTones {
         sine_forces: &[f64],
         gate: Option<&CancelGate>,
     ) -> Result<(), ModalCouplingError> {
+        self.stage_inner(network, cosine_forces, sine_forces, None, gate)
+    }
+
+    pub(crate) fn stage_affine(
+        &mut self,
+        network: &mut CoupledModalSystem,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        gate: Option<&CancelGate>,
+    ) -> Result<(), ModalCouplingError> {
+        self.stage_inner(
+            network,
+            cosine_start,
+            sine_start,
+            Some((cosine_end, sine_end)),
+            gate,
+        )
+    }
+
+    fn stage_inner(
+        &mut self,
+        network: &mut CoupledModalSystem,
+        cosine_forces: &[f64],
+        sine_forces: &[f64],
+        end_forces: Option<(&[f64], &[f64])>,
+        gate: Option<&CancelGate>,
+    ) -> Result<(), ModalCouplingError> {
         poll(gate)?;
         let count = network.mode_count();
         let input_tones = self.frequencies.len();
@@ -353,9 +442,15 @@ impl PreparedJointTones {
                 .iter()
                 .chain(sine_forces)
                 .any(|v| !v.is_finite())
+            || self.flow.is_affine() != end_forces.is_some()
+            || end_forces.is_some_and(|(c, s)| {
+                c.len() != cosine_forces.len()
+                    || s.len() != cosine_forces.len()
+                    || c.iter().chain(s).any(|v| !v.is_finite())
+            })
         {
             return Err(invalid(
-                "one finite cosine/sine force per original mode and tone is required",
+                "complete finite tone endpoints must match the prepared source family",
             ));
         }
         let mut next = 0;
@@ -383,9 +478,22 @@ impl PreparedJointTones {
                 }
                 let fc = cosine.value()?;
                 let fs = sine.value()?;
+                // Coalesce each endpoint before differencing in the core.
+                // A small envelope survives large exactly cancelling tones.
+                let (fc_end, fs_end) = if let Some((c, s)) = end_forces {
+                    let mut cosine = Sum::default();
+                    let mut sine = Sum::default();
+                    for &original in group {
+                        cosine.add(c[mode * input_tones + original])?;
+                        sine.add(s[mode * input_tones + original])?;
+                    }
+                    (cosine.value()?, sine.value()?)
+                } else {
+                    (fc, fs)
+                };
                 let (end, _) = self
                     .flow
-                    .advance_force_phase(tone, fc, fs)
+                    .advance_force_phase(tone, fc_end, fs_end)
                     .map_err(ModalCouplingError::Propagation)?;
                 endpoint_sum.add(end)?;
                 let total_fc = finite(
@@ -397,19 +505,49 @@ impl PreparedJointTones {
                 )?;
                 self.cosine[mode * tones + tone] = total_fc;
                 self.sine[mode * tones + tone] = fs;
-                let amplitude = if self.flow.angular_frequencies_rad_s()[tone] == 0.0 {
+                let mut amplitude = if self.flow.angular_frequencies_rad_s()[tone] == 0.0 {
                     total_fc.abs()
                 } else {
                     det::hypot(total_fc, fs)
                 };
+                if end_forces.is_some() {
+                    let total_end = finite(
+                        fc_end
+                            + if self.rest_tone == Some(tone) {
+                                self.rest_force[mode]
+                            } else {
+                                0.0
+                            },
+                    )?;
+                    self.cosine_end[mode * tones + tone] = total_end;
+                    self.sine_end[mode * tones + tone] = fs_end;
+                    // Norm is convex along each affine coefficient segment.
+                    // Endpoint maxima therefore bound the whole force interval.
+                    amplitude =
+                        amplitude.max(if self.flow.angular_frequencies_rad_s()[tone] == 0.0 {
+                            total_end.abs()
+                        } else {
+                            det::hypot(total_end, fs_end)
+                        });
+                }
                 envelope = finite(envelope + amplitude)?;
             }
             self.endpoint_external[mode] = endpoint_sum.value()?;
             self.force_envelope[mode] = envelope;
         }
-        let record = self
-            .flow
-            .step_observed_into(
+        let record = if end_forces.is_some() {
+            self.flow.step_affine_observed_into(
+                &self.initial,
+                &self.cosine,
+                &self.sine,
+                &self.cosine_end,
+                &self.sine_end,
+                &mut self.endpoint,
+                &mut self.mean_velocity,
+                &mut self.channel_heat,
+            )
+        } else {
+            self.flow.step_observed_into(
                 &self.initial,
                 &self.cosine,
                 &self.sine,
@@ -417,7 +555,8 @@ impl PreparedJointTones {
                 &mut self.mean_velocity,
                 &mut self.channel_heat,
             )
-            .map_err(ModalCouplingError::Propagation)?;
+        }
+        .map_err(ModalCouplingError::Propagation)?;
         poll(gate)?;
         let mut connection_loss = 0.0;
         let mut transfers = Vec::with_capacity(network.connections.len());
