@@ -22224,3 +22224,37 @@ The v1 sidecar exposes `physical_force_frequency_sweeps` and
 physical chirp ODE, the analytic integrated phase across silence, signed modal
 projection, callback equality, source-free ringdown, explicit admission, and
 warm rejected-step retry. Empty sweep sections preserve existing envelope bits.
+
+## Coupled performance source-frequency sweeps
+
+The v2 `CoupledTonePerformance` consumes the same original-row frequency
+schedule and physical force-error admission as independent performances.
+Sweeps opt into the existing complete affine source/receiver preparation;
+the prepared carrier frequencies, structural modes and material laws stay
+fixed. Different physical sources at one prepared carrier retain separate
+phase histories before endpoint coalescing. The exact carrier operators
+propagate their reconstructed force, original work and heat channels, and
+causal receiver on the same physical interval.
+
+The driver queries each sweep once per sample and reuses its cached proposal
+across signed modal projections. Unscaled phase follows the exact target
+frequency integral, including silence and re-attack. It stages gain-scaled
+endpoints and the next phase before touching accepted held inputs; source,
+observer, gain/frequency cursors and held events publish only after acceptance.
+A refused physical step leaves the previous state and retry proposal intact.
+Release retains coupled motion and receiver/delay history.
+
+`frequency_sweep_count` and `maximum_sweep_force_error_bound_n` expose
+the authored count and largest per-original-tone reconstruction bound [N].
+The existing CLI writes those values and the reconstruction scope into its
+sidecar. The bound concerns the prescribed force reconstruction, separately
+from receiver-fit error, accumulated floating-point phase error and modulation
+bandwidth. It does not modify string tension or infer a nonlinear excitation.
+
+`examples/coupled_swept_tones.performance` exercises coherent signed forces,
+distinct sweeps sharing a carrier, gain releases/re-attacks and the existing
+causal delayed receiver. Focused G3 file tests check the independent integrated
+phase, bitwise callback partitions, retained state and positive-heat ringdown
+after source release, explicit admission, rejected-step retry, and exact
+empty-sweep parity. Both existing CLI children have been exercised on their
+swept examples through the unchanged decimation and PCM owners.

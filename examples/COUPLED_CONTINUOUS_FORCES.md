@@ -14,7 +14,7 @@ tones COUNT
 tone VOICE_INDEX PORT_INDEX OMEGA_RAD_S COSINE_N SINE_N
 ```
 
-Without an envelope, each tone applies `COSINE_N*cos(OMEGA_RAD_S*t) + SINE_N*sin(OMEGA_RAD_S*t)`
+Without gain or frequency curves, each tone applies `COSINE_N*cos(OMEGA_RAD_S*t) + SINE_N*sin(OMEGA_RAD_S*t)`
 newtons through the voice's original signed force-port shapes. Time starts at
 the beginning of the performance, and the tones continue over its entire
 declared window. Frequencies can be inharmonic or arbitrarily off an FFT bin.
@@ -92,8 +92,75 @@ floating-point error. Approximating a smooth physical control requires refining
 its knots independently of the mechanics clock. Carrier-frequency admission
 does not certify that envelope sidebands or sharp knot transitions are
 bandlimited; an adequate observation clock and the existing decimation filter
-remain necessary. This path does not prescribe chirps or replace a nonlinear
-contact, jet, bow or hammer model with an authored envelope.
+remain necessary. An amplitude-only section keeps the source frequency fixed.
+Nonlinear contact, jet, bow and hammer excitations retain their physical owners.
+
+## Phase-continuous physical force-frequency sweeps
+
+`music_render modal examples/coupled_swept_tones.performance OUT.wav --block 512`
+combines gain envelopes, three independently swept physical forces, the same
+coupled mechanical assembly, and its causal signed receiver. Two sources share
+one prepared carrier and still retain distinct frequency histories. This is a
+prescribed shaker/actuator load: structural frequencies, tension and material
+properties retain their original values and physical update rules.
+
+After the optional gain envelopes and before the receiver, supply:
+
+```text
+frequency_sweeps COUNT
+sweep TONE_INDEX POINT_COUNT MAX_FORCE_ERROR_N
+omega SAMPLE OMEGA_RAD_S
+```
+
+Repeat `omega` for each knot and `sweep` for each declared source. Indices refer
+to the original tone rows. Each curve begins at zero, increases strictly within
+the performance horizon, interpolates angular frequency linearly, and holds
+its final frequency. Frequencies are finite, nonnegative, and below the
+**original coupled model's guarded Nyquist limit**. Zero frequency holds the
+current source phase. An undeclared row retains its original carrier frequency;
+`frequency_sweeps 0` preserves the existing source path exactly. Gain and
+frequency knots may have different sample indices.
+
+Phase advances by the exact integral of each linear frequency interval,
+`h * (omega_start + omega_end) / 2`, including while gain is zero. The force is
+reconstructed with affine cosine/sine coefficients around the original fixed
+carrier. The existing exact propagator integrates this reconstructed force,
+its work, each dissipation channel and the causal receiver together. No matrix
+exponential is rebuilt during a sweep, and there is no basis or resonant-state
+transfer. A modulation proposal is computed once per source interval, then
+reused for all signed modal projections. Phase, gain/frequency cursors and held
+events publish only after the complete physical and acoustic step accepts.
+
+`MAX_FORCE_ERROR_N` is a positive absolute allowance for **each original physical
+tone row**, before modal projection. Admission bounds the interpolation defect
+over the complete declared history. For original quadrature magnitude `R`, gain
+bound `G`, maximum gain change per sample `dg`, maximum frequency change per
+sample `dw`, and maximum detuning angle `D = h * max|omega - carrier|`, it uses:
+
+```text
+force_error <= R * (2 * dg * D + G * (h * dw + D * D)) / 8
+```
+
+The bound follows from the second derivative of the complex gain envelope.
+Using independent extrema across the history is conservative when the largest
+gain and frequency changes occur in different segments. The parser refuses an
+insufficient allowance before returning a renderer. A finer mechanics clock or
+a fixed carrier closer to the sweep reduces the reconstruction error; changing
+the prepared carrier preserves the intended physical frequency history.
+
+The bound covers force reconstruction in real arithmetic. Floating-point phase
+accumulation, acoustic fit error and mechanical response sensitivity have their
+own scopes. Multiple coherent force rows can add their errors; the reported
+largest per-row bound is not a total pressure error. The CLI records
+`physical_force_frequency_sweeps`,
+`maximum_tone_force_reconstruction_error_n` and `source_reconstruction`.
+
+Sweep knots and retained source metadata use the original tone byte allowance;
+aggregate sweep knots are capped at 65536. The existing affine-source dimension
+and work limits still apply. Source-frequency admission does not certify
+sideband bandwidth or sharp knot transitions. Choose the original mechanics
+and observation clocks accordingly, using the existing anti-aliasing decimator
+when exporting a higher-rate mechanical run.
 
 ## Causal broadband pressure from the complete coupled trajectory
 

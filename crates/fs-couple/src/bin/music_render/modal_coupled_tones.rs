@@ -19,6 +19,13 @@ pub(super) fn run(
     let controls = performance.compiled_controls();
     let tones = performance.continuous_force_tones();
     let envelopes = performance.envelope_count();
+    let sweeps = performance.frequency_sweep_count();
+    let force_error = performance.maximum_sweep_force_error_bound_n();
+    let reconstruction = json_string(if sweeps == 0 {
+        "exact prescribed constant or affine carrier coefficients"
+    } else {
+        "affine carrier reconstruction of integrated source-frequency curves; force bound per original tone"
+    });
     let (broadband, radiation) = match performance.broadband_report() {
         None => (
             "null".to_owned(),
@@ -62,7 +69,7 @@ pub(super) fn run(
         info.full_scale_pa,
     )?;
     let provenance = format!(
-        "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"modal-coupled-tones\",\"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\"wav_blake3\":\"{}\",\"modal_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"voices\":{},\"modes\":{},\"connections\":{},\"force_events\":{},\"compiled_controls\":{controls},\"continuous_force_tones\":{tones},\"physical_force_envelopes\":{envelopes},\"force_phase_origin_s\":0,\"integrator\":\"complete coupled mechanics and continuous forcing exact exponential\",\"heat\":\"independent original loss channels including cross-tone work\",\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"observation_ratio\":{},\"observation_filter\":\"{}\",\"observation_delay_output_samples\":{},\"broadband\":{broadband},\"radiation\":{radiation},\"model_scope\":\"authored linear reduced assembly; no physical-validation claim\"}}}}",
+        "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"modal-coupled-tones\",\"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\"wav_blake3\":\"{}\",\"modal_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"voices\":{},\"modes\":{},\"connections\":{},\"force_events\":{},\"compiled_controls\":{controls},\"continuous_force_tones\":{tones},\"physical_force_envelopes\":{envelopes},\"physical_force_frequency_sweeps\":{sweeps},\"maximum_tone_force_reconstruction_error_n\":{force_error:e},\"source_reconstruction\":{reconstruction},\"force_phase_origin_s\":0,\"integrator\":\"complete coupled mechanics and reconstructed continuous forcing exact exponential\",\"heat\":\"independent original loss channels including cross-tone work\",\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"observation_ratio\":{},\"observation_filter\":\"{}\",\"observation_delay_output_samples\":{},\"broadband\":{broadband},\"radiation\":{radiation},\"model_scope\":\"authored linear reduced assembly; no physical-validation claim\"}}}}",
         info.full_scale_pa,
         rendered.clipped,
         rendered.peak_pa,
