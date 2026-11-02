@@ -166,6 +166,29 @@ fn g3_reaction_calorics_cancel_only_conserved_formation_references() {
             )
             .unwrap();
             let expected = R * (0.5 * temperature.value() + formation_r);
+            let caloric = mechanism
+                .reaction_caloric_change_at(0, temperature, || false)
+                .unwrap();
+            close(caloric.molar_internal_energy.value(), expected, 2e-11);
+            close(
+                caloric.molar_enthalpy.value(),
+                R * (1.5 * temperature.value() + formation_r),
+                2e-11,
+            );
+            close(
+                caloric.molar_enthalpy.value() - caloric.molar_internal_energy.value(),
+                R * temperature.value(),
+                2e-11,
+            );
+            assert!(
+                mechanism
+                    .reaction_caloric_change_at(1, temperature, || false)
+                    .is_err()
+            );
+            assert_eq!(
+                mechanism.reaction_caloric_change_at(0, temperature, || true),
+                Err(KineticsErrorV1::Cancelled)
+            );
             let mut reaction_energy = [0.0];
             mechanism
                 .reaction_internal_energies_at(temperature, &mut reaction_energy, || false)
@@ -240,6 +263,12 @@ fn g0_reaction_calorics_admit_original_spectator_sources() {
                 .unwrap_err(),
             expected
         );
+        assert_eq!(
+            mechanism
+                .reaction_caloric_change_at(0, temperature, || false)
+                .unwrap_err(),
+            expected
+        );
     }
 }
 
@@ -297,6 +326,21 @@ fn g0_reaction_calorics_retain_raw_region_jumps_and_explicit_corrections() {
             let temperature = Temperature::new(t);
             let expected = b.evaluate_properties(temperature).unwrap().u().value()
                 - a.evaluate_properties(temperature).unwrap().u().value();
+            let caloric = mechanism
+                .reaction_caloric_change_at(0, temperature, || false)
+                .unwrap();
+            close(
+                caloric.molar_enthalpy.value(),
+                b.evaluate_properties(temperature).unwrap().h().value()
+                    - a.evaluate_properties(temperature).unwrap().h().value(),
+                3e-11,
+            );
+            close(
+                caloric.molar_gibbs_energy.value(),
+                b.evaluate_properties(temperature).unwrap().g().value()
+                    - a.evaluate_properties(temperature).unwrap().g().value(),
+                1e-8,
+            );
             let mut energy = [0.0];
             mechanism
                 .reaction_internal_energies_at(temperature, &mut energy, || false)

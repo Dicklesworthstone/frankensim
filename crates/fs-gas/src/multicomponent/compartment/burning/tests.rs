@@ -1,4 +1,6 @@
 use super::*;
+
+mod reference;
 use crate::multicomponent::CaloricDomain;
 use crate::multicomponent::compartment::ZoneSolve;
 use crate::multicomponent::tests::source;

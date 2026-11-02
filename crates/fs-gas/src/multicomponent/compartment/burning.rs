@@ -7,7 +7,9 @@
 //! from names. Every species remains an original ideal gas; condensed soot is
 //! outside this owner. Reactions with a species on both sides are refused.
 //!
-//! Chemistry changes the sensible-energy gauge by `-sum(dm_i/dt * e_ref_i)`.
+//! Chemistry changes the sensible-energy gauge by `-extent_rate * Delta u(Tref)`.
+//! This is the source-exact form of `-sum(dm_i/dt * e_ref_i)`, with conserved
+//! formation references canceled before rounding, not extra physical heating.
 //! Physical internal energy is unchanged. The reported reaction enthalpy is a
 //! diagnostic (or a requested-extent conversion), **not another heat source**.
 
@@ -16,7 +18,7 @@ use super::{
 };
 use crate::multicomponent::Error as GasError;
 use fs_qty::{Amount, Energy, Power, Temperature, Time};
-use fs_thermochem::kinetics::IdealGasKineticsV1;
+use fs_thermochem::kinetics::{IdealGasKineticsV1, KineticsErrorV1};
 use fs_thermochem::{MolarEnergyQuantityV1, ReactionId, SpeciesId};
 
 #[cfg(test)]
@@ -35,6 +37,8 @@ pub enum BurningError {
     Unrepresentable(&'static str),
     /// The original NASA source refused a thermodynamic evaluation.
     Gas(GasError),
+    /// The original reaction caloric owner refused its source state.
+    Kinetics(KineticsErrorV1),
     /// Original source-domain or moving-interface solve refused the split update.
     Zone(ZoneError),
     /// Cancellation was observed before a result was returned.
@@ -51,6 +55,14 @@ impl From<ZoneError> for BurningError {
         match error {
             ZoneError::Cancelled => Self::Cancelled,
             other => Self::Zone(other),
+        }
+    }
+}
+impl From<KineticsErrorV1> for BurningError {
+    fn from(error: KineticsErrorV1) -> Self {
+        match error {
+            KineticsErrorV1::Cancelled => Self::Cancelled,
+            other => Self::Kinetics(other),
         }
     }
 }
@@ -84,6 +96,10 @@ pub struct BurningReport {
     pub released_power: Power,
     /// Actual signed molecular-mass source discrepancy [kg/s], never repaired.
     pub mass_balance_rate_kg_s: f64,
+    /// Stable chemical gauge power plus the independently rounded original
+    /// species-reference power [W]. Exposes reference/representation roundoff;
+    /// this diagnostic is never added as a second physical heat source.
+    pub chemical_reference_roundoff_w: f64,
 }
 
 /// One accepted chemical source substep, with no additional physical clock advance.
@@ -103,8 +119,8 @@ pub struct InventoryLimitedReaction {
     gas: MixtureGas,
     mechanism: IdealGasKineticsV1,
     reaction_index: usize,
-    coefficients: [f64; MAX_SPECIES],
     mass_per_extent: [f64; MAX_SPECIES],
+    reference_reaction_internal_energy_j_mol: f64,
 }
 impl InventoryLimitedReaction {
     /// Select one already element/charge/molecular-mass-checked source reaction.
@@ -134,26 +150,35 @@ impl InventoryLimitedReaction {
                 "overlapping reactant/product species",
             ));
         }
-        let mut coefficients = [0.0; MAX_SPECIES];
         let mut mass_per_extent = [0.0; MAX_SPECIES];
         for (i, model) in gas.source().models().iter().enumerate() {
             poll(&mut cancelled)?;
-            coefficients[i] = mechanism.stoichiometry().get(i, reaction_index).ok_or(
+            let coefficient = mechanism.stoichiometry().get(i, reaction_index).ok_or(
                 BurningError::UnsupportedReaction("missing canonical stoichiometry"),
             )? as f64;
-            mass_per_extent[i] = coefficients[i] * model.molar_mass().value();
-            if !mass_per_extent[i].is_finite()
-                || (coefficients[i] != 0.0 && mass_per_extent[i] == 0.0)
+            mass_per_extent[i] = coefficient * model.molar_mass().value();
+            if !mass_per_extent[i].is_finite() || (coefficient != 0.0 && mass_per_extent[i] == 0.0)
             {
                 return Err(BurningError::Unrepresentable("stoichiometric mass"));
             }
         }
+        // MixtureGas stores sensible u relative to each original species at
+        // Tmin. Reduce that same reaction reference on NASA coefficients once;
+        // multiplying rounded species reference powers can invent or lose heat.
+        let reference_reaction_internal_energy_j_mol = mechanism
+            .reaction_caloric_change_at(
+                reaction_index,
+                Temperature::new(gas.domain().minimum_temperature),
+                &mut cancelled,
+            )?
+            .molar_internal_energy
+            .value();
         let out = Self {
             gas: gas.clone(),
             mechanism,
             reaction_index,
-            coefficients,
             mass_per_extent,
+            reference_reaction_internal_energy_j_mol,
         };
         poll(&mut cancelled)?;
         Ok(out)
@@ -300,7 +325,9 @@ impl InventoryLimitedReaction {
                 continue;
             }
             rates.referenced_energy_w =
-                -sum((0..n).map(|i| rates.species_kg_s[i] * self.gas.energy_references()[i]));
+                -progress_rate * self.reference_reaction_internal_energy_j_mol;
+            let chemical_reference_roundoff_w = sum(core::iter::once(rates.referenced_energy_w)
+                .chain((0..n).map(|i| rates.species_kg_s[i] * self.gas.energy_references()[i])));
             let released_enthalpy = -actual * reaction_enthalpy;
             let released_power = -progress_rate * reaction_enthalpy;
             let mass_balance_rate_kg_s = sum(rates.species_kg_s[..n].iter().copied());
@@ -308,6 +335,7 @@ impl InventoryLimitedReaction {
                 || !released_enthalpy.is_finite()
                 || !released_power.is_finite()
                 || !mass_balance_rate_kg_s.is_finite()
+                || !chemical_reference_roundoff_w.is_finite()
             {
                 return Err(BurningError::Unrepresentable(
                     "chemical energy or mass balance",
@@ -324,6 +352,7 @@ impl InventoryLimitedReaction {
                 released_enthalpy: Energy::new(released_enthalpy),
                 released_power: Power::new(released_power),
                 mass_balance_rate_kg_s,
+                chemical_reference_roundoff_w,
             });
         }
         Err(BurningError::Unrepresentable(
@@ -384,22 +413,10 @@ impl InventoryLimitedReaction {
         {
             return Err(BurningError::Invalid("source reference temperature"));
         }
-        let mut terms = [0.0; MAX_SPECIES];
-        for (i, model) in self.gas.source().models().iter().enumerate() {
-            poll(cancelled)?;
-            if self.coefficients[i] != 0.0 {
-                terms[i] = self.coefficients[i]
-                    * model
-                        .evaluate_properties(temperature)
-                        .map_err(|e| BurningError::Gas(GasError::from(e)))?
-                        .h()
-                        .value();
-            }
-        }
-        let value = sum(terms[..self.species().len()].iter().copied());
-        if !value.is_finite() {
-            return Err(BurningError::Unrepresentable("source reaction enthalpy"));
-        }
-        Ok(value)
+        Ok(self
+            .mechanism
+            .reaction_caloric_change_at(self.reaction_index, temperature, cancelled)?
+            .molar_enthalpy
+            .value())
     }
 }

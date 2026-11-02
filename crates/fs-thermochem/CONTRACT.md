@@ -94,6 +94,15 @@ additional heat source in a total-chemical-energy balance. G0/G3 regressions
 cover elemental-reference shifts, changed binding energies, molecular-count
 changes and raw versus explicitly reconciled source seams.
 
+`reaction_caloric_change_at` exposes the same source-coefficient reduction for
+one canonical reaction as typed `ReactionCaloricChangeV1` enthalpy, internal
+energy and Gibbs-energy changes. It evaluates Delta h and Delta u independently,
+retaining Delta h - Delta u = Delta nu R T without subtracting absolute species
+energies. Full original-source support and positive-Cv admission include
+spectators. Successful calls allocate no workspace; cancellation and an invalid
+reaction index refuse. Compartment burning uses this owner for enthalpy power
+conversion and the original internal-energy reference correction.
+
 ### Thermodynamic mass-action entropy
 
 The declared stoichiometric mass-action evaluator uses A/(R T) =

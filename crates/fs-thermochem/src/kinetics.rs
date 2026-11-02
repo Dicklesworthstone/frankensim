@@ -32,7 +32,7 @@ use crate::{
 use fs_qty::{Pressure, Temperature};
 
 mod caloric;
-pub use caloric::admit_caloric_interval;
+pub use caloric::{ReactionCaloricChangeV1, admit_caloric_interval};
 /// Ground-state atomic ionization and recombination at separate Te and Th.
 pub mod atomic_ionization;
 mod electron_impact;
@@ -559,8 +559,10 @@ impl IdealGasKineticsV1 {
             - fs_math::det::ln(t);
         for (j, (source, reaction)) in self.reactions.iter().zip(&self.bound).enumerate() {
             poll(&mut cancelled)?;
-            let (du, dg) =
+            let caloric =
                 caloric::reaction_calorics(&self.thermodynamics, reaction, &caloric_basis)?;
+            let du = caloric.molar_internal_energy.value();
+            let dg = caloric.molar_gibbs_energy.value();
             work.reaction_internal_energies[j] = du;
             let log_kc = -dg / (R * t) + reaction.delta_molecules * standard_c_log;
             let dlog_kc = (du / (R * t)) / t;

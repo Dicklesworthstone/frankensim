@@ -1581,12 +1581,16 @@ and enthalpy exactly once. A driver with simultaneous reactant outflow must
 reserve that withdrawal first or transport before burning; timestep halving
 alone cannot make an additional withdrawal compatible with complete depletion.
 
-The adapter returns chemistry-only species rates and the energy-reference
-correction `-sum(dm_s/dt * e_ref_s)`. Original formation energies therefore
-produce sensible heating while preserving physical internal energy. Reported
-reaction enthalpy and power are diagnostics, never a second heat source.
-Power-to-extent conversion uses the original reaction enthalpy at an explicit
-reference temperature. One common extent may be rounded down by a bounded
+The adapter returns chemistry-only species rates and the source-coefficient
+energy-reference correction `-extent_rate * Delta u(Tmin)`, evaluated at the
+original `MixtureGas` reference temperature. Conserved elemental formation
+references cancel before absolute-energy rounding; distinct formation energies,
+original caloric corrections and molecular-count pressure work remain active.
+Reported reaction enthalpy and power are diagnostics, never a second heat
+source. Power-to-extent conversion uses source-coefficient Delta h at an explicit
+reference temperature. `chemical_reference_roundoff_w` separately exposes the
+discrepancy from independently rounded species-reference powers and is never
+added as heat. The original moving-interface solve retains all paired p dV work. One common extent may be rounded down by a bounded
 number of adjacent floating-point values to admit actual update arithmetic;
 individual species are never clipped, seeded, or independently repaired.
 
