@@ -916,8 +916,10 @@ surface IDs and odd canonical pair IDs retain disjoint, input-order-independent
 feature identity within the fixed prepared scene.
 
 `mixed_sphere_trajectory_candidate` passes every detected rigid/rigid and
-rigid/solid row into the same simultaneous response, then uses the original solid
-and full-inertia rigid smooth owners. Whole affine paths check every rigid pair,
+rigid/solid row into the same simultaneous response, then uses the original
+objective energy/momentum solid and full-inertia rigid smooth owners. The
+explicit `mixed_sphere_trajectory_candidate_with_pressure` entry preserves
+uniform pressure on the original closed solid boundary throughout retries. Whole affine paths check every rigid pair,
 swept triangle candidate and original tetrahedron orientation. An unresolved
 possible encounter shortens and recomputes original native motion; endpoints are
 never projected. The surface-only compatibility entry still refuses rigid pairs
@@ -21133,8 +21135,8 @@ conserved native histories, signed parameter work and source/ideal-clamp refusal
 All property data in these tests are explicitly authored numerical fixtures.
 
 `contact::step::free::rigid_free_flight_candidate` advances the original finite
-solid midpoint owner and each original rigid `step_verlet_with` owner over one
-positive interval. It retains native state receipts and returns both candidates
+solid objective energy/momentum discrete-gradient owner and each original rigid
+`step_verlet_with` owner over one positive interval. It retains native state receipts and returns both candidates
 only after complete momentum and work checks. Solid forces come from the same
 prepared external-load owner as the native solve. Rigid gravity is included
 once in force work; solid gravity remains an explicit caller-supplied load.
@@ -21156,7 +21158,16 @@ magnitudes, so opposite lost kicks cannot cancel in the complete-system account.
 Unrepresentable kicks refuse. Inputs remain unchanged on native failure,
 cancellation or late audit rejection. This entry does not admit a collision
 path, certify trajectory accuracy, model exact externally forced Euler flow,
-or infer heat. Pressure-bound solids retain their explicit-pressure refusal.
+or infer heat. The no-pressure entry retains the native refusal for a
+pressure-bound solid.
+
+`rigid_free_flight_candidate_with_pressure` holds an explicit uniform pressure
+on the original closed material boundary. The original pressure-aware discrete
+gradient advances material energy plus pressure-volume potential. Its native
+`-p Delta V` work stays visible in `report.solid.pressure_work_j` and enters total
+source work exactly once. Closed uniform pressure adds no net external force or
+torque; its algorithmic fixed-support reactions remain in the original support
+impulse account. Nonuniform face pressure is not supplied by this entry.
 
 Focused G1/G3/G4 fixtures exercise constant acceleration and axial spin/work,
 deforming-solid and asymmetric-rigid conservation, stationary support reaction
@@ -21166,8 +21177,8 @@ moments, and lost-kick/cancellation refusal. Material coefficients are synthetic
 
 `finite_solid::contact::step::sphere_trajectory_candidate` composes the original
 current-surface detector, simultaneous consistent-mass/full-inertia contact
-solver and native smooth integrators. Each rigid body supplies one COM-centred
-sphere. The entire trajectory remains a private candidate until all requested
+solver, objective energy/momentum solid motion and native full-inertia rigid
+motion. Each rigid body supplies one COM-centred sphere. The entire trajectory remains a private candidate until all requested
 time, geometry, physical balance and work gates succeed. Current contacts are
 resolved together at their actual positive activation gaps; original material
 witnesses are never moved to eliminate tangential angular couples.
@@ -21189,9 +21200,20 @@ maximum timestep and work caps are explicit refinement controls. Offset sphere
 centres need a curved rotational path and remain limited to discrete event
 queries. Sustained loaded contact, unresolved grazing and Zeno accumulation can
 exhaust progress or work bounds; they never create artificial rest or runout.
-Pressure-bound solids retain the native explicit-pressure refusal. This is not
-a general Moreau--Jean trajectory, global mesh-injectivity proof or a claimed
-global convergence order for impacts.
+The original no-pressure entry retains the explicit-pressure refusal. This is
+not a general Moreau--Jean trajectory, global mesh-injectivity proof or a
+claimed global convergence order for impacts.
+
+`sphere_trajectory_candidate_with_pressure` and
+`mixed_sphere_trajectory_candidate_with_pressure` admit an explicit uniform
+pressure on the original closed surface before contact work. Both reuse the
+same event/retry core and preserve that held pressure through every shortened
+trial. Each accepted free phase uses the original pressure-aware objective
+solid step. Impacts retain the original positions, so fixed-pressure work
+telescopes across the whole call. Simultaneous contact loss, source/pressure
+work, support impulse and signed/absolute numerical defects stay separate.
+These entries do not extend the sustained loaded-contact lane or infer a
+nonuniform face-pressure law.
 
 Whole-call accounting retains stable kinetic/strain increments, original source
 work, stationary-support impulse and moment, signed/absolute smooth integration
@@ -21208,6 +21230,21 @@ friction-driven spin and support moment through real attitude evolution,
 otherwise unseen sphere-pair crossing, late budget/offset/cancellation rollback,
 and loss of requested time at a large native timestamp. These are authored
 analytic references, not experimental validation.
+
+The default-DG/pressure extension adds four public regression cases for nonlinear
+free flight, a freely recoiling pressurized impact, pressure-preserving geometry
+retries/zero-pressure parity and binding/cancellation refusal. The full Cx-bound
+public target remains uncompiled and unexecuted where the runtime dependency
+closure is absent. A bounded actual-native numerical fixture executes original
+consistent-mass assembly/FGMRES initialization, simultaneous contact, material/
+pressure stress and tangent, time integration and rigid impulses/drift. Its five
+finite-step comparisons reduce a free-spin work defect from about 7.68e-5 J to
+1.00e-15 J and a post-impact defect from about 2.53e-7 J to 1.89e-15 J. The
+pressurized impact has 0.375 N s impulse, 0.09375 J physical contact loss and
+0.0156686896022 J pressure work, closing work within 3.47e-15 J. This direct
+composition does not execute the public geometry/retry or receipt wrappers.
+The existing native frictional-impact regression executable also passes 18/18;
+these checks are not a full Cargo/DSR gate or experimental qualification.
 
 ### Ordinary heavy solids on the resolved immersed-fluid owner
 

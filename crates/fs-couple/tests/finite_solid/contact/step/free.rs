@@ -404,3 +404,58 @@ fn a_nonrepresentable_native_kick_is_rejected_instead_of_credited_as_applied_wor
         assert_eq!(solid.native_state(), &original);
     });
 }
+
+#[test]
+fn nonlinear_free_flight_uses_the_native_energy_momentum_solid_step() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        let f = [1.3, 0.18, -0.08, 0.06, 0.87, 0.12, 0.04, -0.09, 1.08];
+        let x: [[f64; 3]; 4] = NODES
+            .map(|point| core::array::from_fn(|i| (0..3).map(|j| f[3 * i + j] * point[j]).sum()));
+        let u: [[f64; 3]; 4] =
+            core::array::from_fn(|a| core::array::from_fn(|i| x[a][i] - NODES[a][i]));
+        let v = x.map(|p| {
+            let spin = Vec3::new(0.9, -0.6, 0.7).cross(vec(p));
+            [spin.x + 0.1, spin.y - 0.08, spin.z + 0.03]
+        });
+        let solid = FiniteSolidBody::new(
+            problem(&material, &[], &[]),
+            &u,
+            &v,
+            0.0,
+            Default::default(),
+            cx,
+        )
+        .unwrap();
+        let before = solid.native_state().clone();
+        // This finite-strain interval has a measurable ordinary-midpoint work
+        // defect; the conservative transient-contact path must not inherit it.
+        assert!(matches!(
+            solid.step_candidate(0.02, &[], [0.0; 3], controls(1e-10), cx),
+            Err(FiniteSolidError::Energy { .. })
+        ));
+        let direct = solid
+            .step_energy_momentum_candidate(0.02, &[], [0.0; 3], controls(1e-10), cx)
+            .unwrap();
+        let (next, rigid, report) = solid
+            .rigid_free_flight_candidate(
+                &[],
+                &[],
+                &[],
+                [0.0; 3],
+                &[],
+                Gravity::ZERO,
+                0.02,
+                [0.0; 3],
+                flight_controls(1e-10),
+                cx,
+            )
+            .unwrap();
+        assert!(rigid.is_empty());
+        assert_eq!(next.native_state(), direct.0.native_state());
+        near(report.solid_integration_defect_j, 0.0, 1e-10);
+        near(report.kinetic_change_j + report.strain_change_j, 0.0, 1e-10);
+        flight_audit(&report);
+        assert_eq!(solid.native_state(), &before);
+    });
+}

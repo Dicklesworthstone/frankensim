@@ -1,6 +1,6 @@
 //! Native finite-solid and rigid free motion with one physical balance account.
 //!
-//! The original solid midpoint step and rigid endpoint-kick/free-rotation step
+//! The original solid energy/momentum step and rigid endpoint-kick/free-rotation step
 //! own every candidate state. Held loads are accounted at their actual material
 //! points. Consistent nodal momentum and current coordinates retain the solid's
 //! orbital angular momentum; rigid spin is evaluated from both actual attitudes.
@@ -113,8 +113,9 @@ impl<'a> FiniteSolidBody<'a> {
     /// A wrench holds its world force and body torque at BOTH endpoints. Applied
     /// angular impulse uses those two rotated body torques and actual endpoint
     /// force moments. This is the native discrete torque convention, not an
-    /// exact forced Euler-top flow. The solid's original midpoint reaction is
-    /// integrated at current midpoint coordinates; fixed supports do zero work.
+    /// exact forced Euler-top flow. The solid uses its original objective
+    /// energy/momentum discrete gradient, including the same algorithmic support
+    /// reaction integrated at midpoint coordinates; fixed supports do zero work.
     ///
     /// The signed solid and rigid-drift energy defects are separately bounded
     /// through their absolute sum. Neither this gate nor free motion admits a
@@ -128,6 +129,73 @@ impl<'a> FiniteSolidBody<'a> {
         properties: &[MassProperties],
         nodal_forces_n: &[(usize, f64)],
         body_force_n_m3: [f64; 3],
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FreeFlightControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, Vec<RigidBodyState>, FreeFlightReport), FreeFlightError> {
+        self.rigid_free_flight_with_pressure(
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            None,
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance both owners with uniform pressure held on the solid's original
+    /// closed material boundary. The solid uses its objective discrete gradient
+    /// of material energy plus pressure-volume potential; native -p Delta V work
+    /// remains in `report.solid.pressure_work_j` and total source work. Closed
+    /// uniform pressure adds no net external linear/angular impulse. Stationary
+    /// support reactions and all existing phase balance gates remain active.
+    /// This does not add nonuniform pressure or resolve a contact path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rigid_free_flight_candidate_with_pressure(
+        &self,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_pa: f64,
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FreeFlightControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, Vec<RigidBodyState>, FreeFlightReport), FreeFlightError> {
+        self.rigid_free_flight_with_pressure(
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            Some(pressure_pa),
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn rigid_free_flight_with_pressure(
+        &self,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
         wrenches: &[Wrench],
         gravity: Gravity,
         duration_s: f64,
@@ -156,15 +224,28 @@ impl<'a> FiniteSolidBody<'a> {
                 "bounded matching bodies, positive interval and finite physical controls required",
             ));
         }
-        let (solid_next, solid) = self.step_candidate(
-            duration_s,
-            nodal_forces_n,
-            body_force_n_m3,
-            controls.solid,
-            cx,
-        )?;
+        admit_uniform_pressure(self, uniform_pressure_pa, cx)?;
+        let (solid_next, solid) = match uniform_pressure_pa {
+            Some(pressure_pa) => self.step_energy_momentum_candidate_with_pressure(
+                duration_s,
+                nodal_forces_n,
+                body_force_n_m3,
+                pressure_pa,
+                controls.solid,
+                cx,
+            ),
+            None => self.step_energy_momentum_candidate(
+                duration_s,
+                nodal_forces_n,
+                body_force_n_m3,
+                controls.solid,
+                cx,
+            ),
+        }?;
         // Same prepared load owner as the native step: no second body-force
-        // quadrature or lumped mass enters the momentum account.
+        // quadrature or lumped mass enters the momentum account. Uniform pressure
+        // has zero total force/torque; its actual work and any constrained
+        // support impulse already belong to the native solid receipt.
         let force = self
             .prepared
             .external_force_n(nodal_forces_n, body_force_n_m3, cx)
@@ -382,6 +463,27 @@ impl<'a> FiniteSolidBody<'a> {
         poll(cx)?;
         Ok((solid_next, rigid_next, report))
     }
+}
+
+// Pressure admission precedes contact work in the trajectory consumer. The
+// original bound surface still owns closure/reference identity and finite load.
+pub(super) fn admit_uniform_pressure(
+    solid: &FiniteSolidBody<'_>,
+    pressure_pa: Option<f64>,
+    cx: &Cx<'_>,
+) -> Result<(), FreeFlightError> {
+    if let Some(pressure_pa) = pressure_pa {
+        let surface = solid
+            .pressure_surface
+            .as_deref()
+            .ok_or(FreeFlightError::Solid(FiniteSolidError::Invalid(
+                "body was not initialized with a pressure surface",
+            )))?;
+        surface
+            .validate_pressure(pressure_pa.into(), cx)
+            .map_err(FiniteSolidError::from)?;
+    }
+    Ok(())
 }
 
 fn angular_average(

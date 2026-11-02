@@ -1,7 +1,8 @@
 //! Native rigid/deformable free motion and geometry-admitted impact trajectories.
 //!
 //! Automatic current-surface witnesses, the original simultaneous impulse solve,
-//! and the original smooth mechanical integrators advance one private candidate.
+//! and objective energy/momentum solid motion advance one private candidate.
+//! Rigid smooth motion retains its original full-inertia integrator.
 //! A cached BVH and interval separating-plane bounds admit the ENTIRE declared
 //! straight coordinate interpolation between native endpoints. An unresolved
 //! window shortens the native step; every retry recomputes the native trajectory.
@@ -288,6 +289,7 @@ impl<'a> FiniteSolidBody<'a> {
             spheres,
             nodal_forces_n,
             body_force_n_m3,
+            None,
             wrenches,
             gravity,
             duration_s,
@@ -334,6 +336,99 @@ impl<'a> FiniteSolidBody<'a> {
             scene.spheres(),
             nodal_forces_n,
             body_force_n_m3,
+            None,
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance the original transient impact trajectory with uniform pressure
+    /// held on the solid for this whole call. Every trial and shortened retry
+    /// uses the same pressure-aware objective solid step. Native pressure work,
+    /// simultaneous impact loss and numerical defects keep separate accounts;
+    /// current supports, rigid recoil and complete geometric admission remain.
+    /// Pressure is admitted on the original bound closed surface before contact
+    /// work. This retains the transient lane's scope: sustained loaded contact
+    /// and nonuniform face pressure are not supplied by this entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sphere_trajectory_candidate_with_pressure(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        spheres: &[FiniteSolidSphere],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_pa: f64,
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (Self, Vec<RigidBodyState>, FiniteSolidSphereTrajectoryReport),
+        FiniteSolidSphereTrajectoryError,
+    > {
+        self.sphere_trajectory_with(
+            surface,
+            None,
+            bodies,
+            properties,
+            spheres,
+            nodal_forces_n,
+            body_force_n_m3,
+            Some(pressure_pa),
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance the original transient impact trajectory with uniform pressure
+    /// held on the solid for this whole call. Every trial and shortened retry
+    /// uses the same pressure-aware objective solid step. Native pressure work,
+    /// simultaneous impact loss and numerical defects keep separate accounts;
+    /// current supports, rigid recoil and complete geometric admission remain.
+    /// Pressure is admitted on the original bound closed surface before contact
+    /// work. This retains the transient lane's scope: sustained loaded contact
+    /// and nonuniform face pressure are not supplied by this entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mixed_sphere_trajectory_candidate_with_pressure(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_pa: f64,
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (Self, Vec<RigidBodyState>, FiniteSolidSphereTrajectoryReport),
+        FiniteSolidSphereTrajectoryError,
+    > {
+        self.sphere_trajectory_with(
+            surface,
+            Some(scene),
+            bodies,
+            properties,
+            scene.spheres(),
+            nodal_forces_n,
+            body_force_n_m3,
+            Some(pressure_pa),
             wrenches,
             gravity,
             duration_s,
@@ -353,6 +448,7 @@ impl<'a> FiniteSolidBody<'a> {
         spheres: &[FiniteSolidSphere],
         nodal_forces_n: &[(usize, f64)],
         body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
         wrenches: &[Wrench],
         gravity: Gravity,
         duration_s: f64,
@@ -365,6 +461,7 @@ impl<'a> FiniteSolidBody<'a> {
     > {
         poll(cx)?;
         validate(bodies, properties, spheres, wrenches, duration_s, controls)?;
+        free::admit_uniform_pressure(self, uniform_pressure_pa, cx)?;
         let start_time = self.native_state().t;
         let end_time = start_time + duration_s;
         if !end_time.is_finite() || end_time <= self.native_state().t {
@@ -426,18 +523,20 @@ impl<'a> FiniteSolidBody<'a> {
                         elapsed_s: elapsed,
                     });
                 }
-                let (candidate, rigid_candidate, free) = post_solid.rigid_free_flight_candidate(
-                    &post_rigid,
-                    properties,
-                    nodal_forces_n,
-                    body_force_n_m3,
-                    wrenches,
-                    gravity,
-                    dt,
-                    origin_m,
-                    controls.free,
-                    cx,
-                )?;
+                let (candidate, rigid_candidate, free) = post_solid
+                    .rigid_free_flight_with_pressure(
+                        &post_rigid,
+                        properties,
+                        nodal_forces_n,
+                        body_force_n_m3,
+                        uniform_pressure_pa,
+                        wrenches,
+                        gravity,
+                        dt,
+                        origin_m,
+                        controls.free,
+                        cx,
+                    )?;
                 let represented = candidate.native_state().t - post_solid.native_state().t;
                 if (represented - dt).abs() > clock_tolerance {
                     return Err(FiniteSolidSphereTrajectoryError::TimeResolution {
