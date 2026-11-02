@@ -9381,3 +9381,29 @@ Native validation: `cargo check --offline --locked -p fs-material --test
 nonideal_flash` passed with both the S,V closure and all six parcel regressions
 registered. Rustfmt and whitespace checks passed. Runtime test execution remains
 unverified following the upstream compiler memory failure described above.
+
+## Frozen finite-strain viscoelastic potentials for spatial equilibrium
+
+`visco_hyper::ViscoHyperelastic::freeze(accepted, dt_s)` borrows the original
+native law, complete accepted `ViscoState` and one nonnegative physical interval.
+The resulting immutable `FrozenViscoHyperelastic` implements
+`hyper::cards::FiniteStrainPotential` using the original branch minimization,
+Piola stress and symmetric algorithmic tangent. Newton and backtracking trials
+cannot advance the accepted viscous metrics or elapsed interval. Stress and
+potential evaluation share one branch preparation.
+
+`step_response` proposes the same native update as `step` and exposes its
+reduced incremental potential, physical stored energy, frozen-state loading-work
+increment and nonnegative relaxation-loss increment separately. The increments
+are retained before cumulative-ledger rounding. The incremental potential is
+the function whose gradient gives the trial Piola stress; it is not physical
+stored energy or heat. `dt_s = 0` retains the native elastic-jump semantics.
+Nonfinite work/storage, negative relaxation loss, invalid histories and original
+constitutive refusals publish no candidate. No alternate material equation,
+fitted relaxation parameter or mechanical integration convention is introduced.
+
+`tests/visco_incremental.rs` checks directional energy/stress/tangent consistency
+after nontrivial history, unchanged accepted states under repeated trial queries,
+and the distinct potential/storage/heat accounts during held-strain relaxation.
+The spatial consumer is `fs-solid::hyper3::visco`; its physical endpoint-work
+quadrature discrepancy belongs to that consumer and must not be booked as heat.

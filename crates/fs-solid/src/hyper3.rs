@@ -89,6 +89,9 @@ pub mod prepared;
 /// Retained multiplicative finite-strain plastic history on the native mesh.
 pub mod plastic;
 
+/// Retained finite-strain Maxwell histories on the same native equilibrium solver.
+pub mod visco;
+
 /// Newton / load-stepping controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HyperTetSettings {

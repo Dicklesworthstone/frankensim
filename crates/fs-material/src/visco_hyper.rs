@@ -114,6 +114,58 @@ pub struct ViscoHyperelastic {
     newton_max_iterations: usize,
 }
 
+/// One proposed material endpoint, with physical and incremental energies kept
+/// distinct. Every density is per original reference volume [J/m³ = Pa].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViscoStepResponse {
+    /// Complete proposed history; the borrowed accepted history is unchanged.
+    pub state: ViscoState,
+    /// First Piola stress conjugate to the proposed total deformation gradient.
+    pub first_piola_pa: [f64; 9],
+    /// Reduced potential whose gradient is `first_piola_pa`. This is neither
+    /// physical stored energy nor viscous heat.
+    pub incremental_potential_pa: f64,
+    /// This step's native loading work with the old viscous metric frozen.
+    /// A spatial integrator must account for its own endpoint-work difference.
+    pub loading_work_pa: f64,
+    /// This step's nonnegative relaxation loss, before cumulative-ledger rounding.
+    pub dissipated_pa: f64,
+}
+
+/// Immutable constitutive potential for one spatial Newton solve. All trial
+/// evaluations retain the SAME accepted history and physical interval.
+#[derive(Debug, Clone, Copy)]
+pub struct FrozenViscoHyperelastic<'a> {
+    law: &'a ViscoHyperelastic,
+    accepted: &'a ViscoState,
+    dt_s: f64,
+}
+
+impl crate::hyper::cards::FiniteStrainPotential for FrozenViscoHyperelastic<'_> {
+    fn energy_density(&self, deformation: &[f64; 9]) -> f64 {
+        self.stress_and_potential(deformation)
+            .map_or(f64::NAN, |(_, potential)| potential)
+    }
+
+    fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
+        self.stress_and_potential(deformation)
+            .map(|(stress, _)| stress)
+    }
+
+    fn consistent_tangent(&self, deformation: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
+        self.law
+            .algorithmic_tangent(self.accepted, deformation, self.dt_s)
+    }
+
+    fn stress_and_potential(
+        &self,
+        deformation: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        let prepared = self.law.prepare(self.accepted, deformation, self.dt_s)?;
+        self.law.stress_and_potential_from(&prepared, deformation)
+    }
+}
+
 fn parameters(what: String) -> MaterialError {
     MaterialError::Parameters { what }
 }
@@ -442,8 +494,8 @@ fn local_solve(
     // eps_trial - eps* = c * tau exactly at the stationary point.
     let delta = [c * tau[0], c * tau[1], c * tau[2]];
     let x_star = expand(eta);
-    let dissipation = c * (tau[0] * tau[0] + tau[1] * tau[1] + tau[2] * tau[2])
-        + energy.bregman(&x_star, &delta);
+    let dissipation =
+        c * (tau[0] * tau[0] + tau[1] * tau[1] + tau[2] * tau[2]) + energy.bregman(&x_star, &delta);
     // K = H (I + c H)^-1 on the plane.
     let hr = reduced_hessian(&hess);
     let n = [
@@ -461,8 +513,7 @@ fn local_solve(
     let off = 0.5 * (k2[0][1] + k2[1][0]);
     k2[0][1] = off;
     k2[1][0] = off;
-    let pi = psi
-        + ((eta[0] - eta_tr[0]).powi(2) + (eta[1] - eta_tr[1]).powi(2)) / (2.0 * c);
+    let pi = psi + ((eta[0] - eta_tr[0]).powi(2) + (eta[1] - eta_tr[1]).powi(2)) / (2.0 * c);
     Ok(Local {
         eta,
         psi_tr,
@@ -532,7 +583,9 @@ fn trial_stretch_tensor<T: Real>(f: &[T; 9], cv: &[f64; 9]) -> [T; 9] {
     let jm23 = (T::from_f64(-2.0 / 3.0) * j.ln()).exp();
     let m: [T; 9] = core::array::from_fn(|ij| {
         let (r, c) = (ij / 3, ij % 3);
-        (0..3).fold(T::zero(), |s, k| s + f[3 * r + k] * T::from_f64(cv[3 * k + c]))
+        (0..3).fold(T::zero(), |s, k| {
+            s + f[3 * r + k] * T::from_f64(cv[3 * k + c])
+        })
     });
     core::array::from_fn(|ij| {
         let (r, c) = (ij / 3, ij % 3);
@@ -619,6 +672,30 @@ impl Prepared {
 }
 
 impl ViscoHyperelastic {
+    /// Borrow one accepted history and nonnegative physical interval for a
+    /// spatial equilibrium solve. Trials cannot advance either of them.
+    pub fn freeze<'a>(
+        &'a self,
+        accepted: &'a ViscoState,
+        dt_s: f64,
+    ) -> Result<FrozenViscoHyperelastic<'a>, MaterialError> {
+        self.check_inputs(accepted, &accepted.deformation_gradient, dt_s)?;
+        if ![accepted.work, accepted.stored, accepted.dissipated]
+            .iter()
+            .all(|value| value.is_finite())
+            || accepted.dissipated < 0.0
+        {
+            return Err(state_error(
+                "nonfinite history ledger or negative accumulated loss".into(),
+            ));
+        }
+        Ok(FrozenViscoHyperelastic {
+            law: self,
+            accepted,
+            dt_s,
+        })
+    }
+
     /// Construct with parameter checks.
     ///
     /// # Errors
@@ -733,8 +810,7 @@ impl ViscoHyperelastic {
         f: &[f64; 9],
     ) -> Result<([f64; 9], [f64; 3], [f64; 9]), MaterialError> {
         let ct = trial_stretch_tensor(f, cv);
-        let sym: [f64; 9] =
-            core::array::from_fn(|ij| 0.5 * (ct[ij] + ct[3 * (ij % 3) + ij / 3]));
+        let sym: [f64; 9] = core::array::from_fn(|ij| 0.5 * (ct[ij] + ct[3 * (ij % 3) + ij / 3]));
         let (d, v) = jacobi_eigh(&sym, 3);
         if d.len() != 3 || d.iter().any(|x| !x.is_finite() || *x <= 0.0) {
             return Err(state_error(
@@ -850,12 +926,7 @@ impl ViscoHyperelastic {
         })
     }
 
-    fn prepare(
-        &self,
-        s: &ViscoState,
-        f: &[f64; 9],
-        dt: f64,
-    ) -> Result<Prepared, MaterialError> {
+    fn prepare(&self, s: &ViscoState, f: &[f64; 9], dt: f64) -> Result<Prepared, MaterialError> {
         self.check_inputs(s, f, dt)?;
         let mut branches = Vec::with_capacity(self.branches.len());
         for (branch, cv6) in self.branches.iter().zip(&s.inverse_viscous_cauchy_green) {
@@ -879,32 +950,74 @@ impl ViscoHyperelastic {
         f_new: &[f64; 9],
         dt: f64,
     ) -> Result<(ViscoState, [f64; 9]), MaterialError> {
+        let response = self.step_response(s, f_new, dt)?;
+        Ok((response.state, response.first_piola_pa))
+    }
+
+    /// Propose the same native update as [`Self::step`], also retaining its
+    /// reduced potential and individual physical work/loss increments. The
+    /// branch return map is prepared only once for all these quantities.
+    pub fn step_response(
+        &self,
+        s: &ViscoState,
+        f_new: &[f64; 9],
+        dt: f64,
+    ) -> Result<ViscoStepResponse, MaterialError> {
         let prep = self.prepare(s, f_new, dt)?;
-        let p = self.stress_from(&prep, f_new)?;
+        let (p, incremental_potential_pa) = self.stress_and_potential_from(&prep, f_new)?;
         let psi_eq = self.equilibrium.energy(f_new);
         let psi_tr: f64 = prep.branches.iter().map(|b| b.psi_tr).sum();
         let psi_star: f64 = prep.branches.iter().map(|b| b.psi_star).sum();
         let dissipation: f64 = prep.branches.iter().map(|b| b.dissipation).sum();
+        let loading_work_pa = psi_eq + psi_tr - s.stored;
         let next = ViscoState {
             inverse_viscous_cauchy_green: prep.branches.iter().map(|b| b.cv_new).collect(),
             deformation_gradient: *f_new,
-            work: s.work + (psi_eq + psi_tr - s.stored),
+            work: s.work + loading_work_pa,
             stored: psi_eq + psi_star,
             dissipated: s.dissipated + dissipation,
         };
-        Ok((next, p))
+        if ![
+            next.work,
+            next.stored,
+            next.dissipated,
+            loading_work_pa,
+            dissipation,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            || dissipation < 0.0
+        {
+            return Err(state_error(
+                "nonfinite material work/storage or negative relaxation loss".into(),
+            ));
+        }
+        Ok(ViscoStepResponse {
+            state: next,
+            first_piola_pa: p,
+            incremental_potential_pa,
+            loading_work_pa,
+            dissipated_pa: dissipation,
+        })
     }
 
-    fn stress_from(&self, prep: &Prepared, f: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
+    fn stress_and_potential_from(
+        &self,
+        prep: &Prepared,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
         let mut p = self.equilibrium.piola(f)?;
-        let (_, grad) = fs_ad::gradient::<9>(*f, |x| prep.potential(&x));
+        let (branch_potential, grad) = fs_ad::gradient::<9>(*f, |x| prep.potential(&x));
+        let potential = self.equilibrium.energy(f) + branch_potential;
         for (a, g) in p.iter_mut().zip(grad) {
             *a += g;
         }
-        if p.iter().all(|x| x.is_finite()) {
-            Ok(p)
+        if p.iter().all(|x| x.is_finite()) && potential.is_finite() {
+            Ok((p, potential))
         } else {
-            Err(state_error("nonfinite Piola stress".to_string()))
+            Err(state_error(
+                "nonfinite Piola stress or incremental potential".to_string(),
+            ))
         }
     }
 

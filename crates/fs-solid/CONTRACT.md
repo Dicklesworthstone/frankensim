@@ -3369,3 +3369,47 @@ The existing generic SmallStrainTetProblem directly consumes ThermalChaboche wit
 ## Timed cyclic plasticity in the native tetrahedral consumer
 
 The existing generic tetrahedral owner also advances source-pinned timed thermal Chaboche histories through heating, tensile/compressive holds and reversal. The timed regression in tests/plastic_thermal_chaboche.rs uses affine Voce Q(T), independent affine branch moduli and n=3 Perzyna kinetics. Independent endpoint flow, branch-recovery and viscous heat, coefficient storage and the first law are checked alongside force equilibrium and support work. Repeated frozen-history solves are identical; a shorter physical interval relaxes less. The test uses prescribed temperature and does not claim automatic Chaboche-state coupling in ThermoplasticSolid's heat owner, finite deformation or experimental validation.
+
+## Retained finite-strain viscoelastic tetrahedra
+
+`hyper3::visco::FiniteViscoTetSolid` consumes uniform or per-element original
+`ViscoHyperelastic` laws. `try_new` admits the native reference geometry and
+relaxed history. `advance(dt_s, supports, loads, body_load, settings, controls,
+cx)` solves one actual quasistatic endpoint through the existing generic
+`HyperTetProblem`, with its original force-equilibrium gate, consistent tangent,
+linear solver and globalization. Every trial borrows the same accepted
+`ViscoState` and physical interval; no trial or load-search iteration advances
+viscous memory. Original reference geometry is prepared once and shared between
+accepted candidates. Regional spectra are never averaged.
+
+Displacement, complete element histories, Piola stress, physical storage and
+elapsed time change together only after the native solve and physical work
+gates pass. Dropping or refusing a candidate leaves the previous solid intact.
+Absolute endpoint supports and loads permit continued loading, unloading,
+stress relaxation and creep; `dt_s = 0` is the native elastic jump. One native
+load endpoint is required. The caller controls physical interval subdivision
+and explicit finite work tolerances.
+
+The accepted energy record distinguishes physical storage before/after,
+nonnegative native relaxation loss, native frozen-state loading work, reduced
+incremental potential, actual internal/dead-load/support endpoint work, native
+material balance and signed endpoint integration defect. The potential is used
+only by Newton. Native work minus storage change and relaxation loss is checked
+independently; assembled potential and support/load equilibrium work are also
+checked. The signed endpoint defect is actual internal work minus physical
+storage change and native loss. It has its own explicit allowance and is never
+deposited as heat or hidden by clipping dissipation.
+
+`tests/hyper_visco.rs` covers an affine relaxation patch with a free interior
+node against native material-point histories, maintained-load creep with
+physical work/loss accounts, recovery of the original elastic solver when there
+are no Maxwell branches, and heterogeneous compatible histories with failed-step
+rollback and deterministic retry. `cargo run -p fs-solid --example
+viscoelastic_creep` reports extension, maintained force, storage, interval loss
+and endpoint defect for an explicitly synthetic constrained-lateral coupon.
+
+Scope is isothermal quasistatic finite-bulk P1 tetrahedra. Volumetric locking is
+not mitigated; this is not the Taylor–Hood mixed/incompressible formulation from
+IRP M1.3-W2b. Inertia, contact, evolving temperature, source-parameter resolution,
+time/mesh convergence and experimental qualification require their respective
+owners and evidence. No closure of that full mixed-element bead is claimed.
