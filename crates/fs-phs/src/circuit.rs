@@ -50,6 +50,9 @@ use crate::{DescriptorPortHamiltonian, PhsError, QuadraticStorage, StepRecord, s
 
 /// Bounded charge/voltage laws on the original capacitor coordinates.
 pub mod capacitance;
+/// Grounded reciprocal multi-terminal passive conductance.
+pub mod conductance;
+use conductance::ConductanceBlock;
 
 /// One circuit branch between two node indices (node 0 is GROUND).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -203,17 +206,53 @@ pub fn assemble_circuit(graph: &CircuitGraph) -> Result<CircuitDae, CircuitError
 /// Ordinary circuit refusals; invalid/duplicate coupling endpoints; nonfinite
 /// M; a nonpositive-definite or numerically unresolved inductance matrix.
 /// Pairwise `|M_ij| < sqrt(L_i L_j)` alone does not admit a multiwinding core.
-#[allow(clippy::too_many_lines)] // one assembly pass, kept whole
 pub fn assemble_circuit_with_mutual_inductance(
     graph: &CircuitGraph,
     mutual: &[MutualInductance],
+) -> Result<CircuitDae, CircuitError> {
+    assemble_circuit_parts(graph, mutual, &[], &mut || Ok(()))
+}
+
+/// Stamp complete reciprocal conductance blocks into the original Kirchhoff
+/// descriptor. Each block contributes B G B^T, including every mutual term.
+/// Original C/L storage, source ports, ideal transformers and time stepping
+/// remain in this same system. Block-only terminals count as incident before
+/// isolated-node admission; zero conductance cannot anchor a free potential.
+pub fn assemble_circuit_with_conductance(
+    graph: &CircuitGraph,
+    blocks: &[ConductanceBlock],
+) -> Result<CircuitDae, CircuitError> {
+    assemble_circuit_with_conductance_polled(graph, blocks, || Ok(()))
+}
+
+/// Same assembly with cancellation around each bounded block and the original
+/// synchronous descriptor/storage admission. Admits at most 64 nodes, 128
+/// branches, 32 transformers/source ports, 64 blocks and 256 descriptor states.
+/// These fixed bounds cover dense matrix storage and work; they do not promise
+/// interruptibility inside the existing native factorization or time step.
+pub fn assemble_circuit_with_conductance_polled(
+    graph: &CircuitGraph,
+    blocks: &[ConductanceBlock],
+    mut poll: impl FnMut() -> Result<(), CircuitError>,
+) -> Result<CircuitDae, CircuitError> {
+    poll()?;
+    conductance::admit_circuit(graph, blocks)?;
+    assemble_circuit_parts(graph, &[], blocks, &mut poll)
+}
+
+#[allow(clippy::too_many_lines)] // one original Kirchhoff assembly pass
+fn assemble_circuit_parts(
+    graph: &CircuitGraph,
+    mutual: &[MutualInductance],
+    blocks: &[ConductanceBlock],
+    poll: &mut impl FnMut() -> Result<(), CircuitError>,
 ) -> Result<CircuitDae, CircuitError> {
     if graph.node_count < 2 {
         return Err(CircuitError::Invalid {
             what: "a circuit needs ground plus at least one node",
         });
     }
-    if graph.branches.is_empty() {
+    if graph.branches.is_empty() && blocks.is_empty() {
         return Err(CircuitError::Invalid {
             what: "a circuit needs at least one branch",
         });
@@ -279,6 +318,10 @@ pub fn assemble_circuit_with_mutual_inductance(
                 what: "transformer ratio must be finite and nonzero",
             });
         }
+    }
+    for block in blocks {
+        poll()?;
+        block.admit_nodes(&mut incident)?;
     }
     for (node, &count) in incident.iter().enumerate().skip(1) {
         if count == 0 {
@@ -429,6 +472,10 @@ pub fn assemble_circuit_with_mutual_inductance(
             }
         }
     }
+    for block in blocks {
+        poll()?;
+        block.stamp(&mut r, n, off_v)?;
+    }
     for (t_idx, t) in graph.transformers.iter().enumerate() {
         let xi = off_it + t_idx;
         // Single algebraic row: (v1a − v1b) − ratio (v2a − v2b) = 0;
@@ -456,6 +503,7 @@ pub fn assemble_circuit_with_mutual_inductance(
         }
     }
     let storage = Box::new(QuadraticStorage::new(q_storage, n)?);
+    poll()?;
     let system = DescriptorPortHamiltonian {
         n,
         n_diff,

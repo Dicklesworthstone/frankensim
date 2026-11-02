@@ -11,6 +11,40 @@ stepping, and Galerkin reduction preserves the structure.
 
 ## Public types and semantics
 
+### Reciprocal conducting fields in the original circuit descriptor
+
+`circuit::conductance::ConductanceBlock` carries a complete grounded reciprocal
+conductance G [S] and an explicit terminal-to-graph-node map. The first terminal
+is the caller's voltage reference; non-reference currents are
+`G (V[1..] - V[0])`, and reference current is their negative sum.
+`assemble_circuit_with_conductance` adds the complete `B G B^T` stamp to the
+original `CircuitDae`. Its capacitor charges, inductor fluxes, ideal-transformer
+constraints, source ports, consistent initialization and native time step remain
+the only circuit owners. An electrode with no lumped branch can therefore solve
+as an ordinary zero-net-current algebraic terminal.
+
+Original reciprocal coefficients, including either mutual sign, are retained.
+The existing resistance-factor owner admits passivity and supplies independent
+positive-square `power_w`; heat is never inferred from storage loss or a ledger
+residual. Unresolved negative modes, nonfinite arithmetic, duplicate/out-of-range
+nodes and asymmetric matrices refuse. A zero block or absent reference cannot
+conceal an isolated circuit node. The field caller retains responsibility for
+physical source validity, constitutive refresh and spatial heat distribution.
+
+The dense seam admits at most 32 independent block voltages and 64 blocks,
+64 graph nodes, 128 branches, 32 transformers and source ports, and 256 descriptor
+states. Construction has bounded cubic temporary storage and quartic worst-case
+scalar work through the existing resistance factor; block queries are quadratic.
+The polled constructor and assembler check cancellation around bounded native
+kernels and block stamps. They do not make existing synchronous factorizations
+or time stepping interruptible. Ordinary circuit entry points retain their
+existing admission behavior.
+
+`tests/circuit_conductance.rs` exercises two analytic RC modes with positive
+mutual coefficients, one shared finite C/L step, a field-only floating electrode,
+arbitrary reference mapping, independent terminal power, passive nullspaces,
+separated physical scales, and malformed/cancelled/over-capacity refusals.
+
 ### Continuous harmonic response of the complete linear system
 
 `harmonic::HarmonicModel::{from_ode,from_descriptor}` prepares the original
