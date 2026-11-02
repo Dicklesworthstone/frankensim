@@ -243,7 +243,7 @@ fn fixed_physical_shear_refinement_removes_modeled_transport() {
 }
 
 #[test]
-fn refusals_keep_complete_reservoirs_and_excess_transport_out_of_the_owner() {
+fn refusals_keep_excess_transport_and_acceptance_use_out_of_the_owner() {
     let make = || {
         NsfGrid3::<D3q27>::new(
             spec([6, 4, 4], [false, true, true], WallThermal::Adiabatic),
@@ -253,18 +253,6 @@ fn refusals_keep_complete_reservoirs_and_excess_transport_out_of_the_owner() {
         .unwrap()
     };
     let config = config(SgsModel::Smagorinsky { cs: 0.17 });
-    let reservoir = NsfOpenState {
-        density_kg_m3: make().law.rho_ref_kg_m3,
-        velocity_m_s: [0.0; 3],
-        temperature_k: 293.15,
-    };
-    let mut active = make().with_sgs(config).unwrap();
-    let hash = active.state_hash();
-    assert!(active.set_open_face(0, false, Some(reservoir)).is_err());
-    assert_eq!(active.state_hash(), hash);
-    let mut prescribed = make();
-    prescribed.set_open_face(0, false, Some(reservoir)).unwrap();
-    assert!(prescribed.with_sgs(config).is_err());
     let mut bounded = config;
     bounded.closure.maximum_eddy_to_molecular = 0.01;
     let mut active = make().with_sgs(bounded).unwrap();

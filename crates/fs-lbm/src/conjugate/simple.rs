@@ -84,7 +84,7 @@ use super::domain::{FluidProperties, VoxelDomain};
 use super::energy::ConvectionScheme;
 use super::flow::{FlowField, scale_rows};
 use super::krylov::bicgstab_ilu0;
-use super::turbulence::{TURBULENT_PRANDTL, law_of_the_wall_ratios, wall_distance};
+use super::turbulence::{TURBULENT_PRANDTL, law_of_the_wall_ratios, wall_distance_and_boundary};
 use super::{ChtError, finite, finite_positive, poll};
 use crate::d3q19::Face3;
 
@@ -634,6 +634,9 @@ pub(super) struct Solver<'a> {
     /// the law-of-the-wall secant viscosity ratio `y+ / u+` per cell, and
     /// whether a cell borders a wall; all empty when laminar.
     wall_distance: Vec<f64>,
+    /// Nearest domain wall selected by the same distance transform. None
+    /// denotes a stationary internal solid (unused for non-fluid cells).
+    wall_boundary: Vec<Option<u8>>,
     eddy_viscosity: Vec<f64>,
     wall_ratio: Vec<f64>,
     wall_adjacent: Vec<bool>,
@@ -934,6 +937,15 @@ impl<'a> Solver<'a> {
                 }
             })
             .collect();
+        let (wall_distance, wall_boundary) = match config.turbulence {
+            Turbulence::Laminar => (Vec::new(), Vec::new()),
+            Turbulence::Lvel => wall_distance_and_boundary(
+                domain,
+                config
+                    .faces
+                    .map(|rule| matches!(rule, FvBoundary::Wall { .. })),
+            ),
+        };
         Self {
             domain,
             config,
@@ -954,15 +966,8 @@ impl<'a> Solver<'a> {
             faces: config.faces,
             sweeps: 0,
             amg: None,
-            wall_distance: match config.turbulence {
-                Turbulence::Laminar => Vec::new(),
-                Turbulence::Lvel => wall_distance(
-                    domain,
-                    config
-                        .faces
-                        .map(|rule| matches!(rule, FvBoundary::Wall { .. })),
-                ),
-            },
+            wall_distance,
+            wall_boundary,
             eddy_viscosity: match config.turbulence {
                 Turbulence::Laminar => Vec::new(),
                 Turbulence::Lvel => vec![0.0; domain.cell_count()],
@@ -1147,7 +1152,9 @@ impl<'a> Solver<'a> {
     }
 
     /// LVEL: refresh the eddy viscosity from the current cell-centred
-    /// speeds (under-relaxed by one half after the first sweep).
+    /// speeds relative to the nearest wall (under-relaxed by one half after
+    /// the first sweep). A uniform translation with that wall produces no
+    /// turbulent stress or heat transport.
     fn update_turbulence(&mut self) {
         if self.config.turbulence != Turbulence::Lvel {
             return;
@@ -1159,11 +1166,18 @@ impl<'a> Solver<'a> {
                 continue;
             }
             let at = self.domain.coords(c);
+            let wall_velocity = self.wall_boundary[c].map_or([0.0; 3], |face| {
+                match self.faces[usize::from(face)] {
+                    FvBoundary::Wall { velocity } => velocity,
+                    _ => unreachable!("the distance transform selects only wall faces"),
+                }
+            });
             let mut speed2 = 0.0;
             for a in 0..3 {
                 let v = 0.5
                     * (self.vel[a][self.cell_face(a, at, false)]
-                        + self.vel[a][self.cell_face(a, at, true)]);
+                        + self.vel[a][self.cell_face(a, at, true)])
+                    - wall_velocity[a];
                 speed2 += v * v;
             }
             let reynolds = fs_math::det::sqrt(speed2) * self.wall_distance[c] / nu;

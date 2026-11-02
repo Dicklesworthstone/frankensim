@@ -1968,7 +1968,7 @@ uncertainty (0.67 to 0.84) is not propagated. No recording, graded or instrument
 ### Exploratory NSF3 subgrid momentum and heat transport
 
 `NsfGrid3::with_sgs(NsfSgsConfig)` explicitly enables the shared full-gradient
-Smagorinsky or WALE closure on the existing low-Mach NSF owner. Only the
+Smagorinsky, WALE or Vreman closure on the existing low-Mach NSF owner. Only the
 deviatoric relaxation receives `nu_t`; the source-owned molecular bulk rate is
 unchanged. The matching stress enters the conservative total-energy flux.
 Interior heat conduction additionally receives `rho (cp/R) nu_t / Pr_t` in
@@ -1982,7 +1982,10 @@ domain-wall derivatives use actual halfway wall values, including prescribed
 wall motion. Impermeable wall heat transfer retains its molecular half-cell
 resistance, with zero modeled wall heat flux. Characteristic faces use their
 original reconstructed half-cell velocity, while a localized transverse
-reservoir aperture uses its original ghost velocity one full spacing away.
+reservoir aperture or complete prescribed face uses its original ghost velocity
+one full spacing away. A one-cell layer between a prescribed ghost and an
+internal solid uses the quadratic derivative with distances one and one-half,
+respectively; it is not interpreted as two stationary halfway walls.
 The same predictor faces feed SGS, thermal-pressure forcing and energy flux.
 Adjacent algebraic conductivity is extrapolated to either opening (zero
 normal gradient of the modeled transport coefficient); temperature differences
@@ -1990,7 +1993,10 @@ retain their original half-cell or full-cell distances. Modeled conduction
 and stress work enter the existing total-energy and open-boundary accounts,
 including selected characteristic patches. Rebinding controls refreshes SGS
 and conservative history atomically; rejected/dropped trials retain both.
-Complete prescribed-reservoir faces still refuse active SGS. The existing
+Complete prescribed-reservoir faces admit active SGS in either configuration
+order; `set_open_face` refreshes the closure, matching shear stress and heat
+flux together while retaining the original physical state. Removing a face
+restores its actual stationary wall stencil. The existing
 Mach, temperature and total-viscosity envelope remains in force; ratio-cap
 violations refuse rather than clip. Zero coefficient preserves molecular
 arithmetic, and acceptance-render use remains forbidden.
@@ -2000,7 +2006,10 @@ tests cover moving-wall gradients, independent bulk relaxation, conservative
 heat diffusion, closed energy, worker identity, exact zero control, fixed-Re
 closure refinement, NASA9 heat capacity, uniform throughflow without spurious
 open-face wall shear, reservoir gradients, open heat flux, complete
-mass/energy exchange and transactional admission failures. These are
+mass/energy exchange and transactional admission failures. The prescribed-face
+tests cover all three axes and closures, exact quadratic ghost/wall gradients
+on both orientations, heated throughflow with conservative total energy,
+1/3-worker identity, zero controls and viscosity-cap rebind rollback. These are
 algebraic low-Mach transport integrations, not a new compressible-turbulence
 qualification: no SGS kinetic-energy equation, isotropic SGS pressure,
 pressure-dilatation, shocklet closure or thermal wall function is supplied.
@@ -2622,11 +2631,11 @@ correlation, not a measurement of a particular grille).
 Spalding 1996), the electronics-cooling model for fan-driven flows on
 coarse voxel meshes: per fluid cell, the wall distance `L` (exact Euclidean
 transform to the nearest solid voxel or wall-type domain face; openings,
-inlets and symmetry planes do not count) and the local speed give
-`Re_L = V L / nu`, which Spalding's unified law of the wall (`k` 0.41, `E`
+inlets and symmetry planes do not count) and the local speed relative to that
+wall give `Re_L = V L / nu`, which Spalding's unified law of the wall (`k` 0.41, `E`
 8.6) inverts for `u+`. Interior diffusion uses the profile's tangent
 `nu_eff = nu dy+/du+`; the half-cell flux to a wall uses its secant
-`nu_w = nu y+/u+`, so the discrete wall shear `mu_w u_P / L` equals
+`nu_w = nu y+/u+`, so the discrete wall shear `mu_w |u_P - u_wall| / L` equals
 `rho u_tau^2` of the law of the wall at any first-cell `y+` (using the
 tangent at the wall over-predicted the friction by 61 % and the Nusselt
 number by 43 % at Re_Dh 2e4). Both are under-relaxed by one half per sweep.
@@ -2634,6 +2643,21 @@ number by 43 % at Re_Dh 2e4). Both are under-relaxed by one half per sweep.
 (the secant value in wall-adjacent cells); `fv_natural_convection` applies
 the same closure. The cooling-cht scene selects it with
 `solver.turbulence: "lvel"`.
+
+The distance transform retains the selected domain-wall identity and its
+prescribed velocity; internal solid voxels remain stationary. LVEL evaluates
+`|u - u_wall| L / nu` in that wall's translating frame, consistent with
+[Spalding wall functions](https://cpp.openfoam.org/v13/nutUSpaldingWallFunctionFvPatchScalarField_8C_source.html).
+Both tangent momentum viscosity and secant wall/heat transport use this same
+relative speed. A uniform fluid/wall translation therefore adds no modeled
+turbulent viscosity or conductivity. The original deterministic nearest-feature
+tie breaking and distance geometry are retained, and the wall identity is
+cached at construction without a per-sweep geometry search. Focused G0/G3
+tests in `simple/turbulence_tests.rs` cover all three translation axes, graded
+Couette Galilean boosts, mixed moving domain walls and stationary voxel solids,
+and a public moving-wall plug-flow solve. This extends the equilibrium closure
+to the existing prescribed tangential wall velocities; it supplies no moving
+geometry, rotating-frame or turbulence-history model.
 
 The varying effective viscosity enters the complete symmetric momentum stress,
 `div(mu_eff (grad(u) + grad(u)^T))`, including normal and reciprocal shear terms.

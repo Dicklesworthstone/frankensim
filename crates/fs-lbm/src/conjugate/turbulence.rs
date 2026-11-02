@@ -5,8 +5,8 @@
 //!
 //! # Model
 //!
-//! At each fluid cell, from the wall distance `L` and the local speed `V`,
-//! the local Reynolds number `Re_L = V L / nu` fixes the law-of-the-wall
+//! At each fluid cell, the wall distance `L` and the local speed `V` relative
+//! to that wall give `Re_L = V L / nu`, which fixes the law-of-the-wall
 //! coordinates through Spalding's unified profile
 //!
 //! ```text
@@ -23,7 +23,7 @@
 //! with `k = 0.41`, `E = 8.6`. That tangent viscosity drives interior
 //! diffusion; the discrete wall flux over the half cell to a wall uses the
 //! secant `nu_w / nu = y+ / u+` of the same profile, so the wall shear
-//! `mu_w u_P / L` reproduces `rho u_tau^2` of the unified law of the wall
+//! `mu_w |u_P - u_wall| / L` reproduces `rho u_tau^2` of the unified wall law
 //! (using the tangent there over-predicts the friction: measured +61 % at
 //! Re_Dh = 2e4 before this distinction). Both degrade to laminar flow as
 //! `Re_L -> 0`. The energy equation takes the turbulent conductivity
@@ -186,8 +186,34 @@ fn edt_1d(
 /// then to that seed cell's box (exact for axis-aligned walls), at least
 /// half the cell's smallest width. Solid cells get zero.
 #[must_use]
-#[allow(clippy::too_many_lines)] // padding, three passes, box distances
 pub fn wall_distance(domain: &VoxelDomain, wall: [bool; 6]) -> Vec<f64> {
+    let mut distance = Vec::with_capacity(domain.cell_count());
+    wall_features(domain, wall, |d, _| distance.push(d));
+    distance
+}
+
+/// The same distance transform also retains the identity of a domain wall.
+/// Internal solid voxels have no boundary face and remain stationary. Keeping
+/// the feature selected by the transform ties the velocity reference to the
+/// distance actually used, including deterministic ties between walls.
+pub(super) fn wall_distance_and_boundary(
+    domain: &VoxelDomain,
+    wall: [bool; 6],
+) -> (Vec<f64>, Vec<Option<u8>>) {
+    let mut distance = Vec::with_capacity(domain.cell_count());
+    let mut boundary = Vec::with_capacity(domain.cell_count());
+    wall_features(domain, wall, |d, face| {
+        distance.push(d);
+        boundary.push(face);
+    });
+    (distance, boundary)
+}
+
+/// Share the distance/feature transform without a second grid scan or an
+/// intermediate per-cell tuple allocation. The additional small boundary
+/// cache is absent from laminar/SGS solvers.
+#[allow(clippy::too_many_lines)] // padding, three passes, box distances
+fn wall_features(domain: &VoxelDomain, wall: [bool; 6], mut emit: impl FnMut(f64, Option<u8>)) {
     let [nx, ny, nz] = domain.dims();
     let n = [nx, ny, nz];
     // Padded grid: one ghost layer on every side; ghost cells are seeds on
@@ -288,28 +314,37 @@ pub fn wall_distance(domain: &VoxelDomain, wall: [bool; 6]) -> Vec<f64> {
             }
         }
     }
-    (0..domain.cell_count())
-        .map(|c| {
-            if !domain.is_fluid(c) {
-                return 0.0;
+    for c in 0..domain.cell_count() {
+        if !domain.is_fluid(c) {
+            emit(0.0, None);
+            continue;
+        }
+        let [x, y, z] = domain.coords(c);
+        let cell = index(x + 1, y + 1, z + 1);
+        if !grid[cell].is_finite() {
+            emit(f64::INFINITY, None);
+            continue;
+        }
+        // Distance from this centre to the nearest seed's box.
+        let seed = feature[cell];
+        let own = domain.widths(c);
+        let mut squared = 0.0;
+        for a in 0..3 {
+            let gap = ((position[a][[x, y, z][a] + 1] - position[a][seed[a]]).abs()
+                - 0.5 * width(a, seed[a]))
+            .max(0.0);
+            squared = gap.mul_add(gap, squared);
+        }
+        let floor = 0.5 * own.iter().fold(f64::INFINITY, |m, w| m.min(*w));
+        let boundary = (0..3).find_map(|a| {
+            if seed[a] == 0 {
+                Some((2 * a) as u8)
+            } else if seed[a] == n[a] + 1 {
+                Some((2 * a + 1) as u8)
+            } else {
+                None
             }
-            let [x, y, z] = domain.coords(c);
-            let cell = index(x + 1, y + 1, z + 1);
-            if !grid[cell].is_finite() {
-                return f64::INFINITY;
-            }
-            // Distance from this centre to the nearest seed's box.
-            let seed = feature[cell];
-            let own = domain.widths(c);
-            let mut squared = 0.0;
-            for a in 0..3 {
-                let gap = ((position[a][[x, y, z][a] + 1] - position[a][seed[a]]).abs()
-                    - 0.5 * width(a, seed[a]))
-                .max(0.0);
-                squared = gap.mul_add(gap, squared);
-            }
-            let floor = 0.5 * own.iter().fold(f64::INFINITY, |m, w| m.min(*w));
-            squared.sqrt().max(floor)
-        })
-        .collect()
+        });
+        emit(squared.sqrt().max(floor), boundary);
+    }
 }

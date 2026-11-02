@@ -352,3 +352,260 @@ fn coupled_open_sgs_trials_conserve_mass_energy_and_keep_atomic_histories() {
         b.accept();
     }
 }
+
+fn prescribed_grid(
+    axis: usize,
+    workers: usize,
+    model: SgsModel,
+    sgs_first: bool,
+) -> NsfGrid3<D3q27> {
+    let mut periodic = [true; 3];
+    periodic[axis] = false;
+    let mut setup = spec([6; 3], periodic, WallThermal::Adiabatic);
+    setup.workers = workers;
+    let mut grid = NsfGrid3::<D3q27>::new(
+        setup,
+        |_| false,
+        |x| {
+            let angle = core::f64::consts::TAU * (x[axis] as f64 + 0.5) / 6.0;
+            let transverse = core::f64::consts::TAU * (x[(axis + 1) % 3] as f64 + 0.5) / 6.0;
+            let temperature = 293.15 + 0.1 * angle.cos();
+            let mut velocity = [0.0; 3];
+            velocity[axis] = 0.003 + 0.002 * angle.sin() * transverse.cos();
+            velocity[(axis + 1) % 3] = -0.002 * angle.cos() * transverse.sin();
+            (293.15 / temperature, velocity, temperature)
+        },
+    )
+    .unwrap();
+    if sgs_first {
+        grid = grid.with_sgs(config(model)).unwrap();
+    }
+    for (high, temperature) in [(false, 293.75), (true, 293.45)] {
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, 101_325.0).unwrap();
+        let mut velocity = [0.0; 3];
+        velocity[axis] = 0.003 * grid.law.dx_m / grid.law.dt_s;
+        grid.set_open_face(
+            axis,
+            high,
+            Some(NsfOpenState {
+                density_kg_m3: gas.density,
+                velocity_m_s: velocity,
+                temperature_k: temperature,
+            }),
+        )
+        .unwrap();
+    }
+    if !sgs_first {
+        grid = grid.with_sgs(config(model)).unwrap();
+    }
+    grid
+}
+
+#[test]
+fn g0_g5_prescribed_reservoirs_transport_sgs_heat_and_conserve_the_original_energy() {
+    for axis in 0..3 {
+        for model in [
+            SgsModel::Smagorinsky { cs: 0.17 },
+            SgsModel::Wale { cw: 0.5 },
+            SgsModel::Vreman { cv: 0.07 },
+        ] {
+            let mut serial = prescribed_grid(axis, 1, model, true);
+            let mut parallel = prescribed_grid(axis, 3, model, true);
+            let other_order = prescribed_grid(axis, 1, model, false);
+            for (left, right) in serial.sgs_transport.iter().zip(&other_order.sgs_transport) {
+                let scale = left
+                    .eddy_viscosity_lu
+                    .abs()
+                    .max(right.eddy_viscosity_lu.abs());
+                // The Guo-frame rebase can change velocity rounding even at
+                // a strain-null point; compare against the initial flow's
+                // 0.005 LU scale there, rather than demand relative zero.
+                let roundoff = 64.0 * f64::EPSILON * 0.005;
+                assert!(
+                    (left.eddy_viscosity_lu - right.eddy_viscosity_lu).abs()
+                        < 1e-10 * scale + roundoff
+                );
+            }
+            // Isolate the new boundary heat from viscous stress work. The
+            // adjacent coefficient uses the same full-spacing ghost gradient
+            // as collision; no extra half-cell factor belongs here.
+            let (rho, mom) = serial.macro_fields(&serial.f);
+            let u = serial.velocity_field(&rho, &mom, &serial.force);
+            let stress = vec![[0.0; 6]; serial.n];
+            let molecular = serial
+                .flux_divergence(&serial.e, &rho, &u, &serial.theta, &stress, &[], None)
+                .unwrap();
+            let modeled = serial
+                .flux_divergence(
+                    &serial.e,
+                    &rho,
+                    &u,
+                    &serial.theta,
+                    &stress,
+                    &serial.sgs_transport,
+                    None,
+                )
+                .unwrap();
+            let mut expected_heat = 0.0;
+            for i in 0..serial.n {
+                for direction in [-1, 1] {
+                    if let Some(ghost) = serial.open_at(i, axis, direction) {
+                        expected_heat -= serial.sgs_transport[i].turbulent_conductivity_lu
+                            * (ghost.theta - serial.theta[i]);
+                    }
+                }
+            }
+            assert!(
+                (modeled.2.prescribed_out - molecular.2.prescribed_out - expected_heat).abs()
+                    < 1e-13
+            );
+            let change_in_divergence: f64 =
+                modeled.0.iter().zip(&molecular.0).map(|(a, b)| a - b).sum();
+            assert!((change_in_divergence - expected_heat).abs() < 1e-13);
+            assert!(
+                expected_heat < -1e-9,
+                "heated inlet must exercise SGS heat transport"
+            );
+            for _ in 0..6 {
+                let previous_energy = serial.total_energy_j();
+                let a = serial.step().unwrap();
+                let b = parallel.step().unwrap();
+                assert_eq!(a, b);
+                assert_eq!(serial.state_hash(), parallel.state_hash());
+                assert_eq!(serial.sgs_transport, parallel.sgs_transport);
+                let residual =
+                    serial.total_energy_j() - previous_energy - a.open_energy_j - a.wall_heat_j;
+                assert!(residual.abs() < 3e-12 * previous_energy);
+                assert!(a.residual_rel < 3e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_reservoir_to_solid_gap_uses_unequal_ghost_and_wall_distances() {
+    // Exact quadratic derivatives in a one-cell fluid layer between a full
+    // prescribed ghost (distance 1) and an internal wall (distance 1/2).
+    for axis in 0..3 {
+        for high in [false, true] {
+            let mut periodic = [true; 3];
+            periodic[axis] = false;
+            let center = if high { 3 } else { 0 };
+            let wall_position: f64 = if high { -0.5 } else { 0.5 };
+            let polynomial = |x: f64| {
+                0.003 * (x - wall_position) + 0.001 * (x * x - wall_position * wall_position)
+            };
+            let mut grid = NsfGrid3::<D3q27>::new(
+                spec([4; 3], periodic, WallThermal::Adiabatic),
+                |x| x[axis] == if high { 2 } else { 1 },
+                |x| {
+                    let mut velocity = [0.0; 3];
+                    velocity[(axis + 1) % 3] = polynomial(x[axis] as f64 - center as f64);
+                    (1.0, velocity, 293.15)
+                },
+            )
+            .unwrap();
+            let mut ghost_velocity = [0.0; 3];
+            ghost_velocity[(axis + 1) % 3] =
+                polynomial(if high { 1.0 } else { -1.0 }) * grid.law.dx_m / grid.law.dt_s;
+            grid.set_open_face(
+                axis,
+                high,
+                Some(NsfOpenState {
+                    density_kg_m3: grid.law.rho_ref_kg_m3,
+                    velocity_m_s: ghost_velocity,
+                    temperature_k: 293.15,
+                }),
+            )
+            .unwrap();
+            let grid = grid
+                .with_sgs(config(SgsModel::Smagorinsky { cs: 0.17 }))
+                .unwrap();
+            let mut cell = [1; 3];
+            cell[axis] = center;
+            let expected = 0.17_f64.powi(2) * 0.003;
+            let actual = grid.sgs_transport(cell).unwrap().unwrap().eddy_viscosity_lu;
+            assert!((actual / expected - 1.0).abs() < 1e-11);
+        }
+    }
+}
+
+#[test]
+fn g0_g4_prescribed_sgs_rebind_is_atomic_and_zero_control_retains_molecular_bits() {
+    let make = || {
+        NsfGrid3::<D3q27>::new(
+            spec([6, 4, 4], [false, true, true], WallThermal::Adiabatic),
+            |_| false,
+            rest,
+        )
+        .unwrap()
+    };
+    let reference = make();
+    let reservoir = NsfOpenState {
+        density_kg_m3: reference.law.rho_ref_kg_m3,
+        velocity_m_s: [0.0; 3],
+        temperature_k: 293.15,
+    };
+    let mut limited = config(SgsModel::Smagorinsky { cs: 0.17 });
+    limited.closure.maximum_eddy_to_molecular = 1e-5;
+    let mut active = make().with_sgs(limited).unwrap();
+    active.set_open_face(0, false, Some(reservoir)).unwrap();
+    active.step().unwrap();
+    let before = (
+        active.state_hash(),
+        active.force.clone(),
+        active.div.clone(),
+        active.sgs_transport.clone(),
+        active.wall_out,
+        active.open_out.prescribed_out,
+        active.cumulative_ledger(),
+    );
+    assert!(matches!(
+        active.set_open_face(
+            0,
+            false,
+            Some(NsfOpenState {
+                velocity_m_s: [0.0, 5.0, 0.0],
+                temperature_k: 293.65,
+                ..reservoir
+            })
+        ),
+        Err(NsfError::Sgs(SgsError::ViscosityRatioExceeded { .. }))
+    ));
+    assert_eq!(
+        (
+            active.state_hash(),
+            active.force.clone(),
+            active.div.clone(),
+            active.sgs_transport.clone(),
+            active.wall_out,
+            active.open_out.prescribed_out,
+            active.cumulative_ledger(),
+        ),
+        before
+    );
+    let retained = active.open_at(0, 0, -1).unwrap();
+    assert_eq!(retained.u, [0.0; 3]);
+    assert_eq!(retained.theta.to_bits(), THETA0.to_bits());
+
+    let mut molecular = make();
+    let mut zero = make()
+        .with_sgs(config(SgsModel::Vreman { cv: 0.0 }))
+        .unwrap();
+    for boundary in [
+        Some(reservoir),
+        Some(NsfOpenState {
+            temperature_k: 293.65,
+            ..reservoir
+        }),
+        None,
+    ] {
+        molecular.set_open_face(0, false, boundary).unwrap();
+        zero.set_open_face(0, false, boundary).unwrap();
+        assert_eq!(molecular.state_hash(), zero.state_hash());
+        for _ in 0..2 {
+            assert_eq!(molecular.step().unwrap(), zero.step().unwrap());
+            assert_eq!(molecular.state_hash(), zero.state_hash());
+        }
+    }
+}

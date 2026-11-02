@@ -48,8 +48,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// Attach an explicit exploratory closure and restart the current
     /// conservative flux history. Periodic faces, stationary solids and
     /// stationary/moving halfway walls, characteristic faces and their localized
-    /// transverse reservoir aperture are supported. Complete prescribed-reservoir
-    /// faces remain unsupported in either configuration order.
+    /// transverse reservoir aperture, and complete prescribed-reservoir faces
+    /// are supported in either configuration order.
     /// The zero-coefficient control leaves the molecular trajectory unchanged.
     ///
     /// All existing gas/Mach/temperature bounds still apply; the *total*
@@ -77,11 +77,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ));
             }
             return Ok(self);
-        }
-        if self.reservoir_faces.iter().flatten().any(Option::is_some) {
-            return Err(NsfError::Input(
-                "NSF SGS does not support complete prescribed-reservoir faces",
-            ));
         }
         if self.characteristic_thermal_policy.contains(&NsfCharacteristicThermalPolicy::EnthalpyFlux) {
             return Err(NsfError::Input(
@@ -278,7 +273,30 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                                 - velocity[low][component] / 3.0
                         }
                     }
-                    (None, None) => wall_high[component] - wall_low[component],
+                    (None, None) => {
+                        // A complete open plane may be backed by an interior
+                        // solid. Its reservoir ghost is one spacing away,
+                        // whereas the opposite no-slip wall is halfway away.
+                        // Differentiate the quadratic through those two
+                        // physical locations and this cell centre; treating
+                        // the ghost as a stationary half-cell wall would
+                        // manufacture SGS stress and lose the inflow shear.
+                        match (self.open_at(i, axis, -1), self.open_at(i, axis, 1)) {
+                            (Some(low), Some(high)) => {
+                                0.5 * (high.u[component] - low.u[component])
+                            }
+                            (Some(low), None) => {
+                                (4.0 / 3.0) * wall_high[component]
+                                    - velocity[i][component]
+                                    - low.u[component] / 3.0
+                            }
+                            (None, Some(high)) => {
+                                velocity[i][component] + high.u[component] / 3.0
+                                    - (4.0 / 3.0) * wall_low[component]
+                            }
+                            (None, None) => wall_high[component] - wall_low[component],
+                        }
+                    }
                 };
             }
         }

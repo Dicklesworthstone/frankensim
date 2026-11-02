@@ -565,6 +565,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     ///
     /// Updating the ghost state restarts force/energy-flux history while
     /// preserving the current fluid's density, physical velocity and energy.
+    /// An attached exploratory SGS closure is recomputed from the new ghost
+    /// velocity before refreshing shear stress and the total heat flux. Its
+    /// adjacent-cell conductivity is extrapolated to the face; no independent
+    /// turbulent inflow spectrum or external eddy viscosity is prescribed.
     /// A refusal leaves the boundary and all published state unchanged.
     ///
     /// # Errors
@@ -576,11 +580,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         high: bool,
         state: Option<NsfOpenState>,
     ) -> Result<(), NsfError> {
-        if self.sgs.is_some() {
-            return Err(NsfError::Input(
-                "NSF SGS does not support prescribed-reservoir faces",
-            ));
-        }
         if self.open.is_some() {
             return Err(NsfError::Input(
                 "prescribed reservoir and characteristic faces are exclusive",
@@ -633,9 +632,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 std::array::from_fn(|a| self.force[i][a] - force[i][a]),
             );
         }
-        let sig = self.stress_field(&populations, &force, &rho, &self.theta, &self.material, &[]);
-        let history = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &[], None);
-        let (div, wall, open) = match history {
+        let history = (|| {
+            let transport = self.sgs_field(&rho, &u, &self.theta, &self.material, None)?;
+            let sig = self.stress_field(
+                &populations, &force, &rho, &self.theta, &self.material, &transport,
+            );
+            let (div, wall, open) =
+                self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &transport, None)?;
+            Ok((transport, div, wall, open))
+        })();
+        let (transport, div, wall, open) = match history {
             Ok(value) => value,
             Err(error) => {
                 self.reservoir_faces[axis][side] = previous;
@@ -644,6 +650,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         };
         self.f = populations;
         self.force = force;
+        self.sgs_transport = transport;
         self.div = div;
         self.wall_out = wall;
         self.open_out = open;

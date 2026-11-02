@@ -136,3 +136,180 @@ fn lvel_refuses_an_unbounded_wall_distance() {
     config.turbulence = Turbulence::Laminar;
     assert!(admit(&domain, &fluid(), &config).is_ok());
 }
+
+#[test]
+fn comoving_lvel_walls_produce_no_turbulent_stress_or_heat_transport() {
+    // G0/G3: an exact translation is the same physical state as rest. All
+    // wall identities/axes must carry the same velocity reference as distance.
+    let domain = VoxelDomain::graded([
+        vec![0.125, 0.25, 0.625],
+        vec![0.25, 0.5, 0.25],
+        vec![0.5, 0.5],
+    ])
+    .unwrap();
+    for axis in 0..3 {
+        for speed in [-8.0, 0.0, 8.0] {
+            let mut velocity = [0.0; 3];
+            velocity[axis] = speed;
+            let mut config = SimpleConfig::new([FvBoundary::Wall { velocity }; 6]);
+            config.faces[2 * axis] = FvBoundary::Outlet;
+            config.faces[2 * axis + 1] = FvBoundary::Outlet;
+            config.turbulence = Turbulence::Lvel;
+            let fluid = fluid();
+            let mut solver = Solver::new(&domain, &fluid, &config);
+            solver.vel[axis].fill(speed);
+            solver.update_turbulence();
+            assert!(solver.eddy_viscosity.iter().all(|&nu| nu == 0.0));
+            assert!(solver.wall_ratio.iter().all(|&ratio| ratio == 1.0));
+            assert!(solver.heat_eddy_viscosity().iter().all(|&nu| nu == 0.0));
+            assert!(
+                solver
+                    .wall_boundary
+                    .iter()
+                    .all(|&side| { side.is_some_and(|side| usize::from(side) / 2 != axis) })
+            );
+            let flow = solver.finish_projected(&fluid, 0, (0.0, 0.0));
+            assert!(flow.eddy_conductivity(&fluid).iter().all(|&k| k == 0.0));
+        }
+    }
+}
+
+#[test]
+fn lvel_moving_wall_couette_is_invariant_under_galilean_boosts() {
+    // G3: the dyadic geometry makes the uniform boosts exact in f64, so
+    // changes in the closure cannot be excused as cancellation roundoff.
+    let domain = VoxelDomain::graded([
+        vec![0.25, 0.75],
+        vec![0.125, 0.125, 0.25, 0.5],
+        vec![0.5, 0.5],
+    ])
+    .unwrap();
+    let fluid = FluidProperties {
+        kinematic_viscosity_m2_s: 0.001,
+        ..fluid()
+    };
+    let mut reference = None;
+    for boost in [0.0, -8.0, 8.0] {
+        let mut faces = [FvBoundary::Symmetry; 6];
+        faces[0] = FvBoundary::Outlet;
+        faces[1] = FvBoundary::Outlet;
+        faces[2] = FvBoundary::Wall {
+            velocity: [boost + 0.25, 0.0, 0.0],
+        };
+        faces[3] = FvBoundary::Wall {
+            velocity: [boost + 1.25, 0.0, 0.0],
+        };
+        let mut config = SimpleConfig::new(faces);
+        config.turbulence = Turbulence::Lvel;
+        let mut solver = Solver::new(&domain, &fluid, &config);
+        for face in 0..solver.vel[0].len() {
+            let at = solver.comps[0].coords(face);
+            let y = domain.face_coord(1, at[1]) + 0.5 * domain.width(1, at[1]);
+            solver.vel[0][face] = boost + 0.25 + y;
+        }
+        solver.update_turbulence();
+        for c in 0..domain.cell_count() {
+            let at = domain.coords(c);
+            let y = domain.center(at[0], at[1], at[2])[1];
+            let distance = y.min(1.0 - y);
+            assert_eq!(solver.wall_distance[c], distance);
+            assert_eq!(solver.wall_boundary[c], Some(if y < 0.5 { 2 } else { 3 }));
+            let (tangent, secant) =
+                law_of_the_wall_ratios(distance * distance / fluid.kinematic_viscosity_m2_s);
+            assert_eq!(
+                solver.eddy_viscosity[c],
+                tangent * fluid.kinematic_viscosity_m2_s
+            );
+            assert_eq!(solver.wall_ratio[c], secant);
+        }
+        let observed = (
+            solver.eddy_viscosity.clone(),
+            solver.wall_ratio.clone(),
+            solver.heat_eddy_viscosity(),
+        );
+        if let Some(expected) = &reference {
+            assert_eq!(&observed, expected, "Galilean boost {boost}");
+        } else {
+            assert!(observed.0.iter().any(|&nu| nu > 0.0));
+            reference = Some(observed);
+        }
+    }
+}
+
+#[test]
+fn lvel_uses_stationary_internal_solids_and_the_nearest_moving_domain_wall() {
+    // G0: a moving outer wall must not move the frame of a nearby solid.
+    let domain = VoxelDomain::from_fn(3, 5, 1, 1.0, |p| {
+        if p[1] < 1.0 {
+            crate::conjugate::Voxel::Solid(0)
+        } else {
+            crate::conjugate::Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    faces[3] = FvBoundary::Wall {
+        velocity: [3.0, 0.0, 0.0],
+    };
+    let mut config = SimpleConfig::new(faces);
+    config.turbulence = Turbulence::Lvel;
+    let fluid = fluid();
+    let mut solver = Solver::new(&domain, &fluid, &config);
+    solver.vel[0].fill(3.0);
+    solver.update_turbulence();
+    for c in 0..domain.cell_count() {
+        let y = domain.coords(c)[1];
+        if y == 0 {
+            assert_eq!(solver.wall_distance[c], 0.0);
+            assert_eq!(solver.eddy_viscosity[c], 0.0);
+        } else if y <= 2 {
+            assert_eq!(solver.wall_boundary[c], None);
+            let distance = y as f64 - 0.5;
+            assert_eq!(solver.wall_distance[c], distance);
+            assert_eq!(
+                solver.eddy_viscosity[c],
+                crate::conjugate::turbulence::eddy_viscosity_ratio(3.0 * distance)
+            );
+            assert!(solver.eddy_viscosity[c] > 0.0);
+        } else {
+            assert_eq!(solver.wall_boundary[c], Some(3));
+            assert_eq!(solver.wall_distance[c], 4.5 - y as f64);
+            assert_eq!(solver.eddy_viscosity[c], 0.0);
+            assert_eq!(solver.wall_ratio[c], 1.0);
+        }
+    }
+}
+
+#[test]
+fn moving_wall_channel_recovers_plug_flow_without_artificial_heat_diffusion() {
+    // G0: exercise the public solve and returned thermal coefficients, not
+    // only a manufactured closure field. The belts and inflow move together.
+    let domain = VoxelDomain::new(6, 4, 1, 0.25).unwrap();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Inlet {
+        velocity: [0.5, 0.0, 0.0],
+    };
+    faces[1] = FvBoundary::Outlet;
+    faces[2] = FvBoundary::Wall {
+        velocity: [0.5, 0.0, 0.0],
+    };
+    faces[3] = faces[2];
+    let mut config = SimpleConfig::new(faces);
+    config.turbulence = Turbulence::Lvel;
+    config.tolerance = 1e-10;
+    config.pressure_tolerance = 1e-12;
+    let fluid = FluidProperties {
+        kinematic_viscosity_m2_s: 0.01,
+        ..fluid()
+    };
+    let flow = simple_flow(&domain, &fluid, &config, &CancelGate::new()).unwrap();
+    for velocity in &flow.velocity_m_s {
+        assert!((velocity[0] - 0.5).abs() < 1e-9, "{velocity:?}");
+        assert!(velocity[1].abs() < 1e-9 && velocity[2].abs() < 1e-9);
+    }
+    assert!(flow.eddy_viscosity_m2_s.iter().all(|&nu| nu < 1e-9));
+    assert!(flow.eddy_conductivity(&fluid).iter().all(|&k| k < 1e-9));
+    assert!(flow.report.max_divergence_m3_s < 1e-11);
+}
