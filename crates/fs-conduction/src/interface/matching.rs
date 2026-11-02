@@ -1593,7 +1593,7 @@ fn coincident_candidates(mesh: &ConductionMesh) -> Result<Vec<InterfaceFacePair>
     Ok(pairs)
 }
 
-fn matching_vertices(
+pub(super) fn matching_vertices(
     mesh: &ConductionMesh,
     pair: InterfaceFacePair,
 ) -> Result<[usize; 3], ConductionError> {

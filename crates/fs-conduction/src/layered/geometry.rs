@@ -47,7 +47,9 @@ impl LayerShape {
         thickness: f64,
     ) -> Option<Self> {
         let outer = inner + thickness;
-        if ![inner, reference, thickness, outer].into_iter().all(positive)
+        if ![inner, reference, thickness, outer]
+            .into_iter()
+            .all(positive)
             || reference > inner
             || outer <= inner
             || !(thickness / inner).is_finite()
@@ -55,7 +57,11 @@ impl LayerShape {
             return None;
         }
         let mut shape = Self {
-            kind: ShapeKind::Radial { kind, inner, reference },
+            kind: ShapeKind::Radial {
+                kind,
+                inner,
+                reference,
+            },
             thickness,
             volume: 0.0,
             resistance: 0.0,
@@ -64,21 +70,36 @@ impl LayerShape {
         shape.volume = shape.volume_length(thickness);
         shape.resistance = shape.resistance_length(thickness);
         shape.source_weight = shape.generation_weight(thickness);
-        [shape.volume, shape.resistance, shape.source_weight, shape.area_ratio(thickness)]
-            .into_iter()
-            .all(positive)
-            .then_some(shape)
+        [
+            shape.volume,
+            shape.resistance,
+            shape.source_weight,
+            shape.area_ratio(thickness),
+        ]
+        .into_iter()
+        .all(positive)
+        .then_some(shape)
     }
 
-    pub(super) fn thickness(self) -> f64 { self.thickness }
-    pub(super) fn volume(self) -> f64 { self.volume }
-    pub(super) fn resistance(self) -> f64 { self.resistance }
+    pub(super) fn thickness(self) -> f64 {
+        self.thickness
+    }
+    pub(super) fn volume(self) -> f64 {
+        self.volume
+    }
+    pub(super) fn resistance(self) -> f64 {
+        self.resistance
+    }
 
     /// A(x)/Aref, so q_local=q_reference/area_ratio.
     pub(super) fn area_ratio(self, x: f64) -> f64 {
         match self.kind {
             ShapeKind::Planar => 1.0,
-            ShapeKind::Radial { kind, inner, reference } => {
+            ShapeKind::Radial {
+                kind,
+                inner,
+                reference,
+            } => {
                 let ratio = (inner + x) / reference;
                 match kind {
                     RadialKind::Cylindrical => ratio,
@@ -92,7 +113,11 @@ impl LayerShape {
     pub(super) fn volume_length(self, x: f64) -> f64 {
         match self.kind {
             ShapeKind::Planar => x,
-            ShapeKind::Radial { kind, inner, reference } => {
+            ShapeKind::Radial {
+                kind,
+                inner,
+                reference,
+            } => {
                 let t = x / inner;
                 let ratio = inner / reference;
                 match kind {
@@ -107,7 +132,11 @@ impl LayerShape {
     pub(super) fn resistance_length(self, x: f64) -> f64 {
         match self.kind {
             ShapeKind::Planar => x,
-            ShapeKind::Radial { kind, inner, reference } => match kind {
+            ShapeKind::Radial {
+                kind,
+                inner,
+                reference,
+            } => match kind {
                 RadialKind::Cylindrical => reference * (x / inner).ln_1p(),
                 RadialKind::Spherical => (reference / inner) * ((reference / (inner + x)) * x),
             },
@@ -115,9 +144,13 @@ impl LayerShape {
     }
 
     fn generation_weight(self, x: f64) -> f64 {
-        let ShapeKind::Radial { kind, inner, .. } = self.kind else { return 0.5 };
+        let ShapeKind::Radial { kind, inner, .. } = self.kind else {
+            return 0.5;
+        };
         let t = x / inner;
-        if t == 0.0 { return 0.5; }
+        if t == 0.0 {
+            return 0.5;
+        }
         match kind {
             RadialKind::Cylindrical => {
                 // B=x²*(1/4 + b/2), b=(t-ln(1+t))/t².
@@ -125,7 +158,9 @@ impl LayerShape {
                 let log = t.ln_1p();
                 let b = if t < 0.125 {
                     let mut b = 1.0 / 21.0;
-                    for n in (0..19).rev() { b = 1.0 / (n + 2) as f64 - t * b; }
+                    for n in (0..19).rev() {
+                        b = 1.0 / (n + 2) as f64 - t * b;
+                    }
                     b
                 } else {
                     (1.0 - log / t) / t
@@ -175,4 +210,6 @@ impl LayerShape {
     }
 }
 
-fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
+fn positive(x: f64) -> bool {
+    x.is_finite() && x > 0.0
+}

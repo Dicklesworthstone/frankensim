@@ -97,10 +97,10 @@ impl ThermalInterfaces {
         max_face_pairs: usize,
     ) -> Result<Vec<ContactResistanceGradient>, ConductionError> {
         poll(cx, 0)?;
-        if !self.nonmatching.is_empty() {
+        if self.nonmatching.iter().any(|surface|surface.is_nonmatching()) {
             return Err(error("matching resistance controls cannot omit nonmatching contact pieces"));
         }
-        self.matching.resistance_scale_pullback(cx, temperature, nodal_load_adjoint, max_face_pairs)
+        self.resistance_scale_pullback(cx, temperature, nodal_load_adjoint, max_face_pairs)
     }
 }
 

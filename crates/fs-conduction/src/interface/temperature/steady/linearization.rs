@@ -74,7 +74,7 @@ impl TemperatureContacts<'_, '_> {
     /// tolerance. An externally constructed result or a globally cancelling
     /// heat defect cannot bypass the physical endpoint checks.
     ///
-    /// Matching laws retain face means; nonmatching laws retain pointwise
+    /// Matching laws retain their selected face-mean or pointwise rule; nonmatching laws retain
     /// common-refinement queries. The response includes bulk K'(T) and both
     /// contact temperature partials. Its tangent and true transpose use the
     /// existing bounded FGMRES response owner, even for a constant bulk tensor.

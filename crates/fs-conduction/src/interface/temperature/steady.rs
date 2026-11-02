@@ -82,8 +82,8 @@ impl SteadyContactConfig {
 impl TemperatureContacts<'_, '_> {
     /// Solve steady conduction with fresh local R(T_A,T_B) or declared mean laws.
     ///
-    /// Matching laws retain their face-mean convention; nonmatching laws retain
-    /// their common-refinement quadrature. Every trial delegates the spatial
+    /// Matching laws retain their declared face-mean or pointwise convention;
+    /// nonmatching laws retain common-refinement quadrature. Every trial delegates the spatial
     /// problem, heterogeneous material assignment and nonlinear bulk k(T) to
     /// the original steady solver. Only the next query field is relaxed.
     ///

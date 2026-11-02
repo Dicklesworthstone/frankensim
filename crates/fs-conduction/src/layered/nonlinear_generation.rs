@@ -169,7 +169,10 @@ impl LayeredWall {
             area_m2,
             volumetric_generation_w_m3,
             options,
-            self.layers.iter().map(|layer| LayerShape::planar(layer.thickness_m)).collect(),
+            self.layers
+                .iter()
+                .map(|layer| LayerShape::planar(layer.thickness_m))
+                .collect(),
             &self.contact_resistances_m2_k_per_w,
             self.surface_resistances_m2_k_per_w,
         )
@@ -210,9 +213,7 @@ impl LayeredWall {
         }
         for boundary in 0..2 {
             let temperature = reservoir_temperatures_k[boundary];
-            if surfaces[boundary] == 0.0
-                && (temperature < low || temperature > high)
-            {
+            if surfaces[boundary] == 0.0 && (temperature < low || temperature > high) {
                 return Err(invalid(
                     "a prescribed face lies outside the material interval",
                 ));
@@ -229,7 +230,10 @@ impl LayeredWall {
         {
             checkpoint(cx, index)?;
             finite("volumetric generation", source)?;
-            let amount = finite("layer generation per reference area", source * shapes[index].volume())?;
+            let amount = finite(
+                "layer generation per reference area",
+                source * shapes[index].volume(),
+            )?;
             if source != 0.0 && amount == 0.0 {
                 return Err(invalid("nonzero volumetric generation underflowed"));
             }
@@ -404,7 +408,10 @@ impl LayeredWall {
                         "interior temperature extremum is not representable",
                     ));
                 }
-                let x = finite("interior extremum position", shape.stationary_position(fraction))?;
+                let x = finite(
+                    "interior extremum position",
+                    shape.stationary_position(fraction),
+                )?;
                 if x <= 0.0 || x >= layer.thickness_m {
                     return Err(invalid("interior extremum position is not representable"));
                 }
@@ -428,7 +435,8 @@ impl LayeredWall {
                     maximum_x = x;
                 }
             }
-            let magnitude = law.integral(cx, left.min(right), left.max(right))? / shape.resistance();
+            let magnitude =
+                law.integral(cx, left.min(right), left.max(right))? / shape.resistance();
             let recomputed = if left >= right { magnitude } else { -magnitude };
             let residual = finite("mean Fourier residual", recomputed - mean_flux)?;
             maximum_flux_residual = maximum_flux_residual.max(residual.abs());
@@ -462,8 +470,7 @@ impl LayeredWall {
         let right_flux = finite("right boundary flux", inlet_flux + produced)?;
         let right_residual = finite(
             "right reservoir residual",
-            (-right_flux).mul_add(surfaces[1], temperature)
-                - reservoirs[1],
+            (-right_flux).mul_add(surfaces[1], temperature) - reservoirs[1],
         )?;
         for (jump, resistance, flux) in [
             (
@@ -471,11 +478,7 @@ impl LayeredWall {
                 surfaces[0],
                 inlet_flux,
             ),
-            (
-                temperature - reservoirs[1],
-                surfaces[1],
-                right_flux,
-            ),
+            (temperature - reservoirs[1], surfaces[1], right_flux),
         ] {
             if resistance > 0.0 {
                 maximum_flux_residual = maximum_flux_residual

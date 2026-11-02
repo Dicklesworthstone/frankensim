@@ -288,6 +288,41 @@ constant heat flux with spatially varying source resistance, mixed overlap
 and coincident patches, a manufactured transient energy balance, source
 reversal, the full Jacobian/transpose and fresh-solve resistance sensitivities.
 
+## Pointwise source laws on matching thermal interfaces
+
+`TemperatureContact::new_pointwise` binds an explicitly ordered mean-temperature
+or two-sided source law to exactly paired P1 triangles.
+`TemperatureContacts::with_matching_quadrature` requires separate face and
+quadrature allowances; mixed independently tessellated contacts continue
+through `with_nonmatching`. The original matching owner admits every pair and
+exclusive boundary ownership. Three positive degree-two points per triangle
+are built directly from its exact vertex correspondence, so faceted curved
+surfaces need no global planar approximation or clipping. The existing
+pointwise source, weak-form, flux and derivative owner is reused, with each
+contact assembled once. `surface_is_nonmatching` remains false for exact pairs.
+
+Every integration point queries the original pinned card at both local traces
+under the declared coordinate convention. Paired vertices also pass the source
+query, preventing an unsupported hot/cold corner from hiding behind a supported
+mean or interior rule. These finite guards do not certify that an arbitrary
+nonconvex source domain has no unsampled holes. Strict derivatives additionally
+require the source-coordinate neighborhoods at guards; forward scalar/curve
+Newton keeps its existing semismooth policy, with every actual residual still
+source-checked. All nonthermal coordinates, geometry and source selection stay
+fixed.
+
+A frozen snapshot retains all three actual source receipts per face in
+`quadrature_states`; `states` remains the face-mean API's output. Residual,
+signed A-to-B heat, complete contact tangent/transpose and whole-law resistance
+pullbacks use the same samples. Existing steady, capacity, primary-enthalpy and
+radiation-coupled consumers inherit this rule. Three-point integration is exact
+for constant resistance and the corresponding polynomial integrands; general
+nonlinear reciprocal laws remain quadrature approximations. Existing face-mean
+constructors preserve their declared semantics. Seven regressions in
+`tests/pointwise_matching_contact.rs` and its transient child cover unresolved
+hotspots, analytic flux, bent surfaces, source support, budgets, derivatives,
+closed capacity energy and latent enthalpy.
+
 ## Two-sided source laws on matching thermal interfaces
 
 `interface::temperature::TemperatureContact::new_two_sided` binds separate

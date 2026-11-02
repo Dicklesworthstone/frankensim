@@ -5,8 +5,8 @@
 
 use super::geometry::{LayerShape, RadialKind};
 use super::{
-    LayeredWall, NonlinearGeneratedLayeredWallSolution, NonlinearGenerationOptions,
-    checkpoint, finite, invalid, positive,
+    LayeredWall, NonlinearGeneratedLayeredWallSolution, NonlinearGenerationOptions, checkpoint,
+    finite, invalid, positive,
 };
 use crate::ConductionError;
 use fs_exec::Cx;
@@ -45,7 +45,13 @@ impl RadialLayeredWall {
         length_m: f64,
     ) -> Result<Self, ConductionError> {
         positive("cylinder length", length_m)?;
-        Self::new(wall, RadialWallGeometry::Cylindrical { inner_radius_m, length_m })
+        Self::new(
+            wall,
+            RadialWallGeometry::Cylindrical {
+                inner_radius_m,
+                length_m,
+            },
+        )
     }
 
     /// Bind the existing source stack to a complete hollow spherical shell.
@@ -55,7 +61,10 @@ impl RadialLayeredWall {
 
     fn new(wall: LayeredWall, geometry: RadialWallGeometry) -> Result<Self, ConductionError> {
         let (kind, inner, area) = match geometry {
-            RadialWallGeometry::Cylindrical { inner_radius_m, length_m } => (
+            RadialWallGeometry::Cylindrical {
+                inner_radius_m,
+                length_m,
+            } => (
                 RadialKind::Cylindrical,
                 inner_radius_m,
                 (2.0 * core::f64::consts::PI * inner_radius_m) * length_m,
@@ -74,8 +83,10 @@ impl RadialLayeredWall {
         radii_m.push(inner);
         let mut radius = inner;
         for (index, layer) in wall.layers.iter().enumerate() {
-            let shape = LayerShape::radial(kind, radius, inner, layer.thickness_m)
-                .ok_or_else(|| invalid("radial layer metrics are nonpositive or unrepresentable"))?;
+            let shape =
+                LayerShape::radial(kind, radius, inner, layer.thickness_m).ok_or_else(|| {
+                    invalid("radial layer metrics are nonpositive or unrepresentable")
+                })?;
             radius = finite("outer layer radius", radius + layer.thickness_m)?;
             let ratio = shape.area_ratio(layer.thickness_m);
             positive("outer layer area", ratio * area)?;
@@ -87,7 +98,10 @@ impl RadialLayeredWall {
             radii_m.push(radius);
         }
         let outer_ratio = shapes.last().expect("admitted nonempty stack").area_ratio(
-            wall.layers.last().expect("admitted nonempty stack").thickness_m,
+            wall.layers
+                .last()
+                .expect("admitted nonempty stack")
+                .thickness_m,
         );
         let surfaces = [
             wall.surface_resistances_m2_k_per_w[0],
@@ -105,12 +119,20 @@ impl RadialLayeredWall {
     }
 
     /// Unchanged material tables, source receipts and physical areal resistances.
-    pub fn wall(&self) -> &LayeredWall { &self.wall }
-    pub const fn geometry(&self) -> RadialWallGeometry { self.geometry }
+    pub fn wall(&self) -> &LayeredWall {
+        &self.wall
+    }
+    pub const fn geometry(&self) -> RadialWallGeometry {
+        self.geometry
+    }
     /// Increasing physical layer boundaries, including the inner and outer face.
-    pub fn radii_m(&self) -> &[f64] { &self.radii_m }
+    pub fn radii_m(&self) -> &[f64] {
+        &self.radii_m
+    }
     /// Inner boundary area used ONLY to normalize the shared scalar solver.
-    pub const fn reference_area_m2(&self) -> f64 { self.reference_area_m2 }
+    pub const fn reference_area_m2(&self) -> f64 {
+        self.reference_area_m2
+    }
 
     /// Solve -div(k(T) grad T)=s with uniform signed generation in each shell.
     /// Q(r) changes by the exact generated volume, while local flux is Q/A(r).
@@ -141,13 +163,26 @@ impl RadialLayeredWall {
             self.surfaces_reference_m2_k_w,
         )?;
         let mut layers = Vec::with_capacity(self.shapes.len());
-        for (index, (row, &shape)) in normalized.layer_temperatures.iter().zip(&self.shapes).enumerate() {
+        for (index, (row, &shape)) in normalized
+            .layer_temperatures
+            .iter()
+            .zip(&self.shapes)
+            .enumerate()
+        {
             checkpoint(cx, index)?;
             let radii = [self.radii_m[index], self.radii_m[index + 1]];
             let ratios = [shape.area_ratio(0.0), shape.area_ratio(shape.thickness())];
             let rates = [
-                scaled(row.face_fluxes_w_per_m2[0], self.reference_area_m2, "inner face heat rate")?,
-                scaled(row.face_fluxes_w_per_m2[1], self.reference_area_m2, "outer face heat rate")?,
+                scaled(
+                    row.face_fluxes_w_per_m2[0],
+                    self.reference_area_m2,
+                    "inner face heat rate",
+                )?,
+                scaled(
+                    row.face_fluxes_w_per_m2[1],
+                    self.reference_area_m2,
+                    "outer face heat rate",
+                )?,
             ];
             layers.push(NonlinearGeneratedRadialLayerTemperatures {
                 face_radii_m: radii,
@@ -155,8 +190,16 @@ impl RadialLayeredWall {
                 face_temperatures_k: row.face_temperatures_k,
                 radial_heat_rates_w: rates,
                 radial_heat_fluxes_w_per_m2: [
-                    scaled(row.face_fluxes_w_per_m2[0], 1.0 / ratios[0], "inner face heat flux")?,
-                    scaled(row.face_fluxes_w_per_m2[1], 1.0 / ratios[1], "outer face heat flux")?,
+                    scaled(
+                        row.face_fluxes_w_per_m2[0],
+                        1.0 / ratios[0],
+                        "inner face heat flux",
+                    )?,
+                    scaled(
+                        row.face_fluxes_w_per_m2[1],
+                        1.0 / ratios[1],
+                        "outer face heat flux",
+                    )?,
                 ],
                 generated_heat_rate_w: scaled(
                     normalized.volumetric_generation_w_m3[index] * shape.volume(),
@@ -164,9 +207,15 @@ impl RadialLayeredWall {
                     "layer generated heat",
                 )?,
                 minimum_temperature_k: row.minimum_temperature_k,
-                minimum_radius_m: finite("minimum temperature radius", radii[0] + row.minimum_position_m)?,
+                minimum_radius_m: finite(
+                    "minimum temperature radius",
+                    radii[0] + row.minimum_position_m,
+                )?,
                 maximum_temperature_k: row.maximum_temperature_k,
-                maximum_radius_m: finite("maximum temperature radius", radii[0] + row.maximum_position_m)?,
+                maximum_radius_m: finite(
+                    "maximum temperature radius",
+                    radii[0] + row.maximum_position_m,
+                )?,
                 recomputed_resistance_weighted_heat_rate_w: finite(
                     "recomputed heat rate",
                     row.recomputed_mean_flux_w_per_m2 * self.reference_area_m2,
@@ -192,8 +241,14 @@ impl RadialLayeredWall {
             right_boundary_residual_k: normalized.right_boundary_residual_k,
             iterations: normalized.iterations,
             inner_heat_rate_bracket_w: [
-                finite("lower heat rate bracket", normalized.left_flux_bracket_w_per_m2[0] * self.reference_area_m2)?,
-                finite("upper heat rate bracket", normalized.left_flux_bracket_w_per_m2[1] * self.reference_area_m2)?,
+                finite(
+                    "lower heat rate bracket",
+                    normalized.left_flux_bracket_w_per_m2[0] * self.reference_area_m2,
+                )?,
+                finite(
+                    "upper heat rate bracket",
+                    normalized.left_flux_bracket_w_per_m2[1] * self.reference_area_m2,
+                )?,
             ],
             options,
             normalized,
@@ -245,7 +300,9 @@ pub struct NonlinearGeneratedRadialWallSolution {
 }
 
 impl NonlinearGeneratedRadialWallSolution {
-    pub fn wall(&self) -> &LayeredWall { &self.normalized.wall }
+    pub fn wall(&self) -> &LayeredWall {
+        &self.normalized.wall
+    }
     /// Original signed uniform source in each physical layer, W/m3.
     pub fn volumetric_generation_w_m3(&self) -> &[f64] {
         &self.normalized.volumetric_generation_w_m3
@@ -253,17 +310,32 @@ impl NonlinearGeneratedRadialWallSolution {
 
     /// Recover the source-integrated temperature at a physical radial offset
     /// inside one layer. The offset is measured from that layer's inner face.
-    pub fn temperature_at(&self, cx: &Cx<'_>, layer: usize, offset_m: f64) -> Result<f64, ConductionError> {
+    pub fn temperature_at(
+        &self,
+        cx: &Cx<'_>,
+        layer: usize,
+        offset_m: f64,
+    ) -> Result<f64, ConductionError> {
         self.normalized.temperature_at(cx, layer, offset_m)
     }
 
     /// Signed local heat flux at a physical radial offset, W/m2.
-    pub fn heat_flux_at(&self, cx: &Cx<'_>, layer: usize, offset_m: f64) -> Result<f64, ConductionError> {
+    pub fn heat_flux_at(
+        &self,
+        cx: &Cx<'_>,
+        layer: usize,
+        offset_m: f64,
+    ) -> Result<f64, ConductionError> {
         checkpoint(cx, layer)?;
-        let shape = self.normalized.shapes.get(layer)
+        let shape = self
+            .normalized
+            .shapes
+            .get(layer)
             .ok_or_else(|| invalid("heat flux query layer index is out of range"))?;
         if !offset_m.is_finite() || offset_m < 0.0 || offset_m > shape.thickness() {
-            return Err(invalid("heat flux query must lie inside its physical layer"));
+            return Err(invalid(
+                "heat flux query must lie inside its physical layer",
+            ));
         }
         let row = &self.normalized.layer_temperatures[layer];
         let reference = if offset_m == 0.0 {
@@ -274,10 +346,15 @@ impl NonlinearGeneratedRadialWallSolution {
             finite(
                 "local reference heat flux",
                 row.face_fluxes_w_per_m2[0]
-                    + self.normalized.volumetric_generation_w_m3[layer] * shape.volume_length(offset_m),
+                    + self.normalized.volumetric_generation_w_m3[layer]
+                        * shape.volume_length(offset_m),
             )?
         };
-        scaled(reference, 1.0 / shape.area_ratio(offset_m), "local radial heat flux")
+        scaled(
+            reference,
+            1.0 / shape.area_ratio(offset_m),
+            "local radial heat flux",
+        )
     }
 }
 

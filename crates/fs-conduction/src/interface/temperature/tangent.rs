@@ -1,6 +1,6 @@
-//! Exact linearization of admitted per-face mean or two-sided contact laws.
-//! Matching faces retain their original mass rule. Nonmatching faces retain
-//! their common-refinement point samples. This adds dK/dT * T; it does not
+//! Exact linearization of admitted face-mean or pointwise contact quadrature.
+//! Matching faces retain their declared mass or pointwise rule; nonmatching
+//! faces retain common-refinement samples. This adds dK/dT * T; it does not
 //! replace K, change the quadrature, or finite-difference a solve.
 
 use std::collections::BTreeMap;
@@ -110,17 +110,10 @@ impl TemperatureContact<'_> {
         }
     }
 
-    fn temperature_partials(
-        &self, cx: &Cx<'_>, temperatures: [f64; 2], response: &ContactDerivative<'_>,
-        policy: DerivativePolicy,
-    ) -> Result<[f64; 2], ConductionError> {
+    fn temperature_neighbourhood(
+        &self, cx: &Cx<'_>, temperatures: [f64; 2],
+    ) -> Result<(), ConductionError> {
         let point = self.query_point_at(temperatures)?;
-        // A forward solve may use a generalized derivative of a continuous
-        // piecewise-linear curve. Its actual pinned query already admitted
-        // this state; trial residuals still enforce the original support.
-        // Surface laws retain the existing unique, two-sided gradient rule.
-        let primal = matches!(policy, DerivativePolicy::PrimalSemismooth)
-            && !matches!(response, ContactDerivative::Surface(_));
         let axes = match &self.coordinates {
             TemperatureContactCoordinates::Mean(axis) => std::slice::from_ref(axis),
             TemperatureContactCoordinates::TwoSided(axes) => axes.as_slice(),
@@ -129,7 +122,7 @@ impl TemperatureContact<'_> {
         // neighbours admit all declared thermal validity coordinates; they do
         // not estimate a derivative. Perturb the source coordinate directly:
         // half-weighting a trace ULP could otherwise round back to the mean.
-        for axis in axes.iter().filter(|_| !primal) {
+        for axis in axes {
             let t = *point.axes().get(axis)
                 .ok_or_else(|| invalid(self.name(), "contact derivative lost a thermal query coordinate"))?;
             for temperature in [t.next_down(), t.next_up()] {
@@ -141,6 +134,21 @@ impl TemperatureContact<'_> {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    fn temperature_partials(
+        &self, cx: &Cx<'_>, temperatures: [f64; 2], response: &ContactDerivative<'_>,
+        policy: DerivativePolicy,
+    ) -> Result<[f64; 2], ConductionError> {
+        let point = self.query_point_at(temperatures)?;
+        // A forward solve may use a generalized derivative of a continuous
+        // piecewise-linear curve. Its actual pinned query already admitted
+        // this state; trial residuals still enforce the original support.
+        // Surface laws retain the existing unique, two-sided gradient rule.
+        let primal = matches!(policy, DerivativePolicy::PrimalSemismooth)
+            && !matches!(response, ContactDerivative::Surface(_));
+        if !primal { self.temperature_neighbourhood(cx, temperatures)?; }
         match response {
             ContactDerivative::Constant => Ok([0.0; 2]),
             ContactDerivative::Curve { axis, knots } => {
@@ -325,6 +333,19 @@ impl TemperatureContacts<'_, '_> {
         for (i, law) in self.variable.iter().enumerate() {
             poll(cx, i)?;
             responses.insert(law.name(), (law, law.derivative_response()?));
+        }
+        // Pointwise matching guards also admit the appropriate source
+        // neighbourhood. Strict adjoints cannot hide a domain-end corner
+        // behind interior quadrature points. Forward scalar/curve solves keep
+        // the existing semismooth policy and actual residual support checks.
+        for surface in &physical.interfaces.nonmatching {
+            if let Some((law, response)) = responses.get(surface.name.as_str()) {
+                if matches!(policy, DerivativePolicy::TwoSided)
+                    || matches!(response, ContactDerivative::Surface(_)) {
+                    surface.matching_source_support(cx, temperature,
+                        |traces| law.temperature_neighbourhood(cx, traces))?;
+                }
+            }
         }
         let mut partials = BTreeMap::new();
         for (i, state) in physical.states().iter().enumerate() {

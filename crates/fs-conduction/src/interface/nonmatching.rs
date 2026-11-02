@@ -15,6 +15,8 @@ use fs_sparse::Coo;
 use crate::{ConductionError, ConductionMesh, ThermalBoundary};
 use super::{InterfaceFlux, InterfaceResistance};
 
+mod matching;
+
 /// Explicit geometry/work policy for one planar contact.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NonmatchingOptions {
@@ -188,6 +190,9 @@ impl Stencil {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Bound {
     pub(super) name: String,
+    // Exact paired triangles can use the same pointwise constitutive rule
+    // without claiming nonmatching geometry or repeating planar clipping.
+    matching_only: bool,
     resistances: ResistanceField,
     faces: Arc<[Face]>,
     stencils: Arc<[Stencil]>,
@@ -308,7 +313,7 @@ impl Bound {
             }
         }
         poll(cx,at)?;
-        Ok(Self { name:name.clone(), resistances:surface.resistances.clone(),
+        Ok(Self { name:name.clone(), matching_only:false, resistances:surface.resistances.clone(),
             faces:a.into_iter().chain(b).collect::<Vec<_>>().into(), stencils:stencils.into(),
             quadrature_resistances:None })
     }
@@ -398,6 +403,8 @@ impl Bound {
     }
 
     pub(super) fn triangle_count(&self)->usize {self.stencils.len()}
+
+    pub(super) fn is_nonmatching(&self)->bool {!self.matching_only}
 
     pub(super) fn at_quadrature(&self,cx:&Cx<'_>,temperature:&[f64],
         mut query:impl FnMut(super::InterfaceFacePair,usize,f64,[f64;2])->Result<InterfaceResistance,ConductionError>)

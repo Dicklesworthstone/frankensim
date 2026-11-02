@@ -22,8 +22,9 @@ use super::{InterfaceFacePair, InterfaceResistance, InterfaceSurface, Nonmatchin
     NonmatchingSurface, ThermalInterfaces};
 use crate::{ConductionError, ConductionMesh, ThermalBoundary};
 
-/// Thermal coordinates owned by a contact source law. Matching contacts use
-/// face means; nonmatching contacts use both traces at each common quadrature point.
+/// Thermal coordinates owned by a contact source law. The matching constructors
+/// select face means or explicit pointwise quadrature; nonmatching contacts use
+/// both traces at each retained common quadrature point.
 ///
 /// Face-pair A/B order is the source card's declared surface order. A reversal
 /// of the physical interface must reverse both the face assignment and the
@@ -39,11 +40,13 @@ pub enum TemperatureContactCoordinates {
 #[derive(Debug, Clone)]
 enum ContactSurface {
     Matching(InterfaceSurface),
+    PointwiseMatching(InterfaceSurface),
     Nonmatching(NonmatchingSurface),
 }
 
 enum ContactFaces {
     Matching(Vec<InterfaceFacePair>),
+    PointwiseMatching(Vec<InterfaceFacePair>),
     Nonmatching { side_a:Vec<usize>, side_b:Vec<usize>, options:NonmatchingOptions },
 }
 
@@ -91,6 +94,34 @@ impl<'a> TemperatureContact<'a> {
     ) -> Result<Self, ConductionError> {
         Self::bind(name.into(), ContactFaces::Matching(face_pairs), card, point,
             TemperatureContactCoordinates::TwoSided(temperature_axes.map(String::from)), selection)
+    }
+
+    /// Bind a pointwise source law on explicitly paired, exactly coincident
+    /// P1 triangles. Each face uses three positive degree-two quadrature
+    /// points with both traces evaluated at the SAME physical point. Curved
+    /// faceted surfaces need no global planar approximation or intersection.
+    ///
+    /// `coordinates` explicitly selects the local mean or independent ordered
+    /// source temperatures. Unlike the face-mean constructors, local hot spots
+    /// change the resistance within a face and therefore its residual, heat
+    /// rate and complete tangent. A nonlinear reciprocal resistance is still
+    /// quadrature-approximated; no exact continuum integral is claimed.
+    ///
+    /// Paired vertices also pass the original pinned source query. These
+    /// guards prevent an unsupported hot corner being hidden by interior
+    /// samples, but do not certify unsampled holes in a nonconvex source domain.
+    /// Use `TemperatureContacts::with_matching_quadrature` to supply the
+    /// explicit integration allowance, or `with_nonmatching` for mixed traces.
+    pub fn new_pointwise(
+        name: impl Into<String>,
+        face_pairs: Vec<InterfaceFacePair>,
+        card: &'a InterfaceSystemCard,
+        point: &QueryPoint,
+        coordinates: TemperatureContactCoordinates,
+        selection: SelectionPolicy,
+    ) -> Result<Self, ConductionError> {
+        Self::bind(name.into(), ContactFaces::PointwiseMatching(face_pairs), card,
+            point, coordinates, selection)
     }
 
     /// Bind a local source law to two independently triangulated planar traces.
@@ -141,6 +172,8 @@ impl<'a> TemperatureContact<'a> {
         let resistance = InterfaceResistance::from_card(&name, card, point, selection)?;
         let reference = match faces {
             ContactFaces::Matching(pairs)=>ContactSurface::Matching(InterfaceSurface::new(name,pairs,resistance.clone())?),
+            ContactFaces::PointwiseMatching(pairs)=>ContactSurface::PointwiseMatching(
+                InterfaceSurface::new(name,pairs,resistance.clone())?),
             ContactFaces::Nonmatching{side_a,side_b,options}=>ContactSurface::Nonmatching(
                 NonmatchingSurface::new(name,side_a,side_b,resistance.clone(),options)?),
         };
@@ -153,7 +186,7 @@ impl<'a> TemperatureContact<'a> {
     /// Stable interface name, retaining the ordered card's surface convention.
     #[must_use]
     pub fn name(&self) -> &str {
-        match &self.reference {ContactSurface::Matching(surface)=>surface.name(),
+        match &self.reference {ContactSurface::Matching(surface)|ContactSurface::PointwiseMatching(surface)=>surface.name(),
             ContactSurface::Nonmatching(surface)=>&surface.name}
     }
     /// Original query including fixed pressure and all other source conditions.
@@ -221,7 +254,7 @@ pub struct TemperatureContactEvaluation {
     quadrature_states:Vec<ContactQuadratureState>,
 }
 
-/// One physical common-refinement quadrature query, with its original A/B roles.
+/// One physical matching/common-refinement quadrature query, with original A/B roles.
 #[derive(Debug,Clone,PartialEq)]
 pub struct ContactQuadratureState {
     /// Named physical interface.
@@ -248,7 +281,7 @@ impl TemperatureContactEvaluation {
     /// Source-backed state for each temperature-dependent face pair.
     #[must_use]
     pub fn states(&self) -> &[ContactFaceState] { &self.states }
-    /// Pointwise nonmatching source states, including exactly coincident pieces.
+    /// Pointwise matching and nonmatching source states, including coincident pieces.
     /// These are actual source queries; a surface aggregate uses only a
     /// representative receipt and does not invent an averaged material claim.
     #[must_use]
@@ -281,16 +314,36 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         variable: Vec<TemperatureContact<'c>>,
         max_face_pairs: usize,
     ) -> Result<Self, ConductionError> {
-        if variable.iter().any(|law|matches!(law.reference,ContactSurface::Nonmatching(_))) {
-            return Err(invalid("<contact-set>","nonmatching laws require an explicit common-quadrature allowance"));
+        if variable.iter().any(|law|!matches!(law.reference,ContactSurface::Matching(_))) {
+            return Err(invalid("<contact-set>","pointwise contact laws require an explicit quadrature allowance"));
         }
         Self::with_nonmatching(cx,mesh,boundary,fixed,Vec::new(),variable,max_face_pairs,0)
     }
 
+    /// Bind exact matching contacts with an explicit pointwise integration
+    /// allowance. Face-mean and fixed contacts may coexist. Each pointwise
+    /// triangle counts once against `max_face_pairs` and contributes three
+    /// retained source states against `max_quadrature_points`; its three
+    /// additional vertex support queries are bounded by the same face count.
+    /// Geometry admission remains exact matching, including exclusive contact
+    /// ownership. Use `with_nonmatching` when independent tessellations coexist.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_matching_quadrature(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh, boundary: &ThermalBoundary,
+        fixed: Vec<InterfaceSurface>, variable: Vec<TemperatureContact<'c>>,
+        max_face_pairs: usize, max_quadrature_points: usize,
+    ) -> Result<Self, ConductionError> {
+        if variable.iter().any(|law|matches!(law.reference,ContactSurface::Nonmatching(_))) {
+            return Err(invalid("<contact-set>","matching quadrature does not admit independent tessellations"));
+        }
+        Self::with_nonmatching(cx,mesh,boundary,fixed,Vec::new(),variable,
+            max_face_pairs,max_quadrature_points)
+    }
+
     /// Bind matching and nonmatching laws with independent trace-work limits.
     /// max_face_pairs bounds matching pairs plus retained overlap triangles;
-    /// max_quadrature_points bounds all nonmatching samples, including fixed
-    /// patches. Each planar surface also retains its own geometry-work policy.
+    /// max_quadrature_points bounds all pointwise samples, including fixed
+    /// nonmatching patches. Each planar nonmatching surface retains its geometry-work policy.
     /// Exact pieces of variable nonmatching laws stay on the pointwise rule;
     /// they are admitted by the original matching owner but assembled once.
     #[allow(clippy::too_many_arguments)]
@@ -306,7 +359,7 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         }
         let mut count = 0usize;
         for surface in fixed.iter().chain(variable.iter().filter_map(|law|match &law.reference {
-            ContactSurface::Matching(surface)=>Some(surface),ContactSurface::Nonmatching(_)=>None})) {
+            ContactSurface::Matching(surface)=>Some(surface),_=>None})) {
             poll(cx, count)?;
             count = count.checked_add(surface.face_pairs().len())
                 .ok_or_else(|| invalid("<contact-set>", "contact face count overflows"))?;
@@ -314,18 +367,35 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
                 return Err(invalid(surface.name(), "contact faces exceed the declared pair allowance"));
             }
         }
+        let pointwise_pairs = variable.iter().try_fold(0usize, |n, law| {
+            n.checked_add(match &law.reference {
+                ContactSurface::PointwiseMatching(surface)=>surface.face_pairs().len(), _=>0,
+            })
+        }).ok_or_else(||invalid("<contact-set>","pointwise matching face count overflows"))?;
+        if count.checked_add(pointwise_pairs).is_none_or(|n|n>max_face_pairs)
+            || pointwise_pairs.checked_mul(3).is_none_or(|n|n>max_quadrature_points
+                || n.checked_mul(std::mem::size_of::<ContactQuadratureState>()).is_none_or(|bytes|bytes>isize::MAX as usize)) {
+            return Err(invalid("<contact-set>","pointwise matching contacts exceed the declared face or quadrature allowance"));
+        }
         variable.sort_by(|a, b| a.name().cmp(b.name()));
         let variable_pairs = variable.iter().filter_map(|law|match &law.reference {
-            ContactSurface::Matching(surface)=>Some(surface.face_pairs().len()),ContactSurface::Nonmatching(_)=>None}).sum();
+            ContactSurface::Matching(surface)=>Some(surface.face_pairs().len()),_=>None}).sum();
         let mut all = fixed.clone();
         for law in &variable {match &law.reference {
-            ContactSurface::Matching(surface)=>all.push(surface.clone()),
+            ContactSurface::Matching(surface)|ContactSurface::PointwiseMatching(surface)=>all.push(surface.clone()),
             ContactSurface::Nonmatching(surface)=>fixed_nonmatching.push(surface.clone()),
         }}
         // The original owner rejects missing, duplicated, shared-node,
         // noncoincident and externally occupied contact faces.
-        let reference=if fixed_nonmatching.is_empty() {ThermalInterfaces::new(mesh,boundary,all)?}
+        let mut reference=if fixed_nonmatching.is_empty() {ThermalInterfaces::new(mesh,boundary,all)?}
             else {ThermalInterfaces::with_nonmatching(cx,mesh,boundary,all,fixed_nonmatching)?};
+        for law in &variable {
+            if let ContactSurface::PointwiseMatching(surface)=&law.reference {
+                reference.nonmatching.push(super::nonmatching::Bound::matching_quadrature(
+                    cx,mesh,boundary,surface)?);
+            }
+        }
+        reference.nonmatching.sort_by(|a,b|a.name.cmp(&b.name));
         let nonmatching_triangles=reference.nonmatching.iter().try_fold(0usize,|n,s|
             n.checked_add(s.triangle_count())).ok_or_else(||invalid("<contact-set>","overlap-triangle count overflows"))?;
         if count.checked_add(nonmatching_triangles).is_none_or(|n|n>max_face_pairs)
@@ -404,6 +474,9 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         let mut quadrature_owned=std::collections::BTreeSet::new();
         for surface in &mut interfaces.nonmatching {
             let Some(law)=self.variable.iter().find(|law|law.name()==surface.name) else {continue;};
+            surface.matching_source_support(cx,temperatures,|traces| {
+                law.at_traces_with_query_refusal(traces,on_refusal).map(|_| ())
+            })?;
             *surface=surface.at_quadrature(cx,temperatures,|pair,index,weight,traces| {
                 let resistance=law.at_traces_with_query_refusal(traces,on_refusal)?;
                 quadrature_states.push(ContactQuadratureState {interface:law.name().into(),pair,

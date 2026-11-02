@@ -155,10 +155,10 @@ impl ThermalInterfaces {
         if let Some(surface)=self.nonmatching.iter().find(|s|s.name==name) {Some(surface.is_mapped())}
         else {self.matching.surface_is_mapped(name)}
     }
-    /// Matching: per-face-pair values in the original order. Nonmatching:
+    /// Face-mean matching: per-face-pair values in the original order. Nonmatching:
     /// resistance inherited from the original A face for each common-refinement
     /// integration triangle, including exactly matched delegated pieces. A
-    /// pointwise temperature law returns its flattened triangle/point values;
+    /// pointwise matching or nonmatching law returns flattened triangle/point values;
     /// its evaluation's quadrature_states retains the corresponding sources.
     #[must_use]
     pub fn surface_face_resistances(&self,name:&str)->Option<Vec<f64>> {
@@ -176,7 +176,7 @@ impl ThermalInterfaces {
     /// Whether a named surface uses explicitly admitted planar overlap traces.
     #[must_use]
     pub fn surface_is_nonmatching(&self,name:&str)->bool {
-        self.nonmatching.iter().any(|s|s.name==name)
+        self.nonmatching.iter().any(|s|s.name==name && s.is_nonmatching())
     }
 
     /// One signed A-to-B heat report per named interface. Matching-only calls
@@ -212,7 +212,7 @@ impl ThermalInterfaces {
     /// overlap topology and contact resistance law are held fixed.
     pub fn nonmatching_log_resistance_pullback(&self,cx:&Cx<'_>,name:&str,
         temperature:&[f64],nodal_load_adjoint:&[f64])->Result<Option<f64>,ConductionError> {
-        self.nonmatching.iter().find(|s|s.name==name)
+        self.nonmatching.iter().find(|s|s.name==name && s.is_nonmatching())
             .map(|s|s.log_resistance_pullback(cx,temperature,nodal_load_adjoint)).transpose()
     }
 }
