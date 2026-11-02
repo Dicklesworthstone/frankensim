@@ -15,6 +15,7 @@ pub(super) struct TonePower {
     n: usize,
     m: usize,
     sources: usize,
+    stride: usize,
     rate: f64,
     root_rate: f64,
     scales: Vec<f64>,
@@ -32,17 +33,20 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), crate::PreparedStepE
 }
 
 impl TonePower {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         system: &PortHamiltonian,
         split: &LinearSplit,
         frequencies: &[f64],
         source_scales: &[f64],
         dt: f64,
+        affine: bool,
         channels: &[ResistanceWitness],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, crate::PreparedStepError> {
         let (n, m) = (system.n, system.m);
         let sources = source_scales.len();
+        let stride = if affine { 4 } else { 2 };
         let scales = (0..n)
             .map(|i| split.coordinate_scale(i))
             .collect::<Vec<_>>();
@@ -84,6 +88,7 @@ impl TonePower {
             &a,
             rate,
             dt,
+            affine,
             output,
             m,
             true,
@@ -119,6 +124,7 @@ impl TonePower {
                 &a,
                 rate,
                 dt,
+                affine,
                 root,
                 n,
                 false,
@@ -129,6 +135,7 @@ impl TonePower {
             n,
             m,
             sources,
+            stride,
             rate,
             root_rate: det::sqrt(rate),
             scales,
@@ -150,7 +157,7 @@ impl TonePower {
         coordinates: &mut [f64],
         heat: &mut [f64],
     ) -> Result<f64, PhsError> {
-        let tones = self.sources / (2 * self.m);
+        let tones = self.sources / (self.stride * self.m);
         for i in 0..self.n {
             let mut force = Sum::default();
             let mut conservative = Sum::default();
@@ -158,7 +165,7 @@ impl TonePower {
             for p in 0..self.m {
                 let mut total = Sum::default();
                 for t in 0..tones {
-                    total.add(input[2 * (p * tones + t)]);
+                    total.add(input[self.stride * (p * tones + t)]);
                 }
                 force.add(system.g[i * self.m + p] * total.value());
             }
@@ -243,6 +250,7 @@ fn prepare_observation(
     a: &[f64],
     rate: f64,
     dt: f64,
+    affine: bool,
     map: Vec<f64>,
     rows: usize,
     paired: bool,
@@ -279,12 +287,24 @@ fn prepare_observation(
     }
     for p in 0..m {
         for (tone, &omega) in frequencies.iter().enumerate() {
-            let c = 2 * (p * frequencies.len() + tone);
+            let stride = if affine { 4 } else { 2 };
+            let c = stride * (p * frequencies.len() + tone);
             generator[(rows + n + c) * d + rows + n + c + 1] = omega;
             generator[(rows + n + c + 1) * d + rows + n + c] = -omega;
+            if affine {
+                generator[(rows + n + c) * d + rows + n + c + 2] = 1.0 / dt;
+                generator[(rows + n + c + 1) * d + rows + n + c + 3] = 1.0 / dt;
+                generator[(rows + n + c + 2) * d + rows + n + c + 3] = omega;
+                generator[(rows + n + c + 3) * d + rows + n + c + 2] = -omega;
+            }
             for i in 0..n {
                 generator[(rows + i) * d + rows + n + c + 1] =
                     (scales[i] * system.g[i * m + p] / source_scales[c]) * (omega / rate);
+                if affine {
+                    // b'=A*b+D*G*u'/rate, including the actual envelope slope.
+                    generator[(rows + i) * d + rows + n + c + 2] =
+                        (scales[i] * system.g[i * m + p] / source_scales[c]) * ((1.0 / dt) / rate);
+                }
             }
         }
     }
@@ -292,7 +312,7 @@ fn prepare_observation(
         let mut source = vec![0.0; d * d];
         for p in 0..m {
             for tone in 0..frequencies.len() {
-                let c = 2 * (p * frequencies.len() + tone);
+                let c = (if affine { 4 } else { 2 }) * (p * frequencies.len() + tone);
                 source[p * d + rows + n + c] = 1.0 / source_scales[c];
             }
         }

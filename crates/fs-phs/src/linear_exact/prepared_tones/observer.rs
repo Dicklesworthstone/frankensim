@@ -220,18 +220,109 @@ impl PreparedToneObserver {
         sine: &[f64],
         observer_next: &mut [f64],
         output: &mut [f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), PreparedStepError> {
+        self.preview_impl(
+            source,
+            physical_initial,
+            observer_initial,
+            cosine,
+            sine,
+            None,
+            observer_next,
+            output,
+            cancelled,
+        )
+    }
+
+    /// Observe affine tone envelopes through the SAME continuous source and
+    /// filter map. Four endpoint arrays use the interval-start carrier phase,
+    /// exactly as `PreparedExactTones::step_affine_into`. Requires affine source
+    /// preparation; physical and observation candidates still commit together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn preview_affine_into(
+        &mut self,
+        source: &PreparedExactTones<'_>,
+        physical_initial: &[f64],
+        observer_initial: &[f64],
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        observer_next: &mut [f64],
+        output: &mut [f64],
+    ) -> Result<(), PhsError> {
+        self.preview_affine_into_controlled(
+            source,
+            physical_initial,
+            observer_initial,
+            cosine_start,
+            sine_start,
+            cosine_end,
+            sine_end,
+            observer_next,
+            output,
+            || false,
+        )
+        .map_err(uncancelled)
+    }
+
+    /// Same allocation-free affine candidate preview with cancellation. All
+    /// caller outputs remain unchanged on any failure or cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn preview_affine_into_controlled(
+        &mut self,
+        source: &PreparedExactTones<'_>,
+        physical_initial: &[f64],
+        observer_initial: &[f64],
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        observer_next: &mut [f64],
+        output: &mut [f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), PreparedStepError> {
+        self.preview_impl(
+            source,
+            physical_initial,
+            observer_initial,
+            cosine_start,
+            sine_start,
+            Some((cosine_end, sine_end)),
+            observer_next,
+            output,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn preview_impl(
+        &mut self,
+        source: &PreparedExactTones<'_>,
+        physical_initial: &[f64],
+        observer_initial: &[f64],
+        cosine: &[f64],
+        sine: &[f64],
+        end: Option<(&[f64], &[f64])>,
+        observer_next: &mut [f64],
+        output: &mut [f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), PreparedStepError> {
         poll(&mut cancelled)?;
         let n = source.state_dim();
         let s = self.input.len();
         if !Arc::ptr_eq(&self.identity, &source.identity)
+            || source.is_affine() != end.is_some()
             || physical_initial.len() != n
             || observer_initial.len() != self.states
             || cosine.len() != source.port_dim() * source.tone_count()
             || sine.len() != cosine.len()
             || observer_next.len() != self.states
             || output.len() != self.outputs
+            || end.is_some_and(|(c, s)| {
+                c.len() != cosine.len() || s.len() != sine.len() || !finite(c) || !finite(s)
+            })
             || [physical_initial, observer_initial, cosine, sine]
                 .iter()
                 .any(|v| !finite(v))
@@ -241,14 +332,27 @@ impl PreparedToneObserver {
             )
             .into());
         }
-        combine_tones(
-            &source.mapping,
-            source.unique.len(),
-            cosine,
-            sine,
-            &mut self.sums,
-            &mut self.input,
-        )?;
+        if let Some((end_cosine, end_sine)) = end {
+            super::affine::combine(
+                &source.mapping,
+                source.unique.len(),
+                cosine,
+                sine,
+                end_cosine,
+                end_sine,
+                &mut self.sums,
+                &mut self.input,
+            )?;
+        } else {
+            combine_tones(
+                &source.mapping,
+                source.unique.len(),
+                cosine,
+                sine,
+                &mut self.sums,
+                &mut self.input,
+            )?;
+        }
         let (_, transform) = source
             .flow
             .tone_operator()

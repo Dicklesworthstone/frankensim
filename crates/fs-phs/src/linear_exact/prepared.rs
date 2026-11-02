@@ -146,18 +146,20 @@ impl PreparedQuadraticFlow {
     // The same complete operator/Gramian owner, with continuous source
     // quadratures instead of held source coordinates. All physical states and
     // original linear observations remain in their existing order.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new_tones_controlled(
         sys: &PortHamiltonian,
         split: &LinearSplit,
         dt: f64,
         frequencies: &[f64],
+        affine: bool,
         linear_forms: &[Vec<f64>],
         budget: DenseExponentialBudget,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
         Self::prepare(
             sys, split, dt, &[], linear_forms, budget, cancelled, None,
-            Some(frequencies), None,
+            Some((frequencies, affine)), None,
         )
     }
 
@@ -204,24 +206,25 @@ impl PreparedQuadraticFlow {
         budget: DenseExponentialBudget,
         mut cancelled: impl FnMut() -> bool,
         extension: Option<(&[f64], &[f64])>,
-        tones: Option<&[f64]>,
+        tones: Option<(&[f64], bool)>,
         input_override: Option<&[f64]>,
     ) -> Result<Self, PreparedStepError> {
         check_cancel(&mut cancelled)?;
         let (base_n, ports) = (split.n, split.m);
-        let m = if let Some(frequencies) = tones {
+        let m = if let Some((frequencies, affine)) = tones {
             if frequencies.is_empty()
                 || ports == 0
                 || extension.is_some()
                 || input_override.is_some()
                 || frequencies.iter().any(|v| !v.is_finite() || *v < 0.0)
+                || (affine && !(1.0 / dt).is_finite())
             {
                 return Err(refuse(
                     "tone sources require nonempty finite frequencies and physical ports",
                 ).into());
             }
             ports.checked_mul(frequencies.len())
-                .and_then(|v| v.checked_mul(2))
+                .and_then(|v| v.checked_mul(if affine { 4 } else { 2 }))
                 .ok_or_else(|| refuse("tone source dimension overflow"))?
         } else {
             ports
@@ -440,7 +443,8 @@ impl PreparedQuadraticFlow {
                 }
             }
         }
-        if let Some(frequencies) = tones {
+        if let Some((frequencies, affine)) = tones {
+            let stride = if affine { 4 } else { 2 };
             for p in 0..ports {
                 let magnitude = (0..n)
                     .map(|i| physical_input[i * ports + p].abs())
@@ -450,11 +454,18 @@ impl PreparedQuadraticFlow {
                     return Err(refuse("tone input scale must be finite").into());
                 }
                 for (tone, &omega) in frequencies.iter().enumerate() {
-                    let c = 2 * (p * frequencies.len() + tone);
-                    source_scales[c] = scale;
-                    source_scales[c + 1] = scale;
+                    let c = stride * (p * frequencies.len() + tone);
+                    source_scales[c..c + stride].fill(scale);
                     generator[(n + c) * d + n + c + 1] = omega;
                     generator[(n + c + 1) * d + n + c] = -omega;
+                    if affine {
+                        // Delta coefficients have force units. Their rotating
+                        // pair drives an affine envelope over this exact h.
+                        generator[(n + c) * d + n + c + 2] = 1.0 / dt;
+                        generator[(n + c + 1) * d + n + c + 3] = 1.0 / dt;
+                        generator[(n + c + 2) * d + n + c + 3] = omega;
+                        generator[(n + c + 3) * d + n + c + 2] = -omega;
+                    }
                     for i in 0..n {
                         generator[i * d + n + c] = physical_input[i * ports + p] / scale;
                         balanced_input[i * m + c] = generator[i * d + n + c];

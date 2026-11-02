@@ -924,6 +924,38 @@ warm steps, and atomic/budget/cancellation refusals. Existing positive-heat,
 owned exact-flow, stiff-energy and common-flow regressions protect the shared
 numerical owners; full-workspace qualification is not asserted.
 
+### Affine envelopes on continuous tone sources
+
+The `PreparedExactTones::new_affine`/`new_owned_affine` family opts into
+piecewise-affine cosine and sine envelopes while retaining the original
+complete physical owner. `step_affine_into` and its observed variant accept
+port-major start/end quadratures in the same interval-start carrier basis:
+`u(t)=(c0+(t/h)*(c1-c0))*cos(w*t)+(s0+(t/h)*(s1-s0))*sin(w*t)`.
+Rotate END coefficients through the existing phase helper to continue. Exact
+duplicate endpoints coalesce independently before subtraction, retaining small
+ramps among cancelling large sources. The ordinary two-coordinate constant
+path remains; affine plans use four source coordinates and `is_affine` identifies
+the admitted API family. A mismatched family refuses.
+
+The existing full exponential, paired signed-work and positive-heat owners
+retain all envelope/carrier and cross-tone terms. Original resistance channels
+follow the same trajectory; their derivative source includes the envelope
+slope. `PreparedToneObserver::preview_affine_into` and its controlled variant
+reuse the identical source generator and packing for continuous causal pressure.
+Original storage/work/heat gates, owner binding, external checkpoint state and
+atomic output publication remain. Complete source dimensions and byte/work
+limits are admitted before preparation; no coordinate is discarded. Warm
+physical/observer/phase calls allocate nothing. This is an affine force
+reconstruction, not a chirp or an inferred physical excitation law.
+
+Seven native tests cover a closed-form resonant ramp, independent Maxwell
+motion/work/channel-heat/filter integration, DC and constant-envelope limits,
+large duplicate cancellation, 1,000 allocation-free subdivision/phase steps,
+atomic refusals and an 8/16/32 smooth attack-release reconstruction ladder with
+second-order convergence. All eight constant-tone and five existing observer
+tests also pass. These are focused numerical checks, not full workspace or
+rigorous interval qualification.
+
 ### Continuous one-way observation of a prepared tone source
 
 `linear_exact::PreparedToneObserver` prepares `z'=A*z+B*x`,

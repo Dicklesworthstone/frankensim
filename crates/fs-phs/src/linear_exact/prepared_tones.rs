@@ -1,4 +1,5 @@
 //! Continuous sources through the original complete quadratic pHS owner.
+mod affine;
 mod observer;
 mod power;
 pub use observer::PreparedToneObserver;
@@ -39,6 +40,9 @@ struct Scratch {
 /// The convention is `exp(-i Omega t)`; DC is explicit. All original states,
 /// coupling, damping and material memories remain. Source oscillators are
 /// numerical forcing coordinates and acquire no fictitious stored energy.
+/// The `new_affine` constructor family additionally interpolates each cosine
+/// and sine envelope between supplied endpoints. Those plans require the
+/// corresponding `step_affine_into` or `step_affine_observed_into` methods.
 ///
 /// Motion and average outputs use the existing complete exponential/Gramian
 /// owner. Original resistance squares and paired source/output factors give
@@ -50,6 +54,7 @@ struct Scratch {
 /// storage callbacks. Caller state and source phase are never mutated.
 pub struct PreparedExactTones<'a> {
     identity: Arc<()>,
+    affine: bool,
     system: System<'a>,
     duration: f64,
     frequencies: Vec<f64>,
@@ -109,6 +114,7 @@ impl PreparedExactTones<'static> {
             dense_budget,
             channels,
             &mut || false,
+            false,
         )
         .map_err(uncancelled)
     }
@@ -133,6 +139,7 @@ impl PreparedExactTones<'static> {
             dense_budget,
             channels,
             &mut cancelled,
+            false,
         )
     }
 }
@@ -156,10 +163,12 @@ impl<'a> PreparedExactTones<'a> {
             dense_budget,
             &[],
             &mut || false,
+            false,
         )
         .map_err(uncancelled)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         owner: System<'a>,
         frequencies: &[f64],
@@ -168,6 +177,7 @@ impl<'a> PreparedExactTones<'a> {
         dense_budget: DenseExponentialBudget,
         channels: &[ResistanceWitness],
         cancelled: &mut impl FnMut() -> bool,
+        affine: bool,
     ) -> Result<Self, PreparedStepError> {
         if cancelled() {
             return Err(PreparedStepError::Cancelled);
@@ -181,6 +191,7 @@ impl<'a> PreparedExactTones<'a> {
             channels,
             split_budget,
             dense_budget,
+            affine,
         )?;
         let mut unique = Vec::new();
         let mut mapping = Vec::with_capacity(frequencies.len());
@@ -212,6 +223,7 @@ impl<'a> PreparedExactTones<'a> {
             &split,
             duration,
             &unique,
+            affine,
             &outputs,
             dense_budget,
             &mut *cancelled,
@@ -222,10 +234,11 @@ impl<'a> PreparedExactTones<'a> {
             &unique,
             flow.source_scales(),
             duration,
+            affine,
             channels,
             cancelled,
         )?;
-        let sources = 2 * m * unique.len();
+        let sources = if affine { 4 } else { 2 } * m * unique.len();
         let scratch = Scratch {
             input: vec![0.0; sources],
             sums: vec![Sum::default(); sources],
@@ -249,6 +262,7 @@ impl<'a> PreparedExactTones<'a> {
         }
         Ok(Self {
             identity: Arc::new(()),
+            affine,
             system: owner,
             duration,
             frequencies: frequencies.to_vec(),
@@ -321,7 +335,7 @@ impl<'a> PreparedExactTones<'a> {
         average_output: &mut [f64],
     ) -> Result<PreparedStepRecord, PhsError> {
         self.check_outputs(next, average_output)?;
-        let record = self.evaluate(initial, cosine, sine)?;
+        let record = self.evaluate(initial, cosine, sine, None)?;
         next.copy_from_slice(&self.scratch.endpoint);
         average_output.copy_from_slice(&self.scratch.output);
         Ok(record)
@@ -343,7 +357,7 @@ impl<'a> PreparedExactTones<'a> {
         if channel_heat.len() != self.resistance_channel_count() {
             return Err(refuse("continuous-tone channel output extent"));
         }
-        let record = self.evaluate(initial, cosine, sine)?;
+        let record = self.evaluate(initial, cosine, sine, None)?;
         next.copy_from_slice(&self.scratch.endpoint);
         average_output.copy_from_slice(&self.scratch.output);
         channel_heat.copy_from_slice(&self.scratch.heat[1..]);
@@ -364,30 +378,48 @@ impl<'a> PreparedExactTones<'a> {
         initial: &[f64],
         cosine: &[f64],
         sine: &[f64],
+        end: Option<(&[f64], &[f64])>,
     ) -> Result<PreparedStepRecord, PhsError> {
         let system = self.system.get();
         let (n, m) = (system.n, system.m);
         let k = self.frequencies.len();
-        if initial.len() != n
+        if self.affine != end.is_some()
+            || initial.len() != n
             || cosine.len() != m * k
             || sine.len() != m * k
             || !finite(initial)
             || !finite(cosine)
             || !finite(sine)
+            || end.is_some_and(|(c, s)| {
+                c.len() != m * k || s.len() != m * k || !finite(c) || !finite(s)
+            })
         {
             return Err(refuse(
                 "continuous-tone complete finite state and port-major inputs required",
             ));
         }
         let scratch = &mut self.scratch;
-        combine_tones(
-            &self.mapping,
-            self.unique.len(),
-            cosine,
-            sine,
-            &mut scratch.sums,
-            &mut scratch.input,
-        )?;
+        if let Some((end_cosine, end_sine)) = end {
+            affine::combine(
+                &self.mapping,
+                self.unique.len(),
+                cosine,
+                sine,
+                end_cosine,
+                end_sine,
+                &mut scratch.sums,
+                &mut scratch.input,
+            )?;
+        } else {
+            combine_tones(
+                &self.mapping,
+                self.unique.len(),
+                cosine,
+                sine,
+                &mut scratch.sums,
+                &mut scratch.input,
+            )?;
+        }
         self.flow.evaluate_into(
             initial,
             &scratch.input,
@@ -455,6 +487,7 @@ fn admit(
     channels: &[ResistanceWitness],
     split: LinearSplitBudget,
     budget: DenseExponentialBudget,
+    affine: bool,
 ) -> Result<(), PhsError> {
     let (n, m) = (system.n, system.m);
     if n == 0
@@ -462,6 +495,7 @@ fn admit(
         || frequencies.is_empty()
         || !dt.is_finite()
         || dt <= 0.0
+        || (affine && !(1.0 / dt).is_finite())
         || frequencies
             .iter()
             .any(|w| !w.is_finite() || *w < 0.0 || !(w * dt).is_finite())
@@ -472,7 +506,7 @@ fn admit(
     }
     let source = m
         .checked_mul(frequencies.len())
-        .and_then(|v| v.checked_mul(2))
+        .and_then(|v| v.checked_mul(if affine { 4 } else { 2 }))
         .ok_or_else(|| refuse("continuous-tone source dimension overflow"))?;
     let flow = n
         .checked_add(source)
