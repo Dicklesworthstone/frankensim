@@ -220,21 +220,31 @@ fn conductivity_model<'a>(
     }
 }
 
-fn conductivity_at(
-    material: &ConductivityModel,
-    assigned: Option<&ElementMaterials>,
+/// Check the whole P1 temperature field before evaluating its element mean.
+/// A linear field attains its extrema at the vertices, so checking all four
+/// values admits the entire tetrahedron without adding quadrature or allocation.
+/// Callers validate the field length before entering their element loop.
+pub(crate) fn checked_element_temperature(
+    mesh: &ConductionMesh,
     element: usize,
-    temperature: f64,
-) -> Result<[[f64; 3]; 3], ConductionError> {
-    conductivity_model(material, assigned, element)?.tensor_at(temperature)
+    material: &ConductivityModel,
+    temperature: &[f64],
+) -> Result<f64, ConductionError> {
+    let span = material.temperature_span();
+    for &vertex in &mesh.complex().tets[element] {
+        let value = temperature[vertex as usize];
+        crate::require_finite("temperature iterate", value)?;
+        span.check(value)?;
+    }
+    Ok(element_temperature(mesh, element, temperature))
 }
 
 /// Assemble `A(T)` and the load `b`.
 ///
 /// # Errors
 /// [`ConductionError::Cancelled`] at a tile boundary;
-/// [`ConductionError::OutsideTemperatureSpan`] when the iterate leaves
-/// the sampled conductivity span; [`ConductionError::FieldLength`] for a
+/// [`ConductionError::OutsideTemperatureSpan`] when any element vertex leaves
+/// its sampled conductivity span; [`ConductionError::FieldLength`] for a
 /// mis-sized field.
 pub fn assemble_operator(
     cx: &Cx<'_>,
@@ -391,8 +401,9 @@ pub(crate) fn assemble_operator_scaled_with_interfaces(
         let end = (start + ASSEMBLY_TILE).min(ne);
         for e in start..end {
             let tet = mesh.complex().tets[e];
-            let t_e = element_temperature(mesh, e, temperature);
-            let k = conductivity_at(material, element_materials, e, t_e)?;
+            let model = conductivity_model(material, element_materials, e)?;
+            let t_e = checked_element_temperature(mesh, e, model, temperature)?;
+            let k = model.tensor_at(t_e)?;
             let mut ke = element_stiffness(mesh, e, &k);
             if let Some(scale) = element_scale {
                 for row in &mut ke {
@@ -742,8 +753,8 @@ fn assemble_transport_jacobian(
         let end = (start + ASSEMBLY_TILE).min(ne);
         for e in start..end {
             let tet = mesh.complex().tets[e];
-            let t_e = element_temperature(mesh, e, temperature);
             let model = conductivity_model(material, element_materials, e)?;
+            let t_e = checked_element_temperature(mesh, e, model, temperature)?;
             let k = model.tensor_at(t_e)?;
             let ke = element_stiffness(mesh, e, &k);
             let scale = element_scales.map_or(1.0, |scales| scales[e]);

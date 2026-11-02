@@ -8,7 +8,7 @@ mod support;
 
 use fs_adjoint::verify_gradient;
 use fs_conduction::adjoint::ConductivityDesign;
-use fs_conduction::assemble::{DofMap, residual};
+use fs_conduction::assemble::{DofMap, assemble_jacobian, assemble_operator, residual};
 use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
 use fs_conduction::duty::{
     DutyCycle, DutySegment, march_duty_cycle, march_duty_cycle_with_element_materials,
@@ -26,11 +26,12 @@ use fs_conduction::transient::{
 };
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
-    CONDUCTIVITY_DIMS, ConductionError, ConductionProblem, InitialGuess, InterfaceFacePair,
-    InterfaceResistance, InterfaceSurface, LineSearch, LinearConfig, Nonlinearity, PowerMap,
-    ProvenanceClass, SolveConfig, StopRule, TEMPERATURE_DIMS, ThermalInterfaces,
-    assemble_jacobian_with_element_materials, assemble_operator_with_element_materials,
-    element_heat_flux_assigned, solve, solve_with_interfaces,
+    CONDUCTIVITY_DIMS, ConductionError, ConductionProblem, ConductionSolver, InitialGuess,
+    InterfaceFacePair, InterfaceResistance, InterfaceSurface, LineSearch, LinearConfig,
+    Nonlinearity, PowerMap, ProvenanceClass, SolveConfig, StopRule, TEMPERATURE_DIMS,
+    ThermalInterfaces, assemble_jacobian_with_element_materials,
+    assemble_operator_with_element_materials, element_heat_flux, element_heat_flux_assigned, solve,
+    solve_with_interfaces,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -343,6 +344,305 @@ fn temperature_dependent_layer_refuses_outside_its_span() {
     );
 }
 
+/// G1: two conducting slabs and two surface films form an exact series circuit.
+/// No prescribed vertex exists to seed the solve; the assigned source domains
+/// must drive initialization independently of an unused fallback material.
+#[test]
+fn all_robin_layered_solve_initializes_from_the_assigned_material_spans() {
+    let (complex, positions) = box_grid([4, 2, 2], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let left = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(330.0, 1.0), (390.0, 1.0)]).expect("left"),
+    );
+    let right = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(310.0, 2.0), (350.0, 2.0)]).expect("right"),
+    );
+    let table =
+        MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("materials");
+    let assigned = ElementMaterials::new(
+        table,
+        two_layer_ids(&mesh).into_iter().map(MaterialId).collect(),
+    )
+    .expect("assignment");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot bath",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::robin(2.0, 400.0).expect("hot film"),
+        )
+        .expect("hot face")
+        .region(
+            "cold bath",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::robin(2.0, 300.0).expect("cold film"),
+        )
+        .expect("cold face")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    assert!(boundary.dirichlet().is_empty());
+    let source = ScalarField::Uniform(0.0);
+    // Neither fallback supports the assigned physical temperature interval.
+    for fallback in [
+        ConductivityModel::isotropic_declared(1000.0).expect("unbounded fallback"),
+        ConductivityModel::isotropic(
+            ConductivityTable::declared_curve(vec![(10.0, 3.0), (20.0, 5.0)])
+                .expect("unused source interval"),
+        ),
+    ] {
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &fallback,
+            element_materials: Some(&assigned),
+            source: &source,
+        };
+        let solution = with_cx(|cx| solve(cx, problem, config()).expect("all-Robin solve"));
+        // q = (400 - 300)/(1/2 + 1/1 + 1/2 + 1/2) = 40 W/m2.
+        // Surface temperatures are 380 and 320 K, with 340 K at the interface.
+        for (&temperature, point) in solution.temperature.iter().zip(mesh.positions()) {
+            let expected = if point[0] <= 1.0 {
+                380.0 - 40.0 * point[0]
+            } else {
+                340.0 - 20.0 * (point[0] - 1.0)
+            };
+            assert!(
+                (temperature - expected).abs() < 1e-8,
+                "at x={}, T={temperature}, exact T={expected}",
+                point[0]
+            );
+        }
+        for flux in element_heat_flux_assigned(&mesh, &assigned, &solution.temperature)
+            .expect("supported flux")
+        {
+            assert!((flux[0] - 40.0).abs() < 1e-8, "flux {flux:?}");
+            assert!(flux[1].abs() < 1e-8 && flux[2].abs() < 1e-8);
+        }
+    }
+}
+
+/// G0: a supported centroid cannot authorize unsupported portions of a P1 field.
+/// The orthotropic case checks the narrowest principal component's interval.
+#[test]
+fn bulk_operator_jacobian_and_flux_check_the_full_nodal_temperature_range() {
+    let mesh = ConductionMesh::new(
+        TetComplex::from_tets(4, vec![[0, 1, 2, 3]]),
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+    .expect("tetrahedron");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .expect("adiabatic boundary");
+    let narrow = ConductivityTable::declared_curve(vec![(300.0, 1.0), (340.0, 2.0)])
+        .expect("source interval");
+    let c = 0.5f64.sqrt();
+    let anisotropic = ConductivityModel::orthotropic(
+        [[c, c, 0.0], [-c, c, 0.0], [0.0, 0.0, 1.0]],
+        [
+            narrow.clone(),
+            ConductivityTable::declared(3.0).expect("second axis"),
+            ConductivityTable::declared(4.0).expect("third axis"),
+        ],
+    )
+    .expect("rotated material");
+    let fallback = ConductivityModel::isotropic_declared(1.0).expect("fallback");
+    let source = ScalarField::Uniform(0.0);
+    for model in [ConductivityModel::isotropic(narrow), anisotropic] {
+        let assigned = ElementMaterials::new(
+            MaterialTable::new([(MaterialId(1), model.clone())]).expect("table"),
+            vec![MaterialId(1)],
+        )
+        .expect("assignment");
+        for temperatures in [[290.0, 330.0, 330.0, 330.0], [350.0, 310.0, 310.0, 310.0]] {
+            assert_eq!(temperatures.iter().sum::<f64>() / 4.0, 320.0);
+            model.tensor_at(320.0).expect("the mean alone is supported");
+            with_cx(|cx| {
+                let failures = [
+                    assemble_operator(cx, &mesh, &boundary, &model, &source, &temperatures)
+                        .expect_err("uniform operator must reject the unsupported vertex"),
+                    assemble_jacobian(cx, &mesh, &boundary, &model, &temperatures)
+                        .expect_err("uniform Jacobian must reject the unsupported vertex"),
+                    assemble_operator_with_element_materials(
+                        cx,
+                        &mesh,
+                        &boundary,
+                        &fallback,
+                        &source,
+                        &temperatures,
+                        &assigned,
+                    )
+                    .expect_err("assigned operator must reject the unsupported vertex"),
+                    assemble_jacobian_with_element_materials(
+                        cx,
+                        &mesh,
+                        &boundary,
+                        &fallback,
+                        &temperatures,
+                        &assigned,
+                    )
+                    .expect_err("assigned Jacobian must reject the unsupported vertex"),
+                    element_heat_flux(&mesh, &model, &temperatures)
+                        .expect_err("uniform flux must reject the unsupported vertex"),
+                    element_heat_flux_assigned(&mesh, &assigned, &temperatures)
+                        .expect_err("assigned flux must reject the unsupported vertex"),
+                ];
+                for error in failures {
+                    assert!(
+                        matches!(error, ConductionError::OutsideTemperatureSpan { temperature, .. }
+                            if temperature == temperatures[0]),
+                        "unexpected refusal: {error:?}"
+                    );
+                }
+            });
+        }
+        let endpoints = [300.0, 340.0, 320.0, 320.0];
+        with_cx(|cx| {
+            assemble_operator_with_element_materials(
+                cx, &mesh, &boundary, &fallback, &source, &endpoints, &assigned,
+            )
+            .expect("closed source endpoints remain admitted");
+            assemble_jacobian_with_element_materials(
+                cx, &mesh, &boundary, &fallback, &endpoints, &assigned,
+            )
+            .expect("closed source endpoints retain the Jacobian");
+        });
+        element_heat_flux_assigned(&mesh, &assigned, &endpoints).expect("closed endpoints flux");
+        assert!(matches!(
+            element_heat_flux(&mesh, &model, &[320.0; 3]),
+            Err(ConductionError::FieldLength { .. })
+        ));
+        assert!(matches!(
+            element_heat_flux_assigned(&mesh, &assigned, &[320.0; 3]),
+            Err(ConductionError::FieldLength { .. })
+        ));
+    }
+}
+
+/// G0: an empty source-domain intersection has no admissible P1 state.
+#[test]
+fn automatic_initialization_refuses_disjoint_conductivity_support() {
+    let (complex, positions) = box_grid([2, 1, 1], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "anchor",
+            |face| on_box_face(face.centroid[0], 0.0),
+            ThermalBc::dirichlet(370.0).expect("anchor temperature"),
+        )
+        .expect("anchor face")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let hot =
+        ConductivityTable::declared_curve(vec![(350.0, 1.0), (400.0, 2.0)]).expect("hot source");
+    let cold =
+        ConductivityTable::declared_curve(vec![(300.0, 2.0), (340.0, 3.0)]).expect("cold source");
+    let disjoint = ConductivityModel::orthotropic(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [
+            hot.clone(),
+            cold.clone(),
+            ConductivityTable::declared(3.0).expect("third axis"),
+        ],
+    )
+    .expect("individually valid component tables");
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &disjoint,
+        element_materials: None,
+        source: &source,
+    };
+    assert!(matches!(
+        ConductionSolver::new(problem, config()),
+        Err(ConductionError::Conductivity { what }) if what.contains("disjoint temperature spans")
+    ));
+    let assigned = ElementMaterials::new(
+        MaterialTable::new([
+            (MaterialId(1), ConductivityModel::isotropic(hot)),
+            (MaterialId(2), ConductivityModel::isotropic(cold)),
+        ])
+        .expect("materials"),
+        two_layer_ids(&mesh).into_iter().map(MaterialId).collect(),
+    )
+    .expect("assignment");
+    assert!(matches!(
+        ConductionSolver::new(rooted(problem, &assigned), config()),
+        Err(ConductionError::MaterialAssignment { what, .. })
+            if what.contains("disjoint temperature spans at vertex")
+    ));
+}
+
+/// G1/G0: an insulated body's exact uniform heating law is dT/dt=f/(rho Cp).
+/// The old field may be supported while the new endpoint has left the source.
+#[test]
+fn linear_backward_euler_checks_conductivity_support_at_the_new_endpoint() {
+    use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
+
+    let (complex, positions) = box_grid([1, 1, 1], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .expect("insulated boundary");
+    let material = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(300.0, 2.0), (340.0, 2.0)])
+            .expect("bounded constant law"),
+    );
+    let assigned = ElementMaterials::new(
+        MaterialTable::new([(MaterialId(1), material.clone())]).expect("table"),
+        vec![MaterialId(1); mesh.element_count()],
+    )
+    .expect("assignment");
+    let source = ScalarField::Uniform(10.0);
+    let old = vec![320.0; mesh.vertex_count()];
+    let config = StepConfig {
+        linear: LinearConfig {
+            tolerance: 1e-12,
+            max_iterations: 100,
+            restart: 20,
+        },
+        energy_tolerance_j: 1e-9,
+    };
+    with_cx(|cx| {
+        let stepper = BackwardEuler::uniform(
+            cx,
+            &mesh,
+            VolumetricHeatCapacity::declared(1.0).expect("capacity"),
+        )
+        .expect("stepper");
+        for element_materials in [None, Some(&assigned)] {
+            let problem = ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                element_materials,
+                source: &source,
+            };
+            let accepted = stepper
+                .advance(cx, problem, None, &old, 1.0, config)
+                .expect("330 K remains supported");
+            for temperature in accepted.temperature {
+                assert!((temperature - 330.0).abs() < 1e-10);
+            }
+            assert!((accepted.stored_energy_change_j - 10.0).abs() < 1e-9);
+            assert!(matches!(
+                stepper.advance(cx, problem, None, &old, 3.0, config),
+                Err(ConductionError::OutsideTemperatureSpan { temperature, high, .. })
+                    if temperature > high && high == 340.0
+            ));
+        }
+    });
+    assert!(old.iter().all(|&temperature| temperature == 320.0));
+}
+
 /// An admissible start whose SOLUTION lies beyond the card's span: the
 /// Newton iterate is pinned at the span edge and every admissible step
 /// stalls. The refusal must name the span (the design runs outside the
@@ -376,9 +676,14 @@ fn a_solution_beyond_the_material_span_refuses_by_span_not_line_search() {
     };
     let err = with_cx(|cx| solve(cx, problem, SolveConfig::default()).expect_err("beyond span"));
     match err {
-        ConductionError::OutsideTemperatureSpan { temperature, high, .. } => {
+        ConductionError::OutsideTemperatureSpan {
+            temperature, high, ..
+        } => {
             assert_eq!(high, 320.0);
-            assert!(temperature > high, "the refusal names the driven temperature {temperature}");
+            assert!(
+                temperature > high,
+                "the refusal names the driven temperature {temperature}"
+            );
         }
         other => panic!("expected the span refusal, got {other:?}"),
     }

@@ -57,7 +57,7 @@ use crate::assemble::{
 use crate::bc::{ThermalBc, ThermalBoundary};
 use crate::field::ScalarField;
 use crate::interface::{InterfaceFlux, ThermalInterfaces};
-use crate::material::{ConductivityModel, ElementMaterials, ProvenanceClass};
+use crate::material::{ConductivityModel, ElementMaterials, ProvenanceClass, TemperatureSpan};
 use crate::mesh::ConductionMesh;
 
 mod maximum;
@@ -187,9 +187,10 @@ impl Default for LinearConfig {
 pub enum InitialGuess {
     /// A uniform temperature, K.
     Uniform(f64),
-    /// The arithmetic mean of the prescribed Dirichlet values; falls
-    /// back to the midpoint of the material's sampled span, then to
-    /// `0 K` when neither exists. The choice is recorded, never hidden.
+    /// The arithmetic mean of prescribed Dirichlet values, projected into
+    /// each free vertex's incident-material temperature support. Without
+    /// Dirichlet data, use the midpoint of that support, then `0 K` for an
+    /// unbounded model. An assigned model never uses the uniform fallback.
     #[default]
     DirichletMean,
     /// An explicit free-dof vector.
@@ -577,13 +578,20 @@ fn physical_report(
     temperature: &[f64],
 ) -> Result<PhysicalReport, ConductionError> {
     let (energy, robin_fluxes) = energy_balance(
-        problem.mesh, problem.boundary, problem.source, system, dofs, temperature,
+        problem.mesh,
+        problem.boundary,
+        problem.source,
+        system,
+        dofs,
+        temperature,
     );
     Ok(PhysicalReport {
         final_residual: norm2(&residual(system, dofs, temperature)),
         energy,
-        interface_fluxes: interfaces.map(|value| value.fluxes(temperature))
-            .transpose()?.unwrap_or_default(),
+        interface_fluxes: interfaces
+            .map(|value| value.fluxes(temperature))
+            .transpose()?
+            .unwrap_or_default(),
         robin_fluxes,
     })
 }
@@ -1054,7 +1062,11 @@ impl<'m> ConductionSolver<'m> {
             .expect("a converged step caches its assembled system");
         let temperature = self.dofs.scatter(&self.state.free_temperature);
         let physical = physical_report(
-            self.problem, self.interfaces, system, &self.dofs, &temperature,
+            self.problem,
+            self.interfaces,
+            system,
+            &self.dofs,
+            &temperature,
         )?;
         Ok(ConductionSolution {
             temperature,
@@ -1112,15 +1124,55 @@ fn initial_free(
         }
         InitialGuess::DirichletMean => {
             let fixed = dofs.fixed();
-            if !fixed.is_empty() {
+            let preferred = if fixed.is_empty() {
+                None
+            } else {
                 let sum: f64 = fixed.iter().map(|&v| dofs.prescribed()[v]).sum();
-                return Ok(vec![sum / fixed.len() as f64; n]);
-            }
-            let t0 = match problem.material.temperature_span() {
-                crate::material::TemperatureSpan::Sampled { low, high } => f64::midpoint(low, high),
-                crate::material::TemperatureSpan::Unbounded => 0.0,
+                Some(sum / fixed.len() as f64)
             };
-            Ok(vec![t0; n])
+            let guess_in_span = |span| match span {
+                TemperatureSpan::Sampled { low, high } => {
+                    preferred.map_or_else(|| f64::midpoint(low, high), |t| t.clamp(low, high))
+                }
+                TemperatureSpan::Unbounded => preferred.unwrap_or(0.0),
+            };
+            let Some(materials) = problem.element_materials else {
+                let span = problem.material.temperature_span();
+                if matches!(span, TemperatureSpan::Sampled { low, high } if low > high) {
+                    return Err(ConductionError::Conductivity {
+                        what: "principal conductivity components have disjoint temperature spans"
+                            .to_string(),
+                    });
+                }
+                return Ok(vec![guess_in_span(span); n]);
+            };
+
+            // A shared P1 vertex belongs to every incident material. Initialize
+            // inside their intersection, never from the unused uniform fallback.
+            // Distinct regions may have different intervals without requiring a
+            // single global temperature supported by all of them.
+            let mut spans = vec![TemperatureSpan::Unbounded; problem.mesh.vertex_count()];
+            for (element, tet) in problem.mesh.complex().tets.iter().enumerate() {
+                let material_span = materials.model_for(element)?.temperature_span();
+                for &vertex in tet {
+                    let vertex = vertex as usize;
+                    let span = spans[vertex].intersect(material_span);
+                    if matches!(span, TemperatureSpan::Sampled { low, high } if low > high) {
+                        return Err(ConductionError::MaterialAssignment {
+                            what: format!(
+                                "incident conductivity materials have disjoint temperature spans at vertex {vertex}"
+                            ),
+                            fix: "use material data with common temperature support at shared vertices, or separate the traces with a declared contact interface".to_string(),
+                        });
+                    }
+                    spans[vertex] = span;
+                }
+            }
+            Ok(dofs
+                .free()
+                .iter()
+                .map(|&v| guess_in_span(spans[v]))
+                .collect())
         }
     }
 }
@@ -1261,17 +1313,25 @@ pub(crate) fn energy_balance(
 /// claim about it.
 ///
 /// # Errors
-/// [`ConductionError::OutsideTemperatureSpan`] when an element mean
-/// leaves the material's sampled span.
+/// [`ConductionError::OutsideTemperatureSpan`] when any element vertex
+/// leaves the material's sampled span; [`ConductionError::FieldLength`]
+/// for a mis-sized field and [`ConductionError::NonFinite`] for invalid data.
 pub fn element_heat_flux(
     mesh: &ConductionMesh,
     material: &ConductivityModel,
     temperature: &[f64],
 ) -> Result<Vec<[f64; 3]>, ConductionError> {
+    if temperature.len() != mesh.vertex_count() {
+        return Err(ConductionError::FieldLength {
+            field: "temperature iterate",
+            expected: mesh.vertex_count(),
+            found: temperature.len(),
+        });
+    }
     let mut out = Vec::with_capacity(mesh.element_count());
     for e in 0..mesh.element_count() {
         let tet = mesh.complex().tets[e];
-        let t_e = crate::assemble::element_temperature(mesh, e, temperature);
+        let t_e = crate::assemble::checked_element_temperature(mesh, e, material, temperature)?;
         let k = material.tensor_at(t_e)?;
         let g = &mesh.geometry().grads[e];
         let mut grad = [0.0f64; 3];
@@ -1300,11 +1360,19 @@ pub fn element_heat_flux_assigned(
     temperature: &[f64],
 ) -> Result<Vec<[f64; 3]>, ConductionError> {
     materials.validate_for(mesh)?;
+    if temperature.len() != mesh.vertex_count() {
+        return Err(ConductionError::FieldLength {
+            field: "temperature iterate",
+            expected: mesh.vertex_count(),
+            found: temperature.len(),
+        });
+    }
     let mut out = Vec::with_capacity(mesh.element_count());
     for e in 0..mesh.element_count() {
         let tet = mesh.complex().tets[e];
-        let t_e = crate::assemble::element_temperature(mesh, e, temperature);
-        let k = materials.model_for(e)?.tensor_at(t_e)?;
+        let material = materials.model_for(e)?;
+        let t_e = crate::assemble::checked_element_temperature(mesh, e, material, temperature)?;
+        let k = material.tensor_at(t_e)?;
         let g = &mesh.geometry().grads[e];
         let mut grad = [0.0f64; 3];
         for (b, gb) in g.iter().enumerate() {

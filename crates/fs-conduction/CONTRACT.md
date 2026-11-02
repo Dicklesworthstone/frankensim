@@ -876,6 +876,19 @@ linear in `T` the element integral `V·k(T̄_e)` equals `∫_e k(T_h) dV` exactl
 for a curved `k(T)` it is the midpoint rule, second-order in the element
 diameter.
 
+Material validity is checked over the whole P₁ field, independently of this
+quadrature choice: every tetrahedron's four nodal temperatures must be finite
+and inside its assigned conductivity model's span. These are the extrema of a
+linear field on the tetrahedron. A valid element mean cannot authorize an
+unsupported hot or cold corner. Primal assembly, temperature/enthalpy
+Jacobians, and uniform/assigned heat-flux recovery use the same check. The
+orthotropic span is the intersection of its principal conductivity components;
+shared vertices must satisfy every incident material. Tests in
+`tests/heterogeneous.rs` exercise both source endpoints and unsupported nodal
+extrema whose means remain supported. Linear backward-Euler publication also
+checks the new field against the conductivity spans; assembling a bounded
+constant law at an admitted old temperature does not admit arbitrary heating.
+
 ## Public types and semantics
 
 | type | meaning |
@@ -986,9 +999,19 @@ Globalization (`Nonlinearity`):
   `(V/4) gᵀ_a K'(T̄_e) ∇T_h` term, which is NOT symmetric, so this path runs
   FGMRES.
 
-Both share the **admissibility guard**: a trial iterate whose element mean
-leaves the material's sampled temperature span has no merit value at all, so it
+Both share the **admissibility guard**: a trial iterate with any element vertex
+outside that material's sampled temperature span has no merit value at all, so it
 is rejected and the step shrunk. Extrapolating material data is never a fallback.
+
+`InitialGuess::DirichletMean` projects the prescribed-temperature mean into each
+free vertex's incident-material support. With no Dirichlet data it uses the
+midpoint of that support, or the existing zero initial guess for unbounded
+models. Per-element assignments completely replace the unused uniform fallback
+for initialization as well as assembly. Empty support intersections at shared
+vertices refuse by name. This is numerical initialization only: prescribed
+temperatures and converged values are never clipped. The all-Robin two-layer
+regression checks the resulting temperatures and heat flux against the exact
+slab-plus-film series solution for two different unused fallback models.
 
 Preconditioner: ILU(0) where the factorization exists, Jacobi where it breaks
 down. The choice is a pure function of the matrix, so a replay picks the same one.

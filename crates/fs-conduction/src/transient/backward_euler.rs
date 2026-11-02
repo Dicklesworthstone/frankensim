@@ -334,7 +334,7 @@ impl<'m> BackwardEuler<'m> {
         dofs: &DofMap, system: &AssembledSystem, temperature: Vec<f64>,
         relative_residual: f64, krylov_iterations: usize) -> Result<StepSolution, ConductionError>
     {
-        self.validate_capacity_temperature(cx, &temperature)?;
+        super::validate_material_temperature(cx, problem, self, &temperature)?;
         // Account using the rounded temperature field that the caller actually
         // receives, not an unpublished high-accuracy correction vector.
         let delta: Vec<f64> = temperature.iter().zip(old).map(|(a,b)| a-b).collect();
