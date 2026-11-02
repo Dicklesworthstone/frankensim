@@ -42,8 +42,9 @@ pub use coherence::{
 
 mod exposure;
 pub use exposure::{
-    AngularSpectrumExposure, AngularSpectrumExposureField, AngularSpectrumExposureLimits,
-    AngularSpectrumExposurePoint,
+    AngularSpectrumExposure, AngularSpectrumExposureEnsemble,
+    AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureField,
+    AngularSpectrumExposureLimits, AngularSpectrumExposurePoint,
 };
 
 /// Bounds the uninterruptible work of one existing FFT pencil.

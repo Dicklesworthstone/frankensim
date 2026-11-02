@@ -2,9 +2,10 @@
 use super::*;
 use fs_em::plane_wave::{
     angular_spectrum::{
-        AngularSpectrumError, AngularSpectrumExposure, AngularSpectrumExposureLimits,
-        AngularSpectrumGrid, AngularSpectrumLimits, AngularSpectrumSide as Side,
-        PlanarAngularSpectrum,
+        AngularSpectrumCoherence, AngularSpectrumCoherenceLimits, AngularSpectrumError,
+        AngularSpectrumExposure, AngularSpectrumExposureEnsemble,
+        AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureLimits, AngularSpectrumGrid,
+        AngularSpectrumLimits, AngularSpectrumSide as Side, PlanarAngularSpectrum,
     },
     layers::{DielectricLayer, PlanarDielectricLayers},
 };
@@ -24,6 +25,15 @@ fn limits() -> AngularSpectrumExposureLimits {
         maximum_point_line_pairs: 1024,
         maximum_point_frequency_pairs: 1024,
         maximum_workspace_bytes: 2 << 20,
+        maximum_fft_work: 1 << 20,
+    }
+}
+fn ensemble_limits() -> AngularSpectrumExposureEnsembleLimits {
+    AngularSpectrumExposureEnsembleLimits {
+        maximum_factors: 8,
+        maximum_point_line_pairs: 1024,
+        maximum_point_frequency_pairs: 1024,
+        maximum_workspace_bytes: 4 << 20,
         maximum_fft_work: 1 << 20,
     }
 }
@@ -49,6 +59,206 @@ fn constant<'s, 'm>(
     e: [C64; 2],
 ) -> PlanarAngularSpectrum<'s, 'm> {
     prepare(source, &[e; 4])
+}
+
+#[test]
+fn g1_proper_spectral_covariance_and_mean_match_authored_ensemble_through_a_film() {
+    let medium = material(E, M);
+    let film = finite_layers::debye(2.0 * E, E, 1.0, 1.0);
+    let films = [DielectricLayer {
+        response: DielectricResponse::Debye(&film),
+        thickness_m: 0.4,
+    }];
+    let stacks = [1.0e9, 1.17e9].map(|omega| {
+        PlanarDielectricLayers::try_new(
+            &medium,
+            DielectricResponse::Lossless(&medium),
+            omega,
+            &films,
+        )
+        .unwrap()
+    });
+    let samples: Vec<_> = (0..4)
+        .map(|x| {
+            let phase = -(x as f64) * core::f64::consts::FRAC_PI_2;
+            let p = C64::new(phase.cos(), phase.sin());
+            [C64::new(0.3, -0.2) * p, C64::new(0.7, 0.1) * p]
+        })
+        .collect();
+    let mean_lines = [constant(&stacks[0], [C64::new(0.4, -0.1), C64::ZERO])];
+    let first_lines = [
+        constant(&stacks[0], [C64::new(0.8, 0.2), C64::new(0.1, -0.6)]),
+        prepare(&stacks[1], &samples),
+    ];
+    let second_lines = [constant(
+        &stacks[1],
+        [C64::new(-0.2, 0.3), C64::new(0.4, 0.1)],
+    )];
+    let mean =
+        AngularSpectrumExposure::try_new(&mean_lines[0], &mean_lines, limits(), || false).unwrap();
+    let factors = [
+        AngularSpectrumExposure::try_new(&first_lines[0], &first_lines, limits(), || false)
+            .unwrap(),
+        AngularSpectrumExposure::try_new(&second_lines[0], &second_lines, limits(), || false)
+            .unwrap(),
+    ];
+    let bank = AngularSpectrumExposureEnsemble::try_new(
+        &mean_lines[0],
+        Some(&mean),
+        &factors,
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(bank.factor_count(), 2);
+    assert_eq!(bank.line_count(), 4);
+    let (start, duration, distance) = (2e-9, 4e-9, 0.23);
+    let result = bank
+        .field(
+            Side::Transmitted,
+            distance,
+            HarmonicWindow::new(start, duration).unwrap(),
+            || false,
+        )
+        .unwrap();
+    let lines = [
+        &mean_lines[0],
+        &first_lines[0],
+        &first_lines[1],
+        &second_lines[0],
+    ];
+    let fields = lines
+        .iter()
+        .map(|line| line.field(Side::Transmitted, distance, || false).unwrap())
+        .collect::<Vec<_>>();
+    let phases = [C64::ONE, -C64::ONE, C64::new(0.0, 1.0), C64::new(0.0, -1.0)];
+    let steps = 2048;
+    for (point, observed) in result.points().iter().enumerate() {
+        let mut expected = [0.0; 9];
+        // Enumerate two independent, explicitly authored proper four-state
+        // amplitudes and integrate their REAL fields plus the coherent mean.
+        // No production temporal kernel or covariance contraction is reused.
+        for z in phases {
+            for w in phases {
+                for step in 0..=steps {
+                    let time = start + duration * step as f64 / steps as f64;
+                    let mut real = [0.0; 6];
+                    for ((line, field), coefficient) in
+                        lines.iter().zip(&fields).zip([C64::ONE, z, z, w])
+                    {
+                        let (sin, cos) = (line.source().angular_frequency_rad_s() * time).sin_cos();
+                        for (component, amplitude) in field.electric_v_per_m()[point]
+                            .iter()
+                            .chain(&field.magnetic_a_per_m()[point])
+                            .enumerate()
+                        {
+                            let amplitude = *amplitude * coefficient;
+                            real[component] += amplitude.re * cos - amplitude.im * sin;
+                        }
+                    }
+                    let weight = if step == 0 || step == steps {
+                        1.0
+                    } else if step % 2 == 0 {
+                        2.0
+                    } else {
+                        4.0
+                    };
+                    for c in 0..3 {
+                        expected[c] += weight * real[c] * real[c];
+                        expected[c + 3] += weight * real[c + 3] * real[c + 3];
+                        let (a, b) = ((c + 1) % 3, (c + 2) % 3);
+                        expected[c + 6] += weight * (real[a] * real[b + 3] - real[b] * real[a + 3]);
+                    }
+                }
+            }
+        }
+        for (actual, expected) in observed
+            .electric_mean_squared_v2_m2
+            .iter()
+            .chain(&observed.magnetic_mean_squared_a2_m2)
+            .chain(&observed.poynting_w_m2)
+            .zip(expected.map(|x| x / (48.0 * steps as f64)))
+        {
+            near(*actual, expected, 3e-10 * expected.abs().max(1e-14));
+        }
+    }
+}
+
+#[test]
+fn g3_proper_monochromatic_exposure_matches_existing_spatial_coherence() {
+    let medium = material(E, M);
+    let film = finite_layers::debye(2.0 * E, E, 1.0, 1.0);
+    let stack = PlanarDielectricLayers::try_new(
+        &medium,
+        DielectricResponse::Lossless(&medium),
+        1e9,
+        &[DielectricLayer {
+            response: DielectricResponse::Debye(&film),
+            thickness_m: 0.3,
+        }],
+    )
+    .unwrap();
+    let lines = [
+        constant(&stack, [C64::new(0.7, -0.2), C64::new(0.1, 0.5)]),
+        constant(&stack, [C64::new(-0.3, 0.4), C64::new(0.6, -0.1)]),
+    ];
+    let spatial = AngularSpectrumCoherence::try_new(
+        &lines[0],
+        &lines,
+        AngularSpectrumCoherenceLimits {
+            maximum_modes: 8,
+            maximum_point_mode_pairs: 1024,
+            maximum_workspace_bytes: 2 << 20,
+            maximum_fft_work: 1 << 20,
+        },
+        || false,
+    )
+    .unwrap();
+    let factors = lines
+        .iter()
+        .map(|line| {
+            AngularSpectrumExposure::try_new(line, std::slice::from_ref(line), limits(), || false)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let ensemble = AngularSpectrumExposureEnsemble::try_new(
+        &lines[0],
+        None,
+        &factors,
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap();
+    for side in [Side::Incident, Side::Reflected, Side::Transmitted] {
+        let reference = spatial.field(side, 0.23, || false).unwrap();
+        for window in [
+            HarmonicWindow::new(0.0, 1e-19).unwrap(),
+            HarmonicWindow::new(2.0e-9, 1.0e-9).unwrap(),
+        ] {
+            let observed = ensemble.field(side, 0.23, window, || false).unwrap();
+            for (actual, expected) in observed.points().iter().zip(reference.points()) {
+                for c in 0..3 {
+                    for (a, b) in [
+                        (
+                            actual.electric_mean_squared_v2_m2[c],
+                            expected.electric_coherency_v2_m2[c][c].re,
+                        ),
+                        (
+                            actual.magnetic_mean_squared_a2_m2[c],
+                            expected.magnetic_rms_squared_a2_m2[c],
+                        ),
+                        (
+                            actual.poynting_w_m2[c],
+                            expected.complex_poynting_w_m2[c].re,
+                        ),
+                    ] {
+                        near(a, b, 2e-13 * b.abs().max(1e-18));
+                    }
+                }
+            }
+            near(observed.normal_power_w(), reference.normal_power_w(), 1e-13);
+        }
+    }
 }
 
 #[test]
@@ -144,6 +354,225 @@ fn g1_dispersive_vector_interference_matches_independent_real_time_quadrature() 
         * grid().spacing_m[0]
         * grid().spacing_m[1];
     near(result.normal_power_w(), expected_power, 1e-14);
+}
+
+#[test]
+fn g1_partial_spectral_coherence_controls_beats_without_inventing_carrier_phase() {
+    let medium = material(1.0, 1.0);
+    let stacks = [10.0, 11.0].map(|omega| {
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), omega, &[])
+            .unwrap()
+    });
+    let mean_lines = [constant(&stacks[0], [C64::ONE, C64::ZERO])];
+    let mean =
+        AngularSpectrumExposure::try_new(&mean_lines[0], &mean_lines, limits(), || false).unwrap();
+    for rho in [0.0, 0.6, 1.0] {
+        let first = [
+            constant(&stacks[0], [C64::ONE, C64::ZERO]),
+            constant(&stacks[1], [C64::new(0.6 * rho, 0.8 * rho), C64::ZERO]),
+        ];
+        let second = [constant(
+            &stacks[1],
+            [C64::from_re(fs_math::det::sqrt(1.0 - rho * rho)), C64::ZERO],
+        )];
+        let factors = [
+            AngularSpectrumExposure::try_new(&first[0], &first, limits(), || false).unwrap(),
+            AngularSpectrumExposure::try_new(&second[0], &second, limits(), || false).unwrap(),
+        ];
+        let ensemble = AngularSpectrumExposureEnsemble::try_new(
+            &mean_lines[0],
+            None,
+            &factors,
+            ensemble_limits(),
+            || false,
+        )
+        .unwrap();
+        let illuminated = AngularSpectrumExposureEnsemble::try_new(
+            &mean_lines[0],
+            Some(&mean),
+            &factors,
+            ensemble_limits(),
+            || false,
+        )
+        .unwrap();
+        let duration = 1e-10;
+        for start in [0.0, core::f64::consts::FRAC_PI_2] {
+            let window = HarmonicWindow::new(start, duration).unwrap();
+            let short = ensemble
+                .field(Side::Transmitted, 0.0, window, || false)
+                .unwrap();
+            // Beat angular frequency is 1 rad/s. The second factor keeps the
+            // diagonal source powers fixed while rho controls their coherence.
+            let midpoint = start + duration * 0.5;
+            let sinc = (0.5 * duration).sin() / (0.5 * duration);
+            let expected = 1.0 + rho * (0.6 * midpoint.cos() - 0.8 * midpoint.sin()) * sinc;
+            near(short.points()[0].poynting_w_m2[2], expected, 2e-14);
+            let total = illuminated
+                .field(Side::Transmitted, 0.0, window, || false)
+                .unwrap();
+            let coherent = mean
+                .field(Side::Transmitted, 0.0, window, || false)
+                .unwrap();
+            near(
+                total.points()[0].poynting_w_m2[2],
+                expected + coherent.points()[0].poynting_w_m2[2],
+                3e-14,
+            );
+        }
+        let long = ensemble
+            .field(
+                Side::Transmitted,
+                0.0,
+                HarmonicWindow::new(0.0, core::f64::consts::TAU).unwrap(),
+                || false,
+            )
+            .unwrap();
+        near(long.points()[0].poynting_w_m2[2], 1.0, 2e-14);
+    }
+}
+
+#[test]
+fn g4_ensemble_budgets_identity_cancellation_and_empty_factors_are_explicit() {
+    let medium = material(1.0, 1.0);
+    let stack =
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), 2.0, &[])
+            .unwrap();
+    let lines = [constant(&stack, [C64::ONE, C64::ZERO])];
+    let factors =
+        [AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap()];
+    let admitted = AngularSpectrumExposureEnsemble::try_new(
+        &lines[0],
+        Some(&factors[0]),
+        &factors,
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(admitted.point_line_pairs(), 8);
+    assert_eq!(admitted.point_frequency_pairs(), 8);
+    assert_eq!(admitted.field_fft_work(), 2 * factors[0].field_fft_work());
+    for cap in [
+        AngularSpectrumExposureEnsembleLimits {
+            maximum_factors: 0,
+            ..ensemble_limits()
+        },
+        AngularSpectrumExposureEnsembleLimits {
+            maximum_point_line_pairs: admitted.point_line_pairs() - 1,
+            ..ensemble_limits()
+        },
+        AngularSpectrumExposureEnsembleLimits {
+            maximum_point_frequency_pairs: admitted.point_frequency_pairs() - 1,
+            ..ensemble_limits()
+        },
+        AngularSpectrumExposureEnsembleLimits {
+            maximum_workspace_bytes: admitted.workspace_bytes() - 1,
+            ..ensemble_limits()
+        },
+        AngularSpectrumExposureEnsembleLimits {
+            maximum_fft_work: admitted.field_fft_work() - 1,
+            ..ensemble_limits()
+        },
+    ] {
+        assert!(
+            AngularSpectrumExposureEnsemble::try_new(
+                &lines[0],
+                Some(&factors[0]),
+                &factors,
+                cap,
+                || false,
+            )
+            .is_err()
+        );
+    }
+    let exact = AngularSpectrumExposureEnsembleLimits {
+        maximum_factors: 1,
+        maximum_point_line_pairs: admitted.point_line_pairs(),
+        maximum_point_frequency_pairs: admitted.point_frequency_pairs(),
+        maximum_workspace_bytes: admitted.workspace_bytes(),
+        maximum_fft_work: admitted.field_fft_work(),
+    };
+    assert!(
+        AngularSpectrumExposureEnsemble::try_new(
+            &lines[0],
+            Some(&factors[0]),
+            &factors,
+            exact,
+            || false,
+        )
+        .is_ok()
+    );
+    let replacement = material(1.0, 1.0);
+    let other = PlanarDielectricLayers::try_new(
+        &replacement,
+        DielectricResponse::Lossless(&replacement),
+        2.0,
+        &[],
+    )
+    .unwrap();
+    let changed = [constant(&other, [C64::ONE, C64::ZERO])];
+    let changed_banks =
+        [AngularSpectrumExposure::try_new(&changed[0], &changed, limits(), || false).unwrap()];
+    assert!(
+        AngularSpectrumExposureEnsemble::try_new(
+            &lines[0],
+            None,
+            &changed_banks,
+            ensemble_limits(),
+            || false,
+        )
+        .is_err()
+    );
+    assert!(
+        AngularSpectrumExposureEnsemble::try_new(
+            &lines[0],
+            Some(&changed_banks[0]),
+            &factors,
+            ensemble_limits(),
+            || false,
+        )
+        .is_err()
+    );
+    let window = HarmonicWindow::new(0.13, 0.71).unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        admitted.field(Side::Transmitted, 0.0, window, || {
+            polls += 1;
+            polls > 5
+        }),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+    let retry = admitted
+        .field(Side::Transmitted, 0.0, window, || false)
+        .unwrap();
+    let replay = admitted
+        .field(Side::Transmitted, 0.0, window, || false)
+        .unwrap();
+    assert_eq!(retry.points(), replay.points());
+    let mean_only = AngularSpectrumExposureEnsemble::try_new(
+        &lines[0],
+        Some(&factors[0]),
+        &[],
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap()
+    .field(Side::Transmitted, 0.0, window, || false)
+    .unwrap();
+    let original = factors[0]
+        .field(Side::Transmitted, 0.0, window, || false)
+        .unwrap();
+    assert_eq!(mean_only.points(), original.points());
+    let dark =
+        AngularSpectrumExposureEnsemble::try_new(&lines[0], None, &[], ensemble_limits(), || false)
+            .unwrap()
+            .field(Side::Transmitted, 0.0, window, || false)
+            .unwrap();
+    assert_eq!(dark.normal_power_w(), 0.0);
+    assert!(
+        dark.points()
+            .iter()
+            .all(|p| p.electric_mean_squared_v2_m2 == [0.0; 3])
+    );
 }
 
 #[test]

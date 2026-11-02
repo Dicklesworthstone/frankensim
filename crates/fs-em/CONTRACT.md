@@ -2245,6 +2245,53 @@ subcycle shutters, polarization, signed reflection, exact cancellation and
 small residuals among large equal-frequency fields. G4 checks source identity,
 budget boundaries, cancellation and replay.
 
+### Finite exposures of proper complex spectral covariance
+
+`angular_spectrum::AngularSpectrumExposureEnsemble` composes the existing
+frequency-resolved exposure banks into an explicitly authored partially
+coherent source. One bank is one covariance factor across its frequencies,
+with square-root statistical weights included in its field amplitudes. For
+factor coefficients `z_r`, the source declares `E[z_r]=0`,
+`E[z_r z_s*]=delta_rs` and `E[z_r z_s]=0`. Its covariance is therefore
+`W(omega,x;omega',x') = sum_r B_r(omega,x) B_r(omega',x')*`, positive
+semidefinite without an inferred eigenbasis or sampled random phases. Factors
+need not be orthogonal. Properness alone asserts neither Gaussianity nor
+stationarity; nonzero cross-frequency covariance can retain time-dependent
+beats in the ensemble averages.
+
+The shared proper-product temporal kernel evaluates one half of the real
+cross-frequency covariance integrated over the actual rectangular shutter.
+Sum-frequency covariance terms vanish because the authored pseudocovariance
+is zero, even for subcycle shutters. Each factor retains the existing
+compensated equal-frequency field sums, original frequency-specific material
+and film operators, complete vector Maxwell reconstruction and signed flux.
+An optional deterministic mean bank uses the original sum-and-difference
+kernel; its second moments add without a mean/fluctuation cross term.
+All banks retain the same original material owners, geometry and grid.
+
+Preparation visits R prepared factor banks without copying their sources or
+frequency groups. Queries stream one bank at a time and retain DD arithmetic
+through pair contraction and ensemble accumulation. For N spatial samples,
+L_r authored lines and F_r distinct frequencies per bank, work is
+`O(N + R + sum_r(L_r*N + F_r*N*log N + F_r²*N))`, including the optional
+mean as another bank. Additional query storage is
+`O(N*max_r F_r + max_r F_r² + N)`; complete borrowed owners are not summed
+into that bound. Public limits cap factor count, aggregate line/pair/FFT work
+and conservative peak logical numerical storage before a query. Empty factors
+and no mean are darkness. Cancellation publishes no partial result.
+
+Results are the existing real mean-square E/H and signed mean Poynting
+observables on exterior planes, including integrated normal watts. They are
+ensemble moments, not an individual noisy detector realization, a PSD, an
+inferred coherence length or transient dispersive heating. Nonzero
+pseudocovariance requires a different explicitly authored source model and is
+not silently discarded. Focused regressions cover direct four-state ensemble
+and real-time quadrature through a Debye film, monochromatic agreement with
+the existing spatial coherence owner, partial beat visibility, optional mean
+illumination, unitary factor invariance, weak residuals near a distinct-frequency
+null, source identity, budget boundaries, cancellation and replay. Extended
+precision accumulation does not certify arbitrary relative accuracy near nulls.
+
 ### Two-sided coherent illumination and layer heating
 
 `PlanarDielectricLayers::prepare_illumination` retains the same source-bound

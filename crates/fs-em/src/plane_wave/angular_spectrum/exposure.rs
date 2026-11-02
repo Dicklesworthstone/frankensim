@@ -14,8 +14,11 @@
 //! inferred. Each frequency uses its original material/film/diffraction solve.
 
 use super::*;
-use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow};
+use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, ProperHarmonicProduct};
 use fs_math::dd::Dd;
+
+mod ensemble;
+pub use ensemble::{AngularSpectrumExposureEnsemble, AngularSpectrumExposureEnsembleLimits};
 
 /// Whole-line-bank bounds for a query. Pair work counts N*F² for N spatial
 /// points and F distinct frequencies. Logical numerical storage includes one
@@ -383,6 +386,20 @@ fn integrate_point(
     field_at: impl Fn(usize) -> [C64; 6],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<[f64; 9], MomentError> {
+    integrate_point_dd(frequencies, kernels, field_at, product, cancelled)
+        .map(|sum| sum.map(Dd::to_f64))
+}
+
+// Both deterministic means and proper covariance factors use exactly the
+// same vector contraction. Keep the pair products and their sum in extended
+// precision through the complete exposure/ensemble accumulation.
+fn integrate_point_dd<P: Copy>(
+    frequencies: usize,
+    kernels: &[P],
+    field_at: impl Fn(usize) -> [C64; 6],
+    product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[Dd; 9], MomentError> {
     let mut sum = [Dd::ZERO; 9];
     for i in 0..frequencies {
         let a = field_at(i);
@@ -405,7 +422,7 @@ fn integrate_point(
     if values.iter().any(|x| !x.is_finite()) || values[..6].iter().any(|x| *x < 0.0) {
         return Err(MomentError::Unrepresentable);
     }
-    Ok(values)
+    Ok(sum)
 }
 
 fn add(sum: &mut Dd, value: f64) {
@@ -413,6 +430,14 @@ fn add(sum: &mut Dd, value: f64) {
 }
 fn product(kernel: HarmonicProduct, a: C64, b: C64) -> Result<Dd, MomentError> {
     // The shared window uses exp(-i omega t); EM uses exp(+i omega t).
+    kernel
+        .mean_real_product_dd(a.conj(), b.conj())
+        .map_err(MomentError::Product)
+}
+
+fn proper_product(kernel: ProperHarmonicProduct, a: C64, b: C64) -> Result<Dd, MomentError> {
+    // Proper covariance removes sum-frequency terms by its authored zero
+    // pseudocovariance, not by an optical-cycle or long-window approximation.
     kernel
         .mean_real_product_dd(a.conj(), b.conj())
         .map_err(MomentError::Product)
@@ -445,6 +470,146 @@ mod tests {
             })
             .collect::<Vec<_>>();
         integrate_point(frequencies.len(), &kernels, |i| waves[i], &mut || false).unwrap()
+    }
+
+    fn evaluate_proper(
+        waves: &[[C64; 6]],
+        frequencies: &[f64],
+        start: f64,
+        duration: f64,
+    ) -> [Dd; 9] {
+        let window = HarmonicWindow::new(start, duration).unwrap();
+        let kernels = frequencies
+            .iter()
+            .flat_map(|&a| {
+                frequencies
+                    .iter()
+                    .map(move |&b| window.proper_product_kernel(a, b).unwrap())
+            })
+            .collect::<Vec<_>>();
+        integrate_point_dd(
+            frequencies.len(),
+            &kernels,
+            |i| waves[i],
+            proper_product,
+            &mut || false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn g1_proper_vector_covariance_matches_authored_phase_ensemble_quadrature() {
+        let frequencies = [4.0, 5.3];
+        let waves = [
+            wave(4.0, false, [C64::new(0.7, -0.3), C64::new(0.2, 0.5)]),
+            wave(5.3, true, [C64::new(-0.4, 0.2), C64::new(0.1, -0.6)]),
+        ];
+        let (start, duration) = (0.17, 0.83);
+        let actual = evaluate_proper(&waves, &frequencies, start, duration).map(Dd::to_f64);
+        let mut expected = [0.0; 9];
+        let n = 4096;
+        // This explicitly authored four-state distribution has E[z]=E[z²]=0
+        // and E[|z|²]=1. It is an independent second-moment oracle, not sampled
+        // noise or an assumption about the production source distribution.
+        for z in [C64::ONE, -C64::ONE, C64::new(0.0, 1.0), C64::new(0.0, -1.0)] {
+            for k in 0..=n {
+                let t = start + duration * k as f64 / n as f64;
+                let mut real = [0.0; 6];
+                for (wave, omega) in waves.iter().zip(frequencies) {
+                    let (s, c) = (omega * t).sin_cos();
+                    for j in 0..6 {
+                        let a = wave[j] * z;
+                        real[j] += a.re * c - a.im * s;
+                    }
+                }
+                let weight = if k == 0 || k == n {
+                    1.0
+                } else if k % 2 == 0 {
+                    2.0
+                } else {
+                    4.0
+                };
+                for j in 0..3 {
+                    expected[j] += weight * real[j] * real[j];
+                    expected[j + 3] += weight * real[j + 3] * real[j + 3];
+                    let (u, v) = ((j + 1) % 3, (j + 2) % 3);
+                    expected[j + 6] += weight * (real[u] * real[v + 3] - real[v] * real[u + 3]);
+                }
+            }
+        }
+        for (actual, expected) in actual
+            .into_iter()
+            .zip(expected.map(|v| v / (12.0 * n as f64)))
+        {
+            assert!((actual - expected).abs() < 4e-13, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn g1_proper_near_null_covariance_keeps_tiny_distinct_frequency_beats() {
+        let frequencies = [10.0, 10.000000001];
+        let waves = [
+            wave(frequencies[0], false, [C64::from_re(1e6), C64::ZERO]),
+            wave(frequencies[1], false, [C64::from_re(-1e6), C64::ZERO]),
+        ];
+        let actual = evaluate_proper(&waves, &frequencies, 0.3, 0.7)[0].to_f64();
+        let mut expected = 0.0;
+        let n = 1024;
+        for k in 0..=n {
+            let t = 0.3 + 0.7 * k as f64 / n as f64;
+            // 1/2 |A exp(i wa t)-A exp(i wb t)|², evaluated without
+            // subtracting near-identical powers or cosines.
+            let sine = (0.5 * (frequencies[1] - frequencies[0]) * t).sin();
+            let weight = if k == 0 || k == n {
+                1.0
+            } else if k % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            expected += weight * 2e12 * sine * sine;
+        }
+        expected /= 3.0 * n as f64;
+        assert!(actual > 0.0);
+        assert!(
+            (actual / expected - 1.0).abs() < 2e-12,
+            "{actual} != {expected}"
+        );
+    }
+
+    #[test]
+    fn g1_proper_covariance_is_invariant_to_unitary_factor_mixing() {
+        let frequencies = [3.0, 5.0];
+        let a = [
+            wave(3.0, false, [C64::new(0.8, 0.3), C64::new(-0.2, 0.5)]),
+            wave(5.0, true, [C64::new(-0.3, 0.1), C64::new(0.4, -0.7)]),
+        ];
+        let b = [
+            wave(3.0, true, [C64::new(0.2, -0.1), C64::new(0.5, 0.3)]),
+            wave(5.0, false, [C64::new(0.7, 0.6), C64::new(-0.1, 0.2)]),
+        ];
+        let i = C64::new(0.0, 1.0);
+        let mixed_a: [[C64; 6]; 2] = std::array::from_fn(|r| {
+            std::array::from_fn(|c| (a[r][c] + i * b[r][c]).scale(core::f64::consts::FRAC_1_SQRT_2))
+        });
+        let mixed_b: [[C64; 6]; 2] = std::array::from_fn(|r| {
+            std::array::from_fn(|c| (i * a[r][c] + b[r][c]).scale(core::f64::consts::FRAC_1_SQRT_2))
+        });
+        let original_a = evaluate_proper(&a, &frequencies, 0.13, 0.71);
+        let original_b = evaluate_proper(&b, &frequencies, 0.13, 0.71);
+        let mixed_a = evaluate_proper(&mixed_a, &frequencies, 0.13, 0.71);
+        let mixed_b = evaluate_proper(&mixed_b, &frequencies, 0.13, 0.71);
+        for c in 0..9 {
+            let original = (original_a[c] + original_b[c]).to_f64();
+            let mixed = (mixed_a[c] + mixed_b[c]).to_f64();
+            assert!((original - mixed).abs() < 5e-15, "{original} != {mixed}");
+        }
+        // A proper monochromatic factor has no carrier-phase dependence,
+        // even when the shutter duration is far below one cycle.
+        let sine = wave(10.0, true, [C64::new(0.0, 1.0), C64::ZERO]);
+        let short = evaluate_proper(&[sine], &[10.0], 0.0, 1e-10).map(Dd::to_f64);
+        assert_eq!(short[0], 0.5);
+        assert_eq!(short[8], -0.5);
     }
 
     #[test]
