@@ -139,15 +139,44 @@ impl ReservoirLayerGeometry {
         if !positive(high) {
             return Err(DepositionError::Arithmetic);
         }
+        // Evaluate the residual across the larger series resistance. When the
+        // film dominates, reconstructing Q from the rounded absolute face
+        // temperature amplifies its ulp by C*k (large for a thin metal wall).
+        // Invert the SAME material integral instead and measure the film flux
+        // mismatch. Both residuals increase with Q with derivative >= 1, so
+        // their absolute value bounds the remaining flux error in watts.
+        let invert_material = film_resistance_k_w >= delta.abs() / signed_wall_power.abs();
         let mut power = 0.5 * high;
         for iteration in 0..config.max_iterations {
             checkpoint()?;
-            let face = bulk - sign * (film_resistance_k_w * power);
-            let kface = curve.conductivity_w_m_k(face)?;
-            let wall_power = sign * self.multiplier_m * curve.integral_w_m(reservoir, face)?;
-            let residual = power - wall_power;
+            let (face, kface, other_power, inverse_derivative) = if invert_material {
+                let face = curve.temperature_after_integral_w_m(
+                    reservoir,
+                    sign * (power / self.multiplier_m),
+                )?;
+                let kface = curve.conductivity_w_m_k(face)?;
+                let film_power = sign * (bulk - face) / film_resistance_k_w;
+                let material_resistance = (1.0 / kface) / self.multiplier_m;
+                (
+                    face,
+                    kface,
+                    film_power,
+                    1.0 / (1.0 + material_resistance / film_resistance_k_w),
+                )
+            } else {
+                let face = bulk - sign * (film_resistance_k_w * power);
+                let kface = curve.conductivity_w_m_k(face)?;
+                let wall_power = sign * self.multiplier_m * curve.integral_w_m(reservoir, face)?;
+                (
+                    face,
+                    kface,
+                    wall_power,
+                    1.0 / (1.0 + film_resistance_k_w * self.multiplier_m * kface),
+                )
+            };
+            let residual = power - other_power;
             let tolerance = config.absolute_heat_tolerance_w
-                + config.relative_heat_tolerance * power.abs().max(wall_power.abs());
+                + config.relative_heat_tolerance * power.abs().max(other_power.abs());
             if !residual.is_finite() || !tolerance.is_finite() {
                 return Err(DepositionError::Arithmetic);
             }
@@ -174,7 +203,6 @@ impl ReservoirLayerGeometry {
                 low = power;
             }
             // A safeguarded Newton step; extreme series stiffness falls back to bisection.
-            let inverse_derivative = 1.0 / (1.0 + film_resistance_k_w * self.multiplier_m * kface);
             let newton = power - residual * inverse_derivative;
             let next = if newton.is_finite() && low < newton && newton < high {
                 newton
@@ -213,7 +241,9 @@ pub struct ReservoirLayerResponse {
     pub endpoint_derivative_w_k: [f64; 2],
     /// Material temperature after the gas/contact film [K].
     pub material_face_temperature_k: f64,
-    /// Difference between film and exact integrated material power [W].
+    /// Signed residual of the selected monotone flux equation [W]. Its absolute
+    /// value bounds the flux error; either the film or the original material
+    /// integral supplies the inverse law to avoid a stiff temperature residual.
     pub heat_residual_w: f64,
     /// Root iterations; zero for the perfect-contact or equilibrium limit.
     pub iterations: usize,
@@ -329,6 +359,66 @@ mod tests {
                     2e-7,
                 );
             }
+        }
+    }
+
+    #[test]
+    fn film_dominated_metal_wall_retains_small_heat_fluxes_near_equilibrium() {
+        let conductivity = ConductivityCurve::new(vec![[200.0, 200.0], [1000.0, 200.0]]).unwrap();
+        let geometry = ReservoirLayerGeometry::planar(0.1, 0.0001).unwrap();
+        let film = 20.0;
+        let expected_g = 1.0 / (film + 1.0 / (geometry.multiplier_m * 200.0));
+        let controls = LayerConductionConfig {
+            absolute_heat_tolerance_w: 1e-12,
+            ..config()
+        };
+        for bulk in [300.003, 299.997, 320.0] {
+            let response = geometry
+                .evaluate(&conductivity, [bulk, 300.0], film, controls, || Ok(()))
+                .unwrap();
+            close(
+                response.power_to_reservoir_w,
+                expected_g * (bulk - 300.0),
+                1e-12,
+            );
+            assert!(
+                response.heat_residual_w.abs()
+                    <= controls.absolute_heat_tolerance_w
+                        + controls.relative_heat_tolerance * response.power_to_reservoir_w.abs()
+            );
+        }
+    }
+
+    #[test]
+    fn aluminum_source_curve_matches_analytic_film_flux_without_temperature_quantization() {
+        // Original k(T) knots from aluminum-2024-t3-first-heating-km2024.
+        // The real gas-field example exposed stagnation from C*k*ulp(300 K).
+        let conductivity =
+            ConductivityCurve::new(vec![[298.15, 121.1], [323.15, 125.2], [373.15, 133.0]])
+                .unwrap();
+        let geometry = ReservoirLayerGeometry::cylindrical(0.0073, 0.0103, 0.285).unwrap();
+        let film = 0.01 / geometry.surface_area_m2();
+        let controls = LayerConductionConfig {
+            max_iterations: 96,
+            absolute_heat_tolerance_w: 1e-11,
+            relative_heat_tolerance: 1e-12,
+        };
+        let slope = (125.2 - 121.1) / (323.15 - 298.15);
+        let k_reservoir = 121.1 + slope * (300.0 - 298.15);
+        // Within the face's first affine source segment, u = T_face - 300
+        // satisfies a*u^2 + b*u - delta = 0. This is an independent closed form.
+        let a = 0.5 * film * geometry.multiplier_m * slope;
+        let b = 1.0 + film * geometry.multiplier_m * k_reservoir;
+        for bulk in [300.003, 302.97, 320.0, 340.0, 299.0] {
+            let delta = bulk - 300.0;
+            let offset = 2.0 * delta / (b + (b * b + 4.0 * a * delta).sqrt());
+            let expected_q = (delta - offset) / film;
+            let response = geometry
+                .evaluate(&conductivity, [bulk, 300.0], film, controls, || Ok(()))
+                .unwrap();
+            assert!((298.15..323.15).contains(&response.material_face_temperature_k));
+            close(response.power_to_reservoir_w, expected_q, 1e-11);
+            close(response.material_face_temperature_k, 300.0 + offset, 1e-11);
         }
     }
 
