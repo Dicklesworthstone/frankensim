@@ -27,6 +27,9 @@ use fs_math::det;
 #[path = "baffled_pressure_bandlimited.rs"]
 mod bandlimited;
 
+#[path = "baffled_pressure_directional.rs"]
+mod directional;
+
 #[path = "baffled_pressure_path.rs"]
 mod path;
 
@@ -130,6 +133,10 @@ pub struct CircularOutletReceiver {
 /// cold; one output step has a bounded multiply-add count and no allocation.
 pub struct BaffledPressure {
     kernels: Vec<(usize, Vec<f64>)>,
+    /// First-order microphones retain the reactive particle-velocity term on
+    /// one additional, time-aligned bank of the SAME Rayleigh surface. This
+    /// child consumes velocity directly and never has another child.
+    directional_velocity: Option<Box<Self>>,
     /// Interleaved frames with exactly `modes` entries, not MAX_RAYLEIGH_INPUTS
     /// padding. Increasing the admitted bandwidth does not multiply memory
     /// for an existing one-mode or four-mode soundboard.
@@ -177,6 +184,7 @@ impl Clone for BaffledPressure {
     fn clone(&self) -> Self {
         let transposed=self.tap_history==self.history.as_ptr() as usize;
         let mut copy=Self { kernels:self.kernels.clone(),history:self.history.clone(),
+            directional_velocity:self.directional_velocity.clone(),
             history_frames:self.history_frames,taps:self.taps.clone(),
             packed_weights:self.packed_weights.clone(),tap_offsets:self.tap_offsets.clone(),tap_history:0,
             previous_velocity:self.previous_velocity.clone(),acceleration:self.acceleration.clone(),
@@ -368,6 +376,7 @@ impl BaffledPressure {
         let history_frames=last+1;
         let samples=history_frames.checked_mul(modes).ok_or("microphone history size overflow")?;
         let mut receiver = Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
+            directional_velocity:None,
             taps:Vec::new(),packed_weights:Vec::new(),tap_offsets:Vec::new(),tap_history:0,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
             decimator:antialias::Decimator::new(1,modes)?,differentiate_velocity:false,pressure_derivative:None,interpolation_delay:0,
@@ -399,6 +408,7 @@ impl BaffledPressure {
     pub fn multiply_adds_per_sample(&self)->usize {
         self.kernels.len()*self.modes + self.decimator.multiplies_per_output_frame()
             + self.pressure_derivative.as_ref().map_or(0, antialias::Decimator::multiplies_per_output_frame)
+            + self.directional_velocity.as_ref().map_or(0, |v|v.multiply_adds_per_sample())
     }
 
     /// Pressure contribution of each input mode at the most recently emitted
@@ -413,13 +423,15 @@ impl BaffledPressure {
             return Err("modal pressures need the per-input derivative; differentiate_pressure is on".into());
         }
         output.fill(0.0);
-        let emitted_head = if self.head == 0 {self.history_frames - 1} else {self.head - 1};
-        for (delay, weights) in &self.kernels {
-            let frame = if emitted_head >= *delay {emitted_head - *delay}
-                else {emitted_head + self.history_frames - *delay};
-            let offset = frame * self.modes;
-            for (i, weight) in weights.iter().enumerate() {
-                output[i] += weight * self.history[offset + i];
+        for receiver in std::iter::once(self).chain(self.directional_velocity.as_deref()) {
+            let emitted_head = if receiver.head == 0 {receiver.history_frames - 1} else {receiver.head - 1};
+            for (delay, weights) in &receiver.kernels {
+                let frame = if emitted_head >= *delay {emitted_head - *delay}
+                    else {emitted_head + receiver.history_frames - *delay};
+                let offset = frame * receiver.modes;
+                for (i, weight) in weights.iter().enumerate() {
+                    output[i] += weight * receiver.history[offset + i];
+                }
             }
         }
         Ok(())
@@ -478,10 +490,14 @@ impl BaffledPressure {
             }
         }
         if !pressure.is_finite() {return Err("radiated pressure overflow".into());}
-        let pressure=match &mut self.pressure_derivative {
+        let mut pressure=match &mut self.pressure_derivative {
             Some(derivative)=>derivative.preview(&[pressure])?[0],
             None=>pressure,
         };
+        if let Some(reactive)=&mut self.directional_velocity {
+            pressure+=reactive.preview_trace(velocity)?;
+        }
+        if !pressure.is_finite() {return Err("first-order microphone overflow".into());}
         Ok(pressure)
     }
 
@@ -502,6 +518,7 @@ impl BaffledPressure {
         self.decimator.commit();
         if let Some(derivative)=&mut self.pressure_derivative {derivative.commit();}
         self.head+=1;if self.head==self.history_frames{self.head=0;}
+        if let Some(reactive)=&mut self.directional_velocity {reactive.accept_trace(velocity);}
     }
 }
 
