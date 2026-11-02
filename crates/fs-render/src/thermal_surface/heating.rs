@@ -6,13 +6,19 @@
 //! absorption. Only absorption heats the explicitly assigned thermal cell.
 //! Outgoing light remains the responsibility of its original transport owner.
 //!
-//! Responses are fixed within caller-declared temperature domains. No optical
-//! temperature dependence, phase mixing, spatial deposition depth, multilayer
-//! heat partition, emission or cooling law is inferred. Native caloric storage,
+//! Responses are fixed or supplied by an explicit native-temperature/enthalpy
+//! conductor law. No phase mixing, spatial deposition depth, multilayer heat
+//! partition, emission or cooling law is inferred. Native caloric storage,
 //! conduction and independently composed boundary owners remain authoritative.
 
 mod response;
 pub use response::SurfacePowerResponse;
+
+/// Explicit conductor optical constants versus native temperature or enthalpy.
+pub mod feedback;
+mod state;
+use state::SurfaceFeedbackState;
+pub use state::{StatefulSurfaceIlluminationSource, SurfaceIncidence};
 
 use super::ThermalSurfaceError;
 use crate::conductor::ConductorError;
@@ -195,8 +201,10 @@ struct Pending<const N: usize> {
 #[derive(Clone, Debug)]
 pub struct SurfaceOpticalHeating<const N: usize> {
     model: Arc<Model<N>>,
+    feedback: Option<SurfaceFeedbackState<N>>,
     time_s: f64,
     evaluations: usize,
+    response_evaluations: usize,
     sums: Sums<N>,
     energy: SurfaceHeatingEnergy<N>,
     sources_w: Arc<BTreeMap<CellId, f64>>,
@@ -317,8 +325,10 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
                 budget,
                 tolerance,
             }),
+            feedback: None,
             time_s: thermal.time_s(),
             evaluations: 0,
+            response_evaluations: 0,
             energy: sums.value()?,
             sums,
             sources_w: Arc::new(BTreeMap::new()),
@@ -343,6 +353,11 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
     }
     pub fn source_evaluations(&self) -> usize {
         self.evaluations
+    }
+    /// Actual Fresnel packet rebuilds in this advance. Admission builds are
+    /// excluded; unchanged constitutive values and dark packets reuse storage.
+    pub fn response_evaluations(&self) -> usize {
+        self.response_evaluations
     }
     pub fn source_count(&self) -> usize {
         self.model.sources.len()
@@ -383,6 +398,9 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
                 });
             }
         }
+        if let Some(feedback) = &self.feedback {
+            feedback.validate(thermal, checkpoint)?;
+        }
         Ok(())
     }
 }
@@ -392,6 +410,7 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
 
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.evaluations = 0;
+        self.response_evaluations = 0;
         self.pending = None;
         Ok(())
     }
@@ -443,21 +462,34 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
             return Err(SurfaceHeatingError::Budget);
         }
         self.pending = None;
+        if let Some(feedback) = &mut self.feedback {
+            feedback.refresh(thermal, checkpoint)?;
+        }
         let mut sums = self.sums.clone();
         let mut receiving = BTreeMap::<CellId, CheckedSum>::new();
         let mut absorbed = CheckedSum::default();
         let mut residuals = [CheckedSum::default(); N];
-        for source in &self.model.sources {
+        for (index, source) in self.model.sources.iter().enumerate() {
             let mean = source
                 .power
                 .mean_power_w(start_s, duration_s, end_s, &mut *checkpoint)?;
+            let response = match &mut self.feedback {
+                Some(feedback) => feedback
+                    .response(
+                        index,
+                        mean.iter().any(|watts| *watts > 0.0),
+                        &mut self.response_evaluations,
+                        checkpoint,
+                    )?
+                    .unwrap_or(source.response),
+                None => source.response,
+            };
             for lane in 0..N {
                 let incident = mean[lane];
-                let reflected =
-                    physical_product(incident, source.response.reflected_fraction()[lane])?;
+                let reflected = physical_product(incident, response.reflected_fraction()[lane])?;
                 let transmitted =
-                    physical_product(incident, source.response.transmitted_fraction()[lane])?;
-                let heat = physical_product(incident, source.response.absorbed_fraction()[lane])?;
+                    physical_product(incident, response.transmitted_fraction()[lane])?;
+                let heat = physical_product(incident, response.absorbed_fraction()[lane])?;
                 let mut residual = CheckedSum::default();
                 for value in [incident, -reflected, -transmitted, -heat] {
                     residual.add(value)?;

@@ -30,6 +30,9 @@ mod pulsed;
 #[path = "optical_heating/surface.rs"]
 mod surface;
 
+#[path = "optical_heating/surface_feedback.rs"]
+mod surface_feedback;
+
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::volumes::VolumeGrid;

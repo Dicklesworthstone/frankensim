@@ -4608,3 +4608,53 @@ Fixed synthetic optical constants, prescribed incidence/intercepted power and
 aggregate coating/substrate heat are explicit assumptions; radiation and bulk
 absorption behind the clear interface are outside this example. Run with
 `cargo run -p fs-render --example surface_optical_heating --no-default-features --features optical-heating,material-state`.
+
+### Surface absorption follows native temperature and latent enthalpy
+
+`thermal_surface::heating::feedback::SurfaceConductorLaw` admits explicitly
+authored complex-index rows versus either native temperature [K] or specific
+enthalpy [J/kg]. Every row retains its original nine-knot spectrum and source.
+Rows must share one wavelength grid and exactly the same attached transparent,
+absorbing or periodic coating. Interpolation acts on substrate n/k before the
+original Fresnel/coherent-film solve; reflected and absorbed fractions are never
+interpolated. Exact endpoints/constants and an endpoint-near FMA preserve small
+positive indices without introducing another optical kernel.
+
+An enthalpy law names the exact original caloric identity and energy datum,
+requires native enthalpy storage and checks both h and T support. Negative
+enthalpies remain valid when the named datum permits them. Two states on one
+constant-temperature latent plateau may therefore have different optical
+constants and absorbed powers. No phase fraction, solid/liquid mixing rule or
+complete material-card query point is inferred. The separately declared law
+source and all row identities remain bound; representative endpoint spectra
+cannot become caller-asserted measured optics through this constructor.
+
+`SurfaceOpticalHeating::try_new_with_stateful` admits fixed and evolving sources
+into the original surface energy/source path. `SurfaceIncidence` retains the
+prescribed wavelength packet, incident medium, angle and s/p power fractions.
+The existing cell/material and source temperature domains remain active. The
+additional knot budget counts state rows across distinct immutable law identities,
+including shared laws only once; each row has the fixed nine spectral knots.
+
+Receiver/material/law bindings are deduplicated. Immutable laws and prepared
+optical packets share storage across candidate clones. Each source interval
+resolves n/k once per distinct binding; unchanged optical values keep their
+Fresnel packets. Changed packets rebuild only when nonzero illumination needs
+them. Dark intervals still check native material, caloric identity and T/h
+support, including at accepted endpoints and events. `response_evaluations`
+reports actual packet rebuilds during an advance; admission builds are excluded.
+
+The optical response is held at the accepted interval's START state. Native
+thermal storage, events, conduction and cooling remain authoritative, and all
+existing pending-history, energy reduction and rollback rules apply. Exact
+scheduled fluence does not remove this explicit constitutive time error. The
+feature has no fully endpoint-implicit optical claim and does not supply
+temperature-dependent film thickness, coating optics, roughness, geometry or a
+broadband thermal-emission law.
+
+G1/G3/G4 checks cover independent n/k-before-Fresnel response, convergence to a
+separated one-cell nonlinear ODE, actual latent-enthalpy feedback, retained
+coatings, constant-table bit parity and zero redundant Fresnel builds, shared-law
+budgets, canonical split continuation, and transactional dark-domain/caloric/
+cancellation refusals. The original caloric owner remains the sole phase and
+temperature model in every coupled test.
