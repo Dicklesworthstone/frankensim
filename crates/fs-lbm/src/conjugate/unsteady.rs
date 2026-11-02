@@ -33,16 +33,23 @@
 //! explicit `*_with_sgs` entries instead compute Smagorinsky/WALE from each
 //! iterate's full velocity gradient, for exploration only; they do not
 //! establish resolved turbulent spectra or thermal wall resolution. The
-//! energy coupling is first order in time and lags buoyancy by one step.
+//! Energy coupling is first order in time. The material endpoint entry closes
+//! buoyancy and transport on the returned temperature; ordinary marches retain
+//! the explicitly documented one-step source lag.
 //! Face fans are steady models and refuse here; use
 //! internal fans. The opt-in thermal_wall::march_conjugate_with_wall_heat
 //! entry uses this same march with freshly prepared equilibrium wall transport.
 
+use core::cell::Cell;
 use fs_exec::CancelGate;
 
-pub(in crate::conjugate) mod wall_heat;
+mod endpoint;
+pub(crate) use endpoint::MaterialEndpointCoupling;
+pub use endpoint::{MaterialEndpointConfig, MaterialEndpointMarch, MaterialEndpointStepReport};
+
 #[cfg(feature = "enthalpy-coupling")]
 mod material;
+pub(in crate::conjugate) mod wall_heat;
 #[cfg(feature = "enthalpy-coupling")]
 pub(super) use material::MaterialMomentum;
 
@@ -53,8 +60,10 @@ use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
 use super::simple::sgs::FvSgsConfig;
 use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
-use super::transient::{TransientRecord, energy_step_with_conductivity, heat_capacity,
-    junction_stored_energy_change_j, record_energy_step, scale_power, solve_step_with_fields};
+use super::transient::{
+    TransientRecord, energy_step_with_conductivity, heat_capacity, junction_stored_energy_change_j,
+    record_energy_step, scale_power, solve_step_with_fields,
+};
 use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
 #[cfg(feature = "enthalpy-coupling")]
@@ -72,10 +81,13 @@ pub(crate) struct MaterialViscousHeat {
 #[cfg(feature = "enthalpy-coupling")]
 impl MaterialViscousHeat {
     pub(crate) fn new(controls: ViscousHeatControls) -> Self {
-        Self { controls, audit: UnsteadyHeatingAudit::default(), records: Vec::new() }
+        Self {
+            controls,
+            audit: UnsteadyHeatingAudit::default(),
+            records: Vec::new(),
+        }
     }
 }
-
 
 /// Time-march controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -274,6 +286,19 @@ impl<'a> Marcher<'a> {
     /// Solve step `step` (1-based) with the inlets scaled by `inflow`,
     /// project, record, and accumulate.
     fn step(&mut self, step: usize, inflow: f64, gate: &CancelGate) -> Result<(), ChtError> {
+        let inner = self.solve_step(step, inflow, gate)?;
+        self.record_step(step, inner, gate)
+    }
+
+    /// Solve the current native time-discrete equations without advancing
+    /// their accepted history or recording a physical sample. Coupled trials
+    /// may reuse the current iterate while previous/older time levels stay fixed.
+    fn solve_step(
+        &mut self,
+        step: usize,
+        inflow: f64,
+        gate: &CancelGate,
+    ) -> Result<usize, ChtError> {
         finite("unsteady.inlet_schedule", inflow)?;
         self.solver.scale_inlets(inflow);
         let (inner, residuals) = converge_step(&mut self.solver, self.unsteady, step, gate)?;
@@ -281,9 +306,21 @@ impl<'a> Marcher<'a> {
         self.solver.update_sgs(gate)?;
         self.sweeps += inner;
         self.residuals = residuals;
+        Ok(inner)
+    }
+
+    fn record_step(
+        &mut self,
+        step: usize,
+        inner: usize,
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
         let mut kinetic = 0.0;
         let averaging = step >= self.unsteady.average_from_step;
         for c in 0..self.domain.cell_count() {
+            if c.is_multiple_of(256) {
+                poll(gate)?;
+            }
             if !self.domain.is_fluid(c) {
                 continue;
             }
@@ -314,8 +351,8 @@ impl<'a> Marcher<'a> {
         self.records.push(FlowStepRecord {
             time_s: step as f64 * self.unsteady.time_step_s,
             inner_iterations: inner,
-            mass_residual: residuals.0,
-            momentum_residual: residuals.1,
+            mass_residual: self.residuals.0,
+            momentum_residual: self.residuals.1,
             probe_velocity_m_s: self
                 .unsteady
                 .probe
@@ -526,6 +563,7 @@ pub fn march_conjugate_with_sgs(
 
 /// Reused per-voxel coefficient buffers; material sources remain in their
 /// adapter, while the native solver owns momentum, temperature and time.
+#[derive(Clone)]
 pub(crate) struct MaterialCoefficients {
     pub viscosity_pa_s: Vec<f64>,
     pub conductivity_w_m_k: Vec<[f64; 3]>,
@@ -550,6 +588,8 @@ pub(crate) struct MaterialHeatStep<'a> {
     energy: &'a EnergyConfig,
     solids_present: bool,
     radiation: Option<(&'a Radiators, &'a RadiationConfig)>,
+    /// Optional outer endpoint budget, shared by every caloric/radiative trial.
+    endpoint_energy_budget: Option<&'a Cell<usize>>,
     gate: &'a CancelGate,
 }
 
@@ -562,7 +602,10 @@ impl MaterialHeatStep<'_> {
     /// Append the independent junction rows to a material owner's cell rates.
     /// Constant capacities are final; C(T) entries are only reference rates.
     /// The shared endpoint owner refreshes their exact enthalpy secants.
-    pub(crate) fn append_junction_storage(&self, storage_w_k: &mut Vec<f64>) -> Result<(), ChtError> {
+    pub(crate) fn append_junction_storage(
+        &self,
+        storage_w_k: &mut Vec<f64>,
+    ) -> Result<(), ChtError> {
         let cells = self.domain.cell_count();
         if storage_w_k.len() != cells
             || self.reference_capacity_j_k.len() != cells + self.setup.compact_components.len()
@@ -573,11 +616,12 @@ impl MaterialHeatStep<'_> {
             });
         }
         for (j, part) in self.setup.compact_components.iter().enumerate() {
-            if j.is_multiple_of(256) { poll(self.gate)?; }
+            if j.is_multiple_of(256) {
+                poll(self.gate)?;
+            }
             let rate = self.reference_capacity_j_k[cells + j] / self.time_step_s;
-            let old = self.previous_temperature_k[
-                self.domain.index(part.lo[0], part.lo[1], part.lo[2])
-            ];
+            let old =
+                self.previous_temperature_k[self.domain.index(part.lo[0], part.lo[1], part.lo[2])];
             finite_positive("thermal.storage.junction_coefficient_w_k", rate)?;
             finite("thermal.storage.junction_rhs_w", rate * old)?;
             storage_w_k.push(rate);
@@ -585,10 +629,17 @@ impl MaterialHeatStep<'_> {
         Ok(())
     }
 
-    pub(crate) fn junction_stored_energy_change_j(&self, temperature: &[f64]) -> Result<f64, ChtError> {
+    pub(crate) fn junction_stored_energy_change_j(
+        &self,
+        temperature: &[f64],
+    ) -> Result<f64, ChtError> {
         junction_stored_energy_change_j(
-            self.domain, self.setup, self.reference_capacity_j_k,
-            self.previous_temperature_k, temperature, self.gate,
+            self.domain,
+            self.setup,
+            self.reference_capacity_j_k,
+            self.previous_temperature_k,
+            temperature,
+            self.gate,
         )
     }
 
@@ -618,7 +669,10 @@ impl MaterialHeatStep<'_> {
     /// A fixed-temperature row bypasses ordinary source assembly. Preserve
     /// its actual generated molecular heat as equal source/reservoir entries
     /// before the source-caloric owner's nonlinear closure test.
-    fn record_physical_heat(&self, mut record: TransientRecord) -> Result<TransientRecord, ChtError> {
+    fn record_physical_heat(
+        &self,
+        mut record: TransientRecord,
+    ) -> Result<TransientRecord, ChtError> {
         if self.physical_fixed_heat_j != 0.0 {
             record.source_j += self.physical_fixed_heat_j;
             record.boundary_outflow_j += self.physical_fixed_heat_j;
@@ -641,9 +695,34 @@ impl MaterialHeatStep<'_> {
         thermal: &ThermalSetup,
         remaining_solves: &mut usize,
     ) -> Result<(EnergySolution, f64, f64), ChtError> {
-        solve_step_with_fields(self.domain, self.fluid, self.solids, self.flow,
-            thermal, self.energy, storage_w_k, self.previous_temperature_k, self.time_step_s, self.radiation,
-            Some(conductivity_w_m_k), Some(enthalpy), Some(remaining_solves), self.gate)
+        let mut allowed = self
+            .endpoint_energy_budget
+            .map_or(*remaining_solves, |budget| {
+                (*remaining_solves).min(budget.get())
+            });
+        let opening = allowed;
+        let result = solve_step_with_fields(
+            self.domain,
+            self.fluid,
+            self.solids,
+            self.flow,
+            thermal,
+            self.energy,
+            storage_w_k,
+            self.previous_temperature_k,
+            self.time_step_s,
+            self.radiation,
+            Some(conductivity_w_m_k),
+            Some(enthalpy),
+            Some(&mut allowed),
+            self.gate,
+        );
+        let spent = opening - allowed;
+        *remaining_solves -= spent;
+        if let Some(budget) = self.endpoint_energy_budget {
+            budget.set(budget.get() - spent);
+        }
+        result
     }
 
     /// Endpoint source-Cp SGS conductivity on the SAME native face/link laws.
@@ -655,8 +734,15 @@ impl MaterialHeatStep<'_> {
         thermal: &ThermalSetup,
         net_defects_w: &mut Vec<f64>,
     ) -> Result<(f64, f64), ChtError> {
-        solution.conductivity_flux_defect(self.domain, self.solids, self.flow,
-            thermal, molecular_w_m_k, net_defects_w, self.gate)
+        solution.conductivity_flux_defect(
+            self.domain,
+            self.solids,
+            self.flow,
+            thermal,
+            molecular_w_m_k,
+            net_defects_w,
+            self.gate,
+        )
     }
 
     /// Actual constitutive storage with the original boundary/reservoir ledger.
@@ -674,7 +760,9 @@ impl MaterialHeatStep<'_> {
             });
         }
         for (cell, &stored) in stored_by_cell_j.iter().enumerate() {
-            if cell.is_multiple_of(4096) { poll(self.gate)?; }
+            if cell.is_multiple_of(4096) {
+                poll(self.gate)?;
+            }
             if self.is_compact_cell(cell) && stored != 0.0 {
                 return Err(ChtError::InvalidInput {
                     field: "thermal.storage",
@@ -682,11 +770,19 @@ impl MaterialHeatStep<'_> {
                 });
             }
         }
-        let mut record = record_energy_step(self.domain, self.setup, solution, |cell| stored_by_cell_j[cell],
+        let mut record = record_energy_step(
+            self.domain,
+            self.setup,
+            solution,
+            |cell| stored_by_cell_j[cell],
             (self.time_s, self.time_step_s, self.solids_present),
-            radiated_w, outflow_correction_w)?;
-        record.stored_energy_change_j += self.junction_stored_energy_change_j(&solution.temperature)?;
-        record.closure_j = record.stored_energy_change_j + record.boundary_outflow_j - record.source_j;
+            radiated_w,
+            outflow_correction_w,
+        )?;
+        record.stored_energy_change_j +=
+            self.junction_stored_energy_change_j(&solution.temperature)?;
+        record.closure_j =
+            record.stored_energy_change_j + record.boundary_outflow_j - record.source_j;
         finite("thermal.storage.energy_j", record.stored_energy_change_j)?;
         finite("thermal.storage.energy_j", record.closure_j)?;
         self.record_physical_heat(record)
@@ -723,6 +819,7 @@ pub(crate) fn march_conjugate_with_material<E: From<ChtError>>(
             &mut MaterialCoefficients,
         ) -> Result<(Vec<f64>, TransientRecord), E>,
     >,
+    endpoint: Option<&mut MaterialEndpointCoupling>,
     gate: &CancelGate,
 ) -> Result<ConjugateMarch, E> {
     march_conjugate_inner_with_material(
@@ -744,6 +841,7 @@ pub(crate) fn march_conjugate_with_material<E: From<ChtError>>(
         power_schedule,
         energy,
         radiation,
+        endpoint,
         gate,
     )
 }
@@ -785,6 +883,7 @@ fn march_conjugate_inner(
         power_schedule,
         energy,
         radiation,
+        None,
         gate,
     )
 }
@@ -813,14 +912,34 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
     power_schedule: impl Fn(f64) -> f64,
     energy: &EnergyConfig,
     radiation: Option<&RadiationConfig>,
+    mut endpoint: Option<&mut MaterialEndpointCoupling>,
     gate: &CancelGate,
 ) -> Result<ConjugateMarch, E> {
     admit(domain, fluid, config)?;
     admit_unsteady(domain, config, unsteady)?;
+    if let Some(coupling) = endpoint.as_deref() {
+        coupling.admit(unsteady)?;
+        if material.is_none() || sgs.is_some() || wall_heat.is_some() {
+            return Err(ChtError::InvalidInput {
+                field: "unsteady.material_endpoint",
+                reason: "implicit material feedback requires its original laminar material owner without SGS or a wall closure".into(),
+            }.into());
+        }
+        #[cfg(feature = "enthalpy-coupling")]
+        if viscous_heat.is_some() {
+            return Err(ChtError::InvalidInput {
+                field: "unsteady.material_endpoint",
+                reason: "implicit molecular heating needs a joint mechanical/thermal closure and is not selected by this entry".into(),
+            }.into());
+        }
+    }
     #[cfg(feature = "enthalpy-coupling")]
     if viscous_heat.is_some()
-        && (unsteady.scheme != TimeScheme::BackwardEuler || sgs.is_some()
-            || material.is_none() || material_heat.is_none() || wall_heat.is_some())
+        && (unsteady.scheme != TimeScheme::BackwardEuler
+            || sgs.is_some()
+            || material.is_none()
+            || material_heat.is_none()
+            || wall_heat.is_some())
     {
         return Err(ChtError::InvalidInput {
             field: "unsteady.material_viscous_heat",
@@ -855,7 +974,8 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
                 "expected {cells} entries, got {}",
                 initial_temperature.len()
             ),
-        }.into());
+        }
+        .into());
     }
     for &t in initial_temperature {
         finite("unsteady.initial_temperature", t)?;
@@ -885,7 +1005,9 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
     let mut marcher = Marcher::new(domain, fluid, config, unsteady);
     #[cfg(feature = "enthalpy-coupling")]
     if let Some(heating) = &viscous_heat {
-        marcher.solver.enable_unsteady_stokes_heat(heating.controls)?;
+        marcher
+            .solver
+            .enable_unsteady_stokes_heat(heating.controls)?;
     }
     if let Some(sgs) = sgs {
         marcher.solver.enable_sgs(sgs, gate)?;
@@ -895,151 +1017,210 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
     let mut energy_records = Vec::with_capacity(unsteady.steps);
     let mut stepped = setup.clone();
     if let Some(coupling) = material.as_mut() {
-        (coupling.refresh)(&temperature, coupling.fields)?;
+        if let Some(feedback) = endpoint.as_deref_mut() {
+            feedback.refresh(coupling, &temperature)?;
+        } else {
+            (coupling.refresh)(&temperature, coupling.fields)?;
+        }
     }
     for step in 1..=unsteady.steps {
         poll(gate)?;
-        if let Some(coupling) = material.as_ref() {
-            marcher.solver.set_material_transport(
-                &coupling.fields.viscosity_pa_s, Some(&coupling.fields.force_n_m3), gate,
-            )?;
-        }
-        if let Some(b) = buoyancy {
-            marcher.solver.set_force(
-                (0..cells)
-                    .map(|c| {
-                        if !domain.is_fluid(c) {
-                            return [0.0; 3];
-                        }
-                        let scale = -fluid.density_kg_m3
-                            * b.expansion_per_k
-                            * (temperature[c] - b.reference_temperature_k);
-                        b.gravity_m_s2.map(|g| scale * g)
-                    })
-                    .collect(),
-            );
-        }
         let time_s = step as f64 * unsteady.time_step_s;
-        marcher.step(step, inlet_schedule(time_s), gate)?;
-        let scale = power_schedule(time_s);
-        finite("unsteady.power_schedule", scale)?;
-        scale_power(&mut stepped, setup, scale);
-        #[cfg(feature = "enthalpy-coupling")]
-        let mechanical_step = viscous_heat.as_ref().map(|heating| {
-            marcher.solver.unsteady_mechanical_step(
-                (step - 1) as f64 * unsteady.time_step_s, time_s,
-                material.as_ref().map(|coupling| coupling.fields.force_n_m3.as_slice()),
-                heating.controls, gate,
-            )
-        }).transpose()?;
-        let physical_fixed_heat_j = 0.0;
-        #[cfg(feature = "enthalpy-coupling")]
-        let physical_fixed_heat_j = if let Some(receipt) = &mechanical_step {
-            // Power scheduling applies only to authored sources. The actual
-            // molecular work is then deposited once and held fixed throughout
-            // every caloric/radiative trial of this SAME physical interval.
-            // An empty authored field has no entries for scale_power to reset.
-            // Clear the preceding physical deposit before adding this receipt.
-            if setup.power_w.is_empty() { stepped.power_w.fill(0.0); }
-            if stepped.power_w.is_empty() { stepped.power_w.resize(cells, 0.0); }
-            if stepped.power_w.len() != cells {
-                return Err(ChtError::InvalidInput {
-                    field: "thermal.power_w", reason: "expected one source per original cell".into(),
-                }.into());
-            }
-            for (cell, (source, &heat)) in stepped.power_w.iter_mut()
-                .zip(&receipt.power.cell_heat_w).enumerate()
-            {
-                if cell.is_multiple_of(256) { poll(gate)?; }
-                *source += heat;
-                finite("thermal.viscous_heat.power_w", *source)?;
-            }
-            let mut fixed: Vec<_> = stepped.fixed_temperature.iter().map(|&(cell, _)| cell).collect();
-            fixed.sort_unstable();
-            fixed.dedup();
-            let mut fixed_heat_w = 0.0;
-            for cell in fixed {
-                fixed_heat_w += *receipt.power.cell_heat_w.get(cell).ok_or_else(|| ChtError::InvalidInput {
-                    field: "thermal.fixed_temperature", reason: "fixed cell outside original domain".into(),
-                })?;
-            }
-            let fixed_heat_j = fixed_heat_w * unsteady.time_step_s;
-            finite("thermal.viscous_heat.fixed_energy_j", fixed_heat_j)?;
-            fixed_heat_j
-        } else { physical_fixed_heat_j };
-
-        if wall_heat.is_none()
-            && (config.turbulence != Turbulence::Laminar || marcher.solver.has_sgs())
-        {
-            stepped.eddy_conductivity_w_m_k = marcher
-                .solver
-                .heat_eddy_viscosity()
-                .iter()
-                .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL)
-                .collect();
-        }
-        // One projected flux image is shared with wall preparation and energy.
-        // `stepped` never receives generated wall corrections: it remains the
-        // authored setup plus this step's source schedule.
-        let field = marcher.solver.field();
-        let prepared_walls = wall_heat
-            .as_deref_mut()
-            .map(|wall| wall.prepare(&marcher.solver, &field, &stepped, gate))
-            .transpose()?;
-        let thermal = prepared_walls
-            .as_ref()
-            .map_or(&stepped, |walls| &walls.thermal);
-        let (next, record) = if let (Some(advance), Some(coupling)) =
-            (material_heat.as_deref_mut(), material.as_mut())
-        {
-            let interval = MaterialHeatStep {
-                domain,
-                setup: thermal,
-                previous_temperature_k: &temperature,
-                reference_capacity_j_k: &capacity,
-                time_s,
-                time_step_s: unsteady.time_step_s,
-                physical_fixed_heat_j,
+        let (next, record) = if let Some(feedback) = endpoint.as_deref_mut() {
+            let inflow = inlet_schedule(time_s);
+            let scale = power_schedule(time_s);
+            finite("unsteady.power_schedule", scale)?;
+            scale_power(&mut stepped, setup, scale);
+            feedback.step(
+                &mut marcher,
+                material.as_mut().expect("admitted original material owner"),
+                &mut material_heat,
                 fluid,
                 solids,
-                flow: &field,
+                &stepped,
                 energy,
-                solids_present,
-                radiation: radiators.as_ref().zip(radiation),
-                gate,
-            };
-            advance(&interval, coupling.fields)?
-        } else {
-            energy_step_with_conductivity(
-                domain,
-                fluid,
-                solids,
-                &field,
-                thermal,
-                energy,
-                (&capacity, &storage),
+                &capacity,
+                &storage,
                 &temperature,
-                (time_s, unsteady.time_step_s, solids_present),
+                step,
+                inflow,
+                solids_present,
                 radiators.as_ref().zip(radiation),
-                material
-                    .as_ref()
-                    .map(|coupling| coupling.fields.conductivity_w_m_k.as_slice()),
                 gate,
             )?
+        } else {
+            if let Some(coupling) = material.as_ref() {
+                marcher.solver.set_material_transport(
+                    &coupling.fields.viscosity_pa_s,
+                    Some(&coupling.fields.force_n_m3),
+                    gate,
+                )?;
+            }
+            if let Some(b) = buoyancy {
+                marcher.solver.set_force(
+                    (0..cells)
+                        .map(|c| {
+                            if !domain.is_fluid(c) {
+                                return [0.0; 3];
+                            }
+                            let scale = -fluid.density_kg_m3
+                                * b.expansion_per_k
+                                * (temperature[c] - b.reference_temperature_k);
+                            b.gravity_m_s2.map(|g| scale * g)
+                        })
+                        .collect(),
+                );
+            }
+            marcher.step(step, inlet_schedule(time_s), gate)?;
+            let scale = power_schedule(time_s);
+            finite("unsteady.power_schedule", scale)?;
+            scale_power(&mut stepped, setup, scale);
+            #[cfg(feature = "enthalpy-coupling")]
+            let mechanical_step = viscous_heat
+                .as_ref()
+                .map(|heating| {
+                    marcher.solver.unsteady_mechanical_step(
+                        (step - 1) as f64 * unsteady.time_step_s,
+                        time_s,
+                        material
+                            .as_ref()
+                            .map(|coupling| coupling.fields.force_n_m3.as_slice()),
+                        heating.controls,
+                        gate,
+                    )
+                })
+                .transpose()?;
+            let physical_fixed_heat_j = 0.0;
+            #[cfg(feature = "enthalpy-coupling")]
+            let physical_fixed_heat_j = if let Some(receipt) = &mechanical_step {
+                // Power scheduling applies only to authored sources. The actual
+                // molecular work is then deposited once and held fixed throughout
+                // every caloric/radiative trial of this SAME physical interval.
+                // An empty authored field has no entries for scale_power to reset.
+                // Clear the preceding physical deposit before adding this receipt.
+                if setup.power_w.is_empty() {
+                    stepped.power_w.fill(0.0);
+                }
+                if stepped.power_w.is_empty() {
+                    stepped.power_w.resize(cells, 0.0);
+                }
+                if stepped.power_w.len() != cells {
+                    return Err(ChtError::InvalidInput {
+                        field: "thermal.power_w",
+                        reason: "expected one source per original cell".into(),
+                    }
+                    .into());
+                }
+                for (cell, (source, &heat)) in stepped
+                    .power_w
+                    .iter_mut()
+                    .zip(&receipt.power.cell_heat_w)
+                    .enumerate()
+                {
+                    if cell.is_multiple_of(256) {
+                        poll(gate)?;
+                    }
+                    *source += heat;
+                    finite("thermal.viscous_heat.power_w", *source)?;
+                }
+                let mut fixed: Vec<_> = stepped
+                    .fixed_temperature
+                    .iter()
+                    .map(|&(cell, _)| cell)
+                    .collect();
+                fixed.sort_unstable();
+                fixed.dedup();
+                let mut fixed_heat_w = 0.0;
+                for cell in fixed {
+                    fixed_heat_w += *receipt.power.cell_heat_w.get(cell).ok_or_else(|| {
+                        ChtError::InvalidInput {
+                            field: "thermal.fixed_temperature",
+                            reason: "fixed cell outside original domain".into(),
+                        }
+                    })?;
+                }
+                let fixed_heat_j = fixed_heat_w * unsteady.time_step_s;
+                finite("thermal.viscous_heat.fixed_energy_j", fixed_heat_j)?;
+                fixed_heat_j
+            } else {
+                physical_fixed_heat_j
+            };
+
+            if wall_heat.is_none()
+                && (config.turbulence != Turbulence::Laminar || marcher.solver.has_sgs())
+            {
+                stepped.eddy_conductivity_w_m_k = marcher
+                    .solver
+                    .heat_eddy_viscosity()
+                    .iter()
+                    .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL)
+                    .collect();
+            }
+            // One projected flux image is shared with wall preparation and energy.
+            // `stepped` never receives generated wall corrections: it remains the
+            // authored setup plus this step's source schedule.
+            let field = marcher.solver.field();
+            let prepared_walls = wall_heat
+                .as_deref_mut()
+                .map(|wall| wall.prepare(&marcher.solver, &field, &stepped, gate))
+                .transpose()?;
+            let thermal = prepared_walls
+                .as_ref()
+                .map_or(&stepped, |walls| &walls.thermal);
+            let (next, record) = if let (Some(advance), Some(coupling)) =
+                (material_heat.as_deref_mut(), material.as_mut())
+            {
+                let interval = MaterialHeatStep {
+                    domain,
+                    setup: thermal,
+                    previous_temperature_k: &temperature,
+                    reference_capacity_j_k: &capacity,
+                    time_s,
+                    time_step_s: unsteady.time_step_s,
+                    physical_fixed_heat_j,
+                    fluid,
+                    solids,
+                    flow: &field,
+                    energy,
+                    solids_present,
+                    radiation: radiators.as_ref().zip(radiation),
+                    endpoint_energy_budget: None,
+                    gate,
+                };
+                advance(&interval, coupling.fields)?
+            } else {
+                energy_step_with_conductivity(
+                    domain,
+                    fluid,
+                    solids,
+                    &field,
+                    thermal,
+                    energy,
+                    (&capacity, &storage),
+                    &temperature,
+                    (time_s, unsteady.time_step_s, solids_present),
+                    radiators.as_ref().zip(radiation),
+                    material
+                        .as_ref()
+                        .map(|coupling| coupling.fields.conductivity_w_m_k.as_slice()),
+                    gate,
+                )?
+            };
+            // Validate every source at the accepted endpoint, including the final
+            // step, before exposing results. Reuse these fields for the next step.
+            if let Some(coupling) = material.as_mut() {
+                (coupling.refresh)(&next, coupling.fields)?;
+            }
+            #[cfg(feature = "enthalpy-coupling")]
+            if let (Some(heating), Some(receipt)) = (viscous_heat.as_deref_mut(), mechanical_step) {
+                heating.audit.accept(&receipt, heating.controls)?;
+                heating.records.push(receipt);
+            }
+            if let (Some(wall), Some(prepared)) = (wall_heat.as_deref_mut(), prepared_walls) {
+                wall.record(prepared, &next, time_s, unsteady.time_step_s, gate)?;
+            }
+            (next, record)
         };
-        // Validate every source at the accepted endpoint, including the final
-        // step, before exposing results. Reuse these fields for the next step.
-        if let Some(coupling) = material.as_mut() {
-            (coupling.refresh)(&next, coupling.fields)?;
-        }
-        #[cfg(feature = "enthalpy-coupling")]
-        if let (Some(heating), Some(receipt)) = (viscous_heat.as_deref_mut(), mechanical_step) {
-            heating.audit.accept(&receipt, heating.controls)?;
-            heating.records.push(receipt);
-        }
-        if let (Some(wall), Some(prepared)) = (wall_heat.as_deref_mut(), prepared_walls) {
-            wall.record(prepared, &next, time_s, unsteady.time_step_s, gate)?;
-        }
         energy_records.push(record);
         temperature = next;
         if step >= unsteady.average_from_step {
@@ -1051,7 +1232,9 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
         if viscous_heat.is_some() {
             // The physical work owner uses one BE interval. Start its next
             // interval from the exact accepted faces without a stale BDF level.
-            marcher.solver.start_time(unsteady.time_step_s, TimeScheme::BackwardEuler);
+            marcher
+                .solver
+                .start_time(unsteady.time_step_s, TimeScheme::BackwardEuler);
         } else {
             marcher.solver.advance_time();
         }

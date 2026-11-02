@@ -2908,7 +2908,7 @@ copying it on every coupled evaluation.
 
 Existing distributed quasi-steady, inertial and resolved-time drivers receive
 the same reconstruction through `GraphEnthalpyTransport::endpoint_transport`.
-`transient::nonlinear::advance_implicit_with_heat` additionally solves prescribed
+`GraphEnthalpyTransport::advance_implicit_with_heat` additionally solves prescribed
 signed flow with endpoint-resolved wall/source coefficients through the existing
 Newton/Krylov owner and original backward-Euler energy residual. Its bounded
 endpoint-query count includes numerical derivatives and final physical

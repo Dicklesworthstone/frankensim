@@ -5,6 +5,8 @@
 mod solid;
 #[path = "material_unsteady_buoyancy/caloric_solids.rs"]
 mod caloric_solids;
+#[path = "material_unsteady_buoyancy/implicit.rs"]
+mod implicit;
 
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{

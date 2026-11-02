@@ -7300,3 +7300,48 @@ volumes, deforming nonplanar solids, moving contact lines and simultaneous
 phase-mass transfer remain open MR69/MR29 work. Focused G1/G3/G4 regressions
 cover all six wall orientations, nonzero carried momentum, exact advance/retreat
 state, stale-wall refusal, cancellation and full-domain overflow.
+
+## Endpoint-coupled material buoyancy on the native transient clock
+
+`MaterialChtFluid::march_natural_convection_implicit` and
+`march_natural_convection_with_enthalpy_implicit` close original source viscosity,
+conductivity and density-derived buoyancy against each accepted native thermal
+endpoint. The first retains reference-Cp thermal storage; the second composes
+the existing source h(T) storage and conservative donor-enthalpy transport.
+Original density/Cp departure limits and source-domain admission still apply.
+
+Each bounded nonlinear pass solves the same original BE/BDF2 momentum interval
+and backward-Euler heat interval. Accepted previous/older velocity levels and
+old temperature remain fixed throughout those trials. Current velocity and
+pressure may warm-start the next native solve, but do not become new physical
+history. Flow projection, thermal assembly, caloric iteration, compact storage,
+contacts, fixed solid properties, thermostats, scheduled sources and endpoint
+radiation remain on their existing owners.
+
+Acceptance independently bounds the actual unrelaxed temperature change, every
+applied-versus-endpoint viscosity/conductivity value and every buoyancy-force
+component. A small temperature increment cannot hide a sharp material response.
+Temperature relaxation affects only the next source-temperature iterate. One
+accepted physical step adds one flow/heat record and one average sample, then
+advances native momentum time levels once. The returned original result retains
+applied and endpoint source samples and one closure report per physical step.
+
+`MaterialEndpointConfig` bounds passes per step and whole-march momentum solves,
+actual linear energy solves and transport-source refreshes. Discarded material,
+caloric, radiation and compact-storage trials consume these limits. The
+source-caloric entry debits both its original heat budget and the outer budget
+by actual solves; the smaller remaining allowance governs the next native call.
+Repeated outer trials accumulate their caloric work into one physical-step
+report. Source refusal is terminal; native failure, cancellation, exhausted
+work or failed closure returns no partial march or accepted history.
+
+Regression sources use an independent nonlinear-conductivity backward-Euler
+solution, signed Darcy BE/BDF2 recurrences, true h(T) thermostat storage,
+open-channel enthalpy recurrence and datum shifts. They check single history/
+average advancement, sharp material-response refusal, late source failure and
+joint caloric/radiation work limits. The new entries are opt-in laminar source
+coupling, with first-order coupled time accuracy even when momentum uses BDF2.
+Implicit SGS, source-solid calorics, wall closures and viscous-heating
+composition are not selected by these entries. No unconditional nonlinear
+convergence, measured performance or experimental accuracy is claimed.
+

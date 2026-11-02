@@ -270,6 +270,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             power_schedule,
             radiation,
             Some(&mut advance),
+            None,
             gate,
             resolve,
         )?;

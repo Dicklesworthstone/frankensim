@@ -1,16 +1,22 @@
 //! Source-material natural and mixed convection on the native transient clock.
 
 use super::{MaterialBuoyancyError, MaterialBuoyancySample, poll, samples};
-use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep, compact_owners, march_conjugate_with_material};
+#[cfg(feature = "enthalpy-coupling")]
+use crate::conjugate::unsteady::MaterialViscousHeat;
+use crate::conjugate::unsteady::{
+    MaterialCoefficients, MaterialEndpointCoupling, MaterialHeatStep, compact_owners,
+    march_conjugate_with_material,
+};
+pub use crate::conjugate::unsteady::{
+    MaterialEndpointConfig, MaterialEndpointMarch, MaterialEndpointStepReport,
+};
 use crate::conjugate::{
-    ConjugateMarch, EnergyConfig, FvSgsConfig, RadiationConfig, SimpleConfig, SolidMaterial, ThermalSetup,
-    TransientRecord, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
+    ConjugateMarch, EnergyConfig, FvSgsConfig, RadiationConfig, SimpleConfig, SolidMaterial,
+    ThermalSetup, TransientRecord, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
 };
 use crate::material::conjugate::MaterialChtFluid;
 use crate::material::transport::boussinesq::BoussinesqConfig;
 use fs_exec::CancelGate;
-#[cfg(feature = "enthalpy-coupling")]
-use crate::conjugate::unsteady::MaterialViscousHeat;
 use fs_material::{
     MaterialError,
     fluid_transport::{FluidTransport, FluidTransportState},
@@ -30,7 +36,8 @@ pub struct MaterialBuoyancyMarch<F> {
     pub applied: Vec<MaterialBuoyancySample<F>>,
     /// Original sources freshly admitted at the returned temperature field.
     pub endpoint: Vec<MaterialBuoyancySample<F>>,
-    /// Time of the temperatures used for the last explicit material refresh.
+    /// Physical time of the final applied source epoch. Endpoint-coupled
+    /// entries use the returned time; explicit entries use the preceding time.
     pub applied_time_s: f64,
     /// Time of the returned thermal state and endpoint source snapshots.
     pub endpoint_time_s: f64,
@@ -85,12 +92,92 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialBuoyancyMarch<S>, MaterialBuoyancyError> {
         self.march_natural_convection_inner(
-            domain, solids, flow_config, thermal, energy_config, initial_temperature_k,
-            config, unsteady, None,
+            domain,
+            solids,
+            flow_config,
+            thermal,
+            energy_config,
+            initial_temperature_k,
+            config,
+            unsteady,
+            None,
             #[cfg(feature = "enthalpy-coupling")]
             None,
-            inlet_schedule, power_schedule, radiation, None, gate, resolve,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            None,
+            gate,
+            resolve,
         )
+    }
+
+    /// Close source viscosity, conductivity and density-derived buoyancy at
+    /// each native thermal endpoint, retaining the original momentum history.
+    ///
+    /// Every bounded outer pass solves the same BE/BDF2 momentum interval and
+    /// backward-Euler heat interval. Previous/older velocity levels and the old
+    /// accepted temperature stay fixed throughout the nonlinear iteration;
+    /// physical records, averages and time levels advance once after acceptance.
+    /// Source queries at the actual unrelaxed candidate must close temperature,
+    /// mu/k and every force component independently. Relaxation changes only
+    /// the next source-temperature iterate. A sharp admissible material change
+    /// cannot pass solely because its temperature increment is small.
+    ///
+    /// This removes the explicit source lag but coupled time accuracy remains
+    /// FIRST ORDER because heat uses backward Euler. Reference rho/Cp still
+    /// owns mass, inertia, advection and storage. Use the source-enthalpy implicit
+    /// entry when storage and heat transport require the original h(T) law.
+    /// Original solids, contacts, compact capacities, schedules and endpoint
+    /// radiation retain their owners. Every discarded momentum/energy/source
+    /// trial consumes the whole-march budgets in `endpoint_controls`.
+    ///
+    /// # Errors
+    /// Unsupported source state, native solve failure, exhausted work, failure
+    /// of any unrelaxed closure test or cancellation returns no partial march.
+    /// This laminar entry does not select SGS, wall closures or viscous heating.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_implicit<S: FluidTransport>(
+        &self,
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        flow_config: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        config: BoussinesqConfig<3>,
+        unsteady: &UnsteadyConfig,
+        endpoint_controls: MaterialEndpointConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEndpointMarch<MaterialBuoyancyMarch<S>>, MaterialBuoyancyError> {
+        let mut endpoint = MaterialEndpointCoupling::new(endpoint_controls)?;
+        let solution = self.march_natural_convection_inner(
+            domain,
+            solids,
+            flow_config,
+            thermal,
+            energy_config,
+            initial_temperature_k,
+            config,
+            unsteady,
+            None,
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            Some(&mut endpoint),
+            gate,
+            resolve,
+        )?;
+        poll(gate)?;
+        Ok(endpoint.finish(solution))
     }
 
     /// March source-dependent molecular viscosity with explicitly selected
@@ -135,11 +222,24 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialBuoyancyMarch<S>, MaterialBuoyancyError> {
         self.march_natural_convection_inner(
-            domain, solids, flow_config, thermal, energy_config, initial_temperature_k,
-            config, unsteady, Some(sgs),
+            domain,
+            solids,
+            flow_config,
+            thermal,
+            energy_config,
+            initial_temperature_k,
+            config,
+            unsteady,
+            Some(sgs),
             #[cfg(feature = "enthalpy-coupling")]
             None,
-            inlet_schedule, power_schedule, radiation, None, gate, resolve,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            None,
+            gate,
+            resolve,
         )
     }
 
@@ -159,8 +259,14 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         inlet_schedule: impl Fn(f64) -> f64,
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
-        material_heat: Option<&mut dyn FnMut(&MaterialHeatStep<'_>, &mut MaterialCoefficients)
-            -> Result<(Vec<f64>, TransientRecord), MaterialBuoyancyError>>,
+        material_heat: Option<
+            &mut dyn FnMut(
+                &MaterialHeatStep<'_>,
+                &mut MaterialCoefficients,
+            )
+                -> Result<(Vec<f64>, TransientRecord), MaterialBuoyancyError>,
+        >,
+        endpoint_coupling: Option<&mut MaterialEndpointCoupling>,
         gate: &CancelGate,
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialBuoyancyMarch<S>, MaterialBuoyancyError> {
@@ -232,6 +338,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             applied = core::mem::replace(&mut endpoint, next);
             Ok::<(), MaterialBuoyancyError>(())
         };
+        let implicit = endpoint_coupling.is_some();
         let march = march_conjugate_with_material(
             domain,
             &self.properties,
@@ -250,6 +357,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             &mut fields,
             &mut refresh,
             material_heat,
+            endpoint_coupling,
             gate,
         )?;
         poll(gate)?;
@@ -258,7 +366,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             march,
             applied,
             endpoint,
-            applied_time_s: (unsteady.steps - 1) as f64 * unsteady.time_step_s,
+            applied_time_s: (unsteady.steps - usize::from(!implicit)) as f64 * unsteady.time_step_s,
             endpoint_time_s: unsteady.steps as f64 * unsteady.time_step_s,
         })
     }

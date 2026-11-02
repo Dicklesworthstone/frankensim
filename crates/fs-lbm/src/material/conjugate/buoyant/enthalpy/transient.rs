@@ -6,25 +6,27 @@ mod solid;
 pub use solid::MaterialEnthalpySolidMarch;
 
 use super::super::{
-    MaterialBuoyancyError, MaterialBuoyancyMarch, MaterialChtFluid, admit_open_boundary_materials,
-    poll,
+    MaterialBuoyancyError, MaterialBuoyancyMarch, MaterialChtFluid, MaterialEndpointConfig,
+    MaterialEndpointMarch, admit_open_boundary_materials, poll,
 };
 use super::{
     CaloricCoupling, ConvectionCaloricLaw, MaterialEnthalpyConfig, MaterialEnthalpyReport,
     MaterialEnthalpyState, defect_field,
 };
-use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep};
-use crate::conjugate::{
-    AdvectiveEnthalpyField, AffineSpecificEnthalpy, ChtError, EnergyConfig, EnergySolution,
-    FvSgsConfig, RadiationConfig, SimpleConfig, SolidMaterial,
-    ThermalSetup, TransientRecord, UnsteadyConfig, VoxelDomain,
-};
-use crate::material::transport::boussinesq::BoussinesqConfig;
-use fs_exec::CancelGate;
 #[cfg(feature = "enthalpy-coupling")]
 use crate::conjugate::unsteady::MaterialViscousHeat;
+use crate::conjugate::unsteady::{
+    MaterialCoefficients, MaterialEndpointCoupling, MaterialHeatStep,
+};
+use crate::conjugate::{
+    AdvectiveEnthalpyField, AffineSpecificEnthalpy, ChtError, EnergyConfig, EnergySolution,
+    FvSgsConfig, RadiationConfig, SimpleConfig, SolidMaterial, ThermalSetup, TransientRecord,
+    UnsteadyConfig, VoxelDomain,
+};
 #[cfg(feature = "enthalpy-coupling")]
 use crate::conjugate::{UnsteadyHeatingAudit, UnsteadyMechanicalStep, ViscousHeatControls};
+use crate::material::transport::boussinesq::BoussinesqConfig;
+use fs_exec::CancelGate;
 use fs_material::{
     MaterialError,
     fluid_transport::{FluidTransport, FluidTransportState},
@@ -35,7 +37,8 @@ use fs_material::{
 pub struct MaterialEnthalpyTransientConfig {
     /// Common datum and local advective and source-SGS diffusive heat tolerance.
     pub caloric: MaterialEnthalpyConfig,
-    /// Maximum caloric linearizations for each accepted thermal time step.
+    /// Maximum caloric linearizations for each native momentum/heat trial.
+    /// The implicit material entry separately bounds trials per physical step.
     pub maximum_passes_per_step: usize,
     /// Whole-march ceiling on actual linear energy solves, including every
     /// endpoint-radiation trial inside each caloric pass.
@@ -55,9 +58,11 @@ pub struct MaterialEnthalpyTransientConfig {
 pub struct MaterialEnthalpyStepReport {
     /// Accepted physical time, s.
     pub time_s: f64,
-    /// Caloric linearizations completed during this time step.
+    /// All caloric linearizations during this physical time step, including
+    /// discarded outer material trials in the implicit entry.
     pub passes: usize,
-    /// Actual linear heat solves, including endpoint radiation trials.
+    /// Actual linear heat solves, including discarded material and endpoint
+    /// radiation/compact-storage trials.
     pub energy_solves: usize,
     /// Unrelaxed final temperature defect, K.
     pub temperature_defect_k: f64,
@@ -79,8 +84,8 @@ pub struct MaterialEnthalpyMarch<'a, F, C: ConvectionCaloricLaw> {
     pub caloric: &'a C,
     /// Applied finite work budgets and nonlinear acceptance tolerances.
     pub config: MaterialEnthalpyTransientConfig,
-    /// Final caloric linearization and true endpoint. These are nonlinear
-    /// thermal epochs; transport snapshots retain the explicit material lag.
+    /// Final caloric linearization and true endpoint. The selected convection
+    /// entry determines explicit or implicit transport-source closure.
     pub enthalpy: MaterialEnthalpyState,
     /// One nonlinear acceptance/work record per native time step.
     pub records: Vec<MaterialEnthalpyStepReport>,
@@ -122,7 +127,6 @@ impl MaterialEnthalpyTransientConfig {
     }
 }
 
-
 /// Trial-local source-Cp conversion of one immutable accepted SGS field.
 /// Original molecular conductivity and the reference SGS field are never
 /// overwritten. Repeated caloric trials recompute, rather than multiply, k_t.
@@ -134,7 +138,11 @@ struct SourceSgsHeat {
 impl SourceSgsHeat {
     fn new(step: &MaterialHeatStep<'_>) -> Self {
         Self {
-            thermal: step.setup.eddy_conductivity_w_m_k.iter().any(|&k| k != 0.0)
+            thermal: step
+                .setup
+                .eddy_conductivity_w_m_k
+                .iter()
+                .any(|&k| k != 0.0)
                 .then(|| step.setup.clone()),
             net_defects_w: Vec::new(),
         }
@@ -147,18 +155,34 @@ impl SourceSgsHeat {
         tangents: &[Option<AffineSpecificEnthalpy>],
         gate: &CancelGate,
     ) -> Result<(), MaterialBuoyancyError> {
-        let Some(thermal) = &mut self.thermal else { return Ok(()); };
+        let Some(thermal) = &mut self.thermal else {
+            return Ok(());
+        };
         let cp_reference = reference.specific_heat_j_kg_k();
-        for (cell, ((eddy, &base), tangent)) in thermal.eddy_conductivity_w_m_k.iter_mut()
-            .zip(&step.setup.eddy_conductivity_w_m_k).zip(tangents).enumerate()
+        for (cell, ((eddy, &base), tangent)) in thermal
+            .eddy_conductivity_w_m_k
+            .iter_mut()
+            .zip(&step.setup.eddy_conductivity_w_m_k)
+            .zip(tangents)
+            .enumerate()
         {
-            if cell.is_multiple_of(256) { poll(gate)?; }
+            if cell.is_multiple_of(256) {
+                poll(gate)?;
+            }
             *eddy = if step.domain.is_fluid(cell) {
-                let cp = tangent.ok_or(MaterialBuoyancyError::Invalid(
-                    "source SGS heat requires the original fluid caloric tangent",
-                ))?.heat_capacity_j_kg_k;
-                if cp == cp_reference { base } else { base * (cp / cp_reference) }
-            } else { 0.0 };
+                let cp = tangent
+                    .ok_or(MaterialBuoyancyError::Invalid(
+                        "source SGS heat requires the original fluid caloric tangent",
+                    ))?
+                    .heat_capacity_j_kg_k;
+                if cp == cp_reference {
+                    base
+                } else {
+                    base * (cp / cp_reference)
+                }
+            } else {
+                0.0
+            };
             if !eddy.is_finite() || *eddy < 0.0 || (base > 0.0 && *eddy == 0.0) {
                 return Err(MaterialBuoyancyError::Invalid(
                     "local source-Cp SGS conductivity is unrepresentable",
@@ -178,8 +202,15 @@ impl SourceSgsHeat {
         molecular_w_m_k: &[[f64; 3]],
         solution: &EnergySolution,
     ) -> Result<(f64, f64), MaterialBuoyancyError> {
-        let Some(thermal) = &self.thermal else { return Ok((0.0, 0.0)); };
-        Ok(step.conductivity_flux_defect(solution, molecular_w_m_k, thermal, &mut self.net_defects_w)?)
+        let Some(thermal) = &self.thermal else {
+            return Ok((0.0, 0.0));
+        };
+        Ok(step.conductivity_flux_defect(
+            solution,
+            molecular_w_m_k,
+            thermal,
+            &mut self.net_defects_w,
+        )?)
     }
 }
 
@@ -380,7 +411,9 @@ fn energy_step(
         let mut maximum_storage_defect_w = 0.0f64;
         let mut outflow_correction_w = if sgs_outflow_correction_w == 0.0 {
             radiation_correction_w
-        } else { radiation_correction_w + sgs_outflow_correction_w };
+        } else {
+            radiation_correction_w + sgs_outflow_correction_w
+        };
         for cell in 0..domain.cell_count() {
             poll(gate)?;
             temperature_defect_k =
@@ -530,12 +563,105 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialEnthalpyMarch<'a, S, C>, MaterialBuoyancyError> {
         self.march_natural_convection_with_enthalpy_inner(
-            domain, solids, flow, thermal, energy, initial_temperature_k,
-            bounds, caloric, controls, unsteady, None,
+            domain,
+            solids,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            controls,
+            unsteady,
+            None,
             #[cfg(feature = "enthalpy-coupling")]
             None,
-            inlet_schedule, power_schedule, radiation, gate, resolve,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            gate,
+            resolve,
         )
+    }
+
+    /// Implicit source transport and buoyancy coupled to actual source h(T)
+    /// storage and donor-enthalpy advection on the original transient owner.
+    ///
+    /// Each outer trial solves native BE/BDF2 momentum from the SAME accepted
+    /// previous/older velocity levels, then the original bounded caloric heat
+    /// problem from the SAME old temperature on that trial's projected fluxes.
+    /// The actual unrelaxed thermal endpoint is independently queried for mu,
+    /// k and density-derived force. Those defects and the temperature defect
+    /// must all pass before physical histories, averages or records advance.
+    /// Every caloric candidate still passes true local h(T) storage/advection
+    /// defects and the original physical heat-ledger closure.
+    ///
+    /// The outer budgets count every discarded native momentum and actual
+    /// linear heat solve, including caloric, radiation and compact-storage
+    /// iterations. `controls.maximum_energy_solves` is an additional shared
+    /// whole-march limit; the smaller available heat budget wins. The returned
+    /// caloric work records sum all outer trials at each physical time level.
+    /// Source-domain refusal is terminal, including at a final endpoint; trial
+    /// temperature relaxation never scales the source or closure defects.
+    ///
+    /// Coupled time accuracy remains FIRST ORDER because heat is backward Euler.
+    /// Reference density owns inertia and volume-flux continuity; original
+    /// density/Cp departure admission, source identity, fixed solids, contacts,
+    /// compact capacities, thermostats and radiation retain their owners.
+    /// This laminar entry does not compose SGS or physical viscous heating.
+    ///
+    /// # Errors
+    /// Original caloric/native/source errors, exhausted coupled work, failed
+    /// endpoint closure or cancellation return no partial result or history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_enthalpy_implicit<
+        'a,
+        S: FluidTransport,
+        C: ConvectionCaloricLaw,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        flow: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        bounds: BoussinesqConfig<3>,
+        caloric: &'a C,
+        controls: MaterialEnthalpyTransientConfig,
+        unsteady: &UnsteadyConfig,
+        endpoint_controls: MaterialEndpointConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEndpointMarch<MaterialEnthalpyMarch<'a, S, C>>, MaterialBuoyancyError> {
+        let mut endpoint = MaterialEndpointCoupling::new(endpoint_controls)?;
+        let solution = self.march_natural_convection_with_enthalpy_inner(
+            domain,
+            solids,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            controls,
+            unsteady,
+            None,
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            Some(&mut endpoint),
+            gate,
+            resolve,
+        )?;
+        poll(gate)?;
+        Ok(endpoint.finish(solution))
     }
 
     /// Compose explicit unsteady SGS with original source h(T) storage and
@@ -587,11 +713,25 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialEnthalpyMarch<'a, S, C>, MaterialBuoyancyError> {
         self.march_natural_convection_with_enthalpy_inner(
-            domain, solids, flow, thermal, energy, initial_temperature_k,
-            bounds, caloric, controls, unsteady, Some(sgs),
+            domain,
+            solids,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            controls,
+            unsteady,
+            Some(sgs),
             #[cfg(feature = "enthalpy-coupling")]
             None,
-            inlet_schedule, power_schedule, radiation, gate, resolve,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            gate,
+            resolve,
         )
     }
 
@@ -621,7 +761,9 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     #[cfg(feature = "enthalpy-coupling")]
     #[allow(clippy::too_many_arguments)]
     pub fn march_natural_convection_with_enthalpy_and_viscous_heat<
-        'a, S: FluidTransport, C: ConvectionCaloricLaw,
+        'a,
+        S: FluidTransport,
+        C: ConvectionCaloricLaw,
     >(
         &self,
         domain: &VoxelDomain,
@@ -640,16 +782,34 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         radiation: Option<&RadiationConfig>,
         gate: &CancelGate,
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
-    ) -> Result<MaterialViscousHeatMarch<MaterialEnthalpyMarch<'a, S, C>>, MaterialBuoyancyError> {
+    ) -> Result<MaterialViscousHeatMarch<MaterialEnthalpyMarch<'a, S, C>>, MaterialBuoyancyError>
+    {
         let mut heating = MaterialViscousHeat::new(heating);
         let thermal = self.march_natural_convection_with_enthalpy_inner(
-            domain, solids, flow, thermal, energy, initial_temperature_k,
-            bounds, caloric, controls, unsteady, None, Some(&mut heating),
-            inlet_schedule, power_schedule, radiation, gate, resolve,
+            domain,
+            solids,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            controls,
+            unsteady,
+            None,
+            Some(&mut heating),
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            gate,
+            resolve,
         )?;
         poll(gate)?;
         Ok(MaterialViscousHeatMarch {
-            thermal, heating: heating.audit, mechanical_steps: heating.records,
+            thermal,
+            heating: heating.audit,
+            mechanical_steps: heating.records,
         })
     }
 
@@ -675,6 +835,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         inlet_schedule: impl Fn(f64) -> f64,
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
+        endpoint_coupling: Option<&mut MaterialEndpointCoupling>,
         gate: &CancelGate,
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialEnthalpyMarch<'a, S, C>, MaterialBuoyancyError> {
@@ -713,10 +874,10 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             &mut resolve,
         )?;
         let mut remaining_solves = controls.maximum_energy_solves;
-        let mut records = Vec::with_capacity(unsteady.steps);
+        let mut records: Vec<MaterialEnthalpyStepReport> = Vec::with_capacity(unsteady.steps);
         let mut last_state = None;
         let mut thermal_step = |step: &MaterialHeatStep<'_>, fields: &mut MaterialCoefficients| {
-            let (next, record, state, defects) = energy_step(
+            let (next, record, state, mut defects) = energy_step(
                 coupling,
                 controls,
                 domain,
@@ -728,7 +889,22 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                 gate,
             )?;
             last_state = Some(state);
-            records.push(defects);
+            if let Some(previous) = records.last_mut().filter(|old| old.time_s == step.time_s) {
+                // Retain one physical record, while charging every discarded
+                // material trial's actual caloric and linear heat work.
+                defects.passes = defects.passes.checked_add(previous.passes).ok_or(
+                    MaterialBuoyancyError::Invalid("caloric pass count overflow"),
+                )?;
+                defects.energy_solves = defects
+                    .energy_solves
+                    .checked_add(previous.energy_solves)
+                    .ok_or(MaterialBuoyancyError::Invalid(
+                    "caloric solve count overflow",
+                ))?;
+                *previous = defects;
+            } else {
+                records.push(defects);
+            }
             Ok((next, record))
         };
         let convection = self.march_natural_convection_inner(
@@ -747,6 +923,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             power_schedule,
             radiation,
             Some(&mut thermal_step),
+            endpoint_coupling,
             gate,
             resolve,
         )?;

@@ -1,4 +1,6 @@
 //! Native-time source storage/advection and independent physical recurrences.
+#[path = "transient/implicit.rs"]
+mod implicit;
 use super::*;
 use fs_lbm::conjugate::{
     ChtError, FlowResistance, RadiationConfig, STEFAN_BOLTZMANN, TimeScheme, UnsteadyConfig,

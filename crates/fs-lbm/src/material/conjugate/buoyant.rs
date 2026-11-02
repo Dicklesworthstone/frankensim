@@ -6,7 +6,10 @@
 //! feedback. It never replaces density response with an ideal-gas beta.
 
 mod unsteady;
-pub use unsteady::{MaterialBuoyancyMarch, MaterialSolidBuoyancyMarch, SolidThermalConfig, SolidThermalRecord};
+pub use unsteady::{
+    MaterialBuoyancyMarch, MaterialEndpointConfig, MaterialEndpointMarch, MaterialEndpointStepReport,
+    MaterialSolidBuoyancyMarch, SolidThermalConfig, SolidThermalRecord,
+};
 
 use super::{
     EnergyConfig, EnergySolution, FvFlow, MaterialChtFluid, SimpleConfig, SolidMaterial,
