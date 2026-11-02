@@ -3,7 +3,8 @@
 //! The natural datum is t = (2 nu D(u) - p I)n, with kinematic pressure
 //! and traction (both divided by the same constant reference density).
 //! Leaving a boundary velocity unknown also retains its continuity equation:
-//! a traction boundary fixes the pressure datum, so no pressure pin is added.
+//! a traction boundary fixes that connected component's pressure datum, so no
+//! pressure pin is added there. Sealed components retain independent gauges.
 
 use super::{FluxParams, FluxSolution, FluxSystem};
 use crate::bdm::edge_gauss_pub;
@@ -39,11 +40,14 @@ pub enum StokesBoundary<'a> {
 /// Meaning of the reported kinematic pressure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StokesPressureReference {
-    /// All boundary velocities are prescribed; output has zero area mean.
+    /// All boundary velocities are prescribed; each component has zero area mean.
     MeanZero,
     /// The total-traction data fixes the pressure datum; output is not shifted.
     /// This is not thermodynamic/EOS absolute pressure.
     TractionDatum,
+    /// Some components retain traction datums while others have mean-zero
+    /// gauges. Inspect each cell's reference before comparing pressures.
+    Componentwise,
 }
 
 /// Checked mixed-boundary admission, assembly or solve failure.
@@ -74,6 +78,8 @@ pub enum StokesBoundaryError {
     },
     /// Prescribed velocities violate the all-Dirichlet net-flux compatibility.
     IncompatibleFlux {
+        /// Connected fluid component (ordered by its first triangle).
+        component: usize,
         /// Signed outward integral of prescribed velocity.
         net_flux: f64,
         /// Roundoff allowance for the assembled boundary quadrature.
@@ -81,8 +87,12 @@ pub enum StokesBoundaryError {
     },
     /// Pure traction leaves rigid velocity modes; no hidden grounding is added.
     NoVelocityBoundary,
-    /// This entry point admits one connected fluid domain.
-    DisconnectedMesh,
+    /// One disconnected component has neither a velocity boundary nor positive
+    /// porous drag. Another component cannot remove its rigid velocity modes.
+    UnanchoredComponent {
+        /// Connected fluid component (ordered by its first triangle).
+        component: usize,
+    },
     /// The constitutive/momentum iteration refused its candidate.
     Rheology(crate::ns::FluxRheologyError),
     /// The assembled linear system could not be factored.
@@ -114,7 +124,7 @@ enum Samples {
 /// Samples are retained once so the strong moments and SIP use identical data.
 pub(super) struct AdmittedBoundary {
     samples: Vec<Option<Samples>>,
-    pub(super) has_traction: bool,
+    pub(super) has_traction: Vec<bool>,
 }
 
 impl AdmittedBoundary {
@@ -145,6 +155,7 @@ pub struct StokesAssembly<'a, 'm> {
     rhs: Vec<f64>,
     params: FluxParams,
     reference: StokesPressureReference,
+    has_traction: Vec<bool>,
 }
 
 /// The admitted discrete field together with pressure in its declared datum.
@@ -155,6 +166,9 @@ pub struct StokesSolution {
     pub pressure: Vec<f64>,
     /// Whether an output gauge shift was applied.
     pub pressure_reference: StokesPressureReference,
+    /// Actual reference for each cell, always MeanZero or TractionDatum.
+    /// Independent mean-zero components have no known pressure difference.
+    pub pressure_reference_per_cell: Vec<StokesPressureReference>,
 }
 
 impl StokesAssembly<'_, '_> {
@@ -174,6 +188,18 @@ impl StokesAssembly<'_, '_> {
     #[must_use]
     pub const fn pressure_reference(&self) -> StokesPressureReference {
         self.reference
+    }
+
+    /// Local pressure interpretation; `None` when cell is outside this mesh.
+    #[must_use]
+    pub fn pressure_reference_at(&self, cell: usize) -> Option<StokesPressureReference> {
+        self.system.pressure_component.get(cell).map(|&component| {
+            if self.has_traction[component] {
+                StokesPressureReference::TractionDatum
+            } else {
+                StokesPressureReference::MeanZero
+            }
+        })
     }
 
     /// Require both original and row-scaled residuals without shifting
@@ -203,10 +229,7 @@ impl StokesAssembly<'_, '_> {
     // Share the physical pressure interpretation after either checked linear
     // convergence or checked nonlinear endpoint convergence.
     fn report_solution(&self, field: FluxSolution) -> Result<StokesSolution, StokesBoundaryError> {
-        let pressure = match self.reference {
-            StokesPressureReference::MeanZero => self.system.pressure(&field.x),
-            StokesPressureReference::TractionDatum => field.x[self.system.n_u..].to_vec(),
-        };
+        let pressure = self.system.pressure_in_gauges(&field.x, &self.has_traction);
         if !pressure.iter().all(|value| value.is_finite()) {
             return Err(StokesBoundaryError::InvalidInput(
                 "non-finite reported pressure",
@@ -216,6 +239,12 @@ impl StokesAssembly<'_, '_> {
             field,
             pressure,
             pressure_reference: self.reference,
+            pressure_reference_per_cell: (0..self.system.mesh.tris.len())
+                .map(|cell| {
+                    self.pressure_reference_at(cell)
+                        .expect("cell belongs to mesh")
+                })
+                .collect(),
         })
     }
 }
@@ -224,7 +253,7 @@ impl<'m> FluxSystem<'m> {
     /// Assemble steady -div(2 nu D(u)) + grad(p) = f, div(u) = 0.
     ///
     /// Every boundary edge must have exactly one velocity or total-traction
-    /// owner. At least one velocity edge must anchor this connected domain.
+    /// owner. At least one velocity edge must anchor each connected domain.
     /// Natural edges retain both normal BDM moments and every continuity row.
     /// If all edges prescribe velocity, compatibility is checked before the
     /// existing pressure pin is used. That case is numerically identical to
@@ -236,7 +265,7 @@ impl<'m> FluxSystem<'m> {
     ///
     /// # Errors
     /// Refuses invalid/incomplete edge ownership before invoking callbacks,
-    /// disconnected or unanchored domains, non-finite data, incompatible
+    /// unanchored domains, non-finite data, incompatible component-local
     /// all-velocity flux, invalid parameters or unrepresentable assembly.
     pub fn assemble_stokes_mixed<'a>(
         &'a self,
@@ -357,11 +386,14 @@ impl<'m> FluxSystem<'m> {
             matrix,
             rhs,
             params,
-            reference: if admitted.has_traction {
+            reference: if admitted.has_traction.iter().all(|&value| value) {
                 StokesPressureReference::TractionDatum
-            } else {
+            } else if admitted.has_traction.iter().all(|&value| !value) {
                 StokesPressureReference::MeanZero
+            } else {
+                StokesPressureReference::Componentwise
             },
+            has_traction: admitted.has_traction.clone(),
         })
     }
 
@@ -370,14 +402,14 @@ impl<'m> FluxSystem<'m> {
         params: FluxParams,
         boundaries: &[StokesBoundary<'_>],
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {
-        self.admit_stokes_problem_with_drag(params, boundaries, false)
+        self.admit_stokes_problem_with_drag(params, boundaries, &[])
     }
 
     pub(super) fn admit_stokes_problem_with_drag(
         &self,
         params: FluxParams,
         boundaries: &[StokesBoundary<'_>],
-        drag_anchors_velocity: bool,
+        drag_anchors_velocity: &[bool],
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {
         if !(params.sigma.is_finite()
             && params.sigma > 0.0
@@ -399,29 +431,25 @@ impl<'m> FluxSystem<'m> {
         &self,
         boundaries: &[StokesBoundary<'_>],
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {
-        self.admit_stokes_boundaries_with_drag(boundaries, false)
+        self.admit_stokes_boundaries_with_drag(boundaries, &[])
     }
 
     fn admit_stokes_boundaries_with_drag(
         &self,
         boundaries: &[StokesBoundary<'_>],
-        drag_anchors_velocity: bool,
+        drag_anchors_velocity: &[bool],
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {
         let mesh = self.mesh;
         let mut owners = vec![None; mesh.edges.len()];
-        let mut has_velocity = false;
-        let mut has_traction = false;
+        let components = self.pressure_roots.len();
+        let mut has_velocity = vec![false; components];
+        let mut has_traction = vec![false; components];
+        let mut boundary_count = vec![0_usize; components];
         // Complete the ownership audit before querying any user callback.
         for boundary in boundaries {
             let edge = match *boundary {
-                StokesBoundary::Velocity { edge, .. } => {
-                    has_velocity = true;
-                    edge
-                }
-                StokesBoundary::TotalTraction { edge, .. } => {
-                    has_traction = true;
-                    edge
-                }
+                StokesBoundary::Velocity { edge, .. }
+                | StokesBoundary::TotalTraction { edge, .. } => edge,
             };
             if edge >= mesh.edges.len() {
                 return Err(StokesBoundaryError::EdgeOutOfRange { edge });
@@ -432,41 +460,39 @@ impl<'m> FluxSystem<'m> {
             if owners[edge].replace(*boundary).is_some() {
                 return Err(StokesBoundaryError::DuplicateEdge { edge });
             }
+            let component = self.pressure_component[mesh.edges[edge].tris.0];
+            boundary_count[component] += 1;
+            match boundary {
+                StokesBoundary::Velocity { .. } => has_velocity[component] = true,
+                StokesBoundary::TotalTraction { .. } => has_traction[component] = true,
+            }
         }
         for (edge, owner) in owners.iter().enumerate() {
             if mesh.is_boundary(edge) && owner.is_none() {
                 return Err(StokesBoundaryError::MissingEdge { edge });
             }
         }
-        if !has_velocity && !drag_anchors_velocity {
-            return Err(StokesBoundaryError::NoVelocityBoundary);
-        }
-        let mut visited = vec![false; mesh.tris.len()];
-        let mut queue = vec![0];
-        visited[0] = true;
-        while let Some(cell) = queue.pop() {
-            for &(edge, _) in &mesh.tri_edges[cell] {
-                let adjacent = mesh.edges[edge].tris;
-                let other = if adjacent.0 == cell {
-                    adjacent.1
+        for (component, &velocity) in has_velocity.iter().enumerate() {
+            if !velocity
+                && !drag_anchors_velocity
+                    .get(component)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                return Err(if components == 1 {
+                    StokesBoundaryError::NoVelocityBoundary
                 } else {
-                    adjacent.0
-                };
-                if other != usize::MAX && !visited[other] {
-                    visited[other] = true;
-                    queue.push(other);
-                }
+                    StokesBoundaryError::UnanchoredComponent { component }
+                });
             }
         }
-        if visited.iter().any(|seen| !seen) {
-            return Err(StokesBoundaryError::DisconnectedMesh);
-        }
         let mut samples = vec![None; mesh.edges.len()];
-        let mut net_flux = 0.0_f64;
-        let mut absolute_flux = 0.0_f64;
+        let mut net_flux = vec![0.0_f64; components];
+        let mut absolute_flux = vec![0.0_f64; components];
         for (edge, owner) in owners.into_iter().enumerate() {
             let Some(owner) = owner else { continue };
             let geometry = &mesh.edges[edge];
+            let component = self.pressure_component[geometry.tris.0];
             let points = edge_gauss_pub(mesh.verts[geometry.verts.0], mesh.verts[geometry.verts.1]);
             let mut values = [[0.0; 2]; 2];
             for (q, (point, weight)) in points.into_iter().enumerate() {
@@ -480,8 +506,8 @@ impl<'m> FluxSystem<'m> {
                 if matches!(owner, StokesBoundary::Velocity { .. }) {
                     let flux = weight
                         * (values[q][0] * geometry.normal[0] + values[q][1] * geometry.normal[1]);
-                    net_flux += flux;
-                    absolute_flux += flux.abs();
+                    net_flux[component] += flux;
+                    absolute_flux[component] += flux.abs();
                 }
             }
             samples[edge] = Some(match owner {
@@ -489,16 +515,22 @@ impl<'m> FluxSystem<'m> {
                 StokesBoundary::TotalTraction { .. } => Samples::Traction(values),
             });
         }
-        if !net_flux.is_finite() || !absolute_flux.is_finite() {
-            return Err(StokesBoundaryError::InvalidInput("boundary flux overflow"));
-        }
-        if !has_traction {
+        for component in 0..components {
+            let net_flux = net_flux[component];
+            let absolute_flux = absolute_flux[component];
+            if !net_flux.is_finite() || !absolute_flux.is_finite() {
+                return Err(StokesBoundaryError::InvalidInput("boundary flux overflow"));
+            }
+            if has_traction[component] {
+                continue;
+            }
             let tolerance = 256.0
                 * f64::EPSILON
-                * boundaries.len() as f64
+                * boundary_count[component] as f64
                 * absolute_flux.max(f64::MIN_POSITIVE);
             if net_flux.abs() > tolerance {
                 return Err(StokesBoundaryError::IncompatibleFlux {
+                    component,
                     net_flux,
                     tolerance,
                 });

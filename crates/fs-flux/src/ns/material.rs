@@ -470,17 +470,19 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
         boundary: &dyn Fn([f64; 2]) -> [f64; 2],
         run: impl FnOnce(&dyn Fn([f64; 2]) -> [f64; 2], &dyn Fn([f64; 2]) -> [f64; 2]) -> T,
     ) -> Result<T, MaterialFluxError> {
-        // Pinning p_0 removes cell zero's continuity equation. A small residual
+        // Pinning removes one continuity equation per component. A small residual
         // of that matrix cannot establish mass conservation unless the actual
         // prescribed BDM boundary moments sum to zero. Check before querying
         // forces or entering any solve, using the assembly's quadrature.
-        let mut net_flux = 0.0;
-        let mut compensation = 0.0;
-        let mut absolute_flux = 0.0_f64;
+        let components = self.system.pressure_component_count();
+        let mut net_flux = vec![0.0; components];
+        let mut compensation = vec![0.0; components];
+        let mut absolute_flux = vec![0.0_f64; components];
         for (index, edge) in self.system.mesh.edges.iter().enumerate() {
             if edge.tris.1 != usize::MAX {
                 continue;
             }
+            let component = self.system.pressure_component[edge.tris.0];
             let vertices = &self.system.mesh.verts;
             for (point, weight) in
                 crate::bdm::edge_gauss_pub(vertices[edge.verts.0], vertices[edge.verts.1])
@@ -500,27 +502,32 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
                     ));
                 }
                 for value in contributions {
-                    let corrected = value - compensation;
-                    let sum = net_flux + corrected;
-                    compensation = (sum - net_flux) - corrected;
-                    net_flux = sum;
-                    absolute_flux += value.abs();
+                    let corrected = value - compensation[component];
+                    let sum = net_flux[component] + corrected;
+                    compensation[component] = (sum - net_flux[component]) - corrected;
+                    net_flux[component] = sum;
+                    absolute_flux[component] += value.abs();
                 }
             }
         }
-        if !net_flux.is_finite() || !absolute_flux.is_finite() {
-            return Err(MaterialFluxError::Boundary(
-                StokesBoundaryError::InvalidInput("boundary flux overflow"),
-            ));
-        }
-        let tolerance = 256.0 * f64::EPSILON * absolute_flux.max(f64::MIN_POSITIVE);
-        if net_flux.abs() > tolerance {
-            return Err(MaterialFluxError::Boundary(
-                StokesBoundaryError::IncompatibleFlux {
-                    net_flux,
-                    tolerance,
-                },
-            ));
+        for component in 0..components {
+            let net_flux = net_flux[component];
+            let absolute_flux = absolute_flux[component];
+            if !net_flux.is_finite() || !absolute_flux.is_finite() {
+                return Err(MaterialFluxError::Boundary(
+                    StokesBoundaryError::InvalidInput("boundary flux overflow"),
+                ));
+            }
+            let tolerance = 256.0 * f64::EPSILON * absolute_flux.max(f64::MIN_POSITIVE);
+            if net_flux.abs() > tolerance {
+                return Err(MaterialFluxError::Boundary(
+                    StokesBoundaryError::IncompatibleFlux {
+                        component,
+                        net_flux,
+                        tolerance,
+                    },
+                ));
+            }
         }
         let invalid = Cell::new(false);
         let density = self.transport.density_kg_m3();

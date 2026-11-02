@@ -63,6 +63,15 @@ impl<G> MaterialStokesRheologySolution<G> {
     pub const fn pressure_reference(&self) -> StokesPressureReference {
         self.flow.solution.pressure_reference
     }
+    /// Local datum for a componentwise pressure field, in original cell order.
+    #[must_use]
+    pub fn pressure_reference_at(&self, cell: usize) -> Option<StokesPressureReference> {
+        self.flow
+            .solution
+            .pressure_reference_per_cell
+            .get(cell)
+            .copied()
+    }
     /// Physical kinetic energy per metre of out-of-plane depth.
     #[must_use]
     pub const fn kinetic_energy_j_per_m(&self) -> f64 {

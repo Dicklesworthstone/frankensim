@@ -150,6 +150,40 @@ fn g3_picard_retains_the_same_material_and_creeping_flow_limit() {
 
 // G0: a pressure pin cannot replace the closed-domain mass constraint.
 #[test]
+fn material_flow_refuses_opposite_leaks_in_disconnected_chambers() {
+    let mesh = TriMesh::from_mesh2(&Mesh2 {
+        nodes: vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [2.0, 1.0],
+        ],
+        elems: vec![vec![0, 1, 2], vec![3, 4, 5]],
+        patches: Vec::new(),
+    });
+    let system = FluxSystem::new(&mesh);
+    let material = transport(1.2, 0.03);
+    let flow =
+        MaterialFluxSystem::new(&system, &material, MaterialFluxNumerics::default()).unwrap();
+    let force = |_| panic!("force must not be evaluated before local flux admission");
+    let boundary = |p: [f64; 2]| {
+        if p[0] < 1.5 {
+            [p[0], 0.0]
+        } else {
+            [2.0 - p[0], 0.0]
+        }
+    };
+    assert!(matches!(
+        flow.assemble_stokes(&force, &boundary),
+        Err(MaterialFluxError::Boundary(StokesBoundaryError::IncompatibleFlux { component: 0, net_flux, .. }))
+            if (net_flux - 0.5).abs() < 1e-13
+    ));
+}
+
+// G0: a pressure pin cannot replace the closed-domain mass constraint.
+#[test]
 fn incompatible_boundary_flux_is_refused_before_force_evaluation() {
     let mesh = mesh();
     let system = FluxSystem::new(&mesh);
@@ -182,6 +216,7 @@ fn incompatible_boundary_flux_is_refused_before_force_evaluation() {
             let Err(MaterialFluxError::Boundary(StokesBoundaryError::IncompatibleFlux {
                 net_flux,
                 tolerance,
+                ..
             })) = result
             else {
                 panic!("entry {entry} did not refuse incompatible flux: {result:?}");

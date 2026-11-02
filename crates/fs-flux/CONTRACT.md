@@ -59,9 +59,11 @@ adjoints.
   moments — identity rows), tangential weak via symmetric interior
   penalty; every remaining basis function has v·n ≡ 0 on the whole
   boundary by dof duality, so the ∮p(v·n) consistency term vanishes
-  identically. Pressure pinned by REPLACING cell 0's continuity row
-  (its div-freeness is implied by the other cells plus the prescribed
-  net flux — never an additive penalty, which would corrupt it).
+  identically. Pressure pinned by REPLACING the first continuity row of
+  each edge-connected fluid component (its div-freeness is implied by the
+  other cells and that component's compatible prescribed net flux — never
+  an additive penalty, which would corrupt it). Component topology is
+  prepared once and reused by assembly, output and boundary admission.
   Convection: upwinded DG on the SINGLE-VALUED face flux w·n (H(div)
   conformity makes upwinding well-posed), volume term in
   divergence form −∫(u⊗w):∇v. A BDM1 normal trace can reverse within ONE
@@ -516,7 +518,7 @@ with its physical viscosity already included; the assembler does not multiply
 that boundary stress by viscosity again. The field entry ignores params.nu,
 while the legacy constant entry preserves its positive finite nu admission.
 
-One connected fluid domain and at least one velocity edge are required.
+Each connected fluid domain requires at least one velocity edge.
 Duplicate, missing, interior and out-of-range ownership is refused before
 callbacks run. Boundary quadrature samples are retained once for consistent
 strong moments and SIP. Non-finite loads and assembly, incompatible net flux
@@ -527,10 +529,16 @@ point and value in InvalidViscosity, stops subsequent viscosity queries and
 discards the private assembly before any solve or publication. No hidden
 grounding is added for pure-traction rigid modes.
 
-All-velocity problems retain the original pressure pin and report MeanZero
-pressure. With any total-traction edge, all continuity equations are retained,
-no pressure pin is added and StokesSolution::pressure reports TractionDatum
-without subtracting its mean. The pressure and traction are kinematic
+All-velocity components retain one pressure pin each and independently report
+MeanZero pressure. A component with a total-traction edge retains every
+continuity equation, has no pressure pin and reports TractionDatum without
+subtracting its mean. A mix of these component kinds reports Componentwise;
+StokesAssembly::pressure_reference_at and StokesSolution's per-cell reference
+metadata disclose which datum applies, also through the material wrapper.
+Independent mean-zero components have no known relative pressure offset.
+Boundary flux compatibility and Brinkman drag anchors are likewise local:
+opposite leaks or a physical anchor in another component cannot cancel a
+sealed component's incompatibility or rigid modes. The pressure and traction are kinematic
 (stress divided by one constant reference density); TractionDatum does not
 mean thermodynamic/EOS absolute pressure. A pressure shift dp requires changing
 the prescribed total traction by -dp*n. A pressure-only load is -p*n, but a
@@ -551,11 +559,18 @@ identity; and checked coefficient refusal without publishing a fallback.
 examples/pressure_channel.rs is runnable with
 cargo run -p fs-flux --example pressure_channel.
 
+The disconnected-domain regressions in the same test file cover independent
+affine pressure-gradient equilibria, dense/sparse agreement, a pressure-datum
+shift confined to one open chamber, component-local flux refusal, and the
+original discrete adjoint against independently re-solved pressure-difference
+sensitivities. The existing Brinkman test also checks independently anchored
+porous domains and refusal when only the other domain has drag.
+
 The frozen-field assembly above covers steady linear, constant-density Stokes with frozen
 positive spatially varying Newtonian viscosity on the existing straight-sided
 2D triangulation. It does not add
 nonlinear convection/backflow, open-boundary time integration, pure-traction
-rigid-mode quotients, disconnected domains, material-bound SI pressure
+rigid-mode quotients, material-bound SI pressure
 conversion or continuum error bounds. Existing synchronous cancellation and
 dense/iterative solver limitations remain in force.
 
@@ -1766,8 +1781,9 @@ principal rates and world-axis projections compile once per cell; symmetric
 cell integrals use the original quadrature without a second global matrix.
 The original SIP interface law, strong normal velocity moments, total-traction
 loads, exact cell continuity, pressure datum and checked residuals remain in
-force. Positive pore drag anchors rigid velocity modes, allowing an entirely
-traction-driven connected porous domain; disconnected meshes still refuse.
+force. Positive pore drag anchors rigid velocity modes in its own connected
+component, allowing entirely traction-driven porous components. Every other
+component still needs its own prescribed-velocity boundary.
 Free-fluid cells have exactly zero drag and preserve the original Stokes law.
 
 `MaterialFluxSystem::solve_brinkman_mixed` uses the original immutable material

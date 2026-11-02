@@ -18,6 +18,258 @@ fn velocity_boundaries<'a>(
         .collect()
 }
 
+fn separate_domains() -> TriMesh {
+    let mut mesh = Mesh2::triangles(1.0, 1.0, 2, 2);
+    let second = Mesh2::triangles(1.0, 1.0, 2, 2);
+    let offset = mesh.nodes.len();
+    mesh.nodes
+        .extend(second.nodes.iter().map(|p| [p[0] + 3.0, p[1]]));
+    mesh.elems.extend(
+        second
+            .elems
+            .iter()
+            .map(|e| e.iter().map(|i| i + offset).collect()),
+    );
+    TriMesh::from_mesh2(&mesh)
+}
+
+/// G1: two independent hydrostatic-gradient equilibria need two independent
+/// pressure gauges. Exact affine pressure is represented by its cell averages.
+#[test]
+fn disconnected_closed_domains_balance_independent_pressure_gradients() {
+    let mesh = separate_domains();
+    let system = FluxSystem::new(&mesh);
+    assert_eq!(system.pressure_component_count(), 2);
+    let params = FluxParams::default();
+    let force = |p: [f64; 2]| if p[0] < 2.0 { [2.0, -3.0] } else { [-4.0, 1.0] };
+    let zero = |_: [f64; 2]| [0.0; 2];
+    let boundaries = velocity_boundaries(&mesh, &zero);
+    let assembled = system
+        .assemble_stokes_mixed(params, &force, &boundaries)
+        .unwrap();
+    let solution = assembled.solve().unwrap();
+    let (velocity_error, divergence) = system.velocity_error(&solution.field.x, &zero);
+    assert!(velocity_error < 1e-12 && divergence < 1e-12);
+    let mut means = [0.0; 2];
+    for (cell, &component) in system.pressure_components().iter().enumerate() {
+        let p = mesh.centroids[cell];
+        let gradient = force(p);
+        let center_x = if component == 0 { 0.5 } else { 3.5 };
+        let exact = gradient[0] * (p[0] - center_x) + gradient[1] * (p[1] - 0.5);
+        assert!((solution.pressure[cell] - exact).abs() < 2e-11);
+        means[component] += mesh.areas[cell] * solution.pressure[cell];
+        assert_eq!(
+            solution.pressure_reference_per_cell[cell],
+            StokesPressureReference::MeanZero
+        );
+    }
+    assert!(means.iter().all(|value| value.abs() < 1e-13));
+
+    // The legacy assembly and sparse solver consume the same component pins.
+    let (matrix, rhs) =
+        system.assemble_variable_viscosity(params, &|_, _| params.nu, &force, &zero, None);
+    let sparse = system.solve_sparse(&matrix, &rhs, params);
+    assert!(sparse.converged(params.tol));
+    for (actual, expected) in system.pressure(&sparse.x).iter().zip(&solution.pressure) {
+        assert!((actual - expected).abs() < 2e-9);
+    }
+}
+
+/// G3: an open chamber owns its traction datum; its pressure offset cannot
+/// ground or move a disconnected sealed chamber.
+#[test]
+fn disconnected_open_and_closed_domains_retain_local_pressure_datums() {
+    let mesh = separate_domains();
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        nu: 0.7,
+        ..FluxParams::default()
+    };
+    let velocity = |p: [f64; 2]| {
+        if p[0] < 2.0 {
+            [0.0; 2]
+        } else {
+            [0.2 + 1.3 * p[1], 0.0]
+        }
+    };
+    let force = |p: [f64; 2]| if p[0] < 2.0 { [2.0, -3.0] } else { [0.0; 2] };
+    let mut previous: Option<Vec<f64>> = None;
+    for pressure in [7.0, 32.0] {
+        let traction = |_: [f64; 2], n: [f64; 2]| {
+            let shear = params.nu * 1.3;
+            [
+                -pressure * n[0] + shear * n[1],
+                shear * n[0] - pressure * n[1],
+            ]
+        };
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, geometry)| {
+                if geometry.mid[0] < 2.0 || geometry.normal[0] < -0.5 {
+                    StokesBoundary::Velocity {
+                        edge,
+                        value: &velocity,
+                    }
+                } else {
+                    StokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
+                }
+            })
+            .collect();
+        let assembly = system
+            .assemble_stokes_mixed(params, &force, &boundaries)
+            .unwrap();
+        assert_eq!(
+            assembly.pressure_reference(),
+            StokesPressureReference::Componentwise
+        );
+        let solution = assembly.solve().unwrap();
+        let (error, divergence) = system.velocity_error(&solution.field.x, &velocity);
+        assert!(error < 1e-11 && divergence < 1e-11);
+        for (cell, &component) in system.pressure_components().iter().enumerate() {
+            let (expected, reference) = if component == 0 {
+                let p = mesh.centroids[cell];
+                (
+                    2.0 * (p[0] - 0.5) - 3.0 * (p[1] - 0.5),
+                    StokesPressureReference::MeanZero,
+                )
+            } else {
+                (pressure, StokesPressureReference::TractionDatum)
+            };
+            assert!((solution.pressure[cell] - expected).abs() < 2e-10);
+            assert_eq!(assembly.pressure_reference_at(cell), Some(reference));
+            assert_eq!(solution.pressure_reference_per_cell[cell], reference);
+        }
+        if let Some(old) = &previous {
+            assert!(
+                old.iter()
+                    .zip(&solution.field.x[..system.n_u])
+                    .all(|(a, b)| (a - b).abs() < 1e-11)
+            );
+        }
+        previous = Some(solution.field.x[..system.n_u].to_vec());
+    }
+}
+
+/// G0: opposite leaks in disconnected chambers cannot cancel, and an open
+/// boundary in the other chamber cannot repair a sealed chamber's leak.
+#[test]
+fn disconnected_pressure_pins_require_local_flux_compatibility() {
+    let mesh = separate_domains();
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let incompatible = |p: [f64; 2]| {
+        if p[0] < 2.0 {
+            [p[0], 0.0]
+        } else {
+            [3.0 - p[0], 0.0]
+        }
+    };
+    let traction = |_: [f64; 2], _: [f64; 2]| [0.0; 2];
+    for open_second in [false, true] {
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, geometry)| {
+                if open_second && geometry.mid[0] > 3.5 {
+                    StokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
+                } else {
+                    StokesBoundary::Velocity {
+                        edge,
+                        value: &incompatible,
+                    }
+                }
+            })
+            .collect();
+        assert!(matches!(
+            system.assemble_stokes_mixed(params, &|_| [0.0; 2], &boundaries),
+            Err(StokesBoundaryError::IncompatibleFlux { component: 0, net_flux, .. })
+                if (net_flux - 1.0).abs() < 1e-13
+        ));
+    }
+    let previous = vec![0.0; system.n_u];
+    let result = system.bdf1_rheology_step(
+        params,
+        &|_, _, _| 1.0,
+        &|_| [0.0; 2],
+        &incompatible,
+        &previous,
+        0.1,
+        4,
+        1e-8,
+    );
+    assert!(matches!(
+        result,
+        Err(fs_flux::FluxRheologyError::IncompatibleBoundaryFlux { component: 0, .. })
+    ));
+}
+
+/// G3: the original transposed operator includes every pressure gauge. A
+/// local pressure-difference sensitivity agrees with independently re-solved
+/// load perturbations and does not couple the two disconnected domains.
+#[test]
+fn disconnected_pressure_adjoint_matches_independent_load_perturbations() {
+    let mesh = separate_domains();
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let zero = |_: [f64; 2]| [0.0; 2];
+    let assemble = |scale: f64| {
+        system.assemble_variable_viscosity(
+            params,
+            &|_, _| 1.0,
+            &|p| {
+                if p[0] < 2.0 {
+                    [2.0 * scale, -3.0 * scale]
+                } else {
+                    [-4.0, 1.0]
+                }
+            },
+            &zero,
+            None,
+        )
+    };
+    let (matrix, rhs) = assemble(1.0);
+    let mut objective = vec![0.0; system.n];
+    objective[system.n_u] = -1.0;
+    objective[system.n_u + 1] = 1.0;
+    let adjoint = system
+        .solve_adjoint_checked(&matrix, &objective, params)
+        .unwrap();
+    let h = 1e-4;
+    let (plus_a, plus_b) = assemble(1.0 + h);
+    let (minus_a, minus_b) = assemble(1.0 - h);
+    let plus = system.solve_linear(&plus_a, &plus_b, params);
+    let minus = system.solve_linear(&minus_a, &minus_b, params);
+    let finite_difference = ((plus.x[system.n_u + 1] - plus.x[system.n_u])
+        - (minus.x[system.n_u + 1] - minus.x[system.n_u]))
+        / (2.0 * h);
+    let sensitivity: f64 = adjoint
+        .multipliers
+        .iter()
+        .zip(plus_b.iter().zip(&minus_b))
+        .map(|(lambda, (plus, minus))| lambda * (plus - minus) / (2.0 * h))
+        .sum();
+    assert!((sensitivity - finite_difference).abs() < 1e-9);
+    let exact = 2.0 * (mesh.centroids[1][0] - mesh.centroids[0][0])
+        - 3.0 * (mesh.centroids[1][1] - mesh.centroids[0][1]);
+    assert!((sensitivity - exact).abs() < 1e-9);
+    assert!(
+        system
+            .solve_linear(&matrix, &rhs, params)
+            .converged(params.tol)
+    );
+}
+
 /// Independent fully developed solution: u=y(1-y), p=5.3-0.8x,
 /// nu=0.4 on [0,2]x[0,1], hence -nu*u''+p'=0 and Q=1/6.
 /// The end's TOTAL stress includes its tangential viscous traction.

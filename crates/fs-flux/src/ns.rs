@@ -9,8 +9,9 @@
 //! discrete adjoint of the linearized system. Dirichlet velocity BCs
 //! split by component: u·n STRONG (boundary-edge BDM dofs are exactly
 //! the normal moments — identity rows), tangential weak via SIP;
-//! pressure pinned by replacing cell 0's continuity row (implied by
-//! the others plus the prescribed net flux).
+//! one pressure pinned per connected fluid component by replacing its first
+//! cell's continuity row (implied by the other rows and that component's
+//! prescribed net flux).
 
 use crate::bdm::{CellBasis, cell_basis, eval_basis, tri_quad};
 use crate::trimesh::TriMesh;
@@ -191,6 +192,8 @@ pub enum FluxRheologyError {
     Invalid(&'static str),
     /// Prescribed normal boundary moments violate global mass conservation.
     IncompatibleBoundaryFlux {
+        /// Connected fluid component (ordered by its first triangle).
+        component: usize,
         /// Signed integrated outward boundary velocity.
         net_flux: f64,
         /// Integrated absolute normal-velocity contributions used for scaling.
@@ -219,11 +222,12 @@ impl core::fmt::Display for FluxRheologyError {
         match self {
             Self::Invalid(message) => write!(f, "implicit rheology: {message}"),
             Self::IncompatibleBoundaryFlux {
+                component,
                 net_flux,
                 absolute_flux,
             } => write!(
                 f,
-                "implicit rheology: incompatible boundary flux {net_flux} (absolute contributions {absolute_flux})"
+                "implicit rheology: component {component} has incompatible boundary flux {net_flux} (absolute contributions {absolute_flux})"
             ),
             Self::LinearConvergence {
                 iteration,
@@ -256,6 +260,10 @@ pub struct FluxSystem<'m> {
     pub n_u: usize,
     /// Total dof count (velocity + pressure).
     pub n: usize,
+    /// Edge-connected fluid components, prepared once for every solver path.
+    pressure_component: Vec<usize>,
+    /// First triangle in each component, in increasing triangle order.
+    pressure_roots: Vec<usize>,
 }
 
 impl<'m> FluxSystem<'m> {
@@ -264,12 +272,53 @@ impl<'m> FluxSystem<'m> {
     pub fn new(mesh: &'m TriMesh) -> FluxSystem<'m> {
         let bases = (0..mesh.tris.len()).map(|t| cell_basis(mesh, t)).collect();
         let n_u = 2 * mesh.edges.len();
+        let mut pressure_component = vec![usize::MAX; mesh.tris.len()];
+        let mut pressure_roots = Vec::new();
+        let mut stack = Vec::new();
+        for start in 0..mesh.tris.len() {
+            if pressure_component[start] != usize::MAX {
+                continue;
+            }
+            let component = pressure_roots.len();
+            pressure_roots.push(start);
+            pressure_component[start] = component;
+            stack.push(start);
+            while let Some(cell) = stack.pop() {
+                for &(edge, _) in &mesh.tri_edges[cell] {
+                    let adjacent = mesh.edges[edge].tris;
+                    let other = if adjacent.0 == cell {
+                        adjacent.1
+                    } else {
+                        adjacent.0
+                    };
+                    if other != usize::MAX && pressure_component[other] == usize::MAX {
+                        pressure_component[other] = component;
+                        stack.push(other);
+                    }
+                }
+            }
+        }
         FluxSystem {
             mesh,
             bases,
             n_u,
             n: n_u + mesh.tris.len(),
+            pressure_component,
+            pressure_roots,
         }
+    }
+
+    /// Number of independently connected pressure domains.
+    #[must_use]
+    pub fn pressure_component_count(&self) -> usize {
+        self.pressure_roots.len()
+    }
+
+    /// Triangle-to-component map, ordered by each component's first triangle.
+    /// Vertex-only contact does not connect fluid pressure domains.
+    #[must_use]
+    pub fn pressure_components(&self) -> &[usize] {
+        &self.pressure_component
     }
 
     /// Global velocity dof of (triangle-local dof i) on triangle `t`.
@@ -396,9 +445,9 @@ impl<'m> FluxSystem<'m> {
         // Velocity-edge normal moments are the BDM dofs, so u·n = g·n
         // is strong. Natural total-traction edges retain their normal dofs:
         // the boundary stress is supplied on the RHS, including pressure.
-        // With velocity everywhere, cell 0's redundant continuity row is
-        // replaced by p_0 = 0. With traction, keep every continuity row
-        // because the boundary data already determines the pressure datum.
+        // Each all-velocity component has one redundant continuity row,
+        // replaced by a zero pressure datum. A traction in another component
+        // cannot determine this component's independent pressure constant.
         let mut con: Vec<Option<f64>> = vec![None; self.n];
         for (e, edge) in mesh.edges.iter().enumerate() {
             if edge.tris.1 != usize::MAX || boundary.is_some_and(|data| data.is_traction(e)) {
@@ -420,8 +469,10 @@ impl<'m> FluxSystem<'m> {
             con[2 * e] = Some(m0);
             con[2 * e + 1] = Some(m1);
         }
-        if boundary.is_none_or(|data| !data.has_traction) {
-            con[self.n_u] = Some(0.0);
+        for (component, &root) in self.pressure_roots.iter().enumerate() {
+            if boundary.is_none_or(|data| !data.has_traction[component]) {
+                con[self.n_u + root] = Some(0.0);
+            }
         }
         // --- Cell terms: viscous stress, div coupling, load.
         for t in 0..mesh.tris.len() {
@@ -1020,18 +1071,20 @@ impl<'m> FluxSystem<'m> {
                 "finite velocity dofs, positive timestep/tolerances and nonzero iteration budgets required",
             ));
         }
-        // Pressure pinning omits cell zero's continuity equation. Its physical
-        // compatibility follows from the prescribed boundary flux, not from
+        // Each pressure pin omits one continuity equation. Its physical
+        // compatibility follows from that component's boundary flux, not from
         // the residual of the pinned matrix. Use exactly the boundary moment
         // quadrature and outward normals used by assembly, with compensated
         // summation so a large balanced inflow/outflow is still admissible.
-        let mut net_flux = 0.0;
-        let mut compensation = 0.0;
-        let mut absolute_flux = 0.0;
+        let components = self.pressure_roots.len();
+        let mut net_flux = vec![0.0; components];
+        let mut compensation = vec![0.0; components];
+        let mut absolute_flux = vec![0.0; components];
         for edge in &self.mesh.edges {
             if edge.tris.1 != usize::MAX {
                 continue;
             }
+            let component = self.pressure_component[edge.tris.0];
             let (va, vb) = (self.mesh.verts[edge.verts.0], self.mesh.verts[edge.verts.1]);
             for (point, weight) in crate::bdm::edge_gauss_pub(va, vb) {
                 let velocity = boundary(point);
@@ -1049,22 +1102,27 @@ impl<'m> FluxSystem<'m> {
                     ));
                 }
                 for value in contributions {
-                    let corrected = value - compensation;
-                    let sum = net_flux + corrected;
-                    compensation = (sum - net_flux) - corrected;
-                    net_flux = sum;
-                    absolute_flux += value.abs();
+                    let corrected = value - compensation[component];
+                    let sum = net_flux[component] + corrected;
+                    compensation[component] = (sum - net_flux[component]) - corrected;
+                    net_flux[component] = sum;
+                    absolute_flux[component] += value.abs();
                 }
             }
         }
-        if !net_flux.is_finite() || !absolute_flux.is_finite() {
-            return Err(FluxRheologyError::Invalid("boundary flux must be finite"));
-        }
-        if net_flux.abs() > 256.0 * f64::EPSILON * absolute_flux.max(f64::MIN_POSITIVE) {
-            return Err(FluxRheologyError::IncompatibleBoundaryFlux {
-                net_flux,
-                absolute_flux,
-            });
+        for component in 0..components {
+            let net_flux = net_flux[component];
+            let absolute_flux = absolute_flux[component];
+            if !net_flux.is_finite() || !absolute_flux.is_finite() {
+                return Err(FluxRheologyError::Invalid("boundary flux must be finite"));
+            }
+            if net_flux.abs() > 256.0 * f64::EPSILON * absolute_flux.max(f64::MIN_POSITIVE) {
+                return Err(FluxRheologyError::IncompatibleBoundaryFlux {
+                    component,
+                    net_flux,
+                    absolute_flux,
+                });
+            }
         }
         let inv_dt = timestep_s.recip();
         let mut current = vec![0.0; self.n];
@@ -1134,18 +1192,35 @@ impl<'m> FluxSystem<'m> {
         unreachable!("the nonzero iteration budget either accepts or refuses its final candidate")
     }
 
-    /// Cell pressures shifted to zero area-weighted mean.
+    /// Cell pressures shifted to zero area-weighted mean independently in
+    /// each connected fluid component. Use the checked Stokes output to retain
+    /// pressure datums fixed by prescribed total traction.
     #[must_use]
     pub fn pressure(&self, x: &[f64]) -> Vec<f64> {
-        let mut total = 0.0;
-        let mut mean = 0.0;
-        for t in 0..self.mesh.tris.len() {
-            total += self.mesh.areas[t];
-            mean += self.mesh.areas[t] * x[self.n_u + t];
+        self.pressure_in_gauges(x, &vec![false; self.pressure_roots.len()])
+    }
+
+    fn pressure_in_gauges(&self, x: &[f64], has_traction: &[bool]) -> Vec<f64> {
+        let mut total = vec![0.0; self.pressure_roots.len()];
+        let mut mean = vec![0.0; self.pressure_roots.len()];
+        for (cell, &component) in self.pressure_component.iter().enumerate() {
+            if !has_traction[component] {
+                let datum = x[self.n_u + self.pressure_roots[component]];
+                total[component] += self.mesh.areas[cell];
+                mean[component] += self.mesh.areas[cell] * (x[self.n_u + cell] - datum);
+            }
         }
-        mean /= total;
-        (0..self.mesh.tris.len())
-            .map(|t| x[self.n_u + t] - mean)
+        self.pressure_component
+            .iter()
+            .enumerate()
+            .map(|(cell, &component)| {
+                if has_traction[component] {
+                    x[self.n_u + cell]
+                } else {
+                    let datum = x[self.n_u + self.pressure_roots[component]];
+                    (x[self.n_u + cell] - datum) - mean[component] / total[component]
+                }
+            })
             .collect()
     }
 

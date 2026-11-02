@@ -480,7 +480,10 @@ fn g0_drag_in_one_component_does_not_anchor_a_disconnected_free_fluid() {
         BrinkmanCell::try_new(tensor(0.0), 1.0).unwrap(),
         BrinkmanCell::free_fluid(),
     ];
-    let traction = |_: [f64; 2], _: [f64; 2]| [0.0; 2];
+    let traction = |point: [f64; 2], normal: [f64; 2]| {
+        let pressure = if point[0] < 1.5 { 3.0 } else { 7.0 };
+        [-pressure * normal[0], -pressure * normal[1]]
+    };
     let boundaries: Vec<_> = (0..mesh.edges.len())
         .map(|edge| StokesBoundary::TotalTraction {
             edge,
@@ -489,6 +492,21 @@ fn g0_drag_in_one_component_does_not_anchor_a_disconnected_free_fluid() {
         .collect();
     assert!(matches!(
         system.assemble_brinkman_mixed(FluxParams::default(), &cells, &|_| [0.0; 2], &boundaries),
-        Err(fs_flux::StokesBoundaryError::DisconnectedMesh)
+        Err(fs_flux::StokesBoundaryError::UnanchoredComponent { component: 1 })
     ));
+    // Grounding both domains through their own physical drag admits their
+    // independently prescribed traction pressures without velocity pins.
+    let cells = [cells[0]; 2];
+    let solution = system
+        .assemble_brinkman_mixed(FluxParams::default(), &cells, &|_| [0.0; 2], &boundaries)
+        .unwrap()
+        .solve()
+        .unwrap();
+    assert!(
+        solution.field.x[..system.n_u]
+            .iter()
+            .all(|u| u.abs() < 1e-12)
+    );
+    assert!((solution.pressure[0] - 3.0).abs() < 1e-11);
+    assert!((solution.pressure[1] - 7.0).abs() < 1e-11);
 }

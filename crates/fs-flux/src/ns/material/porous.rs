@@ -32,10 +32,16 @@ impl MaterialBrinkmanSolution {
     pub fn pressure_pa(&self) -> &[f64] {
         &self.pressure_pa
     }
-    /// The traction datum or all-velocity mean-zero gauge.
+    /// The traction datum, all-velocity mean-zero gauge, or componentwise mix.
     #[must_use]
     pub const fn pressure_reference(&self) -> StokesPressureReference {
         self.flow.pressure_reference
+    }
+    /// Local datum in original cell order; independent closed components have
+    /// no known relative pressure offset.
+    #[must_use]
+    pub fn pressure_reference_at(&self, cell: usize) -> Option<StokesPressureReference> {
+        self.flow.pressure_reference_per_cell.get(cell).copied()
     }
     /// Original immutable material snapshot used by both stress and pore drag.
     #[must_use]

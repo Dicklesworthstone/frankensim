@@ -3361,6 +3361,22 @@ physical liquid/gas equation of state. Tests cover actual direction/reversal on
 all axes, pressure-reference invariance, material-density similitude, capillary
 zero-load equivalence, mass preservation and atomic refusal/cancellation.
 
+`MaterialFreeSurfaceScaling::free_surface3_from_cells_with_pressure` also
+admits a positive absolute liquid-pressure field at occupied initial cell
+centers, using that same fixed reference and pressure scale. The caller can
+initialize hydrostatic or capillary pressure together with transferred fill
+and Guo-corrected velocity; the pressure is sampled only at construction.
+Every initial density must satisfy an explicit excursion bound in (0,1).
+Native mass remains `fill*rho_lattice*rho_source*dx³`, so pressure-induced
+numerical density contributes to initial mass; no physical equation of state
+or mass-preserving pressure projection is asserted. Frozen source properties
+are unchanged. The ordinary zero-perturbation initializer is bit-preserved.
+Tests check hydrostatic cancellation of initial interior acceleration in all
+six gravity directions, a pressure-matched flat surface at rest, the supplied
+spherical Laplace jump, gauge invariance and refused/cancelled ingress. These
+are initialization checks, not an exactly well-balanced hydrostatic or
+static-drop scheme, and do not establish long-time or refinement accuracy.
+
 ### Sourced equilibrium angle at one planar domain wall
 
 `MaterialFreeSurfaceScaling::with_planar_wetting` binds a

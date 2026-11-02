@@ -270,10 +270,10 @@ impl<'m> FluxSystem<'m> {
     /// Cellwise coefficients are compiled once outside all quadrature loops.
     /// Strong normal moments, total-traction boundaries, SIP interfaces, exact
     /// cell continuity and both true residual checks remain owned by Stokes.
-    /// A positive porous cell removes all rigid velocity modes of this single
-    /// connected domain, admitting all-traction boundaries without an artificial
-    /// velocity anchor. Disconnected meshes still refuse. Without pore drag the
-    /// original requirement for a velocity boundary remains in force.
+    /// A positive porous cell removes all rigid velocity modes of its connected
+    /// domain, admitting all-traction boundaries there without an artificial
+    /// velocity anchor. Every component without pore drag independently
+    /// requires a velocity boundary.
     ///
     /// # Errors
     /// Refuses the native Stokes admission failures, mismatched cell counts,
@@ -300,11 +300,11 @@ impl<'m> FluxSystem<'m> {
             }
             effective_nu.push(effective);
         }
-        let admitted = self.admit_stokes_problem_with_drag(
-            params,
-            boundaries,
-            cells.iter().any(|cell| cell.permeability.is_some()),
-        )?;
+        let mut anchors = vec![false; self.pressure_component_count()];
+        for (cell, law) in cells.iter().enumerate() {
+            anchors[self.pressure_component[cell]] |= law.permeability.is_some();
+        }
+        let admitted = self.admit_stokes_problem_with_drag(params, boundaries, &anchors)?;
         let stokes = self.assemble_stokes_admitted_viscosity_and_drag(
             params,
             &|cell, _| effective_nu[cell],
