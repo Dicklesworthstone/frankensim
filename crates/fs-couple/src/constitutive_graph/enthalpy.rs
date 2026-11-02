@@ -386,8 +386,11 @@ fn resolved_candidate<'m, S, E>(
             return Err(GraphThermalError::ThermalBudget);
         }
         trials.set(trials.get() + 1);
+        // The generic Newton-Krylov solve proposes arbitrary cell-energy iterates, and a component can fall
+        // below its cell's enthalpy resolution. Such a component is the exactly representable zero, as
+        // fs-thermal's implicit conduction driver proposes; the residual still charges every joule.
         step.evaluate(
-            energy,
+            &step.resolvable_increments_j(energy),
             |endpoint| {
                 let remaining = controls.maximum_graph_evaluations - graph_evaluations.get();
                 if remaining == 0 {

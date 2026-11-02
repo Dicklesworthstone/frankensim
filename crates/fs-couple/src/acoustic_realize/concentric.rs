@@ -407,7 +407,10 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
         }
         let trials = Cell::new(0usize);
         let evaluate = |x: &[f64]| {
-            step.evaluate(x, |endpoint| {
+            // The generic Newton-Krylov solve proposes arbitrary cell-energy iterates, and a component can
+            // fall below its cell's enthalpy resolution. Such a component is the exactly representable zero,
+            // as fs-thermal's implicit conduction driver proposes; the residual still charges every joule.
+            step.evaluate(&step.resolvable_increments_j(x), |endpoint| {
                 checkpoint(cx)?;
                 if trials.get() >= controls.maximum_thermal_trials { return Err(ConcentricStringError::TrialBudget); }
                 trials.set(trials.get()+1);

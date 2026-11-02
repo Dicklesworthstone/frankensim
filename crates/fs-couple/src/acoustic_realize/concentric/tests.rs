@@ -281,6 +281,30 @@ fn g3_one_layer_data_swap_changes_force_and_pressure_with_identical_solver_and_g
 }
 
 #[test]
+fn a_guess_component_below_a_cells_enthalpy_resolution_is_the_zero_iterate_not_a_refusal() {
+    // A generic Newton solve hands arbitrary cell-energy iterates to the thermal
+    // step; 1e-30 J cannot move a cell holding 200 J/kg, so it is exactly the zero
+    // iterate. The first iterate is the one a test controls exactly; the stencil
+    // and line-search iterates go through the same closure.
+    with_cx(|cx, _| {
+        let sources = Sources::new(4e-5);
+        let run = |guess: &[f64]| {
+            let (mut runtime, mut thermal) = sources.runtime(cx);
+            let frame = runtime.step_with_thermal_network(cx, &mut thermal, controls(),
+                guess, &[0.0; 2], heat);
+            (frame, thermal)
+        };
+        let (exact, exact_thermal) = run(&[0.002, 0.0]);
+        let (noisy, noisy_thermal) = run(&[0.002, 1e-30]);
+        let exact = exact.unwrap();
+        let noisy = noisy.expect("a sub-resolution guess must be projected to zero, not refused");
+        assert_eq!(noisy.vibration, exact.vibration);
+        assert_eq!(noisy.layers, exact.layers);
+        assert_eq!(noisy_thermal.cells(), exact_thermal.cells());
+    });
+}
+
+#[test]
 fn failed_source_or_step_budget_preserves_all_histories_and_retry() {
     with_cx(|cx, _| {
         let sources = Sources::new(4e-5);

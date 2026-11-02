@@ -596,6 +596,10 @@ pub(crate) fn cell_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
             conductances_w_k: coefficients.conductances_w_k,
             payload: (circuit, coefficients.source, deposited, entropy) }, boundaries }, transfers })
         };
+        // The generic Newton-Krylov solve proposes arbitrary cell-energy iterates, and a component can fall
+        // below its cell's enthalpy resolution. Such a component is the exactly representable zero, as
+        // fs-thermal's implicit conduction driver proposes; the residual still charges every joule.
+        let x = &step.resolvable_increments_j(x);
         if entropy_requested {
             step.evaluate_with_transport_and_entropy(x, coefficients, checkpoint)
         } else {

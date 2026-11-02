@@ -331,6 +331,40 @@ fn sourced_resistance_and_heat_capacity_close_the_finite_cell_quadratic() {
 }
 
 #[test]
+fn a_guess_below_the_cells_enthalpy_resolution_is_the_zero_iterate_not_a_refusal() {
+    // A generic Newton solve hands arbitrary cell-energy iterates to the thermal
+    // step; 1e-30 J cannot move a cell holding 200 J/kg, so it is exactly the
+    // zero iterate. The first iterate is the one a test controls exactly; the
+    // stencil and line-search iterates go through the same closure.
+    with_cx(|cx, _| {
+        let (card, curve) = material(2.0, 2.0, 1.0);
+        let initial = timeline(
+            &[(MaterialId(0), curve.curve() as &dyn ThermalLaw)],
+            vec![birth(HEATER, MaterialId(0), 200.0)],
+        );
+        let graph = ohmic_graph(&card);
+        let feedback = voltage_feedback();
+        let run = |guess: &[f64]| {
+            step_candidate(
+                cx,
+                &initial,
+                0.5,
+                feedback.input(&graph, &[]),
+                thermal_controls(),
+                guess,
+                no_additional_heat,
+            )
+        };
+        let exact = run(&[0.0]).unwrap();
+        let noisy = run(&[1e-30])
+            .expect("a sub-resolution guess must be projected to zero, not refused");
+        assert_eq!(noisy.thermal().cells(), exact.thermal().cells());
+        assert_eq!(noisy.graph().external, exact.graph().external);
+        assert_eq!(noisy.report().graph_heat_j, exact.report().graph_heat_j);
+    });
+}
+
+#[test]
 fn conductivity_data_changes_both_original_bodies_and_the_converged_current() {
     with_cx(|cx, _| {
         let run = |k_scale: f64| {

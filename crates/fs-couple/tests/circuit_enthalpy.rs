@@ -172,3 +172,19 @@ fn thermal_events_are_not_implicitly_consumed_by_circuit_trials() {
     assert_eq!(right.cells()[&CellId(30)].boundary.source_w,4.0);
     assert_eq!(right.energy_j(),left.thermal().energy_j());
 }
+
+#[test]
+fn a_guess_component_below_a_cells_enthalpy_resolution_is_the_zero_iterate_not_a_refusal() {
+    // A generic Newton solve hands arbitrary cell-energy iterates to the thermal
+    // step; 1e-30 J cannot move a 1 kg cell holding 100-200 J/kg, so it is exactly the zero
+    // iterate. The first iterate is the one a test controls exactly; stencil and
+    // line-search iterates go through the same closure.
+    let (a,ca)=material(1.0,1.0,0.0);let (b,cb)=material(3.0,2.0,0.0);
+    let cards=[a,b];let curves=[ca,cb];let thermal=initial(&curves,2.0,None);let old=circuit(&thermal,&cards,&curves);
+    let run=|guess:&[f64]| step_candidate(&thermal,1.0,input(&old),config(),guess,
+        |s|coefficients(s,&cards,&curves),||false);
+    let exact=run(&[0.0;2]).unwrap();
+    let noisy=run(&[0.0,1e-30]).expect("a sub-resolution guess component must be projected, not refused");
+    assert_eq!(noisy.thermal().cells(),exact.thermal().cells());
+    assert_eq!(noisy.circuit(),exact.circuit());
+}
