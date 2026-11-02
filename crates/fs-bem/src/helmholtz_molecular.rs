@@ -15,6 +15,7 @@
 //! energy; it is not flux measured on a distant sphere in an absorbing medium.
 
 use super::aperture::{self, Aperture, ApertureImpedance};
+use super::bc::Admittance;
 use super::laplace::complex::{self, ComplexError, ComplexOptions};
 use super::laplace::{DampedWaveNumber, PointField, fields_from_traces};
 use super::*;
@@ -96,6 +97,20 @@ pub struct MolecularRadiation {
     boundary_work_w: f64,
 }
 
+/// Outgoing field with separate surface absorption and imposed-drive work.
+/// The exterior work includes molecular absorption in the gas; surface
+/// absorption is a different energy channel and is counted exactly once.
+#[derive(Debug, Clone)]
+pub struct MolecularBoundarySolution {
+    pub radiation: MolecularRadiation,
+    /// Mean work entering the boundary admittance [W], without clipping.
+    pub absorbed_power_w: f64,
+    /// Mean work supplied by the prescribed velocity drive [W].
+    pub driving_power_w: f64,
+    /// Whether an active boundary was explicitly requested by the caller.
+    pub declared_active: bool,
+}
+
 impl MolecularExterior {
     /// Bind an already evaluated material; no gas composition or reservoir
     /// constants are inferred. The band is a caller declaration, not a source
@@ -134,8 +149,50 @@ impl MolecularExterior {
         fields: &[&[C64]],
         formulation: Formulation,
         options: &ComplexOptions,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<MolecularRadiation>, MolecularError> {
+        self.solve_boundary_batch(
+            surface,
+            omega,
+            fields,
+            Admittance::Rigid,
+            formulation,
+            options,
+            cancelled,
+        )
+        .map(|solutions| solutions.into_iter().map(|s| s.radiation).collect())
+    }
+
+    /// Radiate prescribed drives through one shared surface admittance and
+    /// the SAME relaxing exterior. `Admittance` retains its existing convention
+    /// `beta = rho*c_eq*Y`, with `Y` in m/(Pa s). The real equilibrium `rho*c_eq`
+    /// is only a normalization; the dispersive wave impedance is not used to
+    /// convert boundary pressure to velocity.
+    ///
+    /// In exp(-i omega t), `v = v_drive - Y p`, so `q = i*rho*omega*v` and
+    /// `(A + i*(omega/c_eq)*B*beta) p = B*(i*rho*omega*v_drive)`.
+    /// Substituting complex k for omega/c_eq here would change the physical
+    /// boundary law. This is the same Robin substitution as the lossless owner,
+    /// applied to the original complex-k boundary pair, including BOTH
+    /// Burton--Miller rows. Surface loss and gas absorption remain distinct.
+    ///
+    /// Local laws add O(N²) work without another dense matrix. Nonlocal laws
+    /// retain their original full operator (N applications plus O(N³) dense
+    /// composition), with cancellation between columns and rows. ComplexOptions
+    /// bounds the original assembly; a nonlocal law owns its application budget.
+    /// One factorization serves every drive. Closed retained triangles are
+    /// required for a nonzero Robin law, as in the original boundary owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_boundary_batch(
+        &self,
+        surface: &SpherePanels,
+        omega: f64,
+        fields: &[&[C64]],
+        admittance: Admittance<'_>,
+        formulation: Formulation,
+        options: &ComplexOptions,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<MolecularBoundarySolution>, MolecularError> {
         poll(&mut cancelled)?;
         if !omega.is_finite() || omega < self.band_rad_s[0] || omega > self.band_rad_s[1] {
             return Err(bad(
@@ -153,54 +210,135 @@ impl MolecularExterior {
                 "molecular exterior needs a finite, bounded boundary-field batch",
             ));
         }
+        admittance.validate(n)?;
+        let is_rigid = admittance.is_zero();
+        if !is_rigid {
+            super::bc::validate_closed(surface)?;
+        }
+        let law_stamp = admittance.stamp();
+        let gas = self.source.gas();
+        let rho_c = gas.density * gas.sound_speed;
+        let q_scale = C64::new(0.0, gas.density * omega);
+        let robin_scale = C64::new(0.0, omega / gas.sound_speed);
+        if !rho_c.is_finite() || rho_c <= 0.0 || !finite(q_scale) || !finite(robin_scale) {
+            return Err(bad(
+                "molecular exterior boundary scales are unrepresentable",
+            ));
+        }
         let k = self.source.relaxing_wavenumber(omega)?;
         if !finite(k) || k.re <= 0.0 || k.im < 0.0 {
             return Err(bad(
                 "molecular exterior wavenumber must be outgoing and passive",
             ));
         }
-        let op =
+        let mut op =
             complex::assemble_values_with_cancel(surface, k, formulation, options, &mut cancelled)?;
         poll(&mut cancelled)?;
+        if !is_rigid {
+            match admittance {
+                Admittance::Local { beta, .. } => {
+                    for i in 0..n {
+                        poll(&mut cancelled)?;
+                        for (j, &b) in beta.iter().enumerate() {
+                            op.a[i * n + j] = op.a[i * n + j] + robin_scale * op.b[i * n + j] * b;
+                        }
+                    }
+                }
+                Admittance::NonLocal { .. } => {
+                    let mut basis = vec![C64::ZERO; n];
+                    for j in 0..n {
+                        poll(&mut cancelled)?;
+                        basis[j] = C64::ONE;
+                        let column = admittance.image(&basis)?;
+                        basis[j] = C64::ZERO;
+                        for i in 0..n {
+                            poll(&mut cancelled)?;
+                            let mut product = C64::ZERO;
+                            for (q, &value) in column.iter().enumerate() {
+                                product = product + op.b[i * n + q] * value;
+                            }
+                            op.a[i * n + j] = op.a[i * n + j] + robin_scale * product;
+                        }
+                    }
+                }
+                Admittance::Rigid => unreachable!("zero laws retain the original operator"),
+            }
+            if op.a.iter().any(|&z| !finite(z)) {
+                return Err(bad("nonfinite molecular Robin operator"));
+            }
+        }
         let lu = lu_complex_with_cancel(&op.a, n, &mut cancelled)?;
         // The factor owns its coefficients; retain only B across the RHS batch.
         drop(op.a);
         poll(&mut cancelled)?;
-        let q_scale = C64::new(0.0, self.source.gas().density * omega);
-        if !finite(q_scale) {
-            return Err(bad("molecular exterior Neumann scale is unrepresentable"));
-        }
         let fingerprint = surface_fingerprint(surface);
         let mut out = Vec::with_capacity(fields.len());
-        for &velocity in fields {
+        for &drive in fields {
             poll(&mut cancelled)?;
+            if admittance.stamp() != law_stamp {
+                return Err(bad("molecular boundary admittance changed during solve"));
+            }
             let mut pressure = vec![C64::ZERO; n];
             for i in 0..n {
                 poll(&mut cancelled)?;
-                for (j, &v) in velocity.iter().enumerate() {
+                for (j, &v) in drive.iter().enumerate() {
                     pressure[i] = pressure[i] + op.b[i * n + j] * (q_scale * v);
                 }
             }
             lu.solve_with_cancel(&mut pressure, &mut cancelled)?;
+            let absorbed = if is_rigid {
+                Vec::new()
+            } else {
+                admittance.image(&pressure)?
+            };
+            let mut velocity = drive.to_vec();
             let mut boundary_work_w = 0.0;
-            for ((&p, &v), &area) in pressure.iter().zip(velocity).zip(surface.areas()) {
-                if !finite(p) {
-                    return Err(bad("nonfinite molecular boundary pressure"));
+            let mut absorbed_power_w = 0.0;
+            let mut driving_power_w = 0.0;
+            let mut apparent_absorbed = 0.0;
+            for i in 0..n {
+                let p = pressure[i];
+                let area = surface.areas()[i];
+                if !is_rigid {
+                    let inward = absorbed[i].scale(1.0 / rho_c);
+                    velocity[i] = drive[i] - inward;
+                    absorbed_power_w += 0.5 * (p * inward.conj()).re * area;
+                    apparent_absorbed += 0.5 * p.abs() * inward.abs() * area;
                 }
-                boundary_work_w += 0.5 * (p * v.conj()).re * area;
+                if !finite(p) || !finite(velocity[i]) {
+                    return Err(bad("nonfinite molecular boundary pressure or velocity"));
+                }
+                boundary_work_w += 0.5 * (p * velocity[i].conj()).re * area;
+                driving_power_w += 0.5 * (p * drive[i].conj()).re * area;
             }
-            if !boundary_work_w.is_finite() {
-                return Err(bad("nonfinite molecular boundary work"));
+            if !boundary_work_w.is_finite()
+                || !driving_power_w.is_finite()
+                || !absorbed_power_w.is_finite()
+                || !apparent_absorbed.is_finite()
+                || (!admittance.declared_active()
+                    && absorbed_power_w < -1e-10 * apparent_absorbed.max(f64::MIN_POSITIVE))
+            {
+                return Err(bad(
+                    "molecular boundary has nonfinite or undeclared active work",
+                ));
             }
-            out.push(MolecularRadiation {
-                source: Arc::clone(&self.source),
-                omega,
-                k,
-                fingerprint,
-                pressure,
-                velocity: velocity.to_vec(),
-                boundary_work_w,
+            out.push(MolecularBoundarySolution {
+                radiation: MolecularRadiation {
+                    source: Arc::clone(&self.source),
+                    omega,
+                    k,
+                    fingerprint,
+                    pressure,
+                    velocity,
+                    boundary_work_w,
+                },
+                absorbed_power_w,
+                driving_power_w,
+                declared_active: admittance.declared_active(),
             });
+        }
+        if admittance.stamp() != law_stamp {
+            return Err(bad("molecular boundary admittance changed during solve"));
         }
         poll(&mut cancelled)?;
         Ok(out)

@@ -248,3 +248,190 @@ fn molecular_front_delay_caching_band_and_cancellation_remain_source_bound() {
         "do not cross a representation resonance or switch quadrature inside a bake"
     );
 }
+
+/// G1/G3: spherical propagation in a relaxing medium keeps the actual
+/// pressure gradient and its reactive velocity; p/(rho*c) is not momentum.
+#[test]
+fn harmonic_molecular_fields_preserve_momentum_dispersion_and_absorbed_power() {
+    let surface = SpherePanels::icosphere(0.1, 1).unwrap();
+    let model = observer(&surface, material(101_325.0, 0.25, true));
+    let omega = 600.0;
+    let gas = model.source().gas();
+    let k = model.source().relaxing_wavenumber(omega).unwrap();
+    assert!(k.im > 0.0);
+    let samples = model.frequency_sample(omega, || false).unwrap();
+    let prepared = model.prepare_harmonic(omega, || false).unwrap();
+    assert_eq!(prepared.producer_hash(), model.operator_hash());
+    assert_eq!(prepared.sources(), &model.boundary.sources);
+    assert_eq!(prepared.receivers(), &model.boundary.receivers);
+    assert!(matches!(
+        prepared.producer_uncertainty(),
+        ProducerUncertainty::Unresolved { .. }
+    ));
+    let mut fields = [HarmonicField::default(); 2];
+    prepared
+        .evaluate_coherent(&[C64::ONE], &mut fields, || false)
+        .unwrap();
+    let mut statistics = [HarmonicFieldStatistics::default(); 2];
+    prepared
+        .evaluate_independent_sources(
+            &[1.0],
+            HarmonicWorkBudget {
+                maximum_products: 100,
+            },
+            &mut statistics,
+            || false,
+        )
+        .unwrap();
+    for (receiver, radius) in [1.0, 3.0].into_iter().enumerate() {
+        let p = fields[receiver].pressure_pa;
+        assert_eq!(p, samples[4 * receiver]);
+        for axis in 0..3 {
+            let expected =
+                samples[4 * receiver + axis + 1] * C64::new(0.0, -1.0 / (gas.density * omega));
+            assert_eq!(fields[receiver].particle_velocity_m_s[axis], expected);
+        }
+        // Differentiate p=A exp(ikr)/r independently: radial velocity is
+        // p*(k+i/r)/(rho*omega), including spherical and molecular reactance.
+        let radial = p * (k + C64::new(0.0, 1.0 / radius)).scale(1.0 / (gas.density * omega));
+        let actual = fields[receiver].particle_velocity_m_s[2];
+        assert!((actual - radial).abs() < 0.01 * radial.abs());
+        let exact_intensity = p * radial.conj().scale(0.5);
+        let intensity = statistics[receiver].complex_intensity_w_m2[2];
+        assert!((intensity - exact_intensity).abs() < 0.01 * exact_intensity.abs());
+        assert!(intensity.re > 0.0 && intensity.im < 0.0);
+        assert!(
+            (actual - p.scale(1.0 / (gas.density * gas.sound_speed))).abs() > 0.01 * actual.abs()
+        );
+    }
+    // Outgoing power decreases with radius by exp(-2 Im(k) delta_r).
+    // Multiplying pressure power by 1/(rho*c) or adding absorption again
+    // would break these jointly observed pressure/velocity relations.
+    let power_ratio = 9.0 * statistics[1].complex_intensity_w_m2[2].re
+        / statistics[0].complex_intensity_w_m2[2].re;
+    let expected = det::exp(-4.0 * k.im);
+    assert!((power_ratio - expected).abs() < 0.02 * expected);
+    assert!(power_ratio < 1.0);
+}
+
+/// G0/G3: structural velocity and volume flow keep their distinct units but
+/// interfere before averaging, including pressure/velocity microphone terms.
+#[test]
+fn molecular_harmonics_preserve_mixed_source_interference_and_microphone_phase() {
+    use crate::near_field::FirstOrder;
+
+    let surface = SpherePanels::icosphere(0.1, 0).unwrap();
+    let n = surface.areas().len();
+    let area: f64 = surface.areas().iter().sum();
+    let base = observer(&surface, material(101_325.0, 1.0, true));
+    let model = MolecularBemObservation::new(
+        &surface,
+        base.source().clone(),
+        &[
+            SourceId::StructuralMode("surface velocity".into()),
+            SourceId::ApertureVolumeFlow("volume flow".into()),
+        ],
+        &[vec![1.0; n], vec![1.0 / area; n]],
+        &base.boundary.receivers,
+        0.01,
+        [1.0, 3_000.0],
+        ComplexOptions {
+            max_panels: n,
+            max_bytes: 32 * n * n,
+            max_work: 512 * (n * n) as u64,
+        },
+    )
+    .unwrap();
+    let prepared = model.prepare_harmonic(600.0, || false).unwrap();
+    let source = C64::new(0.3, 0.4);
+    let mut field = [HarmonicField::default(); 2];
+    prepared
+        .evaluate_coherent(&[source, C64::ZERO], &mut field, || false)
+        .unwrap();
+    let patterns = [
+        FirstOrder::new(0.5, [0.0, 0.0, -1.0]).unwrap(),
+        FirstOrder::new(0.0, [0.0, 0.0, -1.0]).unwrap(),
+    ];
+    let medium = Medium::from(model.source().gas());
+    let expected = core::array::from_fn::<_, 2, _>(|i| {
+        // Existing microphone calibration uses real equilibrium rho*c. The
+        // dispersive velocity itself still came from the momentum equation.
+        field[i].pressure_pa.scale(patterns[i].pressure_fraction())
+            + field[i].particle_velocity_m_s[2].scale(
+                (1.0 - patterns[i].pressure_fraction()) * medium.density * medium.sound_speed,
+            )
+    });
+    let budget = HarmonicWorkBudget {
+        maximum_products: 200,
+    };
+    let mut array = prepared.microphones(&patterns).unwrap();
+    let cross = array
+        .evaluate_coherence_modes(&[source, C64::ZERO], 1, budget, || false)
+        .unwrap();
+    for i in 0..2 {
+        for j in 0..2 {
+            let reference = expected[i] * expected[j].conj().scale(0.5);
+            assert!((cross[i * 2 + j] - reference).abs() < 1e-12 * reference.abs());
+        }
+    }
+    assert!(cross[1].im.abs() > 0.01 * cross[1].abs());
+    let mut cancelled = [HarmonicField::default(); 2];
+    prepared
+        .evaluate_coherent(&[source, source.scale(-area)], &mut cancelled, || false)
+        .unwrap();
+    for i in 0..2 {
+        assert!(cancelled[i].pressure_pa.abs() < 1e-12 * field[i].pressure_pa.abs());
+        for axis in 0..3 {
+            assert!(
+                cancelled[i].particle_velocity_m_s[axis].abs()
+                    < 1e-12 * field[i].particle_velocity_m_s[2].abs()
+            );
+        }
+    }
+}
+
+/// G0/G3: an empty reservoir bank recovers the original physical observation;
+/// zero frequency, out-of-band queries and cancellation never publish a bank.
+#[test]
+fn molecular_harmonic_lossless_limit_and_admission() {
+    let surface = SpherePanels::icosphere(0.1, 0).unwrap();
+    let model = observer_with_formulation(
+        &surface,
+        material(101_325.0, 1.0, false),
+        MolecularObservationFormulation::CentroidBurtonMiller,
+        [1.0, 3_000.0],
+    );
+    let omega = 500.0;
+    let prepared = model.prepare_harmonic(omega, || false).unwrap();
+    let baseline = model.boundary.prepare_harmonic(omega, || false).unwrap();
+    let mut actual = [HarmonicField::default(); 2];
+    let mut expected = [HarmonicField::default(); 2];
+    prepared
+        .evaluate_coherent(&[C64::ONE], &mut actual, || false)
+        .unwrap();
+    baseline
+        .evaluate_coherent(&[C64::ONE], &mut expected, || false)
+        .unwrap();
+    for i in 0..2 {
+        assert!(
+            (actual[i].pressure_pa - expected[i].pressure_pa).abs()
+                < 1e-12 * expected[i].pressure_pa.abs()
+        );
+        for axis in 0..3 {
+            assert!(
+                (actual[i].particle_velocity_m_s[axis] - expected[i].particle_velocity_m_s[axis])
+                    .abs()
+                    < 1e-12 * expected[i].particle_velocity_m_s[2].abs()
+            );
+        }
+    }
+    for frequency in [0.0, -1.0, 0.5, 3_001.0, f64::NAN, f64::INFINITY] {
+        assert!(model.prepare_harmonic(frequency, || false).is_err());
+    }
+    assert!(matches!(
+        model.prepare_harmonic(omega, || true),
+        Err(MolecularObservationError::Transfer(
+            TransferError::Cancelled
+        ))
+    ));
+}

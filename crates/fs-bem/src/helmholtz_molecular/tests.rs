@@ -204,6 +204,354 @@ fn empty_reservoirs_recover_original_radiation_and_rates_change_reaction() {
     assert!((pa - pb).abs() > 1e-3 * pa.abs());
 }
 
+/// G1/G3: the Robin sphere has the independent radial impedance
+/// Z=i*rho*omega/(i*k-1/a), p=Z*v_drive/(1+Y*Z). Gas and surface
+/// dissipation are separate even when k and Y both have reactive parts.
+#[test]
+fn relaxing_robin_sphere_closes_drive_wall_and_exterior_work() {
+    let material = model(true, 1.0);
+    let omega = 600.0;
+    let radius = 0.2;
+    let gas = material.source().gas();
+    let k = material.source().relaxing_wavenumber(omega).unwrap();
+    let beta = C64::new(0.8, -0.4);
+    let y = beta.scale(1.0 / (gas.density * gas.sound_speed));
+    let z = C64::new(0.0, gas.density * omega) / C64::new(-1.0 / radius - k.im, k.re);
+    let drive = C64::new(0.2, 0.1);
+    let expected_p = z * drive / (C64::ONE + y * z);
+    let expected_v = drive - y * expected_p;
+    let mut errors = Vec::new();
+    for level in 0..=2 {
+        let surface = SpherePanels::icosphere(radius, level).unwrap();
+        let n = surface.areas().len();
+        let fields = vec![drive; n];
+        let law = vec![beta; n];
+        let solved = material
+            .solve_boundary_batch(
+                &surface,
+                omega,
+                &[&fields],
+                Admittance::Local {
+                    beta: &law,
+                    declared_active: false,
+                },
+                Formulation::BurtonMiller,
+                &limits(n),
+                || false,
+            )
+            .unwrap()
+            .remove(0);
+        let result = &solved.radiation;
+        let area: f64 = surface.areas().iter().sum();
+        let average = |values: &[C64]| {
+            values
+                .iter()
+                .zip(surface.areas())
+                .fold(C64::ZERO, |s, (&p, a)| s + p.scale(a / area))
+        };
+        let p = average(result.pressure_pa());
+        errors.push((p - expected_p).abs() / expected_p.abs());
+        close(average(result.velocity_m_s()), drive - y * p, 1e-13);
+        assert!(solved.absorbed_power_w > 0.0);
+        assert!(result.boundary_work_w() > 0.0);
+        assert!(!solved.declared_active);
+        let balance = solved.driving_power_w - solved.absorbed_power_w - result.boundary_work_w();
+        assert!(balance.abs() < 1e-12 * solved.driving_power_w);
+        if level == 2 {
+            close(average(result.velocity_m_s()), expected_v, 0.05);
+            let r = 0.8;
+            let phase = k.scale(r - radius);
+            let expected = expected_p
+                * C64::new(det::cos(phase.re), det::sin(phase.re))
+                    .scale(det::exp(-phase.im) * radius / r);
+            let observed = result
+                .observe(&surface, &[[0.0, 0.0, r]], 0.1, || false)
+                .unwrap()[0];
+            close(observed.pressure_pa, expected, 0.08);
+        }
+    }
+    assert!(
+        errors[1] < 0.7 * errors[0] && errors[2] < 0.7 * errors[1],
+        "{errors:?}"
+    );
+    assert!(errors[2] < 0.05, "{errors:?}");
+}
+
+/// G0/G3: zero admittance is exactly the original molecular path; without
+/// reservoirs a mixed wall matches the independent real-wavenumber owner.
+#[test]
+fn molecular_robin_recovers_rigid_and_original_lossless_boundaries() {
+    let surface = SpherePanels::icosphere(0.2, 0).unwrap();
+    let n = surface.areas().len();
+    let omega = 700.0;
+    let drive: Vec<_> = surface
+        .centroids()
+        .iter()
+        .map(|x| C64::new(1.0 + x[2], x[0]))
+        .collect();
+    for relaxing in [false, true] {
+        let material = model(relaxing, 1.0);
+        let zero = vec![C64::ZERO; n];
+        let rigid = material
+            .solve_batch(
+                &surface,
+                omega,
+                &[&drive],
+                Formulation::BurtonMiller,
+                &limits(n),
+                || false,
+            )
+            .unwrap()
+            .remove(0);
+        let solved = material
+            .solve_boundary_batch(
+                &surface,
+                omega,
+                &[&drive],
+                Admittance::Local {
+                    beta: &zero,
+                    declared_active: false,
+                },
+                Formulation::BurtonMiller,
+                &limits(n),
+                || false,
+            )
+            .unwrap()
+            .remove(0);
+        assert_eq!(solved.radiation.pressure_pa(), rigid.pressure_pa());
+        assert_eq!(solved.radiation.velocity_m_s(), rigid.velocity_m_s());
+        assert_eq!(solved.absorbed_power_w, 0.0);
+        assert_eq!(solved.driving_power_w, rigid.boundary_work_w());
+    }
+    let material = model(false, 1.0);
+    let gas = material.source().gas();
+    let medium = Medium {
+        density: gas.density,
+        sound_speed: gas.sound_speed,
+    };
+    let beta: Vec<_> = (0..n)
+        .map(|i| {
+            if i % 3 == 0 {
+                C64::ZERO
+            } else {
+                C64::new(0.6, 0.2)
+            }
+        })
+        .collect();
+    let law = Admittance::Local {
+        beta: &beta,
+        declared_active: false,
+    };
+    for formulation in [Formulation::PlainCbie, Formulation::BurtonMiller] {
+        let old = super::super::bc::solve_radiation_bc(
+            &surface,
+            omega / gas.sound_speed,
+            medium,
+            super::super::bc::SurfaceBc {
+                drive_velocity: &drive,
+                admittance: law,
+            },
+            formulation,
+        )
+        .unwrap();
+        let new = material
+            .solve_boundary_batch(
+                &surface,
+                omega,
+                &[&drive],
+                law,
+                formulation,
+                &limits(n),
+                || false,
+            )
+            .unwrap()
+            .remove(0);
+        for (&a, &b) in new
+            .radiation
+            .pressure_pa()
+            .iter()
+            .zip(&old.radiation.pressure)
+        {
+            close(a, b, 2e-12);
+        }
+        for (&a, &b) in new
+            .radiation
+            .velocity_m_s()
+            .iter()
+            .zip(&old.radiation.velocity)
+        {
+            close(a, b, 2e-12);
+        }
+        assert!((new.absorbed_power_w - old.absorbed_power_w).abs() < 2e-12 * old.absorbed_power_w);
+    }
+}
+
+/// A uniform connected backing responds to the area-mean pressure, not each
+/// panel separately. Its weighted quadratic form is passive for Re(beta)>=0.
+struct MeanAdmittance {
+    areas: Vec<f64>,
+    beta: C64,
+}
+impl super::super::bc::BoundaryOperator for MeanAdmittance {
+    fn len(&self) -> usize {
+        self.areas.len()
+    }
+    fn fingerprint(&self) -> u64 {
+        self.beta.re.to_bits() ^ self.beta.im.to_bits()
+    }
+    fn apply(&self, pressure: &[C64], output: &mut [C64]) -> Result<(), HelmholtzError> {
+        let area: f64 = self.areas.iter().sum();
+        let mean = pressure
+            .iter()
+            .zip(&self.areas)
+            .fold(C64::ZERO, |s, (&p, a)| s + p.scale(a / area));
+        output.fill(self.beta * mean);
+        Ok(())
+    }
+}
+
+/// G1/G3: independent rank-one feedback of the rigid source solutions checks
+/// all nonlocal off-diagonal terms and observes the actual loaded velocity.
+#[test]
+fn molecular_nonlocal_boundary_retains_pressure_feedback_and_batch_superposition() {
+    let material = model(true, 1.0);
+    let gas = material.source().gas();
+    let omega = 700.0;
+    let surface = SpherePanels::icosphere(0.2, 0).unwrap();
+    let n = surface.areas().len();
+    let unit = vec![C64::ONE; n];
+    let drive: Vec<_> = surface
+        .centroids()
+        .iter()
+        .map(|x| C64::new(1.0 + 3.0 * x[2], x[0]))
+        .collect();
+    let phase = C64::new(0.2, 0.5);
+    let shifted: Vec<_> = drive.iter().map(|&v| v * phase).collect();
+    let free = material
+        .solve_batch(
+            &surface,
+            omega,
+            &[&unit, &drive],
+            Formulation::BurtonMiller,
+            &limits(n),
+            || false,
+        )
+        .unwrap();
+    let law = MeanAdmittance {
+        areas: surface.areas().to_vec(),
+        beta: C64::new(0.8, -0.2),
+    };
+    let area: f64 = law.areas.iter().sum();
+    let mean = |p: &[C64]| {
+        p.iter()
+            .zip(&law.areas)
+            .fold(C64::ZERO, |s, (&p, a)| s + p.scale(a / area))
+    };
+    let y = law.beta.scale(1.0 / (gas.density * gas.sound_speed));
+    let mean_loaded = mean(free[1].pressure_pa()) / (C64::ONE + y * mean(free[0].pressure_pa()));
+    let absorbed_velocity = y * mean_loaded;
+    let solved = material
+        .solve_boundary_batch(
+            &surface,
+            omega,
+            &[&drive, &shifted],
+            Admittance::NonLocal {
+                operator: &law,
+                declared_active: false,
+            },
+            Formulation::BurtonMiller,
+            &limits(n),
+            || false,
+        )
+        .unwrap();
+    for i in 0..n {
+        let reference = free[1].pressure_pa()[i] - free[0].pressure_pa()[i] * absorbed_velocity;
+        close(solved[0].radiation.pressure_pa()[i], reference, 2e-12);
+        close(
+            solved[0].radiation.velocity_m_s()[i],
+            drive[i] - absorbed_velocity,
+            2e-12,
+        );
+        close(
+            solved[1].radiation.pressure_pa()[i],
+            reference * phase,
+            2e-12,
+        );
+    }
+    let s = &solved[0];
+    assert!(s.absorbed_power_w > 0.0);
+    assert!(
+        (s.driving_power_w - s.absorbed_power_w - s.radiation.boundary_work_w()).abs()
+            < 1e-12 * s.driving_power_w
+    );
+}
+
+#[test]
+fn molecular_boundary_refuses_invalid_active_and_cancelled_laws() {
+    let material = model(true, 1.0);
+    let surface = SpherePanels::icosphere(0.2, 0).unwrap();
+    let n = surface.areas().len();
+    let drive = vec![C64::ONE; n];
+    for beta in [
+        vec![C64::ONE; n - 1],
+        vec![C64::new(-0.1, 0.0); n],
+        vec![C64::new(f64::NAN, 0.0); n],
+    ] {
+        assert!(
+            material
+                .solve_boundary_batch(
+                    &surface,
+                    700.0,
+                    &[&drive],
+                    Admittance::Local {
+                        beta: &beta,
+                        declared_active: false
+                    },
+                    Formulation::BurtonMiller,
+                    &limits(n),
+                    || false,
+                )
+                .is_err()
+        );
+    }
+    let law = MeanAdmittance {
+        areas: surface.areas().to_vec(),
+        beta: C64::from_re(-0.1),
+    };
+    for declared_active in [false, true] {
+        let result = material.solve_boundary_batch(
+            &surface,
+            700.0,
+            &[&drive],
+            Admittance::NonLocal {
+                operator: &law,
+                declared_active,
+            },
+            Formulation::BurtonMiller,
+            &limits(n),
+            || false,
+        );
+        if declared_active {
+            let solved = result.unwrap().remove(0);
+            assert!(solved.declared_active && solved.absorbed_power_w < 0.0);
+        } else {
+            assert!(result.is_err());
+        }
+    }
+    assert!(matches!(
+        material.solve_boundary_batch(
+            &surface,
+            700.0,
+            &[&drive],
+            Admittance::Rigid,
+            Formulation::BurtonMiller,
+            &limits(n),
+            || true,
+        ),
+        Err(MolecularError::Boundary(HelmholtzError::Cancelled))
+    ));
+}
+
 #[test]
 fn molecular_aperture_matrix_closes_existing_duct_and_observes_solved_flows() {
     use fs_duct::compose::ComposeOptions;

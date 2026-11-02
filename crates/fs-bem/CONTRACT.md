@@ -121,6 +121,20 @@ An independent pulsating-sphere case spans low frequency and the first
 interior Dirichlet resonance under one combined operator; formulation changes
 also invalidate a cached transfer while retaining the same material and arrival.
 
+`MolecularBemObservation::prepare_harmonic` binds those same complex-wavenumber
+boundary and receiver fields to the shared coherent and partially coherent
+observation bank. Particle velocity follows `grad(p)/(i rho omega)` from the
+original inviscid momentum law. Intensity and microphone cross spectra retain
+source interference, dispersive phase and reactive velocity without another
+absorption correction or boundary solve during evaluation. Ideal first-order
+microphones retain their real equilibrium `rho*c` pressure-equivalent
+calibration; that reference is not the frequency-dependent wave impedance, so
+unity plane-wave sensitivity in a dispersive medium is not implied. Material
+band, cancellation and unresolved spatial-uncertainty boundaries remain.
+G1/G3 tests check independently differentiated spherical waves, radial
+transported-power attenuation, mixed structural/volume-flow interference,
+microphone cross-phase and empty-reservoir recovery.
+
 ## Partially coherent harmonic observations and microphone arrays
 
 `BemObservation`, `ReciprocalBemObservation`, `ScatteringObservation`,
@@ -1765,6 +1779,30 @@ uses the existing centroid Green representation for finite pressure and
 Cartesian gradient. Receiver geometry/clearance checks are unchanged. Its raw
 boundary work is neither clipped nor equated with distant radiated flux: it
 includes energy ultimately absorbed in the exterior gas.
+
+`solve_boundary_batch` also admits the existing local or nonlocal surface
+admittance, including mixed rigid/absorbing patches. Its normalization remains
+`beta = rho*c_eq*Y`; the physical surface condition is
+`v = v_drive - Y p`. Substitution gives
+`(A + i*(omega/c_eq)*B*beta)p = B*(i*rho*omega*v_drive)` on the original
+complex-k boundary pair. Complex k is used for propagation and never replaces
+omega/c_eq in this boundary conversion. Nonzero laws require the original
+closed-triangle admission. Zero laws preserve the original rigid arithmetic.
+Local laws add O(N²) work with no extra dense matrix; nonlocal laws preserve
+their full image through N applications and O(N³) dense composition. Their
+application work remains the law owner's responsibility; ComplexOptions still
+bounds the original complex assembly. Cancellation reaches each composition
+column/row, the original LU and each drive, without partial publication.
+
+`MolecularBoundarySolution` retains the actual loaded velocity and reports
+drive work, surface absorption and exterior boundary work separately.
+Surface absorption is checked against its declared passive/active policy;
+the exterior term includes gas absorption and outgoing flux. No term is
+clipped or debited twice, and a caller-owned nonlocal law must retain its
+fingerprint during the solve. G1/G3 tests use a three-mesh analytic Robin
+sphere, empty-reservoir agreement with the original mixed-wall owner,
+independent rank-one pressure feedback for a spatially nonlocal backing,
+batch superposition and the drive/surface/exterior work balance.
 
 `aperture_response` reuses original aperture admission, force projection,
 reciprocity/Hermitian-part diagnostics and `ApertureImpedance::acoustic(0)`.

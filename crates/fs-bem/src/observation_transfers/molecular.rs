@@ -310,6 +310,38 @@ impl<'a> MolecularBemObservation<'a> {
         Ok(out)
     }
 
+    /// Prepare material-bound pressure and particle velocity for coherent
+    /// fields, source-coherence statistics and microphone cross spectra.
+    ///
+    /// The original complex-wavenumber boundary solve supplies every pressure
+    /// and gradient. Inviscid momentum remains `u = grad(p)/(i*rho*omega)`;
+    /// neither the equilibrium `rho*c` nor a complex wave impedance replaces
+    /// that relation. Subsequent observations reuse this complete transfer
+    /// bank without another boundary solve or an absorption correction.
+    ///
+    /// Ideal first-order microphones retain their existing real equilibrium
+    /// `rho*c` pressure-equivalent calibration. In this dispersive medium that
+    /// reference is not the actual frequency-dependent plane-wave impedance,
+    /// so unity plane-wave sensitivity is not implied. Spatial uncertainty
+    /// and material/band/cancellation refusals remain with the original owners.
+    pub fn prepare_harmonic(
+        &self,
+        omega: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedHarmonicObservation, MolecularObservationError> {
+        let medium = self.boundary.medium;
+        harmonic::admit_frequency(omega, medium)?;
+        let samples = self.frequency_sample(omega, cancelled)?;
+        Ok(PreparedHarmonicObservation::from_samples(
+            omega,
+            medium,
+            &self.boundary.sources,
+            &self.boundary.receivers,
+            self.operator_hash(),
+            samples,
+        )?)
+    }
+
     /// One row of the work-conjugate boundary impedance at the same frequency.
     /// Projects each source's pressure against the original receiving trace
     /// and panel areas, preserving mixed structural/volume-flow units.
