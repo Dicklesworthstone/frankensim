@@ -2,6 +2,9 @@ use super::*;
 use crate::osmosis::OsmoticPressureVolume;
 use fs_material::osmosis::IdealDiluteSolution;
 
+#[path = "sorption_tests.rs"]
+mod sorption;
+
 fn bulk(concentrations: &[f64], volume: f64, pressure: f64) -> OsmoticCompartment {
     OsmoticCompartment::new(
         IdealDiluteSolution::new(

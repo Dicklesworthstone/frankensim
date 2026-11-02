@@ -15,10 +15,24 @@
 //! steady face equation is `dc/ds = Jv*c - Js`, so the same exponential fit also
 //! covers piecewise-constant D without averaging away a slow barrier layer.
 //!
+//! Optional equilibrium linear sorption stores immobile solute in each cell:
+//! `n_total = R * V_water * c_mobile`, with explicit fixed `R >= 1`. All transport
+//! and membrane osmotic driving use ONLY the mobile concentration. At zero flow
+//! equilibrium has common `c_mobile` (and ideal aqueous chemical potential), while
+//! total concentration can jump with R. This is total/mobile partition, not a
+//! change in the mobile phase's chemical-potential standard state. At fixed
+//! water volumes the reduced ideal free energy divided by RT is
+//! `sum(n_total * (ln(n_total / (R*V_water*c_ref)) - 1))`; its derivative is
+//! `ln(c_mobile/c_ref)` and its positive curvature supplies the diffusion
+//! equilibrium. Linear
+//! equilibrium sorption and retardation follow the formulation described by
+//! Goode and Konikow (1989), <https://doi.org/10.3133/wri894030>.
+//!
 //! This is an isothermal, neutral, ideal dilute film model with cellwise constant
-//! diffusivities and negligible film hydraulic loss. Concentration is continuous
-//! across internal faces: no partition coefficient or sorbed inventory is
-//! implied. It does not infer crossflow, turbulence, ionic fields,
+//! diffusivities and negligible film hydraulic loss. Mobile concentration is
+//! continuous across internal faces. Sorption has no saturation, kinetic lag,
+//! swelling or caloric balance; its coefficients must be supplied within that
+//! model's applicability. It does not infer crossflow, turbulence, ionic fields,
 //! concentration-dependent diffusion, or heat storage.
 //! Cell averages approximate center concentrations; spatial refinement and time
 //! refinement are separate obligations. `step` accepts one first-order implicit
@@ -121,7 +135,7 @@ fn zeros(len: usize) -> Result<Box<[f64]>> {
     Ok(data.into_boxed_slice())
 }
 
-/// Explicit cell geometry, species diffusivities, and an initial profile.
+/// Explicit cell geometry, species diffusivities, and an initial MOBILE profile.
 /// Diffusivity and thickness are independent: a steady `D/thickness` coefficient
 /// alone cannot specify either solvent storage or the diffusion time scale.
 #[derive(Clone, Debug)]
@@ -130,6 +144,7 @@ pub struct TransientFilm {
     species_count: usize,
     diffusivity_m2_s: Box<[f64]>,
     initial_concentrations_mol_m3: Box<[f64]>,
+    total_to_mobile_ratio: Option<Box<[f64]>>,
 }
 impl TransientFilm {
     /// Uniform cells, with one diffusivity per species throughout the film.
@@ -197,7 +212,37 @@ impl TransientFilm {
             species_count,
             diffusivity_m2_s: diffusivity_m2_s.into_boxed_slice(),
             initial_concentrations_mol_m3: initial_concentrations_mol_m3.into_boxed_slice(),
+            total_to_mobile_ratio: None,
         })
+    }
+
+    /// Add equilibrium, immobile, unsaturated linear sorption in original
+    /// cell-major species order. Each explicit dimensionless R must be >= 1:
+    /// `n_mobile = V_water*c_mobile`, `n_sorbed = (R-1)*V_water*c_mobile`.
+    /// For a stated porous-medium basis, R may be supplied as `1+rho_b*Kd/theta`;
+    /// this owner does not infer solid density, porosity or a material Kd.
+    ///
+    /// The constructor's initial profile remains MOBILE concentration. Sorbed
+    /// moles are additional declared initial inventory, never withdrawn from a
+    /// bulk. To prescribe total concentration, explicitly supply `c_total/R`.
+    /// R=1 is the original nonsorbing model. D and water volume are unchanged;
+    /// reducing D by R as well would incorrectly count retardation twice.
+    pub fn with_linear_sorption(mut self, total_to_mobile_ratio: Vec<f64>) -> Result<Self> {
+        if total_to_mobile_ratio.len() != self.initial_concentrations_mol_m3.len()
+            || total_to_mobile_ratio
+                .iter()
+                .any(|&r| !positive(r) || r < 1.0)
+        {
+            return Err(invalid(
+                "linear sorption requires one finite R >= 1 per cell and species",
+            ));
+        }
+        self.total_to_mobile_ratio = if total_to_mobile_ratio.iter().all(|&r| r == 1.0) {
+            None
+        } else {
+            Some(total_to_mobile_ratio.into_boxed_slice())
+        };
+        Ok(self)
     }
 
     fn half_cell_permeance(&self, cell: usize, species: usize) -> Result<FilmPermeance> {
@@ -253,8 +298,18 @@ pub struct TransientStepReport {
 
 struct FilmGeometry {
     cell_volumes_m3: Box<[f64]>,
+    /// R*V_water, cell-major by species; None is exactly the original R=1 path.
+    solute_capacities_m3: Option<Box<[f64]>>,
     interior: Box<[MembraneTransport]>,
     outer_half_cell: MembraneTransport,
+}
+impl FilmGeometry {
+    fn solute_capacity(&self, cell: usize, species: usize, count: usize) -> f64 {
+        self.solute_capacities_m3.as_ref().map_or_else(
+            || self.cell_volumes_m3[cell],
+            |capacity| capacity[cell * count + species],
+        )
+    }
 }
 struct Workspace {
     trial_amounts: Box<[f64]>,
@@ -338,8 +393,27 @@ fn prepare_film(film: &TransientFilm, area: f64, side: usize) -> Result<FilmGeom
     let interior = (0..cells - 1)
         .map(|cell| film_operator(film, cell, Some(cell + 1)))
         .collect::<Result<Box<[_]>>>()?;
+    let solute_capacities_m3 = film
+        .total_to_mobile_ratio
+        .as_ref()
+        .map(|ratios| {
+            ratios
+                .iter()
+                .enumerate()
+                .map(|(index, &ratio)| {
+                    let capacity = ratio * cell_volumes_m3[index / film.species_count];
+                    if positive(capacity) {
+                        Ok(capacity)
+                    } else {
+                        Err(invalid("linear sorption capacity is not representable"))
+                    }
+                })
+                .collect::<Result<Box<[_]>>>()
+        })
+        .transpose()?;
     Ok(FilmGeometry {
         cell_volumes_m3,
+        solute_capacities_m3,
         interior,
         outer_half_cell: film_operator(film, if side == 0 { 0 } else { cells - 1 }, None)?,
     })
@@ -384,6 +458,12 @@ impl TransientOsmoticPair {
             .map(|f| f.cell_widths_m.len())
             .sum();
         let rows = film_cells + 2;
+        let sorption_entries: usize = definitions
+            .iter()
+            .flatten()
+            .filter_map(|film| film.total_to_mobile_ratio.as_ref())
+            .map(|ratios| ratios.len())
+            .sum();
         // Conservative owned-heap bound: accepted/trial amounts, candidate
         // bulks, five matrix/RHS arrays, the original LU workspace, and all
         // boxed membrane/film coefficients. The initial supplied profile and
@@ -393,6 +473,7 @@ impl TransientOsmoticPair {
             + ((film_cells + 1) * count) * size_of::<(ReflectionCoefficient, SolutePermeance)>()
             + film_cells * size_of::<MembraneTransport>()
             + 2 * count * size_of::<Option<FilmPermeance>>()
+            + 2 * sorption_entries * size_of::<f64>()
             + size_of::<Self>();
         if workspace_bytes > maximum_workspace_bytes {
             return Err(OsmoticNetworkError::Workspace {
@@ -435,7 +516,8 @@ impl TransientOsmoticPair {
                 for (index, &concentration) in
                     definition.initial_concentrations_mol_m3.iter().enumerate()
                 {
-                    let amount = concentration * geometry.cell_volumes_m3[index / count];
+                    let amount = concentration
+                        * geometry.solute_capacity(index / count, index % count, count);
                     if !nonnegative(amount) || concentration > 0.0 && amount == 0.0 {
                         return Err(invalid("initial film amount is not representable"));
                     }
@@ -500,7 +582,7 @@ impl TransientOsmoticPair {
             .get(cell)
             .copied()
     }
-    /// Actual cell inventory in the original species order. Both film profiles
+    /// TOTAL mobile-plus-sorbed inventory in the original species order. Both film profiles
     /// are indexed left to right, including the film on the right of the membrane.
     pub fn film_solute_moles(&self, side: usize, cell: usize) -> Option<&[f64]> {
         if cell >= self.films.get(side)?.as_ref()?.cell_volumes_m3.len() {
@@ -509,6 +591,43 @@ impl TransientOsmoticPair {
         let offset = if side == 0 { 0 } else { self.left_cells() };
         let begin = (offset + cell) * self.species_count;
         Some(&self.film_amounts[begin..begin + self.species_count])
+    }
+    /// Mobile aqueous concentration used by all face transport and osmotic laws.
+    /// None for an absent/invalid film, cell or species.
+    pub fn film_mobile_concentration_mol_m3(
+        &self,
+        side: usize,
+        cell: usize,
+        species: usize,
+    ) -> Option<f64> {
+        let amount = *self.film_solute_moles(side, cell)?.get(species)?;
+        let film = self.films.get(side)?.as_ref()?;
+        Some(amount / film.solute_capacity(cell, species, self.species_count))
+    }
+    /// Mobile portion of the actual total inventory; immobile solute is excluded.
+    pub fn film_mobile_solute_moles(
+        &self,
+        side: usize,
+        cell: usize,
+        species: usize,
+    ) -> Option<f64> {
+        let amount = *self.film_solute_moles(side, cell)?.get(species)?;
+        let film = self.films.get(side)?.as_ref()?;
+        Some(
+            amount
+                * (film.cell_volumes_m3[cell]
+                    / film.solute_capacity(cell, species, self.species_count)),
+        )
+    }
+    /// Equilibrated immobile portion; exactly zero for the nonsorbing model.
+    pub fn film_sorbed_solute_moles(
+        &self,
+        side: usize,
+        cell: usize,
+        species: usize,
+    ) -> Option<f64> {
+        let amount = *self.film_solute_moles(side, cell)?.get(species)?;
+        Some(amount - self.film_mobile_solute_moles(side, cell, species)?)
     }
     pub fn total_solvent_volume_m3(&self) -> f64 {
         self.bulks
@@ -522,7 +641,7 @@ impl TransientOsmoticPair {
                 .flat_map(|f| f.cell_volumes_m3.iter())
                 .sum::<f64>()
     }
-    /// Include the two bulks AND every stored film cell in each species balance.
+    /// Include the two bulks AND every mobile/sorbed film inventory in each species balance.
     pub fn total_solute_moles_into(&self, output: &mut [f64]) -> Result<()> {
         if output.len() != self.species_count {
             return Err(invalid("total amount output shape mismatch"));
@@ -564,6 +683,22 @@ impl TransientOsmoticPair {
                 .as_ref()
                 .expect("right film cell")
                 .cell_volumes_m3[cell - self.left_cells() - 1]
+        }
+    }
+
+    fn solute_capacity(&self, cell: usize, species: usize, water: f64) -> f64 {
+        if cell == 0 || cell + 1 == self.rows {
+            self.volume(cell, water)
+        } else if cell <= self.left_cells() {
+            self.films[0]
+                .as_ref()
+                .expect("left film cell")
+                .solute_capacity(cell - 1, species, self.species_count)
+        } else {
+            self.films[1]
+                .as_ref()
+                .expect("right film cell")
+                .solute_capacity(cell - self.left_cells() - 1, species, self.species_count)
         }
     }
 
@@ -629,8 +764,8 @@ impl TransientOsmoticPair {
                     };
                     operator.solute_stream_coefficients(species, flux)?
                 };
-                let a = area_time * kl / self.volume(edge, water);
-                let b = area_time * kr / self.volume(edge + 1, water);
+                let a = area_time * kl / self.solute_capacity(edge, species, water);
+                let b = area_time * kr / self.solute_capacity(edge + 1, species, water);
                 if !nonnegative(a) || !nonnegative(b) {
                     return Err(invalid("film implicit coefficient overflow"));
                 }
@@ -692,8 +827,10 @@ impl TransientOsmoticPair {
                     residual_mol: trial.balance[species],
                 });
             }
-            let left = self.workspace.solution[middle] / self.volume(middle, water);
-            let right = self.workspace.solution[middle + 1] / self.volume(middle + 1, water);
+            let left =
+                self.workspace.solution[middle] / self.solute_capacity(middle, species, water);
+            let right = self.workspace.solution[middle + 1]
+                / self.solute_capacity(middle + 1, species, water);
             (trial.faces[0][species], trial.faces[1][species]) =
                 membrane.membrane_face_concentrations(left, right)?;
         }

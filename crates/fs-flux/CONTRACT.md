@@ -2211,9 +2211,10 @@ half-cell diffusion resistances in series, preserving slow barrier layers and
 the original exponential advection fit. Storage and balance use each cell's
 own volume; `film_cell_volume_m3(side, cell)` exposes that volume. The uniform
 constructor remains available. Coefficients are positive and fixed in time;
-concentration is continuous across internal faces, with no inferred partition
-coefficient or sorbed storage. Focused regressions cover analytical resistance,
-both flow directions, high material contrast and nonuniform spatial refinement.
+mobile concentration is continuous across internal faces. Optional explicit
+linear sorption below partitions total storage while preserving the same mobile
+phase. Focused regressions cover analytical resistance, both flow directions,
+high material contrast and nonuniform spatial refinement.
 
 The `step` call accepts one backward-Euler step. Original exponentially fitted donor
 coefficients form a positive implicit amount system for each species. Native
@@ -2233,11 +2234,39 @@ outside this owner. Root tolerances alone are not temporal error estimates;
 `step` callers refine time independently, and all callers still refine the mesh.
 
 The `transient_osmotic_filtration` example matches initial whole-system water
-and solute against the steady-film comparison, then exposes startup film
-storage and face enrichment. Focused regressions cover analytical diffusion,
+and total solute against a nonsorbing steady-film reference. It exposes startup
+mobile/bound storage and face enrichment in layers with R=1,2,6. The reference
+uses the true series mobile diffusion resistance but has different storage
+physics; it is not the steady limit of the sorbing film. Focused regressions cover analytical diffusion,
 multiple permeating species on unequal meshes, steady forward/reverse limits,
 time/space refinement, steep roots, inventory checks and atomic refusal.
 
+
+### Equilibrium immobile sorption in transient films
+
+`TransientFilm::with_linear_sorption` accepts an explicit cell/species total-to-
+mobile ratio R>=1 for instantaneous, unsaturated, immobile linear sorption.
+Conserved film amount is n_total=R*V_water*c_mobile. Initial profiles remain
+mobile concentrations, so the added bound inventory is explicit; callers
+prescribing total concentration supply c_total/R. Prepared R*V capacities
+convert total moles to mobile concentration at every diffusion/advection face
+and membrane reconstruction. D, actual water volume and hydraulic laws stay
+unchanged, avoiding double-counted retardation.
+
+Common mobile concentration and ideal chemical potential define the no-flow
+equilibrium; total concentration may jump with R. This is not a change in the
+mobile phase's chemical-potential standard state. Existing film/system amounts
+and adaptive inventory norms include both pools; separate getters expose mobile
+concentration, mobile moles and sorbed moles. R=1 retains the exact original
+calculation without an additional capacity array. Prepared stepping remains
+allocation-free and additional preparation storage is included in its budget.
+Saturation, kinetic lag, swelling and sorption heat require other owners.
+
+Focused authored tests check exact R=1 compatibility, stationary heterogeneous
+partition without a false osmotic force, analytical finite-bath retardation,
+reduced fixed-volume chemical-potential dissipation, and mobile-only advection
+in both directions at high Peclet number. They are not measured sorption or
+filtration validation.
 
 ### Accuracy-controlled transient osmotic films
 
