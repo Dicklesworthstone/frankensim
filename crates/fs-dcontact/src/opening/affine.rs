@@ -70,12 +70,17 @@ impl<'a> AffineContactStep<'a> {
                 alpha: self.law.alpha(), loss: self.law.internal_loss(),
             };
             let (elastic, damping) = point.coefficients(local_after)?;
-            let raw_force = elastic - damping * local_velocity;
-            if !raw_force.is_finite() { return Err(bad()); }
-            let normal_force = raw_force.max(0.0);
+            let viscous_force = damping * local_velocity;
+            if !viscous_force.is_finite() { return Err(bad()); }
+            // Retain the loss increment before adding the elastic reaction:
+            // subtracting two nearly equal total forces would erase weak
+            // physical dissipation. Cap unloading locally at zero attraction.
+            let loss_force = viscous_force.min(elastic);
+            let normal_force = elastic - loss_force;
+            if !normal_force.is_finite() { return Err(bad()); }
             result.elastic_force -= b * elastic;
             result.force -= b * normal_force;
-            result.dissipated_power += (elastic - normal_force) * local_velocity;
+            result.dissipated_power += loss_force * local_velocity;
         }
         if ![result.elastic_force, result.force, result.dissipated_power].iter().all(|x| x.is_finite())
             || result.dissipated_power < 0.0 { return Err(bad()); }
@@ -130,6 +135,35 @@ mod tests {
         let a = AffineContactStep::new(&whole,-0.002,4).unwrap().response(-0.001,0.1).unwrap();
         let b = AffineContactStep::new(&split,-0.002,4).unwrap().response(-0.001,0.1).unwrap();
         assert_eq!(a,b);
+    }
+    #[test]
+    fn weak_contact_loss_survives_rounding_into_the_elastic_reaction() {
+        let ob = law(vec![-1.0], vec![0.0], vec![1.0], 1e-20);
+        for velocity in [-0.1, 0.1] {
+            let response = AffineContactStep::new(&ob, -0.001, 1).unwrap()
+                .response(-0.001, velocity).unwrap();
+            // G1: the instantaneous HC loss is chi*K*p^alpha*v^2.
+            // It is well represented even though adding the viscous increment
+            // to the much larger conservative force rounds it away.
+            let expected = 1e-20 * 3e6 * 0.001_f64.powi(2) * velocity * velocity;
+            assert_eq!(response.force, response.elastic_force);
+            assert!(response.dissipated_power > 0.0);
+            assert!((response.dissipated_power - expected).abs() < 1e-13 * expected);
+        }
+    }
+    #[test]
+    fn capped_unloading_and_loading_accumulate_before_mixed_sign_projection() {
+        let ob = law(vec![-2.0, 0.5], vec![-0.004, -0.004], vec![0.2, 0.8], 1.0);
+        let response = AffineContactStep::new(&ob, 0.0, 2).unwrap()
+            .response(0.0, 0.75).unwrap();
+        // First point unloads at 1.5 m/s and caps to zero reaction;
+        // second point loads at -0.375 m/s. Each must dissipate positively
+        // even though their generalized conservative forces cancel here.
+        let first_elastic = 0.2 * 3e6 * 0.004_f64.powi(2);
+        let second_elastic = 0.8 * 3e6 * 0.004_f64.powi(2);
+        let expected = first_elastic * 1.5 + second_elastic * 0.375_f64.powi(2);
+        assert!((response.dissipated_power - expected).abs() < 1e-13 * expected);
+        assert_eq!(response.elastic_force, 0.0);
     }
     #[test]
     fn raw_shape_budget_and_nonfinite_trials_refuse_before_indexing() {

@@ -95,6 +95,15 @@ nonfinite state or derived forces refuse before a force vector is returned.
 without making this crate depend on its owner. The loss formula and local
 non-attractive unloading saturation are unchanged.
 
+`opening::AffineContactStep` also retains each point's Hunt--Crossley loss
+increment before adding it to the conservative reaction. Its heat is the
+original capped loss times local opening velocity, never the subtraction of
+two nearly equal total forces. Thus weak representable dissipation survives
+even when adding its force to a much larger elastic reaction rounds away the
+increment. Pointwise unloading remains non-attractive before mixed-sign
+collocation projection. G1 tests check both velocity signs at weak loss and
+simultaneous capped unloading/loading with cancelling generalized elastic forces.
+
 ## Contact parameter derivatives
 
 `Obstacle::resistance_parameter_vjp_into` differentiates the original total
