@@ -1,5 +1,24 @@
 # CONTRACT: fs-mbd
 
+## Exact linearly weighted tetrahedral inertia
+
+`SpatialInertia::from_weighted_tetrahedron` accepts a positive total mass,
+four body-frame vertices and four positive relative density weights. Barycentric
+linear interpolation defines the mass distribution; common weight scaling
+does not change it. Analytic degree-three moments supply the density-weighted
+centre and full centroidal tensor. Nine centred positive dyads avoid cancellation
+between large origin moments, with fixed work and no quadrature allocation.
+The supplied mass is retained exactly, allowing affine mesh deformation to
+transport reference matter without re-querying density or drifting mass.
+
+Nonfinite/collapsed tetrahedra refuse even when the supplied mass is positive.
+The original inertia owner admits the complete result. This numerical helper
+has no material/source dependency, no mesh-overlap authority and no uncertainty
+certificate. Source-density resolution and per-cell Jacobian transport live in
+`fs-mbd-material::density_field`; its focused tests check independent Cartesian
+integrals, all tetrahedron vertex orders, refinement, deformation and actual
+native impulse/buoyancy response.
+
 ## Simultaneous resultant momentum impulses
 
 `RigidBodyState::apply_momentum_impulse` accepts one world linear impulse and

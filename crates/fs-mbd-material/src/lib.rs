@@ -21,6 +21,8 @@ pub mod articulated;
 pub mod attachments;
 /// Compatible nonuniform deformation with conserved material mass.
 pub mod deformation;
+/// Source-bound continuous nodal density and conserved affine mass transport.
+pub mod density_field;
 /// Principal-frame adaptation for the existing free-body and contact APIs.
 pub mod principal;
 /// Material-driven buoyancy, displacement and hydrostatic torque.

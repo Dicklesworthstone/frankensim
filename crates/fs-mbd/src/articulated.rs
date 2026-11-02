@@ -19,6 +19,9 @@ pub mod generalized;
 #[path = "articulated/contact_geometry.rs"]
 pub mod contact_geometry;
 
+#[path = "articulated/mass_moments.rs"]
+mod mass_moments;
+
 use core::fmt;
 use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
 use fs_math::dd::Dd;

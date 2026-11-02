@@ -71,6 +71,40 @@ without moving the geometry or misplacing contact forces. The source model
 must match the state; the adapter does not infer a live material-exchange law.
 
 
+## Continuous material-density fields and conserved affine deformation
+
+`density_field::TetrahedralDensityBody` resolves the original positive density
+requirement once at each shared reference vertex, retaining the complete
+material state, query and selected source receipt. Explicit P1 interpolation
+defines density within each tetrahedron. The native material-independent
+`SpatialInertia::from_weighted_tetrahedron` integrates its mass-weighted centre
+and full inertia analytically; averaging density preserves total mass but would
+lose these centres and cross moments. Geometry and source interpolation remain
+distinct assumptions. Only density is required from the source cards.
+
+Cells and their indices are canonically ordered, with 4096 cells and 16384
+vertices as hard bounds. `deform` uses the actual shared current vertices,
+retains each cell's exact reference mass, and transports density by its positive
+affine volume Jacobian. It recomputes the full tensor through the same weighted
+integration. Different cell Jacobians can give different current densities at
+a shared vertex; these remain per-cell quantities and are never averaged into
+an artificial inventory. Inversion, collapse, unsupported sources, invalid
+arithmetic and cancellation refuse the complete candidate.
+
+Both reference and deformed bodies expose the original `SpatialInertia` and
+`PrincipalFrame`, consumed directly by native articulated, impulse and
+hydrostatic mechanics. This is a material-configuration calculation, not an
+elasticity solve, live momentum remap, mixture law or measured density field.
+Mesh coverage/nonoverlap, the nodal interpolation model and source applicability
+remain caller obligations. No new density query at the deformed state changes
+the mass of an existing closed specimen.
+
+`tests/density_field.rs` checks independent cubic Cartesian moments, uniform
+source equivalence, subdivision and all vertex permutations, full-tensor shear
+and expansion, unequal cell Jacobians, and original native impulse/hydrostatic
+motion. Synthetic density fields verify these numerical consequences; they
+do not establish experimental material validity.
+
 ## Heat transport to mechanical configuration
 
 `thermal::heating::HeatedBody` binds each original region to its source-resolved
