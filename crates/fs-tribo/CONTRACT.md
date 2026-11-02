@@ -1483,6 +1483,38 @@ superposition and area-force convergence, changing normal/shear histories,
 local Coulomb bounds and original ownership/domain/frictionless behavior.
 All 30 surface, fixed-load and changing-load Mindlin tests pass.
 
+### Curved adhesive slip/spin and finite extinction
+
+`AdhesiveWrenchContact::advance_transient` extends the original constant-source
+disk law to curved three-coordinate motion on its complete positive-definite
+body mobility. The original exact-ray branch remains the fast path and must
+also pass the transient endpoint-rate gate. Other paths use a bounded positive-
+stage Bogacki--Shampine 3(2) update of actual force, spin moment, travel and
+original physical sliding power. Independent dimensional rate, integrated-
+wrench, travel and heat estimates govern refinement; accepted plus rejected
+attempts and support evaluations are bounded and cancellable. Original effort
+limits and the separate actual-matrix work gate remain in force.
+
+The uniform disk's dissipation is a norm. Conservative original-matrix inverse
+and factor residuals supply mass-metric radial decay bounds. Moving substeps
+stay strictly before a possible zero crossing. An uncomputed extinction tail
+is accepted only when its entire stopping interval lies before the requested
+horizon, its interval width fits the time tolerance, and its travel bound plus
+accumulated quadrature estimate fits the travel tolerance. Its integrated
+impulse follows actual eventual rest and its heat is the remaining relative
+kinetic energy. Prefix physical-power quadrature and its independent work
+residual remain unchanged; numerical error is never added to physical heat.
+The unknown tail travel is explicitly bounded, and the stopping time remains
+an interval. These are analytical tail bounds from a numerically resolved
+prefix, not validated enclosures of the complete exact flow.
+
+Six groups in `tests/adhesive_transient.rs` check an independent RK4 curved-flow
+reference, original full-matrix stopping impulse and energy, requested horizons
+before arrest, time/accuracy refinement, pure-limit fast paths, the stricter
+near-ray endpoint gate, tangent covariance, cancellation and atomic budget retry.
+The branch holds geometry, strengths and mobility fixed without external drive;
+it does not evolve normal adhesion, poses or temperature.
+
 ### Irreversible local Mindlin sliding and pressure-weighted wear input
 
 `MindlinDeresiewiczPoint::advance_with_surface_sliding` performs the original

@@ -20,6 +20,9 @@ pub mod multiple;
 /// Continuous fixed-ray impulse phases that resolve finite arrest and rest.
 pub mod trajectory;
 
+/// Curved slip/spin trajectories with bounded finite-extinction continuation.
+pub mod transient;
+
 /// Prescribed thermal changes of normal adhesion, real area and native recoil.
 pub mod thermal_normal;
 

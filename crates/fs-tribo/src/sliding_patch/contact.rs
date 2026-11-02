@@ -873,7 +873,7 @@ impl Active {
 }
 
 #[derive(Clone, Copy)]
-struct Factor {
+pub(crate) struct Factor {
     lower: Matrix,
     scale: f64,
     size: usize,
@@ -910,7 +910,7 @@ impl Factor {
         Some(Self { lower, scale, size })
     }
 
-    fn solve(self, rhs: Vector) -> Option<Vector> {
+    pub(crate) fn solve(self, rhs: Vector) -> Option<Vector> {
         let mut x = [0.0; 3];
         for i in 0..self.size {
             let mut value = rhs[i] / self.scale;
@@ -928,6 +928,24 @@ impl Factor {
         }
         x.iter().all(|v| v.is_finite()).then_some(x)
     }
+
+    /// Coordinates in the original kinetic-energy metric, without inversion.
+    pub(crate) fn mass_coordinates(self, rhs: Vector) -> Option<Vector> {
+        let root = det::sqrt(self.scale);
+        let mut x = [0.0; 3];
+        for i in 0..3 {
+            let mut value = rhs[i] / root;
+            for j in 0..i {
+                value -= self.lower[i][j] * x[j];
+            }
+            x[i] = value / self.lower[i][i];
+        }
+        x.into_iter().all(f64::is_finite).then_some(x)
+    }
+
+    pub(crate) const fn normalized_lower(self) -> (Matrix, f64) {
+        (self.lower, self.scale)
+    }
 }
 
 /// Reuse the original circular-response symmetry and positive-pivot gates.
@@ -937,6 +955,17 @@ pub(crate) fn validate_circular_response(
     config: HertzWrenchConfig,
 ) -> Result<(), HertzWrenchError> {
     admit_matrix(input, config).map(|_| ())
+}
+
+/// Reuse original admission while factoring the unchanged physical matrix.
+pub(crate) fn factor_circular_response(
+    input: Matrix,
+    config: HertzWrenchConfig,
+) -> Result<Factor, HertzWrenchError> {
+    validate_circular_response(input, config)?;
+    Factor::new(input, 3, config.relative_matrix_tolerance).ok_or(HertzWrenchError::Invalid(
+        "positive finite-body mobility required",
+    ))
 }
 
 fn admit_matrix(

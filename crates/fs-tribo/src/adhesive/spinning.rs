@@ -29,6 +29,9 @@ pub mod contact;
 /// Continuous fixed-ray relaxation through a located finite stopping event.
 pub mod relaxation;
 
+/// Bounded curved slip/spin integration and finite-extinction continuation.
+pub mod transient;
+
 /// Independently supplied solid-contact geometry and uniform junction strength.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdhesiveSlidingPatchParameters {

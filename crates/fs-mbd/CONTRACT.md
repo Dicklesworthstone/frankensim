@@ -3506,3 +3506,26 @@ Three G1/G3/G4 groups in `tests/adhesive_thermal_normal.rs` check independent
 zero-approach JKR radius and torque, separate bulk/interface temperatures, full
 scaled mobility, complete storage work, zero-slip thermal work, accepted source
 continuation and atomic history/control/cancellation refusal.
+
+### Native curved adhesive trajectories
+
+`tangential_friction::adhesive::transient` applies the original source-owned
+curved disk trajectory to the actual finite body pair. It retains every
+translation/spin mobility entry and applies only integrated original point and
+free-couple impulses. Actual endpoint velocity/spin, each body's requested
+impulse, total momentum and native kinetic work are independently checked.
+Original instantaneous power quadrature and the physical finite-extinction
+tail supply heat; an average-wrench endpoint-power test is not substituted for
+the actual changing traction history. The returned stopping interval and
+uncomputed travel bounds remain available to the surrounding time owner.
+
+A conservative original normal-response-row bound covers the entire moving
+path and analytic tail. Unsupported normal/shear coupling refuses without
+inventing a normal correction. Detached zero-area sources remain exact no-ops.
+Preparation is immutable and application publishes both bodies together only
+after all original dimensional gates and cancellation checks. Source properties,
+normal geometry and poses remain frozen with no external drive. Three native
+groups in `tests/adhesive_transient.rs` exercise full-mobility curved recoil,
+actual per-body impulses and work, tangent covariance, eventual rest with finite
+common motion, source gap detachment and atomic normal-path/cancellation/budget
+refusal and retry.
