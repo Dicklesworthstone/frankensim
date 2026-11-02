@@ -82,3 +82,6 @@ fn runtime_envelope_and_sample_identity_remain_explicit() {
 
 #[path="source_point/temperature.rs"]
 mod temperature;
+
+#[path="source_point/path.rs"]
+mod path;

@@ -1668,6 +1668,23 @@ checks compare both halves against independent radial-graph integration and
 recover second-order time refinement against independent two-line motion;
 G0/G4 checks retain source/history, budgets, cancellation and identical retry.
 
+## Exact source-owned elastic Hertz path averages
+
+`normal_patch::source::SourcePointContact::elastic_path_average` supplies the
+mean normal force, its final-indentation derivative and signed reversible work
+for an affine indentation path. The coefficient comes from the original
+material-bound finite-patch evaluator, including actual elliptic geometry.
+Scaled positive polynomials avoid cancellation between nearly equal endpoint
+potentials and require constant work and no allocation per evaluation.
+
+Both endpoints, the actual affine rate and duration retain the original source
+limits. First contact, unloading to zero and equal-depth tangents are explicit;
+Hunt--Crossley models refuse instead of losing their dissipative port. Three
+physical test groups compare original source energies, independent derivative
+probes, subdivision, reversal, one-ulp travel and applicability refusals. Native
+mobility, evolving geometry and time integration remain the mechanical owner's
+responsibility. This operator supplies elastic work, not a normal-impact law.
+
 ## Source-bound circular junction spin resistance
 
 `SourceAdhesiveShear::{sliding_patch_jkr,sliding_patch_dmt,sliding_patch_maugis}`
