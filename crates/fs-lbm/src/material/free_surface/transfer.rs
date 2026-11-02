@@ -24,10 +24,11 @@ use std::collections::BTreeMap;
 pub mod enthalpy;
 
 mod components;
+mod momentum;
 pub use components::TetLiquidComponentTransfer;
 
 use fs_exec::Cx;
-use fs_la::factor::{cholesky, lu};
+use fs_la::factor::lu;
 use fs_mesh::overlap::{OverlapError, tetrahedron_box_moments};
 
 use super::{
@@ -615,18 +616,12 @@ fn correct_momenta(
         translated.angular_momentum_kg_m2_s,
     );
     if norm(omega) > limits.angular_momentum_tolerance_kg_m2_s {
-        // Normalize before the native dense solve to retain density
-        // similitude and avoid putting the physical mass scale in its pivots.
-        for value in &mut inertia {
-            *value /= before.mass_kg;
-        }
-        omega = scale(omega, 1.0 / before.mass_kg);
-        let factor = cholesky(&inertia, 3)
-            .map_err(|_| invalid("target grid cannot resolve source angular momentum; refine"))?;
-        factor.solve(&mut omega);
-        if omega.iter().any(|v| !v.is_finite()) {
-            return Err(invalid("unrepresentable angular momentum correction"));
-        }
+        omega = momentum::angular_correction(
+            &inertia,
+            omega,
+            limits.angular_momentum_tolerance_kg_m2_s,
+        )
+        .ok_or_else(|| invalid("target grid cannot resolve source angular momentum; refine"))?;
         for cell in cells {
             checkpoint(cx)?;
             cell.velocity_m_s = add(

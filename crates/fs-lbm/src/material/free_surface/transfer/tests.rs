@@ -290,6 +290,114 @@ fn a_cut_tetrahedron_transfers_true_volume_and_affine_motion() {
 }
 
 #[test]
+fn thin_prism_carries_transverse_spin_and_refuses_unrepresented_axial_spin() {
+    let source = liquid(1000.0);
+    let (mut p, t, _) = cube([0.0; 3]);
+    for point in &mut p {
+        for coordinate in &mut point[1..] {
+            *coordinate = 0.0025 + (*coordinate - 0.004) * 0.125;
+        }
+    }
+    let centroid = [0.004, 0.0025, 0.0025];
+    let translation = [0.01, -0.005, 0.002];
+    let velocities = |omega| {
+        p.iter()
+            .map(|&point| add(translation, cross(omega, sub(point, centroid))))
+            .collect::<Vec<_>>()
+    };
+    let v = velocities([0.0, 0.0, 3.0]);
+    let mass = 1000.0 * 0.004 * 0.0005_f64.powi(2);
+    let source_inertia = mass * (0.004_f64.powi(2) + 0.0005_f64.powi(2)) / 12.0;
+    let target_inertia = mass * (0.004_f64.powi(2) - 0.001_f64.powi(2)) / 12.0;
+    let expected_momentum = scale(translation, mass);
+    let expected_angular = add(
+        cross(centroid, expected_momentum),
+        [0.0, 0.0, 3.0 * source_inertia],
+    );
+    let projection_change = 0.5 * 9.0 * source_inertia * (source_inertia / target_inertia - 1.0);
+    let mut bounds = limits();
+    // Resolving the same angular momentum on cell centres requires this
+    // explicitly bounded numerical kinetic gain; it is never physical heat.
+    bounds.maximum_projection_energy_change_j = 1.5 * projection_change;
+    let snapshot = TetrahedralLiquidState {
+        positions_m: &p,
+        tetrahedra: &t,
+        velocities_m_s: &v,
+    };
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let scaling = plan_free_surface_from_material(&source, 0.001, 0.001, 0.1).unwrap();
+        let (mut flow, report) = scaling
+            .free_surface3_from_tetrahedra(domain(), [0.0; 3], snapshot, bounds, cx)
+            .unwrap();
+        assert_eq!(report.wet_cells, 4);
+        close(report.target.mass_kg, mass, 1e-19);
+        for axis in 0..3 {
+            close(
+                report.target.momentum_kg_m_s[axis],
+                expected_momentum[axis],
+                1e-20,
+            );
+            close(
+                report.target.angular_momentum_kg_m2_s[axis],
+                expected_angular[axis],
+                1e-22,
+            );
+        }
+        // The receiving row has no axial inertia, but its transverse angular
+        // momentum uniquely fixes the physical y velocities at its four centres.
+        for x in 2..6 {
+            let sample = flow.sample_at_si(x, 2, 2).unwrap().unwrap();
+            let expected = add(
+                translation,
+                [0.0, 3.25 * ((x as f64 + 0.5) * 0.001 - centroid[0]), 0.0],
+            );
+            for axis in 0..3 {
+                close(sample.velocity_m_s[axis], expected[axis], 1e-13);
+            }
+        }
+        close(report.kinetic_energy_change_j, projection_change, 1e-22);
+        flow.step().unwrap();
+        close(
+            flow.ledger_mass_kg().unwrap(),
+            mass,
+            limits().mass_tolerance_kg,
+        );
+
+        let mut insufficient_energy = bounds;
+        insufficient_energy.maximum_projection_energy_change_j = 0.5 * projection_change;
+        assert!(
+            scaling
+                .free_surface3_from_tetrahedra(
+                    domain(),
+                    [0.0; 3],
+                    snapshot,
+                    insufficient_energy,
+                    cx
+                )
+                .is_err()
+        );
+
+        let axial = velocities([3.0, 0.0, 0.0]);
+        assert!(
+            scaling
+                .free_surface3_from_tetrahedra(
+                    domain(),
+                    [0.0; 3],
+                    TetrahedralLiquidState {
+                        positions_m: &p,
+                        tetrahedra: &t,
+                        velocities_m_s: &axial,
+                    },
+                    bounds,
+                    cx,
+                )
+                .is_err()
+        );
+    });
+}
+
+#[test]
 fn insufficient_resolution_energy_or_work_and_cancellation_refuse_before_publication() {
     let source = liquid(1000.0);
     let (p, t, v) = cube([0.0; 3]);
