@@ -605,13 +605,42 @@ body-compliance root, heat calculation and memory cap are reused. Normal-path
 transfer is linear in bounded retained history; it introduces no spring grid.
 Foreign owners, invalid loads or exhausted memory refuse without modifying the
 accepted state. Variable material coefficients, rolling, spin, nonproportional
-shear and a simultaneous normal/tangential trajectory solver remain outside it.
+shear and body trajectory integration remain outside it.
 
 `tests/mindlin_loading.rs` checks Hertz work, exact fixed-load delegation,
 stress-free normal growth, the independent saturated-patch `a^5` unloading
 energy, a small normal decrement, separation/recontact, normal subdivision,
 load/shear path dependence, atomic memory refusal and spatial refinement of an
 independent fixed-coordinate MDR spring quadrature under mixed loading/reversal.
+
+### Simultaneous Hertz--Mindlin indentation and shear
+
+`HertzMindlinContact::advance_prescribed_path` advances simultaneous affine
+indentation and scalar macroscopic shear over the caller's interval. The
+supplied normal load is the endpoint load; the Hertz force itself follows the
+nonlinear indentation law. The caller supplies a prescribed path with zero
+body compliance. Curved or dynamically coupled trajectories still require
+their mechanical owner and trajectory refinement.
+
+The original analytic spring history is retained. In a fixed reference patch,
+each local Coulomb bound varies affinely in time. The method resolves spring
+entry, yield and detachment events and integrates their force and positive
+plastic-work products analytically. Newly contacting material starts relaxed;
+detached memory is removed only after its complete work/storage/heat balance.
+It returns time-average shear effort, actual endpoint force, normal work,
+reversible shear storage change and nonnegative microslip heat separately.
+No spring grid, numerical time substeps or normal dashpot is introduced.
+Cost is linear in the bounded history; cancellation is checked at every
+interval/event partition, and refusals publish no history. Constant-normal
+paths delegate exactly to the original fixed-load implementation.
+
+Five G1/G3/G4 groups in `tests/mindlin_loading.rs` check the independent
+proportional Hertz solution, energy recovery during combined unloading,
+retained-history subdivision invariance, a three-rung independent spring/time
+quadrature, and atomic cancellation/memory/force/domain refusal. They use
+synthetic inputs and do not claim material calibration or a full three-dimensional
+elastic-friction solution. The model is the same decoupled MDR formulation in
+Popov, Hess and Willert (2019), section 4.4, equations 4.21--4.25.
 
 ### Rolling and contour-deformation loss rungs
 

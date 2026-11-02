@@ -1,5 +1,6 @@
 //! Independent Hertz/MDR checks for explicit varying-load shear histories.
 use fs_math::det;
+use fs_tribo::mindlin::loading::path::MindlinPathError;
 use fs_tribo::mindlin::loading::{HertzMindlinContact, HertzMindlinParameters, HertzMindlinState};
 use fs_tribo::mindlin::{MindlinDeresiewiczPoint, MindlinPointParameters};
 use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStepInput};
@@ -404,4 +405,274 @@ fn mixed_normal_and_reversing_shear_history_matches_independent_spatial_refineme
         );
     }
     assert!(errors[2] < errors[0] / 4.0, "refinement errors={errors:?}");
+}
+
+#[test]
+fn simultaneous_loading_has_the_independent_proportional_hertz_solution() {
+    let law = model(32);
+    let normal = 10.0;
+    let end = law.normal_step(&law.initial_state(), normal).unwrap().state;
+    let reference = fixed(&law, &end);
+    let d = reference.gross_slip_displacement_m();
+    let energy_scale = reference.initial_stiffness_n_per_m() * d * d;
+    for u in [-2.0_f64, -0.4, 0.0, 0.4, 2.0] {
+        let result = law
+            .advance_prescribed_path(
+                &law.initial_state(),
+                &input(normal, u * d, 0.0),
+                &mut || false,
+            )
+            .unwrap();
+        let step = result.tangential;
+        // A linear indentation produces P(t)=P_end*t^(3/2). Virgin
+        // proportional shear gives Q/P=mu*clamp(u,-1,1), hence <Q>=2Q_end/5.
+        let q = 0.6 * normal * u.clamp(-1.0, 1.0);
+        close(step.state.endpoint_force_n(), q, 2e-13 * normal);
+        close(step.traction_n[0], 0.4 * q, 2e-13 * normal);
+        close(
+            law.stored_energy_j(&step.state),
+            4.0 / 15.0 * energy_scale * u.abs().min(1.0).powi(2),
+            2e-13 * energy_scale,
+        );
+        close(
+            step.dissipated_j,
+            4.0 / 15.0 * energy_scale * (u.abs() - 1.0).max(0.0),
+            2e-13 * energy_scale,
+        );
+        close(step.closure_residual_j, 0.0, 2e-13 * energy_scale);
+        close(result.normal_work_j, end.normal_energy_j(), 1e-19);
+        // Subsequent fixed-load reversals use the SAME retained analytic owner.
+        let follow = law
+            .advance(&step.state, &input(normal, -0.1 * d, 0.0))
+            .unwrap();
+        assert!(follow.dissipated_j >= 0.0);
+        close(follow.closure_residual_j, 0.0, 2e-13 * energy_scale);
+    }
+}
+
+#[test]
+fn simultaneous_unloading_distinguishes_recovered_work_from_microslip_heat() {
+    let law = model(32);
+    let normal = law.normal_step(&law.initial_state(), 10.0).unwrap().state;
+    let d = fixed(&law, &normal).gross_slip_displacement_m();
+    let loaded = law
+        .advance(&normal, &input(10.0, 2.0 * d, 0.0))
+        .unwrap()
+        .state;
+    let stored = law.stored_energy_j(&loaded);
+    for u in [-1.0, -0.5, 0.0, 0.5, 2.0] {
+        let step = law
+            .advance_prescribed_path(&loaded, &input(0.0, u * d, 0.0), &mut || false)
+            .unwrap();
+        close(step.tangential.traction_n[0], 0.4 * 6.0, 2e-12);
+        close(
+            step.tangential.dissipated_j,
+            (1.0 + u) * stored,
+            2e-13 * stored,
+        );
+        close(step.tangential.closure_residual_j, 0.0, 2e-13 * stored);
+        close(step.normal_work_j, -loaded.normal_energy_j(), 1e-19);
+        assert_eq!(step.tangential.state.history_intervals(), 0);
+        assert_eq!(step.tangential.state.endpoint_force_n(), 0.0);
+        // At u=-1 the shrinking spring bounds are followed elastically:
+        // all shear energy is returned as mechanical work, none becomes heat.
+        if u == -1.0 {
+            close(step.tangential.dissipated_j, 0.0, 1e-14 * stored);
+        }
+    }
+}
+
+#[test]
+fn coupled_paths_preserve_history_work_and_heat_under_time_subdivision() {
+    let law = model(4096);
+    let first = law.normal_step(&law.initial_state(), 10.0).unwrap().state;
+    let d = fixed(&law, &first).gross_slip_displacement_m();
+    let mut direct = law
+        .advance(&first, &input(10.0, 0.6 * d, 0.0))
+        .unwrap()
+        .state;
+    let mut split = direct.clone();
+    for (target, du) in [
+        (35.0, 0.7 * d),
+        (3.0, -0.3 * d),
+        (15.0, -1.4 * d),
+        (0.0, 0.2 * d),
+        (6.0, 0.6 * d),
+    ] {
+        let start_load = direct.normal_force_n();
+        let result = law
+            .advance_prescribed_path(&direct, &input(target, du, 0.0), &mut || false)
+            .unwrap();
+        let mut work = 0.0;
+        let mut heat = 0.0;
+        // Hertz d is proportional to P^(2/3), so this refines the SAME path.
+        let d0 = det::pow(start_load, 2.0 / 3.0);
+        let d1 = det::pow(target, 2.0 / 3.0);
+        for i in 1..=16 {
+            let p = if i == 16 {
+                target
+            } else {
+                det::pow(d0 + (d1 - d0) * i as f64 / 16.0, 1.5)
+            };
+            let step = law
+                .advance_prescribed_path(&split, &input(p, du / 16.0, 0.0), &mut || false)
+                .unwrap();
+            heat += step.tangential.dissipated_j;
+            work += step.tangential.traction_n[0] * du / 16.0;
+            split = step.tangential.state;
+        }
+        close(
+            split.endpoint_force_n(),
+            result.tangential.state.endpoint_force_n(),
+            2e-10,
+        );
+        close(
+            law.stored_energy_j(&split),
+            law.stored_energy_j(&result.tangential.state),
+            2e-10 * d,
+        );
+        close(heat, result.tangential.dissipated_j, 2e-10 * d);
+        close(work, result.tangential.traction_n[0] * du, 2e-10 * d);
+        close(result.tangential.closure_residual_j, 0.0, 2e-10 * d);
+        direct = result.tangential.state;
+    }
+}
+
+#[test]
+fn independent_spatial_spring_and_time_grid_converge_to_simultaneous_path_heat() {
+    let law = model(128);
+    let normal = law.normal_step(&law.initial_state(), 10.0).unwrap().state;
+    let d = normal.indentation_m();
+    let a = normal.contact_radius_m();
+    let native = fixed(&law, &normal);
+    let slip = native.gross_slip_displacement_m();
+    let g = native.initial_stiffness_n_per_m() / (2.0 * a);
+    let beta = 0.6 * law.normal_modulus_pa() / g;
+    let trajectory = [(0.0, 0.0), (1.0, 0.7), (0.2, 1.3), (1.4, -0.8), (0.0, -0.8)];
+    let mut exact = law.initial_state();
+    let mut heat = 0.0;
+    for pair in trajectory.windows(2) {
+        let step = law
+            .advance_prescribed_path(
+                &exact,
+                &input(
+                    10.0 * det::pow(pair[1].0, 1.5),
+                    (pair[1].1 - pair[0].1) * slip,
+                    0.0,
+                ),
+                &mut || false,
+            )
+            .unwrap();
+        heat += step.tangential.dissipated_j;
+        exact = step.tangential.state;
+    }
+    assert!(heat > 0.0);
+    let mut errors = Vec::new();
+    for n in [96, 192, 384] {
+        let dx = a * 1.4_f64.sqrt() / n as f64;
+        let stiffness = 2.0 * g * dx;
+        let mut springs = vec![0.0; n];
+        let mut force = 0.0;
+        let mut work = 0.0;
+        for pair in trajectory.windows(2) {
+            for k in 1..=n {
+                let fraction = k as f64 / n as f64;
+                let depth = d * (pair[0].0 + (pair[1].0 - pair[0].0) * fraction);
+                let previous_depth =
+                    d * (pair[0].0 + (pair[1].0 - pair[0].0) * (k - 1) as f64 / n as f64);
+                let du = (pair[1].1 - pair[0].1) * slip / n as f64;
+                let mut next_force = 0.0;
+                for (j, e) in springs.iter_mut().enumerate() {
+                    let x = (j as f64 + 0.5) * dx;
+                    let profile = x * x / law.parameters().effective_radius_m;
+                    let bound = beta * (depth - profile).max(0.0);
+                    *e = if profile >= previous_depth {
+                        0.0
+                    } else {
+                        (*e + du).clamp(-bound, bound)
+                    };
+                    next_force += stiffness * *e;
+                }
+                work += 0.5 * (force + next_force) * du;
+                force = next_force;
+            }
+        }
+        // The final patch is open, so every spring's stored energy is zero
+        // and independent trapezoidal external work is the total friction heat.
+        errors.push((work - heat).abs() / heat);
+    }
+    assert!(
+        errors[1] < 0.75 * errors[0] && errors[2] < 0.75 * errors[1],
+        "{errors:?}"
+    );
+    assert!(errors[2] < 0.015, "{errors:?}");
+}
+
+#[test]
+fn prescribed_path_delegates_fixed_load_and_refuses_atomically() {
+    let law = model(32);
+    let state = law.normal_step(&law.initial_state(), 10.0).unwrap().state;
+    let d = fixed(&law, &state).gross_slip_displacement_m();
+    let x = input(10.0, 0.6 * d, 0.0);
+    assert_eq!(
+        law.advance(&state, &x).unwrap(),
+        law.advance_prescribed_path(&state, &x, &mut || false)
+            .unwrap()
+            .tangential
+    );
+    let loaded = law.advance(&state, &x).unwrap().state;
+    for normal in [2.0, 10.0 * (1.0 - 1e-8), 20.0] {
+        let original = law.normal_step(&loaded, normal).unwrap();
+        let path = law
+            .advance_prescribed_path(&loaded, &input(normal, 0.0, 0.0), &mut || false)
+            .unwrap();
+        close(
+            path.tangential.state.endpoint_force_n(),
+            original.state.endpoint_force_n(),
+            2e-12,
+        );
+        close(
+            path.tangential.dissipated_j,
+            original.dissipated_j,
+            2e-13 * d,
+        );
+        close(
+            law.stored_energy_j(&path.tangential.state),
+            law.stored_energy_j(&original.state),
+            2e-13 * d,
+        );
+        close(path.tangential.closure_residual_j, 0.0, 2e-13 * d);
+    }
+    let saved = state.clone();
+    let mut polls = 0;
+    assert_eq!(
+        law.advance_prescribed_path(&state, &input(20.0, d, 0.0), &mut || {
+            polls += 1;
+            polls == 3
+        }),
+        Err(MindlinPathError::Cancelled)
+    );
+    assert!(
+        law.advance_prescribed_path(&state, &input(20.0, d, 1.0), &mut || false)
+            .is_err()
+    );
+    let mut budget = input(20.0, d, 0.0);
+    budget.solve.maximum_force_n = 1e-12;
+    assert!(
+        law.advance_prescribed_path(&state, &budget, &mut || false)
+            .is_err()
+    );
+    assert_eq!(state, saved);
+    let limited = model(1);
+    let state = limited
+        .normal_step(&limited.initial_state(), 10.0)
+        .unwrap()
+        .state;
+    let saved = state.clone();
+    assert!(
+        limited
+            .advance_prescribed_path(&state, &input(20.0, 0.1 * d, 0.0), &mut || false)
+            .is_err()
+    );
+    assert_eq!(state, saved);
 }

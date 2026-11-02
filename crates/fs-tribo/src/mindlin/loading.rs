@@ -11,7 +11,8 @@
 //! `normal_step` is a monotonic normal-load segment at fixed macroscopic shear
 //! displacement. `TangentialLaw::advance` is a shear segment at the retained
 //! normal load, using the original fixed-load owner. Callers explicitly choose
-//! that path ordering and refine it when approximating simultaneous motion.
+//! that path ordering. `advance_prescribed_path` instead integrates simultaneous
+//! affine indentation and shear analytically, including entry and detachment.
 //! There is no implied instantaneous rescaling, thermal coefficient evolution,
 //! two-dimensional shear, or normal/tangential elastic coupling. Normal work
 //! and normal Hertz storage are separate from the tangential work port.
@@ -31,6 +32,9 @@ use crate::{
     FrictionRegime, TangentialLaw, TangentialStep, TangentialStepInput, TriboError, checked_add,
     checked_mul, finite, nonnegative_finite, positive_finite,
 };
+
+/// Simultaneous prescribed indentation and shear with analytic local events.
+pub mod path;
 
 /// Immutable geometry and elastic/interface parameters for a Hertz contact.
 /// The caller owns admission of the small-strain, half-space approximation.
@@ -205,25 +209,7 @@ impl HertzMindlinContact {
         let (fixed, indentation_m, normal_energy_j, heat) = if normal_force_n == 0.0 {
             (None, 0.0, 0.0, before)
         } else {
-            let radius_cube = checked_mul(
-                0.75 * (normal_force_n / self.normal_modulus_pa),
-                self.parameters.effective_radius_m,
-                "mindlin_hertz_radius_cube",
-            )?;
-            positive_finite(radius_cube, "mindlin_hertz_radius_cube")?;
-            let radius = det::pow(radius_cube, 1.0 / 3.0);
-            let indentation = radius * (radius / self.parameters.effective_radius_m);
-            positive_finite(indentation, "mindlin_hertz_indentation_m")?;
-            let normal_energy =
-                checked_mul(0.4 * normal_force_n, indentation, "mindlin_normal_energy_j")?;
-            let law = MindlinDeresiewiczPoint::new(MindlinPointParameters {
-                normal_force_n,
-                contact_radius_m: radius,
-                shear_moduli_pa: self.parameters.shear_moduli_pa,
-                poisson_ratios: self.parameters.poisson_ratios,
-                friction_coefficient: self.parameters.friction_coefficient,
-                maximum_history_intervals: self.parameters.maximum_history_intervals,
-            })?;
+            let (law, indentation, normal_energy) = self.normal_geometry(normal_force_n)?;
             let (fixed, released) = if let Some(old) = state.fixed.as_ref()
                 && self.parameters.friction_coefficient > 0.0
             {
@@ -255,6 +241,32 @@ impl HertzMindlinContact {
             dissipated_j: heat,
             closure_residual_j: closure,
         })
+    }
+
+    fn normal_geometry(
+        &self,
+        normal_force_n: f64,
+    ) -> Result<(MindlinDeresiewiczPoint, f64, f64), TriboError> {
+        let radius_cube = checked_mul(
+            0.75 * (normal_force_n / self.normal_modulus_pa),
+            self.parameters.effective_radius_m,
+            "mindlin_hertz_radius_cube",
+        )?;
+        positive_finite(radius_cube, "mindlin_hertz_radius_cube")?;
+        let radius = det::pow(radius_cube, 1.0 / 3.0);
+        let indentation = radius * (radius / self.parameters.effective_radius_m);
+        positive_finite(indentation, "mindlin_hertz_indentation_m")?;
+        let normal_energy =
+            checked_mul(0.4 * normal_force_n, indentation, "mindlin_normal_energy_j")?;
+        let law = MindlinDeresiewiczPoint::new(MindlinPointParameters {
+            normal_force_n,
+            contact_radius_m: radius,
+            shear_moduli_pa: self.parameters.shear_moduli_pa,
+            poisson_ratios: self.parameters.poisson_ratios,
+            friction_coefficient: self.parameters.friction_coefficient,
+            maximum_history_intervals: self.parameters.maximum_history_intervals,
+        })?;
+        Ok((law, indentation, normal_energy))
     }
 
     fn check_owner(&self, state: &HertzMindlinState) -> Result<(), TriboError> {

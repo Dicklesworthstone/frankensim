@@ -96,7 +96,8 @@ pub struct MindlinDeresiewiczPoint {
     energy_scale_j: f64,
 }
 
-// On [previous.upper, upper], z(r)/d = slope*r + offset. Slopes are -1, 0, 1.
+// On [previous.upper, upper], z(r)/d = slope*r + offset. Slopes lie in [-1, 1];
+// simultaneous normal/shear growth can add partially strained material.
 // Adjacent identical polynomials are merged; no reversal is silently dropped.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MemoryInterval {
