@@ -20702,3 +20702,51 @@ film agreement, full source coherence, independent analytical weak-loss cell
 integrals, actual native enthalpy/temperature with authored heating, reversal
 and area scaling, opaque two-face heating, and transactional source/work/timeline
 refusals. Numerical execution is a separate validation step.
+
+## Coherent porous acoustic absorption on native thermal cells
+
+`porous_heating::PorousHeating` binds one original
+`fs_duct::porous::PorousLayerExcitation` to a complete ordered depth partition
+of existing `fs_thermal::enthalpy` cells. Each distinct CellId receives its
+analytic viscous and thermal-relaxation work over its own interval, including
+coherent standing-wave cross terms. Heat is not inferred by subtracting face
+powers or divided uniformly over the specimen. The original peak-phasor 1/2
+and full cross-sectional area are already included and are never applied again.
+
+The mapping admits adjoining, straight, uniform prismatic control volumes:
+cell centreline endpoints are opposite face centres, increasing depth follows
+the original acoustic layer normal, volume equals full face area times depth,
+and the complete partition ends at the original layer thickness. Length,
+alignment and volume comparisons allow floating-point roundoff only. Duplicate
+destinations, incomplete coverage, gaps, bends, wrong area/volume, inactive cells
+and stale geometry/mass/material bindings refuse. Material storage basis and
+available original caloric identity remain bound. A caller-declared preparation
+budget is capped at 4096 cells before allocation. One analytic integral per
+cell prepares the heat; thermal substeps only copy the cached source map.
+
+`advance_to` uses the existing transactional `DepositionObserver::sources`
+path. The original explicit thermal timeline retains its conduction CFL,
+native caloric domains and latent storage, authored heat, contact/reservoir
+exchange, events and acceptance gates. Generated acoustic watts are added for
+the current substep and never persisted in authored boundaries. The caller
+must not also author the same acoustic heat as a boundary source. Exact native
+step durations accumulate per-cell heat, both dissipation mechanisms and the
+incident/outgoing acoustic energy in compensated accounts. Only cell work is
+deposited; acoustic boundary closure is checked independently without scaling
+the heat. The native thermal report already includes that heat together with
+its other external exchanges. Failure or cancellation publishes no candidate.
+
+The caller explicitly authors each cell as one thermally lumped specimen
+volume and owns the justification for one fluid/skeleton storage temperature.
+The viscous/thermal acoustic mechanism split does not determine constituent
+heat fractions. Acoustic coefficients and a monochromatic coherent drive are
+held fixed over an advance: temperature-dependent acoustic refresh, frame
+motion, startup transients and two-temperature heat exchange are not inferred.
+This composes the original rigid-frame constitutive and thermal models and
+does not extend their source support or provide material qualification.
+
+Five focused regressions in `tests/porous_heating.rs` cover independent
+standing-wave volume integration and 1/3/11-cell partition invariance, native
+finite storage, original conduction/reservoir/authored heat, scheduled boundary
+changes and continuation, latent storage and domain/cancellation rollback,
+exact native zero-drive behavior and physical-mapping refusals.

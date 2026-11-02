@@ -141,6 +141,8 @@ pub mod laminate_thermal;
 /// Coherent finite-film absorption deposited once into original thermal cells.
 #[cfg(feature = "layered-wave-heating")]
 pub mod layered_wave_heating;
+/// Analytic porous acoustic absorption deposited once into existing thermal cells.
+pub mod porous_heating;
 pub mod tract;
 /// Source-bound dry sliding work and finite-body temperature feedback.
 pub mod tribothermal;
