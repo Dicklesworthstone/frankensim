@@ -160,6 +160,59 @@ impl<'a> PlanarDielectricLayers<'a> {
         self.layers.get(index).map(|layer| layer.wave.epsilon_f_m)
     }
 
+    // A net film force needs the same original homogeneous exterior on both
+    // faces. Equal index alone does not establish its constitutive/source law.
+    pub(super) fn admit_momentum_exterior(&self) -> Result<(), ReflectionError> {
+        match self.exit {
+            DielectricResponse::Lossless(exit) if exit.identity() == self.incident.identity() => {
+                Ok(())
+            }
+            _ => Err(bad(
+                "radiation force requires the same original lossless exterior on both faces",
+            )),
+        }
+    }
+
+    /// Cycle-mean force per film area [Pa] under a left-incident plane wave.
+    /// The incidence plane is x/z, k_x >= 0 and z points into the films. The
+    /// explicit source is a peak tangential E [V/m] on the existing TE/TM axis.
+    ///
+    /// Both exteriors must retain the same original lossless source. This is
+    /// the electromagnetic Maxwell load of the complete stack; exterior
+    /// striction/pressure, transient momentum storage, edge forces and motion
+    /// feedback are excluded. Do not add this load to another EM force on the
+    /// same body. The original positive loss modes preserve weak absorption.
+    pub fn radiation_pressure(
+        &self,
+        incidence_cosine: f64,
+        polarization: Polarization,
+        incident_tangential_e_v_m: C64,
+    ) -> Result<[f64; 3], ReflectionError> {
+        self.admit_momentum_exterior()?;
+        if !finite(incident_tangential_e_v_m) {
+            return Err(bad("radiation-pressure source must be finite"));
+        }
+        let response = self.response(incidence_cosine, polarization)?;
+        let epsilon = linear_electric_permittivity(self.incident)?;
+        let mu = linear_magnetic_permeability(self.incident)?;
+        let y = match polarization {
+            Polarization::Te => response.incident_normal_wavenumber_rad_m / (self.omega * mu),
+            Polarization::Tm => self.omega * epsilon / response.incident_normal_wavenumber_rad_m,
+        };
+        let power = 0.5 * positive(y)? * incident_tangential_e_v_m.norm_sq();
+        let speed_inverse = det::sqrt(epsilon) * det::sqrt(mu);
+        let sine = det::sqrt((1.0 - incidence_cosine) * (1.0 + incidence_cosine));
+        let force = super::momentum::one_sided(
+            [speed_inverse * sine, 0.0, speed_inverse * incidence_cosine],
+            power * response.reflected_power_fraction,
+            power * response.absorbed_power_fraction,
+        );
+        if !power.is_finite() || force.iter().any(|f| !f.is_finite()) {
+            return Err(bad("radiation pressure is unrepresentable"));
+        }
+        Ok(force)
+    }
+
     // A polychromatic field must use the same physical stack at every
     // frequency. Equal fitted constants do not establish source identity;
     // retain the original constitutive models and authored layer geometry.

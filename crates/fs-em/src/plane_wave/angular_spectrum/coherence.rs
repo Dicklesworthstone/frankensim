@@ -181,6 +181,33 @@ impl<'b, 's, 'm> AngularSpectrumCoherence<'b, 's, 'm> {
         self.field_fft_work
     }
 
+    /// Net ensemble Maxwell force [N] in the original beam coordinates.
+    /// Original coherent factors interfere internally, then their forces add
+    /// as second moments. The common source/grid and preparation work limits
+    /// are unchanged. O(factors*points), allocation-free, without any FFT.
+    /// See `PlanarAngularSpectrum::radiation_force` for the exterior stress
+    /// admission, periodic-cell geometry and mechanical no-claim boundaries.
+    pub fn radiation_force(
+        &self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<[f64; 3], AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        self.source().admit_momentum_exterior()?;
+        let mut sums = [Dd::ZERO; 3];
+        for factor in self.factors {
+            let force = factor.radiation_force(&mut cancelled)?;
+            for (sum, value) in sums.iter_mut().zip(force) {
+                *sum = *sum + Dd::from_f64(value);
+            }
+        }
+        let force = sums.map(Dd::to_f64);
+        if force.iter().any(|f| !f.is_finite()) {
+            return Err(bad("coherence radiation force is unrepresentable"));
+        }
+        poll(&mut cancelled)?;
+        Ok(force)
+    }
+
     /// Complex fields interfere within each source factor through the existing
     /// six-component Maxwell reconstruction. Their second moments then add.
     pub fn field(

@@ -42,6 +42,10 @@ pub mod angular_spectrum;
 pub mod optical;
 pub use optical::OpticalConductorResponse;
 
+// Shared power-to-momentum contractions. Source/geometry admission belongs
+// to the original film and beam owners, not to an arbitrary power input.
+mod momentum;
+
 /// Electric field transverse to the incidence plane, or magnetic field transverse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarization {

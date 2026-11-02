@@ -40,6 +40,8 @@ pub use coherence::{
     PreparedAngularSpectrumCoherenceLayer,
 };
 
+mod force;
+
 mod exposure;
 pub use exposure::{
     AngularSpectrumExposure, AngularSpectrumExposureEnsemble,
@@ -156,6 +158,8 @@ struct Mode {
     reflected_e: [C64; 2],
     transmitted_e_te_tm: [C64; 2],
     transmitted_h_te_tm: [C64; 2],
+    reflected_power_w: f64,
+    absorbed_power_w: f64,
 }
 
 /// One prepared coherent beam and its original material/film owner. The two
@@ -325,12 +329,14 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                 let te_power = (area * 0.5) * a[0].norm_sq() * te_admittance;
                 let tm_power = (area * 0.5) * a[1].norm_sq() * tm_admittance;
                 power.incident_w += te_power + tm_power;
-                power.reflected_w +=
+                let reflected_power_w =
                     te_power * te.reflected_power_fraction + tm_power * tm.reflected_power_fraction;
+                power.reflected_w += reflected_power_w;
                 power.transmitted_w += te_power * te.transmitted_power_fraction
                     + tm_power * tm.transmitted_power_fraction;
-                power.film_absorbed_w +=
+                let absorbed_power_w =
                     te_power * te.absorbed_power_fraction + tm_power * tm.absorbed_power_fraction;
+                power.film_absorbed_w += absorbed_power_w;
                 modes.push(Mode {
                     kx,
                     ky,
@@ -341,6 +347,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                     reflected_e,
                     transmitted_e_te_tm,
                     transmitted_h_te_tm,
+                    reflected_power_w,
+                    absorbed_power_w,
                 });
             }
         }

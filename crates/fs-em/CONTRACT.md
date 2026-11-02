@@ -1972,6 +1972,47 @@ total heat, and missing/replaced-source refusal. Interfaces remain stationary,
 Ohmic at each supplied context and without storage; nonlinear or hysteretic
 contact laws require their own physical state and closure.
 
+## Radiation pressure from the original reflected and absorbed waves
+
+`PlanarDielectricLayers::radiation_pressure` and
+`PreparedLayerIllumination::radiation_pressure` return the cycle-mean net
+electromagnetic force per film area in Pa, including oblique incidence and
+coherent illumination from both faces. Both exterior half-spaces must use the
+same original lossless material snapshot. The exterior stress is
+`<T_ij> = Re(epsilon E_i E_j* + mu H_i H_j*)/2
+- delta_ij (epsilon |E|² + mu |H|²)/4` with the existing peak phasors.
+The complete finite stack may contain the original lossy/metallic films.
+This adopts the homogeneous exterior Maxwell stress, as in the static force
+owners; material striction and ambient mechanical pressure are not inferred.
+
+One-sided normal momentum uses `k_z*(2 P_reflected + P_absorbed)/omega`;
+tangential momentum uses `k_parallel*P_absorbed/omega`. Physical absorption
+comes from the original positive loss modes, so weak force is retained when
+subtracting incident and transmitted powers would erase it. Two-sided normal
+force contracts the positive one-sided diagonal responses and the actual
+complex scattering cross terms; changing relative source phase can reverse
+its sign. This force is not another thermal credit.
+
+`PlanarAngularSpectrum::radiation_force` returns net newtons over the declared
+periodic cell. Each cached Fourier mode retains its original reflected and
+absorbed watts and direction; Parseval orthogonality removes cross-mode terms
+only in this full-cell integral. The original workspace budget includes the
+two additional f64 values per mode. Queries are allocation-free O(points),
+with no new FFT or constitutive solve. `AngularSpectrumCoherence` sums the
+original factor forces as second moments, allocation-free O(factors*points).
+Both poll cancellation in bounded batches and publish no partial result.
+These are operation/storage bounds, not measured throughput.
+
+Focused regressions cover slab resonances, oblique absorption, coherent force
+reversal, independent six-field exterior-stress integration, propagation-plane
+invariance, ensemble/darkness limits and source/cancellation refusal. The two
+new production momentum-kernel tests executed natively with the original
+fs-math dependency; the full source-backed integration regressions have not
+executed in this environment. This does not provide local force density,
+periodic-cell torque, finite-edge scattering, transient momentum storage or
+moving-body power closure. A mechanical consumer must apply this load once,
+without adding a second Maxwell/Lorentz force on the same body.
+
 ## Exact planar dielectric reflection
 
 The opt-in `plane-wave` feature exposes

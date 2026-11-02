@@ -44,6 +44,9 @@ mod ohmic;
 #[path = "plane_wave/optical.rs"]
 mod optical;
 
+#[path = "plane_wave/momentum.rs"]
+mod momentum;
+
 fn source(
     properties: &[(&str, Dims, f64)],
     validity: ValidityDomain,

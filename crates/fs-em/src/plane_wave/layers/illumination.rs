@@ -238,6 +238,54 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
         self.scattering
     }
 
+    /// Net cycle-mean Maxwell force per film area [Pa] under simultaneous
+    /// coherent illumination of both faces. The original x/z incidence plane
+    /// has k_x >= 0; both sources share this tangential wavevector while their
+    /// normal wavevectors have opposite signs. Source phase can change the
+    /// force, including its normal sign, even at fixed incoming powers.
+    ///
+    /// Requires the same original lossless exterior at both faces. The load
+    /// excludes exterior striction/pressure, transients, finite edges and
+    /// mechanical work feedback. It is not an additional absorbed-heat input.
+    /// Allocation-free, O(layers), with the original positive layer-loss modes.
+    pub fn radiation_pressure(
+        &self,
+        incoming_tangential_e_v_m: [C64; 2],
+    ) -> Result<[f64; 3], ReflectionError> {
+        self.stack.admit_momentum_exterior()?;
+        let mut heat = [0.0; MAX_LAYERS];
+        let response = self.evaluate(
+            incoming_tangential_e_v_m,
+            &mut heat[..self.loss_modes.len()],
+        )?;
+        let mut diagonal = [Dd::ZERO; 2];
+        for modes in &self.loss_modes {
+            for (s, sum) in diagonal.iter_mut().enumerate() {
+                *sum = *sum
+                    + Dd::from_f64(modes[0][s].norm_sq())
+                    + Dd::from_f64(modes[1][s].norm_sq());
+            }
+        }
+        let normal_power = super::super::momentum::two_sided_normal(
+            incoming_tangential_e_v_m,
+            self.scattering,
+            self.admittance_s[0],
+            diagonal.map(Dd::to_f64),
+        );
+        let inverse_speed = det::sqrt(linear_electric_permittivity(self.stack.incident)?)
+            * det::sqrt(linear_magnetic_permeability(self.stack.incident)?);
+        let sine = det::sqrt((1.0 - self.incidence_cosine) * (1.0 + self.incidence_cosine));
+        let pressure = [
+            inverse_speed * sine * response.power.absorbed_w_m2,
+            0.0,
+            inverse_speed * self.incidence_cosine * normal_power,
+        ];
+        if pressure.iter().any(|f| !f.is_finite()) {
+            return Err(bad("coherent radiation pressure is unrepresentable"));
+        }
+        Ok(pressure)
+    }
+
     fn admit_output(&self, n: usize) -> Result<(), ReflectionError> {
         if n != self.loss_modes.len() {
             return Err(bad("one heat output is required per authored film"));
