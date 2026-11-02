@@ -488,6 +488,27 @@ differentiable lift). Pure Rust throughout.
   emission, source/receiver admission, numerical darkness, cumulative budgets,
   cancellation, empty-fixture pixel parity and spectral pixel radiometry.
 
+- With `photometry` and `volumes`,
+  `camera::point_lights::participating::CurvedRayleighPointLightCameraScene`
+  composes the exact original molecular camera with its admitted point fixtures.
+  At matching diffuse arrivals, source scattering survival multiplies the
+  existing calibrated source contribution once. Camera-prefix survival remains
+  exclusively in the native molecular free-flight law; there is no second
+  camera extinction factor, phase weighting or collision rate in the diffuse
+  connection. Original surface emission, continuation and all camera random
+  streams remain unchanged. Source tracking has independent counter streams
+  and cumulative draw/candidate limits across all connections and bounces.
+  Legitimate zero ratio samples retain camera emission and continuation without
+  retrying a source path. Source failures preserve their native errors.
+  `CurvedCameraRaster::sample_pixel_rayleigh_point_lights` carries this behavior
+  through each original wavelength lane and native XYZ integration, retaining
+  separate camera and source counts. Failed lanes refuse the complete pixel.
+  This adds diffuse-receiver lighting through molecular media; direct point
+  lighting at volume-scattering vertices, general area-light MIS and complete
+  optical-image discovery remain outside this consumer. Focused camera and
+  pixel regressions check conditional radiometry, stochastic darkness,
+  independent source draws, cumulative limits, spectral survival and parity.
+
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original
   `CurvedRayleighScene` surface owner, checked by pointer identity. Native

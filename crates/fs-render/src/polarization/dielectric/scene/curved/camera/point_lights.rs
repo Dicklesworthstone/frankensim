@@ -18,6 +18,8 @@
 //! and the original camera's environment/continuation rules remain in force.
 //! This owner has no participating-medium binding: molecular scattering or
 //! volume extinction on either connecting leg must not be inferred.
+//! With `volumes`, the `participating` consumer composes the original molecular camera
+//! walk with independently tracked source-leg scattering survival.
 //!
 //! Connections use the original contact's resolved surface witness. Its
 //! numerical localization and each explicit connection tolerance remain
@@ -33,15 +35,20 @@ use crate::dielectric::DielectricError;
 use crate::photometry::source::PhotometricSource;
 use crate::photometry::source::bundle::{BundlePhotometryError, PlanarIrradianceReceiver};
 use crate::polarization::Stokes;
-use crate::polarization::dielectric::scene::curved::SceneMedium;
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
-    BundleBranchPolicy, BundleConnectionError, BundleConnectionLaunch, BundleConnectionOptions,
-    BundleConnectionTarget,
+    BundleBranchPolicy, BundleConnection, BundleConnectionError, BundleConnectionLaunch,
+    BundleConnectionOptions, BundleConnectionTarget,
 };
+use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, SceneMedium};
 use crate::polarization::dielectric::scene::{Interaction, PathTermination, SceneError};
 use crate::polarization::dielectric::transport::PolarizationFrame;
 use fs_exec::Cx;
 use fs_geom::Vec3;
+use fs_math::det;
+
+/// Molecular camera paths and independently tracked fixture connections.
+#[cfg(feature = "volumes")]
+pub mod participating;
 
 /// Fixed admission bound; camera rays allocate no fixture-owned workspace.
 pub const MAX_POINT_LIGHT_BRANCHES: usize = 64;
@@ -107,6 +114,15 @@ pub enum PointLightCameraError {
         binding: usize,
         error: BundlePhotometryError,
     },
+    #[cfg(feature = "volumes")]
+    SourceConnection {
+        binding: usize,
+        error: crate::polarization::dielectric::scene::curved::participating::transmittance::CurvedTransmittanceError,
+    },
+    #[cfg(feature = "volumes")]
+    SourceCandidateLimit,
+    #[cfg(feature = "volumes")]
+    SourceDrawLimit,
     NumericalRange,
 }
 
@@ -320,6 +336,77 @@ struct ConnectionWork {
     traces: u32,
     fields: u64,
     geometry: u64,
+    #[cfg(feature = "volumes")]
+    source_draws: u32,
+    #[cfg(feature = "volumes")]
+    source_candidates: u32,
+}
+
+// Both camera owners use the same contact radiometry and cumulative work.
+// A connector chooses only the native source-leg traversal; it cannot supply
+// a different receiving point, albedo, camera prefix or source calibration.
+struct FixtureConnectionRequest<'p> {
+    binding: usize,
+    #[cfg(feature = "volumes")]
+    ordinal: u32,
+    launch: BundleConnectionLaunch,
+    target: BundleConnectionTarget,
+    options: BundleConnectionOptions,
+    policy: BundleBranchPolicy<'p>,
+}
+
+struct FixtureConnection {
+    original: BundleConnection,
+    work: ConnectionWork,
+    log_scattering_survival: f64,
+    ratio_tracking_zero: bool,
+}
+
+trait FixtureConnector {
+    fn connect(
+        &mut self,
+        cx: &Cx<'_>,
+        request: FixtureConnectionRequest<'_>,
+        previous_work: ConnectionWork,
+    ) -> Result<FixtureConnection, PointLightCameraError>;
+}
+
+struct ClearFixtureConnector<'s, 'm> {
+    scene: &'s CurvedPolarizedScene<'m>,
+}
+
+impl FixtureConnector for ClearFixtureConnector<'_, '_> {
+    fn connect(
+        &mut self,
+        cx: &Cx<'_>,
+        request: FixtureConnectionRequest<'_>,
+        _previous_work: ConnectionWork,
+    ) -> Result<FixtureConnection, PointLightCameraError> {
+        let original = self
+            .scene
+            .connect_bundle_with_policy(
+                cx,
+                request.launch,
+                request.target,
+                request.options,
+                request.policy,
+            )
+            .map_err(|error| PointLightCameraError::Connection {
+                binding: request.binding,
+                error,
+            })?;
+        Ok(FixtureConnection {
+            work: ConnectionWork {
+                traces: original.trace_evaluations(),
+                fields: original.field_evaluations(),
+                geometry: original.query_work(),
+                ..ConnectionWork::default()
+            },
+            original,
+            log_scattering_survival: 0.0,
+            ratio_tracking_zero: false,
+        })
+    }
 }
 
 struct FixtureContributions<'q, 'a, 's, 'm, 'l> {
@@ -348,7 +435,19 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
     }
 
     fn observe(&mut self, cx: &Cx<'_>, path: &CurvedPathResult) -> Result<(), CurvedSceneError> {
-        self.add_contact(cx, path).map_err(|error| {
+        let mut connector = ClearFixtureConnector {
+            scene: self.owner.camera.scene,
+        };
+        self.observe_with_connector(cx, path, &mut connector)
+    }
+
+    fn observe_with_connector(
+        &mut self,
+        cx: &Cx<'_>,
+        path: &CurvedPathResult,
+        connector: &mut impl FixtureConnector,
+    ) -> Result<(), CurvedSceneError> {
+        self.add_contact(cx, path, connector).map_err(|error| {
             self.error = Some(error);
             CurvedSceneError::NumericalRange
         })
@@ -358,6 +457,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
         &mut self,
         cx: &Cx<'_>,
         path: &CurvedPathResult,
+        connector: &mut impl FixtureConnector,
     ) -> Result<(), PointLightCameraError> {
         let contact = path
             .last_contact()
@@ -438,28 +538,59 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
                 normalized_source_stokes: Stokes::unpolarized(1.0),
                 initial_medium: branch.initial_medium,
             };
+            let request = FixtureConnectionRequest {
+                binding: index,
+                #[cfg(feature = "volumes")]
+                ordinal: self.work.connections,
+                launch,
+                target,
+                options,
+                policy: branch.policy,
+            };
             self.work.connections += 1;
-            let connection = scene
-                .connect_bundle_with_policy(cx, launch, target, options, branch.policy)
-                .map_err(|error| PointLightCameraError::Connection {
-                    binding: index,
-                    error,
-                })?;
+            let connection = connector.connect(cx, request, self.work)?;
             self.work.traces = self
                 .work
                 .traces
-                .checked_add(connection.trace_evaluations())
+                .checked_add(connection.work.traces)
                 .ok_or(PointLightCameraError::NumericalRange)?;
             self.work.fields = self
                 .work
                 .fields
-                .checked_add(connection.field_evaluations())
+                .checked_add(connection.work.fields)
                 .ok_or(PointLightCameraError::NumericalRange)?;
             self.work.geometry = self
                 .work
                 .geometry
-                .checked_add(connection.query_work())
+                .checked_add(connection.work.geometry)
                 .ok_or(PointLightCameraError::NumericalRange)?;
+            #[cfg(feature = "volumes")]
+            {
+                self.work.source_draws = self
+                    .work
+                    .source_draws
+                    .checked_add(connection.work.source_draws)
+                    .ok_or(PointLightCameraError::NumericalRange)?;
+                self.work.source_candidates = self
+                    .work
+                    .source_candidates
+                    .checked_add(connection.work.source_candidates)
+                    .ok_or(PointLightCameraError::NumericalRange)?;
+            }
+            if connection.ratio_tracking_zero {
+                // An exact null-factor zero is a valid transmittance estimate,
+                // even if unattenuated source photometry would underflow. The
+                // native source owner still validates its complete optical leg.
+                if connection.log_scattering_survival != f64::NEG_INFINITY {
+                    return Err(PointLightCameraError::NumericalRange);
+                }
+                continue;
+            }
+            if !connection.log_scattering_survival.is_finite()
+                || connection.log_scattering_survival > 0.0
+            {
+                return Err(PointLightCameraError::NumericalRange);
+            }
             let receiver = PlanarIrradianceReceiver::try_new(
                 target.position_m(),
                 target.normal(),
@@ -472,7 +603,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
             let irradiance = branch
                 .source
                 .spectral_irradiance_from_refractive_bundle(
-                    connection.path().bundle(),
+                    connection.original.path().bundle(),
                     receiver,
                     options.projection,
                 )
@@ -481,7 +612,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
                     error,
                 })?;
             if irradiance == 0.0 {
-                let bundle = connection.path().bundle();
+                let bundle = connection.original.path().bundle();
                 // Native bundle photometry retains logarithmic attenuation,
                 // but its final positive irradiance can still round to zero.
                 // Such a value may be amplified by the camera prefix; do not
@@ -507,15 +638,58 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
                 return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
             }
             let local_index = phase_index(beam.medium(), wavelength_nm)?;
-            let ratio = self.initial_index / local_index;
-            let weight = nonnegative(beam.power().i * (ratio * ratio))?;
-            let contribution = nonnegative(weight * (rho * irradiance / core::f64::consts::PI))?;
-            if contribution == 0.0 {
-                return Err(PointLightCameraError::NumericalRange);
-            }
+            let contribution = fixture_contribution(
+                beam.power().i,
+                self.initial_index,
+                local_index,
+                rho,
+                irradiance,
+                connection.log_scattering_survival,
+            )?;
             self.radiance = nonnegative(self.radiance + contribution)?;
         }
         Ok(())
+    }
+}
+
+fn fixture_contribution(
+    prefix: f64,
+    initial_index: f64,
+    local_index: f64,
+    rho: f64,
+    irradiance: f64,
+    log_scattering_survival: f64,
+) -> Result<f64, PointLightCameraError> {
+    let ratio = initial_index / local_index;
+    let weight = prefix * (ratio * ratio);
+    let unattenuated = weight * (rho * irradiance / core::f64::consts::PI);
+    if log_scattering_survival == 0.0 {
+        // Preserve the existing clear-source arithmetic and error policy.
+        nonnegative(weight)?;
+        let value = nonnegative(unattenuated)?;
+        return if value > 0.0 {
+            Ok(value)
+        } else {
+            Err(PointLightCameraError::NumericalRange)
+        };
+    }
+    let value = unattenuated * det::exp(log_scattering_survival);
+    if value.is_finite() && value > 0.0 {
+        return Ok(value);
+    }
+    // Keep source survival logarithmic when a tiny transmission and a large
+    // physical source/prefix still combine to a representable contribution.
+    let logarithm = det::ln(prefix)
+        + 2.0 * (det::ln(initial_index) - det::ln(local_index))
+        + det::ln(rho)
+        + det::ln(irradiance)
+        - det::ln(core::f64::consts::PI)
+        + log_scattering_survival;
+    let value = det::exp(logarithm);
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(PointLightCameraError::NumericalRange)
     }
 }
 

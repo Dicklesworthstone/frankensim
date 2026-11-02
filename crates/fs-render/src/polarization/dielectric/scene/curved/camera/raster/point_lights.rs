@@ -16,6 +16,10 @@ use super::{
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
+/// Molecularly scattering camera and source paths with the same spectral pixels.
+#[cfg(feature = "volumes")]
+pub mod participating;
+
 /// A physical-camera failure or the original source-connection failure in one
 /// spectral lane. No successfully traced prefix is published as a partial pixel.
 #[derive(Debug)]
