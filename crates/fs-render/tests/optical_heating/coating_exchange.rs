@@ -14,6 +14,8 @@ use fs_render::thermal_surface::heating::{
 use fs_thermal::enthalpy::{Reservoir, ThermalLink};
 use std::sync::Arc;
 
+mod infrared;
+
 struct Hot;
 impl ThermalLaw for Hot {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {

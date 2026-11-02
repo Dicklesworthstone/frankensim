@@ -163,7 +163,12 @@ impl<const N: usize> TransmittingSurfacePowerResponse<N> {
         source_identity: ContentHash,
     ) -> Result<Self, SurfaceHeatingError> {
         validate_packet(&wavelengths_nm, &s_power_fraction)?;
-        let stack = DielectricCoatingStack::try_mixed(layers)?;
+        // The supplied exterior indices describe these exact packet nodes;
+        // they do not extend any original film's wavelength support.
+        let stack = DielectricCoatingStack::try_mixed_in_band(
+            layers,
+            (wavelengths_nm[0], wavelengths_nm[N - 1]),
+        )?;
         let mut hash = response_hash(b"transmitting-coating-stack", source_identity)?;
         hash.update(
             CoherentCoatingStack::try_new(layers)?

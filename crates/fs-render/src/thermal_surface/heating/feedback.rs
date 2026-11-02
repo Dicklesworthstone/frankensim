@@ -113,12 +113,13 @@ impl SurfaceConductorLaw {
                 .samples()
                 .map(|sample| sample.wavelength_nm().to_bits())
                 != wavelengths
+                || optics.max_knot_span_nm().to_bits() != reference.max_knot_span_nm().to_bits()
                 || optics.coating() != reference.coating()
                 || optics.absorbing_coating() != reference.absorbing_coating()
                 || optics.periodic_coating() != reference.periodic_coating()
             {
                 return Err(invalid(
-                    "surface optical rows must share their spectral grid and fixed coating",
+                    "surface optical rows must share their spectral grid, gap limit and fixed coating",
                 ));
             }
             if source.status() == ConductorDataStatus::CallerAssertedMeasured
@@ -309,13 +310,14 @@ impl SurfaceConductorLaw {
         let fraction = (coordinate - a) / (b - a);
         let mut samples = left.samples();
         for (sample, rhs) in samples.iter_mut().zip(right.samples()) {
-            *sample = ConductorIorSample::try_new(
+            *sample = ConductorIorSample::try_new_in_band(
                 sample.wavelength_nm(),
                 interpolate_value(sample.eta(), rhs.eta(), fraction),
                 interpolate_value(sample.k(), rhs.k(), fraction),
             )?;
         }
-        let mut optics = ConductorOptics::try_new(samples, self.source)?;
+        let mut optics =
+            ConductorOptics::try_new_in_band(samples, left.max_knot_span_nm(), self.source)?;
         if let Some(coating) = left.coating() {
             optics = optics.with_coating(coating);
         } else if let Some(coating) = left.absorbing_coating() {

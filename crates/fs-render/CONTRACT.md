@@ -5369,3 +5369,50 @@ zero-depth, matched and grazing paths. These tests verify implementation and
 model boundaries; their synthetic optical values establish no measured-specimen
 accuracy or authority outside the supplied source data.
 <!-- optical-band:end -->
+
+<!-- source-band-thermal-exchange:start -->
+
+## Source-bounded coating emission and native infrared heat
+
+`CoatingThermalEmission` retains the positive-width intersection of every
+original film law and the opaque bulk substrate or transmitting opposite-medium
+law. `wavelength_bounds_nm()` reports that exact vacuum-nanometre interval.
+Transparent and zero-thickness films still constrain it. An empty transmitting
+interface retains its explicitly supplied real-index law's support and emits
+zero; an empty opaque stack retains its original substrate's support. Disjoint
+source bands are refused before preparation. An explicit coating stack continues
+to replace any coating attached to its opaque substrate.
+
+The same original positive reciprocal s/p absorption supplies emitted radiance
+and the `CoatingExchangeResponse` angular integral. The latter now integrates
+exactly that retained common band, with wavelength widths in nm, physical area,
+projected solid angle and the native stable Planck differences/secants. Its
+reported band and optical identity bind cache reuse. The explicit midpoint
+counts remain convergence controls, not a quadrature error certificate. Only
+supported radiation contributes; finite-band power is not bolometric cooling.
+
+`SurfaceCoatingLaw` and `SurfaceConductorLaw` retain each row's source band and
+caller-declared maximum knot span while interpolating absolute n/k in native
+T or exact-caloric specific enthalpy. Rows must have identical wavelength grids
+and gap policies. No wavelength/state extrapolation or upgrade of source data
+status occurs. Packet-based transmitting heating admits only its supplied
+ordered wavelength nodes and requires every original film to cover their range;
+explicit real surrounding indices remain supplied at those exact nodes.
+
+`NativeCoatingEmission` and `NativeCoatingExchange` consume these same resolved
+laws, so supported infrared absorption, nonisothermal emitted appearance and
+isothermal external cooling share the original optical owners. Existing native
+storage, caloric identity, accepted-step work, cancellation, area and budget
+contracts remain binding. Fixed optics reuse their angular/spectral response;
+state-dependent optics invalidate it only when the resolved optical identity
+changes. Independently emitting internal layers do not constitute a complete
+model of internal or near-field heat exchange.
+
+Focused physical witnesses cover independent Beer--Lambert depth work with SI
+Planck sources at infrared wavelengths, common-domain and dark-layer refusals,
+finite-band Planck integral convergence, original gap-policy retention, 300 K
+native cooling against independent SI Planck/RK4 integration, and infrared
+latent-enthalpy feedback at 310 K. The pre-existing visible native paths remain
+in the same focused regression suite.
+
+<!-- source-band-thermal-exchange:end -->

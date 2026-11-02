@@ -5,6 +5,8 @@ use crate::conductor::{
 use crate::dielectric::CauchyIor;
 use core::f64::consts::PI;
 
+mod infrared;
+
 fn source(tag: u8) -> ConductorSource {
     ConductorSource::try_new(ContentHash([tag; 32]), ConductorDataStatus::Representative).unwrap()
 }

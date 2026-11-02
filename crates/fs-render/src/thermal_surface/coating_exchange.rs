@@ -19,7 +19,6 @@ use super::{
     CoatingEmissionError, CoatingThermalEmission, ThermalSurfaceError,
     planck_radiative_exchange_w_and_w_k,
 };
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::det;
@@ -27,7 +26,7 @@ use std::sync::Arc;
 
 /// Explicit composite-midpoint rule over vacuum wavelength and outward cosine.
 ///
-/// Wavelength bins cover exactly 380--780 nm; cosine bins cover `(0,1)` with
+/// Wavelength bins cover the emitter's common declared band; cosine bins cover `(0,1)` with
 /// uniform widths `1/cosine_bins`. The owner supplies the azimuthal factor 2*pi
 /// and the projected-area cosine. Nodes avoid the singular exactly tangent mode.
 /// These are approximation controls, not an error certificate: refine both
@@ -75,7 +74,7 @@ struct SpectralNode {
 /// temperature. A temperature/enthalpy-dependent law must be resolved again
 /// before reuse; [`Self::optical_identity`] identifies the retained optical data.
 ///
-/// Only the original 380--780 nm band contributes. This is neither bolometric
+/// Only the common original source band contributes. This is neither bolometric
 /// cooling nor an infrared continuation of a visible optical table. It is a
 /// physical power response; a native thermal owner applies its signed heat and
 /// combines its secant with the native caloric slope and other stability limits.
@@ -87,6 +86,7 @@ pub struct CoatingExchangeResponse {
     optical_evaluations: usize,
     optical_identity: ContentHash,
     identity: ContentHash,
+    wavelength_bounds_nm: (f64, f64),
 }
 
 impl CoatingExchangeResponse {
@@ -120,7 +120,12 @@ impl CoatingExchangeResponse {
         nodes
             .try_reserve_exact(quadrature.wavelength_bins)
             .map_err(|_| CoatingExchangeError::Allocation)?;
-        let wavelength_width = (LAMBDA_MAX - LAMBDA_MIN) / quadrature.wavelength_bins as f64;
+        let wavelength_bounds_nm = emitter.wavelength_bounds_nm();
+        let wavelength_width =
+            (wavelength_bounds_nm.1 - wavelength_bounds_nm.0) / quadrature.wavelength_bins as f64;
+        if !wavelength_width.is_finite() || wavelength_width <= 0.0 {
+            return Err(CoatingExchangeError::Quadrature);
+        }
         let cosine_count = quadrature.cosine_bins as f64;
         let mut hash = DomainHasher::new("org.frankensim.render.coating-exchange-response.v1");
         hash.update(emitter.optical_identity().as_bytes());
@@ -129,7 +134,8 @@ impl CoatingExchangeResponse {
             hash.update(&(count as u64).to_le_bytes());
         }
         for wavelength_index in 0..quadrature.wavelength_bins {
-            let wavelength_nm = LAMBDA_MIN + (wavelength_index as f64 + 0.5) * wavelength_width;
+            let wavelength_nm =
+                wavelength_bounds_nm.0 + (wavelength_index as f64 + 0.5) * wavelength_width;
             let mut angular = Sum::default();
             for cosine_index in 0..quadrature.cosine_bins {
                 checkpoint()?;
@@ -164,6 +170,7 @@ impl CoatingExchangeResponse {
             optical_evaluations,
             optical_identity: emitter.optical_identity(),
             identity: hash.finalize(),
+            wavelength_bounds_nm,
         })
     }
 
@@ -190,7 +197,7 @@ impl CoatingExchangeResponse {
         planck_radiative_exchange_w_and_w_k(
             temperature_k,
             bath_temperature_k,
-            LAMBDA_MIN,
+            self.wavelength_bounds_nm.0,
             0.0,
             0.0,
         )?;
@@ -218,6 +225,12 @@ impl CoatingExchangeResponse {
             outward_power_w,
             secant_w_k,
         })
+    }
+
+    /// Integrated common original optical band, in vacuum nanometres.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.wavelength_bounds_nm
     }
 
     /// Positive physical area of the selected observed port, m².

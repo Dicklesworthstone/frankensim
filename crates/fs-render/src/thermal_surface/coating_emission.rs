@@ -23,10 +23,12 @@ use crate::conductor::{
     CoatingLayer, CoherentAbsorbingCoating, CoherentCoatingStack, CoherentDielectricCoating,
     ConductorError, ConductorOptics, MAX_COHERENT_STACK_LAYERS,
 };
-use crate::dielectric::{DielectricCoatingStack, DielectricError, DielectricIor};
+use crate::dielectric::{
+    DielectricCoatingStack, DielectricError, DielectricIor, MAX_DIELECTRIC_KNOT_SPAN_NM,
+};
 use crate::polarization::{Mueller, Stokes};
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_math::det;
 use std::sync::Arc;
 
 /// Owned finite-band emitter with one temperature per original physical film.
@@ -49,6 +51,7 @@ pub struct CoatingThermalEmission {
     source_identity: ContentHash,
     identity: ContentHash,
     optical_identity: ContentHash,
+    wavelength_bounds_nm: (f64, f64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -97,7 +100,6 @@ impl CoatingThermalEmission {
         substrate_temperature_k: f64,
         source_identity: ContentHash,
     ) -> Result<Self, CoatingEmissionError> {
-        validate_temperature(substrate_temperature_k)?;
         Self::prepare(
             layers,
             film_temperatures_k,
@@ -152,8 +154,26 @@ impl CoatingThermalEmission {
         if source_identity == ContentHash([0; 32]) {
             return Err(ThermalSurfaceError::SourceIdentity.into());
         }
+        // Every original constitutive law must support the reciprocal mode,
+        // including transparent and zero-thickness films. A source's explicit
+        // nonvisible data never extends another source's declared support.
+        let mut wavelength_bounds_nm = match exit {
+            Exit::Opaque { substrate, .. } => substrate.wavelength_bounds_nm(),
+            Exit::Transmitting { opposite_ior, .. } => opposite_ior.wavelength_bounds_nm(),
+        };
+        for layer in layers {
+            let bounds = layer.wavelength_bounds_nm();
+            wavelength_bounds_nm.0 = wavelength_bounds_nm.0.max(bounds.0);
+            wavelength_bounds_nm.1 = wavelength_bounds_nm.1.min(bounds.1);
+        }
+        if wavelength_bounds_nm.0 >= wavelength_bounds_nm.1 {
+            return Err(CoatingEmissionError::WavelengthDomain);
+        }
         for &temperature in temperatures {
-            validate_temperature(temperature)?;
+            validate_temperature(temperature, wavelength_bounds_nm.0)?;
+        }
+        if let Exit::Opaque { temperature_k, .. } = exit {
+            validate_temperature(temperature_k, wavelength_bounds_nm.0)?;
         }
         // A temperature change with fixed optical laws does not invalidate an
         // angular/spectral absorption response. Keep the existing complete
@@ -215,6 +235,7 @@ impl CoatingThermalEmission {
             source_identity,
             identity: hash.finalize(),
             optical_identity: optical_hash.finalize(),
+            wavelength_bounds_nm,
         })
     }
 
@@ -225,13 +246,16 @@ impl CoatingThermalEmission {
     /// direction. No absolute value, side swap, area or cosine projection is
     /// applied. Exact tangent directions have no positive normal incident flux
     /// and are refused, consistently for opaque and transmitting stacks.
-    /// Wavelength support is exactly the original closed 380--780 nm interval.
+    /// Wavelength support is the closed intersection of every original film
+    /// and substrate/opposite-medium law, reported by [`Self::wavelength_bounds_nm`].
     pub fn evaluate(
         &self,
         wavelength_nm: f64,
         outgoing_cosine: f64,
     ) -> Result<CoatingEmissionSample, CoatingEmissionError> {
-        if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+        if !wavelength_nm.is_finite()
+            || !(self.wavelength_bounds_nm.0..=self.wavelength_bounds_nm.1).contains(&wavelength_nm)
+        {
             return Err(ThermalSurfaceError::Wavelength.into());
         }
         if !outgoing_cosine.is_finite() || outgoing_cosine <= 0.0 || outgoing_cosine > 1.0 {
@@ -286,15 +310,17 @@ impl CoatingThermalEmission {
             Exit::Transmitting {
                 opposite_ior,
                 reverse,
-            } => Ok(DielectricCoatingStack::try_mixed(layers)?
-                .layer_power_balance(
-                    wavelength_nm,
-                    reverse,
-                    cosine,
-                    1.0,
-                    opposite_ior.eval(wavelength_nm)?,
-                )?
-                .absorbed),
+            } => Ok(
+                DielectricCoatingStack::try_mixed_in_band(layers, self.wavelength_bounds_nm)?
+                    .layer_power_balance(
+                        wavelength_nm,
+                        reverse,
+                        cosine,
+                        1.0,
+                        opposite_ior.eval(wavelength_nm)?,
+                    )?
+                    .absorbed,
+            ),
         })
     }
 
@@ -337,13 +363,15 @@ impl CoatingThermalEmission {
                 opposite_ior,
                 reverse,
             } => {
-                let work = DielectricCoatingStack::try_mixed(layers)?.layer_power_balance(
-                    wavelength_nm,
-                    reverse,
-                    cosine,
-                    1.0,
-                    opposite_ior.eval(wavelength_nm)?,
-                )?;
+                let work =
+                    DielectricCoatingStack::try_mixed_in_band(layers, self.wavelength_bounds_nm)?
+                        .layer_power_balance(
+                        wavelength_nm,
+                        reverse,
+                        cosine,
+                        1.0,
+                        opposite_ior.eval(wavelength_nm)?,
+                    )?;
                 sample.reflected = polarized_powers(work.fresnel.reflection);
                 sample.transmitted = polarized_powers(work.fresnel.transmission);
                 sample.absorbed = work.absorbed;
@@ -391,6 +419,13 @@ impl CoatingThermalEmission {
         outgoing_cosine: f64,
     ) -> Result<f64, CoatingEmissionError> {
         Ok(self.evaluate(wavelength_nm, outgoing_cosine)?.stokes.i)
+    }
+
+    /// Common original optical support, in vacuum nanometres. This finite band
+    /// does not authorize any extrapolation or an unobserved infrared tail.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.wavelength_bounds_nm
     }
 
     /// Number of original films, including explicit lossless/zero-thickness ones.
@@ -500,6 +535,8 @@ pub enum CoatingEmissionError {
     LayerTemperatures,
     /// Outgoing cosine must be finite and in `(0,1]` for the selected vacuum side.
     EmissionDirection,
+    /// The original material laws have no common positive-width wavelength band.
+    WavelengthDomain,
     /// Native Planck source, wavelength support or source-identity admission.
     Thermal(ThermalSurfaceError),
     /// Original conductor/coherent-film optical refusal.
@@ -533,18 +570,23 @@ impl core::fmt::Display for CoatingEmissionError {
 }
 impl core::error::Error for CoatingEmissionError {}
 
-fn validate_temperature(temperature_k: f64) -> Result<(), ThermalSurfaceError> {
+fn validate_temperature(
+    temperature_k: f64,
+    minimum_wavelength_nm: f64,
+) -> Result<(), ThermalSurfaceError> {
     if !temperature_k.is_finite() || temperature_k <= 0.0 {
         return Err(ThermalSurfaceError::Temperature);
     }
     // Same finite-band Rayleigh--Jeans envelope as the original spectral
     // thermal owner. No T^4 or unobserved infrared continuation is assumed.
-    let lambda2 = LAMBDA_MIN * LAMBDA_MIN;
-    let upper_per_kelvin = 2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27 / (lambda2 * lambda2);
-    if temperature_k > f64::MAX / upper_per_kelvin {
+    // Evaluate the envelope in logs: an explicitly supported band need not
+    // have representable lambda^4, even when its emitted radiance does.
+    let upper_log = det::ln(2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27) + det::ln(temperature_k)
+        - 4.0 * det::ln(minimum_wavelength_nm);
+    if upper_log > det::ln(f64::MAX) {
         return Err(ThermalSurfaceError::Unrepresentable);
     }
-    planck_radiance_w_m2_sr_nm(temperature_k, LAMBDA_MIN)?;
+    planck_radiance_w_m2_sr_nm(temperature_k, minimum_wavelength_nm)?;
     Ok(())
 }
 
@@ -617,6 +659,10 @@ fn hash_ior(hash: &mut DomainHasher, ior: DielectricIor) {
             for sample in law.samples() {
                 hash.update(&sample.wavelength_nm().to_bits().to_le_bytes());
                 hash.update(&sample.index().to_bits().to_le_bytes());
+            }
+            if law.max_knot_span_nm() != MAX_DIELECTRIC_KNOT_SPAN_NM {
+                hash.update(b"declared-knot-span");
+                hash.update(&law.max_knot_span_nm().to_bits().to_le_bytes());
             }
         }
     }

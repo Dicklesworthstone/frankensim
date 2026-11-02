@@ -21,7 +21,8 @@ enum Coordinate {
 
 /// An explicit constitutive law for one uniform passive coherent film.
 ///
-/// All rows retain the same nine-knot spectral grid and physical thickness.
+/// All rows retain the same nine-knot spectral grid, declared interpolation
+/// gap ceiling and physical thickness, including explicitly sourced IR bands.
 /// Linear n/k interpolation is a caller-authored state law, not an inferred
 /// solid/liquid mixing rule or a claim of measured behavior. Exact zero
 /// extinction remains transparent. The reconstructed film carries the declared
@@ -117,9 +118,10 @@ impl SurfaceCoatingLaw {
                 .map(|sample| sample.wavelength_nm().to_bits())
                 != wavelengths
                 || coating.thickness_m().to_bits() != reference.thickness_m().to_bits()
+                || coating.max_knot_span_nm().to_bits() != reference.max_knot_span_nm().to_bits()
             {
                 return Err(invalid(
-                    "surface coating rows must share their spectral grid and fixed thickness",
+                    "surface coating rows must share their spectral grid, gap limit and fixed thickness",
                 ));
             }
             if source.status() == ConductorDataStatus::CallerAssertedMeasured
@@ -314,15 +316,16 @@ impl SurfaceCoatingLaw {
         let fraction = (coordinate - a) / (b - a);
         let mut samples = left.samples();
         for (sample, rhs) in samples.iter_mut().zip(right.samples()) {
-            *sample = CoatingIorSample::try_new(
+            *sample = CoatingIorSample::try_new_in_band(
                 sample.wavelength_nm(),
                 interpolate_value(sample.eta(), rhs.eta(), fraction),
                 interpolate_value(sample.k(), rhs.k(), fraction),
             )?;
         }
-        Ok(CoherentAbsorbingCoating::try_new(
+        Ok(CoherentAbsorbingCoating::try_new_in_band(
             samples,
             left.thickness_m(),
+            left.max_knot_span_nm(),
             self.source,
         )?)
     }
