@@ -380,6 +380,8 @@ impl MolecularScatteredField<'_, '_> {
 }
 
 #[cfg(test)]
+#[path = "scattering/sphere_tests.rs"]
 mod sphere_tests;
 #[cfg(test)]
+#[path = "scattering/tests.rs"]
 mod tests;
