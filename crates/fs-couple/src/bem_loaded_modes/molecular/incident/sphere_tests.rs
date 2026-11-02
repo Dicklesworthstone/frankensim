@@ -36,7 +36,7 @@ fn exterior() -> MolecularExterior {
 }
 
 fn body(level: usize, gas: &GasState) -> BemLoadedModes {
-    let surface = SpherePanels::icosphere(RADIUS, level).unwrap();
+    let surface = SpherePanels::icosphere(RADIUS, level.try_into().unwrap()).unwrap();
     let p = surface.areas().len();
     let n = p + 2;
     let weight = 1.0 / det::sqrt(MASS);
