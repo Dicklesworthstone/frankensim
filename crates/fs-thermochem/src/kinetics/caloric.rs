@@ -80,6 +80,32 @@ impl IdealGasKineticsV1 {
         poll(&mut cancelled)
     }
 
+    /// Original reaction enthalpy changes in canonical reaction order.
+    /// Like `reaction_internal_energies_at`, this combines source coefficients
+    /// before evaluation, admits every original species and allocates nothing.
+    /// It is the fixed-pressure caloric derivative, not additional reaction heat.
+    pub fn reaction_enthalpies_at(
+        &self,
+        temperature: Temperature,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), KineticsErrorV1> {
+        poll(&mut cancelled)?;
+        if !positive(temperature.value()) || out.len() != self.bound.len() {
+            return Err(KineticsErrorV1::Invalid(
+                "reaction caloric temperature or output shape",
+            ));
+        }
+        let basis = self.admitted_caloric_basis(temperature, &mut cancelled)?;
+        for (reaction, value) in self.bound.iter().zip(out) {
+            poll(&mut cancelled)?;
+            *value = reaction_calorics(&self.thermodynamics, reaction, &basis)?
+                .molar_enthalpy
+                .value();
+        }
+        poll(&mut cancelled)
+    }
+
     // Full rate evaluation has already admitted these properties. Standalone
     // reaction queries enforce that same source semantics once per call.
     fn admitted_caloric_basis(

@@ -8,9 +8,66 @@ pub(super) struct Statistics {
 }
 
 struct StateWorkspace {
+    // Amounts divided by the immutable reference volume, never diluted.
     concentrations: Vec<f64>,
     kinetics: KineticWorkspaceV1,
     energy_residual_density: f64,
+    pressure: Option<PressureWorkspace>,
+}
+
+struct PressureWorkspace {
+    pressure: f64,
+    concentrations: Vec<f64>,
+    rates: Vec<f64>,
+    jacobian: Vec<f64>,
+    temperature_derivatives: Vec<f64>,
+}
+
+/// Thermodynamic totals divided by the immutable reference volume. Temperature
+/// and pressure are physical; volume_ratio converts the reference to actual V.
+#[derive(Clone, Copy)]
+pub(super) struct ReactorState {
+    pub temperature: Temperature,
+    pub pressure: Pressure,
+    pub volume_ratio: f64,
+    pub mass_density_kg_m3: f64,
+    pub internal_energy_density_j_m3: f64,
+    pub constraint_energy_density_j_m3: f64,
+    pub heat_capacity_density_j_m3_k: f64,
+    pub entropy_density_j_m3_k: f64,
+}
+
+impl StateWorkspace {
+    fn rates(&self) -> &[f64] {
+        self.pressure
+            .as_ref()
+            .map_or_else(|| self.kinetics.reaction_rates(), |p| p.rates.as_slice())
+    }
+    fn jacobian(&self) -> &[f64] {
+        self.pressure
+            .as_ref()
+            .map_or_else(|| self.kinetics.rate_jacobian(), |p| p.jacobian.as_slice())
+    }
+    fn temperature_derivatives(&self) -> &[f64] {
+        self.pressure.as_ref().map_or_else(
+            || self.kinetics.temperature_derivatives(),
+            |p| p.temperature_derivatives.as_slice(),
+        )
+    }
+    fn species_energies(&self) -> &[f64] {
+        if self.pressure.is_some() {
+            self.kinetics.species_enthalpies()
+        } else {
+            self.kinetics.species_internal_energies()
+        }
+    }
+    fn reaction_energies(&self) -> &[f64] {
+        if self.pressure.is_some() {
+            self.kinetics.reaction_enthalpies()
+        } else {
+            self.kinetics.reaction_internal_energies()
+        }
+    }
 }
 
 struct CaloricReference {
@@ -74,10 +131,18 @@ impl Reactor {
             (work.matrix.capacity() + work.rhs.capacity() + work.row_scale.capacity())
                 * core::mem::size_of::<f64>()
         });
+        let pressure = self.state.pressure.as_ref().map_or(0, |work| {
+            (work.concentrations.capacity()
+                + work.rates.capacity()
+                + work.jacobian.capacity()
+                + work.temperature_derivatives.capacity())
+                * core::mem::size_of::<f64>()
+        });
         scalars * core::mem::size_of::<f64>()
             + self.state.kinetics.workspace_bytes()
             + sparse
             + direct
+            + pressure
     }
 
     pub fn new(
@@ -116,6 +181,7 @@ impl Reactor {
                 concentrations: zeros(ns)?,
                 kinetics,
                 energy_residual_density: 0.0,
+                pressure: None,
             },
             trial: zeros(nr)?,
             residual: zeros(nr)?,
@@ -125,11 +191,24 @@ impl Reactor {
             stats: Statistics::default(),
         })
     }
+    pub(super) fn prepare_pressure(&mut self) -> Result<(), IsochoricKineticsError> {
+        let ns = self.initial.len();
+        let nr = self.mechanism.reactions().len();
+        self.state.pressure = Some(PressureWorkspace {
+            pressure: 1.0,
+            concentrations: zeros(ns)?,
+            rates: zeros(nr)?,
+            jacobian: zeros(ns * nr)?,
+            temperature_derivatives: zeros(nr)?,
+        });
+        Ok(())
+    }
     /// Replace every cell-dependent input without reallocating admitted storage.
     pub fn initialize(
         &mut self,
         amounts: &[Amount],
         volume: Volume,
+        pressure: Option<Pressure>,
         temperature: Temperature,
         target: Option<Energy>,
         cancelled: &mut impl FnMut() -> bool,
@@ -150,18 +229,23 @@ impl Reactor {
                 ));
             }
         }
-        let initial = self.mechanism.evaluate_thermodynamics(
-            temperature,
-            &self.initial,
-            &mut self.state.kinetics,
-            &mut *cancelled,
-        )?;
+        match (&mut self.state.pressure, pressure) {
+            (Some(work), Some(pressure)) => work.pressure = pressure.value(),
+            (None, None) => {}
+            _ => {
+                return Err(IsochoricKineticsError::Invalid(
+                    "reactor constraint differs from prepared workspace",
+                ));
+            }
+        }
+        self.state.concentrations.copy_from_slice(&self.initial);
+        let initial = evaluate_state(&self.mechanism, temperature, &mut self.state, cancelled)?;
         if !positive(initial.mass_density_kg_m3 * volume.value()) {
             return Err(IsochoricKineticsError::Invalid(
                 "unrepresentable original parcel mass",
             ));
         }
-        let initial_energy = initial.internal_energy_density_j_m3 * volume.value();
+        let initial_energy = initial.constraint_energy_density_j_m3 * volume.value();
         let target = target.unwrap_or_else(|| Energy::new(initial_energy));
         let target_density = target.value() / volume.value();
         let increment = (target.value() - initial_energy) / volume.value();
@@ -179,12 +263,20 @@ impl Reactor {
         self.caloric_reference.temperature = temperature;
         self.caloric_reference
             .species_energies
-            .copy_from_slice(self.state.kinetics.species_internal_energies());
-        self.mechanism.reaction_internal_energies_at(
-            temperature,
-            &mut self.caloric_reference.reaction_energies,
-            &mut *cancelled,
-        )?;
+            .copy_from_slice(self.state.species_energies());
+        if pressure.is_some() {
+            self.mechanism.reaction_enthalpies_at(
+                temperature,
+                &mut self.caloric_reference.reaction_energies,
+                &mut *cancelled,
+            )?;
+        } else {
+            self.mechanism.reaction_internal_energies_at(
+                temperature,
+                &mut self.caloric_reference.reaction_energies,
+                &mut *cancelled,
+            )?;
+        }
         self.caloric_reference.target_increment_density = increment;
         self.caloric_reference.chemical_energy_density = Sum::default();
         self.caloric_reference.composition_roundoff_density = Sum::default();
@@ -194,6 +286,33 @@ impl Reactor {
     }
     pub fn concentrations(&self) -> &[f64] {
         &self.state.concentrations
+    }
+
+    #[cfg(test)]
+    pub(super) fn constrained_rate_linearization(
+        &mut self,
+        extents: &[f64],
+        temperature_hint: f64,
+    ) -> Result<(Vec<f64>, Vec<f64>), IsochoricKineticsError> {
+        let state = self.resolve(extents, temperature_hint, &mut || false)?;
+        evaluate_rates(&self.mechanism, state, &mut self.state, &mut || false)?;
+        let nr = extents.len();
+        let ns = self.initial.len();
+        let mut jacobian = vec![0.0; nr * nr];
+        for j in 0..nr {
+            for k in 0..nr {
+                let mut derivative = Sum::default();
+                for i in 0..ns {
+                    derivative.add(self.state.jacobian()[j * ns + i] * self.nu[i * nr + k]);
+                }
+                derivative.add(
+                    self.state.temperature_derivatives()[j]
+                        * (-self.state.reaction_energies()[k] / state.heat_capacity_density_j_m3_k),
+                );
+                jacobian[j * nr + k] = derivative.value();
+            }
+        }
+        Ok((self.state.rates().to_vec(), jacobian))
     }
 
     /// Change coordinates after an accepted step without changing any physical
@@ -249,7 +368,7 @@ impl Reactor {
         for (i, &initial) in self.initial.iter().enumerate() {
             for term in [
                 initial * self.caloric_reference.species_energies[i],
-                self.state.concentrations[i] * self.state.kinetics.species_internal_energies()[i],
+                self.state.concentrations[i] * self.state.species_energies()[i],
             ] {
                 bound.add((64.0 * f64::EPSILON * term.abs()) * self.volume);
             }
@@ -261,7 +380,7 @@ impl Reactor {
         extents: &[f64],
         hint: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<KineticThermodynamicsV1, IsochoricKineticsError> {
+    ) -> Result<ReactorState, IsochoricKineticsError> {
         resolve(
             &self.mechanism,
             self.controls,
@@ -284,9 +403,9 @@ impl Reactor {
         step: f64,
         out: &mut [f64],
         stage_forcing: &mut [f64],
-        base_state: KineticThermodynamicsV1,
+        base_state: ReactorState,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<KineticThermodynamicsV1, IsochoricKineticsError> {
+    ) -> Result<ReactorState, IsochoricKineticsError> {
         out.copy_from_slice(base);
         if self.controls.method == IsochoricKineticsMethod::BackwardEuler {
             return self.implicit_stage(
@@ -314,10 +433,7 @@ impl Reactor {
         self.stage_entropy(stage, base_state, step)?;
         // Every successful implicit_stage exit has evaluated reaction rates
         // at exactly the returned state. Reserve this sole extra vector once.
-        for (forcing, rate) in stage_forcing
-            .iter_mut()
-            .zip(self.state.kinetics.reaction_rates())
-        {
+        for (forcing, rate) in stage_forcing.iter_mut().zip(self.state.rates()) {
             *forcing = ((1.0 - GAMMA) * step) * rate;
             if !forcing.is_finite() {
                 return Err(failed(step, "unrepresentable SDIRK stage forcing"));
@@ -337,8 +453,8 @@ impl Reactor {
 
     fn stage_entropy(
         &self,
-        stage: KineticThermodynamicsV1,
-        base: KineticThermodynamicsV1,
+        stage: ReactorState,
+        base: ReactorState,
         step: f64,
     ) -> Result<(), IsochoricKineticsError> {
         let change = (stage.entropy_density_j_m3_k - base.entropy_density_j_m3_k) * self.volume;
@@ -360,7 +476,7 @@ impl Reactor {
         out: &mut [f64],
         hint: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<KineticThermodynamicsV1, IsochoricKineticsError> {
+    ) -> Result<ReactorState, IsochoricKineticsError> {
         if !positive(step) {
             return Err(failed(step, "unrepresentable implicit stage duration"));
         }
@@ -369,16 +485,11 @@ impl Reactor {
         for iteration in 0..self.controls.maximum_newton_iterations {
             poll(cancelled)?;
             self.stats.nonlinear_iterations += 1;
-            self.mechanism.evaluate(
-                state.temperature,
-                &self.state.concentrations,
-                &mut self.state.kinetics,
-                &mut *cancelled,
-            )?;
+            evaluate_rates(&self.mechanism, state, &mut self.state, cancelled)?;
             for j in 0..nr {
                 self.residual[j] = (out[j] - base[j])
                     - forcing.map_or(0.0, |f| f[j])
-                    - step * self.state.kinetics.reaction_rates()[j];
+                    - step * self.state.rates()[j];
             }
             let norm = residual_norm(
                 self.controls,
@@ -398,13 +509,12 @@ impl Reactor {
             }
             for k in 0..nr {
                 self.temperature_extent_derivatives[k] =
-                    -self.state.kinetics.reaction_internal_energies()[k]
-                        / state.heat_capacity_v_density_j_m3_k;
+                    -self.state.reaction_energies()[k] / state.heat_capacity_density_j_m3_k;
             }
             let direct_fallback = self.newton.solve(
                 &self.nu,
-                self.state.kinetics.rate_jacobian(),
-                self.state.kinetics.temperature_derivatives(),
+                self.state.jacobian(),
+                self.state.temperature_derivatives(),
                 &self.temperature_extent_derivatives,
                 state.temperature.value(),
                 step,
@@ -438,21 +548,17 @@ impl Reactor {
                         return Err(IsochoricKineticsError::Cancelled);
                     }
                     Ok(candidate) => {
-                        let rates = self.mechanism.evaluate(
-                            candidate.temperature,
-                            &self.state.concentrations,
-                            &mut self.state.kinetics,
-                            &mut *cancelled,
-                        );
+                        let rates =
+                            evaluate_rates(&self.mechanism, candidate, &mut self.state, cancelled);
                         match rates {
-                            Err(KineticsErrorV1::Cancelled) => {
+                            Err(IsochoricKineticsError::Cancelled) => {
                                 return Err(IsochoricKineticsError::Cancelled);
                             }
                             Ok(_) => {
                                 for j in 0..nr {
                                     self.residual[j] = (self.trial[j] - base[j])
                                         - forcing.map_or(0.0, |f| f[j])
-                                        - step * self.state.kinetics.reaction_rates()[j];
+                                        - step * self.state.rates()[j];
                                 }
                                 let trial_norm = residual_norm(
                                     self.controls,
@@ -1010,6 +1116,160 @@ fn residual_norm(
     norm
 }
 
+fn evaluate_state(
+    mechanism: &IdealGasKineticsV1,
+    temperature: Temperature,
+    work: &mut StateWorkspace,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ReactorState, IsochoricKineticsError> {
+    let volume_ratio = if let Some(pressure) = &mut work.pressure {
+        let mut count = Sum::default();
+        for &x in &work.concentrations {
+            count.add(x);
+        }
+        let ratio = (fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature.value())
+            * (count.value() / pressure.pressure);
+        if !positive(ratio) {
+            return Err(IsochoricKineticsError::Invalid(
+                "unrepresentable isobaric volume ratio",
+            ));
+        }
+        for (c, &x) in pressure.concentrations.iter_mut().zip(&work.concentrations) {
+            *c = x / ratio;
+            if !c.is_finite() || (x > 0.0 && *c == 0.0) {
+                return Err(IsochoricKineticsError::Invalid(
+                    "unrepresentable isobaric concentration",
+                ));
+            }
+        }
+        ratio
+    } else {
+        1.0
+    };
+    let concentrations = work
+        .pressure
+        .as_ref()
+        .map_or(work.concentrations.as_slice(), |pressure| {
+            pressure.concentrations.as_slice()
+        });
+    let physical = mechanism.evaluate_thermodynamics(
+        temperature,
+        concentrations,
+        &mut work.kinetics,
+        &mut *cancelled,
+    )?;
+    let internal_energy_density_j_m3 = physical.internal_energy_density_j_m3 * volume_ratio;
+    let (constraint_energy_density_j_m3, heat_capacity_density_j_m3_k) = if let Some(pressure) =
+        &work.pressure
+    {
+        let tolerance = 64.0 * f64::EPSILON * (concentrations.len() + 1) as f64 * pressure.pressure;
+        if (physical.pressure.value() - pressure.pressure).abs() > tolerance {
+            return Err(IsochoricKineticsError::Invalid(
+                "isobaric ideal-gas pressure is unresolved",
+            ));
+        }
+        let mut enthalpy = Sum::default();
+        let mut cp = Sum::default();
+        for (i, &x) in work.concentrations.iter().enumerate() {
+            enthalpy.add(x * work.kinetics.species_enthalpies()[i]);
+            cp.add(
+                x * (work.kinetics.species_heat_capacities_v()[i]
+                    + fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K),
+            );
+        }
+        (enthalpy.value(), cp.value())
+    } else {
+        (
+            internal_energy_density_j_m3,
+            physical.heat_capacity_v_density_j_m3_k,
+        )
+    };
+    let state = ReactorState {
+        temperature,
+        pressure: physical.pressure,
+        volume_ratio,
+        mass_density_kg_m3: physical.mass_density_kg_m3 * volume_ratio,
+        internal_energy_density_j_m3,
+        constraint_energy_density_j_m3,
+        heat_capacity_density_j_m3_k,
+        entropy_density_j_m3_k: physical.entropy_density_j_m3_k * volume_ratio,
+    };
+    if !positive(state.mass_density_kg_m3)
+        || !positive(state.heat_capacity_density_j_m3_k)
+        || !state.internal_energy_density_j_m3.is_finite()
+        || !state.constraint_energy_density_j_m3.is_finite()
+        || !state.entropy_density_j_m3_k.is_finite()
+    {
+        return Err(IsochoricKineticsError::Invalid(
+            "unrepresentable extensive reactor thermodynamics",
+        ));
+    }
+    Ok(state)
+}
+
+fn evaluate_rates(
+    mechanism: &IdealGasKineticsV1,
+    state: ReactorState,
+    work: &mut StateWorkspace,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), IsochoricKineticsError> {
+    let concentrations = work
+        .pressure
+        .as_ref()
+        .map_or(work.concentrations.as_slice(), |pressure| {
+            pressure.concentrations.as_slice()
+        });
+    mechanism.evaluate(
+        state.temperature,
+        concentrations,
+        &mut work.kinetics,
+        &mut *cancelled,
+    )?;
+    if let Some(pressure) = &mut work.pressure {
+        // x=n/V0, zeta=V/V0=RT sum(x)/p, c=x/zeta and F=zeta*r(T,c).
+        // At fixed x, dF/dT=zeta[r_T+(r-r_c.c)/T]. At fixed T,
+        // dF/dx_i=r_c_i+zeta(r-r_c.c)/sum(x). The volume and dilution
+        // terms are both needed, including for explicit collider/falloff rates.
+        let mut count = Sum::default();
+        for &x in &work.concentrations {
+            count.add(x);
+        }
+        let ns = work.concentrations.len();
+        for j in 0..pressure.rates.len() {
+            poll(cancelled)?;
+            let rate = work.kinetics.reaction_rates()[j];
+            let row = &work.kinetics.rate_jacobian()[j * ns..(j + 1) * ns];
+            let mut dilation = Sum::default();
+            dilation.add(rate);
+            for (&derivative, &c) in row.iter().zip(&pressure.concentrations) {
+                dilation.add(-derivative * c);
+            }
+            let feedback = state.volume_ratio * dilation.value();
+            pressure.rates[j] = state.volume_ratio * rate;
+            pressure.temperature_derivatives[j] = state.volume_ratio
+                * work.kinetics.temperature_derivatives()[j]
+                + feedback / state.temperature.value();
+            for (out, &derivative) in pressure.jacobian[j * ns..(j + 1) * ns].iter_mut().zip(row) {
+                *out = derivative + feedback / count.value();
+                if !out.is_finite() {
+                    return Err(IsochoricKineticsError::Invalid(
+                        "unrepresentable isobaric rate derivative",
+                    ));
+                }
+            }
+            if !pressure.rates[j].is_finite()
+                || (rate != 0.0 && pressure.rates[j] == 0.0)
+                || !pressure.temperature_derivatives[j].is_finite()
+            {
+                return Err(IsochoricKineticsError::Invalid(
+                    "unrepresentable isobaric reaction rate",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve(
     mechanism: &IdealGasKineticsV1,
@@ -1023,7 +1283,7 @@ fn resolve(
     work: &mut StateWorkspace,
     statistics: &mut Statistics,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<KineticThermodynamicsV1, IsochoricKineticsError> {
+) -> Result<ReactorState, IsochoricKineticsError> {
     poll(cancelled)?;
     let nr = extents.len();
     for (i, &value) in initial.iter().enumerate() {
@@ -1051,14 +1311,7 @@ fn resolve(
                     statistics: &mut Statistics,
                     cancelled: &mut _| {
         statistics.temperature_evaluations += 1;
-        let state = mechanism
-            .evaluate_thermodynamics(
-                Temperature::new(temperature),
-                &work.concentrations,
-                &mut work.kinetics,
-                &mut *cancelled,
-            )
-            .map_err(IsochoricKineticsError::from)?;
+        let state = evaluate_state(mechanism, Temperature::new(temperature), work, cancelled)?;
         let mut residual = chemical;
         residual.add(-caloric.target_increment_density);
         for (model, &concentration) in mechanism
@@ -1071,13 +1324,20 @@ fn resolve(
             if concentration == 0.0 {
                 continue;
             }
-            let change = model
-                .molar_internal_energy_change(caloric.temperature, state.temperature)
-                .map_err(|source| KineticsErrorV1::SpeciesEvaluation {
-                    species: model.species().clone(),
-                    source,
-                })?;
-            residual.add(concentration * change.value());
+            let change = if work.pressure.is_some() {
+                model
+                    .molar_enthalpy_change(caloric.temperature, state.temperature)
+                    .map(|value| value.value())
+            } else {
+                model
+                    .molar_internal_energy_change(caloric.temperature, state.temperature)
+                    .map(|value| value.value())
+            }
+            .map_err(|source| KineticsErrorV1::SpeciesEvaluation {
+                species: model.species().clone(),
+                source,
+            })?;
+            residual.add(concentration * change);
         }
         work.energy_residual_density = residual.value();
         if !work.energy_residual_density.is_finite() {
@@ -1107,8 +1367,8 @@ fn resolve(
     }
     if !(lower_residual < 0.0 && upper_residual > 0.0) {
         return Err(IsochoricKineticsError::EnergyNotBracketed {
-            lower_energy_j: lower.internal_energy_density_j_m3 * volume,
-            upper_energy_j: upper.internal_energy_density_j_m3 * volume,
+            lower_energy_j: lower.constraint_energy_density_j_m3 * volume,
+            upper_energy_j: upper.constraint_energy_density_j_m3 * volume,
         });
     }
     let mut state = first;
@@ -1119,7 +1379,7 @@ fn resolve(
         } else {
             hi = t;
         }
-        let next = t - residual / state.heat_capacity_v_density_j_m3_k;
+        let next = t - residual / state.heat_capacity_density_j_m3_k;
         t = if next > lo && next < hi {
             next
         } else {

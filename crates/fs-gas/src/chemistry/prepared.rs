@@ -151,9 +151,11 @@ pub struct IsochoricKineticsView<'a> {
     pub(super) temperature: Temperature,
     pub(super) pressure: Pressure,
     pub(super) internal_energy: Energy,
-    pub(super) target_internal_energy: Energy,
+    pub(super) target_energy: Energy,
+    pub(super) constrained_energy: Energy,
     pub(super) mass: Mass,
     pub(super) volume: Volume,
+    pub(super) initial_volume: Volume,
     pub(super) elapsed_time: Time,
     pub(super) balance: IsochoricKineticsBalance,
 }
@@ -181,7 +183,7 @@ impl IsochoricKineticsView<'_> {
     }
     /// Single original conserved energy target, J.
     pub const fn target_internal_energy(&self) -> Energy {
-        self.target_internal_energy
+        self.target_energy
     }
     /// Endpoint source molecular mass, kg.
     pub const fn mass(&self) -> Mass {
@@ -250,9 +252,11 @@ impl IsochoricKineticsView<'_> {
             temperature: self.temperature,
             pressure: self.pressure,
             internal_energy: self.internal_energy,
-            target_internal_energy: self.target_internal_energy,
+            target_energy: self.target_energy,
+            constrained_energy: self.constrained_energy,
             mass: self.mass,
             volume: self.volume,
+            initial_volume: self.initial_volume,
             elapsed_time: self.elapsed_time,
             balance: self.balance,
             sources,

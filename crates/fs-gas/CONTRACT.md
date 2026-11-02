@@ -1,5 +1,40 @@
 # fs-gas contract
 
+## Constant-pressure finite-rate chemistry
+
+`chemistry::isobaric::IsobaricReactor` advances a sealed ideal-gas parcel at
+prescribed pressure with total enthalpy conserved. It shares the original
+extent integrator, backward Euler/SDIRK2 stages, adaptive comparisons, reduced
+Newton factorization, source admission and conservation gates. The rigid U,V
+entry points retain their original behavior. The prepared adapter reuses its
+admitted storage across independent parcels; owning convenience results retain
+the original mechanism and endpoint thermodynamic receipts.
+
+Every trial computes its physical volume from nRT/p and evaluates kinetics at
+the resulting actual concentrations. Reference-volume extent coordinates keep
+stoichiometry exact; their rate Jacobian includes both volume and concentration
+dilution derivatives. Temperature recovery uses original source enthalpy
+increments, coefficient-combined reaction Delta h and Cp. Chemical formation
+energy enters that single enthalpy constraint, never an additional heat source.
+Entropy and elemental, charge and mass balances remain extensive at the
+physical variable volume. Results expose initial/final V, H, U and outward
+p Delta V, so the adiabatic first law can be checked independently.
+
+The explicit-H entry point first resolves the initial thermodynamic state at
+the authored composition. That resolved state defines initial volume and zero
+boundary work; the temperature hint is not an additional energy source.
+Unresolved energy targets, source domains, invalid pressure, cancellation or
+bounded work exhaustion publish no accepted result. This is a homogeneous,
+single-temperature ideal-gas reactor with prescribed constant pressure, not a
+piston inertia, heat-transfer, nonideal or multiphase model.
+
+Focused G1/G3 fixtures cover analytic isothermal dissociation, concentration-
+sensitive bimolecular recombination, both stiff methods, full constrained
+Jacobian differences, original reduced Newton work, actual binding-energy
+changes and exact elemental energy-reference shifts. G4 exercises prepared
+cancellation/reuse and zero-duration explicit-H semantics.
+
+
 `fs-gas` owns L3 evolving gas systems. Constitutive and species laws remain in
 `fs-thermochem`; this crate does not replace those sources with an independent
 caloric model. Production dependencies remain pure Rust and Franken-owned.

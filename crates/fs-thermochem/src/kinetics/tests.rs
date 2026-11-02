@@ -194,11 +194,32 @@ fn g3_reaction_calorics_cancel_only_conserved_formation_references() {
                 .reaction_internal_energies_at(temperature, &mut reaction_energy, || false)
                 .unwrap();
             close(reaction_energy[0], expected, 2e-11);
+            let mut reaction_enthalpy = [0.0];
+            mechanism
+                .reaction_enthalpies_at(temperature, &mut reaction_enthalpy, || false)
+                .unwrap();
+            close(reaction_enthalpy[0], caloric.molar_enthalpy.value(), 2e-11);
             let mut workspace = KineticWorkspaceV1::new(&mechanism).unwrap();
             let result = mechanism
                 .evaluate(temperature, &[0.1, 1.0], &mut workspace, || false)
                 .unwrap();
             close(workspace.reaction_internal_energies()[0], expected, 2e-11);
+            close(
+                workspace.reaction_enthalpies()[0],
+                caloric.molar_enthalpy.value(),
+                2e-11,
+            );
+            for (model, &enthalpy) in mechanism
+                .thermodynamics()
+                .models()
+                .iter()
+                .zip(workspace.species_enthalpies())
+            {
+                assert_eq!(
+                    enthalpy,
+                    model.evaluate_properties(temperature).unwrap().h().value()
+                );
+            }
             let expected_rate = -expected * workspace.reaction_rates()[0] / (R * (0.1 * 1.5 + 2.5));
             close(
                 result.adiabatic_temperature_rate_k_s,

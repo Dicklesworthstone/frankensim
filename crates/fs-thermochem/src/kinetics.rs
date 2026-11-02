@@ -494,6 +494,7 @@ impl IdealGasKineticsV1 {
                 ));
             }
             work.u[i] = p.u().value();
+            work.h[i] = p.h().value();
             work.cv[i] = cvi;
             work.log_c[i] = if concentrations[i] == 0.0 {
                 f64::NEG_INFINITY
@@ -564,6 +565,7 @@ impl IdealGasKineticsV1 {
             let du = caloric.molar_internal_energy.value();
             let dg = caloric.molar_gibbs_energy.value();
             work.reaction_internal_energies[j] = du;
+            work.reaction_enthalpies[j] = caloric.molar_enthalpy.value();
             let log_kc = -dg / (R * t) + reaction.delta_molecules * standard_c_log;
             let dlog_kc = (du / (R * t)) / t;
             let scale = pressure::effective_rate(source, reaction, t, &work.log_c, &mut cancelled)?;
@@ -734,10 +736,12 @@ impl IdealGasKineticsV1 {
 #[derive(Clone, Debug)]
 pub struct KineticWorkspaceV1 {
     u: Vec<f64>,
+    h: Vec<f64>,
     cv: Vec<f64>,
     log_c: Vec<f64>,
     reaction_rates: Vec<f64>,
     reaction_internal_energies: Vec<f64>,
+    reaction_enthalpies: Vec<f64>,
     species_rates: Vec<f64>,
     species_rate_correction: Vec<f64>,
     rate_jacobian: Vec<f64>,
@@ -752,10 +756,12 @@ impl KineticWorkspaceV1 {
         let nr = owner.reactions.len();
         Ok(Self {
             u: zeros(ns)?,
+            h: zeros(ns)?,
             cv: zeros(ns)?,
             log_c: zeros(ns)?,
             reaction_rates: zeros(nr)?,
             reaction_internal_energies: zeros(nr)?,
+            reaction_enthalpies: zeros(nr)?,
             species_rates: zeros(ns)?,
             species_rate_correction: zeros(ns)?,
             rate_jacobian: zeros(nr * ns)?,
@@ -770,10 +776,12 @@ impl KineticWorkspaceV1 {
     pub fn workspace_bytes(&self) -> usize {
         let scalars = [
             &self.u,
+            &self.h,
             &self.cv,
             &self.log_c,
             &self.reaction_rates,
             &self.reaction_internal_energies,
+            &self.reaction_enthalpies,
             &self.species_rates,
             &self.species_rate_correction,
             &self.rate_jacobian,
@@ -796,6 +804,12 @@ impl KineticWorkspaceV1 {
     pub fn reaction_internal_energies(&self) -> &[f64] {
         &self.reaction_internal_energies
     }
+    /// Original molar reaction enthalpy changes, J/mol of progress.
+    /// Populated by successful full kinetics from the same coefficient reduction
+    /// as Delta u; no absolute species energies are subtracted.
+    pub fn reaction_enthalpies(&self) -> &[f64] {
+        &self.reaction_enthalpies
+    }
     /// Canonical signed species production, mol/(m3 s).
     pub fn species_rates(&self) -> &[f64] {
         &self.species_rates
@@ -811,6 +825,10 @@ impl KineticWorkspaceV1 {
     /// Original species molar internal energies including formation references.
     pub fn species_internal_energies(&self) -> &[f64] {
         &self.u
+    }
+    /// Original species molar enthalpies including formation and pressure work.
+    pub fn species_enthalpies(&self) -> &[f64] {
+        &self.h
     }
     /// Original species molar Cv, J/(mol K).
     pub fn species_heat_capacities_v(&self) -> &[f64] {

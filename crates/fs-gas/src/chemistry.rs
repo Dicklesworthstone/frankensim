@@ -1,9 +1,10 @@
-//! Adaptive finite-rate chemistry in a sealed, rigid ideal-gas volume.
+//! Adaptive finite-rate chemistry in a sealed ideal-gas parcel.
 //!
 //! The immutable L1 mechanism owns reaction laws and thermodynamics. This L3
 //! owner advances reaction extents with damped backward Euler or the optional
 //! two-stage, second-order L-stable SDIRK method, both with step doubling.
-//! Each trial inverts the same total internal energy, including formation energy
+//! The original entry points fix U,V; `isobaric` fixes H,p using the same
+//! integrator and actual variable volume. Each trial includes formation energy
 //! exactly once. Analytic constrained Jacobians handle stiffness; no explicit
 //! positivity clipping, trace seeding or equilibrium projection is used.
 //!
@@ -17,15 +18,15 @@ use fs_qty::{Amount, Energy, Mass, Pressure, Temperature, Time, Volume};
 use fs_thermochem::equilibrium::composition::{
     FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1,
 };
-use fs_thermochem::kinetics::{
-    IdealGasKineticsV1, KineticThermodynamicsV1, KineticWorkspaceV1, KineticsErrorV1,
-};
+use fs_thermochem::kinetics::{IdealGasKineticsV1, KineticWorkspaceV1, KineticsErrorV1};
 use fs_thermochem::{Nasa9EvaluationReceiptV1, SpeciesId};
 
 /// Source-bound frozen-population electron/heavy energy evolution.
 pub mod energy;
 /// Source-bound two-temperature atomic ionization and three-body recombination.
 pub mod ionization;
+/// Adiabatic constant-pressure evolution through the shared extent integrator.
+pub mod isobaric;
 mod prepared;
 mod solve;
 
@@ -73,7 +74,8 @@ pub struct IsochoricKineticsSolve {
     pub minimum_temperature_k: f64,
     /// Common upper source-supported temperature, K.
     pub maximum_temperature_k: f64,
-    /// Absolute tolerance on the complete parcel internal energy, J.
+    /// Absolute tolerance on the complete conserved parcel energy, J.
+    /// This is U for the original owner and H for the isobaric adapter.
     pub energy_tolerance_j: f64,
     /// Estimated local relative species and temperature tolerance.
     pub relative_tolerance: f64,
@@ -201,9 +203,11 @@ pub struct IsochoricKineticsResult {
     temperature: Temperature,
     pressure: Pressure,
     internal_energy: Energy,
-    target_internal_energy: Energy,
+    target_energy: Energy,
+    constrained_energy: Energy,
     mass: Mass,
     volume: Volume,
+    initial_volume: Volume,
     elapsed_time: Time,
     balance: IsochoricKineticsBalance,
     sources: Vec<Nasa9EvaluationReceiptV1>,
@@ -231,7 +235,7 @@ impl IsochoricKineticsResult {
     }
     /// Original single energy target, J.
     pub const fn target_internal_energy(&self) -> Energy {
-        self.target_internal_energy
+        self.target_energy
     }
     /// Final source molecular mass, kg.
     pub const fn mass(&self) -> Mass {
@@ -405,11 +409,35 @@ fn advance_prepared<'a>(
     volume: Volume,
     initial_temperature: Temperature,
     duration: Time,
+    cancelled: impl FnMut() -> bool,
+) -> Result<IsochoricKineticsView<'a>, IsochoricKineticsError> {
+    advance_prepared_constraint(
+        prepared,
+        feed,
+        target,
+        volume,
+        None,
+        initial_temperature,
+        duration,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_prepared_constraint<'a>(
+    prepared: &'a mut IsochoricReactor,
+    feed: &[Amount],
+    target: Option<Energy>,
+    volume: Volume,
+    pressure: Option<Pressure>,
+    initial_temperature: Temperature,
+    duration: Time,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<IsochoricKineticsView<'a>, IsochoricKineticsError> {
     poll(&mut cancelled)?;
     let controls = prepared.controls();
     if !positive(volume.value())
+        || pressure.is_some_and(|pressure| !positive(pressure.value()))
         || !duration.value().is_finite()
         || duration.value() < 0.0
         || !initial_temperature.value().is_finite()
@@ -433,13 +461,26 @@ fn advance_prepared<'a>(
         amounts,
     } = prepared;
     let explicit_target = target.is_some();
-    let target = reactor.initialize(feed, volume, initial_temperature, target, &mut cancelled)?;
+    let target = reactor.initialize(
+        feed,
+        volume,
+        pressure,
+        initial_temperature,
+        target,
+        &mut cancelled,
+    )?;
     current.fill(0.0);
     full.fill(0.0);
     half.fill(0.0);
     fine.fill(0.0);
     current_concentrations.copy_from_slice(&reactor.initial);
     let initial = reactor.resolve(current, initial_temperature.value(), &mut cancelled)?;
+    let initial_volume = initial.volume_ratio * volume.value();
+    if !positive(initial_volume) {
+        return Err(IsochoricKineticsError::Invalid(
+            "unrepresentable initial reactor volume",
+        ));
+    }
     // Resolve source support first so an out-of-domain target retains its
     // physical EnergyNotBracketed refusal before the precision admission.
     let target_magnitude = target.value().abs();
@@ -594,7 +635,7 @@ fn advance_prepared<'a>(
         (accepted.mass_density_kg_m3 - initial.mass_density_kg_m3) * volume.value();
     balance.energy_residual_j = reactor.energy_residual_j();
     balance.absolute_energy_residual_j =
-        accepted.internal_energy_density_j_m3 * volume.value() - target.value();
+        accepted.constraint_energy_density_j_m3 * volume.value() - target.value();
     balance.composition_reference_roundoff_j = reactor.composition_reference_roundoff_j();
     balance.entropy_change_j_k =
         (accepted.entropy_density_j_m3_k - initial.entropy_density_j_m3_k) * volume.value();
@@ -615,12 +656,16 @@ fn advance_prepared<'a>(
     )?;
     let final_mass = accepted.mass_density_kg_m3 * volume.value();
     let final_energy = accepted.internal_energy_density_j_m3 * volume.value();
+    let constrained_energy = accepted.constraint_energy_density_j_m3 * volume.value();
+    let final_volume = accepted.volume_ratio * volume.value();
     let absolute_roundoff = reactor.absolute_energy_roundoff_allowance_j();
     let unexplained_absolute_residual = balance.absolute_energy_residual_j
         - balance.energy_residual_j
         - balance.composition_reference_roundoff_j;
     if !positive(final_mass)
         || !final_energy.is_finite()
+        || !constrained_energy.is_finite()
+        || !positive(final_volume)
         || !balance.mass_residual_kg.is_finite()
         || !balance.maximum_relative_element_residual.is_finite()
         || !balance.energy_residual_j.is_finite()
@@ -649,9 +694,11 @@ fn advance_prepared<'a>(
         temperature: accepted.temperature,
         pressure: accepted.pressure,
         internal_energy: Energy::new(final_energy),
-        target_internal_energy: target,
+        target_energy: target,
+        constrained_energy: Energy::new(constrained_energy),
         mass: Mass::new(final_mass),
-        volume,
+        volume: Volume::new(final_volume),
+        initial_volume: Volume::new(initial_volume),
         elapsed_time: duration,
         balance,
     };

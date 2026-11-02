@@ -1,5 +1,23 @@
 # CONTRACT: fs-thermochem
 
+## Prepared fixed-pressure reaction calorics
+
+`IdealGasKineticsV1::reaction_enthalpies_at` evaluates canonical reaction
+Delta h from the same coefficient-combined original NASA sources as Delta u
+and Delta g. All original species, including spectators, retain source and Cv
+admission; the successful prepared query allocates nothing.
+`KineticWorkspaceV1::reaction_enthalpies` and `species_enthalpies` retain the
+corresponding values from the actual temperature evaluation, with reusable
+storage included in the reported workspace size.
+
+These values support fixed-pressure enthalpy evolution in fs-gas. They do not
+add reaction heat to a total-energy balance or replace the existing
+fixed-volume Delta u derivatives. The original source offsets, continuity
+policies and elemental reference cancellation remain authoritative. Focused
+G3 caloric tests compare the typed standalone query, prepared arrays and
+stoichiometrically conserved reference shifts.
+
+
 > Status: ACTIVE, CODE-FIRST SLICES. This contract covers typed,
 > provenance-bound NASA-9 ideal-gas standard-state evaluation and bounded
 > frozen-composition ideal-gas mixture evaluation, plus a positive-state
