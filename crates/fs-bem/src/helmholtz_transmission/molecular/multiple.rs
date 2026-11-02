@@ -536,4 +536,5 @@ fn samples_from_traces(
 }
 
 #[cfg(test)]
+#[path = "multiple/tests.rs"]
 mod tests;

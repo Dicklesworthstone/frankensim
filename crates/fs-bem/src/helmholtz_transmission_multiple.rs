@@ -23,6 +23,7 @@
 
 use super::*;
 
+#[path = "helmholtz_transmission_multiple/engine.rs"]
 pub(in crate::helmholtz::transmission) mod engine;
 
 /// Original surface and inviscid fluid source for one bounded body.

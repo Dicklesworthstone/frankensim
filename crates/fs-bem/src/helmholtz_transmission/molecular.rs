@@ -18,8 +18,10 @@ use crate::helmholtz::bc::incident::IncidentSample;
 use crate::helmholtz::laplace::{DampedWaveNumber, fields_from_traces};
 use fs_material::relaxation::RelaxationState;
 
+#[path = "molecular/kernels.rs"]
 mod kernels;
 /// All mutual reflections among source-owned molecular gas bodies.
+#[path = "molecular/multiple.rs"]
 pub mod multiple;
 
 /// One original molecular gas on each side, with one reusable factorization.
@@ -505,4 +507,5 @@ fn admit_products(terms: usize, points: usize, maximum: u64) -> Result<(), Helmh
 }
 
 #[cfg(test)]
+#[path = "molecular/tests.rs"]
 mod tests;
