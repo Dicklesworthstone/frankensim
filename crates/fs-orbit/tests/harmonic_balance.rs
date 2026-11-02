@@ -327,3 +327,333 @@ fn persistent_sampling_disagreement_has_a_bounded_named_refusal() {
         other => panic!("expected unresolved sampling, got {other:?}"),
     }
 }
+
+// The triangular nonlinear ODE has an exact finite Fourier response.
+// X1=(1-i)/4, Y1=-3i/32, Y3=(-2+i)/160; the cubic creates the
+// third harmonic even when the retained N=1 equations have zero defect.
+struct CubicCascade {
+    equation_scale: f64,
+    dc: f64,
+    maximum_port_harmonic: f64,
+}
+
+impl OrbitProblem for CubicCascade {
+    fn dim(&self) -> usize {
+        2
+    }
+    fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+        out[0] = fs_math::det::cos(t) - x[0];
+        out[1] = self.equation_scale * (self.dc + x[0].powi(3) - x[1]);
+    }
+    fn port(&self, s: C64) -> Vec<C64> {
+        assert!(
+            s.im <= self.maximum_port_harmonic,
+            "unretained port was queried"
+        );
+        vec![
+            s,
+            C64::new(0.0, 0.0),
+            C64::new(0.0, 0.0),
+            s.scale(self.equation_scale),
+        ]
+    }
+    fn autonomous(&self) -> bool {
+        false
+    }
+}
+
+fn order_budget(max_harmonics: usize) -> fs_orbit::HbRefinementBudget {
+    fs_orbit::HbRefinementBudget {
+        max_harmonics,
+        residual_tolerances: vec![1.0e-9; 2],
+        state_tolerances: vec![1.0e-9; 2],
+        frequency_tolerance: 1.0e-10,
+    }
+}
+
+#[test]
+fn adaptive_order_resolves_generated_harmonics_and_compares_actual_solutions() {
+    let problem = CubicCascade {
+        equation_scale: 1.0,
+        dc: 0.0,
+        maximum_port_harmonic: 7.0,
+    };
+    let result = fs_orbit::solve_hb_adaptive(
+        &problem,
+        HbAnchor::Forced { omega: 1.0 },
+        0.5,
+        &HbBudget {
+            harmonics: 1,
+            tolerance: 1.0e-13,
+            ..HbBudget::default()
+        },
+        &order_budget(7),
+    )
+    .expect("cubic cascade resolves after adding its generated third harmonic");
+    let orders: Vec<_> = result
+        .refinement_trace
+        .iter()
+        .map(|check| check.harmonics)
+        .collect();
+    assert_eq!(orders, [1, 3, 7]);
+    let first = result.refinement_trace[0];
+    assert!(first.retained_residual_ratio < 1.0);
+    assert!((first.omitted_residual_ratio * 1.0e-9 - 0.0625).abs() < 1.0e-11);
+    assert_eq!(first.state_change_ratio, None);
+    let middle = result.refinement_trace[1];
+    assert!(middle.omitted_residual_ratio < 1.0);
+    assert!(middle.state_change_ratio.expect("actual larger solve") > 1.0e6);
+    let last = result.refinement_trace.last().unwrap();
+    assert!(last.state_change_ratio.unwrap() < 1.0);
+    assert!(last.sampling_defect_ratio < 1.0);
+    assert_complex(result.orbit.coeffs[0][1], C64::new(0.25, -0.25), 1.0e-10);
+    assert_complex(result.orbit.coeffs[1][1], C64::new(0.0, -0.09375), 1.0e-10);
+    assert_complex(
+        result.orbit.coeffs[1][3],
+        C64::new(-0.0125, 0.00625),
+        1.0e-10,
+    );
+    for n in [0, 2, 4, 5, 6, 7] {
+        assert!(result.orbit.coeffs[0][n].abs() < 1.0e-10);
+        assert!(result.orbit.coeffs[1][n].abs() < 1.0e-10);
+    }
+}
+
+#[test]
+fn adaptive_order_cap_checks_beyond_the_cap_without_dc_or_unit_masking() {
+    for (scale, dc) in [(1.0, 0.0), (1.0e-6, 1000.0)] {
+        let problem = CubicCascade {
+            equation_scale: scale,
+            dc,
+            maximum_port_harmonic: 2.0,
+        };
+        let mut refinement = order_budget(2);
+        refinement.residual_tolerances[1] *= scale;
+        // Use the exact retained response so this probes harmonic omission,
+        // independently of the inner solver's separate global residual scale.
+        let result = fs_orbit::solve_hb_adaptive_seeded(
+            &problem,
+            HbAnchor::Forced { omega: 1.0 },
+            vec![0.0, dc, 0.25, 0.0, -0.25, -0.09375],
+            &HbBudget {
+                harmonics: 1,
+                tolerance: 1.0e-14,
+                ..HbBudget::default()
+            },
+            &refinement,
+        );
+        match result {
+            Err(OrbitError::HarmonicsUnresolved { check }) => {
+                assert_eq!(check.harmonics, 2);
+                assert_eq!(check.checked_harmonics, 5);
+                assert!(check.retained_residual_ratio < 1.0);
+                assert!((check.omitted_residual_ratio * 1.0e-9 - 0.0625).abs() < 1.0e-8);
+                assert!(check.state_change_ratio.is_some());
+            }
+            other => panic!("unresolved cubic harmonic must survive cap/scaling: {other:?}"),
+        }
+    }
+}
+
+struct LinearBackbone;
+impl OrbitProblem for LinearBackbone {
+    fn dim(&self) -> usize {
+        2
+    }
+    fn island(&self, _t: f64, x: &[f64], out: &mut [f64]) {
+        out[0] = x[1];
+        out[1] = -4.0 * x[0];
+    }
+    fn autonomous(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn adaptive_order_relocates_the_solved_frequency_in_the_warm_seed() {
+    let result = fs_orbit::solve_hb_adaptive(
+        &LinearBackbone,
+        HbAnchor::Backbone {
+            amplitude: 1.0,
+            omega_guess: 1.7,
+        },
+        1.0,
+        &HbBudget {
+            harmonics: 1,
+            tolerance: 1.0e-12,
+            ..HbBudget::default()
+        },
+        &order_budget(3),
+    )
+    .expect("known-frequency backbone survives a larger canonical packing");
+    assert_eq!(result.refinement_trace.len(), 2);
+    assert!((result.orbit.omega - 2.0).abs() < 1.0e-10);
+    assert!((result.orbit.first_harmonic_amplitude(0) - 1.0).abs() < 1.0e-10);
+    assert!(
+        result.refinement_trace[1]
+            .relative_frequency_change
+            .unwrap()
+            < 1.0e-10
+    );
+    assert!(result.refinement_trace[1].state_change_ratio.unwrap() < 1.0);
+}
+
+#[test]
+fn adaptive_order_distinguishes_loose_newton_from_missing_harmonics() {
+    struct UnitEquilibrium;
+    impl OrbitProblem for UnitEquilibrium {
+        fn dim(&self) -> usize {
+            1
+        }
+        fn island(&self, _: f64, _: &[f64], out: &mut [f64]) {
+            out[0] = 1.0;
+        }
+        fn port(&self, _: C64) -> Vec<C64> {
+            vec![C64::new(1.0, 0.0)]
+        }
+        fn autonomous(&self) -> bool {
+            false
+        }
+    }
+    let result = fs_orbit::solve_hb_adaptive(
+        &UnitEquilibrium,
+        HbAnchor::Forced { omega: 1.0 },
+        0.0,
+        &HbBudget {
+            harmonics: 1,
+            tolerance: 2.0,
+            ..HbBudget::default()
+        },
+        &fs_orbit::HbRefinementBudget {
+            max_harmonics: 7,
+            residual_tolerances: vec![1.0e-9],
+            state_tolerances: vec![1.0e-9],
+            frequency_tolerance: 1.0e-9,
+        },
+    );
+    match result {
+        Err(OrbitError::HarmonicsUnresolved { check }) => {
+            assert_eq!(
+                check.harmonics, 1,
+                "do not spend higher orders on a loose Newton solve"
+            );
+            assert!(check.retained_residual_ratio > 1.0e8);
+            assert!(check.omitted_residual_ratio < 1.0);
+            assert_eq!(check.state_change_ratio, None);
+        }
+        other => panic!("physical retained residual must be checked: {other:?}"),
+    }
+}
+
+#[test]
+fn adaptive_order_admission_precedes_model_evaluation() {
+    struct NoEvaluation;
+    impl OrbitProblem for NoEvaluation {
+        fn dim(&self) -> usize {
+            2
+        }
+        fn island(&self, _: f64, _: &[f64], _: &mut [f64]) {
+            panic!("invalid budget evaluated");
+        }
+        fn autonomous(&self) -> bool {
+            true
+        }
+    }
+    let anchor = HbAnchor::Autonomous { omega_guess: 1.0 };
+    let hb = HbBudget {
+        harmonics: 1,
+        ..HbBudget::default()
+    };
+    let refinement = order_budget(3);
+    for omega in [0.0, -1.0, f64::NAN] {
+        let mut seed = vec![0.0; 7];
+        seed[6] = omega;
+        assert!(matches!(
+            fs_orbit::solve_hb_adaptive_seeded(&NoEvaluation, anchor, seed, &hb, &refinement),
+            Err(OrbitError::BadParameter { .. }),
+        ));
+    }
+    for bad in [
+        fs_orbit::HbRefinementBudget {
+            max_harmonics: 1,
+            ..refinement.clone()
+        },
+        fs_orbit::HbRefinementBudget {
+            residual_tolerances: vec![1.0e-9],
+            ..refinement.clone()
+        },
+        fs_orbit::HbRefinementBudget {
+            state_tolerances: vec![0.0; 2],
+            ..refinement.clone()
+        },
+    ] {
+        assert!(matches!(
+            fs_orbit::solve_hb_adaptive(&NoEvaluation, anchor, 1.0, &hb, &bad),
+            Err(OrbitError::BadParameter { .. }),
+        ));
+    }
+    for bad_hb in [
+        HbBudget {
+            tolerance: f64::NAN,
+            ..hb
+        },
+        HbBudget {
+            max_newton: 0,
+            ..hb
+        },
+    ] {
+        assert!(matches!(
+            fs_orbit::solve_hb_adaptive(&NoEvaluation, anchor, 1.0, &bad_hb, &refinement),
+            Err(OrbitError::BadParameter { .. }),
+        ));
+    }
+}
+
+#[test]
+fn adaptive_retained_and_omitted_residuals_share_one_physical_budget() {
+    struct SplitResidual;
+    impl OrbitProblem for SplitResidual {
+        fn dim(&self) -> usize {
+            1
+        }
+        fn island(&self, t: f64, _: &[f64], out: &mut [f64]) {
+            out[0] = 0.8 + 0.8 * fs_math::det::sqrt(2.0) * fs_math::det::cos(5.0 * t);
+        }
+        fn port(&self, _: C64) -> Vec<C64> {
+            vec![C64::new(1.0, 0.0)]
+        }
+        fn autonomous(&self) -> bool {
+            false
+        }
+    }
+    // A deliberately loose inner solve returns the same zero waveform at N=1
+    // and N=3. At N=3 each spectral band has RMS 0.8, but their combined
+    // equation defect sqrt(0.8^2 + 0.8^2) exceeds the one physical budget.
+    let result = fs_orbit::solve_hb_adaptive(
+        &SplitResidual,
+        HbAnchor::Forced { omega: 1.0 },
+        0.0,
+        &HbBudget {
+            harmonics: 1,
+            tolerance: 2.0,
+            ..HbBudget::default()
+        },
+        &fs_orbit::HbRefinementBudget {
+            max_harmonics: 3,
+            residual_tolerances: vec![1.0],
+            state_tolerances: vec![1.0],
+            frequency_tolerance: 1.0e-9,
+        },
+    );
+    match result {
+        Err(OrbitError::HarmonicsUnresolved { check }) => {
+            assert_eq!(check.harmonics, 3);
+            assert!((check.retained_residual_ratio - 0.8).abs() < 1e-12);
+            assert!((check.omitted_residual_ratio - 0.8).abs() < 1e-12);
+            assert!((check.total_residual_ratio - fs_math::det::sqrt(1.28)).abs() < 1e-12);
+            assert!(check.total_residual_ratio > 1.0);
+            assert_eq!(check.state_change_ratio, Some(0.0));
+        }
+        other => panic!("the full measured equation must meet its single budget: {other:?}"),
+    }
+}

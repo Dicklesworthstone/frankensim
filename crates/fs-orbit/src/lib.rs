@@ -32,6 +32,12 @@ use fs_la::factor::lu;
 use fs_math::c64::C64;
 use fs_math::det;
 
+mod adaptive;
+pub use adaptive::{
+    AdaptiveHbOrbit, HbRefinementBudget, HbRefinementCheck, solve_hb_adaptive,
+    solve_hb_adaptive_seeded,
+};
+
 const TAU: f64 = core::f64::consts::TAU;
 
 // Four successively finer quadratures bound sampling work independently of
@@ -66,6 +72,13 @@ pub enum OrbitError {
         residual: f64,
         /// Norm of the change in retained balance coefficients.
         defect: f64,
+    },
+    /// Measured harmonic resolution failed: either the physical retained-row
+    /// tolerances were unmet, or the largest order did not resolve the omitted
+    /// band and successive-solution change. This is not an infinite-tail bound.
+    HarmonicsUnresolved {
+        /// Last independently measured finite-band check.
+        check: HbRefinementCheck,
     },
     /// The HB/shooting Jacobian became singular.
     SingularJacobian,
@@ -113,6 +126,17 @@ impl core::fmt::Display for OrbitError {
             } => write!(
                 f,
                 "FS-ORBIT-SAMPLING: {samples} samples, residual {residual:.3e}, defect {defect:.3e}"
+            ),
+            OrbitError::HarmonicsUnresolved { check } => write!(
+                f,
+                "FS-ORBIT-HARMONICS: order {}, checked through {}, total ratio {:.3e}, retained ratio {:.3e}, omitted ratio {:.3e}, state change {:?}, relative frequency change {:?}",
+                check.harmonics,
+                check.checked_harmonics,
+                check.total_residual_ratio,
+                check.retained_residual_ratio,
+                check.omitted_residual_ratio,
+                check.state_change_ratio,
+                check.relative_frequency_change
             ),
             OrbitError::SingularJacobian => write!(f, "FS-ORBIT-SINGULAR: Jacobian factorization"),
             OrbitError::ContinuationExhausted { steps } => {
