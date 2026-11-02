@@ -9,6 +9,7 @@ use fs_lbm::d3q27::{
     CollisionConfig27, CollisionModel27, D3q27, Equilibrium27, Rates27, equilibrium27,
 };
 use fs_lbm::lattice3::{Grid3, GridBudget3};
+use fs_lbm::sgs3::dynamic::{DynamicAveraging, DynamicSgsConfig};
 use fs_lbm::sgs3::{SgsConfig, SgsModel, SgsUse};
 use fs_math::det;
 use std::io::{BufWriter, Write};
@@ -19,14 +20,20 @@ Run: cargo run --release -p fs-lbm --example turbulent_taylor_green -- [options]
   --steps N                steps, 0..1000000 (default 120; 0 reports initial state)
   --reynolds R             Re = U/(k nu), k=2*pi, U=1 (default 1600)
   --velocity U             lattice velocity, 0 < U <= 0.08 (default 0.04)
-  --model M                none | smagorinsky | wale (default none)
-  --coefficient C          nonnegative (defaults: none=0, smagorinsky=0.12, wale=0.5)
+  --model M                none | smagorinsky | wale | vreman | dynamic-local | dynamic-domain
+                           (default none; dynamic models fit C_s squared from the field)
+  --coefficient C          fixed models only; defaults: none=0, smagorinsky=0.12,
+                           wale=0.5, vreman=0.07
   --max-eddy-ratio R        maximum nu_sgs/nu, refusal not clipping (default 1000)
+  --max-coefficient-squared C  dynamic fit admission bound, refusal not clipping (default 1)
+  --max-sgs-bytes B         dynamic workspace byte bound (default 134217728)
   --help                   show this help
 Example refinement at matched convective time (repeat with --model none):
   --grid 16 --steps 80  --reynolds 1600 --velocity 0.04 --model wale --coefficient 0.5
   --grid 32 --steps 160 --reynolds 1600 --velocity 0.04 --model wale --coefficient 0.5
   --grid 64 --steps 320 --reynolds 1600 --velocity 0.04 --model wale --coefficient 0.5
+Dynamic comparison: repeat with --model dynamic-local or --model dynamic-domain,
+omitting --coefficient. The 27-cell Favre test box has width three grid cells.
 Compare the CSV dissipation ratio and energy histories; convergence is measured,
 not presumed. A coarse high-Re run is not a DNS claim.\n";
 
@@ -34,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut n, mut steps) = (24_usize, 120_usize);
     let (mut re, mut speed) = (1600.0_f64, 0.04_f64);
     let (mut label, mut coefficient, mut cap) = (String::from("none"), None, 1000.0_f64);
+    let (mut coefficient_cap, mut sgs_bytes) = (1.0_f64, 128 * 1024 * 1024_usize);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--help" {
@@ -51,6 +59,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--model" => label = value,
             "--coefficient" => coefficient = Some(value.parse::<f64>()?),
             "--max-eddy-ratio" => cap = value.parse()?,
+            "--max-coefficient-squared" => coefficient_cap = value.parse()?,
+            "--max-sgs-bytes" => sgs_bytes = value.parse()?,
             _ => return Err(format!("unknown option {arg}; use --help").into()),
         }
     }
@@ -60,16 +70,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !(re.is_finite() && re > 0.0 && speed.is_finite() && speed > 0.0 && speed <= 0.08) {
         return Err("require finite Re > 0 and 0 < lattice velocity <= 0.08".into());
     }
+    let dynamic = match label.as_str() {
+        "dynamic-local" => Some(DynamicAveraging::LocalBox),
+        "dynamic-domain" => Some(DynamicAveraging::Domain),
+        _ => None,
+    };
+    if dynamic.is_some() && coefficient.is_some() {
+        return Err("dynamic models derive their coefficient; omit --coefficient".into());
+    }
     let coefficient = coefficient.unwrap_or(match label.as_str() {
         "none" => 0.0,
         "smagorinsky" => 0.12,
         "wale" => 0.5,
-        _ => return Err("model must be none, smagorinsky, or wale".into()),
+        "vreman" => 0.07,
+        "dynamic-local" | "dynamic-domain" => 0.0,
+        _ => return Err("unknown model; use --help".into()),
     });
     let model = match label.as_str() {
         "none" if coefficient == 0.0 => SgsModel::Smagorinsky { cs: 0.0 },
         "smagorinsky" => SgsModel::Smagorinsky { cs: coefficient },
         "wale" => SgsModel::Wale { cw: coefficient },
+        "vreman" => SgsModel::Vreman { cv: coefficient },
+        "dynamic-local" | "dynamic-domain" => SgsModel::Smagorinsky { cs: 0.0 },
         _ => return Err("the none control requires coefficient=0".into()),
     };
     let config = SgsConfig {
@@ -79,6 +101,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         usage: SgsUse::Exploration,
     };
     config.validate()?;
+    let dynamic = dynamic.map(|averaging| DynamicSgsConfig {
+        averaging,
+        maximum_coefficient_squared: coefficient_cap,
+        maximum_eddy_to_molecular: cap,
+        usage: SgsUse::Exploration,
+    });
+    if let Some(config) = dynamic {
+        config.validate()?;
+    }
     let k = core::f64::consts::TAU;
     let cells = n * n * n;
     let nu = speed * n as f64 / (k * re);
@@ -116,14 +147,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             equilibrium27(rho, u, Equilibrium27::Factorized)
         },
     )?;
-    let mut workspace = grid.sgs_workspace()?;
+    // Allocate only the selected closure's workspace. Both routes prepare
+    // the exact collision field consumed by the original lattice step.
+    let mut workspace = if dynamic.is_none() {
+        Some(grid.sgs_workspace()?)
+    } else {
+        None
+    };
+    let mut dynamic_workspace = if dynamic.is_some() {
+        Some(grid.dynamic_sgs_workspace(sgs_bytes)?)
+    } else {
+        None
+    };
     let gate = CancelGate::new_clock_free();
     let arenas = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let mut output = BufWriter::new(std::io::stdout().lock());
     writeln!(
         output,
-        "# grid={n} steps={steps} Re={re} U_lu={speed} model={label} coefficient={coefficient} max_eddy_ratio={cap}"
+        "# grid={n} steps={steps} Re={re} U_lu={speed} model={label} fixed_coefficient={} max_eddy_ratio={cap}",
+        if dynamic.is_some() {
+            f64::NAN
+        } else {
+            coefficient
+        }
     )?;
+    if dynamic.is_some() {
+        writeln!(
+            output,
+            "# dynamic_test_width_cells=3 max_coefficient_squared={coefficient_cap} max_sgs_bytes={sgs_bytes} negative_fit_policy=no_backscatter"
+        )?;
+    }
     writeln!(
         output,
         "# unit_periodic_box=1 U_reference=1 rho_reference=1 k={k} nu_reference={} dx={} dt={} dt_star={} tau={tau}",
@@ -146,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     writeln!(
         output,
-        "step,time_star,kinetic_energy_star,resolved_dissipation_star,sgs_dissipation_star,sgs_to_resolved,max_eddy_to_molecular,mean_density"
+        "step,time_star,kinetic_energy_star,resolved_dissipation_star,sgs_dissipation_star,sgs_to_resolved,max_eddy_to_molecular,mean_density,max_coefficient_squared,min_raw_coefficient_squared,backscatter_limited_cells,undetermined_cells"
     )?;
     arenas.scope(|arena| -> Result<(), Box<dyn std::error::Error>> {
         let cx = Cx::new(
@@ -164,7 +217,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for step in 0..=steps {
             // Both diagnostics describe the SAME current state. Preparation
             // is reused by collision; there is no duplicate SGS sweep.
-            let report = grid.prepare_sgs(&cx, config, None, &mut workspace)?;
+            let (report, fit, collisions) = if let Some(config) = dynamic {
+                let work = dynamic_workspace.as_mut().expect("dynamic workspace");
+                let report = grid.prepare_dynamic_sgs(&cx, config, None, work)?;
+                (report.dissipation, Some(report.fit), work.collisions())
+            } else {
+                let work = workspace.as_mut().expect("fixed-model workspace");
+                let report = grid.prepare_sgs(&cx, config, None, work)?;
+                (report, None, work.collisions())
+            };
             let (mut energy, mut mass) = (0.0, 0.0);
             for cell in 0..cells {
                 let (rho, u) = grid.macroscopic(cell)?;
@@ -174,17 +235,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let dissipation_scale = n as f64 / (cells as f64 * speed * speed * speed * k);
             writeln!(
                 output,
-                "{step},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
+                "{step},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{},{}",
                 step as f64 * k * speed / n as f64,
                 energy / (cells as f64 * speed * speed),
                 report.resolved_dissipation_lu * dissipation_scale,
                 report.sgs_dissipation_lu * dissipation_scale,
                 report.dissipation_ratio(),
                 report.maximum_eddy_to_molecular,
-                mass / cells as f64
+                mass / cells as f64,
+                fit.map_or(f64::NAN, |r| r.maximum_coefficient_squared),
+                fit.map_or(f64::NAN, |r| r.minimum_raw_coefficient_squared),
+                fit.map_or(0, |r| r.backscatter_limited_cells),
+                fit.map_or(0, |r| r.undetermined_cells)
             )?;
             if step < steps {
-                grid.step_serial_with_collisions(&cx, workspace.collisions())?;
+                grid.step_serial_with_collisions(&cx, collisions)?;
             }
         }
         Ok(())

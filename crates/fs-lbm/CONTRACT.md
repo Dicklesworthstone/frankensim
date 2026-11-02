@@ -1717,7 +1717,14 @@ not accumulated thermal energy and do not close a total-energy or scalar-flux
 equation.
 
 `examples/turbulent_taylor_green.rs` runs the same D3Q27 cumulant step owner
-with `none`, `smagorinsky`, or `wale`. Explicit model, Reynolds-number,
+with `none`, `smagorinsky`, `wale`, `vreman`, `dynamic-local`, or
+`dynamic-domain`. The dynamic variants fit the squared Smagorinsky coefficient
+from the current density and velocity using the 27-cell Favre test box; they
+reject an authored `--coefficient`. An explicit coefficient admission bound,
+eddy/molecular ratio bound and workspace byte budget constrain that fit.
+CSV output includes its maximum applied and minimum raw coefficient, negative
+fits excluded by the no-backscatter policy, and undetermined cells. Dynamic
+fit columns are NaN for fixed models. Explicit model, Reynolds-number,
 coefficient and resolution controls accompany CSV energy and instantaneous
 dissipation histories. Its `--help` gives a fixed-Re, matched-time refinement
 sequence; the example does not substitute for a developed-turbulence benchmark.
