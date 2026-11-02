@@ -509,7 +509,12 @@ fn source_domain_binding_and_cancellation_refuse_without_changing_phase_history(
     );
     assert_eq!(before.cells(), &original);
     let one = self::body(&[&law], &[1.0], &[1], &[], shape);
-    assert!(one.bind(ids(), [Some(0.0), Some(0.0)]).is_err());
+    let both_faces = one.bind(ids(), [Some(0.0), Some(0.0)]).unwrap();
+    assert!(
+        both_faces
+            .birth_events(0.0, &[20.0], [Some(400.0), None], || Ok(()))
+            .is_err()
+    );
     assert!(body.bind(ids(), [Some(-0.1), None]).is_err());
     let mut events = bound
         .birth_events(0.0, &[10.0, 20.0], [None; 2], || Ok(()))
@@ -541,3 +546,6 @@ fn source_domain_binding_and_cancellation_refuse_without_changing_phase_history(
     assert!(bound.conduction_observer(&foreign, || Ok(())).is_err());
     assert_eq!(body.layers()[0].conductivity.identity(), law.identity());
 }
+
+#[path = "phase_layered_transport/boundaries.rs"]
+mod boundaries;

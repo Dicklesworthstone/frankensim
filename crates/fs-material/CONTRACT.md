@@ -6341,14 +6341,22 @@ surface resistance.
 The original conduction observer and implicit/adaptive enthalpy chain own
 evolution and energy/entropy accounting, including zero latent dT/dh and source
 dk/dh. Geometry and reference mass remain fixed; cellwise conductivity requires
-spatial refinement. A cell supports at most one native reservoir. Source-domain,
-original-law, inventory, topology and cancellation failures refuse without
-publishing a changed timeline. This bounded MR19 transport increment does not
-establish empirical source qualification or phase kinetics.
+spatial refinement. A single cell can exchange with both physical end-face
+baths: its inner face uses the original ambient channel and its outer face the
+original reservoir channel. Each retains its own temperature, finite material
+and film resistance, signed heat and bath entropy. Native exposed-area rounding
+is admitted only within a bounded coverage tolerance; scaling both areal
+resistances preserves the original physical face conductance and its derivative.
+No boundary heat is reclassified as a generated source or counted twice.
+Source-domain, original-law, inventory, topology and cancellation failures
+refuse without publishing a changed timeline. This bounded MR19 transport
+increment does not establish empirical source qualification or phase kinetics.
 
-Five integration regressions cover latent inventory, nonlinear multi-material
+Seven integration regressions cover latent inventory, nonlinear multi-material
 contact balances in all three geometries, physical face heating, a computed
-Stefan front with spatial/time refinement, and transactional refusal. Formatting,
+Stefan front with spatial/time refinement, transactional refusal, source-varying
+two-bath latent transport, and equal-opposite bath heat with positive conduction
+entropy under explicit and adaptive evolution. Formatting,
 parsing and independent scalar oracle checks passed. Native integration execution,
 including the Stefan convergence thresholds, remains unverified because the
 shared workspace's dependency build exceeded its memory/storage capacity.

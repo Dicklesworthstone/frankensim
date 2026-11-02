@@ -15,7 +15,8 @@ use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionError, DepositionSimulation, Event,
     MaterialId, Reservoir, ThermalLaw, ThermalLink, TimedEvent,
     conduction::{
-        ConductionObserver, ConductiveLink, ConductiveReservoir, ConductivityLaw,
+        ConductionObserver, ConductiveAmbient, ConductiveLink, ConductiveReservoir,
+        ConductivityLaw,
         implicit::{ImplicitConductionChain, ImplicitConductionError, ImplicitConductionLaw},
     },
     series_contact_conductance_w_k,
@@ -232,7 +233,9 @@ impl<'a> PreparedPhaseLayeredThermalBody<'a> {
     /// Bind optional reservoirs to the physical inner/outer faces. None is an
     /// insulated face; Some(0) prescribes the FACE temperature, with its bulk
     /// half-cell resistance retained. Positive values are areal film/contact
-    /// resistances. One original cell supports at most one reservoir.
+    /// resistances. If both faces belong to one cell, the inner face uses the
+    /// original ambient channel and the outer face the original reservoir,
+    /// preserving each bath's own temperature, heat and entropy account.
     pub fn bind(
         &self,
         ids: LayeredThermalIds,
@@ -254,11 +257,8 @@ impl<'a> PreparedPhaseLayeredThermalBody<'a> {
             .iter()
             .flatten()
             .any(|&r| !nonnegative(r))
-            || n == 1 && end_surface_resistances_m2_k_w.iter().all(Option::is_some)
         {
-            return Err(bad(
-                "nonnegative face resistances and at most one reservoir per cell required",
-            ));
+            return Err(bad("nonnegative physical face resistances required"));
         }
         let mut reservoirs = [None; 2];
         for side in 0..2 {
@@ -289,6 +289,7 @@ impl<'a> PreparedPhaseLayeredThermalBody<'a> {
                     area,
                     distance,
                     resistance,
+                    ambient: n == 1 && side == 0 && end_surface_resistances_m2_k_w[1].is_some(),
                 });
             }
         }
@@ -306,6 +307,7 @@ struct Face {
     area: f64,
     distance: f64,
     resistance: f64,
+    ambient: bool,
 }
 
 /// Exact source objects and physical reference geometry bound to timeline IDs.
@@ -376,6 +378,7 @@ impl<'a> BoundPhaseLayeredThermalBody<'_, 'a> {
         for (i, cell) in self.body.cells.iter().enumerate() {
             checkpoint()?;
             let mut reservoir = None;
+            let mut ambient = None;
             for (side, face) in self.reservoirs.iter().enumerate() {
                 if let Some(face) = face.filter(|face| face.index == i) {
                     let k = states[i].conductivity_w_m_k();
@@ -389,14 +392,33 @@ impl<'a> BoundPhaseLayeredThermalBody<'_, 'a> {
                         }
                         g
                     };
-                    reservoir = Some(Reservoir {
-                        area_m2: face.area,
-                        conductance_w_k: conductance,
-                        temperature_k: reservoir_temperatures_k[side]
-                            .expect("face temperature admitted"),
-                    });
+                    let temperature_k =
+                        reservoir_temperatures_k[side].expect("face temperature admitted");
+                    if face.ambient {
+                        ambient = Some((face, conductance, temperature_k));
+                    } else {
+                        reservoir = Some(Reservoir {
+                            area_m2: face.area,
+                            conductance_w_k: conductance,
+                            temperature_k,
+                        });
+                    }
                 }
             }
+            let (ambient_k, htc_w_m2_k) = if let Some((face, conductance, temperature)) = ambient {
+                // A dual-face cell has no internal contacts. Match the original
+                // coverage subtraction, retaining its bounded area roundoff.
+                let exposed = cell.geometry.surface_area_m2
+                    - reservoir.map_or(0.0, |boundary| boundary.area_m2);
+                surface_area_scale(face.area, exposed, cell.geometry.surface_area_m2)?;
+                let htc = finite(conductance / exposed)?;
+                if conductance > 0.0 && !positive(htc) {
+                    return Err(DepositionError::Arithmetic);
+                }
+                (temperature, htc)
+            } else {
+                (states[i].temperature_k(), 0.0)
+            };
             events.push(TimedEvent {
                 time_s,
                 event: Event::Birth(DepositedCell {
@@ -408,8 +430,8 @@ impl<'a> BoundPhaseLayeredThermalBody<'_, 'a> {
                     specific_h_j_kg: specific_enthalpies_j_kg[i],
                     geometry: cell.geometry,
                     boundary: Boundary {
-                        ambient_k: states[i].temperature_k(),
-                        htc_w_m2_k: 0.0,
+                        ambient_k,
+                        htc_w_m2_k,
                         reservoir,
                         source_w: 0.0,
                     },
@@ -477,13 +499,43 @@ impl<'a> BoundPhaseLayeredThermalBody<'_, 'a> {
             .reservoirs
             .iter()
             .flatten()
+            .filter(|face| !face.ambient)
             .map(|face| ConductiveReservoir {
                 cell_id: self.cell_id(face.index),
                 half_distance_m: face.distance,
                 surface_resistance_m2_k_w: face.resistance,
             })
             .collect();
-        ConductionObserver::new(thermal, &laws, &links, &reservoirs, checkpoint)
+        let observer =
+            ConductionObserver::new(thermal, &laws, &links, &reservoirs, &mut checkpoint)?;
+        let mut ambient = Vec::new();
+        for face in self.reservoirs.iter().flatten().filter(|face| face.ambient) {
+            checkpoint()?;
+            let id = self.cell_id(face.index);
+            let scale = surface_area_scale(
+                face.area,
+                thermal.exposed_area_m2(id)?,
+                self.body.cells[face.index].geometry.surface_area_m2,
+            )?;
+            // The native ambient channel uses its original exposed coverage.
+            // Scale BOTH areal resistances so its total physical resistance
+            // remains the one computed from the actual face and centroid.
+            let distance = finite(face.distance * scale)?;
+            let resistance = finite(face.resistance * scale)?;
+            if !positive(distance) || face.resistance > 0.0 && !positive(resistance) {
+                return Err(DepositionError::Arithmetic);
+            }
+            ambient.push(ConductiveAmbient {
+                cell_id: id,
+                half_distance_m: distance,
+                surface_resistance_m2_k_w: resistance,
+            });
+        }
+        if ambient.is_empty() {
+            Ok(observer)
+        } else {
+            observer.with_ambient_faces(thermal, &ambient, checkpoint)
+        }
     }
 
     /// Use the existing full enthalpy residual, zero latent dT/dh, analytic
@@ -549,7 +601,19 @@ impl<'a> BoundPhaseLayeredThermalBody<'_, 'a> {
                 .reservoirs
                 .iter()
                 .flatten()
-                .find(|face| face.index == i);
+                .find(|face| face.index == i && !face.ambient);
+            if let Some(ambient) = self
+                .reservoirs
+                .iter()
+                .flatten()
+                .find(|face| face.index == i && face.ambient)
+            {
+                surface_area_scale(
+                    ambient.area,
+                    thermal.exposed_area_m2(cell.id)?,
+                    expected.geometry.surface_area_m2,
+                )?;
+            }
             match (face, cell.boundary.reservoir) {
                 (None, None) => {}
                 (Some(face), Some(reservoir)) if face.area == reservoir.area_m2 => {}
@@ -580,6 +644,21 @@ impl<'a> BoundPhaseLayeredThermalBody<'_, 'a> {
     fn cell_id(&self, i: usize) -> CellId {
         CellId(self.ids.first_cell + i as u64)
     }
+}
+// Native coverage subtracts rounded physical surface areas. Keep that account
+// while preserving the face's own resistance; an absent/unrepresentable area
+// cannot be used to hide an additional bath.
+fn surface_area_scale(expected: f64, actual: f64, total: f64) -> Result<f64, DepositionError> {
+    if !positive(actual) || (actual - expected).abs() > 8.0 * f64::EPSILON * total {
+        return Err(bad(
+            "phase ambient coverage differs from its original physical face",
+        ));
+    }
+    let scale = finite(actual / expected)?;
+    if !positive(scale) {
+        return Err(DepositionError::Arithmetic);
+    }
+    Ok(scale)
 }
 fn positive(v: f64) -> bool {
     v.is_finite() && v > 0.0
