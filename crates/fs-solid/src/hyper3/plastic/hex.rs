@@ -20,7 +20,8 @@
 //! This is a finite-bulk, displacement-only representation of a condensed
 //! mean-dilatation formulation, with fully integrated deviatoric response.
 //! It supplies no fully incompressible inf-sup guarantee, general shear-locking
-//! remedy, follower/contact loads, inertia, evolving conductivity or heat solve.
+//! remedy, follower/contact loads, evolving conductivity or heat solve.
+//! [`dynamics`] adds consistent reference inertia on the same material solve.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -39,10 +40,14 @@ use crate::plastic3::hex::HexAssemblyBudget;
 use crate::plastic3::increment::{self, IncrementControls, IncrementOperator};
 use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
+/// Reference-mass momentum with complete thermal and inelastic history.
+pub mod dynamics;
 mod element;
 use element::PreparedHex;
 
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+type AcceptedHexMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy);
 
 /// Compatible full integration or the finite-strain assumed volume map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,6 +155,9 @@ pub struct FiniteThermoplasticHexEnergy {
     pub material_endpoint_work_j: f64,
     /// Actual nodal internal force dotted with the nodal displacement increment.
     pub internal_endpoint_work_j: f64,
+    /// Optional momentum work, separately resolved into kinetic change and
+    /// numerical loss by the dynamic owner. Zero for a static increment.
+    pub inertial_endpoint_work_j: f64,
     pub dead_load_endpoint_work_j: f64,
     pub support_endpoint_work_j: f64,
     pub equilibrium_work_residual_j: f64,
@@ -203,6 +211,7 @@ struct HexOperator<'a> {
     initial: &'a [FiniteJ2State],
     formulation: FiniteHexFormulation,
     dofs: usize,
+    inertia: Option<&'a crate::inertia::BackwardEulerInertia<'a>>,
 }
 
 // Keep the solver's flat vector throughout Newton; reshape only for the public
@@ -273,6 +282,11 @@ impl HexOperator<'_> {
                     }
                 }
             }
+        }
+        if let (Some(matrix), Some(inertia)) = (&mut coo, self.inertia) {
+            inertia
+                .add_tangent(matrix, cx)
+                .map_err(SmallStrainTetError::from)?;
         }
         let tangent_n_m = coo.map(|matrix| matrix.assemble());
         if !potential.is_finite()
@@ -577,6 +591,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexSolid<'a, L> {
             initial: &self.states,
             formulation: self.formulation,
             dofs: 3 * self.nodes_m.len(),
+            inertia: None,
         };
         let result = operator
             .assemble(
@@ -612,6 +627,35 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexSolid<'a, L> {
         controls: FinitePlasticStepControls,
         cx: &Cx<'_>,
     ) -> Result<FiniteThermoplasticHexStep<'a, L>, FiniteThermoplasticHexError> {
+        Ok(self
+            .advance_with_inertia(
+                new_temperatures_k,
+                prescribed_m,
+                nodal_forces_n,
+                dt_s,
+                settings,
+                controls,
+                None,
+                cx,
+            )?
+            .0)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_with_inertia(
+        &self,
+        new_temperatures_k: &[f64],
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        dt_s: f64,
+        settings: IncrementSettings,
+        controls: FinitePlasticStepControls,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (FiniteThermoplasticHexStep<'a, L>, Option<AcceptedHexMotion>),
+        FiniteThermoplasticHexError,
+    > {
         checkpoint(cx)?;
         let dofs = 3 * self.nodes_m.len();
         if settings.max_newton_iterations == 0
@@ -685,6 +729,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexSolid<'a, L> {
             initial: &self.states,
             formulation: self.formulation,
             dofs,
+            inertia,
         };
         let solved = increment::solve(
             &operator,
@@ -696,10 +741,14 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexSolid<'a, L> {
                 settings,
             },
             Some((self.displacement_m.as_flattened(), &self.states)),
-            None,
+            inertia,
             cx,
         )?;
         let new_u = &solved.displacement_m;
+        let motion = inertia
+            .map(|owner| owner.motion(new_u, cx))
+            .transpose()
+            .map_err(SmallStrainTetError::from)?;
         let assembled = operator.assemble(&self.states, new_u, None, false, cx)?.0;
         let equilibrium = solved
             .increments
@@ -710,7 +759,12 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexSolid<'a, L> {
         let mut physical = Vec::with_capacity(self.states.len());
         let mut assumed = Vec::with_capacity(self.states.len());
         let mut stress = Vec::with_capacity(self.states.len());
-        let mut energy = FiniteThermoplasticHexEnergy::default();
+        let mut energy = FiniteThermoplasticHexEnergy {
+            inertial_endpoint_work_j: motion
+                .as_ref()
+                .map_or(0.0, |(_, energy)| energy.inertial_work_j),
+            ..FiniteThermoplasticHexEnergy::default()
+        };
         let (mut old_free, mut new_free, mut old_internal, mut new_internal, mut flow_potential) =
             (0.0, 0.0, 0.0, 0.0, 0.0);
         let tolerance = controls.equilibrium_work_tolerance_j;
@@ -840,11 +894,13 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexSolid<'a, L> {
             energy.material_endpoint_work_defect_j + energy.projection_work_defect_j;
         energy.equilibrium_work_residual_j = energy.dead_load_endpoint_work_j
             + energy.support_endpoint_work_j
-            - energy.internal_endpoint_work_j;
+            - energy.internal_endpoint_work_j
+            - energy.inertial_endpoint_work_j;
         energy.balance_error_j = energy.dead_load_endpoint_work_j + energy.support_endpoint_work_j
             - energy.internal_energy_change_j
             - energy.caloric_heat_j
-            - energy.endpoint_work_defect_j;
+            - energy.endpoint_work_defect_j
+            - energy.inertial_endpoint_work_j;
         for (quantity, value) in [
             ("accepted free energy", old_free - self.free_energy_j),
             (
@@ -908,26 +964,29 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexSolid<'a, L> {
             .into());
         }
         checkpoint(cx)?;
-        Ok(FiniteThermoplasticHexStep {
-            solid: Self {
-                nodes_m: self.nodes_m,
-                hexahedra: self.hexahedra,
-                elements: Arc::clone(&self.elements),
-                families: Arc::clone(&self.families),
-                formulation: self.formulation,
-                budget: self.budget,
-                temperatures_k: new_temperatures_k.to_vec(),
-                displacement_m: new_u.chunks_exact(3).map(|x| [x[0], x[1], x[2]]).collect(),
-                physical_deformation: physical,
-                assumed_deformation: assumed,
-                states: solved.point_states,
-                first_piola_pa: stress,
-                free_energy_j: new_free,
-                internal_energy_j: new_internal,
+        Ok((
+            FiniteThermoplasticHexStep {
+                solid: Self {
+                    nodes_m: self.nodes_m,
+                    hexahedra: self.hexahedra,
+                    elements: Arc::clone(&self.elements),
+                    families: Arc::clone(&self.families),
+                    formulation: self.formulation,
+                    budget: self.budget,
+                    temperatures_k: new_temperatures_k.to_vec(),
+                    displacement_m: new_u.chunks_exact(3).map(|x| [x[0], x[1], x[2]]).collect(),
+                    physical_deformation: physical,
+                    assumed_deformation: assumed,
+                    states: solved.point_states,
+                    first_piola_pa: stress,
+                    free_energy_j: new_free,
+                    internal_energy_j: new_internal,
+                },
+                equilibrium,
+                quadrature_energy,
+                energy,
             },
-            equilibrium,
-            quadrature_energy,
-            energy,
-        })
+            motion,
+        ))
     }
 }

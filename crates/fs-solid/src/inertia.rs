@@ -1,4 +1,4 @@
-//! Shared reference P1 mass and backward-Euler momentum integration.
+//! Shared consistent reference mass and backward-Euler momentum integration.
 //!
 //! Extracted from the small-strain inelastic owner without changing its mass
 //! kernel, accumulation order, momentum residual or kinetic-work identity.
@@ -66,12 +66,15 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 
 /// Immutable consistent mass on an already admitted reference mesh.
 #[derive(Debug)]
-pub(crate) struct P1ReferenceMass {
+pub(crate) struct ReferenceMass {
     matrix: Csr,
     reference_mass_kg: f64,
 }
 
-impl P1ReferenceMass {
+/// Preserve the original tetrahedral constructor and all existing callers.
+pub(crate) type P1ReferenceMass = ReferenceMass;
+
+impl ReferenceMass {
     /// The caller owns reference geometry validation and assembly budgets.
     /// Entries are original connectivity and positive reference volume;
     /// density is original mass per reference volume in the same element order.
@@ -120,7 +123,87 @@ impl P1ReferenceMass {
                 }
             }
         }
-        let matrix = mass.assemble();
+        Self::from_matrix(mass.assemble(), reference_mass_kg, ndofs, cx)
+    }
+
+    /// Consistent Hex8 mass at the original full eight-point quadrature.
+    /// The admitted geometry supplies positive reference weights and the native
+    /// trilinear shapes; neither current volume nor assumed dilatation enters.
+    /// The matrix is exact for affine bricks and uses the original geometry's
+    /// quadrature for warped cells. The same nonnegative mass action supports
+    /// the existing momentum stopping gate and kinetic-work identity.
+    pub(crate) fn from_hex8_quadrature(
+        geometry: impl ExactSizeIterator<Item = ([usize; 8], [([f64; 8], f64); 8])>,
+        densities: &[f64],
+        ndofs: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, InertiaError> {
+        checkpoint(cx)?;
+        if densities.len() != geometry.len()
+            || densities.iter().any(|rho| !rho.is_finite() || *rho <= 0.0)
+            || ndofs == 0
+            || !ndofs.is_multiple_of(3)
+        {
+            return Err(invalid(
+                "one positive reference density per hex and complete nodal components required",
+            ));
+        }
+        let mut mass = Coo::new(ndofs, ndofs);
+        let mut reference_mass_kg = 0.0;
+        for ((nodes, points), &density) in geometry.zip(densities) {
+            checkpoint(cx)?;
+            if nodes.iter().any(|&node| node >= ndofs / 3)
+                || (0..8).any(|a| nodes[..a].contains(&nodes[a]))
+            {
+                return Err(invalid(
+                    "distinct original Hex8 nodes required for reference mass",
+                ));
+            }
+            let mut local = [[0.0; 8]; 8];
+            for (shapes, weight) in points {
+                if !weight.is_finite()
+                    || weight <= 0.0
+                    || shapes
+                        .iter()
+                        .any(|n| !n.is_finite() || *n <= 0.0 || *n > 1.0)
+                    || (shapes.iter().sum::<f64>() - 1.0).abs() > 64.0 * f64::EPSILON
+                {
+                    return Err(invalid(
+                        "positive full Hex8 quadrature with partition of unity required",
+                    ));
+                }
+                let point_mass = finite(density * weight)?;
+                if point_mass <= 0.0 {
+                    return Err(invalid("consistent Hex8 mass underflowed"));
+                }
+                reference_mass_kg = finite(reference_mass_kg + point_mass)?;
+                for a in 0..8 {
+                    for b in a..8 {
+                        local[a][b] = (point_mass * shapes[a]).mul_add(shapes[b], local[a][b]);
+                    }
+                }
+            }
+            for a in 0..8 {
+                for b in 0..8 {
+                    let value = finite(local[a.min(b)][a.max(b)])?;
+                    if value <= 0.0 {
+                        return Err(invalid("consistent Hex8 mass entry underflowed"));
+                    }
+                    for component in 0..3 {
+                        mass.push(3 * nodes[a] + component, 3 * nodes[b] + component, value);
+                    }
+                }
+            }
+        }
+        Self::from_matrix(mass.assemble(), reference_mass_kg, ndofs, cx)
+    }
+
+    fn from_matrix(
+        matrix: Csr,
+        reference_mass_kg: f64,
+        ndofs: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, InertiaError> {
         for row in 0..ndofs {
             if row % 256 == 0 {
                 checkpoint(cx)?;
@@ -220,7 +303,7 @@ impl<'a> BackwardEulerInertia<'a> {
                 (finite(u - old_u)?.abs() * self.inverse_dt + old_v.abs()) * self.inverse_dt,
             )?);
         }
-        // Every entry of the original P1 consistent mass is nonnegative,
+        // Both admitted consistent reference mass rules have nonnegative entries,
         // so its existing action is exactly |M| times this positive vector.
         let force = self.action(&acceleration_scale, cx)?;
         let mut inertial_norm = 0.0_f64;
