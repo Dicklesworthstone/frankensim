@@ -5,7 +5,7 @@ const OPEN_BODY: &str = include_str!("../../open-shell-cavity.body");
 const OPEN_PERFORMANCE: &str = include_str!("../../open-shell-cavity.material-strings");
 
 fn open_source_text() -> String {
-    OPEN_PERFORMANCE.replace("audio 8000 4096", "audio 8000 1024")
+    OPEN_PERFORMANCE.replace("audio 9000 4096", "audio 9000 1024")
 }
 
 fn open_source() -> input::Spec {

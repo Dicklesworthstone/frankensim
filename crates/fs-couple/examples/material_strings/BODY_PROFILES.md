@@ -1856,12 +1856,25 @@ and retains that exact face in the original 80-tetrahedron volume. The explicit
 opening has a 0.04 m internal length and zero internal resistance. Its order-two
 interior selects the complete 0–180 Hz window with one pressure-mode allowance;
 the same eigensolver refuses if that allowance cannot retain the full window.
-The paired performance declares BEM loading over 0.4–180 Hz and an 8 kHz
+The paired performance declares BEM loading over 0.4–180 Hz and a 9 kHz
 microphone with a 60 Hz pass-band endpoint and a 180 Hz taper stop. The nominal
 uniform-neck resonance lies within that declared taper, so this example is a
 finite-band source/observer integration, not full-passband instrument audio or
 a measured violin, cello or bass. Frequency, panel and FIR error gates remain
 those of the original owners.
+
+The 9 kHz clock is set by the complete acoustic/mechanical frequency bound of
+`with_radiation_load`, which must stay under 0.9 pi times the sample rate. For
+this fitted load (measured with the storage ladder of 3c3a50888) the
+mechanical bound is 4582 rad/s, the highest storage pole 13272 rad/s and the
+coupling bound 10171 rad/s, so the bound is 23443 rad/s: above the 22619 rad/s
+that 8 kHz admits, below the 25447 rad/s that 9 kHz admits. Those three terms do
+not depend on the rate. The minimum rate is 8291 Hz; 9 kHz is that minimum with
+a 5 % margin (8706 Hz) rounded up, a choice and not a repository rule. At 9 kHz
+the observer's FFT ladder covers n/4 = 4096 samples of its 16384 finest rung,
+0.455 s, and its 256-sample latency is 28.4 ms (0.512 s and 32 ms at 8 kHz).
+Admitting the load is not converging the observer's FIR bake, which stays
+pending native execution.
 
 The joint load now uses the existing symmetric P1/P0 Galerkin source; the
 receiver evaluates that same source's P1 pressure and P0 auxiliary density.

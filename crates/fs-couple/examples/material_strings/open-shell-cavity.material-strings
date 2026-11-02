@@ -1,5 +1,5 @@
 frankensim-material-strings-v1
-audio 8000 4096 0.01 128
+audio 9000 4096 0.01 128
 state 293.15 1000
 gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
 body closed-shell.fsmatpk 0.4 0.4 0.001 1 1
