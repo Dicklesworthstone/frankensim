@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from descriptors import GraderRefusalError, fit_stiff_string_law, track_partials  # noqa: E402
 from instrgrade import GRADER_VERSION, SR, describe, distance, highpass, hz_of, load, midi_of, name_of, write_wav  # noqa: E402
 
-DECOMPOSE_VERSION = "decompose-2"
+DECOMPOSE_VERSION = "decompose-3"
 PREROLL_S = 0.010  # both signals are cut this long before the detected onset
 MAX_S = 3.0
 ALIGN_TOL_MS = 1.5
@@ -417,6 +417,15 @@ def lowpass(x, cap_hz):
     return np.fft.irfft(X * (0.5 - 0.5 * np.cos(np.pi * g)), n)[: len(x)]
 
 
+def band_limit(x, band_hz):
+    """`x` with everything above `band_hz` removed: the FFT bins at or below the band are untouched, the ones above it are zeroed. `lowpass` leaves a signal with nothing above its cap, but the cut
+    that alignment makes (and any floor added after the filter) splatters back above it; a signal that is valid only below a band is analysed as the band-limited signal it is."""
+    x = np.asarray(x, dtype=np.float64)
+    X = np.fft.rfft(x)
+    X[np.fft.rfftfreq(len(x), 1 / SR) > band_hz] = 0.0
+    return np.fft.irfft(X, len(x))
+
+
 def cepstral_envelope(P_db, freqs, f0, grid):
     """Smooth spectral envelope [dB] of the mean sounding spectrum, liftered below 0.6/f0, read on `grid` [Hz]."""
     n = (len(freqs) - 1) * 2
@@ -474,8 +483,11 @@ def match_level_db(y, kind):
 class Note:
     """Everything the decomposition needs from one aligned signal, computed once."""
 
-    def __init__(self, y, f0_hz, kind="sustained", inharmonic=False, label="", info=None, max_cents=50.0):
+    def __init__(self, y, f0_hz, kind="sustained", inharmonic=False, label="", info=None, max_cents=50.0, band_hz=None):
+        if band_hz:
+            y = band_limit(y, band_hz)
         self.y, self.kind, self.inharmonic, self.label, self.info = y, kind, inharmonic, label, info or {}
+        self.band_hz = band_hz  # the band this signal was low-passed at (a render valid only below it), or None: nothing above it is signal
         self.f0_hint = f0_hz
         self.dur = len(y) / SR
         w0, w1 = (0.0, 0.3) if kind == "decaying" else (0.1, 0.8)
@@ -599,7 +611,7 @@ METRICS = OrderedDict([
     ("harm_db", _m("Harmonic level pattern", "dB", "dB", "RMS gap of the tracked partials' mean levels, relative to the total.")),
     ("stft_lsd_db", _m("Spectrogram difference", "dB", "dB", "RMS dB difference of the two STFT maps over cells within 60 dB of the reference peak; onsets aligned, loudness matched.", SAME_NOTE)),
     ("cwt_lsd_db", _m("Scalogram difference", "dB", "dB", "RMS dB difference of the two Morlet scalograms over cells within 60 dB of the reference peak.", SAME_NOTE)),
-    ("cepstral_env_db", _m("Spectral envelope (cepstral)", "dB", "dB", "RMS dB gap of the cepstrally smoothed mean spectra, liftered below 0.6/f0, 100 Hz to 12 kHz.")),
+    ("cepstral_env_db", _m("Spectral envelope (cepstral)", "dB", "dB", "RMS dB gap of the cepstrally smoothed mean spectra, liftered below 0.6/f0, 100 Hz to 12 kHz (to the band a render is valid up to, if it has one: a signal with a band is band-limited to it first).")),
     ("partial_traj_db", _m("Partial level trajectories", "dB", "dB", "Median over the first eight partials of the RMS difference of their level-versus-time curves with the mean removed.")),
     ("partial_freq_cents", _m("Partial frequencies", "cents", "cents", "RMS over partials of the difference in frequency deviation from the harmonic series (stretch, inharmonicity).")),
     ("f0_cents", _m("Fundamental frequency", "Hz", "cents", "Distance in cents between the two fitted fundamentals.", SAME_NOTE, "f0_hz")),
@@ -671,6 +683,13 @@ def compare(a: Note, b: Note):
     g["stft_lsd_db"] = _map_gap(a.S, b.S, a.sf, b.sf, off)
     g["cwt_lsd_db"] = _map_gap(a.C, b.C, a.cf, b.cf, off)
     de = a.env_db + off - b.env_db
+    # Above the band a signal was low-passed at there is nothing but a floor, and the dB of a floor is not a spectrum. The envelope is read from 100 Hz to 12 kHz; with a declared band the
+    # gap is taken up to that band, signal and ruler alike (and the Note has already been band-limited to it, so what the smoothing carries across the band edge is the same on both sides).
+    bands = [x for x in (a.band_hz, b.band_hz) if x]
+    if bands:
+        inb = a.env_grid <= min(bands)
+        if inb.any():
+            de = de[inb]
     g["cepstral_env_db"] = (float(np.sqrt(np.mean(de * de))), float(np.mean(de)))
     pairs = _partial_match(a, b)
     nf = min(a.frames, b.frames)
@@ -777,7 +796,7 @@ class Refs:
         key = (e["file"], e["start"], self.band_hz)
         if key not in self._notes:
             y, info = self.aligned(e)
-            self._notes[key] = Note(y, hz_of(e["note"]), e["kind"], e["inst"] in ("xylophone", "marimba"), f'{e["file"]}@{e["name"]}.{e["dyn"]}', info)
+            self._notes[key] = Note(y, hz_of(e["note"]), e["kind"], e["inst"] in ("xylophone", "marimba"), f'{e["file"]}@{e["name"]}.{e["dyn"]}', info, band_hz=self.band_hz)
             while len(self._notes) > 160:
                 self._notes.popitem(last=False)
         return self._notes[key]
@@ -1072,8 +1091,8 @@ def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_
     f0 = hz_of(ref_e["note"])
     inh = ref_e["inst"] in ("xylophone", "marimba")
     n = len(ref_y) if cand_y is None else min(len(ref_y), len(cand_y))
-    real = Note(ref_y[:n], f0, ref_e["kind"], inh, "real", ref_info)
-    ours = Note(cand_y[:n], f0, ref_e["kind"], inh, "ours", cand_info, max_cents=400.0) if cand_y is not None else None
+    real = Note(ref_y[:n], f0, ref_e["kind"], inh, "real", ref_info, band_hz=refs.band_hz)
+    ours = Note(cand_y[:n], f0, ref_e["kind"], inh, "ours", cand_info, max_cents=400.0, band_hz=refs.band_hz) if cand_y is not None else None
     if ours is not None:
         d_on, _ = onset_gap_ms(ours.info, real.info)
         if d_on > ALIGN_TOL_MS:

@@ -1107,5 +1107,133 @@ class SubframeOnsetTests(unittest.TestCase):
             self.assertLessEqual(abs(info["cut_onset_subframe_s"] * 1000 - pre_ms), dc.ALIGN_TOL_MS, f"anchor {anchor}")
 
 
+class BandDeadZoneTests(unittest.TestCase):
+    """A render valid only below a band is graded only up to it (decompose-3; bead frankensim-grader-onset-subframe-zlv3e, found on trombone Bb2 at 3.9 kHz).
+
+    Above the band the signals hold only a floor (the filter's numerical floor, the splatter of the cut), whose level follows the attack and the phase of the frames against it, so a
+    measure that reads above the band compares two floors. On the 9 band-limited pairs of the site, with the dead band made 20 dB louder, the gaps of cepstral_env_db, stft_lsd_db,
+    cwt_lsd_db, centroid_st, flux_db and attack_log2 moved by 0.3 to 4.2 (their own units), and hnr_db, partial_traj_db, spec_db and env_db by up to 0.04. A Note with a declared band is
+    therefore analysed as the signal band-limited to it (band_limit), and the cepstral gap is taken over the grid points below the band. Every expected value here is fixed by how the
+    signals are built: the same low-passed tone, one with a different floor planted above the band after the low-pass, or one with a 40 dB notch."""
+
+    BAND = 3900.0
+
+    @staticmethod
+    def planted_floor(x, rel_db, lo=4200.0):
+        """`x` plus white noise confined above `lo` Hz, at `rel_db` re the RMS of `x`: the spectrum below `lo` is `x`'s, the floor above it is new."""
+        spec = np.fft.rfft(np.random.default_rng(3).standard_normal(len(x)))
+        spec[np.fft.rfftfreq(len(x), 1 / SR) < lo] = 0.0
+        z = np.fft.irfft(spec, len(x))
+        return x + np.sqrt(np.mean(x * x)) * 10 ** (rel_db / 20) * z / np.sqrt(np.mean(z * z))
+
+    @staticmethod
+    def notch_db(f, f_c, depth_db=40.0, octaves=0.5):
+        """The dB gain of a notch `depth_db` deep at `f_c` and `octaves` wide: a raised cosine in log2 frequency, 0 dB at f_c * 2**(+-octaves/2)."""
+        u = np.log2(np.maximum(f, 1e-9) / f_c) / octaves
+        return -depth_db * np.where(np.abs(u) < 0.5, 0.5 + 0.5 * np.cos(2 * np.pi * u), 0.0)
+
+    def notched(self, x, f_c):
+        return np.fft.irfft(np.fft.rfft(x) * 10 ** (self.notch_db(np.fft.rfftfreq(len(x), 1 / SR), f_c) / 20), len(x))
+
+    def note(self, x, band):
+        """x is already what the pipeline would hand over (low-passed, or not)."""
+        floor = dc.render_floor(dc.highpass(x, F0), F0)
+        y, info = dc.align(x, F0, floor)
+        return Note(y, F0, "sustained", False, "synthetic", info, band_hz=band)
+
+    def test_a_different_out_of_band_floor_moves_no_measure(self):
+        """Every key compare() returns, floors planted above the band, banded against unbanded, at four phases of the frames against the attack.
+
+        -47 dB re the tone's RMS is the loudest dead band measured on the 9 band-limited pairs (render, recording and ruler notes: -47 to -119 dB re the RMS below the band, median -77); -30 dB
+        is 17 dB louder. The tolerance of each is what is left once the floor is outside the analysis: its leakage into the band across the finite cut, which scales with the floor. Measured on
+        this tone: at most 0.004 (cepstral_env_db) at -47 and 0.22 (stft_lsd_db) at -30, in each measure's own unit (dB, cents, semitones, octaves of time); the tolerances are 0.02 and 0.5. A
+        measure that reads above the band moves by much more than that: unbanded, at -47 hnr_db moves 100 dB, cepstral_env_db 38 and cwt_lsd_db 27; at -30 stft_lsd_db 54, cepstral_env_db
+        46, cwt_lsd_db 34, spec_db and env_db 14, flux_db 1.9. The keys that cannot see a floor of this size even unbanded (f0, inharmonicity, partial frequencies, odd/even, harmonic levels,
+        centroid, attack, partial trajectories) are held to the same tolerance, which is all a test on a clean tone can say about them; the table of the site's regrade says what they do on
+        the real pairs."""
+        base = dc.lowpass(tone(attack=0.04, lead=0.3, dur=2.6), self.BAND)
+        saw = {"banded": set(), "control": set()}
+        for phase in (0, 11, 23, 37):
+            pad = np.zeros(phase)
+            ref_b, ref_u = self.note(np.concatenate([pad, base]), self.BAND), self.note(np.concatenate([pad, base]), None)
+            for rel_db, tol, control in ((-47.0, 0.02, ("hnr_db", "cepstral_env_db", "cwt_lsd_db")), (-30.0, 0.5, ("stft_lsd_db", "spec_db", "env_db", "flux_db"))):
+                moved = np.concatenate([pad, self.planted_floor(base, rel_db)])
+                banded = dc.compare(self.note(moved, self.BAND), ref_b)
+                unbanded = dc.compare(self.note(moved, None), ref_u)
+                for k, (gap, _) in banded.items():
+                    if gap is None:
+                        self.assertEqual(k, "decay_db_s", f"phase {phase}, {rel_db} dB: {k} has no value")  # a sustained note has no decay
+                        continue
+                    self.assertLess(gap, tol, f"phase {phase}, floor {rel_db} dB: {k} reads above the band ({gap:.4f})")
+                for k in control:  # the control: without the band the same floor is seen by these measures, so the test could fail
+                    self.assertGreater(unbanded[k][0], 1.0, f"phase {phase}, floor {rel_db} dB: the unbanded control must see the floor in {k}")
+
+    def test_a_notch_inside_the_band_is_a_timbre_gap_and_the_same_notch_above_it_is_not(self):
+        """Two tones low-passed at 3.9 kHz, with noise between their partials and a -47 dB floor above 4.2 kHz; one has a 40 dB notch, 0.5 octave wide.
+
+        The notch is a raised cosine in log2 frequency (notch_db): at 2 kHz it spans 1.68 to 2.38 kHz and covers 3 of the 32 grid points of the envelope below the band (1/6 octave apart), at
+        dips of 40, 12 and 8 dB; the RMS of those dips over the 32 points is 7.5 dB (computed below from the grid). The lifter (0.6/f0 = 2.7 ms for 220 Hz) resolves about 370 Hz and the notch is
+        700 Hz wide, so the smoothed gap is a fraction of that: measured 0.56 of it (4.2 dB); the threshold is 0.4 of it, 3.0 dB. (Without the noise between the partials the log spectrum there sits at the
+        numerical floor, the smoothing is dominated by it, and the same notch reads 2.8 dB.) The same notch at 5 kHz (4.2 to 5.9 kHz) is above the band, where
+        there is nothing to compare but the floor: its gap must be under 0.5 dB, and without the band (the control) it is a gap of the same size as the one inside."""
+        floor = self.planted_floor(dc.lowpass(tone(attack=0.04, lead=0.3, dur=2.6, noise_db=-60), self.BAND), -47.0)  # -60 dB FS of noise between the partials, as a recording has
+        ref = self.note(floor, self.BAND)
+        grid = ref.env_grid[ref.env_grid <= self.BAND]  # the points of the envelope that compare() reads for a banded pair
+        self.assertEqual(len(grid), 32)
+        for f_c, inside in ((2000.0, True), (5000.0, False)):
+            expected = float(np.sqrt(np.mean(self.notch_db(grid, f_c) ** 2)))  # the unsmoothed RMS dip over the grid points below the band
+            banded = dc.compare(self.note(self.notched(floor, f_c), self.BAND), ref)["cepstral_env_db"][0]
+            if inside:
+                self.assertAlmostEqual(expected, 7.5, delta=0.1)
+                self.assertGreater(banded, 0.4 * expected, f"a 40 dB notch at {f_c:.0f} Hz, inside the band: {banded:.3f} dB against {expected:.2f} unsmoothed")
+            else:
+                self.assertEqual(expected, 0.0)
+                self.assertLess(banded, 0.5, f"a 40 dB notch at {f_c:.0f} Hz, above the band: {banded:.3f} dB")
+                unbanded = dc.compare(self.note(self.notched(floor, f_c), None), self.note(floor, None))["cepstral_env_db"][0]
+                self.assertGreater(unbanded, 3.0, "the control: without the band the notch in the floor is a gap")
+
+    def test_the_cepstral_gap_is_taken_over_the_grid_points_below_the_band_only(self):
+        """Band-limited, the dead band of a Note is still not exactly alike on both sides (the leakage of the in-band lines into it is not), and the smoothing is of dB. Whatever the envelope
+        holds above the band must not be in the gap: 20 dB added to every grid point above it changes nothing for a banded pair, and is a large gap for an unbanded one."""
+        a0, b0 = tone(attack=0.02, dur=2.6, tilt=1.3), tone(attack=0.02, dur=2.6)
+        a, b = self.note(dc.lowpass(a0, self.BAND), self.BAND), self.note(dc.lowpass(b0, self.BAND), self.BAND)
+        clean = dc.compare(a, b)["cepstral_env_db"]
+        self.assertGreater(clean[0], 0.5)  # a real in-band gap, from the tilt
+        a.env_db = a.env_db + 20.0 * (a.env_grid > self.BAND)
+        self.assertEqual(dc.compare(a, b)["cepstral_env_db"], clean)
+        a, b = self.note(a0, None), self.note(b0, None)
+        clean = dc.compare(a, b)["cepstral_env_db"]
+        a.env_db = a.env_db + 20.0 * (a.env_grid > self.BAND)
+        self.assertGreater(dc.compare(a, b)["cepstral_env_db"][0], clean[0] + 5.0)  # the control: with no band the same change is a gap
+
+    def test_the_gap_of_a_banded_pair_is_the_same_at_every_phase(self):
+        base = dc.lowpass(tone(attack=0.01, lead=0.3, dur=2.6), self.BAND)
+        other = dc.lowpass(tone(attack=0.01, lead=0.3, dur=2.6, tilt=1.4), self.BAND)  # a different spectral tilt: a real in-band gap
+        gaps = []
+        for phase in range(0, 48, 6):
+            a = self.note(np.concatenate([np.zeros(phase), other]), self.BAND)
+            b = self.note(base, self.BAND)
+            gaps.append(dc.compare(a, b)["cepstral_env_db"][0])
+        self.assertGreater(min(gaps), 0.5)  # the gap is real
+        self.assertLess(max(gaps) - min(gaps), 0.05, f"{min(gaps):.3f}..{max(gaps):.3f}")
+
+    def test_a_note_with_no_band_is_graded_over_the_whole_grid_as_before(self):
+        a, b = self.note(tone(attack=0.02, dur=2.6, tilt=1.3), None), self.note(tone(attack=0.02, dur=2.6), None)
+        self.assertEqual(len(a.env_grid), 42)  # 100 Hz to 12 kHz, 1/6 octave apart
+        off = b.level_db - a.level_db
+        de = a.env_db + off - b.env_db
+        self.assertEqual(dc.compare(a, b)["cepstral_env_db"], (float(np.sqrt(np.mean(de * de))), float(np.mean(de))))
+
+    def test_band_limit_removes_what_is_above_the_band_and_nothing_else(self):
+        x = tone(attack=0.02, dur=1.0, noise_db=-50)  # broadband
+        for n in (len(x), len(x) - 1):  # even and odd lengths
+            y = dc.band_limit(x[:n], self.BAND)
+            X, Y = np.fft.rfft(x[:n]), np.fft.rfft(y)
+            f = np.fft.rfftfreq(n, 1 / SR)
+            self.assertLess(np.abs(Y[f > self.BAND]).max(), 1e-9)
+            self.assertLess(np.abs(Y[f <= self.BAND] - X[f <= self.BAND]).max(), 1e-9 * np.abs(X).max())
+            self.assertLess(np.abs(dc.band_limit(y, self.BAND) - y).max(), 1e-12)  # idempotent
+
+
 if __name__ == "__main__":
     unittest.main()
