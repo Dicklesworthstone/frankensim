@@ -10,8 +10,9 @@
 //! Node storage is perfectly mixed; resolving pipe residence time requires
 //! caller-declared spatial control volumes. The base binding prescribes flow;
 //! [`coupled`] resolves quasi-steady hydraulic and wall feedback at each native
-//! implicit endpoint. Reference density stays fixed, with no compressible
-//! storage or inertial momentum added.
+//! implicit endpoint. [`inertial`] couples retained branch momentum to the same
+//! thermal residual using native step-average rates. Reference density stays
+//! fixed; neither binding adds compressible storage.
 
 use std::collections::BTreeMap;
 
@@ -24,7 +25,7 @@ use fs_thermal::enthalpy::{
 use fs_thermal::enthalpy::advection::{AdvectionAudit, Advected, MassBoundary, MassFlow};
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, TransportStepCoefficients};
 
-use crate::graph::GraphSolution;
+use crate::graph::{GraphSolution, LossGraph};
 use super::{TransportError, poll};
 use super::recirculation::{MAX_RECIRCULATION_SUPPLIES, solve_feedback};
 
@@ -69,31 +70,128 @@ impl GraphEnthalpyTransport {
     /// Other thermal cells/links may coexist for the general explicit path.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        cx: &Cx<'_>, flow: &GraphSolution, reference_density: Density,
-        node_cells: &[CellId], thermal: &DepositionSimulation<'_>,
-        boundaries: Vec<MassBoundary>, max_connections: usize,
+        cx: &Cx<'_>,
+        flow: &GraphSolution,
+        reference_density: Density,
+        node_cells: &[CellId],
+        thermal: &DepositionSimulation<'_>,
+        boundaries: Vec<MassBoundary>,
+        max_connections: usize,
+    ) -> Result<Self, TransientTransportError> {
+        Self::bind(
+            cx,
+            flow.pressures.len(),
+            flow.gravity
+                .as_ref()
+                .map(|g| g.reference_transport().density_kg_m3()),
+            flow.branches
+                .iter()
+                .map(|branch| (branch.from, branch.to, branch.flow.value())),
+            reference_density,
+            node_cells,
+            thermal,
+            boundaries,
+            max_connections,
+        )
+    }
+
+    /// Bind signed reference-volume rates directly to the original graph.
+    ///
+    /// Inertial owners supply their native step-average rates here; no steady
+    /// pressure solution is fabricated for an accelerating fluid. The caller
+    /// owns momentum and source admission. This binding independently enforces
+    /// the same reference inventory, caloric datum and local mass closure as
+    /// [`Self::new`], including explicit external streams at pressure nodes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_volume_flows(
+        cx: &Cx<'_>,
+        graph: &LossGraph,
+        signed_volume_flows_m3_s: &[f64],
+        reference_density: Density,
+        node_cells: &[CellId],
+        thermal: &DepositionSimulation<'_>,
+        boundaries: Vec<MassBoundary>,
+        max_connections: usize,
+    ) -> Result<Self, TransientTransportError> {
+        poll(cx)?;
+        if signed_volume_flows_m3_s.len() != graph.branches().len() {
+            return Err(TransientTransportError::Invalid(
+                "one signed volume flow per original graph branch is required",
+            ));
+        }
+        Self::bind(
+            cx,
+            graph.node_count(),
+            graph
+                .gravity()
+                .map(|g| g.reference_transport().density_kg_m3()),
+            graph
+                .branches()
+                .iter()
+                .zip(signed_volume_flows_m3_s)
+                .map(|(branch, &flow)| (branch.from, branch.to, flow)),
+            reference_density,
+            node_cells,
+            thermal,
+            boundaries,
+            max_connections,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind(
+        cx: &Cx<'_>,
+        node_count: usize,
+        gravity_reference_density: Option<f64>,
+        branch_flows: impl ExactSizeIterator<Item = (usize, usize, f64)>,
+        reference_density: Density,
+        node_cells: &[CellId],
+        thermal: &DepositionSimulation<'_>,
+        boundaries: Vec<MassBoundary>,
+        max_connections: usize,
     ) -> Result<Self, TransientTransportError> {
         poll(cx)?;
         let rho = reference_density.value();
-        if !rho.is_finite() || rho <= 0.0 || node_cells.is_empty()
-            || node_cells.len() != flow.pressures.len()
-            || flow.branches.len().checked_add(boundaries.len()).is_none_or(|n| n > max_connections)
-            || flow.gravity.as_ref().is_some_and(|g| g.reference_transport().density_kg_m3() != rho)
+        if !rho.is_finite()
+            || rho <= 0.0
+            || node_cells.is_empty()
+            || node_cells.len() != node_count
+            || branch_flows
+                .len()
+                .checked_add(boundaries.len())
+                .is_none_or(|n| n > max_connections)
+            || gravity_reference_density.is_some_and(|value| value != rho)
         {
-            return Err(TransientTransportError::Invalid("invalid node, density or connection binding"));
+            return Err(TransientTransportError::Invalid(
+                "invalid node, density or connection binding",
+            ));
         }
         let mut storage = BTreeMap::new();
         for &id in node_cells {
             poll(cx)?;
-            let cell = thermal.cells().get(&id)
-                .ok_or(TransientTransportError::Invalid("hydraulic node has no active storage cell"))?;
+            let cell = thermal
+                .cells()
+                .get(&id)
+                .ok_or(TransientTransportError::Invalid(
+                    "hydraulic node has no active storage cell",
+                ))?;
             let expected = rho * cell.geometry.volume_m3;
-            if !expected.is_finite() || expected <= 0.0
-                || (cell.mass_kg - expected).abs() > 64.0*f64::EPSILON*cell.mass_kg.max(expected)
-                || thermal.material_storage_basis(cell.material_id)? != ThermalStorageBasis::Enthalpy
-                || storage.insert(id, (cell.material_id, cell.mass_kg, cell.geometry.volume_m3)).is_some()
+            if !expected.is_finite()
+                || expected <= 0.0
+                || (cell.mass_kg - expected).abs()
+                    > 64.0 * f64::EPSILON * cell.mass_kg.max(expected)
+                || thermal.material_storage_basis(cell.material_id)?
+                    != ThermalStorageBasis::Enthalpy
+                || storage
+                    .insert(
+                        id,
+                        (cell.material_id, cell.mass_kg, cell.geometry.volume_m3),
+                    )
+                    .is_some()
             {
-                return Err(TransientTransportError::Invalid("storage needs distinct enthalpy cells with the declared reference density"));
+                return Err(TransientTransportError::Invalid(
+                    "storage needs distinct enthalpy cells with the declared reference density",
+                ));
             }
         }
         for boundary in &boundaries {
@@ -102,24 +200,35 @@ impl GraphEnthalpyTransport {
                 MassBoundary::Inlet { cell, .. } | MassBoundary::Outlet { cell, .. } => cell,
             };
             if !storage.contains_key(id) {
-                return Err(TransientTransportError::Invalid("mass boundary is outside the hydraulic storage binding"));
+                return Err(TransientTransportError::Invalid(
+                    "mass boundary is outside the hydraulic storage binding",
+                ));
             }
         }
-        let mut flows = Vec::with_capacity(flow.branches.len());
-        for (index, branch) in flow.branches.iter().enumerate() {
+        let mut flows = Vec::with_capacity(branch_flows.len());
+        for (index, (from, to, volume_flow)) in branch_flows.enumerate() {
             poll(cx)?;
-            if branch.from >= node_cells.len() || branch.to >= node_cells.len()
-                || branch.from == branch.to || !branch.flow.value().is_finite()
+            if from >= node_cells.len()
+                || to >= node_cells.len()
+                || from == to
+                || !volume_flow.is_finite()
             {
-                return Err(TransientTransportError::Invalid("invalid hydraulic branch endpoints or flow"));
+                return Err(TransientTransportError::Invalid(
+                    "invalid hydraulic branch endpoints or flow",
+                ));
             }
-            let kg_s = rho * branch.flow.value();
-            if !kg_s.is_finite() || (branch.flow.value() != 0.0 && kg_s == 0.0) {
-                return Err(TransientTransportError::Invalid("mass flow is not representable"));
+            let kg_s = rho * volume_flow;
+            if !kg_s.is_finite() || (volume_flow != 0.0 && kg_s == 0.0) {
+                return Err(TransientTransportError::Invalid(
+                    "mass flow is not representable",
+                ));
             }
             flows.push(MassFlow {
-                id: u64::try_from(index).map_err(|_| TransientTransportError::Invalid("branch ID overflow"))?,
-                a: node_cells[branch.from], b: node_cells[branch.to], kg_s,
+                id: u64::try_from(index)
+                    .map_err(|_| TransientTransportError::Invalid("branch ID overflow"))?,
+                a: node_cells[from],
+                b: node_cells[to],
+                kg_s,
             });
         }
         let advection = Advected::new((), flows, max_connections)?
@@ -127,7 +236,12 @@ impl GraphEnthalpyTransport {
         // Reuse the actual datum-aware upwind law and its roundoff-level
         // continuity test; a loose hydraulic stopping tolerance is not a leak.
         advection.endpoint_transport(thermal, || thermal_checkpoint(cx))?;
-        Ok(Self { node_cells: node_cells.to_vec(), storage, advection, max_connections })
+        Ok(Self {
+            node_cells: node_cells.to_vec(),
+            storage,
+            advection,
+            max_connections,
+        })
     }
 
     /// Node-to-storage mapping, in hydraulic node order.
@@ -269,6 +383,7 @@ fn thermal_checkpoint(cx: &Cx<'_>) -> Result<(), DepositionError> {
 }
 
 pub mod coupled;
+pub mod inertial;
 
 #[cfg(test)]
 mod tests;

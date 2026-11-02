@@ -2624,3 +2624,37 @@ It is an incompressible, fixed-reference-density model, with no inferred acousti
 compressible, turbulent or multiphase storage. Native regression sources cover
 branched startup/decay/reversal, nonlinear loss closure, source gas buoyancy and
 viscosity, explicit pressure-port work and transactional refusal.
+
+### Joint branched momentum and finite enthalpy convection
+
+With `transient-transport`,
+`thermal::transport::transient::inertial::advance_inertial_graph` couples the
+retained branched momentum owner to the original finite-cell backward-Euler
+thermal owner. The native Newton--Krylov residual closes cell energy increments
+and candidate-versus-native branch-average rates together. A pure constitutive
+callback resolves actual candidate material states; the actual-flow callback
+re-admits retained sources at native averages and old/new speed envelopes,
+then supplies wall exchange and explicit external mass/enthalpy streams.
+
+`GraphEnthalpyTransport::from_volume_flows` binds those actual average rates
+directly to graph topology, preserving the original reference inventory,
+caloric identity and all-cell mass closure. No steady pressure solution is
+fabricated for accelerating fluid. Internal upwind transfers remain internal;
+external advective heat and native nonadvective heat enter exactly once.
+Unmapped solid cells and their original conduction/boundaries remain active.
+
+A fresh final proposal independently gates flow closure, original impulse,
+mechanical energy and per-cell/total thermal energy. Both original inputs are
+immutable; updated momentum and thermal states return at one accepted time
+only after every gate and final cancellation checkpoint passes. Rest preserves
+finite heat storage. A reversed endpoint velocity does not reverse net heat
+transport when the native interval-average velocity is still positive.
+
+Midpoint momentum with endpoint-held backward-Euler heat is first order as a
+coupled method. Time and cell refinement, source support, original thermal
+event splitting, explicit low-Eckert caps and bounded native dense momentum
+remain required. No reversal-time event locator, compressible energy equation
+or inferred spatial mesh is added. Five regression sources exercise independent
+branched startup and thermal roots, directional heat transport through reversal,
+temperature-dependent drag feedback, rest/refusal behavior and explicit
+reservoir mass/enthalpy binding.
