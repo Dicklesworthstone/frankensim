@@ -3,6 +3,8 @@
 mod elliptic;
 #[path = "contact/mixed.rs"]
 mod mixed;
+#[path = "contact/solids.rs"]
+mod solids;
 #[path = "contact/step.rs"]
 mod step;
 #[path = "contact/surface.rs"]

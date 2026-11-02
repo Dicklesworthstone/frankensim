@@ -1013,6 +1013,48 @@ fixtures cover coupled free/supported chains, rigid-only chains, directional spi
 input-order invariance and atomic refusal. Native execution remains required;
 format/source review is not a test-suite pass.
 
+## Simultaneous deformable-solid contact assemblies
+
+`finite_solid::contact::solids::contact_candidate` resolves caller-supplied
+material-point contacts among one to eight original prepared finite solids at
+one common physical time. Bodies may retain different source materials,
+reference densities and stationary supports. Up to 21 contact rows use one
+original simultaneous Coulomb/restitution solve; contact IDs determine stable
+row order while returned bodies retain input order.
+
+Signed material-point traces use each body's native supported consistent mass.
+The assembled mobility retains every directed cross-contact entry and all four
+signed blocks for distinct witnesses on the same body. Each body receives one
+summed native point-impulse candidate, preserving shared-body coupling and
+quadratic work. There is no lumped point mass, pairwise restitution sweep,
+numerical symmetry repair or replacement mass/contact solver.
+
+Acceptance checks actual endpoint point velocities, native quadratic kinetic
+increments, relative impulse work, nonnegative loss and total linear/angular
+momentum about the caller's origin, with stationary-support reactions accounted
+separately. Absolute sums of per-body momentum/work residuals prevent
+cancellation. The independent `absolute_contact_couple_kg_m2_s` gate sums
+`|(x_first - x_second) cross J|` across pairs: opposing finite-gap friction
+couples cannot hide in the global angular balance. Witnesses are never relocated
+to repair that balance.
+
+Candidates are returned together only after final admission and cancellation.
+Sources, configuration, acceleration, time and accepted-step history are
+unchanged by this instantaneous event. Contact discovery, trajectory integration,
+moving supports, penetration repair and per-contact thermal allocation remain
+separate concerns. Supplied witnesses must lie on the same normal line within
+the declared geometric tolerance; the original contact law owns activation,
+restitution, nonuniqueness and passivity admission.
+
+Seven numerical cases passed with actual native CSR, complete consistent-mass
+initialization/FGMRES, the original contact solver and the exact signed-scatter
+helper. They cover unequal densities under a common boost, sliding loss, a
+shared middle body, same-body touching arms, a supported counterpart and single
+or globally cancelling finite-gap couples. The full Cx-bound public candidate
+and five new public regression functions were statically reviewed but could not
+be type-checked or executed without the missing material/runtime dependency
+closure; these native numerical cases are not a full public-target Cargo pass.
+
 ## Spatial layer heating and native laminate deformation
 
 `laminate_thermal::LayeredThermalShell` binds the original sourced thermal stack

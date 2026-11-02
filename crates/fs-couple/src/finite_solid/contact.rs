@@ -19,6 +19,9 @@
 /// Directional interface sources through the same coupled mechanical event.
 pub mod elliptic;
 
+/// Simultaneous events among original deformable solids.
+pub mod solids;
+
 /// Mixed rigid/rigid and rigid/finite-solid events through one mechanical core.
 pub mod mixed;
 
