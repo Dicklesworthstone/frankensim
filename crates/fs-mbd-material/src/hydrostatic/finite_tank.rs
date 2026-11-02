@@ -23,6 +23,9 @@ use fs_ga::{Se3, Vec3};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_mbd::{Gravity, RigidBodyState};
 
+mod density_change;
+pub use density_change::FiniteTankDensityChange;
+
 /// Hard bound on geometry evaluations per finite-bath load query.
 pub const MAX_TANK_VOLUME_EVALUATIONS: usize = 128;
 
@@ -65,7 +68,8 @@ pub struct FiniteTankFill {
 }
 
 /// One frozen source snapshot and one conserved liquid inventory.
-/// Temperature/source replacement is an externally accounted model change.
+/// `rebind_source_at_pose` carries this same mass to another supplied liquid
+/// state and reports the complete gravitational-energy change at a held pose.
 #[derive(Debug)]
 pub struct FiniteHydrostaticTank<'a, F: FluidTransport + ?Sized> {
     source: &'a F,

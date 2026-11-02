@@ -864,6 +864,23 @@ The heave reference is `k=rho*g*a*A/(A-a)`, which differs from the prescribed
 infinite-reservoir stiffness `rho*g*a`. These are code regression definitions,
 not a claim of executed or experimentally validated sloshing dynamics.
 
+`FiniteHydrostaticTank::rebind_source_at_pose` carries that exact liquid mass
+to one externally supplied new source state. It uses `V_new=M/rho_new`, the
+same tank/gravity and original clipping/root solve at one held body pose.
+Equal-density updates preserve volume and fill bits; the new source is frozen
+after one checked transport evaluation. `FiniteTankDensityChange` includes the
+change of the empty-bath datum `M*|g|*h_empty/2` as well as the native relative
+displacement potential. Their sum is the complete liquid gravitational-storage
+change, including expansion when the body is dry. The external thermal/EOS
+owner must account for this energy and any caloric/ambient-pressure work;
+the update does not supply free energy, integrate heat or model fluid motion.
+`FluidTransport` has no material/composition identity, so another admissible
+state of the same single-phase liquid is an explicit caller obligation, not
+inferred from equal numerical tuples. Overflow, source refusal, failed fill or
+late cancellation returns neither a new tank nor a partial audit. Focused
+regressions exercise analytic energy/waterline changes, continued native body
+motion, the dry-body datum, same-density exactness and atomic refusal.
+
 ## Buoyancy through gas and layered liquid reservoirs
 
 `hydrostatic::LayeredHydrostaticMedium` accepts an optional upper

@@ -31,7 +31,8 @@ mod linear_density;
 mod step;
 mod finite_tank;
 pub use finite_tank::{
-    FiniteHydrostaticTank, FiniteTankControls, FiniteTankFill, HydrostaticTankGeometry,
+    FiniteHydrostaticTank, FiniteTankControls, FiniteTankDensityChange, FiniteTankFill,
+    HydrostaticTankGeometry,
     MAX_TANK_VOLUME_EVALUATIONS,
 };
 pub use step::{HydrostaticStep, HydrostaticStepControls, HydrostaticStepError};

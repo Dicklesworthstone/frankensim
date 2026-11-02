@@ -381,3 +381,252 @@ fn overflow_contact_work_budget_and_cancellation_never_return_partial_loads() {
         FiniteHydrostaticTank::new(&water, gravity(), tilted, 16.0, volume_controls()).is_err()
     );
 }
+
+#[test]
+fn changing_source_density_preserves_mass_and_changes_native_waterline_and_motion() {
+    let initial = fluid(1000.0);
+    let updated = fluid(800.0);
+    let tank = FiniteHydrostaticTank::new(
+        &initial,
+        gravity(),
+        tank_geometry(Vec3::new(4.0, 4.0, 4.0)),
+        16.0,
+        volume_controls(),
+    )
+    .unwrap();
+    let mesh = cube();
+    let held = pose(1.5);
+    let (next, audit) = tank
+        .rebind_source_at_pose(&updated, &mesh, held, || false)
+        .unwrap();
+    assert_eq!(
+        next.liquid_mass_kg().to_bits(),
+        tank.liquid_mass_kg().to_bits()
+    );
+    close(next.liquid_volume_m3(), 20.0);
+    assert!(std::ptr::eq(tank.source(), &initial));
+    assert!(std::ptr::eq(next.source(), &updated));
+    close(audit.fill_before.surface_height_m, 7.0 / 6.0);
+    close(audit.fill_after.surface_height_m, 1.5);
+    close(audit.fill_after.displaced.volume_m3(), 4.0);
+    assert_eq!(audit.liquid_volume_m3, [16.0, 20.0]);
+    assert_eq!(audit.density_kg_m3, [1000.0, 800.0]);
+
+    // Independently integrate liquid height over the rectangular bath minus
+    // the prism: G = rho*g*(A*h²/2 - a*(h²-bottom²)/2).
+    let potential = |rho: f64, height: f64| {
+        rho * 10.0 * (8.0 * height * height - 2.0 * (height * height - 0.25))
+    };
+    let expected = potential(800.0, 1.5) - potential(1000.0, 7.0 / 6.0);
+    close(audit.empty_tank_gravitational_energy_change_j, 20000.0);
+    close(audit.displacement_potential_change_j, 16000.0 / 3.0);
+    close(audit.liquid_gravitational_energy_change_j, expected);
+    close(audit.liquid_gravitational_energy_change_j, 76000.0 / 3.0);
+
+    let material = body(500.0, Vec3::new(2.0, 2.0, 2.0));
+    let body = material.principal_body(1e-12, || false).unwrap();
+    let state = body.state_from_kinematics(held, Twist::zero()).unwrap();
+    close(
+        next.load(&mesh, &body, state, || false)
+            .unwrap()
+            .wrench()
+            .force_world
+            .z,
+        32000.0,
+    );
+    let step = next
+        .step(
+            &mesh,
+            &body,
+            state,
+            HydrostaticStepControls {
+                duration_s: 0.001,
+                maximum_energy_defect_j: 1e-6,
+            },
+            || false,
+        )
+        .unwrap();
+    // Native first kick/drift: (32000 N - 4000 kg*10 m/s²)/4000 kg = -2 m/s².
+    close(
+        body.world_from_body(step.dynamics.state_after)
+            .unwrap()
+            .translation()
+            .z,
+        1.5 - 0.001_f64.powi(2),
+    );
+
+    let (restored, reverse) = next
+        .rebind_source_at_pose(&initial, &mesh, held, || false)
+        .unwrap();
+    assert_eq!(restored.liquid_mass_kg(), tank.liquid_mass_kg());
+    assert_eq!(restored.liquid_volume_m3(), tank.liquid_volume_m3());
+    assert_eq!(reverse.fill_after, audit.fill_before);
+    close(reverse.liquid_gravitational_energy_change_j, -expected);
+}
+
+#[test]
+fn density_update_includes_empty_bath_energy_even_when_the_body_is_dry() {
+    let initial = fluid(1000.0);
+    let updated = fluid(800.0);
+    let mesh = cube();
+    for floor_z in [0.0, 10000.0] {
+        let tank = FiniteHydrostaticTank::new(
+            &initial,
+            gravity(),
+            HydrostaticTankGeometry {
+                world_from_tank: pose(floor_z),
+                inside_dimensions_m: Vec3::new(4.0, 4.0, 6.0),
+            },
+            16.0,
+            volume_controls(),
+        )
+        .unwrap();
+        let (_, audit) = tank
+            .rebind_source_at_pose(&updated, &mesh, pose(floor_z + 4.0), || false)
+            .unwrap();
+        assert_eq!(audit.fill_before.displaced.volume_m3(), 0.0);
+        assert_eq!(audit.fill_after.displaced.volume_m3(), 0.0);
+        assert_eq!(audit.displacement_potential_change_j, 0.0);
+        close(audit.liquid_gravitational_energy_change_j, 20000.0);
+        close(audit.fill_after.surface_height_m, 1.25);
+    }
+}
+
+#[test]
+fn unchanged_density_retains_inventory_and_fill_bits_and_freezes_the_new_source_once() {
+    struct Source {
+        calls: std::cell::Cell<usize>,
+        viscosity: f64,
+    }
+    impl FluidTransport for Source {
+        fn transport_state(&self) -> Result<FluidTransportState, fs_material::MaterialError> {
+            self.calls.set(self.calls.get() + 1);
+            FluidTransportState::try_new(997.3, 4000.0, 0.5, self.viscosity)
+        }
+    }
+    let original = Source {
+        calls: std::cell::Cell::new(0),
+        viscosity: 0.001,
+    };
+    let source = Source {
+        calls: std::cell::Cell::new(0),
+        viscosity: 0.002,
+    };
+    let tank = FiniteHydrostaticTank::new(
+        &original,
+        gravity(),
+        tank_geometry(Vec3::new(4.0, 4.0, 4.0)),
+        15.123,
+        volume_controls(),
+    )
+    .unwrap();
+    let mesh = cube();
+    let expected = tank.fill_at_pose(&mesh, pose(1.5), || false).unwrap();
+    let (next, audit) = tank
+        .rebind_source_at_pose(&source, &mesh, pose(1.5), || false)
+        .unwrap();
+    assert_eq!(original.calls.get(), 1);
+    assert_eq!(source.calls.get(), 1);
+    assert_eq!(
+        next.liquid_mass_kg().to_bits(),
+        tank.liquid_mass_kg().to_bits()
+    );
+    assert_eq!(
+        next.liquid_volume_m3().to_bits(),
+        tank.liquid_volume_m3().to_bits()
+    );
+    assert_eq!(audit.fill_before, expected);
+    assert_eq!(audit.fill_after, expected);
+    assert_eq!(
+        audit.empty_tank_gravitational_energy_change_j.to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_eq!(
+        audit.displacement_potential_change_j.to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_eq!(
+        audit.liquid_gravitational_energy_change_j.to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_eq!(next.transport().dynamic_viscosity_pa_s(), 0.002);
+    next.fill_at_pose(&mesh, pose(1.5), || false).unwrap();
+    assert_eq!(source.calls.get(), 1);
+
+    // Zero change remains representable even if the absolute M*g scale is not.
+    let large = FiniteHydrostaticTank::new(
+        &original,
+        Gravity::new(fs_mbd::Vec3::new(0.0, 0.0, -1e10)).unwrap(),
+        tank_geometry(Vec3::new(1e150, 1e150, 6.0)),
+        1e300,
+        volume_controls(),
+    )
+    .unwrap();
+    let (_, unchanged) = large
+        .rebind_source_at_pose(&source, &mesh, pose(4.0), || false)
+        .unwrap();
+    assert_eq!(unchanged.liquid_gravitational_energy_change_j, 0.0);
+}
+
+#[test]
+fn density_update_source_overflow_and_late_cancellation_leave_the_original_tank_intact() {
+    struct Source {
+        density: f64,
+    }
+    impl FluidTransport for Source {
+        fn transport_state(&self) -> Result<FluidTransportState, fs_material::MaterialError> {
+            FluidTransportState::try_new(self.density, 4000.0, 0.5, 0.001)
+        }
+    }
+    let initial = Source { density: 1000.0 };
+    let changed = Source { density: 800.0 };
+    let tank = FiniteHydrostaticTank::new(
+        &initial,
+        gravity(),
+        tank_geometry(Vec3::new(4.0, 4.0, 1.7)),
+        16.0,
+        volume_controls(),
+    )
+    .unwrap();
+    let mesh = cube();
+    let held = pose(1.5);
+    let expected = tank.fill_at_pose(&mesh, held, || false).unwrap();
+    // Empty inventory fits, but its displacement at the held pose overflows.
+    assert!(matches!(
+        tank.rebind_source_at_pose(&Source { density: 600.0 }, &mesh, held, || false),
+        Err(HydrostaticError::TankOverflow { .. })
+    ));
+    // Even the empty inventory cannot fit at this lower density.
+    assert!(matches!(
+        tank.rebind_source_at_pose(&Source { density: 400.0 }, &mesh, held, || false),
+        Err(HydrostaticError::TankOverflow { .. })
+    ));
+    assert!(matches!(
+        tank.rebind_source_at_pose(&Source { density: -1.0 }, &mesh, held, || false),
+        Err(HydrostaticError::Material(_))
+    ));
+    let mut polls = 0;
+    let (_, success) = tank
+        .rebind_source_at_pose(&changed, &mesh, held, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    for stop in [1, polls / 2, polls] {
+        let mut count = 0;
+        assert!(matches!(
+            tank.rebind_source_at_pose(&changed, &mesh, held, || {
+                count += 1;
+                count == stop
+            }),
+            Err(HydrostaticError::Cancelled)
+        ));
+    }
+    assert_eq!(tank.fill_at_pose(&mesh, held, || false).unwrap(), expected);
+    assert_eq!(tank.liquid_mass_kg(), 16000.0);
+    assert_eq!(tank.liquid_volume_m3(), 16.0);
+    let (_, replay) = tank
+        .rebind_source_at_pose(&changed, &mesh, held, || false)
+        .unwrap();
+    assert_eq!(replay, success);
+}
