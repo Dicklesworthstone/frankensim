@@ -4,6 +4,7 @@
 use fs_aeroac::SCOPE_STATEMENT;
 use fs_aeroac::material::{JetPhysicalState, MaterialSlotJet3d, SlotJet3dSetup};
 use fs_aeroac::slot_jet_3d::run_slot_jet_3d;
+use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitPlan};
 use fs_lbm::d3q19::CollisionModel3;
 use fs_material::fluid_acoustics::FluidAcoustics;
 use fs_material::gas::GasState;
@@ -128,8 +129,61 @@ fn g0_actual_3d_force_uses_volume_mass_and_shared_physical_spectrum() {
         assert!((line.force_n[axis] - expected[axis]).abs() < 2e-10 * expected[axis].abs());
     }
     assert!(line.force_n[1].abs() > 0.0);
+    let spectrum = run
+        .prepare_force_spectrum(run.force_series_n().len())
+        .unwrap();
+    assert_eq!(spectrum.acoustic(), run.acoustic());
+    assert_eq!(spectrum.span_m(), run.span_m());
+    assert_eq!(spectrum.timestep_s(), dt);
+    assert_eq!(spectrum.sample_count(), run.force_series_n().len());
+    assert!(
+        run.prepare_force_spectrum(spectrum.sample_count() - 1)
+            .is_err()
+    );
+    for bin in [1, 4, 9, 31] {
+        let cached = spectrum.force_spectral_line(bin).unwrap();
+        let single = run.force_spectral_line(bin).unwrap();
+        assert_eq!(cached.frequency_hz, single.frequency_hz);
+        assert_eq!(cached.force_n, single.force_n);
+        assert_eq!(
+            cached.acoustic_wavenumber_rad_m,
+            single.acoustic_wavenumber_rad_m
+        );
+    }
+    let plan = HarmonicFitPlan::new(
+        spectrum.sample_count(),
+        dt,
+        4.3 / (spectrum.sample_count() as f64 * dt),
+        &[1, 2, 3],
+        HarmonicFitBudget {
+            max_workspace_bytes: 1_048_576,
+            min_reciprocal_condition: 1e-10,
+        },
+    )
+    .unwrap();
+    let fitted = run.fit_force_harmonics(&plan).unwrap();
+    assert_eq!(fitted.acoustic(), run.acoustic());
+    assert_eq!(fitted.span_m(), run.span_m());
+    assert_eq!(fitted.harmonics(), &[1, 2, 3]);
+    for axis in 0..2 {
+        let samples: Vec<_> = run.force_series_n().iter().map(|f| f[axis]).collect();
+        let reference = plan.fit(&samples).unwrap();
+        close(fitted.dc_force_n[axis], reference.dc);
+        close(fitted.residual_rms_n[axis], reference.residual_rms);
+        for (actual, expected) in fitted.force_n().iter().zip(reference.phasors) {
+            assert_eq!(actual[axis], C64::new(expected.re, expected.im));
+        }
+    }
+    let fitted_line = fitted.force_harmonic(2).unwrap();
+    close(fitted_line.frequency_hz, 2.0 * plan.fundamental_hz());
+    close(
+        fitted_line.acoustic_wavenumber_rad_m,
+        core::f64::consts::TAU * fitted_line.frequency_hz / run.acoustic().sound_speed_m_s(),
+    );
+    assert!(fitted.force_harmonic(4).is_err());
     for bin in [0, 32, usize::MAX] {
         assert!(run.force_spectral_line(bin).is_err());
+        assert!(spectrum.force_spectral_line(bin).is_err());
     }
 }
 

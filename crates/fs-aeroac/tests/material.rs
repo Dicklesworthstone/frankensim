@@ -7,6 +7,7 @@ use fs_aeroac::jetlab::run_jet_labium;
 use fs_aeroac::material::{
     JetLabiumSetup, JetPhysicalState, MaterialJetLabium, MaterialJetLabiumRun,
 };
+use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitPlan};
 use fs_lbm::core2::CollisionModel2;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
@@ -134,6 +135,60 @@ fn g0_actual_lattice_force_and_frequency_have_correct_physical_units() {
     assert!((observed.field.pressure - expected.pressure).abs() < 2e-11 * expected.pressure.abs());
     assert!(actual.pressure.abs() > 0.0);
     assert_eq!(actual.scope, SCOPE_STATEMENT);
+    let spectrum = run
+        .prepare_force_spectrum(run.force_series_n_m().len())
+        .unwrap();
+    assert_eq!(spectrum.acoustic(), run.acoustic());
+    assert_eq!(spectrum.timestep_s(), dt);
+    assert_eq!(spectrum.sample_count(), run.force_series_n_m().len());
+    assert!(
+        run.prepare_force_spectrum(spectrum.sample_count() - 1)
+            .is_err()
+    );
+    for bin in [1, 4, 9, 31] {
+        let cached = spectrum
+            .observe_spectral_line(bin, observer, source)
+            .unwrap();
+        let single = run.observe_spectral_line(bin, observer, source).unwrap();
+        assert_eq!(cached.frequency_hz, single.frequency_hz);
+        assert_eq!(cached.force_n_m, single.force_n_m);
+        assert_eq!(cached.field.pressure, single.field.pressure);
+    }
+    // A non-bin fundamental exercises the real material/force consumer;
+    // the short transient is not asserted to be a stationary harmonic source.
+    let plan = HarmonicFitPlan::new(
+        spectrum.sample_count(),
+        dt,
+        4.3 / (spectrum.sample_count() as f64 * dt),
+        &[1, 2, 3],
+        HarmonicFitBudget {
+            max_workspace_bytes: 1_048_576,
+            min_reciprocal_condition: 1e-10,
+        },
+    )
+    .unwrap();
+    let fitted = run.fit_force_harmonics(&plan).unwrap();
+    assert_eq!(fitted.acoustic(), run.acoustic());
+    assert_eq!(fitted.harmonics(), &[1, 2, 3]);
+    for axis in 0..2 {
+        let samples: Vec<_> = run.force_series_n_m().iter().map(|f| f[axis]).collect();
+        let reference = plan.fit(&samples).unwrap();
+        close(fitted.dc_force_n_m[axis], reference.dc);
+        close(fitted.residual_rms_n_m[axis], reference.residual_rms);
+        for (actual, expected) in fitted.force_n_m().iter().zip(reference.phasors) {
+            assert_eq!(actual[axis], C64::new(expected.re, expected.im));
+        }
+    }
+    let fitted_line = fitted.observe_harmonic(2, observer, source).unwrap();
+    let reference = run
+        .radiate_force_line(
+            fitted_line.force_n_m,
+            2.0 * plan.fundamental_hz(),
+            observer,
+            source,
+        )
+        .unwrap();
+    assert_eq!(fitted_line.field.pressure, reference.pressure);
     let prepared = run
         .prepare_coherent_observer(frequency, observer, &[source, source], 2)
         .unwrap();

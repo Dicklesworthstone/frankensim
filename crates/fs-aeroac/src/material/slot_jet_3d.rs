@@ -6,11 +6,12 @@
 //! deliberately leaves spatial radiation to an appropriate acoustic boundary.
 
 use super::{
-    JetPhysicalState, MAX_PHYSICAL_MACH, MaterialAeroacError, acoustic_from_scaling,
-    force_spectral_line, invalid,
+    ForceSpectrum, JetPhysicalState, MAX_PHYSICAL_MACH, MaterialAeroacError, acoustic_from_scaling,
+    check_force_bin, fit_force_harmonics, invalid,
 };
 use crate::slot_jet_3d::{SlotJet3dConfig, SlotJet3dDiagnostics, run_slot_jet_3d, validate_config};
 use crate::{AeroacError, SCOPE_STATEMENT};
+use fs_fft::harmonic::HarmonicFitPlan;
 use fs_lbm::d3q19::CollisionModel3;
 use fs_lbm::material::{MaterialScaling, plan_scaling_from_material};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
@@ -216,7 +217,7 @@ pub struct MaterialSlotJet3dRun<'a, F: FluidTransport + FluidAcoustics + ?Sized 
     pub lattice_diagnostics: SlotJet3dDiagnostics,
 }
 
-/// Hann-windowed force amplitude at one physical frequency, not sound pressure.
+/// Peak force amplitude at one physical frequency, not sound pressure.
 #[derive(Clone, Debug)]
 pub struct SlotJet3dForceLine {
     /// Physical frequency [Hz].
@@ -227,6 +228,123 @@ pub struct SlotJet3dForceLine {
     /// Acoustic wavenumber [rad/m] derived from the same material fluid state.
     /// This does not identify a radiation geometry or propagation model.
     pub acoustic_wavenumber_rad_m: f64,
+}
+
+/// Cached Hann spectrum of forces integrated over the original periodic span.
+/// It retains N, not N/m, and does not declare an isolated acoustic radiator.
+pub struct SlotJet3dForceSpectrum {
+    acoustic: FluidAcousticState,
+    span_m: f64,
+    spectrum: ForceSpectrum,
+}
+
+impl SlotJet3dForceSpectrum {
+    /// Original number of uniformly recorded samples.
+    #[must_use]
+    pub const fn sample_count(&self) -> usize {
+        self.spectrum.sample_count
+    }
+    /// Original physical sampling interval [s].
+    #[must_use]
+    pub const fn timestep_s(&self) -> f64 {
+        self.spectrum.timestep_s
+    }
+    /// Original periodic span represented by the integrated force [m].
+    #[must_use]
+    pub const fn span_m(&self) -> f64 {
+        self.span_m
+    }
+    /// Same frozen fluid snapshot used by the actual flow.
+    #[must_use]
+    pub const fn acoustic(&self) -> FluidAcousticState {
+        self.acoustic
+    }
+
+    /// Read a cached interior FFT bin; no transform or allocation is repeated.
+    /// DC, Nyquist, invalid bins and unrepresentable wave scales refuse.
+    pub fn force_spectral_line(&self, bin: usize) -> Result<SlotJet3dForceLine, AeroacError> {
+        let (force_n, frequency_hz) = self.spectrum.line(bin)?;
+        force_line(self.acoustic, force_n, frequency_hz)
+    }
+}
+
+/// Joint DC and harmonic fit of the accepted periodic-cell forces, in N.
+///
+/// A non-bin fundamental is allowed. This estimates the declared frequencies,
+/// not a new source model; no isolated-source radiation or SPL is inferred.
+pub struct SlotJet3dForceHarmonics {
+    acoustic: FluidAcousticState,
+    span_m: f64,
+    harmonics: Vec<usize>,
+    fundamental_hz: f64,
+    force_n: Vec<[C64; 2]>,
+    /// Simultaneously fitted constant `(Fx, Fy)` forces [N].
+    pub dc_force_n: [f64; 2],
+    /// Unweighted sample residual RMS [N]; not a confidence interval.
+    pub residual_rms_n: [f64; 2],
+}
+
+impl SlotJet3dForceHarmonics {
+    /// Harmonic orders, in the original fit plan's order.
+    #[must_use]
+    pub fn harmonics(&self) -> &[usize] {
+        &self.harmonics
+    }
+    /// Known fundamental of the fit [Hz].
+    #[must_use]
+    pub const fn fundamental_hz(&self) -> f64 {
+        self.fundamental_hz
+    }
+    /// Peak force phasors in N, aligned with `harmonics()`, exp(-i omega t).
+    #[must_use]
+    pub fn force_n(&self) -> &[[C64; 2]] {
+        &self.force_n
+    }
+    /// Original periodic span represented by the integrated force [m].
+    #[must_use]
+    pub const fn span_m(&self) -> f64 {
+        self.span_m
+    }
+    /// The source's actual frozen fluid, used for acoustic wavenumbers.
+    #[must_use]
+    pub const fn acoustic(&self) -> FluidAcousticState {
+        self.acoustic
+    }
+
+    /// Return a requested harmonic with its same-fluid acoustic wavenumber.
+    /// An undeclared harmonic refuses; no spectral interpolation is invented.
+    pub fn force_harmonic(&self, harmonic: usize) -> Result<SlotJet3dForceLine, AeroacError> {
+        let index =
+            self.harmonics
+                .binary_search(&harmonic)
+                .map_err(|_| AeroacError::InvalidParameter {
+                    what: "requested force harmonic was not fitted",
+                })?;
+        force_line(
+            self.acoustic,
+            self.force_n[index],
+            self.fundamental_hz * harmonic as f64,
+        )
+    }
+}
+
+fn force_line(
+    acoustic: FluidAcousticState,
+    force_n: [C64; 2],
+    frequency_hz: f64,
+) -> Result<SlotJet3dForceLine, AeroacError> {
+    let acoustic_wavenumber_rad_m =
+        core::f64::consts::TAU * frequency_hz / acoustic.sound_speed_m_s();
+    if !acoustic_wavenumber_rad_m.is_finite() || acoustic_wavenumber_rad_m <= 0.0 {
+        return Err(AeroacError::NonFinite {
+            what: "physical acoustic wavenumber is unrepresentable",
+        });
+    }
+    Ok(SlotJet3dForceLine {
+        frequency_hz,
+        force_n,
+        acoustic_wavenumber_rad_m,
+    })
 }
 
 impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialSlotJet3dRun<'_, F> {
@@ -270,19 +388,41 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialSlotJet3dRun<'_, F> {
     /// # Errors
     /// DC, Nyquist, invalid bins or unrepresentable frequency/force refuse.
     pub fn force_spectral_line(&self, bin: usize) -> Result<SlotJet3dForceLine, AeroacError> {
-        let (force_n, frequency_hz) =
-            force_spectral_line(&self.force_series_n, self.timestep_s, bin)?;
-        let acoustic_wavenumber_rad_m =
-            core::f64::consts::TAU * frequency_hz / self.acoustic.sound_speed_m_s();
-        if !acoustic_wavenumber_rad_m.is_finite() || acoustic_wavenumber_rad_m <= 0.0 {
-            return Err(AeroacError::NonFinite {
-                what: "physical acoustic wavenumber is unrepresentable",
-            });
-        }
-        Ok(SlotJet3dForceLine {
-            frequency_hz,
+        check_force_bin(self.force_series_n.len(), bin)?;
+        self.prepare_force_spectrum(self.force_series_n.len())?
+            .force_spectral_line(bin)
+    }
+
+    /// Transform the accepted record once for many frequency-bin queries.
+    /// Checks the caller's sample bound before O(N) storage/O(N log N) work.
+    pub fn prepare_force_spectrum(
+        &self,
+        max_samples: usize,
+    ) -> Result<SlotJet3dForceSpectrum, AeroacError> {
+        Ok(SlotJet3dForceSpectrum {
+            acoustic: self.acoustic,
+            span_m: self.span_m,
+            spectrum: ForceSpectrum::new(&self.force_series_n, self.timestep_s, max_samples)?,
+        })
+    }
+
+    /// Jointly fit DC and requested harmonics with the shared L1 QR plan.
+    /// The plan must match the actual sample count and physical clock exactly;
+    /// both recorded force axes share its factorization and scratch. No force
+    /// per span, acoustic pressure or absent spanwise component is invented.
+    pub fn fit_force_harmonics(
+        &self,
+        plan: &HarmonicFitPlan,
+    ) -> Result<SlotJet3dForceHarmonics, AeroacError> {
+        let (force_n, summary) = fit_force_harmonics(&self.force_series_n, self.timestep_s, plan)?;
+        Ok(SlotJet3dForceHarmonics {
+            acoustic: self.acoustic,
+            span_m: self.span_m,
+            harmonics: plan.harmonics().to_vec(),
+            fundamental_hz: plan.fundamental_hz(),
             force_n,
-            acoustic_wavenumber_rad_m,
+            dc_force_n: summary.map(|s| s.dc),
+            residual_rms_n: summary.map(|s| s.residual_rms),
         })
     }
 }

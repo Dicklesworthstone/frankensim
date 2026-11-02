@@ -15,9 +15,11 @@
 /// Same-material SI binding for the existing three-dimensional slot-jet rig.
 pub mod slot_jet_3d;
 pub use slot_jet_3d::{
-    MaterialSlotJet3d, MaterialSlotJet3dRun, SlotJet3dForceLine, SlotJet3dSetup,
+    MaterialSlotJet3d, MaterialSlotJet3dRun, SlotJet3dForceHarmonics, SlotJet3dForceLine,
+    SlotJet3dForceSpectrum, SlotJet3dSetup,
 };
 
+use fs_fft::harmonic::{HarmonicFitPlan, HarmonicFitSummary};
 use fs_lbm::core2::CollisionModel2;
 use fs_lbm::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_material};
 use fs_material::MaterialError;
@@ -293,15 +295,141 @@ pub struct MaterialJetLabiumRun<'a, F: FluidTransport + FluidAcoustics + ?Sized 
     pub lattice_diagnostics: JetLabiumDiagnostics,
 }
 
-/// One observed bin of the actual surface-force record.
+/// One observed frequency of the actual surface-force record.
 #[derive(Clone, Debug)]
 pub struct ObservedJetLine {
-    /// Physical bin frequency [Hz].
+    /// Physical frequency [Hz].
     pub frequency_hz: f64,
-    /// Complex force per span [N/m], normalized by the Hann coherent gain.
+    /// Complex peak force per span [N/m], in exp(-i omega t) convention.
+    /// FFT observations use Hann coherent gain; fitted harmonics use the
+    /// joint least-squares amplitudes without a window-gain approximation.
     pub force_n_m: [C64; 2],
     /// Same-medium Curle pressure and its existing scope boundary.
     pub field: DipoleField,
+}
+
+/// Prepared Hann-windowed spectrum of the actual 2-D source record.
+///
+/// Both force components are transformed once. Subsequent bin/receiver queries
+/// allocate no FFT workspace and preserve the original material sound speed.
+/// Finite-window leakage remains; this does not fit off-bin tones.
+pub struct JetForceSpectrum {
+    acoustic: FluidAcousticState,
+    spectrum: ForceSpectrum,
+}
+
+impl JetForceSpectrum {
+    /// Original record length; interior positive bins are 1..sample_count/2.
+    #[must_use]
+    pub const fn sample_count(&self) -> usize {
+        self.spectrum.sample_count
+    }
+
+    /// Original sample interval [s].
+    #[must_use]
+    pub const fn timestep_s(&self) -> f64 {
+        self.spectrum.timestep_s
+    }
+
+    /// Same frozen fluid snapshot used by the actual flow.
+    #[must_use]
+    pub const fn acoustic(&self) -> FluidAcousticState {
+        self.acoustic
+    }
+
+    /// Observe one cached force bin at an actual source/receiver geometry.
+    /// DC, Nyquist, invalid bins, geometry and nonfinite fields refuse.
+    pub fn observe_spectral_line(
+        &self,
+        bin: usize,
+        observer_m: [f64; 2],
+        source_m: [f64; 2],
+    ) -> Result<ObservedJetLine, AeroacError> {
+        let (force_n_m, frequency_hz) = self.spectrum.line(bin)?;
+        observe_force(self.acoustic, force_n_m, frequency_hz, observer_m, source_m)
+    }
+}
+
+/// Joint DC and specified-harmonic fit of one actual 2-D force record.
+///
+/// No source harmonic is invented: the common L1 fitter separates the declared
+/// frequencies in the recorded samples, including a non-bin fundamental.
+/// Residual RMS measures unexplained samples, not uncertainty or omitted physics.
+pub struct JetForceHarmonics {
+    acoustic: FluidAcousticState,
+    harmonics: Vec<usize>,
+    fundamental_hz: f64,
+    force_n_m: Vec<[C64; 2]>,
+    /// Simultaneously fitted constant `(Fx, Fy)` forces [N/m].
+    pub dc_force_n_m: [f64; 2],
+    /// Unweighted sample residual RMS for each force component [N/m].
+    pub residual_rms_n_m: [f64; 2],
+}
+
+impl JetForceHarmonics {
+    /// Requested harmonic orders, in the shared plan's original order.
+    #[must_use]
+    pub fn harmonics(&self) -> &[usize] {
+        &self.harmonics
+    }
+
+    /// Known fundamental supplied to the fit [Hz]; it is not pitch estimation.
+    #[must_use]
+    pub const fn fundamental_hz(&self) -> f64 {
+        self.fundamental_hz
+    }
+
+    /// Complex peak `(Fx, Fy)` amplitudes [N/m], aligned with `harmonics()`.
+    /// Phase is referenced to the first recorded sample, in exp(-i omega t).
+    #[must_use]
+    pub fn force_n_m(&self) -> &[[C64; 2]] {
+        &self.force_n_m
+    }
+
+    /// Exact source medium retained for all harmonic radiation paths.
+    #[must_use]
+    pub const fn acoustic(&self) -> FluidAcousticState {
+        self.acoustic
+    }
+
+    /// Radiate a fitted harmonic using its actual frequency and original fluid.
+    /// An undeclared harmonic order refuses rather than interpolating a tone.
+    pub fn observe_harmonic(
+        &self,
+        harmonic: usize,
+        observer_m: [f64; 2],
+        source_m: [f64; 2],
+    ) -> Result<ObservedJetLine, AeroacError> {
+        let index =
+            self.harmonics
+                .binary_search(&harmonic)
+                .map_err(|_| AeroacError::InvalidParameter {
+                    what: "requested force harmonic was not fitted",
+                })?;
+        observe_force(
+            self.acoustic,
+            self.force_n_m[index],
+            self.fundamental_hz * harmonic as f64,
+            observer_m,
+            source_m,
+        )
+    }
+}
+
+fn observe_force(
+    acoustic: FluidAcousticState,
+    force_n_m: [C64; 2],
+    frequency_hz: f64,
+    observer_m: [f64; 2],
+    source_m: [f64; 2],
+) -> Result<ObservedJetLine, AeroacError> {
+    let wavenumber = core::f64::consts::TAU * frequency_hz / acoustic.sound_speed_m_s();
+    let field = dipole_pressure(force_n_m, wavenumber, observer_m, source_m)?;
+    Ok(ObservedJetLine {
+        frequency_hz,
+        force_n_m,
+        field,
+    })
 }
 
 impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabiumRun<'_, F> {
@@ -352,13 +480,44 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabiumRun<'_, F> {
         observer_m: [f64; 2],
         source_m: [f64; 2],
     ) -> Result<ObservedJetLine, AeroacError> {
-        let (force_n_m, frequency_hz) =
-            force_spectral_line(&self.force_series_n_m, self.timestep_s, bin)?;
-        let field = self.radiate_force_line(force_n_m, frequency_hz, observer_m, source_m)?;
-        Ok(ObservedJetLine {
-            frequency_hz,
+        check_force_bin(self.force_series_n_m.len(), bin)?;
+        self.prepare_force_spectrum(self.force_series_n_m.len())?
+            .observe_spectral_line(bin, observer_m, source_m)
+    }
+
+    /// Transform both recorded forces once for repeated harmonic/bin queries.
+    /// The caller's sample-count bound is checked before allocating O(N)
+    /// spectrum and FFT storage. Preparation is O(N log N); each lookup is O(1)
+    /// plus the existing acoustic transfer. No physical source law changes.
+    pub fn prepare_force_spectrum(
+        &self,
+        max_samples: usize,
+    ) -> Result<JetForceSpectrum, AeroacError> {
+        Ok(JetForceSpectrum {
+            acoustic: self.acoustic,
+            spectrum: ForceSpectrum::new(&self.force_series_n_m, self.timestep_s, max_samples)?,
+        })
+    }
+
+    /// Fit DC and all declared harmonics jointly on the original sample clock.
+    /// Reuse one L1 QR plan for both axes; frequencies need not be FFT bins.
+    /// An incorrect record length or sample period refuses. The plan controls
+    /// memory and conditioning; one additional N-sample axis buffer is reused.
+    /// This estimates resolved periodic content, not stationarity or source
+    /// compactness, and does not recover harmonics already aliased by sampling.
+    pub fn fit_force_harmonics(
+        &self,
+        plan: &HarmonicFitPlan,
+    ) -> Result<JetForceHarmonics, AeroacError> {
+        let (force_n_m, summary) =
+            fit_force_harmonics(&self.force_series_n_m, self.timestep_s, plan)?;
+        Ok(JetForceHarmonics {
+            acoustic: self.acoustic,
+            harmonics: plan.harmonics().to_vec(),
+            fundamental_hz: plan.fundamental_hz(),
             force_n_m,
-            field,
+            dc_force_n_m: summary.map(|s| s.dc),
+            residual_rms_n_m: summary.map(|s| s.residual_rms),
         })
     }
 
@@ -431,46 +590,128 @@ impl MaterialJetLabiumRun<'_, GasState> {
     }
 }
 
-// Both spatial rigs use one amplitude, window and phase convention. Units
-// stay those of the input history: the 2-D run supplies N/m, the 3-D run N.
-fn force_spectral_line(
-    forces: &[[f64; 2]],
-    timestep_s: f64,
-    bin: usize,
-) -> Result<([C64; 2], f64), AeroacError> {
-    let n = forces.len();
+fn check_force_bin(n: usize, bin: usize) -> Result<(), AeroacError> {
     if bin == 0 || bin >= n / 2 {
         return Err(AeroacError::InvalidParameter {
             what: "observed force bin must be strictly between DC and Nyquist",
         });
     }
-    let n_f = n as f64;
-    let window: Vec<f64> = (0..n)
-        .map(|i| 0.5 - 0.5 * fs_math::det::cos(core::f64::consts::TAU * i as f64 / (n_f - 1.0)))
-        .collect();
-    let normalization = 2.0 / window.iter().sum::<f64>();
-    let fft = fs_fft::Fft::new(n);
-    let mut buffer = vec![fs_fft::C64::default(); n];
-    let mut scratch = vec![fs_fft::C64::default(); n];
-    let mut line = [C64::new(0.0, 0.0); 2];
-    for axis in 0..2 {
-        let mean = forces.iter().map(|f| f[axis]).sum::<f64>() / n_f;
-        for (i, value) in forces.iter().enumerate() {
-            buffer[i] = fs_fft::C64::new((value[axis] - mean) * window[i], 0.0);
+    Ok(())
+}
+
+// Both spatial rigs use one amplitude, window and phase convention. Units
+// stay those of the input history: the 2-D run supplies N/m, the 3-D run N.
+struct ForceSpectrum {
+    sample_count: usize,
+    timestep_s: f64,
+    lines: Vec<[C64; 2]>,
+}
+
+impl ForceSpectrum {
+    fn new(forces: &[[f64; 2]], timestep_s: f64, max_samples: usize) -> Result<Self, AeroacError> {
+        let n = forces.len();
+        if n < 4 || !n.is_power_of_two() || n > max_samples {
+            return Err(AeroacError::InvalidParameter {
+                what: "force spectrum requires a power-of-two record within the sample budget",
+            });
         }
-        fft.forward(&mut buffer, &mut scratch);
-        line[axis] = C64::new(buffer[bin].re, -buffer[bin].im).scale(normalization);
+        if !timestep_s.is_finite() || timestep_s <= 0.0 {
+            return Err(AeroacError::InvalidParameter {
+                what: "force spectrum requires a positive finite sample interval",
+            });
+        }
+        let n_f = n as f64;
+        let window: Vec<f64> = (0..n)
+            .map(|i| 0.5 - 0.5 * fs_math::det::cos(core::f64::consts::TAU * i as f64 / (n_f - 1.0)))
+            .collect();
+        let normalization = 2.0 / window.iter().sum::<f64>();
+        let fft = fs_fft::Fft::new(n);
+        let mut buffer = vec![fs_fft::C64::default(); n];
+        let mut scratch = vec![fs_fft::C64::default(); n];
+        let mut lines = vec![[C64::ZERO; 2]; n / 2];
+        for axis in 0..2 {
+            let mean = forces.iter().map(|f| f[axis]).sum::<f64>() / n_f;
+            for (i, value) in forces.iter().enumerate() {
+                buffer[i] = fs_fft::C64::new((value[axis] - mean) * window[i], 0.0);
+            }
+            fft.forward(&mut buffer, &mut scratch);
+            for (bin, line) in lines.iter_mut().enumerate().skip(1) {
+                line[axis] = C64::new(buffer[bin].re, -buffer[bin].im).scale(normalization);
+            }
+        }
+        Ok(Self {
+            sample_count: n,
+            timestep_s,
+            lines,
+        })
     }
-    let frequency_hz = bin as f64 / (n_f * timestep_s);
-    if !frequency_hz.is_finite()
-        || frequency_hz <= 0.0
-        || line
-            .iter()
-            .any(|value| !value.re.is_finite() || !value.im.is_finite())
-    {
-        return Err(AeroacError::NonFinite {
-            what: "physical force spectrum or frequency is unrepresentable",
+
+    fn line(&self, bin: usize) -> Result<([C64; 2], f64), AeroacError> {
+        check_force_bin(self.sample_count, bin)?;
+        let line = self.lines[bin];
+        let frequency_hz = bin as f64 / (self.sample_count as f64 * self.timestep_s);
+        if !frequency_hz.is_finite()
+            || frequency_hz <= 0.0
+            || line
+                .iter()
+                .any(|value| !value.re.is_finite() || !value.im.is_finite())
+        {
+            return Err(AeroacError::NonFinite {
+                what: "physical force spectrum or frequency is unrepresentable",
+            });
+        }
+        Ok((line, frequency_hz))
+    }
+}
+
+fn fit_force_harmonics(
+    forces: &[[f64; 2]],
+    timestep_s: f64,
+    plan: &HarmonicFitPlan,
+) -> Result<(Vec<[C64; 2]>, [HarmonicFitSummary; 2]), AeroacError> {
+    if plan.sample_count() != forces.len() || plan.timestep_s().to_bits() != timestep_s.to_bits() {
+        return Err(AeroacError::InvalidParameter {
+            what: "harmonic fit plan must match the original force record and sample clock",
         });
     }
-    Ok((line, frequency_hz))
+    let mut axis_samples = vec![0.0; forces.len()];
+    let mut scratch = vec![0.0; forces.len()];
+    let mut phasors = vec![fs_fft::C64::default(); plan.harmonics().len()];
+    let mut forces_fitted = vec![[C64::ZERO; 2]; plan.harmonics().len()];
+    let fit_axis = |axis: usize,
+                    samples: &mut [f64],
+                    scratch: &mut [f64],
+                    phasors: &mut [fs_fft::C64],
+                    fitted: &mut [[C64; 2]]|
+     -> Result<HarmonicFitSummary, AeroacError> {
+        for (sample, force) in samples.iter_mut().zip(forces) {
+            *sample = force[axis];
+        }
+        let summary = plan
+            .fit_into(samples, scratch, phasors)
+            .map_err(AeroacError::HarmonicFit)?;
+        for (force, phasor) in fitted.iter_mut().zip(phasors) {
+            force[axis] = C64::new(phasor.re, phasor.im);
+        }
+        Ok(summary)
+    };
+    let x = fit_axis(
+        0,
+        &mut axis_samples,
+        &mut scratch,
+        &mut phasors,
+        &mut forces_fitted,
+    )?;
+    let y = fit_axis(
+        1,
+        &mut axis_samples,
+        &mut scratch,
+        &mut phasors,
+        &mut forces_fitted,
+    )?;
+    Ok((forces_fitted, [x, y]))
 }
+
+#[cfg(test)]
+#[path = "material/spectrum_tests.rs"]
+mod spectrum_tests;

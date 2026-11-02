@@ -190,6 +190,9 @@ fn refusal(error: AeroacError) -> &'static str {
     match error {
         AeroacError::NonFinite { what } | AeroacError::InvalidParameter { what } => what,
         AeroacError::NotConverged { .. } => "forced jet integration did not converge",
+        AeroacError::HarmonicFit(_) => {
+            "force harmonic fit refused its numerical input or conditioning"
+        }
     }
 }
 

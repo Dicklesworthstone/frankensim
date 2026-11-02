@@ -300,6 +300,36 @@ conjugation makes the phase convention `exp(-i omega t)` relative to the first
 recorded sample. Physical bin frequency and same-medium pressure are returned
 together. An independent direct DFT checks force amplitude and phase.
 
+Both material-run types provide `prepare_force_spectrum(max_samples)` to retain
+the two force-component FFTs once. The sample budget is checked before O(N)
+storage and O(N log N) transformation. Cached interior-bin queries do not repeat
+an FFT or allocate its workspace; they preserve the existing mean, symmetric
+Hann, coherent-gain and phase arithmetic. The 2-D `JetForceSpectrum` observes
+N/m sources in its original fluid. `SlotJet3dForceSpectrum` retains actual N,
+the original periodic span and the same-fluid acoustic wavenumber. DC and
+Nyquist bins remain refused, and no isolated 3-D radiator is inferred.
+
+For a known fundamental that falls between FFT bins, both runs also expose
+`fit_force_harmonics(&fs_fft::harmonic::HarmonicFitPlan)`. The shared L1 owner
+jointly fits DC and every declared sine/cosine pair through one prepared QR;
+the two physical force axes reuse that factorization and their work buffers.
+The plan must match the original sample count and timestep exactly. Its memory
+budget and reciprocal-condition gate remain explicit, with original typed
+numerical refusals preserved as `AeroacError::HarmonicFit`. The adapter adds one
+reused N-sample axis buffer to the fitter's scratch/output storage. Returned
+peak phasors use exp(-i omega t), phase zero at the first recorded sample, and
+retain N/m or N without a span conversion. `JetForceHarmonics::observe_harmonic`
+uses the fitted physical frequency in the original Curle transfer;
+`SlotJet3dForceHarmonics::force_harmonic` retains periodic-cell source semantics.
+The fitted DC and per-axis sample residual RMS are exposed separately. This is
+known-frequency estimation, not pitch detection, a stationarity certificate,
+statistical uncertainty, broadband PSD, recovery of already aliased samples,
+or source/radiation validation. Unexplained sampled content remains in the
+residual; unmodeled tones and frequency error can also bias fitted components.
+G0/G1/G3 tests check independent Hann DFT coefficients, weak
+off-bin even harmonics, phase/units, same-medium radiation, clock mismatches and
+bounded admission; the actual 2-D/3-D flow tests exercise both consumer routes.
+
 The physical Mach envelope is strictly below 0.3 and is checked separately
 from numerical lattice Mach. Grid allocation is budgeted before construction.
 An observed speed-envelope violation refuses output; diagnostics sample the

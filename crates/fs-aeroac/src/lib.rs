@@ -83,6 +83,9 @@ before any comparison to measured levels.";
 /// Typed refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AeroacError {
+    /// The shared numerical harmonic fitter refused its input, budget or
+    /// conditioning. Its diagnostics remain distinct from acoustic admission.
+    HarmonicFit(fs_fft::harmonic::HarmonicFitError),
     /// Non-finite input.
     NonFinite {
         /// Where.
@@ -107,6 +110,7 @@ pub enum AeroacError {
 impl core::fmt::Display for AeroacError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            AeroacError::HarmonicFit(error) => write!(f, "force harmonic fit: {error}"),
             AeroacError::NonFinite { what } => write!(f, "non-finite input: {what}"),
             AeroacError::InvalidParameter { what } => write!(f, "invalid parameter: {what}"),
             AeroacError::NotConverged { what, residual } => {
