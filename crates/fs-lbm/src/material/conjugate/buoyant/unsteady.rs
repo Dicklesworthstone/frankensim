@@ -3,7 +3,7 @@
 use super::{MaterialBuoyancyError, MaterialBuoyancySample, poll, samples};
 use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep, compact_owners, march_conjugate_with_material};
 use crate::conjugate::{
-    ConjugateMarch, EnergyConfig, RadiationConfig, SimpleConfig, SolidMaterial, ThermalSetup,
+    ConjugateMarch, EnergyConfig, FvSgsConfig, RadiationConfig, SimpleConfig, SolidMaterial, ThermalSetup,
     TransientRecord, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
 };
 use crate::material::conjugate::MaterialChtFluid;
@@ -84,7 +84,54 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     ) -> Result<MaterialBuoyancyMarch<S>, MaterialBuoyancyError> {
         self.march_natural_convection_inner(
             domain, solids, flow_config, thermal, energy_config, initial_temperature_k,
-            config, unsteady, inlet_schedule, power_schedule, radiation, None, gate, resolve,
+            config, unsteady, None, inlet_schedule, power_schedule, radiation, None, gate, resolve,
+        )
+    }
+
+    /// March source-dependent molecular viscosity with explicitly selected
+    /// transient SGS transport on the original momentum and thermal clock.
+    ///
+    /// The source supplies molecular mu(T), k(T) and buoyancy at each accepted
+    /// thermal endpoint. Every nonlinear momentum sweep recomputes nu_t from
+    /// the resolved velocity and checks its ratio to the LOCAL molecular nu.
+    /// Their sum supplies the full symmetric stress; material jumps retain
+    /// harmonic edge transmission. No eddy coefficient is folded back into
+    /// the source state or compounded on a subsequent refresh. No-slip wall
+    /// traction still uses the molecular half-cell viscosity.
+    ///
+    /// Projected nu_t adds one gradient heat flux with the original reference
+    /// rho*Cp and Pr_t=0.9, separately from source molecular conductivity.
+    /// Storage, advection and the density/Cp departure bounds are those of
+    /// `march_natural_convection`. The source feedback is first order in time;
+    /// refinement must resolve both material gradients and the wall layer.
+    /// No molecular or modeled dissipation is relabelled as a heating source.
+    /// This is an exploratory algebraic closure, not a turbulent-DNS claim.
+    ///
+    /// # Errors
+    /// The original source/solver refusals, invalid SGS controls, acceptance
+    /// use, a local eddy/molecular ratio above its explicit cap, or LVEL/another
+    /// authored eddy-conductivity field. Failure returns no partial march.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_sgs<S: FluidTransport>(
+        &self,
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        flow_config: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        config: BoussinesqConfig<3>,
+        unsteady: &UnsteadyConfig,
+        sgs: FvSgsConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialBuoyancyMarch<S>, MaterialBuoyancyError> {
+        self.march_natural_convection_inner(
+            domain, solids, flow_config, thermal, energy_config, initial_temperature_k,
+            config, unsteady, Some(sgs), inlet_schedule, power_schedule, radiation, None, gate, resolve,
         )
     }
 
@@ -99,6 +146,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         initial_temperature_k: &[f64],
         config: BoussinesqConfig<3>,
         unsteady: &UnsteadyConfig,
+        sgs: Option<FvSgsConfig>,
         inlet_schedule: impl Fn(f64) -> f64,
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
@@ -182,6 +230,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             thermal,
             flow_config,
             unsteady,
+            sgs,
             initial_temperature_k,
             inlet_schedule,
             power_schedule,

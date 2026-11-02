@@ -641,6 +641,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             initial_temperature_k,
             bounds,
             unsteady,
+            None,
             inlet_schedule,
             power_schedule,
             radiation,

@@ -114,6 +114,105 @@ fn lattice_and_conjugate_plans_share_one_snapshot_without_resampling() {
 }
 
 #[test]
+fn heated_source_viscosity_reaches_native_sgs_momentum_and_one_thermal_flux() {
+    use fs_lbm::conjugate::{FvSgsConfig, TimeScheme, TransientConfig, UnsteadyConfig, march_energy};
+    use fs_lbm::sgs3::{SgsModel, SgsUse};
+
+    // G0/G3: a heated closed cavity, with a spatially varying T-dependent
+    // molecular viscosity. The source is synthetic and rho/Cp stay fixed.
+    let domain = VoxelDomain::new(4, 4, 1, 0.25).unwrap();
+    let mut faces = [FvBoundary::wall(); 6];
+    faces[3] = FvBoundary::Wall { velocity: [0.05, 0.0, 0.0] };
+    faces[4] = FvBoundary::Symmetry;
+    faces[5] = FvBoundary::Symmetry;
+    let flow = SimpleConfig::new(faces);
+    let mut thermal = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    thermal.power_w = vec![0.01; domain.cell_count()];
+    let initial: Vec<_> = (0..domain.cell_count())
+        .map(|c| 300.0 + 4.0 * domain.coords(c)[0] as f64 / 3.0).collect();
+    let source = FluidTransportState::try_new(1.0, 2.0, 0.002, 0.01).unwrap();
+    let bound = MaterialChtFluid::try_new(&source).unwrap();
+    let gate = CancelGate::new();
+    let bounds = BoussinesqConfig {
+        gravity_m_s2: [0.0; 3],
+        max_relative_density_departure: 0.0,
+        max_relative_specific_heat_departure: 0.0,
+    };
+    let energy = EnergyConfig::default();
+    let mut unsteady = UnsteadyConfig::new(0.2, 6);
+    unsteady.scheme = TimeScheme::BackwardEuler;
+    unsteady.inner_iterations = 1000;
+    unsteady.inner_tolerance = 1e-9;
+    let sgs = |cs| FvSgsConfig {
+        model: SgsModel::Smagorinsky { cs },
+        filter_width_factor: 1.0,
+        maximum_eddy_to_molecular: 100.0,
+        usage: SgsUse::Exploration,
+    };
+    let resolve = |slope: f64| move |_: usize, t: f64, _: &FluidTransportState| {
+        FluidTransportState::try_new(1.0, 2.0, 0.002, 0.01 / (1.0 + slope * (t - 300.0)))
+    };
+    let run = |slope, cs, controls: &UnsteadyConfig| bound.march_natural_convection_with_sgs(
+        &domain, &[], &flow, &thermal, &energy, &initial, bounds, controls,
+        sgs(cs), |_| 1.0, |_| 1.0, None, &gate, resolve(slope),
+    ).unwrap();
+    let active = run(0.15, 0.5, &unsteady);
+    let frozen = run(0.0, 0.5, &unsteady);
+    let zero = run(0.15, 0.0, &unsteady);
+    let laminar = bound.march_natural_convection(
+        &domain, &[], &flow, &thermal, &energy, &initial, bounds, &unsteady,
+        |_| 1.0, |_| 1.0, None, &gate, resolve(0.15),
+    ).unwrap();
+    assert_eq!(zero.march.flow, laminar.march.flow);
+    assert_eq!(zero.march.temperature, laminar.march.temperature);
+    let difference = |left: &[[f64; 3]], right: &[[f64; 3]]| {
+        left.iter().zip(right).flat_map(|(a, b)| a.iter().zip(b))
+            .map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max)
+    };
+    assert!(difference(&active.march.flow.flow.velocity_m_s,
+        &frozen.march.flow.flow.velocity_m_s) > 1e-6, "source viscosity must reach momentum");
+    assert!(difference(&active.march.flow.flow.velocity_m_s,
+        &zero.march.flow.flow.velocity_m_s) > 1e-6, "SGS must remain active with source viscosity");
+    assert!(active.march.flow.flow.eddy_viscosity_m2_s.iter().any(|&nu| nu > 1e-7));
+    for sample in active.applied.iter().chain(&active.endpoint) {
+        near(sample.material.resolved_transport().dynamic_viscosity_pa_s(),
+            0.01 / (1.0 + 0.15 * (sample.temperature_k - 300.0)), 1e-14);
+    }
+    assert!(active.applied.iter().zip(&active.endpoint)
+        .any(|(a, b)| (a.temperature_k - b.temperature_k).abs() > 1e-5));
+    let supplied: f64 = active.march.energy_records.iter().map(|r| r.source_j).sum();
+    let stored: f64 = active.march.temperature.iter().zip(&initial).enumerate()
+        .map(|(c, (t, old))| 2.0 * domain.volume(c) * (t - old)).sum();
+    near(stored, supplied, 1e-8);
+    for record in &active.march.energy_records {
+        assert!(record.closure_j.abs() < 1e-8);
+    }
+
+    // One-step independent replay: the same molecular k plus ONE
+    // conductivity from the accepted projected SGS field. This detects
+    // dropped or compounded eddy heat, independently of the energy ledger.
+    let one_step = UnsteadyConfig { steps: 1, average_from_step: 1, ..unsteady };
+    let first = run(0.15, 0.5, &one_step);
+    let replay = |eddy_scale: f64| {
+        let mut setup = thermal.clone();
+        setup.eddy_conductivity_w_m_k = first.march.flow.flow.eddy_conductivity(bound.properties())
+            .into_iter().map(|k| eddy_scale * k).collect();
+        march_energy(&domain, bound.properties(), &[], &first.march.flow.flow.field,
+            &setup, &initial, |_| 1.0, &TransientConfig {
+                time_step_s: one_step.time_step_s, steps: 1, energy,
+            }, None, &gate).unwrap()
+    };
+    let once = replay(1.0);
+    let omitted = replay(0.0);
+    let twice = replay(2.0);
+    let error = |other: &[f64]| first.march.temperature.iter().zip(other)
+        .map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
+    assert!(error(&once.temperature) < 1e-8);
+    assert!(error(&omitted.temperature) > 1e-5);
+    assert!(error(&twice.temperature) > 1e-5);
+}
+
+#[test]
 fn unrepresentable_capacity_and_conflicting_eddy_input_refuse() {
     // Factored transport ratios remain finite, but CHT explicitly forms rho cp.
     let huge = FluidTransportState::try_new(1e200, 1e200, 1e300, 1e200).unwrap();

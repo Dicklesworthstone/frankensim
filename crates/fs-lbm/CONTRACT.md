@@ -1693,8 +1693,9 @@ same full-gradient Smagorinsky/WALE kernel through explicit `FvSgsConfig`.
 The physical filter width is the declared factor times `cell_volume^(1/3)`;
 neither `SimpleConfig` nor existing march entry points enable SGS. Acceptance
 use and simultaneous equilibrium LVEL refuse. A zero coefficient keeps the
-ordinary laminar arithmetic and empty closure state. These entries currently
-use the declared constant molecular viscosity, not a material-viscosity field.
+ordinary laminar arithmetic and empty closure state. These raw entries use
+the declared constant molecular viscosity. The source-material entry below
+retains a separate evolving molecular-viscosity field.
 
 One reusable velocity workspace freezes the gradient field before each
 nonlinear momentum sweep. Normal derivatives use the owning staggered faces;
@@ -1722,6 +1723,24 @@ quadratic Neumann gradients, native MAC normal derivatives, WALE's pure-shear
 zero, physical Smagorinsky viscosity, exact disabled flow identity, admission
 and cap refusals, and a moving-wall flow/heat step compared against an
 independently supplied turbulent-conductivity energy solve.
+
+`MaterialChtFluid::march_natural_convection_with_sgs` uses the same native
+transient owner with source-dependent molecular viscosity and conductivity.
+Each accepted thermal endpoint refreshes the original source field; each
+nonlinear momentum sweep checks `nu_t/(mu_local/rho)` against the explicit
+cap and applies `mu_local + rho*nu_t` in the reciprocal symmetric stress.
+Material edges retain harmonic transmission, and no-slip half-cell wall
+traction remains molecular. Source snapshots never absorb the eddy field,
+so a constitutive refresh cannot compound turbulent viscosity. The projected
+eddy field supplies exactly one separate gradient heat flux with reference
+`rho*Cp` and `Pr_t=0.9`. Neither molecular nor modeled mechanical loss is
+deposited as heat. Source density/Cp bounds, first-order feedback, cancellation
+and exploratory SGS restrictions remain in force; equilibrium LVEL and a
+second authored eddy-conductivity field still refuse. The focused source/SGS
+tests cover affine shear, reciprocal edges, molecular walls, local viscosity
+caps, and refresh without compounding. The `material_conjugate` heated-cavity
+regression checks live viscosity/momentum response, zero-closure identity,
+heat conservation and an independent once/omitted/twice eddy-heat replay.
 
 ## Compressible Navier-Stokes-Fourier hybrid (IRP M3.2-W3a, `nsf3`)
 

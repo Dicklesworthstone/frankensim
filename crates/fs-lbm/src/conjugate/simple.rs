@@ -1022,14 +1022,16 @@ impl<'a> Solver<'a> {
 
     /// Effective dynamic viscosity of `cell` (molecular plus eddy).
     fn mu_eff(&self, cell: [usize; 3]) -> f64 {
-        if !self.molecular_viscosity.is_empty() {
-            return self.molecular_viscosity[cell_of(self.n, cell)];
-        }
-        if self.eddy_viscosity.is_empty() {
+        let molecular = if self.molecular_viscosity.is_empty() {
             self.mu
         } else {
+            self.molecular_viscosity[cell_of(self.n, cell)]
+        };
+        if self.eddy_viscosity.is_empty() {
+            molecular
+        } else {
             self.rho
-                .mul_add(self.eddy_viscosity[cell_of(self.n, cell)], self.mu)
+                .mul_add(self.eddy_viscosity[cell_of(self.n, cell)], molecular)
         }
     }
 
@@ -1044,12 +1046,15 @@ impl<'a> Solver<'a> {
     fn wall_mu(&self, minus: [usize; 3], plus: [usize; 3]) -> f64 {
         if !self.molecular_viscosity.is_empty() {
             let Some(a) = (0..3).find(|&a| minus[a] != plus[a]) else {
-                return self.mu_eff(minus);
+                return self.molecular_viscosity[cell_of(self.n, minus)];
             };
             let wm = self.domain.width(a, minus[a]);
             let wp = self.domain.width(a, plus[a]);
             // Parallel half-cell wall patches, weighted by their actual areas.
-            return (wm / (wm + wp)) * self.mu_eff(minus) + (wp / (wm + wp)) * self.mu_eff(plus);
+            // The resolved SGS model has no wall function: the wall remains
+            // molecular, exactly as for the constant-molecular SGS path.
+            return (wm / (wm + wp)) * self.molecular_viscosity[cell_of(self.n, minus)]
+                + (wp / (wm + wp)) * self.molecular_viscosity[cell_of(self.n, plus)];
         }
         if self.wall_ratio.is_empty() {
             return self.mu;
@@ -1090,7 +1095,9 @@ impl<'a> Solver<'a> {
         if self.symmetric_stress() {
             // One positive coefficient at the MAC shear edge, shared by
             // tau_ad and tau_da. Material jumps use harmonic transmission;
-            // smooth eddy fields retain the native arithmetic interpolation.
+            // with SGS the transmitted coefficient is the TOTAL viscosity.
+            // Without a molecular field, smooth eddy coefficients retain
+            // their native arithmetic interpolation.
             // The same area weights also handle graded cells.
             let a = (0..3).find(|&a| minus[a] != plus[a]).unwrap_or((d + 1) % 3);
             let mut weights = [(0usize, 0.0, 1.0); 4];
@@ -1298,6 +1305,8 @@ impl<'a> Solver<'a> {
     /// Refresh admitted molecular transport on the retained native time levels.
     /// Geometric Darcy resistance follows the same local viscosity; pressure
     /// preconditioning is rebuilt, while velocity, pressure and BDF history stay.
+    /// Explicit unsteady SGS remains separate and recomputes its ratio against
+    /// this local molecular field on the next native sweep.
     /// Apply before any separately supplied phase drag, whose constitutive
     /// response has its own material owner.
     pub(super) fn set_material_transport(
@@ -1309,11 +1318,10 @@ impl<'a> Solver<'a> {
         poll(gate)?;
         if dynamic_viscosity_pa_s.len() != self.domain.cell_count()
             || self.config.turbulence != Turbulence::Laminar
-            || self.has_sgs()
         {
             return Err(ChtError::InvalidInput {
                 field: "simple.dynamic_viscosity_pa_s",
-                reason: "one molecular viscosity per voxel and the laminar closure are required"
+                reason: "one molecular viscosity per voxel is required; equilibrium LVEL is unsupported"
                     .into(),
             });
         }

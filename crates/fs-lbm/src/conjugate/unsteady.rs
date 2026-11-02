@@ -655,6 +655,7 @@ pub(crate) fn march_conjugate_with_material<E: From<ChtError>>(
     setup: &ThermalSetup,
     config: &SimpleConfig,
     unsteady: &UnsteadyConfig,
+    sgs: Option<FvSgsConfig>,
     initial_temperature: &[f64],
     inlet_schedule: impl Fn(f64) -> f64,
     power_schedule: impl Fn(f64) -> f64,
@@ -677,7 +678,7 @@ pub(crate) fn march_conjugate_with_material<E: From<ChtError>>(
         setup,
         config,
         unsteady,
-        None,
+        sgs,
         None,
         None,
         Some(MaterialCoupling { fields, refresh }),
@@ -759,14 +760,13 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
     admit_unsteady(domain, config, unsteady)?;
     if material.is_some()
         && (buoyancy.is_some()
-            || sgs.is_some()
             || wall_heat.is_some()
             || config.turbulence != Turbulence::Laminar
             || !setup.eddy_conductivity_w_m_k.is_empty())
     {
         return Err(ChtError::InvalidInput {
             field: "unsteady.material",
-            reason: "material transport owns laminar buoyancy and conductivity; scalar beta, SGS and wall closures cannot be combined".into(),
+            reason: "material transport owns buoyancy and molecular conductivity; scalar beta, equilibrium LVEL and wall closures cannot be combined".into(),
         }.into());
     }
     if let Some(sgs) = sgs {

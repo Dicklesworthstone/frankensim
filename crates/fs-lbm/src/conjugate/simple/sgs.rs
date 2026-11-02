@@ -110,11 +110,6 @@ impl Solver<'_> {
         if self.config.turbulence != Turbulence::Laminar {
             return Err(refuse("SGS and equilibrium LVEL cannot be combined"));
         }
-        if !self.molecular_viscosity.is_empty() {
-            return Err(refuse(
-                "this transient SGS entry requires the declared constant molecular viscosity",
-            ));
-        }
         // Preserve ordinary laminar arithmetic, including its existing stress
         // shortcut, for the exact zero-coefficient comparison/control.
         if config.disabled() {
@@ -170,7 +165,6 @@ impl Solver<'_> {
                 }
                 state.velocity[cell] = self.cell_velocity(cell);
             }
-            let nu = self.mu / self.rho;
             for cell in 0..self.domain.cell_count() {
                 if cell % 64 == 0 {
                     poll(gate)?;
@@ -179,6 +173,11 @@ impl Solver<'_> {
                     self.eddy_viscosity[cell] = 0.0;
                     continue;
                 }
+                // Source refresh changes molecular transport, never the SGS
+                // state itself. Re-evaluate this cap with the actual local
+                // molecular coefficient on every nonlinear sweep.
+                let molecular = self.molecular_viscosity.get(cell).copied().unwrap_or(self.mu);
+                let nu = molecular / self.rho;
                 let gradient = self.sgs_gradient(cell, &state.velocity);
                 let eddy = match state.config.model {
                     SgsModel::Vreman { cv } => vreman_eddy_viscosity(
@@ -195,6 +194,9 @@ impl Solver<'_> {
                         "cell {cell}: eddy/molecular ratio {ratio} exceeds {}",
                         state.config.maximum_eddy_to_molecular
                     )));
+                }
+                if !self.rho.mul_add(eddy, molecular).is_finite() {
+                    return Err(refuse(format!("cell {cell}: effective dynamic viscosity is not representable")));
                 }
                 self.eddy_viscosity[cell] = eddy;
             }
