@@ -3,6 +3,8 @@
 mod common;
 #[path = "native_mindlin/driven.rs"]
 mod driven;
+#[path = "native_mindlin/wear.rs"]
+mod wear;
 
 use fs_contact::interface_binding::mindlin::loading::{
     SourceHertzMindlinContact, SourceHertzMindlinState,

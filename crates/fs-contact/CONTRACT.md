@@ -1865,3 +1865,16 @@ Eight new G1/G3/G4 source groups verify exact native-path preservation, original
 nonlinear pressure means, fixed-load reduction, compliant recoil, unload/lift-off
 fretting, two independent A/B inventories, source/rate refusal, second-surface
 overflow and last-poll cancellation with complete rollback and identical retry.
+
+## Source wear inventories on an already resolved native trajectory
+
+`SourceHertzMindlinWear::advance_volume_candidates` exposes the existing ordered
+Archard accumulation without another contact solve or history transfer. It
+requires the original accepted contact and selected k/H identities and a
+mechanical owner's admitted pressure-weighted local-sliding integral. It returns
+both volume candidates together; the mechanical owner must accept them with
+the same complete contact/body candidate. This is a volume-only operation and
+does not certify caller-supplied motion, alter native work or add a heat sink.
+The native Hertz--Mindlin consumer exercises actual changing-normal recoil,
+external drive, frictionless Hertz averaging, selected-role refusal and late
+second-surface overflow without partial publication.

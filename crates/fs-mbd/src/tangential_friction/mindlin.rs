@@ -36,6 +36,9 @@ mod driven;
 pub mod multiple;
 #[path = "mindlin/normal.rs"]
 mod normal;
+/// Original-source fretting volumes on this same native normal/shear trajectory.
+#[path = "mindlin/wear.rs"]
+pub mod wear;
 
 use driven::HeldDrive;
 use normal::solve_normal;

@@ -3573,3 +3573,26 @@ three-body/two-contact load line with independent mass/inertia algebra, classica
 virgin and reversal Mindlin work, retained partial/gross/reversal histories,
 products of inertia, common acceleration and world/local frame covariance,
 canonical contact/global body indexing, and physical recoil/transactional refusal.
+
+## Native Hertz--Mindlin dynamics with two-surface fretting wear
+
+`mindlin::wear::advance_rigid_mindlin_wear` and its driven counterpart compose
+the original native changing-normal/shear phase with source-bound Archard
+inventories. Actual masses, full inertia, contact arms and held external wrenches
+determine both trajectories once. Positive mu uses that phase's physical shear
+dissipation divided by mu; explicit zero friction uses the original sourced
+Hertz mean normal force times actual accepted shear travel. No endpoint load,
+offered motion or reversible normal work substitutes for local sliding.
+
+Original body candidates, retained normal/shear history, normal potential,
+shear storage/heat, external work and both cumulative wear volumes return
+together. A late wear refusal or cancellation publishes none of them. No new
+constitutive solve, source refresh, history copy, mesh or heat partition is
+introduced. The existing central, scalar, affine-path and compressed-contact
+limits remain; volumes diagnose small removal without changing geometry,
+mass, material conditions or the native dissipative work port.
+
+Three G1/G3/G4 groups verify exact unchanged native mechanics through elastic
+release and driven loading/reversal, separate ordered k/H inventories, the
+nonlinear frictionless normal trajectory, original selected-role identity,
+overflow after successful mechanics, zero-drive equality and final cancellation.

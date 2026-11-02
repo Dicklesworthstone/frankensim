@@ -95,6 +95,31 @@ impl SourceHertzMindlinWear {
         })
     }
 
+    /// Propose both original wear volumes from a mechanical owner's path integral.
+    ///
+    /// This volume-only leaf performs no contact solve, history transfer or
+    /// acceptance. The caller owns `integral p*abs(ds) dA` [N m] for the same
+    /// admitted affine Hertz/shear phase and must accept these inventories with
+    /// that phase's complete native candidate. An endpoint load multiplied by
+    /// offered motion is not this integral. Both original k/H roles and the
+    /// accepted contact identity are checked; either surface's refusal leaves
+    /// the entire borrowed checkpoint unchanged.
+    pub fn advance_volume_candidates(
+        &self,
+        state: &SourceHertzMindlinWearState,
+        pressure_weighted_sliding_j: f64,
+    ) -> Result<([WearState; 2], [WearAdvance; 2]), SourceFrettingError> {
+        if state.owner != self.wear.owner
+            || !self.contact.stored_energy_j(&state.contact).is_finite()
+        {
+            return Err(invalid(
+                "native fretting requires original contact history and ordered k/H claims",
+            ));
+        }
+        self.wear
+            .advance_volumes(state.volumes, pressure_weighted_sliding_j)
+    }
+
     /// Advance one affine indentation/solved-shear path and both wear inventories.
     ///
     /// The original source path resolves normal pressure and compliant shear
