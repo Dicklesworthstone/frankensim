@@ -136,7 +136,7 @@
    "title": "The f-holes' conductance, computed from the CT scan",
    "decided": "Quote the computed number for A0; never adjust it toward a target band.",
    "why": "A boundary-element solve of the scanned f-holes in a baffle gives 45.29 mm for the pair: 0.930 of the ellipse-neck value in the body table, not the +33 % the A0 band would need. Each hole alone is within 2 % of its equivalent ellipse; together they carry 0.918 of the sum.",
-   "effect": "Rigid A0 moves about -3.6 %. The closed-cavity side is the next solve.",
+   "effect": "Rigid A0 moves about -3.6 %. The closed-cavity side is the next solve. It was later found to have been computed on f-holes missing their hooks and eyes; see the 1 November finding.",
    "refs": [
     "b224d16a6"
    ]
@@ -373,7 +373,7 @@
    "title": "The clarinet's open holes all lose energy by one measured orifice law, and F5 and G5 now overblow",
    "decided": "The clarinet's 21 fingerings were rendered again at commit e60c12cf3, with a music_render built there and no local changes. Two changes since the last renders (ruling 8058, commit bad91f2ec). First, the bore's linear tone-hole model no longer carries a vortex resistance worked out in advance for an assumed playing level; that model is now strictly linear, with only the air's viscous and thermal losses and radiation. Second, every open hole sheds energy through one time-domain law: the pressure drop of flow through a sharp-edged orifice, with the contraction coefficient 0.61 that Atig, Dalmont, Gilbert and Picart measured (2004). No hole is singled out. Commit e60c12cf3 adds a method the landing left out; origin did not build between the two. All 21 renders are identical to the byte to the ones the lane graded before landing. Graded by the committed grader (commit c263e2af0); the earlier gradings stay in each note's history.",
    "why": "A resistance computed for one assumed amplitude is a fitted constant in disguise: it cannot follow the real flow through the hole as the note grows and decays. The orifice law is measured and acts on the actual flow, sample by sample.",
-   "effect": "Seventeen notes are graded. On those, the measures inside the spread between real recordings rose from 115 to 121: eight notes improved, four lost one measure and five held. Four notes are refused. F5 and G5 now speak at the clarinet's third resonance, 1160 and 1257 Hz, instead of the second, so the grader does not hear the named note. The old fixed resistance had damped that third resonance enough to suppress it. D5 and A5 sound at their pitch, but they take 70 and 50 ms to settle into the upper register, and the grader cannot align their onsets with the recordings'. The open question is what physical loss above 1 kHz the bore and reed lack. The candidates are the tone-hole lattice above its cutoff, the pads close over their holes, the reed's own damping, and viscous and thermal loss in the holes' chimneys. The lane predicts first, then renders.",
+   "effect": "Seventeen notes are graded. On those, the measures inside the spread between real recordings rose from 115 to 121: eight notes improved, four lost one measure and five held. Four notes are refused. F5 and G5 now speak at the clarinet's third resonance, 1160 and 1257 Hz, instead of the second, so the grader does not hear the named note. The old fixed resistance had damped that third resonance enough to suppress it. D5 and A5 sound at their pitch, but they take 70 and 50 ms to settle into the upper register, and the grader could not then align their onsets with the recordings' (a later grader does, and grades both: see the entry on where each sound starts, read to the sample). The open question is what physical loss above 1 kHz the bore and reed lack. The candidates are the tone-hole lattice above its cutoff, the pads close over their holes, the reed's own damping, and viscous and thermal loss in the holes' chimneys. The lane predicts first, then renders.",
    "refs": [
     "bad91f2ec",
     "e60c12cf3",
@@ -417,6 +417,124 @@
     "f1629dacc",
     "1718d79fb",
     "frankensim-irp-v5-instrument-realism-pexfp.135"
+   ]
+  },
+  {
+   "date": "2026-11-01",
+   "kind": "owner",
+   "title": "Re-render wherever the compiled code changed",
+   "decided": "\"Update the website for the instrument tests with ALL the new updates and information and re-render the simulated audio files where the new compiled code has changed.\" The published renders were made again with the engine at b0512b614 and compared with the live files sample by sample; the exceptions are named below.",
+   "why": "A render made by an older engine only shows what that engine could do. The site has to show what the current code produces, or say plainly which renders are older.",
+   "effect": "Byte-identical: clarinet (38 files), voice (20), recorder (10), tin whistle notes (4) and phrases (4), trumpet and trombone notes (9), guitar (6), piano (3) and six drum-kit pieces. Identical within rounding: piano C6 (one step in the last bit), crash and ride (float32 rounding) and the Db5 xylophone bar (65 of 288,000 samples differ, by at most 3.2e-15 of the peak). Changed and republished: pan pipes (4 notes) and flute (2 notes), six phrases (among them the trumpet phrase, now on its current cards), and the closed hi-hat. Its first 16 samples changed with the recording-boundary fix of 796937164, which keeps the output filter's history across the cut that removes the settling time. After that the two runs differ only at the level of floating-point rounding, 164 dB below the signal at 5 ms, and the closed pair's rim contact amplifies that to 14 dB below it by 20 ms; over the whole file the difference is 15.6 dB below the signal. Its level and spectrum are unchanged: within 0.01 dB overall and within 0.02 dB in each band from 0 to 16 kHz (split at 0.5, 1, 2, 4 and 8 kHz), with the same peak. So after its first 15 ms the closed hat's waveform depends on rounding and is not reproducible from one build to the next, while its level and spectrum are. Not re-rendered: the kit roll, which uses an older modal engine (619c72c97). Violin: the four open notes were rendered again at dda01dcbd, after the pin, so that they carry the stick rule of f8ae88277; they grade 36 of 58 against 39 for the notes they replace, and the lower grade is published as measured. The violin melody, double-stop and scale phrases were then rendered again note by note at dda01dcbd (render_phrases.sh, recipe d562160d8). The scale came last. At the render's 1 Pa full scale its C4 clipped (16,970 of 136,800 samples), so that note was rendered again alone with an 8 Pa full scale. Where the first render had not clipped, the two agree to within 4 of its 16-bit steps. The timpani note took about 13 hours on one core and is byte-identical to the live file, so the site keeps it.",
+   "refs": [
+    "pin b0512b614",
+    "site deploys 107-111",
+    "kit source.json binary_note",
+    "violin abba2c424",
+    "violin phrases d562160d8, site deploys 113 and 114"
+   ]
+  },
+  {
+   "date": "2026-11-01",
+   "kind": "finding",
+   "title": "The violin's body against published violins: its air mode is low, and its 522 Hz mode rings too long",
+   "decided": "Publish where the body sits against measured violins; never tune the body toward them.",
+   "why": "Read from the assembled violin's own bridge response (a diagnostic variant of the rendered card, with the strings open and without the residual-flexibility line). The air mode A0 is at 240.6 Hz. Bissinger's 17 violins (JASA 124, 2008) average 275 Hz with a standard deviation of 9 Hz, so the model is 3.8 standard deviations low and under his lowest violin. A strong mode at 522.3 Hz is inside his B1+ range (541 Hz, standard deviation 22 Hz), but its bandwidth is 6.4 Hz (Q 82) against Jansson's 14 Hz (standard deviation 3 Hz), and its peak bridge mobility is about 15 dB above the highest 400 to 600 Hz peaks in Woodhouse's measurements (Rep. Prog. Phys. 77, 2014). The body model leaves out the neck, the blocks and the linings.",
+   "effect": "The scale's C4 sounds at its octave. Its second harmonic, 523.5 Hz, falls 1.2 Hz from that mode, inside half its bandwidth: the expected lift of the second harmonic over the first is 28.6 dB, and the render reads 28.5 dB. This is a fault of the body model, not of the bow, and it stays audible until the body is fixed.",
+   "refs": [
+    "pexfp.377",
+    "Bissinger 2008",
+    "Jansson ch. VII",
+    "Woodhouse 2014"
+   ]
+  },
+  {
+   "date": "2026-11-01",
+   "kind": "finding",
+   "title": "The violin's f-holes are missing their hooks and eyes",
+   "decided": "Cut the f-holes again from the scan, solve their conductance again and render the violin again, then quote whatever air mode that gives.",
+   "why": "The table the body's f-holes were cut from, built from the il Cannone CT scan, closed the narrow necks between each stem and its hooks and then dropped the cut-off pieces. One hole lost its upper hook and eye, and the other lost both. The table's openings are 409.0 and 312.8 square millimetres; measured through the scanned plate at 0.1 mm they are 530.8 and 496.9, which is 30 % and 59 % larger.",
+   "effect": "Every violin render on this site used the truncated holes, and so did the 23 October conductance finding (45.29 mm for the pair). The larger openings raise the conductance; the new air mode is not predicted until the new boundary-element solve has run. The violin renders stay up, with this entry as their label, until they are rendered again.",
+   "refs": [
+    "pexfp.366",
+    "b224d16a6"
+   ]
+  },
+  {
+   "date": "2026-11-01",
+   "kind": "ruling",
+   "title": "The viola, cello and double bass bow forces are chosen again, by one rule, on the friction law their cards use",
+   "decided": "Each open-string card's bow force is the geometric mean of the two ends of the longest run of playable Helmholtz motion in a sweep of that card, and the force is used exactly as the rule gives it.",
+   "why": "The forces had been chosen on a sweep run under the earlier Gaussian friction law, while the cards now select the hyperbolic law. Each card was swept again at 01c5841f4 under the law it uses, and the sweep is committed beside the family (data/instruments/grades/<family>/bowed-card-sweep-hyperbolic-01c5841f4.jsonl). A point counts when the sweep finds it playable and the slip takes up a share of each period within 25 % of the bow's relative position along the string, as Helmholtz motion requires. Where two runs are equally long, the one nearer the old force wins. The sweep uses a rigid end and a 1 s speed ramp, so it stands in for the render; it does not reproduce it.",
+   "effect": "11 of the 12 forces moved; the viola D4 kept its force and its render is unchanged byte for byte. The 12 notes were rendered and graded again at 01c5841f4. Measures inside the real spread, of the 14 per note that have a spread of recordings: viola C3, G3 and D4 15 to 13 (C3 5 to 4, G3 8 to 7), cello 43 to 42 (C2 9 to 8), double bass 21 to 24 (A1 5 to 8). The grader now refuses the viola A4: its onset check finds 2.00 ms between the render and the recording, against a 1.5 ms limit. That check reads the onset on a 1 ms grid, and moving the same render by a fraction of a millisecond turns the refusal on and off (13 of 48 shifts refuse, for the old A4 render as well as the new one), so the refusal says nothing about the sound. The render is not shifted to pass it; the fix belongs in the grader (the grader was fixed afterwards, and grades the A4: see the entry on where each sound starts, read to the sample). The bass E1 has only one such point in its sweep (11.4653 N): 0.04 % more force and it turns raucous, and even there its string slips 1.375 times per period on average rather than once. The nine viola, cello and double bass phrases were rendered again with these forces on the same build. Each cello and double bass string sets the bow down with a share of its force, and those shares had been chosen by a sweep at the earlier forces (they were swept again afterwards: see the next entry). Some notes now take longer to speak and some less: in the cello scale the descending F2 on the C string no longer settles within its 0.5 s (it took 40 ms, the recording 30 ms) while both D2s on the same string settle in 140 ms (they did not settle before); in the double bass scale both B1s and the descending C2 and A1 no longer settle (they took 140 to 220 ms) while the rising D2 settles at once (it did not settle before). In the scales the pitch reader still finds the cello D2 an octave high and the double bass A1 and B1 far from their notes (278 and 289 Hz); it no longer finds the cello E2 and F2, the double bass G1 or the cello melody's D3 an octave or more away.",
+   "refs": [
+    "24866e58f",
+    "PinkLantern 13188, 13228, 13296",
+    "PinkLantern 13324, 13325 (viola A4 onset)",
+    "phrases rendered again at 01c5841f4 (deploy 119)"
+   ]
+  },
+  {
+   "date": "2026-11-01",
+   "kind": "ruling",
+   "title": "The share of its force a cello or double bass string sets the bow down with is swept again at the new forces",
+   "decided": "Each string whose phrase notes set the bow down with a share of the note's force takes the share that, in a sweep at the forces its card now carries, gets that string's scale notes speaking soonest in total. A share is left out where a note sounds its octave or settles more than 1.5 times brighter than it does at most shares. The rule was fixed before the sweep ran.",
+   "why": "The shares had been swept at the earlier forces, and the new forces doubled the double bass A string's (9.0 to 18.2 N) and cut the cello C string's (7.8 to 4.75 N). Each share from 0.02 to 1 was swept again at 01c5841f4 on the phrase cards of the notes each string plays, 96 renders, by the measure the shares were first chosen with: the time until five 60 ms windows in a row repeat at the string's period. That measure is read from the sound, which cannot tell Helmholtz motion from a steady multiple slip.",
+   "effect": "The double bass A string now sets the bow down at 0.2 of its force instead of 0.1; the bass E string keeps 0.2. For the cello C and G strings the rule finds no share: their stopped D2 and C3 sound their octave at nearly every share (D2 settles brighter at the one share where it does not), so the regime belongs to those notes rather than to the set-down, and the two strings keep 0.1 and 0.7. In the double bass scale, the six notes on the A string now take 1.41 s in total to settle rather than 2.54 s: both B1s settle in 50 ms and the descending A1 in 270 ms, where none of the three settled within its 0.5 s before, while the rising A1 and the descending C2 still do not settle. The rising D2 that follows the A string now takes 340 ms where it settled at once (the recording takes 290 ms). The pitch reader now finds both C2s 36 cents sharp, where they read within 1 cent, and still finds the A1 and B1 far from their notes (282 and 145 Hz).",
+   "refs": [
+    "73236c62b",
+    "setdown119: 96 renders at 01c5841f4",
+    "double bass scale rendered again (deploy 120)"
+   ]
+  },
+  {
+   "date": "2026-11-01",
+   "kind": "method",
+   "title": "The grader reads where each sound starts to the sample, and cuts both clips there",
+   "decided": "The grader finds the moment a sound starts to the sample, over its whole level envelope, and cuts the render and the recording there, the same preroll before each. Its check that the two start together compares those onsets. Every pair on this site was graded again with it: the 85 render pairs, the 4 piano pairs and the 55 recordings shown without a render.",
+   "why": "The grader read the onset on a 1 ms grid and cut on that grid, so where a sound started inside its clip carried up to 1 ms of chance. Moving the same render by a fraction of a millisecond turned the viola A4's refusal on and off (13 of 48 shifts). The new grader gives the same answer at all 48 shifts for the viola A4 and the clarinet D5. Its tests plant delays between two aligned clips: 1 ms passes and 1.7 and 2.5 ms are refused, at every one of the 48 shifts. Graded again with the old grader, every stored measure of every pair comes back the same (123 of 123), so each change below is the new grader's.",
+   "effect": "The viola A4, the clarinet D5 and A5 and the trombone Bb3 are now graded rather than refused: their onsets are 0.35, 0.02, 0.02 and 0.02 ms apart. They fall inside the recordings' own spread on 4, 4, 7 and 6 measures and outside it on 10, 10, 8 and 8. The clarinet F5 and G5 and the flute A5 are still refused, because they do not sound the named note; so is the horn Db2, whose recording is too quiet to grade (graded again later, it is still refused: see the entry on reading a render only on the band it is valid in). Every clip on the site moves by less than 2 ms and is the same sound. Five graded notes move one measure inside the spread: the double bass E1's spectral flux, the guitar E2's harmonics-to-noise, the trombone C3's cepstral envelope (the spread it is read against grew from 6.9 to 10.7 dB), the violin A4's odd/even balance (9.6 to 10.5 dB) and the piano A3 mf's decay rate, because the neighbouring Ab3 recording, which the old grader left out, now joins its spread at 1.85 dB/s. The trombone Bb2 moves two measures out (8 inside and 6 outside becomes 6 and 8): its spectrogram difference now exceeds its spread by 0.1 dB, and its cepstral envelope gap goes from 7.0 to 15.3 dB. Cut at six points within a millisecond of each other, the old grader put that gap at 7.0, 9.3, 3.4, 4.3, 4.9 and 5.8 dB; the new grader puts it at 15.3 dB at every one, outside that range. So the cepstral envelope depends by several dB on where the cut starts, and the new grader makes it reproducible without making it trustworthy (the cause was found afterwards: the measure read the near-silence above the band the trombone render is valid in, and the trombone C3's new inside went with it: see the entry on reading a render only on the band it is valid in). The same measure moved the spread of recordings most, by 8.7 dB for the trombone F3's pp recording against its mf.",
+   "refs": [
+    "dbd95a3e2",
+    "the 144 pairs on this site graded again with dbd95a3e2 (deploy 121)"
+   ]
+  },
+  {
+   "date": "2026-11-02",
+   "kind": "method",
+   "title": "The grader reads a render that is valid only below a band on that band, and the recordings with it",
+   "decided": "The trombone renders are valid only below 3.9 kHz and the trumpet renders only below 6.9 kHz. The grader now analyses such a render, and every recording it is measured against, as the sound with everything above that band removed, and it compares cepstral envelopes only at the frequencies below the band. Nothing changes for a render without a band. Every pair on this site was graded again with it: the 85 render pairs, the 4 piano pairs, the 55 recordings shown without a render and the horn Db2.",
+   "why": "Both clips were already low-passed at the band, but what was left above it, 47 to 119 dB under the sound and different in every clip, still moved six measures. Made 20 dB louder, it moved the cepstral envelope by up to 4.4 dB, the spectrogram difference by up to 2.3 dB and the attack, wavelet, centroid and flux measures by 0.3 to 0.9. It is also why the cepstral envelope depended on where the cut starts. With the band removed, the same test moves no measure at all, and in the grader's tests the cepstral gap is the same, to 0.05 dB, at eight cut points. Graded again, the 135 pairs without a band come back the same in every measure, so each change below is the band's.",
+   "effect": "Only the nine pairs with a band change: five trombone notes and four trumpet notes. Four trombone verdicts move. The Bb2 goes from 6 measures inside the recordings' spread and 8 outside to 8 and 6: its cepstral envelope gap falls from 15.3 to 3.9 dB, inside a spread of 8.1, and its spectrogram difference, which exceeded its spread by 0.1 dB, falls by 0.5 dB to sit 0.4 dB inside it, a narrow margin. The C3, F3 and Gb3 each lose one measure inside (8/7 to 7/8, 5/9 to 4/10, 6/8 to 5/9): their cepstral envelopes were counted inside only because the near-silence widened the spread they are read against. The F3's spread falls from 20.2 to 7.3 dB, where its 11.1 dB gap is outside; the Gb3's falls from 18.6 to 8.6 dB against a gap of 9.9; the C3's falls from 10.7 to 7.3 dB, and its 7.5 dB gap is outside by 0.2 dB, another narrow margin. The trombone B3 and the trumpet Bb3, Bb4, D5 and F4 keep their counts: the trumpet's four cepstral gaps fall by 6.7 to 8.2 dB and stay outside, and the B3's rises by 1.4 dB. The horn Db2, graded again, is still refused because its recording is too quiet.",
+   "refs": [
+    "2ddc9a1d6",
+    "the 145 pairs on this site graded again with 2ddc9a1d6 (deploy 122)"
+   ]
+  },
+  {
+   "date": "2026-11-02",
+   "kind": "ruling",
+   "title": "Each drum is heard at the overhead as one closed body",
+   "decided": "The kick, snare, snare-off, tom-12 and tom-14 are each heard at the overhead as one closed body: both heads and a rigid shell, with the floor an image plane. The body is baked by closed-surface BEM below each drum's crossover f_x: kick 532 Hz, snare and snare-off 1066 Hz, tom-12 1019 Hz, tom-14 689 Hz. Above f_x the render is the old baffled path, unchanged; refresh-2 measured 0.00 dB above f_x on all five drums. To render a drum this way: kit PIECE OUT.wav --observer crates/fs-vkplate/data/closed-body/<piece>.tsv. Without --observer a render is byte-identical to before: at 9f31722cd the five drums rendered without a table equal refresh-1's renders byte for byte, and the crash, ride and both hats, which have no table, are byte-identical too (refresh-2, ts2). This replaces the overhead of 2026-10-27, which heard the kick's batter head only. The kick, snare, snare-off and both toms were rendered again at 9f31722cd, from origin with no local changes, and the groove was mixed again from them.",
+   "why": "A drum sounds from both heads and its shell at once, over the floor. An overhead that hears the batter head alone misses the other head and the cancellation of the two heads moving together, so it overstated each drum's lowest line. The tables come from fs-bem's closed-surface solver on each drum's own geometry, and the predictions were written before any render.",
+   "effect": "Kick: the route moves the kick's lowest line further from the recording. The recording has 42.5 Hz at 0 dB and 127.4 Hz at −13.5 dB. Before the observer, the kick's strongest line was its 42.6 Hz together line. With the observer, the strongest line is 120.8 Hz and the 42.6 Hz line sits 16.2 dB under it (whole-file peak bins). This is the bead's own caveat (the vent, pillow, resonant-head detune and reference microphone are missing). It is physics, not a fit. It is not a failure of the route. Predictions were written before any render and scored by a method stamped before any re-render. 5 of 8 primary lines are within ±2 dB. The misses: kick together −18.9 dB against −21.1, kick breathing −3.7 against +0.1, tom-14 breathing −4.5 against −0.8. On this site's comparison the octave-balance gap to the recording moves from 9.8 to 12.7 dB on the kick, 7.4 to 4.8 on the snare, 15.0 to 12.1 on the snare without wires, 4.4 to 2.5 on the 12-inch tom and 8.6 to 9.1 on the 14-inch tom. In the first 250 ms the kick's strongest line is now 115.2 Hz, was 47.6, against the recording's 44.5; the snare's is 184.8 Hz, was 111, against 235.5. The crash, ride and both hi-hats have no table and are unchanged.",
+   "refs": [
+    "9f31722cd",
+    "frankensim-irp-v5-instrument-realism-pexfp.378",
+    "replaces the ruling of 2026-10-27 on the kick's overhead"
+   ]
+  },
+  {
+   "date": "2026-11-02",
+   "kind": "method",
+   "title": "A recording's noise floor no longer depends on which note asked for it first",
+   "decided": "The grader computes each recording's noise floor once per file and band and keeps it. The floor depends on the note through one number, the high-pass corner, the lower of 50 Hz and half the note's pitch, but it was kept under the file and band alone, so a note below 100 Hz could be read against a floor computed for another note. It is now kept under the corner too. Every pair on this site was graded again with it: the 85 render pairs, the 4 piano pairs, the 55 recordings shown without a render and the horn Db2.",
+   "why": "A measure must not depend on the order in which the grader reads the notes.",
+   "effect": "Three pairs change and no verdict moves. The tuba B2 recording is now cut 2 samples differently; of its measures the largest change is its spectral centroid, 515.01 to 514.96, and its spreads move by at most 0.005. The tuba Bb2 and the double bass G2 change only in spreads read from other recordings, by at most 0.005. Four graded pairs, the trombone Bb3, viola A4 and clarinet D5 and A5, had kept a placeholder where their render's observer is named, from a pass in which their grading had been refused; they now name their family's render script and observer, as the other notes rendered with them do.",
+   "refs": [
+    "e34e7618f",
+    "frankensim-tgc2z",
+    "the 145 pairs on this site graded again with e34e7618f (deploy 123)"
    ]
   }
  ]

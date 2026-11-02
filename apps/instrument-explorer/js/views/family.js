@@ -317,7 +317,9 @@ function provenance(p) {
     if (p.real.credit) rows.push(['Credit', [p.real.credit, p.real.licence ? ` · ${p.real.licence}` : '']]);
   }
   if (p.f0_hz) {
-    rows.push(['Fundamental', [Number.isFinite(p.f0_hz.ours) ? `simulation ${fmt.num(p.f0_hz.ours, 2)} Hz` : null,
+    // a kit piece's figure is kitgrade's strongest component 30-1200 Hz in the first 250 ms, not a pitch: a drum heard as
+    // one closed body can put its lowest line well under a higher one (the kick's 47 Hz line sits 17 dB under 115 Hz)
+    rows.push([p.compare ? 'Strongest line, first 250 ms' : 'Fundamental', [Number.isFinite(p.f0_hz.ours) ? `simulation ${fmt.num(p.f0_hz.ours, 2)} Hz` : null,
       Number.isFinite(p.f0_hz.real) ? `recording ${fmt.num(p.f0_hz.real, 2)} Hz` : null].filter(Boolean).join(' · ') || '–']);
   }
   if (p.level_match) rows.push(['Loudness', p.level_match]);

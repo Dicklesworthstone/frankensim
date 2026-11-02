@@ -75,7 +75,8 @@ FAMILIES = [
     ("marimba", "Marimba", "Mallets", ["irp-bars"], ["bar"], ["marimba"]),
     ("vibraphone", "Vibraphone", "Mallets", ["irp-vibraphone"], ["bar"], ["vibraphone"]),
     ("timpani", "Timpani", "Drums", [], [], ["timpani", "kettle ?drum"]),
-    ("kit", "Drum kit", "Drums", [], [], ["drum", "kit", "snare", "cymbals?", "kick", "toms?"]),
+    # "tom" is case-sensitive: the capitalised "Tom" in titles is the voice source Tom et al. 1999, not a drum
+    ("kit", "Drum kit", "Drums", [], [], ["drum", "kit", "snare", "cymbals?", "kick", "(?-i:toms?)"]),
     ("snare", "Snare drum", "Drums", [], [], ["snare"]),
     ("voice", "Voice", "Voice", ["irp-voice"], ["voice-glottis", "voice-tract"], ["voice", "vowels?", "glott\\w*", "vocal tract"]),
 ]
@@ -877,7 +878,10 @@ def main() -> int:
     for wav in sorted(va.glob("*.wav")) if va.is_dir() else []:
         extras["violin"].append({"id": wav.stem, "title": "Assembled violin, G3 (2 s)", "audio": media.audio(wav, f"audio/extra/violin/{wav.stem}"),
                                  "date": stamp_of(wav), "era": "Speed-lane render (.358) of the assembled instrument: strings, il Cannone body "
-                                                               "and enclosed air; not graded"})
+                                                               "and enclosed air; not graded. It sounds at 197.7 Hz. Rendered again at "
+                                                               "546225d42, the same note leaves the string after about 0.5 s for a body "
+                                                               "oscillation near 560 Hz and sounds at 535 Hz, so this clip has not been "
+                                                               "replaced while that is found (frankensim-zehpq)"})
     fl = mirror / "renders" / "flute-exterior"
     if fl.is_dir():
         for wav in sorted(fl.glob("*/*.wav")):
