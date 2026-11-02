@@ -557,8 +557,11 @@ impl NormalPatchRequest {
         let tangent = checked(core::f64::consts::PI * modulus / log, "cylinder_tangent")?;
         let p0 = checked(2.0 * q / (core::f64::consts::PI * a), "cylinder_pressure")?;
         let ratios = self.ratios(a, radius, approach, p0)?;
+        // a ~ sqrt(q), so d(approach)/dq = log(4R/a)/(pi E*).
+        // Recoverable storage is integral q d(approach), not the complementary
+        // energy integral approach dq (whose constant would be 3/4).
         let energy = checked(
-            q * q * (log + 0.75) / (2.0 * core::f64::consts::PI * modulus),
+            q * q * (log + 0.25) / (2.0 * core::f64::consts::PI * modulus),
             "cylinder_energy",
         )?;
         self.line_receipt(

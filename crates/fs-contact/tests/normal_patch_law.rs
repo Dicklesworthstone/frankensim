@@ -222,7 +222,7 @@ fn np_002_cylinder_reconstructs_line_resultant_and_scale() {
     assert!((r.pressure.second_moment_m2 - a * a / 4.0).abs() < 1e-18);
     let log = (4.0 * 0.02 / a).ln();
     let expected_approach = 100.0 * (log + 0.5) / (core::f64::consts::PI * 2.0e9);
-    let expected_energy = 100.0_f64.powi(2) * (log + 0.75) / (2.0 * core::f64::consts::PI * 2.0e9);
+    let expected_energy = 100.0_f64.powi(2) * (log + 0.25) / (2.0 * core::f64::consts::PI * 2.0e9);
     assert!((r.approach_m - expected_approach).abs() <= expected_approach * 1e-12);
     assert!((r.reversible_energy_j_per_m - expected_energy).abs() <= expected_energy * 1e-12);
     assert_eq!(r.units, LINE_SI_UNITS);
@@ -242,6 +242,56 @@ fn np_002_cylinder_reconstructs_line_resultant_and_scale() {
     };
     scaled.line_load_n_per_m = 200.0;
     assert!((line(scaled.evaluate().unwrap()).unwrap().patch_half_width_m / a - 2.0).abs() < 1e-12);
+}
+
+/// G1: recoverable line-contact energy generates the force and equals physical
+/// loading work. Integrate q d(delta) independently from the public approaches;
+/// copying the closed-form energy expression would miss a complementary-energy bug.
+#[test]
+fn np_cylinder_storage_generates_line_load_and_recovers_loading_work() {
+    let mut req = request(NormalPatchLaw::HertzCylinderPlane {
+        effective_radius_m: 0.02,
+        reduced_modulus_pa: 2.0e9,
+    });
+    req.indentation_rate_m_per_s = 0.0;
+    let evaluate = |load| {
+        let mut sample = req.clone();
+        sample.line_load_n_per_m = load;
+        line(sample.evaluate().unwrap()).unwrap()
+    };
+    for q in [1.0, 100.0, 10_000.0] {
+        let h = q * 1e-4;
+        let minus = evaluate(q - h);
+        let plus = evaluate(q + h);
+        let energy_gradient = (plus.reversible_energy_j_per_m - minus.reversible_energy_j_per_m)
+            / (plus.approach_m - minus.approach_m);
+        assert!((energy_gradient / q - 1.0).abs() < 1e-8);
+
+        let start_load = 0.25 * q;
+        let start = evaluate(start_load);
+        let end = evaluate(q);
+        let stored = end.reversible_energy_j_per_m - start.reversible_energy_j_per_m;
+        let work = |steps| {
+            let mut previous = start.clone();
+            let mut sum = 0.0;
+            for i in 1..=steps {
+                let current = evaluate(start_load + (q - start_load) * i as f64 / steps as f64);
+                sum += 0.5
+                    * (previous.normal_line_load_n_per_m + current.normal_line_load_n_per_m)
+                    * (current.approach_m - previous.approach_m);
+                previous = current;
+            }
+            sum
+        };
+        let coarse_error = (work(32) - stored).abs();
+        let medium_error = (work(64) - stored).abs();
+        let fine_error = (work(128) - stored).abs();
+        assert!(medium_error < 0.3 * coarse_error);
+        assert!(fine_error < 0.3 * medium_error);
+        assert!(fine_error < 1e-6 * stored);
+        assert_eq!(end.irreversible_work_j_per_m, 0.0);
+        assert_eq!(end.dissipated_power_w_per_m, 0.0);
+    }
 }
 
 #[test]

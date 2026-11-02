@@ -252,6 +252,16 @@ nonadhesion applicability ratios. `ConstraintBarrierReceipt` is deliberately a
 different type with no force, patch, or energy fields, so IPC/barrier output
 cannot masquerade as physical compliance.
 
+The cylinder rung's existing logarithmic approach law uses
+`delta(q) = q (ln(4R/a(q)) + 1/2) / (pi E*)`, with `a(q)` proportional to
+`sqrt(q)`. Its recoverable energy per unit length is the physical loading work
+`integral q d(delta) = q^2 (ln(4R/a(q)) + 1/4) / (2 pi E*)`; complementary
+energy `integral delta dq` is not stored elastic energy. The public receipt
+therefore satisfies `dU/d(delta) = q` on its admitted branch. Focused G1 checks
+differentiate receipt storage and refine independent force/approach work
+quadrature across four decades of line load. This does not extend the declared
+half-space, curvature or small-strain applicability of the approach law.
+
 ### Source-backed Hertz--Mindlin tangential contact
 
 `interface_binding::mindlin::SourceMindlinContact` implements the shared
