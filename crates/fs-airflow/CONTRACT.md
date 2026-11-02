@@ -108,6 +108,11 @@ large-reference-enthalpy regression covers hydraulic, wall-heating and
 wall-cooling refusal while the same increments remain valid at an ordinary datum.
 The hydraulic source shift also refuses a nonzero driving-temperature increment
 that underflows or disappears on addition, before it can bypass that caloric guard.
+The shared marcher also checks the accepted caloric temperature against the
+original exponential's inlet/driving-temperature interval, allowing temperature
+interpolation roundoff only. A nonzero enthalpy increment that rounds past the
+wall therefore refuses instead of publishing an impossible heating or cooling
+endpoint with a self-consistent but physically wrong Robin heat report.
 
 `LiquidHeatPath::march_with_dissipation` closes regional outlet temperature,
 convection coefficient and hydraulic power together. The original liquid law

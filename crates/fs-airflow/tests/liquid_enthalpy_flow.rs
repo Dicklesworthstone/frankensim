@@ -381,3 +381,29 @@ fn caloric_rounding_cannot_turn_unstored_hydraulic_power_into_wall_heat() {
         assert_eq!(path.path().inlet_temperature_k(),300.0);
     });
 }
+
+#[test]
+fn g3_rounded_enthalpy_cannot_drive_liquid_past_a_heating_or_cooling_wall() {
+    let card = card(false,"rounded-caloric-overshoot");
+    let liquid = liquid(&card,1.0);
+    let ordinary = caloric(&card,1.0,SolidLiquidPhase::Liquid);
+    let shifted = caloric_with_reference(&card,1.0,SolidLiquidPhase::Liquid,1e18);
+    let path = FrozenFlowMedium::Liquid(&liquid).channel_series(VolumetricFlowRate::new(1e-6),
+        Temperature::new(298.0), &[section("wall",0.02)]).unwrap();
+    with_cx(|cx| {
+        for wall in [298.04,297.96] {
+            let ordinary_march = path.march_liquid_enthalpy(cx,&ordinary,"T",&[wall]).unwrap();
+            let expected = 298.0 + (wall-298.0)*(-(-219.6_f64*0.02/2.0).exp_m1());
+            close(ordinary_march.outlet().temperature_k(),expected);
+            assert!((wall.min(298.0)..=wall.max(298.0))
+                .contains(&ordinary_march.outlet().temperature_k()));
+            // The 71.1 J/kg physical increment rounds to 128 J/kg at this
+            // datum, instead of disappearing. The former zero-increment guard
+            // therefore accepted 298.064 K on heating and 297.936 K on cooling.
+            assert!(matches!(path.march_liquid_enthalpy(cx,&shifted,"T",&[wall]),
+                Err(LiquidEnthalpyError::Invalid("rounded specific enthalpy crosses the driving temperature"))));
+            assert_eq!(path.march_liquid_enthalpy(cx,&ordinary,"T",&[wall]).unwrap(),ordinary_march);
+        }
+        assert_eq!(path.path().inlet_temperature_k(),298.0);
+    });
+}

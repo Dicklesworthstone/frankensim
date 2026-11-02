@@ -383,7 +383,19 @@ fn march_region(
             return Err(LiquidEnthalpyError::Invalid("specific-enthalpy advance is unrepresentable"));
         }
         if (lo.specific_enthalpy_j_kg..=hi.specific_enthalpy_j_kg).contains(&trial_enthalpy) {
-            return Ok(curve.state_at_specific_enthalpy(trial_enthalpy)?);
+            let outlet = curve.state_at_specific_enthalpy(trial_enthalpy)?;
+            // A nonzero rounded increment can still exceed the entire heat
+            // available from this wall. The caloric/Robin balance alone cannot
+            // detect that overshoot: both would reuse the same rounded h.
+            // Admit the original exponential's temperature maximum principle,
+            // allowing only interpolation roundoff on the temperature scale.
+            let roundoff = 8.0 * f64::EPSILON * temperature.max(wall);
+            if outlet.temperature_k() < temperature.min(wall) - roundoff
+                || outlet.temperature_k() > temperature.max(wall) + roundoff
+            {
+                return Err(LiquidEnthalpyError::Invalid("rounded specific enthalpy crosses the driving temperature"));
+            }
+            return Ok(outlet);
         }
         let boundary = if heating { hi } else { lo };
         let consumed = area_to_knot(temperature, wall, boundary, mass_flow, cp, segment.htc_w_per_m2_k())?;
