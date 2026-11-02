@@ -143,6 +143,42 @@ material scaling and domain/representability refusals.
   in `tests/harmonic_observation.rs` check a subperiod analytic solution,
   coherent nulls and small residuals, beats against independent real-signal
   quadrature, clock shifts, actual 2D/3D source-consumer paths and admission.
+- `observation::PreparedProperHarmonicField` adds finite-window second moments
+  for explicitly authored joint source/frequency factors. For factor fields
+  `A_r(t) = sum_j A_rj exp(-i omega_rj t)`, the real field is
+  `Re sum_r A_r(t) xi_r`, with declared moments `E[xi_r]=0`,
+  `E[xi_r conj(xi_s)]=delta_rs` and `E[xi_r xi_s]=0`. These assumptions give
+  positive-semidefinite covariance by construction; they do not require a
+  Gaussian distribution, imply stationarity, or infer unknown source phases.
+  Properness removes sum-frequency terms even in subperiod windows. Authored
+  cross-frequency coherence still produces difference-frequency beating;
+  only distinct uncorrelated factors add second moments without cross terms.
+  Same-frequency source contributions coalesce before squaring within each
+  factor. The original receiver, frame, source clock, material propagation and
+  source-model authority remain the caller's responsibility, with propagation
+  supplied by the existing observer owners. Peak-unit coefficients use
+  covariance `2 df S` for a one-sided PSD bin of width df, not unscaled PSD/Hz.
+  `WindowedAcousticStatistics` returns the ensemble/window mean pressure square,
+  full real symmetric velocity covariance and signed physical `E[p(t)u(t)]`
+  energy flux. These are averages of instantaneous products, not products of
+  window averages, complex spectral covariances, reactive intensities or
+  uncertainty estimates. A separately observed deterministic mean field adds
+  its pressure square and intensity to the zero-mean fluctuation contributions;
+  nonzero pseudocovariance is outside this model. Preparation checks total
+  modes, supplied lines and sum of squared per-mode line counts before any
+  allocation. Observation allocates nothing, reuses one proper temporal kernel
+  per frequency pair, and accumulates every quadratic contribution in
+  double-double arithmetic until the complete bank is reduced. Physical
+  frequency differences are formed in Hz before radian conversion, preserving
+  a slow beat in the presence of a much larger common carrier. Negative
+  pressure/velocity variances refuse without clamping; arbitrary nulls have no
+  relative-accuracy guarantee. Callback cancellation returns typed refusal
+  without a partial result and leaves the immutable bank reusable. G0/G1/G3
+  cases in `tests/proper_harmonic_observation.rs` check subperiod normalization,
+  complex partial correlation against independently synthesized four-phase
+  ensembles, beating versus declared independence, pressure-null motion,
+  dynamic-range residuals, unitary factors, physical clock and common-carrier
+  shifts, sub-ulp beat energy, bounded admission and cancellation/reuse.
 - `PreparedCompactSourceObserver::new_molecular` retains an original
   `fs_material::relaxation::RelaxationState` and propagates its relaxing
   compression law through the same coherent 3D source operator. The original
@@ -552,9 +588,9 @@ chemical evolution, acoustic radiation, turbulence-convergence or SPL claim.
 
 ## Error model
 
-Typed `AeroacError` (non-finite, invalid-parameter, not-converged
-with disclosed residual). No silent degradation, no fabricated
-eigenvalues.
+Typed `AeroacError` (non-finite, invalid-parameter, cancelled,
+not-converged with disclosed residual, and the preserved shared harmonic-fit
+refusal). No silent degradation, no fabricated eigenvalues.
 
 ## Determinism class
 
@@ -571,6 +607,13 @@ Synchronous, milliseconds-class. No `Cx` integration (workspace
 seconds-to-minutes class (window 90 b/U0 at dx 0.1: 100-175 s on a
 loaded 8-worker trj; dx 0.2: 52 s) and is not interruptible; callers
 poll their gate before and after it.
+
+`PreparedProperHarmonicField::observe_window_cancellable` accepts an explicit
+caller gate and polls before work, at each factor and frequency pair, and before
+publication. Cancellation returns `AeroacError::Cancelled` with no partial
+statistics; the prepared bank is unchanged and can be observed again.
+Preparation is separately bounded and synchronous. This callback does not
+provide `Cx` ownership or implicitly alter other synchronous APIs.
 
 ## Unsafe boundary
 

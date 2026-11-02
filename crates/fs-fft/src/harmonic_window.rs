@@ -156,7 +156,6 @@ impl HarmonicWindow {
     /// The real-part covariance identity follows Neeser and Massey (1993),
     /// equations (2)–(5) and Definition 1:
     /// <https://www.isiweb.ee.ethz.ch/papers/arch/fneese-mass-inspec-1993-1.pdf>.
-    #[allow(clippy::float_cmp)] // Equal physical frequencies have exactly zero beat.
     pub fn proper_product_kernel(
         self,
         omega_a: f64,
@@ -165,16 +164,42 @@ impl HarmonicWindow {
         if !omega_a.is_finite() || !omega_b.is_finite() {
             return Err(WindowError::InvalidFrequency);
         }
+        // Subtract before applying the physical clock. Two independently
+        // rounded carrier phases can lose a well-resolved, slow beat.
+        self.proper_difference_kernel(checked(Dd::from_f64(omega_a) - Dd::from_f64(omega_b))?)
+    }
+
+    /// Proper second-moment kernel for frequencies authored in cycles/second.
+    ///
+    /// The difference is formed in double-double BEFORE conversion to rad/s.
+    /// Separately rounding `TAU*f_a` and `TAU*f_b` can corrupt a resolved beat
+    /// between close carriers; rounding the difference before clock evaluation
+    /// can also discard the phase of a much smaller component. This method
+    /// retains both operations through the same difference-only kernel.
+    pub fn proper_product_kernel_hz(
+        self,
+        frequency_a_hz: f64,
+        frequency_b_hz: f64,
+    ) -> Result<ProperHarmonicProduct, WindowError> {
+        if !frequency_a_hz.is_finite() || !frequency_b_hz.is_finite() {
+            return Err(WindowError::InvalidFrequency);
+        }
+        let difference = checked(Dd::from_f64(frequency_a_hz) - Dd::from_f64(frequency_b_hz))?;
+        self.proper_difference_kernel(checked(difference * Dd::from_f64(core::f64::consts::TAU))?)
+    }
+
+    #[allow(clippy::float_cmp)] // Exact zero is the normalized DD identity.
+    fn proper_difference_kernel(
+        self,
+        difference: Dd,
+    ) -> Result<ProperHarmonicProduct, WindowError> {
         let half = Dd::from_f64(0.5);
-        if omega_a == omega_b {
+        if difference.hi == 0.0 && difference.lo == 0.0 {
             return Ok(ProperHarmonicProduct {
                 real: half,
                 imaginary: Dd::ZERO,
             });
         }
-        // Subtract before applying the physical clock. Two independently
-        // rounded carrier phases can lose a well-resolved, slow beat.
-        let difference = checked(Dd::from_f64(omega_a) - Dd::from_f64(omega_b))?;
         let width = if difference.hi.abs() >= self.duration_s {
             checked((difference * half) * Dd::from_f64(self.duration_s))?
         } else {
@@ -662,6 +687,41 @@ mod tests {
                 .unwrap()
                 .proper_product_kernel(1e200, 0.0),
             Err(WindowError::Unrepresentable)
+        ));
+    }
+
+    #[test]
+    fn g3_proper_hz_conversion_preserves_authored_frequency_differences() {
+        let carrier = 2.0_f64.powi(52);
+        // Converting the two carriers first yields an 8 rad/s difference,
+        // despite an exactly represented physical difference of one hertz.
+        assert_eq!(TAU * (carrier + 1.0) - TAU * carrier, 8.0);
+        let window = HarmonicWindow::new(0.17, 0.63).unwrap();
+        let a = C64::new(0.7, -1.2);
+        let b = C64::new(-0.2, 0.8);
+        let large = window
+            .proper_product_kernel_hz(carrier + 1.0, carrier)
+            .unwrap()
+            .mean_real_product_dd(a, b)
+            .unwrap();
+        let small = window
+            .proper_product_kernel_hz(1.0, 0.0)
+            .unwrap()
+            .mean_real_product_dd(a, b)
+            .unwrap();
+        assert_eq!(large, small);
+        close(
+            large.to_f64(),
+            window
+                .proper_product_kernel(TAU, 0.0)
+                .unwrap()
+                .mean_real_product(a, b)
+                .unwrap(),
+            0.0,
+        );
+        assert!(matches!(
+            window.proper_product_kernel_hz(f64::INFINITY, 0.0),
+            Err(WindowError::InvalidFrequency)
         ));
     }
 }
