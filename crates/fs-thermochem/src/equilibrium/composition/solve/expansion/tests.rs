@@ -224,3 +224,32 @@ fn g4_failed_prepared_query_cannot_publish_a_stale_success() {
     let recovered = path.sample(Pressure::new(30000.0), || false).unwrap();
     close(recovered.temperature.value(), 1600.0 * 0.3_f64.powf(2.0 / 7.0), 2e-9);
 }
+
+// One SP solve on a fresh workspace, with or without the stagnation polish; returns the accepted temperature, the two
+// iteration counts and the entropy residual of the composition the workspace then holds, all as bits.
+fn sp_with(o: &IdealGasEquilibriumV1, pressure: f64, target: f64, c: EquilibriumEntropySolveV1, polish: bool)
+    -> Result<(u64, usize, usize, u64), EquilibriumExpansionErrorV1>
+{
+    let mut work = Workspace::new(o, Pressure::new(pressure), &[(id("H2"), Amount::new(1.0))])?;
+    work.admit_temperature_path(o, c)?;
+    let (t, iterations, steps) = work.solve_entropy_with(o, target, c, None, &mut || false,
+        |w, t, cancel| Ok(w.entropy(o, t, cancel)?), polish)?;
+    let residual = work.entropy(o, t, &mut || false)? - target;
+    Ok((t.value().to_bits(), iterations, steps, residual.to_bits()))
+}
+
+#[test]
+fn g4_a_polished_residual_still_above_the_tolerance_is_refused_exactly_as_before() {
+    // Planted negative: a budget of two temperature iterations stops the search far from the root, so the entropy residual
+    // is orders of magnitude above the 1e-8 tolerance however well the composition there is polished. The refusal must
+    // stand with the very same error (same iteration count, same residual bits).
+    let o = dissociation(0.0, 0.0);
+    let (pressure, temperature) = (56942.976229007836, 1887.9155931346877);
+    let target = tp(&o, temperature, pressure, 1.0).entropy_j_k();
+    let mut c = controls(1.0);
+    c.maximum_temperature_iterations = 2;
+    let (old, new) = (sp_with(&o, pressure, target, c, false), sp_with(&o, pressure, target, c, true));
+    assert!(matches!(old, Err(EquilibriumExpansionErrorV1::EntropyNoConvergence { residual_j_k, .. })
+        if residual_j_k.abs() > 100.0 * c.entropy_tolerance_j_k), "premise: {old:?}");
+    assert_eq!(old, new);
+}

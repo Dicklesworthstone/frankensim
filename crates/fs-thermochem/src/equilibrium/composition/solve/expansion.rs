@@ -14,6 +14,11 @@
 
 use super::*;
 
+/// At most this many tightened composition re-solves are tried at a collapsed entropy bracket before the refusal stands.
+const STAGNATION_POLISH_PASSES: usize = 2;
+/// Each such pass multiplies the composition potential and balance tolerances by this factor: the polish only ever tightens.
+const STAGNATION_POLISH_TIGHTENING: f64 = 1e-3;
+
 /// Prepared isentropic queries sharing the original equilibrium workspace.
 pub mod path;
 
@@ -422,7 +427,17 @@ impl Workspace {
     // Absolute SP and reference-relative isentropes share every root decision.
     fn solve_entropy<C: FnMut() -> bool>(&mut self, owner: &IdealGasEquilibriumV1, target: f64,
         controls: EquilibriumEntropySolveV1, preferred_temperature: Option<f64>, cancelled: &mut C,
-        mut entropy: impl FnMut(&Self, Temperature, &mut C) -> Result<f64, EquilibriumExpansionErrorV1>)
+        entropy: impl FnMut(&Self, Temperature, &mut C) -> Result<f64, EquilibriumExpansionErrorV1>)
+        -> Result<(Temperature, usize, usize), EquilibriumExpansionErrorV1> {
+        self.solve_entropy_with(owner, target, controls, preferred_temperature, cancelled, entropy, true)
+    }
+
+    // `polish == false` is the solver exactly as it was before the stagnation polish; the tests compare the two.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_entropy_with<C: FnMut() -> bool>(&mut self, owner: &IdealGasEquilibriumV1, target: f64,
+        controls: EquilibriumEntropySolveV1, preferred_temperature: Option<f64>, cancelled: &mut C,
+        mut entropy: impl FnMut(&Self, Temperature, &mut C) -> Result<f64, EquilibriumExpansionErrorV1>,
+        polish: bool)
         -> Result<(Temperature, usize, usize), EquilibriumExpansionErrorV1> {
         let (mut low, mut high) = (controls.minimum_temperature_k, controls.maximum_temperature_k);
         let preferred = preferred_temperature.filter(|t| t.is_finite() && *t > low && *t < high);
@@ -452,12 +467,14 @@ impl Workspace {
         }
         let mut t = preferred.unwrap_or_else(|| low + 0.5 * (high - low));
         let mut residual = upper - target;
+        let mut last_t = high;
         let mut steps = preliminary_steps;
         for step in (preliminary_steps + 1)..=controls.maximum_temperature_iterations {
             poll(cancelled)?;
             steps = step;
             iterations += self.solve(owner, Temperature::new(t), controls.equilibrium, cancelled)?;
             residual = entropy(self, Temperature::new(t), cancelled)? - target;
+            last_t = t;
             if residual.abs() <= controls.entropy_tolerance_j_k {
                 return Ok((Temperature::new(t), iterations, step));
             }
@@ -474,6 +491,32 @@ impl Workspace {
                 newton
             } else { low + 0.5 * (high - low) };
             if t == low || t == high { break; }
+        }
+        // The bracket collapsed (or the budget ran out) with the entropy residual outside the tolerance. `residual` belongs to
+        // the last composition solved at `last_t`; each trial composition is warm-started and accepted at the composition
+        // tolerance without refinement, so its entropy carries an error of about (reaction entropy) x (that tolerance) that is
+        // not a property of T (2.1e-8 J/K at the default 1e-9 for the manufactured H/H2 fixture, against a 1e-8 tolerance). Re-solve
+        // THAT temperature with tighter composition tolerances, a fixed small number of passes, and stop as soon as the entropy no
+        // longer moves by more than a quarter of the tolerance: then the residual is real and the refusal stands. Only this failing
+        // exit can change; every converged path above returns before reaching it, bit for bit as before.
+        if polish {
+            let mut tightened = controls.equilibrium;
+            let mut previous = residual;
+            for _ in 0..STAGNATION_POLISH_PASSES {
+                tightened.dimensionless_potential_tolerance *= STAGNATION_POLISH_TIGHTENING;
+                tightened.relative_balance_tolerance *= STAGNATION_POLISH_TIGHTENING;
+                match self.solve(owner, Temperature::new(last_t), tightened, cancelled) {
+                    Ok(extra) => iterations += extra,
+                    Err(E::Cancelled) => return Err(E::Cancelled.into()),
+                    Err(_) => break,
+                }
+                let polished = entropy(self, Temperature::new(last_t), cancelled)? - target;
+                if polished.abs() <= controls.entropy_tolerance_j_k {
+                    return Ok((Temperature::new(last_t), iterations, steps));
+                }
+                if (polished - previous).abs() <= 0.25 * controls.entropy_tolerance_j_k { break; }
+                previous = polished;
+            }
         }
         Err(EquilibriumExpansionErrorV1::EntropyNoConvergence { iterations: steps, residual_j_k: residual })
     }
