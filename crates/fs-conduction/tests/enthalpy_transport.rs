@@ -2,6 +2,9 @@
 
 mod support;
 
+#[path = "enthalpy_transport/nodal_density.rs"]
+mod nodal_density;
+
 use fs_blake3::ContentHash;
 use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;

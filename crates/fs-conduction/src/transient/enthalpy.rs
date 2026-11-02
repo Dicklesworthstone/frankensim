@@ -9,7 +9,9 @@
 //!
 //! Nodal constitutive evaluation gives `T_i=T(h_i)` and the existing P1
 //! temperature interpolant. Row-sum storage gives invariant reference masses
-//! `m_i=sum_e rho0 V_e/4`. Backward Euler solves, in joules,
+//! `m_i=sum_e integral(rho0 N_i)`, equal to `sum_e rho0 V_e/4` for
+//! cellwise density. Positive P1 nodal density retains its exact row moments.
+//! Backward Euler solves, in joules,
 //! `R(h)=m*(h-h_old)+dt*(A(T(h),f(h))*T(h)-b)=0`. The exact spatial
 //! Jacobian includes both temperature-column scaling and the direct phase
 //! conductivity derivative. An optional caller-declared law multiplies each
@@ -53,6 +55,7 @@ mod endpoint;
 pub use endpoint::EnthalpyEndpointEvaluation;
 mod contact;
 mod pointwise;
+mod reference_mass;
 use pointwise::{PointwiseBoundary, PointwiseBoundaryAssembly};
 
 use std::{cell::RefCell, fmt};
@@ -298,6 +301,41 @@ struct PhaseConductivity {
     variable_vertices: Vec<bool>,
 }
 
+fn reference_mass_node_count(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    budget: EnthalpyBudget,
+) -> Result<usize, EnthalpyError> {
+    poll(cx, 0)?;
+    let n = mesh.vertex_count();
+    for (resource, required, limit) in [
+        ("vertices", n, budget.max_vertices),
+        ("elements", mesh.element_count(), budget.max_elements),
+    ] {
+        if required > limit {
+            return Err(EnthalpyError::Budget {
+                resource,
+                required,
+                limit,
+            });
+        }
+    }
+    if n == 0 || mesh.element_count() == 0 {
+        return Err(EnthalpyError::InvalidInput(
+            "nonempty mesh and positive finite reference density required",
+        ));
+    }
+    // Mesh/contact assembly is at most dense in its admitted vertex set.
+    // Check both dense-index and element-staging products before allocation.
+    n.checked_mul(n)
+        .and_then(|v| v.checked_mul(24))
+        .and_then(|_| mesh.element_count().checked_mul(32 * 24))
+        .ok_or(EnthalpyError::InvalidInput(
+            "spatial allocation size overflow",
+        ))?;
+    Ok(n)
+}
+
 impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
     /// Prepare invariant P1 nodal masses from declared reference density [kg/m3].
     /// This is mass quadrature, not a heat-capacity declaration. The curve's
@@ -309,37 +347,12 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         reference_density_kg_m3: f64,
         budget: EnthalpyBudget,
     ) -> Result<Self, EnthalpyError> {
-        poll(cx, 0)?;
-        let n = mesh.vertex_count();
-        for (resource, required, limit) in [
-            ("vertices", n, budget.max_vertices),
-            ("elements", mesh.element_count(), budget.max_elements),
-        ] {
-            if required > limit {
-                return Err(EnthalpyError::Budget {
-                    resource,
-                    required,
-                    limit,
-                });
-            }
-        }
-        if n == 0
-            || mesh.element_count() == 0
-            || !reference_density_kg_m3.is_finite()
-            || reference_density_kg_m3 <= 0.0
-        {
+        let n = reference_mass_node_count(cx, mesh, budget)?;
+        if !reference_density_kg_m3.is_finite() || reference_density_kg_m3 <= 0.0 {
             return Err(EnthalpyError::InvalidInput(
                 "nonempty mesh and positive finite reference density required",
             ));
         }
-        // Mesh/contact assembly is at most dense in its admitted vertex set.
-        // Check both dense-index and element-staging products before allocation.
-        n.checked_mul(n)
-            .and_then(|v| v.checked_mul(24))
-            .and_then(|_| mesh.element_count().checked_mul(32 * 24))
-            .ok_or(EnthalpyError::InvalidInput(
-                "spatial allocation size overflow",
-            ))?;
         let mut masses = vec![0.0; n];
         for (element, vertices) in mesh.complex().tets.iter().enumerate() {
             if element % ASSEMBLY_TILE == 0 {
@@ -356,6 +369,74 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                 masses[vertex as usize] = finite(masses[vertex as usize] + contribution)?;
             }
         }
+        Self::with_reference_masses(cx, mesh, curve, masses)
+    }
+
+    /// Prepare the native enthalpy balance with a positive P1 reference density
+    /// supplied once per original mesh vertex, in kg/m³.
+    ///
+    /// Each tetrahedron contributes `V*(sum(rho)+rho_a)/20` to vertex a.
+    /// These exact row moments preserve total mass and the integral of a P1
+    /// specific-enthalpy field. A cell mean loses the correlation between
+    /// density and enthalpy, and produces incorrect local heating/phase rates.
+    /// Globally uniform input retains the original uniform-constructor bits.
+    ///
+    /// The resulting reference masses remain fixed during every nonlinear
+    /// trial and time step, including latent plateaus and prescribed-temperature
+    /// reservoir accounting. Existing history/source adjoints use these same
+    /// masses; this entry does not add density-control derivatives or reinterpret
+    /// heterogeneous material-density controls. The caloric chart's equilibrium
+    /// density never replaces this declared inventory. Geometry remains fixed.
+    ///
+    /// # Errors
+    /// Wrong nodal count, nonpositive/nonfinite density, original mesh/work
+    /// admission, unrepresentable mass or cancellation.
+    pub fn from_nodal_reference_density(
+        cx: &Cx<'_>,
+        mesh: &'m ConductionMesh,
+        curve: &'c EquilibriumEnthalpyPhaseCurve,
+        reference_nodal_density_kg_m3: &[f64],
+        budget: EnthalpyBudget,
+    ) -> Result<Self, EnthalpyError> {
+        let n = reference_mass_node_count(cx, mesh, budget)?;
+        if reference_nodal_density_kg_m3.len() != n
+            || reference_nodal_density_kg_m3
+                .iter()
+                .any(|rho| !rho.is_finite() || *rho <= 0.0)
+        {
+            return Err(EnthalpyError::InvalidInput(
+                "one positive finite reference density per mesh vertex required",
+            ));
+        }
+        if reference_nodal_density_kg_m3
+            .iter()
+            .all(|rho| rho.to_bits() == reference_nodal_density_kg_m3[0].to_bits())
+        {
+            return Self::uniform(cx, mesh, curve, reference_nodal_density_kg_m3[0], budget);
+        }
+        let mut masses = vec![0.0; n];
+        for (element, vertices) in mesh.complex().tets.iter().enumerate() {
+            if element % ASSEMBLY_TILE == 0 {
+                poll(cx, element)?;
+            }
+            let density = vertices.map(|vertex| reference_nodal_density_kg_m3[vertex as usize]);
+            let local = reference_mass::p1_nodal_masses(mesh.element_volume(element), density)
+                .ok_or(EnthalpyError::InvalidInput(
+                    "positive graded reference mass is not representable",
+                ))?;
+            for (a, &vertex) in vertices.iter().enumerate() {
+                masses[vertex as usize] = finite(masses[vertex as usize] + local[a])?;
+            }
+        }
+        Self::with_reference_masses(cx, mesh, curve, masses)
+    }
+
+    fn with_reference_masses(
+        cx: &Cx<'_>,
+        mesh: &'m ConductionMesh,
+        curve: &'c EquilibriumEnthalpyPhaseCurve,
+        masses: Vec<f64>,
+    ) -> Result<Self, EnthalpyError> {
         for (vertex, &mass) in masses.iter().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(cx, vertex)?;
@@ -366,7 +447,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                 ));
             }
         }
-        poll(cx, n)?;
+        poll(cx, masses.len())?;
         Ok(Self {
             mesh,
             curve,

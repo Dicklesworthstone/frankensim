@@ -2081,7 +2081,8 @@ authority.
   field on the existing P1 tetrahedral mesh. It reuses the existing conductivity,
   source, Neumann, Robin and finite-contact assembly; temperature-dependent k(T)
   is evaluated at each actual nonlinear trial. Fixed reference masses are
-  `m_i = sum_e rho0 V_e/4`; equilibrium density changes never create or remove
+  `m_i = sum_e integral(rho0 N_i)`, reducing to `sum_e rho0 V_e/4` for uniform
+  density; equilibrium density changes never create or remove
   specimen mass. The nodal equilibrium chart returns temperature and liquid
   fraction, preserving a true isothermal latent plateau without apparent-Cp
   smoothing. The discrete residual is `m*(h-h_old)+dt*(A(T(h))*T(h)-b)` in joules.
@@ -2096,8 +2097,9 @@ authority.
   that account. Spatial caps precede mass allocation and checked products bound
   Newton workspace/work arithmetic. Constitutive, assembly and operator tiles
   poll Cx, with final polling before publication.
-  This initial lane binds one spatially uniform equilibrium chart and a declared
-  reference density. Prescribed endpoint temperatures select enthalpy by
+  This lane binds one spatially uniform equilibrium chart and declared uniform
+  or positive P1 nodal reference density. Prescribed endpoint temperatures
+  select enthalpy by
   inverting each node's original piecewise-linear chart. Temperatures equal
   to a latent plateau (including either endpoint) or outside source support
   refuse; a prescribed bath never chooses an interior liquid fraction.
@@ -2120,6 +2122,25 @@ authority.
   returns `dt*lambda_i` on free residual rows and zero on fixed rows. P1 source
   basis columns at prescribed vertices remain active wherever they load
   neighboring free residual rows.
+
+  `from_nodal_reference_density` assembles each graded tetrahedron's exact
+  row masses `V*(sum(rho)+rho_a)/20`. These preserve total mass and the integral
+  of a P1 specific-enthalpy field, including density/enthalpy correlations that
+  a cell mean discards. Normalized density accumulation avoids overflowing the
+  raw density sum when the final reference mass is representable. Globally
+  uniform input delegates to the original constructor with identical bits.
+  The resulting immutable masses enter the existing nonlinear heat equation,
+  latent storage, constrained-node reservoir heat, endpoint energy and
+  history/source adjoints. Heterogeneous material-density pullbacks retain
+  their original element/material controls; this constructor adds no nodal
+  density-control derivative, material mixture law, evolving geometry or
+  current-state density substitution. Native quadrature regressions check
+  independent degree-two integration, graded total enthalpy, exact geometric
+  partitioning, uniform bits and extreme representable density/volume scales.
+  The full public regressions in `tests/enthalpy_transport/nodal_density.rs`
+  cover nonuniform sensible heating, latent-phase evolution and adjoints,
+  prescribed-bath storage, replay and admission. Their full spatial execution
+  remains unverified in the current dependency-constrained environment.
 
   `EnthalpyHistoryRun` admits unique prescribed temperatures without changing
   initial physical enthalpy. Event-aligned, adaptive and ambient-radiation
