@@ -773,34 +773,34 @@ impl MultiFrictionModalSystem {
         Ok((step.traction_n, regime, iterations, Some(FrictionRoots { found: step.roots, selected: step.selected })))
     }
 
-    /// Active-set rescue for a step the Gauss-Seidel sweep cannot converge
-    /// (frankensim-o7qbp). Builds the effective load line (the bank's line rows,
-    /// plus each port's series/hair compliance on the diagonal; free slip plus each
-    /// port's stored-stretch shift), solves a consistent stick/slip partition
-    /// directly, and on success overwrites the held tractions and regimes with
-    /// it. Returns whether a consistent partition was adopted.
-    ///
-    /// Restricted to the plain friction case: a material shear layer, a Mindlin
-    /// contact, or a stop with any non-zero coupling to the friction ports, makes
-    /// the rescue decline and the caller refuse with the sweep's own last failure
-    /// as the decline's cause. Coupling here means a non-zero `nt` or `tn` entry.
-    /// The rescue doesn't solve a stop with exactly none, so the stops' own check
-    /// runs on the rescued state before it is adopted, and a refusal there is
-    /// named as the stops'. A contact-loaded port on such a bank is rescued with
-    /// its stop's reaction as the normal load, a constant the friction can't move.
     /// Override the active-set pivot budget (frankensim-o7qbp). For tests that
     /// plant a budget-exhaustion negative; production uses the construction default.
     pub fn force_active_set_budget(&mut self, budget: usize) { self.active_set_budget = budget; }
 
+    /// Active-set rescue for a step the Gauss-Seidel sweep cannot converge
+    /// (frankensim-o7qbp). Builds the effective load line (the bank's line rows,
+    /// plus each port's series/hair compliance on the diagonal; free slip plus each
+    /// port's stored-stretch shift), solves a consistent stick/slip partition
+    /// directly, and on success overwrites the held tractions and regimes with it.
+    ///
+    /// A material shear layer or a Mindlin contact on any port makes the rescue
+    /// decline, and the caller refuses with the sweep's own last failure as the
+    /// decline's cause. A stop bank with exactly no coupling to the ports (every
+    /// `nt`, `tn` and `tn_end` entry zero) is rescued on the plain line; the stops'
+    /// own check then runs on the rescued tractions before anything is adopted, and
+    /// a refusal there is named as the stops'. A contact-loaded port on such a bank
+    /// takes its stop's reaction as a constant normal load.
+    ///
+    /// A stop bank with any coupling (MagentaBadger 12431) takes the condensed
+    /// line: `coupled_stop_rescue`.
     fn active_set_rescue(&mut self, drives: &[FrictionDrive], gate: Option<&CancelGate>,
         cause: ModalFrictionError) -> Result<(), ModalFrictionError>
     {
         let p = self.points.len();
         let coupled_stop = self.obstacles.as_ref().is_some_and(|stops| !stops.friction_decoupled());
-        if coupled_stop || self.shear_layers.iter().any(Option::is_some)
-            || self.mindlin_contacts.iter().any(Option::is_some) {
-            // Not attempted: the active-set model covers only the plain friction
-            // ports. Name it a decline that carries the Gauss-Seidel failure.
+        if self.shear_layers.iter().any(Option::is_some) || self.mindlin_contacts.iter().any(Option::is_some) {
+            // Not attempted: the active-set model has no shear layer or Mindlin
+            // law. Name it a decline that carries the Gauss-Seidel failure.
             return Err(ModalFrictionError::ActiveSetDeclined { cause: Box::new(cause) });
         }
         let dt = self.sample_period_s();
@@ -819,6 +819,9 @@ impl MultiFrictionModalSystem {
         }
         let laws: Vec<FrictionLaw> = (0..p).map(|i| self.points[i].port.law.clone()).collect();
         let lawrefs: Vec<&FrictionLaw> = laws.iter().collect();
+        if coupled_stop {
+            return self.coupled_stop_rescue(&a, &f, &normal, &lawrefs, drives, gate);
+        }
         let seed = self.regimes.clone();
         match active_set::solve_active_set(&a, &f, &normal, &lawrefs, dt, &seed, self.active_set_budget)? {
             active_set::Resolution::Solved(tractions, regimes) => {
@@ -845,6 +848,99 @@ impl MultiFrictionModalSystem {
                 })
             }
         }
+    }
+
+    /// The rescue on a bank whose stops are coupled to its ports (MagentaBadger
+    /// 12431, Proposal A). The stops are condensed out of the line
+    /// (`ObstacleSet::condensed`): each traction trial solves the stops' own
+    /// reactions at those tractions, so slips and contact-loaded normal loads
+    /// move with the tractions, and the walk is the plain one on that line.
+    ///
+    /// On a consistent partition the step adopts the tractions, the regimes AND
+    /// the stops' reactions at those tractions; the plain rescue keeps the sweep's
+    /// reactions, which is why a coupled bank used to decline. The adopted state
+    /// is then put to the sweep's own tests: the stops' check (a refusal is named
+    /// `ActiveSetRefusedByStops`) and every port's check, whose refusal is its own.
+    /// Nothing is published on a refusal.
+    fn coupled_stop_rescue(&mut self, a: &[f64], f: &[f64], normal: &[f64], laws: &[&FrictionLaw],
+        drives: &[FrictionDrive], gate: Option<&CancelGate>) -> Result<(), ModalFrictionError>
+    {
+        let p = self.points.len();
+        let dt = self.sample_period_s();
+        poll(gate)?;
+        let stops = self.obstacles.as_ref().ok_or_else(|| invalid("coupled stop rescue lost its stops"))?;
+        let line = CoupledStopLine { stops, a, f, normal, loads: &self.contact_loads,
+            endpoint: self.endpoint_line, dt, max_sweeps: self.config.max_sweeps };
+        let resolution = active_set::solve_active_set_condensed(&line, p, laws, dt, self.active_set_budget)?;
+        let (tractions, regimes) = match resolution {
+            active_set::Resolution::Solved(tractions, regimes) => (tractions, regimes),
+            active_set::Resolution::Exhausted { pivots, last_set, worst } => {
+                return Err(ModalFrictionError::ActiveSetExhausted {
+                    pivots,
+                    budget: self.active_set_budget,
+                    last_active_set: last_set,
+                    worst_port: worst.port,
+                    worst_condition: worst.condition,
+                    worst_size: worst.size,
+                });
+            }
+        };
+        poll(gate)?;
+        // The walk evaluated these same reactions at these tractions: from zero,
+        // they are a function of the tractions alone.
+        let reactions = stops.condensed(&tractions, self.endpoint_line, dt, self.config.max_sweeps)
+            .map_err(|error| ModalFrictionError::ActiveSetRefusedByStops { cause: Box::new(error.into()) })?
+            .reactions;
+        if let Some(stops) = &mut self.obstacles { stops.set_reactions(&reactions); }
+        self.tractions.copy_from_slice(&tractions);
+        self.regimes.copy_from_slice(&regimes);
+        for b in &mut self.staged_branches { *b = ContactBranch::Fresh; }
+        if let Some(stops) = &self.obstacles {
+            if let Err(error) = stops.check_prediction(&self.tractions, dt, None) {
+                return Err(ModalFrictionError::ActiveSetRefusedByStops { cause: Box::new(error.into()) });
+            }
+        }
+        match self.first_port_failure(drives, gate)? {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    // The sweep's per-port test of the held tractions and regimes: each port's
+    // slip on its line, with the held stop shift and its series stretch, checked
+    // by the port's own law. Returns the first refusal; an error while forming
+    // a slip is returned at once, as in the sweep.
+    fn first_port_failure(&self, drives: &[FrictionDrive], gate: Option<&CancelGate>)
+        -> Result<Option<ModalFrictionError>, ModalFrictionError>
+    {
+        let mut failure = None;
+        for i in 0..self.points.len() {
+            poll(gate)?;
+            let mut slip = finite(self.free_slip[i] - dot(self.line(i), &self.tractions)?)?;
+            if let Some(residual) = &self.friction_residual {
+                slip = finite(slip - residual.displacement(i, &self.tractions)?)?;
+            }
+            if let Some(obstacles) = &self.obstacles { slip = finite(slip + obstacles.slip_shift(i, self.endpoint_line)?)?; }
+            if let Some(series) = self.series_drives[i] {
+                let eta = series.staged_stretch_m(self.tractions[i], self.sample_period_s());
+                slip = finite(slip - (eta - series.stretch_m()))?;
+            }
+            let drive = self.contact_loaded_drive(i, drives[i])?;
+            let checked = if let Some(layer) = &self.shear_layers[i] {
+                layer.check(slip, self.tractions[i], drive.normal_force_n, self.sample_period_s(),
+                    self.points[i].config, self.iterations[i])
+            } else if let Some(contact) = &self.mindlin_contacts[i] {
+                contact.check(slip, self.tractions[i], drive.normal_force_n, self.sample_period_s(),
+                    self.points[i].config, self.iterations[i])
+            } else {
+                scalar::check(&self.points[i].port.law, self.points[i].config,
+                    self.sample_period_s(), drive, self.tractions[i], slip, slip, self.regimes[i], self.iterations[i]).map(|_| ())
+            };
+            if let Err(error) = checked {
+                if failure.is_none() { failure = Some(error); }
+            }
+        }
+        Ok(failure)
     }
 
     // Original simultaneous friction/obstacle solve with held modal forces.
@@ -929,32 +1025,8 @@ impl MultiFrictionModalSystem {
             let mut failure = self.obstacles.as_ref().and_then(|obstacles|
                 obstacles.check_prediction(&self.tractions, self.core.network.dt, gate).err())
                 .map(ModalFrictionError::Network);
-            for i in 0..p {
-                poll(gate)?;
-                let mut slip = finite(self.free_slip[i] - dot(self.line(i), &self.tractions)?)?;
-                if let Some(residual) = &self.friction_residual {
-                    slip = finite(slip - residual.displacement(i, &self.tractions)?)?;
-                }
-                if let Some(obstacles) = &self.obstacles { slip = finite(slip + obstacles.slip_shift(i, self.endpoint_line)?)?; }
-                if let Some(series) = self.series_drives[i] {
-                    let eta = series.staged_stretch_m(self.tractions[i], self.sample_period_s());
-                    slip = finite(slip - (eta - series.stretch_m()))?;
-                }
-                let drive = self.contact_loaded_drive(i, drives[i])?;
-                let checked = if let Some(layer) = &self.shear_layers[i] {
-                    layer.check(slip, self.tractions[i], drive.normal_force_n, self.sample_period_s(),
-                        self.points[i].config, self.iterations[i])
-                } else if let Some(contact) = &self.mindlin_contacts[i] {
-                    contact.check(slip, self.tractions[i], drive.normal_force_n, self.sample_period_s(),
-                        self.points[i].config, self.iterations[i])
-                } else {
-                    scalar::check(&self.points[i].port.law, self.points[i].config,
-                        self.sample_period_s(), drive, self.tractions[i], slip, slip, self.regimes[i], self.iterations[i]).map(|_| ())
-                };
-                if let Err(error) = checked {
-                    if failure.is_none() { failure = Some(error); }
-                }
-            }
+            let port_failure = self.first_port_failure(drives, gate)?;
+            if failure.is_none() { failure = port_failure; }
             match failure {
                 None => { sweeps = sweep; break; },
                 Some(cause) if sweep == self.config.max_sweeps => {
@@ -1192,6 +1264,45 @@ impl MultiFrictionModalSystem {
     pub fn interface(&self, index: usize) -> Option<&interface::DryFrictionBinding> {
         if index == 0 { self.core.interface() }
         else { self.interfaces.get(index-1).and_then(Option::as_ref) }
+    }
+}
+
+/// The bank's line with its coupled stops condensed out (MagentaBadger 12431):
+/// `slip(t) = f - a t + T R(t)`, and a contact-loaded port's normal load is
+/// `R_c(t)`. `a` and `f` are the plain rescue's, series compliance and stretch
+/// shift included; `normal` holds the prescribed loads.
+struct CoupledStopLine<'a> {
+    stops: &'a obstacles::ObstacleSet,
+    a: &'a [f64],
+    f: &'a [f64],
+    normal: &'a [f64],
+    loads: &'a [Option<usize>],
+    endpoint: bool,
+    dt: f64,
+    max_sweeps: usize,
+}
+
+impl active_set::CondensedLine for CoupledStopLine<'_> {
+    fn at(&self, t: &[f64]) -> Result<active_set::LinePoint, ModalFrictionError> {
+        let p = self.f.len();
+        let stops = self.stops.condensed(t, self.endpoint, self.dt, self.max_sweeps)?;
+        let mut slip = vec![0.0; p];
+        let mut normal = self.normal.to_vec();
+        let mut dslip = vec![0.0; p*p];
+        let mut dnormal = vec![0.0; p*p];
+        for i in 0..p {
+            let mut s = self.f[i];
+            for j in 0..p {
+                s -= self.a[i*p+j]*t[j];
+                dslip[i*p+j] = finite(stops.dshift[i*p+j] - self.a[i*p+j])?;
+            }
+            slip[i] = finite(s + stops.shift[i])?;
+            if let Some(k) = self.loads[i] {
+                normal[i] = stops.reactions[k];
+                dnormal[i*p..(i+1)*p].copy_from_slice(&stops.dreactions[k*p..(k+1)*p]);
+            }
+        }
+        Ok(active_set::LinePoint { slip, normal, dslip, dnormal })
     }
 }
 

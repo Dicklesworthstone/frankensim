@@ -29,8 +29,108 @@
 //! Every row is on the bank's one line: the endpoint line (end slip speed times
 //! dt, MagentaBadger 8060), or the displacement line for a bank with a series
 //! drive, a shear layer or a bound bow residual on any port.
+//!
+//! A stop bank coupled to the ports (MagentaBadger 12431, Proposal A) makes that
+//! line move with the tractions: `slip(t) = f - a t + T R(t)`, with each
+//! contact-loaded port's normal load `N_i(t) = R_c(i)(t)`. `R(t)` is the stops'
+//! own reaction at held tractions `t`, so the stops are condensed out and are
+//! not walk cells. `R(t)` is unique, because `I + D Nn` is a P-matrix
+//! (`D = diag(phi') >= 0`, `Nn` symmetric positive semidefinite). Nothing at run
+//! time relies on that argument: every accepted state passes the stops' own
+//! check. The walk itself is unchanged. Only the partition solve differs. It
+//! uses the condensed line's derivative, `-a + T (I + D Nn)^-1 D Nt` for the
+//! slips, and the rows of `(I + D Nn)^-1 D Nt` for contact-loaded normals. A
+//! partition whose stops can't be resolved is named `stops-unresolved` in the
+//! refusal's payload.
 
 use super::*;
+
+/// The walk's name for a partition whose stops refused to resolve at its held tractions.
+pub(super) const STOPS_UNRESOLVED: &str = "stops-unresolved";
+const NEWTON_NONCONVERGENCE: &str = "newton-nonconvergence";
+/// A partition Newton that failed with nothing to measure the miss by.
+const DIVERGED: (&str, f64) = (NEWTON_NONCONVERGENCE, f64::INFINITY);
+
+/// One evaluation of a condensed line (a stop bank coupled to the ports): every
+/// port's slip and normal load at tractions `t`, with their derivatives in `t`.
+pub(super) struct LinePoint {
+    pub slip: Vec<f64>,
+    pub normal: Vec<f64>,
+    /// d slip_i / d t_j, row-major p x p.
+    pub dslip: Vec<f64>,
+    /// d normal_i / d t_j, row-major p x p. A prescribed load's row is zero.
+    pub dnormal: Vec<f64>,
+}
+
+/// A load line whose slips and normal loads move with the tractions.
+pub(super) trait CondensedLine {
+    /// The line at tractions `t`, or the stops' refusal to resolve there.
+    fn at(&self, t: &[f64]) -> Result<LinePoint, ModalFrictionError>;
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The raw number of the last stops' refusal the walk met on this thread: an
+    /// unconverged root's signed residual, or a broken budget's value. Only the
+    /// tests read it, to pin a refusal's size to the root that refused.
+    pub(super) static LAST_STOPS_REFUSAL: core::cell::Cell<Option<f64>> = const { core::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn record_refusal(point: &Result<LinePoint, ModalFrictionError>) {
+    if let Err(error) = point {
+        let raw = match error {
+            ModalFrictionError::Network(ModalCouplingError::ContactSolve { residual_n, .. }) => Some(*residual_n),
+            ModalFrictionError::Network(ModalCouplingError::Budget { value, .. }) => Some(*value),
+            _ => None,
+        };
+        LAST_STOPS_REFUSAL.with(|last| last.set(raw));
+    }
+}
+
+#[cfg(not(test))]
+fn record_refusal(_: &Result<LinePoint, ModalFrictionError>) {}
+
+/// Every read of a condensed line by the walk. Outside the tests it is `line.at(t)`.
+fn condensed_at(line: &dyn CondensedLine, t: &[f64]) -> Result<LinePoint, ModalFrictionError> {
+    let point = line.at(t);
+    record_refusal(&point);
+    point
+}
+
+/// The line a walk runs on: the plain fixed line, or a condensed one.
+enum Line<'a> {
+    Fixed { a: &'a [f64], f: &'a [f64], normal: &'a [f64] },
+    Condensed(&'a dyn CondensedLine),
+}
+
+impl Line<'_> {
+    /// Every port's slip and normal load at tractions `t`.
+    fn state(&self, t: &[f64]) -> Result<(Vec<f64>, Vec<f64>), ModalFrictionError> {
+        match self {
+            Line::Fixed { a, f, normal } => Ok((slips(a, f, t), normal.to_vec())),
+            Line::Condensed(line) => condensed_at(*line, t).map(|point| (point.slip, point.normal)),
+        }
+    }
+    /// The tractions of partition `cells`, or the name of why it did not resolve
+    /// and by how much (unbounded when nothing measures the miss).
+    fn solve(&self, law: &[&FrictionLaw], dt: f64, cells: &[Branch]) -> Result<Vec<f64>, (&'static str, f64)> {
+        match self {
+            Line::Fixed { a, f, normal } => solve_partition(a, f, normal, law, dt, cells, 100).ok_or(DIVERGED),
+            Line::Condensed(line) => solve_condensed(*line, law, dt, cells, 100),
+        }
+    }
+}
+
+/// How far a stops' refusal missed: the residual of an unconverged root, the
+/// value of a broken budget, otherwise unbounded.
+fn refusal_size(error: &ModalFrictionError) -> f64 {
+    match error {
+        ModalFrictionError::Network(ModalCouplingError::ContactSolve { residual_n, .. }) => residual_n.abs(),
+        ModalFrictionError::Network(ModalCouplingError::Budget { value, .. }) => *value,
+        _ => f64::INFINITY,
+    }
+}
 
 /// The worst Karush-Kuhn-Tucker violation of a candidate active set: which port,
 /// which friction condition it broke, and by how much. Carried in a refusal so a
@@ -92,8 +192,9 @@ fn slips(a: &[f64], f: &[f64], t: &[f64]) -> Vec<f64> {
 }
 
 /// Solve the dense `n x n` system `m x = b` by partial-pivot Gaussian
-/// elimination. Deterministic; returns None on a singular pivot.
-fn dense_solve(m: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
+/// elimination. Deterministic; returns None on a singular pivot. The condensed
+/// stops (`ObstacleSet::condensed`) use it for `(I + D Nn)^-1 D Nt`.
+pub(super) fn dense_solve(m: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
     let mut aug = vec![0.0f64; n * (n + 1)];
     for i in 0..n {
         for j in 0..n {
@@ -246,6 +347,87 @@ fn solve_partition(
     }
 }
 
+/// A law's kinetic coefficient at slip speed `speed`, exactly as `kinetic_traction` takes it.
+fn kinetic_mu(law: &FrictionLaw, speed: f64) -> Result<f64, ModalFrictionError> {
+    Ok(if speed == 0.0 { law.zero_speed_kinetic_coefficient()? } else { law.kinetic_coefficient(speed)? })
+}
+
+/// Joint-Newton the tractions of a FIXED partition on a condensed line. The rows
+/// are those of `solve_partition`: a stuck port pins `slip_i(t) = 0`, a sliding
+/// port pins `t_i = kinetic_traction(branch sign, N_i(t), |slip_i(t)|)`.
+///
+/// No row is differenced through the stops. Their reactions are converged only
+/// to the stops' tolerance, so a difference over a small traction step would be
+/// mostly that tolerance. Every row instead takes the line's own derivative. A
+/// sliding row adds the law's slope in slip speed, by a forward difference of
+/// the law alone: `d/dt_j (sign mu N_i) = sign (mu' (sgn slip_i / dt) dslip_ij N_i + mu dN_ij)`.
+/// Returns the tractions, or why the partition did not resolve and by how much:
+/// a stops' refusal is sized by `refusal_size` (the residual of an unconverged
+/// root, the value of a broken budget), a Newton failure is unbounded.
+fn solve_condensed(
+    line: &dyn CondensedLine,
+    law: &[&FrictionLaw],
+    dt: f64,
+    cells: &[Branch],
+    max_newton: usize,
+) -> Result<Vec<f64>, (&'static str, f64)> {
+    let p = cells.len();
+    let evaluate = |t: &[f64]| -> Result<(Vec<f64>, Vec<f64>), (&'static str, f64)> {
+        let point = condensed_at(line, t).map_err(|error| (STOPS_UNRESOLVED, refusal_size(&error)))?;
+        let mut r = vec![0.0f64; p];
+        let mut jac = vec![0.0f64; p * p];
+        for i in 0..p {
+            if cells[i] == Branch::Stuck {
+                r[i] = point.slip[i];
+                jac[i * p..(i + 1) * p].copy_from_slice(&point.dslip[i * p..(i + 1) * p]);
+                continue;
+            }
+            let sign = branch_sign(cells[i]);
+            let kt = kinetic_traction(law[i], point.normal[i], sign, point.slip[i], dt).map_err(|_| DIVERGED)?;
+            r[i] = t[i] - kt;
+            let speed = (point.slip[i] / dt).abs();
+            let mu = kinetic_mu(law[i], speed).map_err(|_| DIVERGED)?;
+            let h = 1e-7 * speed.max(1e-6);
+            let slope = (kinetic_mu(law[i], speed + h).map_err(|_| DIVERGED)? - mu) / h;
+            // d|slip|/d slip; a port at exactly zero slip contributes no slope.
+            let along = if point.slip[i] > 0.0 {
+                1.0 / dt
+            } else if point.slip[i] < 0.0 {
+                -1.0 / dt
+            } else {
+                0.0
+            };
+            for j in 0..p {
+                let d = slope * along * point.dslip[i * p + j] * point.normal[i] + mu * point.dnormal[i * p + j];
+                let identity = if i == j { 1.0 } else { 0.0 };
+                jac[i * p + j] = identity - sign * d;
+            }
+        }
+        Ok((r, jac))
+    };
+    let mut t = vec![0.0f64; p];
+    for _ in 0..max_newton {
+        let (r, jac) = evaluate(&t)?;
+        if r.iter().all(|x| x.abs() <= 1e-18) {
+            break;
+        }
+        let neg: Vec<f64> = r.iter().map(|x| -x).collect();
+        let delta = dense_solve(&jac, &neg, p).ok_or(DIVERGED)?;
+        for i in 0..p {
+            t[i] += delta[i];
+            if !t[i].is_finite() {
+                return Err(DIVERGED);
+            }
+        }
+    }
+    let (r, _) = evaluate(&t)?;
+    if r.iter().all(|x| x.abs() <= 1e-12) {
+        Ok(t)
+    } else {
+        Err(DIVERGED)
+    }
+}
+
 /// Branch -> owner regime.
 fn regime_of(b: Branch) -> ModalFrictionRegime {
     match b {
@@ -256,7 +438,9 @@ fn regime_of(b: Branch) -> ModalFrictionRegime {
 
 /// Is partition `cells` with tractions `t` a consistent (KKT) joint solution?
 /// Stuck ports stay inside the static cone; sliding ports actually slip in their
-/// assigned direction and the traction opposes that slip (dissipative).
+/// assigned direction and the traction opposes that slip (dissipative). The walk
+/// uses `consistent_at` on its line's own evaluation; the tests use this form.
+#[cfg(test)]
 fn is_consistent(
     a: &[f64],
     f: &[f64],
@@ -266,8 +450,19 @@ fn is_consistent(
     cells: &[Branch],
     t: &[f64],
 ) -> Result<bool, ModalFrictionError> {
-    let p = f.len();
-    let slip = slips(a, f, t);
+    consistent_at(&slips(a, f, t), normal, law, dt, cells, t)
+}
+
+/// `is_consistent` on slips and normal loads already evaluated at `t`.
+fn consistent_at(
+    slip: &[f64],
+    normal: &[f64],
+    law: &[&FrictionLaw],
+    dt: f64,
+    cells: &[Branch],
+    t: &[f64],
+) -> Result<bool, ModalFrictionError> {
+    let p = slip.len();
     for i in 0..p {
         match cells[i] {
             Branch::Stuck => {
@@ -306,10 +501,26 @@ pub(super) fn solve_active_set(
     seed: &[ModalFrictionRegime],
     budget: usize,
 ) -> Result<Resolution, ModalFrictionError> {
-    let p = f.len();
+    let _ = seed;
+    walk_line(&Line::Fixed { a, f, normal }, f.len(), law, dt, budget)
+}
+
+/// The same walk on a condensed line: a stop bank coupled to the ports.
+pub(super) fn solve_active_set_condensed(
+    line: &dyn CondensedLine,
+    ports: usize,
+    law: &[&FrictionLaw],
+    dt: f64,
+    budget: usize,
+) -> Result<Resolution, ModalFrictionError> {
+    walk_line(&Line::Condensed(line), ports, law, dt, budget)
+}
+
+fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: usize)
+    -> Result<Resolution, ModalFrictionError>
+{
     // First partition: every port stuck. A stuck port that cannot hold will be
     // flipped to the sliding direction its over-cone traction indicates.
-    let _ = seed;
     let mut cells = vec![Branch::Stuck; p];
     let mut seen: Vec<Vec<Branch>> = Vec::new();
     let mut pivots = 0usize;
@@ -323,36 +534,51 @@ pub(super) fn solve_active_set(
             return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst });
         }
         seen.push(cells.clone());
-        let Some(t) = solve_partition(a, f, normal, law, dt, &cells, 100) else {
-            // This partition's Newton did not resolve; perturb by flipping the
-            // port with the largest |slip| that is pinned stuck, else give up.
-            let slip = slips(a, f, &vec![0.0; p]);
-            let mut flip = None;
-            let mut w = 0.0;
-            for i in 0..p {
-                if cells[i] == Branch::Stuck && slip[i].abs() > w {
-                    w = slip[i].abs();
-                    flip = Some(i);
+        let t = match line.solve(law, dt, &cells) {
+            Ok(t) => t,
+            Err((condition, size)) => {
+                // This partition did not resolve; perturb by flipping the port
+                // with the largest |slip| that is pinned stuck, else give up.
+                let slip = match line.state(&vec![0.0; p]) {
+                    Ok((slip, _)) => slip,
+                    Err(error) => {
+                        worst = KktViolation { port: 0, condition: STOPS_UNRESOLVED, size: refusal_size(&error) };
+                        return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst });
+                    }
+                };
+                let mut flip = None;
+                let mut w = 0.0;
+                for i in 0..p {
+                    if cells[i] == Branch::Stuck && slip[i].abs() > w {
+                        w = slip[i].abs();
+                        flip = Some(i);
+                    }
                 }
-            }
-            match flip {
-                Some(i) => {
-                    worst = KktViolation { port: i, condition: "newton-nonconvergence", size: w };
-                    cells[i] = if slip[i] >= 0.0 { Branch::SlidePos } else { Branch::SlideNeg };
-                    continue;
-                }
-                None => {
-                    worst = KktViolation { port: 0, condition: "newton-nonconvergence", size: f64::INFINITY };
-                    return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst });
+                match flip {
+                    Some(i) => {
+                        worst = KktViolation { port: i, condition, size: w };
+                        cells[i] = if slip[i] >= 0.0 { Branch::SlidePos } else { Branch::SlideNeg };
+                        continue;
+                    }
+                    None => {
+                        worst = KktViolation { port: 0, condition, size };
+                        return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst });
+                    }
                 }
             }
         };
-        if is_consistent(a, f, normal, law, dt, &cells, &t)? {
+        let (slip, normal) = match line.state(&t) {
+            Ok(state) => state,
+            Err(error) => {
+                worst = KktViolation { port: 0, condition: STOPS_UNRESOLVED, size: refusal_size(&error) };
+                return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst });
+            }
+        };
+        if consistent_at(&slip, &normal, law, dt, &cells, &t)? {
             let regimes = cells.iter().map(|&b| regime_of(b)).collect();
             return Ok(Resolution::Solved(t, regimes));
         }
         // Flip the single worst KKT violator, recording port/condition/size.
-        let slip = slips(a, f, &t);
         let mut flip = None;
         let mut wsize = 0.0f64;
         let mut wport = 0usize;

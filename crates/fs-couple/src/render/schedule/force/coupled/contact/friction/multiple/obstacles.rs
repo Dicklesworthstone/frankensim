@@ -302,12 +302,18 @@ impl NormalPoint {
     // `share` of the declared tolerance bounds the residual: all of it at the
     // actual endpoint, half of it on a prediction solved with headroom.
     fn check(&self, reaction: f64, x: f64, dt: f64, share: f64) -> Result<(f64, f64, f64), ModalCouplingError> {
+        self.check_counted(reaction, x, dt, share, self.iterations)
+    }
+    // `check`, naming `iterations` as the root work behind `reaction` in a refusal.
+    fn check_counted(&self, reaction: f64, x: f64, dt: f64, share: f64, iterations: usize)
+        -> Result<(f64, f64, f64), ModalCouplingError>
+    {
         let (expected, elastic) = law_force(&self.law, self.old, x, dt)?;
         let tolerance = force_tolerance(reaction, expected, self.config)?;
         let residual = finite(reaction-expected)?;
         if residual.abs() > share*tolerance {
             return Err(ModalCouplingError::ContactSolve { residual_n: residual,
-                tolerance_n: share*tolerance, iterations: self.iterations });
+                tolerance_n: share*tolerance, iterations });
         }
         // Exactly the original nonadhesive constitutive loss, not a new damper
         // or a residual disguised as physical dissipation.
@@ -315,6 +321,18 @@ impl NormalPoint {
         if loss < 0.0 { return Err(invalid("obstacle loss must not create energy")); }
         Ok((loss, residual, tolerance))
     }
+}
+
+/// The stops condensed at held friction (see `ObstacleSet::condensed`).
+pub(super) struct CondensedStops {
+    /// Each stop's reaction [N].
+    pub reactions: Vec<f64>,
+    /// Each port's slip shift `T R` on the bank's line [m].
+    pub shift: Vec<f64>,
+    /// `dR_k/dt_j`, row-major q x p.
+    pub dreactions: Vec<f64>,
+    /// `d(T R)_i/dt_j`, row-major p x p [m/N].
+    pub dshift: Vec<f64>,
 }
 
 pub(in super::super) struct ObstacleSet {
@@ -583,6 +601,18 @@ impl ObstacleSet {
     pub(super) fn sweep(&mut self, friction: &[f64], dt: f64, gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>
     {
+        let mut reactions = std::mem::take(&mut self.reactions);
+        let mut used = vec![0; self.points.len()];
+        let swept = self.sweep_reactions(friction, &mut reactions, &mut used, dt, gate);
+        self.reactions = reactions;
+        for (point, used) in self.points.iter_mut().zip(used) { point.iterations += used; }
+        swept
+    }
+    // One coordinate sweep of the stops' own bracketed roots at held friction,
+    // in place on `reactions`, counting each stop's root iterations in `used`.
+    fn sweep_reactions(&self, friction: &[f64], reactions: &mut [f64], used: &mut [usize], dt: f64,
+        gate: Option<&CancelGate>) -> Result<(), ModalCouplingError>
+    {
         let q = self.points.len(); let p = self.friction_ports;
         if let Some(residual) = &self.residual {
             for &block in &residual.blocks {
@@ -592,18 +622,18 @@ impl ObstacleSet {
                 let mut frees = [0.0; 2];
                 for (slot, k) in [i, j].into_iter().enumerate() {
                     let mut free = finite(self.points[k].free+dot(&self.nt[k*p..(k+1)*p], friction)?)?;
-                    for m in 0..q { if m != i && m != j { free = finite(free-self.nn[k*q+m]*self.reactions[m])?; } }
+                    for m in 0..q { if m != i && m != j { free = finite(free-self.nn[k*q+m]*reactions[m])?; } }
                     frees[slot] = free;
                 }
                 if i == j {
-                    let point = &mut self.points[i];
+                    let point = &self.points[i];
                     let mut config = point.config;
                     if self.headroom {
                         if config.force_absolute_tolerance_n*0.125 > 0.0 { config.force_absolute_tolerance_n *= 0.125; }
                         if config.force_relative_tolerance*0.125 > 0.0 { config.force_relative_tolerance *= 0.125; }
                     }
                     let (reaction, iterations) = solve_contact(&point.law, point.old, frees[0], self.nn[i*q+i], dt, config, gate)?;
-                    self.reactions[i] = reaction; point.iterations += iterations;
+                    reactions[i] = reaction; used[i] += iterations;
                 } else {
                     let (ri, rj, iterations) = self.solve_pair(i, j, frees[0], frees[1], dt, gate)?;
                     for (k, r) in [(i, ri), (j, rj)] {
@@ -611,7 +641,7 @@ impl ObstacleSet {
                         if r > limit {
                             return Err(ModalCouplingError::Budget { what: "contact normal force", value: r, limit });
                         }
-                        self.reactions[k] = r; self.points[k].iterations += iterations;
+                        reactions[k] = r; used[k] += iterations;
                     }
                 }
             }
@@ -620,8 +650,8 @@ impl ObstacleSet {
         for i in 0..q {
             poll(gate)?;
             let mut free = finite(self.points[i].free+dot(&self.nt[i*p..(i+1)*p], friction)?)?;
-            for j in 0..q { if j != i { free = finite(free-self.nn[i*q+j]*self.reactions[j])?; } }
-            let point = &mut self.points[i];
+            for j in 0..q { if j != i { free = finite(free-self.nn[i*q+j]*reactions[j])?; } }
+            let point = &self.points[i];
             let mut config = point.config;
             if self.headroom {
                 // As in the plain multi-contact owner: a tighter coordinate root
@@ -630,7 +660,7 @@ impl ObstacleSet {
                 if config.force_relative_tolerance*0.125 > 0.0 { config.force_relative_tolerance *= 0.125; }
             }
             let (reaction, iterations) = solve_contact(&point.law, point.old, free, self.nn[i*q+i], dt, config, gate)?;
-            self.reactions[i] = reaction; point.iterations += iterations;
+            reactions[i] = reaction; used[i] += iterations;
         }
         Ok(())
     }
@@ -648,15 +678,86 @@ impl ObstacleSet {
     pub(super) fn check_prediction(&self, friction: &[f64], dt: f64, gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>
     {
+        self.check_reactions(friction, &self.reactions, None, dt, gate)
+    }
+    // The stops' own check of `reactions` at held friction. `used` replaces each
+    // stop's sweep iteration count in a refusal when another solve produced them.
+    fn check_reactions(&self, friction: &[f64], reactions: &[f64], used: Option<&[usize]>, dt: f64,
+        gate: Option<&CancelGate>) -> Result<(), ModalCouplingError>
+    {
         let q = self.points.len(); let p = self.friction_ports;
         for (i, point) in self.points.iter().enumerate() {
             poll(gate)?;
             let x = finite(finite(point.free+dot(&self.nt[i*p..(i+1)*p], friction)?)?
-                - dot(&self.nn[i*q..(i+1)*q], &self.reactions)?)?;
-            point.check(self.reactions[i], x, dt, if self.headroom { 0.5 } else { 1.0 })?;
+                - dot(&self.nn[i*q..(i+1)*q], reactions)?)?;
+            let iterations = used.map_or(point.iterations, |used| used[i]);
+            point.check_counted(reactions[i], x, dt, if self.headroom { 0.5 } else { 1.0 }, iterations)?;
         }
         Ok(())
     }
+    /// The stops condensed at held friction `friction`, for the active-set rescue
+    /// of a bank whose stops are coupled to its ports (MagentaBadger 12431).
+    ///
+    /// The reactions are the stops' own: the same bracketed coordinate roots as
+    /// the joint sweep, swept from zero at FIXED friction until the stops' own
+    /// check passes, at most `max_sweeps` times. No other stop solver is used,
+    /// so the clipped law's kink at contact onset meets a bracket, not a Newton
+    /// step. A stop that does not pass returns its own refusal. Starting from
+    /// zero makes the reactions a function of `friction` alone. The gate is not
+    /// polled here: the rescue polls before and after its walk, as it does for
+    /// the plain line.
+    ///
+    /// With `D = diag(phi')`, each stop law's slope at its closure by a forward
+    /// difference of that law alone, the reactions' derivative is
+    /// `dR/dt = (I + D Nn)^-1 D Nt`, and the shift `T R` of the ports' slips
+    /// (`T` = `tn_end` on the endpoint line, else `tn`) moves by `T dR/dt`.
+    pub(super) fn condensed(&self, friction: &[f64], endpoint: bool, dt: f64, max_sweeps: usize)
+        -> Result<CondensedStops, ModalCouplingError>
+    {
+        let q = self.points.len(); let p = self.friction_ports;
+        let mut reactions = vec![0.0; q];
+        let mut used = vec![0; q];
+        let mut refusal = None;
+        for _ in 0..max_sweeps.max(1) {
+            self.sweep_reactions(friction, &mut reactions, &mut used, dt, None)?;
+            refusal = self.check_reactions(friction, &reactions, Some(&used), dt, None).err();
+            if refusal.is_none() { break; }
+        }
+        if let Some(error) = refusal { return Err(error); }
+        let mut response = vec![0.0; q*q];
+        let mut drive = vec![0.0; q*p];
+        for (k, point) in self.points.iter().enumerate() {
+            let x = finite(finite(point.free+dot(&self.nt[k*p..(k+1)*p], friction)?)?
+                - dot(&self.nn[k*q..(k+1)*q], &reactions)?)?;
+            let h = 1e-7*x.abs().max(point.old.abs()).max(1e-12);
+            let (at, _) = law_force(&point.law, point.old, x, dt)?;
+            let (above, _) = law_force(&point.law, point.old, finite(x+h)?, dt)?;
+            let slope = finite((above-at)/h)?;
+            for m in 0..q { response[k*q+m] = finite(slope*self.nn[k*q+m] + if k == m { 1.0 } else { 0.0 })?; }
+            for j in 0..p { drive[k*p+j] = finite(slope*self.nt[k*p+j])?; }
+        }
+        let mut dreactions = vec![0.0; q*p];
+        for j in 0..p {
+            let column: Vec<f64> = (0..q).map(|k| drive[k*p+j]).collect();
+            let w = super::active_set::dense_solve(&response, &column, q)
+                .ok_or_else(|| invalid("condensed stop response I + D Nn is singular"))?;
+            for k in 0..q { dreactions[k*p+j] = finite(w[k])?; }
+        }
+        let map = if endpoint { &self.tn_end } else { &self.tn };
+        let mut shift = vec![0.0; p];
+        let mut dshift = vec![0.0; p*p];
+        for i in 0..p {
+            shift[i] = dot(&map[i*q..(i+1)*q], &reactions)?;
+            for j in 0..p {
+                let mut moved = 0.0;
+                for k in 0..q { moved = finite(moved + map[i*q+k]*dreactions[k*p+j])?; }
+                dshift[i*p+j] = moved;
+            }
+        }
+        Ok(CondensedStops { reactions, shift, dreactions, dshift })
+    }
+    // Adopt reactions solved outside the sweep, by the coupled rescue only.
+    pub(super) fn set_reactions(&mut self, reactions: &[f64]) { self.reactions.copy_from_slice(reactions); }
     pub(super) fn add_forces(&self, forces: &mut [f64], gate: Option<&CancelGate>) -> Result<(), ModalCouplingError> {
         for (i, (point, &reaction)) in self.points.iter().zip(&self.reactions).enumerate() {
             poll(gate)?;

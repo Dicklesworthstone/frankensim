@@ -13,6 +13,9 @@ use fs_tribo::FrictionLaw;
 #[path = "modal_multi_friction/nonlinear.rs"]
 mod nonlinear;
 
+#[path = "modal_multi_friction/coupled_stop.rs"]
+mod coupled_stop;
+
 fn budgets() -> ModalCouplingConfig {
     ModalCouplingConfig { max_modes: 8, max_connections: 4, max_setup_terms: 4096,
         nyquist_guard_fraction: 0.9, maximum_total_energy_j: 100.0,

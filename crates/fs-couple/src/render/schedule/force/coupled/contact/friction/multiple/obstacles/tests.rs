@@ -365,19 +365,94 @@ fn a_stop_that_misses_at_its_actual_endpoint_is_solved_again_and_accepted() {
     assert_eq!(joint.obstacle_resolves(), resolved);
 }
 
+// The pinched pair, whose joint sweep misses the stops' 1e-13 relative tolerance,
+// goes to the coupled-stop rescue, and the walk runs out on a partition whose
+// stops refused at a trial traction (MagentaBadger 13023). The refusal must be
+// named `stops-unresolved` and sized by the root that refused: its ContactSolve
+// residual or its Budget value, read where the walk met it, never unbounded.
+#[test]
+fn the_pinched_pairs_stop_refusal_is_named_and_sized_by_the_root_that_refused() {
+    use super::super::active_set::{LAST_STOPS_REFUSAL, STOPS_UNRESOLVED};
+    let mut joint = pinched(5e5, 1e-13);
+    for _ in 0..2000 {
+        LAST_STOPS_REFUSAL.with(|last| last.set(None));
+        let error = match joint.step(&[0.0, 0.0], &[FrictionDrive { speed_m_s: 0.05, normal_force_n: 0.2 }]) {
+            Ok(_) => continue,
+            Err(error) => error,
+        };
+        let refused = LAST_STOPS_REFUSAL.with(|last| last.get())
+            .unwrap_or_else(|| panic!("the walk met no stops' refusal; the step refused with {error}"));
+        match error {
+            ModalFrictionError::ActiveSetExhausted { worst_condition, worst_size, .. } => {
+                assert_eq!(worst_condition, STOPS_UNRESOLVED);
+                assert!(worst_size.is_finite(), "an unsized refusal: {worst_size}");
+                assert_eq!(worst_size, refused.abs());
+            }
+            other => panic!("expected the walk to run out on the stops, got {other}"),
+        }
+        return;
+    }
+    panic!("the pinched pair no longer refuses in 2000 steps: this test pins that refusal and must be revisited");
+}
+
+// A static bow against a preloaded stop, with one joint sweep: the sweep solves
+// the stop at zero traction, then the bow, whose traction moves the stop's
+// closure through `nt`. One sweep can't settle that.
+fn one_sweep_bow_on_a_preloaded_stop() -> MultiFrictionModalSystem {
+    let gate = CancelGate::new_clock_free();
+    friction(network(1000.0))
+        .with_additional_ports(vec![], MultiFrictionConfig { max_ports: 8, max_sweeps: 1, max_setup_terms: 100000 }, &gate)
+        .unwrap().with_obstacles(vec![(obstacle(1.0, -1e-4), normal_limits())], limits(), &gate).unwrap()
+}
+const STATIC_BOW: [FrictionDrive; 1] = [FrictionDrive { speed_m_s: 0.0, normal_force_n: 1.0 }];
+
+// A manufactured elastic film: no rosin, coating or measured material. 20 um over
+// 2 mm^2 with G = 1e10 Pa is a 1e9 N/m shear spring, stiff enough that the bow's
+// traction still moves the stop past its tolerance in one sweep; a 1e7 Pa yield
+// stress (20 N) keeps it elastic.
+fn stiff_elastic_film() -> fs_material::state_point::ResolvedShearLayer {
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
+        PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+    use fs_material::state_point::{MaterialPropertySelection, ResolvedShearLayer, ScalarAdmissibility,
+        ScalarPropertyRequirement, resolve_material_state_point};
+    use fs_qty::{DynViscosity, Pressure};
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    for (name, dims, value) in [("shear_modulus", Pressure::DIMS, 1e10), ("shear_yield_stress", Pressure::DIMS, 1e7),
+        ("plastic_shear_viscosity", DynViscosity::DIMS, 1.0)] {
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(name, dims),
+            value: PropertyValue::Scalar { value, dims },
+            validity: ValidityDomain::unconstrained().with("T", 280.0, 310.0).with("omega", 0.0, 1e6),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![],
+            provenance: Provenance { source: "manufactured thin simple-shear layer".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+        requirements.push(ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap());
+    }
+    let card = MaterialCard::assemble(MaterialStateId { chemistry: "manufactured-layer".into(),
+        phase: "solid".into(), process: "fixture".into(), revision: 0 }, claims, vec![]).unwrap();
+    let material = resolve_material_state_point(&card,
+        &QueryPoint::new().with("T", 293.15).unwrap().with("omega", 0.0).unwrap(),
+        &requirements, MaterialPropertySelection::SingleClaimOnly).unwrap();
+    ResolvedShearLayer::new(material, 2e-6, 20e-6, 0.05).unwrap()
+}
+
 #[test]
 fn a_declined_rescue_names_the_sweep_failure_it_could_not_converge() {
-    // One joint sweep cannot settle a static bow against a preloaded stop: the
-    // bow's traction moves the stop's closure after its reaction was solved. The
-    // stop is coupled to the bow, so the active-set rescue declines; the refusal
-    // must carry that unconverged contact solve, not only the decline.
+    // The rescue has no shear-layer law, so a film on the bow makes it decline
+    // (MagentaBadger 12431 chose the case: shear layer). The refusal must carry
+    // the sweep's unconverged stop solve, not only the decline.
     let gate = CancelGate::new_clock_free();
-    let mut joint = friction(network(1000.0))
-        .with_additional_ports(vec![], MultiFrictionConfig { max_ports: 8, max_sweeps: 1, max_setup_terms: 100000 }, &gate)
-        .unwrap().with_obstacles(vec![(obstacle(1.0, -1e-4), normal_limits())], limits(), &gate).unwrap();
+    let mut joint = one_sweep_bow_on_a_preloaded_stop()
+        .with_material_shear_layers(vec![(0, stiff_elastic_film())], &gate).unwrap();
+    assert!(!joint.obstacles.as_ref().unwrap().friction_decoupled());
     let before = states(&joint);
-    let error = match joint.step(&[0.0], &[FrictionDrive { speed_m_s: 0.0, normal_force_n: 1.0 }]) {
-        Ok(_) => panic!("one sweep settled a bow against a preloaded stop"),
+    let error = match joint.step(&[0.0], &STATIC_BOW) {
+        Ok(_) => panic!("one sweep settled a filmed bow against a preloaded stop"),
         Err(error) => error,
     };
     match &error {
@@ -387,6 +462,32 @@ fn a_declined_rescue_names_the_sweep_failure_it_could_not_converge() {
     }
     assert!(error.to_string().contains("; the joint sweep's last failure: friction network: "), "{error}");
     assert_eq!(states(&joint), before, "a refused step publishes no motion");
+}
+
+#[test]
+fn a_bow_coupled_to_a_preloaded_stop_is_rescued_on_the_condensed_line() {
+    // K6 (MagentaBadger 12431): the static bow that used to decline. Its stop is
+    // coupled to the bow, so the rescue condenses the stop out and adopts the
+    // stop's reaction with the bow's traction. The rescued step must pass the
+    // code's own checks and reach the partition the full sweep reaches.
+    let gate = CancelGate::new_clock_free();
+    let mut swept = friction(network(1000.0))
+        .with_additional_ports(vec![], MultiFrictionConfig { max_ports: 8, max_sweeps: 128, max_setup_terms: 100000 }, &gate)
+        .unwrap().with_obstacles(vec![(obstacle(1.0, -1e-4), normal_limits())], limits(), &gate).unwrap();
+    let full = swept.step(&[0.0], &STATIC_BOW).unwrap().clone();
+    assert_eq!(full.active_set_rescues, 0);
+    let mut joint = one_sweep_bow_on_a_preloaded_stop();
+    assert!(!joint.obstacles.as_ref().unwrap().friction_decoupled());
+    let frame = joint.step(&[0.0], &STATIC_BOW).unwrap().clone();
+    assert_eq!((frame.sweeps, frame.active_set_rescues), (1, 1));
+    assert_eq!(frame.ports[0].regime, ModalFrictionRegime::Sticking);
+    assert_eq!(frame.ports[0].regime, full.ports[0].regime);
+    assert!(frame.ports[0].end_slip_speed_m_s.unwrap().abs()*joint.sample_period_s()
+        <= joint.points[0].config.sticking_tolerance_m);
+    let stop = joint.last_obstacle_frames().unwrap()[0];
+    assert!(stop.normal_force_n > 0.0);
+    assert!(stop.constitutive_residual_n.abs() <= stop.force_tolerance_n);
+    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
 }
 
 // Two ports share two body modes and the stops press modes of their own, so every
@@ -430,25 +531,32 @@ fn a_stop_with_no_friction_coupling_leaves_the_step_to_the_rescue() {
 }
 
 #[test]
-fn any_non_zero_stop_coupling_still_declines_the_rescue() {
-    // The smallest positive double: any tolerance on the zero would admit it.
+fn any_non_zero_stop_coupling_takes_the_condensed_rescue_to_the_decoupled_partition() {
+    // Continuity (MagentaBadger 12431). The smallest positive double planted in
+    // nt, tn or tn_end makes the bank coupled, with no tolerance on the zero, so
+    // the step takes the condensed line, the only rescue a coupled bank has. A
+    // coupling that small must not move the partition the plain rescue lands on
+    // the decoupled bank.
+    let decoupled = {
+        let mut bank = decoupled_stop_bank(false);
+        let frame = bank.step(&[0.0; 4], &CREEPING).unwrap().clone();
+        assert_eq!(frame.active_set_rescues, 1);
+        frame.ports.iter().map(|port| port.regime).collect::<Vec<_>>()
+    };
     let planted = f64::from_bits(1);
-    let plants: [fn(&mut ObstacleSet, f64); 3] = [|stops, c| stops.nt[0] = c, |stops, c| stops.tn[0] = c,
-        |stops, c| stops.tn_end[0] = c];
+    let plants: [fn(&mut ObstacleSet, f64) -> f64; 3] = [
+        |stops, c| { stops.nt[0] = c; stops.nt[0] },
+        |stops, c| { stops.tn[0] = c; stops.tn[0] },
+        |stops, c| { stops.tn_end[0] = c; stops.tn_end[0] },
+    ];
     for plant in plants {
         let mut bank = decoupled_stop_bank(false);
-        plant(bank.obstacles.as_mut().unwrap(), planted);
-        let before = states(&bank);
-        let error = match bank.step(&[0.0; 4], &CREEPING) {
-            Ok(_) => panic!("a coupled stop reached the rescue"),
-            Err(error) => error,
-        };
-        match &error {
-            ModalFrictionError::ActiveSetDeclined { cause } => assert!(
-                matches!(**cause, ModalFrictionError::Sticking { .. }), "cause: {cause}"),
-            other => panic!("expected a declined rescue, got {other}"),
-        }
-        assert_eq!(states(&bank), before, "a refused step publishes no motion");
+        let stops = bank.obstacles.as_mut().unwrap();
+        assert!(plant(stops, planted) != 0.0, "the planted coupling is nonzero");
+        assert!(!stops.friction_decoupled());
+        let frame = bank.step(&[0.0; 4], &CREEPING).unwrap().clone();
+        assert_eq!(frame.active_set_rescues, 1);
+        assert_eq!(frame.ports.iter().map(|port| port.regime).collect::<Vec<_>>(), decoupled);
     }
 }
 
