@@ -454,3 +454,109 @@ fn rarefaction_keeps_structural_species_zeros_and_refusals_are_atomic() {
     assert_eq!(duplicate.states, f.states);
     duplicate.validate_states(&mut || false).unwrap();
 }
+
+#[test]
+fn exact_equal_trace_flux_uses_the_source_admitted_physical_flux() {
+    let gas = gas(vec![
+        source("A", R, 3.5, 0.2, 0.0),
+        source("B", 2.0 * R, 5.0, 0.4, -5.0),
+    ]);
+    for velocity in [0.0, -0.17, 0.31] {
+        for pressure in [0.7, 1.3, 2.9, 7.1] {
+            let q = gas.conserved(&[0.7, 0.3], velocity, pressure).unwrap();
+            let p = gas.primitive(q.as_cell(), || false).unwrap();
+            let mut flux = [f64::NAN; 4];
+            let face = gas
+                .hllc_flux(q.as_cell(), q.as_cell(), &mut flux, || false)
+                .unwrap();
+            assert_eq!(
+                flux,
+                [
+                    q.partial_densities[0] * p.velocity,
+                    q.partial_densities[1] * p.velocity,
+                    q.momentum * p.velocity + p.pressure,
+                    (q.energy + p.pressure) * p.velocity,
+                ],
+                "equal axial trace at velocity {velocity}, pressure {pressure}",
+            );
+            assert_eq!(face.signal_speed, p.velocity.abs() + p.sound_speed);
+            assert!(!face.used_hll_fallback);
+
+            let input = SpatialPrimitive {
+                partial_densities: &[0.7, 0.3],
+                normal_velocity: velocity,
+                transverse_velocity: [0.43, -0.87],
+                pressure,
+            };
+            let mut state = [0.0; 6];
+            let p = gas.spatial_conserved_into(input, &mut state).unwrap();
+            let mut flux = [f64::NAN; 6];
+            let face = gas
+                .hllc_spatial_flux_from_primitive(input, input, &mut flux, || false)
+                .unwrap();
+            let mut expected = state.map(|value| value * p.velocity);
+            expected[2] += p.pressure;
+            expected[5] = (state[5] + p.pressure) * p.velocity;
+            assert_eq!(flux, expected, "equal spatial trace");
+            assert!(!face.used_hll_fallback);
+        }
+    }
+}
+
+#[test]
+fn exact_stationary_species_and_shear_contacts_transport_only_pressure() {
+    let gas = gas(vec![
+        source("A", R, 3.5, 0.2, 0.0),
+        source("B", 2.0 * R, 5.0, 0.4, -5.0),
+    ]);
+    // Different molecular masses, caloric laws and tangential velocities.
+    // Equal molar concentrations make the source-evaluated pressures exactly
+    // equal, without a near-equality tolerance or fabricated primitive state.
+    for pressure in [0.7, 1.3, 2.9, 7.1] {
+        let left = SpatialPrimitive {
+            partial_densities: &[1.0, 0.0],
+            normal_velocity: 0.0,
+            transverse_velocity: [0.43, -0.87],
+            pressure,
+        };
+        let right = SpatialPrimitive {
+            partial_densities: &[0.0, 2.0],
+            normal_velocity: 0.0,
+            transverse_velocity: [-0.91, 0.37],
+            pressure,
+        };
+        let mut l = [0.0; 6];
+        let mut r = [0.0; 6];
+        let pl = gas.spatial_conserved_into(left, &mut l).unwrap();
+        let pr = gas.spatial_conserved_into(right, &mut r).unwrap();
+        assert_eq!(pl.pressure, pr.pressure);
+        assert_ne!(pl.sound_speed, pr.sound_speed);
+        let mut flux = [f64::NAN; 6];
+        let face = gas
+            .hllc_spatial_flux_from_primitive(left, right, &mut flux, || false)
+            .unwrap();
+        assert_eq!(flux, [0.0, 0.0, pl.pressure, 0.0, 0.0, 0.0]);
+        assert_eq!(face.signal_speed, pl.sound_speed.max(pr.sound_speed));
+        assert!(!face.used_hll_fallback);
+
+        let mut planar = [f64::NAN; 5];
+        gas.hllc_normal_flux_from_primitive(
+            NormalPrimitive {
+                partial_densities: left.partial_densities,
+                normal_velocity: 0.0,
+                transverse_velocity: left.transverse_velocity[0],
+                pressure,
+            },
+            NormalPrimitive {
+                partial_densities: right.partial_densities,
+                normal_velocity: 0.0,
+                transverse_velocity: right.transverse_velocity[0],
+                pressure,
+            },
+            &mut planar,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(planar, [0.0, 0.0, pl.pressure, 0.0, 0.0]);
+    }
+}
