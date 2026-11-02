@@ -53,6 +53,8 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         GoldCyanidation,
         PyriteOxidationFerrous,
         PyriteOxidationFerricHydroxide,
+        MagnesiteCalcination,
+        MagnetiteOxidationToHematite,
     ] {
         let first = recipe.build().unwrap();
         let second = recipe.build().unwrap();
@@ -115,6 +117,29 @@ fn carbonate_neutralization_and_lime_amounts() {
     close(amount(&lime, 3.0, "CaO(s)"), 3.0);
     close(amount(&lime, 3.0, "H2O(l)"), 3.0);
     close(amount(&lime, 3.0, "Ca(OH)2(s)"), 3.0);
+}
+
+#[test]
+fn calcination_and_oxide_oxidation_keep_gas_endpoints_and_written_extent() {
+    let calcination = MineralReaction::MagnesiteCalcination.build().unwrap();
+    close(amount(&calcination, 2.0, "MgCO3(s)"), 2.0);
+    close(amount(&calcination, 2.0, "MgO(s)"), 2.0);
+    close(amount(&calcination, 2.0, "CO2(g)"), 2.0);
+    let oxidation = MineralReaction::MagnetiteOxidationToHematite
+        .build()
+        .unwrap();
+    close(amount(&oxidation, 0.25, "Fe3O4(s)"), 1.0);
+    close(amount(&oxidation, 0.25, "O2(g)"), 0.25);
+    close(amount(&oxidation, 0.25, "Fe2O3(s)"), 1.5);
+    // Oxygen limits this authored inventory: 10 mol magnetite needs 2.5 mol O2.
+    let extent = oxidation
+        .limiting_extent(&[
+            (id("Fe3O4(s)"), Amount::new(10.0)),
+            (id("O2(g)"), Amount::new(2.0)),
+        ])
+        .unwrap();
+    close(extent.value(), 2.0);
+    close(amount(&oxidation, extent.value(), "Fe3O4(s)"), 8.0);
 }
 
 #[test]

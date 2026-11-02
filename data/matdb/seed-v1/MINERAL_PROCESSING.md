@@ -1,6 +1,6 @@
 # Mineral processing: public sources and callable physics
 
-These **18 source profiles and 56 property claims** provide reusable mineral
+These **24 source profiles and 74 property claims** provide reusable mineral
 and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and
 `matdb-catalog` discovery. No separate material registry or schema is required.
@@ -103,6 +103,37 @@ Pure liquid sulfuric acid does not represent an aqueous acid concentration;
 solid NaOH/NaCN do not supply aqueous ion formation properties. Commercial
 purity, slurry composition, solvation and heat of dilution remain separate.
 
+### Carbonate calcination and iron-oxide oxidation
+
+Six additional profiles supply `molar-mass`,
+`standard-molar-formation-enthalpy` and `standard-molar-entropy` at the same
+298.15 K / 100000 Pa JANAF reference. Their selected crystalline and gaseous
+species close two complete mixed-phase heat balances:
+
+| Profile | Formation enthalpy, J/mol | Entropy, J/(mol K) | Original JANAF table |
+| --- | ---: | ---: | --- |
+| `magnesite-solid-janaf-mining` | −1111689 | 65.854 | [C-079](https://janaf.nist.gov/tables/C-079.html) |
+| `magnesium-oxide-solid-janaf-mining` | −601241 | 26.924 | [Mg-008](https://janaf.nist.gov/tables/Mg-008.html) |
+| `carbon-dioxide-gas-janaf-mining` | −393522 | 213.795 | [C-095](https://janaf.nist.gov/tables/C-095.html) |
+| `magnetite-solid-janaf-mining` | −1120894 | 145.266 | [Fe-032](https://janaf.nist.gov/tables/Fe-032.html) |
+| `hematite-solid-janaf-mining` | −825503 | 87.400 | [Fe-030](https://janaf.nist.gov/tables/Fe-030.html) |
+| `oxygen-gas-janaf-mining` | 0 | 205.147 | [O-029](https://janaf.nist.gov/tables/O-029.html) |
+
+The gas profiles require `source-phase-gas=1`; the solids require
+`source-phase-solid=1`. Other reference flags are the same as above. Oxygen's
+zero formation enthalpy still has an original source claim and receipt.
+Existing heat-capacity and gas-EOS models remain separate sources; these six
+profiles supply reference-point quantities without inventing temperature curves.
+
+`MgCO3(s) -> MgO(s) + CO2(g)` gives **+116926 J/mol of reaction**. At
+84.3139 kg of pure carbonate actually reacted, the source molar masses give
+approximately 1000 mol extent, 44.0095 kg CO2 formed and **+116.926 MJ**.
+
+`4 Fe3O4(s) + O2(g) -> 6 Fe2O3(s)` gives **−469442 J/mol of the written
+reaction**, or −117360.5 J per mole of magnetite consumed. Fe2O3 denotes the
+hematite endpoint. These are standard chemical-energy changes; sensible heat,
+phase stability, conversion, kinetics and kiln fuel duty need further inputs.
+
 ## Run a source-backed reaction balance
 
 Compile the three native source packs and run the checked example:
@@ -137,6 +168,34 @@ rate or an operating dose. Original uncertainty is retained without producing
 a fabricated error band. Independently rounded source molar masses need not
 be bit-exactly additive; exact elemental conservation is a separate proof.
 
+The same executable also supports the two new mineral reactions. Compile their
+sources, then select the desired reaction explicitly:
+
+```bash
+for pack in magnesite-solid-janaf-mining magnesium-oxide-solid-janaf-mining carbon-dioxide-gas-janaf-mining magnetite-solid-janaf-mining oxygen-gas-janaf-mining hematite-solid-janaf-mining; do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
+    --out "$mining_pack_dir/$pack.fsmatpk"
+done
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --reaction magnesite-calcination \
+  "$mining_pack_dir/magnesite-solid-janaf-mining.fsmatpk" \
+  "$mining_pack_dir/magnesium-oxide-solid-janaf-mining.fsmatpk" \
+  "$mining_pack_dir/carbon-dioxide-gas-janaf-mining.fsmatpk" \
+  84.3139
+cargo run -p fs-thermochem --example mineral_processing -- \
+  --reaction magnetite-oxidation \
+  "$mining_pack_dir/magnetite-solid-janaf-mining.fsmatpk" \
+  "$mining_pack_dir/oxygen-gas-janaf-mining.fsmatpk" \
+  "$mining_pack_dir/hematite-solid-janaf-mining.fsmatpk" \
+  926.132
+```
+
+The oxidation invocation consumes 4000 mol magnetite at 1000 mol extent,
+requiring 1000 mol O2 and forming 6000 mol hematite. The executable verifies
+the expected pack identities, prints every consumed/formed amount and mass,
+and reports the standard enthalpy change with its sign.
+
 ### Other callable reaction foundations
 
 `ConservedReaction` accepts existing `ElementalMatrix`, `StoichiometricMatrix`
@@ -161,7 +220,7 @@ caller-declared extent of 3 mol. The final inventory contains 7 mol malachite,
 An extent above 3 mol refuses. This is a declared material-flow calculation;
 the availability bound does not predict reaction progress or a commercial dose.
 
-`MineralReaction::build` provides ten explicit endpoint choices:
+`MineralReaction::build` provides twelve explicit endpoint choices:
 
 | Reference | What the equation accounts for |
 | --- | --- |
@@ -175,13 +234,16 @@ the availability bound does not predict reaction progress or a commercial dose.
 | `GoldCyanidation` | Two mol cyanide and 0.25 mol oxygen per mol gold, net ionic Elsner balance |
 | `PyriteOxidationFerrous` | 3.5 mol O2 consumed and 2 mol H+ generated per mol pyrite |
 | `PyriteOxidationFerricHydroxide` | 3.75 mol O2 consumed and 4 mol H+ generated per mol pyrite |
+| `MagnesiteCalcination` | Forms one mol MgO and one mol gaseous CO2 per mol magnesite |
+| `MagnetiteOxidationToHematite` | Consumes 0.25 mol O2 and forms 1.5 mol hematite per mol magnetite |
 
 Pyrite equations use integer multiples of two/four FeS2; an extent is per
 equation as written. These endpoints follow the primary references cited in
-`stoichiometry/minerals.rs`
-and do not choose pH/Eh, speciation or precipitates. Only lime hydration has
-complete formation-enthalpy inputs in this new seed slice. Missing aqueous-ion
-data for other reaction heats remain missing.
+`stoichiometry/minerals.rs` and do not choose pH/Eh, speciation or precipitates.
+Lime hydration, magnesite
+calcination and magnetite oxidation have complete formation-enthalpy inputs
+in this seed slice. Missing aqueous-ion data for other reaction heats remain
+missing.
 
 `faraday_yield(charge, molar_mass, electrons_per_formula, efficiency)` supplies
 `n = Q * efficiency / (z * F)` and a typed mass/amount record. With explicit
@@ -250,7 +312,7 @@ It is not an operating-speed recommendation, power-draw model or DEM solver.
 Normal workspace commands for these slices:
 
 ```bash
-cargo test -p xtask --test mining_mineral_sources --test mining_mineral_coverage --test mining_reagent_sources --test mining_reagent_references --test mining_reaction_balances
+cargo test -p xtask --test mining_mineral_sources --test mining_mineral_coverage --test mining_reagent_sources --test mining_reagent_references --test mining_oxide_sources --test mining_reaction_balances
 cargo test -p fs-material comminution
 cargo test -p fs-thermochem stoichiometry::tests
 ```

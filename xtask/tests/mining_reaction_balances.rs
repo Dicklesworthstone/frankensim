@@ -73,6 +73,14 @@ fn compile(slug: &str, omit_formation_axis: Option<&str>) -> NormalizedPack {
 }
 
 fn point(liquid: bool) -> QueryPoint {
+    phase_point(if liquid {
+        "source-phase-liquid"
+    } else {
+        "source-phase-solid"
+    })
+}
+
+fn phase_point(phase_axis: &str) -> QueryPoint {
     let mut point = QueryPoint::new()
         .with_quantity(
             "temperature",
@@ -95,14 +103,7 @@ fn point(liquid: bool) -> QueryPoint {
         ("source-pure-species", 1.0),
         ("engineering-reference-model", 1.0),
         ("source-specimen-qualified", 0.0),
-        (
-            if liquid {
-                "source-phase-liquid"
-            } else {
-                "source-phase-solid"
-            },
-            1.0,
-        ),
+        (phase_axis, 1.0),
     ] {
         point = point
             .with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)
@@ -265,4 +266,150 @@ fn g3_reaction_refuses_incomplete_duplicate_or_incompatible_source_contexts() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn g1_janaf_magnesite_calcination_closes_carbon_dioxide_and_standard_heat() {
+    let slugs = [
+        "magnesite-solid-janaf-mining",
+        "magnesium-oxide-solid-janaf-mining",
+        "carbon-dioxide-gas-janaf-mining",
+    ];
+    let packs = slugs.map(|slug| compile(slug, None));
+    let ids = ["MgCO3(s)", "MgO(s)", "CO2(g)"].map(|name| SpeciesId::new(name).unwrap());
+    let points = [point(false), point(false), phase_point("source-phase-gas")];
+    let reaction = MineralReaction::MagnesiteCalcination.build().unwrap();
+    let heat = reaction
+        .standard_enthalpy_change(&sources(&packs, &ids, &points))
+        .unwrap();
+    // JANAF C-079, Mg-008, C-095: products - reactant, literal 298.15 K rows.
+    assert_eq!(heat.molar().value(), 116_926.0);
+    let molar_mass = packs[0]
+        .claims()
+        .query_typed(
+            &PropertyKey::with_quantity(
+                "molar-mass",
+                QuantitySpec::dimensional(Dims([0, 1, 0, 0, 0, -1])),
+            ),
+            &points[0],
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+    packs[0]
+        .claims()
+        .verify_receipt(&molar_mass.receipt)
+        .unwrap();
+    let extent = reaction
+        .extent_from_reacted_mass(
+            &ids[0],
+            Mass::new(84.3139),
+            MolarMass::new(molar_mass.evidence.value.value),
+        )
+        .unwrap();
+    assert!((extent.value() - 1000.0).abs() < 1e-10);
+    assert!((heat.at_extent(extent).unwrap().value() - 116_926_000.0).abs() < 1e-7);
+    let amounts = reaction.amounts(extent).unwrap();
+    let carbon_dioxide = amounts
+        .iter()
+        .find(|amount| amount.term.species == ids[2])
+        .unwrap();
+    assert_eq!(carbon_dioxide.term.coefficient, 1);
+    assert!((carbon_dioxide.amount.value() - 1000.0).abs() < 1e-10);
+    let co2_mass = packs[2]
+        .claims()
+        .query_typed(
+            &PropertyKey::with_quantity(
+                "molar-mass",
+                QuantitySpec::dimensional(Dims([0, 1, 0, 0, 0, -1])),
+            ),
+            &points[2],
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+    assert!(
+        (carbon_dioxide.amount.value() * co2_mass.evidence.value.value - 44.0095).abs() < 1e-12
+    );
+    for term in heat.terms() {
+        let pack = packs
+            .iter()
+            .find(|pack| pack.pack_id() == term.pack_id)
+            .unwrap();
+        pack.claims().verify_receipt(&term.answer.receipt).unwrap();
+        assert_eq!(
+            term.answer.evidence.value.uncertainty,
+            UncertaintyModel::Unstated
+        );
+        assert!(!term.answer.receipt.source_hashes.is_empty());
+    }
+    // Reference-point chemical energy cannot be silently promoted to kiln duty.
+    let hot_points = points
+        .clone()
+        .map(|point| point.with("temperature", 900.0).unwrap());
+    assert!(
+        reaction
+            .standard_enthalpy_change(&sources(&packs, &ids, &hot_points))
+            .is_err()
+    );
+}
+
+#[test]
+fn g1_janaf_magnetite_oxidation_uses_four_mineral_moles_per_extent_and_real_oxygen() {
+    let slugs = [
+        "magnetite-solid-janaf-mining",
+        "oxygen-gas-janaf-mining",
+        "hematite-solid-janaf-mining",
+    ];
+    let packs = slugs.map(|slug| compile(slug, None));
+    let ids = ["Fe3O4(s)", "O2(g)", "Fe2O3(s)"].map(|name| SpeciesId::new(name).unwrap());
+    let points = [point(false), phase_point("source-phase-gas"), point(false)];
+    let reaction = MineralReaction::MagnetiteOxidationToHematite
+        .build()
+        .unwrap();
+    let heat = reaction
+        .standard_enthalpy_change(&sources(&packs, &ids, &points))
+        .unwrap();
+    // JANAF Fe-032, Fe-030, O-029: 6*(-825503) - 4*(-1120894) - 0.
+    assert_eq!(heat.molar().value(), -469_442.0);
+    assert_eq!(
+        heat.at_extent(Amount::new(0.25)).unwrap().value(),
+        -117_360.5
+    );
+    let extent = reaction
+        .limiting_extent(&[
+            (ids[0].clone(), Amount::new(1000.0)),
+            (ids[1].clone(), Amount::new(200.0)),
+        ])
+        .unwrap();
+    assert_eq!(extent.value(), 200.0);
+    let amounts = reaction.amounts(extent).unwrap();
+    for (species, amount) in [(0, 800.0), (1, 200.0), (2, 1200.0)] {
+        assert_eq!(
+            amounts
+                .iter()
+                .find(|term| term.term.species == ids[species])
+                .unwrap()
+                .amount
+                .value(),
+            amount
+        );
+    }
+    assert_eq!(heat.at_extent(extent).unwrap().value(), -93_888_400.0);
+    // Zero elemental formation enthalpy still has an actual source dependency.
+    let oxygen = heat
+        .terms()
+        .iter()
+        .find(|term| term.term.species == ids[1])
+        .unwrap();
+    assert_eq!(oxygen.answer.evidence.value.value, 0.0);
+    packs[1]
+        .claims()
+        .verify_receipt(&oxygen.answer.receipt)
+        .unwrap();
+    assert!(!oxygen.answer.receipt.source_hashes.is_empty());
+    let wrong_phase = [point(false), point(true), point(false)];
+    assert!(
+        reaction
+            .standard_enthalpy_change(&sources(&packs, &ids, &wrong_phase))
+            .is_err()
+    );
 }

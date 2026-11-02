@@ -17,6 +17,10 @@
 //! Net ionic Elsner cyanidation follows
 //! <https://doi.org/10.1038/s41598-019-43383-4> and the EPA 1994 report
 //! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=2000EF6J.TXT>.
+//! Magnesite calcination and magnetite oxidation retain the crystalline/gas
+//! endpoints of JANAF C-079, Mg-008, C-095, Fe-032, Fe-030 and O-029:
+//! <https://janaf.nist.gov/>. Their standard reaction heats do not determine
+//! a decomposition temperature, kiln duty, oxidation rate or phase stability.
 //! These equations conserve atoms and charge; they do not select pH/Eh,
 //! dissolved speciation, precipitates, gas transfer, rates or conversion.
 
@@ -52,15 +56,20 @@ pub enum MineralReaction {
     /// 4 FeS2(s) + 15 O2(g) + 14 H2O(l) -> 4 Fe(OH)3(s) + 8 SO4(2-) + 16 H+.
     /// Ideal ferric-hydroxide endpoint; no claim that a particular solid precipitates.
     PyriteOxidationFerricHydroxide,
+    /// MgCO3(s) -> MgO(s) + CO2(g); crystalline carbonate/oxide endpoints.
+    MagnesiteCalcination,
+    /// 4 Fe3O4(s) + O2(g) -> 6 Fe2O3(s), with hematite as the product phase.
+    /// One mole of reaction extent consumes four moles of magnetite.
+    MagnetiteOxidationToHematite,
 }
 
 // One species: stable phase/charge id, element counts, charge, signed coefficient.
 type Participant = (&'static str, &'static [i128], i128, i128);
 
 impl MineralReaction {
-    /// Build through the existing exact atom/charge checker. Pyrite equations
-    /// use integer multiples of two/four FeS2; an extent is per equation as
-    /// written, not implicitly per mole of pyrite. Species ids include phase.
+    /// Build through the existing exact atom/charge checker. An extent is per
+    /// integer equation as written, not implicitly per mole of mineral.
+    /// Species ids include phase; Fe2O3(s) here denotes the hematite endpoint.
     pub fn build(self) -> Result<ConservedReaction, ReactionBalanceError> {
         let (name, elements, participants): (&str, &[&str], &[Participant]) = match self {
             Self::LimeHydration => (
@@ -171,6 +180,24 @@ impl MineralReaction {
                     ("Fe(OH)3(s)", &[1, 0, 3, 3], 0, 4),
                     ("SO4[2-](aq)", &[0, 1, 4, 0], -2, 8),
                     ("H+(aq)", &[0, 0, 0, 1], 1, 16),
+                ],
+            ),
+            Self::MagnesiteCalcination => (
+                "magnesite-calcination",
+                &["Mg", "C", "O"],
+                &[
+                    ("MgCO3(s)", &[1, 1, 3], 0, -1),
+                    ("MgO(s)", &[1, 0, 1], 0, 1),
+                    ("CO2(g)", &[0, 1, 2], 0, 1),
+                ],
+            ),
+            Self::MagnetiteOxidationToHematite => (
+                "magnetite-oxidation-to-hematite",
+                &["Fe", "O"],
+                &[
+                    ("Fe3O4(s)", &[3, 4], 0, -4),
+                    ("O2(g)", &[0, 2], 0, -1),
+                    ("Fe2O3(s)", &[2, 3], 0, 6),
                 ],
             ),
         };

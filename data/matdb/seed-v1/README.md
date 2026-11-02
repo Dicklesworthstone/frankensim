@@ -6,9 +6,10 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
-The [mineral-processing guide](MINERAL_PROCESSING.md) covers 18 source profiles
-and 56 claims for ore/gangue constituents and processing reagents, with an
-executable source-backed lime-hydration example. Shared physics now provide
+The [mineral-processing guide](MINERAL_PROCESSING.md) covers 24 source profiles
+and 74 claims for ore/gangue constituents and processing reagents, with an
+executable source-backed lime-hydration, carbonate-calcination and iron-oxide
+oxidation example. Shared physics now provide
 typed Bond milling energy/throughput, ideal ball-mill critical speed, exact
 reaction amounts, standard reaction enthalpy and Faraday product yield.
 Mineral/reference data retain their own conditions; site work indices,

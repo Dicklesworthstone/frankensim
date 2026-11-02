@@ -19,16 +19,21 @@ inventory resolution refuse rather than clipping or disappearing. The exact
 certificate proves the integer equation; binary64 final amounts are separately
 evaluated, with no claim of exact numerical mass conservation.
 
-`stoichiometry::minerals::MineralReaction` provides ten explicit reference
+`stoichiometry::minerals::MineralReaction` provides twelve explicit reference
 endpoints: lime hydration, calcite/dolomite acid neutralization to dissolved
 CO2 or retained bicarbonate, hydrated-lime neutralization, malachite acid
 leaching to dissolved copper and CO2, the net ionic Elsner gold-cyanidation
-balance, and pyrite oxidation to either ferrous ions or ideal ferric hydroxide.
+balance, pyrite oxidation to either ferrous ions or ideal ferric hydroxide,
+magnesite calcination to crystalline MgO and gaseous CO2, and magnetite
+oxidation to hematite.
 The bicarbonate pathways consume half as many protons per mole of carbonate
 mineral as the CO2 pathways. The equations do not assign a universal measured
 acid consumption to an ore, nor infer gas transfer or commercial reagent purity.
-Pyrite equations use integer multiples of two/four FeS2; extent is per equation
-as written. Endpoint choice is declared, never inferred from pH, Eh or time.
+Pyrite and magnetite equations use integer multiples; extent is per equation
+as written. Endpoint choice is declared, never inferred from pH, Eh, time or
+thermal phase stability. The actual JANAF source packs close carbonate and
+iron-oxide standard reaction heats at 298.15 K / 1 bar; they do not determine
+kiln duty, reaction rate or decomposition temperature.
 `faraday_yield` converts integrated charge, positive electron count, supplied
 molar mass and explicit current efficiency to product amount and mass.
 

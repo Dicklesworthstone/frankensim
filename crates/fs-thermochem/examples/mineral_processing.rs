@@ -1,13 +1,17 @@
-//! Evaluate lime slaking from the three compiled, source-backed material packs.
+//! Evaluate mineral reaction amounts and heat from three actual material packs.
 //!
 //! Usage: `cargo run -p fs-thermochem --example mineral_processing -- \
 //! cao.fsmatpk water.fsmatpk caoh2.fsmatpk 56.077`
+//! Select another endpoint by prefixing `--reaction magnesite-calcination` or
+//! `--reaction magnetite-oxidation`; the three pack arguments must then match
+//! that equation's explicit source identities.
 //! Or explicit malachite inventory accounting, with all four inputs in moles:
 //! `cargo run -p fs-thermochem --example mineral_processing -- \
 //! --malachite-inventory 10 12 100 3`
 //!
-//! The final argument is kilograms of pure CaO actually reacted. It is not
-//! commercial feed mass; feed purity and conversion require separate evidence.
+//! In the source-pack modes, the final argument is kilograms of the first pure
+//! reactant actually reacted. It is not commercial feed mass; feed purity and
+//! conversion require separate evidence.
 //! This is standard-state bookkeeping at 298.15 K and 1 bar, not a plant
 //! temperature, reaction-rate, water-dosing or recovery prediction.
 
@@ -17,16 +21,73 @@ use fs_matdb::{MatDbError, NormalizedPack, PropertyKey, QueryPoint, SelectionPol
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Amount, Dims, Mass, MolarMass, QuantitySpec};
 use fs_thermochem::{
-    SpeciesId,
+    MassAmountBasis, SpeciesId,
     stoichiometry::{FormationEnthalpySource, minerals::MineralReaction},
 };
 
 const REFERENCE: &str = "source-elemental-reference-janaf";
-const PACK_IDS: [&str; 3] = [
-    "calcium-oxide-solid-nist-mining",
-    "water-liquid-janaf-mining",
-    "calcium-hydroxide-solid-nist-mining",
-];
+
+struct ReactionCase {
+    reaction: MineralReaction,
+    packs: [&'static str; 3],
+    species: [&'static str; 3],
+    phase_axes: [&'static str; 3],
+    equation: &'static str,
+}
+
+fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
+    Ok(match name {
+        "lime-hydration" => ReactionCase {
+            reaction: MineralReaction::LimeHydration,
+            packs: [
+                "calcium-oxide-solid-nist-mining",
+                "water-liquid-janaf-mining",
+                "calcium-hydroxide-solid-nist-mining",
+            ],
+            species: ["CaO(s)", "H2O(l)", "Ca(OH)2(s)"],
+            phase_axes: [
+                "source-phase-solid",
+                "source-phase-liquid",
+                "source-phase-solid",
+            ],
+            equation: "CaO(s) + H2O(l) -> Ca(OH)2(s)",
+        },
+        "magnesite-calcination" => ReactionCase {
+            reaction: MineralReaction::MagnesiteCalcination,
+            packs: [
+                "magnesite-solid-janaf-mining",
+                "magnesium-oxide-solid-janaf-mining",
+                "carbon-dioxide-gas-janaf-mining",
+            ],
+            species: ["MgCO3(s)", "MgO(s)", "CO2(g)"],
+            phase_axes: [
+                "source-phase-solid",
+                "source-phase-solid",
+                "source-phase-gas",
+            ],
+            equation: "MgCO3(s) -> MgO(s) + CO2(g)",
+        },
+        "magnetite-oxidation" => ReactionCase {
+            reaction: MineralReaction::MagnetiteOxidationToHematite,
+            packs: [
+                "magnetite-solid-janaf-mining",
+                "oxygen-gas-janaf-mining",
+                "hematite-solid-janaf-mining",
+            ],
+            species: ["Fe3O4(s)", "O2(g)", "Fe2O3(s)"],
+            phase_axes: [
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-solid",
+            ],
+            equation: "4 Fe3O4(s) + O2(g) -> 6 Fe2O3(s), hematite endpoint",
+        },
+        _ => return Err(
+            "unknown reaction; use lime-hydration, magnesite-calcination or magnetite-oxidation"
+                .into(),
+        ),
+    })
+}
 
 fn load(path: &Path, expected_id: &str) -> Result<NormalizedPack, Box<dyn Error>> {
     let bytes = std::fs::read(path)?;
@@ -40,7 +101,7 @@ fn load(path: &Path, expected_id: &str) -> Result<NormalizedPack, Box<dyn Error>
     Ok(pack)
 }
 
-fn reference_point(liquid: bool) -> Result<QueryPoint, MatDbError> {
+fn reference_point(phase_axis: &str) -> Result<QueryPoint, MatDbError> {
     let mut point = QueryPoint::new()
         .with_quantity(
             "temperature",
@@ -61,14 +122,7 @@ fn reference_point(liquid: bool) -> Result<QueryPoint, MatDbError> {
         ("source-pure-species", 1.0),
         ("engineering-reference-model", 1.0),
         ("source-specimen-qualified", 0.0),
-        (
-            if liquid {
-                "source-phase-liquid"
-            } else {
-                "source-phase-solid"
-            },
-            1.0,
-        ),
+        (phase_axis, 1.0),
     ] {
         point = point.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)?;
     }
@@ -126,26 +180,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return malachite_inventory(&args);
     }
-    if args.len() != 4 {
+    let (case, args) = if args.len() == 6 && args[0] == "--reaction" {
+        (case(&args[1])?, &args[2..])
+    } else if args.len() == 4 {
+        (case("lime-hydration")?, args.as_slice())
+    } else {
         return Err(
-            "usage: mineral_processing CAO_PACK WATER_PACK CAOH2_PACK REACTED_PURE_CAO_KG".into(),
+            "usage: mineral_processing [--reaction NAME] REACTANT_PACK SECOND_PACK THIRD_PACK REACTED_PURE_REACTANT_KG".into(),
         );
-    }
+    };
     let reacted_kg: f64 = args[3].parse()?;
     let packs = [
-        load(Path::new(&args[0]), PACK_IDS[0])?,
-        load(Path::new(&args[1]), PACK_IDS[1])?,
-        load(Path::new(&args[2]), PACK_IDS[2])?,
+        load(Path::new(&args[0]), case.packs[0])?,
+        load(Path::new(&args[1]), case.packs[1])?,
+        load(Path::new(&args[2]), case.packs[2])?,
     ];
     let species = [
-        SpeciesId::new("CaO(s)")?,
-        SpeciesId::new("H2O(l)")?,
-        SpeciesId::new("Ca(OH)2(s)")?,
+        SpeciesId::new(case.species[0])?,
+        SpeciesId::new(case.species[1])?,
+        SpeciesId::new(case.species[2])?,
     ];
     let points = [
-        reference_point(false)?,
-        reference_point(true)?,
-        reference_point(false)?,
+        reference_point(case.phase_axes[0])?,
+        reference_point(case.phase_axes[1])?,
+        reference_point(case.phase_axes[2])?,
     ];
     let sources = std::array::from_fn::<_, 3, _>(|i| FormationEnthalpySource {
         species: &species[i],
@@ -153,39 +211,53 @@ fn main() -> Result<(), Box<dyn Error>> {
         at: &points[i],
         reference_axis: REFERENCE,
     });
-    let reaction = MineralReaction::LimeHydration.build()?;
+    let reaction = case.reaction.build()?;
     let heat = reaction.standard_enthalpy_change(&sources)?;
-    let molar_mass = packs[0].claims().query_typed(
-        &PropertyKey::with_quantity(
-            "molar-mass",
-            QuantitySpec::dimensional(Dims([0, 1, 0, 0, 0, -1])),
-        ),
-        &points[0],
-        SelectionPolicy::SingleClaimOnly,
-    )?;
-    packs[0].claims().verify_receipt(&molar_mass.receipt)?;
-    let extent = reaction.extent_from_reacted_mass(
-        &species[0],
-        Mass::new(reacted_kg),
-        MolarMass::new(molar_mass.evidence.value.value),
-    )?;
+    let mut molar_masses = Vec::with_capacity(3);
+    for (pack, point) in packs.iter().zip(&points) {
+        let answer = pack.claims().query_typed(
+            &PropertyKey::with_quantity(
+                "molar-mass",
+                QuantitySpec::dimensional(Dims([0, 1, 0, 0, 0, -1])),
+            ),
+            point,
+            SelectionPolicy::SingleClaimOnly,
+        )?;
+        pack.claims().verify_receipt(&answer.receipt)?;
+        molar_masses.push(MolarMass::new(answer.evidence.value.value));
+    }
+    let extent =
+        reaction.extent_from_reacted_mass(&species[0], Mass::new(reacted_kg), molar_masses[0])?;
     let amounts = reaction.amounts(extent)?;
-    let water = amounts
-        .iter()
-        .find(|amount| amount.term.species == species[1])
-        .ok_or("water is absent from the slaking equation")?;
 
-    println!("CaO(s) + H2O(l) -> Ca(OH)2(s), 298.15 K, 100000 Pa");
-    println!("reacted pure CaO mass [kg]: {reacted_kg}");
+    println!("{}, 298.15 K, 100000 Pa", case.equation);
+    println!("reacted pure {} mass [kg]: {reacted_kg}", case.species[0]);
     println!(
-        "source CaO molar mass [kg/mol]: {}",
-        molar_mass.evidence.value.value
+        "source reactant molar mass [kg/mol]: {}",
+        molar_masses[0].value()
     );
-    println!("reacted CaO amount [mol]: {}", extent.value());
     println!(
-        "stoichiometric water consumed [mol]: {}",
-        water.amount.value()
+        "reaction extent [mol of written equation]: {}",
+        extent.value()
     );
+    for amount in &amounts {
+        let index = species
+            .iter()
+            .position(|id| id == &amount.term.species)
+            .ok_or("reaction participant lacks an associated source")?;
+        let mass = MassAmountBasis::from_amount(amount.amount, molar_masses[index])?;
+        let direction = if amount.term.coefficient < 0 {
+            "consumed"
+        } else {
+            "formed"
+        };
+        println!(
+            "{} {direction}: {} mol, {} kg",
+            case.species[index],
+            amount.amount.value(),
+            mass.mass().value()
+        );
+    }
     println!(
         "standard reaction enthalpy [J/mol extent]: {}",
         heat.molar().value()
@@ -199,7 +271,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("Negative enthalpy is exothermic. Source uncertainty is unstated.");
     println!(
-        "This uses actually reacted pure CaO; it does not predict conversion, plant temperature or water dosing."
+        "This uses actually reacted pure material; it does not predict conversion, plant temperature, kiln fuel duty or operating reagent doses."
     );
     Ok(())
 }
