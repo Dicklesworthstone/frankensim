@@ -19,6 +19,8 @@
 //! is inferred. Reported energy is COHESIVE-ONLY straight-path work/storage/
 //! fracture plus separately reported physical bond viscosity, not a complete
 //! structural, actuator, thermal or entropy balance.
+//! The [`dynamics`] owner additionally evolves the same accepted interfaces
+//! with consistent inertia and a complete mechanical work balance.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -32,6 +34,9 @@ use fs_solver::{LinearOp, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, N
 
 /// Geometry-backed matching P1 interfaces and displacement transfer.
 pub mod p1;
+
+/// Inertial evolution with the original mass, elastic and cohesive operators.
+pub mod dynamics;
 
 /// Thermal shrinkage and Maxwell history driving a restrained cohesive joint.
 pub mod thermal_joint;
@@ -126,7 +131,8 @@ pub struct CohesiveSystem<'a> {
 }
 impl<'a> CohesiveSystem<'a> {
     /// Preserve input patch order for prescribed-jump arrays and observations.
-    /// Callers must remove rigid modes or otherwise supply solvable restraints.
+    /// Quasistatic callers must remove rigid modes or supply solvable restraints.
+    /// The dynamics owner may retain those modes with the original positive mass.
     pub fn new(elastic: &'a dyn LinearOp, patches: Vec<CohesivePatch<'a>>, budget: Budget)
         -> Result<Self, Error> {
         let n = elastic.n();

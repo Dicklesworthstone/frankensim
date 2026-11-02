@@ -3706,6 +3706,72 @@ P1/Hex8 arithmetic, budget and cancellation. The existing creep example also
 offers `--dynamic` to release the deformed body and report physical and
 numerical losses independently.
 
+## Deformable cohesive dynamics with retained inertia
+
+`cohesive::dynamics::CohesiveMotion` adopts an existing `CohesiveState`, its
+original reduced consistent mass operator, explicit velocity and clock. It
+retains the same elastic operator, sparse jump maps, patch areas, ordered source
+bundles and accepted fracture histories. There is no second interface assembly
+or independent damage state. Matching and nonmatching P1 traces use their
+existing work-conjugate maps. The mass must use exactly the same reduced DOFs,
+be symmetric positive definite and remain unchanged; the elastic operator must
+be symmetric positive semidefinite and unchanged. These are requirements on
+the original operator owner, not conclusions from dimension or energy samples.
+Rigid-body modes do not require artificial elastic restraints in this path.
+The bulk potential is `u^T K u/2` in the admitted reduced coordinates; an
+additional prestress potential or moving essential boundary data requires its
+own mechanics, inertia and support-work treatment.
+
+For a physical interval `h`, the existing Newton/FGMRES owner solves
+`M (v1-v0)/h + K (u0+u1)/2 + sum B^T A t_mean = f_mean`, with
+`v1 = 2 (u1-u0)/h - v0`. Each trial starts from the same accepted material
+history. `t_mean` is the original analytic vector integral along the straight
+three-component jump path and includes surviving-bond viscosity. The endpoint
+traction tangent is not substituted for the derivative of this path mean.
+The existing fallible numerical-difference adapter supplies Jacobian actions
+with an explicit displacement stencil; all actual residual evaluations count
+against the declared solve budget. A source or stencil refusal refuses the
+whole increment, and the complete physical endpoint is independently replayed
+before acceptance.
+
+The step reports original kinetic, bulk and cohesive endpoint energies,
+intrinsic fracture loss, physical bond-viscosity loss, external force work and
+prescribed-jump work separately. Prescribed work is
+`sum A t_mean dot (jump1-jump0-B(u1-u0))`, so adoption of a previously loaded
+solid neither guesses its old actuator offset nor drops that actuator's work.
+The full gate is external plus prescribed work minus kinetic/bulk/cohesive
+storage changes, fracture and viscosity. No numerical residual is relabeled as
+physical dissipation or routed to a thermal field. Signed roundoff-scale bulk
+energies are retained rather than clamped, with materially negative values
+refused under the explicit energy allowance.
+
+Complete failure removes tensile and shear resistance through the original
+material law while retaining mass, velocity, history and clock. Original normal
+compression remains available on reclosure; this is the existing frictionless
+penalty law, not exact nonpenetration or newly discovered contact. Immutable
+candidate publication makes late cancellation, material-domain refusal, failed
+work gates and exhausted solves leave the entire accepted trajectory intact.
+
+This is fixed-reference small-strain dynamics with fixed material/source
+conditions, frames and topology. It does not update bulk coefficients, impose
+moving reduced constraints, transfer cohesive temperature history, discover
+contact, add damaged-area friction or provide a unique/stable nonlinear root.
+Prescribed interface offsets and reduced external forces are explicit inputs;
+their physical construction and resolution of reversals, crack events and
+softening branches remain caller responsibilities. Smooth elastic motion has
+the midpoint second-order limit, but a closed energy account alone does not
+establish temporal accuracy through fracture.
+
+`tests/cohesive_dynamics.rs` specifies original P1 consistent-mass frequency
+and refinement, independent scalar actuator/viscosity work, release of an
+already softened solid, and source-bound three-component debonding of two
+unrestrained deformable tetrahedra. Its postfailure checks retain each body's
+momentum, drive physical compressive reclosure and retain the same sources and
+damage. Late cancellation, a material-domain refusal and work-budget exhaustion
+also retain the complete accepted trajectory. These focused native tests do
+not constitute a dynamic crack-propagation, finite-strain or service-validation
+campaign.
+
 ## Conservative finite-strain elastic motion
 
 `hyper3::mixed::conservative::{ConservativeTetDefinition, ConservativeTetSolid}`
