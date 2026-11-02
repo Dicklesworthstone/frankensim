@@ -1,5 +1,5 @@
 //! Source-caloric storage and transport on the original native CHT clock.
-//! Explicit SGS can share this clock without replacing source h(T) by a
+//! Explicitly selected SGS shares this clock without replacing source h(T) by a
 //! reference-Cp storage law or advancing momentum during caloric iteration.
 
 mod solid;
@@ -127,7 +127,8 @@ impl MaterialEnthalpyTransientConfig {
     }
 }
 
-/// Trial-local source-Cp conversion of one immutable accepted SGS field.
+/// Trial-local source-Cp conversion of one fixed projected SGS field.
+/// An outer material pass prepares a fresh field from its own momentum trial.
 /// Original molecular conductivity and the reference SGS field are never
 /// overwritten. Repeated caloric trials recompute, rather than multiply, k_t.
 struct SourceSgsHeat {
@@ -733,6 +734,85 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             gate,
             resolve,
         )
+    }
+
+    /// Close source material and buoyancy at the native thermal endpoint while
+    /// retaining original source h(T) storage, advection and explicit SGS.
+    ///
+    /// Each outer material trial solves native momentum from the same accepted
+    /// BE/BDF2 history. The original SGS owner recomputes nu_t from that trial's
+    /// resolved/projected velocity and admits its ratio to local molecular nu.
+    /// On those same fluxes, each caloric trial evaluates the original source
+    /// Cp(T) and forms `rho0*Cp_source(T)*nu_t/0.9` separately from molecular k.
+    /// Actual endpoint-minus-applied diffusive face and cell heat defects,
+    /// source h(T) storage/advection defects and physical heat closure retain
+    /// their original caloric gates. Neither preceding material-trial SGS
+    /// fields nor source coefficients with eddy transport folded in are reused.
+    ///
+    /// Actual unrelaxed temperature, mu/k and density-derived force must also
+    /// pass the outer endpoint gates. Both original caloric and outer energy
+    /// budgets count every linear heat solve, including discarded SGS/material
+    /// trials and radiation/compact storage. Physical history and averages
+    /// advance only once after all gates pass. A zero SGS coefficient recovers
+    /// the laminar implicit entry; the original explicit entries are unchanged.
+    ///
+    /// This is first-order coupled time accuracy and exploratory algebraic SGS.
+    /// It does not establish resolved turbulent spectra or thermal wall-layer
+    /// accuracy, and modeled or molecular dissipation is not a heating source.
+    ///
+    /// # Errors
+    /// Original source/caloric/native/implicit refusals, invalid or acceptance-
+    /// use SGS, local eddy/molecular cap failure, LVEL or duplicate eddy heat.
+    /// Source-domain failure, exhausted work or cancellation returns no march.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_enthalpy_and_sgs_implicit<
+        'a,
+        S: FluidTransport,
+        C: ConvectionCaloricLaw,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        flow: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        bounds: BoussinesqConfig<3>,
+        caloric: &'a C,
+        controls: MaterialEnthalpyTransientConfig,
+        unsteady: &UnsteadyConfig,
+        sgs: FvSgsConfig,
+        endpoint_controls: MaterialEndpointConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEndpointMarch<MaterialEnthalpyMarch<'a, S, C>>, MaterialBuoyancyError> {
+        let mut endpoint = MaterialEndpointCoupling::new(endpoint_controls)?;
+        let solution = self.march_natural_convection_with_enthalpy_inner(
+            domain,
+            solids,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            controls,
+            unsteady,
+            Some(sgs),
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            Some(&mut endpoint),
+            gate,
+            resolve,
+        )?;
+        poll(gate)?;
+        Ok(endpoint.finish(solution))
     }
 
     /// Deposit native molecular viscous work into actual source h(T) on the

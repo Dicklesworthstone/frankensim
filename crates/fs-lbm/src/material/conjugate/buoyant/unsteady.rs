@@ -243,6 +243,73 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         )
     }
 
+    /// Close material/buoyancy feedback with explicitly selected native SGS.
+    ///
+    /// Every material trial solves the original BE/BDF2 momentum equations
+    /// from the same accepted time levels. Its selected native SGS field is
+    /// recomputed from the resolved velocity, including the final pressure
+    /// projection, with the original local eddy/molecular viscosity cap.
+    /// That current trial supplies `rho0*Cp0*nu_t/0.9` to the native heat
+    /// operator exactly once, separately from the original molecular k(T).
+    /// Neither old SGS conductivity nor a compounded material coefficient is
+    /// carried into a new trial. Unrelaxed endpoint temperature, mu/k and
+    /// density-derived force must independently meet `endpoint_controls`.
+    ///
+    /// Histories, averages and physical records advance once on acceptance;
+    /// all discarded native/source/heat work consumes the same explicit
+    /// budgets as `march_natural_convection_implicit`. Thermal accuracy is
+    /// first order. This algebraic SGS composition is exploratory: it does
+    /// not establish resolved turbulent spectra or a thermal wall layer.
+    /// No molecular or modeled dissipation is deposited as heat.
+    ///
+    /// # Errors
+    /// The original implicit/source/native refusals, inadmissible SGS or
+    /// acceptance use, a local eddy/molecular cap violation, equilibrium LVEL,
+    /// or another authored eddy-conductivity field. No partial march is returned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_sgs_implicit<S: FluidTransport>(
+        &self,
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        flow_config: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        config: BoussinesqConfig<3>,
+        unsteady: &UnsteadyConfig,
+        sgs: FvSgsConfig,
+        endpoint_controls: MaterialEndpointConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEndpointMarch<MaterialBuoyancyMarch<S>>, MaterialBuoyancyError> {
+        let mut endpoint = MaterialEndpointCoupling::new(endpoint_controls)?;
+        let solution = self.march_natural_convection_inner(
+            domain,
+            solids,
+            flow_config,
+            thermal,
+            energy_config,
+            initial_temperature_k,
+            config,
+            unsteady,
+            Some(sgs),
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            Some(&mut endpoint),
+            gate,
+            resolve,
+        )?;
+        poll(gate)?;
+        Ok(endpoint.finish(solution))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn march_natural_convection_inner<S: FluidTransport>(
         &self,

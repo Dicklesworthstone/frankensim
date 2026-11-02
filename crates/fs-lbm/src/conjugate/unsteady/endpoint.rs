@@ -7,9 +7,9 @@
 use super::{
     ChtError, EnergyConfig, FluidProperties, Marcher, MaterialCoefficients, MaterialCoupling,
     MaterialHeatStep, RadiationConfig, Radiators, SolidMaterial, ThermalSetup, TransientRecord,
-    UnsteadyConfig, finite, poll, solve_step_with_fields,
+    UnsteadyConfig, finite, poll,
 };
-use crate::conjugate::transient::storage_record;
+use crate::conjugate::turbulence::TURBULENT_PRANDTL;
 use core::cell::Cell;
 use fs_exec::CancelGate;
 
@@ -166,7 +166,7 @@ impl MaterialEndpointCoupling {
         >,
         fluid: &FluidProperties,
         solids: &[SolidMaterial],
-        thermal: &ThermalSetup,
+        thermal: &mut ThermalSetup,
         energy: &EnergyConfig,
         capacity: &[f64],
         storage: &[f64],
@@ -218,61 +218,64 @@ impl MaterialEndpointCoupling {
                 .checked_add(inner)
                 .ok_or_else(|| invalid("native momentum iteration count overflow"))?;
             let field = marcher.solver.field();
+            if marcher.solver.has_sgs() {
+                // The just-projected velocity owns this trial's eddy field.
+                // Replace it from native nu_t, never compound it into source k
+                // or reuse a preceding coupling pass's thermal transport.
+                thermal
+                    .eddy_conductivity_w_m_k
+                    .resize(domain.cell_count(), 0.0);
+                for (cell, (conductivity, &nu_t)) in thermal
+                    .eddy_conductivity_w_m_k
+                    .iter_mut()
+                    .zip(marcher.solver.heat_eddy_viscosity())
+                    .enumerate()
+                {
+                    if cell.is_multiple_of(256) {
+                        poll(gate)?;
+                    }
+                    *conductivity = fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL;
+                    finite("thermal.sgs_conductivity_w_m_k", *conductivity)?;
+                }
+            }
+            let interval = MaterialHeatStep {
+                domain,
+                setup: thermal,
+                previous_temperature_k: previous_temperature,
+                reference_capacity_j_k: capacity,
+                time_s,
+                time_step_s: dt,
+                physical_fixed_heat_j: 0.0,
+                fluid,
+                solids,
+                flow: &field,
+                energy,
+                solids_present,
+                radiation,
+                gate,
+                endpoint_energy_budget: Some(&self.remaining_energy_solves),
+            };
             let (next, heat) = if let Some(advance) = material_heat.as_deref_mut() {
-                let interval = MaterialHeatStep {
-                    domain,
-                    setup: thermal,
-                    previous_temperature_k: previous_temperature,
-                    reference_capacity_j_k: capacity,
-                    time_s,
-                    time_step_s: dt,
-                    physical_fixed_heat_j: 0.0,
-                    fluid,
-                    solids,
-                    flow: &field,
-                    energy,
-                    solids_present,
-                    radiation,
-                    gate,
-                    endpoint_energy_budget: Some(&self.remaining_energy_solves),
-                };
                 advance(&interval, coupling.fields)?
             } else {
-                let mut remaining = self.remaining_energy_solves.get();
-                let solved = solve_step_with_fields(
-                    domain,
-                    fluid,
-                    solids,
-                    &field,
-                    thermal,
-                    energy,
-                    storage,
-                    previous_temperature,
-                    dt,
-                    radiation,
-                    Some(&coupling.fields.conductivity_w_m_k),
-                    None,
-                    Some(&mut remaining),
-                    gate,
-                );
-                self.remaining_energy_solves.set(remaining);
-                let (next, radiated_w, correction_w) = solved?;
-                let record = storage_record(
-                    domain,
-                    thermal,
-                    capacity,
-                    previous_temperature,
-                    &next,
-                    (time_s, dt, solids_present),
-                    (radiated_w, correction_w),
-                    gate,
-                )?;
-                (next.temperature, record)
+                interval.solve(capacity, storage, &coupling.fields.conductivity_w_m_k)?
             };
             // Source refusal at the actual unrelaxed endpoint is terminal.
             // A small temperature update cannot conceal a sharp mu/k/rho change.
             self.charge_source()?;
+            // An inner source-solid owner may have closed its own k(T) here.
+            // Preserve that accepted solid epoch; the fluid source refresh
+            // below overwrites only its own fluid coefficients.
+            endpoint
+                .conductivity_w_m_k
+                .clone_from(&coupling.fields.conductivity_w_m_k);
             (coupling.refresh)(&next, &mut endpoint)?;
+            // Physical SGS applicability is independent of loose material
+            // convergence tolerances. Observe the already projected nu_t at
+            // actual endpoint mu without replacing the applied source epoch.
+            marcher
+                .solver
+                .admit_sgs_material_endpoint(&endpoint.viscosity_pa_s, gate)?;
             let mut report = MaterialEndpointStepReport {
                 time_s,
                 passes: pass,

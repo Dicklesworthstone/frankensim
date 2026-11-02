@@ -62,7 +62,7 @@ use super::simple::sgs::FvSgsConfig;
 use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
 use super::transient::{
     TransientRecord, energy_step_with_conductivity, heat_capacity, junction_stored_energy_change_j,
-    record_energy_step, scale_power, solve_step_with_fields,
+    record_energy_step, scale_power, solve_step_with_fields, storage_record,
 };
 use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
@@ -649,20 +649,53 @@ impl MaterialHeatStep<'_> {
         storage_w_k: &[f64],
         conductivity_w_m_k: &[[f64; 3]],
     ) -> Result<(Vec<f64>, TransientRecord), ChtError> {
-        let (temperature, record) = energy_step_with_conductivity(
-            self.domain,
-            self.fluid,
-            self.solids,
-            self.flow,
-            self.setup,
-            self.energy,
-            (capacity_j_k, storage_w_k),
-            self.previous_temperature_k,
-            (self.time_s, self.time_step_s, self.solids_present),
-            self.radiation,
-            Some(conductivity_w_m_k),
-            self.gate,
-        )?;
+        let (temperature, record) = if let Some(budget) = self.endpoint_energy_budget {
+            let mut remaining = budget.get();
+            let solved = solve_step_with_fields(
+                self.domain,
+                self.fluid,
+                self.solids,
+                self.flow,
+                self.setup,
+                self.energy,
+                storage_w_k,
+                self.previous_temperature_k,
+                self.time_step_s,
+                self.radiation,
+                Some(conductivity_w_m_k),
+                None,
+                Some(&mut remaining),
+                self.gate,
+            );
+            budget.set(remaining);
+            let (next, radiated_w, correction_w) = solved?;
+            let record = storage_record(
+                self.domain,
+                self.setup,
+                capacity_j_k,
+                self.previous_temperature_k,
+                &next,
+                (self.time_s, self.time_step_s, self.solids_present),
+                (radiated_w, correction_w),
+                self.gate,
+            )?;
+            (next.temperature, record)
+        } else {
+            energy_step_with_conductivity(
+                self.domain,
+                self.fluid,
+                self.solids,
+                self.flow,
+                self.setup,
+                self.energy,
+                (capacity_j_k, storage_w_k),
+                self.previous_temperature_k,
+                (self.time_s, self.time_step_s, self.solids_present),
+                self.radiation,
+                Some(conductivity_w_m_k),
+                self.gate,
+            )?
+        };
         Ok((temperature, self.record_physical_heat(record)?))
     }
 
@@ -919,10 +952,10 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
     admit_unsteady(domain, config, unsteady)?;
     if let Some(coupling) = endpoint.as_deref() {
         coupling.admit(unsteady)?;
-        if material.is_none() || sgs.is_some() || wall_heat.is_some() {
+        if material.is_none() || wall_heat.is_some() {
             return Err(ChtError::InvalidInput {
                 field: "unsteady.material_endpoint",
-                reason: "implicit material feedback requires its original laminar material owner without SGS or a wall closure".into(),
+                reason: "implicit material feedback requires its original molecular material owner without a wall closure".into(),
             }.into());
         }
         #[cfg(feature = "enthalpy-coupling")]
@@ -1037,7 +1070,7 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
                 &mut material_heat,
                 fluid,
                 solids,
-                &stepped,
+                &mut stepped,
                 energy,
                 &capacity,
                 &storage,

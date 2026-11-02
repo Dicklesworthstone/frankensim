@@ -1,4 +1,6 @@
 //! Independent endpoint transport and retained-history numerical oracles.
+#[path = "implicit/sgs.rs"]
+mod sgs;
 use super::*;
 use fs_lbm::material::conjugate::buoyant::MaterialEndpointConfig;
 

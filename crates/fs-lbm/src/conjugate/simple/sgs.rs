@@ -60,6 +60,34 @@ fn refuse(reason: impl Into<String>) -> ChtError {
     }
 }
 
+/// One physical applicability check for both native sweeps and actual material
+/// endpoints. Nonlinear convergence tolerances never relax the molecular cap.
+fn admit_local_viscosity(
+    cell: usize,
+    eddy: f64,
+    molecular: f64,
+    rho: f64,
+    maximum_ratio: f64,
+) -> Result<(), ChtError> {
+    if !molecular.is_finite() || molecular <= 0.0 {
+        return Err(refuse(format!(
+            "cell {cell}: molecular viscosity must be finite and positive"
+        )));
+    }
+    let ratio = eddy / (molecular / rho);
+    if !ratio.is_finite() || ratio > maximum_ratio {
+        return Err(refuse(format!(
+            "cell {cell}: eddy/molecular ratio {ratio} exceeds {maximum_ratio}"
+        )));
+    }
+    if !rho.mul_add(eddy, molecular).is_finite() {
+        return Err(refuse(format!(
+            "cell {cell}: effective dynamic viscosity is not representable"
+        )));
+    }
+    Ok(())
+}
+
 /// A sample is either a prescribed value or a prescribed zero derivative
 /// at its actual distance from the cell centre.
 #[derive(Clone, Copy)]
@@ -118,7 +146,11 @@ impl Solver<'_> {
             return Ok(());
         }
         let directional = matches!(config.model, SgsModel::Vreman { .. });
-        let mut filter_width = Vec::with_capacity(if directional { 0 } else { self.domain.cell_count() });
+        let mut filter_width = Vec::with_capacity(if directional {
+            0
+        } else {
+            self.domain.cell_count()
+        });
         for cell in 0..self.domain.cell_count() {
             if cell % 64 == 0 {
                 poll(gate)?;
@@ -127,14 +159,18 @@ impl Solver<'_> {
                 for width in self.domain.widths(cell) {
                     let width = config.filter_width_factor * width;
                     if !(width.is_finite() && width > 0.0) {
-                        return Err(refuse("directional filter width is not representable on this cell geometry"));
+                        return Err(refuse(
+                            "directional filter width is not representable on this cell geometry",
+                        ));
                     }
                 }
             } else {
                 let width = config.filter_width_factor
                     * fs_math::det::pow(self.domain.volume(cell), 1.0 / 3.0);
                 if !(width.is_finite() && width > 0.0) {
-                    return Err(refuse("filter width is not representable on this cell geometry"));
+                    return Err(refuse(
+                        "filter width is not representable on this cell geometry",
+                    ));
                 }
                 filter_width.push(width);
             }
@@ -150,6 +186,40 @@ impl Solver<'_> {
 
     pub(in crate::conjugate) fn has_sgs(&self) -> bool {
         self.sgs.is_some()
+    }
+
+    /// Admit the current projected SGS field against actual endpoint molecular
+    /// viscosity without changing the applied source, velocity or time history.
+    pub(in crate::conjugate) fn admit_sgs_material_endpoint(
+        &self,
+        molecular: &[f64],
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        let Some(state) = &self.sgs else {
+            return Ok(());
+        };
+        if molecular.len() != self.domain.cell_count()
+            || self.eddy_viscosity.len() != self.domain.cell_count()
+        {
+            return Err(refuse(
+                "endpoint admission requires the original molecular and SGS cell fields",
+            ));
+        }
+        for (cell, (&mu, &eddy)) in molecular.iter().zip(&self.eddy_viscosity).enumerate() {
+            if cell % 64 == 0 {
+                poll(gate)?;
+            }
+            if self.domain.is_fluid(cell) {
+                admit_local_viscosity(
+                    cell,
+                    eddy,
+                    mu,
+                    self.rho,
+                    state.config.maximum_eddy_to_molecular,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub(in crate::conjugate) fn update_sgs(&mut self, gate: &CancelGate) -> Result<(), ChtError> {
@@ -176,28 +246,30 @@ impl Solver<'_> {
                 // Source refresh changes molecular transport, never the SGS
                 // state itself. Re-evaluate this cap with the actual local
                 // molecular coefficient on every nonlinear sweep.
-                let molecular = self.molecular_viscosity.get(cell).copied().unwrap_or(self.mu);
-                let nu = molecular / self.rho;
+                let molecular = self
+                    .molecular_viscosity
+                    .get(cell)
+                    .copied()
+                    .unwrap_or(self.mu);
                 let gradient = self.sgs_gradient(cell, &state.velocity);
                 let eddy = match state.config.model {
                     SgsModel::Vreman { cv } => vreman_eddy_viscosity(
                         cv,
-                        self.domain.widths(cell).map(|d| d * state.config.filter_width_factor),
+                        self.domain
+                            .widths(cell)
+                            .map(|d| d * state.config.filter_width_factor),
                         gradient,
                     ),
                     _ => eddy_viscosity(state.config.model, state.filter_width[cell], gradient),
                 }
                 .map_err(|error| refuse(format!("cell {cell}: {error}")))?;
-                let ratio = eddy / nu;
-                if !ratio.is_finite() || ratio > state.config.maximum_eddy_to_molecular {
-                    return Err(refuse(format!(
-                        "cell {cell}: eddy/molecular ratio {ratio} exceeds {}",
-                        state.config.maximum_eddy_to_molecular
-                    )));
-                }
-                if !self.rho.mul_add(eddy, molecular).is_finite() {
-                    return Err(refuse(format!("cell {cell}: effective dynamic viscosity is not representable")));
-                }
+                admit_local_viscosity(
+                    cell,
+                    eddy,
+                    molecular,
+                    self.rho,
+                    state.config.maximum_eddy_to_molecular,
+                )?;
                 self.eddy_viscosity[cell] = eddy;
             }
             Ok(())
