@@ -135,6 +135,26 @@ non-radiative thermal contact; it asserts neither arbitrary-law convergence
 nor uniqueness or experimental
 validation of the synthetic constitutive fixtures.
 
+## Adaptive coupled enthalpy transport
+
+`AdaptiveEnthalpyState::advance_to_with_temperature_contacts` and its pointwise
+ambient/enclosure variants reuse the original full-step/two-half-step controller.
+Every comparison and fine response solves the actual source-backed contact and
+selected radiation law with the adaptive state's unchanged Newton/energy policy.
+The three local error gates remain specific enthalpy, temperature and liquid mass
+fraction, with reference-invariant relative scales. Only complete accepted fine
+pairs change history or contribute external heat; source support, binding and
+cancellation refusals preserve the last accepted field. Observed methods expose
+only accepted fine pairs and retain exact event clipping and stop/resume behavior.
+
+Per-endpoint residual and contact work bounds combine with checked three-endpoint
+trial and linear-work products; reports count actual attempted endpoints, including
+failed and rejected comparisons. Finite independent local residual failures use
+`EnthalpyError::EndpointResidual`, distinct from Newton stalls and whole-domain
+energy defects, and trigger the original bounded timestep reduction. Tests cover
+an independent time-continuous P1 melting reference, accepted-only radiative heat,
+closed internal exchange, bounded failed work and transactional numerical retries.
+
 ## Coupled enthalpy contact and pointwise radiation
 
 `TemperatureContacts::advance_enthalpy_newton_with_pointwise_ambient_radiation`

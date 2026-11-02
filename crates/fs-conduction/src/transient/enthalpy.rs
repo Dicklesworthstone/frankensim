@@ -149,6 +149,12 @@ pub enum EnthalpyError {
     Newton(NewtonError),
     /// Shared Newton/Krylov work or globalization failed to converge.
     NotConverged(NewtonReport),
+    /// Independent physical nodal residual exceeds its unchanged local gate.
+    /// This is not a Newton stall or a whole-domain energy defect.
+    EndpointResidual {
+        residual_j: f64,
+        tolerance_j: f64,
+    },
     /// A nonlinear callback unwound; the incomplete Newton attempt was discarded.
     SolverCallbackPanicked(SolverCallback),
     /// Independently integrated input did not balance the published storage.
@@ -197,6 +203,10 @@ impl fmt::Display for EnthalpyError {
                 formatter,
                 "enthalpy Newton refused after {} attempts: {:?}; residual {} J",
                 report.iterations, report.diagnosis, report.residual_norm
+            ),
+            Self::EndpointResidual { residual_j, tolerance_j } => write!(
+                formatter,
+                "physical enthalpy endpoint residual {residual_j} J exceeds {tolerance_j} J"
             ),
             Self::SolverCallbackPanicked(callback) => {
                 write!(

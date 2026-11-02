@@ -18,6 +18,8 @@
 //! This full-window controller accepts directly assembled physical laws;
 //! authored boundary/source schedules keep their existing history stepper.
 
+pub mod contact;
+
 use std::ops::ControlFlow;
 
 use fs_exec::Cx;
@@ -102,7 +104,8 @@ pub struct AdaptiveEnthalpyReport {
     /// Actual attempted endpoint solves, including rejected comparison work.
     pub endpoint_solves: usize,
     pub last_error: Option<EnthalpyTimeError>,
-    /// A recoverable nonlinear/energy refusal on the latest rejected trial.
+    /// A recoverable nonlinear, physical residual or energy refusal on the
+    /// latest rejected trial.
     pub last_endpoint_refusal: Option<EnthalpyError>,
     /// Direct reference-mass enthalpy change from the ORIGINAL initial field.
     pub stored_energy_change_j: f64,
@@ -453,7 +456,9 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             let (first, fine, input_first, input_second, error) = match candidate {
                 Ok(candidate) => candidate,
                 Err(
-                    error @ (EnthalpyError::NotConverged(_) | EnthalpyError::EnergyBalance { .. }),
+                    error @ (EnthalpyError::NotConverged(_)
+                        | EnthalpyError::EndpointResidual { .. }
+                        | EnthalpyError::EnergyBalance { .. }),
                 ) => {
                     poll(cx, trial)?;
                     self.rejected += 1;

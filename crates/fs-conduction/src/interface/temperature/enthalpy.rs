@@ -57,6 +57,28 @@ pub struct ContactEnthalpyNewtonConfig {
     pub residual_tolerance_j: f64,
 }
 
+pub(crate) fn check_coupled_endpoint(
+    physical: &EnthalpyEndpointEvaluation,
+    config: ContactEnthalpyNewtonConfig,
+) -> Result<(), EnthalpyError> {
+    if !physical.residual_norm_j.is_finite() || !physical.energy_residual_j.is_finite() {
+        return Err(EnthalpyError::NonFiniteArithmetic);
+    }
+    if physical.energy_residual_j.abs() > config.step.energy_tolerance_j {
+        return Err(EnthalpyError::EnergyBalance {
+            residual_j: physical.energy_residual_j,
+            tolerance_j: config.step.energy_tolerance_j,
+        });
+    }
+    if physical.residual_norm_j > config.residual_tolerance_j {
+        return Err(EnthalpyError::EndpointResidual {
+            residual_j: physical.residual_norm_j,
+            tolerance_j: config.residual_tolerance_j,
+        });
+    }
+    Ok(())
+}
+
 fn accept_coupled_endpoint(
     cx: &Cx<'_>,
     solved: EnthalpyStepSolution,
@@ -64,17 +86,7 @@ fn accept_coupled_endpoint(
     physical: EnthalpyEndpointEvaluation,
     config: ContactEnthalpyNewtonConfig,
 ) -> Result<ContactEnthalpyStep, EnthalpyError> {
-    if !physical.residual_norm_j.is_finite()
-        || physical.residual_norm_j > config.residual_tolerance_j
-        || !physical.energy_residual_j.is_finite()
-        || physical.energy_residual_j.abs() > config.step.energy_tolerance_j
-    {
-        return Err(invalid("<contact-enthalpy-newton>", format!(
-            "coupled enthalpy endpoint fails physical gates: residual {:e} J (target {:e}), energy {:e} J (target {:e})",
-            physical.residual_norm_j, config.residual_tolerance_j,
-            physical.energy_residual_j, config.step.energy_tolerance_j,
-        )).into());
-    }
+    check_coupled_endpoint(&physical, config)?;
     let nonlinear_iterations = solved.newton.iterations;
     let krylov_iterations = solved.newton.history.iter().try_fold(0usize, |work, row| {
         work.checked_add(row.linear_iterations)

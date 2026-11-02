@@ -5,6 +5,8 @@ mod radiation;
 mod pointwise;
 #[path = "temperature_contact_enthalpy/pointwise_adjoint.rs"]
 mod pointwise_adjoint;
+#[path = "temperature_contact_enthalpy/adaptive.rs"]
+mod adaptive;
 #[path = "temperature_contact_enthalpy/adjoint.rs"]
 mod adjoint;
 use fs_alloc::{ArenaConfig, ArenaPool};
