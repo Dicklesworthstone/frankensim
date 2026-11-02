@@ -22,6 +22,11 @@ use fs_la::eigen::{admit_jacobi_eigh, jacobi_eigh};
 use fs_la::factor::lu;
 use fs_math::det;
 
+/// The exact step's independent energy balance gate, relative to the step's
+/// energy scale: |delta H + D - S| above it refuses. The Gramian doubling chain
+/// reads it to find where its own f64 rounding could reach the gate.
+const EXACT_BALANCE_RELATIVE: f64 = 1e-12;
+
 mod gramian;
 mod constitutive;
 use gramian::{accumulate, identity, product};
@@ -1013,7 +1018,7 @@ fn exact_zoh_loss(
         || !finite(&[delta_h, dissipated, supplied, energy_scale, defect])
         || !sys.hamiltonian(x0).is_finite() || !sys.hamiltonian(&x).is_finite()
         || dissipated < -1e-12 * energy_scale
-        || (check_balance && defect.abs() > 1e-12 * energy_scale)
+        || (check_balance && defect.abs() > EXACT_BALANCE_RELATIVE * energy_scale)
     {
         return Err(refuse(
             "independent exponential energy balance exceeds 1e-12 relative",

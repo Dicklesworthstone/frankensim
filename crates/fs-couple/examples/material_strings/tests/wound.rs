@@ -89,32 +89,39 @@ fn memory_spec(additional: bool) -> input::Spec {
         .replace("cavity neck", &format!("{declaration}\ncavity neck")).as_bytes()).unwrap()
 }
 
+/// The core's relaxed modulus, bit-equal to `pack`'s young_modulus.
+const EQUILIBRIUM_MODULUS: f64 = 200e9;
+
+fn claimed(base: &NormalizedPack, version: &str, source: &str, band: f64,
+    values: &[(&str, Dims, f64)]) -> NormalizedPack {
+    let mut claims = base.claims().clone();
+    for &(key, dims, value) in values {
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(key, dims), value: PropertyValue::Scalar { value, dims },
+            validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0).with("omega", 0.0, band),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
+            provenance: Provenance { source: source.into(), license: "test-only".into(), artifact: None },
+        }).unwrap();
+    }
+    NormalizedPack::new(base.pack_id(), version,
+        base.source_artifact(), base.redistribution_terms(), claims, vec![], vec![]).unwrap()
+}
+
 fn memory_pack(name: &str, delta: f64, tau: f64, band: f64, eta: Option<f64>) -> NormalizedPack {
     if name != "wire.fsmatpk" {
         // No relaxation modulus/time (or viscosity) is supplied by the wrap.
         return pack(name, if name == "wrap.fsmatpk" { 8900.0 } else { 7800.0 },
             band, (name == "wrap.fsmatpk").then_some(ETA));
     }
-    let base = pack(name, 7800.0, band, Some(ETA));
-    let mut claims = base.claims().clone();
     let mut values = vec![
-        ("equilibrium_young_modulus", Pressure::DIMS, 200e9),
+        ("equilibrium_young_modulus", Pressure::DIMS, EQUILIBRIUM_MODULUS),
         ("relaxing_bending_modulus", Pressure::DIMS, delta),
         ("bending_relaxation_time", Dims([0, 0, 1, 0, 0, 0]), tau),
     ];
     if let Some(eta) = eta { values.push((ETA, DynViscosity::DIMS, eta)); }
-    for (key, dims, value) in values {
-        claims.insert_claim(PropertyClaim {
-            key: PropertyKey::new(key, dims), value: PropertyValue::Scalar { value, dims },
-            validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0).with("omega", 0.0, band),
-            uncertainty: UncertaintyModel::Unstated,
-            interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
-            provenance: Provenance { source: "synthetic wound-core memory integration".into(),
-                license: "test-only".into(), artifact: None },
-        }).unwrap();
-    }
-    NormalizedPack::new(base.pack_id(), "synthetic-wound-core-memory-v1",
-        base.source_artifact(), base.redistribution_terms(), claims, vec![], vec![]).unwrap()
+    claimed(&pack(name, 7800.0, band, Some(ETA)), "synthetic-wound-core-memory-v1",
+        "synthetic wound-core memory integration", band, &values)
 }
 
 #[test]
@@ -216,6 +223,148 @@ fn wound_core_memory_is_equivalent_through_original_or_layered_binding_with_two_
             assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
         }
     });
+}
+
+#[test]
+fn wound_core_memory_renders_through_the_stiff_relaxation_band() {
+    // dt/tau = 2083 (the arm validated with f64 doubling), 2600 and 3600 (the
+    // band where its rounding refused the exact step) and 20833 (1 ns).
+    scoped(|cx, gate| {
+        let spec = memory_spec(false);
+        let dt = 1.0 / f64::from(spec.rate);
+        let mut refused = Vec::new();
+        for tau in [1e-8, dt / 2600.0, dt / 3600.0, 1e-9] {
+            let mut ready = spec.clone().compile(cx, gate, |name|
+                Ok(memory_pack(name, 80e9, tau, 200_000.0, None))).unwrap();
+            let mut p = vec![0.0; ready.spec.samples as usize];
+            if let Some(error) = p.chunks_mut(37).find_map(|chunk| ready.performance.block(chunk).err()) {
+                refused.push(format!("dt/tau {:.0}: {error:?}", dt / tau));
+                continue;
+            }
+            assert!(p.iter().all(|x| x.is_finite()) && p.iter().any(|x| x.abs() > 1e-10), "dt/tau {}", dt / tau);
+            let frame = ready.performance.bank().system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j,
+                "dt/tau {}: {} > {}", dt / tau, frame.energy_residual_j, frame.energy_tolerance_j);
+        }
+        assert!(refused.is_empty(), "{refused:?}");
+    });
+}
+
+/// A test-only alteration of the comparisons below (never of the engine), which
+/// each check must refuse.
+#[derive(Clone, Copy, PartialEq)]
+enum Plant { Faithful, StorageDropped, ArmDoubled }
+
+fn kelvin_voigt_limit(plant: Plant) {
+    // An arm (delta, tau) on bending strain e carries f + tau f' = delta tau e', so
+    // f = eta e' - eta tau e'' + ..., eta = delta tau; with its loss rate f^2 / eta and
+    // storage H = f^2 / (2 delta), from relaxed memory,
+    //   D_arm = D_KV - 2 H_arm - eta tau^2 int e''^2 + O(tau^3),
+    // D_KV = eta int e'^2, the loss of a core viscosity eta on the same motion. At
+    // fixed eta that is D(r) = D_inf + b/r in r = dt/tau: D_inf = D_KV and
+    // b/r = -2 H_arm, measured, not fitted. So A = D_arm + 2 H_arm does not depend on r
+    // to that order.
+    //
+    // Gate, every sample: arms (delta, tau) and (delta/2, 2 tau) share eta, so both
+    // remove energy at the same leading rate eta e'^2 and their motions part only
+    // through the terms below. Allowance on A_slow / A_fast - 1 at t = k dt,
+    // Omega = pi f_s (the Nyquist guard on every admitted frequency; also above
+    // sqrt(3)/t, the e''/e' ratio of motion started from rest within a held-force step):
+    //  (a) the tau^2 remainder, at most (Omega tau)^2 for one arm and (2 Omega tau)^2
+    //      for the other: 5 (Omega tau)^2;
+    //  (b) an arm's residual stiffness, delta (w tau)^2 / (1 + (w tau)^2), is at most
+    //      q = (delta / E_eq)(Omega tau)^2 of a mode's stiffness for (delta, tau) and 2 q
+    //      for (delta/2, 2 tau). It moves a frequency by dw <= w q / 2 (twice that); a
+    //      mode's own loss then moves by <= 4 dw / w and a pair's beat by <= max(dw) t:
+    //      3 q (2 + Omega t / 2);
+    //  (c) rounding in each arm's positive heat factor, doubled s times in f64 outside
+    //      the compensated flow: 2 (2^s - 1) gamma_n per channel, as in gramian.rs, with
+    //      n at most the exact path's dense block cap. The arms need s <= 17 here;
+    //      2^18 covers the rest. Two channels.
+    //
+    // Scale, sample 1: a ratio of arms cannot see a wrongly scaled arm, so the fast arm
+    // meets a core viscosity eta in an otherwise equal card, all channels summed. Every
+    // other channel, G (chiefly the string's own gas drag, in the component channel), is
+    // real physics in both cards and dwarfs D_KV, so no channel can be asserted zero.
+    // Beside (a) and (b) on D_KV, the allowance carries (b) on G; G's response to the
+    // arm-versus-core dissipative difference, (Omega tau)^2 of the core's own reach on
+    // G, which a core decaying a mode at most at c = (delta / E_eq) tau Omega^2 bounds by
+    // 2 c t; and (c) on every channel of both cards. Its beat term grows with t times
+    // G / D_KV, so only k = 1 is checked; the gate holds the law from there.
+    scoped(|cx, gate| {
+        let (delta, tau, band) = (80e9, 1e-9, 200_000.0);
+        // A lossless body plate: the arms are then the only material loss (the core
+        // card's material channel is asserted zero every sample).
+        let body = claimed(&pack("body.fsmatpk", 7800.0, band, Some(ETA)),
+            "synthetic-lossless-body-v1", "synthetic lossless body", band, &[(ETA, DynViscosity::DIMS, 0.0)]);
+        let card = |spec: input::Spec, delta: f64, tau: f64, eta: Option<f64>| {
+            let packs = |name: &str| if name == "body.fsmatpk" { body.clone() }
+                else { memory_pack(name, delta, tau, band, eta) };
+            spec.compile(cx, gate, |name| Ok(packs(name))).unwrap()
+        };
+        let mut fast = card(memory_spec(false), delta, tau, None);
+        let mut slow = card(memory_spec(false), 0.5 * delta, 2.0 * tau, None);
+        let mut viscous = card(wound_spec(), delta, tau, Some(delta * tau));
+        let rate = f64::from(fast.spec.rate);
+        let (dt, omega) = (1.0 / rate, std::f64::consts::PI * rate);
+        for ready in [&fast, &slow, &viscous] {
+            assert!(ready.performance.bank().system().linear_frequency_upper_bound_rad_s() <= omega);
+        }
+        let nu = fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM as f64 * (0.5 * f64::EPSILON);
+        let rounding = 2.0 * 2.0_f64.powi(18) * (nu / (1.0 - nu));
+        let storage = if plant == Plant::StorageDropped { 0.0 } else { 2.0 };
+        let arm = if plant == Plant::ArmDoubled { 2.0 } else { 1.0 };
+        let (mut fast_loss, mut slow_loss) = (0.0, 0.0);
+        for k in 1..=fast.spec.samples {
+            for ready in [&mut fast, &mut slow, &mut viscous] {
+                ready.performance.block(&mut [0.0]).unwrap();
+            }
+            let a = fast.performance.bank().system().coupled_frame().unwrap();
+            let b = slow.performance.bank().system().coupled_frame().unwrap();
+            let v = viscous.performance.bank().system().coupled_frame().unwrap();
+            assert_eq!(v.material_dissipation_j, 0.0, "sample {k}");
+            fast_loss += arm * a.material_dissipation_j;
+            slow_loss += arm * b.material_dissipation_j;
+            let fast_total = fast_loss + storage * arm * a.material_energy_j;
+            let slow_total = slow_loss + storage * arm * b.material_energy_j;
+            let t = k as f64 * dt;
+            let remainder = (omega * tau).powi(2);
+            let stiffness = delta / EQUILIBRIUM_MODULUS * remainder * (2.0 + 0.5 * omega * t);
+            let allowance = 5.0 * remainder + 3.0 * stiffness + 2.0 * rounding;
+            let defect = slow_total / fast_total - 1.0;
+            assert!(defect.abs() <= allowance,
+                "sample {k}: relaxation-time law defect {defect:e} > {allowance:e}");
+            if k == 1 {
+                let rest = a.component_dissipation_j + a.connection_dissipation_j + a.radiation_dissipation_j;
+                let core = v.component_dissipation_j + v.connection_dissipation_j + v.radiation_dissipation_j;
+                let reach = 2.0 * delta / EQUILIBRIUM_MODULUS * tau * omega * omega * t;
+                let allowance = (remainder + stiffness) * fast_total + (stiffness + remainder * reach) * rest
+                    + rounding * (arm * a.material_dissipation_j + rest + core);
+                let defect = fast_total + rest - core;
+                assert!(defect.abs() <= allowance, "core scale defect {defect:e} J > {allowance:e} J");
+            }
+            for frame in [a, b, v] {
+                assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j, "sample {k}");
+            }
+        }
+    });
+}
+
+#[test]
+fn wound_core_memory_at_one_nanosecond_meets_its_kelvin_voigt_limit() {
+    kelvin_voigt_limit(Plant::Faithful);
+}
+
+#[test]
+#[should_panic(expected = "relaxation-time law")]
+fn kelvin_voigt_limit_refuses_an_arm_without_its_storage() {
+    kelvin_voigt_limit(Plant::StorageDropped);
+}
+
+#[test]
+#[should_panic(expected = "core scale")]
+fn kelvin_voigt_limit_refuses_a_doubled_arm() {
+    kelvin_voigt_limit(Plant::ArmDoubled);
 }
 
 #[test]
