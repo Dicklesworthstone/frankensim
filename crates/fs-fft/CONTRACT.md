@@ -581,3 +581,51 @@ high-carrier suppression, weak cancellation, extreme finite amplitude scaling
 and cancellation. All 43 shared temporal/spectral/causal tests compiled,
 linked and executed with the real fs_math library and no nominal physics
 boundaries. This scoped execution is not the full workspace quality gate.
+
+## Physical-unit scaling and balanced causal integration
+
+`PreparedHarmonicProductSpectrum::causal_integral_from_clock_dd_scaled` and
+its cancellable counterpart apply a finite positive output-unit conversion to
+DC/tone amplitudes before the existing allocation-free causal kernels.
+Returned integrals use converted-output-units times seconds; decay and
+one-minus-decay factors are unchanged. Existing DD-clock methods delegate with
+scale one. This lets a tiny authored observable expressed in large physical
+units retain a representable physical input integral without first forming
+an underflowed unscaled quantity.
+
+Harmonic contributions prefer physical time gains: duration multiplies the
+normalized kernel before the source amplitude. Their natural scale for long
+or stiff intervals is inverse frequency or inverse decay, so a small
+normalized kernel does not erase a finite accumulated contribution.
+If that ordering is unrepresentable for a very short interval, the complete
+tone falls back to the original ordering: combine the normalized real and
+imaginary source products in DD, then apply duration. Exact-zero amplitude
+components skip unnecessary gain formation.
+
+Both orderings check their multiplicative steps. Nonzero products that become
+fully zero, and nonfinite products, refuse when no admitted ordering remains.
+Genuine signed cancellation between representable contributions stays valid.
+Early physical-amplitude overflow or underflow can still refuse even when a
+different multiplication order outside this API could represent a later
+integral; this API does not claim an expanded DD exponent range. The existing
+phase, exponential, divided-difference and local-series kernels are unchanged.
+No stronger cancellation-relative or interval accuracy claim is introduced.
+
+Focused causal regressions cover DC and harmonic unit restoration, signed
+phase, ordinary and exponentially weighted input, explicit underflow/overflow
+refusals, signed cancellation, identity scaling, domains and cancellation.
+Long-window tests retain an amplitude of 1e-200 over 1e200 seconds and a stiff
+weighted input beside a finite ordinary integral. The short-window complex
+source case exercises the normalized-projection fallback.
+
+The native nonlinear enthalpy consumer takes the already-converted integral
+directly as source joules, including input below its original f64 phase-state
+resolution; any unapplied part remains visible in the numerical energy
+residual instead of being relabeled as a dark source.
+
+All 49 shared regressions compiled, linked and executed with real fs_math in
+the same native run as the 13 original-owner nonlinear thermal regressions:
+62 passed, 0 failed. Six new causal tests cover the unit and arithmetic-range
+cases above. The shared math is exercised directly, without nominal numerical
+or constitutive substitutes. Native rustfmt passed; the scoped executable is
+not the full repository quality gate.

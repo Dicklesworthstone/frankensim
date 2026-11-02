@@ -15,6 +15,9 @@
 //! node model. The original Biot gate remains mandatory. Radiation, nonlinear
 //! material response and exchange between nodes require a different model.
 
+/// Original phase/transport enthalpy evolution driven by prescribed interference power.
+pub mod enthalpy;
+
 use fs_fft::harmonic_window::{PreparedHarmonicProductSpectrum, ProductSpectrumError};
 use fs_math::dd::Dd;
 

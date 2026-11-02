@@ -1121,14 +1121,24 @@ fn solve_enthalpy_step(
     previous_h: f64,
     dt_s: f64,
 ) -> Result<f64, ConductionError> {
-    let knots = body.phase_curve.knots();
-    let mut lower = knots[0].specific_enthalpy_j_kg;
-    let mut upper = knots[knots.len() - 1].specific_enthalpy_j_kg;
     let residual = |specific_enthalpy: f64| -> Result<f64, ConductionError> {
         let state = phase_state(body, specific_enthalpy)?;
         let (_, _, power) = enthalpy_power(body, config, state.temperature_k())?;
         Ok(body.mass_kg * (specific_enthalpy - previous_h) - dt_s * power)
     };
+    bisect_enthalpy_step(body, config.enthalpy_tolerance_j_kg, residual)
+}
+
+/// Shared native bounded bisection; callers supply their original energy
+/// residual without introducing another constitutive or thermal solver.
+fn bisect_enthalpy_step(
+    body: &LumpedEnthalpyBody<'_>,
+    enthalpy_tolerance_j_kg: f64,
+    mut residual: impl FnMut(f64) -> Result<f64, ConductionError>,
+) -> Result<f64, ConductionError> {
+    let knots = body.phase_curve.knots();
+    let mut lower = knots[0].specific_enthalpy_j_kg;
+    let mut upper = knots[knots.len() - 1].specific_enthalpy_j_kg;
     let lower_residual = residual(lower)?;
     let upper_residual = residual(upper)?;
     if lower_residual > 0.0 || upper_residual < 0.0 {
@@ -1150,7 +1160,7 @@ fn solve_enthalpy_step(
         } else {
             upper = midpoint;
         }
-        if upper - lower <= config.enthalpy_tolerance_j_kg {
+        if upper - lower <= enthalpy_tolerance_j_kg {
             break;
         }
     }

@@ -397,3 +397,218 @@ fn dd_clock_normalization_compatibility_and_refusal_are_explicit() {
         ProductSpectrumError::Cancelled
     );
 }
+
+#[test]
+fn unit_conversion_precedes_dc_time_products_and_retains_weighted_energy() {
+    let spectrum = prepare(vec![input(0.0, [1e-200, 0.0], 0.0, [1.0, 0.0])]);
+    assert_eq!(
+        spectrum.causal_integral(0.0, 1e-200, 0.0).unwrap_err(),
+        ProductSpectrumError::Window(WindowError::Unrepresentable),
+    );
+    for rate in [0.0, 1e200] {
+        let result = spectrum
+            .causal_integral_from_clock_dd_scaled(Dd::ZERO, 1e-200, rate, 1e200)
+            .unwrap();
+        close(result.integral_dd(), 1e-200, 3e-15, 1e-200);
+        let weighted = if rate == 0.0 {
+            1e-200
+        } else {
+            1e-200 * (1.0 - det::exp(-1.0))
+        };
+        close(result.weighted_integral_dd(), weighted, 3e-15, 1e-200);
+        assert!(result.integral_dd().hi > 0.0);
+        assert!(result.weighted_integral_dd().hi > 0.0);
+    }
+    // A representable unweighted integral is not permission to hide a
+    // nonzero weighted integral that underflows before unit conversion.
+    assert_eq!(
+        spectrum.causal_integral(0.0, 1e-100, 1e200).unwrap_err(),
+        ProductSpectrumError::Window(WindowError::Unrepresentable),
+    );
+    let restored = spectrum
+        .causal_integral_from_clock_dd_scaled(Dd::ZERO, 1e-100, 1e200, 1e100)
+        .unwrap();
+    close(restored.integral_dd(), 1e-200, 3e-15, 1e-200);
+    close(restored.weighted_integral_dd(), 1e-300, 3e-15, 1e-300);
+}
+
+#[test]
+fn unit_conversion_precedes_harmonic_time_products_and_preserves_source_phase() {
+    let spectrum = prepare(vec![input(2.0, [-1e-200, 0.5e-200], 0.0, [1.0, 0.0])]);
+    assert_eq!(
+        spectrum.causal_integral(0.125, 1e-200, 0.0).unwrap_err(),
+        ProductSpectrumError::Window(WindowError::Unrepresentable),
+    );
+    let physical_power = -det::cos(0.25) + 0.5 * det::sin(0.25);
+    for rate in [0.0, 1e200] {
+        let result = spectrum
+            .causal_integral_from_clock_dd_scaled(Dd::from_f64(0.125), 1e-200, rate, 1e200)
+            .unwrap();
+        let expected = physical_power * 1e-200;
+        close(result.integral_dd(), expected, 4e-15, 1e-200);
+        close(
+            result.weighted_integral_dd(),
+            if rate == 0.0 {
+                expected
+            } else {
+                expected * (1.0 - det::exp(-1.0))
+            },
+            4e-15,
+            1e-200,
+        );
+        assert!(result.integral_dd().hi < 0.0);
+    }
+    let cosine = prepare(vec![input(1.0, [1e-200, 0.0], 0.0, [1.0, 0.0])]);
+    assert_eq!(
+        cosine.causal_integral(0.0, 1e-100, 1e200).unwrap_err(),
+        ProductSpectrumError::Window(WindowError::Unrepresentable),
+    );
+    let restored = cosine
+        .causal_integral_from_clock_dd_scaled(Dd::ZERO, 1e-100, 1e200, 1e100)
+        .unwrap();
+    close(restored.integral_dd(), 1e-200, 3e-15, 1e-200);
+    close(restored.weighted_integral_dd(), 1e-300, 3e-15, 1e-300);
+}
+
+#[test]
+fn scaled_causal_refuses_unrepresentable_products_and_preserves_signed_cancellation() {
+    for frequency in [0.0, 1.0] {
+        let small = prepare(vec![input(frequency, [1e-200, 0.0], 0.0, [1.0, 0.0])]);
+        // The converted amplitude itself cannot be represented, even though
+        // another multiplication order could restore its final energy.
+        assert_eq!(
+            small
+                .causal_integral_from_clock_dd_scaled(Dd::ZERO, 1e200, 0.0, 1e-200)
+                .unwrap_err(),
+            ProductSpectrumError::Window(WindowError::Unrepresentable),
+        );
+        let large = prepare(vec![input(frequency, [1e200, 0.0], 0.0, [1.0, 0.0])]);
+        assert_eq!(
+            large
+                .causal_integral_from_clock_dd_scaled(Dd::ZERO, 1e-200, 0.0, 1e200)
+                .unwrap_err(),
+            ProductSpectrumError::Window(WindowError::Unrepresentable),
+        );
+    }
+    let tone = prepare(vec![input(1.0, [1.0, 0.0], 0.0, [1.0, 0.0])]);
+    let tone_energy = tone.causal_integral(0.0, 1.0, 0.0).unwrap().integral_dd();
+    let cancellation = PreparedHarmonicProductSpectrum::from_angular_terms(
+        [
+            AngularHarmonicSpectrumTerm {
+                angular_frequency_rad_s: Dd::ZERO,
+                peak_amplitude: [-tone_energy, Dd::ZERO],
+            },
+            AngularHarmonicSpectrumTerm {
+                angular_frequency_rad_s: Dd::ONE,
+                peak_amplitude: [Dd::ONE, Dd::ZERO],
+            },
+        ],
+        HarmonicSpectrumTermLimits {
+            maximum_terms: 2,
+            maximum_workspace_bytes: 4096,
+        },
+    )
+    .unwrap();
+    let result = cancellation
+        .causal_integral_from_clock_dd_scaled(Dd::ZERO, 1.0, 0.0, 2.0)
+        .unwrap();
+    assert_eq!(result.integral_dd(), Dd::ZERO);
+    assert_eq!(result.weighted_integral_dd(), Dd::ZERO);
+}
+
+#[test]
+fn scaled_causal_units_zero_duration_and_cancellation_are_explicit() {
+    let spectrum = prepare(vec![input(2.0, [0.7, 0.2], 0.0, [1.0, 0.0])]);
+    let ordinary = spectrum.causal_integral(0.3, 0.5, 0.8).unwrap();
+    let identity_scale = spectrum
+        .causal_integral_from_clock_dd_scaled(Dd::from_f64(0.3), 0.5, 0.8, 1.0)
+        .unwrap();
+    assert_eq!(ordinary.integral_dd(), identity_scale.integral_dd());
+    assert_eq!(
+        ordinary.weighted_integral_dd(),
+        identity_scale.weighted_integral_dd()
+    );
+    let scaled = spectrum
+        .causal_integral_from_clock_dd_scaled(Dd::from_f64(0.3), 0.5, 0.8, 3.0)
+        .unwrap();
+    close(
+        scaled.integral_dd(),
+        3.0 * ordinary.integral_dd().to_f64(),
+        2e-15,
+        1.0,
+    );
+    close(
+        scaled.weighted_integral_dd(),
+        3.0 * ordinary.weighted_integral_dd().to_f64(),
+        2e-15,
+        1.0,
+    );
+    assert_eq!(scaled.decay_dd(), ordinary.decay_dd());
+    assert_eq!(scaled.one_minus_decay_dd(), ordinary.one_minus_decay_dd());
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            spectrum
+                .causal_integral_from_clock_dd_scaled(Dd::ZERO, 1.0, 0.0, scale)
+                .unwrap_err(),
+            ProductSpectrumError::Window(WindowError::InvalidWindow),
+        );
+    }
+    assert_eq!(
+        spectrum
+            .causal_integral_from_clock_dd_scaled_cancellable(Dd::ZERO, 1.0, 0.0, 1.0, || true,)
+            .unwrap_err(),
+        ProductSpectrumError::Cancelled,
+    );
+    let zero = spectrum
+        .causal_integral_from_clock_dd_scaled(Dd::ZERO, 0.0, 0.8, 3.0)
+        .unwrap();
+    assert_eq!(zero.integral_dd(), Dd::ZERO);
+    assert_eq!(zero.weighted_integral_dd(), Dd::ZERO);
+    assert_eq!(zero.decay_dd(), Dd::ONE);
+}
+
+#[test]
+fn physical_time_gains_preserve_tiny_tones_over_long_intervals() {
+    let amplitude = 1e-200;
+    let duration = 1e200;
+    let spectrum = prepare(vec![input(1.0, [amplitude, 0.0], 0.0, [1.0, 0.0])]);
+    let sine = det::sin(duration);
+    let cosine = det::cos(duration);
+    assert!(sine.abs() > 0.1);
+    for rate in [0.0, 1.0] {
+        let result = spectrum
+            .causal_integral_from_clock_dd_scaled(Dd::ZERO, duration, rate, 1.0)
+            .unwrap();
+        close(result.integral_dd(), amplitude * sine, 8e-15, amplitude);
+        let expected_weighted = if rate == 0.0 {
+            amplitude * sine
+        } else {
+            0.5 * amplitude * (cosine + sine)
+        };
+        close(
+            result.weighted_integral_dd(),
+            expected_weighted,
+            8e-15,
+            amplitude,
+        );
+        assert!(!is_zero(result.integral_dd()));
+        assert!(!is_zero(result.weighted_integral_dd()));
+    }
+}
+
+#[test]
+fn physical_time_gains_preserve_stiff_weighted_input_beside_large_plain_input() {
+    let amplitude = 1e-200;
+    let spectrum = prepare(vec![input(1e-200, [amplitude, 0.0], 0.0, [1.0, 0.0])]);
+    let result = spectrum
+        .causal_integral_from_clock_dd_scaled(Dd::ZERO, 1e200, 1.0, 1.0)
+        .unwrap();
+    close(result.integral_dd(), det::sin(1.0), 8e-15, 1.0);
+    close(
+        result.weighted_integral_dd(),
+        amplitude * det::cos(1.0),
+        8e-15,
+        amplitude,
+    );
+    assert!(!is_zero(result.weighted_integral_dd()));
+}

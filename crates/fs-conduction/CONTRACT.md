@@ -3244,3 +3244,74 @@ BiotGate source and the thirteen new thermal tests compiled, linked and ran
 with real fs_math: all 48 combined tests passed, with no compiler warnings.
 Only the outer ConductionError variants were nominal. Full Cargo workspace,
 Clippy and the repository quality gate were not run in this scoped executable.
+
+## Interference-driven native nonlinear enthalpy evolution
+
+The child module `lumped::interference::enthalpy` advances one actual
+`LumpedEnthalpyBody` under an explicitly bound prescribed thermal-power
+spectrum. Original mass, equilibrium phase curve, latent fractions,
+temperature-dependent transport receipts, fluid/enclosure temperatures and
+convection-plus-radiation Biot gate remain authoritative. Its backward-Euler
+residual calls the original phase and boundary-power helpers and the same
+bounded native bisection implementation. The existing constant-power caller
+retains its original residual and behavior.
+
+Every accepted substep consumes the full shared spectrum's analytic interval
+integral in DD joules, with an explicit positive W-per-input-unit scale and
+declared source clock. Unit conversion acts on source amplitudes BEFORE time
+integration, so a tiny authored source in large physical units is not first
+erased by an unscaled integral. The consumer takes the converted integral
+directly as source joules; it does not divide through a rounded mean watt value.
+A spectrum already in W uses scale one. The absolute clock adds original start
+and accepted elapsed time in DD, so late short substeps are not reset or erased.
+All DC power belongs in the bound spectrum; the original config's separate
+internal-power field must be zero.
+
+Source resolution and thermal numerical accuracy are separate controls. The
+shared outward-rounded primitive-ripple bound limits each step's departure
+from interval-mean forcing, including cycles invisible to endpoint or
+step-doubling checks. Positive unit scaling rounds that bound outward again.
+One admitted maximum-step bound covers all shorter steps without repeating a
+spectral traversal. Fast carriers can remain analytically integrated when
+their primitive ripple is below the declared joule budget. The original
+maximum thermal step still controls a first-order nonlinear discretization;
+root/energy residual and source-ripple tolerances do not certify its global
+temperature error.
+
+The atomic trajectory retains every actual accepted native phase state and
+its source, convective, radiative, storage and residual energy. Boundary
+energies use original endpoint fluxes times accepted duration, with positive
+sign inward. Total storage is also computed directly from original and final
+enthalpy coordinates. Source energy is counted once; observations do not debit
+a field, mutate a material card or publish external thermal state. Exact dark
+equilibria are retained without injecting bisection rounding. Input below the
+original f64 phase-state resolution stays visible in source joules and the
+declared numerical residual, rather than being relabeled as darkness.
+Attempts, accepted steps, spectral visits, output samples and vector storage
+are bounded; cancellation, unsupported phase/transport domains or an unclosed
+energy step discard the complete partial march.
+
+A spectrum explicitly represents applied thermal power, which may include
+signed extraction; reversible field storage is never reclassified as heat.
+Nonlinear evolution driven by ensemble-mean power is a trajectory under that
+mean forcing, not an ensemble-mean temperature or fluctuation prediction.
+Electromagnetic material feedback requires an explicit rebuild by the original
+field owner. The existing restrictions on uniform-body validity, source
+homogenization and equilibrium phase kinetics remain.
+
+Focused tests cover the original latent plateau under beating, an alias case
+with zero full/half-cycle input but a real melting excursion, admissible fast
+carrier primitives, original constant-power bisection, sourced varying
+emissivity/radiation with thermal-step refinement, signed heat accounting,
+low-component source energy, destructive darkness, a large absolute clock,
+physical-unit restoration and fidelity/domain/metadata/resource/residual/
+cancellation refusals.
+
+Native Rust compilation, linking and execution passed all 13 new thermal
+regressions and all 49 shared temporal/spectral/causal regressions: 62 passed,
+0 failed. The focused executable uses the exact current equilibrium phase
+chart, body/transport, conductivity table, emissivity and implicit helper
+source, with real fs_math, fs_matdb, fs_evidence, fs_qty and fs_blake3 libraries.
+Only the unrelated crate ConductionError envelope is nominal. No constitutive
+substitute or alternate production thermal solver is used. This is not a full
+Cargo workspace, Clippy or DSR quality-gate run. Native rustfmt passed.

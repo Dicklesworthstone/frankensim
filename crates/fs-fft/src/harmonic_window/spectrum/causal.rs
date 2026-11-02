@@ -103,6 +103,51 @@ impl PreparedHarmonicProductSpectrum {
         start_s: Dd,
         duration_s: f64,
         decay_rate_per_s: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<HarmonicCausalIntegral, ProductSpectrumError> {
+        self.causal_integral_from_clock_dd_scaled_cancellable(
+            start_s,
+            duration_s,
+            decay_rate_per_s,
+            1.0,
+            cancelled,
+        )
+    }
+
+    /// Integrate after an explicit finite positive output-unit conversion.
+    ///
+    /// The scale multiplies each DC/tone amplitude BEFORE the existing time
+    /// kernels. A small observable in large physical units therefore need not
+    /// lose a representable physical integral through an unscaled underflow.
+    /// Results are in converted-output-units * s. Decay factors are unchanged.
+    ///
+    /// Unrepresentable converted amplitudes or nonzero final duration products
+    /// that underflow to zero refuse; they are never published as darkness.
+    /// Signed cancellation between representable contributions remains valid.
+    /// This is allocation-free and does not widen the DD dynamic range or
+    /// change the existing kernel/phase accuracy guarantees.
+    pub fn causal_integral_from_clock_dd_scaled(
+        &self,
+        start_s: Dd,
+        duration_s: f64,
+        decay_rate_per_s: f64,
+        output_scale: f64,
+    ) -> Result<HarmonicCausalIntegral, ProductSpectrumError> {
+        self.causal_integral_from_clock_dd_scaled_cancellable(
+            start_s,
+            duration_s,
+            decay_rate_per_s,
+            output_scale,
+            || false,
+        )
+    }
+
+    pub fn causal_integral_from_clock_dd_scaled_cancellable(
+        &self,
+        start_s: Dd,
+        duration_s: f64,
+        decay_rate_per_s: f64,
+        output_scale: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<HarmonicCausalIntegral, ProductSpectrumError> {
         spectrum_poll(&mut cancelled)?;
@@ -112,6 +157,8 @@ impl PreparedHarmonicProductSpectrum {
             || duration_s < 0.0
             || !decay_rate_per_s.is_finite()
             || decay_rate_per_s < 0.0
+            || !output_scale.is_finite()
+            || output_scale <= 0.0
         {
             return Err(WindowError::InvalidWindow.into());
         }
@@ -136,8 +183,10 @@ impl PreparedHarmonicProductSpectrum {
         } else {
             checked(duration * checked(one_minus_decay / alpha)?)?
         };
-        let mut integral = checked(self.dc * duration)?;
-        let mut weighted_integral = checked(self.dc * dc_gain)?;
+        let output_scale = Dd::from_f64(output_scale);
+        let dc = checked_source_product(self.dc, output_scale)?;
+        let mut integral = checked_source_product(dc, duration)?;
+        let mut weighted_integral = checked_source_product(dc, dc_gain)?;
         for (index, tone) in self.tones.iter().enumerate() {
             if index % 32 == 0 {
                 spectrum_poll(&mut cancelled)?;
@@ -146,24 +195,19 @@ impl PreparedHarmonicProductSpectrum {
             let phase_start = checked(omega * start_s)?;
             let beta = checked(omega * duration)?;
             let (real, imaginary) = proper_phase(phase_start);
+            let scaled = [
+                checked_source_product(tone.amplitude[0], output_scale)?,
+                checked_source_product(tone.amplitude[1], output_scale)?,
+            ];
             let amplitude = [
-                checked(tone.amplitude[0] * real - tone.amplitude[1] * imaginary)?,
-                checked(tone.amplitude[0] * imaginary + tone.amplitude[1] * real)?,
+                checked(scaled[0] * real - scaled[1] * imaginary)?,
+                checked(scaled[0] * imaginary + scaled[1] * real)?,
             ];
             let (plain, weighted) = integration_kernels(alpha, beta, one_minus_decay)?;
-            integral = checked(
-                integral
-                    + checked(
-                        duration * checked(amplitude[0] * plain[0] - amplitude[1] * plain[1])?,
-                    )?,
-            )?;
+            integral = checked(integral + integrate_source_tone(duration, amplitude, plain)?)?;
             if !zero_decay {
                 weighted_integral = checked(
-                    weighted_integral
-                        + checked(
-                            duration
-                                * checked(amplitude[0] * weighted[0] - amplitude[1] * weighted[1])?,
-                        )?,
+                    weighted_integral + integrate_source_tone(duration, amplitude, weighted)?,
                 )?;
             }
         }
@@ -177,6 +221,52 @@ impl PreparedHarmonicProductSpectrum {
             decay,
             one_minus_decay,
         })
+    }
+}
+
+// Prefer physical time gains, whose natural scale is 1/omega or 1/lambda
+// for long/stiff intervals. A very short interval can instead underflow one
+// gain before two normalized components meet; retain that original ordering
+// as a whole-tone fallback. Neither ordering publishes a failed product.
+fn integrate_source_tone(
+    duration: Dd,
+    amplitude: [Dd; 2],
+    kernel: [Dd; 2],
+) -> Result<Dd, WindowError> {
+    let gain_first = || -> Result<Dd, WindowError> {
+        let component = |index: usize| -> Result<Dd, WindowError> {
+            if is_zero(amplitude[index]) {
+                Ok(Dd::ZERO)
+            } else {
+                checked_source_product(
+                    amplitude[index],
+                    checked_source_product(duration, kernel[index])?,
+                )
+            }
+        };
+        checked(component(0)? - component(1)?)
+    };
+    match gain_first() {
+        Ok(value) => Ok(value),
+        Err(WindowError::Unrepresentable) => {
+            let normalized = checked(
+                checked_source_product(amplitude[0], kernel[0])?
+                    - checked_source_product(amplitude[1], kernel[1])?,
+            )?;
+            checked_source_product(duration, normalized)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+// Guard unit conversion and the final time factors, not signed sums: exact
+// destructive cancellation between nonzero contributions is still permitted.
+fn checked_source_product(left: Dd, right: Dd) -> Result<Dd, WindowError> {
+    let product = checked(left * right)?;
+    if !is_zero(left) && !is_zero(right) && is_zero(product) {
+        Err(WindowError::Unrepresentable)
+    } else {
+        Ok(product)
     }
 }
 
