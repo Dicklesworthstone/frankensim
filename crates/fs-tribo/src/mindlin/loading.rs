@@ -13,6 +13,8 @@
 //! normal load, using the original fixed-load owner. Callers explicitly choose
 //! that path ordering. `advance_prescribed_path` instead integrates simultaneous
 //! affine indentation and shear analytically, including entry and detachment.
+//! `advance_coupled_path` resolves that same path against scalar tangential body
+//! compliance using its actual work-average traction; indentation stays prescribed.
 //! There is no implied instantaneous rescaling, thermal coefficient evolution,
 //! two-dimensional shear, or normal/tangential elastic coupling. Normal work
 //! and normal Hertz storage are separate from the tangential work port.
@@ -33,7 +35,7 @@ use crate::{
     checked_mul, finite, nonnegative_finite, positive_finite,
 };
 
-/// Simultaneous prescribed indentation and shear with analytic local events.
+/// Simultaneous indentation/shear paths and scalar mechanical compliance.
 pub mod path;
 
 /// Immutable geometry and elastic/interface parameters for a Hertz contact.

@@ -619,8 +619,10 @@ independent fixed-coordinate MDR spring quadrature under mixed loading/reversal.
 indentation and scalar macroscopic shear over the caller's interval. The
 supplied normal load is the endpoint load; the Hertz force itself follows the
 nonlinear indentation law. The caller supplies a prescribed path with zero
-body compliance. Curved or dynamically coupled trajectories still require
-their mechanical owner and trajectory refinement.
+body compliance. `advance_coupled_path` instead accepts released tangential
+motion and scalar body compliance and solves `du = du_free - C * Q_average`.
+Normal indentation remains prescribed. Curved trajectories and normal/body
+feedback still require their mechanical owner and trajectory refinement.
 
 The original analytic spring history is retained. In a fixed reference patch,
 each local Coulomb bound varies affinely in time. The method resolves spring
@@ -634,6 +636,21 @@ Cost is linear in the bounded history; cancellation is checked at every
 interval/event partition, and refusals publish no history. Constant-normal
 paths delegate exactly to the original fixed-load implementation.
 
+The mechanically coupled path uses that same average traction for both the
+body response and physical contact work. At each local spring, the derivative
+of time-average strain with respect to total shear is half the square of its
+elastic duration. The existing analytic event moments therefore give a
+nonnegative constitutive tangent without differencing or an extra spring grid.
+The signed force residual is strictly monotone for nonnegative compliance;
+Newton steps are safeguarded by the original Coulomb/force-budget bracket.
+Normal geometry is cached across trials, trial responses allocate no history,
+and only the accepted candidate materializes the bounded history. Convergence
+also checks the returned constitutive effort on its own body load line.
+The zero-compliance result is identical to the prescribed path. A mechanical
+owner can supply `C = dt^2/(2*m_effective)` for a midpoint inertial response;
+contact storage and heat then balance work with the body's kinetic-energy
+change. No body integrator or normal/shear cross-compliance is inferred.
+
 Five G1/G3/G4 groups in `tests/mindlin_loading.rs` check the independent
 proportional Hertz solution, energy recovery during combined unloading,
 retained-history subdivision invariance, a three-rung independent spring/time
@@ -641,6 +658,13 @@ quadrature, and atomic cancellation/memory/force/domain refusal. They use
 synthetic inputs and do not claim material calibration or a full three-dimensional
 elastic-friction solution. The model is the same decoupled MDR formulation in
 Popov, Hess and Willert (2019), section 4.4, equations 4.21--4.25.
+
+Four additional groups check the independent compliant proportional-growth
+solution in elastic and sliding regimes, conversion of retained shear energy
+into finite-body recoil during unloading without spurious heat, returned-force
+compatibility through changing-load reversals and recontact, exact delegation,
+and atomic force/iteration/memory/cancellation refusal. These remain synthetic
+model-equation checks rather than material calibration.
 
 ### Rolling and contour-deformation loss rungs
 

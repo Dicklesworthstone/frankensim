@@ -23,7 +23,9 @@ use crate::{
 };
 use fs_math::det;
 
-/// Complete prescribed-path response; shear work uses the time-average force
+mod compliance;
+
+/// Complete path response; shear work uses the time-average force
 /// in `tangential`, and normal work is audited separately.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MindlinPathStep {
@@ -50,7 +52,7 @@ impl From<TriboError> for MindlinPathError {
 }
 impl core::fmt::Display for MindlinPathError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "prescribed Hertz--Mindlin path: {self:?}")
+        write!(f, "Hertz--Mindlin path: {self:?}")
     }
 }
 impl std::error::Error for MindlinPathError {}
@@ -75,15 +77,26 @@ impl HertzMindlinContact {
         input: &TangentialStepInput,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MindlinPathStep, MindlinPathError> {
+        self.advance_path(state, input, true, cancelled)
+    }
+
+    fn advance_path(
+        &self,
+        state: &HertzMindlinState,
+        input: &TangentialStepInput,
+        prescribed: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MindlinPathStep, MindlinPathError> {
         poll(cancelled)?;
         self.check_owner(state)?;
         input.solve.validate()?;
         positive_finite(input.dt_s, "dt_s")?;
         nonnegative_finite(input.normal_n, "normal_force_n")?;
         finite(input.slip_increment_m[0], "slip_increment_m")?;
-        if input.compliance_m_per_n != 0.0 || input.slip_increment_m[1] != 0.0 {
+        if (prescribed && input.compliance_m_per_n != 0.0) || input.slip_increment_m[1] != 0.0 {
             return Err(invalid("mindlin_path_requires_prescribed_first_axis_motion").into());
         }
+        nonnegative_finite(input.compliance_m_per_n, "compliance_m_per_n")?;
         if let Some(t) = input.contact_temperature_k {
             positive_finite(t, "temperature_kelvin")?;
         }
@@ -109,13 +122,112 @@ impl HertzMindlinContact {
                 normal_stored_change_j: normal.normal_stored_change_j,
             });
         }
-        let (final_law, indentation_m, normal_energy_j) = if input.normal_n == 0.0 {
+        let prepared = PreparedPath::new(self, state, input.normal_n)?;
+        let (increment_m, iterations) = prepared.solve_increment(state, input, cancelled)?;
+        let mut memory = Vec::with_capacity(
+            (state.history_intervals() + 3).min(self.parameters.maximum_history_intervals),
+        );
+        let Response {
+            average_n: average,
+            endpoint_n: endpoint,
+            energy_j: energy,
+            heat_j: heat,
+            ..
+        } = prepared.response(state, increment_m, Some(&mut memory), cancelled)?;
+        if average.abs() > input.solve.maximum_force_n {
+            return Err(TriboError::OutsideApplicability {
+                field: "maximum_force_n",
+                value: average.abs(),
+                minimum: 0.0,
+                maximum: input.solve.maximum_force_n,
+            }
+            .into());
+        }
+        let change = energy - self.stored_energy_j(state);
+        let work = checked_mul(average, increment_m, "mindlin_path_shear_work_j")?;
+        let residual = change + heat - work;
+        finite(residual, "mindlin_path_closure_j")?;
+        let normal_change = prepared.normal_energy_j - state.normal_energy_j;
+        finite(normal_change, "mindlin_path_normal_work_j")?;
+        let slip_m = checked_add(state.slip_m, increment_m, "mindlin_accumulated_slip_m")?;
+        let compatibility = increment_m
+            - (input.slip_increment_m[0]
+                - checked_mul(input.compliance_m_per_n, average, "mindlin_body_response_m")?);
+        finite(compatibility, "mindlin_compatibility_residual_m")?;
+        let fixed = prepared.final_law.map(|owner| MindlinState {
+            owner,
+            memory,
+            slip_m,
+            endpoint_force_n: endpoint,
+            stored_energy_j: energy,
+        });
+        let next = HertzMindlinState {
+            owner: self.clone(),
+            fixed,
+            slip_m,
+            indentation_m: prepared.indentation_m,
+            normal_energy_j: prepared.normal_energy_j,
+        };
+        poll(cancelled)?;
+        Ok(MindlinPathStep {
+            tangential: TangentialStep {
+                traction_n: [average, 0.0],
+                slip_increment_m: [increment_m, 0.0],
+                state: next,
+                regime: if heat > 0.0 {
+                    FrictionRegime::Sliding
+                } else {
+                    FrictionRegime::Sticking
+                },
+                stored_change_j: change,
+                dissipated_j: heat,
+                closure_residual_j: residual,
+                compatibility_residual_m: [compatibility, 0.0],
+                iterations,
+            },
+            normal_work_j: normal_change,
+            normal_stored_change_j: normal_change,
+        })
+    }
+}
+
+// Normal geometry and scales are held fixed throughout the mechanical solve.
+// Trial responses never allocate or modify history; only the accepted response
+// receives an output memory, as in the original fixed-load constitutive owner.
+struct PreparedPath {
+    c0: f64,
+    c1: f64,
+    final_law: Option<MindlinDeresiewiczPoint>,
+    indentation_m: f64,
+    normal_energy_j: f64,
+    force_scale_n: f64,
+    energy_scale_j: f64,
+    critical_slip_m: f64,
+    stiffness_n_per_m: f64,
+    capacity_n: f64,
+}
+
+struct Response {
+    average_n: f64,
+    endpoint_n: f64,
+    energy_j: f64,
+    heat_j: f64,
+    derivative_n_per_m: f64,
+}
+
+impl PreparedPath {
+    fn new(
+        owner: &HertzMindlinContact,
+        state: &HertzMindlinState,
+        normal_n: f64,
+    ) -> Result<Self, MindlinPathError> {
+        let (final_law, indentation_m, normal_energy_j) = if normal_n == 0.0 {
             (None, 0.0, 0.0)
         } else {
-            let (law, d, energy) = self.normal_geometry(input.normal_n)?;
+            let (law, d, energy) = owner.normal_geometry(normal_n)?;
             (Some(law), d, energy)
         };
-        let growing = input.normal_n > state.normal_force_n();
+        let growing = normal_n > state.normal_force_n();
         let reference = if growing {
             final_law.as_ref().expect("positive growing contact")
         } else {
@@ -125,7 +237,7 @@ impl HertzMindlinContact {
                 .expect("positive shrinking contact")
                 .owner
         };
-        let small_load = input.normal_n.min(state.normal_force_n());
+        let small_load = normal_n.min(state.normal_force_n());
         let ratio = small_load / reference.parameters.normal_force_n;
         let cutoff = if ratio == 0.0 {
             1.0
@@ -140,125 +252,92 @@ impl HertzMindlinContact {
         } else {
             (0.0, cutoff)
         };
-        let du = input.slip_increment_m[0] / reference.critical_slip_m;
-        finite(du, "mindlin_path_normalized_increment")?;
-        let mut path = Path {
+        let (force_scale_n, energy_scale_j, critical_slip_m, stiffness_n_per_m, capacity_n) = (
+            reference.force_scale_n,
+            reference.energy_scale_j,
+            reference.critical_slip_m,
+            reference.stiffness_n_per_m,
+            reference.capacity_n,
+        );
+        Ok(Self {
             c0,
             c1,
+            final_law,
+            indentation_m,
+            normal_energy_j,
+            force_scale_n,
+            energy_scale_j,
+            critical_slip_m,
+            stiffness_n_per_m,
+            capacity_n,
+        })
+    }
+
+    fn response(
+        &self,
+        state: &HertzMindlinState,
+        increment_m: f64,
+        memory: Option<&mut Vec<MemoryInterval>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Response, MindlinPathError> {
+        let du = increment_m / self.critical_slip_m;
+        finite(du, "mindlin_path_normalized_increment")?;
+        let mut path = Path {
+            c0: self.c0,
+            c1: self.c1,
             du,
-            final_law: final_law.as_ref(),
-            memory: Vec::with_capacity(
-                (state.history_intervals() + 3).min(self.parameters.maximum_history_intervals),
-            ),
+            final_law: self.final_law.as_ref(),
+            memory,
             average: 0.0,
             endpoint: 0.0,
             energy: 0.0,
             heat: 0.0,
+            derivative: 0.0,
         };
-        if growing {
-            path.interval(0.0, c0, [0.0; 2], true, false, cancelled)?;
+        if self.c0 > 0.0 {
+            path.interval(0.0, self.c0, [0.0; 2], true, false, cancelled)?;
         }
         if let Some(old) = state.fixed.as_ref() {
-            let mut lower = c0;
+            let mut lower = self.c0;
             for interval in &old.memory {
                 poll(cancelled)?;
                 let upper = if interval.upper == 1.0 {
                     1.0
                 } else {
-                    c0 + (1.0 - c0) * interval.upper
+                    self.c0 + (1.0 - self.c0) * interval.upper
                 };
                 if upper <= lower {
                     return Err(invalid("mindlin_path_history_below_resolution").into());
                 }
                 let strain = [
                     interval.slope,
-                    (1.0 - c0) * interval.offset - interval.slope * c0,
+                    (1.0 - self.c0) * interval.offset - interval.slope * self.c0,
                 ];
-                if lower < c1 {
-                    path.interval(lower, upper.min(c1), strain, false, true, cancelled)?;
+                if lower < self.c1 {
+                    path.interval(lower, upper.min(self.c1), strain, false, true, cancelled)?;
                 }
-                if upper > c1 {
-                    path.interval(lower.max(c1), upper, strain, false, false, cancelled)?;
+                if upper > self.c1 {
+                    path.interval(lower.max(self.c1), upper, strain, false, false, cancelled)?;
                 }
                 lower = upper;
             }
         }
-        let average = checked_mul(
-            reference.force_scale_n,
-            path.average,
-            "mindlin_path_average_n",
+        let energy_j = checked_mul(self.energy_scale_j, path.energy, "mindlin_path_storage_j")?;
+        let heat_j = checked_mul(self.energy_scale_j, path.heat, "mindlin_path_heat_j")?;
+        let derivative_n_per_m = checked_mul(
+            self.stiffness_n_per_m,
+            path.derivative,
+            "mindlin_path_tangent_n_per_m",
         )?;
-        let endpoint = checked_mul(
-            reference.force_scale_n,
-            path.endpoint,
-            "mindlin_path_endpoint_n",
-        )?;
-        let energy = checked_mul(
-            reference.energy_scale_j,
-            path.energy,
-            "mindlin_path_storage_j",
-        )?;
-        let heat = checked_mul(reference.energy_scale_j, path.heat, "mindlin_path_heat_j")?;
-        nonnegative_finite(energy, "mindlin_path_storage_j")?;
-        nonnegative_finite(heat, "mindlin_path_heat_j")?;
-        if average.abs() > input.solve.maximum_force_n {
-            return Err(TriboError::OutsideApplicability {
-                field: "maximum_force_n",
-                value: average.abs(),
-                minimum: 0.0,
-                maximum: input.solve.maximum_force_n,
-            }
-            .into());
-        }
-        let change = energy - self.stored_energy_j(state);
-        let work = checked_mul(
-            average,
-            input.slip_increment_m[0],
-            "mindlin_path_shear_work_j",
-        )?;
-        let residual = change + heat - work;
-        finite(residual, "mindlin_path_closure_j")?;
-        let normal_change = normal_energy_j - state.normal_energy_j;
-        finite(normal_change, "mindlin_path_normal_work_j")?;
-        let slip_m = checked_add(
-            state.slip_m,
-            input.slip_increment_m[0],
-            "mindlin_accumulated_slip_m",
-        )?;
-        let memory = path.memory;
-        let fixed = final_law.map(|owner| MindlinState {
-            owner,
-            memory,
-            slip_m,
-            endpoint_force_n: endpoint,
-            stored_energy_j: energy,
-        });
-        let next = HertzMindlinState {
-            owner: self.clone(),
-            fixed,
-            slip_m,
-            indentation_m,
-            normal_energy_j,
-        };
-        poll(cancelled)?;
-        Ok(MindlinPathStep {
-            tangential: TangentialStep {
-                traction_n: [average, 0.0],
-                slip_increment_m: input.slip_increment_m,
-                state: next,
-                regime: if heat > 0.0 {
-                    FrictionRegime::Sliding
-                } else {
-                    FrictionRegime::Sticking
-                },
-                stored_change_j: change,
-                dissipated_j: heat,
-                closure_residual_j: residual,
-                compatibility_residual_m: [0.0; 2],
-                iterations: 0,
-            },
-            normal_work_j: normal_change,
-            normal_stored_change_j: normal_change,
+        nonnegative_finite(energy_j, "mindlin_path_storage_j")?;
+        nonnegative_finite(heat_j, "mindlin_path_heat_j")?;
+        nonnegative_finite(derivative_n_per_m, "mindlin_path_tangent_n_per_m")?;
+        Ok(Response {
+            average_n: checked_mul(self.force_scale_n, path.average, "mindlin_path_average_n")?,
+            endpoint_n: checked_mul(self.force_scale_n, path.endpoint, "mindlin_path_endpoint_n")?,
+            energy_j,
+            heat_j,
+            derivative_n_per_m,
         })
     }
 }
@@ -268,11 +347,12 @@ struct Path<'a> {
     c1: f64,
     du: f64,
     final_law: Option<&'a MindlinDeresiewiczPoint>,
-    memory: Vec<MemoryInterval>,
+    memory: Option<&'a mut Vec<MemoryInterval>>,
     average: f64,
     endpoint: f64,
     energy: f64,
     heat: f64,
+    derivative: f64,
 }
 
 impl Path<'_> {
@@ -385,10 +465,14 @@ impl Path<'_> {
             };
             let sliding = 0.5 * product(2, 3);
             self.average += 0.5 * product(0, 1) + sign * sliding;
+            // Before yield, d(strain)/d(du) is elapsed elastic time. After
+            // yield the strain follows the prescribed normal bound, whose
+            // derivative is zero. Continuity cancels the moving event term.
+            self.derivative += 0.5 * product(1, 1);
             self.heat += if sign == 0.0 { 0.0 } else { rate * sliding };
             self.energy += 0.5 * product(4, 4);
             self.endpoint += moments.integral([values[0][4], values[1][4]], [1.0; 2]);
-            if !detached {
+            if !detached && let Some(memory) = self.memory.as_deref_mut() {
                 let (slope, offset) = if sign != 0.0 {
                     (sign, -sign * self.c1)
                 } else if new {
@@ -401,13 +485,13 @@ impl Path<'_> {
                 } else {
                     (hi - self.c1) / (1.0 - self.c1)
                 };
-                if mapped_upper <= self.memory.last().map_or(0.0, |p| p.upper) {
+                if mapped_upper <= memory.last().map_or(0.0, |p| p.upper) {
                     return Err(invalid("mindlin_path_history_below_resolution").into());
                 }
                 self.final_law
                     .expect("retained contact has positive final load")
                     .append_memory(
-                        &mut self.memory,
+                        memory,
                         MemoryInterval {
                             upper: mapped_upper,
                             slope,

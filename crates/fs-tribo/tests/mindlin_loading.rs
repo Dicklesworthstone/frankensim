@@ -676,3 +676,215 @@ fn prescribed_path_delegates_fixed_load_and_refuses_atomically() {
     );
     assert_eq!(state, saved);
 }
+
+#[test]
+fn compliant_virgin_growth_matches_independent_elastic_and_sliding_solutions() {
+    let law = model(32);
+    let normal = 12.0;
+    let loaded = law.normal_step(&law.initial_state(), normal).unwrap().state;
+    let original = fixed(&law, &loaded);
+    let d = original.gross_slip_displacement_m();
+    let cap = law.parameters().friction_coefficient * normal;
+    // Proportional Hertz growth from zero has Qbar = (2/5)*mu*P*u/d
+    // until |u|=d, then Qbar = sign(u)*(2/5)*mu*P.
+    let stiffness = 0.4 * cap / d;
+    for sign in [-1.0, 1.0] {
+        for dimensionless_compliance in [0.01, 1.0, 100.0] {
+            let compliance = dimensionless_compliance / stiffness;
+            for ratio in [0.35, 2.0] {
+                let expected_slip = sign * ratio * d;
+                let expected_force = sign * 0.4 * cap * ratio.min(1.0);
+                let free = expected_slip + compliance * expected_force;
+                let step = law
+                    .advance_coupled_path(
+                        &law.initial_state(),
+                        &input(normal, free, compliance),
+                        &mut || false,
+                    )
+                    .unwrap();
+                close(step.tangential.traction_n[0], expected_force, 3e-12 * cap);
+                close(
+                    step.tangential.slip_increment_m[0],
+                    expected_slip,
+                    3e-12 * d,
+                );
+                close(step.tangential.closure_residual_j, 0.0, 3e-13 * cap * d);
+                close(step.normal_work_j, loaded.normal_energy_j(), 1e-18);
+                if ratio < 1.0 {
+                    assert_eq!(step.tangential.dissipated_j, 0.0);
+                } else {
+                    close(step.tangential.dissipated_j, 0.4 * cap * d, 3e-12 * cap * d);
+                }
+                assert!(step.tangential.iterations <= 8);
+            }
+        }
+    }
+}
+
+#[test]
+fn compliant_unloading_returns_shear_energy_to_a_finite_body_without_false_heat() {
+    let law = model(32);
+    let normal = 10.0;
+    let loaded = law.normal_step(&law.initial_state(), normal).unwrap().state;
+    let d = fixed(&law, &loaded).gross_slip_displacement_m();
+    let saturated = law
+        .advance(&loaded, &input(normal, 2.0 * d, 0.0))
+        .unwrap()
+        .state;
+    let stored = law.stored_energy_j(&saturated);
+    // With zero released motion, choose the finite mass so its midpoint
+    // recoil exactly follows the shrinking positive Coulomb bound. Every
+    // spring unloads elastically: all shear storage becomes kinetic energy.
+    let average = 0.4 * law.parameters().friction_coefficient * normal;
+    let compliance = d / average;
+    let dt = 0.01;
+    let mass = dt * dt / (2.0 * compliance);
+    let mut x = input(0.0, 0.0, compliance);
+    x.dt_s = dt;
+    let step = law
+        .advance_coupled_path(&saturated, &x, &mut || false)
+        .unwrap();
+    let force = step.tangential.traction_n[0];
+    let velocity = dt * force / mass;
+    let kinetic = 0.5 * mass * velocity * velocity;
+    close(force, average, 3e-12 * average);
+    close(step.tangential.slip_increment_m[0], -d, 3e-12 * d);
+    close(kinetic, stored, 3e-12 * stored);
+    close(step.tangential.dissipated_j, 0.0, 3e-12 * stored);
+    close(step.tangential.stored_change_j, -stored, 3e-13 * stored);
+    close(step.normal_work_j, -saturated.normal_energy_j(), 1e-18);
+    close(
+        kinetic
+            + step.normal_stored_change_j
+            + step.tangential.stored_change_j
+            + step.tangential.dissipated_j
+            - step.normal_work_j,
+        0.0,
+        4e-12 * stored,
+    );
+    assert_eq!(step.tangential.state.history_intervals(), 0);
+    assert_eq!(step.tangential.state.normal_force_n(), 0.0);
+}
+
+#[test]
+fn changing_load_reversals_satisfy_the_returned_efforts_actual_body_response() {
+    let law = model(64);
+    let mut state = law.normal_step(&law.initial_state(), 10.0).unwrap().state;
+    let d = fixed(&law, &state).gross_slip_displacement_m();
+    let k = fixed(&law, &state).initial_stiffness_n_per_m();
+    for (normal, travel, dimensionless_compliance) in [
+        (20.0, 0.3, 1.0),
+        (7.0, -0.2, 40.0),
+        (16.0, -0.8, 0.3),
+        (3.0, 0.15, 200.0),
+        (9.0, 1.3, 10.0),
+        (0.0, -0.1, 2.0),
+        (6.0, -0.4, 50.0),
+    ] {
+        let actual = travel * d;
+        let prescribed = law
+            .advance_prescribed_path(&state, &input(normal, actual, 0.0), &mut || false)
+            .unwrap();
+        let compliance = dimensionless_compliance / k;
+        let x = input(
+            normal,
+            actual + compliance * prescribed.tangential.traction_n[0],
+            compliance,
+        );
+        let solved = law.advance_coupled_path(&state, &x, &mut || false).unwrap();
+        let returned = solved.tangential.traction_n[0];
+        let actual_body_motion = x.slip_increment_m[0] - compliance * returned;
+        let rechecked = law
+            .advance_prescribed_path(&state, &input(normal, actual_body_motion, 0.0), &mut || {
+                false
+            })
+            .unwrap();
+        let tolerance = x.solve.force_absolute_tolerance_n
+            + x.solve.force_relative_tolerance
+                * returned.abs().max(rechecked.tangential.traction_n[0].abs());
+        close(returned, rechecked.tangential.traction_n[0], tolerance);
+        close(solved.tangential.slip_increment_m[0], actual, 3e-11 * d);
+        close(
+            solved.tangential.state.endpoint_force_n(),
+            prescribed.tangential.state.endpoint_force_n(),
+            3e-11,
+        );
+        close(
+            solved.tangential.dissipated_j,
+            prescribed.tangential.dissipated_j,
+            3e-11 * d,
+        );
+        close(solved.tangential.closure_residual_j, 0.0, 3e-12 * d);
+        state = solved.tangential.state;
+    }
+}
+
+#[test]
+fn coupled_path_preserves_delegation_and_refuses_unadmitted_candidates_atomically() {
+    let law = model(32);
+    let state = law.normal_step(&law.initial_state(), 10.0).unwrap().state;
+    let native = fixed(&law, &state);
+    let d = native.gross_slip_displacement_m();
+    let compliance = 1.0 / native.initial_stiffness_n_per_m();
+    let unchanged = input(10.0, 0.6 * d, compliance);
+    assert_eq!(
+        law.advance_coupled_path(&state, &unchanged, &mut || false)
+            .unwrap()
+            .tangential,
+        law.advance(&state, &unchanged).unwrap()
+    );
+    let prescribed = input(20.0, -0.3 * d, 0.0);
+    assert_eq!(
+        law.advance_coupled_path(&state, &prescribed, &mut || false)
+            .unwrap(),
+        law.advance_prescribed_path(&state, &prescribed, &mut || false)
+            .unwrap()
+    );
+    let saved = state.clone();
+    for invalid in [-1.0, f64::INFINITY, f64::NAN] {
+        assert!(
+            law.advance_coupled_path(&state, &input(20.0, d, invalid), &mut || false)
+                .is_err()
+        );
+    }
+    let mut short = input(20.0, d, compliance);
+    short.solve.max_iterations = 1;
+    assert!(matches!(
+        law.advance_coupled_path(&state, &short, &mut || false),
+        Err(MindlinPathError::Constitutive(
+            fs_tribo::TriboError::TangentialSolve { .. }
+        ))
+    ));
+    short.solve.max_iterations = 64;
+    short.solve.maximum_force_n = 1e-9;
+    assert!(matches!(
+        law.advance_coupled_path(&state, &short, &mut || false),
+        Err(MindlinPathError::Constitutive(
+            fs_tribo::TriboError::OutsideApplicability {
+                field: "maximum_force_n",
+                ..
+            }
+        ))
+    ));
+    let mut polls = 0;
+    assert_eq!(
+        law.advance_coupled_path(&state, &input(20.0, d, compliance), &mut || {
+            polls += 1;
+            polls == 7
+        }),
+        Err(MindlinPathError::Cancelled)
+    );
+    assert_eq!(state, saved);
+    let limited = model(1);
+    let initial = limited
+        .normal_step(&limited.initial_state(), 10.0)
+        .unwrap()
+        .state;
+    assert!(
+        limited
+            .advance_coupled_path(&initial, &input(20.0, 0.1 * d, compliance), &mut || false)
+            .is_err()
+    );
+    assert_eq!(initial.history_intervals(), 1);
+    assert_eq!(initial.slip_m(), 0.0);
+}
