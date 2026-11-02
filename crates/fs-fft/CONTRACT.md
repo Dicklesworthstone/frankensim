@@ -27,6 +27,28 @@ interval certificate, or relative-accuracy guarantee near arbitrary nulls is
 claimed. Each cached scalar contraction is bounded constant work; callers own
 the line-count/pair-work budgets and cancellation of larger field batches.
 
+`HarmonicWindow::proper_product_kernel` additionally integrates explicitly
+authored jointly proper complex covariance factors: `E[z_r]=0`,
+`E[z_r conj(z_s)]=delta_rs`, and `E[z_r z_s]=0`. Its cached
+`ProperHarmonicProduct` returns `1/2 Re[a conj(b) K(omega_a-omega_b)]`, where
+`K` is the rectangular-window average of the negative-time complex phase.
+The factor 1/2 is included. Properness eliminates sum-frequency terms even
+for a subperiod shutter; cross-frequency correlations can remain nonstationary.
+Deterministic means still use `HarmonicProduct`, with their sum terms intact.
+The input factorization supplies square-root statistical weights and positive
+semidefinite covariance; this numerical owner does not estimate either.
+
+The compensated frequency difference is formed before clock multiplication.
+Both cached kernel components and the product accumulation remain double-double;
+half-angle `cos-1` and the `sinc-1` series preserve weak destructive beats that
+round to zero if midpoint cosines are first rounded to f64. Equal-frequency
+normalization is exact even when individual carrier phases are unrepresentable.
+Focused tests use an independent four-phase real-field ensemble and time
+quadrature, a dyadic tiny-beat series, common-carrier/clock invariance and typed
+refusals. These are exposure-averaged instantaneous second moments, not the
+variance of the window-averaged field, random realizations, detector uncertainty,
+Gaussianity, source qualification, or arbitrary-null relative certificates.
+
 v1 was correctness-first radix-2; the 27d3 perf lane has since extended it
 with the r2c **inverse** (c2r), **N-dimensional** (2D/3D) separable pencil
 transforms, **mixed radix-8/4/2 Stockham** stages (three log₂ bits per
