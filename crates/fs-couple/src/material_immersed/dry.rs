@@ -1,7 +1,7 @@
 //! Source-backed ordinary solids with implicit interior-fluid momentum correction.
 //!
-//! This one-body lane retains the ORIGINAL dry mass and complete inertia at
-//! every density ratio. The native resolved flow corrects its reaction using
+//! The one-body and assembly lanes retain ORIGINAL dry mass and complete inertia
+//! at every density ratio. The native resolved flow corrects its reaction using
 //! actual streamed fluid momentum inside the sampled moving geometry. No
 //! displaced tensor is subtracted, no epsilon mass is introduced, and neutral
 //! buoyancy does not suppress the body's original momentum or fluid feedback.
@@ -9,13 +9,18 @@
 //! A fixed reference fluid uses reduced pressure: (M_s-rho_f V)g is applied
 //! once. The original material volume supplies V, independently of quadrature.
 //! The fluid is initially quiescent, single phase and incompressible in the
-//! native low-Mach sense. No free surface, thermal expansion, near-contact film
-//! or exact-rigid-interior guarantee is implied. Inspect native sampled-volume,
+//! native low-Mach sense. Assemblies can include the original spherical film
+//! law; the one-body entry has no film. No free surface, thermal expansion or
+//! exact-rigid-interior guarantee is implied. Inspect native sampled-volume,
 //! actual interior-mass/slip and kinetic diagnostics and refine dx/dt/quadrature.
 
 use fs_lbm::d3q19::{DryBodyCouplingConfig3, DryBodyExchange3};
 
 use super::*;
+
+mod assembly;
+/// Source-backed physical dry assemblies, including simultaneous sphere films.
+pub use assembly::ResolvedImmersedBodies;
 
 /// ONE ordinary sphere/ellipsoid on the existing source-scaled D3Q19 owner.
 /// Its private native container is reused for units/source identity only; this

@@ -2,6 +2,8 @@
 //! Synthetic cards exercise the implementation, not measured-material accuracy.
 #[path = "material_immersed/dry.rs"]
 mod dry;
+#[path = "material_immersed/assembly.rs"]
+mod dry_assembly;
 use fs_couple::material_immersed::{
     AdditionalMaterialSphere, FilmGeometry, ImmersedDomain, MaterialImmersedError,
     RetainedFluidSpheres, SphereStateSi,

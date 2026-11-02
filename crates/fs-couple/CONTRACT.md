@@ -21478,6 +21478,49 @@ and accepted-step count. One fully immersed body only: stationary/periodic fluid
 boundaries, no contact film, no free surface, and no exact rigidity/GCL or
 unconditional light-body stability claim.
 
+### Original-source physical dry assemblies and sphere films
+
+`material_immersed::dry::ResolvedImmersedBodies` extends original material
+ownership to one through eight simultaneous light, neutral or heavy bodies.
+Its sphere and rotated-ellipsoid constructors retain every source, analytic
+original volume, complete positive dry inertia and authored initial motion.
+All bodies share one source-owned reference fluid and lattice/SI scaling.
+Reduced gravity is `(M_dry-rho_reference*V_original)*g` once per body;
+the reduced-pressure fluid has no additional gravity source.
+
+Sphere assemblies use the original native implicit dry-body and simultaneous
+lubrication owner. Bulk and normal/optional tangent-spin film resistance obtain
+viscosity from the same fluid snapshot. Film loads participate in every coupled
+candidate, including the measured streamed interior-fluid momentum correction;
+they are not applied after the solve. Rotated ellipsoids use the same original
+full-tensor dry-assembly owner with native shape axes and enclosing-sphere
+clearance. No ellipsoid film law is inferred.
+
+`step_forces_si` accepts world center forces and couples and returns the
+unchanged complete `DryBodiesExchange3` in lattice units. Explicit observation
+conversions preserve the native separation of external, resolved-fluid,
+interior-correction and film accounts. Density-preserving rebind updates bulk
+and film viscosity together without discarding accepted fluid/body history.
+Density changes remain refused because they require conservative transfer.
+All unit conversions and the next step count are checked before the native
+atomic publication; refused calls preserve accepted sources, populations,
+bodies and time. Prepared sampler/solver scratch may change on a refusal.
+
+The bounded applicability remains stationary or periodic fluid boundaries,
+fully immersed nonoverlapping shapes, native clearance/Mach/volume-change
+limits and a converged finite dry-body correction. Positive dry inertia alone
+does not guarantee convergence at every density ratio or timestep. Exact
+rigidity/GCL, free surfaces, deforming solids, a thermal destination for film
+loss and unconditional light-body stability are not supplied.
+
+Four public regression groups cover mixed source densities and original inertia,
+independently rebuilt full-fluid/dry-body momentum at a fixed origin, physical
+normal-film resistance and external wrench conversion, source-preserving rebind,
+atomic refusal/exact retry and rotated full-tensor ellipsoids. They are authored
+and statically reviewed, with pinned formatting checks, but remain uncompiled
+and unexecuted: the narrow Cargo command fails loading the missing asupersync
+sibling before Rust compilation. No public-target pass is claimed.
+
 ### Continuous modal reflection on the complete exact flow
 
 `mm_line::continuous::ContinuousModalLine` is a full-state lossless
