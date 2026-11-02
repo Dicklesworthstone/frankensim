@@ -19,6 +19,7 @@
 //! authored boundary/source schedules keep their existing history stepper.
 
 pub mod contact;
+pub mod material;
 
 use std::ops::ControlFlow;
 

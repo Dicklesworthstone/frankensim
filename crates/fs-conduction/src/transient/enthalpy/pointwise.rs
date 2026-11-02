@@ -4,13 +4,14 @@
 use crate::{
     ConductionError, PointwiseAmbientRadiation, PointwiseEnclosureAssembly,
     PointwiseEnclosureRadiation, PointwiseEnclosureReport, PointwiseRadiationAssembly,
-    PointwiseRadiationReport,
+    PointwiseRadiationReport, MaterialPointwiseAmbientRadiation,
 };
 use fs_exec::Cx;
 
 #[derive(Clone, Copy)]
 pub(super) enum PointwiseBoundary<'a> {
     Ambient(&'a PointwiseAmbientRadiation<'a>),
+    MaterialAmbient(&'a MaterialPointwiseAmbientRadiation<'a>),
     Enclosure(&'a PointwiseEnclosureRadiation<'a>),
 }
 
@@ -30,10 +31,14 @@ impl PointwiseBoundary<'_> {
         &self,
         cx: &Cx<'_>,
         temperature: &[f64],
+        specific_h: &[f64],
     ) -> Result<PointwiseBoundaryAssembly, ConductionError> {
         match self {
             Self::Ambient(owner) => owner
                 .assemble(cx, temperature)
+                .map(PointwiseBoundaryAssembly::Ambient),
+            Self::MaterialAmbient(owner) => owner
+                .assemble_at_temperature(cx, specific_h, temperature)
                 .map(PointwiseBoundaryAssembly::Ambient),
             Self::Enclosure(owner) => owner
                 .assemble(cx, temperature)
@@ -45,10 +50,14 @@ impl PointwiseBoundary<'_> {
         &self,
         cx: &Cx<'_>,
         temperature: &[f64],
+        specific_h: &[f64],
     ) -> Result<(Vec<f64>, PointwiseBoundaryReport), ConductionError> {
         match self {
             Self::Ambient(owner) => owner
                 .load_and_report(cx, temperature)
+                .map(|(load, report)| (load, PointwiseBoundaryReport::Ambient(report))),
+            Self::MaterialAmbient(owner) => owner
+                .load_and_report(cx, specific_h, temperature)
                 .map(|(load, report)| (load, PointwiseBoundaryReport::Ambient(report))),
             Self::Enclosure(owner) => owner
                 .load_and_report(cx, temperature)

@@ -14,6 +14,7 @@
 use std::fmt;
 
 mod radiation;
+mod material_ambient;
 pub use radiation::{EnthalpyHeatStep, EnthalpyRadiation};
 
 use fs_exec::Cx;

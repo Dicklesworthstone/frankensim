@@ -120,6 +120,27 @@ impl EnthalpyBackwardEuler<'_, '_> {
         )
     }
 
+    /// Evaluate original-material ambient radiation at a supplied h endpoint.
+    /// No derivative, nonlinear solve, or history mutation is performed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_material_ambient_radiation(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old_specific_h: &[f64],
+        candidate_specific_h: &[f64], dt_s: f64, config: EnthalpyStepConfig,
+        radiation: &crate::MaterialPointwiseAmbientRadiation<'_>,
+    ) -> Result<EnthalpyEndpointEvaluation, EnthalpyError> {
+        poll(cx, 0)?;
+        if !std::ptr::eq(self.mesh, problem.mesh)
+            || !radiation.matches(problem.mesh, problem.boundary)
+            || !radiation.matches_curves(cx, |vertex| self.curve_for_vertex(vertex))? {
+            return Err(EnthalpyError::InvalidInput(
+                "material radiation must retain the exact mesh, boundary and original nodal caloric objects",
+            ));
+        }
+        self.evaluate_endpoint_radiative(cx, problem, interfaces, old_specific_h,
+            candidate_specific_h, dt_s, config, None, Some(PointwiseBoundary::MaterialAmbient(radiation)))
+    }
+
     /// Measure a supplied endpoint with local emission and fresh reflected
     /// enclosure exchange. The same radiosity and enclosure-closure gates as
     /// the primal apply; net internal radiation stays separate from convection.
@@ -258,7 +279,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
         };
         let mut radiation_out_w = match pointwise_radiation {
             Some(radiation) => {
-                let (_, report) = radiation.load_and_report(cx, &temperature)?;
+                let (_, report) = radiation.load_and_report(cx, &temperature, candidate_specific_h)?;
                 finite(report.outward_heat_w())?
             }
             None => 0.0,

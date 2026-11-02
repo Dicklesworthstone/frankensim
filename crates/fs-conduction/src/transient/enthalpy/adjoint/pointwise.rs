@@ -94,6 +94,12 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         physical_target_j: f64,
         max_radiation_entries: usize,
     ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        if accepted.pointwise_radiation.as_ref().is_some_and(|report|
+            report.patches.iter().any(|patch| !patch.material_states.is_empty())) {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "state-dependent material emissivity cannot be rebound as a fixed ambient radiation adjoint",
+            ));
+        }
         admit(cx, problem, radiation.patch_count(), 1, physical_target_j, max_radiation_entries)?;
         if !radiation.matches(problem.mesh, problem.boundary)
             || accepted.pointwise_radiation.is_none()

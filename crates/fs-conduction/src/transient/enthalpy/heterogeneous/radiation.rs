@@ -35,6 +35,8 @@ pub enum EnthalpyRadiation<'a> {
     },
     /// Spatial P1 emission to the declared ambient reservoirs.
     PointwiseAmbient(&'a PointwiseAmbientRadiation<'a>),
+    /// Original material-state nodal emissivity, including latent-phase response.
+    MaterialAmbient(&'a crate::MaterialPointwiseAmbientRadiation<'a>),
     /// Spatial P1 emission and reflected, patch-uniform irradiation.
     PointwiseEnclosure(&'a PointwiseEnclosureRadiation<'a>),
 }
@@ -116,6 +118,11 @@ impl HeterogeneousEnthalpyBackwardEuler<'_, '_> {
                     cx, problem, interfaces, old_specific_h, candidate_specific_h,
                     dt_s, config, owner,
                 ),
+            EnthalpyRadiation::MaterialAmbient(owner) =>
+                self.evaluate_endpoint_with_material_ambient_radiation(
+                    cx, problem, interfaces, old_specific_h, candidate_specific_h,
+                    dt_s, config, owner,
+                ),
             EnthalpyRadiation::PointwiseEnclosure(owner) =>
                 self.evaluate_endpoint_with_pointwise_enclosure_radiation(
                     cx, problem, interfaces, old_specific_h, candidate_specific_h,
@@ -181,6 +188,11 @@ impl HeterogeneousEnthalpyBackwardEuler<'_, '_> {
                     dt_s,
                     config,
                     owner,
+                )
+                .map(EnthalpyHeatStep::Native),
+            EnthalpyRadiation::MaterialAmbient(owner) => self
+                .advance_with_material_ambient_radiation(
+                    cx, problem, interfaces, old_specific_h, dt_s, config, owner,
                 )
                 .map(EnthalpyHeatStep::Native),
             EnthalpyRadiation::PointwiseEnclosure(owner) => self

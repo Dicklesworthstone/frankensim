@@ -507,6 +507,27 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         )
     }
 
+    /// Advance with original-material nodal emissivity on the same P1 trace.
+    /// The full h tangent includes phase-dependent emissivity even when dT/dh
+    /// vanishes. Original Robin heat stays separate from radiative heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_material_ambient_radiation(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old_specific_h: &[f64], dt_s: f64,
+        config: EnthalpyStepConfig, radiation: &crate::MaterialPointwiseAmbientRadiation<'_>,
+    ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        poll(cx, 0)?;
+        if !std::ptr::eq(self.mesh, problem.mesh)
+            || !radiation.matches(problem.mesh, problem.boundary)
+            || !radiation.matches_curves(cx, |vertex| self.curve_for_vertex(vertex))? {
+            return Err(EnthalpyError::InvalidInput(
+                "material radiation must retain the exact mesh, boundary and original nodal caloric objects",
+            ));
+        }
+        self.advance_radiative(cx, problem, interfaces, old_specific_h, dt_s, config,
+            Some(PointwiseBoundary::MaterialAmbient(radiation)))
+    }
+
     /// Advance local P1 emission and reflected enclosure exchange in the SAME
     /// nonlinear enthalpy solve. The complete generally nonsymmetric radiation
     /// tangent uses the existing Newton-FGMRES lane. No outer frozen-radiation
@@ -752,7 +773,7 @@ impl StepContext<'_, '_, '_, '_> {
         let radiation = if self.problem.boundary.dirichlet().is_empty() {
             None
         } else {
-            self.pointwise_radiation.map(|radiation| radiation.load_and_report(self.cx, temperature)).transpose()?
+            self.pointwise_radiation.map(|radiation| radiation.load_and_report(self.cx, temperature, h)).transpose()?
         };
         let mut heat = 0.0;
         for (index, &(vertex, _)) in self.problem.boundary.dirichlet().iter().enumerate() {
@@ -951,7 +972,7 @@ impl StepContext<'_, '_, '_, '_> {
     fn stage(&self, h: &[f64]) -> Result<NewtonStage<'_, '_, '_, '_, '_>, EnthalpyError> {
         let temperature = self.temperatures(h)?;
         let radiation = self.pointwise_radiation
-            .map(|radiation| radiation.assemble(self.cx, &temperature)).transpose()?;
+            .map(|radiation| radiation.assemble(self.cx, &temperature, h)).transpose()?;
         let phase_scales = self.phase_scales(h)?;
         let picard = self.assemble(&temperature, phase_scales.as_deref())?;
         let mut slope = Vec::with_capacity(h.len());
@@ -1023,7 +1044,7 @@ impl StepContext<'_, '_, '_, '_> {
         out: &mut [f64],
     ) -> Result<(), EnthalpyError> {
         let radiation = self.pointwise_radiation
-            .map(|radiation| radiation.load_and_report(self.cx, temperature)).transpose()?;
+            .map(|radiation| radiation.load_and_report(self.cx, temperature, h)).transpose()?;
         for (vertex, value) in out.iter_mut().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(self.cx, vertex)?;
@@ -1094,7 +1115,7 @@ impl StepContext<'_, '_, '_, '_> {
         poll(self.cx, h.len())?;
         let dirichlet_in_w = self.prescribed_heat_input_w(&h, &temperature, &system)?;
         let pointwise_radiation = self.pointwise_radiation
-            .map(|radiation| radiation.load_and_report(self.cx, &temperature).map(|(_, report)| report)).transpose()?;
+            .map(|radiation| radiation.load_and_report(self.cx, &temperature, &h).map(|(_, report)| report)).transpose()?;
         let net =
             finite(energy.source_w + dirichlet_in_w - energy.neumann_out_w - energy.robin_out_w)?;
         let net = match &pointwise_radiation {

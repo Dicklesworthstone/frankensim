@@ -119,6 +119,7 @@ pub use radiation::{
     ConvectiveEnclosureSolution, CoupledRadiationConfig, CoupledRadiationReport,
     CoupledRadiationSolution, EMISSIVITY_DIMS,
     GrayDiffuseEnclosure, LinearizedRadiationPoint, LinearizedSurfaceRadiation, RadiationSurface,
+    MaterialAmbientRadiationPatch, MaterialPointwiseAmbientRadiation, MaterialRadiationNodeState,
     PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationParameterGradient,
     PointwiseRadiationPatchReport,
     PointwiseRadiationReport,

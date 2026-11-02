@@ -103,6 +103,42 @@ Geometry, pressure, contact area and all nonthermal source coordinates remain
 fixed. This is backward Euler with constant prepared heat capacity; variable
 caloric storage and latent heat remain owned by the primary-enthalpy path.
 
+## Material-state spatial ambient radiation
+
+`MaterialPointwiseAmbientRadiation` resolves original surface emissivity at each
+participating node's enthalpy-derived temperature and liquid mass fraction. Each
+named trace retains its original material card, caloric object, fixed nonthermal
+conditions and pinned source claim. Supported responses are static scalars and
+piecewise-linear source curves in the declared temperature or liquid-fraction
+axis. A different material chart requires a distinct trace; conflicting shared
+vertex charts and mismatched storage/mesh bindings refuse before nodal lookup.
+
+The declared P1 discretization interpolates both temperature and emissivity.
+Positive 16-point Duffy/Gauss quadrature integrates the resulting degree-six
+surface load and tangent polynomials up to floating-point roundoff. Prepared
+face/node bindings and one source query per participating patch node avoid
+repeated material queries at quadrature points. Factored fourth-power differences
+retain the sign and precision of emission or absorption near a reservoir.
+
+The complete enthalpy tangent includes both emission times dT/dh and the direct
+material term (T^4 - T_bath^4) times d epsilon/dh. Liquid-fraction feedback survives
+isothermal latent plateaus. The original positive frozen-emission diagonal remains
+the preconditioner; signed material feedback stays in the true matrix-free action.
+The complete h action and transpose are available for physical operator checks.
+Reports retain actual nodal phase, emissivity and material receipts; fixed-snapshot
+adjoints explicitly refuse those reports before reconstructing an endpoint.
+
+Uniform, heterogeneous, generic `EnthalpyRadiation::MaterialAmbient`, independent
+endpoint-audit and coupled temperature-contact methods use the same original
+enthalpy/Newton owner. Adaptive material-ambient methods, with and without
+source-backed contacts, reuse the original h/T/fraction controller and accepted-only
+heat integration. Source-domain trials backtrack without clipping, extrapolation
+or source switching. Tests cover hot/cold latent evolution, enthalpy datum shifts,
+nonuniform exact simplex moments, full tangent/transpose checks, source/mesh refusal
+and phase-controlled trajectories against an independent exponential solution.
+Variable-emissivity enclosure reflection and material source-parameter adjoints
+remain unsupported by this ambient-only extension.
+
 ## Coupled primary-enthalpy contact Newton
 
 `TemperatureContacts::advance_enthalpy_newton` closes source-backed R(T)

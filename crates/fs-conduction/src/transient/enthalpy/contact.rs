@@ -309,6 +309,10 @@ impl EnthalpyBackwardEuler<'_, '_> {
             Some(PointwiseBoundary::Ambient(owner)) => {
                 owner.matches(problem.mesh, problem.boundary)
             }
+            Some(PointwiseBoundary::MaterialAmbient(owner)) => {
+                owner.matches(problem.mesh, problem.boundary)
+                    && owner.matches_curves(cx, |vertex| self.curve_for_vertex(vertex))?
+            }
             Some(PointwiseBoundary::Enclosure(owner)) => {
                 owner.matches(problem.mesh, problem.boundary)
             }

@@ -14,6 +14,11 @@
 
 use fs_exec::Cx;
 
+/// Original-material emissivity refreshed from the nodal enthalpy state.
+pub mod material;
+pub use material::{MaterialAmbientRadiationPatch, MaterialPointwiseAmbientRadiation,
+    MaterialRadiationNodeState};
+
 use super::{
     AmbientRadiationPatch, STEFAN_BOLTZMANN_W_M2_K4, SURFACE_EMISSIVITY_PROPERTY, radiation_error,
     require_temperature,
@@ -36,6 +41,11 @@ pub struct PointwiseRadiationPatchReport {
     /// Integral of epsilon sigma (T_h^4 - T_a^4), W outward.
     /// Negative values are absorbed heat from a hotter reservoir.
     pub outward_heat_w: f64,
+    /// Empty for a fixed emissivity snapshot. Otherwise these are the actual
+    /// nodal phase/emissivity samples defining the P1 emissivity trace; `patch`
+    /// retains only its preparation-time source snapshot and ambient bath.
+    /// This marker prevents rebinding a material response to a frozen adjoint.
+    pub material_states: Vec<MaterialRadiationNodeState>,
 }
 
 /// Direct integrated radiation balance, separate from convective heat.
@@ -78,14 +88,44 @@ struct FaceTangent {
 pub struct PointwiseRadiationAssembly {
     /// Full nodal outward load `integral N_i q_rad dA`, W.
     pub outward_load_w: Vec<f64>,
-    /// Diagonal of the temperature tangent, W/K, including shared faces.
+    /// Positive frozen-emissivity emission diagonal, W/K, including shared
+    /// faces. Material feedback stays in the full h action, not this Picard
+    /// preconditioner.
     pub temperature_diagonal_w_k: Vec<f64>,
     /// Independently integrated trace powers and retained material declarations.
     pub report: PointwiseRadiationReport,
     tangent: Vec<FaceTangent>,
+    // Additional columns already expressed in h, never multiplied by dT/dh.
+    enthalpy_feedback: Vec<FaceTangent>,
+    material_temperature_slopes: Option<Vec<f64>>,
 }
 
 impl PointwiseRadiationAssembly {
+    /// Apply the complete material-radiation tangent in specific enthalpy
+    /// coordinates. Direct phase feedback survives an isothermal latent plateau.
+    /// Fixed-emissivity assemblies use their original temperature action.
+    pub fn enthalpy_tangent_apply(
+        &self, cx: &Cx<'_>, direction: &[f64], output: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        let slopes = self.material_temperature_slopes.as_deref()
+            .ok_or_else(|| invalid("an enthalpy radiation action requires material-state assembly"))?;
+        self.check_fields(direction.len(), output.len())?;
+        output.fill(0.0);
+        self.add_scaled_tangent(cx, direction, Some(slopes), 1.0, |_| true, output)
+    }
+
+    /// Algebraic transpose of the same full enthalpy tangent. This does not
+    /// admit source-parameter or accepted-endpoint material adjoints.
+    pub fn enthalpy_tangent_apply_transpose(
+        &self, cx: &Cx<'_>, direction: &[f64], output: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        let slopes = self.material_temperature_slopes.as_deref()
+            .ok_or_else(|| invalid("an enthalpy radiation transpose requires material-state assembly"))?;
+        self.check_fields(direction.len(), output.len())?;
+        output.fill(0.0);
+        self.add_scaled_tangent_transpose(cx, direction, Some(slopes), 1.0, |_| true, output)
+    }
+
     /// Apply the symmetric temperature tangent to a full nodal direction.
     /// The output is replaced, not accumulated; no state or coefficients change.
     pub fn tangent_apply(
@@ -117,6 +157,9 @@ impl PointwiseRadiationAssembly {
                 "radiation tangent scaling has the wrong field length",
             ));
         }
+        if self.material_temperature_slopes.is_some() && column_scale.is_none() {
+            return Err(invalid("material emissivity requires the complete enthalpy tangent, not a frozen temperature action"));
+        }
         for (slot, face) in self.tangent.iter().enumerate() {
             if slot % ASSEMBLY_TILE == 0 {
                 poll(cx, slot)?;
@@ -131,6 +174,17 @@ impl PointwiseRadiationAssembly {
                         local[0],
                         face.matrix[i][1].mul_add(local[1], face.matrix[i][2] * local[2]),
                     );
+                    output[vertex] = finite(scale.mul_add(applied, output[vertex]))?;
+                }
+            }
+        }
+        for (slot, face) in self.enthalpy_feedback.iter().enumerate() {
+            if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+            for (i, &vertex) in face.vertices.iter().enumerate() {
+                if include_row(vertex) {
+                    let applied = face.matrix[i][0].mul_add(direction[face.vertices[0]],
+                        face.matrix[i][1].mul_add(direction[face.vertices[1]],
+                            face.matrix[i][2] * direction[face.vertices[2]]));
                     output[vertex] = finite(scale.mul_add(applied, output[vertex]))?;
                 }
             }
@@ -162,6 +216,9 @@ impl PointwiseRadiationAssembly {
         output: &mut [f64],
     ) -> Result<(), ConductionError> {
         poll(cx, 0)?;
+        if self.material_temperature_slopes.is_some() && column_scale.is_none() {
+            return Err(invalid("material emissivity requires the complete enthalpy transpose, not a frozen temperature action"));
+        }
         self.check_fields(direction.len(), output.len())?;
         if column_scale.is_some_and(|values| values.len() != direction.len()) {
             return Err(invalid("radiation transpose scaling has the wrong field length"));
@@ -179,6 +236,16 @@ impl PointwiseRadiationAssembly {
                 ))?;
                 let coefficient = finite(scale * column_scale.map_or(1.0, |s| s[vertex]))?;
                 output[vertex] = finite(coefficient.mul_add(applied, output[vertex]))?;
+            }
+        }
+        for (slot, face) in self.enthalpy_feedback.iter().enumerate() {
+            if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+            for (j, &vertex) in face.vertices.iter().enumerate() {
+                let mut applied = 0.0;
+                for (i, &row) in face.vertices.iter().enumerate() {
+                    if include_row(row) { applied = finite(face.matrix[i][j].mul_add(direction[row], applied))?; }
+                }
+                output[vertex] = finite(scale.mul_add(applied, output[vertex]))?;
             }
         }
         poll(cx, self.tangent.len())
@@ -222,6 +289,9 @@ impl PointwiseRadiationAssembly {
     }
 
     pub(crate) fn admit_adjoint(&self, cx: &Cx<'_>) -> Result<(), ConductionError> {
+        if self.report.patches.iter().any(|patch| !patch.material_states.is_empty()) {
+            return Err(invalid("material emissivity cannot be differentiated as a fixed snapshot"));
+        }
         for (patch, report) in self.report.patches.iter().enumerate() {
             poll(cx, patch)?;
             if let Some((low, high)) = report.patch.emissivity().temperature_validity_k() {
@@ -283,55 +353,9 @@ impl<'a> PointwiseAmbientRadiation<'a> {
         boundary: &'a ThermalBoundary,
         patches: &'a [AmbientRadiationPatch],
     ) -> Result<Self, ConductionError> {
-        poll(cx, 0)?;
-        if patches.is_empty() || patches.len() > boundary.region_names().len() {
-            return Err(invalid(
-                "nonempty distinct pointwise radiation regions required",
-            ));
-        }
-        mesh.boundary()
-            .len()
-            .checked_mul(9 * std::mem::size_of::<f64>())
-            .ok_or_else(|| invalid("radiative face storage size overflow"))?;
-        let mut owners = vec![None; boundary.region_names().len()];
-        for (index, patch) in patches.iter().enumerate() {
-            poll(cx, index)?;
-            let region = boundary
-                .region_names()
-                .iter()
-                .position(|name| name == patch.region())
-                .ok_or_else(|| invalid("unknown pointwise radiation region"))?;
-            if owners[region].replace(index).is_some() {
-                return Err(invalid("duplicate pointwise radiation region"));
-            }
-            if matches!(boundary.conditions()[region], ThermalBc::Dirichlet { .. }) {
-                return Err(invalid(
-                    "pointwise radiation requires a natural boundary trace",
-                ));
-            }
-        }
-        let mut faces = Vec::new();
-        let mut areas = vec![0.0; patches.len()];
-        for (slot, face) in mesh.boundary().iter().enumerate() {
-            if slot % ASSEMBLY_TILE == 0 {
-                poll(cx, slot)?;
-            }
-            if let Some(patch) = boundary.region_for(slot).and_then(|region| owners[region]) {
-                faces.push((slot, patch));
-                areas[patch] = finite(areas[patch] + face.area)?;
-            }
-        }
-        if areas.iter().any(|&area| area <= 0.0) {
-            return Err(invalid("pointwise radiation region has no exterior area"));
-        }
-        poll(cx, faces.len())?;
-        Ok(Self {
-            mesh,
-            boundary,
-            patches,
-            faces,
-            areas,
-        })
+        let names: Vec<_> = patches.iter().map(AmbientRadiationPatch::region).collect();
+        let (faces, areas) = prepare_geometry(cx, mesh, boundary, &names)?;
+        Ok(Self { mesh, boundary, patches, faces, areas })
     }
 
     pub(crate) fn patch_count(&self) -> usize { self.patches.len() }
@@ -399,6 +423,7 @@ impl<'a> PointwiseAmbientRadiation<'a> {
                 minimum_surface_temperature_k: f64::INFINITY,
                 maximum_surface_temperature_k: f64::NEG_INFINITY,
                 outward_heat_w: 0.0,
+                material_states: Vec::new(),
             })
             .collect();
         for (index, &(slot, patch_index)) in self.faces.iter().enumerate() {
@@ -508,8 +533,48 @@ impl<'a> PointwiseAmbientRadiation<'a> {
                 outward_heat_w,
             },
             tangent,
+            enthalpy_feedback: Vec::new(),
+            material_temperature_slopes: None,
         })
     }
+}
+
+// Both ambient owners retain the original named natural-boundary partition.
+fn prepare_geometry(
+    cx: &Cx<'_>, mesh: &ConductionMesh, boundary: &ThermalBoundary, names: &[&str],
+) -> Result<(Vec<(usize, usize)>, Vec<f64>), ConductionError> {
+    poll(cx, 0)?;
+    if names.is_empty() || names.len() > boundary.region_names().len() {
+        return Err(invalid("nonempty distinct pointwise radiation regions required"));
+    }
+    mesh.boundary().len().checked_mul(18 * std::mem::size_of::<f64>())
+        .ok_or_else(|| invalid("radiative face storage size overflow"))?;
+    let mut owners = vec![None; boundary.region_names().len()];
+    for (index, name) in names.iter().enumerate() {
+        poll(cx, index)?;
+        let region = boundary.region_names().iter().position(|candidate| candidate.as_str() == *name)
+            .ok_or_else(|| invalid("unknown pointwise radiation region"))?;
+        if owners[region].replace(index).is_some() {
+            return Err(invalid("duplicate pointwise radiation region"));
+        }
+        if matches!(boundary.conditions()[region], ThermalBc::Dirichlet { .. }) {
+            return Err(invalid("pointwise radiation requires a natural boundary trace"));
+        }
+    }
+    let mut faces = Vec::new();
+    let mut areas = vec![0.0; names.len()];
+    for (slot, face) in mesh.boundary().iter().enumerate() {
+        if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+        if let Some(patch) = boundary.region_for(slot).and_then(|region| owners[region]) {
+            faces.push((slot, patch));
+            areas[patch] = finite(areas[patch] + face.area)?;
+        }
+    }
+    if areas.iter().any(|&area| area <= 0.0) {
+        return Err(invalid("pointwise radiation region has no exterior area"));
+    }
+    poll(cx, faces.len())?;
+    Ok((faces, areas))
 }
 
 // Dunavant's degree-five rule, normalized so weights sum to one. The exact

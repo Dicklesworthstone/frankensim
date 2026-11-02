@@ -1,6 +1,7 @@
 //! Temperature-dependent contact with primary enthalpy and immutable history.
 
 pub mod pointwise;
+pub mod material;
 
 use fs_exec::Cx;
 use crate::{AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationReport,
