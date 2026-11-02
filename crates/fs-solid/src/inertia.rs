@@ -1,4 +1,4 @@
-//! Shared consistent reference mass and backward-Euler momentum integration.
+//! Shared consistent reference mass and native momentum integration.
 //!
 //! Extracted from the small-strain inelastic owner without changing its mass
 //! kernel, accumulation order, momentum residual or kinetic-work identity.
@@ -19,7 +19,8 @@ pub struct InertialEnergy {
     pub kinetic_after_j: f64,
     /// Evaluated as `average(v) dot M delta(v)` to avoid subtracting large K.
     pub kinetic_change_j: f64,
-    /// Nonnegative backward-Euler kinetic loss, distinct from plastic loss.
+    /// Nonnegative numerical kinetic loss; zero for midpoint kinematics.
+    /// Backward-Euler loss is kept separate from physical material loss.
     pub numerical_loss_j: f64,
     /// Endpoint inertial force dotted with the actual displacement increment.
     pub inertial_work_j: f64,
@@ -664,6 +665,163 @@ impl<'a> BackwardEulerInertia<'a> {
     }
 }
 
+/// Centered momentum equation for a work-conjugate discrete material gradient.
+///
+/// `v_next = 2*(u_next-u_old)/dt-v_old` makes the inertial work equal the
+/// physical kinetic change, with no numerical kinetic loss. Conservation of
+/// total energy and momenta still requires the caller's actual discrete stress,
+/// loads and nonlinear solve; this adapter does not remove frequency warping.
+pub(crate) struct MidpointInertia<'a> {
+    original: BackwardEulerInertia<'a>,
+}
+
+impl<'a> MidpointInertia<'a> {
+    pub(crate) fn new(
+        mass: &'a ReferenceMass,
+        old_u: &'a [f64],
+        old_v: &'a [f64],
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, InertiaError> {
+        let original = BackwardEulerInertia::new(mass, old_u, old_v, dt_s, cx)?;
+        finite(2.0 * (original.inverse_dt * original.inverse_dt))?;
+        Ok(Self { original })
+    }
+
+    pub(crate) fn action(&self, x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>, InertiaError> {
+        self.original.action(x, cx)
+    }
+
+    /// Physical free-row reference bound; no elastic stiffness times rigid travel.
+    pub(crate) fn force_scale(
+        &self,
+        u: &[f64],
+        free: &[usize],
+        elastic_free_norm: f64,
+        external_free_norm: f64,
+        cx: &Cx<'_>,
+    ) -> Result<f64, InertiaError> {
+        let inertial = finite(2.0 * self.original.force_scale(u, free, 0.0, 0.0, cx)?)?;
+        Ok(inertial
+            .max(finite(elastic_free_norm)?)
+            .max(finite(external_free_norm)?))
+    }
+
+    pub(crate) fn add_force(
+        &self,
+        u: &[f64],
+        force: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), InertiaError> {
+        self.original.check_length(u)?;
+        self.original.check_length(force)?;
+        let inverse_dt = self.original.inverse_dt;
+        let mut acceleration = Vec::with_capacity(u.len());
+        for (i, ((&u, &old_u), &old_v)) in u
+            .iter()
+            .zip(self.original.old_u)
+            .zip(self.original.old_v)
+            .enumerate()
+        {
+            if i % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            acceleration.push(finite(
+                2.0 * (((u - old_u) * inverse_dt - old_v) * inverse_dt),
+            )?);
+        }
+        let inertial = self.action(&acceleration, cx)?;
+        for (force, inertial) in force.iter_mut().zip(inertial) {
+            *force = finite(*force + inertial)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_tangent(&self, matrix: &mut Coo, cx: &Cx<'_>) -> Result<(), InertiaError> {
+        let coefficient = 2.0 * (self.original.inverse_dt * self.original.inverse_dt);
+        for row in 0..self.original.mass.matrix.nrows() {
+            if row % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let (columns, values) = self.original.mass.matrix.row(row);
+            for (&column, &value) in columns.iter().zip(values) {
+                if value == 0.0 {
+                    continue;
+                }
+                let scaled = finite(coefficient * value)?;
+                if scaled == 0.0 {
+                    return Err(invalid("scaled consistent midpoint inertia underflowed"));
+                }
+                matrix.push(row, column, scaled);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn motion(
+        &self,
+        u: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 3]>, InertialEnergy), InertiaError> {
+        self.original.check_length(u)?;
+        let mut du = Vec::with_capacity(u.len());
+        let mut velocity = Vec::with_capacity(u.len());
+        let mut delta = Vec::with_capacity(u.len());
+        let mut mean = Vec::with_capacity(u.len());
+        for (i, ((&u, &old_u), &old_v)) in u
+            .iter()
+            .zip(self.original.old_u)
+            .zip(self.original.old_v)
+            .enumerate()
+        {
+            if i % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let displacement = finite(u - old_u)?;
+            let next_v = finite(2.0 * (displacement * self.original.inverse_dt) - old_v)?;
+            du.push(displacement);
+            velocity.push(next_v);
+            delta.push(finite(next_v - old_v)?);
+            mean.push(finite(0.5 * next_v + 0.5 * old_v)?);
+        }
+        let old_momentum = self.action(self.original.old_v, cx)?;
+        let next_momentum = self.action(&velocity, cx)?;
+        let impulse = self.action(&delta, cx)?;
+        let kinetic_before_j = finite(0.5 * dot(self.original.old_v, &old_momentum))?;
+        let kinetic_after_j = finite(0.5 * dot(&velocity, &next_momentum))?;
+        let kinetic_change_j = finite(dot(&mean, &impulse))?;
+        let mut inertial = vec![0.0; u.len()];
+        self.add_force(u, &mut inertial, cx)?;
+        let inertial_work_j = finite(dot(&du, &inertial))?;
+        let balance_error_j = finite(inertial_work_j - kinetic_change_j)?;
+        let scale = kinetic_before_j
+            .max(kinetic_after_j)
+            .max(kinetic_change_j.abs())
+            .max(inertial_work_j.abs());
+        if kinetic_before_j < 0.0
+            || kinetic_after_j < 0.0
+            || balance_error_j.abs() > 2048.0 * f64::EPSILON * scale
+        {
+            return Err(invalid(
+                "consistent midpoint inertia misses its discrete kinetic work identity",
+            ));
+        }
+        checkpoint(cx)?;
+        Ok((
+            velocity.as_chunks::<3>().0.to_vec(),
+            InertialEnergy {
+                reference_mass_kg: self.original.mass.reference_mass_kg,
+                kinetic_before_j,
+                kinetic_after_j,
+                kinetic_change_j,
+                numerical_loss_j: 0.0,
+                inertial_work_j,
+                balance_error_j,
+            },
+        ))
+    }
+}
+
 #[cfg(test)]
 mod density_tests {
     use super::*;
@@ -1100,6 +1258,186 @@ mod tet10_tests {
                 ),
                 Err(InertiaError::Cancelled)
             ));
+        });
+    }
+
+    #[test]
+    fn midpoint_inertia_matches_constant_acceleration_without_numerical_loss() {
+        with_cx(false, |cx| {
+            let mass = mass(cx);
+            let old_u = [[0.03, -0.02, 0.01]; 10];
+            let old_v = [[0.2, -0.1, 0.05]; 10];
+            let acceleration = [0.3, -0.2, 0.1];
+            let dt = 0.25;
+            let next: [[f64; 3]; 10] = core::array::from_fn(|node| {
+                core::array::from_fn(|i| {
+                    old_u[node][i] + dt * (old_v[node][i] + 0.5 * dt * acceleration[i])
+                })
+            });
+            let inertia =
+                MidpointInertia::new(&mass, old_u.as_flattened(), old_v.as_flattened(), dt, cx)
+                    .unwrap();
+            let mut force = [0.0; 30];
+            inertia
+                .add_force(next.as_flattened(), &mut force, cx)
+                .unwrap();
+            let (velocity, energy) = inertia.motion(next.as_flattened(), cx).unwrap();
+            for node in 0..10 {
+                let share = if node < 4 { -0.05 } else { 0.2 };
+                for i in 0..3 {
+                    close(force[3 * node + i], share * acceleration[i]);
+                    close(velocity[node][i], old_v[node][i] + dt * acceleration[i]);
+                }
+            }
+            let v = core::array::from_fn::<_, 3, _>(|i| old_v[0][i] + dt * acceleration[i]);
+            let midpoint =
+                core::array::from_fn::<_, 3, _>(|i| old_v[0][i] + 0.5 * dt * acceleration[i]);
+            close(energy.kinetic_before_j, 0.5 * dot(&old_v[0], &old_v[0]));
+            close(energy.kinetic_after_j, 0.5 * dot(&v, &v));
+            close(energy.inertial_work_j, dt * dot(&midpoint, &acceleration));
+            close(energy.kinetic_change_j, energy.inertial_work_j);
+            assert_eq!(energy.numerical_loss_j.to_bits(), 0.0_f64.to_bits());
+            close(energy.balance_error_j, 0.0);
+            // Free flight is an exact fixed velocity, with no kinetic decrement.
+            let flight = core::array::from_fn::<_, 30, _>(|d| {
+                old_u.as_flattened()[d] + dt * old_v.as_flattened()[d]
+            });
+            let (_, account) = inertia.motion(&flight, cx).unwrap();
+            close(account.kinetic_after_j, account.kinetic_before_j);
+            close(account.inertial_work_j, 0.0);
+        });
+    }
+
+    #[test]
+    fn midpoint_signed_tangent_and_nonrigid_linear_angular_work_are_consistent() {
+        with_cx(false, |cx| {
+            let mass = mass(cx);
+            let old_u: [f64; 30] = core::array::from_fn(|d| 0.001 * (d + 1) as f64);
+            let old_v: [f64; 30] = core::array::from_fn(|d| 0.02 * ((d * 5 % 17) as f64 - 8.0));
+            let acceleration: [f64; 30] =
+                core::array::from_fn(|d| 0.03 * ((d * 7 % 13) as f64 - 6.0));
+            let dt = 0.07;
+            let u: [f64; 30] =
+                core::array::from_fn(|d| old_u[d] + dt * (old_v[d] + 0.5 * dt * acceleration[d]));
+            let inertia = MidpointInertia::new(&mass, &old_u, &old_v, dt, cx).unwrap();
+            let mut force = [0.0; 30];
+            inertia.add_force(&u, &mut force, cx).unwrap();
+            let mut coo = Coo::new(30, 30);
+            inertia.add_tangent(&mut coo, cx).unwrap();
+            let tangent = coo.assemble();
+            assert!(tangent.get(0, 12) < 0.0);
+            let direction: [f64; 30] = core::array::from_fn(|d| (d as f64 - 15.0) * 0.01);
+            let (mut plus, mut minus) = ([0.0; 30], [0.0; 30]);
+            let h = 1e-7;
+            inertia
+                .add_force(
+                    &core::array::from_fn::<_, 30, _>(|d| u[d] + h * direction[d]),
+                    &mut plus,
+                    cx,
+                )
+                .unwrap();
+            inertia
+                .add_force(
+                    &core::array::from_fn::<_, 30, _>(|d| u[d] - h * direction[d]),
+                    &mut minus,
+                    cx,
+                )
+                .unwrap();
+            for row in 0..30 {
+                let expected: f64 = (0..30)
+                    .map(|col| tangent.get(row, col) * direction[col])
+                    .sum();
+                assert!(((plus[row] - minus[row]) / (2.0 * h) - expected).abs() < 2e-8);
+                for col in 0..30 {
+                    close(
+                        tangent.get(row, col),
+                        2.0 * mass.matrix.get(row, col) / (dt * dt),
+                    );
+                }
+            }
+            let (velocity, energy) = inertia.motion(&u, cx).unwrap();
+            let next_p = mass.action(velocity.as_flattened(), cx).unwrap();
+            let old_p = mass.action(&old_v, cx).unwrap();
+            let reference = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.5, 0.0, 0.0],
+                [0.5, 0.5, 0.0],
+                [0.0, 0.5, 0.0],
+                [0.0, 0.0, 0.5],
+                [0.5, 0.0, 0.5],
+                [0.0, 0.5, 0.5],
+            ];
+            let (mut angular_change, mut midpoint_torque) = ([0.0; 3], [0.0; 3]);
+            for axis in 0..3 {
+                let change: f64 = (0..10)
+                    .map(|a| next_p[3 * a + axis] - old_p[3 * a + axis])
+                    .sum();
+                let impulse: f64 = (0..10).map(|a| dt * force[3 * a + axis]).sum();
+                close(change, impulse);
+                let (j, k) = ((axis + 1) % 3, (axis + 2) % 3);
+                for (a, x) in reference.iter().enumerate() {
+                    let (old_j, old_k) = (x[j] + old_u[3 * a + j], x[k] + old_u[3 * a + k]);
+                    let (next_j, next_k) = (x[j] + u[3 * a + j], x[k] + u[3 * a + k]);
+                    angular_change[axis] += next_j * next_p[3 * a + k]
+                        - next_k * next_p[3 * a + j]
+                        - old_j * old_p[3 * a + k]
+                        + old_k * old_p[3 * a + j];
+                    midpoint_torque[axis] += 0.5 * (old_j + next_j) * force[3 * a + k]
+                        - 0.5 * (old_k + next_k) * force[3 * a + j];
+                }
+                close(angular_change[axis], dt * midpoint_torque[axis]);
+            }
+            close(energy.kinetic_change_j, energy.inertial_work_j);
+            assert_eq!(energy.numerical_loss_j, 0.0);
+            let expected_bound: f64 = (0..30)
+                .map(|d| {
+                    2.0 * mass.matrix.get(0, d).abs()
+                        * ((u[d] - old_u[d]).abs() / dt + old_v[d].abs())
+                        / dt
+                })
+                .sum();
+            close(
+                inertia.force_scale(&u, &[0], 0.0, 0.0, cx).unwrap(),
+                expected_bound,
+            );
+        });
+    }
+
+    #[test]
+    fn midpoint_inertia_refuses_invalid_intervals_states_and_cancellation() {
+        with_cx(false, |cx| {
+            let mass = mass(cx);
+            let zero = [0.0; 30];
+            for dt in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MIN_POSITIVE] {
+                assert!(MidpointInertia::new(&mass, &zero, &zero, dt, cx).is_err());
+            }
+            assert!(MidpointInertia::new(&mass, &zero[..29], &zero, 0.1, cx).is_err());
+            assert!(MidpointInertia::new(&mass, &zero, &[f64::NAN; 30], 0.1, cx).is_err());
+            let inertia = MidpointInertia::new(&mass, &zero, &zero, 0.1, cx).unwrap();
+            assert!(inertia.motion(&zero[..29], cx).is_err());
+            assert!(inertia.motion(&[f64::NAN; 30], cx).is_err());
+            assert!(inertia.add_force(&zero, &mut [0.0; 29], cx).is_err());
+            with_cx(true, |cancelled| {
+                assert!(matches!(
+                    MidpointInertia::new(&mass, &zero, &zero, 0.1, cancelled),
+                    Err(InertiaError::Cancelled)
+                ));
+                assert!(matches!(
+                    inertia.motion(&zero, cancelled),
+                    Err(InertiaError::Cancelled)
+                ));
+                assert!(matches!(
+                    inertia.add_force(&zero, &mut [0.0; 30], cancelled),
+                    Err(InertiaError::Cancelled)
+                ));
+                assert!(matches!(
+                    inertia.add_tangent(&mut Coo::new(30, 30), cancelled),
+                    Err(InertiaError::Cancelled)
+                ));
+            });
         });
     }
 }

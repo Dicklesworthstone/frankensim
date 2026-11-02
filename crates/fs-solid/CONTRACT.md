@@ -3690,3 +3690,53 @@ moments, tangent finite differences, the absolute-mass bound, original positive
 P1/Hex8 arithmetic, budget and cancellation. The existing creep example also
 offers `--dynamic` to release the deformed body and report physical and
 numerical losses independently.
+
+## Conservative finite-strain elastic motion
+
+`hyper3::mixed::conservative::{ConservativeTetDefinition, ConservativeTetSolid}`
+retain quadratic TET10 displacement and velocity, physical stored energy, elapsed
+time, original element material identities, and a shared consistent reference
+mass. `FullMaterial` evaluates the original finite-strain energy through the
+objective C-based discrete gradient in `fs-material`. Initial displacement and
+velocity are explicit; preparation does not silently relax a supplied state.
+
+Each interval uses centered kinematics, `v_after = 2 Delta u / dt - v_before`,
+and force `2 M (Delta u - dt v_before) / dt^2`. The native consistent P2 mass
+retains its signed entries and quadratic body-force weights. The inertia work
+equals the kinetic-energy increment with zero algorithmic loss. This is a
+separate `MidpointInertia` path; existing backward-Euler motion keeps its
+original dissipative semantics.
+
+Assembly contracts each point's true generally nonsymmetric endpoint tangent
+into one local displacement block before one element scatter. The native
+Newton-FGMRES owner uses that actual Jacobian; only its symmetric part supplies
+the sparse LDL preconditioner. The preconditioner is neither a substituted
+elastic tangent nor an inertia-based stability certificate. Geometry, mass and
+accepted material points are retained between candidate evaluations.
+
+Dead nodal/body loads, moving Dirichlet supports and returned signed reactions
+have explicit work accounts. Each accepted interval checks constitutive work,
+equilibrium work, local total-energy balance and cumulative total-energy balance
+against the caller's allowance in joules. Kinetic work and numerical loss remain
+separate fields. Invalid domains, exhausted budgets, failed solves, failed work
+gates or cancellation return no changed accepted state. One physical interval
+requires one load step; Newton backtracking does not advance material history.
+
+G0/G1 evidence in `tests/hyper_conservative.rs` includes independent consistent
+mass and original-energy checks for a freely translating, rotating and deforming
+body; exact constant-acceleration motion; moving-support work; and rejected or
+cancelled candidate rollback. A genuinely nonlinear quadratic shear benchmark
+uses an independent quartic Ogden oscillator, independent scalar discrete steps,
+and a time-refinement ladder against a converged continuous reference. The
+focused native-source lane passed four tests: the three-rung time order was
+1.99 and 2.00, and the 48-step free-body energy/momentum discrepancies were at
+floating-point roundoff. The native inertia unit lane passed nine tests.
+
+This initial formulation is displacement-only. A very large bulk modulus may
+still lock; no incompressible mixed constraint, pressure gauge, general
+finite-bulk mixed integrator, nonlinear modal reduction, contact, viscoelastic
+dissipation or frequency-matched linear propagator is claimed here. Centered
+time integration has phase error even when its discrete work balance closes.
+The finite fixtures above do not satisfy the separate 10,000-step/long-horizon,
+frequency-matching and complete port/checkpoint obligations of bead
+`frankensim-irp-v5-instrument-realism-pexfp.62`.

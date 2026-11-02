@@ -38,6 +38,9 @@ use element::PreparedMixedMesh;
 /// Retained finite-strain viscoelastic histories on the mixed solid.
 pub mod visco;
 
+/// Objective discrete-gradient elasticity with conservative reference inertia.
+pub mod conservative;
+
 /// Constitutive laws retain their spatial identity; no coefficients are averaged.
 #[derive(Debug)]
 pub enum MixedLawField<'a, L: MixedFiniteStrainPotential = Hyperelastic> {
