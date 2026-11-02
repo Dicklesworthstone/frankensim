@@ -894,6 +894,8 @@ def main() -> int:
                                                                 "against the model's own coupled modes, not graded against a recording"})
     # A lane's listening set with its own record, renders/extras/<family>/<set>/extras.json:
     # {"era": "...", "items": [{"stem": "...", "title": "..."}]}, played in the record's order and never graded.
+    # A/B sets add "group" (the heading they are listed under, first on the family's Listen tab), "before_label" and
+    # "after_label", and per item "before" (the stem of the render it is heard against, played in lock-step) and "detail".
     xd = mirror / "renders" / "extras"
     for rec in sorted(xd.glob("*/*/extras.json")) if xd.is_dir() else []:
         fid, doc = rec.parent.parent.name, json.loads(rec.read_text())
@@ -902,8 +904,19 @@ def main() -> int:
             if not wav.is_file():
                 sys.exit(f"{rec}: no {wav.name}")
             key = f"{rec.parent.name}-{it['stem']}"
-            extras[fid].append({"id": key, "title": it["title"], "audio": media.audio(wav, f"audio/extra/{fid}/{key}"),
-                                "date": stamp_of(wav), "era": doc["era"]})
+            x = {"id": key, "title": it["title"], "audio": media.audio(wav, f"audio/extra/{fid}/{key}"),
+                 "date": stamp_of(wav), "era": doc["era"]}
+            if it.get("before"):
+                bw = rec.parent / f"{it['before']}.wav"
+                if not bw.is_file():
+                    sys.exit(f"{rec}: no {bw.name}")
+                x["before_audio"] = media.audio(bw, f"audio/extra/{fid}/{rec.parent.name}-{it['before']}")
+                x["names"] = [doc.get("before_label", "Before"), doc.get("after_label", "After")]
+            if it.get("detail"):
+                x["detail"] = it["detail"]
+            if doc.get("group"):
+                x["group"] = doc["group"]
+            extras[fid].append(x)
 
     # Every note a family can play today, joined into one phrase, then each note on its own.
     playable = mirror / "renders" / "playable"
@@ -1128,6 +1141,9 @@ def main() -> int:
     index = {
         "built_utc": process["built_utc"], "ref": args.ref, "ref_sha": ref_sha, "mirror": mirror.name,
         "sections": SECTIONS, "families": families_index,
+        # Every A/B item (a new render heard against the current one), for the start page's "New physics" list.
+        "ab": [{"family": fid, "key": f"x-{x['id']}", "title": x["title"], "group": x["group"], "date": x["date"]}
+               for fid, *_ in FAMILIES for x in extras.get(fid, []) if x.get("before_audio")],
         "totals": {
             "families": len(FAMILIES),
             "graded_notes": sum(f["counts"]["graded"] for f in families_index),

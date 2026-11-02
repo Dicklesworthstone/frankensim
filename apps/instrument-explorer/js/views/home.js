@@ -112,10 +112,19 @@ export async function render(root, r) {
         h('span', null, 'What was decided and why: the first-principles pivot, materials and air as data, the grading changes, the findings that changed the plan.')),
       h('a.card', { href: '#/instruments' }, h('b', null, 'All families'),
         h('span', null, 'Which instruments speak, which are graded, which are still blocked on geometry or data, and the qualification ladder of each.'))));
+  // ---- what changed: re-renders with newer physics, each heard against the render it would replace
+  const ab = idx.ab || [];
+  const changed = ab.length
+    ? h('section', { id: 'changed' },
+      h('div.sechead', null, h('div', null, h('h2', null, 'New physics, heard against the current render'),
+        h('p', null, 'Each pair plays the render this site has now and a re-render with newer physics switched on, in lock-step: press 1 or 2, or use the switch, to hear one or the other. Not graded yet. Each page says what was switched on, what was refused, and where the pitch landed.'))),
+      h('div.starthere', null, ab.map(x => h('a.card', { href: link('f', x.family, 'listen', x.key) },
+        h('b', null, `${titles[x.family] || x.family}: ${x.title}`), h('span', null, `${x.group} · ${fmt.date(x.date)}`)))))
+    : null;
   const unknown = r && r.unknown
     ? h('div.note.warn', { role: 'status' }, h('p', null, `There is no page at ${r.unknown}, so this is the start page.`))
     : null;
-  root.replaceChildren(...[unknown, hero, stats, gallery, more].filter(Boolean));
+  root.replaceChildren(...[unknown, hero, changed, stats, gallery, more].filter(Boolean));
 }
 
 function featureCard(p, familyTitle) {

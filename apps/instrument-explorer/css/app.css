@@ -208,6 +208,7 @@ button.ghost:hover { border-color: var(--sim); }
 .nowplaying .np-side { font-size: 0.72rem; font-weight: 600; padding: 0.15em 0.55em; border-radius: 6px; }
 .nowplaying .np-side.sim { background: color-mix(in srgb, var(--sim) 22%, transparent); color: var(--sim-2); }
 .nowplaying .np-side.real { background: color-mix(in srgb, var(--real) 22%, transparent); color: var(--real-2); }
+.nowplaying .np-side.before { background: var(--soft); color: var(--ink-2); }
 .nowplaying .np-bar { position: absolute; left: 14px; right: 14px; bottom: 4px; height: 2px; background: var(--soft); border-radius: 2px; overflow: hidden; }
 .nowplaying .np-bar span { display: block; height: 100%; background: var(--sim); }
 .iconbtn { width: 36px; height: 36px; border-radius: 10px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; display: grid; place-items: center; flex: none; }

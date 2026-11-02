@@ -180,6 +180,8 @@ function header(doc) {
 function listenItems(doc) {
   const items = [];
   const add = (group, key, title, sub, kind, data) => items.push({ group, key, title, sub, kind, data });
+  // A/B sets (a new render heard against the current one) come first: they are what changed.
+  for (const x of doc.extras.filter(x => x.group)) add(x.group, `x-${x.id}`, x.title, x.before_audio ? 'A/B' : fmt.date(x.date), 'extra', x);
   for (const p of doc.pairs) {
     const sub = p.kind === 'graded' && p.tally
       ? `${p.tally.loose.inside}/${p.tally.loose.inside + p.tally.loose.outside} inside`
@@ -187,7 +189,7 @@ function listenItems(doc) {
     const group = { graded: 'Graded against a recording', listening: 'Rendered, no recording to grade against', refused: 'Refused by the grader', compared: 'Beside a recording (not graded)', 'reference-only': 'Recordings the grader holds, not rendered yet' }[p.kind];
     add(group, p.id, [p.note, p.dynamic].filter(Boolean).join(' '), sub, p.kind, p);
   }
-  for (const x of doc.extras) add('Other renders (not graded)', `x-${x.id}`, x.title, fmt.date(x.date), 'extra', x);
+  for (const x of doc.extras.filter(x => !x.group)) add('Other renders (not graded)', `x-${x.id}`, x.title, fmt.date(x.date), 'extra', x);
   for (const x of doc.fixtures) add('August listening fixtures (before the 2026-10-21 pivot)', `fx-${x.id}`, x.title, fmt.date(x.date), 'fixture', x);
   return items;
 }
@@ -195,7 +197,7 @@ function listenItems(doc) {
 function listen(doc, itemKey) {
   const items = listenItems(doc);
   if (!items.length) return empty('Nothing has been rendered for this family yet. Its screened reference recordings are under References.');
-  const sel = items.find(i => i.key === itemKey) || items.find(i => i.kind === 'graded') || items[0];
+  const sel = items.find(i => i.key === itemKey) || items.find(i => i.data && i.data.group) || items.find(i => i.kind === 'graded') || items[0];
   const groups = [...new Set(items.map(i => i.group))];
   const list = h('aside.itemlist', null, groups.map(g => h('div.itemgroup', null, h('h4', null, g),
     items.filter(i => i.group === g).map(i => h(`a.item${i === sel ? '.on' : ''}`, { href: link('f', doc.id, 'listen', i.key) },
@@ -374,13 +376,19 @@ function clipDetail(x, kind) {
   if (x.verdict) out.push(h('p', null, h('b', null, 'Verdict recorded then: '), x.verdict));
   if (x.detail) out.push(h('p.small', null, x.detail));
   if (!x.audio) return [...out, empty('No audio.')];
-  const player = new Player([{ rel: x.audio, label: x.title, side: 'sim' }], { title: x.title, sub: 'simulation, not graded' });
+  // An A/B item plays the current render and the new one in lock-step; keys 1 and 2 (or the switch) pick which is heard.
+  const sources = x.before_audio
+    ? [{ rel: x.before_audio, label: x.names[0], side: 'before' }, { rel: x.audio, label: x.names[1], side: 'sim' }]
+    : [{ rel: x.audio, label: x.title, side: 'sim' }];
+  const player = new Player(sources, { title: x.title, sub: x.before_audio ? 'A/B, not graded' : 'simulation, not graded' });
   focusPlayer(player);
   const mapBox = h('div.maps', null, h('p.small.muted', null, 'Computing the spectrogram…'));
-  player.ready.then(() => loadBuffer(x.audio)).then(buf => {
-    const m = computeMap(buf);
-    mapBox.replaceChildren(mapFrame(m.canvas, { fLo: m.fLo, fHi: m.fHi, duration: m.duration, player, label: 'Simulation' }),
-      h('p.small.muted', null, `Spectrogram computed in the browser: log frequency ${m.fLo}–${Math.round(m.fHi)} Hz, 80 dB below the clip's own peak.`));
+  player.ready.then(() => Promise.all(sources.map(s => loadBuffer(s.rel)))).then(bufs => {
+    const maps = bufs.map(buf => computeMap(buf));
+    const m = maps[0];
+    mapBox.replaceChildren(...maps.map((mi, i) => mapFrame(mi.canvas, { fLo: mi.fLo, fHi: mi.fHi, duration: mi.duration, player,
+      label: sources.length > 1 ? sources[i].label : 'Simulation' })),
+      h('p.small.muted', null, `Spectrogram${maps.length > 1 ? 's' : ''} computed in the browser: log frequency ${m.fLo}–${Math.round(m.fHi)} Hz, 80 dB below each clip's own peak.`));
   }).catch(err => mapBox.replaceChildren(empty(`Could not decode: ${err.message}`)));
   out.push(h('div.playerbox', null, controls(player)), mapBox);
   if (x.provenance && Object.keys(x.provenance).length) {
