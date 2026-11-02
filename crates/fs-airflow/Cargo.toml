@@ -13,6 +13,7 @@ layer = "L3"
 [features]
 default = []
 compartment-fire = ["dep:fs-gas", "dep:fs-la", "dep:fs-thermal", "dep:fs-thermochem"]
+transient-transport = ["dep:fs-thermal"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }

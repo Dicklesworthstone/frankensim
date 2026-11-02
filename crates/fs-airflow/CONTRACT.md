@@ -1,5 +1,22 @@
 # CONTRACT: fs-airflow
 
+## Transient graph convection with native thermal storage
+
+With `transient-transport`, `graph::thermal::transport::transient` binds signed
+hydraulic flows to explicit native enthalpy cells through `GraphEnthalpyTransport`.
+Those cells retain their mass, volume, caloric law, latent heat and heat sources.
+Reference density converts volume flow to mass flow; every storage node must
+balance mass, including pressure datums. Inlet/outlet enthalpy streams are
+explicit. The original thermal stepper owns combined conduction/advection CFL,
+material-domain checks and energy accounting. Closed adiabatic circulation
+needs no artificial reservoir because initial stored enthalpy fixes its state.
+A bounded backward-Euler specialization solves advection plus fixed watts on
+at most 64 cells, including the native enthalpy-datum correction, and accepts
+only through the original local/global energy residual. General wall/contact
+exchange remains available through the native explicit observer and implicit
+endpoint-coefficient interfaces. Flow and density are frozen; cells are perfectly
+mixed, and pipe residence-time resolution requires explicit spatial inventory.
+
 ## Native graph temperature–buoyancy feedback
 
 `graph::thermal::natural_circulation::solve_natural_circulation` closes steady

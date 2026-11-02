@@ -30,6 +30,9 @@ use crate::graph::GraphSolution;
 
 pub mod sensitivity;
 pub mod recirculation;
+/// Conservative fluid storage on the native enthalpy timeline.
+#[cfg(feature = "transient-transport")]
+pub mod transient;
 use recirculation::{Feedback, RecirculationReport};
 mod circulation;
 pub use circulation::MAX_CIRCULATION_NODES;
