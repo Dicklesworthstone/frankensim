@@ -129,7 +129,9 @@ pub use energy::{
     ThermalSetup, solve_energy,
 };
 pub use flow::{
-    DensityProjection, DensityProjectionControls, DensityProjectionReport, FlowFace, FlowField,
+    AdvectedMaterial, DensityProjection, DensityProjectionControls, DensityProjectionReport, FlowFace,
+    FlowField, MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
+    MaterialAdvectionStep, MaterialVolumeSource,
     LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport, ProjectionReport, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};

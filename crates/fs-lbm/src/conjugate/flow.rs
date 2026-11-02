@@ -21,6 +21,11 @@ use crate::d3q19::{
 mod density_projection;
 use density_projection::FrozenDensity;
 pub use density_projection::{DensityProjection, DensityProjectionControls, DensityProjectionReport};
+mod density_transport;
+pub use density_transport::{
+    AdvectedMaterial, MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
+    MaterialAdvectionStep, MaterialVolumeSource,
+};
 
 /// Mass-flow role of one domain face for flux construction and projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

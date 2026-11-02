@@ -2635,6 +2635,31 @@ electronics cooling (the wedge's second physics after steady conduction).
   analytic graded two-density pressure/flux/work on all axes, exact homogeneous
   legacy parity, fixed-boundary work, sealed source/sink compatibility,
   disconnected components, independent readback budgets and refusal rollback.
+- `FlowField::project_and_advect_material` consumes that pressure projection
+  through conservative backward-Euler donor transport on the SAME native face
+  volume fluxes. Cell mass is the authoritative inventory; `rho=M/V` supplies
+  the pressure coefficient without reconstructing an accepted mass from rho.
+  Explicit volume injection supplies its own incoming density and caloric h;
+  extraction and boundary outflow use the accepted local donor state. Incoming
+  and backflow boundaries require an authored rho/h pair in the same datum.
+  The existing sparse row scaling and Krylov owner solve the density equation;
+  its donor densities define transferred masses once. Paired transfers create
+  actual endpoint masses, independently read back in that original equation.
+  A second native donor solve carries `mass*h` on exactly those same transfers.
+  Component-wise caloric centering excludes arbitrary enthalpy datums from the
+  solve tolerance while retaining mass-closure terms. Actual stored h and all
+  local/global mass and enthalpy balances pass explicit physical-unit budgets.
+  No negative inventory clipping, mass renormalization, or numerical-to-heat
+  conversion occurs. Allocation/connection/iteration limits and cancellation
+  precede candidate publication. Focused native G1/G3/G4 cases check independent
+  graded two-cell mass/energy solutions on every axis, volume-driven material
+  injection/removal, large datum invariance, continuing closed circulation,
+  loose-solve readback refusal and atomic input preservation. This is an
+  operator-split pressure/material-advection component; the enclosing physical
+  owner supplies momentum prediction, source momentum/work and compatible
+  material/EOS closure. It does not infer phase expansion, mixing heat,
+  pressure heat or a complete Navier–Stokes/enthalpy timestep. First-order
+  donor diffusion and splitting error require spatial/temporal refinement.
 - `lbm_duct_flow` -> `LbmFlow { field, velocity_m_s, pressure_pa, report }`:
   velocity inlet on `x-min`, pressure outlet on `x-max`,
   no-slip elsewhere and on solid voxels; derives `nu_lat`/`tau` from the
