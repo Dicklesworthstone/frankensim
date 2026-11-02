@@ -34,6 +34,9 @@ use fs_qty::{Dims, QuantitySpec};
 
 use crate::ConductionError;
 
+mod p1;
+pub(crate) use p1::ElementConductivity;
+
 /// SI exponents (m, kg, s, K, A, mol) of a thermal conductivity,
 /// W/(m·K) = kg·m·s⁻³·K⁻¹.
 pub const CONDUCTIVITY_DIMS: Dims = Dims([1, 1, -3, -1, 0, 0]);
@@ -47,7 +50,7 @@ pub const TEMPERATURE_AXIS: &str = "T";
 ///
 /// The enthalpy transport owner evaluates this law at the mean of a
 /// tetrahedron's nodal liquid mass fractions and multiplies its existing
-/// conductivity tensor at the mean nodal temperature. This is an explicit
+/// volume-averaged conductivity tensor over the P1 temperature field. This is an explicit
 /// phenomenological law, not an inferred volume-fraction mixture rule or a
 /// replacement for the base tensor's temperature dependence and provenance.
 #[derive(Debug, Clone, Copy, PartialEq)]

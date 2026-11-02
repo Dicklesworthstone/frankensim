@@ -2,14 +2,14 @@
 //! The retained local loads include its actual phase multiplier, but no
 //! boundary, contact or source terms and no second state derivative.
 
-use crate::assemble::{element_stiffness, element_temperature};
+use crate::assemble::{checked_element_conductivity, element_stiffness};
 
 use super::{
-    ASSEMBLY_TILE, ConductionProblem, Cx, EnthalpyAdjointError,
-    EnthalpyStepLinearization, finite, poll, vector,
+    ASSEMBLY_TILE, ConductionProblem, Cx, EnthalpyAdjointError, EnthalpyStepLinearization, finite,
+    poll, vector,
 };
 
-/// Reuse the production sampling and stiffness scaling order. Phase scales
+/// Reuse the production constitutive integral and stiffness scaling order. Phase scales
 /// come only from StepContext's typed laws at the accepted nodal enthalpies.
 pub(super) fn element_loads(
     cx: &Cx<'_>,
@@ -21,7 +21,8 @@ pub(super) fn element_loads(
     let mesh = problem.mesh;
     let elements = mesh.element_count();
     if phase_scales.is_some_and(|scales| scales.len() != elements)
-        || elements.checked_mul(std::mem::size_of::<[f64; 4]>())
+        || elements
+            .checked_mul(std::mem::size_of::<[f64; 4]>())
             .is_none_or(|bytes| isize::try_from(bytes).is_err())
     {
         return Err(EnthalpyAdjointError::InvalidInput(
@@ -34,13 +35,16 @@ pub(super) fn element_loads(
         EnthalpyAdjointError::InvalidInput("enthalpy conductivity load allocation refused")
     })?;
     for (element, tet) in mesh.complex().tets.iter().enumerate() {
-        if element % ASSEMBLY_TILE == 0 { poll(cx, element)?; }
+        if element % ASSEMBLY_TILE == 0 {
+            poll(cx, element)?;
+        }
         let model = match problem.element_materials {
             Some(materials) => materials.model_for(element)?,
             None => problem.material,
         };
-        let sample = finite(element_temperature(mesh, element, temperature))?;
-        let tensor = model.tensor_at(sample)?;
+        let tensor =
+            checked_element_conductivity(Some(cx), mesh, element, model, temperature, false)?
+                .tensor;
         let mut stiffness = element_stiffness(mesh, element, &tensor);
         if let Some(scales) = phase_scales {
             let scale = finite(scales[element])?;
@@ -50,15 +54,15 @@ pub(super) fn element_loads(
                 ));
             }
             for row in &mut stiffness {
-                for entry in row { *entry = finite(*entry * scale)?; }
+                for entry in row {
+                    *entry = finite(*entry * scale)?;
+                }
             }
         }
         let mut local = [0.0; 4];
         for (a, row) in stiffness.iter().enumerate() {
             for (b, &vertex) in tet.iter().enumerate() {
-                local[a] = finite(finite(row[b])?.mul_add(
-                    temperature[vertex as usize], local[a],
-                ))?;
+                local[a] = finite(finite(row[b])?.mul_add(temperature[vertex as usize], local[a]))?;
             }
         }
         loads.push(local);
@@ -101,8 +105,10 @@ impl EnthalpyStepLinearization<'_> {
     ) -> Result<Vec<f64>, EnthalpyAdjointError> {
         poll(cx, 0)?;
         let elements = self.mesh.element_count();
-        if elements > max_elements || self.conductive_loads.len() != elements
-            || elements.checked_mul(std::mem::size_of::<f64>())
+        if elements > max_elements
+            || self.conductive_loads.len() != elements
+            || elements
+                .checked_mul(std::mem::size_of::<f64>())
                 .is_none_or(|bytes| isize::try_from(bytes).is_err())
         {
             return Err(EnthalpyAdjointError::InvalidInput(
@@ -114,16 +120,24 @@ impl EnthalpyStepLinearization<'_> {
         result.try_reserve_exact(elements).map_err(|_| {
             EnthalpyAdjointError::InvalidInput("enthalpy conductivity gradient allocation refused")
         })?;
-        for (element, (tet, loads)) in self.mesh.complex().tets.iter()
-            .zip(&self.conductive_loads).enumerate()
+        for (element, (tet, loads)) in self
+            .mesh
+            .complex()
+            .tets
+            .iter()
+            .zip(&self.conductive_loads)
+            .enumerate()
         {
-            if element % ASSEMBLY_TILE == 0 { poll(cx, element)?; }
+            if element % ASSEMBLY_TILE == 0 {
+                poll(cx, element)?;
+            }
             let mut contraction = 0.0;
             for (&vertex, &load) in tet.iter().zip(loads) {
-                if self.is_prescribed(vertex as usize) { continue; }
-                contraction = finite(
-                    full_joule_multiplier[vertex as usize].mul_add(load, contraction),
-                )?;
+                if self.is_prescribed(vertex as usize) {
+                    continue;
+                }
+                contraction =
+                    finite(full_joule_multiplier[vertex as usize].mul_add(load, contraction))?;
             }
             result.push(finite(-self.dt * contraction)?);
         }

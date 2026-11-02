@@ -929,11 +929,41 @@ transient cooling and latent-plateau heat removal against that same independent
 surface integral. This removes coefficient-averaging error for P₁ trace data;
 it does not certify the supplied convection law or the spatial solution error.
 
-`K` is evaluated once per element at `T̄_e`, the element mean of the P₁
-iterate. For P₁ that mean is the EXACT element average of `T_h`, so for `k`
-linear in `T` the element integral `V·k(T̄_e)` equals `∫_e k(T_h) dV` exactly;
-for a curved `k(T)` it is the midpoint rule, second-order in the element
-diameter.
+`K_bar_e = (1/V_e) integral_e K(T_h) dV` integrates each retained
+piecewise-linear conductivity component across all crossed material and nodal
+temperature knots. The tetrahedral temperature distribution is a quadratic
+B-spline; weighting it by a local hat function lambda_c gives a cubic B-spline
+with that node's temperature repeated. Two-point Gauss integration on each
+interval therefore integrates both `K_bar_e` and
+`D_c = <lambda_c K'(T_h)>_e` exactly as polynomials, up to roundoff. Positive
+scalar averaging preserves the fixed principal frame and constitutive positivity.
+Constant tensors, uniform fields and single-segment tables retain fast paths.
+No per-element heap allocation or new material query occurs; primal/flux calls
+skip unused derivative moments. Cancellable integrations poll every 128 intervals.
+
+The shared temperature Jacobian is
+`J_ac^e = V g_a^T K_bar_e g_c + V g_a^T D_c grad(T_h)`. The enthalpy owner
+applies its existing temperature-chart and declared mean-liquid-mass-fraction
+scale derivatives to these same moments. Uniform/assigned flux recovery returns
+`q_bar_e = -K_bar_e grad(T_h)`, the element-average flux of the discrete P1
+field. Both steady and enthalpy conductivity-scale pullbacks reuse the integrated
+stiffness. A nonuniform field crossing an interior material knot has a
+differentiable material integral, even when its mean is exactly on that knot.
+Uniform fields at a true slope kink retain the right-segment semismooth Newton
+choice; the total-adjoint API refuses a unique two-sided material tangent there
+and at sampled validity endpoints. Full nodal source-span admission remains
+required. This is exact integration of the admitted P1/table model, not a claim
+about unresolved continuum variation, interelement flux conservation or roundoff
+bounds.
+
+Seven focused crate regressions in `material/p1/tests.rs` cover independent
+conductivity/derivative moments, constant and anisotropic limits, full source
+support, consistent operator/flux/pullback results, and temperature/enthalpy
+Jacobians against perturbed production residuals. Eight additional independent
+native checks executed the actual scalar numerical leaf, including analytical
+Beta moments, a multiknot oracle, all vertex permutations, adjacent floating-point
+temperatures and interval cancellation. Full crate compilation and integration
+execution remain separate validation requirements.
 
 Material validity is checked over the whole P₁ field, independently of this
 quadrature choice: every tetrahedron's four nodal temperatures must be finite
@@ -979,7 +1009,7 @@ constant law at an admitted old temperature does not admit arbitrary heating.
 | `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them. `from_claims_pinned` samples one explicit claim pin at every knot and still refuses invalid or out-of-domain use |
 | `LumpedThermalTransport` | reduced-body transport: explicitly provenance-free declared constants, sourced conductivity/emissivity, or sourced conductivity with radiation explicitly disabled; every active property receipt is retained, sampled models refuse extrapolation and bind to the same card as the phase curve |
 | `ConductivityModel` | constant tensor, isotropic `k(T)`, or orthotropic `Σ_i k_i(T) e_i e_iᵀ`; every construction is checked symmetric and positive definite. `from_pcb_homogenization` consumes fs-matdb's immutable laminate result and retains one property-use receipt per copper/matrix material use |
-| `MaterialId` / `MaterialTable` / `ElementMaterials` | a checked constitutive table plus one id per tet. `from_region_ids` maps labeled mesh regions onto that table. `bind_labeled_volume` is the mesher-agnostic s93ej.1 handoff: an independently audited `TetComplex` + region ids + region→material map become a `ConductionMesh` and assignment together. Assembly, Newton, `assemble_operator_with_element_materials` / `assemble_jacobian_with_element_materials`, and `element_heat_flux_assigned` use the named model at the element mean temperature. This is constitutive selection, not `element_scale`. Unknown/duplicate/empty/unmapped-region/length-mismatched assignments refuse. `solve_with_element_materials` is the product entry; `solve_with_element_materials_and_interfaces` is the joint contact path. Region materials cannot erase undeclared coincident faces. A bound assignment's table receipts and provenance travel on `ConductionReport` in place of the unused fallback. The uniform `ConductionProblem::material` path is unchanged. Two- and three-layer series, assigned `k(T)` Newton, assigned Jacobian-vs-FD, assigned IFT vs FD, one- and two-material contact coexistence, assigned matdb receipts, unused-table/mixed-provenance honesty, rotated orthotropic x-series, contrast/refinement/coalescing/map-swap metamorphics, and a labeled-volume lowering through `bind_labeled_volume` are covered; that last case is not yet the parent solve-stage E2E |
+| `MaterialId` / `MaterialTable` / `ElementMaterials` | a checked constitutive table plus one id per tet. `from_region_ids` maps labeled mesh regions onto that table. `bind_labeled_volume` is the mesher-agnostic s93ej.1 handoff: an independently audited `TetComplex` + region ids + region→material map become a `ConductionMesh` and assignment together. Assembly, Newton, `assemble_operator_with_element_materials` / `assemble_jacobian_with_element_materials`, and `element_heat_flux_assigned` use the named model integrated over the element P1 temperature field. This is constitutive selection, not `element_scale`. Unknown/duplicate/empty/unmapped-region/length-mismatched assignments refuse. `solve_with_element_materials` is the product entry; `solve_with_element_materials_and_interfaces` is the joint contact path. Region materials cannot erase undeclared coincident faces. A bound assignment's table receipts and provenance travel on `ConductionReport` in place of the unused fallback. The uniform `ConductionProblem::material` path is unchanged. Two- and three-layer series, assigned `k(T)` Newton, assigned Jacobian-vs-FD, assigned IFT vs FD, one- and two-material contact coexistence, assigned matdb receipts, unused-table/mixed-provenance honesty, rotated orthotropic x-series, contrast/refinement/coalescing/map-swap metamorphics, and a labeled-volume lowering through `bind_labeled_volume` are covered; that last case is not yet the parent solve-stage E2E |
 | `AssembledSystem`, `DofMap` | the full `n×n` operator and load, and the free/prescribed bookkeeping the Dirichlet elimination uses |
 | `ConductionSolver`, `ConductionState` | the resumable nonlinear iteration and its snapshot payload |
 | `ConductionSolution`, `ConductionReport`, `EnergyBalance`, `LinearSolveEvidence` | the field and everything established about how it was produced |
@@ -1055,7 +1085,7 @@ Globalization (`Nonlinearity`):
 - `Newton { line_search }` — Armijo sufficient decrease on `‖R‖₂`:
   accept when `‖R(T + αδ)‖ ≤ (1 − c α)‖R(T)‖`, shrink by `shrink` per
   backtrack, at most `max_backtracks`. The Jacobian carries the
-  `(V/4) gᵀ_a K'(T̄_e) ∇T_h` term, which is NOT symmetric, so this path runs
+  `V gᵀ_a <λ_c K'(T_h)>_e ∇T_h` term, which is NOT symmetric, so this path runs
   FGMRES.
 
 Both share the **admissibility guard**: a trial iterate with any element vertex
@@ -2060,7 +2090,7 @@ authority.
 - `EnthalpyStepLinearization::conductivity_scale_pullback` contracts the same
   complete joule-residual multiplier into independent element conductivity
   scales. The accepted binder retains four local conductive loads per element
-  from the production element temperature, assigned tensor, stiffness and
+  from the production integrated assigned tensor, stiffness and
   typed phase multiplier at mean nodal liquid mass fraction. The result is
   `-dt * lambda_e^T * (K_eff,e*T_e)`, already including dt, in mesh element
   order. It differentiates a scale of the full effective tensor/curve, with
@@ -2260,9 +2290,10 @@ authority.
   body-fitted TET complexes. Level-A P2 fixtures directly exercise the
   high-order `fs-feec` simplex operator; there is no general higher-order
   thermal frontend, no hex frontend, and no CutFEM frontend.
-- Flux recovery (`element_heat_flux`) is the natural element-wise-constant
-  `−K∇T_h`. It is one order lower than the temperature, it is NOT
-  flux-conserving, and NO superconvergence is claimed for it.
+- Flux recovery (`element_heat_flux`) returns the element-average discrete
+  flux `−<K(T_h)>_e ∇T_h`, retained as one constant vector per element. It
+  remains one order lower than temperature, is not interelement flux-conserving,
+  and carries no superconvergence claim.
 - The energy balance checks the assembled operator against an independent
   post-integration of the SAME boundary data. It catches a sign or scale error
   in one of those two paths, not an error in the data itself.

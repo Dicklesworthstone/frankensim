@@ -1305,8 +1305,10 @@ pub(crate) fn energy_balance(
     )
 }
 
-/// Recover the per-element heat-flux vector `q_e = −K(T̄_e) ∇T_h`, W/m².
+/// Recover the per-element heat-flux vector `q_e = −<K(T_h)>_e ∇T_h`, W/m².
 ///
+/// The material tensor is integrated over the P₁ temperature field, including
+/// crossed source knots, so this returns the element-average physical flux.
 /// P₁ gradients are element-wise constant, so this is the natural
 /// (piecewise-constant, one-order-lower) flux. It is NOT a
 /// flux-conserving recovery and this crate makes no superconvergence
@@ -1331,8 +1333,15 @@ pub fn element_heat_flux(
     let mut out = Vec::with_capacity(mesh.element_count());
     for e in 0..mesh.element_count() {
         let tet = mesh.complex().tets[e];
-        let t_e = crate::assemble::checked_element_temperature(mesh, e, material, temperature)?;
-        let k = material.tensor_at(t_e)?;
+        let k = crate::assemble::checked_element_conductivity(
+            None,
+            mesh,
+            e,
+            material,
+            temperature,
+            false,
+        )?
+        .tensor;
         let g = &mesh.geometry().grads[e];
         let mut grad = [0.0f64; 3];
         for (b, gb) in g.iter().enumerate() {
@@ -1371,8 +1380,15 @@ pub fn element_heat_flux_assigned(
     for e in 0..mesh.element_count() {
         let tet = mesh.complex().tets[e];
         let material = materials.model_for(e)?;
-        let t_e = crate::assemble::checked_element_temperature(mesh, e, material, temperature)?;
-        let k = material.tensor_at(t_e)?;
+        let k = crate::assemble::checked_element_conductivity(
+            None,
+            mesh,
+            e,
+            material,
+            temperature,
+            false,
+        )?
+        .tensor;
         let g = &mesh.geometry().grads[e];
         let mut grad = [0.0f64; 3];
         for (b, gb) in g.iter().enumerate() {

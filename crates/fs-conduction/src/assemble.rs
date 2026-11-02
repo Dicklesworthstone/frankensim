@@ -6,7 +6,7 @@
 //! each tet), `V` the element volume, and `A` a boundary-face area:
 //!
 //! ```text
-//!   element conduction   K^e_ab = V · gᵀ_a K(T̄_e) g_b
+//!   element conduction   K^e_ab = V · gᵀ_a <K(T_h)>_e g_b
 //!   element source       b^e_a  = Σ_b  V (1 + δ_ab)/20 · f_b
 //!   face Neumann         b^F_a −= Σ_b  A (1 + δ_ab)/12 · q_b
 //!   face Robin (matrix)  R^F_ab = Σ_c h_c ∫_F λ_a λ_b λ_c dA
@@ -21,11 +21,14 @@
 //! wall temperature and reference temperature. It is exact for independently
 //! P₁ `h` and `T_ref`. All four rules are stated in `CONTRACT.md`.
 //!
-//! `K` is evaluated ONCE per element at `T̄_e`, the element mean of the
-//! P₁ iterate — which for P₁ is the EXACT element average of `T_h`, not
-//! an approximation of it. For `k` linear in `T` the resulting element
-//! integral `V·k(T̄_e)` equals `∫_e k(T_h) dV` exactly; for a curved
-//! `k(T)` it is the midpoint rule, second-order in the element diameter.
+//! `<K(T_h)>_e` integrates the retained piecewise-linear material law over
+//! the whole P₁ field, including every crossed material knot. A positive
+//! B-spline moment rule is polynomial-exact up to roundoff, without geometric
+//! subdivision. Constant and single-segment laws retain their fast mean rule.
+//! The consistent material tangent uses `<λ_c K'(T_h)>_e` independently for
+//! each local column; replacing it by `K'(T̄_e)/4` would be wrong across knots.
+//! This removes constitutive integration error, not P₁ spatial discretization
+//! error, and does not certify floating-point roundoff.
 //!
 //! # Cancellation
 //!
@@ -42,7 +45,7 @@ use crate::ConductionError;
 use crate::bc::{ThermalBc, ThermalBoundary};
 use crate::field::ScalarField;
 use crate::interface::ThermalInterfaces;
-use crate::material::{ConductivityModel, ElementMaterials};
+use crate::material::{ConductivityModel, ElementConductivity, ElementMaterials};
 use crate::mesh::ConductionMesh;
 
 /// Elements (or faces) processed between cancellation polls.
@@ -220,23 +223,20 @@ fn conductivity_model<'a>(
     }
 }
 
-/// Check the whole P1 temperature field before evaluating its element mean.
-/// A linear field attains its extrema at the vertices, so checking all four
-/// values admits the entire tetrahedron without adding quadrature or allocation.
-/// Callers validate the field length before entering their element loop.
-pub(crate) fn checked_element_temperature(
+/// Shared constitutive moments for the operator, its tangent, mean flux and
+/// fixed-state material pullbacks. Callers validate the full field length.
+/// The model checks every vertex against its source span, admitting the whole
+/// linear field without allowing a supported mean to hide an invalid extremum.
+pub(crate) fn checked_element_conductivity(
+    cx: Option<&Cx<'_>>,
     mesh: &ConductionMesh,
     element: usize,
     material: &ConductivityModel,
     temperature: &[f64],
-) -> Result<f64, ConductionError> {
-    let span = material.temperature_span();
-    for &vertex in &mesh.complex().tets[element] {
-        let value = temperature[vertex as usize];
-        crate::require_finite("temperature iterate", value)?;
-        span.check(value)?;
-    }
-    Ok(element_temperature(mesh, element, temperature))
+    with_derivatives: bool,
+) -> Result<ElementConductivity, ConductionError> {
+    let nodal = mesh.complex().tets[element].map(|vertex| temperature[vertex as usize]);
+    material.p1_conductivity(cx, nodal, with_derivatives)
 }
 
 /// Assemble `A(T)` and the load `b`.
@@ -322,7 +322,7 @@ pub fn assemble_operator_with_element_materials(
 }
 
 /// [`assemble_operator`] with an optional per-element multiplier on the
-/// conduction block: `K_e ← ρ_e · K(T̄_e)`.
+/// conduction block: `K_e ← ρ_e · <K(T_h)>_e`.
 ///
 /// This is the design-parameterized form the adjoint path differentiates
 /// (and the shape a density/SIMP thermal topology study wants). `ρ` does
@@ -402,8 +402,8 @@ pub(crate) fn assemble_operator_scaled_with_interfaces(
         for e in start..end {
             let tet = mesh.complex().tets[e];
             let model = conductivity_model(material, element_materials, e)?;
-            let t_e = checked_element_temperature(mesh, e, model, temperature)?;
-            let k = model.tensor_at(t_e)?;
+            let k =
+                checked_element_conductivity(Some(cx), mesh, e, model, temperature, false)?.tensor;
             let mut ke = element_stiffness(mesh, e, &k);
             if let Some(scale) = element_scale {
                 for row in &mut ke {
@@ -525,7 +525,7 @@ fn assemble_boundary(
 
 /// Assemble the Newton Jacobian `J = ∂R/∂T` of `R(T) = A(T)T − b`.
 ///
-/// `J^e_ac = V (gᵀ_a K g_c) + (V/4) (gᵀ_a K'(T̄_e) ∇T_h)` plus the
+/// `J^e_ac = V gᵀ_a <K> g_c + V gᵀ_a <λ_c K'> ∇T_h` plus the
 /// (temperature-independent) Robin block. The second term is what makes
 /// `J` NONSYMMETRIC, which is why the Newton path runs FGMRES rather
 /// than CG.
@@ -613,7 +613,7 @@ pub(crate) fn assemble_jacobian_with_optional_interfaces(
     )
 }
 
-/// Spatial enthalpy tangent for `K_e = s_e(h) K_base(T_bar_e(h))`.
+/// Spatial enthalpy tangent for `K_e = s_e(h) <K_base(T_h(h))>_e`.
 ///
 /// Each conductive entry is `s_e J_T,ac T'_c + r_base,a s'_e,c`, where
 /// `r_base = K_base^e T` is the unscaled element conductive residual. The
@@ -754,9 +754,9 @@ fn assemble_transport_jacobian(
         for e in start..end {
             let tet = mesh.complex().tets[e];
             let model = conductivity_model(material, element_materials, e)?;
-            let t_e = checked_element_temperature(mesh, e, model, temperature)?;
-            let k = model.tensor_at(t_e)?;
-            let ke = element_stiffness(mesh, e, &k);
+            let moments =
+                checked_element_conductivity(Some(cx), mesh, e, model, temperature, true)?;
+            let ke = element_stiffness(mesh, e, &moments.tensor);
             let scale = element_scales.map_or(1.0, |scales| scales[e]);
             for a in 0..4 {
                 for b in 0..4 {
@@ -780,10 +780,9 @@ fn assemble_transport_jacobian(
                     }
                 }
             }
-            if !model.is_temperature_dependent() {
+            if moments.derivatives == [[[0.0; 3]; 3]; 4] {
                 continue;
             }
-            let kp = model.tensor_derivative_at(t_e)?;
             let g = &mesh.geometry().grads[e];
             let volume = mesh.element_volume(e);
             // ∇T_h on this element (constant).
@@ -794,16 +793,20 @@ fn assemble_transport_jacobian(
                     grad_t[i] = tb.mul_add(gb[i], grad_t[i]);
                 }
             }
-            // K'·∇T_h.
-            let mut kpg = [0.0f64; 3];
-            for (i, v) in kpg.iter_mut().enumerate() {
-                *v = kp[i][0].mul_add(grad_t[0], kp[i][1].mul_add(grad_t[1], kp[i][2] * grad_t[2]));
+            // <λ_c K'(T_h)>·∇T_h. Distinct columns are necessary when
+            // the P1 field crosses a source knot.
+            let mut kpg = [[0.0f64; 3]; 4];
+            for (column, kp) in kpg.iter_mut().zip(moments.derivatives) {
+                for (i, value) in column.iter_mut().enumerate() {
+                    *value = kp[i][0]
+                        .mul_add(grad_t[0], kp[i][1].mul_add(grad_t[1], kp[i][2] * grad_t[2]));
+                }
             }
             for a in 0..4 {
-                let ga_kpg = g[a][0].mul_add(kpg[0], g[a][1].mul_add(kpg[1], g[a][2] * kpg[2]));
-                let contribution = volume * ga_kpg / 4.0;
                 for c in 0..4 {
-                    let mut entry = contribution;
+                    let ga_kpg =
+                        g[a][0].mul_add(kpg[c][0], g[a][1].mul_add(kpg[c][1], g[a][2] * kpg[c][2]));
+                    let mut entry = volume * ga_kpg;
                     if let Some(slopes) = temperature_derivatives {
                         entry *= scale;
                         entry *= slopes[tet[c] as usize];

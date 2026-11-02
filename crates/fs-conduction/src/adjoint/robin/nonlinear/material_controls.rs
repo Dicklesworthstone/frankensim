@@ -1,10 +1,9 @@
 //! Material-law controls of an already solved complete thermal adjoint.
 //! This is the conduction-block contraction, not another state/adjoint solve.
 
-use super::{ConductionError, ConductionProblem, Cx, checked, invalid,
-    material_is_smooth, poll};
 use super::super::{RobinResponse, vector};
-use crate::assemble::{element_stiffness, element_temperature};
+use super::{ConductionError, ConductionProblem, Cx, checked, invalid, material_is_smooth, poll};
+use crate::assemble::{checked_element_conductivity, element_stiffness};
 
 impl RobinResponse {
     /// Pull a complete nodal-load adjoint back to independent conductivity scales.
@@ -26,13 +25,14 @@ impl RobinResponse {
     /// must add that direct term separately.
     ///
     /// The fixed-state partial uses the production element stiffness at the
-    /// production element temperature. It does NOT insert K'(T) a second time:
+    /// integrated material tensor. It does NOT insert K'(T) a second time:
     /// the full state Jacobian already accounts for it. All prescribed
     /// temperatures remain in the primal vector and their adjoint entries must
     /// be zero, retaining the material-dependent Dirichlet lift exactly once.
     /// Effective element assignments override the fallback model.
     ///
-    /// O(elements + vertices) work, one bounded element-result vector; no global matrix,
+    /// Work scales with elements, vertices and crossed material knots; one
+    /// bounded element-result vector, no global matrix,
     /// degree-of-freedom allocation or additional solve.
     /// max_elements bounds the output/traversal, not total allocator/RSS.
     /// Results are Estimated local model derivatives, not error certificates.
@@ -42,14 +42,19 @@ impl RobinResponse {
     /// adjoint entries, material kinks/domains, nonfinite arithmetic, exhausted
     /// element allowance, allocation failure, or cancellation.
     pub fn conductivity_scale_pullback(
-        cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64],
-        nodal_load_adjoint: &[f64], max_elements: usize,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        temperature: &[f64],
+        nodal_load_adjoint: &[f64],
+        max_elements: usize,
     ) -> Result<Vec<f64>, ConductionError> {
         poll(cx, 0)?;
         let n = problem.mesh.vertex_count();
         let ne = problem.mesh.element_count();
         if ne > max_elements {
-            return Err(invalid("conductivity-scale pullback exceeds the element allowance"));
+            return Err(invalid(
+                "conductivity-scale pullback exceeds the element allowance",
+            ));
         }
         vector(cx, temperature, n)?;
         vector(cx, nodal_load_adjoint, n)?;
@@ -59,14 +64,19 @@ impl RobinResponse {
         for &(v, prescribed) in problem.boundary.dirichlet() {
             poll(cx, v)?;
             if v >= n || temperature[v] != prescribed || nodal_load_adjoint[v] != 0.0 {
-                return Err(invalid("conductivity-scale pullback requires the unchanged prescribed values and zero fixed-node dual"));
+                return Err(invalid(
+                    "conductivity-scale pullback requires the unchanged prescribed values and zero fixed-node dual",
+                ));
             }
         }
         if !material_is_smooth(cx, problem, temperature)? {
-            return Err(invalid("conductivity-scale pullback cannot choose a total derivative at a material kink or validity endpoint"));
+            return Err(invalid(
+                "conductivity-scale pullback cannot choose a total derivative at a material kink or validity endpoint",
+            ));
         }
         let mut result = Vec::new();
-        result.try_reserve_exact(ne)
+        result
+            .try_reserve_exact(ne)
             .map_err(|_| invalid("conductivity-scale result allocation refused"))?;
         for (e, tet) in problem.mesh.complex().tets.iter().enumerate() {
             poll(cx, e)?;
@@ -74,14 +84,17 @@ impl RobinResponse {
                 Some(materials) => materials.model_for(e)?,
                 None => problem.material,
             };
-            let sample = checked(element_temperature(problem.mesh, e, temperature))?;
-            let tensor = model.tensor_at(sample)?;
+            let tensor =
+                checked_element_conductivity(Some(cx), problem.mesh, e, model, temperature, false)?
+                    .tensor;
             let stiffness = element_stiffness(problem.mesh, e, &tensor);
             let mut value = 0.0;
             for (a, &v) in tet.iter().enumerate() {
                 for (b, &w) in tet.iter().enumerate() {
-                    let contribution = checked(checked(nodal_load_adjoint[v as usize]
-                        * checked(stiffness[a][b])?)? * temperature[w as usize])?;
+                    let contribution = checked(
+                        checked(nodal_load_adjoint[v as usize] * checked(stiffness[a][b])?)?
+                            * temperature[w as usize],
+                    )?;
                     value = checked(value - contribution)?;
                 }
             }

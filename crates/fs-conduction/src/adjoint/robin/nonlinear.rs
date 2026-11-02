@@ -5,25 +5,29 @@
 use fs_solver::{FgmresState, LinearOp};
 use fs_sparse::{Csr, ops};
 
-use super::{ConductionError, ConductionProblem, Cx, DofMap, LinearConfig,
-    ThermalInterfaces, checked, failed, invalid, poll, true_residual};
-use crate::assemble::{assemble_jacobian_with_optional_interfaces, element_temperature,
-    reduce_matrix_and_lift};
+use super::{
+    ConductionError, ConductionProblem, Cx, DofMap, LinearConfig, ThermalInterfaces, checked,
+    failed, invalid, poll, true_residual,
+};
+use crate::assemble::{assemble_jacobian_with_optional_interfaces, reduce_matrix_and_lift};
 
 mod mean_feedback;
 pub use mean_feedback::MeanFluxFeedback;
-mod mean_feedback_goal;
-mod material_controls;
-mod prescribed;
 mod contact;
+mod material_controls;
+mod mean_feedback_goal;
+mod prescribed;
 
 pub(super) struct TangentSystem {
     transpose: Csr,
     pub(super) smooth: bool,
 }
 
-pub(crate) fn material_is_smooth(cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64])
-    -> Result<bool, ConductionError> {
+pub(crate) fn material_is_smooth(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    temperature: &[f64],
+) -> Result<bool, ConductionError> {
     let mut smooth = true;
     for element in 0..problem.mesh.element_count() {
         poll(cx, element)?;
@@ -31,35 +35,29 @@ pub(crate) fn material_is_smooth(cx: &Cx<'_>, problem: ConductionProblem<'_>, te
             Some(assigned) => assigned.model_for(element)?,
             None => problem.material,
         };
-        if !model.is_temperature_dependent() { continue; }
-        let t = checked(element_temperature(problem.mesh, element, temperature))?;
-        let slope = model.tensor_derivative_at(t)?;
-        for row in slope { for value in row { checked(value)?; } }
-        // The producer's piecewise-linear tables select the right segment at
-        // a knot. Neighbouring representable temperatures expose a change of
-        // slope or a validity endpoint without finite-differencing the PDE.
-        // Equal slopes across a redundant knot remain differentiable.
-        for neighbour in [t.next_down(), t.next_up()] {
-            match model.tensor_derivative_at(neighbour) {
-                Ok(other) => {
-                    for row in other { for value in row { checked(value)?; } }
-                    smooth &= slope == other;
-                }
-                Err(ConductionError::OutsideTemperatureSpan { .. }) => smooth = false,
-                Err(error) => return Err(error),
-            }
-        }
+        let nodal = problem.mesh.complex().tets[element].map(|v| temperature[v as usize]);
+        smooth &= model.p1_is_smooth(nodal)?;
     }
     Ok(smooth)
 }
 
 pub(super) fn prepare(
-    cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
-    temperature: &[f64], dofs: &DofMap,
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
+    temperature: &[f64],
+    dofs: &DofMap,
 ) -> Result<(Csr, TangentSystem), ConductionError> {
     let smooth = material_is_smooth(cx, problem, temperature)?;
-    let full = assemble_jacobian_with_optional_interfaces(cx, problem.mesh,
-        problem.boundary, problem.material, temperature, interfaces, problem.element_materials)?;
+    let full = assemble_jacobian_with_optional_interfaces(
+        cx,
+        problem.mesh,
+        problem.boundary,
+        problem.material,
+        temperature,
+        interfaces,
+        problem.element_materials,
+    )?;
     // Prescribed temperatures have zero perturbation: discard the PRIMAL lift.
     let (jacobian, _) = reduce_matrix_and_lift(&full, dofs);
     poll(cx, 0)?;
@@ -84,16 +82,27 @@ impl super::RobinResponse {
     /// other guarantees and limitations are those of `pullback_mean_robin`.
     #[allow(clippy::too_many_arguments)]
     pub fn pullback_mean_robin_at(
-        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
-        linear: LinearConfig, temperature: &[f64], regions: &[&str],
-        points: &[[f64; 4]], nodal_weights: &[f64], max_feedback_entries: usize,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig,
+        temperature: &[f64],
+        regions: &[&str],
+        points: &[[f64; 4]],
+        nodal_weights: &[f64],
+        max_feedback_entries: usize,
     ) -> Result<super::RobinGradient, ConductionError> {
         poll(cx, 0)?;
         let n = problem.mesh.vertex_count();
-        if regions.len() != points.len() || regions.len() > 64
-            || n.checked_mul(2).and_then(|v| v.checked_mul(regions.len()))
-                .is_none_or(|v| v > max_feedback_entries) {
-            return Err(invalid("mean-Robin law points must match at most 64 regions within the factor-entry budget"));
+        if regions.len() != points.len()
+            || regions.len() > 64
+            || n.checked_mul(2)
+                .and_then(|v| v.checked_mul(regions.len()))
+                .is_none_or(|v| v > max_feedback_entries)
+        {
+            return Err(invalid(
+                "mean-Robin law points must match at most 64 regions within the factor-entry budget",
+            ));
         }
         let mut rows = Vec::with_capacity(points.len());
         let mut slopes = Vec::with_capacity(points.len());
@@ -101,7 +110,11 @@ impl super::RobinResponse {
         for (&name, point) in regions.iter().zip(points) {
             poll(cx, rows.len())?;
             super::vector(cx, point, 4)?;
-            let region = problem.boundary.region_names().iter().position(|v| v == name)
+            let region = problem
+                .boundary
+                .region_names()
+                .iter()
+                .position(|v| v == name)
                 .ok_or_else(|| invalid("unknown mean-Robin law region"))?;
             rows.push((region, point[0], point[1]));
             slopes.push(point[2]);
@@ -109,9 +122,22 @@ impl super::RobinResponse {
         }
         let boundary = problem.boundary.with_uniform_robin_replacements(&rows)?;
         poll(cx, 0)?;
-        let rebound = ConductionProblem { boundary: &boundary, ..problem };
-        Self::pullback_mean_robin(cx, rebound, interfaces, linear, temperature, regions,
-            &slopes, &reference_slopes, nodal_weights, max_feedback_entries)
+        let rebound = ConductionProblem {
+            boundary: &boundary,
+            ..problem
+        };
+        Self::pullback_mean_robin(
+            cx,
+            rebound,
+            interfaces,
+            linear,
+            temperature,
+            regions,
+            &slopes,
+            &reference_slopes,
+            nodal_weights,
+            max_feedback_entries,
+        )
     }
 
     /// Crate-private constructor for the actual backward-Euler producer. The
@@ -119,51 +145,98 @@ impl super::RobinResponse {
     /// External callers cannot attach a fabricated public StepSolution here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn for_endpoint(
-        cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
         primal: &crate::transient::backward_euler::StepSolution,
-        matrix: Csr, dofs: DofMap, linear: LinearConfig, regions: &[&str],
+        matrix: Csr,
+        dofs: DofMap,
+        linear: LinearConfig,
+        regions: &[&str],
     ) -> Result<Self, ConductionError> {
         super::admit_linear(linear)?;
         super::vector(cx, &primal.temperature, problem.mesh.vertex_count())?;
         let ports = super::bind_ports(cx, problem, regions)?;
         let nonlinear = if super::temperature_dependent(cx, problem)? {
-            if linear.restart == 0 { return Err(invalid("transient tangent requires a positive FGMRES restart")); }
-            Some(TangentSystem { transpose: ops::transpose(&matrix),
-                smooth: material_is_smooth(cx, problem, &primal.temperature)? })
-        } else { None };
+            if linear.restart == 0 {
+                return Err(invalid(
+                    "transient tangent requires a positive FGMRES restart",
+                ));
+            }
+            Some(TangentSystem {
+                transpose: ops::transpose(&matrix),
+                smooth: material_is_smooth(cx, problem, &primal.temperature)?,
+            })
+        } else {
+            None
+        };
         poll(cx, 0)?;
-        Ok(Self { temperature: primal.temperature.clone(), robin_fluxes: primal.robin_fluxes.clone(),
-            matrix, dofs, ports, linear, nonlinear })
+        Ok(Self {
+            temperature: primal.temperature.clone(),
+            robin_fluxes: primal.robin_fluxes.clone(),
+            matrix,
+            dofs,
+            ports,
+            linear,
+            nonlinear,
+        })
     }
 }
 
 /// Borrow both orientations, avoiding a matrix/transpose clone per derivative.
-struct Oriented<'a> { forward: &'a Csr, reverse: &'a Csr }
+struct Oriented<'a> {
+    forward: &'a Csr,
+    reverse: &'a Csr,
+}
 impl LinearOp for Oriented<'_> {
-    fn n(&self) -> usize { self.forward.nrows() }
-    fn apply(&self, x: &[f64], y: &mut [f64]) { self.forward.spmv(x, y); }
-    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.reverse.spmv(x, y); }
+    fn n(&self) -> usize {
+        self.forward.nrows()
+    }
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        self.forward.spmv(x, y);
+    }
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.reverse.spmv(x, y);
+    }
 }
 
 impl TangentSystem {
     pub(super) fn solve(
-        &self, cx: &Cx<'_>, jacobian: &Csr, dofs: &DofMap, config: LinearConfig,
-        full_rhs: &[f64], transposed: bool,
+        &self,
+        cx: &Cx<'_>,
+        jacobian: &Csr,
+        dofs: &DofMap,
+        config: LinearConfig,
+        full_rhs: &[f64],
+        transposed: bool,
     ) -> Result<(Vec<f64>, f64, usize), ConductionError> {
         poll(cx, 0)?;
         if !self.smooth {
-            return Err(invalid("material tangent lies at a slope discontinuity or sampled validity endpoint; no unique two-sided derivative is returned"));
+            return Err(invalid(
+                "material tangent lies at a slope discontinuity or sampled validity endpoint; no unique two-sided derivative is returned",
+            ));
         }
         if config.restart == 0 || config.max_iterations == 0 {
-            return Err(invalid("positive nonlinear tangent restart and Krylov iteration budget required"));
+            return Err(invalid(
+                "positive nonlinear tangent restart and Krylov iteration budget required",
+            ));
         }
         let rhs = dofs.gather(full_rhs);
         let scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        if scale == 0.0 { return Ok((vec![0.0; full_rhs.len()], 0.0, 0)); }
+        if scale == 0.0 {
+            return Ok((vec![0.0; full_rhs.len()], 0.0, 0));
+        }
         let normalized: Vec<f64> = rhs.iter().map(|v| v / scale).collect();
         let operator = if transposed {
-            Oriented { forward: &self.transpose, reverse: jacobian }
-        } else { Oriented { forward: jacobian, reverse: &self.transpose } };
+            Oriented {
+                forward: &self.transpose,
+                reverse: jacobian,
+            }
+        } else {
+            Oriented {
+                forward: jacobian,
+                reverse: &self.transpose,
+            }
+        };
         let preconditioner = crate::solve::spd_preconditioner(operator.forward);
         // At most 64 Arnoldi columns between checkpoint boundaries. This is
         // a ceiling on the caller's restart, not a silent larger work budget.
@@ -176,11 +249,15 @@ impl TangentSystem {
             // final cycle enforces the exact INNER-iteration budget.
             state.restart = restart.min(config.max_iterations - before);
             state.run(&operator, &preconditioner, &normalized, config.tolerance, 1);
-            if state.iters == before { break; }
+            if state.iters == before {
+                break;
+            }
         }
         poll(cx, state.iters)?;
         let residual = true_residual(operator.forward, &state.x, &normalized)?;
-        if residual >= config.tolerance { return Err(failed(state.iters, residual, config)); }
+        if residual >= config.tolerance {
+            return Err(failed(state.iters, residual, config));
+        }
         let mut full = vec![0.0; full_rhs.len()];
         for (index, &vertex) in dofs.free().iter().enumerate() {
             poll(cx, index)?;
