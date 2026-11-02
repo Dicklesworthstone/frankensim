@@ -1268,7 +1268,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                     continue;
                                 }
                             };
-                        let acceptable = if pending_any {
+                        let mut acceptable = if pending_any {
                             true
                         } else if !nonsymmetric && slope < 0.0 {
                             // Compare work increments rather than subtracting
@@ -1346,6 +1346,34 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             };
                             norm(&trial_residual) < target
                         };
+                        // Tiny-strain stored energies can lose the last Newton
+                        // decrement to constitutive cancellation. An already
+                        // converged momentum state needs no resolvable Armijo
+                        // decrement. Recompute the ORIGINAL true force gate at
+                        // this trial, with fully applied supports and native
+                        // inertia/load normalization; do not relax its tolerance.
+                        // The next outer iteration still certifies convergence.
+                        if !acceptable
+                            && !pending_any
+                            && target.iter().all(|&(dof, value)| trial[dof] == value)
+                            && let Some(inertia) = inertia
+                        {
+                            let trial_residual: Vec<f64> = free
+                                .iter()
+                                .map(|&d| evaluated.internal[d] - trial_ext[d])
+                                .collect();
+                            let trial_scale = inertia
+                                .force_scale(
+                                    &trial,
+                                    &free,
+                                    trial_material_free_norm,
+                                    free_force_norm(&trial_ext, &free),
+                                    cx,
+                                )
+                                .map_err(inertia_error)?;
+                            acceptable = norm(&trial_residual) / trial_scale
+                                <= self.settings.relative_tolerance;
+                        }
                         if acceptable {
                             accepted = Some((
                                 trial,

@@ -3408,8 +3408,53 @@ rollback and deterministic retry. `cargo run -p fs-solid --example
 viscoelastic_creep` reports extension, maintained force, storage, interval loss
 and endpoint defect for an explicitly synthetic constrained-lateral coupon.
 
-Scope is isothermal quasistatic finite-bulk P1 tetrahedra. Volumetric locking is
-not mitigated; this is not the Taylor–Hood mixed/incompressible formulation from
-IRP M1.3-W2b. Inertia, contact, evolving temperature, source-parameter resolution,
+The base `FiniteViscoTetSolid::advance` path is isothermal quasistatic finite-bulk
+P1 tetrahedra. Volumetric locking is not mitigated; this is not the Taylor–Hood
+mixed/incompressible formulation from IRP M1.3-W2b. The motion owner below adds
+inertia. Contact, evolving temperature, source-parameter resolution, general
 time/mesh convergence and experimental qualification require their respective
 owners and evidence. No closure of that full mixed-element bead is claimed.
+
+### Native motion with retained viscoelastic memory
+
+`hyper3::visco::dynamics::FiniteViscoTetMotion::try_new` binds the complete
+accepted solid to explicit original reference density and initial nodal velocity.
+Consistent `P1ReferenceMass` is prepared once and shared between candidates;
+current volume and viscous deformation do not change mass. Previously relaxed
+or deformed material histories and elapsed time are retained.
+
+`advance` uses the same positive physical interval for the native branch update
+and `BackwardEulerInertia`. The original hyper3 Newton owner assembles material
+and inertial forces/tangents together, uses its physical free-row momentum
+stopping rule, and includes consistent-mass coupling in support reactions.
+Free bodies require no artificial supports. There is no alternate motion solver
+or lumped-mass approximation. The quasistatic endpoint remains unchanged when
+inertia is absent; its zero-time elastic jump remains available.
+
+Tiny-strain energy subtraction can obscure a final Newton decrement. An
+otherwise rejected inertial trial may be accepted only when its supports are
+fully applied and its actual free-force residual already satisfies the original
+convergence gate using the trial's native material/inertia/load normalization.
+The next Newton iteration still certifies that same gate. No residual tolerance,
+material-domain condition or physical work allowance is relaxed.
+
+The returned step distinguishes physical stored-energy change, native viscous
+loss, signed material endpoint defect, kinetic-energy change, nonnegative
+backward-Euler numerical kinetic loss, and momentum/kinetic balance residuals.
+Their sum closes actual applied/support endpoint work. Numerical kinetic loss
+has its own finite caller allowance and is never material heat. A refused solve,
+work gate, numerical-loss budget or cancellation returns no next motion and
+leaves displacement, velocity, time, original mass and all viscous histories
+unchanged. Dead loads are held over each interval; no follower/contact load,
+mass transfer or automatic thermal coupling is introduced.
+
+`tests/hyper_visco_dynamics.rs` checks unconstrained rigid acceleration against
+the independent discrete momentum solution; a deforming oscillator against
+the small-strain scalar Maxwell/backward-Euler recurrence with the original
+consistent mass; three timestep rungs against the continuous elastic oscillator;
+and post-solve kinetic-budget rollback with deterministic retry. The comparison
+explicitly bounds the small finite-strain correction. These are local model/time
+checks, not a general finite-strain trajectory or spatial-convergence certificate.
+`cargo run -p fs-solid --example viscoelastic_creep -- --dynamic` releases a
+synthetic initially stretched coupon and reports displacement, velocity,
+physical storage/kinetic energy, viscous loss and both numerical work terms.

@@ -8,9 +8,10 @@
 //!
 //! Native frozen-state loading work is distinct from nodal endpoint work.
 //! Their signed integration discrepancy is never viscous heat. Isothermal
-//! quasistatics, finite bulk modulus and P1 tetrahedra only: this path does not
-//! mitigate volumetric locking or provide mixed incompressibility, inertia,
-//! contact, evolving temperature or source-parameter interpolation.
+//! finite bulk modulus and P1 tetrahedra only: this path does not mitigate
+//! volumetric locking or provide mixed incompressibility, contact, evolving
+//! temperature or source-parameter interpolation. [`dynamics`] adds consistent
+//! reference inertia to the same endpoint solve and retained material history.
 
 use std::sync::Arc;
 
@@ -25,6 +26,11 @@ use super::{
     HyperelasticLawField, checkpoint,
 };
 use crate::linear3::TetAssemblyBudget;
+
+/// Native finite-deformation motion with distinct physical and numerical losses.
+pub mod dynamics;
+
+type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy);
 
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
@@ -71,7 +77,9 @@ pub struct FiniteViscoTetEnergy {
     pub internal_endpoint_work_j: f64,
     pub dead_load_endpoint_work_j: f64,
     pub support_endpoint_work_j: f64,
-    /// Dead-load plus support work minus internal endpoint work.
+    /// Inertial endpoint work; zero for quasistatic intervals.
+    pub inertial_endpoint_work_j: f64,
+    /// Dead-load plus support work minus internal and inertial endpoint work.
     pub equilibrium_work_residual_j: f64,
     /// Internal endpoint work minus physical storage change and native loss.
     /// Signed quadrature error, reported and gated separately from dissipation.
@@ -302,6 +310,31 @@ impl<'a> FiniteViscoTetSolid<'a> {
         controls: FiniteViscoStepControls,
         cx: &Cx<'_>,
     ) -> Result<FiniteViscoTetStep<'a>, FiniteViscoTetError> {
+        self.advance_loaded(
+            dt_s,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+        .map(|(step, _)| step)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_loaded(
+        &self,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        settings: HyperTetSettings,
+        controls: FiniteViscoStepControls,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<(FiniteViscoTetStep<'a>, Option<AcceptedMotion>), FiniteViscoTetError> {
         checkpoint(cx)?;
         let time_s = self.time_s + dt_s;
         if !dt_s.is_finite()
@@ -335,13 +368,19 @@ impl<'a> FiniteViscoTetSolid<'a> {
             Some(&self.elements),
             None,
             None,
-            None,
+            inertia,
             cx,
         )?;
         let u = equilibrium.displacement_m.as_flattened();
         let old_u = self.displacement_m.as_flattened();
+        let motion = inertia
+            .map(|owner| owner.motion(u, cx).map_err(super::inertia_error))
+            .transpose()?;
         let mut energy = FiniteViscoTetEnergy {
             stored_before_j: self.stored_energy_j,
+            inertial_endpoint_work_j: motion
+                .as_ref()
+                .map_or(0.0, |(_, account)| account.inertial_work_j),
             ..Default::default()
         };
         let mut states = Vec::with_capacity(self.states.len());
@@ -391,7 +430,8 @@ impl<'a> FiniteViscoTetSolid<'a> {
             energy.native_loading_work_j - stored_change - energy.dissipated_j;
         energy.equilibrium_work_residual_j = energy.dead_load_endpoint_work_j
             + energy.support_endpoint_work_j
-            - energy.internal_endpoint_work_j;
+            - energy.internal_endpoint_work_j
+            - energy.inertial_endpoint_work_j;
         energy.endpoint_work_defect_j =
             energy.internal_endpoint_work_j - stored_change - energy.dissipated_j;
         energy_gate(
@@ -435,10 +475,13 @@ impl<'a> FiniteViscoTetSolid<'a> {
             stored_energy_j: energy.stored_after_j,
             time_s,
         };
-        Ok(FiniteViscoTetStep {
-            solid,
-            equilibrium,
-            energy,
-        })
+        Ok((
+            FiniteViscoTetStep {
+                solid,
+                equilibrium,
+                energy,
+            },
+            motion,
+        ))
     }
 }
