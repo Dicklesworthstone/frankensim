@@ -68,10 +68,10 @@ impl ShearChannelReport {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Coefficients {
-    lower_fraction: f64,
-    upper_fraction: f64,
+    mean_velocity: Vec<f64>,
+    relative_velocity: Vec<f64>,
     shear_scale: f64,
     moving: bool,
 }
@@ -83,6 +83,11 @@ struct Coefficients {
 /// At fixed geometry the complete velocity resistance is reciprocal and
 /// nonnegative. A normal-pressure force without the wall tractions is not the
 /// operator represented here.
+///
+/// Mean and relative wall rows are compiled before evaluating velocity. Small
+/// sliding coordinates therefore survive a large shared translation, and
+/// pressure/shear tractions use those same rows for reciprocal projection.
+/// Unrepresentable derived rows refuse at construction.
 #[derive(Debug, Clone)]
 pub struct ShearedFilm {
     film: ResistiveFilm,
@@ -138,6 +143,28 @@ impl ShearedFilm {
                 Some(profiles) => profile_coefficients(&profiles[i])?,
                 None => (0.5, 0.5, film.channel_viscosities_pa_s()[i]),
             };
+            let mut mean_velocity = Vec::with_capacity(film.ports);
+            let mut relative_velocity = Vec::with_capacity(film.ports);
+            let combined_weight = lower_fraction + upper_fraction;
+            for (&lower, &upper) in wall.lower.iter().zip(&wall.upper) {
+                let relative = upper - lower;
+                if !relative.is_finite() {
+                    return fail("relative wall velocity row is not representable");
+                }
+                // A fused interpolation from the smaller-magnitude endpoint
+                // avoids losing equal subnormal rows or overflowing a finite
+                // weighted mean through a larger intermediate endpoint.
+                let mean = if lower.abs() <= upper.abs() {
+                    upper_fraction.mul_add(relative, combined_weight * lower)
+                } else {
+                    (-lower_fraction).mul_add(relative, combined_weight * upper)
+                };
+                if !mean.is_finite() {
+                    return fail("mean wall velocity row is not representable");
+                }
+                mean_velocity.push(mean);
+                relative_velocity.push(relative);
+            }
             let moving = wall.lower.iter().chain(&wall.upper).any(|&x| x != 0.0);
             let shear_scale = if moving {
                 // Pair the smallest/largest positive factors first so a finite
@@ -153,8 +180,8 @@ impl ShearedFilm {
                 0.0
             };
             coefficients.push(Coefficients {
-                lower_fraction,
-                upper_fraction,
+                mean_velocity,
+                relative_velocity,
                 shear_scale,
                 moving,
             });
@@ -238,7 +265,7 @@ impl ShearedFilm {
         let mut power = 0.0;
         for (k, edge) in self.film.channels.iter().enumerate() {
             let local = state.channels[k];
-            let coefficient = self.coefficients[k];
+            let coefficient = &self.coefficients[k];
             let dp = state.pressure.pressure[edge.from]
                 - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
             let pressure_flow = state.pressure.conductance[k] * dp;
@@ -248,10 +275,9 @@ impl ShearedFilm {
             let flow = pressure_flow + local.entrainment;
             if coefficient.moving {
                 let pressure_force = (edge.width_m * local.gap) * dp;
-                let lower = -coefficient.lower_fraction * pressure_force - shear_force;
-                let upper = -coefficient.upper_fraction * pressure_force + shear_force;
                 for (j, output) in candidate[..self.film.ports].iter_mut().enumerate() {
-                    *output += self.walls[k].lower[j] * lower + self.walls[k].upper[j] * upper;
+                    *output += -coefficient.mean_velocity[j] * pressure_force
+                        + coefficient.relative_velocity[j] * shear_force;
                 }
             }
             if !flow.is_finite()
@@ -328,7 +354,7 @@ impl ShearedFilm {
             .enumerate()
         {
             let local = state.channels[k];
-            let coefficient = self.coefficients[k];
+            let coefficient = &self.coefficients[k];
             let dh = -dot(&edge.gap.closure, dq);
             let dg = if local.gap > 0.0 {
                 3.0 * factor * local.gap * local.gap * dh
@@ -338,8 +364,7 @@ impl ShearedFilm {
             let dp = state.pressure.pressure[edge.from]
                 - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
             let entrainment_change = if coefficient.moving {
-                let mean_change = coefficient.lower_fraction * dot(&self.walls[k].lower, dv)
-                    + coefficient.upper_fraction * dot(&self.walls[k].upper, dv);
+                let mean_change = dot(&coefficient.mean_velocity, dv);
                 edge.width_m * (dh * local.mean_speed + local.gap * mean_change)
             } else {
                 0.0
@@ -359,7 +384,7 @@ impl ShearedFilm {
         let mut candidate = [0.0; MAX_PORTS];
         self.film.project(&rhs, &mut candidate);
         for (k, edge) in self.film.channels.iter().enumerate() {
-            let coefficient = self.coefficients[k];
+            let coefficient = &self.coefficients[k];
             if !coefficient.moving {
                 continue;
             }
@@ -368,14 +393,13 @@ impl ShearedFilm {
             let dp = state.pressure.pressure[edge.from]
                 - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
             let pressure_change = rhs[edge.from] - edge.to.map_or(0.0, |j| rhs[j]);
-            let relative_change = dot(&self.walls[k].upper, dv) - dot(&self.walls[k].lower, dv);
+            let relative_change = dot(&coefficient.relative_velocity, dv);
             let shear_change = (-local.drag * (dh / local.gap)) * local.relative_speed
                 + local.drag * relative_change;
             let pressure_force_change = edge.width_m * (dh * dp + local.gap * pressure_change);
-            let lower = -coefficient.lower_fraction * pressure_force_change - shear_change;
-            let upper = -coefficient.upper_fraction * pressure_force_change + shear_change;
             for (j, output) in candidate[..self.film.ports].iter_mut().enumerate() {
-                *output += self.walls[k].lower[j] * lower + self.walls[k].upper[j] * upper;
+                *output += -coefficient.mean_velocity[j] * pressure_force_change
+                    + coefficient.relative_velocity[j] * shear_change;
             }
         }
         if candidate[..self.film.ports].iter().any(|x| !x.is_finite()) {
@@ -395,7 +419,7 @@ impl ShearedFilm {
         let mut channels = [ChannelState::default(); MAX_CHANNELS];
         let mut entrainment = [0.0; MAX_CHANNELS];
         for (k, edge) in self.film.channels.iter().enumerate() {
-            let coefficient = self.coefficients[k];
+            let coefficient = &self.coefficients[k];
             let h = edge.gap.reference_m - dot(&edge.gap.closure, q);
             if !h.is_finite() || (coefficient.moving && h <= 0.0) {
                 return fail("sliding passage needs a finite positive gap");
@@ -404,10 +428,8 @@ impl ShearedFilm {
                 continue;
             }
             let (mean_speed, relative_speed, drag) = if coefficient.moving {
-                let lower = dot(&self.walls[k].lower, velocity);
-                let upper = dot(&self.walls[k].upper, velocity);
-                let mean = coefficient.lower_fraction * lower + coefficient.upper_fraction * upper;
-                let relative = upper - lower;
+                let mean = dot(&coefficient.mean_velocity, velocity);
+                let relative = dot(&coefficient.relative_velocity, velocity);
                 let drag = coefficient.shear_scale / h;
                 if !mean.is_finite() || !relative.is_finite() || !drag.is_finite() || drag <= 0.0 {
                     return fail("sliding velocity or shear resistance is not representable");

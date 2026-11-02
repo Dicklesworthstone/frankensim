@@ -431,6 +431,10 @@ fn unsupported_pressure_laws_collapsed_sliding_and_late_refusals_leave_outputs_u
     let mut invalid = vec![walls(1.0), walls(-1.0)];
     invalid[1].upper[2] = f64::NAN;
     assert!(ShearedFilm::new(base.clone(), invalid).is_err());
+    let mut unrepresentable = vec![walls(1.0), walls(-1.0)];
+    unrepresentable[0].lower[1] = -f64::MAX;
+    unrepresentable[0].upper[1] = f64::MAX;
+    assert!(ShearedFilm::new(base.clone(), unrepresentable).is_err());
     let barus = base.with_barus_viscosity(1e-4).unwrap();
     assert!(ShearedFilm::new(barus.clone(), vec![walls(1.0); 2]).is_err());
     assert!(
@@ -495,4 +499,78 @@ fn unsupported_pressure_laws_collapsed_sliding_and_late_refusals_leave_outputs_u
             .is_err()
     );
     assert_eq!(force, [42.0; 3]);
+}
+
+#[test]
+fn common_translation_does_not_erase_a_sub_ulp_sliding_coordinate_or_its_tangent() {
+    // G3: generalized coordinates retain a relative velocity even when adding
+    // it to either physical wall's common velocity rounds away that increment.
+    // Physical drag depends on the relative row, not subtraction of two rounded
+    // endpoint velocities. The two open channel halves keep pressure exactly zero.
+    let relative = 1e-17;
+    assert_eq!(1.0 + relative, 1.0);
+    let original_rows: Vec<_> = [1.0, -1.0]
+        .into_iter()
+        .map(|sign| WallVelocityPorts {
+            lower: vec![0.0, sign, 0.0],
+            upper: vec![0.0, sign, sign],
+        })
+        .collect();
+    for stratified in [false, true] {
+        let moving = if stratified {
+            ShearedFilm::from_stratified(
+                StratifiedFilm::new(&film(&[H, H]), vec![layers(), layers()]).unwrap(),
+                original_rows.clone(),
+            )
+            .unwrap()
+        } else {
+            ShearedFilm::new(film(&[H, H]), original_rows.clone()).unwrap()
+        };
+        assert_eq!(moving.wall_ports(), original_rows);
+        let shear_viscosity = if stratified {
+            1.0 / (0.5 / 0.01 + 0.5 / 0.04)
+        } else {
+            MU
+        };
+        let drag = W * L * shear_viscosity / H;
+        let expected_force = 2.0 * drag * relative;
+        let expected_power = expected_force * relative;
+        let mut reference = None;
+        for translation in [0.0, 1.0, -1.0] {
+            let velocity = [0.0, translation, relative];
+            let mut force = [0.0; 3];
+            let mut pressure = [0.0];
+            let report = moving
+                .evaluate_into(&[0.0; 3], &velocity, &mut force, &mut pressure)
+                .unwrap();
+            assert_eq!(pressure, [0.0]);
+            assert_eq!(force[0], 0.0);
+            assert_eq!(force[1], 0.0);
+            near(force[2], expected_force, expected_force * 1e-14);
+            near(
+                report.dissipated_power_w,
+                expected_power,
+                expected_power * 1e-14,
+            );
+            assert!(report.dissipated_power_w > 0.0);
+            if let Some((previous_force, previous_power)) = reference {
+                assert_eq!(force, previous_force);
+                assert_eq!(report.dissipated_power_w, previous_power);
+            }
+            reference = Some((force, report.dissipated_power_w));
+            let mut tangent = [0.0; 3];
+            moving
+                .tangent_into(
+                    &[0.0; 3],
+                    &velocity,
+                    &[0.0; 3],
+                    &[0.0, 1.0, relative],
+                    &mut tangent,
+                )
+                .unwrap();
+            assert_eq!(tangent[0], 0.0);
+            assert_eq!(tangent[1], 0.0);
+            near(tangent[2], expected_force, expected_force * 1e-14);
+        }
+    }
 }

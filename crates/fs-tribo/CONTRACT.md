@@ -19,12 +19,18 @@ operator and exact passage closure; channels with nonzero wall rows require
 positive aperture. Nonzero Barus coefficients explicitly refuse. Per-channel
 reports retain total flow, entrainment, pressure work and shear work.
 
+Mean and relative wall velocity rows are compiled once and reused in flow,
+force and tangent evaluation. A small relative sliding coordinate therefore
+survives a much larger common translation. Original wall rows remain queryable;
+unrepresentable derived rows refuse during construction.
+
 Profiles and wall rows are prescribed. Pressure-only layer work fractions
 do not partition combined Couette heat: layerwise pressure/shear cross
 terms generally do not cancel. This module introduces no thermal clock,
-advection, layer mass, slip, dry friction or evolving interfaces. Six focused
+advection, layer mass, slip, dry friction or evolving interfaces. Seven focused
 regressions cover native reduction, free and blocked Couette flow, layered
-quadrature, reciprocal work, analytic tangents and atomic refusal.
+quadrature, reciprocal work, analytic tangents, translation conditioning
+and atomic refusal.
 
 ## Accept independently resolved directional slip history
 
