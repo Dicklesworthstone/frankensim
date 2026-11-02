@@ -1773,13 +1773,31 @@ Actual normal-potential change minus that mechanical work is signed parameter
 work. This endpoint split is not an entropy calculation, thermal expansion,
 path-stability proof or autonomous caloric feedback.
 
-`SourceAdhesiveShear::rebind_jkr_temperature` continues the same selected
-junction-strength claims on this immutable normal successor. Its subsequent
-sliding/spinning patch uses the successor's actual solid radius and area;
-the earlier frozen-normal strength-only API remains a separate split. Five
-source groups in `tests/adhesive_temperature.rs` cover independent dimensional
-JKR force/area/potential, unequal temperatures, actuator work, claim pinning,
-source expiry, exact no-op receipts, branches, card roles and applicability.
+The same source/result owner refreshes `SourceDmtSphereContact` and
+`SourceMaugisSphereContact` without switching approximations. DMT retains its
+original attraction range and actual contact/gap/separated regime at held
+indentation; a finite attractive gap still has zero solid area. Its held-load
+entry remains on the stable contacting branch and reruns pull-off and low-Tabor
+admission. Maugis transfers the original immutable contact, noncontact or
+detached equilibrium token, reevaluates that same phase and retains its absolute
+elastic-plus-surface potential. Loss of a phase refuses; a no-op retains the
+exact original token and energy. Held-load Maugis refresh uses its original
+stable contact equilibrium and separately reports actuator work. Neither law
+silently creates shear area from an attractive annulus or assigns parameter
+work to heat.
+
+`SourceAdhesiveShear::{rebind_jkr_temperature,rebind_dmt_temperature,
+rebind_maugis_temperature}` continue the same selected junction-strength claims
+on their immutable normal successor. The subsequent sliding/spinning patch
+uses the successor's actual solid radius and area; the Maugis equilibrium entry
+also verifies its original model token and supplies exact zero area for its
+noncontact phases. The earlier frozen-normal strength-only API remains a
+separate split. Nine source groups in `tests/adhesive_temperature.rs` and its
+finite-range module cover independent dimensional JKR/DMT force/area/potential,
+Maugis finite-zone equations and deformed-gap energy, unequal temperatures,
+surface-potential parameter work, actuator work, original shear claims, zero
+annular shear, claim pinning, source expiry, exact no-op receipts, branch loss,
+foreign tokens, card roles and applicability.
 Native continuation and its complete storage accounting are exercised in
 `fs-mbd/tests/adhesive_thermal_normal.rs`.
 

@@ -10,7 +10,12 @@ use super::super::{
     AdhesiveShearError, KINETIC_JUNCTION_SHEAR_PROPERTY, STATIC_JUNCTION_SHEAR_PROPERTY,
     SourceAdhesiveShear,
 };
-use crate::normal_patch::adhesive::{SourceJkrSphereContact, temperature::SourceJkrThermalRefresh};
+use crate::interface_binding::BoundNormalInterfaceState;
+use crate::normal_patch::adhesive::{
+    SourceJkrSphereContact,
+    temperature::{SourceDmtThermalRefresh, SourceJkrThermalRefresh, SourceMaugisThermalRefresh},
+};
+use crate::normal_patch::{dmt::SourceDmtSphereContact, maugis::SourceMaugisSphereContact};
 
 impl SourceAdhesiveShear {
     /// Continue original junction-strength claims on an admitted JKR successor.
@@ -38,7 +43,53 @@ impl SourceAdhesiveShear {
                 reason: "thermal junction continuation requires its original JKR and shear owners",
             });
         }
-        let normal = refreshed.source().normal_state();
+        self.rebind_thermal_normal(refreshed.source().normal_state())
+    }
+
+    /// Continue the same junction claims on the original thermally updated DMT
+    /// law. Only its actual solid disk can carry shear; its attractive gap has
+    /// zero solid area regardless of the refreshed work of adhesion.
+    pub fn rebind_dmt_temperature(
+        &self,
+        original: &SourceDmtSphereContact,
+        refreshed: &SourceDmtThermalRefresh,
+    ) -> Result<Self, AdhesiveShearError> {
+        if self.normal_identity != original.normal_state().identity()
+            || refreshed.original_model_identity() != original.identity()
+            || refreshed.before().normal_state_identity() != self.normal_identity
+        {
+            return Err(AdhesiveShearError::Invalid {
+                reason: "thermal junction continuation requires its original DMT and shear owners",
+            });
+        }
+        self.rebind_thermal_normal(refreshed.source().normal_state())
+    }
+
+    /// Continue the original Maugis junction claims while retaining its complete
+    /// contacting/noncontacting phase. The cohesive annulus does not become a
+    /// shear-bearing disk when its temperature or attraction changes.
+    pub fn rebind_maugis_temperature(
+        &self,
+        original: &SourceMaugisSphereContact,
+        refreshed: &SourceMaugisThermalRefresh,
+    ) -> Result<Self, AdhesiveShearError> {
+        if self.normal_identity != original.normal_state().identity()
+            || refreshed.original_model_identity() != original.identity()
+            || refreshed.before().model_identity() != original.identity()
+        {
+            return Err(AdhesiveShearError::Invalid {
+                reason: "thermal junction continuation requires its original Maugis and shear owners",
+            });
+        }
+        self.rebind_thermal_normal(refreshed.source().normal_state())
+    }
+
+    // Public entries first establish the immutable original-model successor;
+    // this shared leaf resolves only the original pinned junction claims.
+    fn rebind_thermal_normal(
+        &self,
+        normal: &BoundNormalInterfaceState,
+    ) -> Result<Self, AdhesiveShearError> {
         let point = normal.interface_state();
         let resolved = if self.resolved.query_point() == point.query_point()
             && self.resolved.axis_quantities() == point.axis_quantities()

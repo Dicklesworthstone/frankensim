@@ -23,6 +23,11 @@ use crate::interface_binding::temperature::bind_isotropic_elastic_interface_at_t
 use crate::interface_binding::{
     BoundNormalInterfaceState, InterfaceBindingError, bind_normal_interface_state,
 };
+use crate::normal_patch::dmt::{DmtError, DmtResponse, SourceDmtSphereContact};
+use crate::normal_patch::maugis::continuation::{
+    MaugisContinuationError, MaugisEquilibrium, MaugisPhase,
+};
+use crate::normal_patch::maugis::{MaugisError, SourceMaugisSphereContact};
 
 /// Independently specified positive absolute temperatures, in kelvin.
 ///
@@ -151,6 +156,12 @@ impl<M, R> SourceAdhesiveThermalRefresh<M, R> {
 /// Original JKR branch and refreshed JKR equilibrium with complete sources.
 pub type SourceJkrThermalRefresh =
     SourceAdhesiveThermalRefresh<SourceJkrSphereContact, JkrResponse>;
+/// Original finite-range DMT equilibrium and refreshed original-source owner.
+pub type SourceDmtThermalRefresh =
+    SourceAdhesiveThermalRefresh<SourceDmtSphereContact, DmtResponse>;
+/// Original Maugis phase and refreshed equilibrium with absolute potential.
+pub type SourceMaugisThermalRefresh =
+    SourceAdhesiveThermalRefresh<SourceMaugisSphereContact, MaugisEquilibrium>;
 
 /// Atomic source, normal approximation, branch or work-accounting refusal.
 #[derive(Clone, Debug, PartialEq)]
@@ -163,6 +174,12 @@ pub enum AdhesiveTemperatureError {
     Jkr(JkrError),
     /// Original JKR force-controlled equilibrium refused.
     JkrLoading(JkrLoadingError),
+    /// Original finite-range DMT approximation or equilibrium refused.
+    Dmt(DmtError),
+    /// Original Maugis approximation or contact equilibrium refused.
+    Maugis(MaugisError),
+    /// The original Maugis phase or its absolute energy refused.
+    MaugisContinuation(MaugisContinuationError),
     /// Unsupported temperature ownership or nonfinite arithmetic.
     Invalid(&'static str),
 }
@@ -186,6 +203,21 @@ impl From<JkrLoadingError> for AdhesiveTemperatureError {
         Self::JkrLoading(error)
     }
 }
+impl From<DmtError> for AdhesiveTemperatureError {
+    fn from(error: DmtError) -> Self {
+        Self::Dmt(error)
+    }
+}
+impl From<MaugisError> for AdhesiveTemperatureError {
+    fn from(error: MaugisError) -> Self {
+        Self::Maugis(error)
+    }
+}
+impl From<MaugisContinuationError> for AdhesiveTemperatureError {
+    fn from(error: MaugisContinuationError) -> Self {
+        Self::MaugisContinuation(error)
+    }
+}
 impl core::fmt::Display for AdhesiveTemperatureError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -193,6 +225,9 @@ impl core::fmt::Display for AdhesiveTemperatureError {
             Self::Binding(error) => write!(f, "normal adhesive temperature binding: {error}"),
             Self::Jkr(error) => write!(f, "normal adhesive temperature: {error}"),
             Self::JkrLoading(error) => write!(f, "normal adhesive temperature: {error}"),
+            Self::Dmt(error) => write!(f, "normal adhesive temperature: {error}"),
+            Self::Maugis(error) => write!(f, "normal adhesive temperature: {error}"),
+            Self::MaugisContinuation(error) => write!(f, "normal adhesive temperature: {error}"),
             Self::Invalid(reason) => write!(f, "normal adhesive temperature: {reason}"),
         }
     }
@@ -375,6 +410,156 @@ impl SourceJkrSphereContact {
         let response = source.evaluate_force_controlled(force_n)?;
         let change = response.reversible_energy_j - before.reversible_energy_j;
         let work = force_n * (response.indentation_m - before.indentation_m);
+        SourceAdhesiveThermalRefresh::new(
+            self.identity(),
+            source,
+            before,
+            response,
+            AdhesiveThermalControl::HeldLoad { force_n },
+            change,
+            work,
+        )
+    }
+}
+
+impl SourceDmtSphereContact {
+    /// Rebuild the original finite-range DMT law at independently refreshed
+    /// source temperatures, rerunning its low-Tabor and whole-envelope screens.
+    pub fn at_temperatures(
+        &self,
+        material_cards: [&MaterialCard; 2],
+        temperatures: AdhesiveTemperatures,
+    ) -> Result<Self, AdhesiveTemperatureError> {
+        Ok(Self::new(
+            self.normal_state()
+                .at_temperatures(material_cards, temperatures)?,
+            self.effective_radius_m(),
+            self.interaction_range_m(),
+            self.envelope(),
+        )?)
+    }
+
+    /// Retain the actual signed indentation, including finite-gap attraction.
+    /// The original attraction range is fixed, so contact/gap/separated regimes
+    /// are preserved. A noncontact attractive disk never becomes a shear area.
+    pub fn refresh_at_held_indentation(
+        &self,
+        indentation_m: f64,
+        material_cards: [&MaterialCard; 2],
+        temperatures: AdhesiveTemperatures,
+    ) -> Result<SourceDmtThermalRefresh, AdhesiveTemperatureError> {
+        let before = self.evaluate(indentation_m)?;
+        let source = self.at_temperatures(material_cards, temperatures)?;
+        let response = source.evaluate(indentation_m)?;
+        let change = response.reversible_energy_j - before.reversible_energy_j;
+        SourceAdhesiveThermalRefresh::new(
+            self.identity(),
+            source,
+            before,
+            response,
+            AdhesiveThermalControl::HeldIndentation,
+            change,
+            0.0,
+        )
+    }
+
+    /// Retain one applied load on the stable contacting DMT branch. The gap
+    /// branch is not a second force-controlled equilibrium. Pull-off refuses.
+    pub fn refresh_at_held_load(
+        &self,
+        force_n: f64,
+        material_cards: [&MaterialCard; 2],
+        temperatures: AdhesiveTemperatures,
+    ) -> Result<SourceDmtThermalRefresh, AdhesiveTemperatureError> {
+        let before = self.evaluate_contact_load(force_n)?;
+        let source = self.at_temperatures(material_cards, temperatures)?;
+        let response = source.evaluate_contact_load(force_n)?;
+        let change = response.reversible_energy_j - before.reversible_energy_j;
+        let work = force_n * (response.indentation_m - before.indentation_m);
+        SourceAdhesiveThermalRefresh::new(
+            self.identity(),
+            source,
+            before,
+            response,
+            AdhesiveThermalControl::HeldLoad { force_n },
+            change,
+            work,
+        )
+    }
+}
+
+impl SourceMaugisSphereContact {
+    /// Rebuild the original finite-zone Maugis law from the same selected
+    /// sources and original geometry/envelope; lambda changes physically.
+    pub fn at_temperatures(
+        &self,
+        material_cards: [&MaterialCard; 2],
+        temperatures: AdhesiveTemperatures,
+    ) -> Result<Self, AdhesiveTemperatureError> {
+        Ok(Self::new(
+            self.normal_state()
+                .at_temperatures(material_cards, temperatures)?,
+            self.effective_radius_m(),
+            self.interaction_range_m(),
+            self.envelope(),
+        )?)
+    }
+
+    /// Transfer an original immutable contact, noncontact or separated token
+    /// at held indentation. The same phase is reevaluated with its actual
+    /// absolute elastic/surface potential. Loss of that phase refuses; no
+    /// attachment, detachment or change to a DMT/JKR approximation is inferred.
+    pub fn refresh_at_held_indentation(
+        &self,
+        previous: MaugisEquilibrium,
+        material_cards: [&MaterialCard; 2],
+        temperatures: AdhesiveTemperatures,
+    ) -> Result<SourceMaugisThermalRefresh, AdhesiveTemperatureError> {
+        if previous.model_identity() != self.identity() {
+            return Err(MaugisContinuationError::HistoryMismatch.into());
+        }
+        let evaluate = |model: &Self| match previous.phase() {
+            MaugisPhase::Contact => model.evaluate_contact_energy(previous.indentation_m()),
+            MaugisPhase::Noncontact => model.evaluate_noncontact(previous.indentation_m()),
+            MaugisPhase::Detached => model.evaluate_detached(previous.indentation_m()),
+        };
+        // Every equilibrium field is private and the model token matched.
+        // Retain this exact accepted endpoint instead of reinverting its already
+        // rounded indentation and perturbing the stored potential on a no-op.
+        let before = previous;
+        let source = self.at_temperatures(material_cards, temperatures)?;
+        let response = if source.identity() == self.identity() {
+            previous
+        } else {
+            evaluate(&source)?
+        };
+        let change = response.potential_j() - before.potential_j();
+        SourceAdhesiveThermalRefresh::new(
+            self.identity(),
+            source,
+            before,
+            response,
+            AdhesiveThermalControl::HeldIndentation,
+            change,
+            0.0,
+        )
+    }
+
+    /// Retain one applied load on the stable contacting Maugis branch, with
+    /// the original absolute potential and separate normal actuator work.
+    pub fn refresh_at_held_load(
+        &self,
+        force_n: f64,
+        material_cards: [&MaterialCard; 2],
+        temperatures: AdhesiveTemperatures,
+    ) -> Result<SourceMaugisThermalRefresh, AdhesiveTemperatureError> {
+        let old_contact = self.evaluate_contact_load(force_n)?;
+        let before = self.evaluate_contact_energy(old_contact.indentation_m)?;
+        let source = self.at_temperatures(material_cards, temperatures)?;
+        let new_contact = source.evaluate_contact_load(force_n)?;
+        let response = source.evaluate_contact_energy(new_contact.indentation_m)?;
+        let change = response.potential_j() - before.potential_j();
+        let work = force_n * (response.indentation_m() - before.indentation_m());
         SourceAdhesiveThermalRefresh::new(
             self.identity(),
             source,

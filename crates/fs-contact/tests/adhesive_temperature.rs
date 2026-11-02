@@ -1,6 +1,8 @@
 //! Independent thermal normal-adhesion equilibria and original-source refusals.
 #[path = "adhesive_temperature/common.rs"]
 mod common;
+#[path = "adhesive_temperature/finite_range.rs"]
+mod finite_range;
 
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::fixture::JkrLoadingError;

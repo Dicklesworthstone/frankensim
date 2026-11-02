@@ -113,6 +113,31 @@ impl SourceAdhesiveShear {
         )
     }
 
+    /// Preserve the complete Maugis phase, including an attractive noncontact
+    /// state with no solid disk. The original model token is required because
+    /// noncontacting equilibria deliberately carry no solid-contact response.
+    /// Their cohesive annulus never generates shear, spin moment or heat.
+    pub fn sliding_patch_maugis_equilibrium<'a>(
+        &'a self,
+        model: &'a crate::normal_patch::maugis::SourceMaugisSphereContact,
+        response: &crate::normal_patch::maugis::continuation::MaugisEquilibrium,
+    ) -> Result<SourceAdhesiveSlidingPatch<'a>, AdhesiveShearError> {
+        if response.model_identity() != model.identity() {
+            return Err(AdhesiveShearError::Invalid {
+                reason: "Maugis equilibrium must retain its original normal model",
+            });
+        }
+        match response.contact_response() {
+            Some(contact) => self.sliding_patch_maugis(model.normal_state(), contact),
+            None => self.sliding_patch(
+                model.normal_state(),
+                model.normal_state().identity(),
+                0.0,
+                0.0,
+            ),
+        }
+    }
+
     fn sliding_patch<'a>(
         &'a self,
         normal: &'a BoundNormalInterfaceState,
