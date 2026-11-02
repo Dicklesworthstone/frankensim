@@ -2765,3 +2765,54 @@ source refusal, budgets, darkness, cancellation and replay. The exact temporal
 and stress contraction plus three test definitions passed native no-codegen
 type analysis; complete-owner Rust tests await native execution. Independent
 mathematical references do not constitute execution of the Rust owner.
+
+### Real and nonproper spectral source fluctuations
+
+`AngularSpectrumExposureEnsemble::try_new_with_statistics` accepts an
+explicit `AngularSpectrumFactorStatistics::{Real, ProperComplex}` for each
+original factor bank. The existing `try_new` remains an all-proper declaration.
+Statistics are immutable borrowed inputs, with exactly one entry per factor,
+including empty banks. The accessor `factor_statistics` reports that declaration.
+
+Every factor has zero mean and unit second moment. A real coefficient has
+E[z²]=1 and retains phase-locked carrier sum-frequency terms; a proper complex
+coefficient has E[z²]=0 and retains only difference-frequency terms.
+Real-real covariance and proper-proper conjugate covariance are identity;
+cross-factor unconjugated moments and mixed real/proper moments vanish.
+No Gaussian law or statistical independence is required. Unknown source
+phase does not justify choosing either law.
+
+Complex fields driven by real factors can represent general nonproper
+second moments: a real square root of the stacked real/imaginary source
+covariance supplies the factor columns, including their square-root weights.
+The deterministic mean contributes separately. Cross-frequency and cross-face
+coherence remains inside each factor. No source spectrum, PSD normalization,
+sampling bandwidth, stationarity or physical source calibration is inferred.
+
+One shared bank traversal selects the temporal law once per factor across
+exterior E/H/Poynting observations, two-sided illumination, original-layer
+Ohmic/Debye heat and reversible storage, and full Maxwell stress/traction.
+Real factors use the deterministic REAL-PRODUCT kernel while remaining
+zero-mean fluctuations. Proper factors use the difference-only product and
+storage-frequency law. The distinction is therefore retained through the
+entire heat/storage/stress observation, not just through an exterior intensity.
+
+No field, covariance matrix or constitutive solve is added by the statistics
+mapping. Original source identities, frequency caches, scalar work limits,
+workspace limits and cancellation paths are retained. Queries still stream
+one factor at a time and have no statistical-mode branch in their spatial or
+frequency-pair contraction loops. Uniform and triangular detector windows
+remain supported. Storage rate is a weighted average; its endpoint-change
+interpretation applies only to a uniform window.
+
+Four authored native-owner regressions cover phase-locked subcycle energy
+and stress, real/proper mixed joint-face fields and dispersive heat/storage,
+equivalence of a proper factor to two real quadratures, and explicit shape,
+identity, budget, darkness, cancellation and replay behavior. Source formatting
+passed. The exact new statistics iterator/accessors and shared temporal owner
+passed focused native no-codegen type analysis with nominal source-owner
+declarations; this is not a complete EM crate build or executed owner tests.
+Independent eight-state real/proper ensemble quadrature matched the analytical
+18-component field/stress/heat/storage fixture to maximum absolute errors
+5.0e-15 (uniform) and 1.0e-14 (triangular). These are mathematical reference
+checks, not execution of the Rust propagation owner.

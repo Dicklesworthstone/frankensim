@@ -180,10 +180,10 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
         stress_workspace(self.anchor.modes.len(), self.workspace_bytes())
     }
 
-    /// Stress of the authored mean plus mutually uncorrelated proper factors.
-    /// Proper factors retain difference-frequency beats; only their explicitly
-    /// zero pseudocovariance removes sum-frequency terms. The mean retains
-    /// both. No stationary, Gaussian or independent-face source is inferred.
+    /// Stress of the authored mean plus mutually uncorrelated real/proper
+    /// factors. Real factors retain both carrier sum and beat terms; only the
+    /// explicitly zero pseudocovariance of a proper factor removes sum terms.
+    /// No stationary, Gaussian or independent-face source is inferred.
     /// One factor's original frequency fields are retained at a time.
     pub fn stress_field(
         &self,
@@ -195,10 +195,7 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
     ) -> Result<AngularSpectrumExposureStressField, AngularSpectrumError> {
         stress_field(
             self.anchor,
-            self.mean
-                .into_iter()
-                .map(|bank| (bank, false))
-                .chain(self.factors.iter().map(|bank| (bank, true))),
+            self.banks(),
             self.stress_workspace_bytes()?,
             ExposureSide::OneSided(side),
             distance_from_face_m,
@@ -218,10 +215,7 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
     ) -> Result<AngularSpectrumExposureStressField, AngularSpectrumError> {
         stress_field(
             self.anchor,
-            self.mean
-                .into_iter()
-                .map(|bank| (bank, false))
-                .chain(self.factors.iter().map(|bank| (bank, true))),
+            self.banks(),
             self.stress_workspace_bytes()?,
             ExposureSide::TwoSided(side),
             distance_from_face_m,

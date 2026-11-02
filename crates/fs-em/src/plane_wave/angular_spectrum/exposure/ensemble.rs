@@ -1,15 +1,32 @@
-//! Finite exposures of an authored proper-complex spectral covariance.
+//! Finite exposures of authored real and proper-complex source factors.
 //!
-//! A source is its deterministic mean plus sum_r z_r B_r(omega, x), with
-//! E[z_r]=0, E[z_r z_s*]=delta_rs and E[z_r z_s]=0. These second moments are
-//! explicit inputs through the factor fields, not sampled or inferred phases.
-//! Properness removes the covariance's sum-frequency terms even for a short
-//! shutter; correlations between distinct frequencies still produce beats.
-//! Properness alone implies neither Gaussianity nor stationarity. See Neeser
-//! and Massey, IEEE Trans. Information Theory 39 (1993), equations (2)-(5):
+//! A source is its deterministic mean plus sum_r z_r B_r(omega, x). Every
+//! factor has zero mean and unit second moment. A REAL coefficient has
+//! E[z_r²]=1 and retains carrier sum-frequency terms; an explicitly proper
+//! complex coefficient has E[z_r²]=0 and removes only those terms. Different
+//! factors are jointly uncorrelated, including mixed real/proper pairs.
+//! No Gaussian distribution, random phase or stationarity is inferred.
+//! The proper/nonproper distinction follows Neeser and Massey, IEEE Trans.
+//! Information Theory 39 (1993), equations (2)-(5):
 //! <https://www.isiweb.ee.ethz.ch/papers/arch/fneese-mass-inspec-1993-1.pdf>.
 
 use super::*;
+
+/// Authored joint second-moment law of one zero-mean source coefficient.
+///
+/// Real-real covariance and proper-proper conjugate covariance are identity;
+/// all cross-factor unconjugated moments and real/proper mixed moments vanish.
+/// These assumptions make factor second moments additive. Independence and
+/// a Gaussian law are stronger assumptions and are not required.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AngularSpectrumFactorStatistics {
+    /// Real z with E[z]=0 and E[z²]=1. Phase-locked amplitude variability
+    /// retains both sum- and difference-frequency interference.
+    Real,
+    /// Complex z with E[z]=E[z²]=0 and E[|z|²]=1. Only difference-frequency
+    /// terms survive its second moments, even for a subperiod shutter.
+    ProperComplex,
+}
 
 /// Whole-ensemble work limits, including the optional deterministic mean.
 /// Workspace conservatively includes the largest original exposure query,
@@ -25,7 +42,7 @@ pub struct AngularSpectrumExposureEnsembleLimits {
     pub maximum_fft_work: u64,
 }
 
-/// Mean illumination plus mutually uncorrelated proper-complex factors.
+/// Mean illumination plus mutually uncorrelated real/proper-complex factors.
 ///
 /// Each borrowed exposure bank is one factor across its authored frequencies.
 /// Its fields include their square-root statistical weights. Equal-frequency
@@ -33,6 +50,11 @@ pub struct AngularSpectrumExposureEnsembleLimits {
 /// different factors add second moments and need not be orthogonal. The
 /// resulting covariance is positive semidefinite by construction. In symbols,
 /// W(omega,x;omega',x') = sum_r B_r(omega,x) B_r(omega',x')*.
+/// Real factors additionally contribute B_r(omega,x) B_r(omega',x') to
+/// pseudocovariance. Their fields can therefore describe phase-locked noise.
+/// A real square root of the stacked real/imaginary source covariance represents
+/// general positive-semidefinite nonproper second moments without pretending
+/// they are proper. Supplied fields already include all statistical weights.
 /// Only the stated joint second moments are required; statistical independence
 /// and a particular probability distribution are not assumed.
 ///
@@ -40,11 +62,14 @@ pub struct AngularSpectrumExposureEnsembleLimits {
 /// exposure, including carrier sum terms. Its moments add to the zero-mean
 /// covariance without a mean/fluctuation cross term. Cross-frequency source
 /// correlations can be nonstationary; this API does not infer a stationary
-/// spectrum, source bandwidth, pseudocovariance or an individual realization.
+/// spectrum, source bandwidth or an individual realization. The original
+/// constructor declares all factors proper; the explicit-statistics constructor
+/// declares each factor's real/proper law.
 pub struct AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
     pub(super) anchor: &'b PlanarAngularSpectrum<'s, 'm>,
     pub(super) mean: Option<&'e AngularSpectrumExposure<'b, 's, 'm>>,
     pub(super) factors: &'e [AngularSpectrumExposure<'b, 's, 'm>],
+    pub(super) statistics: Option<&'e [AngularSpectrumFactorStatistics]>,
     line_count: usize,
     point_line_pairs: usize,
     point_frequency_pairs: usize,
@@ -62,9 +87,42 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
         mean: Option<&'e AngularSpectrumExposure<'b, 's, 'm>>,
         factors: &'e [AngularSpectrumExposure<'b, 's, 'm>],
         limits: AngularSpectrumExposureEnsembleLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        Self::prepare(anchor, mean, factors, None, limits, cancelled)
+    }
+
+    /// Explicit real/proper source factors in the same order as `factors`.
+    /// All factors are zero-mean with the JOINT moments documented on
+    /// [`AngularSpectrumFactorStatistics`]. A real factor has the same quadratic
+    /// moments as its deterministic waveform, but is not a deterministic mean.
+    ///
+    /// Statistics are borrowed and immutable, require exactly one entry per
+    /// factor (including empty banks), and add no query allocations or solves.
+    /// No source covariance is inferred from an unknown physical phase.
+    pub fn try_new_with_statistics(
+        anchor: &'b PlanarAngularSpectrum<'s, 'm>,
+        mean: Option<&'e AngularSpectrumExposure<'b, 's, 'm>>,
+        factors: &'e [AngularSpectrumExposure<'b, 's, 'm>],
+        statistics: &'e [AngularSpectrumFactorStatistics],
+        limits: AngularSpectrumExposureEnsembleLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        Self::prepare(anchor, mean, factors, Some(statistics), limits, cancelled)
+    }
+
+    fn prepare(
+        anchor: &'b PlanarAngularSpectrum<'s, 'm>,
+        mean: Option<&'e AngularSpectrumExposure<'b, 's, 'm>>,
+        factors: &'e [AngularSpectrumExposure<'b, 's, 'm>],
+        statistics: Option<&'e [AngularSpectrumFactorStatistics]>,
+        limits: AngularSpectrumExposureEnsembleLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
         poll(&mut cancelled)?;
+        if statistics.is_some_and(|values| values.len() != factors.len()) {
+            return Err(bad("exposure factor statistics must match every factor"));
+        }
         if factors.len() > 4096 || factors.len() > limits.maximum_factors {
             return Err(bad("exposure covariance factor count exceeds its budget"));
         }
@@ -72,11 +130,7 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
         let mut point_frequency_pairs = 0_usize;
         let mut field_fft_work = 0_u64;
         let mut bank_workspace = anchor.workspace_bytes();
-        for (bank, proper) in mean
-            .into_iter()
-            .map(|bank| (bank, false))
-            .chain(factors.iter().map(|bank| (bank, true)))
-        {
+        for (bank, proper) in banks(mean, factors, statistics) {
             poll(&mut cancelled)?;
             if bank.anchor.grid() != anchor.grid()
                 || !bank
@@ -139,6 +193,7 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             anchor,
             mean,
             factors,
+            statistics,
             line_count,
             point_line_pairs,
             point_frequency_pairs,
@@ -152,6 +207,18 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
     }
     pub fn factor_count(&self) -> usize {
         self.factors.len()
+    }
+    /// Declared law of an original factor; None means an out-of-range index.
+    pub fn factor_statistics(&self, index: usize) -> Option<AngularSpectrumFactorStatistics> {
+        self.factors.get(index).map(|_| {
+            self.statistics
+                .map_or(AngularSpectrumFactorStatistics::ProperComplex, |s| s[index])
+        })
+    }
+    pub(super) fn banks(
+        &self,
+    ) -> impl Iterator<Item = (&'e AngularSpectrumExposure<'b, 's, 'm>, bool)> {
+        banks(self.mean, self.factors, self.statistics)
     }
     /// Total authored lines in the covariance factors and optional mean.
     pub fn line_count(&self) -> usize {
@@ -230,27 +297,28 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             }
             sums.push([Dd::ZERO; 9]);
         }
-        if let Some(mean) = self.mean {
-            accumulate_bank(
-                mean,
-                side,
-                distance_from_face_m,
-                |a, b| window.product_kernel(a, b),
-                product,
-                &mut sums,
-                &mut cancelled,
-            )?;
-        }
-        for factor in self.factors {
-            accumulate_bank(
-                factor,
-                side,
-                distance_from_face_m,
-                |a, b| window.proper_product_kernel(a, b),
-                proper_product,
-                &mut sums,
-                &mut cancelled,
-            )?;
+        for (bank, proper) in self.banks() {
+            if proper {
+                accumulate_bank(
+                    bank,
+                    side,
+                    distance_from_face_m,
+                    |a, b| window.proper_product_kernel(a, b),
+                    proper_product,
+                    &mut sums,
+                    &mut cancelled,
+                )?;
+            } else {
+                accumulate_bank(
+                    bank,
+                    side,
+                    distance_from_face_m,
+                    |a, b| window.product_kernel(a, b),
+                    product,
+                    &mut sums,
+                    &mut cancelled,
+                )?;
+            }
         }
         let mut points = Vec::new();
         points
@@ -284,6 +352,24 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             normal_power_w,
         })
     }
+}
+
+// Shared traversal for field, layer and stress observers. Real factors use
+// the deterministic PRODUCT kernel while retaining their zero-mean meaning.
+// The caller admits statistics length before storing this immutable mapping.
+pub(super) fn banks<'e, 'b, 's, 'm>(
+    mean: Option<&'e AngularSpectrumExposure<'b, 's, 'm>>,
+    factors: &'e [AngularSpectrumExposure<'b, 's, 'm>],
+    statistics: Option<&'e [AngularSpectrumFactorStatistics]>,
+) -> impl Iterator<Item = (&'e AngularSpectrumExposure<'b, 's, 'm>, bool)> {
+    mean.into_iter()
+        .map(|bank| (bank, false))
+        .chain(factors.iter().enumerate().map(move |(index, bank)| {
+            let proper = statistics.is_none_or(|values| {
+                values[index] == AngularSpectrumFactorStatistics::ProperComplex
+            });
+            (bank, proper)
+        }))
 }
 
 // Monomorphized for deterministic/proper products: no statistical-mode branch

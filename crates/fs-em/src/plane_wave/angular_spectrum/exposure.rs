@@ -27,7 +27,10 @@ pub use stress::{
 };
 
 mod ensemble;
-pub use ensemble::{AngularSpectrumExposureEnsemble, AngularSpectrumExposureEnsembleLimits};
+pub use ensemble::{
+    AngularSpectrumExposureEnsemble, AngularSpectrumExposureEnsembleLimits,
+    AngularSpectrumFactorStatistics,
+};
 
 mod layer;
 pub use layer::{

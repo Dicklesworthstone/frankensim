@@ -37,8 +37,9 @@ pub struct AngularSpectrumExposureLayerDissipation {
     pub polarization_heat_w_m3: f64,
     /// Mean irreversible heating rate; excludes reversible storage changes.
     pub total_heat_w_m3: f64,
-    /// Signed mean dU/dt = (U(end)-U(start))/duration. Multiply by the
-    /// observation duration for storage change [J/m³], not deposited heat.
+    /// Signed detector-weighted mean dU/dt. Only a uniform window gives
+    /// (U(end)-U(start))/duration; a shaped window retains its sensitivity.
+    /// This is reversible storage rate, not deposited heat.
     pub storage_rate_w_m3: f64,
 }
 
@@ -81,6 +82,7 @@ pub struct PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
     anchor: &'b PlanarAngularSpectrum<'s, 'm>,
     mean: Option<&'e AngularSpectrumExposure<'b, 's, 'm>>,
     factors: &'e [AngularSpectrumExposure<'b, 's, 'm>],
+    statistics: Option<&'e [AngularSpectrumFactorStatistics]>,
     layer_index: usize,
     thickness_m: f64,
     law: LossLaw<'m>,
@@ -103,6 +105,7 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             self.anchor,
             Some(self),
             &[],
+            None,
             layer_index,
             limits,
             &mut cancelled,
@@ -121,6 +124,7 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             self.anchor,
             self.mean,
             self.factors,
+            self.statistics,
             layer_index,
             limits,
             &mut cancelled,
@@ -141,6 +145,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         anchor: &'b PlanarAngularSpectrum<'s, 'm>,
         mean: Option<&'e AngularSpectrumExposure<'b, 's, 'm>>,
         factors: &'e [AngularSpectrumExposure<'b, 's, 'm>],
+        statistics: Option<&'e [AngularSpectrumFactorStatistics]>,
         layer_index: usize,
         limits: AngularSpectrumExposureLayerLimits,
         cancelled: &mut impl FnMut() -> bool,
@@ -326,6 +331,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             anchor,
             mean,
             factors,
+            statistics,
             layer_index,
             thickness_m: selected.thickness_m,
             law,
@@ -384,27 +390,28 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             }
             sums.push([Dd::ZERO; 12]);
         }
-        if let Some(mean) = self.mean {
-            self.accumulate_bank(
-                mean,
-                depth_m,
-                false,
-                |a, b| window.product_kernel(a, b),
-                product,
-                &mut sums,
-                &mut cancelled,
-            )?;
-        }
-        for factor in self.factors {
-            self.accumulate_bank(
-                factor,
-                depth_m,
-                true,
-                |a, b| window.proper_product_kernel(a, b),
-                proper_product,
-                &mut sums,
-                &mut cancelled,
-            )?;
+        for (bank, proper) in ensemble::banks(self.mean, self.factors, self.statistics) {
+            if proper {
+                self.accumulate_bank(
+                    bank,
+                    depth_m,
+                    true,
+                    |a, b| window.proper_product_kernel(a, b),
+                    proper_product,
+                    &mut sums,
+                    &mut cancelled,
+                )?;
+            } else {
+                self.accumulate_bank(
+                    bank,
+                    depth_m,
+                    false,
+                    |a, b| window.product_kernel(a, b),
+                    product,
+                    &mut sums,
+                    &mut cancelled,
+                )?;
+            }
         }
         let mut points = Vec::new();
         let mut dissipation = Vec::new();
