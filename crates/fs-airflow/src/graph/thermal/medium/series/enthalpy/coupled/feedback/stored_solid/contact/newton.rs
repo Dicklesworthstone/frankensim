@@ -12,7 +12,8 @@ use fs_conduction::interface::temperature::{
 };
 use fs_conduction::radiation::{GrayDiffuseEnclosure, OpenDiffuseEnclosure};
 use fs_conduction::{
-    AmbientRadiationPatch, ConductionError, PointwiseAmbientRadiation, PointwiseEnclosureRadiation,
+    AmbientRadiationPatch, ConductionError, MaterialAmbientRadiationPatch,
+    MaterialPointwiseAmbientRadiation, PointwiseAmbientRadiation, PointwiseEnclosureRadiation,
     PointwiseEnclosureTolerance, ThermalBoundary,
 };
 use fs_convection::CorrelationRobinBoundary;
@@ -33,6 +34,9 @@ pub enum StoredContactRadiation<'a> {
     None,
     /// Local P1 emission to independently prescribed ambient reservoirs.
     Ambient(&'a [AmbientRadiationPatch]),
+    /// Original material emissivity refreshed at the actual nodal enthalpy.
+    /// Each patch retains the exact caloric object assigned to its storage nodes.
+    MaterialAmbient(&'a [MaterialAmbientRadiationPatch<'a>]),
     /// Reciprocal internal surface exchange; its net power is zero to roundoff.
     ClosedEnclosure {
         enclosure: &'a GrayDiffuseEnclosure,
@@ -59,6 +63,22 @@ impl StoredContactRadiation<'_> {
                 let mut names = BTreeSet::new();
                 for patch in *patches {
                     if !names.insert(patch.region()) {
+                        return Err(StoredCoolingError::Invalid(
+                            "duplicate stored-contact radiation patch",
+                        ));
+                    }
+                }
+                Ok(names)
+            }
+            Self::MaterialAmbient(patches) => {
+                if patches.is_empty() {
+                    return Err(StoredCoolingError::Invalid(
+                        "use None when stored contact radiation is absent",
+                    ));
+                }
+                let mut names = BTreeSet::new();
+                for patch in *patches {
+                    if !names.insert(patch.region) {
                         return Err(StoredCoolingError::Invalid(
                             "duplicate stored-contact radiation patch",
                         ));
@@ -112,6 +132,8 @@ impl<'n, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'n, 'a, 'car
     /// coolant convection heats the return stream. Enclosure exchange between
     /// solid patches is internal; its signed net surface power, including any
     /// explicit black bath, enters the external account exactly once.
+    /// Material ambient patches also refresh their pinned emissivity at every
+    /// trial h, retaining temperature and latent-fraction feedback in Newton.
     ///
     /// One joint enthalpy solve is counted per solid trial. Work exhaustion or
     /// any physics/cancellation refusal publishes neither history. Fixed
@@ -199,6 +221,17 @@ impl<'n, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'n, 'a, 'car
                             patches,
                         )?;
                         contacts.advance_enthalpy_newton_with_pointwise_ambient_radiation(
+                            cx, storage, mapped, old, dt, config, &pointwise,
+                        )?
+                    }
+                    StoredContactRadiation::MaterialAmbient(patches) => {
+                        let pointwise = MaterialPointwiseAmbientRadiation::new(
+                            cx,
+                            mapped.mesh,
+                            mapped.boundary,
+                            patches,
+                        )?;
+                        contacts.advance_enthalpy_newton_with_material_ambient_radiation(
                             cx, storage, mapped, old, dt, config, &pointwise,
                         )?
                     }

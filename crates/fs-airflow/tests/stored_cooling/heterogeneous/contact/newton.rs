@@ -1,4 +1,6 @@
 //! Real stored-solid/coolant solves checked against independent surface moments.
+mod material;
+
 use super::*;
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::stored_solid::contact::newton::{
     ContactNewtonStoredCoolingControls, StoredContactRadiation,

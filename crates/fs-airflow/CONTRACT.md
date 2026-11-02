@@ -25,11 +25,20 @@ transient inertia, coupled adjoint, stability or experimental-validation claim.
 `advance_stored_solid_with_pump_and_contact_newton` to the original
 immutable-history solid/tank/pump transaction. Its explicit
 `StoredContactRadiation` selection admits no radiation, pointwise ambient
-exchange, a closed gray enclosure, or an open enclosure with one black
-reservoir. Each actual coolant-boundary mapping receives its original pointwise
+exchange with fixed or original-material emissivity, a closed gray enclosure,
+or an open enclosure with one black reservoir. Each actual coolant-boundary mapping receives its original pointwise
 owner; the complete contact, conductivity, storage and radiation tangent is
 solved together by `TemperatureContacts`. Original heterogeneous enthalpy
 charts, latent storage and source-domain refusals remain active.
+
+`StoredContactRadiation::MaterialAmbient` retains the original material patch
+bindings and exact storage caloric objects. Each actual coolant trial prepares
+the material-radiation owner on its mapped boundary; current nodal temperature
+and liquid fraction refresh the pinned emissivity within the same contact Newton
+solve. Original convection alone heats the coolant return, while signed radiative
+bath heat enters the external account once. A focused regression distinguishes
+the current material response from its preparation snapshot using independent
+P1 fourth/fifth moments and the complete solid-plus-tank first law.
 
 `ContactNewtonStoredCoolingControls.thermal.solid` is the sole step policy
 and must satisfy the contact owner's Armijo, zero-relative-tolerance and
@@ -48,9 +57,10 @@ joule checks and atomic publication remain unchanged.
 Authored regressions compare surface emission to exact P1 fourth moments
 and two-surface reflection to an independent 2-by-2 radiosity calculation,
 alongside unequal-temperature contact/coolant storage, constant-resistance
-agreement and transactional refusals. These retain fixed geometry, source
-emissivity snapshots and quasi-steady pipe transport; they add no fluid
-phase-change, moving-contact or empirical-validation claim.
+agreement and transactional refusals. Geometry and quasi-steady pipe transport
+remain fixed. Ambient emissivity uses the explicitly chosen snapshot or original
+material response; enclosure emissivities remain snapshots. These methods add no
+fluid phase-change, moving-contact or empirical-validation claim.
 
 ## Transient graph convection with native thermal storage
 
