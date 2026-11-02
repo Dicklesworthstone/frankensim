@@ -95,7 +95,7 @@ fn state_error(what: &str) -> MaterialError {
     }
 }
 
-fn original_volume(law: &Hyperelastic) -> Result<Volumetric, MaterialError> {
+pub(crate) fn original_volume(law: &Hyperelastic) -> Result<Volumetric, MaterialError> {
     let volume = match &law.model {
         HyperelasticModel::NeoHookean { .. } => {
             return Err(MaterialError::Parameters {

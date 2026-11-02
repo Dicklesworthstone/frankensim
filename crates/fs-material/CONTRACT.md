@@ -9835,3 +9835,42 @@ a long-horizon or frequency-matching claim for a solid integrator.
 Reference: O. Gonzalez, *Exact energy and momentum conserving algorithms for
 general models in nonlinear elasticity*, CMAME 190 (2000), 1763-1783,
 doi:10.1016/S0045-7825(00)00189-4.
+
+## Original finite-bulk discrete gradients
+
+`hyper::discrete_gradient::bulk::DiscreteBulkPoint` freezes an original
+quadratic or log-squared bulk law and one accepted quadrature volume. Interval
+pressure is the original energy secant
+`p_alg = (U(J_after)-U(J_before))/(J_after-J_before)`. It is distinct from
+endpoint `U'(J_after)`. Quadratic inversion is analytic; the logarithmic law
+uses bounded safeguarded Newton/bisection on an explicit positive bracket
+strictly below `J=exp(1)`. No bulk coefficient or energy is replaced.
+
+`DiscreteBulkSettings` supplies the volume bracket, scalar iteration cap
+(1 through 128), and separate absolute/relative pressure and work allowances.
+Cancellation is the spatial owner's quadrature-boundary responsibility, with
+each scalar query bounded by that cap. Cancellation-safe nearby logarithmic
+secants and their derivatives retain the coincident limit. The response
+separates original endpoint storage, stable energy change, endpoint pressure,
+interval work, positive inverse derivative, pressure residual, actual work
+defect and iteration count. Both local pressure and work gates must pass.
+
+`from_endpoint_pressure` initializes through the existing original
+`pressure_potential`; the spatial owner must still admit the weak geometric
+volume constraint. Compatible initialization matters: arbitrary geometric
+quadrature volumes can contain unresolved pressure-space components that the
+quadratic secant reflects on alternating steps. Accepted retained volumes are
+never silently replaced by geometric determinants. `rebind` creates a new
+immutable point on the admitted branch. Coupled Neo-Hookean and invalid original
+parameters refuse.
+
+G0/G1 tests in `tests/hyper_discrete_bulk.rs` cover original energy/work,
+independent pressure integration, quadratic and logarithmic compression and
+expansion, inverse derivatives, equal/near-equal volumes, heterogeneous moduli,
+reversal, compatible initialization, branch/fold/domain refusal, bounded work,
+and independent pressure/work tolerances. The focused native-source lane passed
+all five new tests and all five existing objective discrete-gradient tests.
+The largest relative inverse-compliance finite-difference discrepancy was
+`4.43e-8` for the fixed probe including a near-fold fixture. This is a local
+constitutive closure; spatial stability, pressure-space consistency and temporal
+convergence belong to its mixed consumer.

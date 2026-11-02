@@ -30,6 +30,9 @@ use super::mixed::{MixedFiniteStrainPotential, cofactor};
 use super::{Hyperelastic, det3};
 use crate::MaterialError;
 
+/// Original finite-bulk storage and its work-conjugate interval pressure.
+pub mod bulk;
+
 const SQRT_2: f64 = core::f64::consts::SQRT_2;
 
 /// The complete original elastic energy or its admitted bulk-free remainder.
