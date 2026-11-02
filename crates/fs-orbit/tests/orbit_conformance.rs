@@ -24,7 +24,7 @@
 
 use fs_orbit::{
     ContinuableProblem, ContinuationBudget, HbAnchor, HbBudget, OrbitError, OrbitProblem,
-    ShootBudget, continue_branch, solve_hb, solve_shooting,
+    ShootBudget, TimeDomainRhs, continue_branch, solve_hb, solve_shooting,
 };
 
 const TAU: f64 = core::f64::consts::TAU;
@@ -51,6 +51,9 @@ impl OrbitProblem for Duffing {
     fn autonomous(&self) -> bool {
         self.force == 0.0
     }
+    fn time_domain_rhs(&self) -> Option<TimeDomainRhs<Self>> {
+        Some(Self::island)
+    }
 }
 
 impl ContinuableProblem for Duffing {
@@ -74,6 +77,9 @@ impl OrbitProblem for VanDerPol {
     }
     fn autonomous(&self) -> bool {
         true
+    }
+    fn time_domain_rhs(&self) -> Option<TimeDomainRhs<Self>> {
+        Some(Self::island)
     }
 }
 
@@ -377,6 +383,9 @@ impl OrbitProblem for TwoCenters {
     fn autonomous(&self) -> bool {
         false
     }
+    fn time_domain_rhs(&self) -> Option<TimeDomainRhs<Self>> {
+        Some(Self::island)
+    }
 }
 
 #[test]
@@ -502,4 +511,106 @@ fn ob_admission_refuses_degenerate_budgets() {
         fs_orbit::solve_shooting(&duffing, &[0.2, 0.0], 6.28, &shoot),
         Err(fs_orbit::OrbitError::BadParameter { .. })
     ));
+}
+
+/// A frequency-domain load alone does not supply an explicit flow map.
+#[test]
+fn shooting_refuses_frequency_only_ports_before_island_evaluation() {
+    struct FrequencyOnly {
+        calls: std::cell::Cell<usize>,
+    }
+    impl OrbitProblem for FrequencyOnly {
+        fn dim(&self) -> usize {
+            1
+        }
+        fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+            self.calls.set(self.calls.get() + 1);
+            out[0] = fs_math::det::cos(t) - x[0];
+        }
+        fn port(&self, s: fs_math::c64::C64) -> Vec<fs_math::c64::C64> {
+            vec![s.scale(2.0)]
+        }
+        fn autonomous(&self) -> bool {
+            false
+        }
+    }
+    let problem = FrequencyOnly {
+        calls: std::cell::Cell::new(0),
+    };
+    let result = solve_shooting(&problem, &[0.2], TAU, &ShootBudget::default());
+    assert!(matches!(result, Err(OrbitError::TimeDomainUnavailable)));
+    assert_eq!(
+        problem.calls.get(),
+        0,
+        "no substitute dynamics may be evaluated"
+    );
+}
+
+/// 2 x' = -x + cos(t) - sine_force sin(t).
+struct MassLoaded {
+    sine_force: f64,
+}
+
+impl MassLoaded {
+    fn derivative(&self, t: f64, x: &[f64], out: &mut [f64]) {
+        self.island(t, x, out);
+        out[0] *= 0.5;
+    }
+}
+
+impl OrbitProblem for MassLoaded {
+    fn dim(&self) -> usize {
+        1
+    }
+    fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+        out[0] = fs_math::det::cos(t) - self.sine_force * fs_math::det::sin(t) - x[0];
+    }
+    fn port(&self, s: fs_math::c64::C64) -> Vec<fs_math::c64::C64> {
+        vec![s.scale(2.0)]
+    }
+    fn autonomous(&self) -> bool {
+        false
+    }
+    fn time_domain_rhs(&self) -> Option<TimeDomainRhs<Self>> {
+        Some(Self::derivative)
+    }
+}
+
+#[test]
+fn shooting_uses_the_explicit_mass_weighted_time_derivative() {
+    let problem = MassLoaded { sine_force: 0.0 };
+    let hb = solve_hb(
+        &problem,
+        HbAnchor::Forced { omega: 1.0 },
+        0.5,
+        &HbBudget {
+            harmonics: 1,
+            ..HbBudget::default()
+        },
+    )
+    .expect("mass-weighted harmonic balance");
+    let shot = solve_shooting(&problem, &[hb.sample(0, 0.0)], TAU, &ShootBudget::default())
+        .expect("shooting with the equivalent M^-1 g");
+    // x(t) = (cos(t) + 2 sin(t))/5, hence x(0) = 0.2.
+    // Integrating the island alone would instead return x(0) = 0.5.
+    assert!((hb.sample(0, 0.0) - 0.2).abs() < 1.0e-9);
+    assert!((shot.x0[0] - 0.2).abs() < 1.0e-9, "{shot:?}");
+    assert_eq!(shot.multipliers.len(), 1);
+    let (re, im) = shot.multipliers[0];
+    assert!((re - fs_math::det::exp(-0.5 * TAU)).abs() < 5.0e-7);
+    assert!(im.abs() < 1.0e-12);
+}
+
+#[test]
+fn forced_shooting_does_not_mistake_a_turning_point_for_equilibrium() {
+    // The exact forced response is cos(t); its derivative is zero at
+    // phase zero, but the time-dependent forcing immediately moves it.
+    let problem = MassLoaded { sine_force: 2.0 };
+    let mut derivative = [f64::NAN];
+    problem.derivative(0.0, &[1.0], &mut derivative);
+    assert_eq!(derivative[0], 0.0);
+    let shot = solve_shooting(&problem, &[1.0], TAU, &ShootBudget::default())
+        .expect("a forced turning point is not an equilibrium");
+    assert!((shot.x0[0] - 1.0).abs() < 1.0e-9);
+    assert_eq!(shot.period, TAU);
 }

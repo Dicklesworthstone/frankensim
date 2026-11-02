@@ -86,6 +86,10 @@ pub enum OrbitError {
     /// autonomous balance; claiming it as a cycle would be silent
     /// garbage).
     TrivialCollapse,
+    /// Shooting requires an explicitly supplied time-domain realization
+    /// of the harmonic-domain problem. A frequency-only port cannot be
+    /// replaced by the nonlinear island alone.
+    TimeDomainUnavailable,
     /// Eigensolver refusal from fs-la, forwarded.
     Eigen(EigFailure),
 }
@@ -126,12 +130,23 @@ impl core::fmt::Display for OrbitError {
                     "FS-ORBIT-TRIVIAL: converged to the equilibrium, not an orbit"
                 )
             }
+            OrbitError::TimeDomainUnavailable => write!(
+                f,
+                "FS-ORBIT-TIME-DOMAIN: shooting requires an explicit time derivative \
+                 equivalent to the island-plus-port problem"
+            ),
             OrbitError::Eigen(e) => write!(f, "FS-ORBIT-EIG: {e:?}"),
         }
     }
 }
 
 impl std::error::Error for OrbitError {}
+
+/// An explicitly supplied time derivative `x' = f(t, x)` for shooting.
+/// The callback writes all `problem.dim()` components in the same state
+/// coordinates and physical-time convention as the harmonic-domain problem.
+/// Its equivalence to that problem is the model implementer's obligation.
+pub type TimeDomainRhs<P> = fn(&P, f64, &[f64], &mut [f64]);
 
 /// The island-plus-linear-port problem shape.
 pub trait OrbitProblem {
@@ -154,6 +169,21 @@ pub trait OrbitProblem {
             m[i * d + i] = s;
         }
         m
+    }
+
+    /// An equivalent explicit time-domain realization for shooting.
+    ///
+    /// The default is unavailable: in general `port(s) X = G` does
+    /// not mean `x' = island(t, x)`. Plain ODE implementations with
+    /// `port(s) = s I` may explicitly return `Some(Self::island)`.
+    /// For `port(s) = s M`, supply `M^-1 g`; a general frequency
+    /// response needs an actual realization, including its state.
+    /// No realization is inferred or numerically certified here.
+    fn time_domain_rhs(&self) -> Option<TimeDomainRhs<Self>>
+    where
+        Self: Sized,
+    {
+        None
     }
 
     /// Whether the problem is autonomous (the period is then an
@@ -816,7 +846,13 @@ pub struct ShootOrbit {
 }
 
 /// Fixed-step RK4 flow over `[0, t_end]`.
-fn flow<P: OrbitProblem>(problem: &P, x0: &[f64], t_end: f64, steps: usize) -> Vec<f64> {
+fn flow<P: OrbitProblem>(
+    problem: &P,
+    rhs: TimeDomainRhs<P>,
+    x0: &[f64],
+    t_end: f64,
+    steps: usize,
+) -> Vec<f64> {
     let d = problem.dim();
     let h = t_end / steps as f64;
     let mut x = x0.to_vec();
@@ -824,19 +860,19 @@ fn flow<P: OrbitProblem>(problem: &P, x0: &[f64], t_end: f64, steps: usize) -> V
     let mut tmp = vec![0.0; d];
     for j in 0..steps {
         let t = h * j as f64;
-        problem.island(t, &x, &mut k1);
+        rhs(problem, t, &x, &mut k1);
         for i in 0..d {
             tmp[i] = 0.5f64.mul_add(h * k1[i], x[i]);
         }
-        problem.island(t + 0.5 * h, &tmp, &mut k2);
+        rhs(problem, t + 0.5 * h, &tmp, &mut k2);
         for i in 0..d {
             tmp[i] = 0.5f64.mul_add(h * k2[i], x[i]);
         }
-        problem.island(t + 0.5 * h, &tmp, &mut k3);
+        rhs(problem, t + 0.5 * h, &tmp, &mut k3);
         for i in 0..d {
             tmp[i] = h.mul_add(k3[i], x[i]);
         }
-        problem.island(t + h, &tmp, &mut k4);
+        rhs(problem, t + h, &tmp, &mut k4);
         for i in 0..d {
             x[i] += h / 6.0 * (k4[i] + k1[i] + 2.0 * (k2[i] + k3[i]));
         }
@@ -844,7 +880,10 @@ fn flow<P: OrbitProblem>(problem: &P, x0: &[f64], t_end: f64, steps: usize) -> V
     x
 }
 
-/// Shooting: Newton on the period map. Autonomous problems anchor
+/// Shooting: Newton on the explicitly supplied time-domain period map.
+/// Requires [`OrbitProblem::time_domain_rhs`]; the island alone is never
+/// assumed to include the dynamics of a frequency-dependent port.
+/// Autonomous problems anchor
 /// `x0[0]` at the seed value and treat the period as an unknown. On
 /// convergence the monodromy matrix is differenced and its Floquet
 /// multipliers extracted; a non-trivial unit-circle pair with nonzero
@@ -879,6 +918,9 @@ pub fn solve_shooting<P: OrbitProblem>(
             what: "steps per period must be positive",
         });
     }
+    let rhs = problem
+        .time_domain_rhs()
+        .ok_or(OrbitError::TimeDomainUnavailable)?;
     let auto = problem.autonomous();
     // Unknowns: forced -> x0 (period fixed); autonomous -> x0 with
     // x0[0] frozen at the seed, plus the period.
@@ -887,18 +929,21 @@ pub fn solve_shooting<P: OrbitProblem>(
     let mut period = period_guess;
     let mut trace = Vec::new();
     for _ in 0..budget.max_newton {
-        let xt = flow(problem, &x0, period, budget.steps_per_period);
+        let xt = flow(problem, rhs, &x0, period, budget.steps_per_period);
         let r: Vec<f64> = (0..d).map(|i| xt[i] - x0[i]).collect();
         let rn = norm(&r);
         trace.push(rn);
         let scale = norm(&x0).max(1.0);
         if rn < budget.tolerance * scale {
-            // Equilibrium guard: a fixed point satisfies the period
-            // map for EVERY period.
-            let mut fx = vec![0.0f64; d];
-            problem.island(0.0, &x0, &mut fx);
-            if norm(&fx) < 1.0e-9 * scale {
-                return Err(OrbitError::TrivialCollapse);
+            // An autonomous equilibrium satisfies the map for EVERY
+            // period. In a forced problem a zero derivative can instead
+            // be an ordinary turning point on a nonconstant response.
+            if auto {
+                let mut fx = vec![0.0f64; d];
+                rhs(problem, 0.0, &x0, &mut fx);
+                if norm(&fx) < 1.0e-9 * scale {
+                    return Err(OrbitError::TrivialCollapse);
+                }
             }
             // Monodromy by forward differences.
             let mut mono = vec![0.0f64; d * d];
@@ -906,7 +951,7 @@ pub fn solve_shooting<P: OrbitProblem>(
                 let h = 1.0e-7 * x0[col].abs().max(1.0e-3);
                 let mut xp = x0.clone();
                 xp[col] += h;
-                let xph = flow(problem, &xp, period, budget.steps_per_period);
+                let xph = flow(problem, rhs, &xp, period, budget.steps_per_period);
                 for row in 0..d {
                     mono[row * d + col] = (xph[row] - xt[row]) / h;
                 }
@@ -945,8 +990,8 @@ pub fn solve_shooting<P: OrbitProblem>(
                 h = 1.0e-7 * x0[col].abs().max(1.0e-3);
                 xp[col] += h;
             }
-            let xph = flow(problem, &xp, pp, budget.steps_per_period);
-            let xt0 = flow(problem, &x0, period, budget.steps_per_period);
+            let xph = flow(problem, rhs, &xp, pp, budget.steps_per_period);
+            let xt0 = flow(problem, rhs, &x0, period, budget.steps_per_period);
             for row in 0..d {
                 let base = xt0[row] - x0[row];
                 let pert = xph[row] - xp[row];
@@ -970,7 +1015,7 @@ pub fn solve_shooting<P: OrbitProblem>(
                 }
             }
             if pp > 0.0 && pp.is_finite() {
-                let xt_try = flow(problem, &xp, pp, budget.steps_per_period);
+                let xt_try = flow(problem, rhs, &xp, pp, budget.steps_per_period);
                 let tn = det::sqrt(
                     (0..d)
                         .map(|i| (xt_try[i] - xp[i]) * (xt_try[i] - xp[i]))

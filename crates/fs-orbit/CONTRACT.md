@@ -18,7 +18,11 @@ API — never instrument-shaped.
 
 - `OrbitProblem` — `dim`, `island(t, x, out)` (the AFT-sampled
   nonlinearity), `port(s)` (row-major `d x d` complex operator,
-  default `s I`), `autonomous()`.
+  default `s I`), `autonomous()`, and optional `time_domain_rhs()`.
+  The latter supplies a `TimeDomainRhs<Self>` callback for the explicit
+  derivative `x' = f(t, x)` in the same state and time coordinates.
+  It defaults to unavailable; a plain ODE explicitly supplies
+  `Some(Self::island)`, while a mass-weighted problem supplies `M^-1 g`.
 - `HbAnchor` — `Forced { omega }`, `Autonomous { omega_guess }`
   (phase anchored by `Im X_1[0] = 0`), `Backbone { amplitude,
   omega_guess }` (conservative backbone point closed by an APPENDED
@@ -30,7 +34,9 @@ API — never instrument-shaped.
   final verification sample count, measured sampling defect).
 - `ShootBudget` / `solve_shooting` -> `ShootOrbit` (period, orbit
   point, Floquet multipliers from the forward-differenced monodromy
-  through the fs-la complex eigensolver).
+  through the fs-la complex eigensolver). Admission requires the explicit
+  time-domain callback; a frequency-only problem returns
+  `TimeDomainUnavailable` before evaluating its island.
 - `ContinuableProblem` / `ContinuationBudget` / `continue_branch` —
   TRUE pseudo-arclength (bordered corrector on coefficients and the
   parameter jointly), so parameter folds are traversed, not stalled
@@ -65,7 +71,12 @@ API — never instrument-shaped.
   Forced HB solves admit DC, zero, arbitrarily small, and higher-harmonic
   responses: their period is prescribed, not inferred from a cycle.
   Equilibrium deflation applies only to autonomous/backbone anchors.
-  Shooting retains its separate equilibrium check.
+  Shooting applies its derivative-based equilibrium check only to
+  autonomous problems: a forced response can have zero velocity at an
+  ordinary turning point.
+- Every RK4 stage, shooting Jacobian, monodromy evaluation, and autonomous
+  equilibrium check uses the admitted time-domain callback. Shooting never
+  substitutes `island` for a general linear port's realized dynamics.
 - Conservative families carry a parity/phase nullspace: the Newton
   step regularizes a singular factorization with a FIXED Tikhonov
   jitter (deterministic); the converged residual gate is unchanged.
@@ -75,7 +86,8 @@ API — never instrument-shaped.
 Typed `OrbitError`: `BadParameter`, `NewtonStalled` (with the full
 per-iteration residual trace), `SamplingUnresolved` (finest sample count,
 residual and measured defect), `SingularJacobian`,
-`ContinuationExhausted`, `TrivialCollapse`, `TorusSuspected` (a
+`ContinuationExhausted`, `TrivialCollapse`, `TimeDomainUnavailable`,
+`TorusSuspected` (a
 non-trivial unit-circle Floquet pair with nonzero angle:
 quasi-periodic drift is a NAMED no-claim in v1, never a wrong
 answer), forwarded `Eigen`.
@@ -115,7 +127,11 @@ within 0.2% of the independent first-harmonic scalar law; shooting
 cross-validating the same vdP orbit to 1e-12 relative period with
 Floquet classification (trivial multiplier 1 + transverse 8.6e-4);
 refusals by name including `TorusSuspected` on a constructed
-incommensurate two-center fixture; bitwise determinism.
+incommensurate two-center fixture; bitwise determinism. Additional G1/G3
+regressions refuse a frequency-only port before island evaluation, compare
+HB and shooting for `2 x' = -x + cos(t)` against the exact phase-zero value
+0.2 and Floquet multiplier `exp(-pi)`, and retain a forced cosine response
+whose initial derivative vanishes.
 
 The G1/G3 analytic regressions in `tests/harmonic_balance.rs` compare
 higher-harmonic forced oscillator coefficients (including their phase and
@@ -142,7 +158,9 @@ and a bounded named refusal for persistently unresolved forcing.
   bound: sufficiently high frequencies can alias on both grids. Explicit
   input bandwidth must be admitted by domain adapters; shooting is an
   independent cross-check only for problems with an equivalent time-domain
-  formulation.
+  formulation. The explicit callback is a model-supplied realization, not
+  a proof of that equivalence. Frequency responses are never automatically
+  inverted or assigned a state-space realization by the shooting solver.
 - The monodromy is forward-differenced, not a consistent tangent;
   the I09 lattice's consistent-tangent element is a successor.
 - Grazing/hybrid (non-smooth) islands are out of scope in v1.
