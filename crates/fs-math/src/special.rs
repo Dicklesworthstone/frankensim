@@ -9,6 +9,9 @@
 
 use crate::{dd::Dd, det};
 
+mod sphere;
+pub use sphere::{SphericalBesselMoments, spherical_bessel_moments};
+
 const BESSEL_SWITCH: f64 = 18.0;
 /// Series/asymptotic boundary for H₁. At 36 the first omitted algebraic
 /// term is below 1e-17; switching at 20 would not meet the accuracy budget.

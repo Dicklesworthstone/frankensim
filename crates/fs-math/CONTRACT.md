@@ -228,3 +228,27 @@ central package-proof pending.
   bead fz2.4 owns nightly gates).
 - Correctly-rounded (0.5 ULP) results: NOT claimed — budgets above.
 - dd-oracle billions-scale nightly battery arrives with fs-ivl.
+
+## Complete-sphere interference moments
+
+`special::{SphericalBesselMoments, spherical_bessel_moments}` provides the
+scalar, vector and tensor moments of exp(-i x n.e) over the full unit sphere.
+It returns double-double j0(x)-1, j1(x), j1(x)/x-1/3 and j2(x), with continuous
+zero-separation values. Keeping the two small remainders separate prevents
+an early subtraction of their constant baselines from erasing weak
+subwavelength radiation. The functions are spherical Bessel functions,
+distinct from the existing cylindrical circular-piston J1.
+
+Finite signed inputs are accepted; nonfinite inputs return None. Eighteen
+fixed series updates per channel cover |x| <= 1; the large-argument branch
+uses one deterministic sin/cos evaluation and reciprocal powers. There is no
+allocation, no argument-squared overflow at large x, and no change to the
+strict-core operation tree or golden. The series truncation at the switch
+is below 1e-40, which is not a floating-point error certificate. Underflow
+and ill-conditioned source nulls remain subject to representable range;
+no universal relative bound or interval enclosure is claimed.
+
+The added unit regressions cover parity and zero limits, tiny representable
+remainders, an independent polar-angle quadrature for all three moments,
+the series switch, and finite extreme arguments. These new Rust tests await
+native execution; they do not inherit the existing strict-core qualification.
