@@ -32,6 +32,9 @@ use fs_la::factor::lu;
 use fs_math::c64::C64;
 use fs_math::det;
 
+/// Full-state autonomous pseudo-arclength continuation.
+pub mod autonomous;
+
 mod adaptive;
 pub use adaptive::{
     AdaptiveHbOrbit, HbRefinementBudget, HbRefinementCheck, solve_hb_adaptive,
