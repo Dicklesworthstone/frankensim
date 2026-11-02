@@ -27,6 +27,9 @@ use fs_material::gas::{GasSpec, GasState};
 use fs_material::porous::PorousFluidLaw;
 use fs_math::c64::C64;
 
+/// Statistically stationary independent frequencies on one thermal specimen.
+pub mod spectrum;
+
 /// One original calorically perfect/Sutherland gas law at prescribed pressure.
 /// The explicit temperature support is additionally admitted by the original
 /// gas constructor at both ends; no source domain is extended or defaulted.
@@ -186,6 +189,20 @@ impl<'a> TemperaturePorousHeating<'a> {
         options: ComposeOptions,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(thermal, cells, gas, drive, options, None, &mut checkpoint)
+    }
+
+    // Spectral bins share gas evaluations while retaining the same original
+    // single-frequency preparation and complete physical thermal admission.
+    fn prepare(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        drive: PorousHarmonicDrive,
+        options: ComposeOptions,
+        shared_states: Option<&[GasState]>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
         checkpoint()?;
         if cells.is_empty()
             || cells.len() > MAX_POROUS_HEATING_CELLS
@@ -193,10 +210,13 @@ impl<'a> TemperaturePorousHeating<'a> {
         {
             return Err(DepositionError::Budget("temperature-dependent porous cells").into());
         }
+        if shared_states.is_some_and(|states| states.len() != cells.len()) {
+            return Err(PorousHeatingError::Invalid("shared porous gas state count"));
+        }
         let mut states = Vec::with_capacity(cells.len());
         let mut layers = Vec::with_capacity(cells.len());
         let mut partitions = Vec::with_capacity(cells.len());
-        for cell in cells {
+        for (index, cell) in cells.iter().enumerate() {
             checkpoint()?;
             let original = thermal
                 .cells()
@@ -207,7 +227,11 @@ impl<'a> TemperaturePorousHeating<'a> {
             let length = finite(norm(std::array::from_fn(|i| {
                 original.geometry.end_m[i] - original.geometry.start_m[i]
             })))?;
-            let state = gas.evaluate(thermal.temperature_k(cell.cell)?)?;
+            let state = if let Some(states) = shared_states {
+                states[index]
+            } else {
+                gas.evaluate(thermal.temperature_k(cell.cell)?)?
+            };
             layers.push(PorousLayer::try_new(
                 cell.material,
                 &state,
@@ -223,10 +247,10 @@ impl<'a> TemperaturePorousHeating<'a> {
             }]);
         }
         let (heat, boundary) = {
-            let stack = acoustic(&mut checkpoint, |cancelled| {
+            let stack = acoustic(checkpoint, |cancelled| {
                 PorousLayerStack::try_new(&layers, options, cancelled)
             })?;
-            let excitation = acoustic(&mut checkpoint, |cancelled| {
+            let excitation = acoustic(checkpoint, |cancelled| {
                 stack.prepare_excitation(drive.incident_pressure_pa, cancelled)
             })?;
             let partitions: Vec<&[PorousHeatCell]> =
@@ -236,7 +260,7 @@ impl<'a> TemperaturePorousHeating<'a> {
                 thermal,
                 &partitions,
                 cells.len(),
-                &mut checkpoint,
+                &mut *checkpoint,
             )?;
             let boundary = *excitation.boundary_power();
             (
@@ -303,7 +327,7 @@ impl<'a> TemperaturePorousHeating<'a> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), PorousHeatingError> {
         self.heat.validate(thermal, checkpoint)?;
-        let mut changed = false;
+        let mut changed = Vec::new();
         for (i, cell) in self.cells.iter().enumerate() {
             checkpoint()?;
             let temperature = thermal.temperature_k(cell.cell)?;
@@ -311,8 +335,30 @@ impl<'a> TemperaturePorousHeating<'a> {
                 continue;
             }
             let state = self.gas.evaluate(temperature)?;
+            changed.push((i, state));
+            work.gas_evaluations = work
+                .gas_evaluations
+                .checked_add(1)
+                .ok_or(DepositionError::Budget("porous gas evaluations"))?;
+        }
+        self.refresh_changed(&changed, work, checkpoint)
+    }
+
+    // Only internally evaluated native states enter here. The single-frequency
+    // caller or common spectral binding already admitted the thermal specimen.
+    fn refresh_changed(
+        &mut self,
+        changed: &[(usize, GasState)],
+        work: &mut PorousFeedbackWork,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), PorousHeatingError> {
+        if changed.is_empty() {
+            return Ok(());
+        }
+        for &(i, state) in changed {
+            checkpoint()?;
             let layer = PorousLayer::try_new(
-                cell.material,
+                self.cells[i].material,
                 &state,
                 self.drive.angular_frequency_rad_s,
                 self.layers[i].thickness_m(),
@@ -321,14 +367,6 @@ impl<'a> TemperaturePorousHeating<'a> {
             )?;
             self.states[i] = state;
             self.layers[i] = layer;
-            work.gas_evaluations = work
-                .gas_evaluations
-                .checked_add(1)
-                .ok_or(DepositionError::Budget("porous gas evaluations"))?;
-            changed = true;
-        }
-        if !changed {
-            return Ok(());
         }
         let stack = acoustic(checkpoint, |cancelled| {
             PorousLayerStack::try_new(&self.layers, self.options, cancelled)

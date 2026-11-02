@@ -21867,3 +21867,47 @@ domain/mapping/cancellation refusal, and accepted-start rates plus timestep
 refinement against an independent two-cell direct-owner RK4 reference with
 conduction, authored heat and outgoing acoustic energy. The nine existing
 fixed-source porous thermal regressions remain unchanged and pass.
+
+<!-- porous-spectrum-feedback:start -->
+### Stationary finite-band porous heating with native temperature feedback
+
+`porous_heating::feedback::spectrum::PorousSpectrumHeating` advances a common
+physical specimen under distinct statistically independent frequency bins.
+Each bin uses the original coherent two-sided porous stack; its positive
+viscous and thermal cell watts add to one native heat source. Complex pressures
+are never summed across frequencies. Bins are canonicalized by increasing
+positive angular frequency. Duplicate frequencies refuse: coherent waves at
+the same frequency must be combined in one authored bin. All bins share the
+same full specimen area and original thermal/material bindings.
+
+Each `PorousHarmonicDrive` contains the bin's already integrated peak pressure
+phasors and a fixed positive real exterior reference. The explicit
+`angular_pressure_density_bin` helper accepts one-sided angular-frequency
+amplitude density, with mean-square pressure `integral S_pp(omega) d omega`,
+and a positive quadrature weight. It converts density to peak pressure using
+`sqrt(2 * weight)`; bandwidth and the harmonic factor are applied exactly once.
+The two ports remain fully coherent within that statistical component.
+
+Changed native cell temperatures evaluate the original gas law once per cell,
+shared across all frequencies. Each affected bin rebuilds its changed porous
+coefficients and performs one coherent solve. Unchanged/latent temperatures
+reuse prepared rates. Positive powers and exterior accounts use compensated
+sums; per-bin energy is diagnostic, never an extra thermal credit. One shared
+accepted-start observer preserves original conduction, authored heat, events,
+latent storage, continuation and atomic endpoint/cancellation refusal.
+
+Explicit bin and cell-times-bin budgets precede allocation, with hard ceilings
+of 4096 bins and 65536 cached cell/bin pairs. Existing native composition limits
+and the 4096-cell heat ceiling also apply. The model retains the original
+isobaric background and thermally lumped storage assumptions and represents
+stationary ensemble or long-time means. Finite-time beats, acoustic transients,
+frequency conversion and within-bin partial coherence require other owners.
+Spectral quadrature and thermal source feedback each require refinement.
+
+Five focused groups cover independent spatial work, within-bin phase effects,
+angular-density normalization and spectral quadrature refinement, shared caches
+and latent storage, exact single-bin/zero-drive behavior, events/continuation
+and atomic refusals, plus two-frequency temperature/energy refinement against
+an independent direct-owner RK4 reference. Existing fixed and single-frequency
+thermal tests retain their original source and arithmetic.
+<!-- porous-spectrum-feedback:end -->

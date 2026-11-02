@@ -453,6 +453,17 @@ impl HeatAccount {
         }
         Ok(())
     }
+    fn acoustic_energy(&self) -> Result<PorousHeatingEnergy, PorousHeatingError> {
+        let deposited = self.energy.iter().copied().fold(Dd::ZERO, |a, b| a + b);
+        Ok(PorousHeatingEnergy {
+            incident_j: finite(self.boundary[0].to_f64())?,
+            outgoing_j: finite(self.boundary[1].to_f64())?,
+            viscous_j: finite(self.mechanisms[0].to_f64())?,
+            thermal_j: finite(self.mechanisms[1].to_f64())?,
+            deposited_j: finite(deposited.to_f64())?,
+            residual_j: finite((self.boundary[0] - self.boundary[1] - deposited).to_f64())?,
+        })
+    }
     fn finish<'t>(
         self,
         heat: &PreparedHeat,
@@ -460,15 +471,7 @@ impl HeatAccount {
         heat_report: EnergyAudit,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<PorousHeatingStep<'t>, PorousHeatingError> {
-        let deposited = self.energy.iter().copied().fold(Dd::ZERO, |a, b| a + b);
-        let acoustic = PorousHeatingEnergy {
-            incident_j: finite(self.boundary[0].to_f64())?,
-            outgoing_j: finite(self.boundary[1].to_f64())?,
-            viscous_j: finite(self.mechanisms[0].to_f64())?,
-            thermal_j: finite(self.mechanisms[1].to_f64())?,
-            deposited_j: finite(deposited.to_f64())?,
-            residual_j: finite((self.boundary[0] - self.boundary[1] - deposited).to_f64())?,
-        };
+        let acoustic = self.acoustic_energy()?;
         let cell_energy_j = heat
             .cells
             .iter()
