@@ -3580,3 +3580,39 @@ against exact incompressibility. This bounded evidence is not the complete
 Treloar/MMS/inf-sup campaign or a universal locking-free certificate; bead
 `frankensim-irp-v5-instrument-realism-pexfp.61` remains open. The displacement-only
 P1 hyper3 path retains its original volumetric-locking limitation.
+
+## Retained finite-strain mixed viscoelastic solids
+
+`hyper3::mixed::visco::MixedViscoTetSolid` owns the accepted displacement,
+continuous P1 pressure, time, Piola stresses and one distinct
+`ViscoRemainderState` per TET10 quadrature point. `MixedViscoLawField`
+accepts uniform, per-element or per-quadrature original spectra without
+averaging. Prepared P2/P1 geometry is shared across accepted endpoints.
+
+`advance` solves one physical endpoint with accepted metrics and interval frozen
+throughout the native mixed Newton solve, warm-starting displacement and pressure.
+A zero interval means an instantaneous elastic jump. Numerical load continuation
+must have exactly one endpoint; physical substeps remain explicit caller actions.
+A returned candidate owns the complete new state. Cancellation, Newton refusal
+or a failed work gate cannot mutate the accepted solid.
+
+Physical storage is the native remainder plus `U(J(p))`, reconstructed from
+pressure. It is not the original bulk energy at the quadrature deformation:
+the mixed pressure constraint holds weakly. Exact incompressibility never
+evaluates the unused bulk penalty, even when publishing accepted branch updates.
+The report separates remainder/bulk storage, native viscous loss, frozen-history
+loading work, incremental remainder and mixed saddle potentials, pressure
+constraint work, actual internal/dead-load/support endpoint work, equilibrium
+work residual and signed endpoint-work defect. Explicit
+`FiniteViscoStepControls` gate the work residual and defect; neither numerical
+defect nor saddle potential is counted as physical dissipation or heat.
+
+`tests/mixed_visco.rs` verifies held-stretch relaxation against the native
+material point, maintained-traction creep with an independent scalar equilibrium,
+original-bulk storage and the non-aging elastic limit, heterogeneous spectra and
+transactional work-gate refusal. Exact-mode relaxation is bitwise independent
+of unused bulk moduli `1e3` and `1e300`. The runnable
+`mixed_viscoelastic_creep` example applies exact quadratic-face loads and reports
+stretch, pressure, storage, interval viscous loss and signed endpoint defect.
+This owner is isothermal and quasistatic; it does not add mixed inertia, thermal
+closure, a general mesh inf-sup certificate or the full M1.3-W2b acceptance ladder.

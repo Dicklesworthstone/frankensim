@@ -103,6 +103,57 @@ pub struct ViscoState {
     pub dissipated: f64,
 }
 
+/// Original viscous metrics with an explicitly BULK-FREE physical ledger.
+/// This is a distinct history from [`ViscoState`]; its stored energy and
+/// loading work contain the equilibrium remainder and Maxwell branches only.
+/// The spatial mixed owner separately owns pressure-reconstructed bulk energy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViscoRemainderState {
+    /// Original `C_v^{-1}` per branch, `[xx, yy, zz, xy, xz, yz]`, determinant 1.
+    pub inverse_viscous_cauchy_green: Vec<[f64; 6]>,
+    /// Actual last deformation; it is never projected to unit determinant.
+    pub deformation_gradient: [f64; 9],
+    /// Accumulated frozen-metric loading work of the remainder, in Pa.
+    pub work: f64,
+    /// Physical equilibrium-remainder plus branch storage, in Pa.
+    pub stored: f64,
+    /// Accumulated original branch relaxation loss, in Pa.
+    pub dissipated: f64,
+}
+
+// The return map needs the actual metrics, not a particular energy ledger.
+// Both public history types use this one native branch-preparation path.
+trait BranchHistory {
+    fn viscous_metrics(&self) -> &[[f64; 6]];
+}
+
+impl BranchHistory for ViscoState {
+    fn viscous_metrics(&self) -> &[[f64; 6]] {
+        &self.inverse_viscous_cauchy_green
+    }
+}
+
+impl BranchHistory for ViscoRemainderState {
+    fn viscous_metrics(&self) -> &[[f64; 6]] {
+        &self.inverse_viscous_cauchy_green
+    }
+}
+
+impl ViscoRemainderState {
+    fn check_ledger(&self) -> Result<(), MaterialError> {
+        if ![self.work, self.stored, self.dissipated]
+            .iter()
+            .all(|v| v.is_finite())
+            || self.dissipated < 0.0
+        {
+            return Err(state_error(
+                "invalid physical remainder work/storage/loss ledger".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A hyperelastic equilibrium law with finite-strain Maxwell branches.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViscoHyperelastic {
@@ -132,12 +183,37 @@ pub struct ViscoStepResponse {
     pub dissipated_pa: f64,
 }
 
+/// Proposed bulk-free endpoint using the identical original branch update.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViscoRemainderStepResponse {
+    /// Proposed remainder history; the borrowed accepted history is unchanged.
+    pub state: ViscoRemainderState,
+    /// Remainder incremental Piola stress; no mixed pressure or bulk stress.
+    pub first_piola_pa: [f64; 9],
+    /// Remainder value function whose gradient is `first_piola_pa`, in Pa.
+    /// This is neither the physical storage in `state` nor heat.
+    pub incremental_potential_pa: f64,
+    /// Frozen-metric loading-work increment of the remainder, in Pa.
+    pub loading_work_pa: f64,
+    /// Original branch relaxation loss before cumulative rounding, in Pa.
+    pub dissipated_pa: f64,
+}
+
 /// Immutable constitutive potential for one spatial Newton solve. All trial
 /// evaluations retain the SAME accepted history and physical interval.
 #[derive(Debug, Clone, Copy)]
 pub struct FrozenViscoHyperelastic<'a> {
     law: &'a ViscoHyperelastic,
     accepted: &'a ViscoState,
+    dt_s: f64,
+}
+
+/// Immutable bulk-free potential borrowing a remainder history and one actual
+/// physical interval. It never evaluates `U(det F)` or creates a full-energy state.
+#[derive(Debug, Clone, Copy)]
+pub struct FrozenViscoRemainder<'a> {
+    law: &'a ViscoHyperelastic,
+    accepted: &'a ViscoRemainderState,
     dt_s: f64,
 }
 
@@ -172,25 +248,12 @@ impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoHyperelastic
     }
 
     fn validate_mixed(&self) -> Result<(), MaterialError> {
-        self.law.equilibrium.validate_mixed()?;
+        self.law.validate_mixed_parameters()?;
         self.law.check_inputs(
             self.accepted,
             &self.accepted.deformation_gradient,
             self.dt_s,
         )?;
-        if self.law.branches.len() > MAX_FINITE_STRAIN_BRANCHES {
-            return Err(parameters(
-                "mixed viscous branch count exceeds its original cap".into(),
-            ));
-        }
-        for branch in &self.law.branches {
-            branch.energy.validate()?;
-            if !(branch.tau_s.is_finite() && branch.tau_s > 0.0) {
-                return Err(parameters(
-                    "mixed viscous relaxation time must be finite and positive".into(),
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -200,10 +263,7 @@ impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoHyperelastic
     ) -> Result<([f64; 9], f64), MaterialError> {
         crate::hyper::mixed::check_split_state(&self.law.equilibrium, f)?;
         let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
-        let (value, stress) = fs_ad::gradient::<9>(*f, |x| {
-            self.law.equilibrium.isochoric_energy(&x) + prepared.potential(&x)
-        });
-        crate::hyper::mixed::checked_stress(value, stress)
+        self.law.remainder_stress_and_potential_from(&prepared, f)
     }
 
     fn remainder_response(
@@ -212,9 +272,41 @@ impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoHyperelastic
     ) -> Result<crate::hyper::mixed::RemainderResponse, MaterialError> {
         crate::hyper::mixed::check_split_state(&self.law.equilibrium, f)?;
         let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
-        crate::hyper::mixed::response_from_energy(f, |x| {
-            self.law.equilibrium.isochoric_energy(x) + prepared.potential(x)
-        })
+        self.law.remainder_response_from(&prepared, f)
+    }
+}
+
+impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoRemainder<'_> {
+    fn equilibrium_law(&self) -> &Hyperelastic {
+        &self.law.equilibrium
+    }
+
+    fn validate_mixed(&self) -> Result<(), MaterialError> {
+        self.law.validate_mixed_parameters()?;
+        self.accepted.check_ledger()?;
+        self.law.check_inputs(
+            self.accepted,
+            &self.accepted.deformation_gradient,
+            self.dt_s,
+        )
+    }
+
+    fn remainder_stress_and_potential(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        crate::hyper::mixed::check_split_state(&self.law.equilibrium, f)?;
+        let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
+        self.law.remainder_stress_and_potential_from(&prepared, f)
+    }
+
+    fn remainder_response(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<crate::hyper::mixed::RemainderResponse, MaterialError> {
+        crate::hyper::mixed::check_split_state(&self.law.equilibrium, f)?;
+        let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
+        self.law.remainder_response_from(&prepared, f)
     }
 }
 
@@ -724,6 +816,24 @@ impl Prepared {
 }
 
 impl ViscoHyperelastic {
+    fn validate_mixed_parameters(&self) -> Result<(), MaterialError> {
+        crate::hyper::mixed::MixedFiniteStrainPotential::validate_mixed(&self.equilibrium)?;
+        if self.branches.len() > MAX_FINITE_STRAIN_BRANCHES {
+            return Err(parameters(
+                "mixed viscous branch count exceeds its original cap".into(),
+            ));
+        }
+        for branch in &self.branches {
+            branch.energy.validate()?;
+            if !(branch.tau_s.is_finite() && branch.tau_s > 0.0) {
+                return Err(parameters(
+                    "mixed viscous relaxation time must be finite and positive".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Borrow one accepted history and nonnegative physical interval for a
     /// spatial equilibrium solve. Trials cannot advance either of them.
     pub fn freeze<'a>(
@@ -742,6 +852,24 @@ impl ViscoHyperelastic {
             ));
         }
         Ok(FrozenViscoHyperelastic {
+            law: self,
+            accepted,
+            dt_s,
+        })
+    }
+
+    /// Freeze the original viscous history with its explicitly remainder-only
+    /// ledger. Every trial keeps the same metrics, physical interval and actual
+    /// F. Neither preparation nor evaluation touches the original bulk energy.
+    pub fn freeze_remainder<'a>(
+        &'a self,
+        accepted: &'a ViscoRemainderState,
+        dt_s: f64,
+    ) -> Result<FrozenViscoRemainder<'a>, MaterialError> {
+        crate::hyper::mixed::check_split_state(&self.equilibrium, &accepted.deformation_gradient)?;
+        self.check_inputs(accepted, &accepted.deformation_gradient, dt_s)?;
+        accepted.check_ledger()?;
+        Ok(FrozenViscoRemainder {
             law: self,
             accepted,
             dt_s,
@@ -825,7 +953,24 @@ impl ViscoHyperelastic {
         }
     }
 
-    fn check_inputs(&self, s: &ViscoState, f: &[f64; 9], dt: f64) -> Result<(), MaterialError> {
+    /// Unstrained relaxed viscous metrics and a zero remainder-only ledger.
+    #[must_use]
+    pub fn initial_remainder_state(&self) -> ViscoRemainderState {
+        ViscoRemainderState {
+            inverse_viscous_cauchy_green: vec![[1.0, 1.0, 1.0, 0.0, 0.0, 0.0]; self.branches.len()],
+            deformation_gradient: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            work: 0.0,
+            stored: 0.0,
+            dissipated: 0.0,
+        }
+    }
+
+    fn check_inputs<S: BranchHistory>(
+        &self,
+        s: &S,
+        f: &[f64; 9],
+        dt: f64,
+    ) -> Result<(), MaterialError> {
         if !(dt.is_finite() && dt >= 0.0) {
             return Err(state_error(format!(
                 "step {dt} s must be finite and non-negative"
@@ -837,14 +982,14 @@ impl ViscoHyperelastic {
                 "det F = {j} (orientation lost or degenerate)"
             )));
         }
-        if s.inverse_viscous_cauchy_green.len() != self.branches.len() {
+        if s.viscous_metrics().len() != self.branches.len() {
             return Err(state_error(format!(
                 "state holds {} branches, the law has {}",
-                s.inverse_viscous_cauchy_green.len(),
+                s.viscous_metrics().len(),
                 self.branches.len()
             )));
         }
-        for cv in &s.inverse_viscous_cauchy_green {
+        for cv in s.viscous_metrics() {
             let m = sym_expand(cv);
             let dm = det3(&m);
             if !cv.iter().all(|x| x.is_finite()) || !(dm.is_finite() && (dm - 1.0).abs() < 1e-6) {
@@ -978,10 +1123,15 @@ impl ViscoHyperelastic {
         })
     }
 
-    fn prepare(&self, s: &ViscoState, f: &[f64; 9], dt: f64) -> Result<Prepared, MaterialError> {
+    fn prepare<S: BranchHistory>(
+        &self,
+        s: &S,
+        f: &[f64; 9],
+        dt: f64,
+    ) -> Result<Prepared, MaterialError> {
         self.check_inputs(s, f, dt)?;
         let mut branches = Vec::with_capacity(self.branches.len());
-        for (branch, cv6) in self.branches.iter().zip(&s.inverse_viscous_cauchy_green) {
+        for (branch, cv6) in self.branches.iter().zip(s.viscous_metrics()) {
             branches.push(self.prepare_branch(branch, cv6, f, dt)?);
         }
         Ok(Prepared { branches })
@@ -1050,6 +1200,68 @@ impl ViscoHyperelastic {
             incremental_potential_pa,
             loading_work_pa,
             dissipated_pa: dissipation,
+        })
+    }
+
+    /// Propose the identical native branch evolution using a physical remainder
+    /// ledger. No `U(det F)`, full Piola or full-energy `ViscoState` is evaluated.
+    /// The mixed spatial owner supplies pressure stress and bulk work/storage.
+    pub fn step_remainder_response(
+        &self,
+        s: &ViscoRemainderState,
+        f_new: &[f64; 9],
+        dt: f64,
+    ) -> Result<ViscoRemainderStepResponse, MaterialError> {
+        crate::hyper::mixed::check_split_state(&self.equilibrium, f_new)?;
+        s.check_ledger()?;
+        let prep = self.prepare(s, f_new, dt)?;
+        let (first_piola_pa, incremental_potential_pa) =
+            self.remainder_stress_and_potential_from(&prep, f_new)?;
+        let psi_eq = self.equilibrium.isochoric_energy(f_new);
+        let psi_tr: f64 = prep.branches.iter().map(|b| b.psi_tr).sum();
+        let psi_star: f64 = prep.branches.iter().map(|b| b.psi_star).sum();
+        let dissipated_pa: f64 = prep.branches.iter().map(|b| b.dissipation).sum();
+        let loading_work_pa = psi_eq + psi_tr - s.stored;
+        let state = ViscoRemainderState {
+            inverse_viscous_cauchy_green: prep.branches.iter().map(|b| b.cv_new).collect(),
+            deformation_gradient: *f_new,
+            work: s.work + loading_work_pa,
+            stored: psi_eq + psi_star,
+            dissipated: s.dissipated + dissipated_pa,
+        };
+        state.check_ledger()?;
+        if !loading_work_pa.is_finite() || !dissipated_pa.is_finite() || dissipated_pa < 0.0 {
+            return Err(state_error(
+                "nonfinite remainder loading work or negative relaxation loss".into(),
+            ));
+        }
+        Ok(ViscoRemainderStepResponse {
+            state,
+            first_piola_pa,
+            incremental_potential_pa,
+            loading_work_pa,
+            dissipated_pa,
+        })
+    }
+
+    fn remainder_stress_and_potential_from(
+        &self,
+        prep: &Prepared,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        let (value, stress) = fs_ad::gradient::<9>(*f, |x| {
+            self.equilibrium.isochoric_energy(&x) + prep.potential(&x)
+        });
+        crate::hyper::mixed::checked_stress(value, stress)
+    }
+
+    fn remainder_response_from(
+        &self,
+        prep: &Prepared,
+        f: &[f64; 9],
+    ) -> Result<crate::hyper::mixed::RemainderResponse, MaterialError> {
+        crate::hyper::mixed::response_from_energy(f, |x| {
+            self.equilibrium.isochoric_energy(x) + prep.potential(x)
         })
     }
 
@@ -1144,10 +1356,28 @@ impl ViscoHyperelastic {
         s: &ViscoState,
         f: &[f64; 9],
     ) -> Result<f64, MaterialError> {
+        self.physical_remainder_energy(s, f)
+    }
+
+    /// Physical remainder storage for a remainder history at an admitted F.
+    /// The original reference-volume convention and native branch energies apply.
+    pub fn remainder_free_energy(
+        &self,
+        s: &ViscoRemainderState,
+        f: &[f64; 9],
+    ) -> Result<f64, MaterialError> {
+        self.physical_remainder_energy(s, f)
+    }
+
+    fn physical_remainder_energy<S: BranchHistory>(
+        &self,
+        s: &S,
+        f: &[f64; 9],
+    ) -> Result<f64, MaterialError> {
         crate::hyper::mixed::check_split_state(&self.equilibrium, f)?;
         self.check_inputs(s, f, 0.0)?;
         let mut total = self.equilibrium.isochoric_energy(f);
-        for (branch, cv6) in self.branches.iter().zip(&s.inverse_viscous_cauchy_green) {
+        for (branch, cv6) in self.branches.iter().zip(s.viscous_metrics()) {
             let (_, d, _) = Self::trial_spectrum(&sym_expand(cv6), f)?;
             let x = expand(reduce([
                 0.5 * det::ln(d[0]),

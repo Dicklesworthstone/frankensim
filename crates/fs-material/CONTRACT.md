@@ -9637,3 +9637,33 @@ their own stability, quadrature and convergence evidence.
 of original energy/stress/tangent by pressure elimination, every mixed Hessian
 block, exact-constraint bulk independence, physical versus incremental storage,
 original isochoric histories, rotation/unit scaling and domain refusals.
+
+## Retained mixed-viscoelastic remainder histories
+
+`visco_hyper::{ViscoRemainderState, FrozenViscoRemainder,
+ViscoRemainderStepResponse}` give the mixed spatial owner a distinct physical
+remainder ledger. `initial_remainder_state`, `freeze_remainder`,
+`step_remainder_response` and `remainder_free_energy` retain the native
+inverse viscous metrics, actual deformation gradient and branch relaxation law.
+The existing `ViscoState` continues to mean full material energy.
+
+Both history types share the original branch preparation and return map.
+The remainder endpoint evaluates the equilibrium remainder and original branch
+energies directly: it never evaluates or subtracts the unused bulk energy,
+constructs a surrogate full-energy state, or projects the actual deformation to
+unit determinant. Full-invariant HGO fibres therefore retain their actual-volume
+dependence. The spatial mixed owner supplies pressure stress and reconstructed
+bulk storage separately.
+
+A frozen remainder borrows one accepted history and one nonnegative physical
+interval throughout Newton trials. A proposed step leaves that history unchanged.
+Its physical storage, frozen-metric loading work, incremental potential and
+nonnegative branch loss have separate fields. Malformed histories, nonfinite
+ledgers, negative loss, invalid intervals and unsupported coupled laws refuse.
+
+`tests/visco_remainder.rs` checks native-history/loss equivalence, the physical
+bulk difference where representable, immutable trials, tangent consistency,
+full-invariant fibres, refusals, and a discriminating `kappa=1e308, F=3I` case:
+the full bulk energy overflows while the remainder endpoint stays finite and
+matches `kappa=1e3` bit for bit. These are isothermal material accounts; neither
+the incremental potential nor a signed numerical work defect is heat.

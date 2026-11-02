@@ -33,6 +33,9 @@ use crate::linear3::{TetAssemblyBudget, TetElasticError};
 mod element;
 use element::PreparedMixedMesh;
 
+/// Retained finite-strain viscoelastic histories on the mixed solid.
+pub mod visco;
+
 /// Constitutive laws retain their spatial identity; no coefficients are averaged.
 #[derive(Debug)]
 pub enum MixedLawField<'a, L: MixedFiniteStrainPotential = Hyperelastic> {
