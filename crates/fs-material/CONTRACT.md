@@ -6890,6 +6890,15 @@ coincide only under the existing constant-polarizability approximation.
 The v2 state identity includes this model's semantics while retaining the
 original sources, composition and accepted gas state.
 
+`refractive_index_jet_at_density` additionally supplies the analytic second
+density derivative for spatial ray-bundle focusing. With `L = rho K`, it uses
+`n'' = (n')² (1 + 8 L)/(3 n)` and retains the original first-order result.
+Unrepresentable nonzero curvature refuses this optional query without narrowing
+the first-order phase law. Spatial Hessians remain the reconstruction owner's
+responsibility. G1 regressions compare an independent second derivative of the
+closed-form index, finite differences of its first derivative, vacuum, null
+polarizability and the dilute-domain limits.
+
 Preparation is bounded by the original 128-component gas limit; spectral and
 phase evaluation are allocation-free constant work. The exact lambda^-4 law
 assumes constant molecular polarizability on 380–780 nm. No dispersion,

@@ -472,6 +472,42 @@ impl RayleighGasState {
             derivative_density_m3_kg,
         })
     }
+
+    /// The same local phase law with its exact second density derivative.
+    ///
+    /// Smooth-field focusing needs both terms in
+    /// `Hess(n) = n'(rho) Hess(rho) + n''(rho) grad(rho) grad(rho)^T`.
+    /// In particular, an affine density has a nonzero index Hessian: the
+    /// Lorentz--Lorenz map is nonlinear even at fixed molecular composition.
+    /// With `L = rho K`, differentiation gives
+    /// `n'' = (n')² (1 + 8 L) / (3 n)` in m⁶/kg².
+    ///
+    /// This opt-in query retains the first-order query's arithmetic and domain.
+    /// An unrepresentable curvature refuses only this second-order capability;
+    /// it does not invalidate ordinary phase-index/ray-bending queries.
+    pub fn refractive_index_jet_at_density(
+        &self,
+        density_kg_m3: f64,
+        wavelength_nm: f64,
+    ) -> Result<GasRefractiveIndexJet, GasScatteringError> {
+        let index = self.refractive_index_at_density(density_kg_m3, wavelength_nm)?;
+        let lorentz_lorenz = density_kg_m3 * self.mass_refractivity_m3_kg;
+        let factor = (1.0 + 8.0 * lorentz_lorenz) / (3.0 * index.phase_index);
+        let derivative = index.derivative_density_m3_kg;
+        // Factor first: squaring the derivative can overflow even when the
+        // final curvature remains representable.
+        let second_derivative_density_m6_kg2 = derivative * (derivative * factor);
+        if !second_derivative_density_m6_kg2.is_finite()
+            || (derivative > 0.0 && second_derivative_density_m6_kg2 == 0.0)
+        {
+            return Err(GasScatteringError::Unrepresentable);
+        }
+        Ok(GasRefractiveIndexJet {
+            index,
+            second_derivative_density_m6_kg2,
+        })
+    }
+
     /// Exact inverse-fourth visible-band mass scattering coefficient [m²/kg].
     pub fn mass_scattering_m2_kg(&self, wavelength_nm: f64) -> Result<f64, GasScatteringError> {
         inverse_fourth(
@@ -510,6 +546,16 @@ pub struct GasRefractiveIndex {
     pub refractivity: f64,
     /// Exact `dn/d rho` at this density [m³/kg].
     pub derivative_density_m3_kg: f64,
+}
+
+/// Analytic density derivatives of the same source-bound coherent phase law.
+/// This is a density jet, not a supplied spatial reconstruction or Hessian.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasRefractiveIndexJet {
+    /// Original phase index, retained refractivity and first density derivative.
+    pub index: GasRefractiveIndex,
+    /// Exact `d²n/d rho²` [m⁶/kg²], including the Lorentz--Lorenz nonlinearity.
+    pub second_derivative_density_m6_kg2: f64,
 }
 
 /// Atomic refusal before a gas/scattering state is published.

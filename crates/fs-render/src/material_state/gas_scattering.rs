@@ -7,6 +7,8 @@
 
 mod cells;
 pub use cells::MaterialGasScatteringCellGrid;
+mod refraction;
+pub use refraction::{GasDensityJet, GasDensitySecondOrderField};
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -253,16 +255,7 @@ impl<F: GasDensityGradientField + ?Sized> GradientIndexField for MaterialGasRefr
         wavelength_nm: f64,
     ) -> Result<GradientIndexSample, GradientIndexError> {
         self.sample_optics(position, wavelength_nm)
-            .map_err(|error| match error {
-                GasRefractiveFieldError::Field(error) => error,
-                GasRefractiveFieldError::Gas(GasScatteringError::RefractivityDomain) => {
-                    GradientIndexError::OutsideFieldDomain
-                }
-                GasRefractiveFieldError::Gas(_)
-                | GasRefractiveFieldError::MissingSnapshotIdentity => {
-                    GradientIndexError::InvalidSample
-                }
-            })
+            .map_err(GasRefractiveFieldError::into_gradient_error)
     }
 }
 
@@ -275,6 +268,18 @@ pub enum GasRefractiveFieldError {
     Gas(GasScatteringError),
     /// Original provider or native GRIN admission refusal.
     Field(GradientIndexError),
+}
+
+impl GasRefractiveFieldError {
+    fn into_gradient_error(self) -> GradientIndexError {
+        match self {
+            Self::Field(error) => error,
+            Self::Gas(GasScatteringError::RefractivityDomain) => {
+                GradientIndexError::OutsideFieldDomain
+            }
+            Self::Gas(_) | Self::MissingSnapshotIdentity => GradientIndexError::InvalidSample,
+        }
+    }
 }
 
 impl core::fmt::Display for GasRefractiveFieldError {

@@ -3200,6 +3200,19 @@ The refractive field has zero true absorption: Rayleigh scattering remains a
 separate owner and is not converted to heating. Combining curved propagation
 with scene scattering/visibility is not claimed by this adapter.
 
+The same binding implements `SecondOrderIndexField` when its reconstruction
+also implements `GasDensitySecondOrderField`. One allocation-free density-jet
+query supplies the value, gradient and symmetric Hessian in SI units. The
+material owner supplies `n'` and `n''`; the renderer applies both chain-rule
+terms, `Hess(n) = n' Hess(rho) + n'' grad(rho) grad(rho)^T`. An affine density
+therefore retains its nonlinear index curvature, and an on-axis zero gradient
+does not erase focusing by a curved density profile. This feeds the existing
+angular bundles, polarized differentiable scene media and detector projections
+without a second optical law or inferred numerical Hessian. G1 checks compare
+spatial gradient differences, exact on-axis focusing/defocusing, independent
+neighboring rays and physical point-source irradiance. Existing smooth-field,
+fixed-composition, molecular-scattering and unresolved-caustic limits remain.
+
 `MaterialGasScatteringBinding::bind_cell_grid` borrows accepted gas states and
 their exact density buffer in the native `VolumeGrid` cell order. Temperature
 and pressure may vary by cell while composition and molecular optical sources

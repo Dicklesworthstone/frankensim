@@ -277,6 +277,62 @@ fn g1_phase_index_recovers_reference_and_exact_density_derivative() {
 }
 
 #[test]
+fn g1_phase_index_density_curvature_matches_independent_derivatives() {
+    let state = model(&[1.0], &[optical(0.0003, 0.03, 1)])
+        .evaluate(300.0, 100_000.0)
+        .unwrap();
+    let k = state.mass_refractivity_m3_kg();
+    for rho in [0.0, state.gas().density, 0.006 / k] {
+        let jet = state.refractive_index_jet_at_density(rho, 550.0).unwrap();
+        assert_eq!(
+            jet.index,
+            state.refractive_index_at_density(rho, 550.0).unwrap()
+        );
+        let l = rho * k;
+        // Direct second derivative of sqrt((1 + 2 K rho)/(1 - K rho)),
+        // independent of the production formula in terms of the first derivative.
+        let expected =
+            0.75 * k * k * (1.0 + 8.0 * l) / ((1.0 + 2.0 * l).powf(1.5) * (1.0 - l).powf(2.5));
+        near(jet.second_derivative_density_m6_kg2, expected);
+        assert!(jet.second_derivative_density_m6_kg2 > 0.0);
+        for wavelength in [380.0, 780.0] {
+            assert_eq!(
+                state
+                    .refractive_index_jet_at_density(rho, wavelength)
+                    .unwrap(),
+                jet
+            );
+        }
+        if rho > 0.0 {
+            let h = rho * 1.0e-3;
+            let a = state.refractive_index_at_density(rho - h, 550.0).unwrap();
+            let b = state.refractive_index_at_density(rho + h, 550.0).unwrap();
+            let difference = (b.derivative_density_m3_kg - a.derivative_density_m3_kg) / (2.0 * h);
+            assert!((difference / expected - 1.0).abs() < 3.0e-9);
+        }
+    }
+    let null = model(&[1.0], &[optical(0.0, 0.03, 2)])
+        .evaluate(300.0, 100_000.0)
+        .unwrap();
+    assert_eq!(
+        null.refractive_index_jet_at_density(1.0, 550.0)
+            .unwrap()
+            .second_derivative_density_m6_kg2,
+        0.0
+    );
+    for rho in [-1.0, f64::NAN, f64::INFINITY, 1.0 / k] {
+        assert_eq!(
+            state.refractive_index_jet_at_density(rho, 550.0),
+            Err(GasScatteringError::RefractivityDomain)
+        );
+    }
+    assert_eq!(
+        state.refractive_index_jet_at_density(1.0, 800.0),
+        Err(GasScatteringError::Wavelength)
+    );
+}
+
+#[test]
 fn g3_refractivity_mixes_polarizability_and_follows_accepted_density() {
     let optics = [optical(0.00015, 0.0, 1), optical(0.0006, 0.3, 2)];
     let mixture = model(&[0.75, 0.25], &optics);
