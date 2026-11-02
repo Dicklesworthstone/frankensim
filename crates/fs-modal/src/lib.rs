@@ -48,6 +48,9 @@ pub mod time;
 /// Physical displacement/momentum transfer between source modal bases.
 pub mod transfer;
 
+/// Coupled harmonic response, including nonproportional viscous damping.
+pub mod harmonic;
+
 mod windows;
 pub use windows::{MultiSliceReport, SliceTimingReceipt, WindowPlan, slice_windows};
 

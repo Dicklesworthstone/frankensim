@@ -79,6 +79,47 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   window-unresolved (the count-certificate mutation gate), unrepresentable
   mass-coordinate equilibration, quadratic-eig failure.
 
+### `harmonic`: full forced response and resonance
+
+`harmonic::PreparedHarmonicResponse` prepares the complete retained mechanical
+pencil `K - omega^2 M - i omega C` under `exp(-i omega t)`. The source mass,
+stiffness and viscous damping remain fully coupled; a mode count or a list of
+free-decay poles does not substitute for the forced port response. `try_new`
+accepts real exactly symmetric row-major matrices. `try_modal` supplies the
+mass-normalized diagonal stiffness convenience while retaining full damping;
+factored frequency detuning preserves narrow peaks and exact nominal resonance.
+
+Exact binary coordinate/time scaling reuses the quadratic-pencil owner. Native
+fs-la complex LU is cached per frequency for multiple force/receiver queries;
+exactly diagonal pencils use scalar division. The response returns original
+coordinate displacement and velocity phasors, componentwise backward residual,
+and independent cycle-averaged input and viscous powers for peak amplitudes.
+The forcing convention is `v = -i omega q`, `P_in = Re(F^H v)/2` and
+`P_loss = Re(v^H C v)/2`. Source units and conjugate force/velocity projection
+remain the caller's responsibility. Physical radiation loss appears here only
+if its loading is actually included in the supplied pencil.
+
+Mass must pass positive-definite admission. Damping and stiffness pass a Jacobi
+PSD check after their own diagonal congruence, so a small indefinite subspace
+cannot hide behind a larger unrelated mode. The numerical allowance is
+`64 n epsilon`; this is not an interval passivity proof. Source coefficients
+are never clipped, diagonalized or shifted. Zero damping and stiffness
+nullspaces remain intact; singular lossless resonances and unconstrained DC
+free motion refuse instead of manufacturing finite amplitudes.
+
+Caller controls bound retained coordinates, peak numerical-array payload and
+relative solve residual. Preparation/solves poll cancellation between dense
+admission stages, per assembly/diagnostic row and inside LU. Cholesky/Jacobi
+admission is one indivisible bounded-size call. Inputs remain immutable and no
+partial response escapes a failure. Repeat arithmetic is deterministic on one
+host; no new cross-ISA claim is made. Backward error is not a near-resonance
+forward-error bound. Modal truncation, nonlinear response, frequency-dependent
+material validity and startup transients are outside this linear response.
+G1/G3 tests cover analytic resonance phase/linewidth, full nonproportional
+cluster damping, antiresonant port cancellation, a full two-coordinate pencil,
+reciprocity, unit-coordinate changes over 100 orders, physical power balance,
+free motion, singular limits, PSD refusal, budgets, cancellation and replay.
+
 ### `time` (IRP M1.1-W1a; moved from `fs-couple::modal_acoustic_time`)
 
 `ModalAcousticTimeModel` is the generic fixed-rate realization of independent,

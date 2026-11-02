@@ -159,43 +159,14 @@ impl<'v, 'body> AssemblyResponse<'v, 'body> {
         // staging/source payload and work part of these same total ceilings.
         let source_bytes = budget.maximum_projection_bytes - bytes;
         let source_terms = budget.maximum_projection_terms - reserved_terms;
-        let modes: Vec<_> = vibration.modes().collect();
-        if modes
-            .iter()
-            .any(|m| m.phi.len() != free || m.phi.iter().any(|v| !v.is_finite()))
-            || vibration.glue_damping().len() != square
-        {
+        if vibration.glue_damping().len() != square {
             return Err("assembled response basis and source dimensions disagree".into());
         }
-        let (mut mass, mut stiffness) = (vec![0.; square], vec![0.; square]);
-        let (mut mphi, mut kphi) = (vec![0.; free], vec![0.; free]);
-        for j in 0..n {
-            checkpoint(cx)?;
-            model.m.spmv(&modes[j].phi, &mut mphi);
-            model.k.spmv(&modes[j].phi, &mut kphi);
-            for i in 0..=j {
-                let mij = modes[i]
-                    .phi
-                    .iter()
-                    .zip(&mphi)
-                    .map(|(a, b)| a * b)
-                    .sum::<f64>();
-                let kij = modes[i]
-                    .phi
-                    .iter()
-                    .zip(&kphi)
-                    .map(|(a, b)| a * b)
-                    .sum::<f64>();
-                if !mij.is_finite() || !kij.is_finite() {
-                    return Err("assembled response source projection overflow".into());
-                }
-                mass[i * n + j] = mij;
-                mass[j * n + i] = mij;
-                stiffness[i * n + j] = kij;
-                stiffness[j * n + i] = kij;
-            }
-        }
-        drop((mphi, kphi, modes));
+        let (mass, stiffness) = vibration.projected_pencil(
+            budget.maximum_projection_terms,
+            budget.maximum_projection_bytes,
+            cx,
+        )?;
         let factor = positive_factor(&mass, n, budget.maximum_projection_bytes, cx)?;
         positive_factor(&stiffness, n, budget.maximum_projection_bytes, cx)?;
         let mut inverse_mass = vec![0.; square];

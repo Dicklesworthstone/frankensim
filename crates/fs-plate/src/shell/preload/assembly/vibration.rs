@@ -8,6 +8,8 @@ use super::PreloadedShellAssembly;
 use fs_exec::Cx;
 use fs_modal::{ModePair, MultiSliceReport, SliceOptions, WindowPlan, slice_windows};
 
+/// Coupled harmonic response in the same loaded physical coordinates.
+pub mod harmonic;
 /// Exact held-force dynamics about this unchanged loaded equilibrium.
 pub mod response;
 
@@ -36,6 +38,72 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), String> {
 }
 
 impl AssemblyVibration<'_> {
+    /// Full source projection shared by transient and harmonic consumers. The
+    /// finite eigenvector residual and mass-orthogonality error remain in M/K;
+    /// replacing these matrices by I/diag(lambda) changes the admitted body.
+    fn projected_pencil(
+        &self,
+        maximum_terms: u64,
+        maximum_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, Vec<f64>), String> {
+        checkpoint(cx)?;
+        let n = self.mode_count();
+        let square = n
+            .checked_mul(n)
+            .ok_or("response projection size overflow")?;
+        let model = &self.equilibrium.assembly.model;
+        let free = model.free;
+        let sparse = model
+            .k
+            .nnz()
+            .checked_add(model.m.nnz())
+            .ok_or("response projection size overflow")?;
+        let terms = (n as u128) * sparse as u128 + 2 * square as u128 * free as u128;
+        let bytes = 8 * (2 * square as u128 + 2 * free as u128);
+        if n == 0 || terms > maximum_terms as u128 || bytes > maximum_bytes as u128 {
+            return Err("assembled response source projection budget exceeded".into());
+        }
+        let modes: Vec<_> = self.modes().collect();
+        if modes.len() != n
+            || modes
+                .iter()
+                .any(|m| m.phi.len() != free || m.phi.iter().any(|v| !v.is_finite()))
+        {
+            return Err("assembled response basis and source dimensions disagree".into());
+        }
+        let (mut mass, mut stiffness) = (vec![0.; square], vec![0.; square]);
+        let (mut mphi, mut kphi) = (vec![0.; free], vec![0.; free]);
+        for j in 0..n {
+            checkpoint(cx)?;
+            model.m.spmv(&modes[j].phi, &mut mphi);
+            model.k.spmv(&modes[j].phi, &mut kphi);
+            for i in 0..=j {
+                let mij = modes[i]
+                    .phi
+                    .iter()
+                    .zip(&mphi)
+                    .map(|(a, b)| a * b)
+                    .sum::<f64>();
+                let kij = modes[i]
+                    .phi
+                    .iter()
+                    .zip(&kphi)
+                    .map(|(a, b)| a * b)
+                    .sum::<f64>();
+                if !mij.is_finite() || !kij.is_finite() {
+                    return Err("assembled response source projection overflow".into());
+                }
+                mass[i * n + j] = mij;
+                mass[j * n + i] = mij;
+                stiffness[i * n + j] = kij;
+                stiffness[j * n + i] = kij;
+            }
+        }
+        checkpoint(cx)?;
+        Ok((mass, stiffness))
+    }
+
     /// Original per-window inertia counts, residual intervals and work receipts.
     pub fn spectrum(&self) -> &MultiSliceReport {
         &self.spectrum

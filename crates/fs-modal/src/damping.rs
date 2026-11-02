@@ -191,9 +191,7 @@ pub fn certify_modal_damping(
     budget: &ModalDampingBudget,
 ) -> Result<CertifiedModalDamping, ModalError> {
     let n = omega.len();
-    if n == 0 || c.len() != n * n {
-        return Err(input("damping matrix shape", c.len()));
-    }
+    validate_dense_damping(c, n)?;
     validate(omega, budget)?;
     let mut diag = Vec::with_capacity(n);
     let mut near = Vec::with_capacity(n);
@@ -201,13 +199,6 @@ pub fn certify_modal_damping(
         let mut row = Vec::new();
         for j in 0..n {
             let value = c[n * i + j];
-            if !value.is_finite() {
-                return Err(input("non-finite damping entry", n * i + j));
-            }
-            // Exact symmetry; finite values differ iff their difference does.
-            if value - c[n * j + i] != 0.0 {
-                return Err(input("asymmetric damping entry", n * i + j));
-            }
             if j != i && value != 0.0 {
                 row.push((j, value));
             }
@@ -217,6 +208,30 @@ pub fn certify_modal_damping(
     }
     let coupling = Coupling::new(diag, near, vec![0.0; n], None);
     Certifier::new(omega, coupling, budget)?.run()
+}
+
+// The shared finite/symmetric material-damping admission. A nonnegative
+// diagonal alone is NOT a PSD test; harmonic response additionally checks the
+// full matrix, while pole certification retains its existing proposition.
+pub(crate) fn validate_dense_damping(c: &[f64], n: usize) -> Result<(), ModalError> {
+    if n == 0 || n.checked_mul(n) != Some(c.len()) {
+        return Err(input("damping matrix shape", c.len()));
+    }
+    for i in 0..n {
+        for j in 0..n {
+            let value = c[n * i + j];
+            if !value.is_finite() {
+                return Err(input("non-finite damping entry", n * i + j));
+            }
+            if value != c[n * j + i] {
+                return Err(input("asymmetric damping entry", n * i + j));
+            }
+        }
+        if c[n * i + i] < 0.0 {
+            return Err(input("negative modal damping diagonal", i));
+        }
+    }
+    Ok(())
 }
 
 /// Certify without forming C. `near(i, j)` returns `C_ij`. It is called only

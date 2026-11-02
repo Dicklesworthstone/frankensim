@@ -1,5 +1,36 @@
 # CONTRACT: fs-plate
 
+## Harmonic resonance of the accepted loaded assembly
+
+`shell::preload::assembly::vibration::harmonic::AssemblyHarmonicModel` caches
+the complete original `Phi^T M Phi` and `Phi^T K_t Phi` once, using the same
+projection as `AssemblyResponse`. Finite mass-orthogonality and eigenvector
+residual terms remain present. Every frequency factor uses the shared
+`fs-modal::harmonic` owner with all projected glue damping; no artificial
+diagonal loss, modal retuning, mass replacement or second static preload is
+introduced. Factors are reusable for arbitrary phased source/receiver cases.
+
+Peak phasors use `Re(x exp(-i omega t))`. Complex physical component loads
+pass through the original support/tie transpose, and both displacement
+perturbations and velocities expand through its original forward map. The
+accepted loaded mean shape remains unchanged and separate from the harmonic
+perturbation. Physical component cycle power is recomputed independently and
+must agree with retained-coordinate input power. The reported viscous power
+is glue loss only; material/radiation loss is not inferred.
+
+Mode, projection-work and projection-payload limits are explicit, followed by
+the shared frequency solver's separate factor limits and residual threshold.
+No mode is silently removed. Cancelled or refused calls publish no result and
+preserve both the loaded body and the immutable prepared factor. Singular
+undamped frequencies refuse through the shared solver without damping jitter.
+The response is limited to the supplied spectral windows and unchanged
+linearized connection branches; it is not a modal-tail or nonlinear-validity
+certificate. G1 tests compare one-mode loaded resonance/phase reversal with an
+analytic oscillator, reconstruct original FE equations and physical glue heat,
+and demonstrate the error from dropping cross-mode damping. G0/G4 tests cover
+nonmatching slave loads, caps, malformed data, cancellation and deterministic
+factor reuse. These are synthetic numerical checks, not specimen validation.
+
 ## Purpose and layer
 Orthotropic thin-plate bending for instrument bodies: DKT (discrete
 Kirchhoff triangle) elements with an orthotropic bending-rigidity matrix
