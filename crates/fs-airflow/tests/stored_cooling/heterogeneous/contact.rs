@@ -1,4 +1,6 @@
 //! Actual contact/FEM/pump/tank composition, using the existing cooling fixture.
+#[path = "contact/newton.rs"]
+mod newton;
 use super::*;
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::stored_solid::contact::ContactStoredCoolingControls;
 use fs_conduction::{ThermalInterfaces, AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,

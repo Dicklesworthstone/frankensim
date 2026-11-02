@@ -6,6 +6,9 @@
 //! Contact exchange is internal; only original coolant convection enters return
 //! enthalpy. Optional radiation remains external even on a radiation-only trace.
 
+/// Simultaneous contact, spatial radiation and enthalpy Newton responses.
+pub mod newton;
+
 use std::collections::BTreeSet;
 
 use fs_conduction::{AmbientRadiationConfig, AmbientRadiationPatch, ConductionError,

@@ -1,5 +1,38 @@
 # CONTRACT: fs-airflow
 
+## Simultaneous contact and radiation in stored solid cooling
+
+`stored_solid::contact::newton` adds
+`advance_stored_solid_with_pump_and_contact_newton` to the original
+immutable-history solid/tank/pump transaction. Its explicit
+`StoredContactRadiation` selection admits no radiation, pointwise ambient
+exchange, a closed gray enclosure, or an open enclosure with one black
+reservoir. Each actual coolant-boundary mapping receives its original pointwise
+owner; the complete contact, conductivity, storage and radiation tangent is
+solved together by `TemperatureContacts`. Original heterogeneous enthalpy
+charts, latent storage and source-domain refusals remain active.
+
+`ContactNewtonStoredCoolingControls.thermal.solid` is the sole step policy
+and must satisfy the contact owner's Armijo, zero-relative-tolerance and
+absolute joule-target admission. One joint enthalpy solve is counted per
+thermal callback against a whole-step cap; no nested contact/radiation
+iteration product is introduced. The existing hydraulic, return-temperature
+and wall-feedback owners still close the surrounding cooling circuit.
+
+Coolant return energy uses only fresh original convective fluxes on the
+network traces. Internal contact heat and reciprocal closed-enclosure exchange
+are not external inputs. The signed physical-surface radiative sum, including
+black-bath absorption when negative, enters the external heat account once.
+Existing hydraulic heat policy, regional watt gates, independent solid/tank
+joule checks and atomic publication remain unchanged.
+
+Authored regressions compare surface emission to exact P1 fourth moments
+and two-surface reflection to an independent 2-by-2 radiosity calculation,
+alongside unequal-temperature contact/coolant storage, constant-resistance
+agreement and transactional refusals. These retain fixed geometry, source
+emissivity snapshots and quasi-steady pipe transport; they add no fluid
+phase-change, moving-contact or empirical-validation claim.
+
 ## Transient graph convection with native thermal storage
 
 With `transient-transport`, `graph::thermal::transport::transient` binds signed
