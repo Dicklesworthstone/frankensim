@@ -36,6 +36,9 @@
 //! Equilibrium density from the chart never changes the stored reference mass.
 //! This does not model expansion, material motion, pressure work or remapping.
 
+/// Prescribed spectral heating on the original spatial enthalpy balance.
+pub mod interference;
+
 /// Implicit endpoint derivatives through the accepted physical balance.
 pub mod adjoint;
 /// Error-controlled time integration of the same nonlinear enthalpy transport.
@@ -706,60 +709,8 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             dt: dt_s,
             pointwise_radiation,
         };
-        // Resolve history and the initial tangent before shared Newton admits it.
-        // A chart/domain refusal here retains its original typed error.
-        let initial_h = context.initial_values()?;
-        let mut stage = context.stage(&initial_h)?;
-        let mut newton =
-            match NewtonKrylovState::new(&stage, initial_h, config.newton) {
-                Ok(state) => state,
-                Err(error) => {
-                    return Err(stage.take_failure().unwrap_or(EnthalpyError::Newton(error)));
-                }
-            };
-        poll(cx, 0)?;
-        for attempt in 0..config.max_newton_iterations {
-            poll(cx, attempt)?;
-            let progress = newton.run_cancellable(&stage, 1, cx);
-            match progress.progress {
-                SolverRunProgress::Complete => {}
-                SolverRunProgress::Paused => {
-                    return Err(ConductionError::Cancelled {
-                        stage: "spatial-enthalpy-solver",
-                        at: attempt,
-                    }
-                    .into());
-                }
-                SolverRunProgress::CallbackPanicked(callback) => {
-                    return Err(EnthalpyError::SolverCallbackPanicked(callback));
-                }
-                SolverRunProgress::DimensionMismatch { expected, actual } => {
-                    return Err(EnthalpyError::Newton(NewtonError::Dimension {
-                        problem: actual,
-                        state: expected,
-                    }));
-                }
-            }
-            if let Some(error) = stage.fatal.take() {
-                return Err(error);
-            }
-            poll(cx, attempt)?;
-            let report = progress.report;
-            if report.converged {
-                return context.finish(newton.x, report, config.energy_tolerance_j);
-            }
-            if report.diagnosis != Some(NewtonStallDiagnosis::BudgetExhausted)
-                || attempt + 1 == config.max_newton_iterations
-            {
-                return Err(stage
-                    .take_failure()
-                    .unwrap_or(EnthalpyError::NotConverged(report)));
-            }
-            // One shared Newton attempt uses one exact tangent point. Rebuild
-            // after acceptance rather than freezing k(T) across Newton updates.
-            stage = context.stage(&newton.x)?;
-        }
-        unreachable!("positive Newton attempt budget admitted above")
+        let (h, report) = context.solve_newton(config, None)?;
+        context.finish(h, report, config.energy_tolerance_j)
     }
 
     fn admit_step(
@@ -855,6 +806,71 @@ struct StepContext<'a, 'm, 'c, 'cx> {
 }
 
 impl StepContext<'_, '_, '_, '_> {
+    // Both source modes use the original Newton/Krylov driver and tangent.
+    // Prescribed interval joules are independent of h and change only the RHS.
+    fn solve_newton<'s>(
+        &'s self,
+        config: EnthalpyStepConfig,
+        source_j: Option<&'s [fs_math::dd::Dd]>,
+    ) -> Result<(Vec<f64>, NewtonReport), EnthalpyError> {
+        // Resolve history and the initial tangent before shared Newton admits it.
+        // A chart/domain refusal here retains its original typed error.
+        let initial_h = self.initial_values()?;
+        let mut stage = self.stage(&initial_h)?;
+        stage.source_j = source_j;
+        let mut newton =
+            match NewtonKrylovState::new(&stage, initial_h, config.newton) {
+                Ok(state) => state,
+                Err(error) => {
+                    return Err(stage.take_failure().unwrap_or(EnthalpyError::Newton(error)));
+                }
+            };
+        poll(self.cx, 0)?;
+        for attempt in 0..config.max_newton_iterations {
+            poll(self.cx, attempt)?;
+            let progress = newton.run_cancellable(&stage, 1, self.cx);
+            match progress.progress {
+                SolverRunProgress::Complete => {}
+                SolverRunProgress::Paused => {
+                    return Err(ConductionError::Cancelled {
+                        stage: "spatial-enthalpy-solver",
+                        at: attempt,
+                    }
+                    .into());
+                }
+                SolverRunProgress::CallbackPanicked(callback) => {
+                    return Err(EnthalpyError::SolverCallbackPanicked(callback));
+                }
+                SolverRunProgress::DimensionMismatch { expected, actual } => {
+                    return Err(EnthalpyError::Newton(NewtonError::Dimension {
+                        problem: actual,
+                        state: expected,
+                    }));
+                }
+            }
+            if let Some(error) = stage.fatal.take() {
+                return Err(error);
+            }
+            poll(self.cx, attempt)?;
+            let report = progress.report;
+            if report.converged {
+                return Ok((newton.x, report));
+            }
+            if report.diagnosis != Some(NewtonStallDiagnosis::BudgetExhausted)
+                || attempt + 1 == config.max_newton_iterations
+            {
+                return Err(stage
+                    .take_failure()
+                    .unwrap_or(EnthalpyError::NotConverged(report)));
+            }
+            // One shared Newton attempt uses one exact tangent point. Rebuild
+            // after acceptance rather than freezing k(T) across Newton updates.
+            stage = self.stage(&newton.x)?;
+            stage.source_j = source_j;
+        }
+        unreachable!("positive Newton attempt budget admitted above")
+    }
+
     fn is_prescribed(&self, vertex: usize) -> bool {
         self.problem
             .boundary
@@ -1160,6 +1176,7 @@ impl StepContext<'_, '_, '_, '_> {
         poll(self.cx, h.len())?;
         Ok(NewtonStage {
             context: self,
+            source_j: None,
             tangent,
             slope,
             inverse,
@@ -1170,10 +1187,19 @@ impl StepContext<'_, '_, '_, '_> {
     }
 
     fn residual(&self, h: &[f64], out: &mut [f64]) -> Result<(), EnthalpyError> {
+        self.residual_with_source(h, out, None)
+    }
+
+    fn residual_with_source(
+        &self,
+        h: &[f64],
+        out: &mut [f64],
+        source_j: Option<&[fs_math::dd::Dd]>,
+    ) -> Result<(), EnthalpyError> {
         let temperature = self.temperatures(h)?;
         let phase_scales = self.phase_scales(h)?;
         let system = self.assemble(&temperature, phase_scales.as_deref())?;
-        self.assembled_residual(h, &temperature, &system, out)
+        self.assembled_residual_with_source(h, &temperature, &system, out, source_j)
     }
 
     fn assembled_residual(
@@ -1182,6 +1208,17 @@ impl StepContext<'_, '_, '_, '_> {
         temperature: &[f64],
         system: &AssembledSystem,
         out: &mut [f64],
+    ) -> Result<(), EnthalpyError> {
+        self.assembled_residual_with_source(h, temperature, system, out, None)
+    }
+
+    fn assembled_residual_with_source(
+        &self,
+        h: &[f64],
+        temperature: &[f64],
+        system: &AssembledSystem,
+        out: &mut [f64],
+        source_j: Option<&[fs_math::dd::Dd]>,
     ) -> Result<(), EnthalpyError> {
         let radiation = self.pointwise_radiation
             .map(|radiation| radiation.load_and_report(self.cx, temperature, h)).transpose()?;
@@ -1199,10 +1236,21 @@ impl StepContext<'_, '_, '_, '_> {
                 Some((load, _)) => finite(transport + load[vertex])?,
                 None => transport,
             };
-            *value = finite(
-                self.storage.masses[vertex] * (h[vertex] - self.old[vertex])
-                    + self.dt * (transport - system.load[vertex]),
-            )?;
+            *value = match source_j {
+                Some(source) => interference::physical_residual_j(
+                    self.storage.masses[vertex],
+                    h[vertex],
+                    self.old[vertex],
+                    self.dt,
+                    transport,
+                    system.load[vertex],
+                    source[vertex],
+                )?,
+                None => finite(
+                    self.storage.masses[vertex] * (h[vertex] - self.old[vertex])
+                        + self.dt * (transport - system.load[vertex]),
+                )?,
+            };
         }
         for (index, &(vertex, temperature)) in self.problem.boundary.dirichlet().iter().enumerate()
         {
@@ -1300,6 +1348,7 @@ impl StepContext<'_, '_, '_, '_> {
 // are the exact current Newton point's operators, reused across Krylov columns.
 struct NewtonStage<'s, 'a, 'm, 'c, 'cx> {
     context: &'s StepContext<'a, 'm, 'c, 'cx>,
+    source_j: Option<&'s [fs_math::dd::Dd]>,
     tangent: Csr,
     slope: Vec<f64>,
     inverse: Vec<f64>,
@@ -1335,7 +1384,7 @@ impl NonlinearProblem for NewtonStage<'_, '_, '_, '_, '_> {
         if !self.poll_action(0) {
             return;
         }
-        match self.context.residual(x, output) {
+        match self.context.residual_with_source(x, output, self.source_j) {
             Ok(()) => {
                 self.trial_refusal.take();
             }

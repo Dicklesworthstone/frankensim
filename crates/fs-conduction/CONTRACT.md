@@ -3375,10 +3375,13 @@ Three focused regressions cover repeated accepted intervals at a large epoch
 with a significant fractional-clock contribution, exact accepted-state/history
 composition and source-energy closure, zero-copy history extraction, canonical
 origin admission/cancellation, and unchanged native results through the
-existing f64 API. They pass the repository-pinned native Rust formatter and independent source
-review. They have not yet been executed: the execution environment was reset
-after exhausting disk space, removing its cached native dependency libraries.
-The prior enthalpy suite's reported passes above do not cover these changes.
+existing f64 API. All three new regressions and the thirteen existing nonlinear-enthalpy tests
+compiled and ran successfully after recovery: 16 passed, 0 failed. The focused
+executable uses the exact native body, phase chart, conductivity/emissivity,
+transport and bisection helpers, with the actual fs_math, fs_matdb, fs_evidence,
+fs_qty and fs_blake3 libraries. Only the unrelated ConductionError envelope is
+nominal. The 49 shared temporal/spectral/causal tests also passed. Pinned native
+rustfmt and independent source review passed. This is not a full Cargo/DSR gate.
 
 ## Original material enclosure controls on the complete enthalpy adjoint
 
@@ -3418,3 +3421,71 @@ calculation on unequal-area open patches agrees with finite differences within
 7.1e-8 for nodal emissivity controls and 1.1e-10 W/K for bath controls. This checks
 the reflection formula, not execution of the native spatial owner. Both material
 radiation test targets are included in the existing thermal CI lane.
+
+
+## Interference heating in the original spatial enthalpy residual
+
+`transient::enthalpy::interference::PreparedSpatialInterference` binds unique
+named spectra to explicit vertices of one original `EnthalpyBackwardEuler`.
+The authored field is P1 volumetric thermal-power density. Each binding declares
+its input units and a positive conversion to W/m3; unbound vertices are exactly
+zero. The prepared owner retains the actual storage and mesh objects, so equal
+labels, topology or node counts cannot authorize a foreign geometry.
+
+For each requested interval, the shared DD-clock causal integral applies the
+unit conversion before time integration. The existing P1 rule assembles
+`V*(sum(E)+E_i)/20` as dual nodal joules. The physical source account separately
+integrates `V*sum(E)/4`; it is not inferred from a Newton residual or from a
+point density times an invented nodal volume. The source enters the original
+nonlinear balance directly as `m*delta_h + dt*(A*T-b) - source_j`, before the
+solver's final f64 residual interface. There is no J-to-average-W-to-J round trip.
+The original Newton/Krylov driver, exact transport tangent, phase chart, reference
+mass and material-domain gates remain authoritative.
+
+The owned endpoint reports actual h, temperature and liquid fraction, its DD
+source load, local residuals and independent DD source/storage/boundary accounts.
+Prescribed-temperature reaction is the complete constrained-node physical
+balance, including the negative spectral load and any initial boundary jump.
+Internal contact heat is reported by the original owner and excluded from
+external input. Latent heat is already in h. All volumetric input, including DC,
+must belong to the explicit spectra; a nonzero static source refuses to prevent
+a second credit. The result exposes no fictitious instantaneous or mean source
+power. Both free-node and total physical joule defects must pass the declared
+endpoint energy tolerance before any result is returned.
+
+The maximum thermal step and source-ripple allowance are separate controls.
+Ripple admission uses an outward-rounded positive spatial sum of the shared
+local primitive-deviation bounds. Opposite nodal sources and complete carrier
+cycles therefore cannot hide unresolved spatial forcing behind a zero total
+source integral. A fast carrier can be admitted when its physical primitive
+ripple is already below the requested allowance. This is not a certified bound
+on nonlinear thermal time error, continuous-time peaks or spatial interpolation
+error. The caller refines time and mesh independently and may chain accepted h
+and DD end clocks without resetting source phase.
+
+Original Neumann/Robin boundaries, fixed thermal interfaces and all four original
+pointwise radiation owners retain their mesh, boundary and caloric identities.
+Temperature-dependent contact-feedback and automatic field/material feedback are
+not introduced by this ingress. A prescribed expected power does not establish
+an ensemble-mean nonlinear temperature. Source spectra may be signed; a general
+quadratic observable is not proof of dissipative heat.
+
+Preparation bounds bindings, retained spectral terms and additional source
+workspace. Each interval makes two bounded spectral passes and linear mesh
+quadratures; native spatial/Newton budgets still apply separately. Cancellation,
+domain failure, ripple refusal or nonconvergence leaves input history and source
+owners unchanged. Nonzero unrepresentable products refuse instead of becoming
+false darkness. This is a bounded MR19/MR06 capability, not closure of their
+broader coupled-physics acceptance.
+
+Eight scoped arithmetic tests compile and pass against the exact production DD
+residual, P1 source quadrature and outward ripple helpers with actual fs_math
+and shared fs_fft. The probe supplies a fixed prepared-mesh/Cx interface; it
+does not exercise or substitute a Newton or thermal solver. Twelve separate
+original-owner integration regressions cover P1 reactions, nonlinear spatial
+conduction, latent heating, cancelling local carriers, DD continuation, tiny
+unit conversions, original radiation/Robin and refusal paths. Those full FEM
+tests were added but not executed in this recovered environment. Production
+and test sources pass pinned native rustfmt parsing, and independent source
+review covered the native source and radiation lifetime paths. Full Cargo,
+Clippy and DSR verification remains unperformed.
