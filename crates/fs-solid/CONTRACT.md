@@ -1583,18 +1583,38 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   invalid pins, and unsupported contact-adjoint inputs return
   `SolidError::InvalidInput`. `solve_from` holds the previous physical
   displacement fixed as the slip reference; `solve` uses the zero state.
+  `solve_from_with_surface_displacement` additionally admits one finite
+  world-coordinate material-displacement vector per node. Friction uses the
+  relative increment `u - reference_u - surface_displacement`; the prescribed
+  surface increment stays fixed and is not scaled by the load factor. The
+  supplied SDF independently defines current obstacle geometry, so a conveyor
+  can transport the solid without changing its planar chart. Reference-state
+  feasibility is still checked against that chart; no surface trajectory or
+  material correspondence is inferred.
   Numerical lag rounds refresh normal loads and tangent frames only,
   and success requires the refreshed friction residual to meet tolerance.
   The frozen-frame Huber energy, gradient, and Hessian agree in both
-  sticking and sliding branches. When sliding exposes an indefinite
-  tangent, a stiffness-scaled diagonal shift produces a descent search
-  direction while preserving the physical force law, tangent, pin
-  equations, and final residual gate. `eps_v` is a displacement smoothing
+  sticking and sliding branches. Exact Newton directions are retained when
+  finite, descending, and admitted by a true max-norm relative linear
+  residual at most `sqrt(f64::EPSILON)`. Otherwise sliding search directions
+  first add the Huber quadratic majorizer curvature
+  `mu * normal_load / abs(slip)`. This positive search metric changes neither
+  the physical Hessian nor the force law. A stiffness-scaled diagonal shift
+  remains the fallback if the majorized system also fails direction admission;
+  it preserves the physical force law, tangent, pin equations, and final
+  residual gate. Both line-search acceptance branches
+  require admitted material stresses as well as positive sampled gaps;
+  an energy decrease alone cannot bypass the material's stretch domain.
+  `eps_v` is a displacement smoothing
   width; this regularized law permits small creep and does not claim exact
   set-valued static friction. Solutions expose separate normal and
-  tangential reactions plus nonnegative endpoint incremental friction work.
-  The latter is not trajectory-integrated heat; thermal deposition and
-  rigorous continuous-trajectory CCD remain separate capabilities.
+  tangential reactions plus nonnegative endpoint relative friction work.
+  Signed `friction_support_work = sum(f_t dot surface_displacement)` records
+  supplied support work, with `f_t` the force on the solid. Endpoint products
+  close `body_friction_work + friction_work = friction_support_work`.
+  These products are not trajectory-integrated heat or actuator work;
+  thermal deposition and rigorous continuous-trajectory CCD remain separate
+  capabilities.
 - `accept_scenario_bc`: fs-scenario integration — `Dirichlet` and
   `Traction` under `Physics::Elasticity` accepted; dimensioned-value
   resolution stays with the scenario consumer.
@@ -2248,7 +2268,11 @@ force divergence; cnt-002/003 intersection-free hard press and
 reaction balance; cnt-004 tight-clearance and curved-obstacle gap
 audits; cnt-005 lagged friction cone separation; cnt-006
 frictionless contact translation adjoint versus FD; cnt-007
-structured invalid-input returns.
+structured invalid-input returns; cnt-008 fixed-reference friction balance;
+cnt-009 unpinned conveyor transport, common-translation invariance, motion
+reversal and signed endpoint work closure, zero-motion equivalence, and invalid
+surface-displacement refusal (G1/G3, force/translation tolerance 1e-9 and
+endpoint work balance 1e-14).
 
 `tests/structural.rs` (bead tfz.14): str-001 objectivity; str-002
 elastica vs shooting oracle; str-003 circle/twist/helix; str-004 RC

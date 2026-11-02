@@ -1,7 +1,7 @@
 //! SDF-native barrier contact (bead tfz.16, plan §8.2 [F]): the
 //! Incremental Potential Contact family — a log barrier on the obstacle
 //! level-set value that diverges as a sampled node approaches zero gap.
-//! This fixed-obstacle lane first requires a finite,
+//! This prescribed-obstacle lane first requires a finite,
 //! strictly positive nodal gap, then accepts only trial iterates whose
 //! sampled SDF queries remain positive (no penetrate-then-push-out cheats).
 //! That is a conditional discrete-iterate guarantee, not an unconditional
@@ -17,8 +17,8 @@
 //! certification are recorded successor scope. Every accepted iterate keeps
 //! the minimum sampled nodal gap seen as part of the solution record. Friction is
 //! the lagged smoothed Coulomb of IPC: normal forces and tangent frames from
-//! the previous outer round, a fixed physical displacement reference, and a
-//! Huber-smoothed tangential potential — stick/slip is
+//! the previous outer round, a fixed body displacement reference and obstacle
+//! material increment, and a Huber-smoothed tangential potential — stick/slip is
 //! gated by the battery, not asserted here. The barrier Hessian keeps
 //! the b''·∇φ∇φᵀ term and drops the b'·∇²φ curvature term (standard
 //! IPC PSD practice; exact for planar obstacles).
@@ -182,9 +182,15 @@ pub struct ContactSolution {
     pub reactions: Vec<[f64; 2]>,
     /// Per-node tangential reactions opposing the incremental slip.
     pub friction_reactions: Vec<[f64; 2]>,
-    /// Nonnegative endpoint friction work, −Σ f_t·(u−reference_u).
+    /// Nonnegative endpoint relative friction work,
+    /// −Σ f_t·(u−reference_u−surface_displacement).
     /// This incremental diagnostic is not trajectory-integrated heat.
     pub friction_work: f64,
+    /// Signed endpoint work supplied by prescribed obstacle material motion,
+    /// Σ f_t·surface_displacement, where f_t is the force on the solid.
+    /// The body's friction work plus `friction_work` equals this value.
+    /// Zero for stationary obstacles; not trajectory-integrated actuator work.
+    pub friction_support_work: f64,
     /// Final residual max-norm.
     pub residual: f64,
 }
@@ -384,20 +390,57 @@ impl ContactProblem<'_> {
         h: &[f64],
         r: &[f64],
         pins: &[(usize, f64)],
+        friction: Option<(&FrictionLag<'_>, &[f64])>,
     ) -> Result<Vec<f64>, SolidError> {
         let ndof = r.len();
         Self::finite_max_norm(h, "contact tangent")?;
+        let rhs_norm = Self::finite_max_norm(r, "contact direction residual")?;
         let solve = |matrix: &[f64]| -> Option<Vec<f64>> {
             let factor = fs_la::factor::lu(matrix, ndof).ok()?;
             let mut direction: Vec<f64> = r.iter().map(|v| -v).collect();
             factor.solve(&mut direction);
             let slope: f64 = r.iter().zip(&direction).map(|(a, b)| a * b).sum();
-            (direction.iter().all(|v| v.is_finite()) && slope.is_finite() && slope < 0.0)
-                .then_some(direction)
+            if !direction.iter().all(|v| v.is_finite()) || !slope.is_finite() || slope >= 0.0 {
+                return None;
+            }
+            // Sliding can leave an almost singular rigid mode whose rounded
+            // LU step descends yet does not solve the Newton equation. Admit
+            // the actual linear residual before spending line-search trials.
+            let mut defect = 0.0_f64;
+            for (row, &rhs) in matrix.chunks_exact(ndof).zip(r) {
+                let value = row
+                    .iter()
+                    .zip(&direction)
+                    .fold(rhs, |sum, (&a, &d)| a.mul_add(d, sum));
+                if !value.is_finite() {
+                    return None;
+                }
+                defect = defect.max(value.abs());
+            }
+            (defect <= f64::EPSILON.sqrt() * rhs_norm).then_some(direction)
         };
         if let Some(direction) = solve(h) {
             return Ok(direction);
         }
+
+        // Retain convergent exact Newton steps. Only an unresolved/ascent
+        // direction needs the law-derived sliding search metric.
+        let majorizer = friction.map(|(lag, u)| {
+            let mut matrix = h.to_vec();
+            lag.add_sliding_search_curvature(u, &mut matrix);
+            for &(d, _) in pins {
+                for c in 0..ndof {
+                    matrix[d * ndof + c] = if c == d { 1.0 } else { 0.0 };
+                }
+            }
+            matrix
+        });
+        if let Some(matrix) = majorizer.as_deref()
+            && let Some(direction) = solve(matrix)
+        {
+            return Ok(direction);
+        }
+        let h = majorizer.as_deref().unwrap_or(h);
 
         let mut fixed = vec![false; ndof];
         for &(d, _) in pins {
@@ -449,16 +492,68 @@ impl ContactProblem<'_> {
     /// # Errors
     /// The same refusals as [`Self::solve`], including invalid, non-finite,
     /// or intersecting reference states and unconverged friction lags.
-    #[allow(clippy::too_many_lines)] // contact Newton + audited line search is one proof path
     pub fn solve_from(
         &self,
         load: f64,
         reference_u: &[f64],
     ) -> Result<ContactSolution, SolidError> {
+        self.solve_increment(load, reference_u, None)
+    }
+
+    /// Solve with prescribed obstacle material displacement at each solid node.
+    /// Entries are `[dx, dy]` in world coordinates over this physical increment,
+    /// in the same length units as `reference_u`. The displacement is not scaled
+    /// by `load` and remains fixed through every Newton and normal-load lag round.
+    /// Friction opposes the tangential part of
+    /// `u - reference_u - surface_displacement`; normal material motion does not
+    /// itself create tangential traction.
+    ///
+    /// The caller's `sdf` supplies the current obstacle geometry independently.
+    /// For example, a conveyor's material can move while its planar SDF stays
+    /// unchanged. This method does not advect the SDF or integrate its trajectory;
+    /// the initial body state must remain feasible against the supplied chart.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::solve_from`], plus [`SolidError::InvalidInput`]
+    /// for a displacement count different from the node count or non-finite data.
+    pub fn solve_from_with_surface_displacement(
+        &self,
+        load: f64,
+        reference_u: &[f64],
+        surface_displacement: &[[f64; 2]],
+    ) -> Result<ContactSolution, SolidError> {
+        self.solve_increment(load, reference_u, Some(surface_displacement))
+    }
+
+    #[allow(clippy::too_many_lines)] // contact Newton + audited line search is one proof path
+    fn solve_increment(
+        &self,
+        load: f64,
+        reference_u: &[f64],
+        surface_displacement: Option<&[[f64; 2]]>,
+    ) -> Result<ContactSolution, SolidError> {
         self.validate_inputs(load)?;
         self.validate_state_len(reference_u)?;
         let n = self.node_count();
         let ndof = self.ndof();
+        if let Some(displacements) = surface_displacement {
+            if displacements.len() != n {
+                return Err(SolidError::InvalidInput {
+                    what: format!(
+                        "contact surface displacement has {} nodes, expected {n}",
+                        displacements.len()
+                    ),
+                });
+            }
+            if let Some(i) = displacements
+                .iter()
+                .position(|d| !d[0].is_finite() || !d[1].is_finite())
+            {
+                return Err(SolidError::InvalidInput {
+                    what: format!("contact surface displacement at node {i} is not finite"),
+                });
+            }
+        }
         let mut u = reference_u.to_vec();
         let initial_gap = self.min_gap(&u)?;
         if initial_gap <= 0.0 {
@@ -476,7 +571,13 @@ impl ContactProblem<'_> {
         // grounds tangential rigid modes from the first round (a
         // frictionless first round with no pins was measured singular).
         let mut lag: Option<FrictionLag> = match self.friction {
-            Some(fr) => Some(FrictionLag::capture(self, reference_u, &u, fr)?),
+            Some(fr) => Some(FrictionLag::capture(
+                self,
+                reference_u,
+                surface_displacement,
+                &u,
+                fr,
+            )?),
             None => None,
         };
         let mut residual = f64::INFINITY;
@@ -522,7 +623,12 @@ impl ContactProblem<'_> {
                 }
                 // A non-descent Newton direction must not consume forty
                 // expensive trial residuals before the gradient fallback.
-                let du = Self::descent_direction(&h, &r, &self.pins)?;
+                let du = Self::descent_direction(
+                    &h,
+                    &r,
+                    &self.pins,
+                    lag.as_ref().map(|l| (l, u.as_slice())),
+                )?;
                 // Normal-closing filter: tangential slip should not be
                 // throttled by the normal gap. The subsequent φ > 0
                 // audit rejects any curved-SDF trial this first-order
@@ -550,17 +656,15 @@ impl ContactProblem<'_> {
                         .collect();
                     let gap = self.min_gap(&trial)?;
                     if gap > 0.0 {
-                        if let Ok(e1) = self.total_energy(&trial, load, lag.as_ref())
-                            && e1 <= (1e-4 * alpha).mul_add(slope, e0)
-                        {
-                            u = trial;
-                            min_gap_ever = min_gap_ever.min(gap);
-                            accepted = true;
-                            break;
-                        }
-                        if self
-                            .residual_norm_at(&trial, load, lag.as_ref())
-                            .is_ok_and(|trial_residual| trial_residual <= 0.9 * residual)
+                        let energy_decreased = self
+                            .total_energy(&trial, load, lag.as_ref())
+                            .is_ok_and(|e1| e1 <= (1e-4 * alpha).mul_add(slope, e0));
+                        // The energy probe only checks positive determinant.
+                        // Forces additionally admit the material stretch domain,
+                        // which every accepted Newton state must satisfy.
+                        if let Ok(trial_residual) =
+                            self.residual_norm_at(&trial, load, lag.as_ref())
+                            && (energy_decreased || trial_residual <= 0.9 * residual)
                         {
                             u = trial;
                             min_gap_ever = min_gap_ever.min(gap);
@@ -597,17 +701,12 @@ impl ContactProblem<'_> {
                             .collect();
                         let gap = self.min_gap(&trial)?;
                         if gap > 0.0 {
-                            if let Ok(e1) = self.total_energy(&trial, load, lag.as_ref())
-                                && e1 <= (1e-4 * alpha_sd).mul_add(slope_sd, e0)
-                            {
-                                u = trial;
-                                min_gap_ever = min_gap_ever.min(gap);
-                                accepted = true;
-                                break;
-                            }
-                            if self
-                                .residual_norm_at(&trial, load, lag.as_ref())
-                                .is_ok_and(|trial_residual| trial_residual <= 0.9 * residual)
+                            let energy_decreased = self
+                                .total_energy(&trial, load, lag.as_ref())
+                                .is_ok_and(|e1| e1 <= (1e-4 * alpha_sd).mul_add(slope_sd, e0));
+                            if let Ok(trial_residual) =
+                                self.residual_norm_at(&trial, load, lag.as_ref())
+                                && (energy_decreased || trial_residual <= 0.9 * residual)
                             {
                                 u = trial;
                                 min_gap_ever = min_gap_ever.min(gap);
@@ -628,7 +727,13 @@ impl ContactProblem<'_> {
             // Refresh only the normal load and tangent frame. Numerical
             // iterations must never advance the physical slip reference.
             if let Some(fr) = self.friction {
-                lag = Some(FrictionLag::capture(self, reference_u, &u, fr)?);
+                lag = Some(FrictionLag::capture(
+                    self,
+                    reference_u,
+                    surface_displacement,
+                    &u,
+                    fr,
+                )?);
                 residual = self.residual_norm_at(&u, load, lag.as_ref())?;
                 lag_history.push(residual);
                 if residual < self.tol {
@@ -660,7 +765,16 @@ impl ContactProblem<'_> {
         } else {
             0.0
         };
-        if !friction_work.is_finite() {
+        // f_t is the negative residual. Its work on the solid and on the
+        // prescribed surface closes W_body + D_relative = W_support.
+        let friction_support_work = surface_displacement.map_or(0.0, |displacements| {
+            friction_residual
+                .chunks_exact(2)
+                .zip(displacements)
+                .map(|(r, d)| -r[0] * d[0] - r[1] * d[1])
+                .sum::<f64>()
+        });
+        if !friction_work.is_finite() || !friction_support_work.is_finite() {
             return Err(SolidError::InvalidInput {
                 what: "contact friction work is not finite".to_string(),
             });
@@ -676,6 +790,7 @@ impl ContactProblem<'_> {
             reactions,
             friction_reactions,
             friction_work,
+            friction_support_work,
             iterations,
             residual,
             u,
@@ -787,6 +902,7 @@ impl ContactProblem<'_> {
 struct FrictionLag<'a> {
     settings: Friction,
     reference_u: &'a [f64],
+    surface_displacement: Option<&'a [[f64; 2]]>,
     /// Per node: (unit tangent, lagged normal force magnitude).
     frames: Vec<([f64; 2], f64)>,
 }
@@ -795,6 +911,7 @@ impl<'a> FrictionLag<'a> {
     fn capture(
         cp: &ContactProblem<'_>,
         reference_u: &'a [f64],
+        surface_displacement: Option<&'a [[f64; 2]]>,
         u: &[f64],
         settings: Friction,
     ) -> Result<Self, SolidError> {
@@ -825,6 +942,7 @@ impl<'a> FrictionLag<'a> {
         Ok(Self {
             settings,
             reference_u,
+            surface_displacement,
             frames,
         })
     }
@@ -832,9 +950,10 @@ impl<'a> FrictionLag<'a> {
     /// Signed scalar slip in the frozen 2D tangent frame.
     fn slip(&self, u: &[f64], i: usize) -> f64 {
         let t = self.frames[i].0;
+        let surface = self.surface_displacement.map_or([0.0; 2], |d| d[i]);
         t[0].mul_add(
-            u[2 * i] - self.reference_u[2 * i],
-            t[1] * (u[2 * i + 1] - self.reference_u[2 * i + 1]),
+            u[2 * i] - self.reference_u[2 * i] - surface[0],
+            t[1] * (u[2 * i + 1] - self.reference_u[2 * i + 1] - surface[1]),
         )
     }
 
@@ -892,6 +1011,25 @@ impl<'a> FrictionLag<'a> {
         }
     }
 
+    /// The Huber potential is min_{w >= eps} s²/(2w) + w/2 - eps/2.
+    /// Freezing w=max(eps,|s|) gives a quadratic upper bound with the same
+    /// value and gradient. Its sliding curvature grounds rigid search modes
+    /// at the current slip scale without changing forces or the true Hessian.
+    fn add_sliding_search_curvature(&self, u: &[f64], h: &mut [f64]) {
+        let ndof = u.len();
+        for (i, &(t, lambda)) in self.frames.iter().enumerate() {
+            let slip = self.slip(u, i).abs();
+            if slip >= self.settings.eps_v {
+                let k = self.settings.mu * lambda / slip;
+                for a in 0..2 {
+                    for b in 0..2 {
+                        h[(2 * i + a) * ndof + 2 * i + b] += k * t[a] * t[b];
+                    }
+                }
+            }
+        }
+    }
+
     fn work(&self, u: &[f64]) -> f64 {
         self.frames
             .iter()
@@ -916,7 +1054,7 @@ mod tests {
     fn contact_direction_preserves_newton_and_regularizes_ascent() {
         let positive = [4.0, 1.0, 1.0, 3.0];
         let residual = [1.0, -2.0];
-        let direction = ContactProblem::descent_direction(&positive, &residual, &[])
+        let direction = ContactProblem::descent_direction(&positive, &residual, &[], None)
             .expect("exact Newton direction");
         for i in 0..2 {
             let defect =
@@ -927,7 +1065,7 @@ mod tests {
         // The unregularized solve would ascend: [1, -0.1]·[1, 0.2] > 0.
         let indefinite = [-1.0, 0.0, 0.0, 2.0];
         let residual = [1.0, 0.2];
-        let direction = ContactProblem::descent_direction(&indefinite, &residual, &[])
+        let direction = ContactProblem::descent_direction(&indefinite, &residual, &[], None)
             .expect("regularized descent");
         assert!(direction[0] < 0.0 && direction[1] < 0.0);
         assert!(
@@ -946,7 +1084,7 @@ mod tests {
 
         let pinned = [1.0, 0.0, 0.0, 3.0, -1.0, 0.0, 0.0, 0.0, 2.0];
         let residual = [0.25, 1.0, 0.2];
-        let direction = ContactProblem::descent_direction(&pinned, &residual, &[(0, 0.0)])
+        let direction = ContactProblem::descent_direction(&pinned, &residual, &[(0, 0.0)], None)
             .expect("pin-preserving descent");
         assert!(
             (direction[0] + 0.25).abs() < 1e-14,
@@ -1000,6 +1138,7 @@ mod tests {
         let lag = FrictionLag::capture(
             &cp,
             &reference,
+            None,
             &reference,
             Friction {
                 mu: 0.5,
@@ -1044,6 +1183,27 @@ mod tests {
                 }
             }
             assert!(lag.work(&u) >= 0.0);
+
+            // Independently check the search model's global upper bound;
+            // the derivative checks above continue to use the true Hessian.
+            let mut search = h.clone();
+            lag.add_sliding_search_curvature(&u, &mut search);
+            for increment in [-0.08, -0.003, 0.0, 0.003, 0.08] {
+                let mut trial = u.clone();
+                for (i, &(t, _)) in lag.frames.iter().enumerate() {
+                    trial[2 * i] += increment * t[0];
+                    trial[2 * i + 1] += increment * t[1];
+                }
+                let du: Vec<f64> = trial.iter().zip(&u).map(|(a, b)| a - b).collect();
+                let mut bound = lag.energy(&u);
+                for i in 0..n {
+                    bound += r[i] * du[i];
+                    for j in 0..n {
+                        bound += 0.5 * du[i] * search[i * n + j] * du[j];
+                    }
+                }
+                assert!(lag.energy(&trial) <= bound + 1e-12);
+            }
         }
     }
 }

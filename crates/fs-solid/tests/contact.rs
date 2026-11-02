@@ -6,7 +6,7 @@
 use fs_cutfem::sdf::{Circle, CutSdf, HalfPlane};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_solid::SolidError;
-use fs_solid::contact::{Barrier, ContactProblem, Friction};
+use fs_solid::contact::{Barrier, ContactProblem, ContactSolution, Friction};
 use fs_solid::hyper2d::{HyperProblem, NewtonSettings};
 use fs_solid::mesh2::{Mesh2, Patch};
 
@@ -106,6 +106,118 @@ fn cnt_008_friction_balance_and_fixed_reference() {
     assert!(matches!(
         problem.solve_from(1.0, &[]),
         Err(SolidError::InvalidInput { .. })
+    ));
+}
+
+/// G1/G3: prescribed surface material motion transports a friction-supported
+/// solid even though the obstacle chart is unchanged. Endpoint relative work
+/// and signed support work must close separately through motion reversal.
+#[test]
+fn cnt_009_prescribed_surface_motion_and_work() {
+    let mesh = Mesh2::quads(1.0, 1.0, 2, 2);
+    let material = card();
+    let pull = |_: f64, _: f64| [0.02, -0.2];
+    let hyper = HyperProblem {
+        mesh: &mesh,
+        material: &material,
+        dirichlet: vec![],
+        traction: vec![(Patch::Top, &pull)],
+        settings: NewtonSettings::default(),
+    };
+    let floor = HalfPlane {
+        normal: [0.0, 1.0],
+        offset: -0.02,
+    };
+    let problem = ContactProblem {
+        hyper: &hyper,
+        sdf: &floor,
+        barrier: Barrier {
+            kappa: 10.0,
+            dhat: 0.05,
+        },
+        friction: Some(Friction {
+            mu: 0.6,
+            eps_v: 0.001,
+            rounds: 20,
+        }),
+        pins: vec![],
+        max_newton: 100,
+        tol: 1e-9,
+    };
+    let reference = vec![0.0; 2 * mesh.nodes.len()];
+    let stationary = vec![[0.0; 2]; mesh.nodes.len()];
+    let fixed = problem.solve(1.0).expect("stationary surface");
+    let zero = problem
+        .solve_from_with_surface_displacement(1.0, &reference, &stationary)
+        .expect("explicit zero surface motion");
+    assert_eq!(zero.u, fixed.u);
+    assert_eq!(zero.friction_reactions, fixed.friction_reactions);
+    assert_eq!(zero.friction_work, fixed.friction_work);
+    assert_eq!(zero.friction_support_work, 0.0);
+
+    let check_work = |solution: &ContactSolution, old: &[f64], surface: &[[f64; 2]]| {
+        let mut body_work = 0.0;
+        let mut support_work = 0.0;
+        for (i, force) in solution.friction_reactions.iter().enumerate() {
+            for a in 0..2 {
+                body_work += force[a] * (solution.u[2 * i + a] - old[2 * i + a]);
+                support_work += force[a] * surface[i][a];
+            }
+        }
+        assert!(solution.friction_work >= 0.0);
+        assert!((solution.friction_support_work - support_work).abs() < 1e-15);
+        assert!((body_work + solution.friction_work - support_work).abs() < 1e-14);
+    };
+
+    let motion = vec![[0.01, 0.0]; mesh.nodes.len()];
+    let moved = problem
+        .solve_from_with_surface_displacement(1.0, &reference, &motion)
+        .expect("moving conveyor entrains the unpinned block");
+    // Common tangential translation of body and obstacle material leaves
+    // relative slip, contact forces and dissipation unchanged.
+    for i in 0..mesh.nodes.len() {
+        assert!((moved.u[2 * i] - fixed.u[2 * i] - 0.01).abs() < 1e-9);
+        assert!((moved.u[2 * i + 1] - fixed.u[2 * i + 1]).abs() < 1e-9);
+    }
+    assert!((moved.friction_work - fixed.friction_work).abs() < 1e-11);
+    assert!((moved.friction_support_work + 0.02 * 0.01).abs() < 1e-11);
+    assert!(moved.friction_support_work < 0.0);
+    check_work(&moved, &reference, &motion);
+
+    let mut shifted_reference = reference.clone();
+    for i in 0..mesh.nodes.len() {
+        shifted_reference[2 * i] = 0.25;
+    }
+    let shifted = problem
+        .solve_from_with_surface_displacement(1.0, &shifted_reference, &motion)
+        .expect("translated physical reference with the same surface increment");
+    for (i, &old) in shifted_reference.iter().enumerate() {
+        assert!((shifted.u[i] - old - moved.u[i]).abs() < 1e-9);
+    }
+    assert!((shifted.friction_work - moved.friction_work).abs() < 1e-11);
+    check_work(&shifted, &shifted_reference, &motion);
+
+    let reversed_motion = vec![[-0.01, 0.0]; mesh.nodes.len()];
+    let reversed = problem
+        .solve_from_with_surface_displacement(1.0, &moved.u, &reversed_motion)
+        .expect("reversed material motion from the accepted body state");
+    assert!(reversed.u[0] < moved.u[0] - 0.005);
+    assert!((reversed.friction_support_work - 0.02 * 0.01).abs() < 1e-11);
+    assert!(reversed.friction_support_work > 0.0);
+    check_work(&reversed, &moved.u, &reversed_motion);
+
+    // Admission occurs before any equilibrium iteration.
+    let mut nonfinite = stationary.clone();
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        nonfinite[0][1] = bad;
+        assert!(matches!(
+            problem.solve_from_with_surface_displacement(1.0, &reference, &nonfinite),
+            Err(SolidError::InvalidInput { what }) if what.contains("surface displacement")
+        ));
+    }
+    assert!(matches!(
+        problem.solve_from_with_surface_displacement(1.0, &reference, &motion[..1]),
+        Err(SolidError::InvalidInput { what }) if what.contains("surface displacement")
     ));
 }
 
