@@ -19,6 +19,7 @@
 pub mod transport;
 pub mod coupled_transport;
 pub mod medium;
+pub mod natural_circulation;
 
 use std::collections::BTreeSet;
 

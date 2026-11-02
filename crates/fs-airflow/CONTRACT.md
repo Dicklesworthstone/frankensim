@@ -1,5 +1,23 @@
 # CONTRACT: fs-airflow
 
+## Native graph temperature–buoyancy feedback
+
+`graph::thermal::natural_circulation::solve_natural_circulation` closes steady
+temperature -> material density -> Boussinesq head -> hydraulic flow -> heat
+transport on closed native graphs. Straight branches carry explicit axial
+segment fractions; density is integrated along the actual exponential fluid
+temperature profile, with ordering reversed with flow. Material validity and
+density-departure bounds apply at both endpoints and interior samples. Paired
+quadrature, source-query and nonlinear-iteration budgets are explicit.
+Acceptance requires the unrelaxed density residual and a fresh hydraulic solve
+at the resulting thermal densities to satisfy the flow-change tolerance.
+Optional bounded IQN-ILS is acceleration only and resets after flow reversal.
+The result retains heat, density, gravity-head, flow and omitted-dissipation
+diagnostics. Pressure datums are not thermal supplies. Reference density/Cp,
+drag and hA remain fixed; stagnant branches, unsupported material states and
+excess omitted viscous heating refuse. No startup, compressibility, nonlinear
+stability, coupled-adjoint or experimental-validation claim is made.
+
 ## Finite source-backed gas circulation
 
 `feedback::transient::FiniteGasLoop` uses the same private finite-inventory
