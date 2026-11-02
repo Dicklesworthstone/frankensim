@@ -110,6 +110,376 @@ fn heat<T>(payload: T) -> BoundaryStepCoefficients<T> {
     }
     .into()
 }
+
+const PIPE_CELL_MASS_KG: f64 = 0.001;
+
+fn pipe_reference_resistance() -> f64 {
+    let reference = gas(300.0);
+    // Two circular, one-metre cells: A=V/L and Hagen-Poiseuille R=8*pi*mu*L/A^2.
+    let area = PIPE_CELL_MASS_KG / reference.density;
+    16.0 * core::f64::consts::PI * reference.dynamic_viscosity / (area * area)
+}
+
+fn pipe_inventory<'a>(
+    law: &'a dyn ThermalLaw,
+    rho: f64,
+    middle_x: f64,
+) -> DepositionSimulation<'a> {
+    // The hydraulic graph has only nodes 0 and 1. Pipe order is deliberately
+    // 20 then 10, so the authored path cannot be replaced by CellId sorting.
+    let geometry = [
+        (0, [-1.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+        (1, [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
+        (20, [0.0, 0.0, 0.0], [middle_x, 0.0, 0.0]),
+        (10, [middle_x, 0.0, 0.0], [2.0, 0.0, 0.0]),
+    ];
+    let schedule = geometry
+        .into_iter()
+        .map(|(id, start_m, end_m)| TimedEvent {
+            time_s: 0.0,
+            event: Event::Birth(DepositedCell {
+                id: CellId(id),
+                segment_id: id,
+                body_id: 0,
+                material_id: MaterialId(1),
+                mass_kg: PIPE_CELL_MASS_KG,
+                specific_h_j_kg: 0.0,
+                geometry: CellGeometry {
+                    start_m,
+                    end_m,
+                    volume_m3: PIPE_CELL_MASS_KG / rho,
+                    surface_area_m2: 1.0,
+                },
+                boundary: Boundary {
+                    ambient_k: 300.0,
+                    htc_w_m2_k: 0.0,
+                    reservoir: None,
+                    source_w: 0.0,
+                },
+            }),
+        })
+        .collect();
+    DepositionSimulation::new(
+        schedule,
+        &[(MaterialId(1), law)],
+        DepositionBudget {
+            max_cells: 4,
+            max_links: 16,
+            max_events: 4,
+            max_substeps: 100,
+        },
+    )
+    .unwrap()
+    .advance_to(
+        0.0,
+        StepConfig {
+            max_dt_s: 1.0,
+            energy_tolerance_j: 1e-8,
+        },
+        || Ok(()),
+    )
+    .unwrap()
+    .0
+}
+
+fn distributed_response(
+    cx: &Cx<'_>,
+    candidate: &DepositionSimulation<'_>,
+    sign: f64,
+    inlet_excess_k: f64,
+) -> Result<QuasiSteadyGraphResponse<GasState>, String> {
+    let mean_pipe_temperature = 0.5
+        * (candidate
+            .temperature_k(CellId(20))
+            .map_err(|e| e.to_string())?
+            + candidate
+                .temperature_k(CellId(10))
+                .map_err(|e| e.to_string())?);
+    let reference = gas(300.0);
+    let source = gas(mean_pipe_temperature);
+    let graph = viscous_graph(
+        pipe_reference_resistance() * source.dynamic_viscosity / reference.dynamic_viscosity,
+        false,
+    );
+    let hydraulics = graph
+        .solve(
+            &[
+                boundary(
+                    0,
+                    sign * pipe_reference_resistance() * PIPE_CELL_MASS_KG / reference.density,
+                ),
+                boundary(1, 0.0),
+            ],
+            graph_controls(),
+            cx,
+        )
+        .map_err(|e| e.to_string())?;
+    let mass = reference.density * hydraulics.branches[0].flow.value().abs();
+    let area = PIPE_CELL_MASS_KG / reference.density;
+    let diameter = (4.0 * area / core::f64::consts::PI).sqrt();
+    let reynolds = mass * diameter / (area * source.dynamic_viscosity);
+    if !(0.0..=2300.0).contains(&reynolds) {
+        return Err("distributed capillary fixture left its laminar source support".to_string());
+    }
+    let inlet = if sign > 0.0 { CellId(0) } else { CellId(1) };
+    let outlet = if sign > 0.0 { CellId(1) } else { CellId(0) };
+    Ok(QuasiSteadyGraphResponse {
+        hydraulics,
+        mass_boundaries: vec![
+            MassBoundary::Inlet {
+                id: 100,
+                cell: inlet,
+                kg_s: mass,
+                material_id: MaterialId(1),
+                specific_h_j_kg: reference.specific_heat_cp * inlet_excess_k,
+            },
+            MassBoundary::Outlet {
+                id: 101,
+                cell: outlet,
+                kg_s: mass,
+            },
+        ],
+        heat: heat(source),
+    })
+}
+
+#[test]
+fn g1_distributed_quasi_steady_residence_and_reversal_keep_the_original_hydraulics() {
+    with_cx(|cx| {
+        let reference = gas(300.0);
+        let law = GasCaloric {
+            cp: reference.specific_heat_cp,
+        };
+        let graph = viscous_graph(pipe_reference_resistance(), false);
+        let nodes = [CellId(0), CellId(1)];
+        let old = pipe_inventory(&law, reference.density, 1.0);
+        let inventory = DistributedGraphInventory::new(
+            cx,
+            &graph,
+            Density::new(reference.density),
+            &nodes,
+            &[vec![CellId(20), CellId(10)]],
+            &old,
+            8,
+        )
+        .unwrap();
+        let coupling = problem(&graph, &nodes, reference.density);
+        let mut limits = controls();
+        limits.maximum_cells = 4;
+        limits.energy_scale_j = 1.0;
+        let ids = [CellId(0), CellId(1), CellId(20), CellId(10)];
+        let mut before = [0.0; 4];
+        let mut current = old.clone();
+        for (step_index, (sign, inlet)) in [(1.0, 60.0), (-1.0, 0.0)].into_iter().enumerate() {
+            // With a=mdot*dt/M, native BE is the ordered recurrence
+            // e_new=(e_old+a*e_upstream)/(1+a). Solve only the capillary relation
+            // a*mu(T_pipe_mean)/mu(300K)=1 independently of production Newton.
+            let order = if sign > 0.0 {
+                [0, 2, 3, 1]
+            } else {
+                [1, 3, 2, 0]
+            };
+            let field = |turnover: f64| {
+                let mut next = [0.0; 4];
+                let mut upstream = inlet;
+                for index in order {
+                    next[index] = (before[index] + turnover * upstream) / (1.0 + turnover);
+                    upstream = next[index];
+                }
+                next
+            };
+            let (mut lo, mut hi) = (0.0, 1.0);
+            for _ in 0..80 {
+                let turnover = 0.5 * (lo + hi);
+                let temperatures = field(turnover);
+                let resistance = gas(300.0 + 0.5 * (temperatures[2] + temperatures[3]))
+                    .dynamic_viscosity
+                    / reference.dynamic_viscosity;
+                if turnover * resistance > 1.0 {
+                    hi = turnover;
+                } else {
+                    lo = turnover;
+                }
+            }
+            let turnover = 0.5 * (lo + hi);
+            let expected = field(turnover);
+            let (next, report) = advance_quasi_steady_graph_distributed(
+                cx,
+                &coupling,
+                &inventory,
+                &current,
+                (step_index + 1) as f64,
+                limits,
+                &[0.0; 4],
+                |cx, candidate| distributed_response(cx, candidate, sign, inlet),
+            )
+            .unwrap();
+            assert_eq!(report.hydraulics.pressures.len(), 2);
+            assert_eq!(report.hydraulics.branches.len(), 1);
+            assert_eq!(next.cells().len(), 4);
+            let q = report.hydraulics.branches[0].flow.value();
+            near(
+                q,
+                sign * PIPE_CELL_MASS_KG * turnover / reference.density,
+                2e-12,
+            );
+            for (i, id) in ids.into_iter().enumerate() {
+                near(next.temperature_k(id).unwrap(), 300.0 + expected[i], 2e-7);
+            }
+            near(
+                report.heat.dynamic_viscosity,
+                gas(300.0 + 0.5 * (expected[2] + expected[3])).dynamic_viscosity,
+                1e-12,
+            );
+            let residence = inventory.nominal_residence_times_s(cx, &[q]).unwrap()[0].unwrap();
+            near(residence, 2.0 / turnover, 2e-8);
+            let expected_energy = PIPE_CELL_MASS_KG
+                * law.cp
+                * (expected.iter().sum::<f64>() - before.iter().sum::<f64>());
+            near(report.thermal.stored_energy_change_j, expected_energy, 1e-6);
+            near(report.thermal.external_heat_j, expected_energy, 1e-6);
+            if sign < 0.0 {
+                assert!(report.thermal.external_heat_j < 0.0);
+            }
+            before = expected;
+            current = next;
+        }
+        assert_eq!(old.time_s(), 0.0);
+        assert!(old.cells().values().all(|cell| cell.specific_h_j_kg == 0.0));
+        assert_eq!(current.time_s(), 2.0);
+    });
+}
+
+#[test]
+fn g0_distributed_quasi_steady_admission_preserves_inventory_and_source_identity() {
+    struct TaggedCaloric {
+        law: GasCaloric,
+        identity: u8,
+    }
+    impl ThermalLaw for TaggedCaloric {
+        fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+            self.law.temperature_k(h)
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            self.law.maximum_temperature_slope()
+        }
+        fn caloric_identity(&self) -> Option<[u8; 32]> {
+            Some([self.identity; 32])
+        }
+    }
+    with_cx(|cx| {
+        let reference = gas(300.0);
+        let law = TaggedCaloric {
+            law: GasCaloric {
+                cp: reference.specific_heat_cp,
+            },
+            identity: 1,
+        };
+        let other_law = TaggedCaloric {
+            law: GasCaloric {
+                cp: reference.specific_heat_cp,
+            },
+            identity: 2,
+        };
+        let graph = viscous_graph(pipe_reference_resistance(), false);
+        let reversed_graph = viscous_graph(pipe_reference_resistance(), true);
+        let nodes = [CellId(0), CellId(1)];
+        let swapped = [CellId(1), CellId(0)];
+        let old = pipe_inventory(&law, reference.density, 1.0);
+        let changed_geometry = pipe_inventory(&law, reference.density, 1.25);
+        let changed_source = pipe_inventory(&other_law, reference.density, 1.0);
+        let inventory = DistributedGraphInventory::new(
+            cx,
+            &graph,
+            Density::new(reference.density),
+            &nodes,
+            &[vec![CellId(20), CellId(10)]],
+            &old,
+            8,
+        )
+        .unwrap();
+        let good = problem(&graph, &nodes, reference.density);
+        let wrong_nodes = problem(&graph, &swapped, reference.density);
+        let wrong_density = problem(&graph, &nodes, 2.0 * reference.density);
+        let wrong_topology = problem(&reversed_graph, &nodes, reference.density);
+        let mut insufficient_connections = problem(&graph, &nodes, reference.density);
+        insufficient_connections.maximum_connections = 2;
+        let mut limits = controls();
+        limits.maximum_cells = 4;
+        for (problem, state) in [
+            (&wrong_nodes, &old),
+            (&wrong_density, &old),
+            (&wrong_topology, &old),
+            (&insufficient_connections, &old),
+            (&good, &changed_geometry),
+            (&good, &changed_source),
+        ] {
+            let refused = advance_quasi_steady_graph_distributed(
+                cx,
+                problem,
+                &inventory,
+                state,
+                1.0,
+                limits,
+                &[0.0; 4],
+                |_, _| -> Result<QuasiSteadyGraphResponse<()>, &str> {
+                    panic!("inventory mismatch must refuse before source callback work")
+                },
+            );
+            assert!(matches!(
+                refused,
+                Err(QuasiSteadyGraphError::Invalid(_)) | Err(QuasiSteadyGraphError::Transport(_))
+            ));
+        }
+        // A solved response also retains its actual gravity chart. The base
+        // graph has no gravity, so checking only that template would miss this.
+        let wrong_chart = graph
+            .clone()
+            .with_gravity(
+                &reference,
+                &[[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+                [0.0; 3],
+                cx,
+            )
+            .unwrap();
+        let refused = advance_quasi_steady_graph_distributed(
+            cx,
+            &good,
+            &inventory,
+            &old,
+            1.0,
+            limits,
+            &[0.0; 4],
+            |cx, candidate| {
+                let mut response = distributed_response(cx, candidate, 1.0, 60.0)?;
+                response.hydraulics = wrong_chart
+                    .solve(
+                        &[
+                            boundary(
+                                0,
+                                pipe_reference_resistance() * PIPE_CELL_MASS_KG / reference.density,
+                            ),
+                            boundary(1, 0.0),
+                        ],
+                        graph_controls(),
+                        cx,
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>(response)
+            },
+        );
+        assert!(matches!(
+            refused,
+            Err(QuasiSteadyGraphError::Transport(
+                TransientTransportError::Invalid(
+                    "distributed hydraulic gravity disagrees with the original inventory"
+                )
+            ))
+        ));
+        assert_eq!(old.time_s(), 0.0);
+    });
+}
+
 fn problem<'a>(graph: &'a LossGraph, cells: &'a [CellId], rho: f64) -> QuasiSteadyGraphProblem<'a> {
     QuasiSteadyGraphProblem {
         topology: graph,

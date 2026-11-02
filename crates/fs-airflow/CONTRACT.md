@@ -2745,3 +2745,25 @@ The distributed inventory admits at most 4096 fluid cells; original nonlinear,
 momentum and thermal work limits apply independently. Regression sources exercise
 pipe residence and spatial refinement, variable-area inertia, retained heat during
 reversal and rest, coupled timeline acceptance and transactional binding refusal.
+
+### Distributed storage with quasi-steady hydraulic feedback
+
+`advance_quasi_steady_graph_distributed` uses the same distributed pipe inventory
+on each original backward-Euler thermal candidate. The existing quasi-steady
+entrypoint and problem structure remain compatible. No hydraulic nodes or pipe
+cells are inferred. Actual solved signed branch rates are expanded through the
+authored spatial order, including reverse flushing of already heated fluid.
+
+Node mapping, reference density, original topology, native storage identity and
+expanded connection budgets are admitted before source callbacks. Each actual
+solved gravity chart is checked against the inventory as well as the original
+graph template. Native thermal energy, source support and work budgets retain
+the existing acceptance rules. Hydraulic momentum is still quasi-steady; the
+inertial entrypoint owns retained branch impulses. The branch work ledger cannot
+resolve cancelling within-branch density contributions, so material callbacks
+retain responsibility for non-cancelling local section work before aggregation.
+
+Regression sources couple temperature-dependent source viscosity to finite pipe
+residence and reverse flushing, checking an independent ordered cell recurrence
+and scalar flow root. Geometry, caloric identity, node/density/topology, actual
+gravity and connection-budget refusals preserve the original thermal timeline.

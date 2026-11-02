@@ -19,6 +19,7 @@ use fs_thermal::enthalpy::backward_euler::{
 };
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
 
+use super::distributed::DistributedGraphInventory;
 use super::{GraphEnthalpyTransport, TransientTransportError, thermal_checkpoint};
 use crate::graph::{GraphSolution, LossGraph};
 
@@ -60,8 +61,10 @@ pub struct QuasiSteadyGraphControls {
     pub finite_difference_step: f64,
     pub cell_tolerance_j: f64,
     pub total_tolerance_j: f64,
-    /// Sum of dissipative hydraulic power and absolute local anomalous
-    /// buoyancy work. Neither is silently deposited into sensible heat.
+    /// Sum of dissipative hydraulic power and absolute branch anomalous
+    /// buoyancy work. The source callback separately bounds local section work
+    /// before aggregation when spatial density contributions can cancel.
+    /// Neither contribution is silently deposited into sensible heat.
     pub maximum_neglected_power_w: f64,
     pub maximum_neglected_energy_j: f64,
 }
@@ -137,6 +140,68 @@ pub fn advance_quasi_steady_graph<'m, T, E>(
     energy_guess_j: &[f64],
     resolve: impl Fn(&Cx<'_>, &DepositionSimulation<'m>) -> Result<QuasiSteadyGraphResponse<T>, E>,
 ) -> Result<(DepositionSimulation<'m>, QuasiSteadyGraphReport<T>), QuasiSteadyGraphError<E>> {
+    advance_quasi_steady_graph_impl(
+        cx,
+        problem,
+        None,
+        thermal,
+        target_s,
+        controls,
+        energy_guess_j,
+        resolve,
+    )
+}
+
+/// Advance the same coupled endpoint with explicitly distributed pipe storage.
+///
+/// Hydraulic nodes and branches retain the problem's original identities.
+/// Each actual candidate binds one signed branch rate through all of that
+/// branch's declared pipe cells, preserving residence time and stored fluid
+/// during reversal. Original caloric laws, mass, complete geometry and junction
+/// mapping remain with the inventory; no hydraulic nodes or thermal cells are
+/// inferred. External streams still attach only to original junction cells.
+///
+/// The callback sees the full native thermal field, including the pipe cells,
+/// and may resolve material properties or wall exchange from those states.
+/// All solver, energy, neglected-work and source-domain gates are shared with
+/// `advance_quasi_steady_graph`; timestep and spatial refinement remain required.
+/// The driver's omitted-work ledger sees hydraulic branch totals. A material
+/// callback must also bound non-cancelling local section work and support before
+/// aggregating spatial density or resistance states into that graph.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_quasi_steady_graph_distributed<'m, T, E>(
+    cx: &Cx<'_>,
+    problem: &QuasiSteadyGraphProblem<'_>,
+    inventory: &DistributedGraphInventory,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    controls: QuasiSteadyGraphControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(&Cx<'_>, &DepositionSimulation<'m>) -> Result<QuasiSteadyGraphResponse<T>, E>,
+) -> Result<(DepositionSimulation<'m>, QuasiSteadyGraphReport<T>), QuasiSteadyGraphError<E>> {
+    advance_quasi_steady_graph_impl(
+        cx,
+        problem,
+        Some(inventory),
+        thermal,
+        target_s,
+        controls,
+        energy_guess_j,
+        resolve,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_quasi_steady_graph_impl<'m, T, E>(
+    cx: &Cx<'_>,
+    problem: &QuasiSteadyGraphProblem<'_>,
+    inventory: Option<&DistributedGraphInventory>,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    controls: QuasiSteadyGraphControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(&Cx<'_>, &DepositionSimulation<'m>) -> Result<QuasiSteadyGraphResponse<T>, E>,
+) -> Result<(DepositionSimulation<'m>, QuasiSteadyGraphReport<T>), QuasiSteadyGraphError<E>> {
     thermal_checkpoint(cx)?;
     controls
         .solver
@@ -171,6 +236,17 @@ pub fn advance_quasi_steady_graph<'m, T, E>(
             "invalid topology, scale, residual or work budget",
         ));
     }
+    if let Some(inventory) = inventory {
+        if inventory.node_cells() != problem.node_cells
+            || inventory.reference_density() != problem.reference_density
+            || inventory.interior_connection_count() > problem.maximum_connections
+        {
+            return Err(QuasiSteadyGraphError::Invalid(
+                "distributed inventory, hydraulic node map, density or connection budget disagree",
+            ));
+        }
+        inventory.admit_storage(cx, problem.topology, thermal)?;
+    }
     let step = BackwardEulerStep::new(thermal, target_s, || thermal_checkpoint(cx))?;
     let count = step.cell_ids().len();
     if energy_guess_j.len() != count || energy_guess_j.iter().any(|v| !v.is_finite()) {
@@ -197,15 +273,33 @@ pub fn advance_quasi_steady_graph<'m, T, E>(
                 let response = resolve(cx, candidate).map_err(QuasiSteadyGraphError::Resolve)?;
                 thermal_checkpoint(cx)?;
                 admit_topology(problem.topology, &response.hydraulics)?;
-                let binding = GraphEnthalpyTransport::new(
-                    cx,
-                    &response.hydraulics,
-                    problem.reference_density,
-                    problem.node_cells,
-                    candidate,
-                    response.mass_boundaries,
-                    problem.maximum_connections,
-                )?;
+                let binding = if let Some(inventory) = inventory {
+                    admit_distributed_gravity(inventory, &response.hydraulics)?;
+                    let rates: Vec<_> = response
+                        .hydraulics
+                        .branches
+                        .iter()
+                        .map(|branch| branch.flow.value())
+                        .collect();
+                    inventory.bind(
+                        cx,
+                        problem.topology,
+                        &rates,
+                        candidate,
+                        response.mass_boundaries,
+                        problem.maximum_connections,
+                    )?
+                } else {
+                    GraphEnthalpyTransport::new(
+                        cx,
+                        &response.hydraulics,
+                        problem.reference_density,
+                        problem.node_cells,
+                        candidate,
+                        response.mass_boundaries,
+                        problem.maximum_connections,
+                    )?
+                };
                 let neglected = neglected_power(cx, &response.hydraulics)?;
                 let neglected_energy = neglected * step.duration_s();
                 if !neglected_energy.is_finite()
@@ -303,6 +397,30 @@ pub fn advance_quasi_steady_graph<'m, T, E>(
             neglected_energy_j: prepared.neglected_power_w * step.duration_s(),
         },
     ))
+}
+
+// A quasi-steady response carries a solved graph, not its LossGraph owner.
+// Check its actual gravity chart before binding the original graph topology.
+fn admit_distributed_gravity<E>(
+    inventory: &DistributedGraphInventory,
+    flow: &GraphSolution,
+) -> Result<(), QuasiSteadyGraphError<E>> {
+    if let Some(gravity) = &flow.gravity {
+        if gravity.reference_transport().density_kg_m3() != inventory.reference_density().value()
+            || gravity.positions_m().len() != inventory.node_cells().len()
+            || gravity
+                .positions_m()
+                .iter()
+                .zip(inventory.node_positions_m())
+                .any(|(actual, expected)| expected.is_some_and(|expected| *actual != expected))
+        {
+            return Err(TransientTransportError::Invalid(
+                "distributed hydraulic gravity disagrees with the original inventory",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn admit_topology<E>(
