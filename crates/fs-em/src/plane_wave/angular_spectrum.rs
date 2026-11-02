@@ -52,7 +52,9 @@ mod exposure;
 pub use exposure::{
     AngularSpectrumExposure, AngularSpectrumExposureEnsemble,
     AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureField,
-    AngularSpectrumExposureLimits, AngularSpectrumExposurePoint,
+    AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
+    AngularSpectrumExposureLayerLimits, AngularSpectrumExposureLimits,
+    AngularSpectrumExposurePoint, PreparedAngularSpectrumExposureLayer,
 };
 
 /// Bounds the uninterruptible work of one existing FFT pencil.

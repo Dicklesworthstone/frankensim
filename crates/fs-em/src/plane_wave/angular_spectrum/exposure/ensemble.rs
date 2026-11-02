@@ -42,9 +42,9 @@ pub struct AngularSpectrumExposureEnsembleLimits {
 /// correlations can be nonstationary; this API does not infer a stationary
 /// spectrum, source bandwidth, pseudocovariance or an individual realization.
 pub struct AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
-    anchor: &'b PlanarAngularSpectrum<'s, 'm>,
-    mean: Option<&'e AngularSpectrumExposure<'b, 's, 'm>>,
-    factors: &'e [AngularSpectrumExposure<'b, 's, 'm>],
+    pub(super) anchor: &'b PlanarAngularSpectrum<'s, 'm>,
+    pub(super) mean: Option<&'e AngularSpectrumExposure<'b, 's, 'm>>,
+    pub(super) factors: &'e [AngularSpectrumExposure<'b, 's, 'm>],
     line_count: usize,
     point_line_pairs: usize,
     point_frequency_pairs: usize,

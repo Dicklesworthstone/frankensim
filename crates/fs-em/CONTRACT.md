@@ -2340,10 +2340,11 @@ operation count, not measured throughput. Cancellation returns no partial field.
 
 Results contain real componentwise mean-square E/H, signed mean Poynting flux
 and integrated mean normal watts over the original periodic cell. They do not
-assign a monochromatic reactive flux or infer transient dielectric heating from
-these quantities. Dispersive storage/heat evolution, source switch-on, stochastic
-coherence inference and nonlinear Maxwell dynamics remain outside this
-prescribed linear spectral-line model. Source-bound G1/G3 regressions compare
+assign a monochromatic reactive flux or infer dielectric heating from exterior
+field moments alone. The selected-layer reservoir owner below supplies explicit
+settled-harmonic heat and storage rates. Initial-value dispersive transients,
+source switch-on, stochastic coherence inference and nonlinear Maxwell dynamics
+remain outside this prescribed linear spectral-line model. Source-bound G1/G3 regressions compare
 against independent real-time quadrature after a Debye film, and cover beats,
 subcycle shutters, polarization, signed reflection, exact cancellation and
 small residuals among large equal-frequency fields. G4 checks source identity,
@@ -2395,6 +2396,65 @@ the existing spatial coherence owner, partial beat visibility, optional mean
 illumination, unitary factor invariance, weak residuals near a distinct-frequency
 null, source identity, budget boundaries, cancellation and replay. Extended
 precision accumulation does not certify arbitrary relative accuracy near nulls.
+
+### Finite-window interference-dependent film heat and storage
+
+`AngularSpectrumExposure::prepare_layer` and
+`AngularSpectrumExposureEnsemble::prepare_layer` return one
+`PreparedAngularSpectrumExposureLayer` for a selected original film. One TE/TM
+interior response cache per distinct frequency is shared across the deterministic
+mean and proper covariance factors. Cache reuse requires the same original
+material owners, layer order, thicknesses, frequency and grid. Compensated
+equal-frequency modal sums precede each six-component FFT. Repeated depth
+queries perform no new film solve or constitutive evaluation.
+
+The selected law supplies its original instantaneous and dissipative reservoirs:
+lossless, Ohmic, Debye, or Debye with Ohmic conduction. The high-frequency
+permittivity is retained before capacitor geometry reduction. For each original
+Debye pole, `tau*P_dot + P = Delta_epsilon*E` gives irreversible heat
+`(tau/Delta_epsilon)*|P_dot|²` and reversible storage
+`|P|²/(2*Delta_epsilon)`. Every spectral line keeps that pole's complex
+transfer phase. Mixed-frequency interference is contracted within each
+reservoir before its nonnegative heat is added to the others. Ohmic heat is
+`sigma*|E_real|²`. Unrelated reservoir currents are not added before squaring.
+
+The shared real or proper temporal kernels average these products over the
+authored window. The deterministic mean retains sum-frequency terms; proper
+covariance removes them through the explicitly declared zero pseudocovariance.
+The proper storage derivative forms the frequency difference in DD before
+multiplying pair moments, preserving slow beat changes against a large carrier.
+Local mean Ohmic heat, polarization heat, total heat and signed storage rate
+are W/m³. Storage includes `epsilon_infinity*|E|²/2 + mu*|H|²/2` and every
+original polarization reservoir. Its rate is `(U_end-U_start)/duration`;
+multiplication by duration yields storage change in J/m³, not deposited heat.
+Transverse heat/storage-rate integrals are W/m of depth. Integrating their sum
+through the film balances the difference of signed normal boundary powers in W.
+Positive heating can coexist with net outward power when stored energy decreases.
+
+Preparation caps authored frequency groups, distinct-frequency layer/mode
+work, aggregate line work, reservoir pair work, FFT work and logical numerical
+storage. At most 4096 authored frequency groups are sorted. With R banks,
+G authored groups, F distinct frequencies, N samples, S source layers and P
+poles, preparation costs `O(R*S + G*log(1+G) + F*N*S + F*P)`.
+A depth query costs
+`O(N + R + sum_r(L_r*(N+S) + F_r*N*log(N) + (P+1)*F_r²*N + F_r*log(1+F)))`.
+The S term covers structural source checks when original stack pointers differ.
+Additional storage is
+`O(F*N + F*P + N*max_r(F_r) + max_r(F_r²) + N + G)`, excluding other complete
+borrowed owners and allocator overhead. Cancellation publishes no partial plane.
+
+These are settled prescribed harmonics at fixed parameters, without a switch-on
+solution, inferred initial polarization history, temperature update or thermal
+ledger debit. A selected empirical optical n/k law without a causal reservoir
+is explicitly refused; the existing monochromatic optical heat path retains
+its original semantics. Authored regressions cover real-time reservoir
+quadrature, positive heat with net outward energy release, heat-plus-storage
+Poynting balance, proper covariance with mean illumination, cache reuse,
+large-carrier slow-beat storage, original single-tone absorption, source-law
+refusal, budgets, depth and cancellation. The nine new Rust regressions await
+native execution. Independent JavaScript references are mathematical checks,
+not compilation or execution of this owner. No arbitrary-null relative
+accuracy or interval certificate is claimed.
 
 ### Two-sided coherent illumination and layer heating
 

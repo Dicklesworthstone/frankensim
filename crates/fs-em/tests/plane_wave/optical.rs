@@ -2,7 +2,8 @@ use super::*;
 use fs_em::plane_wave::{
     OpticalConductorResponse,
     angular_spectrum::{
-        AngularSpectrumExposure, AngularSpectrumExposureLimits, AngularSpectrumGrid,
+        AngularSpectrumError, AngularSpectrumExposure, AngularSpectrumExposureLimits, AngularSpectrumGrid,
+        AngularSpectrumExposureLayerLimits,
         AngularSpectrumLayerLimits, AngularSpectrumLimits, AngularSpectrumSide,
         PlanarAngularSpectrum,
     },
@@ -417,4 +418,49 @@ fn spectral_metal_exposure_retains_one_original_source_across_frequencies() {
     assert!(
         AngularSpectrumExposure::try_new(&foreign_beam, &lines, exposure_limits, || false).is_err()
     );
+}
+
+#[test]
+fn finite_window_heat_refuses_empirical_optical_loss_without_a_causal_reservoir() {
+    let incident = host();
+    let source = metal(Some(M));
+    let response = DielectricResponse::OpticalConductor(
+        OpticalConductorResponse::try_new(&source).unwrap(),
+    );
+    let stack = PlanarDielectricLayers::try_new(
+        &incident, DielectricResponse::Lossless(&incident), WAVELENGTH_FREQUENCY / 550.0,
+        &[DielectricLayer { response, thickness_m: 35e-9 }],
+    ).unwrap();
+    let beam = PlanarAngularSpectrum::prepare(
+        &stack,
+        AngularSpectrumGrid { width: 1, height: 1, spacing_m: [1e-6, 1e-6] },
+        &[[C64::ONE, C64::ZERO]],
+        AngularSpectrumLimits {
+            maximum_grid_points: 1,
+            maximum_workspace_bytes: 1 << 20,
+            maximum_fft_work: 1 << 16,
+        },
+        || false,
+    ).unwrap();
+    let bank = AngularSpectrumExposure::try_new(
+        &beam, std::slice::from_ref(&beam),
+        AngularSpectrumExposureLimits {
+            maximum_lines: 1,
+            maximum_point_line_pairs: 1,
+            maximum_point_frequency_pairs: 1,
+            maximum_workspace_bytes: 1 << 20,
+            maximum_fft_work: 1 << 16,
+        }, || false,
+    ).unwrap();
+    let result = bank.prepare_layer(0, AngularSpectrumExposureLayerLimits {
+        maximum_frequency_groups: 1,
+        maximum_frequency_layer_mode_pairs: 2,
+        maximum_point_line_pairs: 1,
+        maximum_point_reservoir_frequency_pairs: 3,
+        maximum_workspace_bytes: 1 << 20,
+        maximum_fft_work: 1 << 16,
+    }, || false);
+    assert!(matches!(result, Err(AngularSpectrumError::Invalid(
+        "finite-window film heat needs an original causal material reservoir"
+    ))));
 }

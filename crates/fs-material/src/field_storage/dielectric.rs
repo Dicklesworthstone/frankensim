@@ -74,6 +74,7 @@ pub struct ResolvedDebyeCapacitor {
     area_m2: f64,
     gap_m: f64,
     instantaneous_capacitance_f: f64,
+    high_frequency_permittivity_f_m: f64,
     equilibrium_capacitance_f: f64,
     poles: Vec<DebyePole>,
 }
@@ -174,6 +175,7 @@ impl ResolvedDebyeCapacitor {
             area_m2,
             gap_m,
             instantaneous_capacitance_f,
+            high_frequency_permittivity_f_m: epsilon,
             equilibrium_capacitance_f,
             poles,
         })
@@ -324,6 +326,12 @@ impl ResolvedDebyeCapacitor {
     /// High-frequency capacitance with all polarization processes frozen [F].
     pub const fn instantaneous_capacitance_f(&self) -> f64 {
         self.instantaneous_capacitance_f
+    }
+    /// Original bulk high-frequency permittivity [F/m], retained before any
+    /// capacitor geometry reduction. Used with the original polarization poles
+    /// for local field storage and settled-harmonic material energy balance.
+    pub const fn high_frequency_permittivity_f_m(&self) -> f64 {
+        self.high_frequency_permittivity_f_m
     }
     /// Static capacitance after all polarization processes equilibrate [F].
     pub const fn equilibrium_capacitance_f(&self) -> f64 {

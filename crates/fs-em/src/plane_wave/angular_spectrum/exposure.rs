@@ -20,6 +20,12 @@ use fs_math::dd::Dd;
 mod ensemble;
 pub use ensemble::{AngularSpectrumExposureEnsemble, AngularSpectrumExposureEnsembleLimits};
 
+mod layer;
+pub use layer::{
+    AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
+    AngularSpectrumExposureLayerLimits, PreparedAngularSpectrumExposureLayer,
+};
+
 /// Whole-line-bank bounds for a query. Pair work counts N*F² for N spatial
 /// points and F distinct frequencies. Logical numerical storage includes one
 /// original beam's complete workspace, all retained frequency fields, temporal
@@ -304,6 +310,20 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         distance: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<[C64; 6]>, AngularSpectrumError> {
+        self.frequency_field_with(group, cancelled, |line, cancelled| {
+            line.modal_field(side, distance, cancelled)
+        })
+    }
+
+    fn frequency_field_with<F: FnMut() -> bool>(
+        &self,
+        group: usize,
+        cancelled: &mut F,
+        mut modal_field: impl FnMut(
+            &PlanarAngularSpectrum<'s, 'm>,
+            &mut F,
+        ) -> Result<(Vec<[C64; 3]>, Vec<[C64; 3]>), AngularSpectrumError>,
+    ) -> Result<Vec<[C64; 6]>, AngularSpectrumError> {
         let n = self.anchor.modes.len();
         let mut sums = Vec::new();
         sums.try_reserve_exact(n)
@@ -319,7 +339,7 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         for &index in indices {
             poll(cancelled)?;
             let line = &self.lines[index];
-            let (electric, magnetic) = line.modal_field(side, distance, &mut *cancelled)?;
+            let (electric, magnetic) = modal_field(line, &mut *cancelled)?;
             for (i, ((sum, e), h)) in sums.iter_mut().zip(&electric).zip(&magnetic).enumerate() {
                 if i % 64 == 0 {
                     poll(cancelled)?;

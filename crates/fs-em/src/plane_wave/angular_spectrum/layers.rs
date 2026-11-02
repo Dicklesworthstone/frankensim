@@ -179,7 +179,11 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
     // A coherence factor changes only the incident amplitudes. The source,
     // spatial bins and their TE/TM boundary responses must remain identical.
     fn admit_beam(&self, beam: &PlanarAngularSpectrum<'s, 'm>) -> Result<(), AngularSpectrumError> {
-        if !core::ptr::eq(beam.source(), self.beam.source()) || beam.grid() != self.beam.grid() {
+        let same_source = core::ptr::eq(beam.source(), self.beam.source())
+            || (beam.source().angular_frequency_rad_s()
+                == self.beam.source().angular_frequency_rad_s()
+                && beam.source().same_sources_and_geometry(self.beam.source()));
+        if !same_source || beam.grid() != self.beam.grid() {
             return Err(bad(
                 "layer factors require the same original source and grid",
             ));
@@ -215,12 +219,12 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
         Ok(power)
     }
 
-    pub(super) fn field_for_beam(
+    pub(super) fn modal_field_for_beam(
         &self,
         beam: &PlanarAngularSpectrum<'s, 'm>,
         depth_m: f64,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<AngularSpectrumLayerField, AngularSpectrumError> {
+    ) -> Result<(Vec<[C64; 3]>, Vec<[C64; 3]>), AngularSpectrumError> {
         poll(&mut cancelled)?;
         self.admit_beam(beam)?;
         let thickness = self
@@ -259,6 +263,18 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
             electric.push(e);
             magnetic.push(h);
         }
+        Ok((electric, magnetic))
+    }
+
+    pub(super) fn field_for_beam(
+        &self,
+        beam: &PlanarAngularSpectrum<'s, 'm>,
+        depth_m: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumLayerField, AngularSpectrumError> {
+        let (electric, magnetic) =
+            self.modal_field_for_beam(beam, depth_m, &mut cancelled)?;
+        let n = self.modes.len();
         let field = beam.synthesize(electric, magnetic, &mut cancelled)?;
         AngularSpectrumLayerField::from_field(field, self.heat_coefficient, &mut cancelled)
     }
