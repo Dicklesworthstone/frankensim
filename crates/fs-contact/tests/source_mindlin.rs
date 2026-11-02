@@ -11,6 +11,9 @@ mod sliding;
 #[path = "source_mindlin/surface.rs"]
 mod surface;
 
+#[path = "source_mindlin/fretting.rs"]
+mod fretting;
+
 use fs_contact::interface_binding::mindlin::{SourceMindlinContact, SourceMindlinError};
 use fs_contact::interface_binding::*;
 use fs_contact::normal_patch::source::*;

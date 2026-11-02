@@ -35,6 +35,10 @@ pub mod loading;
 #[path = "mindlin/sliding.rs"]
 pub mod sliding;
 
+/// Local irreversible sliding and source-bound small-removal fretting wear.
+#[path = "mindlin/fretting.rs"]
+pub mod fretting;
+
 /// Original bulk, interface and patch sources around one stateful friction law.
 ///
 /// The scalar shear coordinate is tangent axis 0. Its fixed physical direction
@@ -259,6 +263,51 @@ impl SourceMindlinContact {
         state.normal_model_identity == self.normal.model().identity()
             && state.friction_state_identity == self.friction.identity()
     }
+
+    fn admit_step(
+        &self,
+        state: &SourceMindlinState,
+        input: &TangentialStepInput,
+    ) -> Result<(), TriboError> {
+        if !self.owns_state(state) {
+            return Err(TriboError::InvalidInput {
+                field: "Mindlin checkpoint requires its original normal and friction sources",
+            });
+        }
+        if input.contact_temperature_k != Some(self.temperature_kelvin)
+            || input.nominal_pressure_pa.is_some()
+        {
+            return Err(TriboError::InvalidInput {
+                field: "Mindlin source requires its frozen temperature and no nominal-pressure refresh",
+            });
+        }
+        self.normal
+            .validate_kinematics(self.patch.approach_m, 0.0, input.dt_s)
+            .map_err(|_| TriboError::InvalidInput {
+                field: "Mindlin step exceeds the original normal source envelope",
+            })
+    }
+
+    fn bind_step(
+        &self,
+        candidate: TangentialStep<MindlinState>,
+    ) -> TangentialStep<SourceMindlinState> {
+        TangentialStep {
+            traction_n: candidate.traction_n,
+            slip_increment_m: candidate.slip_increment_m,
+            state: SourceMindlinState {
+                normal_model_identity: self.normal.model().identity(),
+                friction_state_identity: self.friction.identity(),
+                constitutive: candidate.state,
+            },
+            regime: candidate.regime,
+            stored_change_j: candidate.stored_change_j,
+            dissipated_j: candidate.dissipated_j,
+            closure_residual_j: candidate.closure_residual_j,
+            compatibility_residual_m: candidate.compatibility_residual_m,
+            iterations: candidate.iterations,
+        }
+    }
 }
 
 impl TangentialLaw for SourceMindlinContact {
@@ -286,38 +335,8 @@ impl TangentialLaw for SourceMindlinContact {
         state: &Self::State,
         input: &TangentialStepInput,
     ) -> Result<TangentialStep<Self::State>, TriboError> {
-        if !self.owns_state(state) {
-            return Err(TriboError::InvalidInput {
-                field: "Mindlin checkpoint requires its original normal and friction sources",
-            });
-        }
-        if input.contact_temperature_k != Some(self.temperature_kelvin)
-            || input.nominal_pressure_pa.is_some()
-        {
-            return Err(TriboError::InvalidInput {
-                field: "Mindlin source requires its frozen temperature and no nominal-pressure refresh",
-            });
-        }
-        self.normal
-            .validate_kinematics(self.patch.approach_m, 0.0, input.dt_s)
-            .map_err(|_| TriboError::InvalidInput {
-                field: "Mindlin step exceeds the original normal source envelope",
-            })?;
+        self.admit_step(state, input)?;
         let candidate = self.law.advance(&state.constitutive, input)?;
-        Ok(TangentialStep {
-            traction_n: candidate.traction_n,
-            slip_increment_m: candidate.slip_increment_m,
-            state: SourceMindlinState {
-                normal_model_identity: state.normal_model_identity,
-                friction_state_identity: state.friction_state_identity,
-                constitutive: candidate.state,
-            },
-            regime: candidate.regime,
-            stored_change_j: candidate.stored_change_j,
-            dissipated_j: candidate.dissipated_j,
-            closure_residual_j: candidate.closure_residual_j,
-            compatibility_residual_m: candidate.compatibility_residual_m,
-            iterations: candidate.iterations,
-        })
+        Ok(self.bind_step(candidate))
     }
 }

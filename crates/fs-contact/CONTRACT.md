@@ -1757,3 +1757,34 @@ released shear memory.
 Three source integration groups check original Hertz/material/Coulomb
 propagation, loading/open/recontact fields and identity, and foreign-source or
 invalid-radius refusal without mutation. All 22 source Mindlin tests pass.
+
+## Original-source local sliding and Archard fretting wear
+
+`SourceMindlinContact::advance_with_surface_sliding` applies the same original
+normal/interface identity, frozen-temperature and source-envelope admission as
+the existing contact step, then performs its native solve once. The private
+observer exposes local irreversible sliding and work and the accepted integral
+`I = integral p*abs(delta_s) dA`; consuming it returns the complete original
+source-bound tangential candidate.
+
+`mindlin::fretting::SourceMindlinWear` retains selected dimensionless Archard
+coefficients from that same ordered interface and positive pressure-valued
+indentation hardness from each original bulk card. Complete card identities,
+frozen physical queries and axis conventions, exact selected claims and property
+test contexts remain pinned. Construction resolves roles once; each step uses
+the accepted pressure-weighted sliding integral directly in native Archard
+`delta_V_i=k_i*I/H_i`, without a radial integration loop or a second contact solve.
+
+The candidate contains retained contact memory and both cumulative wear volumes
+together. Elastic storage and the original dissipative work are unchanged;
+wear is a small-removal volume diagnostic without inferred geometry, mass/debris
+transport or a separate energy sink. The admitted contact has fixed normal
+load, frozen material state and one scalar direction; wear-induced profile
+evolution and varying-condition fretting retain their own owners.
+
+Four source groups verify small reversal-cycle wear against native analytical
+work with a sticking center and less than 1% of the macroscopic-travel estimate,
+the established gross-sliding and explicit frictionless Archard limits with
+unequal A/B k/H, actual compliant unloading from zero offered displacement, and
+original-source/role/query refusal plus second-surface overflow and late
+cancellation without partial state. All 26 source Mindlin integration tests pass.
