@@ -1475,6 +1475,28 @@ full-grid regressions specify force/trace invariance, inactive cells and
 scalar/field bit parity in both dimensions, with execution still pending a
 resource-capable native build.
 
+`rheology::physical::PhysicalRheology` binds caller-declared SI Newtonian,
+power-law, Carreau and regularized Herschel–Bulkley parameters through the
+existing `MaterialScaling::bind_rheology`. `ScaledRheology` retains the original
+material scale, source, frozen reference density, physical law and declared
+`LiquidViscosityBasis`; dynamic coefficients divide by density exactly once.
+For spacing dx and step dt, kinematic viscosity scales by dt/dx², power-law
+consistency by dt^(2-n)/dx², yield stress/density by dt²/dx², constitutive times
+by 1/dt, and minimum shear rate by dt. Physical power laws require an explicit
+SI low-rate cutoff and use the existing zero-yield Herschel–Bulkley image so
+that grid refinement does not change that material plateau.
+
+Normal conversions retain the original material-scaling operation order;
+deterministic logarithmic fallback admits representable results despite
+intermediate overflow/underflow. Invalid parameters or a lost nonzero term
+refuse. Uniform and spatial 2-D/3-D updates consume the same converted law;
+existing tau floor/cap accounting still bounds numerical resolution. No source
+fit, new material evolution or stability guarantee is inferred. Four focused
+regressions specify physical stress/local-root equivalence under refinement,
+dynamic/kinematic agreement, extreme-scale refusal and source retention through
+both field dimensions. Syntax validation is established; native execution of
+these new whole-crate tests remains pending sufficient host resources.
+
 `tests/extensions.rs` (tfz.19): lbm-101 power-law/Carreau profiles vs
 analytic (0.14% for the n = 0.8 profile with τ floor+cap ledger);
 lbm-102 Rayleigh–Bénard onset

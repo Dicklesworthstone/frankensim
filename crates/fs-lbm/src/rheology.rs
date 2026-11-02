@@ -11,6 +11,9 @@
 //! represent at this resolution — the ledger says HOW MANY, honestly,
 //! instead of silently going unstable).
 
+/// Source-retaining SI constitutive parameters on the admitted material scale.
+pub mod physical;
+
 use crate::core2::{
     Cell, CollisionModel2, Grid, force_corrected_shear_rate, force_corrected_stress,
 };
