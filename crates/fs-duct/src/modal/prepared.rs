@@ -141,6 +141,65 @@ impl<'a> PreparedModalDuct<'a> {
         mm_evaluate_prepared(self, gas, omega, loss, MmLoad::Flanged(exterior), false)
             .map(|response| response.input)
     }
+
+    /// Native input reflection before the input-impedance conversion.
+    ///
+    /// The same propagation and load equations as [`Self::input_impedance`]
+    /// apply. Flow nodes remain finite reflected waves; no impedance inverse
+    /// is required. Use [`ModalReflectionResponse::plane_reflection`] for a
+    /// plane source or [`ModalReflectionResponse::at_references`] for all ports.
+    ///
+    /// # Errors
+    /// The same wave/load refusals as [`Self::input_impedance`], without its
+    /// final input-impedance-pole refusal.
+    pub fn input_reflection(
+        &self, gas: &GasState, omega: f64, loss: LossModel, termination: Termination,
+    ) -> Result<ModalReflectionResponse, DuctError> {
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Analytic(termination), false)
+            .map(|response| response.input)
+    }
+
+    /// [`Self::input_reflection`] with the same tabulated mouth and matched
+    /// higher-mode closure as [`Self::input_impedance_tabulated`].
+    ///
+    /// # Errors
+    /// The table's support and wave admission refusals apply at this frequency.
+    pub fn input_reflection_tabulated(
+        &self, gas: &GasState, omega: f64, loss: LossModel, table: &crate::TabulatedLoad,
+    ) -> Result<ModalReflectionResponse, DuctError> {
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Tabulated(table), false)
+            .map(|response| response.input)
+    }
+
+    /// [`Self::input_reflection`] with a finite passive plane-mouth load,
+    /// including an independently declared static load for quasi-static use.
+    /// Higher mouth modes retain the matched closure.
+    ///
+    /// # Errors
+    /// Invalid waves or a nonfinite/negative-resistance mouth impedance.
+    pub fn input_reflection_load(
+        &self, gas: &GasState, omega: f64, loss: LossModel, impedance: C64,
+    ) -> Result<ModalReflectionResponse, DuctError> {
+        if !impedance.re.is_finite() || !impedance.im.is_finite() || impedance.re < 0.0 {
+            return Err(DuctError::BadParameter {
+                what: "modal mouth impedance must be finite with nonnegative resistance",
+            });
+        }
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Impedance(impedance), false)
+            .map(|response| response.input)
+    }
+
+    /// [`Self::input_reflection`] with the complete flanged radiation matrix.
+    /// The interior/exterior material states and all mutual loads stay live.
+    ///
+    /// # Errors
+    /// The same physical admissions as [`Self::input_impedance_flanged`].
+    pub fn input_reflection_flanged(
+        &self, gas: &GasState, exterior: &GasState, omega: f64, loss: LossModel,
+    ) -> Result<ModalReflectionResponse, DuctError> {
+        mm_reflection_prepared(self, gas, omega, loss, MmLoad::Flanged(exterior), false)
+            .map(|response| response.input)
+    }
 }
 
 #[cfg(test)]

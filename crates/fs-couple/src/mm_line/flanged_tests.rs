@@ -92,7 +92,7 @@ fn flanged_line_selector_retains_full_physical_port_work() {
     }
     let dc = dc_response(&geometry, &gas, config.loss, &load).unwrap();
     assert!(
-        dc.impedance_matrix
+        dc.reflection_matrix
             .iter()
             .all(|z| z.re.is_finite() && z.im.is_finite())
     );

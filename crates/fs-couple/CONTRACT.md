@@ -4859,6 +4859,14 @@ None.
   1e-3 rad/s quasi-static probe, with no table extrapolation, default -1, or
   clipping. Strict-load errors propagate, and plane reflectance is checked
   before FIR realization with the existing 1e-12 rounding allowance.
+  Both staircase FIR consumers now sample the authority's native modal
+  reflection directly, including analytic, tabulated, full flanged and
+  declared-DC loads. They do not pass through a full inlet impedance and
+  back: pressure antinodes retain finite reflected waves. The plane bank
+  imposes zero higher-mode inlet flow; the matrix line uses its constant
+  positive real reference for every incident port. Those are distinct source
+  closures. Existing source coverage, passivity and FIR convergence gates
+  still apply after this conversion.
   `MouthLoad::Matched` refuses explicitly on these staircase time-domain lines.
   The existing FIR Nyquist rolloff and precursor folding remain in effect;
   full-band source coverage is not a new high-band realization-error claim.

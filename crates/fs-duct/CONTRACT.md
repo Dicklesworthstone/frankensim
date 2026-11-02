@@ -484,6 +484,14 @@ pipe `Z_in = +i Zc cot(kL)`.
   consumers (the fs-couple MM characteristic-line realizer), keeping
   the `Im k >= 0` branch rule and the `Zc_n = Zc_0 k_0/k_n`
   derivation single-sourced here.
+  `PreparedModalDuct::input_reflection{,_tabulated,_load,_flanged}` retains
+  that recurrence's `ModalReflectionResponse` before any input-impedance
+  inversion. `at_references` converts its pressure/flow waves by a right solve
+  into positive real per-mode references; signed power uses `diag(1/Zref)`.
+  `plane_reflection` imposes zero higher-mode inlet flow, the `Z00` source
+  closure, rather than matching those incident ports. Both avoid an `I-R`
+  inverse at inlet flow nodes. Existing impedance queries retain their true
+  poles, and load, cutoff, staircase and loss-model admissions remain intact.
   `Closed` imposes zero normal volume flow on every retained mode, and
   `IdealOpen` imposes zero pressure on every mode. Their terminal pressure
   reflection matrices are respectively `+I` and `-I`, including evanescent

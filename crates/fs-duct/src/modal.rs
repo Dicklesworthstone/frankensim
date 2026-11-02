@@ -68,6 +68,9 @@ pub mod time_domain;
 mod prepared;
 pub use prepared::PreparedModalDuct;
 
+mod reflection;
+pub use reflection::ModalReflectionResponse;
+
 /// Continuous multimodal propagation on smooth profiles (M2.1-W3b).
 mod riccati;
 pub use riccati::{
@@ -708,6 +711,49 @@ fn mm_evaluate_prepared(
     load: MmLoad<'_>,
     observe_mouth: bool,
 ) -> Result<outlet::MouthResponse, DuctError> {
+    let response = mm_reflection_prepared(geometry, state, omega, loss, load, observe_mouth)?;
+    let input = response.input;
+    let z_in = impedance_from_reflection(
+        &input.reflection_matrix, &input.characteristic_impedances, input.n_modes,
+    )?;
+    let flow_map = outlet::finish(
+        response.mouth_flow, &z_in, &input.characteristic_impedances, input.n_modes,
+    )?;
+    Ok(outlet::MouthResponse {
+        inlet_radius_m: response.inlet_radius_m,
+        mouth_radius_m: response.mouth_radius_m,
+        flow_map,
+        input: ModalResponse {
+            omega: input.omega,
+            n_modes: input.n_modes,
+            plane_impedance: z_in[0],
+            impedance_matrix: z_in,
+            min_shear_number: input.min_shear_number,
+            mouth_ka: input.mouth_ka,
+            cutoffs_at_throat_hz: input.cutoffs_at_throat_hz,
+            steps_used: input.steps_used,
+            tail_bound_estimate: None,
+        },
+    })
+}
+
+struct ModalWaveResponse {
+    input: ModalReflectionResponse,
+    inlet_radius_m: f64,
+    mouth_radius_m: f64,
+    mouth_flow: Option<Vec<C64>>,
+}
+
+// Retain the native wave response before any conversion to input impedance.
+// A flow node is a legitimate impedance pole, but its reflected wave is finite.
+fn mm_reflection_prepared(
+    geometry: &PreparedModalDuct<'_>,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: MmLoad<'_>,
+    observe_mouth: bool,
+) -> Result<ModalWaveResponse, DuctError> {
     if !(omega.is_finite() && omega > 0.0) {
         return Err(DuctError::BadParameter {
             what: "omega must be finite and positive",
@@ -798,8 +844,6 @@ fn mm_evaluate_prepared(
         wave_here = wave_up;
     }
 
-    let z_in = impedance_from_reflection(&r, &wave_here.zc, n)?;
-    let flow_map = outlet::finish(mouth_flow, &z_in, &wave_here.zc, n)?;
     let throat = stations
         .iter()
         .map(|s| s.radius)
@@ -808,20 +852,19 @@ fn mm_evaluate_prepared(
         .iter()
         .map(|g| state.sound_speed * g / (core::f64::consts::TAU * throat))
         .collect();
-    Ok(outlet::MouthResponse {
+    Ok(ModalWaveResponse {
         inlet_radius_m: wave_here.radius,
         mouth_radius_m: mouth,
-        flow_map,
-        input: ModalResponse {
+        mouth_flow,
+        input: ModalReflectionResponse {
             omega,
             n_modes: n,
-            plane_impedance: z_in[0],
-            impedance_matrix: z_in,
+            reflection_matrix: r,
+            characteristic_impedances: wave_here.zc,
             min_shear_number: min_shear,
             mouth_ka,
             cutoffs_at_throat_hz: cutoffs,
             steps_used: stations.len(),
-            tail_bound_estimate: None,
         },
     })
 }

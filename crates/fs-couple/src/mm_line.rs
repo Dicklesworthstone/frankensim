@@ -9,15 +9,17 @@
 //! REALIZATION DOCTRINE (the §6.2 bake-off this module documents): at a
 //! brass input plane the higher m = 0 modes are DEEPLY evanescent (an
 //! 8 mm throat puts mode 1's local cutoff near 26 kHz), so the
-//! MM-derived plane-mode reflectance `R_00(omega)` — which already
+//! MM-derived plane-source reflectance — which already
 //! contains every interior mode-conversion round trip — is what a
-//! plane-driven source sees. The DOMINANT realization is therefore one
-//! exact-FIR line filled from `R_00`; the FULL-MATRIX realization
+//! plane-driven source sees when higher inlet flows vanish. The DOMINANT
+//! realization is therefore one exact-FIR line with that closure; the FULL-MATRIX realization
 //! ([`MatrixFirLine`], N^2 FIRs) exists as the bake-off arm and for
 //! sources that genuinely inject higher modes, subject to complete-operator
 //! convergence and finite-grid power admission. A passive plane entry cannot
 //! qualify a higher-mode FIR. Test ml-002 keeps a successful one-mode runtime
 //! comparison and witnesses the refused active higher-mode realization.
+//! Both consumers retain the authority's native reflected waves through inlet
+//! impedance poles and convert them directly to their constant real references.
 //!
 //! CONJUGATION DISCIPLINE (the pinned ~50%-error-floor trap): fs-duct
 //! is `e^{-i omega t}`; the DFT that makes a CAUSAL impulse response is
@@ -25,16 +27,16 @@
 //! DFT grid exactly as `fs_couple::driving_point` does; the causality
 //! gate (ml-006) is the executable witness.
 
-use fs_duct::modal::{
-    ModalResponse, PreparedModalDuct, modal_reflection_from_impedance,
-};
+use fs_duct::modal::{ModalReflectionResponse, PreparedModalDuct};
 #[cfg(test)]
 use fs_duct::modal::{mm_input_impedance, mm_input_impedance_load, mm_input_impedance_tabulated};
 use fs_duct::{Duct, DuctError, LossModel, MouthLoad, Segment, TabulatedLoad, Termination};
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
-use fs_vfit::discretize::{DelayedFilter, DiscretizeError, reflectance};
+use fs_vfit::discretize::{DelayedFilter, DiscretizeError};
+#[cfg(test)]
+use fs_vfit::discretize::reflectance;
 use fs_vfit::scattering::ScatteringResponse;
 
 mod matrix_admission;
@@ -286,17 +288,17 @@ pub struct MmLineBank {
     fade_total: usize,
 }
 
-/// Evaluate `mm_input_impedance`, falling back to `LossModel::Bessel` only when
+/// Evaluate native input reflection, falling back to `LossModel::Bessel` only when
 /// `LossModel::WideTube` refuses a low-frequency DFT bin below `s = 10`.
-fn mm_impedance_at(
+fn mm_reflection_at(
     geometry: &PreparedModalDuct<'_>,
     gas: &GasState,
     omega: f64,
     loss: LossModel,
     termination: Termination,
-) -> Result<ModalResponse, MmLineError> {
+) -> Result<ModalReflectionResponse, MmLineError> {
     with_bessel_fallback(loss, |loss| {
-        geometry.input_impedance(gas, omega, loss, termination)
+        geometry.input_reflection(gas, omega, loss, termination)
     })
 }
 
@@ -307,15 +309,15 @@ fn resolve_load(
     omega: f64,
     loss: LossModel,
     load: &MmLoad<'_>,
-) -> Result<(ModalResponse, bool), MmLineError> {
+) -> Result<(ModalReflectionResponse, bool), MmLineError> {
     match load {
-        MmLoad::Analytic(t) => Ok((mm_impedance_at(geometry, gas, omega, loss, *t)?, false)),
+        MmLoad::Analytic(t) => Ok((mm_reflection_at(geometry, gas, omega, loss, *t)?, false)),
         MmLoad::FlangedModal(exterior) => {
-            let response = |loss| geometry.input_impedance_flanged(gas, exterior, omega, loss);
+            let response = |loss| geometry.input_reflection_flanged(gas, exterior, omega, loss);
             Ok((with_bessel_fallback(loss, response)?, false))
         }
         MmLoad::Tabulated(table) => {
-            let response = |loss| geometry.input_impedance_tabulated(gas, omega, loss, table);
+            let response = |loss| geometry.input_reflection_tabulated(gas, omega, loss, table);
             Ok((with_bessel_fallback(loss, response)?, true))
         }
         MmLoad::Matched => Err(matched_refusal()),
@@ -323,11 +325,11 @@ fn resolve_load(
             let (lo, hi) = table.support();
             if omega >= lo && omega <= hi {
                 let resp = with_bessel_fallback(loss, |loss| {
-                    geometry.input_impedance_tabulated(gas, omega, loss, table)
+                    geometry.input_reflection_tabulated(gas, omega, loss, table)
                 })?;
                 Ok((resp, true))
             } else {
-                Ok((mm_impedance_at(geometry, gas, omega, loss, *fallback)?, false))
+                Ok((mm_reflection_at(geometry, gas, omega, loss, *fallback)?, false))
             }
         }
     }
@@ -335,8 +337,8 @@ fn resolve_load(
 
 fn with_bessel_fallback(
     loss: LossModel,
-    mut response: impl FnMut(LossModel) -> Result<ModalResponse, DuctError>,
-) -> Result<ModalResponse, MmLineError> {
+    mut response: impl FnMut(LossModel) -> Result<ModalReflectionResponse, DuctError>,
+) -> Result<ModalReflectionResponse, MmLineError> {
     match response(loss) {
         Err(DuctError::TooNarrow { .. }) if matches!(loss, LossModel::WideTube) => {
             Ok(response(LossModel::Bessel)?)
@@ -396,13 +398,13 @@ fn dc_response(
     gas: &GasState,
     loss: LossModel,
     load: &MmLoad<'_>,
-) -> Result<ModalResponse, MmLineError> {
+) -> Result<ModalReflectionResponse, MmLineError> {
     if let MmLoad::Tabulated(table) = load {
         let mouth = table.mouth().ok_or(MmLineError::Invalid {
             what: "tabulated line requires a mouth reference and DC limit",
         })?;
         with_bessel_fallback(loss, |loss| {
-            geometry.input_impedance_load(
+            geometry.input_reflection_load(
                 gas,
                 1.0e-3,
                 loss,
@@ -541,17 +543,12 @@ impl MmLineBank {
                 let load = loads.at(combo);
                 if load.is_strict() {
                     let response = dc_response(geometry, gas, config.loss, &load)?;
-                    let r = admit_plane_reflection(reflectance(response.plane_impedance, zc0))?;
+                    let r = admit_plane_reflection(response.plane_reflection(zc0)?)?;
                     return Ok(C64::new(r.re, 0.0));
                 }
                 Ok(resolve_load(geometry, gas, 1.0e-3, config.loss, &load)
                     .ok()
-                    .map(|(resp, _)| {
-                        reflectance(
-                            C64::new(resp.plane_impedance.re, resp.plane_impedance.im),
-                            zc0,
-                        )
-                    })
+                    .and_then(|(resp, _)| resp.plane_reflection(zc0).ok())
                     .filter(|r| r.re.is_finite())
                     .map_or(C64::new(-1.0, 0.0), |r| {
                         C64::new(r.re.clamp(-1.0, 1.0), 0.0)
@@ -614,10 +611,7 @@ impl MmLineBank {
                     let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
                     let (response, table) = resolve_load(geometry, gas, omega, config.loss, &load)?;
                     from_table[k] = table;
-                    r_pos[k] = reflectance(
-                        C64::new(response.plane_impedance.re, response.plane_impedance.im),
-                        zc0,
-                    );
+                    r_pos[k] = response.plane_reflection(zc0)?;
                     if load.is_strict() {
                         admit_plane_reflection(r_pos[k])?;
                     }
@@ -1010,12 +1004,7 @@ fn matrix_reflection_at(
 ) -> Result<Vec<C64>, MmLineError> {
     let n = geometry.n_modes();
     let (response, _) = resolve_load(geometry, gas, omega, loss, load)?;
-    let zc = vec![C64::new(zc0, 0.0); n];
-    Ok(modal_reflection_from_impedance(
-        &response.impedance_matrix,
-        &zc,
-        n,
-    )?)
+    Ok(response.at_references(&vec![zc0; n])?)
 }
 
 impl MatrixFirLine {
@@ -1135,11 +1124,7 @@ impl MatrixFirLine {
         // a spectral jump, which leaves an N-independent tail in the IR.
         matrix_admission::poll(&mut cancelled)?;
         let response = dc_response(&geometry, gas, config.loss, &load)?;
-        let dc = modal_reflection_from_impedance(
-            &response.impedance_matrix,
-            &vec![C64::new(zc0, 0.0); n],
-            n,
-        )?;
+        let dc = response.at_references(&vec![zc0; n])?;
         matrix_admission::reflection_gain(&dc, n, &mut cancelled)?;
         // Taking the real part of a contractive matrix preserves its bound;
         // no entry, including the plane entry, is clipped into admission.
@@ -1504,6 +1489,55 @@ mod mm_line_tests {
         (duct, gas, table, config)
     }
 
+    #[test]
+    fn modal_line_sampling_keeps_physical_reflection_at_resonant_bins() {
+        let rate = 48_000;
+        let (duct, gas, table, config) = full_band_load(rate);
+        let mouth = *table.mouth().unwrap();
+        let (lo, hi) = table.support();
+        let pressure_release = TabulatedLoad::try_new(
+            vec![lo, hi], vec![C64::ZERO; 2],
+            "exact pressure-release control with declared static limit", 0.0,
+        ).unwrap().with_mouth(TabulatedMouth { dc_impedance: 0.0, ..mouth }).unwrap();
+        let radius = input_radius(&duct).unwrap();
+        let reference = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+        for n_modes in [1, 3] {
+            let geometry = PreparedModalDuct::new(&duct, n_modes, config.extra_slices).unwrap();
+            for (load, sign) in [
+                (MmLoad::Analytic(Termination::Closed), 1.0),
+                (MmLoad::Analytic(Termination::IdealOpen), -1.0),
+                (MmLoad::Tabulated(&pressure_release), -1.0),
+            ] {
+                validate_mouth_load(&duct, &gas, &load, rate, 65_536).unwrap();
+                // The native recurrence is used by both actual FIR samplers.
+                // At bins 8 and 16 the sixteen-sample round trip lands on
+                // pressure/flow nodes, where forming Z is unnecessary.
+                for bin in [1, 8, 16, 32, 64, 128] {
+                    let omega = core::f64::consts::TAU * bin as f64 * f64::from(rate) / 256.0;
+                    let (response, from_table) = resolve_load(
+                        &geometry, &gas, omega, LossModel::Lossless, &load,
+                    ).unwrap();
+                    assert_eq!(from_table, matches!(load, MmLoad::Tabulated(_)));
+                    let phase = omega * 16.0 / f64::from(rate);
+                    let expected = C64::new(phase.cos(), phase.sin()).scale(sign);
+                    let plane = response.plane_reflection(reference).unwrap();
+                    let matrix = matrix_reflection_at(
+                        &geometry, &gas, omega, LossModel::Lossless, &load, reference,
+                    ).unwrap();
+                    assert!((plane - expected).abs() < 2.0e-12);
+                    assert!((matrix[0] - expected).abs() < 2.0e-12);
+                    assert!(matrix_admission::reflection_gain(&matrix, n_modes, &mut || false).is_ok());
+                }
+                let dc = dc_response(&geometry, &gas, LossModel::Lossless, &load).unwrap();
+                let plane = dc.plane_reflection(reference).unwrap();
+                let phase = 1.0e-3 * 16.0 / f64::from(rate);
+                let expected = C64::new(phase.cos(), phase.sin()).scale(sign);
+                assert!((plane - expected).abs() < 2.0e-12);
+                assert!(dc.at_references(&vec![reference; n_modes]).is_ok());
+            }
+        }
+    }
+
     fn check_resistive_dc(taps: &[f64]) {
         let reflection = (0.7 - 1.0) / (0.7 + 1.0);
         let actual: f64 = taps.iter().sum();
@@ -1608,7 +1642,7 @@ mod mm_line_tests {
                 assert!(from_table);
                 let phase = omega * 16.0 / f64::from(rate);
                 let expected = C64::new(phase.cos(), phase.sin()).scale((0.7 - 1.0) / (0.7 + 1.0));
-                let actual = reflectance(response.plane_impedance, bank.zc0());
+                let actual = response.plane_reflection(bank.zc0()).unwrap();
                 assert!(
                     (actual - expected).abs() < 2.0e-11,
                     "rate {rate}, bin {bin}"
