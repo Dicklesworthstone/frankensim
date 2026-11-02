@@ -1828,6 +1828,46 @@ source accuracy. The original centroid/disc Burton–Miller and triangle-CBIE
 accuracy limits remain. No passivity repair or BEM discretization-error bound
 is introduced, and receiver near-field convergence still requires refinement.
 
+### Material walls and matched molecular source response
+
+`MolecularBemObservation::with_local_boundary` attaches the existing immutable
+`LocalBoundary` mechanical and sourced porous laws to this same exterior.
+Each law is evaluated once per frequency with its original phase, specific
+impedance, physical band and equilibrium fluid. Every panel supporting a
+prescribed structural velocity or aperture volume flow must remain explicitly
+rigid; an absorbing shunt cannot silently change that source coordinate.
+Original wall identity enters the observer hash. Reaction, pressure gradients,
+harmonic intensity and microphone statistics consume the same Robin solutions.
+Mechanical-wall FIR uses the existing observer. Porous laws with a positive
+lower support remain in-band harmonic/reaction inputs: DC and this owner's FIR
+bake refuse because its artifact has no lower-band window. Their original
+equivalent-fluid pore model is retained; molecular pore relaxation is not added.
+
+`prepare_response` returns `PreparedMolecularResponse` with the complete
+work-conjugate source impedance and matched `PreparedHarmonicObservation`.
+All reaction rows and receiver fields reuse one original solution bank, with
+one assembly/LU per bounded source batch. The input, exterior and wall matrices
+project pressure against the prescribed, actual, and absorbed velocities,
+respectively. Separate direct projections preserve small wall losses and
+coherent mutual terms. Arbitrary complex source rates yield resisting efforts
+and signed mean powers through allocation-free O(sources²) queries, with no
+additional BEM solve, clipping, symmetrization or passivity repair. An all-flow
+source bank exposes its pressure/volume-flow impedance in the original source
+order for a duct multiport closure; mixed mechanical coordinates refuse that
+conversion. The reaction on a driven structure is opposite to resisting effort.
+
+Additional explicit caps admit `3*s² + 2*s*p + 8*s*r` live complex entries
+outside assembly and `3*s²*p` projection products, for s sources, p panels and
+r receivers. Cancellation reaches source solves, projection rows/panel tiles
+and receiver queries. Source/medium/band, budget and finite-value refusals are
+preserved. These sampled loads are not a fitted passive time-domain model.
+New G0/G1/G3 tests cover independent mechanical-wall pressure feedback and
+resistive work, original porous source support, mixed source/receiver coherence,
+three-mesh loaded-sphere reaction and receiver convergence, and admission.
+Those new native regressions are authored but unexecuted in the authoring
+environment: pinned sibling dependencies and shared storage/memory pressure
+blocked compilation. Formatting does not qualify their numerical assertions.
+
 ## Source-bound gas and liquid acoustic media
 
 `helmholtz::Medium::from_material` consumes the shared checked

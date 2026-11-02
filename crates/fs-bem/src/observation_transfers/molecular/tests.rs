@@ -435,3 +435,338 @@ fn molecular_harmonic_lossless_limit_and_admission() {
         ))
     ));
 }
+
+fn patch_observer(surface: &SpherePanels, state: RelaxationState) -> MolecularBemObservation<'_> {
+    patch_observer_at_band(surface, state, [1.0, 3_000.0])
+}
+
+fn patch_observer_at_band(
+    surface: &SpherePanels,
+    state: RelaxationState,
+    band: [f64; 2],
+) -> MolecularBemObservation<'_> {
+    let n = surface.areas().len();
+    let mut structure = vec![0.0; n];
+    let mut mouth = vec![0.0; n];
+    structure[..n / 4].fill(1.0);
+    let area: f64 = surface.areas()[n / 4..n / 2].iter().sum();
+    mouth[n / 4..n / 2].fill(1.0 / area);
+    MolecularBemObservation::new(
+        surface,
+        state,
+        &[
+            SourceId::StructuralMode("prescribed patch velocity".into()),
+            SourceId::ApertureVolumeFlow("prescribed mouth flow".into()),
+        ],
+        &[structure, mouth],
+        &[ReceiverSpec {
+            id: "receiver".into(),
+            position_m: [0.2, -0.4, 1.0],
+        }],
+        0.01,
+        band,
+        ComplexOptions {
+            max_panels: n,
+            max_bytes: 32 * n * n,
+            max_work: 512 * (n * n) as u64,
+        },
+    )
+    .unwrap()
+}
+
+fn patch_wall(surface: &SpherePanels, medium: Medium, resistance: f64) -> LocalBoundary {
+    let n = surface.areas().len();
+    LocalBoundary::try_new(
+        medium,
+        vec![
+            LocalWall::Rigid,
+            LocalWall::Mechanical(fs_phs::WallPin {
+                surface_density: 0.1,
+                stiffness_per_area: 4.0e5,
+                resistance,
+            }),
+        ],
+        (0..n).map(|i| usize::from(i >= n / 2)).collect(),
+    )
+    .unwrap()
+}
+
+/// G0/G3: reconstruct pressure feedback through the ORIGINAL rigid mobility,
+/// independently of the Robin assembly. The same source basis then supplies
+/// receiver momentum, work-conjugate reaction and passive wall loss.
+#[test]
+fn molecular_wall_observation_matches_independent_pressure_feedback_and_work() {
+    let surface = SpherePanels::icosphere(0.1, 0).unwrap();
+    let n = surface.areas().len();
+    let state = material(101_325.0, 0.25, true);
+    let gas = *state.gas();
+    let model = patch_observer(&surface, state)
+        .with_local_boundary(patch_wall(&surface, Medium::from(&gas), 200.0))
+        .unwrap();
+    let omega = 600.0;
+    let mut basis = vec![vec![C64::ZERO; n]; n];
+    for (i, field) in basis.iter_mut().enumerate() {
+        field[i] = C64::ONE;
+    }
+    let refs: Vec<_> = basis.iter().map(Vec::as_slice).collect();
+    let rigid = model
+        .exterior
+        .solve_batch(
+            &surface,
+            omega,
+            &refs,
+            helmholtz::Formulation::PlainCbie,
+            &model.limits,
+            || false,
+        )
+        .unwrap();
+    // p = Z (v_drive - Y p). This uses the mechanical coefficients directly,
+    // not the normalized beta or original complex Robin A/B transformation.
+    let wall_y = C64::ONE / C64::new(200.0, 4.0e5 / omega - 0.1 * omega);
+    let mut feedback = vec![C64::ZERO; n * n];
+    for i in 0..n {
+        feedback[i * n + i] = C64::ONE;
+        for (j, solution) in rigid.iter().enumerate().skip(n / 2) {
+            feedback[i * n + j] = feedback[i * n + j] + solution.pressure_pa()[i] * wall_y;
+        }
+    }
+    let factor = fs_la::eigen_complex::lu_complex(&feedback, n).unwrap();
+    let solved = model.boundary_solutions(omega, &mut || false).unwrap();
+    let harmonic = model.prepare_harmonic(omega, || false).unwrap();
+    let amplitudes = [C64::new(0.7, -0.3), C64::new(-0.003, 0.002)];
+    let mut combined_pressure = vec![C64::ZERO; n];
+    let mut combined_velocity = vec![C64::ZERO; n];
+    let mut combined_drive = vec![C64::ZERO; n];
+    let mut expected_receiver = C64::ZERO;
+    let mut expected_velocity = [C64::ZERO; 3];
+    for (source, drive) in model.boundary.fields.iter().enumerate() {
+        let mut expected: Vec<_> = (0..n)
+            .map(|i| {
+                rigid
+                    .iter()
+                    .zip(drive)
+                    .fold(C64::ZERO, |sum, (solution, &v)| {
+                        sum + solution.pressure_pa()[i] * v
+                    })
+            })
+            .collect();
+        factor.solve(&mut expected);
+        let solution = &solved[source];
+        let radiation = &solution.radiation;
+        for i in 0..n {
+            assert!(
+                (radiation.pressure_pa()[i] - expected[i]).abs()
+                    < 2e-11 * expected.iter().map(|z| z.abs()).fold(1.0, f64::max)
+            );
+            let velocity = drive[i]
+                - if i < n / 2 {
+                    C64::ZERO
+                } else {
+                    expected[i] * wall_y
+                };
+            assert!(
+                (radiation.velocity_m_s()[i] - velocity).abs() < 2e-11 * velocity.abs().max(1.0)
+            );
+            if i < n / 2 {
+                assert_eq!(radiation.velocity_m_s()[i], drive[i]);
+            }
+            combined_pressure[i] = combined_pressure[i] + expected[i] * amplitudes[source];
+            combined_velocity[i] = combined_velocity[i] + velocity * amplitudes[source];
+            combined_drive[i] = combined_drive[i] + drive[i] * amplitudes[source];
+        }
+        let independent_wall_work: f64 = (n / 2..n)
+            .map(|i| 0.5 * 200.0 * (expected[i] * wall_y).abs().powi(2) * surface.areas()[i])
+            .sum();
+        assert!(independent_wall_work > 0.0);
+        assert!(
+            (solution.absorbed_power_w - independent_wall_work).abs()
+                < 2e-11 * independent_wall_work
+        );
+        assert!(
+            (solution.driving_power_w - solution.absorbed_power_w - radiation.boundary_work_w())
+                .abs()
+                < 2e-12 * solution.driving_power_w.abs().max(1.0)
+        );
+        let row = model.impedance_row(omega, source, || false).unwrap();
+        for (j, radiating) in solved.iter().enumerate() {
+            let expected_reaction = radiating
+                .radiation
+                .pressure_pa()
+                .iter()
+                .zip(drive)
+                .zip(surface.areas())
+                .fold(C64::ZERO, |sum, ((&p, &v), &area)| {
+                    sum + p * v.conj().scale(area)
+                });
+            assert_eq!(row[j], expected_reaction);
+        }
+        let receiver = radiation
+            .observe(&surface, &model.boundary.points, 0.01, || false)
+            .unwrap()[0];
+        expected_receiver = expected_receiver + receiver.pressure_pa * amplitudes[source];
+        for axis in 0..3 {
+            expected_velocity[axis] = expected_velocity[axis]
+                + receiver.gradient_pa_per_m[axis]
+                    * amplitudes[source]
+                    * C64::new(0.0, -1.0 / (gas.density * omega));
+        }
+    }
+    let mut actual = [HarmonicField::default(); 1];
+    harmonic
+        .evaluate_coherent(&amplitudes, &mut actual, || false)
+        .unwrap();
+    assert!((actual[0].pressure_pa - expected_receiver).abs() < 1e-12 * expected_receiver.abs());
+    for axis in 0..3 {
+        assert!(
+            (actual[0].particle_velocity_m_s[axis] - expected_velocity[axis]).abs()
+                < 1e-12 * expected_velocity[axis].abs().max(1e-10)
+        );
+    }
+    let work = |velocity: &[C64]| -> f64 {
+        combined_pressure
+            .iter()
+            .zip(velocity)
+            .zip(surface.areas())
+            .map(|((&p, &v), &area)| 0.5 * (p * v.conj()).re * area)
+            .sum()
+    };
+    let mixed_wall_work: f64 = (n / 2..n)
+        .map(|i| 0.5 * 200.0 * combined_velocity[i].abs().powi(2) * surface.areas()[i])
+        .sum();
+    assert!(
+        (work(&combined_drive) - work(&combined_velocity) - mixed_wall_work).abs()
+            < 2e-12 * work(&combined_drive).abs().max(1.0)
+    );
+}
+
+#[test]
+fn molecular_wall_identity_rigid_limit_and_physical_source_admission() {
+    let surface = SpherePanels::icosphere(0.1, 0).unwrap();
+    let state = material(101_325.0, 1.0, true);
+    let medium = Medium::from(state.gas());
+    let rigid = patch_observer(&surface, state.clone());
+    let explicit_rigid = patch_observer(&surface, state.clone())
+        .with_local_boundary(
+            LocalBoundary::try_new(
+                medium,
+                vec![LocalWall::Rigid],
+                vec![0; surface.areas().len()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        rigid.frequency_sample(600.0, || false).unwrap(),
+        explicit_rigid.frequency_sample(600.0, || false).unwrap()
+    );
+    let wall_a = patch_observer(&surface, state.clone())
+        .with_local_boundary(patch_wall(&surface, medium, 200.0))
+        .unwrap();
+    let wall_b = patch_observer(&surface, state.clone())
+        .with_local_boundary(patch_wall(&surface, medium, 800.0))
+        .unwrap();
+    assert_ne!(wall_a.operator_hash(), wall_b.operator_hash());
+    assert_ne!(wall_a.operator_hash(), rigid.operator_hash());
+    assert_eq!(wall_a.geometric_delays_s(), rigid.geometric_delays_s());
+    assert_eq!(wall_a.source(), rigid.source());
+    let a = wall_a.frequency_sample(600.0, || false).unwrap();
+    let b = wall_b.frequency_sample(600.0, || false).unwrap();
+    assert!((a[0] - b[0]).abs() > 1e-3 * a[0].abs());
+    assert!(wall_a.frequency_sample(600.0, || true).is_err());
+    assert!(wall_a.prepare_harmonic(3_001.0, || false).is_err());
+    // Uniform radial motion overlaps the mechanical panels, even though that
+    // wall has finite passive impedance. It must not be relabeled as a drive.
+    assert!(
+        observer(&surface, state.clone())
+            .with_local_boundary(patch_wall(&surface, medium, 200.0))
+            .is_err()
+    );
+    assert!(
+        patch_observer(&surface, state.clone())
+            .with_local_boundary(patch_wall(
+                &surface,
+                Medium {
+                    density: medium.density * 1.1,
+                    sound_speed: medium.sound_speed,
+                },
+                200.0
+            ))
+            .is_err()
+    );
+    // A lossless wall resonance inside the declared band is not regularized
+    // into a finite admittance or replaced with a rigid panel.
+    assert!(
+        patch_observer(&surface, state)
+            .with_local_boundary(patch_wall(&surface, medium, 0.0))
+            .is_err()
+    );
+}
+
+#[test]
+fn molecular_porous_observation_retains_original_material_and_frequency_support() {
+    use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
+    use fs_material::porous::{PorousCard, PorousFluidLaw};
+    let surface = SpherePanels::icosphere(0.1, 0).unwrap();
+    let n = surface.areas().len();
+    let state = material(101_325.0, 0.25, true);
+    let gas = *state.gas();
+    let medium = Medium::from(&gas);
+    let law = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let wall = LocalBoundary::try_new(
+        medium,
+        vec![
+            LocalWall::Rigid,
+            LocalWall::PorousRigid {
+                law: law.clone(),
+                fluid: gas.thermoviscous_state().unwrap(),
+                thickness_m: 0.03,
+            },
+        ],
+        (0..n).map(|i| usize::from(i >= n / 2)).collect(),
+    )
+    .unwrap();
+    assert!(
+        patch_observer(&surface, state.clone())
+            .with_local_boundary(wall.clone())
+            .is_err()
+    );
+    let band = [
+        core::f64::consts::TAU * 200.0,
+        core::f64::consts::TAU * 400.0,
+    ];
+    let model = patch_observer_at_band(&surface, state.clone(), band)
+        .with_local_boundary(wall.clone())
+        .unwrap();
+    assert_eq!(
+        model.local_boundary().unwrap().content_hash(),
+        wall.content_hash()
+    );
+    assert_eq!(model.source(), &state);
+    for frequency_hz in [220.0, 370.0] {
+        let omega = core::f64::consts::TAU * frequency_hz;
+        let native =
+            crate::helmholtz::bc::PorousRigidBoundary::new(&law, &gas, omega, 0.03).unwrap();
+        let coefficients = wall.normalized_admittance(omega, || false).unwrap();
+        assert!(coefficients[..n / 2].iter().all(|&beta| beta == C64::ZERO));
+        assert!(
+            coefficients[n / 2..]
+                .iter()
+                .all(|&beta| beta == native.normalized_admittance())
+        );
+        let solutions = model.boundary_solutions(omega, &mut || false).unwrap();
+        assert!(
+            solutions
+                .iter()
+                .all(|solution| solution.absorbed_power_w > 0.0)
+        );
+        let observed = model.frequency_sample(omega, || false).unwrap();
+        let rigid = patch_observer_at_band(&surface, state.clone(), band)
+            .frequency_sample(omega, || false)
+            .unwrap();
+        assert!((observed[0] - rigid[0]).abs() > 1e-3 * rigid[0].abs());
+    }
+    // The material's positive lower support is not silently extended by the
+    // surrounding gas's analytically zero DC radiator response.
+    assert!(model.frequency_sample(0.0, || false).is_err());
+    assert!(model.frequency_sample(band[0] * 0.5, || false).is_err());
+}

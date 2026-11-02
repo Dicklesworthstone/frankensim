@@ -9,10 +9,17 @@
 //! Neither switches discretizations inside a Fourier transfer.
 
 use super::*;
+use crate::helmholtz::bc::Admittance;
 use crate::helmholtz::laplace::complex::ComplexOptions;
-use crate::helmholtz::molecular::{MolecularError, MolecularExterior, MolecularRadiation};
+use crate::helmholtz::molecular::{
+    MolecularBoundarySolution, MolecularError, MolecularExterior, MolecularRadiation,
+};
 use fs_material::relaxation::RelaxationState;
 use std::cell::RefCell;
+
+/// A single solved source bank for both reaction and finite receivers.
+pub mod prepared;
+pub use prepared::{MolecularResponseLimits, MolecularResponsePower, PreparedMolecularResponse};
 
 /// The original material/boundary refusal or shared observation refusal.
 #[derive(Debug)]
@@ -93,6 +100,7 @@ pub struct MolecularBemObservation<'a> {
     formulation: MolecularObservationFormulation,
     limits: ComplexOptions,
     plain_cbie_limit_rad_per_m: f64,
+    local_boundary: Option<LocalBoundary>,
 }
 
 impl<'a> MolecularBemObservation<'a> {
@@ -194,7 +202,61 @@ impl<'a> MolecularBemObservation<'a> {
             formulation,
             limits,
             plain_cbie_limit_rad_per_m,
+            local_boundary: None,
         })
+    }
+
+    /// Attach the existing frequency-dependent material/mechanical wall laws
+    /// to this same relaxing exterior, source basis and receiver geometry.
+    /// Every panel supporting a prescribed source must remain explicitly
+    /// rigid. Otherwise `v = v_drive - Y p` would silently change that source's
+    /// structural normal velocity or prescribed aperture volume flow.
+    ///
+    /// The immutable wall table is evaluated once per frequency. Its original
+    /// specific impedance, source support and exp(-i omega t) convention are
+    /// retained; only the exterior's complex-k propagation changes. The real
+    /// equilibrium rho*c normalizes Y and is never replaced by a complex wave
+    /// impedance. Porous laws retain their original equivalent-fluid model;
+    /// no new molecular relaxation law inside their pores is inferred.
+    /// A positive material lower cutoff remains a harmonic-only binding here:
+    /// this owner's FIR artifact has no explicit lower-band window, so its
+    /// bake refuses instead of extrapolating such a wall to zero frequency.
+    ///
+    /// Surface work and gas absorption remain separate channels. This does
+    /// not establish spatial convergence, a passive reduced realization or
+    /// reciprocity of the original collocation discretization.
+    pub fn with_local_boundary(
+        mut self,
+        boundary: LocalBoundary,
+    ) -> Result<Self, MolecularObservationError> {
+        if boundary.panel_count() != self.boundary.surface.areas().len()
+            || boundary.medium() != self.boundary.medium
+        {
+            return Err(invalid(
+                "molecular wall boundary must use the original panel count and equilibrium gas",
+            ));
+        }
+        let tau = core::f64::consts::TAU;
+        let band = self.exterior.band_rad_s();
+        boundary.admit_physical_band_hz([band[0] / tau, band[1] / tau])?;
+        for field in &self.boundary.fields {
+            if field
+                .iter()
+                .enumerate()
+                .any(|(panel, &value)| value != C64::ZERO && !boundary.rigid_at(panel))
+            {
+                return Err(invalid(
+                    "molecular absorbing/compliant wall overlaps a prescribed source trace",
+                ));
+            }
+        }
+        self.local_boundary = Some(boundary);
+        Ok(self)
+    }
+
+    /// Original immutable wall table, including its material source support.
+    pub fn local_boundary(&self) -> Option<&LocalBoundary> {
+        self.local_boundary.as_ref()
     }
 
     pub fn source(&self) -> &RelaxationState {
@@ -247,14 +309,30 @@ impl<'a> MolecularBemObservation<'a> {
             h.update(&process.heat_capacity_j_kg_k.to_bits().to_le_bytes());
             h.update(&process.relaxation_time_s.to_bits().to_le_bytes());
         }
+        if let Some(boundary) = &self.local_boundary {
+            h.update(b"original-local-boundary-v1");
+            h.update(boundary.content_hash().as_bytes());
+        }
         h.finalize()
     }
 
-    fn solutions(
+    fn boundary_solutions(
         &self,
         omega: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Vec<MolecularRadiation>, MolecularObservationError> {
+    ) -> Result<Vec<MolecularBoundarySolution>, MolecularObservationError> {
+        let coefficients = self
+            .local_boundary
+            .as_ref()
+            .map(|boundary| boundary.normalized_admittance(omega, &mut *cancelled))
+            .transpose()?;
+        let admittance =
+            coefficients
+                .as_ref()
+                .map_or(Admittance::Rigid, |beta| Admittance::Local {
+                    beta,
+                    declared_active: false,
+                });
         let mut solutions = Vec::with_capacity(self.boundary.fields.len());
         for batch in self
             .boundary
@@ -262,16 +340,29 @@ impl<'a> MolecularBemObservation<'a> {
             .chunks(helmholtz::MAX_RADIATION_FIELDS_PER_BATCH)
         {
             let fields: Vec<_> = batch.iter().map(Vec::as_slice).collect();
-            solutions.extend(self.exterior.solve_batch(
+            solutions.extend(self.exterior.solve_boundary_batch(
                 self.boundary.surface,
                 omega,
                 &fields,
+                admittance,
                 self.formulation.boundary_formulation(),
                 &self.limits,
                 &mut *cancelled,
             )?);
         }
         Ok(solutions)
+    }
+
+    fn solutions(
+        &self,
+        omega: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<MolecularRadiation>, MolecularObservationError> {
+        Ok(self
+            .boundary_solutions(omega, cancelled)?
+            .into_iter()
+            .map(|solution| solution.radiation)
+            .collect())
     }
 
     /// Complete exp(-i omega t) p/gradient rows from the original material
@@ -289,6 +380,15 @@ impl<'a> MolecularBemObservation<'a> {
             return Err(invalid("invalid molecular observation frequency"));
         }
         if omega == 0.0 {
+            if self
+                .local_boundary
+                .as_ref()
+                .is_some_and(|wall| wall.supported_band_hz().0 > 0.0)
+            {
+                return Err(invalid(
+                    "molecular observation wall has no zero-frequency source support",
+                ));
+            }
             return Ok(vec![
                 C64::ZERO;
                 4 * self.boundary.points.len()
@@ -382,6 +482,15 @@ impl<'a> MolecularBemObservation<'a> {
         declaration: &TransferDeclaration,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ObservationTransferBake, MolecularObservationError> {
+        if self
+            .local_boundary
+            .as_ref()
+            .is_some_and(|wall| wall.supported_band_hz().0 > 0.0)
+        {
+            return Err(invalid(
+                "positive-band molecular wall needs an explicit lower-window observation owner",
+            ));
+        }
         let band = self.exterior.band_rad_s();
         let finest = declaration.fft_lengths.last().copied().unwrap_or(0);
         if declaration.sources != self.boundary.sources

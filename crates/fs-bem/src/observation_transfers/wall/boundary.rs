@@ -151,7 +151,7 @@ impl LocalBoundary {
         self.hash
     }
 
-    pub(super) fn rigid_at(&self, panel: usize) -> bool {
+    pub(in crate::observation_transfers) fn rigid_at(&self, panel: usize) -> bool {
         matches!(self.laws[self.panel_laws[panel]], LocalWall::Rigid)
     }
 
@@ -173,7 +173,10 @@ impl LocalBoundary {
         self.admit_resonances(tau * lowest, highest_omega, false)
     }
 
-    pub(super) fn admit_physical_band_hz(&self, band: [f64; 2]) -> Result<(), TransferError> {
+    pub(in crate::observation_transfers) fn admit_physical_band_hz(
+        &self,
+        band: [f64; 2],
+    ) -> Result<(), TransferError> {
         if !band.iter().all(|f| f.is_finite() && *f > 0.0)
             || band[0] > band[1]
             || band[0] < self.supported_hz.0

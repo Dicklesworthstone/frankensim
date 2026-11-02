@@ -27,6 +27,7 @@ pub use reciprocal::ReciprocalBemObservation;
 mod molecular;
 pub use molecular::{
     MolecularBemObservation, MolecularObservationError, MolecularObservationFormulation,
+    MolecularResponseLimits, MolecularResponsePower, PreparedMolecularResponse,
 };
 mod scattering;
 pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
