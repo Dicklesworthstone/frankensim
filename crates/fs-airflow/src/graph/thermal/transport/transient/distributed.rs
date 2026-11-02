@@ -20,6 +20,7 @@ use fs_thermal::enthalpy::{CellGeometry, CellId, DepositionSimulation, MaterialI
 
 use super::{GraphEnthalpyTransport, TransientTransportError, poll};
 use crate::graph::LossGraph;
+use crate::graph::gravity::GraphGravity;
 use crate::graph::inertial::{InertialBranch, InertialGraph};
 
 /// Spatial inventory may be refined independently of the bounded hydraulic
@@ -269,6 +270,54 @@ impl DistributedGraphInventory {
         &self.inertial_branches
     }
 
+    /// Admit the same conserved density, junction frame and original pipe path.
+    /// Distributed gravity follows exactly one section per stored pipe cell.
+    /// Empty direct paths own no interior inventory, so only their endpoints
+    /// are checked; no interior geometry or storage is inferred for them.
+    pub fn admit_gravity(
+        &self,
+        cx: &Cx<'_>,
+        gravity: &GraphGravity,
+    ) -> Result<(), TransientTransportError> {
+        poll(cx)?;
+        if gravity.reference_transport().density_kg_m3() != self.reference_density.value()
+            || gravity.positions_m().len() != self.node_cells.len()
+            || gravity.departure_heads_pa().len() != self.branch_cells.len()
+            || gravity
+                .positions_m()
+                .iter()
+                .zip(&self.node_positions_m)
+                .any(|(actual, expected)| expected.is_some_and(|expected| *actual != expected))
+        {
+            return Err(TransientTransportError::Invalid(
+                "hydraulic gravity and distributed reference inventory disagree",
+            ));
+        }
+        if let Some(branches) = gravity.branch_sections() {
+            for (path, sections) in self.branch_cells.iter().zip(branches) {
+                poll(cx)?;
+                if path.is_empty() {
+                    continue;
+                }
+                if path.len() != sections.len() {
+                    return Err(TransientTransportError::Invalid(
+                        "gravity must retain one section per stored pipe cell",
+                    ));
+                }
+                for (id, section) in path.iter().zip(sections) {
+                    poll(cx)?;
+                    let geometry = &self.storage[id].geometry;
+                    if section.start_m != geometry.start_m || section.end_m != geometry.end_m {
+                        return Err(TransientTransportError::Invalid(
+                            "hydraulic gravity section differs from the stored pipe geometry",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Check that each inventoried branch's retained momentum uses the SAME
     /// fluid geometry and rho0. Empty paths keep caller-declared inertia.
     /// This does not attribute junction mixing volumes to branch kinetic energy.
@@ -352,16 +401,7 @@ impl DistributedGraphInventory {
             ));
         }
         if let Some(gravity) = graph.gravity() {
-            if gravity
-                .positions_m()
-                .iter()
-                .zip(&self.node_positions_m)
-                .any(|(a, b)| b.is_some_and(|b| *a != b))
-            {
-                return Err(TransientTransportError::Invalid(
-                    "hydraulic gravity and pipe junction positions differ",
-                ));
-            }
+            self.admit_gravity(cx, gravity)?;
         }
         for (&id, bound) in &self.storage {
             poll(cx)?;

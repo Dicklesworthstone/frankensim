@@ -1,9 +1,11 @@
 //! Native branch-momentum stepping against independent small-network solutions.
 
 use super::*;
+use crate::graph::gravity::GraphGravitySection;
 use crate::graph::porous::{LinearLossElement, LinearLossResistance, PassiveBranch};
 use crate::graph::tests::{boundary, edge, with_cx};
 use crate::{SourceProvenance, ToleranceBasis};
+use fs_material::fluid_transport::FluidTransportState;
 use fs_material::gas::{GasSpec, GasState};
 
 fn gas(t: f64) -> GasState {
@@ -72,6 +74,218 @@ fn owner(
     .unwrap()
 }
 
+fn bent_loop(
+    cx: &Cx<'_>,
+    rising_density: f64,
+    falling_density: f64,
+    height_m: f64,
+    maximum_sections: usize,
+) -> LossGraph {
+    let transport = |rho| FluidTransportState::try_new(rho, 1000.0, 0.1, 0.001).unwrap();
+    let section = |start_m, end_m, rho| GraphGravitySection {
+        start_m,
+        end_m,
+        transport: transport(rho),
+    };
+    let graph = LossGraph::new_mixed(
+        2,
+        [(0, 1), (1, 0)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (from, to))| PassiveBranch::Linear {
+                from,
+                to,
+                loss: LinearLossElement::new(
+                    format!("bent-{i}"),
+                    LinearLossResistance::new(1.0),
+                    0.0,
+                    SourceProvenance::new("analytic bent pipe", "integrated-gravity-v1"),
+                    ToleranceBasis::Analytic,
+                )
+                .unwrap(),
+            })
+            .collect(),
+    )
+    .unwrap();
+    graph
+        .with_distributed_boussinesq_gravity(
+            &transport(1.0),
+            &[
+                vec![
+                    section([0.0; 3], [0.0, 0.0, height_m], rising_density),
+                    section([0.0, 0.0, height_m], [1.0, 0.0, height_m], 1.0),
+                    section([1.0, 0.0, height_m], [1.0, 0.0, 0.0], falling_density),
+                ],
+                vec![section([1.0, 0.0, 0.0], [0.0; 3], 1.0)],
+            ],
+            &[[0.0; 3], [1.0, 0.0, 0.0]],
+            [0.0, 0.0, -8.0],
+            0.3,
+            maximum_sections,
+            cx,
+        )
+        .unwrap()
+}
+
+#[test]
+fn g1_bent_pipe_integral_accelerates_native_momentum_and_freezes_the_full_path() {
+    with_cx(|cx| {
+        let graph = bent_loop(cx, 0.75, 1.0, 2.0, 4);
+        let boundaries = [boundary(0, 0.0)];
+        // Actual paths have lengths 5 and 1. Areas 5 and 1 give L=1 each.
+        let inertia = [
+            InertialBranch {
+                length_m: 5.0,
+                flow_area_m2: 5.0,
+            },
+            InertialBranch {
+                length_m: 1.0,
+                flow_area_m2: 1.0,
+            },
+        ];
+        let initial = InertialGraph::try_new(
+            cx,
+            &graph,
+            Density::new(1.0),
+            &inertia,
+            &boundaries,
+            &[0.0; 2],
+            0.0,
+            16,
+        )
+        .unwrap();
+        // Sum of native midpoint equations: 2L*dQ/dt + 2R*Q_average = 4 Pa.
+        let average = 2.0 / 3.0;
+        let (next, report) = initial
+            .propose(
+                cx,
+                &graph,
+                &boundaries,
+                &[0.0; 2],
+                &[average; 2],
+                1.0,
+                controls(),
+            )
+            .unwrap()
+            .accept(cx, 1e-10, 1e-10)
+            .unwrap();
+        for flow in &report.average_volume_flows_m3_s {
+            near(*flow, average, 1e-12);
+        }
+        for flow in next.volume_flows_m3_s() {
+            near(flow, 2.0 * average, 1e-12);
+        }
+        assert_eq!(report.driving_pressure_pa, vec![0.0; 2]);
+        assert_eq!(report.driving_work_j, 0.0);
+        near(report.anomalous_gravity_work_j, 4.0 * average, 1e-12);
+        near(
+            next.kinetic_energy_j() + report.hydraulic_loss_j,
+            report.anomalous_gravity_work_j,
+            1e-12,
+        );
+        near(
+            report.neglected_buoyancy_energy_bound_j,
+            8.0 * average,
+            1e-12,
+        );
+
+        let refreshed = bent_loop(cx, 0.875, 1.0, 2.0, 4);
+        assert!(
+            graph
+                .gravity()
+                .unwrap()
+                .same_geometry_as(refreshed.gravity().unwrap())
+        );
+        let fresh = initial
+            .propose(
+                cx,
+                &refreshed,
+                &boundaries,
+                &[0.0; 2],
+                &[1.0 / 3.0; 2],
+                1.0,
+                controls(),
+            )
+            .unwrap();
+        near(
+            fresh.report().average_volume_flows_m3_s[0],
+            1.0 / 3.0,
+            1e-12,
+        );
+        for changed in [
+            bent_loop(cx, 0.75, 1.0, 3.0, 4),
+            bent_loop(cx, 0.75, 1.0, 2.0, 5),
+        ] {
+            assert!(matches!(
+                initial.propose(
+                    cx,
+                    &changed,
+                    &boundaries,
+                    &[0.0; 2],
+                    &[average; 2],
+                    1.0,
+                    controls()
+                ),
+                Err(InertialGraphError::Invalid(_))
+            ));
+        }
+        assert_eq!(initial.accepted_time_s(), 0.0);
+        assert_eq!(initial.volume_flows_m3_s(), vec![0.0; 2]);
+    });
+}
+
+#[test]
+fn g0_cancelling_bent_pipe_heads_cannot_hide_local_buoyancy_work() {
+    with_cx(|cx| {
+        let graph = bent_loop(cx, 0.75, 0.75, 2.0, 4);
+        assert_eq!(graph.gravity().unwrap().departure_heads_pa(), &[0.0; 2]);
+        assert_eq!(
+            graph.gravity().unwrap().absolute_departure_heads_pa(),
+            &[8.0, 0.0]
+        );
+        let boundaries = [boundary(0, 0.0)];
+        let state = InertialGraph::try_new(
+            cx,
+            &graph,
+            Density::new(1.0),
+            &geometry(2),
+            &boundaries,
+            &[1.0; 2],
+            0.0,
+            16,
+        )
+        .unwrap();
+        let trial = state
+            .propose(
+                cx,
+                &graph,
+                &boundaries,
+                &[1.0; 2],
+                &[1.0; 2],
+                1.0,
+                controls(),
+            )
+            .unwrap();
+        assert_eq!(trial.report().anomalous_gravity_work_j, 0.0);
+        near(trial.report().neglected_buoyancy_energy_bound_j, 8.0, 1e-12);
+        near(trial.report().neglected_energy_bound_j, 10.0, 1e-12);
+        let tight = InertialGraphControls {
+            maximum_neglected_power_w: 9.0,
+            ..controls()
+        };
+        assert!(matches!(
+            state.propose(cx, &graph, &boundaries, &[1.0; 2], &[1.0; 2], 1.0, tight),
+            Err(InertialGraphError::NeglectedWork { .. })
+        ));
+        assert!(matches!(
+            trial.recheck(cx, &graph, &boundaries, &[1.0; 2], tight),
+            Err(InertialGraphError::NeglectedWork { .. })
+        ));
+        assert_eq!(state.accepted_time_s(), 0.0);
+        assert_eq!(state.volume_flows_m3_s(), vec![1.0; 2]);
+    });
+}
+
 #[test]
 fn g0_constitutive_recheck_audits_the_same_trajectory_without_restepping() {
     with_cx(|cx| {
@@ -114,7 +328,15 @@ fn g0_constitutive_recheck_audits_the_same_trajectory_without_restepping() {
         )
         .unwrap();
         let proposal = initial
-            .propose(cx, &graph, &boundaries, &[3.0; 2], &[1.0; 2], 1.0, controls())
+            .propose(
+                cx,
+                &graph,
+                &boundaries,
+                &[3.0; 2],
+                &[1.0; 2],
+                1.0,
+                controls(),
+            )
             .unwrap();
         let old_x = proposal.report().momentum.x.clone();
         let old_y = proposal.report().momentum.y.clone();
@@ -511,4 +733,3 @@ fn g4_cancellation_refuses_a_prepared_momentum_publication() {
         assert_eq!(state.accepted_time_s(), 0.0);
     });
 }
-

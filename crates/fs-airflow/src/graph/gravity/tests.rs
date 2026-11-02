@@ -388,3 +388,166 @@ fn g0_invalid_geometry_material_departures_and_nonfinite_heads_refuse() {
         assert!(graph.solve(&[boundary(99, 0.0)], config(), cx).is_err());
     });
 }
+
+fn section(start_m: [f64; 3], end_m: [f64; 3], density: f64) -> GraphGravitySection {
+    GraphGravitySection {
+        start_m,
+        end_m,
+        transport: material(density),
+    }
+}
+
+fn bent_paths(rising_density: f64) -> Vec<Vec<GraphGravitySection>> {
+    vec![
+        vec![
+            section([0.0; 3], [0.0, 0.0, 2.0], rising_density),
+            section([0.0, 0.0, 2.0], [1.0, 0.0, 2.0], 1.0),
+            section([1.0, 0.0, 2.0], [1.0, 0.0, 0.0], 1.0),
+        ],
+        vec![section([1.0, 0.0, 0.0], [0.0; 3], 1.0)],
+    ]
+}
+
+#[test]
+fn g1_bent_same_height_branch_circulates_with_no_external_pressure_source() {
+    with_cx(|cx| {
+        let positions = [[0.0; 3], [1.0, 0.0, 0.0]];
+        for reverse in [false, true] {
+            let mut paths = bent_paths(0.75);
+            if reverse {
+                paths[0].reverse();
+                for piece in &mut paths[0] {
+                    core::mem::swap(&mut piece.start_m, &mut piece.end_m);
+                }
+            }
+            let graph = LossGraph::new(
+                2,
+                vec![
+                    edge("bent", usize::from(reverse), usize::from(!reverse), 1.0),
+                    edge("return", 1, 0, 1.0),
+                ],
+            )
+            .unwrap()
+            .with_distributed_boussinesq_gravity(
+                &material(1.0),
+                &paths,
+                &positions,
+                [0.0, 0.0, -8.0],
+                0.3,
+                4,
+                cx,
+            )
+            .unwrap();
+            let gravity = graph.gravity().unwrap();
+            assert_eq!(gravity.branch_materials(), None);
+            assert_eq!(gravity.branch_sections(), Some(paths.as_slice()));
+            let sign = if reverse { -1.0 } else { 1.0 };
+            assert_eq!(gravity.departure_heads_pa(), &[sign * 4.0, 0.0]);
+            assert_eq!(gravity.absolute_departure_heads_pa(), &[4.0, 0.0]);
+            // Both hydraulic nodes are at z=0; an endpoint mean loses this head.
+            let solved = graph.solve(&[boundary(0, 0.0)], config(), cx).unwrap();
+            close(solved.branches[0].flow.value(), sign * 2.0_f64.sqrt());
+            close(solved.branches[1].flow.value(), 2.0_f64.sqrt());
+            let supplied: f64 = solved
+                .branches
+                .iter()
+                .map(|b| b.flow.value() * b.gravity_pressure_head.value())
+                .sum();
+            let dissipated: f64 = solved
+                .branches
+                .iter()
+                .map(|b| b.flow.value() * b.dissipative_pressure_drop.value())
+                .sum();
+            close(supplied, 4.0 * 2.0_f64.sqrt());
+            close(supplied, dissipated);
+        }
+    });
+}
+
+#[test]
+fn g3_section_refinement_translation_and_uniform_hydrostatic_rest_preserve_heads() {
+    with_cx(|cx| {
+        for density in [0.75, 1.0] {
+            for shift in [[0.0; 3], [1.0e8, -2.0e8, 3.0e8]] {
+                let translate = |p: [f64; 3]| core::array::from_fn(|i| p[i] + shift[i]);
+                for refine in [false, true] {
+                    let mut path = vec![
+                        section([0.0; 3], [0.0, 0.0, 2.0], density),
+                        section([0.0, 0.0, 2.0], [1.0, 0.0, 2.0], 1.0),
+                        section([1.0, 0.0, 2.0], [1.0, 0.0, 1.0], 1.0),
+                    ];
+                    if refine {
+                        path[0].end_m = [0.0, 0.0, 1.0];
+                        path.insert(1, section([0.0, 0.0, 1.0], [0.0, 0.0, 2.0], density));
+                    }
+                    for piece in &mut path {
+                        piece.start_m = translate(piece.start_m);
+                        piece.end_m = translate(piece.end_m);
+                    }
+                    let graph = LossGraph::new(2, vec![edge("bent", 0, 1, 1.0)])
+                        .unwrap()
+                        .with_distributed_boussinesq_gravity(
+                            &material(1.0),
+                            &[path],
+                            &[translate([0.0; 3]), translate([1.0, 0.0, 1.0])],
+                            [0.0, 0.0, -8.0],
+                            0.3,
+                            4,
+                            cx,
+                        )
+                        .unwrap();
+                    let anomaly = 16.0 * (1.0 - density);
+                    assert_eq!(graph.gravity().unwrap().departure_heads_pa(), &[anomaly]);
+                    assert_eq!(
+                        graph.gravity().unwrap().pressure_heads_pa(),
+                        &[-8.0 + anomaly]
+                    );
+                    let solved = graph.solve(&[boundary(0, 100.0)], config(), cx).unwrap();
+                    close(solved.branches[0].flow.value(), 0.0);
+                    close(solved.pressures[1].value(), 92.0 + anomaly);
+                    if density == 1.0 {
+                        assert_eq!(solved.branches[0].flow.value(), 0.0);
+                        assert_eq!(solved.sweeps, 0);
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_distributed_gravity_admits_every_local_sample_and_original_path_before_binding() {
+    with_cx(|cx| {
+        let positions = [[0.0; 3], [1.0, 0.0, 0.0]];
+        let bind = |paths: &[Vec<GraphGravitySection>], maximum| {
+            LossGraph::new(2, vec![edge("bent", 0, 1, 1.0), edge("return", 1, 0, 1.0)])
+                .unwrap()
+                .with_distributed_boussinesq_gravity(
+                    &material(1.0),
+                    paths,
+                    &positions,
+                    [0.0; 3],
+                    0.3,
+                    maximum,
+                    cx,
+                )
+        };
+        assert!(bind(&bent_paths(0.75), 4).is_ok());
+        for budget in [0, 3, MAX_GRAVITY_SECTIONS + 1] {
+            assert!(bind(&bent_paths(0.75), budget).is_err());
+        }
+        for fault in 0..6 {
+            let mut paths = bent_paths(0.75);
+            match fault {
+                0 => paths[0].clear(),
+                1 => paths[0][1].start_m[0] = 0.1,
+                2 => paths[0][2].end_m[0] = 2.0,
+                3 => paths[0][0].end_m = paths[0][0].start_m,
+                4 => paths[0][1].transport = material(0.5),
+                _ => paths[0][1].end_m[1] = f64::NAN,
+            }
+            // Density is checked even for a horizontal cell under zero gravity.
+            assert!(bind(&paths, 4).is_err());
+        }
+    });
+}

@@ -1,8 +1,10 @@
 //! Physical residence, retained pipe heat and geometry-consistent inertia.
 
 use super::*;
+use crate::graph::gravity::GraphGravitySection;
 use crate::graph::inertial::InertialGraph;
 use crate::graph::tests::{boundary, edge, with_cx};
+use fs_material::fluid_transport::FluidTransport;
 use fs_material::gas::{GasSpec, GasState};
 use fs_thermal::enthalpy::{
     Boundary, DepositedCell, DepositionBudget, DepositionError, Event, StepConfig, ThermalLaw,
@@ -152,6 +154,109 @@ fn streams(
 }
 fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a} != {b}");
+}
+
+#[test]
+fn g0_integrated_gravity_must_follow_the_original_stored_bend_and_partition() {
+    with_cx(|cx| {
+        let law = law(0.0);
+        let (mut data, path) = cells(&law, 2, 2.0, 1.0);
+        data[2].geometry.end_m = [1.0, 0.0, 1.0];
+        data[3].geometry.start_m = [1.0, 0.0, 1.0];
+        let thermal = simulation(&law, &data);
+        let graph = graph(cx, 2.0);
+        let layout = DistributedGraphInventory::new(
+            cx,
+            &graph,
+            Density::new(gas().density),
+            &NODES,
+            &[path.clone()],
+            &thermal,
+            16,
+        )
+        .unwrap();
+        let sections: Vec<_> = path
+            .iter()
+            .map(|id| {
+                let geometry = thermal.cells()[id].geometry;
+                GraphGravitySection {
+                    start_m: geometry.start_m,
+                    end_m: geometry.end_m,
+                    transport: gas().transport_state().unwrap(),
+                }
+            })
+            .collect();
+        let bind = |sections: Vec<GraphGravitySection>| {
+            graph
+                .clone()
+                .with_distributed_boussinesq_gravity(
+                    &gas(),
+                    &[sections],
+                    &[[0.0; 3], [2.0, 0.0, 0.0]],
+                    [0.0, 0.0, -8.0],
+                    0.2,
+                    4,
+                    cx,
+                )
+                .unwrap()
+        };
+        let correct = bind(sections.clone());
+        layout
+            .admit_gravity(cx, correct.gravity().unwrap())
+            .unwrap();
+        layout.admit_storage(cx, &correct, &thermal).unwrap();
+        let mut refreshed = sections.clone();
+        refreshed[0].transport = GasState::try_new(&GasSpec::dry_air_ussa1976(), 330.0, 101325.0)
+            .unwrap()
+            .transport_state()
+            .unwrap();
+        layout
+            .admit_storage(cx, &bind(refreshed), &thermal)
+            .unwrap();
+
+        let mut other_bend = sections.clone();
+        other_bend[0].end_m[2] = 2.0;
+        other_bend[1].start_m[2] = 2.0;
+        let changed = bind(other_bend);
+        assert!(
+            layout
+                .admit_gravity(cx, changed.gravity().unwrap())
+                .is_err()
+        );
+        assert!(layout.admit_storage(cx, &changed, &thermal).is_err());
+        let merged = bind(vec![GraphGravitySection {
+            end_m: sections[1].end_m,
+            ..sections[0]
+        }]);
+        assert!(layout.admit_gravity(cx, merged.gravity().unwrap()).is_err());
+        assert!(
+            DistributedGraphInventory::new(
+                cx,
+                &changed,
+                Density::new(gas().density),
+                &NODES,
+                &[path],
+                &thermal,
+                16
+            )
+            .is_err()
+        );
+
+        // A direct connection explicitly owns no interior storage to compare.
+        let direct = simulation(&law, &data[..2]);
+        let empty = DistributedGraphInventory::new(
+            cx,
+            &graph,
+            Density::new(gas().density),
+            &NODES,
+            &[vec![]],
+            &direct,
+            16,
+        )
+        .unwrap();
+        empty.admit_gravity(cx, changed.gravity().unwrap()).unwrap();
+        assert_eq!(thermal.time_s(), 0.0);
+    });
 }
 
 #[test]

@@ -1,9 +1,11 @@
 //! Actual material/hydraulic/thermal owners against independent small-system roots.
 
 use super::*;
+use crate::graph::gravity::GraphGravitySection;
 use crate::graph::porous::{LinearLossElement, LinearLossResistance, PassiveBranch};
 use crate::graph::tests::{boundary, config as graph_controls, edge, with_cx};
 use crate::{SourceProvenance, ToleranceBasis};
+use fs_material::fluid_transport::FluidTransportState;
 use fs_material::gas::{GasSpec, GasState};
 use fs_qty::{Length, VolumetricFlowRate};
 use fs_thermal::enthalpy::{
@@ -109,6 +111,40 @@ fn heat<T>(payload: T) -> BoundaryStepCoefficients<T> {
         payload,
     }
     .into()
+}
+
+#[test]
+fn g0_quasi_steady_work_counts_opposing_local_heads_before_they_cancel() {
+    with_cx(|cx| {
+        let material = |rho| FluidTransportState::try_new(rho, 1000.0, 0.1, 0.001).unwrap();
+        let points = [[0.0; 3], [0.0, 0.0, 2.0], [1.0, 0.0, 2.0], [1.0, 0.0, 0.0]];
+        let sections = (0..3)
+            .map(|i| GraphGravitySection {
+                start_m: points[i],
+                end_m: points[i + 1],
+                transport: material(0.75),
+            })
+            .collect();
+        let graph = LossGraph::new(2, vec![edge("bent", 0, 1, 1.0)])
+            .unwrap()
+            .with_distributed_boussinesq_gravity(
+                &material(1.0),
+                &[sections],
+                &[points[0], points[3]],
+                [0.0, 0.0, -8.0],
+                0.3,
+                3,
+                cx,
+            )
+            .unwrap();
+        let flow = graph
+            .solve(&[boundary(0, 1.0), boundary(1, 0.0)], graph_controls(), cx)
+            .unwrap();
+        assert_eq!(flow.branches[0].gravity_pressure_head.value(), 0.0);
+        assert_eq!(flow.branches[0].flow.value(), 1.0);
+        // 1 W drag plus |+4 Pa|*1 m3/s + |-4 Pa|*1 m3/s.
+        assert_eq!(neglected_power::<()>(cx, &flow).unwrap(), 9.0);
+    });
 }
 
 const PIPE_CELL_MASS_KG: f64 = 0.001;
@@ -472,7 +508,7 @@ fn g0_distributed_quasi_steady_admission_preserves_inventory_and_source_identity
             refused,
             Err(QuasiSteadyGraphError::Transport(
                 TransientTransportError::Invalid(
-                    "distributed hydraulic gravity disagrees with the original inventory"
+                    "hydraulic gravity and distributed reference inventory disagree"
                 )
             ))
         ));

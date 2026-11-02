@@ -173,7 +173,11 @@ impl InertialGraphTrial {
         driving_pressure_pa: &[f64],
         controls: InertialGraphControls,
     ) -> Result<Self, InertialGraphError> {
-        let Self { initial, next, report } = self;
+        let Self {
+            initial,
+            next,
+            report,
+        } = self;
         let (_, reduced_pressures) = initial.admit_step(
             cx,
             graph,
@@ -512,10 +516,7 @@ impl InertialGraph {
         let edges = c.inertances.len();
         let dt = target_s - self.accepted_time_s;
         let average = &momentum.y;
-        if average.len() != edges
-            || momentum.x.len() != c.states
-            || flow_residuals.len() != edges
-        {
+        if average.len() != edges || momentum.x.len() != c.states || flow_residuals.len() != edges {
             return Err(InertialGraphError::Invalid(
                 "native descriptor returned mismatched dimensions",
             ));
@@ -593,7 +594,10 @@ impl InertialGraph {
                 secant(graph, edge, speed)? * speed * speed,
                 "loss envelope",
             )?)?;
-            envelope_buoyancy_power.add(finite((head * speed).abs(), "gravity envelope")?)?;
+            let absolute_head = graph
+                .gravity()
+                .map_or(0.0, |gravity| gravity.absolute_departure_heads_pa()[edge]);
+            envelope_buoyancy_power.add(finite(absolute_head * speed, "gravity envelope")?)?;
             pressure_losses.push(loss);
         }
         for boundary in boundaries {
@@ -691,8 +695,7 @@ fn admit_topology(c: &Compiled, graph: &LossGraph) -> Result<(), InertialGraphEr
     match (graph.gravity(), c.topology.gravity()) {
         (None, None) => {}
         (Some(a), Some(b))
-            if a.positions_m() == b.positions_m()
-                && a.acceleration_m_s2() == b.acceleration_m_s2()
+            if a.same_geometry_as(b)
                 && a.maximum_relative_density_departure()
                     <= b.maximum_relative_density_departure() => {}
         _ => {
@@ -803,4 +806,3 @@ fn nonnegative(value: f64) -> bool {
 
 #[cfg(test)]
 mod tests;
-

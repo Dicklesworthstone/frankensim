@@ -3,7 +3,7 @@
 //! Static pressure obeys `p_from - p_to + rho g·dx = loss(Q)`. Solve in
 //! `p - rho0 g·(x-x0)` so the uniform-density hydrostatic state is balanced
 //! without iteration or subtraction of large heads inside each edge solve.
-//! Only `(rho-rho0) g·dx` remains in the numerical edge law. Different edge
+//! Only the integrated `(rho-rho0) g·dx` remains in the numerical edge law. Different edge
 //! densities are a declared Boussinesq approximation: mass and heat transport
 //! retain rho0, and the frozen density samples affect gravity alone.
 //!
@@ -19,6 +19,30 @@ use fs_qty::Pressure;
 
 use super::{FixedPressure, GraphError, LossGraph, Sum, checkpoint, finite, periodic_checkpoint};
 
+/// Hard allocation bound for all explicit gravity sections in one graph.
+pub const MAX_GRAVITY_SECTIONS: usize = 65_536;
+
+/// One oriented straight section of an original branch, with its frozen material.
+/// A bent branch retains every section instead of inventing an effective density.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GraphGravitySection {
+    /// Section start in the node positions' Cartesian frame [m].
+    pub start_m: [f64; 3],
+    /// Section end in the same frame [m].
+    pub end_m: [f64; 3],
+    /// Original local material snapshot; density alone supplies gravity.
+    pub transport: FluidTransportState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum GravitySamples {
+    Branches(Vec<FluidTransportState>),
+    Sections {
+        branches: Vec<Vec<GraphGravitySection>>,
+        maximum_sections: usize,
+    },
+}
+
 /// Frozen gravity geometry and the original material-transport snapshots.
 /// A numerical snapshot does not create source authority beyond its material.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,10 +50,11 @@ pub struct GraphGravity {
     acceleration_m_s2: [f64; 3],
     positions_m: Vec<[f64; 3]>,
     reference: FluidTransportState,
-    branch_materials: Vec<FluidTransportState>,
+    samples: GravitySamples,
     maximum_relative_density_departure: f64,
     reference_pressures_pa: Vec<f64>,
     departure_heads_pa: Vec<f64>,
+    absolute_departure_heads_pa: Vec<f64>,
     pressure_heads_pa: Vec<f64>,
 }
 
@@ -46,9 +71,58 @@ impl GraphGravity {
     pub const fn reference_transport(&self) -> &FluidTransportState {
         &self.reference
     }
-    /// Original frozen source samples in branch order. Density alone drives head.
-    pub fn branch_materials(&self) -> &[FluidTransportState] {
-        &self.branch_materials
+    /// Original single samples, when every branch has one uniform material.
+    /// Distributed paths have no single effective density and return None.
+    pub fn branch_materials(&self) -> Option<&[FluidTransportState]> {
+        match &self.samples {
+            GravitySamples::Branches(materials) => Some(materials),
+            GravitySamples::Sections { .. } => None,
+        }
+    }
+    /// Every original section and its local material, in branch/path order.
+    pub fn branch_sections(&self) -> Option<&[Vec<GraphGravitySection>]> {
+        match &self.samples {
+            GravitySamples::Branches(_) => None,
+            GravitySamples::Sections { branches, .. } => Some(branches),
+        }
+    }
+    /// Explicit total section allocation bound, absent for uniform branch samples.
+    pub const fn maximum_sections(&self) -> Option<usize> {
+        match &self.samples {
+            GravitySamples::Branches(_) => None,
+            GravitySamples::Sections {
+                maximum_sections, ..
+            } => Some(*maximum_sections),
+        }
+    }
+    /// Same gravity frame and original path partition, independent of local density.
+    /// A retained momentum owner must not change its geometry during source refresh.
+    pub fn same_geometry_as(&self, other: &Self) -> bool {
+        self.acceleration_m_s2 == other.acceleration_m_s2
+            && self.positions_m == other.positions_m
+            && match (&self.samples, &other.samples) {
+                (GravitySamples::Branches(a), GravitySamples::Branches(b)) => a.len() == b.len(),
+                (
+                    GravitySamples::Sections {
+                        branches: a,
+                        maximum_sections: a_max,
+                    },
+                    GravitySamples::Sections {
+                        branches: b,
+                        maximum_sections: b_max,
+                    },
+                ) => {
+                    a_max == b_max
+                        && a.len() == b.len()
+                        && a.iter().zip(b).all(|(a, b)| {
+                            a.len() == b.len()
+                                && a.iter()
+                                    .zip(b)
+                                    .all(|(a, b)| a.start_m == b.start_m && a.end_m == b.end_m)
+                        })
+                }
+                _ => false,
+            }
     }
     /// Admitted `abs(rho-rho0)/rho0`; zero is the uniform-density specialization.
     pub const fn maximum_relative_density_departure(&self) -> f64 {
@@ -57,6 +131,15 @@ impl GraphGravity {
     /// Full gravitational pressure supply, signed in each edge's direction [Pa].
     pub fn pressure_heads_pa(&self) -> &[f64] {
         &self.pressure_heads_pa
+    }
+    /// Signed integral of `(rho-rho0) g·dx` in each original edge direction [Pa].
+    pub fn departure_heads_pa(&self) -> &[f64] {
+        &self.departure_heads_pa
+    }
+    /// Sum of absolute local anomalous heads, before any section cancellation [Pa].
+    /// Multiplying by the absolute branch flow bounds omitted local buoyancy power.
+    pub fn absolute_departure_heads_pa(&self) -> &[f64] {
+        &self.absolute_departure_heads_pa
     }
     pub(super) fn reference_pressure(&self, node: usize) -> f64 {
         self.reference_pressures_pa[node]
@@ -83,7 +166,7 @@ impl LossGraph {
         let materials = vec![reference; self.branches.len()];
         self.bind_gravity(
             reference,
-            materials,
+            GravitySamples::Branches(materials),
             node_positions_m,
             acceleration_m_s2,
             0.0,
@@ -123,7 +206,61 @@ impl LossGraph {
         }
         self.bind_gravity(
             reference,
-            materials,
+            GravitySamples::Branches(materials),
+            node_positions_m,
+            acceleration_m_s2,
+            maximum_relative_density_departure,
+            cx,
+        )
+    }
+
+    /// Attach a bounded line integral of local material density along each branch.
+    ///
+    /// Paths are ordered from the original from-node to the to-node. Adjacent
+    /// section endpoints must agree exactly; every section has finite positive
+    /// length. The declared total section budget is retained with the geometry.
+    /// The reference material still owns conserved mass, heat and Darcy drag.
+    /// All local density departures, including horizontal sections, must obey
+    /// the stated Boussinesq allowance. Binding caches both the signed head for
+    /// native momentum and the absolute local sum for omitted-work envelopes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_distributed_boussinesq_gravity<F: FluidTransport + ?Sized>(
+        self,
+        reference: &F,
+        branch_sections: &[Vec<GraphGravitySection>],
+        node_positions_m: &[[f64; 3]],
+        acceleration_m_s2: [f64; 3],
+        maximum_relative_density_departure: f64,
+        maximum_sections: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, GraphError> {
+        checkpoint(cx)?;
+        if branch_sections.len() != self.branches.len()
+            || maximum_sections == 0
+            || maximum_sections > MAX_GRAVITY_SECTIONS
+        {
+            return Err(GraphError::InvalidInput(
+                "distributed gravity needs one path per branch and a bounded section budget",
+            ));
+        }
+        let mut count = 0usize;
+        for (edge, sections) in branch_sections.iter().enumerate() {
+            periodic_checkpoint(edge, cx)?;
+            if sections.is_empty() || sections.len() > maximum_sections - count {
+                return Err(GraphError::InvalidBranch {
+                    branch: edge,
+                    reason: "gravity path is empty or exceeds the total section budget",
+                });
+            }
+            count += sections.len();
+        }
+        let reference = reference.transport_state().map_err(GraphError::Material)?;
+        self.bind_gravity(
+            reference,
+            GravitySamples::Sections {
+                branches: branch_sections.to_vec(),
+                maximum_sections,
+            },
             node_positions_m,
             acceleration_m_s2,
             maximum_relative_density_departure,
@@ -140,7 +277,7 @@ impl LossGraph {
     fn bind_gravity(
         mut self,
         reference: FluidTransportState,
-        materials: Vec<FluidTransportState>,
+        samples: GravitySamples,
         positions: &[[f64; 3]],
         acceleration: [f64; 3],
         maximum_departure: f64,
@@ -163,16 +300,10 @@ impl LossGraph {
             reference_pressures_pa.push(head(acceleration, positions[0], position, rho0)?);
         }
         let mut departure_heads_pa = Vec::with_capacity(self.branches.len());
+        let mut absolute_departure_heads_pa = Vec::with_capacity(self.branches.len());
         let mut pressure_heads_pa = Vec::with_capacity(self.branches.len());
-        for (edge, (branch, material)) in self.branches.iter().zip(&materials).enumerate() {
+        for (edge, branch) in self.branches.iter().enumerate() {
             periodic_checkpoint(edge, cx)?;
-            let departure = material.density_kg_m3() - rho0;
-            if !departure.is_finite() || (departure / rho0).abs() > maximum_departure {
-                return Err(GraphError::InvalidBranch {
-                    branch: edge,
-                    reason: "gravity density exceeds the declared Boussinesq allowance",
-                });
-            }
             if self.linear_losses[edge]
                 .as_ref()
                 .and_then(|loss| loss.material())
@@ -183,18 +314,87 @@ impl LossGraph {
                     reason: "gravity reference density differs from the bound Darcy material",
                 });
             }
-            let perturbation = head(
-                acceleration,
-                positions[branch.from],
-                positions[branch.to],
-                departure,
-            )?;
+            let (perturbation, absolute) = match &samples {
+                GravitySamples::Branches(materials) => {
+                    let departure =
+                        density_departure(materials[edge], rho0, maximum_departure, edge)?;
+                    let value = head(
+                        acceleration,
+                        positions[branch.from],
+                        positions[branch.to],
+                        departure,
+                    )?;
+                    (value, value.abs())
+                }
+                GravitySamples::Sections { branches, .. } => {
+                    let mut signed = Sum::default();
+                    let mut absolute = Sum::default();
+                    let mut previous = positions[branch.from];
+                    for (index, section) in branches[edge].iter().enumerate() {
+                        periodic_checkpoint(index, cx)?;
+                        if section.start_m != previous
+                            || section
+                                .start_m
+                                .iter()
+                                .chain(&section.end_m)
+                                .any(|v| !v.is_finite())
+                        {
+                            return Err(GraphError::InvalidBranch {
+                                branch: edge,
+                                reason: "gravity sections must form a finite continuous original path",
+                            });
+                        }
+                        let mut displacement = [0.0; 3];
+                        for axis in 0..3 {
+                            displacement[axis] = finite(
+                                section.end_m[axis] - section.start_m[axis],
+                                "gravity section displacement",
+                            )?;
+                        }
+                        let scale = displacement.iter().fold(0.0_f64, |a, d| a.max(d.abs()));
+                        let length = if scale == 0.0 {
+                            0.0
+                        } else {
+                            scale
+                                * fs_math::det::sqrt(
+                                    displacement
+                                        .iter()
+                                        .map(|d| {
+                                            let normalized = d / scale;
+                                            normalized * normalized
+                                        })
+                                        .sum(),
+                                )
+                        };
+                        if !length.is_finite() || length <= 0.0 {
+                            return Err(GraphError::InvalidBranch {
+                                branch: edge,
+                                reason: "gravity sections need finite positive length",
+                            });
+                        }
+                        let departure =
+                            density_departure(section.transport, rho0, maximum_departure, edge)?;
+                        let value = head(acceleration, section.start_m, section.end_m, departure)?;
+                        signed.add(value)?;
+                        absolute.add(value.abs())?;
+                        previous = section.end_m;
+                    }
+                    if previous != positions[branch.to] {
+                        return Err(GraphError::InvalidBranch {
+                            branch: edge,
+                            reason: "gravity path must end at its original to-node",
+                        });
+                    }
+                    (signed.value()?, absolute.value()?)
+                }
+            };
             let full = finite(
                 (reference_pressures_pa[branch.to] - reference_pressures_pa[branch.from])
                     + perturbation,
                 "gravitational pressure head",
             )?;
             departure_heads_pa.push(perturbation);
+            absolute_departure_heads_pa.push(absolute);
             pressure_heads_pa.push(full);
         }
         checkpoint(cx)?;
@@ -202,10 +402,11 @@ impl LossGraph {
             acceleration_m_s2: acceleration,
             positions_m: positions.to_vec(),
             reference,
-            branch_materials: materials,
+            samples,
             maximum_relative_density_departure: maximum_departure,
             reference_pressures_pa,
             departure_heads_pa,
+            absolute_departure_heads_pa,
             pressure_heads_pa,
         }));
         Ok(self)
@@ -278,6 +479,23 @@ impl LossGraph {
             difference
         };
         self.flow_from_difference(edge, drive)
+    }
+}
+
+fn density_departure(
+    material: FluidTransportState,
+    reference_density: f64,
+    maximum_departure: f64,
+    edge: usize,
+) -> Result<f64, GraphError> {
+    let departure = material.density_kg_m3() - reference_density;
+    if !departure.is_finite() || (departure / reference_density).abs() > maximum_departure {
+        Err(GraphError::InvalidBranch {
+            branch: edge,
+            reason: "gravity density exceeds the declared Boussinesq allowance",
+        })
+    } else {
+        Ok(departure)
     }
 }
 

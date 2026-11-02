@@ -274,7 +274,7 @@ fn advance_quasi_steady_graph_impl<'m, T, E>(
                 thermal_checkpoint(cx)?;
                 admit_topology(problem.topology, &response.hydraulics)?;
                 let binding = if let Some(inventory) = inventory {
-                    admit_distributed_gravity(inventory, &response.hydraulics)?;
+                    admit_distributed_gravity(cx, inventory, &response.hydraulics)?;
                     let rates: Vec<_> = response
                         .hydraulics
                         .branches
@@ -402,23 +402,12 @@ fn advance_quasi_steady_graph_impl<'m, T, E>(
 // A quasi-steady response carries a solved graph, not its LossGraph owner.
 // Check its actual gravity chart before binding the original graph topology.
 fn admit_distributed_gravity<E>(
+    cx: &Cx<'_>,
     inventory: &DistributedGraphInventory,
     flow: &GraphSolution,
 ) -> Result<(), QuasiSteadyGraphError<E>> {
     if let Some(gravity) = &flow.gravity {
-        if gravity.reference_transport().density_kg_m3() != inventory.reference_density().value()
-            || gravity.positions_m().len() != inventory.node_cells().len()
-            || gravity
-                .positions_m()
-                .iter()
-                .zip(inventory.node_positions_m())
-                .any(|(actual, expected)| expected.is_some_and(|expected| *actual != expected))
-        {
-            return Err(TransientTransportError::Invalid(
-                "distributed hydraulic gravity disagrees with the original inventory",
-            )
-            .into());
-        }
+        inventory.admit_gravity(cx, gravity)?;
     }
     Ok(())
 }
@@ -446,7 +435,7 @@ fn admit_topology<E>(
 fn neglected_power<E>(cx: &Cx<'_>, flow: &GraphSolution) -> Result<f64, QuasiSteadyGraphError<E>> {
     let mut total = 0.0;
     if let Some(gravity) = &flow.gravity {
-        if gravity.branch_materials().len() != flow.branches.len()
+        if gravity.absolute_departure_heads_pa().len() != flow.branches.len()
             || gravity.positions_m().len() != flow.pressures.len()
         {
             return Err(QuasiSteadyGraphError::Invalid(
@@ -464,15 +453,7 @@ fn neglected_power<E>(cx: &Cx<'_>, flow: &GraphSolution) -> Result<f64, QuasiSte
         }
         total += dissipation;
         if let Some(gravity) = &flow.gravity {
-            let from = gravity.positions_m()[branch.from];
-            let to = gravity.positions_m()[branch.to];
-            let acceleration = gravity.acceleration_m_s2();
-            let height = (0..3)
-                .map(|axis| acceleration[axis] * (to[axis] - from[axis]))
-                .sum::<f64>();
-            let departure = gravity.branch_materials()[index].density_kg_m3()
-                - gravity.reference_transport().density_kg_m3();
-            total += (branch.flow.value() * departure * height).abs();
+            total += branch.flow.value().abs() * gravity.absolute_departure_heads_pa()[index];
         }
         if !total.is_finite() {
             return Err(QuasiSteadyGraphError::Invalid(
