@@ -18,14 +18,19 @@ fn settings(averaging: DynamicAveraging) -> (DynamicSgsConfig, DynamicScalarConf
 }
 
 fn field(n: usize) -> (Vec<f64>, Vec<[f64; 3]>, Vec<f64>) {
+    cartesian_field([n; 3])
+}
+
+fn cartesian_field(shape: [usize; 3]) -> (Vec<f64>, Vec<[f64; 3]>, Vec<f64>) {
     let mut rho = Vec::new();
     let mut u = Vec::new();
     let mut phi = Vec::new();
-    for z in 0..n {
-        for y in 0..n {
-            for x in 0..n {
-                let [x, y, z] =
-                    [x, y, z].map(|i| core::f64::consts::TAU * (i as f64 + 0.5) / n as f64);
+    for z in 0..shape[2] {
+        for y in 0..shape[1] {
+            for x in 0..shape[0] {
+                let [x, y, z] = core::array::from_fn::<_, 3, _>(|axis| {
+                    core::f64::consts::TAU * ([x, y, z][axis] as f64 + 0.5) / shape[axis] as f64
+                });
                 rho.push(1.2 + 0.2 * x.sin() + 0.1 * y.cos());
                 u.push([
                     0.3 * x.sin() + 0.2 * (y + z).sin() + 0.1 * (2.0 * x - y).cos(),
@@ -43,25 +48,38 @@ fn field(n: usize) -> (Vec<f64>, Vec<[f64; 3]>, Vec<f64>) {
 
 // Independent full physical-unit reference: raw first/second moments, explicit
 // modulo indexing, all nine strain entries, no production filter helpers or
-// normalization. The h^2 and test-width factor are present in the model tensor.
+// normalization. Delta^2 and the test-width factor are present in the model.
 fn reference(
-    n: usize,
-    h: f64,
+    shape: [usize; 3],
+    spacing: [f64; 3],
     rho: &[f64],
     u: &[[f64; 3]],
     phi: &[f64],
     averaging: DynamicAveraging,
 ) -> (Vec<f64>, Vec<f64>) {
     let len = u.len();
-    let at = |p: [usize; 3]| ((p[2] % n) * n + p[1] % n) * n + p[0] % n;
-    let xyz = |c: usize| [c % n, c / n % n, c / (n * n)];
+    let delta_squared = spacing.iter().product::<f64>().cbrt().powi(2);
+    let at = |p: [usize; 3]| {
+        ((p[2] % shape[2]) * shape[1] + p[1] % shape[1]) * shape[0] + p[0] % shape[0]
+    };
+    let xyz = |c: usize| {
+        [
+            c % shape[0],
+            c / shape[0] % shape[1],
+            c / (shape[0] * shape[1]),
+        ]
+    };
     let box_cells = |c: usize| {
         let p = xyz(c);
         let mut result = Vec::new();
         for z in 0..3 {
             for y in 0..3 {
                 for x in 0..3 {
-                    result.push(at([p[0] + n + x - 1, p[1] + n + y - 1, p[2] + n + z - 1]));
+                    result.push(at([
+                        p[0] + shape[0] + x - 1,
+                        p[1] + shape[1] + y - 1,
+                        p[2] + shape[2] + z - 1,
+                    ]));
                 }
             }
         }
@@ -70,9 +88,9 @@ fn reference(
     let derivative = |v: &[f64], c: usize, axis: usize| {
         let mut a = xyz(c);
         let mut b = a;
-        a[axis] += n - 1;
+        a[axis] += shape[axis] - 1;
         b[axis] += 1;
-        (v[at(b)] - v[at(a)]) / (2.0 * h)
+        (v[at(b)] - v[at(a)]) / (2.0 * spacing[axis])
     };
     let rates = |velocity: &[[f64; 3]]| {
         let components: Vec<Vec<f64>> = (0..3)
@@ -118,10 +136,11 @@ fn reference(
             let mut a = 0.0;
             for j in box_cells(c) {
                 moment += rho[j] * u[j][i] * phi[j] / 27.0;
-                a += rho[j] * h * h * rate[j] * derivative(phi, j, i) / 27.0;
+                a += rho[j] * delta_squared * rate[j] * derivative(phi, j, i) / 27.0;
             }
             let l = moment - mean_rho[c] * mean_u[c][i] * mean_phi[c];
-            let m = a - 9.0 * h * h * mean_rho[c] * mean_rate[c] * derivative(&mean_phi, c, i);
+            let m =
+                a - 9.0 * delta_squared * mean_rho[c] * mean_rate[c] * derivative(&mean_phi, c, i);
             pairs[c][0] += l * m;
             pairs[c][1] += m * m;
         }
@@ -148,7 +167,7 @@ fn reference(
     let alpha = coefficient
         .iter()
         .zip(rate)
-        .map(|(c, s)| c.max(0.0) * h * h * s)
+        .map(|(c, s)| c.max(0.0) * delta_squared * s)
         .collect();
     (coefficient, alpha)
 }
@@ -166,7 +185,7 @@ fn g1_scalar_germano_matches_independent_physical_unit_reference() {
             let (_, report) = flow
                 .prepare_with_scalar(mc, sc, density, &u, &phi, &mut scalar, || false)
                 .unwrap();
-            let (coefficient, expected) = reference(n, h, density, &u, &phi, averaging);
+            let (coefficient, expected) = reference([n; 3], [h; 3], density, &u, &phi, averaging);
             for (a, b) in scalar.diffusivities().iter().zip(expected) {
                 assert!((a - b).abs() < 2e-13, "{averaging:?}: {a} != {b}");
             }
@@ -176,6 +195,246 @@ fn g1_scalar_germano_matches_independent_physical_unit_reference() {
                 assert!(report.maximum_diffusivity > 1e-4);
                 assert!(report.backscatter_limited_cells > 0);
             }
+        }
+    }
+}
+
+#[test]
+fn cartesian_scalar_matches_independent_physical_unit_reference() {
+    let shape = [5, 6, 7];
+    let spacing = [0.3, 0.7, 1.1];
+    let (rho, u, phi) = cartesian_field(shape);
+    for averaging in [DynamicAveraging::Domain, DynamicAveraging::LocalBox] {
+        let (mc, sc) = settings(averaging);
+        for density in [&rho, &vec![1.0; u.len()]] {
+            let mut flow = PeriodicDynamicSgs::new_cartesian(shape, spacing, usize::MAX).unwrap();
+            let mut scalar = PeriodicDynamicScalar::new(shape, usize::MAX).unwrap();
+            let (_, report) = flow
+                .prepare_with_scalar(mc, sc, density, &u, &phi, &mut scalar, || false)
+                .unwrap();
+            let (coefficient, expected) = reference(shape, spacing, density, &u, &phi, averaging);
+            for (a, b) in scalar.diffusivities().iter().zip(expected) {
+                assert!((a - b).abs() < 2e-13, "{averaging:?}: {a} != {b}");
+            }
+            let minimum = coefficient.into_iter().fold(f64::INFINITY, f64::min);
+            assert!((report.minimum_raw_coefficient - minimum).abs() < 2e-13);
+            if averaging == DynamicAveraging::LocalBox {
+                assert!(report.maximum_diffusivity > 1e-4);
+                assert!(report.backscatter_limited_cells > 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn cartesian_equal_spacing_preserves_both_fits_bit_for_bit() {
+    let shape = [5, 6, 7];
+    let (rho, u, phi) = cartesian_field(shape);
+    for averaging in [DynamicAveraging::Domain, DynamicAveraging::LocalBox] {
+        let (mc, sc) = settings(averaging);
+        for h in [0.37, 1.0, 1e-150, 1e150] {
+            let mut old = PeriodicDynamicSgs::new(shape, h, usize::MAX).unwrap();
+            let mut new = PeriodicDynamicSgs::new_cartesian(shape, [h; 3], usize::MAX).unwrap();
+            let mut scalar = PeriodicDynamicScalar::new(shape, usize::MAX).unwrap();
+            let expected = old
+                .prepare_with_scalar(mc, sc, &rho, &u, &phi, &mut scalar, || false)
+                .unwrap();
+            let alpha = scalar
+                .diffusivities()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>();
+            let observed = new
+                .prepare_with_scalar(mc, sc, &rho, &u, &phi, &mut scalar, || false)
+                .unwrap();
+            assert_eq!(new.filter_width().to_bits(), h.to_bits());
+            assert_eq!(observed, expected);
+            assert!(
+                new.viscosities()
+                    .iter()
+                    .zip(old.viscosities())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+            assert!(
+                scalar
+                    .diffusivities()
+                    .iter()
+                    .zip(alpha)
+                    .all(|(a, b)| a.to_bits() == b)
+            );
+        }
+    }
+}
+
+#[test]
+fn cartesian_fits_covary_under_axis_permutation() {
+    let shape = [5, 6, 7];
+    let spacing = [0.2, 0.35, 0.8];
+    let (rho, u, phi) = cartesian_field(shape);
+    for averaging in [DynamicAveraging::Domain, DynamicAveraging::LocalBox] {
+        let (mc, sc) = settings(averaging);
+        let mut flow = PeriodicDynamicSgs::new_cartesian(shape, spacing, usize::MAX).unwrap();
+        let mut scalar = PeriodicDynamicScalar::new(shape, usize::MAX).unwrap();
+        let expected_report = flow
+            .prepare_with_scalar(mc, sc, &rho, &u, &phi, &mut scalar, || false)
+            .unwrap();
+        for permutation in [[1, 0, 2], [2, 0, 1]] {
+            let new_shape = permutation.map(|axis| shape[axis]);
+            let new_spacing = permutation.map(|axis| spacing[axis]);
+            let mut source = Vec::new();
+            for z in 0..new_shape[2] {
+                for y in 0..new_shape[1] {
+                    for x in 0..new_shape[0] {
+                        let mut p = [0; 3];
+                        for axis in 0..3 {
+                            p[permutation[axis]] = [x, y, z][axis];
+                        }
+                        source.push((p[2] * shape[1] + p[1]) * shape[0] + p[0]);
+                    }
+                }
+            }
+            let rotated_rho = source.iter().map(|&c| rho[c]).collect::<Vec<_>>();
+            let rotated_u = source
+                .iter()
+                .map(|&c| permutation.map(|axis| u[c][axis]))
+                .collect::<Vec<_>>();
+            let rotated_phi = source.iter().map(|&c| phi[c]).collect::<Vec<_>>();
+            let mut rotated =
+                PeriodicDynamicSgs::new_cartesian(new_shape, new_spacing, usize::MAX).unwrap();
+            let mut rotated_scalar = PeriodicDynamicScalar::new(new_shape, usize::MAX).unwrap();
+            let report = rotated
+                .prepare_with_scalar(
+                    mc,
+                    sc,
+                    &rotated_rho,
+                    &rotated_u,
+                    &rotated_phi,
+                    &mut rotated_scalar,
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(
+                rotated.filter_width().to_bits(),
+                flow.filter_width().to_bits()
+            );
+            for (c, &original) in source.iter().enumerate() {
+                assert!((rotated.viscosities()[c] - flow.viscosities()[original]).abs() < 2e-13);
+                assert!(
+                    (rotated_scalar.diffusivities()[c] - scalar.diffusivities()[original]).abs()
+                        < 2e-13
+                );
+            }
+            assert!(
+                (report.0.minimum_raw_coefficient_squared
+                    - expected_report.0.minimum_raw_coefficient_squared)
+                    .abs()
+                    < 2e-13
+            );
+            assert!(
+                (report.1.minimum_raw_coefficient - expected_report.1.minimum_raw_coefficient)
+                    .abs()
+                    < 2e-13
+            );
+        }
+    }
+}
+
+#[test]
+fn cartesian_extreme_length_units_reuse_current_scalar_geometry() {
+    let shape = [5, 6, 7];
+    let spacing = [0.125, 0.25, 0.5];
+    let (rho, u, phi) = cartesian_field(shape);
+    let (mc, sc) = settings(DynamicAveraging::LocalBox);
+    let mut flow = PeriodicDynamicSgs::new_cartesian(shape, spacing, usize::MAX).unwrap();
+    let mut scalar = PeriodicDynamicScalar::new(shape, usize::MAX).unwrap();
+    let bytes = scalar.workspace_bytes();
+    let allocation = scalar.diffusivities().as_ptr();
+    let reference = flow
+        .prepare_with_scalar(mc, sc, &rho, &u, &phi, &mut scalar, || false)
+        .unwrap();
+    let alpha = scalar.diffusivities().to_vec();
+    for (hs, us, rs, ps) in [
+        (1e-250, 1e250, 1e-150, 1e150),
+        (1e250, 1e-250, 1e150, -1e-150),
+        (4.0, 2.0, 3.0, -5.0),
+    ] {
+        let mut scaled =
+            PeriodicDynamicSgs::new_cartesian(shape, spacing.map(|h| h * hs), usize::MAX).unwrap();
+        let r = rho.iter().map(|v| v * rs).collect::<Vec<_>>();
+        let v = u.iter().map(|v| v.map(|q| q * us)).collect::<Vec<_>>();
+        let p = phi.iter().map(|v| v * ps).collect::<Vec<_>>();
+        let report = scaled
+            .prepare_with_scalar(mc, sc, &r, &v, &p, &mut scalar, || false)
+            .unwrap();
+        for (a, b) in scaled.viscosities().iter().zip(flow.viscosities()) {
+            assert!((a / (hs * us) - b).abs() < 2e-13);
+        }
+        for (a, b) in scalar.diffusivities().iter().zip(&alpha) {
+            assert!((a / (hs * us) - b).abs() < 2e-13);
+        }
+        assert!(
+            (report.0.maximum_coefficient_squared - reference.0.maximum_coefficient_squared).abs()
+                < 2e-13
+        );
+        assert!((report.1.maximum_coefficient - reference.1.maximum_coefficient).abs() < 2e-13);
+        assert_eq!(scalar.diffusivities().as_ptr(), allocation);
+        assert_eq!(scalar.workspace_bytes(), bytes);
+    }
+    // The scalar owner carries no metric: reusing it with a different aspect
+    // ratio must agree with a fresh owner on the same current flow geometry.
+    let mut changed =
+        PeriodicDynamicSgs::new_cartesian(shape, [0.2, 0.7, 0.4], usize::MAX).unwrap();
+    let mut fresh = PeriodicDynamicScalar::new(shape, usize::MAX).unwrap();
+    let expected = changed
+        .prepare_with_scalar(mc, sc, &rho, &u, &phi, &mut fresh, || false)
+        .unwrap();
+    let observed = changed
+        .prepare_with_scalar(mc, sc, &rho, &u, &phi, &mut scalar, || false)
+        .unwrap();
+    assert_eq!(observed, expected);
+    assert_eq!(scalar.diffusivities(), fresh.diffusivities());
+}
+
+#[test]
+fn cartesian_underflow_is_refused_instead_of_becoming_an_undetermined_fit() {
+    let shape = [7, 8, 9];
+    let len = shape.iter().product();
+    let rho = vec![1.0; len];
+    let mut u = vec![[0.0; 3]; len];
+    let mut phi = vec![0.0; len];
+    for c in 0..len {
+        let x = core::f64::consts::TAU * (c % shape[0]) as f64 / shape[0] as f64;
+        let y = core::f64::consts::TAU * (c / shape[0] % shape[1]) as f64 / shape[1] as f64;
+        u[c][0] = y.sin();
+        phi[c] = (x + y).sin();
+    }
+    for averaging in [DynamicAveraging::Domain, DynamicAveraging::LocalBox] {
+        let (mc, sc) = settings(averaging);
+        for spacing in [[1e100, 1e100, 1e-200], [1e-200, 1e200, 1.0]] {
+            let mut flow = PeriodicDynamicSgs::new_cartesian(shape, spacing, usize::MAX).unwrap();
+            let mut scalar = PeriodicDynamicScalar::new(shape, usize::MAX).unwrap();
+            assert!(matches!(
+                flow.prepare_with_scalar(mc, sc, &rho, &u, &phi, &mut scalar, || false),
+                Err(DynamicSgsError::Cell { .. })
+            ));
+            // A mathematically zero velocity strain remains a valid zero fit
+            // on the very same geometry; the refusal is numerical, not an
+            // arbitrary aspect-ratio limit.
+            let (momentum, heat) = flow
+                .prepare_with_scalar(
+                    mc,
+                    sc,
+                    &rho,
+                    &vec![[1.0; 3]; len],
+                    &phi,
+                    &mut scalar,
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(momentum.undetermined_cells, len);
+            assert_eq!(heat.undetermined_cells, len);
+            assert!(flow.viscosities().iter().all(|v| *v == 0.0));
+            assert!(scalar.diffusivities().iter().all(|v| *v == 0.0));
         }
     }
 }

@@ -1,18 +1,20 @@
 //! Dynamic Favre gradient-diffusion transport on the original periodic filter.
 //!
 //! For resolved scalar `phi`, the modeled flux is
-//! `q_i = -rho C_phi h^2 |S| grad_i(phi)`. The scalar Germano identity gives
+//! `q_i = -rho C_phi Delta^2 |S| grad_i(phi)`. The scalar Germano identity gives
 //! `L_i = hat(rho u_i phi) - hat(rho) uhat_i phihat` and
 //! `M_i = hat(rho |S| grad_i(phi)) - 9 hat(rho) |Shat| grad_i(phihat)`
-//! in cell coordinates. We fit `C_phi = <L.M>/<M.M>`; unlike the stress
+//! with derivatives scaled by the grid filter width `Delta`, each using its
+//! physical axis spacing. We fit `C_phi = <L.M>/<M.M>`; unlike the stress
 //! identity there is no factor two. The physical diffusivity is
-//! `alpha_t = C_phi h^2 |S|`. It is fitted independently of momentum viscosity,
+//! `alpha_t = C_phi Delta^2 |S|`. It is fitted independently of momentum viscosity,
 //! avoiding a singular turbulent-Prandtl ratio when that viscosity vanishes.
 //!
 //! Reference: Squires, CTR Annual Research Briefs (1991), equations
 //! (2.13)--(2.19), https://web.stanford.edu/group/ctr/ResBriefs/1991/19_SQUIRES.pdf;
 //! Moin, Squires, Cabot & Lee (1991), doi:10.1063/1.858164. The existing box
-//! filter has test width 3h (squared ratio nine). Coefficient averaging and
+//! filter has each test-box width three times its grid-box width (squared
+//! geometric-mean ratio nine). Coefficient averaging and
 //! nonnegative diffusion are explicit policies. This supplies no wall model,
 //! reaction-rate model, variable-property thermodynamic closure, or DNS claim.
 
@@ -72,16 +74,31 @@ pub struct PeriodicDynamicScalar {
     diffusivity: Vec<f64>,
 }
 
-fn gradient(shape: [usize; 3], cell: usize, field: &[f64]) -> [f64; 3] {
+fn gradient(
+    shape: [usize; 3],
+    metric: [f64; 3],
+    cell: usize,
+    field: &[f64],
+) -> Result<[f64; 3], DynamicSgsError> {
     let p = coordinates(shape, cell);
-    core::array::from_fn(|axis| {
+    let mut gradient = [0.0; 3];
+    for axis in 0..3 {
         let sides = neighbors(shape[axis], p[axis]);
         let mut low = p;
         let mut high = p;
         low[axis] = sides[0];
         high[axis] = sides[2];
-        0.5 * (field[index(shape, high)] - field[index(shape, low)])
-    })
+        let difference = field[index(shape, high)] - field[index(shape, low)];
+        let derivative = 0.5 * difference * metric[axis];
+        if !derivative.is_finite() || (derivative == 0.0 && difference != 0.0) {
+            return Err(DynamicSgsError::Cell {
+                cell,
+                reason: "unrepresentable normalized scalar derivative",
+            });
+        }
+        gradient[axis] = derivative;
+    }
+    Ok(gradient)
 }
 
 impl PeriodicDynamicScalar {
@@ -192,8 +209,18 @@ impl PeriodicDynamicScalar {
         }
         for cell in 0..n {
             poll(cancelled, cell)?;
-            self.basis[cell] = gradient(self.shape, cell, &self.scalar)
-                .map(|v| (density[cell] / scales.density) * flow.strain_rate[cell] * v);
+            let g = gradient(self.shape, flow.derivative_metric, cell, &self.scalar)?;
+            let rho = density[cell] / scales.density;
+            let rate = flow.strain_rate[cell];
+            self.basis[cell] = g.map(|v| rho * rate * v);
+            if g.iter().zip(self.basis[cell]).any(|(g, b)| {
+                !b.is_finite() || (b == 0.0 && rho != 0.0 && rate != 0.0 && *g != 0.0)
+            }) {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "unrepresentable normalized scalar basis",
+                });
+            }
             let mut value = 0.0;
             each_box(self.shape, cell, |j| {
                 value += (density[j] / scales.density / 27.0) * self.scalar[j];
@@ -216,13 +243,21 @@ impl PeriodicDynamicScalar {
                     a[axis] += self.basis[j][axis] / 27.0;
                 }
             });
-            let (rate, _) = strain(self.shape, cell, &flow.filtered);
-            let g = gradient(self.shape, cell, &self.filtered);
+            let (rate, _) = strain(self.shape, flow.derivative_metric, cell, &flow.filtered)?;
+            let g = gradient(self.shape, flow.derivative_metric, cell, &self.filtered)?;
             let mut pair = [0.0; 2];
+            let mut modeled = false;
             for axis in 0..3 {
                 let m = a[axis] - 9.0 * mean[3] * rate * g[axis];
+                modeled |= m != 0.0;
                 pair[0] += l[axis] * m;
                 pair[1] += m * m;
+            }
+            if pair.iter().any(|v| !v.is_finite()) || (pair[1] == 0.0 && modeled) {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "unrepresentable scalar least-squares contraction",
+                });
             }
             self.contraction[cell] = pair;
             numerator.add(pair[0]);
@@ -239,14 +274,28 @@ impl PeriodicDynamicScalar {
                 DynamicAveraging::Domain => domain,
                 DynamicAveraging::LocalBox => {
                     let mut pair = [0.0; 2];
+                    let mut determined = false;
                     each_box(self.shape, cell, |j| {
+                        determined |= self.contraction[j][1] != 0.0;
                         for k in 0..2 {
                             pair[k] += self.contraction[j][k] / 27.0;
                         }
                     });
+                    if determined && pair[1] == 0.0 {
+                        return Err(DynamicSgsError::Cell {
+                            cell,
+                            reason: "underflow of local scalar least-squares denominator",
+                        });
+                    }
                     pair
                 }
             };
+            if pair.iter().any(|v| !v.is_finite()) || (pair[1] == 0.0 && pair[0] != 0.0) {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "unrepresentable averaged scalar least-squares contraction",
+                });
+            }
             let raw = if pair[1] == 0.0 {
                 report.undetermined_cells += 1;
                 0.0
@@ -271,7 +320,8 @@ impl PeriodicDynamicScalar {
                     maximum: config.maximum_coefficient,
                 });
             }
-            let diffusivity = coefficient * flow.strain_rate[cell] * scales.velocity * flow.spacing;
+            let diffusivity =
+                coefficient * flow.strain_rate[cell] * scales.velocity * flow.filter_width;
             if !diffusivity.is_finite() {
                 return Err(DynamicSgsError::Cell {
                     cell,

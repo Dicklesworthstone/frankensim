@@ -10,13 +10,18 @@ fn config(averaging: DynamicAveraging) -> DynamicSgsConfig {
 }
 
 fn field(n: usize) -> (Vec<f64>, Vec<[f64; 3]>) {
+    cartesian_field([n; 3])
+}
+
+fn cartesian_field(shape: [usize; 3]) -> (Vec<f64>, Vec<[f64; 3]>) {
     let mut rho = Vec::new();
     let mut u = Vec::new();
-    for z in 0..n {
-        for y in 0..n {
-            for x in 0..n {
-                let [x, y, z] =
-                    [x, y, z].map(|i| core::f64::consts::TAU * (i as f64 + 0.5) / n as f64);
+    for z in 0..shape[2] {
+        for y in 0..shape[1] {
+            for x in 0..shape[0] {
+                let [x, y, z] = core::array::from_fn::<_, 3, _>(|axis| {
+                    core::f64::consts::TAU * ([x, y, z][axis] as f64 + 0.5) / shape[axis] as f64
+                });
                 rho.push(1.2 + 0.2 * x.sin() + 0.1 * y.cos());
                 u.push([
                     0.3 * x.sin() + 0.2 * (y + z).sin() + 0.1 * (2.0 * x - y).cos(),
@@ -32,32 +37,50 @@ fn field(n: usize) -> (Vec<f64>, Vec<[f64; 3]>) {
 // Independent full 3x3 physical-unit reference. It uses raw first/second
 // moments, explicit modulo indexing and no packed tensors or normalization.
 fn reference(
-    n: usize,
+    shape: [usize; 3],
+    spacing: [f64; 3],
     rho: &[f64],
     u: &[[f64; 3]],
     averaging: DynamicAveraging,
 ) -> (Vec<f64>, Vec<f64>) {
-    let at = |x: usize, y: usize, z: usize| ((z % n) * n + y % n) * n + x % n;
+    let delta_squared = spacing.iter().product::<f64>().cbrt().powi(2);
+    let at = |x: usize, y: usize, z: usize| {
+        ((z % shape[2]) * shape[1] + y % shape[1]) * shape[0] + x % shape[0]
+    };
+    let xyz = |c: usize| {
+        [
+            c % shape[0],
+            c / shape[0] % shape[1],
+            c / (shape[0] * shape[1]),
+        ]
+    };
     let neighbors = |c: usize| -> Vec<usize> {
-        let [x, y, z] = [c % n, c / n % n, c / (n * n)];
+        let [x, y, z] = xyz(c);
         (0..3)
             .flat_map(move |k| {
                 (0..3).flat_map(move |j| {
-                    (0..3).map(move |i| at(x + n + i - 1, y + n + j - 1, z + n + k - 1))
+                    (0..3).map(move |i| {
+                        at(
+                            x + shape[0] + i - 1,
+                            y + shape[1] + j - 1,
+                            z + shape[2] + k - 1,
+                        )
+                    })
                 })
             })
             .collect()
     };
     let strain = |v: &[[f64; 3]], c: usize| -> (f64, [[f64; 3]; 3]) {
-        let p = [c % n, c / n % n, c / (n * n)];
+        let p = xyz(c);
         let mut g = [[0.0; 3]; 3];
         for j in 0..3 {
             let mut a = p;
             let mut b = p;
-            a[j] += n - 1;
+            a[j] += shape[j] - 1;
             b[j] += 1;
             for i in 0..3 {
-                g[i][j] = (v[at(b[0], b[1], b[2])][i] - v[at(a[0], a[1], a[2])][i]) / 2.0;
+                g[i][j] =
+                    (v[at(b[0], b[1], b[2])][i] - v[at(a[0], a[1], a[2])][i]) / (2.0 * spacing[j]);
             }
         }
         let mut s = core::array::from_fn::<_, 3, _>(|i| {
@@ -88,7 +111,7 @@ fn reference(
         rate[c] = r;
         for i in 0..3 {
             for j in 0..3 {
-                base[c][i][j] = rho[c] * r * s[i][j];
+                base[c][i][j] = rho[c] * delta_squared * r * s[i][j];
             }
         }
     }
@@ -106,7 +129,7 @@ fn reference(
                     a += base[d][i][j] / 27.0;
                 }
                 l[i][j] = product - rh[c] * filtered[c][i] * filtered[c][j];
-                m[i][j] = 2.0 * (a - 9.0 * rh[c] * r * s[i][j]);
+                m[i][j] = 2.0 * (a - 9.0 * delta_squared * rh[c] * r * s[i][j]);
             }
         }
         let trace = (l[0][0] + l[1][1] + l[2][2]) / 3.0;
@@ -140,7 +163,7 @@ fn reference(
     let nu = coefficients
         .iter()
         .zip(rate)
-        .map(|(c, r)| c.max(0.0) * r)
+        .map(|(c, r)| c.max(0.0) * delta_squared * r)
         .collect();
     (coefficients, nu)
 }
@@ -155,7 +178,7 @@ fn dynamic_favre_filter_matches_independent_full_tensor_reference() {
             let report = work
                 .prepare(config(averaging), density, &u, || false)
                 .unwrap();
-            let (coefficient, expected) = reference(n, density, &u, averaging);
+            let (coefficient, expected) = reference([n; 3], [1.0; 3], density, &u, averaging);
             for (a, b) in work.viscosities().iter().zip(expected) {
                 assert!((a - b).abs() < 2e-14, "{averaging:?}: {a} != {b}");
             }
@@ -171,6 +194,89 @@ fn dynamic_favre_filter_matches_independent_full_tensor_reference() {
             }
         }
     }
+}
+
+#[test]
+fn cartesian_favre_momentum_matches_independent_physical_tensor_reference() {
+    let shape = [5, 6, 7];
+    let spacing = [0.3, 0.7, 1.1];
+    let (rho, u) = cartesian_field(shape);
+    for averaging in [DynamicAveraging::Domain, DynamicAveraging::LocalBox] {
+        for density in [&rho, &vec![1.0; u.len()]] {
+            let mut work = PeriodicDynamicSgs::new_cartesian(shape, spacing, usize::MAX).unwrap();
+            let report = work
+                .prepare(config(averaging), density, &u, || false)
+                .unwrap();
+            let (coefficient, expected) = reference(shape, spacing, density, &u, averaging);
+            for (a, b) in work.viscosities().iter().zip(expected) {
+                assert!((a - b).abs() < 2e-13, "{averaging:?}: {a} != {b}");
+            }
+            let minimum = coefficient.iter().copied().fold(f64::INFINITY, f64::min);
+            assert!((report.minimum_raw_coefficient_squared - minimum).abs() < 2e-13);
+            if averaging == DynamicAveraging::LocalBox {
+                assert!(report.maximum_eddy_viscosity > 1e-5);
+                assert!(report.backscatter_limited_cells > 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn cartesian_geometry_preserves_bytes_and_refuses_unrepresentable_metrics() {
+    let shape = [5, 6, 7];
+    let bytes = PeriodicDynamicSgs::required_bytes(shape.iter().product()).unwrap();
+    assert_eq!(bytes, 136 * shape.iter().product::<usize>());
+    for scale in [1.0, 1e-250, 1e250] {
+        let spacing = [scale, 2.0 * scale, 4.0 * scale];
+        let work = PeriodicDynamicSgs::new_cartesian(shape, spacing, bytes).unwrap();
+        assert_eq!(work.shape(), shape);
+        assert_eq!(work.spacing(), spacing);
+        assert!((work.filter_width() / scale - 2.0).abs() < 3e-15);
+        assert_eq!(work.workspace_bytes(), bytes);
+    }
+    let tiny = f64::from_bits(1);
+    let work =
+        PeriodicDynamicSgs::new_cartesian(shape, [tiny, 2.0 * tiny, 4.0 * tiny], bytes).unwrap();
+    assert_eq!(work.filter_width(), 2.0 * tiny);
+    let work =
+        PeriodicDynamicSgs::new_cartesian(shape, [f64::MAX / 4.0, f64::MAX / 2.0, f64::MAX], bytes)
+            .unwrap();
+    assert!((work.filter_width() / (f64::MAX / 2.0) - 1.0).abs() < 3e-15);
+    for ulps in [1, 2, 4, 16, 1024] {
+        let spacing = [
+            f64::MAX,
+            f64::from_bits(f64::MAX.to_bits() - ulps),
+            f64::from_bits(f64::MAX.to_bits() - 2 * ulps),
+        ];
+        let work = PeriodicDynamicSgs::new_cartesian(shape, spacing, bytes).unwrap();
+        assert!(work.filter_width() >= spacing[2] && work.filter_width() <= spacing[0]);
+    }
+    for offsets in [[0, 0, 1], [0, 1, 1]] {
+        let spacing = offsets.map(|ulps| f64::from_bits(f64::MAX.to_bits() - ulps));
+        let work = PeriodicDynamicSgs::new_cartesian(shape, spacing, bytes).unwrap();
+        assert!(work.filter_width() >= spacing[2] && work.filter_width() <= spacing[0]);
+    }
+    for spacing in [
+        [0.0, 1.0, 2.0],
+        [-1.0, 1.0, 2.0],
+        [f64::NAN, 1.0, 2.0],
+        [1.0, f64::INFINITY, 2.0],
+        [tiny, 1.0, f64::MAX],
+    ] {
+        assert!(PeriodicDynamicSgs::new_cartesian(shape, spacing, bytes).is_err());
+    }
+    assert!(matches!(
+        PeriodicDynamicSgs::new_cartesian(shape, [0.3, 0.7, 1.1], bytes - 1),
+        Err(DynamicSgsError::WorkspaceBytes { .. })
+    ));
+    assert!(PeriodicDynamicSgs::new_cartesian([2, 6, 7], [0.3, 0.7, 1.1], bytes).is_err());
+    let mut extreme =
+        PeriodicDynamicSgs::new_cartesian(shape, [1e-150, 1.0, 1e150], bytes).unwrap();
+    let (rho, u) = cartesian_field(shape);
+    assert!(matches!(
+        extreme.prepare(config(DynamicAveraging::LocalBox), &rho, &u, || false),
+        Err(DynamicSgsError::Cell { .. })
+    ));
 }
 
 #[test]

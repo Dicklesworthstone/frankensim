@@ -1,16 +1,18 @@
 //! Germano--Lilly dynamic viscosity on a uniform, periodic Cartesian field.
 //!
 //! The test filter is the equal-volume average of the 27 adjacent cells.
-//! Interpreting the resolved values as cell averages gives a grid box of width
-//! `h` and a test box of width `3 h`; the modeled squared-width ratio is NINE,
-//! not the often-assumed four. Density-weighted (Favre) test velocities retain
-//! variable-density covariance. Only the deviatoric stress is modeled.
+//! Interpreting the resolved values as cell averages gives a grid box with
+//! widths `(hx, hy, hz)` and a test box with widths `(3hx, 3hy, 3hz)`. The
+//! scalar filter length is `Delta = (hx hy hz)^(1/3)` and its modeled
+//! squared-width ratio is NINE. Density-weighted (Favre) test velocities
+//! retain variable-density covariance. Only the deviatoric stress is modeled.
 //!
 //! With `A = rho |S| S_dev`, `L = hat(rho u u) - hat(rho u)hat(rho u)/hat(rho)`
 //! and `M = 2 [hat(A) - 9 hat(rho) |S_hat| S_hat_dev]`, the least-squares
-//! coefficient is `C_s^2 = <L_dev:M>/<M:M>`. Lengths in this identity are in
-//! cells; the returned viscosity restores physical `h`. Averaging is either
-//! over the entire periodic domain or over the same local 27-cell test box.
+//! coefficient is `C_s^2 = <L_dev:M>/<M:M>`. Derivatives in this identity are
+//! scaled by `Delta`, with each axis using its physical spacing; the returned
+//! viscosity restores physical units. Averaging is either over the entire
+//! periodic domain or over the same local 27-cell test box.
 //! Negative coefficients are explicitly set to zero (no backscatter). Positive
 //! coefficients above the caller's bound REFUSE rather than being truncated.
 //!
@@ -18,6 +20,9 @@
 //! (1991), doi:10.1063/1.858164. This implements the deviatoric dynamic viscosity,
 //! not their complete compressible SGS energy/heat model. It supplies no wall
 //! treatment, shock model, scale-dependent correction or DNS validation.
+//! Rectangular cells retain an isotropic eddy-viscosity closure: physical
+//! derivatives do not establish calibrated accuracy at arbitrary grid aspect
+//! ratios. See Scotti, Meneveau & Lilly (1993), doi:10.1063/1.858537.
 
 use super::SgsUse;
 use fs_math::det;
@@ -106,7 +111,9 @@ pub struct DynamicSgsReport {
 /// Cell order is x-fastest, followed by y and z; every dimension is periodic.
 pub struct PeriodicDynamicSgs {
     shape: [usize; 3],
-    spacing: f64,
+    spacing: [f64; 3],
+    filter_width: f64,
+    derivative_metric: [f64; 3],
     velocity: Vec<[f64; 3]>,
     filtered: Vec<[f64; 4]>,
     basis: Vec<[f64; 6]>,
@@ -182,7 +189,12 @@ fn deviator(mut a: [f64; 6]) -> [f64; 6] {
     a
 }
 
-fn strain<const N: usize>(shape: [usize; 3], cell: usize, u: &[[f64; N]]) -> (f64, [f64; 6]) {
+fn strain<const N: usize>(
+    shape: [usize; 3],
+    metric: [f64; 3],
+    cell: usize,
+    u: &[[f64; N]],
+) -> Result<(f64, [f64; 6]), DynamicSgsError> {
     let at = coordinates(shape, cell);
     let mut g = [[0.0; 3]; 3];
     for axis in 0..3 {
@@ -192,8 +204,15 @@ fn strain<const N: usize>(shape: [usize; 3], cell: usize, u: &[[f64; N]]) -> (f6
         low[axis] = sides[0];
         high[axis] = sides[2];
         for component in 0..3 {
-            g[component][axis] =
-                0.5 * (u[index(shape, high)][component] - u[index(shape, low)][component]);
+            let difference = u[index(shape, high)][component] - u[index(shape, low)][component];
+            let derivative = 0.5 * difference * metric[axis];
+            if !derivative.is_finite() || (derivative == 0.0 && difference != 0.0) {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "unrepresentable normalized velocity derivative",
+                });
+            }
+            g[component][axis] = derivative;
         }
     }
     let s = [
@@ -204,7 +223,44 @@ fn strain<const N: usize>(shape: [usize; 3], cell: usize, u: &[[f64; N]]) -> (f6
         0.5 * (g[0][2] + g[2][0]),
         0.5 * (g[1][2] + g[2][1]),
     ];
-    (det::sqrt(2.0 * contract(s, s)), deviator(s))
+    let rate = det::sqrt(2.0 * contract(s, s));
+    if !rate.is_finite() || (rate == 0.0 && s.iter().any(|v| *v != 0.0)) {
+        return Err(DynamicSgsError::Cell {
+            cell,
+            reason: "unrepresentable normalized strain contraction",
+        });
+    }
+    Ok((rate, deviator(s)))
+}
+
+// Split off binary exponents before forming the volume. All intermediate
+// mantissa products lie in [1, 32), even for subnormal or near-maximum cells.
+// Sorting makes the length independent of the labeling of the three axes.
+fn geometric_mean(mut spacing: [f64; 3]) -> f64 {
+    spacing.sort_by(f64::total_cmp);
+    let mut product = 1.0;
+    let mut exponent = 0i32;
+    for h in spacing {
+        let (normal, shift) = if h < f64::MIN_POSITIVE {
+            (h * 4_503_599_627_370_496.0, -52)
+        } else {
+            (h, 0)
+        };
+        let bits = normal.to_bits();
+        exponent += ((bits >> 52) & 0x7ff) as i32 - 1023 + shift;
+        product *= f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000);
+    }
+    product *= (1u32 << exponent.rem_euclid(3)) as f64;
+    let root = det::exp(det::ln(product) / 3.0);
+    let exponent = exponent.div_euclid(3);
+    let scale = if exponent >= -1022 {
+        f64::from_bits(((exponent + 1023) as u64) << 52)
+    } else {
+        f64::from_bits(1u64 << (exponent + 1074))
+    };
+    // A geometric mean is between the input extrema. Enforcing this analytic
+    // bound also prevents an upward-rounded root from overflowing at MAX.
+    (root * scale).clamp(spacing[0], spacing[2])
 }
 
 #[derive(Default)]
@@ -252,7 +308,9 @@ impl PeriodicDynamicSgs {
         }
         let result = Self {
             shape,
-            spacing,
+            spacing: [spacing; 3],
+            filter_width: spacing,
+            derivative_metric: [1.0; 3],
             velocity: allocated(n, [0.0; 3])?,
             filtered: allocated(n, [0.0; 4])?,
             basis: allocated(n, [0.0; 6])?,
@@ -270,6 +328,43 @@ impl PeriodicDynamicSgs {
         Ok(result)
     }
 
+    /// Uniform rectangular Cartesian cells. Physical central derivatives use
+    /// each axis spacing; the 27-cell test box preserves the grid aspect ratio.
+    /// `Delta = (hx hy hz)^(1/3)` sets an isotropic eddy-viscosity length, not
+    /// an anisotropic SGS stress model. No aspect-ratio correction is applied.
+    /// Nonpositive, nonfinite or unrepresentable geometry refuses. Equal
+    /// spacings follow [`Self::new`] exactly, including its arithmetic.
+    pub fn new_cartesian(
+        shape: [usize; 3],
+        spacing: [f64; 3],
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        if spacing[0] == spacing[1] && spacing[1] == spacing[2] {
+            return Self::new(shape, spacing[0], maximum_bytes);
+        }
+        if spacing.iter().any(|h| !h.is_finite() || *h <= 0.0) {
+            return Err(DynamicSgsError::Invalid(
+                "positive finite Cartesian spacing required",
+            ));
+        }
+        let filter_width = geometric_mean(spacing);
+        let derivative_metric = spacing.map(|h| filter_width / h);
+        if !filter_width.is_finite()
+            || filter_width <= 0.0
+            || derivative_metric
+                .iter()
+                .any(|m| !m.is_finite() || *m <= 0.0)
+        {
+            return Err(DynamicSgsError::Invalid(
+                "unrepresentable Cartesian filter width or derivative metric",
+            ));
+        }
+        let mut result = Self::new(shape, filter_width, maximum_bytes)?;
+        result.spacing = spacing;
+        result.derivative_metric = derivative_metric;
+        Ok(result)
+    }
+
     /// Actual numerical vector capacities, excluding the fixed-size owner and
     /// allocator metadata. Consumers include this in their complete byte gate.
     pub fn workspace_bytes(&self) -> usize {
@@ -284,6 +379,13 @@ impl PeriodicDynamicSgs {
 
     pub const fn shape(&self) -> [usize; 3] {
         self.shape
+    }
+    pub const fn spacing(&self) -> [f64; 3] {
+        self.spacing
+    }
+    /// Geometric-mean grid-box width, in the same units as [`Self::spacing`].
+    pub const fn filter_width(&self) -> f64 {
+        self.filter_width
     }
     pub fn viscosities(&self) -> &[f64] {
         &self.viscosity
@@ -370,9 +472,18 @@ impl PeriodicDynamicSgs {
         }
         for cell in 0..n {
             poll(&mut cancelled, cell)?;
-            let (rate, s) = strain(self.shape, cell, &self.velocity);
+            let (rate, s) = strain(self.shape, self.derivative_metric, cell, &self.velocity)?;
             self.strain_rate[cell] = rate;
-            self.basis[cell] = s.map(|v| (density[cell] / density_scale) * rate * v);
+            let rho = density[cell] / density_scale;
+            self.basis[cell] = s.map(|v| rho * rate * v);
+            if s.iter().zip(self.basis[cell]).any(|(s, b)| {
+                !b.is_finite() || (b == 0.0 && rho != 0.0 && rate != 0.0 && *s != 0.0)
+            }) {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "unrepresentable normalized stress basis",
+                });
+            }
             let mut filtered = [0.0; 4];
             each_box(self.shape, cell, |j| {
                 let rho = density[j] / density_scale / 27.0;
@@ -415,9 +526,17 @@ impl PeriodicDynamicSgs {
                     a[k] += self.basis[j][k] / 27.0;
                 }
             });
-            let (rate, s) = strain(self.shape, cell, &self.filtered);
+            let (rate, s) = strain(self.shape, self.derivative_metric, cell, &self.filtered)?;
             let m = core::array::from_fn(|k| 2.0 * (a[k] - 9.0 * mean[3] * rate * s[k]));
             let pair = [contract(deviator(l), m), contract(m, m)];
+            if pair.iter().any(|v| !v.is_finite())
+                || (pair[1] == 0.0 && m.iter().any(|v| *v != 0.0))
+            {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "unrepresentable least-squares contraction",
+                });
+            }
             self.contraction[cell] = pair;
             numerator.add(pair[0]);
             denominator.add(pair[1]);
@@ -433,14 +552,28 @@ impl PeriodicDynamicSgs {
                 DynamicAveraging::Domain => domain,
                 DynamicAveraging::LocalBox => {
                     let mut pair = [0.0; 2];
+                    let mut determined = false;
                     each_box(self.shape, cell, |j| {
+                        determined |= self.contraction[j][1] != 0.0;
                         for k in 0..2 {
                             pair[k] += self.contraction[j][k] / 27.0;
                         }
                     });
+                    if determined && pair[1] == 0.0 {
+                        return Err(DynamicSgsError::Cell {
+                            cell,
+                            reason: "underflow of local least-squares denominator",
+                        });
+                    }
                     pair
                 }
             };
+            if pair.iter().any(|v| !v.is_finite()) || (pair[1] == 0.0 && pair[0] != 0.0) {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "unrepresentable averaged least-squares contraction",
+                });
+            }
             let raw = if pair[1] == 0.0 {
                 report.undetermined_cells += 1;
                 0.0
@@ -466,7 +599,7 @@ impl PeriodicDynamicSgs {
                     maximum: config.maximum_coefficient_squared,
                 });
             }
-            let nu = coefficient * self.strain_rate[cell] * velocity_scale * self.spacing;
+            let nu = coefficient * self.strain_rate[cell] * velocity_scale * self.filter_width;
             if !nu.is_finite() {
                 return Err(DynamicSgsError::Cell {
                     cell,

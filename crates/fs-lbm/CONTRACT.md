@@ -1825,6 +1825,24 @@ developed turbulent TGV dissipation histories, a channel DNS profile, jet
 physics or finest-rung acoustic equivalence. Those full M3.2-W5/G2 campaigns
 remain open. Neither SGS nor LVEL is a resolved-turbulence acceptance render.
 
+### Cartesian geometry for the dynamic LES field
+
+`PeriodicDynamicSgs::new_cartesian` admits uniform Cartesian cells with
+independent positive finite spacings `[hx, hy, hz]`. The momentum and scalar
+fits use centered derivatives in each physical direction and the equivalent
+filter length `Delta = (hx*hy*hz)^(1/3)`, evaluated without forming the volume
+product. The 27-cell test box has physical widths `[3hx, 3hy, 3hz]`; its
+equivalent squared filter-length ratio remains nine. Unrepresentable geometry
+metrics refuse. The isotropic constructor and equal-spacing Cartesian calls
+retain the original arithmetic, numerical payload and allocation-free sweeps.
+
+This remains a scalar eddy-viscosity/gradient-diffusion model on a uniform,
+fully periodic grid with at least three cells per axis. Correct directional
+metrics do not qualify arbitrary cell aspect ratios, tensor-valued SGS
+transport, nonuniform grids, walls or turbulent DNS agreement. The geometric
+mean scale follows Scotti, Meneveau & Lilly (1993), DOI `10.1063/1.858537`,
+whose anisotropic-grid analysis supports it for moderate resolution anisotropy.
+
 ### Dynamic scalar transport on the periodic LES field
 
 `sgs3::dynamic::scalar` supplies an independently fitted scalar diffusivity.
@@ -1832,7 +1850,7 @@ remain open. Neither SGS nor LVEL is a resolved-turbulence acceptance render.
 from the same density, velocity and scalar fields, reusing the Favre-filtered
 velocity and strain. The scalar Leonard vector and modeled gradient vector
 are contracted by least squares, following Squires (1991), equations
-(2.13)--(2.19), with the implementation's explicit `3h` test box. The scalar
+(2.13)--(2.19), with the implementation's explicit Cartesian test box. The scalar
 model has no stress-tensor factor of two. It returns diffusivity directly;
 it never divides by a possibly zero momentum coefficient to form Prandtl.
 
