@@ -7,6 +7,9 @@
 //! positive M-matrix for every representable positive time step. The original
 //! tridiagonal solver owns elimination; this module checks original cell and
 //! whole-membrane amount balances before returning a candidate.
+//! Each connected component is solved relative to its minimum initial/boundary
+//! Henry pressure. This preserves a uniform equilibrium exactly, including
+//! independently sealed components, without clipping fluxes or concentrations.
 //!
 //! Material coefficients and geometry stay fixed. Reservoir pressures are
 //! prescribed over each step; the reservoirs and an isothermal thermostat are
@@ -260,6 +263,7 @@ pub struct MembraneDiffusionWorkspace {
     upper: Vec<f64>,
     rhs: Vec<f64>,
     solution: Vec<f64>,
+    pressure_reference: Vec<f64>,
     cached: Option<(Arc<MembraneDiffusion>,u64,Option<[u64;2]>)>,
 }
 impl MembraneDiffusionWorkspace {
@@ -270,7 +274,7 @@ impl MembraneDiffusionWorkspace {
     fn with_rows(cells:usize)->Result<Self,Error> {
         Ok(Self {linear:TridiagonalWorkspace::new(cells)?,mass:vec![0.0;cells],left:vec![0.0;cells],
             right:vec![0.0;cells],diagonal:vec![0.0;cells],lower:vec![0.0;cells-1],upper:vec![0.0;cells-1],
-            rhs:vec![0.0;cells],solution:vec![0.0;cells],cached:None})
+            rhs:vec![0.0;cells],solution:vec![0.0;cells],pressure_reference:vec![0.0;cells],cached:None})
     }
     fn factor(&mut self,model:&Arc<MembraneDiffusion>,dt:f64,cancelled:&mut impl FnMut()->bool)->Result<(),Error> {
         self.factor_with_reservoirs(model,dt,None,cancelled)
@@ -319,6 +323,64 @@ impl MembraneDiffusionWorkspace {
         poll(cancelled)?;
         self.cached=Some((model.clone(),dt.to_bits(),capacity_bits));
         Ok(())
+    }
+
+    /// A constant pressure is in the nullspace of every connected diffusion
+    /// block. Subtract it analytically before forming the RHS: solving for
+    /// absolute pressures would turn LU roundoff into artificial equilibrium
+    /// flux, amplified by long steps. The component minimum keeps the shifted
+    /// RHS nonnegative, unlike a signed pressure-increment solve near depletion.
+    /// Finite reservoir rows participate in the same blocks as sorbed cells.
+    fn solve_pressures(
+        &mut self,
+        initial_pressure: impl Fn(usize) -> f64,
+        prescribed_reservoirs: Option<[f64; 2]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        let rows = self.mass.len();
+        let mut start = 0;
+        while start < rows {
+            poll(cancelled)?;
+            let mut end = start + 1;
+            let mut reference = initial_pressure(start);
+            while end < rows && self.upper[end - 1] != 0.0 {
+                if end % 128 == 0 { poll(cancelled)?; }
+                reference = reference.min(initial_pressure(end));
+                end += 1;
+            }
+            if let Some(boundary) = prescribed_reservoirs {
+                if start == 0 && self.left[0] > 0.0 {
+                    reference = reference.min(boundary[0]);
+                }
+                if end == rows && self.right[rows - 1] > 0.0 {
+                    reference = reference.min(boundary[1]);
+                }
+            }
+            for i in start..end {
+                if i % 128 == 0 { poll(cancelled)?; }
+                self.pressure_reference[i] = reference;
+                let mut rhs = self.mass[i] * (initial_pressure(i) - reference);
+                if let Some(boundary) = prescribed_reservoirs {
+                    if i == 0 {
+                        rhs = self.left[i].mul_add(boundary[0] - reference, rhs);
+                    }
+                    if i + 1 == rows {
+                        rhs = self.right[i].mul_add(boundary[1] - reference, rhs);
+                    }
+                }
+                self.rhs[i] = finite(rhs)?;
+            }
+            start = end;
+        }
+        self.linear.solve_factored_into(&self.rhs, &mut self.solution, &mut *cancelled)?;
+        for i in 0..rows {
+            if i % 128 == 0 { poll(cancelled)?; }
+            if !nonnegative(self.solution[i]) {
+                return Err(Error::Invalid("implicit membrane pressure difference lost nonnegativity"));
+            }
+            self.solution[i] = finite(self.pressure_reference[i] + self.solution[i])?;
+        }
+        poll(cancelled)
     }
 }
 
@@ -426,15 +488,7 @@ impl MembraneDiffusionState {
             return Err(Error::Invalid("positive representable duration and nonnegative reservoir pressures required"));
         }
         work.factor(&self.model,duration_s,&mut cancelled)?;
-        let n=self.partial_pressures_pa.len();
-        for i in 0..n {
-            if i%128==0 {poll(&mut cancelled)?;}
-            let mut rhs=work.mass[i]*self.partial_pressures_pa[i];
-            if i==0 {rhs=work.left[i].mul_add(reservoirs[0],rhs);}
-            if i+1==n {rhs=work.right[i].mul_add(reservoirs[1],rhs);}
-            work.rhs[i]=finite(rhs)?;
-        }
-        work.linear.solve_factored_into(&work.rhs,&mut work.solution,&mut cancelled)?;
+        work.solve_pressures(|i| self.partial_pressures_pa[i], Some(reservoirs), &mut cancelled)?;
         self.finish_step(reservoirs,duration_s,&work.solution,controls,&mut cancelled)
     }
     /// One owner for sorbed-state admission, face transfer and local/global

@@ -70,6 +70,48 @@ fn finite_reservoir_transient_converges_in_time_to_the_continuous_capacity_model
 }
 
 #[test]
+fn finite_reservoir_partition_equilibrium_has_no_numerical_transfer() {
+    let layers=[layer(L,11,D,S),layer(0.5*L,13,3.0*D,2.0*S)];
+    let model=MembraneDiffusion::new(AREA,&layers,&[Some(MolarPermeance::try_new(1e-11).unwrap())],||false).unwrap();
+    let film=model.initial_state(&[P;24],||false).unwrap();
+    let state=FiniteMembraneDiffusionState::new(film,[capacity(5e-12),capacity(2e-8)],[P;2],||false).unwrap();
+    let mut work=FiniteMembraneDiffusionWorkspace::new(24).unwrap();
+    for duration in [0.01,100.0,1e8] {
+        let candidate=state.step_candidate(duration,controls(),&mut work,||false).unwrap();
+        assert_eq!(candidate.state().reservoir_pressures_pa(),[P;2]);
+        assert_eq!(candidate.state().membrane().partial_pressures_pa(),&[P;24]);
+        assert_eq!(candidate.step().membrane.face_molar_fluxes_mol_m2_s,vec![0.0;25]);
+        assert_eq!(candidate.step().membrane.stored_change_mol,0.0);
+        assert_eq!(candidate.step().reservoir_amount_changes_mol,[0.0;2]);
+        assert_eq!(candidate.step().amount_residual_mol,0.0);
+        assert_eq!(candidate.step().total_after_mol,candidate.step().total_before_mol);
+    }
+}
+
+#[test]
+fn small_diffusion_mode_survives_a_large_common_pressure() {
+    // Equal capacities give the exact slow eigenmode [1,0,-1] with
+    // lambda=2D/L^2. Backward Euler attenuates its amplitude by 1/(1+lambda*dt).
+    let amplitude=0.001;
+    let film=MembraneDiffusion::new(AREA,&[layer(L,1,D,S)],&[],||false).unwrap()
+        .initial_state(&[P],||false).unwrap();
+    let state=FiniteMembraneDiffusionState::new(film,[capacity(AREA*S*L);2],
+        [P+amplitude,P-amplitude],||false).unwrap();
+    let mut work=FiniteMembraneDiffusionWorkspace::new(1).unwrap();
+    let duration=1e5;
+    let candidate=state.step_candidate(duration,controls(),&mut work,||false).unwrap();
+    let actual_amplitude=(state.reservoir_pressures_pa()[0]-state.reservoir_pressures_pa()[1])*0.5;
+    let expected_amplitude=actual_amplitude/(1.0+2.0*D/(L*L)*duration);
+    let [left,right]=candidate.state().reservoir_pressures_pa();
+    let rounding=2.0*f64::EPSILON*P;
+    assert!((left-(P+expected_amplitude)).abs()<=rounding);
+    assert!((right-(P-expected_amplitude)).abs()<=rounding);
+    assert!((candidate.state().membrane().partial_pressures_pa()[0]-P).abs()<=rounding);
+    assert!(candidate.step().reservoir_amount_changes_mol[0]<0.0);
+    assert!(candidate.step().reservoir_amount_changes_mol[1]>0.0);
+}
+
+#[test]
 fn unequal_reservoirs_and_layers_equilibrate_with_sorbed_capacity_in_the_denominator() {
     let layers=[layer(L,8,D,S),layer(0.5*L,4,0.5*D,4.0*S)];
     let model=MembraneDiffusion::new(AREA,&layers,&[Some(MolarPermeance::try_new(1e-11).unwrap())],||false).unwrap();

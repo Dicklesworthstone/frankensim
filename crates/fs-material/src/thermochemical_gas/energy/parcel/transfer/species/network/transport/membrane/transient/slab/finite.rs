@@ -135,13 +135,10 @@ impl FiniteMembraneDiffusionState {
         let n=self.membrane.partial_pressures_pa.len();
         work.factor_with_reservoirs(&self.membrane.model,duration_s,
             Some(self.capacities.map(MolarPressureCapacity::value_si)),&mut cancelled)?;
-        for i in 0..n+2 {
-            if i%128==0 {poll(&mut cancelled)?;}
-            let pressure=if i==0 {self.reservoir_pressures_pa[0]}else if i==n+1 {self.reservoir_pressures_pa[1]}
-                else {self.membrane.partial_pressures_pa[i-1]};
-            work.rhs[i]=finite(work.mass[i]*pressure)?;
-        }
-        work.linear.solve_factored_into(&work.rhs,&mut work.solution,&mut cancelled)?;
+        work.solve_pressures(|i| {
+            if i==0 {self.reservoir_pressures_pa[0]}else if i==n+1 {self.reservoir_pressures_pa[1]}
+                else {self.membrane.partial_pressures_pa[i-1]}
+        }, None, &mut cancelled)?;
         let pressures=[work.solution[0],work.solution[n+1]];
         let candidate=self.membrane.finish_step(pressures,duration_s,&work.solution[1..n+1],controls,&mut cancelled)?;
         let (membrane,report)=candidate.into_parts();

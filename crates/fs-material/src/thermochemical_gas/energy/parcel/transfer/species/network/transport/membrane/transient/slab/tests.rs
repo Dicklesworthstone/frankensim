@@ -134,11 +134,34 @@ fn partition_equilibrium_preserves_common_potential_and_different_concentrations
     let state=MembraneDiffusion::new(AREA,&layers,&[None],||false).unwrap()
         .initial_state(&[PRESSURE;8],||false).unwrap();
     let mut work=MembraneDiffusionWorkspace::new(8).unwrap();
-    let candidate=state.step_candidate([PRESSURE;2],100.0,controls(),&mut work,||false).unwrap();
-    for &q in candidate.state().partial_pressures_pa() {relative(q,PRESSURE,2e-14);}
-    let c=candidate.state().concentrations_mol_m3().collect::<Vec<_>>();
-    relative(c[4]/c[3],3.0,2e-14);
-    relative(candidate.state().stored_amount_mol().unwrap(),state.stored_amount_mol().unwrap(),2e-14);
+    // One common Henry pressure is equilibrium even when partitioning makes
+    // concentrations discontinuous. Stiff time steps must not manufacture
+    // flux or storage from the absolute pressure datum.
+    for duration in [0.01,100.0,1e8] {
+        let candidate=state.step_candidate([PRESSURE;2],duration,controls(),&mut work,||false).unwrap();
+        assert_eq!(candidate.state().partial_pressures_pa(),state.partial_pressures_pa());
+        assert_eq!(candidate.step().face_molar_fluxes_mol_m2_s,vec![0.0;9]);
+        assert_eq!(candidate.step().stored_change_mol,0.0);
+        assert_eq!(candidate.step().amount_residual_mol,0.0);
+        let c=candidate.state().concentrations_mol_m3().collect::<Vec<_>>();
+        relative(c[4]/c[3],3.0,2e-14);
+        assert_eq!(candidate.state().stored_amount_mol().unwrap(),state.stored_amount_mol().unwrap());
+    }
+}
+
+#[test]
+fn sealed_components_preserve_their_own_distinct_equilibria_exactly() {
+    let seal=Some(MolarPermeance::try_new(0.0).unwrap());
+    let layers=[layer(L,7,D,S),layer(0.5*L,9,2.0*D,3.0*S),layer(2.0*L,5,0.25*D,0.5*S)];
+    let pressures=[vec![1200.0;7],vec![40000.0;9],vec![71000.0;5]].concat();
+    let state=MembraneDiffusion::new_with_surfaces(AREA,&layers,&[seal;2],[seal;2],||false).unwrap()
+        .initial_state(&pressures,||false).unwrap();
+    let mut work=MembraneDiffusionWorkspace::new(pressures.len()).unwrap();
+    let candidate=state.step_candidate([0.0,1e7],1e8,controls(),&mut work,||false).unwrap();
+    assert_eq!(candidate.state().partial_pressures_pa(),pressures);
+    assert_eq!(candidate.step().face_molar_fluxes_mol_m2_s,vec![0.0;pressures.len()+1]);
+    assert_eq!(candidate.step().stored_change_mol,0.0);
+    assert_eq!(candidate.step().maximum_cell_amount_residual_mol,0.0);
 }
 
 #[test]
