@@ -1,5 +1,36 @@
 # CONTRACT: fs-couple
 
+## Layer-resolved incompressible film heat
+
+`render::plate::impact::material::heating::SqueezeFilmLayerHeatRoute`
+and `HeatedImpactSystem::new_with_layer_losses` locate an original
+passage's pressure-flow work within its retained `GapViscosityProfile`.
+Every prescribed viscosity layer explicitly names one existing finite caloric
+store. Several layers may share a store. The source layer interfaces,
+viscosities and positive integrals of `(z-z0)^2/mu` remain queryable;
+no wall heat split, layer inventory, density, mixing or advection is inferred.
+
+The actual channel coefficient must exactly match the retained profile's
+hydraulic-equivalent viscosity, both at attachment and before each deposit.
+A common native Barus factor preserves these pressure-work fractions.
+Whole-film, whole-channel and layered routes cannot overlap or duplicate
+physical work. Existing uniform/channel liquid feedback refuses replacement
+of a retained layered film; these profiles are frozen until an explicit
+layer-law binding is provided. Couette work is outside this pressure-only
+route: combined pressure/shear layer cross terms require their own partition.
+
+The original pressure solve is evaluated once per selected island at the
+accepted discrete-gradient velocity and midpoint geometry. Its physical
+channel work is counted once in the mechanical loss gate, irrespective of
+the number of representational layers. Nonlargest layer energies are summed
+with compensation; only the rounding remainder goes to the largest physical
+contributor, preserving tiny positive deposits. All deposits remain scratch
+until the existing adiabatic, transport or thermal-network owner accepts
+the same mechanical step. Any chart, profile or cancellation refusal leaves
+motion, stores and clock unchanged. Five focused regressions cover exact
+uniform reduction, independent two-layer work, tiny contributions, invalid
+coverage, late rollback, network conservation and feedback admission.
+
 ## Continuous physical tones in coupled performance files
 
 Continuous coupled force files (`render::schedule::force::file::coupled_tones`):

@@ -1091,3 +1091,29 @@ fn selective_channel_heat_retains_unrouted_work_and_identical_mechanics() {
         1e-13,
     );
 }
+
+#[test]
+fn scalar_feedback_cannot_replace_retained_through_gap_rheology() {
+    use fs_couple::render::plate::impact::material::heating::SqueezeFilmLayerHeatRoute;
+    use fs_couple::render::plate::impact::material::heating::layered_film::{
+        GapViscosityProfile, ViscosityLayer,
+    };
+    let card = card(0.2, 0.001);
+    let c = curve(card.content_hash(), 0.2, 1.0);
+    let law = law(&card);
+    let profile = GapViscosityProfile::new(vec![ViscosityLayer {
+        upper_fraction: 1.0,
+        dynamic_viscosity_pa_s: law.reference_state().dynamic_viscosity_pa_s(),
+    }]).unwrap();
+    let inner = HeatedImpactSystem::new_with_layer_losses(
+        mechanics(law.reference_state(), 0.0).prepare_analytic().unwrap(),
+        stores(&c), vec![], vec![], vec![],
+        vec![SqueezeFilmLayerHeatRoute {
+            film: 0, channel: 0, profile, layer_destinations: vec!["fluid".into()],
+        }], vec![], 1e-13,
+    ).unwrap();
+    assert!(LiquidFilmImpactSystem::new(inner, vec![LiquidFilmBinding {
+        film: 0, reservoir: "fluid".into(), law,
+        maximum_relative_viscosity_change: 0.1,
+    }]).is_err());
+}

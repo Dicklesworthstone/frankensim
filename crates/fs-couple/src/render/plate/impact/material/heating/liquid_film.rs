@@ -209,6 +209,12 @@ impl<'m> LiquidFilmImpactSystem<'m> {
             start = end;
         }
         groups.sort_by_key(|group| group.film);
+        if groups.iter().any(|group|inner.film_routes.iter()
+            .any(|route|route.film==group.film && route.layers.is_some())) {
+            return Err(invalid(
+                "uniform/channel liquid feedback cannot replace a retained through-gap layer profile",
+            ));
+        }
         let mut reservoir_indices = Vec::with_capacity(count);
         let mut sources = Vec::with_capacity(count);
         for (reservoir, law, maximum_change) in source_bindings(&bindings, &channel_bindings) {
