@@ -503,6 +503,130 @@ fn g3_borrowed_full_spectrum_laws_and_zero_layers_keep_native_limits() {
 }
 
 #[test]
+fn g3_rough_coating_reuses_only_identical_angles_and_preserves_exact_pdf() {
+    use crate::dielectric::{
+        SampledFresnel, evaluate_rough_with_fresnel, normalize_admitted, sample_ggx_visible_normal,
+    };
+
+    let absorbing =
+        CauchyCoatingLayer::try_new(CauchyIor::try_constant(2.0).unwrap(), 0.01, 50.0e-9).unwrap();
+    let coatings = [
+        surface(&[layer(1.3, 90.0), layer(2.0, 50.0)], 32),
+        surface(&[layer(1.3, 90.0), absorbing], 32),
+    ];
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let mut accepted = 0_u32;
+    let mut reused = 0_u32;
+    let mut reflections = 0_u32;
+    let mut transmissions = 0_u32;
+    let mut tir = 0_u32;
+    for coated in coatings {
+        for (eta_i, eta_t, reverse) in [(1.0, 1.5, false), (1.5, 1.0, true)] {
+            let interface = coated.interface(550.0, reverse).unwrap();
+            for cosine in [1.0_f64, 0.8, 0.01] {
+                let wo = Vec3::new((1.0 - cosine * cosine).sqrt(), 0.0, cosine);
+                let normalized_wo = normalize_admitted(wo);
+                for alpha in [0.03, 0.5] {
+                    for (u, v) in [(0.0, 0.0), (0.17, 0.63), (0.37, 0.61), (0.99, 0.1)] {
+                        let facet =
+                            sample_ggx_visible_normal(normal, normalized_wo, alpha, u, v).unwrap();
+                        let sampled_cosine = normalized_wo.dot(facet).clamp(0.0, 1.0);
+                        let response = interface.fresnel(sampled_cosine, eta_i, eta_t).unwrap();
+                        for event_sample in [0.0, 0.999] {
+                            let Some(sample) = interface
+                                .sample_rough(normal, wo, eta_i, eta_t, alpha, u, v, event_sample)
+                                .unwrap()
+                            else {
+                                continue;
+                            };
+                            let full = interface
+                                .evaluate_rough(
+                                    normal,
+                                    normalized_wo,
+                                    sample.direction,
+                                    eta_i,
+                                    eta_t,
+                                    alpha,
+                                )
+                                .unwrap();
+                            let cached = SampledFresnel {
+                                cosine: sampled_cosine,
+                                response,
+                            };
+                            let mut recomputed = false;
+                            let replay = evaluate_rough_with_fresnel(
+                                normal,
+                                normalized_wo,
+                                sample.direction,
+                                eta_i,
+                                eta_t,
+                                alpha,
+                                Some(interface),
+                                |angle| {
+                                    cached.resolve(angle, || {
+                                        recomputed = true;
+                                        interface.fresnel(angle, eta_i, eta_t)
+                                    })
+                                },
+                            )
+                            .unwrap();
+                            assert_eq!(replay.value.to_bits(), full.value.to_bits());
+                            assert_eq!(replay.pdf.to_bits(), full.pdf.to_bits());
+                            assert_eq!(sample.value.to_bits(), full.value.to_bits());
+                            assert_eq!(sample.pdf.to_bits(), full.pdf.to_bits());
+                            assert_eq!(
+                                sample.radiance_weight.to_bits(),
+                                (full.value * normal.dot(sample.direction).abs() / full.pdf)
+                                    .to_bits()
+                            );
+                            accepted += 1;
+                            reused += u32::from(!recomputed);
+                            reflections += u32::from(sample.event == DielectricEvent::Reflection);
+                            transmissions +=
+                                u32::from(sample.event == DielectricEvent::Transmission);
+                            tir += u32::from(response.total_internal_reflection);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(reflections > 0 && transmissions > 0 && tir > 0);
+    assert!(reused > 0 && reused < accepted);
+    eprintln!(
+        "rough 64-layer coatings: {accepted} accepted draws, {reused} exact response reuses; optical solves {} -> {}",
+        2 * accepted,
+        2 * accepted - reused
+    );
+}
+
+#[test]
+fn g0_rough_coating_response_recomputes_for_one_ulp_angle_change() {
+    let coated = surface(&[layer(3.0, 550.0 / 12.0), layer(1.0, 550.0 / 4.0)], 32);
+    let interface = coated.interface(550.0, false).unwrap();
+    let cosine = 0.8_f64;
+    let response = interface.fresnel(cosine, 1.0, 1.5).unwrap();
+    let cache = crate::dielectric::SampledFresnel { cosine, response };
+    assert_eq!(
+        cache.resolve(cosine, || panic!(
+            "identical angle repeated the coating solve"
+        )),
+        Ok(response)
+    );
+    let adjacent = f64::from_bits(cosine.to_bits() + 1);
+    let mut calls = 0;
+    let cache = crate::dielectric::SampledFresnel { cosine, response };
+    let actual = cache
+        .resolve(adjacent, || {
+            calls += 1;
+            interface.fresnel(adjacent, 1.0, 1.5)
+        })
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(actual, interface.fresnel(adjacent, 1.0, 1.5).unwrap());
+}
+
+#[test]
 fn g3_rough_samples_replay_pdf_and_reciprocal_transmitted_bsdf() {
     let coated = surface(&[layer(1.3, 90.0), layer(2.0, 50.0)], 2);
     let normal = Vec3::new(0.0, 0.0, 1.0);
@@ -592,10 +716,15 @@ fn g0_absorbing_dielectric_films_retain_loss_and_work_is_bounded() {
     let absorbing =
         CauchyCoatingLayer::try_new(CauchyIor::try_constant(1.5).unwrap(), 0.01, 80.0e-9).unwrap();
     let coating = DielectricCoating::try_new(
-            CoherentPeriodicCoating::try_new(&[absorbing], 1, source()).unwrap()
-        ).unwrap();
-    let response = DielectricSurface::SMOOTH.with_coating(coating)
-        .interface(550.0, false).unwrap().fresnel(0.8, 1.0, 1.5).unwrap();
+        CoherentPeriodicCoating::try_new(&[absorbing], 1, source()).unwrap(),
+    )
+    .unwrap();
+    let response = DielectricSurface::SMOOTH
+        .with_coating(coating)
+        .interface(550.0, false)
+        .unwrap()
+        .fresnel(0.8, 1.0, 1.5)
+        .unwrap();
     assert!(response.absorption_residual() > 0.0);
     let film = CoherentDielectricCoating::try_new(
         CauchyIor::try_constant(1.5).unwrap(),
