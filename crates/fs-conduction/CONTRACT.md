@@ -544,6 +544,29 @@ existing source/card and film-support tests exercise the new path too.
 Generation is prescribed independently of temperature; neither this path nor
 its roundoff residuals claim Joule/reaction feedback, material-error enclosure,
 transient accuracy or experimental qualification.
+
+`RadialLayeredWall` binds the same original source stack and generated nonlinear
+solve to positive-radius hollow cylinders (insulated ends) and full spherical
+shells. It retains physical radial thicknesses, the actual area of each contact
+and each reservoir film, and the exact generated volume of every layer. A small
+cached geometry leaf supplies integrated reciprocal area and distributed-source
+moments to the existing Kirchhoff/shooting owner. Cylindrical logarithms use
+ln_1p, thin-shell source moments avoid subtractive cancellation, and stationary
+radii invert swept volume without subtracting nearly equal radii. Conductivity
+integration, common source-domain admission, interior extremum checks, work
+limits and cancellation remain shared with the planar path.
+
+Reports distinguish total signed radial heat rate from the local Q/A flux;
+outward reservoir heat closes the signed volume generation. Profile recovery
+uses the retained original material integrals. The inner face area is only a
+numerical normalization: the absolute flux tolerance refers to that area, and
+reported constitutive residuals are converted to watts. Cylinder length scales
+powers without changing its radial temperatures. Five focused tests in
+`tests/layered_nonlinear/radial.rs` cover nonlinear logarithmic/inverse-radius
+conduction, internal hot/cold spots, multilayer contacts and films, subdivision,
+length/thin-shell limits and source/geometry/budget/cancellation refusal.
+A zero-radius solid centre, axial/lateral spreading, moving geometry, nonlinear
+generation feedback and transient radial storage are outside this shell model.
 Seven cases in `tests/layered_nonlinear.rs` cover affine and interior-knot laws,
 contacts/films, reversal, equal temperatures, original source receipts and bounded
 refusal. No density/Cp, transient history, lateral spreading,

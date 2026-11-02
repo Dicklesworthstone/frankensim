@@ -1,12 +1,14 @@
-//! Internally heated walls with the original positive piecewise-linear k(T).
+//! Internally heated stacks with the original positive piecewise-linear k(T).
 //!
-//! The Kirchhoff potential K(T)=integral(k(T), dT) obeys K''=-s, so its
-//! profile is quadratic even when temperature is not. Exact source-segment
-//! inversion recovers temperature; a monotone scalar search closes the right
-//! reservoir. See Peavy, DOI:10.1177/109719639602000107 for the steady
-//! one-dimensional Kirchhoff transformation. Generation follows directly
-//! from dq/dx=s and q=-dK/dx.
+//! For a planar wall the Kirchhoff potential K(T)=integral(k(T), dT) obeys
+//! K''=-s, so its profile is quadratic even when temperature is not. The
+//! shared radial caller supplies exact reciprocal-area and source moments.
+//! Exact source-segment inversion recovers temperature; a monotone scalar
+//! search closes the right reservoir. See Peavy, DOI:10.1177/109719639602000107
+//! for the steady one-dimensional Kirchhoff transformation. In all geometries
+//! dQ/dr=s*A(r) and Q=-A(r)*dK/dr; geometry owns only those spatial integrals.
 
+use super::geometry::LayerShape;
 use super::nonlinear::ConductivityIntegral;
 use super::{LayeredWall, NonlinearWallOptions, checkpoint, finite, invalid, positive};
 use crate::ConductionError;
@@ -80,6 +82,7 @@ pub struct NonlinearGeneratedLayeredWallSolution {
     /// Unchanged caller-declared domain, work and residual limits.
     pub options: NonlinearGenerationOptions,
     laws: Vec<ConductivityIntegral>,
+    pub(super) shapes: Vec<LayerShape>,
 }
 
 impl NonlinearGeneratedLayeredWallSolution {
@@ -113,9 +116,11 @@ impl NonlinearGeneratedLayeredWallSolution {
         }
         let drop = finite(
             "interior Kirchhoff drop",
-            position_m
-                * (0.5 * self.volumetric_generation_w_m3[layer_index] * position_m
-                    + row.face_fluxes_w_per_m2[0]),
+            self.shapes[layer_index].potential_drop(
+                row.face_fluxes_w_per_m2[0],
+                self.volumetric_generation_w_m3[layer_index] * self.shapes[layer_index].volume(),
+                position_m,
+            ),
         )?;
         self.laws[layer_index]
             .shift(cx, row.face_temperatures_k[0], drop)?
@@ -158,6 +163,34 @@ impl LayeredWall {
         volumetric_generation_w_m3: &[f64],
         options: NonlinearGenerationOptions,
     ) -> Result<NonlinearGeneratedLayeredWallSolution, ConductionError> {
+        self.solve_generated_geometry(
+            cx,
+            reservoir_temperatures_k,
+            area_m2,
+            volumetric_generation_w_m3,
+            options,
+            self.layers.iter().map(|layer| LayerShape::planar(layer.thickness_m)).collect(),
+            &self.contact_resistances_m2_k_per_w,
+            self.surface_resistances_m2_k_per_w,
+        )
+    }
+
+    // Shared material integral, source-domain/extremum checks and scalar solve.
+    // The private radial caller uses q=Q/Aref and R_reference=R_areal*Aref/Aface.
+    // Its public report converts these private normalized quantities to actual
+    // heat rates and local fluxes. Planar arithmetic stays area-independent.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn solve_generated_geometry(
+        &self,
+        cx: &Cx<'_>,
+        reservoir_temperatures_k: [f64; 2],
+        area_m2: f64,
+        volumetric_generation_w_m3: &[f64],
+        options: NonlinearGenerationOptions,
+        shapes: Vec<LayerShape>,
+        contacts: &[f64],
+        surfaces: [f64; 2],
+    ) -> Result<NonlinearGeneratedLayeredWallSolution, ConductionError> {
         checkpoint(cx, 0)?;
         options.solver.validate()?;
         positive("wall area", area_m2)?;
@@ -177,7 +210,7 @@ impl LayeredWall {
         }
         for boundary in 0..2 {
             let temperature = reservoir_temperatures_k[boundary];
-            if self.surface_resistances_m2_k_per_w[boundary] == 0.0
+            if surfaces[boundary] == 0.0
                 && (temperature < low || temperature > high)
             {
                 return Err(invalid(
@@ -196,7 +229,7 @@ impl LayeredWall {
         {
             checkpoint(cx, index)?;
             finite("volumetric generation", source)?;
-            let amount = finite("layer generation per area", source * layer.thickness_m)?;
+            let amount = finite("layer generation per reference area", source * shapes[index].volume())?;
             if source != 0.0 && amount == 0.0 {
                 return Err(invalid("nonzero volumetric generation underflowed"));
             }
@@ -213,9 +246,9 @@ impl LayeredWall {
         // integral drop lies in [-capacity,capacity], bounding the inlet flux
         // regardless of generation in later layers or external reservoirs.
         let capacity = laws[0].integral(cx, low, high)?;
-        let half_width = capacity / self.layers[0].thickness_m;
+        let half_width = capacity / shapes[0].resistance();
         positive("inlet flux bracket half-width", half_width)?;
-        let center = -0.5 * generation[0];
+        let center = -shapes[0].weighted_flux(0.0, generation[0]);
         let mut bracket = [
             finite("inlet flux lower bound", center - half_width)?,
             finite("inlet flux upper bound", center + half_width)?,
@@ -234,6 +267,9 @@ impl LayeredWall {
                 &laws,
                 reservoir_temperatures_k,
                 &generation,
+                &shapes,
+                contacts,
+                surfaces,
                 flux,
                 [low, high],
                 &mut rows,
@@ -285,6 +321,7 @@ impl LayeredWall {
                             left_flux_bracket_w_per_m2: bracket,
                             options,
                             laws,
+                            shapes,
                         });
                     }
                     if right_residual > 0.0 {
@@ -314,13 +351,16 @@ impl LayeredWall {
         laws: &[ConductivityIntegral],
         reservoirs: [f64; 2],
         generation: &[f64],
+        shapes: &[LayerShape],
+        contacts: &[f64],
+        surfaces: [f64; 2],
         inlet_flux: f64,
         interval: [f64; 2],
         rows: &mut Vec<NonlinearGeneratedLayerTemperatures>,
     ) -> Result<Shot, ConductionError> {
         let mut temperature = finite(
             "left face temperature",
-            (-inlet_flux).mul_add(self.surface_resistances_m2_k_per_w[0], reservoirs[0]),
+            (-inlet_flux).mul_add(surfaces[0], reservoirs[0]),
         )?;
         let mut maximum_flux_residual = 0.0_f64;
         let mut produced = 0.0;
@@ -336,8 +376,12 @@ impl LayeredWall {
             let flux_in = finite("layer inlet flux", inlet_flux + produced)?;
             produced = finite("accumulated source", produced + generation[index])?;
             let flux_out = finite("layer outlet flux", inlet_flux + produced)?;
-            let mean_flux = finite("layer mean flux", flux_in + 0.5 * generation[index])?;
-            let drop = finite("layer Kirchhoff drop", mean_flux * layer.thickness_m)?;
+            let shape = shapes[index];
+            let mean_flux = finite(
+                "resistance-weighted reference flux",
+                shape.weighted_flux(flux_in, generation[index]),
+            )?;
+            let drop = finite("layer Kirchhoff drop", mean_flux * shape.resistance())?;
             if mean_flux != 0.0 && drop == 0.0 {
                 return Err(invalid("nonzero Kirchhoff drop underflowed"));
             }
@@ -360,8 +404,14 @@ impl LayeredWall {
                         "interior temperature extremum is not representable",
                     ));
                 }
-                let x = finite("interior extremum position", fraction * layer.thickness_m)?;
-                let extremum_drop = finite("interior extremum Kirchhoff drop", 0.5 * x * flux_in)?;
+                let x = finite("interior extremum position", shape.stationary_position(fraction))?;
+                if x <= 0.0 || x >= layer.thickness_m {
+                    return Err(invalid("interior extremum position is not representable"));
+                }
+                let extremum_drop = finite(
+                    "interior extremum Kirchhoff drop",
+                    shape.potential_drop(flux_in, generation[index], x),
+                )?;
                 let Some(value) = law.shift(cx, left, extremum_drop)? else {
                     return Ok(if extremum_drop > 0.0 {
                         Shot::TooCold
@@ -378,7 +428,7 @@ impl LayeredWall {
                     maximum_x = x;
                 }
             }
-            let magnitude = law.integral(cx, left.min(right), left.max(right))? / layer.thickness_m;
+            let magnitude = law.integral(cx, left.min(right), left.max(right))? / shape.resistance();
             let recomputed = if left >= right { magnitude } else { -magnitude };
             let residual = finite("mean Fourier residual", recomputed - mean_flux)?;
             maximum_flux_residual = maximum_flux_residual.max(residual.abs());
@@ -393,7 +443,7 @@ impl LayeredWall {
                 mean_flux_residual_w_per_m2: residual,
             });
             temperature = right;
-            if let Some(&contact) = self.contact_resistances_m2_k_per_w.get(index) {
+            if let Some(&contact) = contacts.get(index) {
                 temperature = finite(
                     "contact downstream temperature",
                     (-flux_out).mul_add(contact, right),
@@ -412,18 +462,18 @@ impl LayeredWall {
         let right_flux = finite("right boundary flux", inlet_flux + produced)?;
         let right_residual = finite(
             "right reservoir residual",
-            (-right_flux).mul_add(self.surface_resistances_m2_k_per_w[1], temperature)
+            (-right_flux).mul_add(surfaces[1], temperature)
                 - reservoirs[1],
         )?;
         for (jump, resistance, flux) in [
             (
                 reservoirs[0] - rows[0].face_temperatures_k[0],
-                self.surface_resistances_m2_k_per_w[0],
+                surfaces[0],
                 inlet_flux,
             ),
             (
                 temperature - reservoirs[1],
-                self.surface_resistances_m2_k_per_w[1],
+                surfaces[1],
                 right_flux,
             ),
         ] {

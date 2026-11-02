@@ -7,7 +7,9 @@
 //! perfect contact or a prescribed surface temperature. The generation paths
 //! also resolve uniform volumetric heating within each layer,
 //! including temperature-dependent conductivity and interior hot/cold spots.
-//! There is no lateral spreading, radiation, moisture transport or transient claim.
+//! RadialLayeredWall binds the same generated-material solve to hollow cylinders
+//! and spheres, using actual local areas and volume generation. There is no
+//! lateral spreading, radiation, moisture transport or transient claim.
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
@@ -21,6 +23,12 @@ pub use nonlinear::{
 };
 mod generation;
 pub use generation::{GeneratedLayerTemperatures, GeneratedLayeredWallSolution};
+mod geometry;
+mod radial;
+pub use radial::{
+    NonlinearGeneratedRadialLayerTemperatures, NonlinearGeneratedRadialWallSolution,
+    RadialLayeredWall, RadialWallGeometry,
+};
 mod nonlinear_generation;
 pub use nonlinear_generation::{
     NonlinearGeneratedLayerTemperatures, NonlinearGeneratedLayeredWallSolution,

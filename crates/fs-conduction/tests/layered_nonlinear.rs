@@ -1,6 +1,8 @@
 //! G0/G1/G3/G4: exact source segments, common nonlinear flux and bounded refusal.
 #[path = "layered_nonlinear/generation.rs"]
 mod generation;
+#[path = "layered_nonlinear/radial.rs"]
+mod radial;
 mod support;
 
 use fs_conduction::layered::{LayeredWall, NonlinearWallOptions, PlanarThermalLayer};
