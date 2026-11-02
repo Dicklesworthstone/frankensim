@@ -8,7 +8,7 @@ use fs_atmo::mann::MannParams;
 use fs_atmo::mann_field::{MannQuadrature, MannSpectralModel};
 use fs_material::gas::{GasSpec, GasState};
 
-fn build_grid(workers: usize, reverse_tiles: bool) -> NsfGrid3<D3q27> {
+pub(super) fn build_grid(workers: usize, reverse_tiles: bool) -> NsfGrid3<D3q27> {
     build_grid_with_apertures(workers, reverse_tiles, false)
 }
 
@@ -77,7 +77,7 @@ fn build_grid_with_apertures(
         .unwrap()
 }
 
-fn snapshot(max_kl: f64) -> HomogeneousMannField {
+pub(super) fn snapshot(max_kl: f64) -> HomogeneousMannField {
     let model = MannSpectralModel::build(
         41,
         MannParams {
@@ -97,7 +97,7 @@ fn snapshot(max_kl: f64) -> HomogeneousMannField {
     HomogeneousMannField::at_anchor(model, 79, vec![1.0; 16]).unwrap()
 }
 
-fn config() -> NsfFrozenMannConfig {
+pub(super) fn config() -> NsfFrozenMannConfig {
     NsfFrozenMannConfig {
         pressure_pa: 101325.0,
         temperature_k: 293.35,

@@ -2336,6 +2336,38 @@ step allocation-free or add whole-step cancellation. The existing low-Mach,
 temperature and stability qualifications remain in force; no DNS, wall-model,
 shock or complete compressible SGS-energy claim is added.
 
+### Evolving Mann turbulence on an original reservoir aperture
+
+With `turbulent-inflow`, `NsfEvolvingMannInflow` consumes the original full-tensor
+`FixedStepMannField` at exactly the NSF grid's physical time step. Construction
+binds the current CFD step to the current atmosphere step, so a retained
+snapshot can initialize a running grid without inventing past evolution.
+Later updates use checked relative step increments. The atmosphere owns phase
+advection once; the adapter supplies the explicit physical frame, mean velocity
+and original gas-source pressure/temperature at actual exterior ghost centres.
+Point, face-average and cell-average observations reuse the existing Mann
+spatial filters without restoring unresolved variance.
+
+Each apply advances a trial temporal state and fills a reused canonical tile
+buffer. The original atomic reservoir-profile rebind admits gas states and
+refreshes its Guo force and conservative flux history; only success publishes
+the atmosphere. Refusal or cancellation preserves accepted boundary and source
+state. Reapplying at the same CFD time consumes no noise. Native fluid stepping
+remains a separate operation, as with `NsfFrozenMannInflow`; a later refused
+fluid step retains the already accepted boundary control. No full-grid clone
+or additional fluid/energy solver is introduced.
+
+The caller budgets both temporal owners, retained profile capacity, optional
+filter gains, mode samples and OU transitions. Spectral geometry is immutable;
+the original boundary rebind and NSF step retain their existing allocations.
+Grid spacing, dimensions, dt, aperture orientation and tile membership stay
+bound. Spatial and advective phase bounds retain their original refusals;
+the temporal bound covers advection only because OU innovations are not
+bandlimited. Reports expose both clocks, authored correlation times and actual
+work. This is a synthetic homogeneous turbulent inlet with held boundary
+controls during each native step, not a wall-conditioned atmospheric layer,
+resolved eddy-turnover model, nonreflecting boundary or temporal-order upgrade.
+
 ### Source-owned NASA9 energy and local transport in the NSF grid
 
 `NsfSpec<G = GasSpec>` admits `ThermochemicalNsfGas` through the same

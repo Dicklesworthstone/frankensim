@@ -1,9 +1,11 @@
 //! Full-tensor homogeneous Mann turbulence on an original NSF aperture.
 //!
-//! A retained snapshot is convected continuously using Taylor's frozen-field
+//! The frozen policy convects a retained snapshot using Taylor's frozen-field
 //! hypothesis. Sampling at the actual CFD time avoids rounding to fs-atmo's
 //! 120 Hz OU clock. The snapshot's own tick and phase stay fixed; only the
 //! displacement relative to the caller's CFD reference time changes.
+//! The evolving policy instead uses exact OU transitions at the admitted CFD
+//! dt, with explicit bound clock epochs and atomic atmosphere/profile updates.
 //!
 //! Spatial synthesis is the existing fs-atmo Mann tensor quadrature (Mann,
 //! 1998, doi:10.1016/S0266-8920(97)00036-2). Convected synthetic inflow is also
@@ -16,6 +18,11 @@ use crate::lattice3::Lattice3;
 use fs_atmo::mann_field::HomogeneousMannField;
 use fs_atmo::mann_field::filter::MannBoxFilter;
 use fs_math::det;
+
+mod evolving;
+pub use evolving::{
+    NsfEvolvingMannApplied, NsfEvolvingMannConfig, NsfEvolvingMannError, NsfEvolvingMannInflow,
+};
 
 /// Every flow, frame, clock and work choice is caller-authored.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,6 +72,10 @@ pub enum NsfFrozenMannError {
     Cancelled,
     Work {
         requested: usize,
+        maximum: usize,
+    },
+    WorkspaceBytes {
+        required: usize,
         maximum: usize,
     },
     /// k_max*dx > pi, with k_max=max_kl/L in rad/m.
@@ -132,6 +143,108 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+fn admit_config(config: NsfFrozenMannConfig) -> Result<(), NsfFrozenMannError> {
+    if !config.pressure_pa.is_finite()
+        || config.pressure_pa <= 0.0
+        || !config.temperature_k.is_finite()
+        || config.temperature_k <= 0.0
+        || !config.reference_time_s.is_finite()
+        || config.maximum_mode_samples == 0
+        || !config
+            .mean_velocity_m_s
+            .iter()
+            .chain(&config.convection_velocity_m_s)
+            .chain(&config.grid_origin_in_field_m)
+            .chain(config.field_to_grid.iter().flatten())
+            .all(|value| value.is_finite())
+    {
+        return Err(NsfFrozenMannError::Input(
+            "invalid inlet state, frame, time or work bound",
+        ));
+    }
+    let rotation = config.field_to_grid;
+    for i in 0..3 {
+        for j in 0..3 {
+            let expected = if i == j { 1.0 } else { 0.0 };
+            if (dot(rotation[i], rotation[j]) - expected).abs() > 256.0 * f64::EPSILON {
+                return Err(NsfFrozenMannError::Input(
+                    "field-to-grid rotation must be orthonormal",
+                ));
+            }
+        }
+    }
+    let determinant = rotation[0][0]
+        * (rotation[1][1] * rotation[2][2] - rotation[1][2] * rotation[2][1])
+        - rotation[0][1] * (rotation[1][0] * rotation[2][2] - rotation[1][2] * rotation[2][0])
+        + rotation[0][2] * (rotation[1][0] * rotation[2][1] - rotation[1][1] * rotation[2][0]);
+    if (determinant - 1.0).abs() > 512.0 * f64::EPSILON {
+        return Err(NsfFrozenMannError::Input(
+            "field-to-grid rotation must preserve handedness",
+        ));
+    }
+    Ok(())
+}
+
+fn speed(velocity: [f64; 3]) -> f64 {
+    let scale = velocity.iter().fold(0.0_f64, |m, &u| m.max(u.abs()));
+    if scale == 0.0 {
+        0.0
+    } else {
+        let normalized = velocity.map(|u| u / scale);
+        scale * det::sqrt(dot(normalized, normalized))
+    }
+}
+
+fn prepare_spatial_average(
+    model: &fs_atmo::mann_field::MannSpectralModel,
+    field_to_grid: [[f64; 3]; 3],
+    dx_m: f64,
+    face_axis: Option<usize>,
+    maximum_filter_bytes: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<SpatialAverage, NsfFrozenMannError> {
+    if cancelled() {
+        return Err(NsfFrozenMannError::Cancelled);
+    }
+    // R maps field to grid; its ROW i is R^T e_i in the field frame.
+    let half_edges = core::array::from_fn(|axis| {
+        if face_axis == Some(axis) {
+            [0.0; 3]
+        } else {
+            field_to_grid[axis].map(|v| 0.5 * dx_m * v)
+        }
+    });
+    let filter = MannBoxFilter::prepare(model, half_edges, maximum_filter_bytes, &mut cancelled)
+        .map_err(|error| {
+            if error.code == "mann-filter-cancelled" {
+                NsfFrozenMannError::Cancelled
+            } else {
+                NsfFrozenMannError::Atmosphere(error)
+            }
+        })?;
+    Ok(SpatialAverage {
+        dx_m,
+        face_axis,
+        filter,
+    })
+}
+
+struct SamplingPlan<'a> {
+    config: NsfFrozenMannConfig,
+    maximum_wavenumber_rad_m: f64,
+    convection_speed_m_s: f64,
+    mode_count: usize,
+    averaging: Option<&'a SpatialAverage>,
+}
+
+struct SampledProfile {
+    time_s: f64,
+    tiles: usize,
+    mode_samples: usize,
+    spatial_phase_bound_rad: f64,
+    temporal_phase_bound_rad: f64,
+}
+
 impl NsfFrozenMannInflow {
     /// Retain an already initialized source snapshot without cloning its
     /// spectral model or advancing its OU paths. Grid-specific material,
@@ -140,56 +253,10 @@ impl NsfFrozenMannInflow {
         snapshot: HomogeneousMannField,
         config: NsfFrozenMannConfig,
     ) -> Result<Self, NsfFrozenMannError> {
-        if !config.pressure_pa.is_finite()
-            || config.pressure_pa <= 0.0
-            || !config.temperature_k.is_finite()
-            || config.temperature_k <= 0.0
-            || !config.reference_time_s.is_finite()
-            || config.maximum_mode_samples == 0
-            || !config
-                .mean_velocity_m_s
-                .iter()
-                .chain(&config.convection_velocity_m_s)
-                .chain(&config.grid_origin_in_field_m)
-                .chain(config.field_to_grid.iter().flatten())
-                .all(|value| value.is_finite())
-        {
-            return Err(NsfFrozenMannError::Input(
-                "invalid inlet state, frame, time or work bound",
-            ));
-        }
-        let rotation = config.field_to_grid;
-        for i in 0..3 {
-            for j in 0..3 {
-                let expected = if i == j { 1.0 } else { 0.0 };
-                if (dot(rotation[i], rotation[j]) - expected).abs() > 256.0 * f64::EPSILON {
-                    return Err(NsfFrozenMannError::Input(
-                        "field-to-grid rotation must be orthonormal",
-                    ));
-                }
-            }
-        }
-        let determinant = rotation[0][0]
-            * (rotation[1][1] * rotation[2][2] - rotation[1][2] * rotation[2][1])
-            - rotation[0][1] * (rotation[1][0] * rotation[2][2] - rotation[1][2] * rotation[2][0])
-            + rotation[0][2] * (rotation[1][0] * rotation[2][1] - rotation[1][1] * rotation[2][0]);
-        if (determinant - 1.0).abs() > 512.0 * f64::EPSILON {
-            return Err(NsfFrozenMannError::Input(
-                "field-to-grid rotation must preserve handedness",
-            ));
-        }
+        admit_config(config)?;
         let maximum_wavenumber_rad_m =
             snapshot.model().quadrature().max_kl / snapshot.model().parameters().length_m;
-        let scale = config
-            .convection_velocity_m_s
-            .iter()
-            .fold(0.0_f64, |m, &u| m.max(u.abs()));
-        let convection_speed_m_s = if scale == 0.0 {
-            0.0
-        } else {
-            let normalized = config.convection_velocity_m_s.map(|u| u / scale);
-            scale * det::sqrt(dot(normalized, normalized))
-        };
+        let convection_speed_m_s = speed(config.convection_velocity_m_s);
         if !maximum_wavenumber_rad_m.is_finite()
             || maximum_wavenumber_rad_m <= 0.0
             || !convection_speed_m_s.is_finite()
@@ -247,37 +314,16 @@ impl NsfFrozenMannInflow {
         dx_m: f64,
         face_axis: Option<usize>,
         maximum_filter_bytes: usize,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<Self, NsfFrozenMannError> {
-        if cancelled() {
-            return Err(NsfFrozenMannError::Cancelled);
-        }
-        // R maps field to grid; its ROW i is R^T e_i in the field frame.
-        let half_edges = core::array::from_fn(|axis| {
-            if face_axis == Some(axis) {
-                [0.0; 3]
-            } else {
-                self.config.field_to_grid[axis].map(|v| 0.5 * dx_m * v)
-            }
-        });
-        let filter = MannBoxFilter::prepare(
+        self.averaging = Some(prepare_spatial_average(
             self.snapshot.model(),
-            half_edges,
-            maximum_filter_bytes,
-            &mut cancelled,
-        )
-        .map_err(|error| {
-            if error.code == "mann-filter-cancelled" {
-                NsfFrozenMannError::Cancelled
-            } else {
-                NsfFrozenMannError::Atmosphere(error)
-            }
-        })?;
-        self.averaging = Some(SpatialAverage {
+            self.config.field_to_grid,
             dx_m,
             face_axis,
-            filter,
-        });
+            maximum_filter_bytes,
+            cancelled,
+        )?);
         Ok(self)
     }
 
@@ -324,124 +370,165 @@ impl NsfFrozenMannInflow {
         aperture: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NsfFrozenMannApplied, NsfFrozenMannError> {
-        if cancelled() {
-            return Err(NsfFrozenMannError::Cancelled);
-        }
-        let source = grid
-            .reservoir_aperture_at(aperture)
-            .ok_or(NsfFrozenMannError::Input(
-                "frozen Mann inlet requires an existing localized reservoir aperture",
-            ))?;
-        let axis = source.axis;
-        let high = source.high;
-        if let Some(averaging) = &self.averaging {
-            if averaging.dx_m != grid.law.dx_m
-                || averaging.face_axis.is_some_and(|normal| normal != axis)
-            {
-                return Err(NsfFrozenMannError::Input(
-                    "prepared Mann average requires the original grid spacing and aperture normal",
-                ));
-            }
-        }
-        let count = source.cells.len();
-        let mode_samples = count
-            .checked_mul(self.snapshot.model().mode_count())
-            .ok_or(NsfFrozenMannError::Input("inlet sample work overflows"))?;
-        if mode_samples > self.config.maximum_mode_samples {
-            return Err(NsfFrozenMannError::Work {
-                requested: mode_samples,
-                maximum: self.config.maximum_mode_samples,
-            });
-        }
-        let spatial_phase_bound_rad = self.maximum_wavenumber_rad_m * grid.law.dx_m;
-        if !spatial_phase_bound_rad.is_finite() || spatial_phase_bound_rad > core::f64::consts::PI {
-            return Err(NsfFrozenMannError::SpatialNyquist {
-                phase_bound_rad: spatial_phase_bound_rad,
-                maximum_rad: core::f64::consts::PI,
-            });
-        }
-        let temporal_phase_bound_rad =
-            self.maximum_wavenumber_rad_m * (self.convection_speed_m_s * grid.law.dt_s);
-        if !temporal_phase_bound_rad.is_finite() || temporal_phase_bound_rad > core::f64::consts::PI
-        {
-            return Err(NsfFrozenMannError::TemporalNyquist {
-                phase_bound_rad: temporal_phase_bound_rad,
-                maximum_rad: core::f64::consts::PI,
-            });
-        }
-        // Beyond this, conversion of consecutive integer ticks can alias even
-        // though the modal Nyquist bound is satisfied in real arithmetic.
-        if grid.steps() as u128 >= (1u128 << 53) {
-            return Err(NsfFrozenMannError::Input(
-                "CFD step clock exceeds exact f64 integer range",
-            ));
-        }
-        let time_s = grid.steps() as f64 * grid.law.dt_s;
-        let elapsed_s = time_s - self.config.reference_time_s;
-        if !time_s.is_finite()
-            || !elapsed_s.is_finite()
-            || (grid.steps() as f64 + 1.0) * grid.law.dt_s <= time_s
-        {
-            return Err(NsfFrozenMannError::Input(
-                "CFD inlet time is not representable",
-            ));
-        }
-        let gas = grid
-            .spec
-            .gas
-            .at(self.config.temperature_k, self.config.pressure_pa)?;
         let mut states = Vec::new();
-        states
-            .try_reserve_exact(count)
-            .map_err(|_| NsfFrozenMannError::Allocation)?;
-        for tile in grid
-            .reservoir_aperture_tile_states(aperture)
-            .expect("checked aperture")
-        {
-            if cancelled() {
-                return Err(NsfFrozenMannError::Cancelled);
-            }
-            let mut point_grid = tile.cell.map(|x| (x as f64 + 0.5) * grid.law.dx_m);
-            point_grid[axis] += if high { grid.law.dx_m } else { -grid.law.dx_m };
-            let displacement: [f64; 3] = core::array::from_fn(|a| {
-                point_grid[a] - self.config.convection_velocity_m_s[a] * elapsed_s
-            });
-            let point_field = core::array::from_fn(|a| {
-                self.config.grid_origin_in_field_m[a]
-                    + (0..3)
-                        .map(|i| self.config.field_to_grid[i][a] * displacement[i])
-                        .sum::<f64>()
-            });
-            let fluctuation = match self.spatial_filter() {
-                Some(filter) => self.snapshot.sample_filtered(point_field, filter)?,
-                None => self.snapshot.sample(point_field)?,
-            }
-            .u;
-            let velocity_m_s = core::array::from_fn(|a| {
-                self.config.mean_velocity_m_s[a] + dot(self.config.field_to_grid[a], fluctuation)
-            });
-            states.push(NsfReservoirTileState {
-                cell: tile.cell,
-                state: NsfOpenState {
-                    density_kg_m3: gas.density,
-                    velocity_m_s,
-                    temperature_k: gas.temperature,
-                },
-            });
-        }
-        if cancelled() {
-            return Err(NsfFrozenMannError::Cancelled);
-        }
+        let sampled = sample_profile(
+            grid,
+            aperture,
+            SamplingPlan {
+                config: self.config,
+                maximum_wavenumber_rad_m: self.maximum_wavenumber_rad_m,
+                convection_speed_m_s: self.convection_speed_m_s,
+                mode_count: self.snapshot.model().mode_count(),
+                averaging: self.averaging.as_ref(),
+            },
+            &mut states,
+            |point, filter| match filter {
+                Some(filter) => self.snapshot.sample_filtered(point, filter),
+                None => self.snapshot.sample(point),
+            },
+            &mut cancelled,
+        )?;
         grid.set_reservoir_aperture_profile(aperture, &states)?;
         Ok(NsfFrozenMannApplied {
-            sampled_time_s: time_s,
+            sampled_time_s: sampled.time_s,
             frozen_tick: self.snapshot.tick(),
-            tiles: count,
-            mode_samples,
-            spatial_phase_bound_rad,
-            temporal_phase_bound_rad,
+            tiles: sampled.tiles,
+            mode_samples: sampled.mode_samples,
+            spatial_phase_bound_rad: sampled.spatial_phase_bound_rad,
+            temporal_phase_bound_rad: sampled.temporal_phase_bound_rad,
         })
     }
+}
+
+// The two temporal policies share the physical frame, source, aperture,
+// resolution admission and profile construction. Sampling draws no randomness.
+fn sample_profile<L: Lattice3<27>>(
+    grid: &NsfGrid3<L>,
+    aperture: usize,
+    plan: SamplingPlan<'_>,
+    states: &mut Vec<NsfReservoirTileState>,
+    mut sample: impl FnMut(
+        [f64; 3],
+        Option<&MannBoxFilter>,
+    ) -> Result<fs_atmo::FlowSample, fs_atmo::Refusal>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SampledProfile, NsfFrozenMannError> {
+    if cancelled() {
+        return Err(NsfFrozenMannError::Cancelled);
+    }
+    let source = grid
+        .reservoir_aperture_at(aperture)
+        .ok_or(NsfFrozenMannError::Input(
+            "frozen Mann inlet requires an existing localized reservoir aperture",
+        ))?;
+    let axis = source.axis;
+    let high = source.high;
+    if let Some(averaging) = plan.averaging {
+        if averaging.dx_m != grid.law.dx_m
+            || averaging.face_axis.is_some_and(|normal| normal != axis)
+        {
+            return Err(NsfFrozenMannError::Input(
+                "prepared Mann average requires the original grid spacing and aperture normal",
+            ));
+        }
+    }
+    let count = source.cells.len();
+    let mode_samples = count
+        .checked_mul(plan.mode_count)
+        .ok_or(NsfFrozenMannError::Input("inlet sample work overflows"))?;
+    if mode_samples > plan.config.maximum_mode_samples {
+        return Err(NsfFrozenMannError::Work {
+            requested: mode_samples,
+            maximum: plan.config.maximum_mode_samples,
+        });
+    }
+    let spatial_phase_bound_rad = plan.maximum_wavenumber_rad_m * grid.law.dx_m;
+    if !spatial_phase_bound_rad.is_finite() || spatial_phase_bound_rad > core::f64::consts::PI {
+        return Err(NsfFrozenMannError::SpatialNyquist {
+            phase_bound_rad: spatial_phase_bound_rad,
+            maximum_rad: core::f64::consts::PI,
+        });
+    }
+    let temporal_phase_bound_rad =
+        plan.maximum_wavenumber_rad_m * (plan.convection_speed_m_s * grid.law.dt_s);
+    if !temporal_phase_bound_rad.is_finite() || temporal_phase_bound_rad > core::f64::consts::PI {
+        return Err(NsfFrozenMannError::TemporalNyquist {
+            phase_bound_rad: temporal_phase_bound_rad,
+            maximum_rad: core::f64::consts::PI,
+        });
+    }
+    // Beyond this, conversion of consecutive integer ticks can alias even
+    // though the modal Nyquist bound is satisfied in real arithmetic.
+    if grid.steps() as u128 >= (1u128 << 53) {
+        return Err(NsfFrozenMannError::Input(
+            "CFD step clock exceeds exact f64 integer range",
+        ));
+    }
+    let time_s = grid.steps() as f64 * grid.law.dt_s;
+    let elapsed_s = time_s - plan.config.reference_time_s;
+    if !time_s.is_finite()
+        || !elapsed_s.is_finite()
+        || (grid.steps() as f64 + 1.0) * grid.law.dt_s <= time_s
+    {
+        return Err(NsfFrozenMannError::Input(
+            "CFD inlet time is not representable",
+        ));
+    }
+    let gas = grid
+        .spec
+        .gas
+        .at(plan.config.temperature_k, plan.config.pressure_pa)?;
+    states.truncate(count);
+    states
+        .try_reserve_exact(count.saturating_sub(states.len()))
+        .map_err(|_| NsfFrozenMannError::Allocation)?;
+    for (position, tile) in grid
+        .reservoir_aperture_tile_states(aperture)
+        .expect("checked aperture")
+        .enumerate()
+    {
+        if cancelled() {
+            return Err(NsfFrozenMannError::Cancelled);
+        }
+        let mut point_grid = tile.cell.map(|x| (x as f64 + 0.5) * grid.law.dx_m);
+        point_grid[axis] += if high { grid.law.dx_m } else { -grid.law.dx_m };
+        let displacement: [f64; 3] = core::array::from_fn(|a| {
+            point_grid[a] - plan.config.convection_velocity_m_s[a] * elapsed_s
+        });
+        let point_field = core::array::from_fn(|a| {
+            plan.config.grid_origin_in_field_m[a]
+                + (0..3)
+                    .map(|i| plan.config.field_to_grid[i][a] * displacement[i])
+                    .sum::<f64>()
+        });
+        let fluctuation = sample(point_field, plan.averaging.map(|average| &average.filter))?.u;
+        let velocity_m_s = core::array::from_fn(|a| {
+            plan.config.mean_velocity_m_s[a] + dot(plan.config.field_to_grid[a], fluctuation)
+        });
+        let state = NsfReservoirTileState {
+            cell: tile.cell,
+            state: NsfOpenState {
+                density_kg_m3: gas.density,
+                velocity_m_s,
+                temperature_k: gas.temperature,
+            },
+        };
+        if let Some(slot) = states.get_mut(position) {
+            *slot = state;
+        } else {
+            states.push(state);
+        }
+    }
+    if cancelled() {
+        return Err(NsfFrozenMannError::Cancelled);
+    }
+    Ok(SampledProfile {
+        time_s,
+        tiles: count,
+        mode_samples,
+        spatial_phase_bound_rad,
+        temporal_phase_bound_rad,
+    })
 }
 
 #[cfg(test)]
