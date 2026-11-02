@@ -20976,3 +20976,29 @@ mass removal. Native roundoff slip is retained rather than silently clamped.
 Four physical test groups cover curved travel and distinct thermal hardness,
 forward/reverse sliding and arrest, zero wear, original source/role/fixed-context
 admission, unchanged heat and late atomic rollback.
+
+### Heterogeneous porous stacks on the same thermal timeline
+
+`porous_heating::PorousStackHeating` binds one complete local-depth thermal
+partition to every layer of an original `PorousStackExcitation`. The original
+scattering solution supplies each layer's coherent internal drive, so interface
+reflection, transmission and two-sided interference determine the heat in each
+material. Applying the external drive independently to each slab is not used.
+Only the stack's external incident/outgoing waves enter its acoustic energy
+account; power exchanged between adjacent layers is internal, not extra heat.
+
+Preparation reuses the single-layer analytic cell integrals and physical
+admission, then merges all sources into one cached native heat observer. The
+complete specimen shares the 4096-cell ceiling. Cross-layer cells must be
+distinct and adjoin on one straight, full-area body normal. Each material's
+original mass, caloric/storage law and identity remain bound. Authored thermal
+contacts across interfaces participate in the same native advance, including
+different heat capacities or latent storage. Cell depths stay local to their
+authored acoustic layer; `layer_cells` exposes that exact partition.
+
+The existing fixed-drive and thermally lumped fluid/skeleton assumptions remain
+unchanged. Four focused stack regressions cover heterogeneous internal-field
+volume integration and partition invariance, distinct native material storage,
+cross-material conduction with authored heat and events, one-layer bit parity,
+continuation/cancellation, and complete physical mapping. They establish the
+adapter's numerical behavior without extending material source validity.

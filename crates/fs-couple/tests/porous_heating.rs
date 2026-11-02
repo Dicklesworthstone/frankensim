@@ -7,6 +7,9 @@ use fs_material::porous::{PorousCard, PorousFluidLaw};
 use fs_math::c64::C64;
 use fs_thermal::enthalpy::*;
 
+#[path = "porous_heating/stack.rs"]
+mod stack;
+
 const LENGTH: f64 = 0.08;
 const AREA: f64 = 0.004;
 const DENSITY: f64 = 100.0;

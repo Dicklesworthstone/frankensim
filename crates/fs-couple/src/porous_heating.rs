@@ -23,6 +23,9 @@ use fs_thermal::enthalpy::{
 };
 use std::collections::BTreeMap;
 
+mod stack;
+pub use stack::PorousStackHeating;
+
 /// Hard preparation/storage ceiling; callers may declare a smaller cell budget.
 pub const MAX_POROUS_HEATING_CELLS: usize = 4096;
 
@@ -91,10 +94,16 @@ impl From<DepositionError> for PorousHeatingError {
 /// solve or sample acoustics, and never rebuild the source map by insertion.
 pub struct PorousHeating<'e, 'l, 'm> {
     excitation: &'e PorousLayerExcitation<'l, 'm>,
+    heat: PreparedHeat,
+}
+
+/// The same cached native sources and observer serve a layer or a whole stack.
+struct PreparedHeat {
     cells: Vec<PorousCellHeating>,
     sources_w: BTreeMap<CellId, f64>,
     dissipation: PorousLayerDissipation,
     power_residual_w: f64,
+    boundary_power_w: [f64; 2],
 }
 
 /// Acoustic energy over the exact accepted native thermal substeps.
@@ -286,10 +295,13 @@ impl<'e, 'l, 'm> PorousHeating<'e, 'l, 'm> {
         checkpoint()?;
         Ok(Self {
             excitation,
-            cells,
-            sources_w,
-            dissipation,
-            power_residual_w,
+            heat: PreparedHeat {
+                cells,
+                sources_w,
+                dissipation,
+                power_residual_w,
+                boundary_power_w: [boundary.incident_power_w, boundary.outgoing_power_w],
+            },
         })
     }
 
@@ -299,17 +311,35 @@ impl<'e, 'l, 'm> PorousHeating<'e, 'l, 'm> {
     }
     /// Cached analytic sources in the complete authored depth order.
     pub fn cells(&self) -> &[PorousCellHeating] {
-        &self.cells
+        &self.heat.cells
     }
     /// Compensated sum of physical cell powers, with the original mechanism split.
     pub const fn dissipation(&self) -> PorousLayerDissipation {
-        self.dissipation
+        self.heat.dissipation
     }
     /// Incoming minus outgoing minus summed physical cell heating [W].
     pub const fn power_residual_w(&self) -> f64 {
-        self.power_residual_w
+        self.heat.power_residual_w
     }
 
+    /// Apply this frozen cycle-mean drive over the native accepted substeps.
+    /// Generated watts are additional sources, never persistent boundary data.
+    /// Their harmonic factor 1/2 and specimen volume are already included; the
+    /// native thermal account includes them exactly once. Existing conduction,
+    /// source/boundary events, caloric domains, CFL and latent heat are unchanged.
+    /// Do not also author these same acoustic watts as a thermal boundary source.
+    pub fn advance_to<'t>(
+        &self,
+        initial: &DepositionSimulation<'t>,
+        target_s: f64,
+        config: StepConfig,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<PorousHeatingStep<'t>, PorousHeatingError> {
+        self.heat.advance_to(initial, target_s, config, checkpoint)
+    }
+}
+
+impl PreparedHeat {
     fn validate(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -345,7 +375,7 @@ impl<'e, 'l, 'm> PorousHeating<'e, 'l, 'm> {
     /// native thermal account includes them exactly once. Existing conduction,
     /// source/boundary events, caloric domains, CFL and latent heat are unchanged.
     /// Do not also author these same acoustic watts as a thermal boundary source.
-    pub fn advance_to<'t>(
+    fn advance_to<'t>(
         &self,
         initial: &DepositionSimulation<'t>,
         target_s: f64,
@@ -388,13 +418,13 @@ impl<'e, 'l, 'm> PorousHeating<'e, 'l, 'm> {
 }
 
 #[derive(Clone)]
-struct HeldHeat<'p, 'e, 'l, 'm> {
-    owner: &'p PorousHeating<'e, 'l, 'm>,
+struct HeldHeat<'p> {
+    owner: &'p PreparedHeat,
     energy: Vec<Dd>,
     mechanisms: [Dd; 2],
     boundary: [Dd; 2],
 }
-impl DepositionObserver for HeldHeat<'_, '_, '_, '_> {
+impl DepositionObserver for HeldHeat<'_> {
     type Error = PorousHeatingError;
     fn sources(
         &mut self,
@@ -425,12 +455,7 @@ impl DepositionObserver for HeldHeat<'_, '_, '_, '_> {
                 *sum = *sum + Dd::from_f64(finite(power * dt)?);
             }
         }
-        let boundary = self.owner.excitation.boundary_power();
-        for (sum, power) in self
-            .boundary
-            .iter_mut()
-            .zip([boundary.incident_power_w, boundary.outgoing_power_w])
-        {
+        for (sum, power) in self.boundary.iter_mut().zip(self.owner.boundary_power_w) {
             *sum = *sum + Dd::from_f64(finite(power * dt)?);
         }
         Ok(())
