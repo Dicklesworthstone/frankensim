@@ -1,10 +1,13 @@
 //! G1/G3/G4: deformed native P1 current, original finite heat and loaded J2 history.
-//! All sources are manufactured. Full-boundary material-carried Dirichlet
-//! voltage supplies distributed current; these are NOT insulated two-electrode
-//! rod benchmarks. The heterogeneous loaded case is an independent P1 weak-form
-//! benchmark on this mesh, not an exact continuum transmission solution.
+//! All sources are manufactured. This file's full-boundary material-carried
+//! Dirichlet traces supply distributed current; the terminals child instead
+//! exercises insulated equipotential electrodes. The heterogeneous loaded case
+//! is an independent P1 weak-form benchmark on this mesh, not an exact continuum
+//! transmission solution.
 #[path = "spatial/dynamics.rs"]
 mod dynamics;
+#[path = "spatial/terminals.rs"]
+mod terminals;
 use super::*;
 use fs_couple::solid_enthalpy::plastic::electrical::spatial::*;
 use fs_em::{conduction::ConductionControls, spatial::conduction::*};

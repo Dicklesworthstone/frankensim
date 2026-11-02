@@ -77,6 +77,38 @@ impl<'a> SpatialConductionDrive<'a> {
             reference_voltage_v: 1.0,
         }
     }
+
+    // The ideal source fixes current, not the recovered reaction. Account its
+    // work independently from the Joule integral and native reaction work so
+    // the shared energy gate also detects a terminal-current mismatch.
+    fn supplied_power_w<C: SpatialConductorMaterial>(
+        self,
+        problem: &SpatialConduction<C>,
+        field: &SpatialConductionField,
+    ) -> Result<f64, Error> {
+        let power = match self {
+            Self::Boundary(_) => field.supplied_power_w,
+            Self::TotalCurrent {
+                positive_faces,
+                negative_faces,
+                current_a,
+                ..
+            } => {
+                // Native terminal admission and the completed field solve
+                // establish equipotential, nonempty exterior face sets.
+                let potential = |faces: &[usize]| {
+                    faces
+                        .first()
+                        .and_then(|&face| problem.mesh().faces.get(face))
+                        .and_then(|vertices| field.voltage_v.get(vertices[0] as usize))
+                        .copied()
+                        .ok_or_else(|| invalid("current electrode lost its solved potential"))
+                };
+                current_a * finite(potential(positive_faces)? - potential(negative_faces)?)?
+            }
+        };
+        Ok(finite(power)?)
+    }
 }
 
 impl<'a> From<&'a SpatialConductionBoundary> for SpatialConductionDrive<'a> {
@@ -591,7 +623,11 @@ impl SpatialConductionThermalNetwork<'_> {
                 .map_err(field_error)
                 .map_err(map_conduction_error)?;
                 let heat_j = finite(dt * field.power_w)?;
-                let supplied_work_j = finite(dt * field.supplied_power_w)?;
+                let supplied_work_j = finite(
+                    dt * drive
+                        .supplied_power_w(&next, &field)
+                        .map_err(map_conduction_error)?,
+                )?;
                 if (field.power_w > 0.0 && heat_j == 0.0)
                     || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {

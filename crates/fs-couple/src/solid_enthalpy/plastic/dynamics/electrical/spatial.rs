@@ -7,13 +7,13 @@
 
 use super::super::{ThermoplasticDynamics, ThermoplasticDynamicsReport};
 use crate::circuit_enthalpy::{
-    conduction::spatial::SpatialConductionThermalStep,
+    conduction::spatial::{SpatialConductionDrive, SpatialConductionThermalStep},
     contacts::heat::{HeatAssembly, HeatNetworkSample},
 };
 use crate::solid_enthalpy::plastic::electrical::{
     ElectricalSolidError, ElectricalSolidReport, spatial::SpatialElectricalSolidSolve,
 };
-use fs_em::spatial::conduction::{SpatialConduction, SpatialConductionBoundary};
+use fs_em::spatial::conduction::SpatialConduction;
 use fs_exec::Cx;
 use fs_solid::plastic3::IncrementSettings;
 use fs_thermal::enthalpy::DepositionSimulation;
@@ -63,6 +63,10 @@ impl<'m> ThermoplasticDynamics<'m> {
     ///
     /// The supplied voltage trace follows its original material vertices;
     /// prescribed current density acts on the actual deformed face geometry.
+    /// Shared total-current control instead holds the signed TOTAL current
+    /// through moving equipotential terminal faces. Each source/geometry trial
+    /// solves their voltage and actual current distribution; supplied work is
+    /// I times the solved voltage drop, independently of the Joule integral.
     /// This is quasistatic fully-solid isotropic DC transport, within the native
     /// small-strain/rotation limits. It adds no motional EMF, Lorentz force,
     /// electrical contact motion, field storage or evolving thermal geometry.
@@ -72,12 +76,12 @@ impl<'m> ThermoplasticDynamics<'m> {
     /// Retain all returned owners for continuation. Source/domain, budget,
     /// energy, or cancellation refusal publishes none of the proposed histories.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_spatial_electrical_candidate<'t, A: HeatAssembly + ?Sized>(
+    pub fn advance_spatial_electrical_candidate<'t, 'd, A: HeatAssembly + ?Sized>(
         &self,
         thermal: &DepositionSimulation<'t>,
         problem: &SpatialConduction,
         assembly: &A,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         target_s: f64,
         prescribed_m: &[(usize, f64)],
         nodal_forces_n: &[(usize, f64)],
@@ -93,7 +97,7 @@ impl<'m> ThermoplasticDynamics<'m> {
                 thermal,
                 problem,
                 assembly,
-                boundary,
+                drive,
                 target_s,
                 prescribed_m,
                 nodal_forces_n,

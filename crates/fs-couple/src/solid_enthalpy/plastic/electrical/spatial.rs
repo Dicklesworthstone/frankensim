@@ -6,12 +6,10 @@
 
 use super::*;
 use crate::circuit_enthalpy::conduction::spatial::{
-    SpatialConductionRegion, SpatialConductionThermalNetwork, SpatialConductionThermalStep,
+    SpatialConductionDrive, SpatialConductionRegion, SpatialConductionThermalNetwork,
+    SpatialConductionThermalStep,
 };
-use fs_em::{
-    conduction::ConductionControls,
-    spatial::conduction::{SpatialConduction, SpatialConductionBoundary},
-};
+use fs_em::{conduction::ConductionControls, spatial::conduction::SpatialConduction};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::conductor::ResolvedConductorState;
 use std::cell::RefCell;
@@ -119,6 +117,14 @@ impl<'m> ThermoplasticSolid<'m> {
     /// once. Native plastic/reversible heat shares that finite caloric endpoint;
     /// mechanical storage and numerical loss keep their original accounts.
     ///
+    /// Accepts the original boundary reference or shared total-current control.
+    /// Ideal equipotential terminals follow their original faces on X+u while
+    /// holding TOTAL current independently of the changing area. The original
+    /// spatial conduction owner solves terminal voltage and the nonuniform
+    /// reaction-current distribution at each material/geometry trial. Terminal
+    /// work I times the solved voltage drop and local E.J enter the same finite
+    /// heat residual without an equivalent resistor or uniform-flux reduction.
+    ///
     /// This bounded quasistatic composition retains fully solid isotropic DC
     /// transport and the native small-strain/rotation limits. Thermal geometry,
     /// reference mass, heat-transfer areas and topology remain fixed. Electrical
@@ -132,12 +138,12 @@ impl<'m> ThermoplasticSolid<'m> {
     /// Endpoint geometry/source evaluation gives first-order coupled accuracy;
     /// timestep and spatial refinement remain independent requirements.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_spatial_electrical_candidate<'t, A: HeatAssembly + ?Sized>(
+    pub fn advance_spatial_electrical_candidate<'t, 'd, A: HeatAssembly + ?Sized>(
         &self,
         thermal: &DepositionSimulation<'t>,
         problem: &SpatialConduction<ResolvedConductorState>,
         assembly: &A,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         target_s: f64,
         prescribed_m: &[(usize, f64)],
         nodal_forces_n: &[(usize, f64)],
@@ -151,7 +157,7 @@ impl<'m> ThermoplasticSolid<'m> {
             thermal,
             problem,
             assembly,
-            boundary,
+            drive,
             target_s,
             prescribed_m,
             nodal_forces_n,
@@ -170,13 +176,14 @@ impl<'m> ThermoplasticSolid<'m> {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub(in crate::solid_enthalpy::plastic) fn advance_spatial_electrical_with_motion_candidate<
         't,
+        'd,
         A: HeatAssembly + ?Sized,
     >(
         &self,
         thermal: &DepositionSimulation<'t>,
         problem: &SpatialConduction<ResolvedConductorState>,
         assembly: &A,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         target_s: f64,
         prescribed_m: &[(usize, f64)],
         nodal_forces_n: &[(usize, f64)],
@@ -192,6 +199,7 @@ impl<'m> ThermoplasticSolid<'m> {
         ),
         ElectricalSolidError<A::Error>,
     > {
+        let drive = drive.into();
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
         let dt = target_s - self.time_s;
@@ -304,7 +312,7 @@ impl<'m> ThermoplasticSolid<'m> {
             thermal,
             target_s,
             problem,
-            boundary,
+            drive,
             &[],
             controls.assembly,
             controls.field,
