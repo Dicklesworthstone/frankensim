@@ -14,6 +14,7 @@ mod evolve;
 mod flux;
 mod geometry;
 mod hydrostatic;
+mod moving;
 /// Synchronized shock propagation through passages and finite rigid gas volumes.
 pub mod network;
 pub(crate) mod wall;

@@ -226,7 +226,7 @@ nitrogen shock-tube experiment.
 ### Scope boundary
 
 No evolving species transport, chemistry/flow splitting,
-junctions, valves, viscous stresses, heat conduction, moving mesh, vacuum state,
+junctions, valves, viscous stresses, heat conduction, general moving geometry, vacuum state,
 real-gas EOS, multidimensional flow, adjoint, entropy certificate or experimental
 validation is supplied by this Euler slice. A source-domain refusal is an actual
 refusal and does not extend a NASA fit to hotter or colder shocked gas.
@@ -1039,7 +1039,50 @@ work publication. They have not been executed in the current resource-limited
 session. This remains an instantaneous inviscid face closure: moving geometry,
 cell-volume evolution/geometric conservation, temporal quadrature, piston
 inertia and viscous wall work are the corresponding spatial/mechanical owners'
-responsibility. No stationary `Euler1d` update is silently treated as moving.
+responsibility. The separate moving-interval entry below supplies that spatial
+evolution for a bounded axial geometry; ordinary stationary updates are unchanged.
+
+### Spatial piston dynamics and conservative moving volumes
+
+`Euler1d::step_with_moving_walls` advances the original resolved Euler field in
+a constant-area interval with two impermeable prescribed end walls. Their two
+axial speeds are fixed over each accepted step; all interior faces move by
+affine interpolation, retaining the original nonuniform cell fractions.
+The existing MUSCL reconstruction, source admission and HLLC/HLL wave owner are
+shared with stationary dynamics. An interior Riemann problem is solved in its
+face's translating frame, then its flux is returned to laboratory conserved
+variables as `[f_mass, f_momentum+w*f_mass,
+f_energy+w*f_momentum+(w*w/2)*f_mass]`. Thermodynamic traces are reconstructed
+through the original source in that frame, avoiding subtraction of large
+laboratory kinetic energies. Wall pressure and `p_star*w` work use the existing
+one-sided caloric shock/rarefaction closure.
+
+Both RK2 stages advance extensive `Q=V*U`, with the predictor resolved at the
+new volume and the corrected endpoint on that same new geometry. Cell volume
+changes are exactly the discrete swept volume `dt*A*(w_right-w_left)` used by
+the moving-face flux. Actual face-relative CFL is checked at both old and new
+stage volumes, and contracting geometry also bounds the initial trial. The
+existing bounded retry/source-refusal policy never clips conserved fields.
+`StepReport` retains the same stage-integrated left/right pressure impulses
+and wall work that changed the gas; its conservation residual subtracts those
+boundary exchanges once. Geometry scratch is fallibly allocated at the first
+nonzero-motion entry and reused on subsequent steps. Cancellation/refusal
+preserves the accepted mesh, cells and clock together; zero speeds retain the
+ordinary stationary path and its exact arithmetic.
+
+Six focused regressions cover independent Reynolds-transport and Galilean flux
+relations, zero-speed identity, a co-moving nonuniform pressure-contact field,
+resolved variable-Cp piston compression and formation-gauge invariance, a
+16/32/64-cell homologous-compression comparison against the independent smooth
+isentropic Euler solution, and early/final cancellation or geometry/source
+refusal. They are authored but unexecuted in the resource-limited session.
+The original unreconstructed wall-cell traces can limit global boundary order;
+second-order global convergence is not asserted. This lane does not evolve
+piston inertia, heat transfer, composition, radial/variable-area deformation,
+open ends, bound gravitational atmospheres or multidimensional moving meshes.
+The face-frame conservation convention follows Springel (2010), §3.3,
+<https://doi.org/10.1111/j.1365-2966.2009.15715.x>; it does not claim that paper's
+Voronoi mesh algorithm or its full accuracy properties.
 
 
 ## Conservative molecular, thermal and viscous field evolution

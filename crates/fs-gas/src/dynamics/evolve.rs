@@ -163,7 +163,8 @@ pub(super) struct Workspace {
 /// fluxes. Spatial reconstruction is MUSCL; time integration is SSP RK2. Accepted
 /// stages remain inside the declared NASA-9 temperature path, with positive density
 /// and pressure. Refusal/cancellation preserves every cell and the original time.
-/// Workspace is allocated once at construction, not in a successful step.
+/// Stationary workspace is allocated once at construction. The moving-wall
+/// entry allocates its geometry scratch at first use and reuses it thereafter.
 pub struct Euler1d {
     pub(super) gas: FrozenGas,
     pub(super) states: Vec<Conserved>,
@@ -172,6 +173,7 @@ pub struct Euler1d {
     pub(super) time: f64,
     pub(super) work: Workspace,
     pub(super) hydrostatic: Option<HydrostaticBalance>,
+    pub(super) moving: Option<super::moving::MovingWorkspace>,
 }
 
 impl Euler1d {
@@ -231,6 +233,7 @@ impl Euler1d {
             time: 0.0,
             work,
             hydrostatic: None,
+            moving: None,
         })
     }
     /// Original frozen-mixture EOS and source.
@@ -275,7 +278,8 @@ impl Euler1d {
     pub fn time(&self) -> Time {
         Time::new(self.time)
     }
-    /// Complete stationary geometry and integrated physical volumes.
+    /// Accepted geometry and integrated physical volumes, including accepted
+    /// motion from [`Self::step_with_moving_walls`].
     pub const fn mesh(&self) -> &Mesh1d {
         &self.mesh
     }
@@ -686,6 +690,37 @@ pub(super) fn operator(
     endpoint_overrides: [Option<FaceFlux>; 2],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, Error> {
+    operator_with_face_motion(
+        gas,
+        states,
+        mesh,
+        boundaries,
+        reconstruction,
+        hydrostatic,
+        primitive,
+        slopes,
+        faces,
+        endpoint_overrides,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn operator_with_face_motion(
+    gas: &FrozenGas,
+    states: &[Conserved],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    reconstruction: Reconstruction,
+    hydrostatic: Option<&HydrostaticBalance>,
+    primitive: &mut [Primitive],
+    slopes: &mut [[f64; 3]],
+    faces: &mut [FaceFlux],
+    endpoint_overrides: [Option<FaceFlux>; 2],
+    face_velocity: Option<&[f64]>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, Error> {
     let n = states.len();
     for (i, &q) in states.iter().enumerate() {
         primitive[i] = if let Some(balance) = hydrostatic.filter(|b| b.cells[i].0 == q) {
@@ -848,7 +883,13 @@ pub(super) fn operator(
             } else {
                 (left, 1.0)
             };
-            gas.wall_flux(inside.0, inside.1, normal, cancelled)?
+            if let Some(velocity) = face_velocity {
+                gas.moving_wall_flux(inside.0, inside.1, normal, velocity[face], cancelled)?
+            } else {
+                gas.wall_flux(inside.0, inside.1, normal, cancelled)?
+            }
+        } else if let Some(velocity) = face_velocity {
+            gas.moving_interface(left.0, left.1, right.0, right.1, velocity[face], cancelled)?
         } else {
             gas.interface(left.0, left.1, right.0, right.1, cancelled)?
         };

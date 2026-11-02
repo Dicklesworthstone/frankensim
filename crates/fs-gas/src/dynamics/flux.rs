@@ -455,6 +455,46 @@ impl FrozenGas {
             .map(FaceFlux::from)
     }
 
+    /// F - w*U through a translating face, in laboratory conserved variables.
+    /// Reconstruct source-owned caloric energy in the face frame rather than
+    /// subtracting two potentially large laboratory kinetic energies.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn moving_interface(
+        &self,
+        left: Conserved,
+        pl: Primitive,
+        right: Conserved,
+        pr: Primitive,
+        velocity: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        if velocity == 0.0 {
+            return self.interface(left, pl, right, pr, cancelled);
+        }
+        if !velocity.is_finite() {
+            return Err(Error::Invalid("nonfinite face velocity"));
+        }
+        poll(cancelled)?;
+        let (left, pl) = self.state_at(pl.density, pl.velocity - velocity, pl.pressure)?;
+        poll(cancelled)?;
+        let (right, pr) = self.state_at(pr.density, pr.velocity - velocity, pr.pressure)?;
+        let relative = self.interface(left, pl, right, pr, cancelled)?;
+        let flux = FaceFlux {
+            mass: relative.mass,
+            momentum: relative.momentum + velocity * relative.mass,
+            energy: relative.energy
+                + velocity * relative.momentum
+                + (0.5 * velocity * velocity) * relative.mass,
+            signal_speed: relative.signal_speed,
+            used_hll_fallback: relative.used_hll_fallback,
+        };
+        if flux.array().iter().any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("moving-face laboratory flux overflow"));
+        }
+        poll(cancelled)?;
+        Ok(flux)
+    }
+
     fn normal_interface(
         &self,
         left: NormalConserved,

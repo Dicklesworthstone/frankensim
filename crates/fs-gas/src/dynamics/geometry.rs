@@ -1,4 +1,4 @@
-//! Stationary quasi-one-dimensional control-volume geometry.
+//! Quasi-one-dimensional control-volume geometry and admitted axial motion.
 
 use super::{Error, MAX_EULER_CELLS, allocated, positive};
 use fs_qty::Length;
@@ -108,5 +108,60 @@ impl Mesh1d {
     }
     pub(super) fn width(&self, i: usize) -> f64 {
         self.positions[i + 1] - self.positions[i]
+    }
+
+    pub(super) fn try_copy(&self) -> Result<Self, Error> {
+        let mut positions = allocated(self.positions.len(), 0.0)?;
+        let mut areas = allocated(self.areas.len(), 0.0)?;
+        let mut volumes = allocated(self.volumes.len(), 0.0)?;
+        positions.copy_from_slice(&self.positions);
+        areas.copy_from_slice(&self.areas);
+        volumes.copy_from_slice(&self.volumes);
+        Ok(Self {
+            positions,
+            areas,
+            volumes,
+            uniform_width: self.uniform_width,
+            uniform_area: self.uniform_area,
+        })
+    }
+
+    /// Constant-area GCL: the volume change uses the same face speeds as the
+    /// ALE flux, not a separately rounded difference of displaced coordinates.
+    pub(super) fn prepare_motion(
+        &mut self,
+        original: &Self,
+        velocity: &[f64],
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        let area = original.uniform_area.ok_or(Error::Invalid(
+            "moving interval requires constant cross section",
+        ))?;
+        for (i, (&x, &speed)) in original.positions.iter().zip(velocity).enumerate() {
+            super::poll(cancelled)?;
+            let next = x + dt * speed;
+            if !next.is_finite() || (speed != 0.0 && next == x) {
+                return Err(Error::Invalid("unrepresentable moving-face position"));
+            }
+            self.positions[i] = next;
+        }
+        if self.positions.windows(2).any(|x| !positive(x[1] - x[0])) {
+            return Err(Error::Invalid("moving interval faces crossed"));
+        }
+        for (i, volume) in self.volumes.iter_mut().enumerate() {
+            super::poll(cancelled)?;
+            *volume = original.volumes[i] + dt * area * (velocity[i + 1] - velocity[i]);
+            if !positive(*volume) {
+                return Err(Error::Invalid("moving cell volume is nonpositive"));
+            }
+        }
+        self.areas.copy_from_slice(&original.areas);
+        let n = original.cell_count();
+        let ratio = 1.0
+            + dt * (velocity[n] - velocity[0]) / (original.positions[n] - original.positions[0]);
+        self.uniform_width = original.uniform_width.map(|width| width * ratio);
+        self.uniform_area = original.uniform_area;
+        Ok(())
     }
 }
