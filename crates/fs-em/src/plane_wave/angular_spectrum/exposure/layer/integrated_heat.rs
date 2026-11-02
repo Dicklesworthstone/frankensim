@@ -110,6 +110,12 @@ impl<'p, 'q, 'e, 'b, 's, 'm> AngularSpectrumExposureLayerHeatLoadSpectrum<'p, 'q
     pub fn spectrum(&self) -> &PreparedHarmonicProductSpectrum {
         &self.spectrum
     }
+    /// Move the already prepared watt spectrum into a downstream owner. The
+    /// consumer must retain its own material, quadrature and source-clock binding;
+    /// detaching coefficients neither refreshes fields nor changes their units.
+    pub fn into_spectrum(self) -> PreparedHarmonicProductSpectrum {
+        self.spectrum
+    }
     pub fn preparation_workspace_bytes(&self) -> usize {
         self.workspace_bytes
     }

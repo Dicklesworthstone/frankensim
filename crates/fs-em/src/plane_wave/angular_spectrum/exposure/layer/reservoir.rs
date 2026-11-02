@@ -42,7 +42,7 @@ impl<'m> LossLaw<'m> {
                 shared_ohmic_conductivity(dielectric, conductor)?,
                 dielectric.poles(),
             ),
-            DielectricResponse::OpticalConductor(_) => {
+            DielectricResponse::OpticalConductor(_) | DielectricResponse::OpticalMaterial(_) => {
                 return Err(bad(
                     "finite-window film heat needs an original causal material reservoir",
                 ));

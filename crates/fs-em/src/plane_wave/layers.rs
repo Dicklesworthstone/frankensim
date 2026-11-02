@@ -144,6 +144,17 @@ impl<'a> PlanarDielectricLayers<'a> {
     pub fn exit_material(&self) -> &'a ResolvedMaterialStatePoint {
         self.exit.material()
     }
+    /// Original constitutive owner, preserving the complete exit source on rebuild.
+    pub const fn exit_response(&self) -> DielectricResponse<'a> {
+        self.exit
+    }
+    /// Retained native stack/cache payload, including this value and its layer
+    /// vector capacity. Borrowed material sources and allocator overhead are excluded.
+    pub fn workspace_bytes(&self) -> usize {
+        core::mem::size_of::<Self>().saturating_add(
+            self.layers.capacity().saturating_mul(core::mem::size_of::<PreparedLayer<'a>>()),
+        )
+    }
     pub const fn exit_permittivity_f_m(&self) -> C64 {
         self.exit_wave.epsilon_f_m
     }

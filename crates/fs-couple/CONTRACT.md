@@ -23077,3 +23077,82 @@ separate models. Authored G1/G3 fixtures cover homogeneous splitting,
 heterogeneous rotated free swelling, constrained stress/energy, native
 generalized eigenvalue changes, finite-vapor coupling and whole-window
 atomic refusal; they are not measured laminate or wood validation.
+
+### Quasi-steady interference feedback in one original film
+
+With the existing layered-wave-heating feature,
+layered_wave_heating::interference::QuasiSteadyFilmHeating rebuilds a selected
+Debye, Ohmic or DebyeWithOhmic film at the accepted native thermal temperature.
+It retains the original multilayer order, thicknesses, incident and exit source
+objects, periodic transverse grid and authored physical depth quadrature.
+Only the selected homogeneous film changes state. Its original complete material
+bundle is refreshed through the existing same-card query owner, including
+permeability; the combined Debye/Ohmic law uses one identical refreshed bundle.
+Fixed source conditions and typed absolute-temperature conventions must agree
+with retained thermal source receipts. No constitutive data are fitted or inferred.
+
+The thermal receiver is the original LumpedEnthalpyBody. Its complete chart
+must be fully solid with fixed density; its material card must match the film.
+The declared quadrature covers the complete film thickness and original full
+periodic cell. Partial masks are refused. Thermal mass divided by density must
+match both geometric and actually weighted quadrature volume within 64*f64::EPSILON
+relative allowance. Weights remain unchanged. Native Biot admission remains
+mandatory; it does not alone establish internal equilibration under nonuniform
+standing-wave/beam heating. The uniform-body approximation additionally requires
+internal thermal equilibration faster than the relevant thermal-envelope evolution.
+
+ThermalInterferenceDrive retains both physical-face peak E arrays on one source
+clock for every line. The optional nonempty deterministic mean and each explicitly
+real/proper factor preserve the original joint second-moment assumptions. All
+frequencies in a factor remain coherent. Frequency caches are rebuilt once per
+distinct frequency from the refreshed original film law; original angular-spectrum,
+two-port, exposure, reservoir and integrated-heat owners supply all field physics.
+The output spectrum is already W and reaches the native enthalpy owner at scale 1.
+Reversible field storage, polarization energy and parameter work are never
+reclassified as thermal dissipation.
+
+advance is an EXPLICIT quasi-steady split. It holds the initial-temperature
+coefficients over the requested feedback interval, even if native thermal/ripple
+controls subdivide it. The accepted clock is DD and is never reset by a refresh.
+The native solver keeps its analytic interval source joules, nonlinear phase/chart
+and boundary laws, separate ripple/thermal/root controls and energy ledger.
+Every accepted sample must satisfy the caller's maximum temperature excursion;
+every sample's material refresh is admitted before a joint result is returned.
+The endpoint response is admission for the next rebuild, not a second heat credit.
+A failed source query, excursion, native solve, budget or cancellation returns no
+candidate and leaves all original inputs unchanged. Native samples are moved out
+without duplicating their trajectory vector.
+
+This extension does not preserve transient polarization/field history through
+coefficient changes, close reversible parameter work, solve switch-on Maxwell
+dynamics, perform an implicit/converged thermo-optical iteration, or support
+changing geometry/density/phase. It therefore does not complete MR07. Feedback
+interval refinement and the validity of the quasi-steady approximation remain
+caller-owned. For statistical inputs, the nonlinear thermal result is the
+trajectory driven by expected heat, not an ensemble-mean temperature.
+
+ThermalInterferenceLimits bounds total authored lines and conservatively sums
+coexisting native numerical workspace before each large field preparation.
+Existing limits separately bound field, frequency-pair, depth, reservoir, FFT and
+spectral work. Material-source payloads, borrowed data and allocator overhead
+remain outside these numerical workspace figures. Native thermal output/work caps
+remain independent.
+
+Three focused G1/G3/G4 integration regressions in
+tests/interference_film_heating.rs compiled, linked and executed natively:
+3 passed, 0 failed. The exact source query/refresh, conductor, Debye and phase
+owners, original Maxwell film/two-port/interior/angular/exposure/reservoir/heat
+modules, shared harmonic math and native lumped enthalpy engine all execute.
+The scoped executable supplies a one-point identity FFT boundary (all fixtures
+use a 1x1 periodic grid), unreachable optical-family refusal types, and a nominal
+ConductionError envelope. It does not execute the original FFT implementation or
+build the complete crates. Both new Rust files pass native rustfmt.
+
+The independent oracle uses direct native two-port interior fields, original
+Debye ODE currents and the exact eight mixed real/proper coefficient states.
+Regressions check temperature-dependent permeability/conductivity/polarization
+refresh, native thermal energy, subsequent-interval feedback, a 2^53+0.25 DD
+source clock, and source-domain, temperature-excursion, mass/volume, resource and
+cancellation refusal. These are authored constitutive model tests, not
+experimental material qualification, a spatial thermal-uniformity proof, or
+verification of an implicit/transient electromagnetic feedback scheme.
