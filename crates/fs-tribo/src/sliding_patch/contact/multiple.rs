@@ -30,8 +30,9 @@ use fs_math::det;
 use crate::contact_response::{ContactResponseError, PositiveFactor};
 
 use super::{
-    HertzWrenchConfig, HertzWrenchContact, HertzWrenchError, HertzWrenchInput, HertzWrenchMode,
-    HertzWrenchPhase, HertzWrenchStep, Matrix, Problem, SPIN_RADIUS, Vector, admit_matrix, dot,
+    CircularWrenchLaw, HertzWrenchConfig, HertzWrenchContact, HertzWrenchError, HertzWrenchInput,
+    HertzWrenchMode, HertzWrenchPhase, HertzWrenchStep, Matrix, Problem, Vector, admit_matrix,
+    advance_circular, dot,
 };
 
 /// Explicit matrix, iteration, native support and physical closure budgets.
@@ -63,11 +64,13 @@ impl MultipleHertzConfig {
             || !self.total_energy_tolerance_j.is_finite()
             || self.total_energy_tolerance_j < 0.0
         {
-            return Err(MultipleHertzError::Invalid("multiple Hertz budgets"));
+            return Err(MultipleHertzError::Invalid(
+                "multiple circular-contact budgets",
+            ));
         }
         self.local
             .validate()
-            .map_err(|_| MultipleHertzError::Invalid("original Hertz controls"))
+            .map_err(|_| MultipleHertzError::Invalid("original circular-contact controls"))
     }
 }
 
@@ -77,6 +80,15 @@ pub struct HertzContactInput<'a> {
     pub law: &'a HertzWrenchContact,
     pub free_displacement_m: [f64; 2],
     pub free_spin_angle_rad: f64,
+}
+
+/// Original circular law and released coordinates for the common full-matrix
+/// engine. Geometry and static/kinetic support always belong to the actual law.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CircularContactInput<'a, L: CircularWrenchLaw> {
+    pub(crate) law: &'a L,
+    pub(crate) free_displacement_m: [f64; 2],
+    pub(crate) free_spin_angle_rad: f64,
 }
 
 /// Every contact and the complete physical work belong to one candidate.
@@ -131,7 +143,7 @@ impl From<ContactResponseError> for MultipleHertzError {
 
 impl fmt::Display for MultipleHertzError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "simultaneous Hertz contacts: {self:?}")
+        write!(f, "simultaneous circular contacts: {self:?}")
     }
 }
 impl std::error::Error for MultipleHertzError {}
@@ -139,6 +151,89 @@ impl std::error::Error for MultipleHertzError {}
 /// Immutable physical full response, factored once for repeated source trials.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedHertzContacts {
+    response: PreparedCircularContacts,
+}
+
+impl PreparedHertzContacts {
+    /// Admit the original complete row-major `(3*count)^2` response [m/N].
+    pub fn new(
+        count: usize,
+        scaled_compliance_m_per_n: Vec<f64>,
+        config: MultipleHertzConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MultipleHertzError> {
+        Ok(Self {
+            response: PreparedCircularContacts::new(
+                count,
+                scaled_compliance_m_per_n,
+                config,
+                cancelled,
+            )?,
+        })
+    }
+
+    #[must_use]
+    pub const fn contact_count(&self) -> usize {
+        self.response.contact_count()
+    }
+    #[must_use]
+    pub fn scaled_compliance_m_per_n(&self) -> &[f64] {
+        self.response.scaled_compliance_m_per_n()
+    }
+    #[must_use]
+    pub const fn config(&self) -> MultipleHertzConfig {
+        self.response.config()
+    }
+
+    /// Resolve every original Hertz surface on the same unchanged response.
+    pub fn advance(
+        &self,
+        sites: &[HertzContactInput<'_>],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MultipleHertzStep, MultipleHertzError> {
+        let sites = self.inputs(sites, &mut cancelled)?;
+        self.response.advance(&sites, cancelled)
+    }
+
+    /// Moving patches retain kinetic capacity; stationary patches retain their
+    /// original static sets. The mechanical caller owns physical stop events.
+    pub fn advance_phases(
+        &self,
+        sites: &[HertzContactInput<'_>],
+        phases: &[HertzWrenchPhase],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MultipleHertzStep, MultipleHertzError> {
+        let sites = self.inputs(sites, &mut cancelled)?;
+        self.response.advance_phases(&sites, phases, cancelled)
+    }
+
+    fn inputs<'a>(
+        &self,
+        sites: &[HertzContactInput<'a>],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<CircularContactInput<'a, HertzWrenchContact>>, MultipleHertzError> {
+        poll(cancelled)?;
+        if sites.len() != self.contact_count() {
+            return Err(MultipleHertzError::Invalid("contact input count"));
+        }
+        sites
+            .iter()
+            .map(|site| {
+                poll(cancelled)?;
+                Ok(CircularContactInput {
+                    law: site.law,
+                    free_displacement_m: site.free_displacement_m,
+                    free_spin_angle_rad: site.free_spin_angle_rad,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Numerically prepared response shared by actual circular traction owners.
+/// No pressure, coefficient, normal force or junction area is stored here.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PreparedCircularContacts {
     count: usize,
     compliance: Vec<f64>,
     diagonal: Vec<Matrix>,
@@ -146,10 +241,10 @@ pub struct PreparedHertzContacts {
     config: MultipleHertzConfig,
 }
 
-impl PreparedHertzContacts {
+impl PreparedCircularContacts {
     /// Admit the complete row-major `(3*count)^2` radius-scaled response [m/N].
     /// The physical matrix is never replaced by its symmetric numerical factor.
-    pub fn new(
+    pub(crate) fn new(
         count: usize,
         scaled_compliance_m_per_n: Vec<f64>,
         config: MultipleHertzConfig,
@@ -194,15 +289,15 @@ impl PreparedHertzContacts {
     }
 
     #[must_use]
-    pub const fn contact_count(&self) -> usize {
+    pub(crate) const fn contact_count(&self) -> usize {
         self.count
     }
     #[must_use]
-    pub fn scaled_compliance_m_per_n(&self) -> &[f64] {
+    pub(crate) fn scaled_compliance_m_per_n(&self) -> &[f64] {
         &self.compliance
     }
     #[must_use]
-    pub const fn config(&self) -> MultipleHertzConfig {
+    pub(crate) const fn config(&self) -> MultipleHertzConfig {
         self.config
     }
 
@@ -212,9 +307,9 @@ impl PreparedHertzContacts {
     /// another patch's motion can authorize premature capture of a moving patch.
     /// Original law objects remain unchanged; endpoint event ownership remains
     /// with the mechanical caller.
-    pub fn advance_phases(
+    pub(crate) fn advance_phases<L: CircularWrenchLaw>(
         &self,
-        sites: &[HertzContactInput<'_>],
+        sites: &[CircularContactInput<'_, L>],
         phases: &[HertzWrenchPhase],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MultipleHertzStep, MultipleHertzError> {
@@ -230,7 +325,7 @@ impl PreparedHertzContacts {
         let inputs: Vec<_> = sites
             .iter()
             .zip(&laws)
-            .map(|(site, law)| HertzContactInput { law, ..*site })
+            .map(|(site, law)| CircularContactInput { law, ..*site })
             .collect();
         self.advance(&inputs, cancelled)
     }
@@ -240,9 +335,9 @@ impl PreparedHertzContacts {
     /// admitting kinetic alternatives; unresolved feasibility explicitly refuses.
     /// Intermediate local effort limits are unconstraining; the caller's limits
     /// apply to every final accepted physical wrench after collective closure.
-    pub fn advance(
+    pub(crate) fn advance<L: CircularWrenchLaw>(
         &self,
-        sites: &[HertzContactInput<'_>],
+        sites: &[CircularContactInput<'_, L>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MultipleHertzStep, MultipleHertzError> {
         poll(&mut cancelled)?;
@@ -253,7 +348,7 @@ impl PreparedHertzContacts {
         let mut free = Vec::with_capacity(n);
         for site in sites {
             poll(&mut cancelled)?;
-            let spin = number(site.free_spin_angle_rad * site.law.parameters.contact_radius_m)?;
+            let spin = number(site.free_spin_angle_rad * site.law.radius())?;
             if !site.free_spin_angle_rad.is_finite()
                 || (site.free_spin_angle_rad != 0.0 && spin == 0.0)
             {
@@ -270,7 +365,7 @@ impl PreparedHertzContacts {
         let static_modes: Vec<_> = sites
             .iter()
             .map(|site| {
-                if site.law.static_patch.sliding_capacity_n() == 0.0 {
+                if site.law.static_capacity() == 0.0 {
                     HertzWrenchMode::Frictionless
                 } else {
                     HertzWrenchMode::Sticking
@@ -300,9 +395,7 @@ impl PreparedHertzContacts {
         }
         forces.fill(0.0);
         let mut spent_sweeps = 0;
-        let reduced_static_constraints = sites
-            .iter()
-            .any(|site| site.law.static_patch.sliding_capacity_n() == 0.0);
+        let reduced_static_constraints = sites.iter().any(|site| site.law.static_capacity() == 0.0);
         if self.factor.rank() > 0
             && (self.factor.rank() < n || !supported || reduced_static_constraints)
         {
@@ -310,22 +403,17 @@ impl PreparedHertzContacts {
             // every load allocation in the nullspace is outside those sets.
             // Nor does an inaccurate full-rank solve prove infeasibility, or a
             // seed that incorrectly constrained a zero-capacity row to rest.
-            // Equal static/kinetic coefficients here are a numerical projection
+            // Equal static/kinetic capacities here are a numerical projection
             // onto the ORIGINAL static sets; these temporary laws never supply
             // the returned physical mode, work or heat.
             let projection_laws: Vec<_> = sites
                 .iter()
-                .enumerate()
-                .map(|(index, site)| {
-                    let mut parameters = site.law.parameters();
-                    parameters.kinetic_mu = parameters.static_mu;
-                    HertzWrenchContact::new(parameters).map_err(|error| contact_error(index, error))
-                })
-                .collect::<Result<_, _>>()?;
+                .map(|site| site.law.static_projection())
+                .collect();
             let projection_sites: Vec<_> = sites
                 .iter()
                 .zip(&projection_laws)
-                .map(|(site, law)| HertzContactInput {
+                .map(|(site, law)| CircularContactInput {
                     law,
                     free_displacement_m: site.free_displacement_m,
                     free_spin_angle_rad: site.free_spin_angle_rad,
@@ -429,9 +517,9 @@ impl PreparedHertzContacts {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn block_sweep(
+    fn block_sweep<L: CircularWrenchLaw>(
         &self,
-        sites: &[HertzContactInput<'_>],
+        sites: &[CircularContactInput<'_, L>],
         free: &[f64],
         forces: &mut [f64],
         modes: &mut [HertzWrenchMode],
@@ -451,7 +539,7 @@ impl PreparedHertzContacts {
             let free = self.local_free(free, forces, index)?;
             let input = HertzWrenchInput {
                 free_displacement_m: [free[0], free[1]],
-                free_spin_angle_rad: free[2] / site.law.parameters.contact_radius_m,
+                free_spin_angle_rad: free[2] / site.law.radius(),
                 scaled_compliance_m_per_n: self.diagonal[index],
             };
             let local = HertzWrenchConfig {
@@ -460,9 +548,7 @@ impl PreparedHertzContacts {
                 maximum_spin_moment_nm: f64::MAX,
                 ..self.config.local
             };
-            let step = site
-                .law
-                .advance(&input, local, &mut *cancelled)
+            let step = advance_circular(site.law, &input, local, &mut *cancelled)
                 .map_err(|error| contact_error(index, error))?;
             *evaluations += step.evaluations;
             local_evaluations[index] += step.evaluations;
@@ -471,7 +557,7 @@ impl PreparedHertzContacts {
             forces[3 * index..3 * index + 3].copy_from_slice(&[
                 -step.force_n[0],
                 -step.force_n[1],
-                -step.spin_moment_nm / site.law.parameters.contact_radius_m,
+                -step.spin_moment_nm / site.law.radius(),
             ]);
         }
         Ok(())
@@ -480,9 +566,9 @@ impl PreparedHertzContacts {
     // A user displacement tolerance must not erase a small unsupported drive
     // on a nullspace. All-static admission also requires scale-aware arithmetic
     // closure of the original physical rows. Zero-capacity rows may move freely.
-    fn static_supported(
+    fn static_supported<L: CircularWrenchLaw>(
         &self,
-        sites: &[HertzContactInput<'_>],
+        sites: &[CircularContactInput<'_, L>],
         free: &[f64],
         forces: &[f64],
     ) -> Result<(bool, f64), MultipleHertzError> {
@@ -490,7 +576,7 @@ impl PreparedHertzContacts {
         let mut supported = true;
         let mut maximum = 0.0_f64;
         for (row, &released) in free.iter().enumerate() {
-            if sites[row / 3].law.static_patch.sliding_capacity_n() == 0.0 {
+            if sites[row / 3].law.static_capacity() == 0.0 {
                 continue;
             }
             let mut response = 0.0;
@@ -513,9 +599,9 @@ impl PreparedHertzContacts {
     // every y supported on those rows. Strict violation authorizes the kinetic
     // search; failure to resolve it is NEVER interpreted as static infeasibility.
     #[allow(clippy::too_many_arguments)]
-    fn static_separated(
+    fn static_separated<L: CircularWrenchLaw>(
         &self,
-        sites: &[HertzContactInput<'_>],
+        sites: &[CircularContactInput<'_, L>],
         free: &[f64],
         forces: &[f64],
         evaluations: &mut usize,
@@ -527,7 +613,7 @@ impl PreparedHertzContacts {
         let mut residual = vec![0.0; n];
         for row in 0..n {
             poll(cancelled)?;
-            if sites[row / 3].law.static_patch.sliding_capacity_n() == 0.0 {
+            if sites[row / 3].law.static_capacity() == 0.0 {
                 continue;
             }
             residual[row] = number(
@@ -547,7 +633,7 @@ impl PreparedHertzContacts {
         let normalized: Vec<_> = residual.iter().map(|&value| value / scale).collect();
         for mut direction in [factor_direction, normalized] {
             for row in 0..n {
-                if sites[row / 3].law.static_patch.sliding_capacity_n() == 0.0 {
+                if sites[row / 3].law.static_capacity() == 0.0 {
                     direction[row] = 0.0;
                 }
             }
@@ -573,32 +659,29 @@ impl PreparedHertzContacts {
                 poll(cancelled)?;
                 // A near-null dual can cancel large matrix products. The
                 // original static support is Lipschitz with force bound cap
-                // and scaled spin bound cap*(3*pi/16); propagate those column
+                // and the law's own scaled spin bound; propagate those column
                 // accumulation errors even when the rounded dual is zero.
-                let capacity = number(site.law.static_patch.sliding_capacity_n())?;
+                let capacity = number(site.law.static_capacity())?;
                 arithmetic_scale = number(
                     arithmetic_scale
                         + capacity
                             * (dual_absolute_sum[3 * index]
                                 + dual_absolute_sum[3 * index + 1]
-                                + SPIN_RADIUS * dual_absolute_sum[3 * index + 2]),
+                                + site.law.spin_radius_fraction()
+                                    * dual_absolute_sum[3 * index + 2]),
                 )?;
                 let motion = [dual[3 * index], dual[3 * index + 1], dual[3 * index + 2]];
-                if motion == [0.0; 3] || site.law.static_patch.sliding_capacity_n() == 0.0 {
+                if motion == [0.0; 3] || site.law.static_capacity() == 0.0 {
                     continue;
                 }
                 let remaining = self.config.maximum_evaluations - *evaluations;
                 if remaining == 0 {
                     return Ok(false);
                 }
-                let projection = HertzWrenchContact {
-                    parameters: site.law.parameters,
-                    static_patch: site.law.static_patch,
-                    kinetic_patch: site.law.static_patch,
-                };
+                let projection = site.law.static_projection();
                 let input = HertzWrenchInput {
                     free_displacement_m: [motion[0], motion[1]],
-                    free_spin_angle_rad: motion[2] / site.law.parameters.contact_radius_m,
+                    free_spin_angle_rad: motion[2] / site.law.radius(),
                     scaled_compliance_m_per_n: [[0.0; 3]; 3],
                 };
                 let mut problem = Problem {
@@ -655,9 +738,9 @@ impl PreparedHertzContacts {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn audit(
+    fn audit<L: CircularWrenchLaw>(
         &self,
-        sites: &[HertzContactInput<'_>],
+        sites: &[CircularContactInput<'_, L>],
         free: &[f64],
         forces: &[f64],
         modes: &[HertzWrenchMode],
@@ -679,7 +762,7 @@ impl PreparedHertzContacts {
             let local_free = self.local_free(free, forces, index)?;
             let input = HertzWrenchInput {
                 free_displacement_m: [local_free[0], local_free[1]],
-                free_spin_angle_rad: local_free[2] / site.law.parameters.contact_radius_m,
+                free_spin_angle_rad: local_free[2] / site.law.radius(),
                 scaled_compliance_m_per_n: self.diagonal[index],
             };
             let wrench = [

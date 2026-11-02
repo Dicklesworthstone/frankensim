@@ -1377,3 +1377,30 @@ all translation/spin cross responses, the joint static capacity, moving-phase
 admission, covariance, zero strength, cancellation and retry. The original
 Hertz and multiple-contact regression targets exercise the shared projection.
 
+`adhesive::spinning::contact::multiple::PreparedAdhesiveContacts` resolves all
+attached uniform junctions on the original complete radius-scaled compliance.
+Each patch supplies its own actual radius and static/kinetic shear strengths;
+there is no normal-load surrogate. A crate-private generic circular-support
+engine shares the existing PSD preparation, dependent static-load allocation,
+bounded block solve and final physical audit with the Hertz owner. Every
+support evaluation, torsional bound and static separating margin uses the
+actual traction law, including the adhesive `2a/3` first-moment radius.
+
+Dependent response can redistribute a statically feasible reaction even when
+the minimum-norm seed exceeds one junction's capacity. An unresolved static
+decision explicitly refuses before trying a weaker kinetic branch. Supplied
+moving/static phases keep their respective original capacities. Final work
+uses the unchanged full matrix and final common motion; block sweeps never
+advance physical time or deposit heat. Zero-strength rows remain unconstrained
+and force-free. Zero-area detached junctions are omitted by the normal owner.
+Cancellation, budgets and late closure refusals publish no partial candidate.
+The shared solver retains its bounded numerical decision and nonuniqueness
+limits; it introduces no regularization, compliance, or contact storage.
+
+Five G1/G3/G4 groups in `tests/adhesive_wrench_multiple.rs` cover an independent
+three-junction nine-coordinate solution, uniform-disk torsional limits,
+dependent static redistribution, mixed accepted phases, unsupported motion,
+zero-strength rows, physical reorder/tangent covariance, full-matrix work,
+cancellation and deterministic retry. Existing Hertz and rolling multiple-
+contact targets remain the regression gate for the shared engine.
+

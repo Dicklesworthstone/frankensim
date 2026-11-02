@@ -332,7 +332,7 @@ impl HertzWrenchContact {
 /// A circular traction distribution supplies its own joint support surface.
 /// Sharing the mechanical projection never substitutes a Hertz pressure profile
 /// for a uniform adhesive junction or infers shear strength from normal load.
-pub(crate) trait CircularWrenchLaw {
+pub(crate) trait CircularWrenchLaw: Copy {
     fn radius(&self) -> f64;
     fn static_capacity(&self) -> f64;
     fn kinetic_capacity(&self) -> f64;
@@ -340,6 +340,11 @@ pub(crate) trait CircularWrenchLaw {
     fn spin_radius_fraction(&self) -> f64;
     /// Force and moment normalized by their respective pure-motion capacities.
     fn shape(&self, speed: f64, edge_speed: f64) -> Result<(f64, f64), TriboError>;
+    /// Restrict only the admissible capacity for the mechanically owned phase.
+    fn phase_law(&self, phase: HertzWrenchPhase) -> Self;
+    /// Numerical projection onto this law's actual static set, with no heat or
+    /// physical phase attributed to the temporary support calculation.
+    fn static_projection(&self) -> Self;
 }
 
 impl CircularWrenchLaw for HertzWrenchContact {
@@ -357,6 +362,19 @@ impl CircularWrenchLaw for HertzWrenchContact {
     }
     fn shape(&self, speed: f64, edge_speed: f64) -> Result<(f64, f64), TriboError> {
         Ok(shape_factors(speed, edge_speed))
+    }
+    fn phase_law(&self, phase: HertzWrenchPhase) -> Self {
+        HertzWrenchContact::phase_law(self, phase)
+    }
+    fn static_projection(&self) -> Self {
+        Self {
+            parameters: HertzWrenchParameters {
+                kinetic_mu: self.parameters.static_mu,
+                ..self.parameters
+            },
+            kinetic_patch: self.static_patch,
+            ..*self
+        }
     }
 }
 

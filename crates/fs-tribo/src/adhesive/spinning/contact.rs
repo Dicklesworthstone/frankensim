@@ -7,6 +7,9 @@
 //! The existing bounded circular-support projection retains all nine entries
 //! of the mechanical compliance and all of its work and cancellation gates.
 
+/// Simultaneous junctions on the complete response of shared physical bodies.
+pub mod multiple;
+
 use super::{AdhesiveSlidingPatch, AdhesiveSlidingPatchParameters, shape_factors};
 use crate::TriboError;
 use crate::sliding_patch::contact::{CircularWrenchLaw, advance_circular};
@@ -109,13 +112,7 @@ impl AdhesiveWrenchContact {
         config: AdhesiveWrenchConfig,
         cancelled: impl FnMut() -> bool,
     ) -> Result<AdhesiveWrenchStep, AdhesiveWrenchError> {
-        let law = match phase {
-            AdhesiveWrenchPhase::StaticAdmissible => *self,
-            AdhesiveWrenchPhase::Kinetic => Self {
-                static_patch: self.kinetic_patch,
-                ..*self
-            },
-        };
+        let law = self.phase_law(phase);
         advance_circular(&law, input, config, cancelled)
     }
 }
@@ -135,5 +132,28 @@ impl CircularWrenchLaw for AdhesiveWrenchContact {
     }
     fn shape(&self, speed: f64, edge_speed: f64) -> Result<(f64, f64), TriboError> {
         shape_factors(speed, edge_speed)
+    }
+    fn phase_law(&self, phase: AdhesiveWrenchPhase) -> Self {
+        match phase {
+            AdhesiveWrenchPhase::StaticAdmissible => *self,
+            AdhesiveWrenchPhase::Kinetic => Self {
+                parameters: AdhesiveWrenchParameters {
+                    static_shear_strength_pa: self.parameters.kinetic_shear_strength_pa,
+                    ..self.parameters
+                },
+                static_patch: self.kinetic_patch,
+                ..*self
+            },
+        }
+    }
+    fn static_projection(&self) -> Self {
+        Self {
+            parameters: AdhesiveWrenchParameters {
+                kinetic_shear_strength_pa: self.parameters.static_shear_strength_pa,
+                ..self.parameters
+            },
+            kinetic_patch: self.static_patch,
+            ..*self
+        }
     }
 }
