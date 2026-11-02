@@ -87,6 +87,34 @@ pub(super) fn reframe(
     Ok(populations)
 }
 
+/// Change physical velocity while retaining density, pressure and physical
+/// nonequilibrium stress in the same Guo frame. The external mass/momentum
+/// owner supplies the impulse and accounts for its kinetic work.
+pub(super) fn retarget_velocity(
+    mut populations: [f64; Q3],
+    previous: [f64; 3],
+    next: [f64; 3],
+    force: [f64; 3],
+) -> Result<[f64; Q3], FreeSurfaceError3> {
+    if previous == next {
+        return Ok(populations);
+    }
+    let rho = populations.iter().sum::<f64>();
+    let old_eq = equilibrium3(rho, previous);
+    let new_eq = equilibrium3(rho, next);
+    for (q, value) in populations.iter_mut().enumerate() {
+        *value += new_eq[q] - old_eq[q]
+            + 0.5 * (source(q, previous, force) - source(q, next, force));
+    }
+    preserve_density(&mut populations, rho)?;
+    if populations.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+        return Err(FreeSurfaceError3::Transport(
+            "inflow velocity needs positive finite populations",
+        ));
+    }
+    Ok(populations)
+}
+
 impl FreeSurface3 {
     pub(crate) fn reference_force(&self) -> [f64; 3] {
         self.grid.collision().1
@@ -210,6 +238,34 @@ mod tests {
             }
         }
         (momentum, stress)
+    }
+
+    #[test]
+    fn g1_inflow_velocity_retarget_keeps_density_and_physical_nonequilibrium() {
+        for rho in [0.4, 0.8, 1.3, 2.5] {
+            let previous = [0.02, -0.01, 0.03];
+            let next = [-0.01, 0.025, 0.015];
+            let force = [0.0003, -0.0002, 0.0001];
+            let mut physical = equilibrium3(rho, previous);
+            for (q, value) in physical.iter_mut().enumerate() {
+                *value += 0.001 * rho * W3[q] * f64::from(E3[q].0 * E3[q].1);
+            }
+            let initial = reframe(physical, previous, [0.0; 3], force).unwrap();
+            let actual_rho = initial.iter().sum::<f64>();
+            let after = retarget_velocity(initial, previous, next, force).unwrap();
+            assert_eq!(actual_rho.to_bits(), after.iter().sum::<f64>().to_bits());
+            let (momentum, stress) = physical_moments(&after, next, force);
+            let (_, old_stress) = physical_moments(&initial, previous, force);
+            for a in 0..3 {
+                assert!((momentum[a] - actual_rho * next[a]).abs() < 2e-14 * rho);
+                for b in 0..3 {
+                    let expected_change = actual_rho
+                        * (next[a] * next[b] - previous[a] * previous[b]);
+                    assert!((stress[a][b] - old_stress[a][b] - expected_change).abs() < 2e-14 * rho);
+                }
+            }
+            assert_eq!(retarget_velocity(initial, previous, previous, force).unwrap(), initial);
+        }
     }
 
     #[test]

@@ -48,7 +48,8 @@ mod transport;
 pub mod mass_exchange;
 pub use mass_exchange::{
     FreeSurfaceMassExchange, FreeSurfaceMassExchangeControls, FreeSurfaceMassExchangeReport,
-    FreeSurfaceMassExchangeSample, FreeSurfaceMassProjection,
+    FreeSurfaceMassExchangeSample, FreeSurfaceMassInflow, FreeSurfaceMassInflowReport,
+    FreeSurfaceMassProjection,
 };
 
 mod phase_conduction;

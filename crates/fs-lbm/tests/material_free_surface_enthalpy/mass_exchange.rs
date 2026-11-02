@@ -5,6 +5,8 @@ use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceMassExchange, FreeSurfaceMassExchangeControls, MaterialFreeSurfaceEnthalpy3,
 };
 
+mod inflow;
+
 #[allow(dead_code)]
 #[path = "../nsf3_thermochemical/source.rs"]
 mod gas_source;

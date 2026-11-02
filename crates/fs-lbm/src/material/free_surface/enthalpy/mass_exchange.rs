@@ -8,6 +8,9 @@
 
 use super::*;
 
+mod inflow;
+pub use inflow::{FreeSurfaceMassInflow, FreeSurfaceMassInflowReport};
+
 /// Read-only selection of the mass increment the native interface can store.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceMassProjection {
@@ -38,7 +41,8 @@ pub struct FreeSurfaceMassExchange {
 pub struct FreeSurfaceMassExchangeControls {
     /// Sum of absolute per-interface requested/represented mass defects [kg].
     pub mass_tolerance_kg: f64,
-    /// Sum of absolute per-interface enthalpy residuals [J].
+    /// Sum of absolute per-interface enthalpy residuals [J]. Well-mixed inflow
+    /// also gates its independent enthalpy-plus-kinetic balance by this bound.
     pub energy_tolerance_j: f64,
     /// Sum of absolute component momentum defects [kg m/s].
     pub momentum_tolerance_kg_m_s: f64,
@@ -80,7 +84,8 @@ pub struct FreeSurfaceMassExchangeReport {
     pub enthalpy_change_j: f64,
     /// Sum of absolute local caloric balance defects, with no datum in the scale [J].
     pub absolute_energy_defect_j: f64,
-    /// Momentum carried at the accepted local liquid velocity, not a force.
+    /// Momentum carried at the declared transfer velocity, not a force. The
+    /// original co-moving exchange uses the accepted local liquid velocity.
     pub carried_momentum_kg_m_s: [f64; 3],
     /// Actual endpoint change after refreshing the original force frame [kg m/s].
     pub momentum_change_kg_m_s: [f64; 3],
@@ -214,6 +219,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         controls: FreeSurfaceMassExchangeControls,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceMassExchangeReport, Error> {
+        self.exchange_interface_mass_model(exchanges, None, controls, gate)
+            .map(|(report, _)| report)
+    }
+
+    fn exchange_interface_mass_model(
+        &mut self,
+        exchanges: &[FreeSurfaceMassExchange],
+        inflow: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
+        controls: FreeSurfaceMassExchangeControls,
+        gate: &CancelGate,
+    ) -> Result<(FreeSurfaceMassExchangeReport, inflow::MixingBalance), Error> {
         poll(gate)?;
         if exchanges.len() > self.controls.max_cells
             || [
@@ -253,6 +269,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let mut lattice = self.flow.lattice.clone();
         let mut h = self.h.clone();
+        let mut mixing = inflow::MixingBalance::default();
         let mut report = FreeSurfaceMassExchangeReport {
             physical_time_s: self.physical_time_s(),
             mass_change_kg: 0.0,
@@ -276,7 +293,26 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             let old_h = self.h[&location];
             // The actual native dm owns the transfer. Center the update on the
             // old datum so a common caloric offset cannot manufacture heat.
-            let relative_supply = dm * (transfer.specific_enthalpy_j_kg - old_h) + transfer.heat_j;
+            let mut relative_supply = dm * (transfer.specific_enthalpy_j_kg - old_h) + transfer.heat_j;
+            if let Some(inflow) = inflow {
+                let before = self.flow.lattice.sample_at(
+                    transfer.coordinates[0], transfer.coordinates[1], transfer.coordinates[2],
+                ).expect("admitted interface");
+                let mut velocity = [0.0; 3];
+                for d in 0..3 {
+                    velocity[d] = self.flow.scaling.velocity_si(before.velocity[d])?;
+                }
+                let (next, heat) = inflow::mixing_state(
+                    projection.initial_mass_kg, dm, new_mass_kg, velocity, inflow[&location],
+                ).ok_or(Error::Invalid("inflow mixing state is unrepresentable"))?;
+                let scale = self.flow.scaling.velocity_si(1.0)?;
+                let native = next.map(|u| u / scale);
+                inflow::admit_velocity(native, self.flow.scaling.flow().u_lattice)?;
+                if next != velocity {
+                    lattice.transport_set_interface_velocity(location, native, gate)?;
+                }
+                relative_supply += heat;
+            }
             let new_h = old_h + relative_supply / new_mass_kg;
             if !new_mass_kg.is_finite()
                 || new_mass_kg <= 0.0
@@ -331,25 +367,46 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 dm * (t.specific_enthalpy_j_kg - self.h[&location]) + t.heat_j
             });
             report.enthalpy_change_j += dm * self.h[&location] + new_mass * dh;
-            report.absolute_energy_defect_j += (new_mass * dh - supplied_relative).abs();
             let before = self
                 .flow
                 .lattice
                 .sample_at(x, y, z)
                 .expect("accepted liquid");
             let after = lattice.sample_at(x, y, z).expect("retained interface");
+            let mut old_velocity = [0.0; 3];
+            let mut delta_velocity = [0.0; 3];
             for axis in 0..3 {
                 let u = self.flow.scaling.velocity_si(before.velocity[axis])?;
                 let du = self
                     .flow
                     .scaling
                     .velocity_si(after.velocity[axis] - before.velocity[axis])?;
-                let carried = dm * u;
-                let change = carried + new_mass * du;
+                let carried = inflow.and_then(|values| values.get(&location))
+                    .map_or(dm * u, |incoming| dm * incoming[axis]);
+                let change = dm * u + new_mass * du;
+                old_velocity[axis] = u;
+                delta_velocity[axis] = du;
                 report.carried_momentum_kg_m_s[axis] += carried;
                 report.momentum_change_kg_m_s[axis] += change;
                 report.absolute_momentum_defect_kg_m_s += (change - carried).abs();
             }
+            let heat = if let Some(inflow) = inflow {
+                let incoming = inflow.get(&location).copied().unwrap_or(old_velocity);
+                let heat = if transfer.is_some() {
+                    inflow::mixing_state(old_mass * mass_unit, dm, new_mass, old_velocity, incoming)
+                        .ok_or(Error::Invalid("inflow mixing balance is unrepresentable"))?.1
+                } else { 0.0 };
+                let carried = 0.5 * dm * incoming.iter().map(|u| u * u).sum::<f64>();
+                let kinetic = inflow::kinetic_change(dm, new_mass, old_velocity, delta_velocity);
+                mixing.carried_kinetic_energy_j += carried;
+                mixing.kinetic_energy_change_j += kinetic;
+                mixing.mixing_heat_j += heat;
+                mixing.absolute_total_energy_defect_j +=
+                    (new_mass * dh - supplied_relative + kinetic - carried).abs();
+                heat
+            } else { 0.0 };
+            let caloric_supply = if inflow.is_some() { supplied_relative + heat } else { supplied_relative };
+            report.absolute_energy_defect_j += (new_mass * dh - caloric_supply).abs();
         }
         if [
             report.mass_change_kg,
@@ -370,6 +427,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             || report.absolute_mass_defect_kg > controls.mass_tolerance_kg
             || report.absolute_energy_defect_j > controls.energy_tolerance_j
             || report.absolute_momentum_defect_kg_m_s > controls.momentum_tolerance_kg_m_s
+            || !mixing.admitted(controls.energy_tolerance_j)
         {
             return Err(Error::Invalid(
                 "interface mass, enthalpy or momentum balance exceeded budget",
@@ -380,6 +438,6 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         self.h = h;
         self.states = resolved.states;
         self.rheology_samples = resolved.rheology;
-        Ok(report)
+        Ok((report, mixing))
     }
 }

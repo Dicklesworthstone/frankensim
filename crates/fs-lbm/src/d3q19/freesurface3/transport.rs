@@ -162,6 +162,36 @@ impl FreeSurface3 {
         Ok(())
     }
 
+    /// Retarget one occupied interface in its actual force frame. Its native
+    /// density, tracked mass and physical nonequilibrium stress remain intact;
+    /// the enclosing inflow owner accounts for momentum and kinetic energy.
+    pub(crate) fn transport_set_interface_velocity(
+        &mut self,
+        location: MassLocation3,
+        velocity: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let (_, density) = self.transport_interface_mass(location)?;
+        let speed = velocity[0].hypot(velocity[1]).hypot(velocity[2]);
+        if !speed.is_finite() || speed / CS2_3.sqrt() >= crate::MACH_LIMIT {
+            return Err(FreeSurfaceError3::Transport("inflow exceeds the lattice Mach domain"));
+        }
+        let MassLocation3::Cell(key, lane) = location else {
+            return Err(FreeSurfaceError3::Transport("inflow needs a located interface"));
+        };
+        let slot = self.grid.slot_of(key).expect("admitted interface");
+        let (_, raw) = self.grid.cell_macros(slot, lane);
+        let force = self.force_at_lane(key, lane);
+        let previous = core::array::from_fn(|d| raw[d] + 0.5 * force[d] / density);
+        let populations = forcing::retarget_velocity(
+            self.grid.populations(slot, lane), previous, velocity, force,
+        )?;
+        check_cancel(gate)?;
+        self.grid.set_populations(slot, lane, populations);
+        Ok(())
+    }
+
     /// Permanent mechanical wall, not an inactive tile that can later be gas.
     /// Thermal contacts must not turn an absent liquid neighbor into a solid.
     pub(crate) fn transport_wall_at(&self, coordinates: [i64; 3]) -> bool {
@@ -302,5 +332,49 @@ impl FreeSurface3 {
         tau: &BTreeMap<(u64, usize), f64>,
     ) -> Result<(), FreeSurfaceError3> {
         self.step_inner(gate, None, Some(tau), None)
+    }
+}
+
+#[cfg(test)]
+mod inflow_tests {
+    use super::*;
+
+    #[test]
+    fn g1_native_interface_inflow_preserves_pressure_and_carried_momentum() {
+        let gate = CancelGate::new_clock_free();
+        fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
+            let cx = fs_exec::Cx::new(&gate, arena,
+                fs_exec::StreamKey { seed: 71, kernel_id: 29, tile: 0, iteration: 0 },
+                fs_exec::Budget::INFINITE, fs_exec::ExecMode::Deterministic);
+            for rho in [0.4, 0.8, 1.3, 2.5] {
+                let velocity = [0.02, -0.01, 0.03];
+                let incoming = [-0.04, 0.05, -0.02];
+                let coordinates = [3, 3, 3];
+                let mut surface = FreeSurface3::from_cells([8; 3], 0.8,
+                    [0.0003, -0.0002, 0.0001], 0.0, ContactModel3::Neutral, &[],
+                    &[FreeSurfaceInitialCell3 { coordinates, fill_fraction: 0.4,
+                        density: rho, velocity }], &cx).unwrap();
+                let location = FreeSurface3::transport_location(coordinates).unwrap();
+                let before = surface.sample_at(3, 3, 3).unwrap();
+                let (mass, density) = surface.transport_interface_mass(location).unwrap();
+                let next_mass = mass + 0.1 * density;
+                let dm = next_mass - mass;
+                let next_velocity = core::array::from_fn(|d|
+                    (mass * before.velocity[d] + dm * incoming[d]) / next_mass);
+                surface.transport_set_interface_mass(location, next_mass, &gate).unwrap();
+                surface.transport_set_interface_velocity(location, next_velocity, &gate).unwrap();
+                let after = surface.sample_at(3, 3, 3).unwrap();
+                assert_eq!(before.density.to_bits(), after.density.to_bits());
+                assert!((after.fill_fraction - 0.5).abs() < 2e-14);
+                assert_eq!(surface.ledger_mass(), next_mass);
+                for d in 0..3 {
+                    assert!((next_mass * after.velocity[d] - mass * before.velocity[d]
+                        - dm * incoming[d]).abs() < 2e-14 * rho);
+                }
+                let accepted = after;
+                assert!(surface.transport_set_interface_velocity(location, [1.0; 3], &gate).is_err());
+                assert_eq!(surface.sample_at(3, 3, 3).unwrap(), accepted);
+            }
+        });
     }
 }

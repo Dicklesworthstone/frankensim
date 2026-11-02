@@ -602,6 +602,35 @@ that coupling owner. `fs-couple::liquid_gas::evaporation` uses these read-only
 operations, the shared finite-rate phase owner and this native exchange to
 publish finite gas plus real VOF liquid together on one native flow interval.
 
+### Positive liquid inflow with explicit local complete mixing
+
+`MaterialFreeSurfaceEnthalpy3::mix_interface_inflow` adds positive mass at a
+declared incoming velocity to an existing occupied interface. The caller selects
+a perfectly inelastic local mixing law: with actual represented incoming mass
+`dm`, old mass `m` and final mass `M`, velocity becomes
+`u + (dm/M)*(v_in-u)` and `0.5*dm*(m/M)*|v_in-u|^2` becomes liquid enthalpy.
+This is the authored loss of relative kinetic energy under complete mixing;
+numerical remap defects are never converted to heat. Incoming enthalpy must
+itself invert to pure liquid at the original fixed caloric density. The incoming
+and accepted velocities must both fit the original scenario's speed domain.
+
+The native update retains canonical population density exactly, preserving
+pressure and the mass-to-fill relation. It translates the physical equilibrium
+in the actual Guo force frame while retaining physical nonequilibrium stress.
+Original material, force, rheology and surface owners re-admit the complete
+candidate before publication. The report separates external heat, mixing heat,
+carried kinetic energy and actual kinetic change; independent local mass,
+momentum, enthalpy and enthalpy-plus-kinetic defects must all fit their budgets.
+The co-moving signed exchange API and its arithmetic remain unchanged.
+
+This bounded filling boundary retains positive interface capacity and the
+original liquid density/phase assumptions. It does not resolve jet impact,
+nucleate cells, supply arbitrary outflow recoil, advance the clock or establish
+global momentum/kinetic conservation of VOF conversion. Native regressions cover
+unequal density, force-frame stress and carried momentum; public material tests
+exercise filling, thermal storage, normal subsequent transport, co-moving
+identity and transactional refusal.
+
 ### Finite atmosphere on the native free-surface thermal timeline
 
 `step_with_finite_gas_environment` gives the same moving-liquid thermal owner
