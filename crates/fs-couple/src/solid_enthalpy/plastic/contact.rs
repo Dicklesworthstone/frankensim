@@ -156,6 +156,28 @@ fn number<E>(value: f64) -> Result<f64, ContactError<E>> {
     }
 }
 
+// Shared native reference-normal projection for thermal supports and matching
+// electrical interfaces. Voigt order is xx, yy, zz, xy, yz, zx (tensor shear).
+pub(super) fn compressive_pressure<E>(
+    stress: &[f64; 6],
+    normal: [f64; 3],
+) -> Result<f64, ContactError<E>> {
+    let [nx, ny, nz] = normal;
+    let pressure = number(
+        -(stress[0] * nx * nx
+            + stress[1] * ny * ny
+            + stress[2] * nz * nz
+            + 2.0 * (stress[3] * nx * ny + stress[4] * ny * nz + stress[5] * nz * nx)),
+    )?;
+    if pressure < 0.0 {
+        return Err(ContactError::Invalid(
+            "tensile normal traction requires an opening/contact model",
+        ));
+    }
+    // Exact zero has one source coordinate identity; this does not clamp tension.
+    Ok(if pressure == 0.0 { 0.0 } else { pressure })
+}
+
 impl ThermalSupportContact<'_> {
     pub(super) fn sample<E>(
         &self,
@@ -182,19 +204,7 @@ impl ThermalSupportContact<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         let phases = [states[0], states[1]];
         let mut point = self.point.at(phases).map_err(ContactError::State)?;
-        let [nx, ny, nz] = normal;
-        // Native Voigt order is xx, yy, zz, xy, yz, zx (tensor shear, not Mandel).
-        let pressure = number(
-            -(stress[0] * nx * nx
-                + stress[1] * ny * ny
-                + stress[2] * nz * nz
-                + 2.0 * (stress[3] * nx * ny + stress[4] * ny * nz + stress[5] * nz * nx)),
-        )?;
-        if pressure < 0.0 {
-            return Err(ContactError::Invalid(
-                "tensile normal traction requires an opening/contact model",
-            ));
-        }
+        let pressure = compressive_pressure(stress, normal)?;
         point = point
             .with(self.pressure_axis, pressure)
             .map_err(|_| ContactError::Invalid("contact pressure coordinate refused"))?;

@@ -8,6 +8,10 @@ use fs_material::electrical_interface::{
 };
 use fs_material::state_point::ResolvedInterfaceStatePoint;
 use fs_material::thermal::interface::ThermalInterfacePoint;
+use fs_qty::{
+    Pressure,
+    semantic::{QuantityKind, ValueForm},
+};
 
 /// Explicit thermal ownership of one original surface contact. Contact indices
 /// refer to the original conduction owner's `contacts()` in canonical trace
@@ -21,6 +25,16 @@ pub struct ConductionContactThermal<'a> {
     /// Authored physical fraction of Joule heat entering surface A, in [0,1].
     /// Its remainder enters B. No effusivity or equal split is inferred.
     pub heat_fraction_to_first: f64,
+}
+
+/// A pressure coordinate owned by an admitted mechanical contact. The native
+/// mechanics owner checks compressive traction and geometry; this shared
+/// source owner checks the original coordinate, source pin and thermal state.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SolvedContactPressure<'a> {
+    pub contact: usize,
+    pub axis: &'a str,
+    pub pressure_pa: f64,
 }
 
 /// Actual surface field and its heat destinations at the accepted endpoint.
@@ -37,6 +51,7 @@ pub struct ConductionContactHeat<R = ConductionContactResponse> {
 pub(super) struct PreparedContacts<'a, 'm> {
     bindings: Vec<&'a ConductionContactThermal<'m>>,
     cells: Vec<[CellId; 2]>,
+    pressure_axes: BTreeMap<usize, String>,
 }
 
 // A refresh pins the selected claim, changing the selection receipt even at
@@ -104,6 +119,7 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             return Ok(Self {
                 bindings: Vec::new(),
                 cells: Vec::new(),
+                pressure_axes: BTreeMap::new(),
             });
         }
         let trace = mesh
@@ -147,6 +163,7 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             bindings,
             routes,
             accepted,
+            &[],
             cancel,
         )
     }
@@ -162,6 +179,7 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
         bindings: &'a [ConductionContactThermal<'m>],
         routes: &[CellId],
         accepted: &MaterialNetworkSample,
+        pressures: &[SolvedContactPressure<'_>],
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Self, Error> {
         check(cancel)?;
@@ -227,8 +245,46 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             }
             cells.push(receivers);
         }
-        let prepared = Self { bindings, cells };
-        let refreshed = prepared.refresh_sources(originals, accepted, cancel)?;
+        let mut pressure_axes = BTreeMap::new();
+        for pressure in pressures {
+            check(cancel)?;
+            let binding = bindings.get(pressure.contact).ok_or_else(|| {
+                invalid("solved pressure requires an original electrical contact")
+            })?;
+            let axis = pressure.axis;
+            if axis.trim().is_empty()
+                || !binding.point.context.axes().contains_key(axis)
+                || binding
+                    .point
+                    .context
+                    .axis_quantities()
+                    .get(axis)
+                    .is_none_or(|quantity| {
+                        quantity.dims() != Pressure::DIMS
+                            || quantity.semantic_type().is_some_and(|semantic| {
+                                semantic.kind() != QuantityKind::Pressure
+                                    || semantic.form() != ValueForm::Static
+                            })
+                    })
+                || binding.point.temperature_axes.contains(&axis)
+                || binding.point.liquid_fraction_axes.contains(&Some(axis))
+                || binding.point.mean_temperature_axis == Some(axis)
+                || pressure_axes
+                    .insert(pressure.contact, axis.to_owned())
+                    .is_some()
+            {
+                return Err(invalid(
+                    "solved contact pressure requires a unique distinct original static pressure coordinate in pascals",
+                ));
+            }
+        }
+        let prepared = Self {
+            bindings,
+            cells,
+            pressure_axes,
+        };
+        let refreshed =
+            prepared.refresh_sources_with_pressures(originals, accepted, pressures, cancel)?;
         if refreshed
             .iter()
             .zip(originals)
@@ -278,10 +334,47 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
         sample: &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<ResolvedElectricalInterface>, Error> {
+        self.refresh_sources_with_pressures(originals, sample, &[], cancel)
+    }
+
+    pub(super) fn refresh_sources_with_pressures(
+        &self,
+        originals: &[&ResolvedElectricalInterface],
+        sample: &MaterialNetworkSample,
+        pressures: &[SolvedContactPressure<'_>],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Vec<ResolvedElectricalInterface>, Error> {
         if originals.len() != self.bindings.len() {
             return Err(invalid(
                 "spatial contact source coverage changed during feedback",
             ));
+        }
+        // A trial may update values, never the original ownership or coordinate.
+        // Keeping this map beside the heat routes makes a missing/duplicate or
+        // renamed mechanical coordinate fail before any source is published.
+        let mut pressure_values = vec![None; self.bindings.len()];
+        if pressures.len() != self.pressure_axes.len() {
+            return Err(invalid(
+                "solved contact pressure coverage changed during feedback",
+            ));
+        }
+        for pressure in pressures {
+            check(cancel)?;
+            if !pressure.pressure_pa.is_finite()
+                || pressure.pressure_pa < 0.0
+                || self
+                    .pressure_axes
+                    .get(&pressure.contact)
+                    .map(String::as_str)
+                    != Some(pressure.axis)
+                || pressure_values[pressure.contact]
+                    .replace(pressure.pressure_pa)
+                    .is_some()
+            {
+                return Err(invalid(
+                    "solved pressure requires finite compression at each original contact coordinate",
+                ));
+            }
         }
         let mut contacts = Vec::with_capacity(self.bindings.len());
         for ((binding, cells), original) in self.bindings.iter().zip(&self.cells).zip(originals) {
@@ -296,10 +389,16 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             let [Some(first), Some(second)] = phases else {
                 return Err(invalid("spatial contact lost a receiving material state"));
             };
-            let point = binding
+            let mut point = binding
                 .point
                 .at([first, second])
                 .map_err(|error| material(MaterialNetworkError::Material(error)))?;
+            if let Some(pressure_pa) = pressure_values[binding.contact] {
+                let axis = &self.pressure_axes[&binding.contact];
+                point = point
+                    .with(axis, pressure_pa)
+                    .map_err(|_| invalid("original mechanical pressure coordinate refused"))?;
+            }
             let source = original
                 .at_query_point(binding.point.interface, &point)
                 .map_err(|error| {

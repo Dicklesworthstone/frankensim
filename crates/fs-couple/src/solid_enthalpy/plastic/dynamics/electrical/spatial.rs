@@ -14,7 +14,8 @@ use crate::circuit_enthalpy::{
     contacts::heat::{HeatAssembly, HeatNetworkSample},
 };
 use crate::solid_enthalpy::plastic::electrical::{
-    ElectricalSolidError, ElectricalSolidReport, spatial::SpatialElectricalSolidSolve,
+    ElectricalSolidError, ElectricalSolidReport,
+    spatial::{SpatialElectricalContactPressure, SpatialElectricalSolidSolve},
 };
 use fs_em::spatial::conduction::SpatialConduction;
 use fs_exec::Cx;
@@ -110,6 +111,75 @@ impl<'m> ThermoplasticDynamics<'m> {
         )
     }
 
+    /// The same inertial/current/heat transaction with selected source pressure
+    /// refreshed from two agreeing native compressive tractions. Projection uses
+    /// original reference normals and requires all paired-face DOFs prescribed;
+    /// it adds no tie/contact force or finite-rotation traction transport.
+    /// Accepted source consistency uses stored stress; each proposed pressure
+    /// uses the actual inertial mechanical endpoint. Original kinetic and
+    /// numerical accounts stay separate from physical heat. All matching-face,
+    /// source, thermal and atomic-candidate guarantees remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_spatial_electrical_pressure_contact_candidate<
+        't,
+        'd,
+        'p,
+        A: HeatAssembly + ?Sized,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        problem: &SpatialConduction,
+        assembly: &A,
+        drive: impl Into<SpatialConductionDrive<'d>>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        pressure_bindings: &[SpatialElectricalContactPressure<'p>],
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: SpatialElectricalSolidSolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<DynamicSpatialElectricalCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
+    {
+        let (candidate, motion) = self
+            .solid
+            .advance_spatial_electrical_with_motion_candidate(
+                thermal,
+                problem,
+                assembly,
+                drive,
+                contact_bindings,
+                pressure_bindings,
+                target_s,
+                prescribed_m,
+                nodal_forces_n,
+                settings,
+                controls,
+                guess_j,
+                Some(&self.velocity_mps),
+                cx,
+            )?;
+        let motion = motion.ok_or(ElectricalSolidError::Invalid(
+            "inertial spatial-current candidate must retain native velocity and kinetic account",
+        ))?;
+        let (thermal, solid, problem, material) = candidate.into_parts();
+        cx.checkpoint()
+            .map_err(|_| ElectricalSolidError::Cancelled)?;
+        Ok(DynamicSpatialElectricalCandidate {
+            thermal,
+            problem,
+            dynamics: Self {
+                solid,
+                velocity_mps: motion.velocity_mps,
+            },
+            report: ThermoplasticDynamicsReport {
+                material,
+                inertia: motion.energy,
+            },
+        })
+    }
+
     /// Advance the same native inertial/current/heat transaction with complete
     /// source-backed matching electrical-interface bindings. The original
     /// surface owner re-admits paired X+u triangles and their actual area, then
@@ -138,40 +208,20 @@ impl<'m> ThermoplasticDynamics<'m> {
         cx: &Cx<'_>,
     ) -> Result<DynamicSpatialElectricalCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
     {
-        let (candidate, motion) = self
-            .solid
-            .advance_spatial_electrical_with_motion_candidate(
-                thermal,
-                problem,
-                assembly,
-                drive,
-                contact_bindings,
-                target_s,
-                prescribed_m,
-                nodal_forces_n,
-                settings,
-                controls,
-                guess_j,
-                Some(&self.velocity_mps),
-                cx,
-            )?;
-        let motion = motion.ok_or(ElectricalSolidError::Invalid(
-            "inertial spatial-current candidate must retain native velocity and kinetic account",
-        ))?;
-        let (thermal, solid, problem, material) = candidate.into_parts();
-        cx.checkpoint()
-            .map_err(|_| ElectricalSolidError::Cancelled)?;
-        Ok(DynamicSpatialElectricalCandidate {
+        self.advance_spatial_electrical_pressure_contact_candidate(
             thermal,
             problem,
-            dynamics: Self {
-                solid,
-                velocity_mps: motion.velocity_mps,
-            },
-            report: ThermoplasticDynamicsReport {
-                material,
-                inertia: motion.energy,
-            },
-        })
+            assembly,
+            drive,
+            contact_bindings,
+            &[],
+            target_s,
+            prescribed_m,
+            nodal_forces_n,
+            settings,
+            controls,
+            guess_j,
+            cx,
+        )
     }
 }

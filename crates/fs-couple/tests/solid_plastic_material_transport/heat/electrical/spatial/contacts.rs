@@ -1,5 +1,7 @@
 //! Matching electrical traces on prescribed native solid kinematics, not a
 //! mechanical contact/tie solver. All material/interface laws are manufactured.
+#[path = "contacts/pressure.rs"]
+mod pressure;
 use super::terminals::{PRISM_NODES, PRISM_TETS, current_drive, prism_thermal_cells};
 use super::*;
 use fs_couple::circuit_enthalpy::{
@@ -111,12 +113,9 @@ fn with_contact<R>(
             BULK_RHO,
         )),
     );
-    let (nodes, tets) = specimen_mesh();
     // The original second card has fixed 40 MPa yield, E, nu and Cp. Both
     // prisms stay elastic with alpha explicitly zero; only interface R'' varies.
-    let material = &f.cards[1];
-    let caloric = &f.caloric[1];
-    let interface = interface(material, r0);
+    let interface = interface(&f.cards[1], r0);
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -128,6 +127,53 @@ fn with_contact<R>(
         .unwrap()
         .with_quantity("p", pressure_quantity(), PRESSURE_PA)
         .unwrap();
+    with_contact_fixture(
+        ContactFixture {
+            material: f,
+            interface,
+            point,
+            fraction: FRACTION,
+            mean_temperature_axis: None,
+            expansion: false,
+        },
+        run,
+    )
+}
+
+// Both fixed-pressure and solved-pressure tests use this original native
+// geometry/caloric/material assembly; only their source laws/owned roles differ.
+struct ContactFixture {
+    material: Fixture,
+    interface: InterfaceSystemCard,
+    point: QueryPoint,
+    fraction: f64,
+    mean_temperature_axis: Option<&'static str>,
+    expansion: bool,
+}
+
+fn with_contact_fixture<R>(
+    fixture: ContactFixture,
+    run: impl FnOnce(
+        &Cx<'_>,
+        &DepositionSimulation<'_>,
+        &ThermoplasticSolid<'_>,
+        &SpatialConduction,
+        &PreparedHeatNetwork<'_, '_>,
+        &[ConductionContactThermal<'_>],
+        &[Vec<usize>; 2],
+    ) -> R,
+) -> R {
+    let ContactFixture {
+        material: f,
+        interface,
+        point,
+        fraction,
+        mean_temperature_axis,
+        expansion,
+    } = fixture;
+    let (nodes, tets) = specimen_mesh();
+    let material = &f.cards[1];
+    let caloric = &f.caloric[1];
     let bindings = [ConductionContactThermal {
         contact: 0,
         point: ThermalInterfacePoint {
@@ -136,9 +182,9 @@ fn with_contact<R>(
             context: &point,
             temperature_axes: ["Ta", "Tb"],
             liquid_fraction_axes: [None, None],
-            mean_temperature_axis: None,
+            mean_temperature_axis,
         },
-        heat_fraction_to_first: FRACTION,
+        heat_fraction_to_first: fraction,
     }];
     with_cx(|_, cx| {
         let thermal = prism_thermal_cells(caloric.curve(), MATS[1], &nodes, &tets, &IDS);
@@ -156,7 +202,8 @@ fn with_contact<R>(
                         temperature_axis: "T".into(),
                         selection: MaterialPropertySelection::SingleClaimOnly,
                         hardening_basis: BASIS,
-                        thermal_expansion: None,
+                        thermal_expansion: expansion
+                            .then_some(MaterialPropertySelection::SingleClaimOnly),
                         strain_limit: 0.04,
                     },
                 })

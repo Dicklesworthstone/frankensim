@@ -9,7 +9,7 @@
 //! source/conductance resolution, Newton work limits, events and acceptance
 //! remain with the existing circuit/enthalpy and material-network owners.
 
-use super::contacts::{self, ConductionContactThermal};
+use super::contacts::{self, ConductionContactThermal, SolvedContactPressure};
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, ConductionLink,
     ConductionRegion, ConductionThermalError, ConductionThermalNetwork, DrivenCoefficients,
@@ -423,6 +423,8 @@ impl SpatialConductionThermalNetwork<'_> {
             sample,
             None,
             |_| Ok(None),
+            &[],
+            |_| Ok(Vec::new()),
             cancel,
         )
     }
@@ -431,12 +433,16 @@ impl SpatialConductionThermalNetwork<'_> {
     // inventory remains on its original reference volumes. Matching electrical
     // interfaces retain their original paired vertices and source/heat owners;
     // the native field re-admits their coincidence and actual surface metric at
-    // every proposal. Source resolution, field work, heat routes and the one
-    // enthalpy residual stay here.
+    // every proposal. An admitted mechanical pressure owner can also refresh
+    // original interface coordinates. Accepted pressures come from the stored
+    // mechanical state, separately from a target-load solve at old temperatures.
+    // Source resolution, field work, heat routes and the one enthalpy residual
+    // stay here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn step_resolved_candidate_with_geometry<
         't,
         'd,
+        'p,
         C: SpatialConductorMaterial,
         S,
         E: From<ConductionThermalError>,
@@ -457,6 +463,10 @@ impl SpatialConductionThermalNetwork<'_> {
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         reference_volumes_m3: Option<&[f64]>,
         trial_positions: impl Fn(&S) -> Result<Option<Vec<[f64; 3]>>, CircuitEnthalpyError<E>>,
+        accepted_pressures: &[SolvedContactPressure<'p>],
+        trial_pressures: impl Fn(
+            &S,
+        ) -> Result<Vec<SolvedContactPressure<'p>>, CircuitEnthalpyError<E>>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
         let drive = drive.into();
@@ -572,6 +582,7 @@ impl SpatialConductionThermalNetwork<'_> {
             contact_bindings,
             &routes,
             sample(&accepted.source),
+            accepted_pressures,
             cancel,
         )
         .map_err(map_conduction_error)?;
@@ -603,8 +614,14 @@ impl SpatialConductionThermalNetwork<'_> {
                         "3D current cannot silently omit graph electrical work",
                     )));
                 }
+                let pressures = trial_pressures(&coefficients.source)?;
                 let refreshed_contacts = contact_owner
-                    .refresh_sources(&contact_sources, sample(&coefficients.source), cancel)
+                    .refresh_sources_with_pressures(
+                        &contact_sources,
+                        sample(&coefficients.source),
+                        &pressures,
+                        cancel,
+                    )
                     .map_err(map_conduction_error)?;
                 let refreshed_contacts = problem
                     .contacts()

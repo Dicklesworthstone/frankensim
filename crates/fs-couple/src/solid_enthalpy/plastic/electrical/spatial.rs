@@ -4,6 +4,9 @@
 //! The original reference-mass caloric cells, native J2 history and complete heat
 //! assembly stay authoritative. This adds no resistor reduction or integrator.
 
+pub mod pressure;
+pub use pressure::SpatialElectricalContactPressure;
+
 use super::*;
 use crate::circuit_enthalpy::conduction::contacts::ConductionContactThermal;
 use crate::circuit_enthalpy::conduction::spatial::{
@@ -204,12 +207,67 @@ impl<'m> ThermoplasticSolid<'m> {
         cx: &Cx<'_>,
     ) -> Result<SpatialElectricalSolidCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
     {
+        self.advance_spatial_electrical_pressure_contact_candidate(
+            thermal,
+            problem,
+            assembly,
+            drive,
+            contact_bindings,
+            &[],
+            target_s,
+            prescribed_m,
+            nodal_forces_n,
+            settings,
+            controls,
+            guess_j,
+            cx,
+        )
+    }
+
+    /// Refresh selected interface pressure coordinates from actual native
+    /// compressive stress on both original adjacent tetrahedra. Projection uses
+    /// the original reference normals, consistent with small-strain mechanics;
+    /// every paired-face displacement must be prescribed. Both finite pressures
+    /// must be nonnegative and agree within the explicit absolute tolerance.
+    /// The first side is retained after agreement; no averaging, tension clamp
+    /// or mechanical contact/tie force is introduced.
+    ///
+    /// Original source pressures must match the STORED accepted stress. Every
+    /// nonlinear trial instead uses its proposed native stress at the same
+    /// caloric endpoint, closing pressure/resistance/Joule/temperature feedback.
+    /// Unselected interface conditions retain their authored values. Matching
+    /// geometry, reference-mass heat and atomic publication retain the scope of
+    /// [`Self::advance_spatial_electrical_contact_candidate`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_spatial_electrical_pressure_contact_candidate<
+        't,
+        'd,
+        'p,
+        A: HeatAssembly + ?Sized,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        problem: &SpatialConduction<ResolvedConductorState>,
+        assembly: &A,
+        drive: impl Into<SpatialConductionDrive<'d>>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        pressure_bindings: &[SpatialElectricalContactPressure<'p>],
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: SpatialElectricalSolidSolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SpatialElectricalSolidCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
+    {
         self.advance_spatial_electrical_with_motion_candidate(
             thermal,
             problem,
             assembly,
             drive,
             contact_bindings,
+            pressure_bindings,
             target_s,
             prescribed_m,
             nodal_forces_n,
@@ -229,6 +287,7 @@ impl<'m> ThermoplasticSolid<'m> {
     pub(in crate::solid_enthalpy::plastic) fn advance_spatial_electrical_with_motion_candidate<
         't,
         'd,
+        'p,
         A: HeatAssembly + ?Sized,
     >(
         &self,
@@ -237,6 +296,7 @@ impl<'m> ThermoplasticSolid<'m> {
         assembly: &A,
         drive: impl Into<SpatialConductionDrive<'d>>,
         contact_bindings: &[ConductionContactThermal<'_>],
+        pressure_bindings: &[SpatialElectricalContactPressure<'p>],
         target_s: f64,
         prescribed_m: &[(usize, f64)],
         nodal_forces_n: &[(usize, f64)],
@@ -287,6 +347,14 @@ impl<'m> ThermoplasticSolid<'m> {
                 "accepted current mesh must be the original solid's actual X+u configuration",
             ));
         }
+        let pressure_routes =
+            pressure::routes::<A::Error>(self, problem, pressure_bindings, prescribed_m, cx)
+                .map_err(source_error)?;
+        // The resolver below uses NEW loads even at old temperatures. Original
+        // source consistency must instead use the actual stored accepted stress.
+        let accepted_pressures =
+            pressure::sample::<A::Error>(&pressure_routes, &self.solution.element_stress, cx)
+                .map_err(source_error)?;
         self.enthalpies::<Infallible>(thermal, true, cx)
             .map_err(|e| match e {
                 ThermoplasticError::Cancelled => ElectricalSolidError::Cancelled,
@@ -463,6 +531,15 @@ impl<'m> ThermoplasticSolid<'m> {
                     cx,
                 )
                 .map(Some)
+                .map_err(CircuitEnthalpyError::Source)
+            },
+            &accepted_pressures,
+            |trial| {
+                pressure::sample::<A::Error>(
+                    &pressure_routes,
+                    &trial.mechanical.solution.element_stress,
+                    cx,
+                )
                 .map_err(CircuitEnthalpyError::Source)
             },
             &cancel,
