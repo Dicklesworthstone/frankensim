@@ -7,7 +7,7 @@ transform path fs-cheb builds on). Layer: **L1 BEDROCK**. Depends on fs-math
 (strict-mode twiddles) and fs-simd (resolved exact-move/stage capsules).
 Plan §6.3.
 
-`harmonic_window` supplies analytic rectangular-window means and real-product
+`harmonic_window` supplies analytic normalized-window means and real-product
 moments for peak phasors `Re(a exp(-i omega t))`. Positive-time consumers
 conjugate their amplitudes. `HarmonicWindow` retains start and duration
 separately; `HarmonicProduct` caches each frequency pair's midpoint rotations
@@ -31,7 +31,7 @@ the line-count/pair-work budgets and cancellation of larger field batches.
 authored jointly proper complex covariance factors: `E[z_r]=0`,
 `E[z_r conj(z_s)]=delta_rs`, and `E[z_r z_s]=0`. Its cached
 `ProperHarmonicProduct` returns `1/2 Re[a conj(b) K(omega_a-omega_b)]`, where
-`K` is the rectangular-window average of the negative-time complex phase.
+`K` is the selected profile's normalized average of the negative-time complex phase.
 The factor 1/2 is included. Properness eliminates sum-frequency terms even
 for a subperiod shutter; cross-frequency correlations can remain nonstationary.
 Deterministic means still use `HarmonicProduct`, with their sum terms intact.
@@ -406,3 +406,51 @@ beat, a fractional carrier on its original clock, retained low amplitudes and
 cosine decrements, and invalid inputs. The complete 16-test module passes
 native Rust type analysis (`rustc --test -Z no-codegen`); these checks do not
 execute tests or constitute a full workspace build.
+
+
+## Normalized shaped detector exposures
+
+`HarmonicWindow::with_profile` admits explicit `HarmonicWindowProfile::Uniform`
+or `Triangular` sensitivity on the original source clock. `new` retains the
+uniform profile and its existing arithmetic. The profile is retained by the
+Copy window and returned by `profile()`. Start and duration remain separate.
+
+The triangular sensitivity is `2*(1-|2*u-1|)/T` for
+`u=(t-start)/T` in [0,1], with zero outside the interval. It is nonnegative,
+has unit integral, vanishes at both endpoints and peaks at 2/T at the midpoint.
+The same single sensitivity weights the instantaneous observable: tapering
+both input fields would square the weight and describe a different detector.
+DC normalization and proper equal-frequency half-power normalization are
+unchanged.
+
+All linear, deterministic and proper kernels, including Hz-authored paths,
+honor the profile. The centered triangular phase transform is
+`sinc(omega*T/4)^2`. Deterministic cosine/cosine and sine/sine weights use the
+convolution of two uniform clocks with half the support: from their Gram
+entries C,S, the triangular entries are C^2+S^2 and 2*C*S. This preserves
+subperiod and disparate-frequency sine energy without differencing nearly
+equal transforms. Original DD phase rotations, small sinc decrements and
+retained-amplitude contractions remain in use. Preparation and contraction
+have bounded constant work, no quadrature, no sampling grid and no allocation.
+Domain owners retain their original line/work limits and cancellation.
+
+These are detector-weighted averages of fields, products, heat or storage
+rates. Multiplying by T gives a sensitivity-weighted exposure. It gives the
+unweighted energy/impulse only for Uniform. For Triangular, the average of a
+local storage derivative is generally not the endpoint storage change divided
+by T. A pointwise physical balance remains valid under the common weight;
+an unweighted endpoint balance must use Uniform. No sampled electronic filter,
+detector bandwidth calibration, new source statistics or arbitrary-null
+relative certificate is supplied.
+
+Six focused G0/G1/G3 regressions cover normalized DC and unchanged defaults,
+weighted real-field and exact four-phase proper-ensemble quadrature, tiny sine
+energy, vastly disparate frequencies, sub-ulp destructive beats, analytic
+transform zeros, clock translation, high-carrier Hz beats and observable
+weighting versus endpoint storage. Native formatting and type analysis
+(`rustc --test -Z no-codegen`) passed for the complete 22-test module; native
+test execution remains pending in the storage-exhausted authoring environment.
+An independent standard-library Python reconstruction of four deterministic
+fixtures and their four-phase ensembles agreed with weighted real-time Simpson
+integration to maximum absolute errors 4.45e-15 and 2.23e-16 respectively.
+Those are reference calculations, not executed Rust results.

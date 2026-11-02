@@ -1,4 +1,4 @@
-//! Analytic rectangular-window moments of real, peak-phasor harmonics.
+//! Analytic normalized-window moments of real, peak-phasor harmonics.
 //!
 //! For `x(t) = Re[a exp(-i omega t)]`, a detector measures moments over
 //! its actual observation interval. Different frequencies retain their beat
@@ -37,16 +37,48 @@ impl core::fmt::Display for WindowError {
 
 impl std::error::Error for WindowError {}
 
-/// A uniform observation on `[start_s, start_s + duration_s]` in seconds.
+/// Nonnegative, unit-integral temporal sensitivity of a detector.
+///
+/// These profiles weight the instantaneous quantity being observed. They do
+/// not taper each field amplitude before multiplication: that would square the
+/// sensitivity and describe a different detector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarmonicWindowProfile {
+    /// Constant sensitivity 1/T over the physical interval.
+    Uniform,
+    /// Linear opening and closing, zero at either endpoint and 2/T at the
+    /// midpoint. For u = (t-start)/T in [0,1], w(t) = 2*(1-|2*u-1|)/T.
+    Triangular,
+}
+
+/// A normalized observation on `[start_s, start_s + duration_s]` in seconds.
+///
+/// Every returned mean is integral(w(t) * quantity(t) dt), where w has unit
+/// integral. Multiplication by duration gives a sensitivity-weighted exposure.
+/// Only the uniform profile gives the unweighted interval integral or makes
+/// a mean storage rate equal to the endpoint storage difference divided by T.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HarmonicWindow {
     start_s: f64,
     duration_s: f64,
+    profile: HarmonicWindowProfile,
 }
 
 impl HarmonicWindow {
-    /// Admit an interval without rounding a short duration into its start.
+    /// Admit a uniform interval without rounding a short duration into its start.
     pub fn new(start_s: f64, duration_s: f64) -> Result<Self, WindowError> {
+        Self::with_profile(start_s, duration_s, HarmonicWindowProfile::Uniform)
+    }
+
+    /// Admit an explicitly shaped, normalized detector sensitivity.
+    ///
+    /// Profiles integrate products of the physical fields with one temporal
+    /// weight. They neither rescale peak amplitudes nor infer source statistics.
+    pub fn with_profile(
+        start_s: f64,
+        duration_s: f64,
+        profile: HarmonicWindowProfile,
+    ) -> Result<Self, WindowError> {
         if !start_s.is_finite()
             || !duration_s.is_finite()
             || duration_s <= 0.0
@@ -57,6 +89,7 @@ impl HarmonicWindow {
         Ok(Self {
             start_s,
             duration_s,
+            profile,
         })
     }
 
@@ -72,7 +105,13 @@ impl HarmonicWindow {
         self.duration_s
     }
 
-    /// Average of `exp(-i omega t)`, including the exact DC limit.
+    /// Original, explicitly selected detector sensitivity.
+    #[must_use]
+    pub const fn profile(self) -> HarmonicWindowProfile {
+        self.profile
+    }
+
+    /// Weighted average of `exp(-i omega t)`, including the exact DC limit.
     pub fn mean_phase(self, omega: f64) -> Result<C64, WindowError> {
         if !omega.is_finite() {
             return Err(WindowError::InvalidFrequency);
@@ -89,7 +128,7 @@ impl HarmonicWindow {
 
     fn mean_phase_extended(self, omega: Dd) -> Result<C64, WindowError> {
         let half_width = self.half_width_extended(omega)?;
-        let scale = sinc(half_width);
+        let scale = self.centered_transform(half_width);
         let [real, imaginary] = self.rotation(omega, half_width)?;
         Ok(C64::new(
             checked(real * scale)?.to_f64(),
@@ -133,36 +172,18 @@ impl HarmonicWindow {
     ) -> Result<HarmonicProduct, WindowError> {
         let a = self.half_width_extended(omega_a)?;
         let b = self.half_width_extended(omega_b)?;
-        let difference = checked(a - b)?;
-        let sum = checked(a + b)?;
-        let half = Dd::from_f64(0.5);
-        // About the midpoint, cos*sin is odd and integrates to zero.
-        // C = (sinc(a-b)+sinc(a+b))/2, S = (sinc(a-b)-sinc(a+b))/2.
-        // Subtract sinc-1 directly for short shutters: subtracting two rounded
-        // numbers near one would erase the positive sin² contribution.
-        let (cos_cos, sin_sin) = if difference.hi.abs().max(sum.hi.abs()) <= 0.5 {
-            let d = sinc_minus_one(difference);
-            let s = sinc_minus_one(sum);
-            (Dd::ONE + half * (d + s), half * (d - s))
-        } else {
-            let d = sinc(difference);
-            let s = sinc(sum);
-            let (small, large) = if a.hi.abs() <= b.hi.abs() {
-                (a, b)
-            } else {
-                (b, a)
-            };
-            let ratio = small / large;
-            let ss = if ratio.hi.abs() < 1e-4 {
-                // Stable divided difference when one frequency tends to DC.
-                let ca = phase(small).re;
-                let cb = phase(large).re;
-                ratio * (sinc(large) * Dd::from_f64(ca) - sinc(small) * Dd::from_f64(cb))
-                    / (Dd::ONE - ratio * ratio)
-            } else {
-                half * (d - s)
-            };
-            (half * (d + s), ss)
+        let (cos_cos, sin_sin) = match self.profile {
+            HarmonicWindowProfile::Uniform => rectangular_gram(a, b)?,
+            HarmonicWindowProfile::Triangular => {
+                // A triangular clock displacement is the sum of two uniform
+                // displacements with half the support. If their Gram entries
+                // are C,S, independence and symmetry give C²+S² and 2CS.
+                // This avoids subtracting two almost equal sinc² transforms
+                // for a short shutter or vastly disparate frequencies.
+                let half = Dd::from_f64(0.5);
+                let (c, s) = rectangular_gram(a * half, b * half)?;
+                (checked(c * c + s * s)?, checked(Dd::from_f64(2.0) * c * s)?)
+            }
         };
         Ok(HarmonicProduct {
             rotation_a: self.rotation(omega_a, a)?,
@@ -256,11 +277,21 @@ impl HarmonicWindow {
         // an enormous clock. Preserve cos-1 as well as sinc-1 near cancellation.
         let (sr, si) = proper_phase(start);
         let (wr, wi) = proper_phase(width);
-        let scale = half * sinc(width);
+        let scale = half * self.centered_transform(width);
         Ok(ProperHarmonicProduct {
             real: checked(checked(sr * wr - si * wi)? * scale)?,
             imaginary: checked(checked(sr * wi + si * wr)? * scale)?,
         })
+    }
+
+    fn centered_transform(self, half_width: Dd) -> Dd {
+        match self.profile {
+            HarmonicWindowProfile::Uniform => sinc(half_width),
+            HarmonicWindowProfile::Triangular => {
+                let half_sinc = sinc(half_width * Dd::from_f64(0.5));
+                half_sinc * half_sinc
+            }
+        }
     }
 
     fn half_width_extended(self, omega: Dd) -> Result<Dd, WindowError> {
@@ -280,6 +311,42 @@ impl HarmonicWindow {
         let (wr, wi) = proper_phase(half_width);
         Ok([checked(sr * wr - si * wi)?, checked(sr * wi + si * wr)?])
     }
+}
+
+// Centered cosine/cosine and sine/sine means under a uniform clock.
+fn rectangular_gram(a: Dd, b: Dd) -> Result<(Dd, Dd), WindowError> {
+    let difference = checked(a - b)?;
+    let sum = checked(a + b)?;
+    let half = Dd::from_f64(0.5);
+    // About the midpoint, cos*sin is odd and integrates to zero.
+    // C = (sinc(a-b)+sinc(a+b))/2, S = (sinc(a-b)-sinc(a+b))/2.
+    // Subtract sinc-1 directly for short shutters: subtracting two rounded
+    // numbers near one would erase the positive sin² contribution.
+    let (cos_cos, sin_sin) = if difference.hi.abs().max(sum.hi.abs()) <= 0.5 {
+        let d = sinc_minus_one(difference);
+        let s = sinc_minus_one(sum);
+        (Dd::ONE + half * (d + s), half * (d - s))
+    } else {
+        let d = sinc(difference);
+        let s = sinc(sum);
+        let (small, large) = if a.hi.abs() <= b.hi.abs() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let ratio = small / large;
+        let ss = if ratio.hi.abs() < 1e-4 {
+            // Stable divided difference when one frequency tends to DC.
+            let ca = phase(small).re;
+            let cb = phase(large).re;
+            ratio * (sinc(large) * Dd::from_f64(ca) - sinc(small) * Dd::from_f64(cb))
+                / (Dd::ONE - ratio * ratio)
+        } else {
+            half * (d - s)
+        };
+        (half * (d + s), ss)
+    };
+    Ok((checked(cos_cos)?, checked(sin_sin)?))
 }
 
 /// Prepared constant-work real-product moment for one frequency pair/window.
@@ -480,7 +547,14 @@ mod tests {
             } else {
                 4.0
             };
-            total += weight * x * y;
+            let sensitivity = match window.profile() {
+                HarmonicWindowProfile::Uniform => 1.0,
+                HarmonicWindowProfile::Triangular => {
+                    let u = i as f64 / n as f64;
+                    2.0 * (1.0 - (2.0 * u - 1.0).abs())
+                }
+            };
+            total += weight * sensitivity * x * y;
         }
         total / (3 * n) as f64
     }
@@ -921,5 +995,204 @@ mod tests {
         let expected = 0.5 * omega * omega;
         assert!(decrement > 0.0);
         close(decrement, expected, expected * 3e-11);
+    }
+    #[test]
+    fn g0_shaped_windows_are_normalized_and_uniform_is_unchanged() {
+        let uniform = HarmonicWindow::new(-0.3, 0.7).unwrap();
+        let explicit =
+            HarmonicWindow::with_profile(-0.3, 0.7, HarmonicWindowProfile::Uniform).unwrap();
+        assert_eq!(uniform, explicit);
+        assert_eq!(uniform.profile(), HarmonicWindowProfile::Uniform);
+        let triangular =
+            HarmonicWindow::with_profile(-0.3, 0.7, HarmonicWindowProfile::Triangular).unwrap();
+        assert_eq!(triangular.mean_phase(0.0).unwrap(), C64::ONE);
+        assert_eq!(
+            triangular
+                .mean_real_product(C64::new(2.0, 17.0), 0.0, C64::new(3.0, -9.0), 0.0,)
+                .unwrap(),
+            6.0,
+        );
+        assert_eq!(triangular.start_s(), -0.3);
+        assert_eq!(triangular.duration_s(), 0.7);
+        for (start, duration) in [(0.0, 0.0), (f64::NAN, 1.0), (0.0, -1.0)] {
+            assert_eq!(
+                HarmonicWindow::with_profile(start, duration, HarmonicWindowProfile::Triangular,),
+                Err(WindowError::InvalidWindow),
+            );
+        }
+    }
+
+    #[test]
+    fn g1_triangular_products_match_weighted_real_signal_quadrature() {
+        let a = C64::new(-0.7, 1.3);
+        let b = C64::new(2.1, -0.4);
+        let phases = [C64::ONE, C64::new(0.0, 1.0), -C64::ONE, C64::new(0.0, -1.0)];
+        for (start, duration, wa, wb) in [
+            (-0.13, 0.027, 13.0, 17.0),
+            (0.25, 0.3, 200.0, 201.0),
+            (-0.2, 0.8, -19.0, 23.0),
+            (0.15, 0.5, 0.0, 31.0),
+        ] {
+            let window =
+                HarmonicWindow::with_profile(start, duration, HarmonicWindowProfile::Triangular)
+                    .unwrap();
+            let expected = simpson(window, a, wa, b, wb);
+            let got = window.mean_real_product(a, wa, b, wb).unwrap();
+            close(got, expected, 3e-11);
+            close(window.mean_real_product(b, wb, a, wa).unwrap(), got, 3e-15);
+            let proper_expected = phases
+                .iter()
+                .map(|&z| simpson(window, a * z, wa, b * z, wb))
+                .sum::<f64>()
+                * 0.25;
+            let proper = window.proper_product_kernel(wa, wb).unwrap();
+            close(
+                proper.mean_real_product(a, b).unwrap(),
+                proper_expected,
+                3e-11,
+            );
+            // A unit DC partner extracts the weighted linear field mean.
+            let mean = window.mean_phase(wa).unwrap();
+            close(
+                window.mean_real_product(a, wa, C64::ONE, 0.0).unwrap(),
+                (a * mean).re,
+                3e-15,
+            );
+        }
+    }
+
+    #[test]
+    fn g1_triangular_shutter_preserves_weak_sine_and_disparate_frequency_energy() {
+        let sine = C64::new(0.0, 1.0);
+        for duration in [1e-4, 1e-8, 1e-12, 1e-50] {
+            let window = HarmonicWindow::with_profile(
+                -0.5 * duration,
+                duration,
+                HarmonicWindowProfile::Triangular,
+            )
+            .unwrap();
+            // The normalized triangular clock has variance T²/24.
+            let expected = duration * duration / 24.0;
+            let actual = window.mean_real_product(sine, 1.0, sine, 1.0).unwrap();
+            assert!(actual > 0.0);
+            close(actual, expected, 1e-9 * expected);
+        }
+        let window =
+            HarmonicWindow::with_profile(-1.0, 2.0, HarmonicWindowProfile::Triangular).unwrap();
+        let small = 1e-40;
+        let large = 3.0_f64;
+        let x = 0.5 * large;
+        // -d/db sinc(b/2)² = sinc(x)*(sin(x)-x*cos(x))/x².
+        let expected = small * (x.sin() / x) * (x.sin() - x * x.cos()) / (x * x);
+        close(
+            window.mean_real_product(sine, small, sine, large).unwrap(),
+            expected,
+            2e-14 * expected.abs(),
+        );
+    }
+
+    #[test]
+    fn g1_triangular_proper_null_retains_sub_ulp_shutter_and_clock_decrements() {
+        let delta = 2.0_f64.powi(-20);
+        let duration = 2.0_f64.powi(-20);
+        let omega = [1.0, 1.0 + delta];
+        let amplitudes = [C64::ONE, -C64::ONE];
+        for (start, coefficient) in [(-0.5 * duration, 1.0 / 48.0), (0.0, 7.0 / 48.0)] {
+            let window =
+                HarmonicWindow::with_profile(start, duration, HarmonicWindowProfile::Triangular)
+                    .unwrap();
+            let mut moment = Dd::ZERO;
+            for i in 0..2 {
+                for j in 0..2 {
+                    moment = moment
+                        + window
+                            .proper_product_kernel(omega[i], omega[j])
+                            .unwrap()
+                            .mean_real_product_dd(amplitudes[i], amplitudes[j])
+                            .unwrap();
+                }
+            }
+            let expected = coefficient * (delta * duration).powi(2);
+            assert!(moment.to_f64() > 0.0);
+            close(moment.to_f64(), expected, 3e-14 * expected);
+        }
+    }
+
+    #[test]
+    fn g3_triangular_transform_clock_shift_and_high_carrier_hz_are_consistent() {
+        let window =
+            HarmonicWindow::with_profile(-0.5, 1.0, HarmonicWindowProfile::Triangular).unwrap();
+        for omega in [0.0, 0.3, 4.0 * PI, 13.0] {
+            let x = 0.25 * omega;
+            let expected = if x == 0.0 { 1.0 } else { (x.sin() / x).powi(2) };
+            let mean = window.mean_phase(omega).unwrap();
+            close(mean.re, expected, 4e-16);
+            close(mean.im, 0.0, 2e-16);
+        }
+        let carrier = 2.0_f64.powi(48);
+        let difference = 0.125;
+        let kernel = window
+            .product_kernel_hz(carrier, carrier + difference)
+            .unwrap();
+        let value = kernel.mean_real_product_dd(C64::ONE, C64::ONE).unwrap()
+            + kernel
+                .mean_real_product_dd(C64::new(0.0, 1.0), C64::new(0.0, 1.0))
+                .unwrap();
+        let quarter_beat = 0.25 * TAU * difference;
+        let expected = (quarter_beat.sin() / quarter_beat).powi(2);
+        close(value.to_f64(), expected, 3e-14);
+        assert_eq!(
+            window
+                .proper_product_kernel_hz(carrier + difference, carrier)
+                .unwrap()
+                .mean_real_product_dd(C64::ONE, C64::ONE)
+                .unwrap(),
+            window
+                .proper_product_kernel_hz(difference, 0.0)
+                .unwrap()
+                .mean_real_product_dd(C64::ONE, C64::ONE)
+                .unwrap(),
+        );
+
+        let shifted =
+            HarmonicWindow::with_profile(-0.5 - 0.37, 1.0, HarmonicWindowProfile::Triangular)
+                .unwrap();
+        let a = C64::new(0.7, -1.2);
+        let b = C64::new(-0.2, 0.8);
+        let rotate = |z, omega: f64| z * C64::new((omega * 0.37).cos(), -(omega * 0.37).sin());
+        close(
+            shifted
+                .mean_real_product(rotate(a, 3.0), 3.0, rotate(b, 7.0), 7.0)
+                .unwrap(),
+            window.mean_real_product(a, 3.0, b, 7.0).unwrap(),
+            3e-15,
+        );
+    }
+
+    #[test]
+    fn g1_triangular_weights_the_observable_once_and_is_not_endpoint_storage() {
+        let window =
+            HarmonicWindow::with_profile(0.0, 1.0, HarmonicWindowProfile::Triangular).unwrap();
+        let uniform = HarmonicWindow::new(0.0, 1.0).unwrap();
+        // A constant physical field has unit mean square for BOTH detectors;
+        // squaring the triangular sensitivity would incorrectly give 4/3.
+        assert_eq!(
+            window
+                .mean_real_product(C64::ONE, 0.0, C64::ONE, 0.0)
+                .unwrap(),
+            1.0,
+        );
+        // U(t) = cos(t), dU/dt = -sin(t). The uniform integral is the
+        // endpoint change; the shaped detector instead averages the local rate.
+        let rate = C64::new(0.0, -1.0);
+        let endpoint = 1.0_f64.cos() - 1.0;
+        close(
+            uniform.mean_real_product(rate, 1.0, C64::ONE, 0.0).unwrap(),
+            endpoint,
+            3e-16,
+        );
+        let weighted = window.mean_real_product(rate, 1.0, C64::ONE, 0.0).unwrap();
+        close(weighted, simpson(window, rate, 1.0, C64::ONE, 0.0), 3e-13);
+        assert!((weighted - endpoint).abs() > 1e-3);
     }
 }
