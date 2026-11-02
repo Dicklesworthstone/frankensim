@@ -5196,3 +5196,42 @@ reuse, positive weak-loss exchange at adjacent temperatures, representable heat
 and secant with underflowed scale products, three spectral/angular refinements,
 and nonisothermal/domain/budget/cancellation refusals without partial publication.
 <!-- coating-exchange:end -->
+
+<!-- native-coating-exchange:start -->
+### Native coating exchange applies signed finite-band heat exactly once
+
+`thermal_surface::heating::coating_exchange::NativeCoatingExchange` binds each
+physical exposed patch to one original isothermal thermal receiver. All its
+films and opaque substrate share that receiver's actual temperature and specific
+energy; the authored specimen mass and caloric law must represent their combined
+storage. Separate film temperatures require an internal radiative-exchange owner.
+An opaque stack or one selected vacuum port of a transmitting stack exchanges
+only the original 380--780 nm band with vacuum, a fixed blackbody bath, or the
+native boundary's evolving ambient temperature.
+
+Original temperature and caloric-enthalpy optical laws resolve before coherent
+quadrature. A changed optical identity rebuilds the response; unchanged optics
+reuse it while Planck rates follow native temperature. Equal-temperature latent
+states retain their optical enthalpy dependence. Repeated law tables share one
+declared row budget; source and coherent-mode work have whole-advance limits.
+Physical patches have canonical unique IDs and must fit current exposed area
+after reservoir/contact coverage. Native material, caloric identity, storage
+basis, geometry and mass remain bound. The caller supplies disjoint patches and
+must not attach a second radiation owner to the same area and wavelength band;
+ambient convection may coexist on that area.
+
+Signed negative outward watts enter the original source hook once. The matching
+positive Planck secants use the native additional-conductance limiter, composing
+with conduction rather than taking independent stability minima. The observer
+charges accepted-start rates before refreshing endpoint optics, and reports
+per-patch outward energy separately from native external heat already booked.
+Boundary events, exposed-area changes, domain failures and late cancellation
+retain native ordering and atomic rollback. Frozen-step monotonicity does not
+establish nonlinear time accuracy; refine thermal time and optical quadrature.
+
+Six G1/G3 integration groups cover stiff cooling/warming/vacuum and equilibrium,
+fixed-optics reuse, state-dependent optics and ambient events, latent feedback,
+coverage/domain/budget/cancellation refusal, independent direct coherent/SI
+Planck RK4 refinement with native convection/reservoir heat, and illumination
+balanced by cooling through the original `CoupledObservers` on one timeline.
+<!-- native-coating-exchange:end -->

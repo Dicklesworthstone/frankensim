@@ -26,6 +26,8 @@ pub use coating_feedback::SurfaceCoatingLaw;
 /// Read-only coherent emission from the same native film/substrate states.
 pub mod coating_emission;
 pub use coating_emission::{NativeCoatingEmission, NativeCoatingEmissionError};
+/// Finite-band radiative heating/cooling of native isothermal coating cells.
+pub mod coating_exchange;
 /// Independently evolving film/substrate optics on the native thermal timeline.
 pub mod coating_state;
 use coating_state::CoatingFeedbackState;
