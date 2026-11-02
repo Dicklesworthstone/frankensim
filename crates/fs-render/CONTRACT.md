@@ -4658,3 +4658,18 @@ coatings, constant-table bit parity and zero redundant Fresnel builds, shared-la
 budgets, canonical split continuation, and transactional dark-domain/caloric/
 cancellation refusals. The original caloric owner remains the sole phase and
 temperature model in every coupled test.
+
+`examples/phase_surface_optical_heating.rs` compares an evolving conductor law
+with the same initial optics held fixed under identical 320 J blue and 200 J red
+pulses. Both synthetic 1 g specimens use the original equilibrium enthalpy chart
+and 350 K latent plateau. The authored n/k rows follow actual native enthalpy,
+so extinction changes while temperature stays at 350 K. Independent optical
+histories share one native clock through `CoupledObservers`; an authored
+convection change then refreezes both in darkness. The fixed control checks its
+analytic normal-incidence absorption. Output retains n/k, temperatures, liquid
+fractions, absorbed/reflected energies, convection, storage and Fresnel rebuilds.
+Assertions require phase traversal, pulse fluence, conservation and zero unused
+Fresnel rebuilds during dark cooling. The example's authored interpolation and
+fixed geometry/coating assumptions are explicit; these are not measured metal
+or phase-mixture data. Run with
+`cargo run -p fs-render --example phase_surface_optical_heating --no-default-features --features optical-heating,material-state`.
