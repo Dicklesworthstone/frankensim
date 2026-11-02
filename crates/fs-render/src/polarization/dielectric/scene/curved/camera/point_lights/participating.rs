@@ -1,8 +1,8 @@
-//! Calibrated diffuse point lighting on the original molecular camera walk.
+//! Calibrated point lighting on the original molecular camera walk.
 //!
 //! Camera free-flight probabilities already include scattering survival. This
 //! owner adds no extinction or collision-rate multiplier to that path. At each
-//! selected diffuse encounter it connects the same original point fixture and
+//! selected diffuse or molecular vertex it connects the original point fixture and
 //! independently estimates source-leg scattering survival on the native curved
 //! bundle. Absorption, Fresnel transfer and the source solid-angle Jacobian stay
 //! in the original solved bundle; the tracked replay supplies survival only.
@@ -17,9 +17,9 @@
 //! not consume or change camera surface/volume variates.
 //!
 //! The original emitter observation and diffuse continuation happen on the same
-//! camera path, including after molecular collisions. This adds direct fixtures
-//! only at depolarizing diffuse surfaces; volume-vertex point-light estimation
-//! requires a polarized connection contraction and is not inferred here.
+//! camera path, including after molecular collisions. Optional volume branches
+//! add the full reciprocal Stokes contraction at accepted molecular vertices,
+//! before sampling their original continuation. Null candidates add no term.
 
 use super::super::participating::CurvedRayleighCameraScene;
 use super::{
@@ -34,13 +34,16 @@ use crate::polarization::dielectric::scene::curved::participating::transmittance
     CurvedTransmittanceError, CurvedTransmittanceOptions,
 };
 use crate::polarization::dielectric::scene::curved::participating::{
-    CurvedRayleighPath, CurvedRayleighScene, CurvedRayleighTraceSettings,
+    CurvedRayleighPath, CurvedRayleighScene, CurvedRayleighTraceSettings, CurvedRayleighVertex,
 };
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
+mod vertices;
+pub use vertices::MolecularPointLightBranch;
+
 /// One canonical camera-surface configuration, the original volume-event cap,
-/// and cumulative source tracking limits across all diffuse encounters.
+/// and cumulative source tracking limits across all selected surface and volume vertices.
 /// `point_lights.max_trace_evaluations` counts both geometric source solves and
 /// their tracked replays. Zero tracking limits still admit clear/uniform source
 /// legs that need no random flight or candidate; limits are charged on work.
@@ -112,6 +115,7 @@ impl RayleighPointLightCameraSample {
 pub struct CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm, 'o, 'l> {
     camera: &'a CurvedRayleighCameraScene<'c, 's, 'm, 'o>,
     point_lights: &'a CurvedPointLightCameraScene<'c, 's, 'm, 'l>,
+    volume_branches: &'a [MolecularPointLightBranch<'l>],
 }
 
 impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm, 'o, 'l> {
@@ -120,14 +124,33 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
         camera: &'a CurvedRayleighCameraScene<'c, 's, 'm, 'o>,
         point_lights: &'a CurvedPointLightCameraScene<'c, 's, 'm, 'l>,
     ) -> Result<Self, PointLightCameraError> {
+        Self::try_new_with_volume_branches(cx, camera, point_lights, &[])
+    }
+
+    /// Add one declared optical branch per original fixture/receiving medium.
+    /// The branch's shooting seed must resolve each sampled volume vertex; an
+    /// unresolved or blocked connection refuses the entire sample. No global
+    /// multiple-image completeness or area-emitter MIS is inferred.
+    pub fn try_new_with_volume_branches(
+        cx: &Cx<'_>,
+        camera: &'a CurvedRayleighCameraScene<'c, 's, 'm, 'o>,
+        point_lights: &'a CurvedPointLightCameraScene<'c, 's, 'm, 'l>,
+        volume_branches: &'a [MolecularPointLightBranch<'l>],
+    ) -> Result<Self, PointLightCameraError> {
         cx.checkpoint()?;
         if !core::ptr::eq(camera.surface_camera(), point_lights.source_camera()) {
             return Err(CameraRadianceError::Scene(SceneError::InvalidBindings.into()).into());
         }
+        vertices::validate_branches(cx, point_lights, volume_branches)?;
         Ok(Self {
             camera,
             point_lights,
+            volume_branches,
         })
+    }
+
+    pub const fn volume_branches(&self) -> &'a [MolecularPointLightBranch<'l>] {
+        self.volume_branches
     }
 
     pub const fn source_camera(&self) -> &'a CurvedRayleighCameraScene<'c, 's, 'm, 'o> {
@@ -175,16 +198,15 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
             .camera
             .participating_scene()
             .for_camera()
-            .trace_observed(
+            .trace_vertices_observed(
                 cx,
                 beam,
                 initial_medium,
                 camera_settings(settings),
                 seed,
                 path_id,
-                |path| {
-                    emission.observe(path)?;
-                    fixtures.observe_with_connector(cx, path, &mut connector)
+                |vertex| {
+                    self.observe_vertex(cx, vertex, &mut emission, &mut fixtures, &mut connector)
                 },
             );
         self.finish(cx, initial_index, emission, fixtures, result)
@@ -219,16 +241,15 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
             .camera
             .participating_scene()
             .for_camera()
-            .trace_with_samples_observed(
+            .trace_with_samples_vertices_observed(
                 cx,
                 beam,
                 initial_medium,
                 camera_settings(settings),
                 surface_samples,
                 flight_samples,
-                |path| {
-                    emission.observe(path)?;
-                    fixtures.observe_with_connector(cx, path, &mut connector)
+                |vertex| {
+                    self.observe_vertex(cx, vertex, &mut emission, &mut fixtures, &mut connector)
                 },
             );
         self.finish(cx, initial_index, emission, fixtures, result)
@@ -236,7 +257,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
 
     /// Uniform or heterogeneous camera flights retain the native fourth,
     /// independent delta-acceptance coordinate. The source sampler's first
-    /// argument distinguishes every matching fixture/contact encounter; its
+    /// argument distinguishes every matching fixture/vertex encounter; its
     /// second counts only that source replay's scalar free-flight draws.
     #[allow(clippy::too_many_arguments)]
     pub fn sample_ray_with_tracking_samples(
@@ -264,19 +285,37 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighPointLightCameraScene<'a, 'c, 's, 'm,
             .camera
             .participating_scene()
             .for_camera()
-            .trace_with_tracking_samples_observed(
+            .trace_with_tracking_samples_vertices_observed(
                 cx,
                 beam,
                 initial_medium,
                 camera_settings(settings),
                 surface_samples,
                 flight_samples,
-                |path| {
-                    emission.observe(path)?;
-                    fixtures.observe_with_connector(cx, path, &mut connector)
+                |vertex| {
+                    self.observe_vertex(cx, vertex, &mut emission, &mut fixtures, &mut connector)
                 },
             );
         self.finish(cx, initial_index, emission, fixtures, result)
+    }
+
+    fn observe_vertex(
+        &self,
+        cx: &Cx<'_>,
+        vertex: CurvedRayleighVertex<'_>,
+        emission: &mut SurfaceEmission<'_, 's, 'm>,
+        fixtures: &mut FixtureContributions<'_, 'c, 's, 'm, 'l>,
+        connector: &mut impl FixtureConnector,
+    ) -> Result<(), CurvedSceneError> {
+        match vertex {
+            CurvedRayleighVertex::Surface(path) => {
+                emission.observe(path)?;
+                fixtures.observe_with_connector(cx, path, connector)
+            }
+            CurvedRayleighVertex::Volume { path, phase } => {
+                fixtures.observe_volume(cx, path, phase, self.volume_branches, connector)
+            }
+        }
     }
 
     fn connector<F: FnMut(u32, u32) -> f64>(

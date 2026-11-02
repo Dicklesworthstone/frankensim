@@ -31,7 +31,7 @@ use crate::volumes::VolumeGrid;
 use crate::volumes::transport::VolumeTransportError;
 use crate::volumes::transport::scattering::polarized::PolarizedScatteringError;
 use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::Point3;
@@ -120,12 +120,14 @@ impl CurvedRayleighBinding<'_> {
         samples: [f64; 2],
         acceptance_sample: f64,
         sampled_majorant: Option<f64>,
+        mut observe_accepted: impl FnMut(&PhaseFunction) -> Result<(), CurvedSceneError>,
     ) -> Result<Option<PolarizedBeam>, CurvedSceneError> {
         match self {
             Self::Density(law) => {
                 if !law.accepts_candidate(beam.ray().origin, acceptance_sample)? {
                     return Ok(None);
                 }
+                observe_accepted(law.phase)?;
                 Ok(Some(
                     law.phase
                         .sample_polarized(beam, samples)
@@ -161,6 +163,7 @@ impl CurvedRayleighBinding<'_> {
                 if acceptance_sample >= probability {
                     return Ok(None);
                 }
+                observe_accepted(&phase)?;
                 Ok(Some(
                     phase
                         .sample_polarized(beam, samples)
@@ -387,6 +390,17 @@ pub struct CurvedRayleighPath {
     volume_events: u32,
     free_flight_draws: u32,
 }
+
+/// Original camera arrival, before a surface response or an accepted molecular
+/// phase sample. Null candidates never produce a volume vertex. The local
+/// phase is the exact admitted law used for the unchanged continuation.
+pub(super) enum CurvedRayleighVertex<'a> {
+    Surface(&'a CurvedPathResult),
+    Volume {
+        path: &'a CurvedPathResult,
+        phase: &'a PhaseFunction,
+    },
+}
 impl CurvedRayleighPath {
     pub const fn path(&self) -> &CurvedPathResult {
         &self.path
@@ -508,7 +522,32 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         settings: CurvedRayleighTraceSettings,
         seed: u64,
         path_id: u64,
-        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+        mut observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_vertices_observed(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            seed,
+            path_id,
+            |vertex| match vertex {
+                CurvedRayleighVertex::Surface(path) => observe_surface(path),
+                CurvedRayleighVertex::Volume { .. } => Ok(()),
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_vertices_observed(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        path_id: u64,
+        observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         let draws = |ordinal, domain| {
             let block = philox4x32_10(
@@ -525,7 +564,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             |event| draws(event, 0x706f_6c32),
             |flight| draws(flight, 0x706f_6c34),
             true,
-            observe_surface,
+            observe_vertex,
         )
     }
 
@@ -562,8 +601,33 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         initial_medium: usize,
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 3],
+        mut observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_samples_vertices_observed(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            flight_samples,
+            |vertex| match vertex {
+                CurvedRayleighVertex::Surface(path) => observe_surface(path),
+                CurvedRayleighVertex::Volume { .. } => Ok(()),
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_with_samples_vertices_observed(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
         mut flight_samples: impl FnMut(u32) -> [f64; 3],
-        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+        observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         self.trace_with_tracking_samples_impl(
             cx,
@@ -576,7 +640,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                 [draw[0], draw[1], draw[2], 0.0]
             },
             false,
-            observe_surface,
+            observe_vertex,
         )
     }
 
@@ -612,7 +676,32 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
         flight_samples: impl FnMut(u32) -> [f64; 4],
-        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+        mut observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_tracking_samples_vertices_observed(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            flight_samples,
+            |vertex| match vertex {
+                CurvedRayleighVertex::Surface(path) => observe_surface(path),
+                CurvedRayleighVertex::Volume { .. } => Ok(()),
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_with_tracking_samples_vertices_observed(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
+        observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         self.trace_with_tracking_samples_impl(
             cx,
@@ -622,7 +711,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             surface_samples,
             flight_samples,
             true,
-            observe_surface,
+            observe_vertex,
         )
     }
 
@@ -636,7 +725,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         surface_samples: impl FnMut(u32) -> [f64; 3],
         mut flight_samples: impl FnMut(u32) -> [f64; 4],
         heterogeneous_samples: bool,
-        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+        observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         cx.checkpoint()?;
         if settings.max_volume_events == 0 || settings.max_volume_events > MAX_POLARIZED_PATH_EVENTS
@@ -649,6 +738,10 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         // exact rate used to sample that flight. Density-scaled laws retain
         // their original evaluation and arithmetic. No per-medium workspace.
         let field_majorant: Cell<Option<(usize, f64)>> = Cell::new(None);
+        // Native surface and molecular callbacks execute sequentially on this
+        // stack. One observer retains cumulative source work in actual path
+        // order without allocating a vertex history or retracing the camera.
+        let observe_vertex = RefCell::new(observe_vertex);
         let (path, volume_events) = self.scene.trace_with_flights(
             cx,
             beam,
@@ -656,7 +749,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             settings.surfaces,
             surface_samples,
             self.radiance_brushing,
-            observe_surface,
+            |path| (observe_vertex.borrow_mut())(CurvedRayleighVertex::Surface(path)),
             settings.max_volume_events,
             |medium, wavelength| {
                 let Some(law) = self.media.get(medium) else {
@@ -714,7 +807,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                     acceptance_sample: draws[3],
                 }))
             },
-            |medium, beam, samples, acceptance_sample| {
+            |medium, path, samples, acceptance_sample| {
                 let law = self
                     .media
                     .get(medium)
@@ -723,7 +816,15 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                     .get()
                     .filter(|(cached_medium, _)| *cached_medium == medium)
                     .map(|(_, rate)| rate);
-                law.scatter_candidate(beam, samples, acceptance_sample, sampled_majorant)
+                law.scatter_candidate(
+                    *path.beam(),
+                    samples,
+                    acceptance_sample,
+                    sampled_majorant,
+                    |phase| {
+                        (observe_vertex.borrow_mut())(CurvedRayleighVertex::Volume { path, phase })
+                    },
+                )
             },
         )?;
         cx.checkpoint()?;

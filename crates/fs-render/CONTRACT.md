@@ -517,11 +517,24 @@ differentiable lift). Pure Rust throughout.
   `CurvedCameraRaster::sample_pixel_rayleigh_point_lights` carries this behavior
   through each original wavelength lane and native XYZ integration, retaining
   separate camera and source counts. Failed lanes refuse the complete pixel.
-  This adds diffuse-receiver lighting through molecular media; direct point
-  lighting at volume-scattering vertices, general area-light MIS and complete
-  optical-image discovery remain outside this consumer. Focused camera and
-  pixel regressions check conditional radiometry, stochastic darkness,
-  independent source draws, cumulative limits, spectral survival and parity.
+  Optional `MolecularPointLightBranch` bindings also supply direct point-fixture
+  contributions at accepted molecular collisions in their original receiver
+  medium. Null candidates contribute nothing. The observer reads the incoming
+  camera path and local admitted phase before continuation, so its contribution
+  includes neither the continuation-phase PDF nor a second collision-rate or
+  camera-survival factor. Each native source connection retains its original
+  Mueller/Fresnel transfer, absorption, transverse bundle area and independently
+  tracked scattering survival. The normalized Rayleigh contraction uses all
+  Stokes components, shared transverse frames and reciprocal direction reversal;
+  multiplying source and camera intensities alone is insufficient. The local
+  `(n_camera/n_vertex)^2` factor is applied once. Reciprocal scalar camera
+  response is supported; arbitrary nonreciprocal optics and polarization-resolved
+  sensor channels are not inferred. Surface and volume connections share the
+  same cumulative work budgets and source ordinals without changing the camera
+  random streams. Existing constructors keep empty volume bindings. Native
+  single-scattering pixel tests compare independent spectral radiometry and XYZ
+  while requiring identical original camera paths. General area-light MIS and
+  complete optical-image discovery remain outside this consumer.
 
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original

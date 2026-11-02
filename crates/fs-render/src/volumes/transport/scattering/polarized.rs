@@ -17,6 +17,9 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 use fs_math::det;
 
+// Reciprocal scalar camera/source connections retain the full Stokes state.
+mod connection;
+
 /// A refusal is not absorption, a rejected sample, or a zero detector reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolarizedScatteringError {

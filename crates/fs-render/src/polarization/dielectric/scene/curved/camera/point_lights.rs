@@ -123,6 +123,11 @@ pub enum PointLightCameraError {
     SourceCandidateLimit,
     #[cfg(feature = "volumes")]
     SourceDrawLimit,
+    #[cfg(feature = "volumes")]
+    MolecularPhase {
+        binding: usize,
+        error: crate::volumes::transport::scattering::polarized::PolarizedScatteringError,
+    },
     NumericalRange,
 }
 
@@ -342,6 +347,35 @@ struct ConnectionWork {
     source_candidates: u32,
 }
 
+impl ConnectionWork {
+    fn add(&mut self, other: Self) -> Result<(), PointLightCameraError> {
+        self.traces = self
+            .traces
+            .checked_add(other.traces)
+            .ok_or(PointLightCameraError::NumericalRange)?;
+        self.fields = self
+            .fields
+            .checked_add(other.fields)
+            .ok_or(PointLightCameraError::NumericalRange)?;
+        self.geometry = self
+            .geometry
+            .checked_add(other.geometry)
+            .ok_or(PointLightCameraError::NumericalRange)?;
+        #[cfg(feature = "volumes")]
+        {
+            self.source_draws = self
+                .source_draws
+                .checked_add(other.source_draws)
+                .ok_or(PointLightCameraError::NumericalRange)?;
+            self.source_candidates = self
+                .source_candidates
+                .checked_add(other.source_candidates)
+                .ok_or(PointLightCameraError::NumericalRange)?;
+        }
+        Ok(())
+    }
+}
+
 // Both camera owners use the same contact radiometry and cumulative work.
 // A connector chooses only the native source-leg traversal; it cannot supply
 // a different receiving point, albedo, camera prefix or source calibration.
@@ -549,34 +583,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
             };
             self.work.connections += 1;
             let connection = connector.connect(cx, request, self.work)?;
-            self.work.traces = self
-                .work
-                .traces
-                .checked_add(connection.work.traces)
-                .ok_or(PointLightCameraError::NumericalRange)?;
-            self.work.fields = self
-                .work
-                .fields
-                .checked_add(connection.work.fields)
-                .ok_or(PointLightCameraError::NumericalRange)?;
-            self.work.geometry = self
-                .work
-                .geometry
-                .checked_add(connection.work.geometry)
-                .ok_or(PointLightCameraError::NumericalRange)?;
-            #[cfg(feature = "volumes")]
-            {
-                self.work.source_draws = self
-                    .work
-                    .source_draws
-                    .checked_add(connection.work.source_draws)
-                    .ok_or(PointLightCameraError::NumericalRange)?;
-                self.work.source_candidates = self
-                    .work
-                    .source_candidates
-                    .checked_add(connection.work.source_candidates)
-                    .ok_or(PointLightCameraError::NumericalRange)?;
-            }
+            self.work.add(connection.work)?;
             if connection.ratio_tracking_zero {
                 // An exact null-factor zero is a valid transmittance estimate,
                 // even if unattenuated source photometry would underflow. The

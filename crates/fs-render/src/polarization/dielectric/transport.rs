@@ -207,7 +207,7 @@ impl PolarizationFrame {
 
     // Re-express a Stokes state for the SAME propagation direction. Dot
     // products give cos/sin directly: no atan or platform trigonometry.
-    fn express_in(self, state: Stokes, target: Self) -> Stokes {
+    pub(crate) fn express_in(self, state: Stokes, target: Self) -> Stokes {
         let c = self.horizontal.dot(target.horizontal);
         let s = self.vertical.dot(target.horizontal);
         let length2 = c * c + s * s;

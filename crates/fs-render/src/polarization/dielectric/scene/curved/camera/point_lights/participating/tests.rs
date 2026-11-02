@@ -1,7 +1,10 @@
 use super::super::{
     CurvedPointLightCameraScene, PointLightBranch, PointLightCameraError, PointLightCameraSettings,
 };
-use super::{CurvedRayleighPointLightCameraScene, RayleighPointLightCameraSettings};
+use super::{
+    CurvedRayleighPointLightCameraScene, MolecularPointLightBranch,
+    RayleighPointLightCameraSettings,
+};
 use crate::charts::{Ray, TriMesh};
 use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
 use crate::gradient_index::event::GradientEventOptions;
@@ -133,6 +136,18 @@ fn branch(source: &PhotometricSource) -> PointLightBranch<'_> {
         receiver_object_id: 1,
         initial_medium: 0,
         initial_direction: Vec3::new(-1.0, 0.0, 0.5).scale(1.0 / 1.25_f64.sqrt()),
+        source_transverse_axis: Vec3::new(0.0, 1.0, 0.0),
+        policy: BundleBranchPolicy::Sequence(&[]),
+        position_tolerance_m: 2e-6,
+    }
+}
+
+fn volume_branch(source: &PhotometricSource) -> MolecularPointLightBranch<'_> {
+    MolecularPointLightBranch {
+        source,
+        receiver_medium: 0,
+        initial_medium: 0,
+        initial_direction: Vec3::new(-1.0, 0.0, 0.25).scale(1.0 / 1.0625_f64.sqrt()),
         source_transverse_axis: Vec3::new(0.0, 1.0, 0.0),
         policy: BundleBranchPolicy::Sequence(&[]),
         position_tolerance_m: 2e-6,
@@ -518,5 +533,220 @@ fn g0_source_stream_ordinals_and_tracking_limits_are_cumulative_across_fixtures(
                 "the first complete fixture alone must fit the shared limit"
             );
         }
+    });
+}
+
+#[test]
+fn g1_point_fixture_at_molecular_collision_uses_transverse_area_and_one_phase_factor() {
+    with_cx(|cx| {
+        let geometry = geometry();
+        let material = material();
+        let media = [SceneMedium::Homogeneous(&material)];
+        let reflectance = [SpectralReflectance::constant(REFLECTANCE).unwrap()];
+        let scene = CurvedPolarizedScene::try_new_with_materials(
+            cx,
+            &geometry,
+            &media,
+            &[],
+            &[],
+            &reflectance,
+            surfaces(),
+            100_000,
+        )
+        .unwrap();
+        let emission = emitters();
+        let camera = CurvedCameraScene::try_new(cx, &scene, &emission, None).unwrap();
+        let fixtures = CurvedPointLightCameraScene::try_new(cx, &camera, &[]).unwrap();
+        let lamp = lamp();
+        let branches = [volume_branch(&lamp)];
+        let phase = PhaseFunction::Rayleigh;
+        let spectrum = MassScatteringSpectrum::constant(1.0).unwrap();
+        for beta in [0.2_f64, 0.9] {
+            let volumes = [Some(
+                CurvedRayleighMedium::try_new(&spectrum, beta, &phase).unwrap(),
+            )];
+            let transport = CurvedRayleighScene::try_new(cx, &scene, &volumes).unwrap();
+            let molecular = CurvedRayleighCameraScene::try_new(cx, &camera, &transport).unwrap();
+            let lit = CurvedRayleighPointLightCameraScene::try_new_with_volume_branches(
+                cx, &molecular, &fixtures, &branches,
+            )
+            .unwrap();
+            let flight = |ordinal| {
+                [
+                    if ordinal == 0 {
+                        1.0 - (-beta * 0.25).exp()
+                    } else {
+                        0.99
+                    },
+                    0.0,
+                    0.2,
+                ]
+            };
+            let ordinary = molecular
+                .sample_ray_with_samples(
+                    cx,
+                    ray(),
+                    550.0,
+                    0,
+                    camera_settings(),
+                    |_| panic!("backscattered camera path hits the original opaque wall"),
+                    flight,
+                )
+                .unwrap();
+            let mut limits = settings();
+            limits.max_source_free_flight_draws = 0;
+            limits.max_source_candidates = 0;
+            let sample = lit
+                .sample_ray_with_samples(
+                    cx,
+                    ray(),
+                    550.0,
+                    0,
+                    limits,
+                    |_| panic!("volume NEE does not create a surface interaction"),
+                    flight,
+                    |_, _| panic!("uniform source survival is analytic"),
+                )
+                .unwrap();
+            assert_eq!(
+                sample.radiance_sample().path(),
+                ordinary.radiance_sample().path()
+            );
+            assert_eq!(sample.volume_events(), 1);
+            assert_eq!(sample.free_flight_draws(), 2);
+            assert_eq!(sample.connections(), 1);
+            assert_eq!(sample.source_free_flight_draws(), 0);
+            assert_eq!(sample.source_candidates(), 0);
+            let distance = 1.0625_f64.sqrt();
+            let cosine_squared = 0.25_f64.powi(2) / distance.powi(2);
+            let phase_per_sr = 3.0 * (1.0 + cosine_squared) / (16.0 * core::f64::consts::PI);
+            let intensity = lamp.flux_lm() * lamp.spectrum().bins_w_per_lumen_nm()[0]
+                / (4.0 * core::f64::consts::PI);
+            // Camera survival and beta are in the sampled event probability.
+            // Only true camera absorption and source (absorption+scattering)
+            // enter this CONDITIONAL radiance. No Lambertian pi or surface
+            // cosine belongs at the molecular receiving point.
+            let expected = phase_per_sr * intensity / distance.powi(2)
+                * (-ABSORPTION * 0.25 - (ABSORPTION + beta) * distance).exp();
+            near(sample.fixture_radiance_w_m2_sr_nm(), expected);
+            near(
+                sample.radiance_sample().radiance_w_m2_sr_nm(),
+                ordinary.radiance_sample().radiance_w_m2_sr_nm() + expected,
+            );
+        }
+    });
+}
+
+#[test]
+fn g1_null_candidates_do_not_emit_and_local_phase_is_shared_with_camera_continuation() {
+    with_cx(|cx| {
+        let geometry = geometry();
+        let material = material();
+        let field = AffineIndexField::try_new(
+            &material,
+            Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            bounds(),
+        )
+        .unwrap();
+        let media = [SceneMedium::Differentiable {
+            field: &field,
+            identity: FIELD_ID,
+        }];
+        let reflectance = [SpectralReflectance::constant(REFLECTANCE).unwrap()];
+        let scene = CurvedPolarizedScene::try_new_with_materials(
+            cx,
+            &geometry,
+            &media,
+            &[],
+            &[],
+            &reflectance,
+            surfaces(),
+            100_000,
+        )
+        .unwrap();
+        let emission = emitters();
+        let camera = CurvedCameraScene::try_new(cx, &scene, &emission, None).unwrap();
+        let fixtures = CurvedPointLightCameraScene::try_new(cx, &camera, &[]).unwrap();
+        let lamp = lamp();
+        let branches = [volume_branch(&lamp)];
+        let law = LocalLaw { rate: 0.25 };
+        let volumes = [Some(CurvedRayleighBinding::Field(&law))];
+        let transport = CurvedRayleighScene::try_new_with_fields(cx, &scene, &volumes).unwrap();
+        let molecular = CurvedRayleighCameraScene::try_new(cx, &camera, &transport).unwrap();
+        let lit = CurvedRayleighPointLightCameraScene::try_new_with_volume_branches(
+            cx, &molecular, &fixtures, &branches,
+        )
+        .unwrap();
+        let flight = |ordinal| match ordinal {
+            0 => [1.0 - (-0.1_f64).exp(), 0.0, 0.2, 0.9],
+            1 => [1.0 - (-0.15_f64).exp(), 0.0, 0.2, 0.1],
+            _ => [0.99, 0.0, 0.2, 0.1],
+        };
+        let ordinary = molecular
+            .sample_ray_with_tracking_samples(
+                cx,
+                ray(),
+                550.0,
+                0,
+                camera_settings(),
+                |_| [0.0; 3],
+                flight,
+            )
+            .unwrap();
+        let mut camera_draws = Vec::new();
+        let mut source_draws = Vec::new();
+        let sample = lit
+            .sample_ray_with_tracking_samples(
+                cx,
+                ray(),
+                550.0,
+                0,
+                settings(),
+                |_| [0.0; 3],
+                |ordinal| {
+                    camera_draws.push(ordinal);
+                    flight(ordinal)
+                },
+                |connection, ordinal| {
+                    source_draws.push((connection, ordinal));
+                    1.0 - (-(if ordinal == 0 { 0.2_f64 } else { 3.0_f64 })).exp()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            sample.radiance_sample().path(),
+            ordinary.radiance_sample().path()
+        );
+        assert_eq!(camera_draws, vec![0, 1, 2]);
+        assert_eq!(source_draws, vec![(0, 0), (0, 1)]);
+        assert_eq!(sample.volume_events(), 1);
+        assert_eq!(
+            sample.connections(),
+            1,
+            "the rejected first candidate contributes no source term"
+        );
+        assert_eq!(sample.source_candidates(), 1);
+        let distance = 1.0625_f64.sqrt();
+        let cosine_squared = 0.25_f64.powi(2) / distance.powi(2);
+        let delta = 0.03;
+        let phase_per_sr = 3.0 * ((1.0 + delta) + (1.0 - delta) * cosine_squared)
+            / (8.0 * core::f64::consts::PI * (2.0 + delta));
+        let intensity = lamp.flux_lm() * lamp.spectrum().bins_w_per_lumen_nm()[0]
+            / (4.0 * core::f64::consts::PI);
+        let expected = phase_per_sr * intensity / distance.powi(2)
+            * (-ABSORPTION * (0.25 + distance)).exp()
+            * 0.75;
+        near(sample.fixture_radiance_w_m2_sr_nm(), expected);
+        let duplicate = [branches[0], branches[0]];
+        assert!(matches!(
+            CurvedRayleighPointLightCameraScene::try_new_with_volume_branches(
+                cx, &molecular, &fixtures, &duplicate,
+            ),
+            Err(PointLightCameraError::DuplicateBinding {
+                first: 0,
+                second: 1
+            })
+        ));
     });
 }

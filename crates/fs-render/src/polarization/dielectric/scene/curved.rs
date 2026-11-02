@@ -263,7 +263,14 @@ impl<'a> CurvedPolarizedScene<'a> {
         max_build_work: u64,
     ) -> Result<Self, CurvedSceneError> {
         Self::try_new_with_materials(
-            cx, geometry, media, conductors, coatings, &[], bindings, max_build_work,
+            cx,
+            geometry,
+            media,
+            conductors,
+            coatings,
+            &[],
+            bindings,
+            max_build_work,
         )
     }
 
@@ -363,22 +370,45 @@ impl<'a> CurvedPolarizedScene<'a> {
         seed: u64,
         path_id: u64,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
-        self.trace_with_seed_mode(cx, beam, initial_medium, settings, seed, path_id, false, |_| Ok(()))
+        self.trace_with_seed_mode(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            seed,
+            path_id,
+            false,
+            |_| Ok(()),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn trace_with_seed_mode(
-        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
-        settings: CurvedTraceSettings, seed: u64, path_id: u64, radiance_brushing: bool,
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        path_id: u64,
+        radiance_brushing: bool,
         observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
-        self.trace_with_samples_mode(cx, beam, initial_medium, settings, |event| {
-            let block = philox4x32_10(
-                [path_id as u32, (path_id >> 32) as u32, event, 0x706f_6c32],
-                [seed as u32, (seed >> 32) as u32],
-            );
-            core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
-        }, radiance_brushing, observe_surface)
+        self.trace_with_samples_mode(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            |event| {
+                let block = philox4x32_10(
+                    [path_id as u32, (path_id >> 32) as u32, event, 0x706f_6c32],
+                    [seed as u32, (seed >> 32) as u32],
+                );
+                core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
+            },
+            radiance_brushing,
+            observe_surface,
+        )
     }
 
     /// Trace through the native clearance/event owner. The sampler is called
@@ -394,7 +424,9 @@ impl<'a> CurvedPolarizedScene<'a> {
         settings: CurvedTraceSettings,
         samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<CurvedPathResult, CurvedSceneError> {
-        self.trace_with_samples_mode(cx, beam, initial_medium, settings, samples, false, |_| Ok(()))
+        self.trace_with_samples_mode(cx, beam, initial_medium, settings, samples, false, |_| {
+            Ok(())
+        })
     }
 
     // Only reciprocal scalar cameras select the radiance shading-normal law.
@@ -402,8 +434,12 @@ impl<'a> CurvedPolarizedScene<'a> {
     // local index ratio once for each source encountered along the path.
     #[allow(clippy::too_many_arguments)]
     fn trace_with_samples_mode(
-        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
-        settings: CurvedTraceSettings, samples: impl FnMut(u32) -> [f64; 3],
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
         radiance_brushing: bool,
         observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
@@ -439,7 +475,7 @@ impl<'a> CurvedPolarizedScene<'a> {
         mut flight: impl FnMut(usize, f64) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
         mut scatter: impl FnMut(
             usize,
-            PolarizedBeam,
+            &CurvedPathResult,
             [f64; 2],
             f64,
         ) -> Result<Option<PolarizedBeam>, CurvedSceneError>,
@@ -592,7 +628,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         let selected = volume_flight.ok_or(CurvedSceneError::NumericalRange)?;
                         if let Some(scattered) = scatter(
                             result.medium,
-                            result.beam,
+                            &result,
                             selected.phase_samples,
                             selected.acceptance_sample,
                         )? {
@@ -665,27 +701,34 @@ impl<'a> CurvedPolarizedScene<'a> {
                     result.termination = PathTermination::Opaque;
                     break;
                 }
-                Interaction::DepolarizingDiffuse { medium, reflectance } => {
+                Interaction::DepolarizingDiffuse {
+                    medium,
+                    reflectance,
+                } => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
                             object_id: instance.object_id(),
                             expected: medium,
                             actual: result.medium,
-                        }.into());
+                        }
+                        .into());
                     }
                     let rho = self.reflectances[reflectance]
                         .at(result.beam.wavelength_nm())
-                        .map_err(|_| BeamError::Dielectric(
-                            crate::dielectric::DielectricError::InvalidWavelength,
-                        ))?;
+                        .map_err(|_| {
+                            BeamError::Dielectric(
+                                crate::dielectric::DielectricError::InvalidWavelength,
+                            )
+                        })?;
                     if rho == 0.0 {
                         result.termination = PathTermination::Opaque;
                         break;
                     }
                     let draw = samples(event);
-                    result.beam = result.beam.sample_depolarizing_diffuse(
-                        witness.normal, rho, [draw[0], draw[1]],
-                    )?.beam;
+                    result.beam = result
+                        .beam
+                        .sample_depolarizing_diffuse(witness.normal, rho, [draw[0], draw[1]])?
+                        .beam;
                 }
                 Interaction::SmoothConductor { optics, medium } => {
                     if result.medium != medium {

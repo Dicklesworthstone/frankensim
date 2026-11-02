@@ -7,6 +7,7 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleBranchPolicy, BundleConnectionOptions,
 };
 use crate::polarization::dielectric::scene::curved::camera::participating::CurvedRayleighCameraScene;
+use crate::polarization::dielectric::scene::curved::camera::point_lights::participating::MolecularPointLightBranch;
 use crate::polarization::dielectric::scene::curved::camera::point_lights::{
     CurvedPointLightCameraScene, PointLightBranch, PointLightCameraSettings,
 };
@@ -58,6 +59,142 @@ fn point_settings() -> RayleighPointLightCameraSettings {
         max_source_free_flight_draws: 256,
         max_source_candidates: 128,
     }
+}
+
+#[test]
+fn g3_molecular_fixture_pixels_match_analytic_single_scattering_and_keep_camera_paths() {
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![
+            GeometryInstance::try_new(
+                9,
+                hash_domain("molecular-point-pixel", b"black-enclosure"),
+                SharedGeometry::chart(SphereChart {
+                    center: Point3::new(0.0, 0.0, 0.0),
+                    radius: 1.6,
+                }),
+                RigidTransform::identity(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let material = material();
+        let media = [SceneMedium::Homogeneous(&material)];
+        let native = CurvedPolarizedScene::try_new(
+            cx,
+            &geometry,
+            &media,
+            vec![SurfaceBinding {
+                object_id: 9,
+                interaction: Interaction::Opaque,
+            }],
+            100_000,
+        )
+        .unwrap();
+        let surface = CurvedCameraScene::try_new(cx, &native, &[], None).unwrap();
+        let fixtures = CurvedPointLightCameraScene::try_new(cx, &surface, &[]).unwrap();
+        let spectrum = MassScatteringSpectrum::constant(0.2).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let laws = [Some(
+            CurvedRayleighMedium::try_new(&spectrum, 1.0, &phase).unwrap(),
+        )];
+        let scattering = CurvedRayleighScene::try_new(cx, &native, &laws).unwrap();
+        let molecular = CurvedRayleighCameraScene::try_new(cx, &surface, &scattering).unwrap();
+        let source = PhotometricSource::try_new(
+            RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], [0.4, 0.0, 0.0]).unwrap(),
+            1000.0,
+            1.0,
+            AngularDistribution::isotropic(),
+            SourceSpectrum::try_from_bins(core::array::from_fn(|i| 1.0 + i as f64 / 80.0)).unwrap(),
+        )
+        .unwrap();
+        let branches = [MolecularPointLightBranch {
+            source: &source,
+            receiver_medium: 0,
+            initial_medium: 0,
+            initial_direction: Vec3::new(0.0, 0.0, 1.0),
+            source_transverse_axis: Vec3::new(0.0, 1.0, 0.0),
+            policy: BundleBranchPolicy::Sequence(&[]),
+            position_tolerance_m: 1e-6,
+        }];
+        let lit = CurvedRayleighPointLightCameraScene::try_new_with_volume_branches(
+            cx, &molecular, &fixtures, &branches,
+        )
+        .unwrap();
+        let physical = camera(0.0);
+        let raster = CurvedCameraRaster::try_new(&physical, 3, 2).unwrap();
+        // This seed gives one real collision in each lane inside the sphere;
+        // every second flight exceeds its diameter, whatever phase direction
+        // was sampled. The test reconstructs these distances independently.
+        let seed = 120;
+        let ordinary = raster
+            .sample_pixel_rayleigh(
+                cx,
+                &molecular,
+                0,
+                CurvedRayleighTraceSettings {
+                    surfaces: trace_settings(),
+                    max_volume_events: 8,
+                },
+                seed,
+                4,
+                9,
+            )
+            .unwrap();
+        let sample = raster
+            .sample_pixel_rayleigh_point_lights(cx, &lit, 0, point_settings(), seed, 4, 9)
+            .unwrap();
+        assert_eq!(sample.volume_events(), &[1; CAMERA_WAVELENGTHS]);
+        assert_eq!(sample.free_flight_draws(), &[2; CAMERA_WAVELENGTHS]);
+        assert_eq!(sample.source_free_flight_draws(), &[0; CAMERA_WAVELENGTHS]);
+        assert_eq!(sample.source_candidates(), &[0; CAMERA_WAVELENGTHS]);
+        let pixel = sample.pixel_sample();
+        assert_eq!(pixel.camera_ray(), ordinary.pixel_sample().camera_ray());
+        let mut expected_xyz = [0.0; 3];
+        for (lane, &wavelength) in pixel.wavelengths_nm().iter().enumerate() {
+            let flight = philox4x32_10([4, 9, 0, 0x6372_7350 + lane as u32], [seed as u32, 0]);
+            let distance = -(1.0 - unit(flight[0])).ln() / 0.2;
+            assert!((0.05..1.4).contains(&distance));
+            let vertex = pixel
+                .camera_ray()
+                .origin
+                .offset(pixel.camera_ray().dir.scale(distance));
+            let source_delta = vertex.delta_from(source.position_m());
+            let source_distance = source_delta.dot(source_delta).sqrt();
+            let source_direction = source_delta.scale(1.0 / source_distance);
+            let cosine = -source_direction.dot(pixel.camera_ray().dir);
+            let phase_per_sr = 3.0 * (1.0 + cosine * cosine) / (16.0 * core::f64::consts::PI);
+            let intensity = source
+                .spectral_intensity_w_sr_nm(source_direction, wavelength)
+                .unwrap();
+            // The selected camera collision already supplies beta_s and its
+            // survival probability. Only source survival appears explicitly;
+            // this direct term also has no continuation-phase PDF divisor.
+            let expected = phase_per_sr * intensity / (source_distance * source_distance)
+                * (-0.1 * distance - 0.3 * source_distance).exp();
+            let actual = pixel.spectral_samples()[lane].radiance_w_m2_sr_nm();
+            assert!((actual - expected).abs() <= 8e-6 * expected + 1e-14);
+            assert_eq!(
+                actual,
+                sample.point_light_sample().fixture_radiance_w_m2_sr_nm()[lane]
+            );
+            assert_eq!(
+                pixel.spectral_samples()[lane].path(),
+                ordinary.pixel_sample().spectral_samples()[lane].path()
+            );
+            assert_eq!(sample.point_light_sample().connections()[lane], 1);
+            assert!(sample.point_light_sample().trace_evaluations()[lane] >= 2);
+            for (sum, observer) in expected_xyz.iter_mut().zip([
+                cie_x(wavelength),
+                cie_y(wavelength),
+                cie_z(wavelength),
+            ]) {
+                *sum += expected * observer * 100.0 / y_integral();
+            }
+        }
+        for (actual, expected) in pixel.xyz().into_iter().zip(expected_xyz) {
+            assert!((actual - expected).abs() <= 8e-6 * expected + 1e-14);
+        }
+    });
 }
 
 #[test]

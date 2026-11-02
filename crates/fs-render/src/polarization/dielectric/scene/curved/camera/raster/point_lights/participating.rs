@@ -2,8 +2,9 @@
 //!
 //! Camera flights retain the original molecular path's probabilities and random
 //! streams. Each source connection independently estimates scattering survival
-//! on its selected curved optical branch. Its samples cannot consume or replace
-//! camera draws. All four wavelengths retain separate source work and budgets.
+//! on its selected curved optical branch, at diffuse contacts and explicitly
+//! bound molecular vertices. Its samples cannot consume or replace camera
+//! draws. All four wavelengths retain separate source work and budgets.
 
 use super::{
     CAMERA_WAVELENGTHS, CameraRadianceError, CurvedCameraRaster, CurvedPixelSample,
