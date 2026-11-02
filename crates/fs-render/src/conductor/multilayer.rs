@@ -10,7 +10,7 @@
 
 use super::{
     CoherentAbsorbingCoating, CoherentDielectricCoating, Complex, ComplexIor, ConductorDataStatus,
-    ConductorError, ConductorOptics, ConductorSource, MAX_COHERENT_COATING_THICKNESS_M,
+    ConductorError, ConductorOptics, ConductorPowerBalance, ConductorSource, MAX_COHERENT_COATING_THICKNESS_M,
     MAX_IOR_COMPONENT, canonical_zero,
 };
 use crate::dielectric::CauchyIor;
@@ -237,6 +237,26 @@ impl CoherentPeriodicCoating {
         geometry: Geometry,
         reverse: bool,
     ) -> Result<Reflection, ConductorError> {
+        self.response_as::<TRANSMISSION, ReflectionOnly>(geometry, reverse)
+    }
+
+    pub(super) fn power_balance(
+        &self,
+        wavelength_nm: f64,
+        incident_eta: f64,
+        substrate: ComplexIor,
+        cosine: f64,
+    ) -> Result<ConductorPowerBalance, ConductorError> {
+        self.response_as::<false, AbsorbedPower>(
+            Geometry::new(wavelength_nm, incident_eta, substrate, cosine)?, false,
+        )
+    }
+
+    fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
+        &self,
+        geometry: Geometry,
+        reverse: bool,
+    ) -> Result<Kind::Output, ConductorError> {
         let mut prepared = [LayerTransfer::IDENTITY; MAX_COHERENT_UNIT_CELL_LAYERS];
         for (slot, layer) in prepared.iter_mut().zip(self.unit_cell()) {
             let ior = ComplexIor {
@@ -245,7 +265,7 @@ impl CoherentPeriodicCoating {
             };
             *slot = LayerTransfer::new::<TRANSMISSION>(ior, layer.thickness_m, geometry);
         }
-        response::<TRANSMISSION>(geometry, self.layer_count(), |index| {
+        response_as::<TRANSMISSION, Kind>(geometry, self.layer_count(), |index| {
             let index = if reverse {
                 self.layer_count() - 1 - index
             } else {
@@ -392,6 +412,25 @@ impl<'a> CoherentCoatingStack<'a> {
             cosine,
         )?;
         self.reflection(geometry)?.reflectance(geometry)
+    }
+
+    /// Reflected and absorbed fractions from the same original boundary-field
+    /// solve. This explicit ordered stack replaces any attached substrate film.
+    /// Absorption is aggregate coating/opaque-substrate power, not per-layer heat.
+    pub fn power_balance(
+        self,
+        substrate: &ConductorOptics,
+        wavelength_nm: f64,
+        incident_eta: f64,
+        cosine: f64,
+    ) -> Result<ConductorPowerBalance, ConductorError> {
+        let geometry = Geometry::new(
+            wavelength_nm, incident_eta, substrate.complex_ior(wavelength_nm)?, cosine,
+        )?;
+        response_as::<false, AbsorbedPower>(geometry, self.layers.len(), |index| {
+            let (ior, thickness) = self.layer(index, wavelength_nm)?;
+            Ok(LayerTransfer::new::<false>(ior, thickness, geometry))
+        })
     }
 
     /// Reflected Mueller matrix with the same s/p frames, phase convention
@@ -575,6 +614,37 @@ struct Reflection {
     transmission: [Complex; 2],
 }
 
+// Static output selection leaves the existing reflected/transmitted paths
+// without absorption arithmetic or extra response storage. New heat consumers
+// retain normal flux from the SAME scaled field solve.
+trait ResponseKind {
+    type Output;
+    fn finish(
+        geometry: Geometry,
+        reflected: Reflection,
+        field: [Complex; 2],
+        flux: [Complex; 2],
+    ) -> Result<Self::Output, ConductorError>;
+}
+struct ReflectionOnly;
+impl ResponseKind for ReflectionOnly {
+    type Output = Reflection;
+    fn finish(_: Geometry, reflected: Reflection, _: [Complex; 2], _: [Complex; 2])
+        -> Result<Self::Output, ConductorError> { Ok(reflected) }
+}
+struct AbsorbedPower;
+impl ResponseKind for AbsorbedPower {
+    type Output = ConductorPowerBalance;
+    fn finish(geometry: Geometry, reflected: Reflection, field: [Complex; 2], flux: [Complex; 2])
+        -> Result<Self::Output, ConductorError> {
+        ConductorPowerBalance::from_boundary(
+            geometry.cosine,
+            [geometry.incident_eta * geometry.cosine, geometry.cosine / geometry.incident_eta],
+            field, flux, reflected.amplitudes,
+        )
+    }
+}
+
 impl Reflection {
     fn transmission_result(self, lossless: bool) -> CoherentTransmission {
         CoherentTransmission {
@@ -613,14 +683,22 @@ fn reflection(
 fn response<const TRANSMISSION: bool>(
     geometry: Geometry,
     layer_count: usize,
-    mut layer: impl FnMut(usize) -> Result<LayerTransfer, ConductorError>,
+    layer: impl FnMut(usize) -> Result<LayerTransfer, ConductorError>,
 ) -> Result<Reflection, ConductorError> {
+    response_as::<TRANSMISSION, ReflectionOnly>(geometry, layer_count, layer)
+}
+
+fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
+    geometry: Geometry,
+    layer_count: usize,
+    mut layer: impl FnMut(usize) -> Result<LayerTransfer, ConductorError>,
+) -> Result<Kind::Output, ConductorError> {
     if geometry.cosine == 0.0 {
-        return Ok(Reflection {
+        return Kind::finish(geometry, Reflection {
             amplitudes: [Complex::new(-1.0, 0.0); 2],
             bare_equivalent: true,
             transmission: [Complex::new(0.0, 0.0); 2],
-        });
+        }, [Complex::new(1.0, 0.0); 2], [Complex::new(0.0, 0.0); 2]);
     }
     let n_squared = Complex::new(geometry.substrate.eta, geometry.substrate.k).square();
     let q = geometry.exit_normal.unwrap_or_else(|| {
@@ -709,7 +787,7 @@ fn response<const TRANSMISSION: bool>(
         }
     }
     if bare_equivalent && !TRANSMISSION {
-        return Ok(Reflection {
+        return Kind::finish(geometry, Reflection {
             amplitudes: super::thin_film::polarization::bare_amplitudes(
                 geometry.incident_eta,
                 geometry.substrate,
@@ -717,7 +795,7 @@ fn response<const TRANSMISSION: bool>(
             ),
             bare_equivalent,
             transmission: [Complex::new(0.0, 0.0); 2],
-        });
+        }, [Complex::new(1.0, 0.0); 2], exit);
     }
     let mut amplitudes = core::array::from_fn(|pol| {
         if TRANSMISSION { flux[pol] / field[pol] } else {
@@ -737,11 +815,11 @@ fn response<const TRANSMISSION: bool>(
             transmission[1] = transmission[0];
         }
     }
-    Ok(Reflection {
+    Kind::finish(geometry, Reflection {
         amplitudes,
         bare_equivalent,
         transmission,
-    })
+    }, field, flux)
 }
 
 #[cfg(test)]

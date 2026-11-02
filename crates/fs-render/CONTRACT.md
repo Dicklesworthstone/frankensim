@@ -4504,3 +4504,30 @@ work and conservation. Fixed geometry/density and finite 6–18 micrometre
 infrared quadrature remain the same explicit model limits as the continuous
 phase-change example. Run with
 `cargo run -p fs-render --example pulsed_optical_heating --no-default-features --features optical-heating,material-state`.
+
+### Opaque surface absorption from electromagnetic power flux
+
+`ConductorOptics::power_balance` and `CoherentCoatingStack::power_balance`
+return separate s/p reflected and absorbed fractions. They reuse the original
+scaled electromagnetic boundary-field solve for the source-bound complex-index
+substrate and its coherent transparent, absorbing or periodic coatings. The
+explicit ordered-stack API replaces any coating attached to the substrate,
+matching the existing stack reflection API.
+
+Absorptance comes directly from normal Poynting flux,
+`4*Y_i*Re(F*conj(G))/|Y_i*F+G|^2`, with compensated products for the normal flux.
+It is not obtained by subtracting reflected power from one. Consequently a
+representable small absorption survives a reflectance rounded to exactly one.
+Numerically unresolved/nonpassive flux refuses; exact grazing gives zero heat.
+Existing reflection/transmission callers retain their original arithmetic and
+response storage through static output selection and perform no added absorption
+calculations.
+
+This is aggregate coating plus opaque-half-space absorption, without an inferred
+individual-film, penetration-depth or thermal-cell partition. Original visible
+wavelength support, positive substrate eta/k, incident-medium constraints,
+source qualification and local planar/coherence assumptions remain in force.
+Representative constants do not become measured material data, and small
+roundoff closure does not certify optical uncertainty. Independent normal-flux
+and Airy references cover weak absorption, single films, periodic stacks, s/p
+response, grazing and exact zero-thickness/matched-layer identities.
