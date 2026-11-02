@@ -4,7 +4,8 @@
 //! MaterialHeatStep callback. Fluid h(T), solid integral Cp(T), solid k(T),
 //! radiation, thermostats and conservative advection therefore see one trial
 //! temperature and one physical energy ledger. No secondary thermal clock or
-//! operator splitting is introduced.
+//! operator splitting is introduced. Explicit SGS holds its one accepted
+//! fluid eddy heat field fixed throughout that common endpoint iteration.
 
 use super::{
     MaterialEnthalpyMarch, MaterialEnthalpyStepReport, MaterialEnthalpyTransientConfig,
@@ -18,7 +19,7 @@ use super::super::super::{
 };
 use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep};
 use crate::conjugate::{
-    AdvectiveEnthalpyField, ChtError, EnergyConfig, RadiationConfig, SimpleConfig,
+    AdvectiveEnthalpyField, ChtError, EnergyConfig, FvSgsConfig, RadiationConfig, SimpleConfig,
     ThermalSetup, TransientRecord, UnsteadyConfig, Voxel, VoxelDomain,
 };
 use crate::material::conjugate::MaterialChtFluid;
@@ -555,13 +556,101 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
         gate: &CancelGate,
-        mut resolve: impl FnMut(
+        resolve: impl FnMut(
             usize,
             f64,
             &FluidTransportState,
         ) -> Result<S, MaterialError>,
     ) -> Result<MaterialEnthalpySolidMarch<'a, S, C>, MaterialBuoyancyError> {
+        self.march_natural_convection_with_enthalpy_and_material_solids_inner(
+            domain, solid_sources, flow, thermal, energy, initial_temperature_k,
+            bounds, caloric, fluid_controls, solid_controls, unsteady, None,
+            inlet_schedule, power_schedule, radiation, gate, resolve,
+        )
+    }
+
+    /// Compose explicit unsteady SGS with joint source-caloric fluid and solid
+    /// endpoint evolution on the original native time step.
+    ///
+    /// Source mu(T) and the independently recomputed nu_t drive the same
+    /// reciprocal momentum stress. The accepted eddy field contributes exactly
+    /// one fluid gradient heat flux with reference rho*Cp and Pr_t=0.9 to every
+    /// joint trial. Original fluid h(T), solid integral Cp(T), solid k(T),
+    /// contacts, radiation and thermostats still share one accepted temperature
+    /// and heat ledger. Neither caloric iteration nor source refresh advances
+    /// the SGS clock or adds eddy transport to a molecular material snapshot.
+    /// Zero SGS recovers the original joint march exactly.
+    ///
+    /// The closure remains exploratory with first-order material feedback;
+    /// its reference-Cp thermal conversion does not replace actual source
+    /// calorimetry. This entry does not enable molecular/SGS dissipation heat
+    /// or the separately owned native viscous-heating model.
+    ///
+    /// # Errors
+    /// Original source, nonlinear, finite-work, conservation and cancellation
+    /// refusals, plus invalid/acceptance-use SGS, a local viscosity cap
+    /// violation, LVEL or a second eddy-conductivity owner. No partial march.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_enthalpy_and_material_solids_and_sgs<
+        'a,
+        S: FluidTransport,
+        C: ConvectionCaloricLaw,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        solid_sources: &[SolidThermalLaw<'_>],
+        flow: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        bounds: BoussinesqConfig<3>,
+        caloric: &'a C,
+        fluid_controls: MaterialEnthalpyTransientConfig,
+        solid_controls: SolidThermalConfig,
+        unsteady: &UnsteadyConfig,
+        sgs: FvSgsConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEnthalpySolidMarch<'a, S, C>, MaterialBuoyancyError> {
+        self.march_natural_convection_with_enthalpy_and_material_solids_inner(
+            domain, solid_sources, flow, thermal, energy, initial_temperature_k,
+            bounds, caloric, fluid_controls, solid_controls, unsteady, Some(sgs),
+            inlet_schedule, power_schedule, radiation, gate, resolve,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn march_natural_convection_with_enthalpy_and_material_solids_inner<
+        'a,
+        S: FluidTransport,
+        C: ConvectionCaloricLaw,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        solid_sources: &[SolidThermalLaw<'_>],
+        flow: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        bounds: BoussinesqConfig<3>,
+        caloric: &'a C,
+        fluid_controls: MaterialEnthalpyTransientConfig,
+        solid_controls: SolidThermalConfig,
+        unsteady: &UnsteadyConfig,
+        sgs: Option<FvSgsConfig>,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEnthalpySolidMarch<'a, S, C>, MaterialBuoyancyError> {
         poll(gate)?;
+        if let Some(sgs) = sgs {
+            sgs.validate()?;
+        }
         fluid_controls.validate()?;
         if !solid_controls_valid(solid_controls) {
             return Err(MaterialBuoyancyError::Invalid(
@@ -641,7 +730,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             initial_temperature_k,
             bounds,
             unsteady,
-            None,
+            sgs,
             inlet_schedule,
             power_schedule,
             radiation,

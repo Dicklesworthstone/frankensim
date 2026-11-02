@@ -1780,6 +1780,25 @@ caps, and refresh without compounding. The `material_conjugate` heated-cavity
 regression checks live viscosity/momentum response, zero-closure identity,
 heat conservation and an independent once/omitted/twice eddy-heat replay.
 
+`march_natural_convection_with_enthalpy_and_sgs`,
+`march_natural_convection_with_material_solids_and_sgs`, and
+`march_natural_convection_with_enthalpy_and_material_solids_and_sgs` extend
+that same explicit native SGS owner through fluid source h(T), solid source
+Cp(T)/k(T), and joint fluid/solid endpoint evolution. Existing signatures
+retain their behavior. One accepted eddy field and projected flow are reused
+through every nonlinear thermal trial; momentum is not stepped again. Eddy
+conductivity is added only to fluid cells, once, and never enters molecular
+snapshots or source storage. Fluid h(T) owns actual storage and conservative
+donor heat; solid source integrals, contacts, reservoirs, radiation, local
+nonlinear gates, work bounds and atomic refusal remain in force. The declared
+gradient-diffusion closure retains reference rho*Cp and Pr_t=0.9, separately
+from source calorimetry. These entries select no new dissipation-heating or
+wall model. First-order feedback and exploratory SGS restrictions apply;
+zero SGS recovers the corresponding original march. The caloric-solids
+regressions specify joint source-mu(T) momentum/heat response, independent
+enthalpy conservation, constant-Cp reductions and late source refusal; these
+new whole-crate tests remain unexecuted under the current host memory limit.
+
 ## Compressible Navier-Stokes-Fourier hybrid (IRP M3.2-W3a, `nsf3`)
 
 `nsf3::NsfGrid3<L: Lattice3<27>>` advances density, momentum and total energy of an ideal gas on the D3Q27 lattice.

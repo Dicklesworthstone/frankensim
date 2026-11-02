@@ -1,9 +1,11 @@
 //! Source-integral solid storage on the existing native thermal step.
+//! Explicit unsteady SGS shares this owner; its accepted eddy heat flux stays
+//! fixed throughout each solid constitutive iteration.
 
 use super::{MaterialBuoyancyMarch, MaterialChtFluid};
 use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep, compact_owners};
 use crate::conjugate::{
-    EnergyConfig, RadiationConfig, SimpleConfig, ThermalSetup, TransientRecord, UnsteadyConfig,
+    EnergyConfig, FvSgsConfig, RadiationConfig, SimpleConfig, ThermalSetup, TransientRecord, UnsteadyConfig,
     Voxel, VoxelDomain,
 };
 use crate::material::conjugate::buoyant::{MaterialBuoyancyError, poll};
@@ -138,7 +140,80 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         gate: &CancelGate,
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialSolidBuoyancyMarch<S>, MaterialBuoyancyError> {
+        self.march_natural_convection_with_material_solids_inner(
+            domain, solid_sources, flow_config, thermal, energy_config,
+            initial_temperature_k, config, unsteady, solid_controls, None,
+            inlet_schedule, power_schedule, radiation, gate, resolve,
+        )
+    }
+
+    /// Compose explicit unsteady SGS with source-integral solid calorimetry.
+    ///
+    /// This uses the same solid k(T)/Cp(T) endpoint iteration and native clock
+    /// as `march_natural_convection_with_material_solids`. Local source mu(T)
+    /// and the separately recomputed nu_t supply momentum; the accepted nu_t
+    /// supplies one fluid gradient heat flux with reference rho*Cp/Pr_t,
+    /// Pr_t=0.9. That flux is held fixed during solid nonlinear trials and is
+    /// never added to solid conductivity, source snapshots or stored energy.
+    /// A zero SGS coefficient recovers the original march exactly.
+    ///
+    /// Source support, local viscosity caps, conservative heat accounting and
+    /// atomic failure retain their original owners. This remains exploratory,
+    /// first-order material feedback without SGS dissipation heating or a
+    /// thermal wall model; it does not select the separate viscous-heating API.
+    ///
+    /// # Errors
+    /// Original source/solid/native refusals, invalid or acceptance-use SGS,
+    /// excessive local eddy viscosity, LVEL or another eddy-conductivity owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_material_solids_and_sgs<S: FluidTransport>(
+        &self,
+        domain: &VoxelDomain,
+        solid_sources: &[SolidThermalLaw<'_>],
+        flow_config: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        config: BoussinesqConfig<3>,
+        unsteady: &UnsteadyConfig,
+        solid_controls: SolidThermalConfig,
+        sgs: FvSgsConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialSolidBuoyancyMarch<S>, MaterialBuoyancyError> {
+        self.march_natural_convection_with_material_solids_inner(
+            domain, solid_sources, flow_config, thermal, energy_config,
+            initial_temperature_k, config, unsteady, solid_controls, Some(sgs),
+            inlet_schedule, power_schedule, radiation, gate, resolve,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn march_natural_convection_with_material_solids_inner<S: FluidTransport>(
+        &self,
+        domain: &VoxelDomain,
+        solid_sources: &[SolidThermalLaw<'_>],
+        flow_config: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        config: BoussinesqConfig<3>,
+        unsteady: &UnsteadyConfig,
+        solid_controls: SolidThermalConfig,
+        sgs: Option<FvSgsConfig>,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialSolidBuoyancyMarch<S>, MaterialBuoyancyError> {
         poll(gate)?;
+        if let Some(sgs) = sgs {
+            sgs.validate()?;
+        }
         solid_controls.validate()?;
         if initial_temperature_k.len() != domain.cell_count() {
             return Err(MaterialBuoyancyError::Invalid(
@@ -188,7 +263,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             initial_temperature_k,
             config,
             unsteady,
-            None,
+            sgs,
             inlet_schedule,
             power_schedule,
             radiation,

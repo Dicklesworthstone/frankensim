@@ -6,12 +6,13 @@ mod compact;
 
 use super::solid::{card, law, specific_energy};
 use super::*;
-use fs_lbm::conjugate::ConvectionScheme;
+use fs_lbm::conjugate::{ConvectionScheme, FvSgsConfig};
 use fs_lbm::material::conjugate::buoyant::SolidThermalConfig;
 use fs_lbm::material::conjugate::buoyant::enthalpy::{
     MaterialEnthalpyConfig, MaterialEnthalpyTransientConfig,
 };
 use fs_lbm::material::conjugate::solid::SolidThermalLaw;
+use fs_lbm::sgs3::{SgsModel, SgsUse};
 use fs_matdb::{ClaimSelection, MaterialCard};
 use fs_material::thermal::transport::isobaric::{
     IsobaricHeatCapacityLaw, IsobaricHeatCapacityQuery,
@@ -83,6 +84,177 @@ fn controls() -> MaterialEnthalpyTransientConfig {
         maximum_storage_defect_w: 1e-8,
         maximum_energy_closure_j: 1e-8,
         temperature_relaxation: 1.0,
+    }
+}
+
+fn sgs(cs: f64) -> FvSgsConfig {
+    FvSgsConfig {
+        model: SgsModel::Smagorinsky { cs },
+        filter_width_factor: 1.0,
+        maximum_eddy_to_molecular: 100.0,
+        usage: SgsUse::Exploration,
+    }
+}
+
+fn shear_cavity(with_solid: bool) -> (VoxelDomain, SimpleConfig, ThermalSetup, Vec<f64>, UnsteadyConfig) {
+    let domain = VoxelDomain::from_fn(4, 5, 1, 0.25, |p| {
+        if with_solid && p[1] < 0.25 { Voxel::Solid(0) } else { Voxel::Fluid }
+    }).unwrap();
+    let mut faces = [FvBoundary::wall(); 6];
+    faces[3] = FvBoundary::Wall { velocity: [0.05, 0.0, 0.0] };
+    faces[4] = FvBoundary::Symmetry;
+    faces[5] = FvBoundary::Symmetry;
+    let mut thermal = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    thermal.power_w = vec![0.01; domain.cell_count()];
+    let initial = (0..domain.cell_count()).map(|c| {
+        if domain.is_fluid(c) { 304.0 + domain.coords(c)[0] as f64 } else { 300.0 }
+    }).collect();
+    let mut unsteady = UnsteadyConfig::new(0.25, 4);
+    unsteady.scheme = TimeScheme::BackwardEuler;
+    unsteady.inner_iterations = 1000;
+    unsteady.inner_tolerance = 1e-9;
+    (domain, SimpleConfig::new(faces), thermal, initial, unsteady)
+}
+
+fn shear_transport(source: &SolidThermalLaw<'_>, t: f64) -> Result<FluidTransportState, MaterialError> {
+    // Original Cp/k/rho queries plus an explicit synthetic molecular mu(T),
+    // not a turbulent effective viscosity or an empirical source claim.
+    let state = transport(source, t)?;
+    FluidTransportState::try_new(state.density_kg_m3(), state.specific_heat_j_kg_k(),
+        state.thermal_conductivity_w_m_k(), 0.03 / (1.0 + 0.15 * (t - 300.0)))
+}
+
+#[test]
+fn sgs_joint_source_calorimetry_preserves_material_refresh_and_total_heat() {
+    let fluid_card = card(0.004, 0.0);
+    let fluid_source = law(&fluid_card, [290.0, 400.0]);
+    let caloric = source_caloric(&fluid_card, &fluid_source, [290.0, 400.0]);
+    let reference = shear_transport(&fluid_source, 300.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&reference).unwrap();
+    let solid_card = card(0.2, 0.01);
+    let solid = law(&solid_card, [290.0, 400.0]);
+    let solids = std::slice::from_ref(&solid);
+    let (domain, flow, thermal, initial, unsteady) = shear_cavity(true);
+    let original = initial.clone();
+    let gate = CancelGate::new();
+    let run = |cs| bound.march_natural_convection_with_enthalpy_and_material_solids_and_sgs(
+        &domain, solids, &flow, &thermal, &energy(), &initial, bounds(),
+        &caloric, controls(), SolidThermalConfig::default(), &unsteady, sgs(cs),
+        |_| 1.0, |_| 1.0, None, &gate, |_, t, _| shear_transport(&fluid_source, t),
+    ).unwrap();
+    let active = run(0.5);
+    let zero = run(0.0);
+    let laminar = bound.march_natural_convection_with_enthalpy_and_material_solids(
+        &domain, solids, &flow, &thermal, &energy(), &initial, bounds(),
+        &caloric, controls(), SolidThermalConfig::default(), &unsteady,
+        |_| 1.0, |_| 1.0, None, &gate, |_, t, _| shear_transport(&fluid_source, t),
+    ).unwrap();
+    assert_eq!(zero.fluid.convection.march.flow, laminar.fluid.convection.march.flow);
+    assert_eq!(zero.fluid.convection.march.temperature, laminar.fluid.convection.march.temperature);
+    assert_eq!(zero.solid_energy_j, laminar.solid_energy_j);
+    let march = &active.fluid.convection.march;
+    assert!(march.flow.flow.eddy_viscosity_m2_s.iter().any(|&nu| nu > 1e-7));
+    let velocity_difference = march.flow.flow.velocity_m_s.iter()
+        .zip(&zero.fluid.convection.march.flow.flow.velocity_m_s)
+        .flat_map(|(a, b)| a.iter().zip(b)).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+    assert!(velocity_difference > 1e-6, "SGS must reach actual material momentum");
+    assert!(march.temperature.iter().zip(&zero.fluid.convection.march.temperature)
+        .any(|(a, b)| (a - b).abs() > 1e-6), "SGS must reach the joint heat solve");
+
+    // Independent original-law integrals, with fixed reference masses. Wall
+    // motion supplies no invented heat in this explicitly non-heated entry.
+    let mut solid_change = 0.0;
+    let mut total_change = 0.0;
+    for (cell, (&t, &old)) in march.temperature.iter().zip(&initial).enumerate() {
+        let slope = if domain.is_fluid(cell) { 0.004 } else { 0.2 };
+        let change = 3.0 * domain.volume(cell)
+            * (specific_energy(t, slope) - specific_energy(old, slope));
+        total_change += change;
+        if !domain.is_fluid(cell) {
+            solid_change += change;
+            close(active.solid_energy_j[cell],
+                3.0 * domain.volume(cell) * (specific_energy(t, 0.2) + 20.0), 1e-9);
+        }
+    }
+    let supplied = unsteady.time_step_s * unsteady.steps as f64 * thermal.power_w.iter().sum::<f64>();
+    close(total_change, supplied, 1e-8);
+    close(active.solid_records.iter().map(|r| r.solid_stored_energy_change_j).sum(), solid_change, 1e-8);
+    assert_eq!(active.fluid.records.len(), unsteady.steps);
+    for (fluid_record, solid_record) in active.fluid.records.iter().zip(&active.solid_records) {
+        assert_eq!(fluid_record.time_s, solid_record.time_s);
+        assert_eq!(fluid_record.passes, solid_record.iterations);
+        assert!(fluid_record.maximum_storage_defect_w <= controls().maximum_storage_defect_w);
+    }
+    for heat in &march.energy_records { assert!(heat.closure_j.abs() <= 1e-8); }
+    for sample in active.fluid.convection.applied.iter().chain(&active.fluid.convection.endpoint) {
+        close(sample.material.resolved_transport().dynamic_viscosity_pa_s(),
+            0.03 / (1.0 + 0.15 * (sample.temperature_k - 300.0)), 1e-13);
+    }
+
+    // A refusal at the first evolved source endpoint returns no partially
+    // accepted caloric/SGS result and leaves original physical inputs intact.
+    let mut queries = 0usize;
+    let refused = bound.march_natural_convection_with_enthalpy_and_material_solids_and_sgs(
+        &domain, solids, &flow, &thermal, &energy(), &initial, bounds(),
+        &caloric, controls(), SolidThermalConfig::default(), &unsteady, sgs(0.5),
+        |_| 1.0, |_| 1.0, None, &gate, |_, t, _| {
+            queries += 1;
+            if queries > domain.fluid_count() {
+                Err(MaterialError::State { what: "synthetic endpoint source refusal".into() })
+            } else { shear_transport(&fluid_source, t) }
+        },
+    );
+    assert!(matches!(refused, Err(MaterialBuoyancyError::Material { .. })));
+    assert_eq!(queries, domain.fluid_count() + 1);
+    assert_eq!(initial, original);
+    assert_eq!(bound.transport(), &reference);
+}
+
+#[test]
+fn sgs_source_caloric_and_solid_entries_recover_constant_fluid_heat_capacity() {
+    let fluid_card = card(0.0, 0.0);
+    let fluid_source = law(&fluid_card, [290.0, 400.0]);
+    let caloric = source_caloric(&fluid_card, &fluid_source, [290.0, 400.0]);
+    let reference = shear_transport(&fluid_source, 300.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&reference).unwrap();
+    let solid_card = card(0.2, 0.01);
+    let solid = law(&solid_card, [290.0, 400.0]);
+    let gate = CancelGate::new();
+    for with_solid in [false, true] {
+        let (domain, flow, thermal, initial, unsteady) = shear_cavity(with_solid);
+        let (caloric_march, fixed_cp_march) = if with_solid {
+            let joint = bound.march_natural_convection_with_enthalpy_and_material_solids_and_sgs(
+                &domain, std::slice::from_ref(&solid), &flow, &thermal, &energy(), &initial,
+                bounds(), &caloric, controls(), SolidThermalConfig::default(), &unsteady, sgs(0.5),
+                |_| 1.0, |_| 1.0, None, &gate, |_, t, _| shear_transport(&fluid_source, t),
+            ).unwrap();
+            let solid_only = bound.march_natural_convection_with_material_solids_and_sgs(
+                &domain, std::slice::from_ref(&solid), &flow, &thermal, &energy(), &initial,
+                bounds(), &unsteady, SolidThermalConfig::default(), sgs(0.5),
+                |_| 1.0, |_| 1.0, None, &gate, |_, t, _| shear_transport(&fluid_source, t),
+            ).unwrap();
+            (joint.fluid.convection.march, solid_only.fluid.march)
+        } else {
+            let caloric_run = bound.march_natural_convection_with_enthalpy_and_sgs(
+                &domain, &[], &flow, &thermal, &energy(), &initial, bounds(),
+                &caloric, controls(), &unsteady, sgs(0.5), |_| 1.0, |_| 1.0,
+                None, &gate, |_, t, _| shear_transport(&fluid_source, t),
+            ).unwrap();
+            let original = bound.march_natural_convection_with_sgs(
+                &domain, &[], &flow, &thermal, &energy(), &initial, bounds(),
+                &unsteady, sgs(0.5), |_| 1.0, |_| 1.0, None, &gate,
+                |_, t, _| shear_transport(&fluid_source, t),
+            ).unwrap();
+            (caloric_run.convection.march, original.march)
+        };
+        assert!(caloric_march.flow.flow.eddy_viscosity_m2_s.iter().any(|&nu| nu > 1e-7));
+        for (&t, &expected) in caloric_march.temperature.iter().zip(&fixed_cp_march.temperature) {
+            assert!((t - expected).abs() < 1e-8, "{t} != {expected}");
+        }
+        for (u, expected) in caloric_march.flow.flow.velocity_m_s.iter()
+            .zip(&fixed_cp_march.flow.flow.velocity_m_s) {
+            for (&a, &b) in u.iter().zip(expected) { close(a, b, 1e-9); }
+        }
     }
 }
 
