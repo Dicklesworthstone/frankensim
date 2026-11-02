@@ -64,7 +64,18 @@ adjoints.
   net flux — never an additive penalty, which would corrupt it).
   Convection: upwinded DG on the SINGLE-VALUED face flux w·n (H(div)
   conformity makes upwinding well-posed), volume term in
-  divergence form −∫(u⊗w):∇v. `picard` for steady NS, `bdf1_step`
+  divergence form −∫(u⊗w):∇v. A BDM1 normal trace can reverse within ONE
+  face. The shared primal/Jacobian quadrature splits at that linear zero,
+  integrating each cubic upwind branch with two Gauss sites; a non-reversing
+  face keeps the original two sites, with no per-face allocation. Incoming
+  boundary velocity uses the fixed affine trace through its original two
+  Gauss samples, consistent with the prescribed normal moments. This also
+  keeps the discrete Jacobian correct for non-affine user boundary data:
+  sample locations do not move with the upwind split, whose endpoint flux
+  is zero. The new local regressions compare piecewise cubic antiderivatives,
+  the exact DG jump-dissipation identity, and full residual differences;
+  no arbitrary nonlinear boundary-quadrature accuracy is implied.
+  `picard` for steady NS, `bdf1_step`
   for IMEX transients (implicit Stokes, lagged convection),
   `solve_adjoint` for the transposed system. Dense LU under n ≤ 1500
   (fixture path, with two residual-correction solves reusing the factors),

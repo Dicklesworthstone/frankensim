@@ -6,7 +6,9 @@
 
 use std::cell::RefCell;
 
-use super::{FluxParams, FluxSystem, viscous_normal};
+use super::{
+    FluxParams, FluxSystem, convection_boundary_trace, convection_edge_quadrature, viscous_normal,
+};
 use crate::bdm::{edge_gauss_pub, eval_basis, tri_quad};
 use fs_sparse::{Coo, Csr};
 
@@ -428,14 +430,21 @@ impl FluxSystem<'_> {
             }
         }
         let mut switches = 0;
-        for edge in &mesh.edges {
+        for (edge_id, edge) in mesh.edges.iter().enumerate() {
             let (a, b) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
             let (c0, c1) = edge.tris;
-            for (point, weight) in edge_gauss_pub(a, b) {
+            let prescribed =
+                (c1 == usize::MAX).then(|| edge_gauss_pub(a, b).map(|(point, _)| boundary(point)));
+            // At the moving split the primal flux is zero, so Leibniz's
+            // endpoint contribution vanishes. Integrate the derivative on
+            // these SAME polynomial pieces, with the fixed boundary trace.
+            for (point, weight, fraction) in
+                convection_edge_quadrature(a, b, [state[2 * edge_id], state[2 * edge_id + 1]])
+            {
                 let u0 = self.linearization_velocity(state, c0, point);
                 let normal = dot(u0, edge.normal);
                 let other = if c1 == usize::MAX {
-                    boundary(point)
+                    convection_boundary_trace(prescribed.expect("boundary samples"), fraction)
                 } else {
                     self.linearization_velocity(state, c1, point)
                 };

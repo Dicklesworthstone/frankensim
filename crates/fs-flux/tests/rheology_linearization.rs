@@ -175,6 +175,85 @@ fn carreau(scale: f64, rate: f64) -> FluxViscosityTangent {
 }
 
 #[test]
+fn moving_upwind_split_retains_the_discrete_boundary_trace_jacobian() {
+    let mesh = mesh(2);
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let mut state = moments(&mesh, &|x| [0.4 + 0.3 * x[1], -0.1 + 0.2 * x[0]]);
+    let boundary_edge = mesh
+        .edges
+        .iter()
+        .position(|e| e.tris.1 == usize::MAX)
+        .unwrap();
+    // A short reversed interval is wholly outside the original Gauss sites.
+    state[2 * boundary_edge] = 0.41;
+    state[2 * boundary_edge + 1] = 1.0 / 12.0;
+    state.resize(system.n, 0.0);
+    let direction: Vec<_> = (0..system.n)
+        .map(|i| ((i * 7 % 23) as f64 - 11.0) / 19.0)
+        .collect();
+    // Non-affine prescribed data must keep one fixed numerical trace while
+    // the zero of w.n moves; its sampling positions cannot follow that zero.
+    let boundary = |x: [f64; 2]| [0.2 + x[0] * x[0], -0.3 + x[1] * x[1]];
+    let law = |_, _, _| FluxViscosityTangent {
+        nu: 0.01,
+        derivative: 0.0,
+    };
+    let linear = system
+        .linearize_rheology(
+            params,
+            &law,
+            &|_| [0.0; 2],
+            &boundary,
+            &state,
+            true,
+            0.0,
+            None,
+        )
+        .unwrap();
+    let mut applied = vec![0.0; system.n];
+    linear.jacobian.spmv(&direction, &mut applied);
+    let residual = |x: &[f64]| {
+        let (matrix, rhs) = system.assemble_variable_viscosity(
+            params,
+            &|_, _| 0.01,
+            &|_| [0.0; 2],
+            &boundary,
+            Some(&x[..system.n_u]),
+        );
+        let mut value = vec![0.0; system.n];
+        matrix.spmv(x, &mut value);
+        for (r, b) in value.iter_mut().zip(rhs) {
+            *r -= b;
+        }
+        value
+    };
+    for h in [2e-5, 1e-5] {
+        let plus: Vec<_> = state
+            .iter()
+            .zip(&direction)
+            .map(|(x, d)| x + h * d)
+            .collect();
+        let minus: Vec<_> = state
+            .iter()
+            .zip(&direction)
+            .map(|(x, d)| x - h * d)
+            .collect();
+        let error: Vec<_> = residual(&plus)
+            .iter()
+            .zip(residual(&minus))
+            .zip(&applied)
+            .map(|((p, m), a)| (p - m) / (2.0 * h) - a)
+            .collect();
+        assert!(
+            norm(&error) / norm(&applied) < 2e-8,
+            "split-face Jacobian error {}",
+            norm(&error) / norm(&applied)
+        );
+    }
+}
+
+#[test]
 fn nonlinear_bdf1_viscosity_adjoint_matches_independent_resolves() {
     let mesh = mesh(4);
     let system = FluxSystem::new(&mesh);

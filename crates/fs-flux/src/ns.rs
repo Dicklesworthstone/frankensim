@@ -54,6 +54,69 @@ fn viscous_normal(grad: [[f64; 2]; 2], n: [f64; 2], symmetric: bool) -> [f64; 2]
     }
 }
 
+/// Integrate each polynomial branch of an upwind BDM1 face exactly.
+/// The native normal moments give w.n = m0 + 12 m1 (s - 1/2), s in [0,1].
+/// Splitting at its interior zero makes (w.n) u_up.v cubic on each segment;
+/// two-point Gauss is then exact (NIST DLMF 3.5(v), https://dlmf.nist.gov/3.5.v).
+/// The last value interpolates between the ORIGINAL two Gauss boundary samples,
+/// defining one fixed affine boundary trace independent of the moving split.
+/// No heap allocation, and non-reversing faces retain their original two sites.
+fn convection_edge_quadrature(
+    a: [f64; 2],
+    b: [f64; 2],
+    moments: [f64; 2],
+) -> impl Iterator<Item = ([f64; 2], f64, f64)> {
+    let original = crate::bdm::edge_gauss_pub(a, b);
+    let mut points = [([0.0; 2], 0.0, 0.0); 4];
+    points[0] = (original[0].0, original[0].1, 0.0);
+    points[1] = (original[1].0, original[1].1, 1.0);
+    let mut count = 2;
+    // Scale BEFORE forming endpoint values so a representable pair of
+    // moments cannot overflow merely while locating its zero.
+    let scale = moments[0].abs().max(moments[1].abs());
+    if scale > 0.0 && scale.is_finite() {
+        let mean = moments[0] / scale;
+        let slope = 6.0 * (moments[1] / scale);
+        let (left, right) = (mean - slope, mean + slope);
+        if (left < 0.0 && right > 0.0) || (left > 0.0 && right < 0.0) {
+            let split = left.abs() / (left.abs() + right.abs());
+            if split > 0.0 && split < 1.0 {
+                let middle = core::array::from_fn(|axis| (1.0 - split) * a[axis] + split * b[axis]);
+                let gauss = 0.5 / 3.0f64.sqrt();
+                let local = [0.5 - gauss, 0.5 + gauss];
+                for (segment, (start, end, lo, span)) in
+                    [(a, middle, 0.0, split), (middle, b, split, 1.0 - split)]
+                        .into_iter()
+                        .enumerate()
+                {
+                    for (q, (point, weight)) in crate::bdm::edge_gauss_pub(start, end)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let s = lo + span * local[q];
+                        let fraction = 0.5 + (s - 0.5) / (2.0 * gauss);
+                        points[2 * segment + q] = (point, weight, fraction);
+                    }
+                }
+                count = 4;
+            }
+        }
+    }
+    points.into_iter().take(count)
+}
+
+fn convection_boundary_trace(samples: [[f64; 2]; 2], fraction: f64) -> [f64; 2] {
+    // Keep the original sample bits on an unsplit face. On a split face the
+    // affine trace agrees with the data already defining the boundary moments.
+    if fraction == 0.0 {
+        return samples[0];
+    }
+    if fraction == 1.0 {
+        return samples[1];
+    }
+    core::array::from_fn(|axis| (1.0 - fraction) * samples[0][axis] + fraction * samples[1][axis])
+}
+
 /// Solver parameters.
 #[derive(Debug, Clone, Copy)]
 pub struct FluxParams {
@@ -599,11 +662,15 @@ impl<'m> FluxSystem<'m> {
             }
         }
         // Face upwinding: ∫ (w·n) u_up · [[v]].
-        for edge in &mesh.edges {
+        for (edge_id, edge) in mesh.edges.iter().enumerate() {
             let (t0, t1) = edge.tris;
             let n = edge.normal;
             let (va, vb) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
-            for (gx, wq) in crate::bdm::edge_gauss_pub(va, vb) {
+            let prescribed = (t1 == usize::MAX)
+                .then(|| crate::bdm::edge_gauss_pub(va, vb).map(|(point, _)| g(point)));
+            for (gx, wq, fraction) in
+                convection_edge_quadrature(va, vb, [wfield[2 * edge_id], wfield[2 * edge_id + 1]])
+            {
                 let wv = w_at(t0, gx); // normal-continuous: either side works
                 let wn = wv[0] * n[0] + wv[1] * n[1];
                 if t1 == usize::MAX {
@@ -622,7 +689,10 @@ impl<'m> FluxSystem<'m> {
                                 coo.push(gi, gj, wq * wn * (uj[0] * vi[0] + uj[1] * vi[1]));
                             }
                         } else {
-                            let gval = g(gx);
+                            let gval = convection_boundary_trace(
+                                prescribed.expect("boundary samples"),
+                                fraction,
+                            );
                             rhs[gi] -= wq * wn * (gval[0] * vi[0] + gval[1] * vi[1]);
                         }
                     }
@@ -1145,5 +1215,144 @@ impl<'m> FluxSystem<'m> {
             }
         }
         (l2.sqrt(), worst_div)
+    }
+}
+
+#[cfg(test)]
+mod convection_tests {
+    use super::*;
+
+    // Antiderivative of (s-r) (a+b*s) (c+d*s), independent of quadrature.
+    fn primitive(s: f64, r: f64, donor: [f64; 2], test: [f64; 2]) -> f64 {
+        let q = [
+            donor[0] * test[0],
+            donor[0] * test[1] + donor[1] * test[0],
+            donor[1] * test[1],
+        ];
+        -r * q[0] * s
+            + (q[0] - r * q[1]) * s.powi(2) / 2.0
+            + (q[1] - r * q[2]) * s.powi(3) / 3.0
+            + q[2] * s.powi(4) / 4.0
+    }
+
+    #[test]
+    fn reversing_face_flux_matches_piecewise_cubic_antiderivatives() {
+        let a = [0.0, 0.0];
+        let b = [2.0, 0.0];
+        let donors = [[-0.3, 1.2], [2.0, 0.7]];
+        let test = [0.4, 0.9];
+        for root in [0.02, 0.25, 0.5, 0.92] {
+            for direction in [-1.0, 1.0] {
+                let moments = [direction * (0.5 - root), direction / 12.0];
+                let flux = |s: f64| {
+                    let normal = direction * (s - root);
+                    let donor = donors[usize::from(normal >= 0.0)];
+                    normal * (donor[0] + donor[1] * s) * (test[0] + test[1] * s)
+                };
+                let quadrature: Vec<_> = convection_edge_quadrature(a, b, moments).collect();
+                assert_eq!(quadrature.len(), 4);
+                let actual: f64 = quadrature
+                    .iter()
+                    .map(|(point, weight, _)| weight * flux(point[0] / 2.0))
+                    .sum();
+                let left = donors[usize::from(direction < 0.0)];
+                let right = donors[usize::from(direction > 0.0)];
+                let exact = 2.0
+                    * direction
+                    * (primitive(root, root, left, test) + primitive(1.0, root, right, test)
+                        - primitive(root, root, right, test));
+                assert!(
+                    (actual - exact).abs() < 2e-15,
+                    "root={root}, direction={direction}, {actual} != {exact}"
+                );
+                let unsplit: f64 = crate::bdm::edge_gauss_pub(a, b)
+                    .into_iter()
+                    .map(|(point, weight)| weight * flux(point[0] / 2.0))
+                    .sum();
+                assert!(
+                    (unsplit - exact).abs() > 1e-5,
+                    "the original rule must expose the missed branch"
+                );
+            }
+        }
+        for moments in [
+            [0.0, 0.0],
+            [1.0, 0.01],
+            [-1.0, 0.01],
+            [0.5, 1.0 / 12.0],
+            [-0.5, 1.0 / 12.0],
+        ] {
+            let original = crate::bdm::edge_gauss_pub(a, b);
+            let actual: Vec<_> = convection_edge_quadrature(a, b, moments).collect();
+            assert_eq!(
+                actual,
+                vec![
+                    (original[0].0, original[0].1, 0.0),
+                    (original[1].0, original[1].1, 1.0)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn reversing_interior_flux_preserves_exact_dg_jump_dissipation() {
+        let mesh = TriMesh::from_mesh2(&fs_solid::Mesh2::triangles(1.0, 1.0, 1, 1));
+        let system = FluxSystem::new(&mesh);
+        let (edge_id, edge) = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .find(|(_, edge)| edge.tris.1 != usize::MAX)
+            .unwrap();
+        // All mean normal moments are zero: w is exactly divergence-free
+        // and has no boundary flow. Its interior trace reverses at mid-edge.
+        let mut advecting = vec![0.0; system.n_u];
+        advecting[2 * edge_id + 1] = 1.0 / 12.0;
+        let mut transported = vec![0.0; system.n];
+        transported[2 * edge_id] = 0.7;
+        transported[2 * edge_id + 1] = -0.2;
+        let mut operator = Coo::new(system.n, system.n);
+        let mut rhs = vec![0.0; system.n];
+        system.add_convection(
+            &mut operator,
+            &mut rhs,
+            &advecting,
+            &|_| [0.0; 2],
+            &vec![None; system.n],
+        );
+        let mut residual = vec![0.0; system.n];
+        operator.assemble().spmv(&transported, &mut residual);
+        let energy: f64 = transported.iter().zip(residual).map(|(u, r)| u * r).sum();
+        let a = mesh.verts[edge.verts.0];
+        let b = mesh.verts[edge.verts.1];
+        let jump_squared = |s: f64| {
+            let point = core::array::from_fn(|axis| (1.0 - s) * a[axis] + s * b[axis]);
+            let mut jump = [0.0; 2];
+            for (cell, sign) in [(edge.tris.0, 1.0), (edge.tris.1, -1.0)] {
+                for i in 0..6 {
+                    let basis = eval_basis(&system.bases[cell], i, point);
+                    for axis in 0..2 {
+                        jump[axis] += sign * transported[system.dof(cell, i)] * basis[axis];
+                    }
+                }
+            }
+            jump[0] * jump[0] + jump[1] * jump[1]
+        };
+        let dissipation = |s: f64| 0.5 * (s - 0.5).abs() * jump_squared(s);
+        // Independent Simpson integration is exact for each cubic branch:
+        // u.C(w)u = 1/2 integral |w.n| |[u]|^2 on this closed domain.
+        let exact: f64 = [(0.0, 0.5), (0.5, 1.0)]
+            .into_iter()
+            .map(|(lo, hi)| {
+                (hi - lo) / 6.0
+                    * (dissipation(lo) + 4.0 * dissipation(0.5 * (lo + hi)) + dissipation(hi))
+            })
+            .sum::<f64>()
+            * edge.len;
+        assert!(exact > 0.01);
+        assert!(
+            (energy - exact).abs() < 2e-13 * exact,
+            "{energy} != {exact}"
+        );
     }
 }
