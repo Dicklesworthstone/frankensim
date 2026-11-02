@@ -763,6 +763,33 @@ convergence. DC admission does not certify that trajectory's transient spectrum.
 independent heat, nonproportional coupling, moving supports, tangent derivatives
 and transactional refusals.
 
+`ViscoElements::dynamic_operator(dt, config, cx)` prepares consistent-mass
+midpoint dynamics on the same P1/TET10/HEX20/HEX27 tensor histories. Its
+`start(history, full_velocity, cx)` retains an accepted constitutive preload;
+`ViscoDynamicState::advance(mean_force, cx)` consumes the actual interval-mean
+nodal load. The solve uses `M + dt² K_mean/2`, where `K_mean` differentiates
+the original exact strain-ramp mean force. Geometry, tensor assembly and CG
+are shared with the existing owners. Endpoint stresses remain observations;
+their trapezoidal average does not replace the work-conjugate material force.
+The accepted interval independently checks momentum and
+`external_work = change(kinetic + material_storage) + physical_heat`.
+No energy defect is relabeled as heat. Exact per-step work and loss survive
+large cumulative counters. Explicit step/free-DOF/iteration budgets, source
+strain limits, finite arithmetic, cancellation and energy allowances are
+checked before publishing motion, memory, work or clock changes.
+
+Supports are stationary at their accepted displacements and have zero velocity
+and zero work. Full dynamic support reactions and moving-support inertial
+couplings are not reconstructed from the reduced mass. Free bodies are admitted
+through their original consistent mass, without artificial constraints. Every
+material band must include DC; transient spectral admission and temporal
+convergence remain caller obligations. The material ramp is exact, while the
+coupled inertial trajectory is a time discretization. `tests/visco_dynamics.rs`
+checks elastic energy conservation, analytical Kelvin-oscillator convergence,
+independent heat, nonproportional memory, applied work, free-body motion and
+transactional refusals. The existing element suite also carries a shared
+TET10/HEX20/HEX27 kinetic/material-energy regression.
+
 `ViscoElements::modes` solves the storage-dispersive ordered eigenproblem
 `lambda(K'(omega), M) = omega^2` using the existing dense fs-modal eigensolver
 and an explicit frequency bracket, iteration/tolerance budget, and a dense
@@ -784,8 +811,8 @@ quadratic (2e-10 relative), and deliberately shifts it by more than a factor
 of two from the equilibrium result.
 
 This module does not yet supply the fractional-target modal-loss ladder,
-certified modal block reduction, valve-card integration, HEX histories,
-displacement time integration, or material/specimen validation. Arbitrary
+certified modal block reduction, valve-card integration, moving-support inertial
+evolution, or material/specimen validation. Arbitrary
 time-domain input is not a certification that its spectrum lies in the law's
 band. Intrinsic material heat excludes support, contact and radiation losses.
 

@@ -100,6 +100,51 @@ fn system(mesh: SolidMeshRef<'_>, m: &TetViscoMaterial, cx: &Cx<'_>) -> ViscoEle
 }
 
 #[test]
+fn g0_high_order_tensor_dynamics_close_original_mass_material_energy() {
+    with_cx(|cx, _| {
+        let original = nodes();
+        let (tet_nodes, tets) = promote_p1_to_p2(&original, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let physical = |p: [i8; 3]| p.map(|x| 0.1 * f64::from(x));
+        let hex20_nodes = HEX20_REFERENCE_NODES.map(physical);
+        let hex27_nodes = HEX27_REFERENCE_NODES.map(physical);
+        let hex20 = [core::array::from_fn(|i| i)];
+        let hex27 = [core::array::from_fn(|i| i)];
+        let material = fixture(1);
+        for mesh in [
+            SolidMeshRef::Tet10 { nodes_m: &tet_nodes, elements: &tets, quadrature: Q },
+            SolidMeshRef::Hex { nodes_m: &hex20_nodes, elements: HexConnectivity::Hex20(&hex20),
+                quadrature: HexQuadrature { points_per_dir: 3 } },
+            SolidMeshRef::Hex { nodes_m: &hex27_nodes, elements: HexConnectivity::Hex27(&hex27),
+                quadrature: HexQuadrature { points_per_dir: 3 } },
+        ] {
+            let coordinates = match mesh {
+                SolidMeshRef::Tet10 { nodes_m, .. } | SolidMeshRef::Hex { nodes_m, .. } => nodes_m,
+                SolidMeshRef::Tet4 { .. } => unreachable!(),
+            };
+            let solid = system(mesh, &material, cx);
+            let prepared = solid.dynamic_operator(2e-6, ViscoDynamicConfig {
+                maximum_steps: 4, maximum_free_dofs: 100,
+                solve: fs_solid::linear3::TetStaticSolveConfig {
+                    maximum_iterations: 500, relative_residual_tolerance: 1e-11,
+                }, absolute_energy_tolerance_j: 1e-12, relative_energy_tolerance: 1e-8,
+            }, cx).unwrap();
+            let mut initial = solid.state(cx).unwrap();
+            let u = displacement(coordinates, [2e-5, -1e-5, 3e-5, 4e-5, -2e-5, 1e-5]);
+            let preload = initial.step_internal_force(&u, 1e-6, cx).unwrap();
+            let zero = vec![0.0; u.len()];
+            let mut state = prepared.start(initial, &zero, cx).unwrap();
+            for _ in 0..4 {
+                let step = state.advance(&zero, cx).unwrap();
+                close(step.kinetic_energy_j + step.constitutive.energy.stored_j
+                    + step.constitutive.energy.dissipated_j - preload.energy.dissipated_j,
+                    preload.energy.stored_j, 1e-8);
+                assert!(step.constitutive.step_dissipated_j >= 0.0);
+            }
+        }
+    });
+}
+
+#[test]
 fn g0_hex_tensor_spectra_and_history_preserve_material_work() {
     with_cx(|cx, _| {
         let physical = |p: [i8; 3]| {

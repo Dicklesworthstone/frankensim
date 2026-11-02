@@ -283,6 +283,29 @@ impl TensorProny {
         }
         Ok(c)
     }
+
+    /// Derivative of the exact interval-mean stress with respect to the final
+    /// strain, in Mandel coordinates. This is the work-conjugate tangent for
+    /// midpoint inertia coupled to an affine strain ramp. Original Maxwell
+    /// ramp coefficients retain their cancellation-free small-rate limits.
+    pub fn mean_tangent_mandel(&self, dt_s: f64) -> Result<Tangent6> {
+        if !dt_s.is_finite() || dt_s < 0.0 {
+            return Err(invalid("time step must be finite and nonnegative"));
+        }
+        let mut c = self.c_eq.map(|row| row.map(|value| 0.5 * value));
+        for branch in self.branches() {
+            let weight = crate::visco::PronyRamp::new(dt_s / branch.tau_s).apply(0.0, 1.0).1;
+            for i in 0..6 { for j in 0..6 { c[i][j] += weight * branch.c_pa[i][j]; } }
+        }
+        if let Some(kv) = self.kv_pa_s().filter(|c| c.iter().flatten().any(|v| *v != 0.0)) {
+            if dt_s == 0.0 { return Err(invalid("Kelvin viscosity has no finite instantaneous strain tangent")); }
+            for i in 0..6 { for j in 0..6 { c[i][j] += kv[i][j] / dt_s; } }
+        }
+        if c.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(invalid("mean tangent overflow"));
+        }
+        Ok(c)
+    }
 }
 
 /// Exact-ramp endpoint and independently integrated energy densities [J/m^3].

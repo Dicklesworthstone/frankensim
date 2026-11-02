@@ -13,7 +13,8 @@
 //! laws can change underneath internal variables. Updates are transactional,
 //! including cancellation and nonfinite-result refusals. Prescribed nodal
 //! histories and load-controlled quasistatic creep share the same material
-//! histories. Inertial displacement evolution belongs to a separate owner.
+//! histories. Dynamics couples their exact work-mean force to consistent-mass
+//! midpoint inertia on the original spatial operators.
 
 use super::hex::{
     HexConnectivity, HexElasticProblem, HexFamily, HexPoint, HexQuadrature, hex20_point,
@@ -34,6 +35,8 @@ mod project;
 pub use project::{ProjectedViscoSolid, SolidProjectionBudget};
 mod quasistatic;
 pub use quasistatic::{ViscoQuasistaticOperator, ViscoQuasistaticStep};
+mod dynamics;
+pub use dynamics::{ViscoDynamicConfig, ViscoDynamicOperator, ViscoDynamicState, ViscoDynamicStep};
 
 /// Geometry and explicit quadrature; material frames must already be resolved.
 #[derive(Clone, Copy)]
@@ -142,6 +145,13 @@ pub enum ViscoElementError {
     },
     /// Nonfinite stress, force or energy; candidate state was discarded.
     NonFiniteResult,
+    /// Independently evaluated inertial/material work balance missed its gate.
+    DynamicEnergy {
+        /// Signed work minus kinetic/storage change and physical heat [J].
+        residual_j: f64,
+        /// Explicit absolute plus relative numerical allowance [J].
+        allowance_j: f64,
+    },
     /// Explicit mode-count, matrix-size, iteration or frequency controls failed.
     InvalidModalBudget,
     /// The existing modal eigensolver refused the pencil.
@@ -869,10 +879,16 @@ pub struct ViscoElementState<'a> {
 
 /// Work-conjugate force observation for one admitted prescribed-history step.
 pub struct ViscoForceStep {
-    /// Endpoint internal force at every DOF, including support reactions [N].
+    /// Endpoint internal force at every DOF [N]. Inertia and applied-load
+    /// subtraction belong to the consuming mechanics owner.
     pub full_force_n: Vec<f64>,
     /// Endpoint internal force in canonical free-DOF order [N].
     pub reduced_force_n: Vec<f64>,
+    /// Exact interval-mean internal force, work-conjugate to the displacement
+    /// increment; this is generally not the average of endpoint forces [N].
+    pub full_mean_force_n: Vec<f64>,
+    /// Exact interval-mean internal force in canonical free-DOF order [N].
+    pub reduced_mean_force_n: Vec<f64>,
     /// Total integrated energy after this step [J].
     pub energy: ViscoEnergy,
     /// Constitutive work during this step, not endpoint force times displacement.
@@ -923,6 +939,7 @@ impl ViscoElementState<'_> {
             histories.push(candidate);
         }
         let mut force = vec![0.0; self.system.full_dofs];
+        let mut mean_force = vec![0.0; self.system.full_dofs];
         let mut energy = ViscoEnergy::default();
         let mut step_work_j = 0.0;
         let mut step_dissipated_j = 0.0;
@@ -932,9 +949,8 @@ impl ViscoElementState<'_> {
                 let strain = core::array::from_fn(|i| {
                     p.b.iter().zip(&e.dofs).map(|(b, &d)| b[i] * u_new[d]).sum()
                 });
-                let old_work = state.work;
-                let old_heat = state.dissipated;
-                let stress = e.law.step(state, strain, dt_s)?;
+                let response = e.law.step_with_mean(state, strain, dt_s)?;
+                let stress = response.stress;
                 if stress
                     .iter()
                     .chain(state.q.iter().flatten())
@@ -947,15 +963,16 @@ impl ViscoElementState<'_> {
                 }
                 for (b, &d) in p.b.iter().zip(&e.dofs) {
                     force[d] += p.volume_m3 * b.iter().zip(stress).map(|(a, s)| a * s).sum::<f64>();
+                    mean_force[d] += p.volume_m3 * b.iter().zip(response.mean_stress).map(|(a, s)| a * s).sum::<f64>();
                 }
                 energy.stored_j += p.volume_m3 * state.stored;
                 energy.work_j += p.volume_m3 * state.work;
                 energy.dissipated_j += p.volume_m3 * state.dissipated;
-                step_work_j += p.volume_m3 * (state.work - old_work);
-                step_dissipated_j += p.volume_m3 * (state.dissipated - old_heat);
+                step_work_j += p.volume_m3 * response.step_work;
+                step_dissipated_j += p.volume_m3 * response.step_dissipated;
             }
         }
-        if force.iter().any(|v| !v.is_finite())
+        if force.iter().chain(&mean_force).any(|v| !v.is_finite())
             || [
                 energy.stored_j,
                 energy.work_j,
@@ -976,12 +993,16 @@ impl ViscoElementState<'_> {
             .iter()
             .map(|&d| force[d])
             .collect();
+        let reduced_mean_force_n = self.system.equilibrium.free_dofs.iter()
+            .map(|&d| mean_force[d]).collect();
         self.histories = histories;
         self.energy = energy;
         self.displacement_m.copy_from_slice(u_new);
         Ok(ViscoForceStep {
             full_force_n: force,
             reduced_force_n,
+            full_mean_force_n: mean_force,
+            reduced_mean_force_n,
             energy,
             step_work_j,
             step_dissipated_j,

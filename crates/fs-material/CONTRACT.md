@@ -1889,6 +1889,16 @@ ledger together only after finite-response checks. G0/G1 tests cover atomic
 overflow refusal and retry, explicit zero viscosity, and stress/storage/heat/
 work parity between Mandel and tensor-shear histories.
 
+`TensorProny::step_with_mean` exposes that same Mandel update's endpoint
+stress, exact interval-mean stress, signed step work and independently integrated
+step heat through `TensorPronyMandelStep`. The increments are returned before
+addition to cumulative counters, retaining weak loss after long histories.
+Legacy `step` delegates to this owner and retains its endpoint-stress API.
+`mean_tangent_mandel(dt)` differentiates the work-mean stress with respect to
+the final strain using the original stable `PronyRamp` coefficients; it is not
+an endpoint-stress trapezoid. The shared solid midpoint dynamics uses this
+pair to close kinetic/material energy against physical heat and applied work.
+
 `visco::tensor::lower` (`TensorComplexModulus`, `KelvinFractional`, `ComplexEngineering`, `PlaneStressTarget`, `TensorLoweringTolerance`, `TensorCertificate`, `LoweredTensorModel`, `lower_tensor_to_prony`, IRP M0.2-W2b) lowers causal frequency-domain anisotropic complex-modulus targets `C*(ω) = C′(ω) + i C″(ω)` to passive `TensorProny` laws over `[f_lo_hz, f_hi_hz]`: 1×1 scalar `FractionalZener` targets delegate to `lower_to_prony` bit-identically; shared-eigenbasis `KelvinFractional` targets solve Lawson–Hanson NNLS (`visco::nnls`) per Kelvin mode on the shared log-spaced `τ` ladder; general non-commuting targets (`ComplexEngineering`, `PlaneStressTarget`) solve PSD-constrained weighted least squares in a simultaneously diagonalized congruence basis at the band midpoint with `jacobi_eigh` PSD cone projection inside the iteration loop (`ViscoError::FitDiverged` on cap exhaustion, no post-fit clipping). `TensorCertificate` certifies `grid_sup_storage + lipschitz_term` and `grid_sup_loss + lipschitz_term` on a 512-point log-spaced verification grid using generalized eigenvalue relative quadratic-form errors `|λ(C_fit − C, C)|` plus the inter-sample Lipschitz enclosure `L · Δln(ω) / 2`, refusing with `ViscoError::FitTolerance` when either bound exceeds `TensorLoweringTolerance`.
 
 ## Invariants

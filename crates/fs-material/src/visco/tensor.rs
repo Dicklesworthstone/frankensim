@@ -131,6 +131,21 @@ pub struct TensorPronyState {
     pub dissipated: f64,
 }
 
+/// Exact affine-ramp observation in work-conjugate Mandel coordinates.
+/// Step work and heat are retained before accumulation, preserving weak
+/// increments even after a long history has accumulated much larger totals.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TensorPronyMandelStep {
+    /// Endpoint physical stress in Mandel coordinates [Pa].
+    pub stress: [f64; 6],
+    /// Exact interval-mean stress in the same coordinates [Pa].
+    pub mean_stress: [f64; 6],
+    /// Signed stress work density during this interval [J/m³].
+    pub step_work: f64,
+    /// Independently integrated nonnegative dashpot heat density [J/m³].
+    pub step_dissipated: f64,
+}
+
 impl TensorPronyState {
     /// Current stored free-energy density `ψ` [J/m³].
     #[must_use]
@@ -852,6 +867,20 @@ impl TensorProny {
         strain_new: [f64; 6],
         dt: f64,
     ) -> Result<[f64; 6], ViscoError> {
+        self.step_with_mean(s, strain_new, dt).map(|step| step.stress)
+    }
+
+    /// Advance the same exact strain ramp, returning endpoint and interval-mean
+    /// stress in Mandel coordinates. The mean is the stress used by the
+    /// original work ledger: `work_increment = mean_stress . strain_increment`.
+    /// It is generally different from the mean of the two endpoint stresses.
+    /// Refusal preserves the complete accepted state, as in [`Self::step`].
+    pub fn step_with_mean(
+        &self,
+        s: &mut TensorPronyState,
+        strain_new: [f64; 6],
+        dt: f64,
+    ) -> Result<TensorPronyMandelStep, ViscoError> {
         if !(dt.is_finite() && dt >= 0.0) || strain_new.iter().any(|v| !v.is_finite()) {
             return Err(ViscoError::Parameters {
                 what: "TensorProny::step requires finite strain and finite non-negative dt",
@@ -991,7 +1020,7 @@ impl TensorProny {
         s.stored = stored_new;
         s.work = total_work;
         s.dissipated = total_dissipated;
-        Ok(stress)
+        Ok(TensorPronyMandelStep {stress, mean_stress, step_work, step_dissipated})
     }
 }
 

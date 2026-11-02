@@ -75,13 +75,7 @@ impl ViscoElements {
         if let Some(error) = &self.static_constraint_error {
             return Err(error.clone().into());
         }
-        let n = self.equilibrium.free_dofs.len();
-        let mut reduced = vec![None; self.full_dofs];
-        for (i, &dof) in self.equilibrium.free_dofs.iter().enumerate() {
-            reduced[dof] = Some(i);
-        }
         let mut tangents = Vec::with_capacity(self.elements.len());
-        let mut stiffness = Coo::new(n, n);
         for element in &self.elements {
             checkpoint(cx)?;
             // The original spectral owner admits the equilibrium limit. A
@@ -91,40 +85,9 @@ impl ViscoElements {
                 .law
                 .tangent_mandel(dt_s)
                 .map_err(ViscoElementError::Projection)?;
-            let d = element.dofs.len();
-            let mut local = vec![0.0; d * d];
-            for point in &element.points {
-                checkpoint(cx)?;
-                for i in 0..d {
-                    for j in i..d {
-                        local[i * d + j] +=
-                            point.volume_m3 * bilinear(&point.b[i], &tangent, &point.b[j]);
-                    }
-                }
-            }
-            for i in 0..d {
-                for j in i..d {
-                    let value = local[i * d + j];
-                    if !value.is_finite() {
-                        return Err(ViscoElementError::NonFiniteResult);
-                    }
-                    if let (Some(row), Some(col)) =
-                        (reduced[element.dofs[i]], reduced[element.dofs[j]])
-                    {
-                        stiffness.push(row, col, value);
-                        if row != col {
-                            stiffness.push(col, row, value);
-                        }
-                    }
-                }
-            }
             tangents.push(tangent);
         }
-        let stiffness = stiffness.assemble();
-        if (0..n).any(|i| stiffness.row(i).1.iter().any(|v| !v.is_finite())) {
-            return Err(ViscoElementError::NonFiniteResult);
-        }
-        checkpoint(cx)?;
+        let (reduced, stiffness) = assemble_tangents(self, &tangents, cx)?;
         let preconditioner = Jacobi::new(&stiffness);
         Ok(ViscoQuasistaticOperator {
             system: self,
@@ -242,26 +205,17 @@ impl<'a> ViscoElementState<'a> {
         if !force_scale.is_finite() || rhs.iter().chain(&history_force).any(|v| !v.is_finite()) {
             return Err(ViscoElementError::NonFiniteResult);
         }
-        let mut solve = CgState::new(&prepared.operator, &prepared.preconditioner, &rhs);
-        while solve.iters < config.maximum_iterations
-            && solve.rel_residual() >= config.relative_residual_tolerance
-        {
-            checkpoint(cx)?;
-            let remaining = config.maximum_iterations - solve.iters;
-            let _ = solve.run(
-                &prepared.operator,
-                &prepared.preconditioner,
-                config.relative_residual_tolerance,
-                remaining.min(64),
-            );
-        }
-        let mut applied = vec![0.0; free.len()];
-        prepared.operator.apply(&solve.x, &mut applied);
-        let residual = euclidean_norm(rhs.iter().zip(&applied).map(|(b, ax)| b - ax)) / force_scale;
-        check_residual(residual, solve.iters, config)?;
+        let (increment, iterations) = solve_linear(
+            &prepared.operator,
+            &prepared.preconditioner,
+            &rhs,
+            force_scale,
+            config,
+            cx,
+        )?;
 
         let mut displacement_m = support_displacement_m.to_vec();
-        for (&dof, &value) in free.iter().zip(&solve.x) {
+        for (&dof, &value) in free.iter().zip(&increment) {
             displacement_m[dof] = self.displacement_m[dof] + value;
         }
         let mut candidate = self.clone();
@@ -277,20 +231,20 @@ impl<'a> ViscoElementState<'a> {
         }
         let true_relative_residual =
             euclidean_norm(free.iter().map(|&d| reaction_force_n[d])) / force_scale;
-        check_residual(true_relative_residual, solve.iters, config)?;
+        check_residual(true_relative_residual, iterations, config)?;
         checkpoint(cx)?;
         *self = candidate;
         Ok(ViscoQuasistaticStep {
             displacement_m,
             reaction_force_n,
             constitutive,
-            iterations: solve.iters,
+            iterations,
             true_relative_residual,
         })
     }
 }
 
-fn check_residual(
+pub(super) fn check_residual(
     residual: f64,
     iterations: usize,
     config: TetStaticSolveConfig,
@@ -304,4 +258,84 @@ fn check_residual(
     } else {
         Ok(())
     }
+}
+
+// Shared spatial tensor assembly; endpoint and work-mean tangents differ only
+// in the original material's coefficients, never in geometry or quadrature.
+pub(super) fn assemble_tangents(
+    system: &ViscoElements,
+    tangents: &[Mandel6],
+    cx: &Cx<'_>,
+) -> Result<(Vec<Option<usize>>, Csr), ViscoElementError> {
+    let n = system.equilibrium.free_dofs.len();
+    let mut reduced = vec![None; system.full_dofs];
+    for (i, &dof) in system.equilibrium.free_dofs.iter().enumerate() {
+        reduced[dof] = Some(i);
+    }
+    let mut stiffness = Coo::new(n, n);
+    for (element, tangent) in system.elements.iter().zip(tangents) {
+        checkpoint(cx)?;
+        let d = element.dofs.len();
+        let mut local = vec![0.0; d * d];
+        for point in &element.points {
+            checkpoint(cx)?;
+            for i in 0..d {
+                for j in i..d {
+                    local[i * d + j] +=
+                        point.volume_m3 * bilinear(&point.b[i], tangent, &point.b[j]);
+                }
+            }
+        }
+        for i in 0..d {
+            for j in i..d {
+                let value = local[i * d + j];
+                if !value.is_finite() {
+                    return Err(ViscoElementError::NonFiniteResult);
+                }
+                if let (Some(row), Some(col)) = (reduced[element.dofs[i]], reduced[element.dofs[j]])
+                {
+                    stiffness.push(row, col, value);
+                    if row != col {
+                        stiffness.push(col, row, value);
+                    }
+                }
+            }
+        }
+    }
+    let stiffness = stiffness.assemble();
+    if (0..n).any(|i| stiffness.row(i).1.iter().any(|v| !v.is_finite())) {
+        return Err(ViscoElementError::NonFiniteResult);
+    }
+    checkpoint(cx)?;
+    Ok((reduced, stiffness))
+}
+
+// One existing CG owner and true-residual gate for both load-control paths.
+pub(super) fn solve_linear(
+    operator: &CsrOp,
+    preconditioner: &Jacobi,
+    rhs: &[f64],
+    scale: f64,
+    config: TetStaticSolveConfig,
+    cx: &Cx<'_>,
+) -> Result<(Vec<f64>, usize), ViscoElementError> {
+    let mut solve = CgState::new(operator, preconditioner, rhs);
+    while solve.iters < config.maximum_iterations
+        && solve.rel_residual() >= config.relative_residual_tolerance
+    {
+        checkpoint(cx)?;
+        let remaining = config.maximum_iterations - solve.iters;
+        let _ = solve.run(
+            operator,
+            preconditioner,
+            config.relative_residual_tolerance,
+            remaining.min(64),
+        );
+    }
+    let mut applied = vec![0.0; rhs.len()];
+    operator.apply(&solve.x, &mut applied);
+    let residual = euclidean_norm(rhs.iter().zip(&applied).map(|(b, ax)| b - ax)) / scale;
+    check_residual(residual, solve.iters, config)?;
+    checkpoint(cx)?;
+    Ok((solve.x, solve.iters))
 }
