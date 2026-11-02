@@ -136,8 +136,8 @@ pub use flow::{
     LbmFlow, LbmFlowConfig, LbmFlowReport,
     MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
     MaterialAdvectionStep, MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport,
-    MaterialMomentumStep, MaterialVolumeSource, ProjectionReport, ThermalVolumeControls,
-    ThermalVolumeStep, lbm_duct_flow,
+    MaterialMomentumStep, MaterialVolumeSource, PiecewiseThermalVolumeControls, ProjectionReport,
+    ThermalVolumeControls, ThermalVolumeStep, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{

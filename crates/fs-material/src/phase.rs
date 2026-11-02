@@ -1138,6 +1138,160 @@ impl EquilibriumEnthalpyPhaseCurve {
         )
     }
 
+    /// Original-chart mixing remainder `v(hr) + v'(hr)*(hd-hr) - v(hd)`
+    /// [m3/kg], with the number of original intervals traversed.
+    ///
+    /// Conservative mass/enthalpy consumers multiply this remainder by each
+    /// original or incoming donor mass. Their common receiver tangent cancels
+    /// in the enthalpy balance, leaving the exact mixing-volume correction.
+    /// The remainder can have either sign across a slope-changing knot. The
+    /// tangent is the right derivative at interior knots and the left one at
+    /// the upper domain endpoint, as for the other chart derivatives.
+    ///
+    /// Traverses only the original intervals between receiver and donor. Each
+    /// affine-density span uses its stable quadratic reciprocal remainder;
+    /// affine-specific-volume spans have zero local curvature. Accumulating
+    /// local enthalpy differences and slope changes avoids subtracting nearly
+    /// equal reciprocal volumes or large absolute caloric datums. No density
+    /// fit, allocation, new chart identity or extrapolation is performed.
+    ///
+    /// The query refuses BEFORE traversal if it would exceed `max_intervals`.
+    /// Equal enthalpies consume zero intervals. A caller bounding an entire
+    /// solve passes its remaining budget and subtracts the returned count.
+    /// Cancellation is checked before/after evaluation and every 64 spans.
+    /// Nonfinite or unrepresentable required arithmetic also refuses.
+    #[allow(clippy::too_many_lines)]
+    pub fn mixing_specific_volume_m3_kg(
+        &self,
+        receiver_enthalpy_j_kg: f64,
+        donor_enthalpy_j_kg: f64,
+        max_intervals: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(f64, usize), PhaseStateError> {
+        if cancelled() {
+            return Err(PhaseStateError::MixingVolumeCancelled);
+        }
+        let receiver = self.values_at_specific_enthalpy(receiver_enthalpy_j_kg)?;
+        let donor = self.values_at_specific_enthalpy(donor_enthalpy_j_kg)?;
+        if receiver_enthalpy_j_kg == donor_enthalpy_j_kg {
+            if cancelled() {
+                return Err(PhaseStateError::MixingVolumeCancelled);
+            }
+            return Ok((0.0, 0));
+        }
+        let right_interval = |h| {
+            self.knots
+                .partition_point(|knot| knot.specific_enthalpy_j_kg <= h)
+                .min(self.knots.len() - 1)
+                - 1
+        };
+        let left_interval = |h| {
+            self.knots
+                .partition_point(|knot| knot.specific_enthalpy_j_kg < h)
+                - 1
+        };
+        let forward = donor_enthalpy_j_kg > receiver_enthalpy_j_kg;
+        let reference_interval = right_interval(receiver_enthalpy_j_kg);
+        let (first, last) = if forward {
+            (reference_interval, left_interval(donor_enthalpy_j_kg))
+        } else {
+            (
+                left_interval(receiver_enthalpy_j_kg),
+                right_interval(donor_enthalpy_j_kg),
+            )
+        };
+        let count = first.abs_diff(last) + 1;
+        if count > max_intervals {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "mixing-volume original-interval budget exhausted",
+            });
+        }
+        let (reference_slope, _) =
+            self.volume_slope_on_interval(reference_interval, receiver.bulk_density_kg_m3)?;
+        let mut current = receiver;
+        let mut total = 0.0;
+        let mut compensation = 0.0;
+        for span in 0..count {
+            if span.is_multiple_of(64) && cancelled() {
+                return Err(PhaseStateError::MixingVolumeCancelled);
+            }
+            let index = if forward { first + span } else { first - span };
+            let next = if index == last {
+                donor
+            } else {
+                self.knots[index + usize::from(forward)]
+            };
+            let (local_slope, law) =
+                self.volume_slope_on_interval(index, current.bulk_density_kg_m3)?;
+            let local_remainder = if law == PhaseIntervalDensityLaw::AffineDensity {
+                let relative = (next.bulk_density_kg_m3 - current.bulk_density_kg_m3)
+                    / current.bulk_density_kg_m3;
+                let value = -((next.bulk_density_kg_m3.recip() * relative) * relative);
+                if !value.is_finite()
+                    || (next.bulk_density_kg_m3 != current.bulk_density_kg_m3 && value == 0.0)
+                {
+                    return Err(PhaseStateError::InvalidCurve {
+                        what: "mixing-volume reciprocal remainder is unrepresentable",
+                    });
+                }
+                value
+            } else {
+                0.0
+            };
+            let contribution = (reference_slope - local_slope).mul_add(
+                next.specific_enthalpy_j_kg - current.specific_enthalpy_j_kg,
+                local_remainder,
+            );
+            let corrected = contribution - compensation;
+            let accumulated = total + corrected;
+            compensation = (accumulated - total) - corrected;
+            total = accumulated;
+            if !total.is_finite() {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "mixing-volume interval sum is unrepresentable",
+                });
+            }
+            current = next;
+        }
+        if cancelled() {
+            return Err(PhaseStateError::MixingVolumeCancelled);
+        }
+        Ok((total, count))
+    }
+
+    fn volume_slope_on_interval(
+        &self,
+        lower_knot: usize,
+        density_kg_m3: f64,
+    ) -> Result<(f64, PhaseIntervalDensityLaw), PhaseStateError> {
+        let law = self.density_law_on_interval(lower_knot)?;
+        let lower = self.knots[lower_knot];
+        let upper = self.knots[lower_knot + 1];
+        let span = upper.specific_enthalpy_j_kg - lower.specific_enthalpy_j_kg;
+        let density_change = upper.bulk_density_kg_m3 - lower.bulk_density_kg_m3;
+        let slope = match law {
+            PhaseIntervalDensityLaw::AffineDensity => {
+                -((density_change / density_kg_m3) / span) / density_kg_m3
+            }
+            PhaseIntervalDensityLaw::AffineSpecificVolume => {
+                let relative =
+                    -density_change / lower.bulk_density_kg_m3.max(upper.bulk_density_kg_m3);
+                lower
+                    .bulk_density_kg_m3
+                    .min(upper.bulk_density_kg_m3)
+                    .recip()
+                    * relative
+                    / span
+            }
+        };
+        if !span.is_finite() || !slope.is_finite() || (density_change != 0.0 && slope == 0.0) {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "mixing-volume original-interval slope is unrepresentable",
+            });
+        }
+        Ok((slope, law))
+    }
+
     /// Piecewise-linear temperature derivative `dT/dh` [K/(J/kg)] on this
     /// specific-enthalpy chart, without extrapolation or phase smoothing.
     ///
@@ -1586,6 +1740,8 @@ pub enum PhaseStateError {
     UnrepresentableTemperatureDerivative,
     /// A positive liquid-mass-fraction slope overflowed or underflowed to zero.
     UnrepresentableLiquidMassFractionDerivative,
+    /// A bounded original-chart mixing-volume evaluation was cancelled.
+    MixingVolumeCancelled,
     /// A signed energy increment was not finite.
     NonFiniteSpecificEnergyIncrement,
     /// Evaluation would extrapolate beyond the source-provided curve.

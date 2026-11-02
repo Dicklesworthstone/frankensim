@@ -34,7 +34,7 @@ pub use density_transport::{
 mod phase_volume;
 pub use phase_volume::{
     CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
-    CoexistenceVolumeStep, ThermalVolumeControls, ThermalVolumeStep,
+    CoexistenceVolumeStep, PiecewiseThermalVolumeControls, ThermalVolumeControls, ThermalVolumeStep,
 };
 
 /// Mass-flow role of one domain face for flux construction and projection.

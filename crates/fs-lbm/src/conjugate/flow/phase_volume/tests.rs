@@ -952,3 +952,390 @@ fn sensible_zero_input_preserves_admitted_roundoff_without_a_volume_source() {
     assert_eq!(result.mixing_volume_source_m3_s, [0.0]);
     assert_eq!(result.source_iterations, 1);
 }
+
+fn piecewise_controls() -> PiecewiseThermalVolumeControls {
+    let mut thermal = thermal_controls();
+    thermal.volume.maximum_cell_volume_defect_m3 = 1e-12;
+    PiecewiseThermalVolumeControls {
+        thermal,
+        max_mixing_intervals: 10_000,
+    }
+}
+
+#[test]
+fn full_chart_heat_and_cooling_cross_both_phase_boundaries_without_reapplying_heat() {
+    let curve = chart(0.0, 1.0, 101);
+    for axis in 0..3 {
+        let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+        let field = FlowField::quiescent(&domain);
+        let cold = curve.state_at_specific_enthalpy(-1.0).unwrap();
+        let mut ctl = piecewise_controls();
+        ctl.max_mixing_intervals = 0;
+        let hot = field
+            .advance_piecewise_thermal_volume(
+                &domain,
+                outlet(axis),
+                &curve,
+                input(&[2.0], &[Some(cold)], &[12.0]),
+                ctl,
+                &CancelGate::new_clock_free(),
+            )
+            .unwrap();
+        let step = &hot.volume;
+        close(step.transport.mass_kg[0], 1.0);
+        close(step.transport.specific_enthalpy_j_kg[0], 5.0);
+        close(step.phase_states[0].unwrap().liquid_mass_fraction(), 1.0);
+        close(step.phase_states[0].unwrap().temperature_k(), 450.0);
+        close(step.volume_source_m3_s[0], 2.0);
+        close(step.report.represented_enthalpy_increment_j, 12.0);
+        close(step.report.material_enthalpy_change_j, 7.0);
+        close(step.transport.report.outgoing_mass_kg, 1.0);
+        close(step.transport.report.carried_enthalpy_j, -5.0);
+        assert_eq!(hot.source_iterations, 1);
+        assert_eq!(hot.mixing_volume_source_m3_s, [0.0]);
+
+        let mut data = input(&step.transport.mass_kg, &step.phase_states, &[-6.0]);
+        data.boundary_inflow[2 * axis + 1] = Some(cold);
+        let returned = step
+            .transport
+            .projection
+            .field
+            .advance_piecewise_thermal_volume(
+                &domain,
+                outlet(axis),
+                &curve,
+                data,
+                ctl,
+                &CancelGate::new_clock_free(),
+            )
+            .unwrap();
+        close(returned.volume.transport.mass_kg[0], 2.0);
+        close(returned.volume.transport.specific_enthalpy_j_kg[0], -1.0);
+        close(returned.volume.transport.report.incoming_mass_kg, 1.0);
+        close(
+            returned.volume.report.represented_enthalpy_increment_j,
+            -6.0,
+        );
+        close(returned.volume.report.material_enthalpy_change_j, -7.0);
+        close(returned.volume.volume_source_m3_s[0], -1.0);
+        assert_eq!(returned.volume.phase_states, [Some(cold)]);
+        assert_eq!(returned.source_iterations, 1);
+        assert_eq!(field, FlowField::quiescent(&domain));
+    }
+}
+
+#[test]
+fn full_chart_cross_branch_inflow_matches_independent_mass_enthalpy_and_volume_solution() {
+    // M0=4/3, h*=−1, incoming h=5/rho=1. Thus M*h=5*M−8.
+    // The retained endpoint is in v=.5+h/8, so M*v=1 gives
+    // M=16/9, h=.5, incoming mass=4/9. This crosses both original
+    // slope changes and has mixing delta_V=−1/9 in addition to heat.
+    let curve = chart(0.0, 1.0, 102);
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let states = [Some(curve.state_at_specific_enthalpy(2.0).unwrap())];
+    let mut data = input(&[4.0 / 3.0], &states, &[-4.0]);
+    data.boundary_inflow[1] = Some(curve.state_at_specific_enthalpy(5.0).unwrap());
+    let field = FlowField::quiescent(&domain);
+    let result = field
+        .advance_piecewise_thermal_volume(
+            &domain,
+            outlet(0),
+            &curve,
+            data,
+            piecewise_controls(),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    let step = &result.volume;
+    close(step.transport.mass_kg[0], 16.0 / 9.0);
+    close(step.transport.specific_enthalpy_j_kg[0], 0.5);
+    close(step.transport.report.incoming_mass_kg, 4.0 / 9.0);
+    close(step.transport.report.carried_enthalpy_j, 20.0 / 9.0);
+    close(step.volume_source_m3_s[0], -8.0 / 9.0);
+    close(result.mixing_volume_source_m3_s[0], -2.0 / 9.0);
+    close(step.report.represented_enthalpy_increment_j, -4.0);
+    close(step.report.material_enthalpy_change_j, -16.0 / 9.0);
+    close(step.phase_states[0].unwrap().liquid_mass_fraction(), 0.125);
+    assert!(result.source_iterations > 1);
+    assert!(step.report.maximum_final_volume_defect_m3 <= 1e-12);
+    assert_eq!(
+        step.phase_states[0].unwrap().phase_curve_identity(),
+        curve.identity()
+    );
+
+    // Each trial needing another update evaluates two spans for each of its
+    // two donors. The cap is global, not restarted at a donor or trial.
+    let mut ctl = piecewise_controls();
+    ctl.max_mixing_intervals = 4 * (result.source_iterations - 1);
+    let exact_budget = field
+        .advance_piecewise_thermal_volume(
+            &domain,
+            outlet(0),
+            &curve,
+            data,
+            ctl,
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    assert_eq!(exact_budget, result);
+    ctl.max_mixing_intervals -= 1;
+    let error = field
+        .advance_piecewise_thermal_volume(
+            &domain,
+            outlet(0),
+            &curve,
+            data,
+            ctl,
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, ChtError::InvalidInput {ref reason, ..}
+        if reason.contains("original-interval budget exhausted")));
+    assert_eq!(field, FlowField::quiescent(&domain));
+}
+
+#[test]
+fn full_chart_graded_internal_mixing_retains_actual_transfers_and_positive_kink_volume() {
+    let curve = chart(0.0, 1.0, 103);
+    for axis in 0..3 {
+        let mut widths = [vec![1.0], vec![1.0], vec![1.0]];
+        widths[axis] = vec![1.0, 2.0];
+        let domain = VoxelDomain::graded(widths).unwrap();
+        let field = FlowField::quiescent(&domain);
+        let states = [Some(curve.state_at_specific_enthalpy(2.0).unwrap()); 2];
+        let mass = [4.0 / 3.0, 8.0 / 3.0];
+        let increments = [4.0, -16.0 / 3.0];
+        let mut data = input(&mass, &states, &increments);
+        data.boundary_inflow[2 * axis + 1] = Some(curve.state_at_specific_enthalpy(0.0).unwrap());
+        let result = field
+            .advance_piecewise_thermal_volume(
+                &domain,
+                outlet(axis),
+                &curve,
+                data,
+                piecewise_controls(),
+                &CancelGate::new_clock_free(),
+            )
+            .unwrap();
+        let step = &result.volume;
+        // First cell ends at h=5, rho=1, exporting 1/3 kg internally.
+        // Second receives that donor and h=0 boundary material: H=5/3,
+        // M*v=2 -> M/2+H/8=2 -> M=43/12, boundary mass=7/12.
+        close(step.transport.mass_kg[0], 1.0);
+        close(step.transport.mass_kg[1], 43.0 / 12.0);
+        close(step.transport.specific_enthalpy_j_kg[0], 5.0);
+        close(step.transport.specific_enthalpy_j_kg[1], 20.0 / 43.0);
+        close(step.transport.report.incoming_mass_kg, 7.0 / 12.0);
+        close(step.transport.report.outgoing_mass_kg, 0.0);
+        close(
+            step.transport
+                .projection
+                .field
+                .outward(&domain, 0, 2 * axis + 1),
+            2.0 / 3.0,
+        );
+        close(step.volume_source_m3_s[1], -5.0 / 4.0);
+        close(result.mixing_volume_source_m3_s[0], 0.0);
+        close(result.mixing_volume_source_m3_s[1], 1.0 / 12.0);
+        close(step.report.material_enthalpy_change_j, -4.0 / 3.0);
+        close(step.transport.report.carried_enthalpy_j, 0.0);
+        close(
+            step.transport.mass_kg.iter().sum(),
+            mass.iter().sum::<f64>() + 7.0 / 12.0,
+        );
+        assert!(
+            step.report.absolute_enthalpy_defect_j
+                <= controls().transport.maximum_enthalpy_defect_j
+        );
+        assert!(result.source_iterations > 1);
+    }
+}
+
+#[test]
+fn original_chart_remainders_preserve_signed_knots_derivative_conventions_and_large_datums() {
+    for offset in [0.0, 1_099_511_627_776.0] {
+        let curve = chart(offset, 1.0, 104);
+        for (receiver, donor, expected, intervals) in [
+            (0.5, -1.0, -0.125, 2),
+            (0.5, 5.0, 0.125, 2),
+            (0.0, -1.0, -0.125, 1), // right latent tangent at the solidus
+            (4.0, 0.0, 0.5, 1),     // right liquid tangent at the liquidus
+            (6.0, 0.0, 0.5, 2),     // upper endpoint uses its left tangent
+            (1.0, 3.0, 0.0, 1),
+            (1.0, 1.0, 0.0, 0),
+        ] {
+            let (actual, used) = curve
+                .mixing_specific_volume_m3_kg(offset + receiver, offset + donor, intervals, || {
+                    false
+                })
+                .unwrap();
+            close(actual, expected);
+            assert_eq!(used, intervals);
+            if intervals > 0 {
+                assert!(
+                    curve
+                        .mixing_specific_volume_m3_kg(
+                            offset + receiver,
+                            offset + donor,
+                            intervals - 1,
+                            || false,
+                        )
+                        .is_err()
+                );
+            }
+        }
+    }
+}
+
+fn two_sensible_intervals() -> EquilibriumEnthalpyPhaseCurve {
+    use fs_material::phase::{HeatCapacityKnot, SolidLiquidPhase};
+    EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+        ContentHash([105; 32]),
+        SolidLiquidPhase::Liquid,
+        0.0,
+        &[(300.0, 2.0), (302.0, 1.75), (304.0, 1.0)].map(|(temperature_k, bulk_density_kg_m3)| {
+            HeatCapacityKnot {
+                temperature_k,
+                specific_heat_capacity_j_kg_k: 1.0,
+                bulk_density_kg_m3,
+            }
+        }),
+        1e-12,
+    )
+    .unwrap()
+}
+
+#[test]
+fn full_chart_retains_distinct_original_affine_density_slopes_and_interval_api_parity() {
+    let curve = two_sensible_intervals();
+    assert_eq!(curve.knots().len(), 3);
+    let (forward, count) = curve
+        .mixing_specific_volume_m3_kg(1.0, 3.0, 2, || false)
+        .unwrap();
+    close(forward, 8.0 / 15.0 + 16.0 / 225.0 - 8.0 / 11.0);
+    assert_eq!(count, 2);
+    let (reverse, _) = curve
+        .mixing_specific_volume_m3_kg(3.0, 1.0, 2, || false)
+        .unwrap();
+    close(reverse, 8.0 / 11.0 - 48.0 / 121.0 - 8.0 / 15.0);
+
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let states = [Some(curve.state_at_specific_enthalpy(3.0).unwrap())];
+    let mass = [11.0 / 8.0];
+    let mut data = input(&mass, &states, &[-11.0 / 4.0]);
+    data.boundary_inflow[1] = Some(curve.state_at_specific_enthalpy(3.5).unwrap());
+    let result = field
+        .advance_piecewise_thermal_volume(
+            &domain,
+            outlet(0),
+            &curve,
+            data,
+            piecewise_controls(),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    // h*=1, hin=3.5. M*h=3.5*M−55/16 and rho=2−h/8.
+    // Combining M=rho gives 128*M²−200*M−55=0.
+    let expected_mass = (25.0 + 1065.0_f64.sqrt()) / 32.0;
+    close(result.volume.transport.mass_kg[0], expected_mass);
+    close(
+        result.volume.transport.specific_enthalpy_j_kg[0],
+        16.0 - 8.0 * expected_mass,
+    );
+    close(
+        result.volume.transport.report.incoming_mass_kg,
+        expected_mass - mass[0],
+    );
+    close(
+        result.volume.report.represented_enthalpy_increment_j,
+        -11.0 / 4.0,
+    );
+
+    let simple = sensible_chart(0.0);
+    let original = [Some(simple.state_at_specific_enthalpy(2.0).unwrap())];
+    let mut data = input(&[1.5], &original, &[-1.5]);
+    data.boundary_inflow[1] = Some(simple.state_at_specific_enthalpy(3.0).unwrap());
+    let ctl = piecewise_controls();
+    let full = field
+        .advance_piecewise_thermal_volume(
+            &domain,
+            outlet(0),
+            &simple,
+            data,
+            ctl,
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    let interval = field
+        .advance_thermal_volume(
+            &domain,
+            outlet(0),
+            &simple,
+            0,
+            data,
+            ctl.thermal,
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    close(
+        full.volume.transport.mass_kg[0],
+        interval.volume.transport.mass_kg[0],
+    );
+    close(
+        full.volume.volume_source_m3_s[0],
+        interval.volume.volume_source_m3_s[0],
+    );
+    close(
+        full.volume.transport.specific_enthalpy_j_kg[0],
+        interval.volume.transport.specific_enthalpy_j_kg[0],
+    );
+    assert_eq!(full.source_iterations, interval.source_iterations);
+}
+
+#[test]
+fn full_chart_domain_identity_iteration_and_cancellation_refuse_without_partial_state() {
+    let curve = chart(0.0, 1.0, 106);
+    let foreign = chart(0.0, 1.0, 107);
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let states = [Some(curve.state_at_specific_enthalpy(2.0).unwrap())];
+    let mass = [4.0 / 3.0];
+    let increments = [-4.0];
+    let mut data = input(&mass, &states, &increments);
+    data.boundary_inflow[1] = Some(curve.state_at_specific_enthalpy(5.0).unwrap());
+    let gate = CancelGate::new_clock_free();
+    let run = |data, ctl| {
+        field.advance_piecewise_thermal_volume(&domain, outlet(0), &curve, data, ctl, &gate)
+    };
+    for count in [0, 1] {
+        let mut ctl = piecewise_controls();
+        ctl.thermal.max_volume_iterations = count;
+        assert!(run(data, ctl).is_err());
+    }
+    let mut foreign_data = data;
+    foreign_data.boundary_inflow[1] = Some(foreign.state_at_specific_enthalpy(5.0).unwrap());
+    assert!(run(foreign_data, piecewise_controls()).is_err());
+    assert!(run(input(&mass, &states, &[8.0]), piecewise_controls()).is_err());
+    let mut polls = 0;
+    let cancelled = curve.mixing_specific_volume_m3_kg(5.0, -1.0, 3, || {
+        polls += 1;
+        polls == 3
+    });
+    assert_eq!(cancelled, Err(PhaseStateError::MixingVolumeCancelled));
+    assert!(
+        curve
+            .mixing_specific_volume_m3_kg(f64::NAN, 0.0, 3, || false)
+            .is_err()
+    );
+    assert!(
+        curve
+            .mixing_specific_volume_m3_kg(0.0, 7.0, 3, || false)
+            .is_err()
+    );
+    gate.request();
+    assert_eq!(run(data, piecewise_controls()), Err(ChtError::Cancelled));
+    assert_eq!(field, FlowField::quiescent(&domain));
+    assert_eq!(mass, [4.0 / 3.0]);
+    assert_eq!(states[0].unwrap().specific_enthalpy_j_kg(), 2.0);
+}

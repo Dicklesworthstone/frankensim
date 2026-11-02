@@ -1,7 +1,7 @@
 //! Original-chart thermal volume evolution on the conservative flux owner.
 
 use fs_material::phase::{
-    EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseIntervalDensityLaw,
+    EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseIntervalDensityLaw, PhaseStateError,
 };
 
 use super::density_transport::{admit, advect_projected_material};
@@ -23,7 +23,7 @@ pub struct CoexistenceVolumeInput<'a> {
     /// Solid grid cells require exactly zero.
     pub net_enthalpy_increment_j: &'a [f64],
     /// Incoming/backflow states on x-, x+, y-, y+, z-, z+ boundaries.
-    /// Their density is obtained from the same original chart interval.
+    /// Their density is obtained from the same admitted original chart range.
     pub boundary_inflow: [Option<EquilibriumPhaseState>; 6],
 }
 
@@ -91,6 +91,18 @@ pub struct ThermalVolumeControls {
     pub source_relaxation: f64,
 }
 
+/// Full original-chart thermal evolution, including sensible/latent crossings.
+#[derive(Clone, Copy, Debug)]
+pub struct PiecewiseThermalVolumeControls {
+    /// Native transport, occupied-volume and nonlinear source-trial budgets.
+    pub thermal: ThermalVolumeControls,
+    /// Maximum TOTAL original intervals traversed by mixing-volume queries
+    /// across all original/incoming donors and all source trials combined.
+    /// Each query is preflighted against the remaining budget. Zero permits
+    /// only candidates needing no unequal-enthalpy mixing-source evaluation.
+    pub max_mixing_intervals: usize,
+}
+
 /// Original-chart thermal volume result with its nonlinear closure evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThermalVolumeStep {
@@ -99,11 +111,63 @@ pub struct ThermalVolumeStep {
     /// Number of complete source trials, including the accepted trial.
     pub source_iterations: usize,
     /// Additional source actually applied for conservative enthalpy mixing
-    /// [m3/s]. Zero on affine-specific-volume intervals. This is not heat.
+    /// [m3/s]. Zero when mixing stays in one affine-specific-volume interval;
+    /// crossings of slope-changing knots can have either sign. This is not heat.
     pub mixing_volume_source_m3_s: Vec<f64>,
 }
 
+#[derive(Clone, Copy)]
+enum ChartVolumeRange {
+    Interval {
+        lower_knot: usize,
+        coexistence_only: bool,
+    },
+    Full {
+        max_mixing_intervals: usize,
+    },
+}
+
 impl FlowField {
+    /// Evolve mobile material across any original sensible or latent intervals.
+    /// Uses the original chart and the same conservative pressure/mass/enthalpy
+    /// owner as [`Self::advance_thermal_volume`], without fitting a new density
+    /// law or splitting/reapplying the prescribed net caloric increment.
+    ///
+    /// For each original or incoming donor mass m, the source iteration adds
+    /// `m * (v(hr) + v'(hr)*(hd-hr) - v(hd))`. The receiver tangent cancels
+    /// under the native enthalpy balance. The chart evaluates this remainder
+    /// stably on its actual crossed intervals, including signed slope changes
+    /// at phase boundaries. Exact accepted donor masses supply the weights.
+    /// Both nonlinear trials and total crossed-interval work are bounded; a
+    /// failed EOS, conservation, work, domain or cancellation gate returns no
+    /// candidate. All trials retain the original mass, heat increment and flow.
+    ///
+    /// The full original h domain bounds every initial, calorically advanced,
+    /// boundary and transported state. Its pressure/composition/source claims
+    /// remain fixed. The caller owns thermal/work closure and phase mobility;
+    /// this adds no thermal PDE, pressure-dependent EOS or solid stress law.
+    pub fn advance_piecewise_thermal_volume(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        input: CoexistenceVolumeInput<'_>,
+        controls: PiecewiseThermalVolumeControls,
+        gate: &CancelGate,
+    ) -> Result<ThermalVolumeStep, ChtError> {
+        self.advance_chart_volume(
+            domain,
+            faces,
+            curve,
+            ChartVolumeRange::Full {
+                max_mixing_intervals: controls.max_mixing_intervals,
+            },
+            input,
+            controls.thermal,
+            gate,
+        )
+    }
+
     /// Expand or contract an explicitly mobile material on one original
     /// caloric interval, including sourced sensible rho(T) and latent volume.
     /// Uses the same inventory carrier as [`Self::advance_coexistence_volume`].
@@ -141,7 +205,16 @@ impl FlowField {
         gate: &CancelGate,
     ) -> Result<ThermalVolumeStep, ChtError> {
         self.advance_chart_volume(
-            domain, faces, curve, lower_knot, input, controls, false, gate,
+            domain,
+            faces,
+            curve,
+            ChartVolumeRange::Interval {
+                lower_knot,
+                coexistence_only: false,
+            },
+            input,
+            controls,
+            gate,
         )
     }
 
@@ -195,14 +268,16 @@ impl FlowField {
             domain,
             faces,
             curve,
-            lower_knot,
+            ChartVolumeRange::Interval {
+                lower_knot,
+                coexistence_only: true,
+            },
             input,
             ThermalVolumeControls {
                 volume: controls,
                 max_volume_iterations: 1,
                 source_relaxation: 1.0,
             },
-            true,
             gate,
         )
         .map(|step| step.volume)
@@ -214,10 +289,9 @@ impl FlowField {
         domain: &VoxelDomain,
         faces: [FlowFace; 6],
         curve: &EquilibriumEnthalpyPhaseCurve,
-        lower_knot: usize,
+        range: ChartVolumeRange,
         input: CoexistenceVolumeInput<'_>,
         thermal_controls: ThermalVolumeControls,
-        coexistence_only: bool,
         gate: &CancelGate,
     ) -> Result<ThermalVolumeStep, ChtError> {
         poll(gate)?;
@@ -245,25 +319,43 @@ impl FlowField {
         if !volume_budget.is_finite() || volume_budget < 0.0 {
             return Err(refuse("invalid cell-volume defect budget"));
         }
-        let upper_knot = lower_knot
-            .checked_add(1)
-            .ok_or_else(|| refuse("coexistence interval index overflow"))?;
-        let (lower, upper) = curve
-            .knots()
-            .get(lower_knot)
-            .zip(curve.knots().get(upper_knot))
-            .ok_or_else(|| refuse("one adjacent original knot interval required"))?;
-        if coexistence_only
-            && (lower.temperature_k != upper.temperature_k
-                || lower.liquid_mass_fraction >= upper.liquid_mass_fraction)
-        {
-            return Err(refuse("selected interval must be isothermal coexistence"));
-        }
-        let density_law = curve
-            .density_law_on_interval(lower_knot)
-            .map_err(|error| refuse(error.to_string()))?;
-        let bounds = [lower.specific_enthalpy_j_kg, upper.specific_enthalpy_j_kg];
-        finite_positive("flow.coexistence_enthalpy_span", bounds[1] - bounds[0])?;
+        let (bounds, density_law, mut remaining_mixing_intervals) = match range {
+            ChartVolumeRange::Interval {
+                lower_knot,
+                coexistence_only,
+            } => {
+                let upper_knot = lower_knot
+                    .checked_add(1)
+                    .ok_or_else(|| refuse("coexistence interval index overflow"))?;
+                let (lower, upper) = curve
+                    .knots()
+                    .get(lower_knot)
+                    .zip(curve.knots().get(upper_knot))
+                    .ok_or_else(|| refuse("one adjacent original knot interval required"))?;
+                if coexistence_only
+                    && (lower.temperature_k != upper.temperature_k
+                        || lower.liquid_mass_fraction >= upper.liquid_mass_fraction)
+                {
+                    return Err(refuse("selected interval must be isothermal coexistence"));
+                }
+                let law = curve
+                    .density_law_on_interval(lower_knot)
+                    .map_err(|error| refuse(error.to_string()))?;
+                let bounds = [lower.specific_enthalpy_j_kg, upper.specific_enthalpy_j_kg];
+                finite_positive("flow.coexistence_enthalpy_span", bounds[1] - bounds[0])?;
+                (bounds, Some(law), 0)
+            }
+            ChartVolumeRange::Full {
+                max_mixing_intervals,
+            } => (
+                [
+                    curve.knots()[0].specific_enthalpy_j_kg,
+                    curve.knots()[curve.knots().len() - 1].specific_enthalpy_j_kg,
+                ],
+                None,
+                max_mixing_intervals,
+            ),
+        };
         let mut boundary_inflow = [None; 6];
         for (output, supplied) in boundary_inflow.iter_mut().zip(input.boundary_inflow) {
             if let Some(state) = supplied {
@@ -393,7 +485,7 @@ impl FlowField {
                 let h = transport.specific_enthalpy_j_kg[c];
                 if h < bounds[0] || h > bounds[1] {
                     return Err(refuse(
-                        "transported enthalpy left the original chart interval",
+                        "transported enthalpy left the admitted original chart range",
                     ));
                 }
                 // Trial EOS queries allocate and hash nothing. Construct the
@@ -462,7 +554,7 @@ impl FlowField {
                     mixing_volume_source_m3_s: mixing_source,
                 });
             }
-            if density_law == PhaseIntervalDensityLaw::AffineSpecificVolume {
+            if density_law == Some(PhaseIntervalDensityLaw::AffineSpecificVolume) {
                 return Err(refuse(
                     "transported mass and phase density exceed the cell-volume defect budget",
                 ));
@@ -480,25 +572,52 @@ impl FlowField {
             let mut mixed_volume = vec![Sum::default(); n];
             for (row, &c) in stencil.cells.iter().enumerate() {
                 poll_every(gate, row)?;
-                mixed_volume[c].add(mixing_volume(
-                    stencil.initial_mass_kg[row],
-                    rho_star[c],
-                    endpoint_density[c],
-                )?);
+                mixed_volume[c].add(if density_law.is_some() {
+                    mixing_volume(
+                        stencil.initial_mass_kg[row],
+                        rho_star[c],
+                        endpoint_density[c],
+                    )?
+                } else {
+                    chart_mixing_volume(
+                        curve,
+                        stencil.initial_mass_kg[row],
+                        transport.specific_enthalpy_j_kg[c],
+                        h_star[c],
+                        &mut remaining_mixing_intervals,
+                        gate,
+                    )?
+                });
             }
             for (index, route) in stencil.routes.iter().enumerate() {
                 poll_every(gate, index)?;
                 if let Some(to) = route.to {
                     let c = stencil.cells[to];
-                    let donor_density = route.from.map_or_else(
-                        || route.inlet.expect("native admitted inlet").density_kg_m3,
-                        |from| endpoint_density[stencil.cells[from]],
-                    );
-                    mixed_volume[c].add(mixing_volume(
-                        route.mass,
-                        donor_density,
-                        endpoint_density[c],
-                    )?);
+                    mixed_volume[c].add(if density_law.is_some() {
+                        let donor_density = route.from.map_or_else(
+                            || route.inlet.expect("native admitted inlet").density_kg_m3,
+                            |from| endpoint_density[stencil.cells[from]],
+                        );
+                        mixing_volume(route.mass, donor_density, endpoint_density[c])?
+                    } else {
+                        let donor_h = route.from.map_or_else(
+                            || {
+                                route
+                                    .inlet
+                                    .expect("native admitted inlet")
+                                    .specific_enthalpy_j_kg
+                            },
+                            |from| transport.specific_enthalpy_j_kg[stencil.cells[from]],
+                        );
+                        chart_mixing_volume(
+                            curve,
+                            route.mass,
+                            transport.specific_enthalpy_j_kg[c],
+                            donor_h,
+                            &mut remaining_mixing_intervals,
+                            gate,
+                        )?
+                    });
                 }
             }
             for c in 0..n {
@@ -541,6 +660,31 @@ fn mixing_volume(mass: f64, donor_density: f64, receiver_density: f64) -> Result
     finite("flow.thermal_mixing_volume", volume)?;
     if donor_density != receiver_density && volume == 0.0 {
         return Err(refuse("nonlinear mixing-volume increment underflowed"));
+    }
+    Ok(volume)
+}
+
+fn chart_mixing_volume(
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    mass: f64,
+    receiver_h: f64,
+    donor_h: f64,
+    remaining_intervals: &mut usize,
+    gate: &CancelGate,
+) -> Result<f64, ChtError> {
+    let (specific_volume, traversed) = curve
+        .mixing_specific_volume_m3_kg(receiver_h, donor_h, *remaining_intervals, || {
+            gate.is_requested()
+        })
+        .map_err(|error| match error {
+            PhaseStateError::MixingVolumeCancelled => ChtError::Cancelled,
+            other => refuse(other.to_string()),
+        })?;
+    *remaining_intervals -= traversed;
+    let volume = mass * specific_volume;
+    finite("flow.chart_mixing_volume", volume)?;
+    if specific_volume != 0.0 && mass != 0.0 && volume == 0.0 {
+        return Err(refuse("original-chart mixing-volume increment underflowed"));
     }
     Ok(volume)
 }

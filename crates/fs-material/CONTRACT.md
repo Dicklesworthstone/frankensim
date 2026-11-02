@@ -1492,6 +1492,18 @@ homogenization, the P2 milestone.
   one adjacent original interval and refuses invalid indices; it neither fits
   a replacement EOS nor changes chart identity. Conservative thermal-volume
   consumers use this distinction to account for nonlinear mixing volume.
+  `mixing_specific_volume_m3_kg` evaluates the original-chart remainder
+  `v(hr) + v'(hr)*(hd-hr) - v(hd)` across sensible and latent boundaries.
+  Each crossed affine-density span uses a stable reciprocal quadratic
+  remainder; affine-volume spans contribute their original slope changes.
+  Signed knot terms and local enthalpy differences retain the physical mixing
+  correction without subtracting large caloric datums or refitting density.
+  Interior knots use their right derivative; the upper endpoint uses its left.
+  The query allocates/hashes nothing, preflights its crossed-interval budget,
+  returns the actual count for whole-solve accounting, and polls caller
+  cancellation before/after evaluation and every 64 spans. Equal enthalpies
+  consume zero intervals. Original domain and representability refusals apply;
+  this constitutive query owns neither material transport nor a heat source.
   Generated charts cap at 4096 knots before allocation. This is bounded
   numerical construction, not experimental validation or a mechanical model.
   `ResolvedHeatCapacityCurve::try_new` admits that chart directly from one

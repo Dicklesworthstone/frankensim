@@ -2811,6 +2811,26 @@ electronics cooling (the wedge's second physics after steady conduction).
   sensible heating/cooling on every axis, continuation, affine parity,
   caloric-datum/relaxation invariance and bounded refusals. First-order donor
   mixing still requires spatial and temporal refinement.
+- `FlowField::advance_piecewise_thermal_volume` admits the full original chart
+  through the same pressure, mass and extensive-enthalpy transport owner.
+  Heating, cooling and donor mixing may cross sensible/latent boundaries and
+  distinct original sensible-density slopes. A receiver's mixing source sums
+  `m*(v(hr) + v'(hr)*(hd-hr) - v(hd))` over original inventory and the actual
+  accepted incoming mass routes. Conservative enthalpy balance cancels the
+  common receiver tangent; the chart evaluates signed slope changes and local
+  reciprocal curvature without fitting another EOS. Original inputs remain
+  frozen across trials and the prescribed net caloric increment is applied
+  exactly once. `PiecewiseThermalVolumeControls` bounds both nonlinear trials
+  and TOTAL crossed intervals across every donor query and every source trial;
+  cancellation and independent occupied-volume/conservation gates publish no
+  partial state. The existing single-interval fast paths remain intact.
+  Chart conditions and source identities remain fixed. The caller still owns
+  phase mobility and thermal/work closure; this does not supply a thermal PDE,
+  solid mechanics, pressure-dependent EOS or free-surface geometry. Native
+  regressions cover heating/cooling through both boundaries on every axis,
+  independent cross-branch mass/enthalpy/EOS solutions, graded internal mixing,
+  both signs of knot-volume corrections, distinct affine-density branches,
+  large caloric datums, exact total-work limits and atomic refusals.
 - `lbm_duct_flow` -> `LbmFlow { field, velocity_m_s, pressure_pa, report }`:
   velocity inlet on `x-min`, pressure outlet on `x-max`,
   no-slip elsewhere and on solid voxels; derives `nu_lat`/`tau` from the
