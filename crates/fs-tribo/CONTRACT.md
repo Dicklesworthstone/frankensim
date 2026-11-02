@@ -842,6 +842,20 @@ independent unequal-channel network pressures, Poiseuille mass fluxes, pressure
 work and directional tangents, conserve cavitation refill/squeeze mass, and
 recover uniform coefficients bitwise. Invalid updates leave prior owners intact.
 
+`evaluate_with_channels_into` returns signed passage volume flows and their
+nonnegative `Q*(p_from-p_to)` work in original channel order, together with the
+same force and pressures from one solve. Physical pressure, not transformed
+potential squared, defines Barus dissipation. The channel powers sum to the
+original resisting-port power, allowing explicit local heat destinations.
+Closed passages return exact zero. All outputs publish together after shape,
+pressure and reciprocal-work checks. The ordinary force/Newton image retains
+its arithmetic and statically excludes channel-report scratch/writes; neither
+image allocates during evaluation. Focused native tests independently integrate
+heterogeneous Poiseuille/Barus fluidity for both flow directions, close every
+cell's volume and total work, check ordinary-result bit parity, and exercise
+closed passages and atomic output refusal. Reports add no time, fluid inventory,
+heat partition or thermal/advection evolution.
+
 The fixed limits are 64 pressure cells, 256 channels and 256 mechanical ports.
 Nonpositive channel apertures close exactly; collapsed volume cells, trapped
 pressure pockets, pressure/gap limit violations and unresolved factorizations

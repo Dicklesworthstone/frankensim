@@ -30,7 +30,8 @@ use core::fmt;
 pub const MAX_CELLS: usize = 64;
 /// Maximum number of generalized mechanical ports.
 pub const MAX_PORTS: usize = 256;
-const MAX_CHANNELS: usize = 256;
+/// Maximum number of hydraulic passages in one pressure island.
+pub const MAX_CHANNELS: usize = 256;
 
 /// Linearized physical separation `reference_m - closure dot q`.
 #[derive(Debug, Clone)]
@@ -97,6 +98,17 @@ pub struct FilmReport {
     /// Largest absolute cell gauge pressure [Pa].
     pub peak_pressure_pa: f64,
     /// Nonnegative viscous power at the supplied work-conjugate rate [W].
+    pub dissipated_power_w: f64,
+}
+
+/// One passage's flow and irreversible work from the same pressure solve.
+/// This has no independent time, mass inventory or heat-partition assumption.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FilmChannelReport {
+    /// Signed volume flow from `from` to `to` (or ambient) [m^3/s].
+    pub volume_flow_m3_s: f64,
+    /// Nonnegative `Q * (p_from - p_to)` [W], including the Barus law.
+    /// A closed passage contributes exactly zero flow and power.
     pub dissipated_power_w: f64,
 }
 
@@ -426,17 +438,62 @@ impl ResistiveFilm {
         force: &mut [f64],
         pressure: &mut [f64],
     ) -> Result<FilmReport, FilmError> {
-        if force.len() != self.ports || pressure.len() != self.cells.len() {
+        self.evaluate::<false>(q, velocity, force, pressure, &mut [])
+    }
+
+    /// Evaluate force, pressure and every passage's flow/work in one solve.
+    ///
+    /// Reports follow the original channel order. Their powers sum to the
+    /// same resisting-port power; a thermal owner can route selected passages
+    /// once to explicit finite stores. For pressure-dependent viscosity the
+    /// power uses physical pressure drop, not the squared transformed potential.
+    /// No wall/fluid partition, fluid storage, or advection model is inferred.
+    /// All output slices remain untouched if any admission or work check fails.
+    pub fn evaluate_with_channels_into(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        force: &mut [f64],
+        pressure: &mut [f64],
+        channels: &mut [FilmChannelReport],
+    ) -> Result<FilmReport, FilmError> {
+        self.evaluate::<true>(q, velocity, force, pressure, channels)
+    }
+
+    // Specialization removes channel-report scratch/writes from ordinary force
+    // and Newton evaluations. Both images use precisely the same arithmetic.
+    fn evaluate<const CHANNEL_REPORTS: bool>(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        force: &mut [f64],
+        pressure: &mut [f64],
+        channels: &mut [FilmChannelReport],
+    ) -> Result<FilmReport, FilmError> {
+        if force.len() != self.ports || pressure.len() != self.cells.len()
+            || (CHANNEL_REPORTS && channels.len() != self.channels.len()) {
             return fail("invalid film output shape");
         }
         let s = self.solve(q, velocity)?;
         let mut candidate = [0.0; MAX_PORTS];
+        let mut channel_candidate = [FilmChannelReport::default(); MAX_CHANNELS];
         self.project(&s.pressure, &mut candidate);
         let mut power = 0.0;
         for (k, edge) in self.channels.iter().enumerate() {
             let dp = s.pressure[edge.from] - edge.to.map_or(0.0, |j| s.pressure[j]);
             let dpsi = s.potential[edge.from] - edge.to.map_or(0.0, |j| s.potential[j]);
-            power += s.conductance[k] * dpsi * dp;
+            let flow = s.conductance[k] * dpsi;
+            let loss = flow * dp;
+            if CHANNEL_REPORTS {
+                if !flow.is_finite() || !loss.is_finite() || loss < 0.0 {
+                    return fail("nonfinite or negative film channel work");
+                }
+                channel_candidate[k] = FilmChannelReport {
+                    volume_flow_m3_s: flow,
+                    dissipated_power_w: loss,
+                };
+            }
+            power += loss;
         }
         let work = dot(velocity, &candidate[..self.ports]);
         if candidate[..self.ports].iter().any(|x| !x.is_finite())
@@ -449,6 +506,9 @@ impl ResistiveFilm {
         }
         force.copy_from_slice(&candidate[..self.ports]);
         pressure.copy_from_slice(&s.pressure[..self.cells.len()]);
+        if CHANNEL_REPORTS {
+            channels.copy_from_slice(&channel_candidate[..self.channels.len()]);
+        }
         Ok(FilmReport {
             minimum_gap_m: s.minimum_gap,
             peak_pressure_pa: pressure.iter().fold(0.0_f64, |m, p| m.max(p.abs())),

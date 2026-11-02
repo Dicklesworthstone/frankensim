@@ -243,6 +243,81 @@ fn barus_network_conserves_volume_and_heat_and_keeps_the_nonsymmetric_tangent() 
 }
 
 #[test]
+fn passage_reports_close_local_volume_and_physical_work_for_heterogeneous_barus_flow() {
+    let q = [0.00001, -0.000002];
+    for alpha in [0.0, 2e-4] {
+        let law = two_cell_barus().with_barus_viscosity(alpha).unwrap()
+            .with_channel_viscosities(&[0.007, 0.02, 0.013]).unwrap();
+        for sign in [-1.0, 1.0] {
+            let velocity = [sign * 0.0006, sign * 0.0001];
+            let mut force = [0.0; 2];
+            let mut pressure = [0.0; 2];
+            let mut channels = [FilmChannelReport::default(); 3];
+            let report = law.evaluate_with_channels_into(
+                &q, &velocity, &mut force, &mut pressure, &mut channels,
+            ).unwrap();
+            let mut ordinary_force = [0.0; 2];
+            let mut ordinary_pressure = [0.0; 2];
+            let ordinary = law.evaluate_into(
+                &q, &velocity, &mut ordinary_force, &mut ordinary_pressure,
+            ).unwrap();
+            assert_eq!(force, ordinary_force);
+            assert_eq!(pressure, ordinary_pressure);
+            assert_eq!(report.dissipated_power_w, ordinary.dissipated_power_w);
+            let mut outflow = [0.0; 2];
+            let mut heat = 0.0;
+            for (k, edge) in law.channels.iter().enumerate() {
+                let h = edge.gap.reference_m - dot(&edge.gap.closure, &q);
+                let g = edge.width_m * h.powi(3)
+                    / (12.0 * law.channel_viscosities_pa_s()[k] * edge.length_m);
+                let a = pressure[edge.from];
+                let b = edge.to.map_or(0.0, |j| pressure[j]);
+                // Independent integrated Poiseuille fluidity uses actual p,
+                // not the pressure solver's transformed potential or factors.
+                let flow = if alpha == 0.0 { g * (a-b) }
+                    else { g * ((-alpha*b).exp()-(-alpha*a).exp())/alpha };
+                assert!((channels[k].volume_flow_m3_s-flow).abs() < 4e-22);
+                assert!((channels[k].dissipated_power_w-flow*(a-b)).abs() < 5e-18);
+                assert!(channels[k].dissipated_power_w >= 0.0);
+                outflow[edge.from] += channels[k].volume_flow_m3_s;
+                if let Some(j) = edge.to { outflow[j] -= channels[k].volume_flow_m3_s; }
+                heat += channels[k].dissipated_power_w;
+            }
+            for (i, cell) in law.cells.iter().enumerate() {
+                assert!((outflow[i]-cell.area_m2*dot(&cell.gap.closure,&velocity)).abs() < 4e-22);
+            }
+            assert_eq!(heat, report.dissipated_power_w);
+            assert!((heat-dot(&velocity,&force)).abs() < 5e-18);
+        }
+    }
+}
+
+#[test]
+fn passage_reports_keep_closed_channels_zero_and_refuse_without_partial_outputs() {
+    let mut law = two_cell_barus();
+    law.channels[0].gap.reference_m = 0.0; // Each cell still drains to ambient.
+    law.channels[0].gap.closure.fill(0.0);
+    let mut force = [0.0; 2];
+    let mut pressure = [0.0; 2];
+    let mut channels = [FilmChannelReport::default(); 3];
+    law.evaluate_with_channels_into(&[0.0;2],&[0.0001,0.0001],
+        &mut force,&mut pressure,&mut channels).unwrap();
+    assert_eq!(channels[0], FilmChannelReport::default());
+    let sentinel = FilmChannelReport {volume_flow_m3_s:42.0,dissipated_power_w:43.0};
+    for (q, velocity, count) in [
+        ([0.0;2],[0.0001,0.0001],2),
+        ([0.0002,0.0],[0.0;2],3),
+        ([0.0;2],[1.0,0.0],3),
+    ] {
+        force.fill(42.0); pressure.fill(42.0); channels.fill(sentinel);
+        assert!(law.evaluate_with_channels_into(&q,&velocity,
+            &mut force,&mut pressure,&mut channels[..count]).is_err());
+        assert_eq!(force,[42.0;2]); assert_eq!(pressure,[42.0;2]);
+        assert_eq!(channels,[sentinel;3]);
+    }
+}
+
+#[test]
 fn zero_barus_is_bitwise_newtonian_and_pressure_barriers_refuse_atomically() {
     let original = film();
     let zero = original

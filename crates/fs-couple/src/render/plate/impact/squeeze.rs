@@ -4,7 +4,7 @@
 //! same trial configuration and discrete-gradient effort, never one tick late.
 /// Shared gas/liquid transport data driving the original Reynolds operator.
 pub mod material;
-pub use fs_tribo::resistive_film::{FilmCell, FilmChannel, FilmError, FilmLimits,
+pub use fs_tribo::resistive_film::{FilmCell, FilmChannel, FilmChannelReport, FilmError, FilmLimits,
     FilmReport, GapPort, ResistiveFilm};
 use super::{ImpactError, ImpactSystem, MAX_IMPACT_MODES, invalid};
 use fs_tribo::resistive_film::MAX_CELLS;
