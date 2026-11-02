@@ -19315,7 +19315,7 @@ admits typed absolute temperature and dry-mass moisture, pins original material
 claims, and obtains dry density only from the reference wet density divided by
 `1 + reference_moisture`. Dry skeleton mass stays fixed.
 
-Every internal face uses a symmetric harmonic series conductance. External
+By default, internal faces use symmetric harmonic series conductance. External
 faces, in -x,+x,-y,+y,-z,+z order, use the original prescribed-moisture, sorption
 and finite surface-emission laws, including half-cell diffusion resistance.
 Each cell stores water once even at edges/corners or when an axis has one cell.
@@ -19347,6 +19347,30 @@ principal axes aligned to the grid. It does not add unlike-material partition
 laws, arbitrary tensor rotation, sorption heat,
 stress-assisted diffusion, hysteresis or finite-deformation transport, and does
 not close the broader MR46 measured-material acceptance item.
+
+### Nonlinear principal-axis moisture potentials
+
+`MoistureCartesian::new_kirchhoff` and `with_kirchhoff_diffusivity` extend the
+homogeneous source-potential scheme to the three explicitly authored,
+grid-aligned principal laws D_i(M). Each trial prepares one original material
+chart per axis over its complete maximum-principle moisture interval. Internal
+fluxes use exact directional potential secants; each physical boundary reuses
+the bounded nonlinear half-cell/surface-emission balance. Charts are reused
+across Picard iterations without per-face source resolution or query-map
+allocation, and the report carries their x/y/z identities.
+
+Nonnegative laws may wet a dry D_i(0)=0 state; identically zero directions remain
+impermeable. The original symmetric seven-point operator, native checked CG,
+nonlinear/residual/water/maximum-principle gates, cancellation checkpoints and
+transactional publication remain authoritative. Existing finite-reservoir and
+solid consumers retain the selected field mode. This does not supply rotated
+or spatially heterogeneous tensors, unlike-material partitioning, or a
+continuum/front-location certificate.
+
+Five authored physical tests cover independent six-face anisotropic uptake,
+simultaneous three-direction interior dry-corner wetting, zero-transverse
+reduction to native slabs, six nonlinear finite-emission interfaces, and
+bounded refusal without state publication.
 
 Finite reservoirs consume this same Cartesian owner through
 `FiniteMoistureAtmosphere::advance_cartesian` / `advance_shared_cartesian` and

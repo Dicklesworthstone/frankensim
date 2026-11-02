@@ -8,6 +8,8 @@ use fs_solid::linear3::{TetAssemblyBudget, TetStaticSolveConfig, source::SolidSt
 
 #[path = "cartesian/reservoir.rs"]
 mod reservoir;
+#[path = "cartesian/kirchhoff.rs"]
+mod kirchhoff;
 
 fn nonlinear() -> MoistureNonlinearConfig {
     MoistureNonlinearConfig {

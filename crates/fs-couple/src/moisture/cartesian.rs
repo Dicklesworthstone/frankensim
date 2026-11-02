@@ -3,8 +3,11 @@
 //! Uniform Cartesian reference cells retain one dry skeleton. Three explicitly
 //! selected principal diffusivities are aligned with the actual grid axes; a
 //! repeated source key is an explicit equal-diffusivity assignment, never an
-//! inferred tensor. Internal faces use harmonic series resistance. All six
-//! external faces use the original sorption/surface-transfer owner.
+//! inferred tensor. Internal faces use harmonic series resistance by default.
+//! Opt-in Kirchhoff transport integrates each original principal D_i(M) across
+//! the face, allowing a degenerate dry state to wet without an artificial
+//! impermeable barrier. All six external faces use the original sorption and
+//! surface-transfer owner, with the same nonlinear half-cell potential balance.
 //! A moisture-independent source may explicitly assign zero to a principal
 //! diffusivity: that direction is impermeable, including its external faces.
 //!
@@ -42,6 +45,7 @@ pub struct MoistureCartesian {
     moisture: Vec<f64>,
     time_s: f64,
     identity: ContentHash,
+    kirchhoff_diffusivity: bool,
 }
 
 /// Physical transfers and original source/solver evidence at one spatial endpoint.
@@ -67,6 +71,9 @@ pub struct MoistureCartesianReport {
     pub linear_iterations: usize,
     /// True relative Euclidean residual of the endpoint-dependent equations.
     pub nonlinear_relative_residual: f64,
+    /// Original prepared x/y/z source-chart identities for Kirchhoff transport.
+    /// `None` denotes the ordinary harmonic-coefficient scheme.
+    pub kirchhoff_sources: Option<[ContentHash; 3]>,
 }
 
 impl MoistureCartesian {
@@ -83,6 +90,55 @@ impl MoistureCartesian {
         selection: MaterialPropertySelection,
         geometry: MoistureCartesianGeometry,
         initial_moisture: Vec<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        Self::new_configured(
+            card,
+            reference_point,
+            diffusivity_properties,
+            selection,
+            geometry,
+            initial_moisture,
+            false,
+            cx,
+        )
+    }
+
+    /// Bind source-integrated homogeneous diffusion in each principal direction.
+    /// A nonnegative D_i(M) may vanish at the initial dry state. Every advance
+    /// admits its complete moisture interval through the original material chart.
+    /// Nonlinear accuracy and work limits remain explicit arguments to `advance`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_kirchhoff(
+        card: MaterialCard,
+        reference_point: QueryPoint,
+        diffusivity_properties: [&str; 3],
+        selection: MaterialPropertySelection,
+        geometry: MoistureCartesianGeometry,
+        initial_moisture: Vec<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        Self::new_configured(
+            card,
+            reference_point,
+            diffusivity_properties,
+            selection,
+            geometry,
+            initial_moisture,
+            true,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_configured(
+        card: MaterialCard,
+        reference_point: QueryPoint,
+        diffusivity_properties: [&str; 3],
+        selection: MaterialPropertySelection,
+        geometry: MoistureCartesianGeometry,
+        initial_moisture: Vec<f64>,
+        kirchhoff_diffusivity: bool,
         cx: &Cx<'_>,
     ) -> Result<Self, MoistureError> {
         poll(cx)?;
@@ -114,7 +170,7 @@ impl MoistureCartesian {
             &diffusivity_properties,
             selection,
             geometry.maximum_moisture,
-            false,
+            kirchhoff_diffusivity,
         )?;
         let spacing =
             std::array::from_fn::<_, 3, _>(|k| geometry.lengths_m[k] / geometry.cells[k] as f64);
@@ -148,6 +204,7 @@ impl MoistureCartesian {
             moisture: initial_moisture,
             time_s: 0.0,
             identity: hash.finalize(),
+            kirchhoff_diffusivity,
         };
         if !positive(field.wet_mass_kg()) || !field.water_mass_kg().is_finite() {
             return Err(MoistureError::Invalid(
@@ -157,6 +214,14 @@ impl MoistureCartesian {
         field.transport_states(&field.moisture, cx)?;
         poll(cx)?;
         Ok(field)
+    }
+
+    /// Select exact source-potential transport for this field and all existing
+    /// reservoir/solid consumers. Geometry, material identity and accepted state
+    /// stay the same; each report identifies the charts used by its interval.
+    pub fn with_kirchhoff_diffusivity(mut self) -> Self {
+        self.kirchhoff_diffusivity = true;
+        self
     }
 
     pub const fn geometry(&self) -> MoistureCartesianGeometry {
@@ -223,13 +288,55 @@ impl MoistureCartesian {
             .iter()
             .map(|&m| {
                 poll(cx)?;
-                binding::resolve_transport_state(
-                    &self.card,
-                    &self.transport,
-                    &self.field().point_at(m)?,
-                )
+                self.transport_state_at(m)
             })
             .collect()
+    }
+
+    fn transport_state_at(
+        &self,
+        moisture: f64,
+    ) -> Result<ResolvedMaterialStatePoint, MoistureError> {
+        let point = self.field().point_at(moisture)?;
+        if self.kirchhoff_diffusivity {
+            Ok(self.transport.at_query_point(&self.card, &point)?)
+        } else {
+            binding::resolve_transport_state(&self.card, &self.transport, &point)
+        }
+    }
+
+    fn kirchhoff_profiles(
+        &self,
+        reservoir: [Option<f64>; 6],
+        cx: &Cx<'_>,
+    ) -> Result<[KirchhoffMoistureDiffusivity; 3], MoistureError> {
+        let mut lower = f64::INFINITY;
+        let mut upper: f64 = 0.0;
+        for (i, m) in self
+            .moisture
+            .iter()
+            .copied()
+            .chain(reservoir.into_iter().flatten())
+            .enumerate()
+        {
+            if i % 128 == 0 {
+                poll(cx)?;
+            }
+            lower = lower.min(m);
+            upper = upper.max(m);
+        }
+        let prepare = |axis: usize| {
+            poll(cx)?;
+            Ok::<_, MoistureError>(KirchhoffMoistureDiffusivity::from_binding(
+                &self.card,
+                &self.transport,
+                &self.properties[axis],
+                [lower, upper],
+            )?)
+        };
+        let profiles = [prepare(0)?, prepare(1)?, prepare(2)?];
+        poll(cx)?;
+        Ok(profiles)
     }
 
     /// Propose a fully implicit interval on all three spatial directions.
@@ -286,14 +393,15 @@ impl MoistureCartesian {
                     "Cartesian surface exceeds bound-water applicability",
                 ));
             }
-            binding::resolve_transport_state(
-                &self.card,
-                &self.transport,
-                &self.field().point_at(m)?,
-            )?;
+            self.transport_state_at(m)?;
         }
+        let profiles = if self.kirchhoff_diffusivity {
+            Some(self.kirchhoff_profiles(reservoir, cx)?)
+        } else {
+            None
+        };
         let start = self.transport_states(&self.moisture, cx)?;
-        let mut system = self.system(dt_s, &boundaries, &start, cx)?;
+        let mut system = self.system(dt_s, &boundaries, &start, profiles.as_ref(), cx)?;
         let mut iterate = self.moisture.clone();
         let mut linear_iterations = 0usize;
         for iteration in 1..=nonlinear.maximum_iterations {
@@ -316,7 +424,8 @@ impl MoistureCartesian {
                 MoistureError::Invalid("Cartesian solver work count overflow"),
             )?;
             let endpoint = self.transport_states(&solution.x, cx)?;
-            let endpoint_system = self.system(dt_s, &boundaries, &endpoint, cx)?;
+            let endpoint_system =
+                self.system(dt_s, &boundaries, &endpoint, profiles.as_ref(), cx)?;
             let relative = endpoint_system.relative_residual(&solution.x, cx)?;
             let transfer = self.transfers(&solution.x, &boundaries, &endpoint_system);
             let water_after = solution
@@ -378,11 +487,7 @@ impl MoistureCartesian {
                         face.fraction
                             .mul_add(equilibrium - solution.x[face.cell], solution.x[face.cell])
                     };
-                    binding::resolve_transport_state(
-                        &self.card,
-                        &self.transport,
-                        &self.field().point_at(m)?,
-                    )?;
+                    self.transport_state_at(m)?;
                     surface_moisture[face.side].push((face.cell, m));
                 }
                 let report = MoistureCartesianReport {
@@ -400,6 +505,9 @@ impl MoistureCartesian {
                     nonlinear_iterations: iteration,
                     linear_iterations,
                     nonlinear_relative_residual: relative,
+                    kirchhoff_sources: profiles
+                        .as_ref()
+                        .map(|p| std::array::from_fn(|k| p[k].identity())),
                 };
                 let mut next = self.clone();
                 next.moisture = solution.x;
@@ -423,7 +531,7 @@ impl MoistureCartesian {
                     *old = nonlinear.relaxation.mul_add(candidate - *old, *old);
                 }
                 let states = self.transport_states(&iterate, cx)?;
-                system = self.system(dt_s, &boundaries, &states, cx)?;
+                system = self.system(dt_s, &boundaries, &states, profiles.as_ref(), cx)?;
             }
         }
         unreachable!("validated positive spatial iteration budget")
@@ -434,6 +542,7 @@ impl MoistureCartesian {
         dt: f64,
         faces: &[ResolvedMoistureFace; 6],
         states: &[ResolvedMaterialStatePoint],
+        profiles: Option<&[KirchhoffMoistureDiffusivity; 3]>,
         cx: &Cx<'_>,
     ) -> Result<CartesianSystem, MoistureError> {
         let n = self.moisture.len();
@@ -466,11 +575,23 @@ impl MoistureCartesian {
                     .value_si();
                 if coordinate + 1 < cells[k] {
                     let j = i + strides[k];
-                    let other = states[j]
-                        .property(&self.properties[k])
-                        .expect("pinned principal diffusivity")
-                        .value_si();
-                    let a = interior_coupling(scale[k], d, other)?;
+                    let a = if let Some(profiles) = profiles {
+                        let mean = profiles[k].mean_diffusivity(
+                            states[i]
+                                .state_coordinate("moisture_content")
+                                .expect("owned moisture coordinate"),
+                            states[j]
+                                .state_coordinate("moisture_content")
+                                .expect("owned moisture coordinate"),
+                        )?;
+                        kirchhoff::scaled_diffusivity(scale[k], mean)?
+                    } else {
+                        let other = states[j]
+                            .property(&self.properties[k])
+                            .expect("pinned principal diffusivity")
+                            .value_si();
+                        interior_coupling(scale[k], d, other)?
+                    };
                     system.operator.forward[i][k] = a;
                     system.operator.diagonal[i] += a;
                     system.operator.diagonal[j] += a;
@@ -483,8 +604,21 @@ impl MoistureCartesian {
                         continue;
                     }
                     if let Some(equilibrium) = faces[side].equilibrium {
-                        let (coefficient, fraction) =
-                            faces[side].coupling(dt, spacing[k], d, scale[k])?;
+                        let (coefficient, fraction) = if let Some(profiles) = profiles {
+                            kirchhoff::surface_coupling(
+                                &profiles[k],
+                                &faces[side],
+                                dt,
+                                spacing[k],
+                                states[i]
+                                    .state_coordinate("moisture_content")
+                                    .expect("owned moisture coordinate"),
+                                scale[k],
+                                cx,
+                            )?
+                        } else {
+                            faces[side].coupling(dt, spacing[k], d, scale[k])?
+                        };
                         if !coefficient.is_finite()
                             || (d > 0.0
                                 && faces[side].coefficient_m_s != Some(0.0)
