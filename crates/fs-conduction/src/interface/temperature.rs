@@ -12,6 +12,8 @@ pub mod steady;
 pub mod enthalpy;
 /// Complete source-backed contact temperature Jacobian and its transpose.
 pub mod tangent;
+mod mapped;
+pub use mapped::ContactFaceReference;
 
 use fs_exec::Cx;
 use fs_matdb::{InterfaceSystemCard, QueryPoint, SelectionPolicy};
@@ -58,6 +60,7 @@ pub struct TemperatureContact<'a> {
     coordinates: TemperatureContactCoordinates,
     reference: ContactSurface,
     resistance: InterfaceResistance,
+    face_references: Vec<ContactFaceReference>,
 }
 
 impl<'a> TemperatureContact<'a> {
@@ -148,6 +151,24 @@ impl<'a> TemperatureContact<'a> {
         coordinates: TemperatureContactCoordinates,
         selection: SelectionPolicy,
     ) -> Result<Self, ConductionError> {
+        Self::admit_reference(&name, point, &coordinates)?;
+        let resistance = InterfaceResistance::from_card(&name, card, point, selection)?;
+        let reference = match faces {
+            ContactFaces::Matching(pairs)=>ContactSurface::Matching(InterfaceSurface::new(name,pairs,resistance.clone())?),
+            ContactFaces::PointwiseMatching(pairs)=>ContactSurface::PointwiseMatching(
+                InterfaceSurface::new(name,pairs,resistance.clone())?),
+            ContactFaces::Nonmatching{side_a,side_b,options}=>ContactSurface::Nonmatching(
+                NonmatchingSurface::new(name,side_a,side_b,resistance.clone(),options)?),
+        };
+        Ok(Self {
+            card, reference_point: point.clone(), coordinates,
+            reference, resistance, face_references: Vec::new(),
+        })
+    }
+
+    fn admit_reference(
+        name: &str, point: &QueryPoint, coordinates: &TemperatureContactCoordinates,
+    ) -> Result<(), ConductionError> {
         let absolute = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature, ValueForm::Static,
         ));
@@ -169,18 +190,7 @@ impl<'a> TemperatureContact<'a> {
                 return Err(invalid(&name, "each contact temperature coordinate needs a positive absolute-temperature value"));
             }
         }
-        let resistance = InterfaceResistance::from_card(&name, card, point, selection)?;
-        let reference = match faces {
-            ContactFaces::Matching(pairs)=>ContactSurface::Matching(InterfaceSurface::new(name,pairs,resistance.clone())?),
-            ContactFaces::PointwiseMatching(pairs)=>ContactSurface::PointwiseMatching(
-                InterfaceSurface::new(name,pairs,resistance.clone())?),
-            ContactFaces::Nonmatching{side_a,side_b,options}=>ContactSurface::Nonmatching(
-                NonmatchingSurface::new(name,side_a,side_b,resistance.clone(),options)?),
-        };
-        Ok(Self {
-            card, reference_point: point.clone(), coordinates,
-            reference, resistance,
-        })
+        Ok(())
     }
 
     /// Stable interface name, retaining the ordered card's surface convention.
@@ -189,19 +199,21 @@ impl<'a> TemperatureContact<'a> {
         match &self.reference {ContactSurface::Matching(surface)|ContactSurface::PointwiseMatching(surface)=>surface.name(),
             ContactSurface::Nonmatching(surface)=>&surface.name}
     }
-    /// Original query including fixed pressure and all other source conditions.
+    /// Original uniform query, or the first canonical mapped A face's query.
+    /// For a mapped law, inspect `reference_face_states` for every local context.
     #[must_use]
     pub fn reference_point(&self) -> &QueryPoint { &self.reference_point }
     /// Explicit source-coordinate convention, including ordered axis names.
     #[must_use]
     pub const fn coordinates(&self) -> &TemperatureContactCoordinates { &self.coordinates }
-    /// Reference source answer. Its selected claim stays pinned at every trial.
+    /// Uniform reference answer, or the first canonical mapped A face's answer.
+    /// Each mapped face pins its own selected claim throughout later trials.
     #[must_use]
     pub fn reference_resistance(&self) -> &InterfaceResistance { &self.resistance }
 
-    fn query_point_at(&self, temperatures_k: [f64; 2]) -> Result<QueryPoint, ConductionError> {
+    fn query_point_at(&self, side_a: Option<usize>, temperatures_k: [f64; 2]) -> Result<QueryPoint, ConductionError> {
         let [a, b] = [positive(temperatures_k[0])?, positive(temperatures_k[1])?];
-        let mut point = self.reference_point.clone();
+        let mut point = self.source_context(side_a)?.0.clone();
         match &self.coordinates {
             TemperatureContactCoordinates::Mean(axis) => {
                 point = point.with(axis, positive(0.5 * a + 0.5 * b)?)
@@ -218,12 +230,13 @@ impl<'a> TemperatureContact<'a> {
     }
 
     fn at_traces_with_query_refusal(
-        &self, temperatures_k: [f64; 2],
+        &self, side_a: Option<usize>, temperatures_k: [f64; 2],
         on_refusal: &mut dyn FnMut(&fs_matdb::MatDbError),
     ) -> Result<InterfaceResistance, ConductionError> {
-        let point = self.query_point_at(temperatures_k)?;
+        let point = self.query_point_at(side_a, temperatures_k)?;
+        let selected = self.source_context(side_a)?.1.receipt().selected;
         InterfaceResistance::from_card_pinned_with_query_refusal(
-            self.name(), self.card, &point, self.resistance.receipt().selected, on_refusal,
+            self.name(), self.card, &point, selected, on_refusal,
         )
     }
 }
@@ -456,7 +469,7 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
                 let a = mean(pair.side_a)?;
                 let b = mean(pair.side_b)?;
                 let temperature = positive(0.5 * a + 0.5 * b)?;
-                let resistance = law.at_traces_with_query_refusal([a, b], on_refusal)?;
+                let resistance = law.at_traces_with_query_refusal(Some(pair.side_a), [a, b], on_refusal)?;
                 resistances.push(resistance.clone());
                 states.push(ContactFaceState {
                     interface: law.name().into(), pair, side_a_temperature_k: a,
@@ -475,10 +488,10 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         for surface in &mut interfaces.nonmatching {
             let Some(law)=self.variable.iter().find(|law|law.name()==surface.name) else {continue;};
             surface.matching_source_support(cx,temperatures,|traces| {
-                law.at_traces_with_query_refusal(traces,on_refusal).map(|_| ())
+                law.at_traces_with_query_refusal(None,traces,on_refusal).map(|_| ())
             })?;
             *surface=surface.at_quadrature(cx,temperatures,|pair,index,weight,traces| {
-                let resistance=law.at_traces_with_query_refusal(traces,on_refusal)?;
+                let resistance=law.at_traces_with_query_refusal(Some(pair.side_a),traces,on_refusal)?;
                 quadrature_states.push(ContactQuadratureState {interface:law.name().into(),pair,
                     quadrature_index:index,weight_m2:weight,side_a_temperature_k:traces[0],
                     side_b_temperature_k:traces[1],resistance:resistance.clone()});

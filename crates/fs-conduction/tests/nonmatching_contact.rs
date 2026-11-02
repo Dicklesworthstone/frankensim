@@ -2,6 +2,8 @@
 mod support;
 #[path = "nonmatching_contact/temperature.rs"]
 mod temperature;
+#[path = "nonmatching_contact/mapped_temperature.rs"]
+mod mapped_temperature;
 #[path = "nonmatching_contact/steady.rs"]
 mod steady;
 #[path = "nonmatching_contact/steady_linearization.rs"]

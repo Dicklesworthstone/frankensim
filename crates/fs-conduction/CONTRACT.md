@@ -76,6 +76,40 @@ static resistance, not a nonlinear nonmatching temperature or pressure law.
 Focused G1/G3 fixtures cover a heterogeneous bondline on independent meshes,
 uniform-map parity, conservation, delegation and resistance-scale contraction.
 
+### Spatially mapped original contexts on nonlinear thermal contacts
+
+`TemperatureContact::new_nonmatching_mapped` assigns one complete original
+reference query to each explicitly named A-side face of a planar nonmatching
+contact. Entries cover A exactly once, in any input order. The existing
+`NonmatchingSurface::new_mapped` retains the one original card identity and
+physical trace ownership; the opposite tessellation does not resample the map.
+`reference_face_states` exposes every canonical original query and selected
+source answer. The older singular reference accessors describe the first
+canonical mapped face, not an averaged source.
+
+Each retained overlap point updates its own ordered trace temperatures while
+keeping that A face's pressure and other query coordinates and individually
+pinned claim. Full temperature tangents and transposes use the same local
+context and selected chart. Each distinct selected source chart is prepared
+once per interface linearization, shared by all mapped faces that use it.
+Frozen assembly, signed heat, contact Newton, sensible/enthalpy evolution and
+endpoint adjoints continue through their original owners with no geometry
+reintersection or second heat transfer.
+
+The original pair-test allowance bounds map preparation before local queries;
+Cx is polled between source admissions. Missing, duplicate, foreign, unsupported
+or cancelled contexts refuse without publishing a partial law. Actual trial
+source failures retain the existing transactional thermal behavior.
+Pressure, geometry and all nonthermal contexts remain fixed during a thermal
+solve. This supplies no mechanical pressure dynamics, gap/contact-area
+evolution, source extrapolation or unsampled source-domain certificate.
+
+Five regressions in `tests/nonmatching_contact/mapped_temperature.rs` cover
+uniform-map operator/receipt parity, independent per-face heat under opposite
+remeshing, distinct pinned pressure charts, fresh-query tangents/transposes and
+ordered reversal, native conservative thermal evolution, and admission/support
+refusals.
+
 ## Steady source-backed thermal contact
 
 `TemperatureContacts::solve_steady` couples the original steady spatial solver

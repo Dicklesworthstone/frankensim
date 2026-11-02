@@ -89,8 +89,8 @@ impl TemperatureContact<'_> {
     // Prepare each original source law once per complete linearization, not
     // once per face. Fixed external axes require no artificial cell tangent:
     // even an isolated exact source sample can be constant in temperature.
-    fn derivative_response(&self) -> Result<ContactDerivative<'_>, ConductionError> {
-        let claim = self.card.claims().claim(self.resistance.receipt().selected)
+    fn derivative_response(&self, selected: fs_matdb::ClaimId) -> Result<ContactDerivative<'_>, ConductionError> {
+        let claim = self.card.claims().claim(selected)
             .ok_or_else(|| invalid(self.name(), "the selected contact claim is missing"))?;
         match (&claim.value, &claim.interpolation) {
             (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) =>
@@ -111,9 +111,10 @@ impl TemperatureContact<'_> {
     }
 
     fn temperature_neighbourhood(
-        &self, cx: &Cx<'_>, temperatures: [f64; 2],
+        &self, cx: &Cx<'_>, side_a: Option<usize>, temperatures: [f64; 2],
     ) -> Result<(), ConductionError> {
-        let point = self.query_point_at(temperatures)?;
+        let point = self.query_point_at(side_a, temperatures)?;
+        let selected = self.source_context(side_a)?.1.receipt().selected;
         let axes = match &self.coordinates {
             TemperatureContactCoordinates::Mean(axis) => std::slice::from_ref(axis),
             TemperatureContactCoordinates::TwoSided(axes) => axes.as_slice(),
@@ -130,7 +131,7 @@ impl TemperatureContact<'_> {
                 let neighbour = point.clone().with(axis, positive(temperature)?)
                     .map_err(|error| invalid(self.name(), format!("contact derivative query refused: {error}")))?;
                 InterfaceResistance::from_card_pinned(
-                    self.name(), self.card, &neighbour, self.resistance.receipt().selected,
+                    self.name(), self.card, &neighbour, selected,
                 )?;
             }
         }
@@ -138,17 +139,17 @@ impl TemperatureContact<'_> {
     }
 
     fn temperature_partials(
-        &self, cx: &Cx<'_>, temperatures: [f64; 2], response: &ContactDerivative<'_>,
+        &self, cx: &Cx<'_>, side_a: Option<usize>, temperatures: [f64; 2], response: &ContactDerivative<'_>,
         policy: DerivativePolicy,
     ) -> Result<[f64; 2], ConductionError> {
-        let point = self.query_point_at(temperatures)?;
+        let point = self.query_point_at(side_a, temperatures)?;
         // A forward solve may use a generalized derivative of a continuous
         // piecewise-linear curve. Its actual pinned query already admitted
         // this state; trial residuals still enforce the original support.
         // Surface laws retain the existing unique, two-sided gradient rule.
         let primal = matches!(policy, DerivativePolicy::PrimalSemismooth)
             && !matches!(response, ContactDerivative::Surface(_));
-        if !primal { self.temperature_neighbourhood(cx, temperatures)?; }
+        if !primal { self.temperature_neighbourhood(cx, side_a, temperatures)?; }
         match response {
             ContactDerivative::Constant => Ok([0.0; 2]),
             ContactDerivative::Curve { axis, knots } => {
@@ -332,27 +333,38 @@ impl TemperatureContacts<'_, '_> {
         let mut responses = BTreeMap::new();
         for (i, law) in self.variable.iter().enumerate() {
             poll(cx, i)?;
-            responses.insert(law.name(), (law, law.derivative_response()?));
+            // Prepare each distinct pinned source chart once, even when many
+            // mapped faces use different fixed contexts on that same chart.
+            for (index, source) in std::iter::once(&law.resistance)
+                .chain(law.face_references.iter().map(|entry| &entry.resistance)).enumerate() {
+                poll(cx, index)?;
+                let key = (law.name(), source.receipt().selected);
+                if let std::collections::btree_map::Entry::Vacant(entry) = responses.entry(key) {
+                    entry.insert((law, law.derivative_response(key.1)?));
+                }
+            }
         }
         // Pointwise matching guards also admit the appropriate source
         // neighbourhood. Strict adjoints cannot hide a domain-end corner
         // behind interior quadrature points. Forward scalar/curve solves keep
         // the existing semismooth policy and actual residual support checks.
         for surface in &physical.interfaces.nonmatching {
-            if let Some((law, response)) = responses.get(surface.name.as_str()) {
+            if let Some(law) = self.variable.iter().find(|law| law.name() == surface.name) {
+                let (_, response) = responses.get(&(law.name(), law.resistance.receipt().selected))
+                    .ok_or_else(|| invalid(law.name(), "contact support check lost its original source"))?;
                 if matches!(policy, DerivativePolicy::TwoSided)
                     || matches!(response, ContactDerivative::Surface(_)) {
                     surface.matching_source_support(cx, temperature,
-                        |traces| law.temperature_neighbourhood(cx, traces))?;
+                        |traces| law.temperature_neighbourhood(cx, None, traces))?;
                 }
             }
         }
         let mut partials = BTreeMap::new();
         for (i, state) in physical.states().iter().enumerate() {
             poll(cx, i)?;
-            let (law, response) = responses.get(state.interface.as_str())
+            let (law, response) = responses.get(&(state.interface.as_str(), state.resistance.receipt().selected))
                 .ok_or_else(|| invalid("<contact-tangent>", "local contact state lost its source owner"))?;
-            let derivative = law.temperature_partials(cx,
+            let derivative = law.temperature_partials(cx, Some(state.pair.side_a),
                 [state.side_a_temperature_k, state.side_b_temperature_k], response, policy)?;
             if partials.insert(state.pair, derivative).is_some() {
                 return Err(invalid(law.name(), "duplicate local contact derivative"));
@@ -365,13 +377,13 @@ impl TemperatureContacts<'_, '_> {
             let mut local=BTreeMap::<&str,Vec<[f64;2]>>::new();
             for (i,state) in physical.quadrature_states().iter().enumerate() {
                 poll(cx,i)?;
-                let (law,response)=responses.get(state.interface.as_str())
+                let (law,response)=responses.get(&(state.interface.as_str(),state.resistance.receipt().selected))
                     .ok_or_else(||invalid("<contact-tangent>","quadrature state lost its source owner"))?;
                 let entries=local.entry(state.interface.as_str()).or_default();
                 if state.quadrature_index!=entries.len() {
                     return Err(invalid(law.name(),"quadrature derivative order differs from the retained physical rule"));
                 }
-                entries.push(law.temperature_partials(cx,
+                entries.push(law.temperature_partials(cx,Some(state.pair.side_a),
                     [state.side_a_temperature_k,state.side_b_temperature_k],response,policy)?);
             }
             let mut coo=Coo::new(n,n);
