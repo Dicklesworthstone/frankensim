@@ -294,6 +294,16 @@ impl<O: DepositionObserver> DepositionObserver for MaterialContactObserver<'_, O
             .reservoir_conductances(thermal, checkpoint)
             .map_err(MaterialContactObserverError::Bulk)
     }
+
+    fn ambient_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.inner
+            .ambient_conductances(thermal, checkpoint)
+            .map_err(MaterialContactObserverError::Bulk)
+    }
     fn heat_transfers(
         &mut self,
         thermal: &DepositionSimulation<'_>,

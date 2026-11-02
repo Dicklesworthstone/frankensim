@@ -684,6 +684,16 @@ impl<'m, O: DepositionObserver, S: CreepSourceFamily<'m>> DepositionObserver
             .reservoir_conductances(thermal, check)
             .map_err(CreepCouplingError::Observer)
     }
+
+    fn ambient_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.inner
+            .ambient_conductances(thermal, check)
+            .map_err(CreepCouplingError::Observer)
+    }
     fn heat_transfers(
         &mut self,
         thermal: &DepositionSimulation<'_>,

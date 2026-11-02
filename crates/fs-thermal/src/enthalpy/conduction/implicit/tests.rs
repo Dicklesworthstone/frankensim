@@ -1035,3 +1035,6 @@ fn observed_refusals_preserve_native_state_and_source_history() {
     assert_eq!(source.evaluations, 0);
     assert_eq!(source.begins, 0);
 }
+
+#[path = "tests/ambient.rs"]
+mod ambient;

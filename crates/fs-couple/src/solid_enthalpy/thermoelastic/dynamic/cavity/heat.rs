@@ -189,6 +189,13 @@ impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.inner.reservoir_conductances(thermal, checkpoint).map_err(CavityError::Observer)
     }
+
+    fn ambient_conductances(
+        &mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.inner.ambient_conductances(thermal, checkpoint).map_err(CavityError::Observer)
+    }
     fn heat_transfers(
         &mut self, thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,

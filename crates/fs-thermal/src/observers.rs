@@ -44,6 +44,8 @@ pub enum ObserverCouplingError<A, B> {
     ConflictingConductance(u64),
     /// Two owners tried to replace the same cell's reservoir conductance.
     ConflictingReservoirConductance(CellId),
+    /// Two owners tried to replace the same cell's total ambient conductance.
+    ConflictingAmbientConductance(CellId),
 }
 impl<A, B> From<DepositionError> for ObserverCouplingError<A, B> {
     fn from(error: DepositionError) -> Self { Self::Thermal(error) }
@@ -56,6 +58,7 @@ impl<A: core::fmt::Display, B: core::fmt::Display> core::fmt::Display for Observ
             Self::Second(e) => write!(f, "second thermal observer: {e}"),
             Self::ConflictingConductance(id) => write!(f, "multiple conductance owners for thermal link {id}"),
             Self::ConflictingReservoirConductance(id) => write!(f, "multiple reservoir conductance owners for thermal cell {}", id.0),
+            Self::ConflictingAmbientConductance(id) => write!(f, "multiple ambient conductance owners for thermal cell {}", id.0),
         }
     }
 }
@@ -63,7 +66,8 @@ impl<A: std::error::Error + 'static, B: std::error::Error + 'static> std::error:
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Thermal(e) => Some(e), Self::First(e) => Some(e), Self::Second(e) => Some(e),
-            Self::ConflictingConductance(_) | Self::ConflictingReservoirConductance(_) => None,
+            Self::ConflictingConductance(_) | Self::ConflictingReservoirConductance(_)
+                | Self::ConflictingAmbientConductance(_) => None,
         }
     }
 }
@@ -99,6 +103,22 @@ fn admit_conductances(
     }
     Ok(())
 }
+fn admit_ambient_conductances(
+    values: &BTreeMap<CellId, f64>, thermal: &DepositionSimulation<'_>,
+    check: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(), DepositionError> {
+    if values.len() > thermal.cells().len() {
+        return Err(DepositionError::InvalidInput("too many composed ambient cells"));
+    }
+    for (index, (id, value)) in values.iter().enumerate() {
+        if index % 256 == 0 { check()?; }
+        if !thermal.cells().contains_key(id) || !value.is_finite() || *value < 0.0 {
+            return Err(DepositionError::InvalidInput("invalid composed ambient conductance or inactive cell"));
+        }
+    }
+    Ok(())
+}
+
 fn admit_reservoir_conductances(
     values: &BTreeMap<CellId, f64>, thermal: &DepositionSimulation<'_>,
     check: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -215,6 +235,27 @@ impl<A: DepositionObserver, B: DepositionObserver> DepositionObserver for Couple
             if index % 256 == 0 { check()?; }
             if result.insert(id, value).is_some() {
                 return Err(ObserverCouplingError::ConflictingConductance(id));
+            }
+        }
+        check()?;
+        Ok(result)
+    }
+
+    fn ambient_conductances(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        check()?;
+        let mut result = self.first.ambient_conductances(thermal, check)
+            .map_err(ObserverCouplingError::First)?;
+        admit_ambient_conductances(&result, thermal, check)?;
+        check()?;
+        let other = self.second.ambient_conductances(thermal, check)
+            .map_err(ObserverCouplingError::Second)?;
+        admit_ambient_conductances(&other, thermal, check)?;
+        for (index, (id, value)) in other.into_iter().enumerate() {
+            if index % 256 == 0 { check()?; }
+            if result.insert(id, value).is_some() {
+                return Err(ObserverCouplingError::ConflictingAmbientConductance(id));
             }
         }
         check()?;

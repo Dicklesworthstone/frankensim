@@ -263,6 +263,14 @@ where
         self.flow.reservoir_conductances(thermal, check).map_err(Into::into)
     }
 
+    fn ambient_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.flow.ambient_conductances(thermal, check).map_err(Into::into)
+    }
+
     fn heat_transfers(
         &mut self,
         thermal: &DepositionSimulation<'_>,

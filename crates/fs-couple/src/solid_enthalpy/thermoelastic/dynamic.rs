@@ -367,6 +367,11 @@ impl<O: DepositionObserver> DepositionObserver for DynamicHeat<'_, '_, '_, '_, O
         check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.inner.reservoir_conductances(thermal, check).map_err(ThermoelasticFeedbackError::Observer)
     }
+
+    fn ambient_conductances(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.inner.ambient_conductances(thermal, check).map_err(ThermoelasticFeedbackError::Observer)
+    }
     fn heat_transfers(&mut self, thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<Vec<HeatTransfer>, Self::Error> {
         self.inner.heat_transfers(thermal, check).map_err(ThermoelasticFeedbackError::Observer)

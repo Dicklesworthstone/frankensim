@@ -100,7 +100,7 @@ impl DepositionSimulation<'_> {
     }
 
     /// Advance a physical observer and entropy on the SAME original substeps.
-    /// Source, link and reservoir overrides are retained for the entropy rate
+    /// Source, link, ambient and reservoir overrides are retained for the entropy rate
     /// audit before the timeline restores authored coefficients. Reservoir
     /// entropy therefore uses the actual bath temperature and applied flux.
     /// Unclassified internal transfers contribute their signed entropy-at-cell
@@ -113,7 +113,7 @@ impl DepositionSimulation<'_> {
         let wrapped = EntropyObserver {
             inner: observer.clone(), initial_h: BTreeMap::new(),
             sources: BTreeMap::new(), conductances: BTreeMap::new(),
-            reservoirs: BTreeMap::new(), transfers: Vec::new(),
+            reservoirs: BTreeMap::new(), ambient: BTreeMap::new(), transfers: Vec::new(),
             interval_sources: BTreeMap::new(), audit: EntropyAudit::default(),
         };
         let (next, wrapped, energy) = self.advance_observed(&wrapped, target_s, config, checkpoint)?;
@@ -255,6 +255,7 @@ struct EntropyObserver<O> {
     sources: BTreeMap<CellId, f64>,
     conductances: BTreeMap<u64, f64>,
     reservoirs: BTreeMap<CellId, f64>,
+    ambient: BTreeMap<CellId, f64>,
     transfers: Vec<HeatTransfer>,
     interval_sources: BTreeMap<CellId, f64>,
     audit: EntropyAudit,
@@ -285,6 +286,12 @@ impl<O: DepositionObserver> DepositionObserver for EntropyObserver<O> {
     ) -> Result<BTreeMap<u64, f64>, Self::Error> {
         self.conductances = self.inner.conductances(thermal, checkpoint)?;
         Ok(self.conductances.clone())
+    }
+    fn ambient_conductances(&mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.ambient = self.inner.ambient_conductances(thermal, checkpoint)?;
+        Ok(self.ambient.clone())
     }
     fn reservoir_conductances(&mut self, thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -346,9 +353,9 @@ impl<O: DepositionObserver> DepositionObserver for EntropyObserver<O> {
                 sources.insert(id, finite(old + sign * transfer.power_w)?);
             }
         }
-        let mut audit = thermal.entropy_step_audit_with_coefficients(
+        let mut audit = thermal.entropy_step_audit_with_boundary_coefficients(
             &self.initial_h, temperatures, duration_s, &sources,
-            &self.conductances, &self.reservoirs, checkpoint,
+            &self.conductances, &self.ambient, &self.reservoirs, checkpoint,
         )?;
         audit.has_unclassified_sources |= has_unclassified;
         self.audit.accumulate(audit)?;

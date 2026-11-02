@@ -164,6 +164,10 @@ impl ImplicitConductionChain<'_> {
                 .map_err(Observer)?
                 .is_empty()
                 || !source
+                    .ambient_conductances(&next, &mut checkpoint)
+                    .map_err(Observer)?
+                    .is_empty()
+                || !source
                     .reservoir_conductances(&next, &mut checkpoint)
                     .map_err(Observer)?
                     .is_empty()

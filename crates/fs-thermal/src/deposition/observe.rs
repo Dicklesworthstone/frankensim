@@ -70,7 +70,16 @@ pub trait DepositionObserver: Clone {
     fn conductances(&mut self, _thermal: &DepositionSimulation<'_>,
         _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<u64, f64>, Self::Error> { Ok(BTreeMap::new()) }
-    /// Step-local reservoir conductances [W/K], evaluated after `conductances`.
+    /// Step-local total ambient conductances [W/K], after `conductances`.
+    /// These replace exposed-area * authored htc in the original flux/CFL owner.
+    /// Ambient temperatures and exposed reference areas remain authoritative;
+    /// nonzero G requires exposed area. The authored htc is never rewritten.
+    /// Retain applied G in the observer when later hooks need that coefficient.
+    /// This channel is independent of an existing reservoir on the same cell.
+    fn ambient_conductances(&mut self, _thermal: &DepositionSimulation<'_>,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error> { Ok(BTreeMap::new()) }
+    /// Step-local reservoir conductances [W/K], after `ambient_conductances`.
     /// Each key must name an active cell with an authored reservoir. The
     /// reservoir's actual temperature and covered area are retained; only its
     /// total conductance changes for this step. This represents a resolved
@@ -346,12 +355,18 @@ impl<'a> DepositionSimulation<'a> {
         }
         let sources = observer.sources(&candidate, &mut checkpoint)?;
         let conductances = observer.conductances(&candidate, &mut checkpoint)?;
+        let ambient = observer.ambient_conductances(&candidate, &mut checkpoint)?;
         let reservoirs = observer.reservoir_conductances(&candidate, &mut checkpoint)?;
         let transfers = observer.heat_transfers(&candidate, &mut checkpoint)?;
         candidate.set_step_conductances(&conductances, &mut checkpoint)?;
         candidate.set_step_reservoir_conductances(&reservoirs, &mut checkpoint)?;
         candidate.add_step_sources(&sources, &mut checkpoint)?;
-        let mut rates = candidate.heat_rates(f64::MAX, &mut checkpoint)?;
+        let boundaries = crate::enthalpy::backward_euler::BoundaryConductances {
+            ambient_w_k: ambient, ..Default::default()
+        };
+        let mut rates = candidate.heat_rates_with_boundaries(
+            f64::MAX, &boundaries, &mut checkpoint,
+        )?;
         candidate.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
         checkpoint()?;
         Ok(PowerBalance { temperatures_k: rates.temperatures, net_power_w: rates.watts,
@@ -427,6 +442,8 @@ impl<'a> DepositionSimulation<'a> {
             checkpoint()?;
             let conductances = observer.conductances(&next, &mut checkpoint)?;
             checkpoint()?;
+            let ambient = observer.ambient_conductances(&next, &mut checkpoint)?;
+            checkpoint()?;
             let reservoirs = observer.reservoir_conductances(&next, &mut checkpoint)?;
             checkpoint()?;
             let transfers = observer.heat_transfers(&next, &mut checkpoint)?;
@@ -434,8 +451,13 @@ impl<'a> DepositionSimulation<'a> {
             let original_links = next.set_step_conductances(&conductances, &mut checkpoint)?;
             let original_reservoirs = next.set_step_reservoir_conductances(&reservoirs, &mut checkpoint)?;
             let authored = next.add_step_sources(&sources, &mut checkpoint)?;
+            let boundaries = crate::enthalpy::backward_euler::BoundaryConductances {
+                ambient_w_k: ambient, ..Default::default()
+            };
             let step: Result<_, O::Error> = (|| {
-                let mut rates = next.heat_rates(config.max_dt_s, &mut checkpoint)?;
+                let mut rates = next.heat_rates_with_boundaries(
+                    config.max_dt_s, &boundaries, &mut checkpoint,
+                )?;
                 next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
                 let dt = observer.limit_timestep_s(&next, rates.explicit_dt_s, &mut checkpoint)?;
                 if !positive(dt) || dt > rates.explicit_dt_s {

@@ -6,8 +6,10 @@
 //! reservoir has `G = A / (d/k(h) + R_surface)`: zero surface resistance places
 //! the prescribed temperature at the FACE, not at the cell centre; `1/htc`
 //! represents a finite film resistance. The reservoir supplies its actual
-//! temperature and covered area. Insulation is represented by zero conductivity
-//! or no reservoir, never an infinite or silently clipped resistance.
+//! temperature and covered area. An explicitly selected ambient face uses the
+//! same law with its original exposed area and its separate ambient bath.
+//! Insulation is represented by zero conductivity or an unbound insulated
+//! channel, never an infinite or silently clipped resistance.
 //!
 //! This observer reevaluates conductivity once per participating cell on every
 //! actual explicit substep. The original timeline owns pairwise signed heat,
@@ -50,6 +52,23 @@ pub struct ConductiveReservoir {
     pub surface_resistance_m2_k_w: f64,
 }
 
+/// Centre-to-face material conduction on the original exposed ambient area.
+/// The ambient bath remains the cell's authored ambient_k, including events.
+/// This explicit binding owns total ambient G; authored htc is not an extra film.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConductiveAmbient {
+    pub cell_id: CellId,
+    pub half_distance_m: f64,
+    /// Zero: prescribed face temperature. Positive: finite film/contact.
+    pub surface_resistance_m2_k_w: f64,
+}
+
+#[derive(Clone, Copy)]
+struct BoundAmbient {
+    geometry: ConductiveAmbient,
+    area_m2: f64,
+}
+
 #[derive(Clone, Copy)]
 struct BoundCell {
     material_id: MaterialId,
@@ -74,7 +93,7 @@ struct BoundReservoir {
 }
 
 /// Prepared geometry and source bindings for the original sparse thermal graph.
-/// This may own a subset of links/reservoirs and compose with other observers;
+/// This may own a subset of links, reservoir and ambient faces and compose with other observers;
 /// each overridden coefficient must have only one owner. It stores O(cells +
 /// faces) data and performs O((cells + faces) log(cells)) work per substep.
 #[derive(Clone)]
@@ -83,8 +102,10 @@ pub struct ConductionObserver<'a> {
     cells: BTreeMap<CellId, BoundCell>,
     links: BTreeMap<u64, BoundLink>,
     reservoirs: BTreeMap<CellId, BoundReservoir>,
+    ambient_faces: BTreeMap<CellId, BoundAmbient>,
     conductivity: BTreeMap<CellId, f64>,
     reservoir_values: BTreeMap<CellId, f64>,
+    ambient_values: BTreeMap<CellId, f64>,
     prepared: bool,
 }
 
@@ -113,8 +134,10 @@ impl<'a> ConductionObserver<'a> {
             cells: BTreeMap::new(),
             links: BTreeMap::new(),
             reservoirs: BTreeMap::new(),
+            ambient_faces: BTreeMap::new(),
             conductivity: BTreeMap::new(),
             reservoir_values: BTreeMap::new(),
+            ambient_values: BTreeMap::new(),
             prepared: false,
         };
         for (i, &(id, law)) in laws.iter().enumerate() {
@@ -191,6 +214,74 @@ impl<'a> ConductionObserver<'a> {
         result.prepare(thermal, &mut checkpoint)?;
         checkpoint()?;
         Ok(result)
+    }
+
+    /// Bind selected complete exposed ambient faces to the same material owner.
+    /// Coverage, reference geometry and material identities remain fixed. Bath
+    /// temperatures may change through boundary events. Repeated cells refuse;
+    /// calling again may add previously unbound cells. A zero conductivity is
+    /// exact insulation; zero surface resistance is a prescribed physical face.
+    pub fn with_ambient_faces(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        faces: &[ConductiveAmbient],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        checkpoint()?;
+        if faces.len() > thermal.cells.len().saturating_sub(self.ambient_faces.len()) {
+            return Err(DepositionError::InvalidInput(
+                "ambient conduction bindings exceed active thermal owner",
+            ));
+        }
+        let ids = faces.iter().map(|face| face.cell_id).collect::<Vec<_>>();
+        let areas = thermal.exposed_areas_m2(&ids, &mut checkpoint)?;
+        for face in faces {
+            checkpoint()?;
+            let area_m2 = areas[&face.cell_id];
+            if !positive(face.half_distance_m)
+                || !nonnegative(face.surface_resistance_m2_k_w)
+                || !positive(area_m2)
+                || self.ambient_faces.contains_key(&face.cell_id)
+            {
+                return Err(DepositionError::InvalidInput(
+                    "ambient conduction needs a unique exposed face and valid material/film geometry",
+                ));
+            }
+            self.bind_cell(thermal, face.cell_id)?;
+            self.ambient_faces.insert(
+                face.cell_id,
+                BoundAmbient {
+                    geometry: *face,
+                    area_m2,
+                },
+            );
+        }
+        self.prepare(thermal, &mut checkpoint)?;
+        checkpoint()?;
+        Ok(self)
+    }
+
+    // One native coverage sweep, preserving per-side contact measures and the
+    // original subtraction order, instead of a link scan for every face.
+    fn admit_ambient_areas(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        if self.ambient_faces.is_empty() {
+            return Ok(());
+        }
+        let ids = self.ambient_faces.keys().copied().collect::<Vec<_>>();
+        let areas = thermal.exposed_areas_m2(&ids, &mut *checkpoint)?;
+        for (&id, face) in &self.ambient_faces {
+            checkpoint()?;
+            if areas[&id] != face.area_m2 {
+                return Err(DepositionError::InvalidInput(
+                    "bound ambient conduction coverage changed",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn bind_cell(
@@ -286,18 +377,25 @@ impl<'a> ConductionObserver<'a> {
             }
             let k = self.conductivity[&id];
             let geometry = binding.geometry;
-            let g = if k == 0.0 || binding.area_m2 == 0.0 {
-                0.0
-            } else {
-                let bulk = finite(geometry.half_distance_m / k)?;
-                let resistance = finite(bulk + geometry.surface_resistance_m2_k_w)?;
-                let value = finite(binding.area_m2 / resistance)?;
-                if !positive(bulk) || !positive(resistance) || !positive(value) {
-                    return Err(DepositionError::Arithmetic);
-                }
-                value
-            };
+            let g = surface_conductance_w_k(
+                binding.area_m2,
+                geometry.half_distance_m,
+                k,
+                geometry.surface_resistance_m2_k_w,
+            )?;
             self.reservoir_values.insert(id, g);
+        }
+        self.admit_ambient_areas(thermal, checkpoint)?;
+        for (&id, binding) in &self.ambient_faces {
+            checkpoint()?;
+            let geometry = binding.geometry;
+            let g = surface_conductance_w_k(
+                binding.area_m2,
+                geometry.half_distance_m,
+                self.conductivity[&id],
+                geometry.surface_resistance_m2_k_w,
+            )?;
+            self.ambient_values.insert(id, g);
         }
         checkpoint()?;
         self.prepared = true;
@@ -324,6 +422,19 @@ impl DepositionObserver for ConductionObserver<'_> {
     ) -> Result<BTreeMap<u64, f64>, Self::Error> {
         self.prepare(thermal, checkpoint)
     }
+    fn ambient_conductances(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        checkpoint()?;
+        if !self.prepared {
+            return Err(DepositionError::InvalidInput(
+                "evaluate conduction coefficients before ambient faces",
+            ));
+        }
+        Ok(self.ambient_values.clone())
+    }
     fn reservoir_conductances(
         &mut self,
         _: &DepositionSimulation<'_>,
@@ -337,7 +448,11 @@ impl DepositionObserver for ConductionObserver<'_> {
         }
         Ok(self.reservoir_values.clone())
     }
-    fn event(&mut self, event: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+    fn event(
+        &mut self,
+        event: &Event,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<(), Self::Error> {
         self.prepared = false;
         match event {
             Event::Contact(link) => {
@@ -370,6 +485,9 @@ impl DepositionObserver for ConductionObserver<'_> {
             }
             _ => {}
         }
+        // Event hooks receive the already-updated candidate. Check even at the
+        // final endpoint, when no later coefficient query would expose a change.
+        self.admit_ambient_areas(thermal, &mut || Ok(()))?;
         Ok(())
     }
     fn step(
@@ -383,6 +501,26 @@ impl DepositionObserver for ConductionObserver<'_> {
         self.prepared = false;
         checkpoint()
     }
+}
+
+// Shared by the explicit observer and implicit endpoint. This is the same
+// original finite half-cell/film resistance arithmetic for either bath channel.
+fn surface_conductance_w_k(
+    area: f64,
+    distance: f64,
+    conductivity: f64,
+    surface_resistance: f64,
+) -> Result<f64, DepositionError> {
+    if conductivity == 0.0 || area == 0.0 {
+        return Ok(0.0);
+    }
+    let bulk = finite(distance / conductivity)?;
+    let resistance = finite(bulk + surface_resistance)?;
+    let value = finite(area / resistance)?;
+    if !positive(bulk) || !positive(resistance) || !positive(value) {
+        return Err(DepositionError::Arithmetic);
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

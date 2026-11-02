@@ -4,6 +4,33 @@ Layer L3. Shared conservative thermal transport and solid/vapor exchange.
 Runtime dependencies: std, fs-la, fs-math, fs-solver. Spatial discretizations and material
 constitutive data remain owned by their existing crates.
 
+## Conducting ambient faces and separate physical baths
+
+`ConductiveAmbient` and `ConductionObserver::with_ambient_faces` bind a selected
+cell's complete original exposed ambient area to the same finite half-cell
+material and declared surface-resistance law as conducting reservoirs:
+`G(h) = A / (d/k(h) + R_surface)`. The original ambient and reservoir baths
+remain separate and may change temperature through boundary events. Geometry,
+reference mass, material identity and coverage stay fixed; changing a bound
+face refuses. Zero conductivity insulates exactly. Zero surface resistance
+prescribes temperature at the physical face while retaining the material
+half-cell resistance.
+
+The explicit observer protocol carries total ambient conductance through the
+original boundary heat and CFL owner. Authored htc is preserved, ambient heat
+is not reclassified as an applied source, and the entropy owner retains the
+exact applied coefficient and actual bath temperature. Observer composition
+rejects duplicate channel ownership. Existing advection, flow, electrical,
+rendering and solid-feedback wrappers forward this channel to their original
+inner observer.
+
+Implicit chains and graphs use the same boundary-aware residual and analytic
+conductivity derivative for each bath, including nonzero dk/dh on a latent
+plateau with zero dT/dh. Existing unselected channels retain their original
+behavior. Source-only implicit observers explicitly refuse ambient overrides
+rather than silently dropping physical heat. Source, topology, work-budget
+and cancellation failures publish no changed thermal history.
+
 ## State-dependent contact in implicit thermal networks
 
 `enthalpy::conduction::implicit::contact::ImplicitContactLaw` supplies positive

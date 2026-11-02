@@ -156,6 +156,14 @@ impl<const NI: usize, const NR: usize> DepositionObserver for JointOpticalHeatin
         self.observers.reservoir_conductances(thermal, checkpoint)
     }
 
+    fn ambient_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.observers.ambient_conductances(thermal, checkpoint)
+    }
+
     fn heat_transfers(
         &mut self,
         thermal: &DepositionSimulation<'_>,

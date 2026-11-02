@@ -196,6 +196,13 @@ impl<F: FluidTransport + ?Sized, O: DepositionObserver> DepositionObserver
         self.advected.reservoir_conductances(thermal, check)
     }
 
+    fn ambient_conductances(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error>
+    {
+        self.advected.ambient_conductances(thermal, check)
+    }
+
     fn limit_timestep_s(&mut self, thermal: &DepositionSimulation<'_>, proposed_s: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<f64, Self::Error>
     {
