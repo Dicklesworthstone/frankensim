@@ -149,6 +149,8 @@ pub mod layered_wave_heating;
 /// Analytic porous acoustic absorption deposited once into existing thermal cells.
 pub mod porous_heating;
 pub mod tract;
+/// Seeded turbulence noise: shared generator and filter, and the voice's opt-in glottal aspiration source.
+pub mod turbulence_noise;
 /// Source-bound dry sliding work and finite-body temperature feedback.
 pub mod tribothermal;
 /// Physical friction heat through a common interface in the existing enthalpy network.

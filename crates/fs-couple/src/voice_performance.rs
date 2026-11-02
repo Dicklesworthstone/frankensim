@@ -38,7 +38,18 @@
 //! subglottal <time_s> <pressure_pa>                  (repeat, strictly increasing time)
 //! tension_modulation <rate_hz> <relative_amplitude>  (optional; vibrato)
 //! fold_mapping bilateral                             (optional; the fold line is one fold of a pair)
+//! aspiration_noise <seed> <xi_pa_s3_per_m6> [<re_crit>]   (optional; turbulence noise at the glottis)
 //! ```
+//!
+//! `aspiration_noise` adds a seeded turbulence pressure source in series with the glottal channel, driven by the
+//! island's own flow and aperture (the law, its sources and the four readings it takes of them are in
+//! [`crate::turbulence_noise`]). The gain `xi` has no default: no source gives one for glottal aspiration, so a card
+//! without it is refused by name. `re_crit` is optional and defaults to the 1700 that Elie and Laprie take from
+//! Sondhi and Schroeter 1987 (who call it arbitrary). The source is added to the step's subglottal drive, which for a
+//! series source downstream of the folds is the same loop equation (`p_sub + p_n`) and the same fold force
+//! (`p_sub + p_n - p_supra`). Without the key nothing is added and a performance is bit-identical to one written
+//! before the key existed; with the key but a gate that never opens (flow below the onset), the added pressure is
+//! exactly zero and the output is bit-identical as well.
 //!
 //! `tension_modulation` is a cricothyroid gesture: the fold's three stiffnesses are scaled by
 //! `1 + a sin(2 pi r t)` ([`GlottalIsland::set_tension`]), so the emergent f0 swings by about
@@ -64,6 +75,7 @@ use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighM
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::tract::{TractChart, TractSection};
+use crate::turbulence_noise::{AspirationCard, GlottalAspiration, RE_CRIT_SONDHI_SCHROETER};
 use fs_duct::Termination;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
@@ -115,6 +127,8 @@ pub struct VoiceDescription {
     /// Vibrato as a fold-tension gesture `(rate_hz, relative_amplitude)`: the stiffnesses scale by
     /// `1 + a sin(2 pi r t)`. `None` leaves the tension at the card's value for the whole performance.
     pub tension_modulation: Option<(f64, f64)>,
+    /// Opt-in glottal aspiration noise ([`crate::turbulence_noise`]); `None` adds nothing.
+    pub aspiration_noise: Option<AspirationCard>,
 }
 
 fn field(rest: &[&str], i: usize, what: &str) -> Result<f64, String> {
@@ -197,6 +211,7 @@ impl VoiceDescription {
         let mut sections: Vec<TractSection> = Vec::new();
         let mut subglottal: Vec<(f64, f64)> = Vec::new();
         let mut tension_modulation = None;
+        let mut aspiration_noise = None;
         let mut fold_mapping = None;
         let mut fold_damping_upper = None;
         for line in lines {
@@ -354,6 +369,26 @@ impl VoiceDescription {
                     }
                     once(&mut tension_modulation, (rate, amplitude), key)?;
                 }
+                "aspiration_noise" => {
+                    // The gain has no default (no source gives one for glottal aspiration); the threshold has the
+                    // Sondhi-Schroeter value via Elie and Laprie.
+                    if !(rest.len() == 2 || rest.len() == 3) {
+                        return Err(format!(
+                            "`{key}` takes 2 or 3 fields (seed, xi, optional re_crit), got {}; xi has no default",
+                            rest.len()
+                        ));
+                    }
+                    let seed = whole(&rest, 0, "aspiration seed")?;
+                    let xi = field(&rest, 1, "aspiration gain xi")?;
+                    let re_crit = if rest.len() == 3 {
+                        field(&rest, 2, "aspiration re_crit")?
+                    } else {
+                        RE_CRIT_SONDHI_SCHROETER
+                    };
+                    let card = AspirationCard { seed, xi, re_crit };
+                    card.validate().map_err(str::to_string)?;
+                    once(&mut aspiration_noise, card, key)?;
+                }
                 "fold_mapping" => {
                     arity(&rest, 1, key)?;
                     if rest[0] != "bilateral" {
@@ -406,6 +441,7 @@ impl VoiceDescription {
             microphone: microphone.ok_or_else(|| missing("microphone"))?,
             subglottal,
             tension_modulation,
+            aspiration_noise,
         })
     }
 
@@ -488,10 +524,18 @@ impl VoiceDescription {
             mouth_flow_rungs: receipt.rungs.len(),
             passive_formants_hz,
         };
+        let aspiration = match self.aspiration_noise {
+            Some(card) => Some(GlottalAspiration::new(card).map_err(str::to_string)?),
+            None => None,
+        };
         Ok(VoicePerformance {
             island,
             mouth,
             receiver,
+            aspiration,
+            gas_density: gas.density,
+            gas_viscosity: gas.dynamic_viscosity,
+            fold_length_m: self.fold.fold_length_m,
             schedule: Schedule {
                 points: self.subglottal.clone(),
                 cursor: 0,
@@ -593,6 +637,11 @@ pub struct VoicePerformance {
     receiver: BaffledPressure,
     schedule: Schedule,
     tension_modulation: Option<(f64, f64)>,
+    /// Opt-in aspiration source, with the gas properties and fold length its law needs.
+    aspiration: Option<GlottalAspiration>,
+    gas_density: f64,
+    gas_viscosity: f64,
+    fold_length_m: f64,
     trace: Vec<f64>,
     ratio: usize,
     mechanics_rate: u32,
@@ -652,11 +701,22 @@ impl VoicePerformance {
                     .set_tension(tension)
                     .map_err(|e| format!("fold tension refused: {e:?}"))?;
             }
-            let drive = self.schedule.at(t);
+            let mut drive = self.schedule.at(t);
+            if let Some(source) = self.aspiration.as_mut() {
+                // A series pressure source downstream of the folds: the loop sees p_sub + p_n. Zero is not added, so a
+                // shut gate leaves the drive bit for bit what it was.
+                let noise = source.pressure_pa(self.gas_density, self.gas_viscosity, 1.0 / f64::from(self.mechanics_rate));
+                if noise != 0.0 {
+                    drive += noise;
+                }
+            }
             let frame = self
                 .island
                 .step(drive)
                 .map_err(|e| format!("glottal island refused: {e:?}"))?;
+            if let Some(source) = self.aspiration.as_mut() {
+                source.record(frame.flow_m3_s, self.fold_length_m * frame.gap_m.max(0.0));
+            }
             let flow = self
                 .mouth
                 .push(self.island.incident_wave_pa())
@@ -1130,6 +1190,67 @@ mod tests {
         let swung = render(&fixture("tension_modulation 5.9 0.08\n"));
         assert!(swung.iter().all(|v| v.is_finite()));
         assert_ne!(plain, swung, "a real gesture must reach the radiated pressure");
+    }
+
+    fn first_difference(a: &[f64], b: &[f64]) -> Option<usize> {
+        a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits())
+    }
+
+    #[test]
+    fn aspiration_noise_parses_and_is_refused_by_name() {
+        let parse = |extra: &str| VoiceDescription::from_bytes(fixture(extra).as_bytes());
+        let ok = parse("aspiration_noise 7 1e-4\n").expect("parses");
+        assert_eq!(ok.aspiration_noise, Some(AspirationCard { seed: 7, xi: 1.0e-4, re_crit: 1700.0 }));
+        let own = parse("aspiration_noise 7 1e-4 2500\n").expect("parses");
+        assert_eq!(own.aspiration_noise.map(|card| card.re_crit), Some(2500.0));
+        assert_eq!(parse("").expect("parses").aspiration_noise, None);
+        for (extra, needle) in [
+            ("aspiration_noise\n", "takes 2 or 3 fields"),
+            ("aspiration_noise 7\n", "xi has no default"),
+            ("aspiration_noise 7 1e-4 1700 9\n", "takes 2 or 3 fields"),
+            ("aspiration_noise x 1e-4\n", "not a non-negative integer"),
+            ("aspiration_noise 7 x\n", "not a number"),
+            ("aspiration_noise 7 nan\n", "must be finite"),
+            ("aspiration_noise 7 0\n", "xi must be finite and positive"),
+            ("aspiration_noise 7 -1e-4\n", "xi must be finite and positive"),
+            ("aspiration_noise 7 1e-4 -1\n", "re_crit"),
+            ("aspiration_noise 7 1e-4\naspiration_noise 8 1e-4\n", "only appear once"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    #[test]
+    fn aspiration_is_silent_below_the_onset_flow_noisy_above_it_and_seeded() {
+        let plain = render(&fixture(""));
+        // A threshold no glottal jet reaches: the gate never opens, nothing is added, and every bit stays.
+        let shut = render(&fixture("aspiration_noise 7 1e-4 1e12\n"));
+        assert!(
+            plain.iter().zip(&shut).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "a gate that never opens must leave the output bit-identical to no key"
+        );
+        // The default threshold (1700): the fixture's jet reaches Re of order 1e4, so the gate opens and the noise reaches the output.
+        let gated = render(&fixture("aspiration_noise 7 1e-4\n"));
+        assert!(gated.iter().all(|v| v.is_finite()));
+        let first_gated = first_difference(&plain, &gated).expect("noise above the onset flow reaches the output");
+        // Planted negative: a gate with no threshold (Re_c = 0) opens at the first flow instead of at Re_c, so its first
+        // difference comes far earlier. The test above would pass a source that ignored its threshold; this one would not.
+        let ungated = render(&fixture("aspiration_noise 7 1e-4 0\n"));
+        let first_ungated = first_difference(&plain, &ungated).expect("an ungated source speaks");
+        assert!(
+            first_ungated + 100 < first_gated,
+            "the gated source must stay silent while Re < Re_c: ungated first difference at {first_ungated}, gated at {first_gated}"
+        );
+        // A declared seed gives one result, another seed another.
+        let again = render(&fixture("aspiration_noise 7 1e-4\n"));
+        assert!(gated.iter().zip(&again).all(|(a, b)| a.to_bits() == b.to_bits()), "the same seed must repeat bit for bit");
+        let other = render(&fixture("aspiration_noise 8 1e-4\n"));
+        assert_ne!(gated, other, "another seed must give another noise");
+        // The noise is broadband and the gain scales it: a bigger gain moves the output further from the noiseless render.
+        let rms_from_plain = |x: &[f64]| (x.iter().zip(&plain).map(|(a, b)| (a - b) * (a - b)).sum::<f64>() / x.len() as f64).sqrt();
+        let loud = render(&fixture("aspiration_noise 7 4e-4\n"));
+        assert!(rms_from_plain(&loud) > 1.5 * rms_from_plain(&gated), "a 4x gain must move the output further");
     }
 
     /// The radiated f0's peak swing at the gesture rate with no key, at `a = 0.04` and at `a = 0.08`, and the largest
