@@ -313,15 +313,21 @@ impl<'a> MaterialEmissivitySource<'a> {
             }
         }
         if let Response::Curve { coordinate, knots } = self.response {
-            let (axis, value) = match coordinate {
-                Coordinate::Temperature => (self.material.temperature_axis, phase.temperature_k()),
+            let (axis, value, slope) = match coordinate {
+                Coordinate::Temperature => (self.material.temperature_axis, phase.temperature_k(), dt),
                 Coordinate::LiquidFraction => (
                     self.material
                         .liquid_fraction_axis
                         .expect("prepared fraction axis"),
                     phase.liquid_mass_fraction(),
+                    df,
                 ),
             };
+            // A strictly smooth chart may hold this coordinate constant on an
+            // open h neighborhood: latent T or pure-phase fraction. Its source
+            // composition then has zero h slope even at an original source
+            // knot or endpoint; ordinate controls still use that exact knot.
+            if slope == 0.0 { return Ok(()); }
             if value <= knots[0].0 || value >= knots[knots.len() - 1].0 {
                 return Err(E::SourceEndpoint {
                     vertex,

@@ -39,6 +39,7 @@ pub mod robin;
 pub mod pointwise;
 /// Original-source derivatives of state-dependent ambient emissivity.
 pub mod material;
+pub mod material_enclosure;
 pub use robin::{EnthalpyRobinGradient, EnthalpyRobinResponse};
 mod conductivity;
 
@@ -322,6 +323,19 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             owner.bind_adjoint(cx, &accepted.specific_enthalpy_j_kg, assembly,
                 material_radiation_entries.ok_or(EnthalpyAdjointError::InvalidInput(
                     "material radiation adjoint requires its explicit original-source entry allowance",
+                ))?)?;
+        }
+        if let (Some(PointwiseBoundary::MaterialEnclosure(owner)),
+            Some(PointwiseBoundaryAssembly::MaterialEnclosure(assembly))) = (pointwise_radiation, &mut stage.radiation)
+        {
+            if accepted.pointwise_enclosure_radiation.as_ref() != Some(&assembly.report) {
+                return Err(EnthalpyAdjointError::InvalidInput(
+                    "material enclosure source receipts differ from the accepted endpoint",
+                ));
+            }
+            owner.bind_adjoint(cx, &accepted.specific_enthalpy_j_kg, assembly,
+                material_radiation_entries.ok_or(EnthalpyAdjointError::InvalidInput(
+                    "material enclosure adjoint requires its explicit original-source entry allowance",
                 ))?)?;
         }
         if let Some(radiation) = &stage.radiation {

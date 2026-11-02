@@ -36,6 +36,59 @@ pub struct MaterialRadiationParameterGradient {
     pub patches: Vec<MaterialRadiationPatchGradient>,
 }
 
+impl MaterialEmissivitySource<'_> {
+    pub(in crate::radiation) fn control_count(&self) -> usize {
+        match self.response {
+            Response::Constant => 1,
+            Response::Curve { knots, .. } => knots.len(),
+        }
+    }
+
+    pub(in crate::radiation) fn control_template(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<MaterialEmissivityGradient, ConductionError> {
+        Ok(match self.response {
+            Response::Constant => MaterialEmissivityGradient::Scalar { derivative: 0.0 },
+            Response::Curve { coordinate, knots } => {
+                let mut knot_abscissae = Vec::with_capacity(knots.len());
+                for (index, knot) in knots.iter().enumerate() {
+                    if index % ASSEMBLY_TILE == 0 { poll(cx, index)?; }
+                    knot_abscissae.push(knot.0);
+                }
+                MaterialEmissivityGradient::Curve {
+                    axis: match coordinate {
+                        Coordinate::Temperature => self.material.temperature_axis,
+                        Coordinate::LiquidFraction => self.material.liquid_fraction_axis
+                            .expect("prepared fraction axis"),
+                    }.into(),
+                    knot_abscissae,
+                    knot_value_derivatives: vec![0.0; knots.len()],
+                }
+            }
+        })
+    }
+
+    /// Original ordinate basis at an already resolved, strictly admitted state.
+    pub(in crate::radiation) fn control_basis(
+        &self,
+        phase: EquilibriumPhaseState,
+    ) -> Result<[(usize, f64); 2], ConductionError> {
+        Ok(match self.response {
+            Response::Constant => [(0, 1.0), (0, 0.0)],
+            Response::Curve { coordinate, knots } => {
+                let value = match coordinate {
+                    Coordinate::Temperature => phase.temperature_k(),
+                    Coordinate::LiquidFraction => phase.liquid_mass_fraction(),
+                };
+                let upper = knots.partition_point(|knot| knot.0 <= value).min(knots.len() - 1);
+                let fraction = finite((value - knots[upper - 1].0) / (knots[upper].0 - knots[upper - 1].0))?;
+                [(upper - 1, 1.0 - fraction), (upper, fraction)]
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FaceParameters {
     vertices: [usize; 3],
@@ -64,10 +117,7 @@ impl MaterialPointwiseAmbientRadiation<'_> {
         }
         let parameters = self.patches.iter().try_fold(0usize, |count, patch| {
             count
-                .checked_add(match patch.source.response {
-                    Response::Constant => 1,
-                    Response::Curve { knots, .. } => knots.len(),
-                })
+                .checked_add(patch.source.control_count())
                 .ok_or_else(fail)
         })?;
         self.mesh
@@ -118,21 +168,7 @@ impl MaterialPointwiseAmbientRadiation<'_> {
         for (index, patch) in self.patches.iter().enumerate() {
             poll(cx, index)?;
             let source = &patch.source;
-            let emissivity = match source.response {
-                Response::Constant => MaterialEmissivityGradient::Scalar { derivative: 0.0 },
-                Response::Curve { coordinate, knots } => MaterialEmissivityGradient::Curve {
-                    axis: match coordinate {
-                        Coordinate::Temperature => source.material.temperature_axis,
-                        Coordinate::LiquidFraction => source
-                            .material
-                            .liquid_fraction_axis
-                            .expect("prepared fraction axis"),
-                    }
-                    .into(),
-                    knot_abscissae: knots.iter().map(|knot| knot.0).collect(),
-                    knot_value_derivatives: vec![0.0; knots.len()],
-                },
-            };
+            let emissivity = source.control_template(cx)?;
             template.patches.push(MaterialRadiationPatchGradient {
                 region: source.region.clone(),
                 material_identity: source.material.material.content_hash(),
@@ -160,25 +196,7 @@ impl MaterialPointwiseAmbientRadiation<'_> {
                         "material adjoint source state differs from the accepted endpoint",
                     ));
                 }
-                let weights = match source.response {
-                    Response::Constant => [(0, 1.0), (0, 0.0)],
-                    Response::Curve { coordinate, knots } => {
-                        let value = match coordinate {
-                            Coordinate::Temperature => response.state.phase.temperature_k(),
-                            Coordinate::LiquidFraction => {
-                                response.state.phase.liquid_mass_fraction()
-                            }
-                        };
-                        let upper = knots
-                            .partition_point(|knot| knot.0 <= value)
-                            .min(knots.len() - 1);
-                        let fraction = finite(
-                            (value - knots[upper - 1].0) / (knots[upper].0 - knots[upper - 1].0),
-                        )?;
-                        [(upper - 1, 1.0 - fraction), (upper, fraction)]
-                    }
-                };
-                basis.push(weights);
+                basis.push(source.control_basis(response.state.phase)?);
             }
             bases.push(basis);
         }

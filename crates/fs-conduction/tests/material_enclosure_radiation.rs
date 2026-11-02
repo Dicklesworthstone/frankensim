@@ -2,6 +2,8 @@
 mod support;
 #[path = "material_enclosure_radiation/adaptive.rs"]
 mod adaptive;
+#[path = "material_enclosure_radiation/adjoint.rs"]
+mod adjoint;
 
 use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
 use fs_conduction::transient::enthalpy::heterogeneous::{

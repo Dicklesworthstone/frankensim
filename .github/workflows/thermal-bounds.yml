@@ -79,7 +79,7 @@ jobs:
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
       - name: Test prescribed-temperature enthalpy physics and trajectories
-        run: cargo test --release -p fs-conduction --test enthalpy_adjoint --test enthalpy_transport --test enthalpy_radiation --test heterogeneous_enthalpy --test thermal_history_enthalpy -- --test-threads=1
+        run: cargo test --release -p fs-conduction --test enthalpy_adjoint --test enthalpy_transport --test enthalpy_radiation --test heterogeneous_enthalpy --test thermal_history_enthalpy --test material_ambient_radiation --test material_enclosure_radiation -- --test-threads=1
       - name: Test native enthalpy storage, bath reactions and controls
         run: cargo test --release -p fs-cli --test solve transient_enthalpy -- --test-threads=1
       - name: Test checked CG and immutable-history cooling

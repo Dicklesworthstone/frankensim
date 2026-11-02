@@ -14,6 +14,8 @@ use crate::radiation::pointwise::material::{
     source::{DerivativeMode, MaterialEmissivitySource},
 };
 
+pub mod adjoint;
+
 /// Original caloric/material source for one complete named enclosure trace.
 #[derive(Debug)]
 pub struct MaterialEnclosureRadiationPatch<'a> {
@@ -25,7 +27,8 @@ pub struct MaterialEnclosureRadiationPatch<'a> {
 
 /// Source-dependent gray reflection on an existing closed or open trace owner.
 /// Original geometry, view factors, bath and watt gates remain authoritative.
-/// Spectral data and material/source adjoints require their own explicit path.
+/// Spectral data require their own explicit path. Source adjoints retain the
+/// original ordinates and the current, source-dependent reflection matrix.
 #[derive(Debug)]
 pub struct MaterialPointwiseEnclosureRadiation<'a> {
     base: &'a PointwiseEnclosureRadiation<'a>,
@@ -57,6 +60,11 @@ pub struct MaterialPointwiseEnclosureAssembly {
     absorption_weights: Vec<Vec<f64>>,
     /// <epsilon dB/dh + (B-G) depsilon/dh>, in patch vertex order.
     patch_slopes: Vec<Vec<f64>>,
+    // Retain centered irradiation so source controls never subtract two large
+    // absolute blackbody radiances near thermal equilibrium.
+    reference_temperature_k: f64,
+    irradiation_corrections_w_m2: Vec<f64>,
+    material_parameters: Option<adjoint::MaterialEnclosureParameterData>,
 }
 
 impl MaterialPointwiseEnclosureAssembly {
@@ -150,14 +158,17 @@ impl MaterialPointwiseEnclosureAssembly {
 
     pub(crate) fn admit_adjoint(&self, cx: &Cx<'_>) -> Result<(), ConductionError> {
         poll(cx, 0)?;
-        Err(invalid("accepted/source-parameter material enclosure adjoints are not admitted"))
+        if self.material_parameters.is_none() {
+            return Err(invalid("material enclosure adjoint requires explicit original-source admission"));
+        }
+        Ok(())
     }
 
     pub(crate) fn parameter_pullback(&self, cx: &Cx<'_>, _weights: &[f64])
         -> Result<PointwiseRadiationParameterGradient, ConductionError>
     {
         poll(cx, 0)?;
-        Err(invalid("material enclosure source-parameter adjoints are not admitted"))
+        Err(invalid("material enclosure controls require the original-source parameter pullback"))
     }
 
     fn check_fields(&self, direction: &[f64], output: &[f64]) -> Result<(), ConductionError> {
@@ -401,6 +412,8 @@ impl<'a> MaterialPointwiseEnclosureRadiation<'a> {
                 view_factor_identity: self.view_factors.identity(), ambient,
                 system_energy_closure_w: closure, spectral: None },
             geometry: Arc::clone(&self.base.geometry), view_factors: Arc::clone(&self.view_factors),
-            factors, local, absorption_weights: absorption, patch_slopes: slopes })
+            factors, local, absorption_weights: absorption, patch_slopes: slopes,
+            reference_temperature_k: reference, irradiation_corrections_w_m2: corrections,
+            material_parameters: None })
     }
 }

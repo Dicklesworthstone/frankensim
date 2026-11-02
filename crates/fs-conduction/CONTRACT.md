@@ -3379,3 +3379,42 @@ existing f64 API. They pass the repository-pinned native Rust formatter and inde
 review. They have not yet been executed: the execution environment was reset
 after exhausting disk space, removing its cached native dependency libraries.
 The prior enthalpy suite's reported passes above do not cover these changes.
+
+## Original material enclosure controls on the complete enthalpy adjoint
+
+Material pointwise closed/open enclosures now have explicit accepted-state
+adjoint binders for uniform storage, heterogeneous reference masses and
+material temperature contacts. The retained physical h tangent includes source
+emissivity feedback and the current reflected field. Original scalar claims
+and curve ordinates keep their material/claim identity, axis and fixed knot
+abscissae. One shared bath-temperature control exists only for open enclosures.
+History, source, reference-density, contact-resistance and radiation controls
+compose through the original complete thermal transpose.
+
+For K=I-diag(1-mean(epsilon))*F, a parameter contraction uses one K-transpose
+solve with the retained current factorization. The right-hand side is F^T times
+weighted patch absorption. Local source derivatives integrate
+Na*Nb*(sigma*T_h^4-G_patch) and include the reflected correction divided by patch
+area; the open bath contributes its original black-row derivative. Centered
+radiance is retained to avoid cancellation near equilibrium. No nodal dense
+Jacobian or separate reflection solver is introduced.
+
+Binding rechecks the unchanged accepted physical report and original source
+receipts, admits declared workspace before parameter retention, and polls
+cancellation. The old fixed-emissivity pullback refuses material controls.
+Geometry, view factors, caloric charts and source knot abscissae remain fixed.
+Moving source corners and caloric transitions refuse typed two-sided admission.
+A source corner at a coordinate constant on a smooth open h interval is admitted:
+latent temperature and pure-phase fraction have zero composed h slope there.
+Ambient and enclosure controls share that same source-composition rule.
+
+Three native regression cases were added for closed/open latent source, bath,
+history, density and heat controls; exact nonuniform triangle moments; datum
+invariance; budgets, receipts and cancellation; and typed kink refusals. The
+existing ambient constant-fraction case was updated. All twelve touched Rust
+files pass parser checks; native conduction compilation/execution is not claimed
+under the current resource constraint. An independent exact-polynomial-moment
+calculation on unequal-area open patches agrees with finite differences within
+7.1e-8 for nodal emissivity controls and 1.1e-10 W/K for bath controls. This checks
+the reflection formula, not execution of the native spatial owner. Both material
+radiation test targets are included in the existing thermal CI lane.

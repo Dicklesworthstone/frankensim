@@ -404,7 +404,7 @@ fn sensible_scalar_and_temperature_curve_controls_match_resolved_source_finite_d
 }
 
 #[test]
-fn original_source_and_chart_corners_refuse_typed_two_sided_material_adjoints() {
+fn moving_source_and_chart_corners_refuse_but_constant_coordinates_admit() {
     let mesh = mesh();
     let boundary = boundary(&mesh);
     let context = context();
@@ -422,7 +422,7 @@ fn original_source_and_chart_corners_refuse_typed_two_sided_material_adjoints() 
     for (h, bath, expected) in [
         (500.0, 400.0, "source"),
         (0.0, 400.0, "chart"),
-        (-50.0, 350.0, "endpoint"),
+        (-50.0, 350.0, "constant"),
     ] {
         with_cx(|cx| {
             let radiation = MaterialPointwiseAmbientRadiation::new(
@@ -446,7 +446,7 @@ fn original_source_and_chart_corners_refuse_typed_two_sided_material_adjoints() 
                 )
                 .unwrap();
             assert_eq!(accepted.specific_enthalpy_j_kg, old);
-            let error = engine
+            let bound = engine
                 .linearize_accepted_with_material_ambient_radiation(
                     cx,
                     problem,
@@ -458,8 +458,18 @@ fn original_source_and_chart_corners_refuse_typed_two_sided_material_adjoints() 
                     accepted,
                     1e-8,
                     radiation.adjoint_workspace_entries().unwrap(),
-                )
-                .unwrap_err();
+                );
+            if expected == "constant" {
+                // f=0 on an open solid h interval. The original fraction
+                // endpoint is therefore a smooth constant composition.
+                let gradient = bound.unwrap()
+                    .pullback_with_material_ambient_controls(cx, &SEED, linear()).unwrap();
+                let MaterialEmissivityGradient::Curve { knot_value_derivatives, .. } =
+                    &gradient.radiation.patches[0].emissivity else { panic!("curve source") };
+                assert_eq!(knot_value_derivatives, &[0.0; 3]);
+                return;
+            }
+            let error = bound.unwrap_err();
             let EnthalpyAdjointError::Enthalpy(EnthalpyError::Conduction(
                 ConductionError::RadiationMaterialSmoothness(error),
             )) = error
