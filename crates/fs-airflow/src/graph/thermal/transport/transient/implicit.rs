@@ -103,6 +103,7 @@ impl GraphEnthalpyTransport {
         target_s: f64,
         controls: SparseAdvectionControls,
     ) -> Result<(DepositionSimulation<'m>, SparseAdvectionReport), SparseAdvectionError> {
+        self.require_upwind()?;
         self.validate_storage(cx, thermal)?;
         let n = thermal.cells().len();
         if !(1..=MAX_SPARSE_ADVECTION_CELLS).contains(&controls.maximum_cells)

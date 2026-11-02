@@ -847,3 +847,32 @@ rollback. Cross-crate tests additionally use actual conductor surface pulses,
 state-dependent n/k response and Beer-Lambert volume deposition. Those checks
 retain independent native and optical energy accounts; they do not certify
 spatial, constitutive or nonlinear-optical accuracy from a small energy residual.
+
+## Limited axial enthalpy reconstruction on native transport
+
+`enthalpy::advection::reconstruction::LimitedEnthalpyReconstruction` prepares
+bounded three-cell stencils on contiguous original centreline geometry. Minmod
+limits physical one-sided enthalpy derivatives using actual adjacent lengths;
+the signed native mass flow selects the donor's appropriate face. Each face
+trace lies between its donor centre and neighboring sample, and an extremum
+has zero slope. Missing stencils preserve the original donor-cell trace.
+
+`Advected<()>::endpoint_transport_with_reconstruction` first runs the original
+endpoint admission and source calculation, then corrects each selected internal
+transfer with the same power on both cells. Original component-datum handling,
+fixed mass continuity, caloric laws, external stream enthalpy and backward-Euler
+energy accounting remain authoritative. Prepared mass, geometry and material
+bindings are checked on every candidate. Topological junction gradients,
+external streams on stencil centres, and entropy/species/selective-stream
+closures refuse instead of silently borrowing an unsupported reconstruction.
+
+The plan bounds authored stencils and retains only native cell identities and
+prepared geometric factors; no new physical timeline or accepted-state clamp is
+introduced. The caller solves the nonlinear endpoint residual and retains the
+original cell and total joule acceptance gates. Regression sources exercise
+nonuniform affine traces, smooth periodic face-error refinement, reversal and
+datum invariance, an independent implicit cell balance above explicit CFL, sharp
+extrema, invalid ownership/topology and cancellation. These checks concern
+spatial face reconstruction and stated discrete equations, not a blanket TVD,
+global convergence or arbitrary-source maximum-principle claim.
+

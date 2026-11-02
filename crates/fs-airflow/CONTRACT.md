@@ -2896,3 +2896,38 @@ Fourier-profile mesh refinement, stagnant native equilibration, signed advection
 with conduction, original nonlinear gas calorics, and geometry/ownership refusal.
 Time and spatial resolution remain caller responsibilities.
 
+### Limited heat-front transport on the shared graph endpoint
+
+`DistributedGraphInventory::with_limited_reconstruction` prepares native
+minmod enthalpy traces only for explicitly ordered interior pipe cells. Actual
+adjacent lengths determine the slopes, including nonuniform and bent paths.
+Junctions and branch endpoints retain original donor-cell traces. Signed solved
+flow selects the actual donor face, while one conservative native transfer owns
+both cell debits. The immutable geometry plan is shared across bindings without
+copying it on every coupled evaluation.
+
+Existing distributed quasi-steady, inertial and resolved-time drivers receive
+the same reconstruction through `GraphEnthalpyTransport::endpoint_transport`.
+`transient::nonlinear::advance_implicit_with_heat` additionally solves prescribed
+signed flow with endpoint-resolved wall/source coefficients through the existing
+Newton/Krylov owner and original backward-Euler energy residual. Its bounded
+endpoint-query count includes numerical derivatives and final physical
+acceptance. Heat callbacks supply nonadvective coefficients; native internal
+transfers and external stream enthalpy are included once.
+
+A nonempty reconstruction cannot enter the old explicit observer or linear
+implicit shortcuts: those entrypoints refuse it explicitly. Storage, original
+caloric identities, source support, scheduled-event splits and independent
+local/global joule acceptance remain authoritative. The original state and
+payload remain unpublished on nonlinear failure, source refusal, cancellation
+or exhausted work.
+
+Regression sources compare smooth-front transport against an independent
+continuous plug-flow profile, connect prescribed and coupled native owners, and
+check reversal, rest, datum shifts and transactional refusal. The limiter bounds
+individual face traces; it does not establish a global maximum principle for
+arbitrary coupled sources or unstructured junctions. Backward Euler remains
+first order in time. Spatial/time refinement, including reversal resolution,
+remains necessary; no measured throughput or unconditional nonlinear convergence
+is claimed.
+

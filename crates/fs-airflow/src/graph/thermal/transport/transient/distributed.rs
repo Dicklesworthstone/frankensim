@@ -22,6 +22,10 @@ use super::{GraphEnthalpyTransport, TransientTransportError, poll};
 use crate::graph::LossGraph;
 use crate::graph::gravity::GraphGravity;
 use crate::graph::inertial::{InertialBranch, InertialGraph};
+use fs_thermal::enthalpy::advection::reconstruction::{
+    AxialCellStencil, LimitedEnthalpyReconstruction,
+};
+use std::sync::Arc;
 
 /// Spatial inventory may be refined independently of the bounded hydraulic
 /// descriptor. The native thermal owner's own work/storage limits still apply.
@@ -54,6 +58,7 @@ pub struct DistributedGraphInventory {
     inertial_branches: Vec<Option<InertialBranch>>,
     inertances_pa_s2_m3: Vec<Option<f64>>,
     maximum_connections: usize,
+    reconstruction: Option<Arc<LimitedEnthalpyReconstruction>>,
 }
 
 impl DistributedGraphInventory {
@@ -225,6 +230,7 @@ impl DistributedGraphInventory {
             inertial_branches,
             inertances_pa_s2_m3: inertances,
             maximum_connections,
+            reconstruction: None,
         };
         // The same native reference-mass, storage-basis, component-law and
         // continuity admission as ordinary graph transport; no second law.
@@ -247,6 +253,58 @@ impl DistributedGraphInventory {
     /// Original hydraulic branch order and positive-direction pipe traversal.
     pub fn branch_cells(&self) -> &[Vec<CellId>] {
         &self.branch_cells
+    }
+
+    /// Prepare conservative minmod face enthalpies on original interior cells.
+    ///
+    /// A stencil contains three consecutive cells of ONE authored pipe path.
+    /// Physical nonuniform center distances and half lengths are derived by
+    /// the native thermal reconstruction owner. Junction storage, first/last
+    /// pipe cells, short paths and direct connections keep donor-cell upwind
+    /// transport. No junction gradient or hidden control volume is inferred.
+    ///
+    /// The shared plan is used by native inertial and quasi-steady endpoint
+    /// residuals, including reversal. Explicit observers and linear frozen-
+    /// flow shortcuts refuse this mode; use the nonlinear implicit entry.
+    pub fn with_limited_reconstruction(
+        mut self,
+        cx: &Cx<'_>,
+        graph: &LossGraph,
+        thermal: &DepositionSimulation<'_>,
+        maximum_stencils: usize,
+    ) -> Result<Self, TransientTransportError> {
+        self.admit_storage(cx, graph, thermal)?;
+        let count: usize = self
+            .branch_cells
+            .iter()
+            .map(|path| path.len().saturating_sub(2))
+            .sum();
+        if maximum_stencils > MAX_DISTRIBUTED_FLUID_CELLS || count > maximum_stencils {
+            return Err(TransientTransportError::Invalid(
+                "bounded original pipe reconstruction stencil count required",
+            ));
+        }
+        let mut stencils = Vec::with_capacity(count);
+        for path in &self.branch_cells {
+            for cells in path.windows(3) {
+                poll(cx)?;
+                stencils.push(AxialCellStencil {
+                    previous: cells[0],
+                    cell: cells[1],
+                    next: cells[2],
+                });
+            }
+        }
+        let plan =
+            LimitedEnthalpyReconstruction::try_new(thermal, &stencils, maximum_stencils, || {
+                super::thermal_checkpoint(cx)
+            })?;
+        self.reconstruction = (!plan.is_empty()).then(|| Arc::new(plan));
+        Ok(self)
+    }
+
+    pub fn reconstruction(&self) -> Option<&LimitedEnthalpyReconstruction> {
+        self.reconstruction.as_deref()
     }
     pub const fn reference_density(&self) -> Density {
         self.reference_density
@@ -473,6 +531,12 @@ impl DistributedGraphInventory {
         // Only the thermal index map expands; this remains the original
         // hydraulic node map exposed by every public graph transport binding.
         transport.node_cells = self.node_cells.clone();
+        transport.reconstruction = self.reconstruction.clone();
+        if transport.reconstruction.is_some() {
+            // Admit the actual signed graph against the prepared original
+            // stencil topology, including zero-rate connections at startup.
+            transport.endpoint_transport(cx, thermal)?;
+        }
         Ok(transport)
     }
 

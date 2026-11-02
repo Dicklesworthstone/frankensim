@@ -24,6 +24,10 @@ pub mod species;
 #[path = "advection/entropy.rs"]
 pub mod entropy;
 
+/// Bounded axial reconstruction for the original implicit transport residual.
+#[path = "advection/reconstruction.rs"]
+pub mod reconstruction;
+
 use std::collections::{BTreeMap, BTreeSet};
 use super::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer, MaterialId, ThermalStorageBasis};
 

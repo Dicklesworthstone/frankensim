@@ -15,9 +15,11 @@
 //! fixed; neither binding adds compressible storage.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_qty::Density;
+use fs_thermal::enthalpy::advection::reconstruction::LimitedEnthalpyReconstruction;
 use fs_thermal::enthalpy::advection::{Advected, AdvectionAudit, MassBoundary, MassFlow};
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, TransportStepCoefficients};
 use fs_thermal::enthalpy::{
@@ -64,6 +66,7 @@ pub struct GraphEnthalpyTransport {
     storage: BTreeMap<CellId, BoundTransportStorage>,
     advection: Advected<()>,
     max_connections: usize,
+    reconstruction: Option<Arc<LimitedEnthalpyReconstruction>>,
 }
 
 #[derive(Clone)]
@@ -260,6 +263,7 @@ impl GraphEnthalpyTransport {
             storage,
             advection,
             max_connections,
+            reconstruction: None,
         })
     }
 
@@ -268,10 +272,30 @@ impl GraphEnthalpyTransport {
         &self.node_cells
     }
 
+    /// Authored interior pipe reconstruction, shared with the fixed inventory.
+    /// Junctions and unstencilled end cells retain the native donor-cell law.
+    pub fn reconstruction(&self) -> Option<&LimitedEnthalpyReconstruction> {
+        self.reconstruction.as_deref()
+    }
+
+    fn require_upwind(&self) -> Result<(), DepositionError> {
+        if self
+            .reconstruction
+            .as_ref()
+            .is_some_and(|plan| !plan.is_empty())
+        {
+            return Err(DepositionError::InvalidInput(
+                "limited pipe reconstruction requires the nonlinear endpoint transport path",
+            ));
+        }
+        Ok(())
+    }
+
     /// Compose with the native source/conduction observer instead of creating
     /// a parallel time owner. Its existing budgets, combined CFL restriction,
     /// transactional histories and material domains remain authoritative.
     pub fn wrap_observer<O>(&self, inner: O) -> Result<Advected<O>, DepositionError> {
+        self.require_upwind()?;
         Advected::new(inner, self.advection.flows().to_vec(), self.max_connections)?
             .with_boundaries(self.advection.boundaries().to_vec(), self.max_connections)
     }
@@ -288,6 +312,7 @@ impl GraphEnthalpyTransport {
         config: StepConfig,
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit, AdvectionAudit), TransientTransportError>
     {
+        self.require_upwind()?;
         self.validate_storage(cx, thermal)?;
         let (next, advected, energy) =
             thermal
@@ -305,9 +330,17 @@ impl GraphEnthalpyTransport {
         thermal: &DepositionSimulation<'_>,
     ) -> Result<TransportStepCoefficients<()>, TransientTransportError> {
         self.validate_storage(cx, thermal)?;
-        Ok(self
-            .advection
-            .endpoint_transport(thermal, || thermal_checkpoint(cx))?)
+        Ok(match &self.reconstruction {
+            Some(plan) => {
+                self.advection
+                    .endpoint_transport_with_reconstruction(thermal, plan, || {
+                        thermal_checkpoint(cx)
+                    })?
+            }
+            None => self
+                .advection
+                .endpoint_transport(thermal, || thermal_checkpoint(cx))?,
+        })
     }
 
     /// One backward-Euler advection/fixed-source step on at most 64 cells.
@@ -328,6 +361,7 @@ impl GraphEnthalpyTransport {
         cell_tolerance_j: f64,
         total_tolerance_j: f64,
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit), TransientTransportError> {
+        self.require_upwind()?;
         self.validate_storage(cx, thermal)?;
         let n = thermal.cells().len();
         if n != self.storage.len()
@@ -473,6 +507,7 @@ pub mod distributed;
 pub mod implicit;
 pub mod inertial;
 pub mod material;
+pub mod nonlinear;
 
 #[cfg(test)]
 mod tests;
