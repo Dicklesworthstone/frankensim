@@ -481,3 +481,6 @@ fn fast_layered_bending_original_bending_and_torsion_share_the_exact_material_ow
 
 #[path = "material_string_relaxation/exclusive.rs"]
 mod exclusive;
+
+#[path = "material_string_relaxation/fiber_ribbon.rs"]
+mod fiber_ribbon;

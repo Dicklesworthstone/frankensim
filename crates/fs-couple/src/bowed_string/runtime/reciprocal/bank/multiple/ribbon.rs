@@ -232,18 +232,21 @@ impl ReciprocalStringBank {
             }
             memory.validate_band(self.system.linear_frequency_upper_bound_rad_s(),
                 self.system.sample_period_s()).map_err(fiber_memory_error)?;
-            if self.source.longitudinal_waves.is_some() {
-                super::super::nonlinear::longitudinal::relaxation::finite_strain::validate_sources(
-                    &self.source, &self.system, gate).map_err(|error| match error {
-                        crate::render::plate::impact::ImpactError::Cancelled =>
-                            ReciprocalStringError::Network(crate::render::schedule::force::coupled::ModalCouplingError::Cancelled),
-                        error => ReciprocalStringError::Material(
-                            crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string())),
-                    })?;
-            } else {
-                self.source.validate_body_memory_frequencies(&self.system, gate)?;
-                self.source.validate_material_bridge_frequencies(&self.system, gate)?;
-            }
+        }
+        // Even elastic fibers enlarge the complete coupled frequency band.
+        // Existing string/body/bridge sources must cover it independently of
+        // whether the newly attached fibers carry their own material memory.
+        if self.source.longitudinal_waves.is_some() {
+            super::super::nonlinear::longitudinal::relaxation::finite_strain::validate_sources(
+                &self.source, &self.system, gate).map_err(|error| match error {
+                    crate::render::plate::impact::ImpactError::Cancelled =>
+                        ReciprocalStringError::Network(crate::render::schedule::force::coupled::ModalCouplingError::Cancelled),
+                    error => ReciprocalStringError::Material(
+                        crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string())),
+                })?;
+        } else {
+            self.source.validate_body_memory_frequencies(&self.system, gate)?;
+            self.source.validate_material_bridge_frequencies(&self.system, gate)?;
         }
         let mut bank = self.with_uniform_bow_ribbon(ribbon.geometry().width_m, cells, joint, gate)?;
         let attachments = (0..cells).map(|port| FrictionSurfaceAttachment { port,
