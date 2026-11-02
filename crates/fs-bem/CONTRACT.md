@@ -2318,3 +2318,65 @@ active/reactive surface work. Deterministic traversal is retained. Compensation
 does not certify arbitrary permutation equality, resolve kernel/phase errors,
 or bound a nearly cancelling field's relative error; the original spatial,
 quadrature, conditioning and material limitations still apply.
+
+## Finite-window observations of prepared BEM fields
+
+`PreparedHarmonicExposure` consumes the existing
+`PreparedHarmonicObservation` source-to-receiver pressure/particle-velocity
+transfers at each authored positive angular frequency. The canonical owner
+and explicit source clock define physical scope, including an empty/dark
+observation. Every line must match its producer hash, ordered physical source
+coordinates, exact receiver names/positions and original density/sound speed.
+Matching receiver names alone cannot authorize mixing different physical
+operators. The common emission clock is explicitly declared, not reconstructed
+from unrelated phase data.
+
+An optional deterministic mean and explicitly joint proper-complex factor
+banks retain all source, incident/scattered and cross-frequency interference.
+The factors obey E[xi_r]=0, E[xi_r conj(xi_s)]=delta_rs,
+E[xi_r xi_s]=0. Different factors and the mean add second moments; frequencies
+within a factor do not become independent. Factor amplitudes carry peak source
+units and any square-root statistical weights. No Gaussian distribution,
+stationarity or PSD-bin normalization is inferred.
+
+Preparation contracts retained p/u rows in double-double arithmetic, without
+another BEM solve, then coalesces exactly equal frequencies in authored order.
+Each query reuses the shared `fs_fft::harmonic_window` analytic rad/s kernels
+across all receivers and components. Deterministic means integrate against a
+unit DC field through the same DD kernel, preserving low components before
+cross-frequency cancellation. Output includes pressure/velocity means,
+uncentered pressure mean square, the full real symmetric Cartesian velocity
+second moment and signed finite-window mean p u [W/m^2]. No plane-wave
+pressure-to-intensity substitution, reactive-intensity surrogate, positive
+clipping or heating attribution occurs.
+
+The immutable prepared owner retains its original producer uncertainty; these
+moments do not certify source fidelity, boundary discretization or quadrature
+accuracy. Double-double arithmetic improves cancellation but supplies no
+certified relative guarantee at arbitrary nulls. Nonfinite or negative
+computed self moments refuse.
+
+At most 4096 supplied lines and 256 factors are admitted. Explicit source-row,
+receiver-frequency-pair and logical workspace budgets precede allocation.
+Preparation takes O(receivers * sources * lines) transfer work; queries take
+O(receivers * sum(distinct frequencies per bank squared)) fixed-size
+four-component contractions. Preparation/query cancellation publishes no
+partial result and leaves accepted owners reusable. The returned point array
+borrows original source/receiver identity and the declared clock.
+
+Eight authored G0/G1/G3/G4/G5 regressions cover two-frequency physical
+incident-plus-scattered fields against independent simultaneous-source BEM
+solves and real-time integration; exact finite proper-factor phase ensembles;
+full velocity covariance and orthogonal factor mixing; negative subperiod
+standing-wave energy flux; sub-ulp proper beats; weak coherent source/group
+residuals; clock covariance; and original-owner, budget, cancellation and dark
+field behavior. Source formatting and focused production-module Rust type analysis passed. Native numerical execution is
+pending because the authoring environment's storage is exhausted; source
+inspection and independent reference calculations are not a Rust test pass.
+
+An independent JavaScript reconstruction of the two-frequency/four-component
+proper-factor fixture agreed with direct Simpson integration over its exact
+16-state phase ensemble to 3.96e-16 maximum absolute error. The same analytic
+references give -0.001546695268142812 W/m^2 standing-wave flux and
+1.378634354255046e-25 Pa^2 for the weak proper beat; these are reference
+calculations, not executed Rust results.
