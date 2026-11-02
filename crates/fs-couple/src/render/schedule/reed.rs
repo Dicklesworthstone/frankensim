@@ -49,6 +49,7 @@ use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 mod field_input;
 mod molecular_input;
 mod outlet;
+pub mod source;
 use super::{
     GestureCompileError, PressureGestureBinding, ScheduledControl, ScheduledRenderer,
     compile_pressure_gestures,
@@ -486,7 +487,20 @@ impl ReedPerformance {
         max_block: usize,
         policy: ObservationPolicy,
         sources: Option<&ThermochemicalSources<'_>>,
+        gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
+    ) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_environment_and_reed(
+            bytes, max_block, policy, sources, gas_field, None,
+        )
+    }
+
+    fn from_bytes_with_environment_and_reed(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        sources: Option<&ThermochemicalSources<'_>>,
         mut gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
+        source_reed: Option<BeatingReed>,
     ) -> Result<Self, ReedPerformanceError> {
         if bytes.len() > MAX_REED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(
@@ -535,15 +549,33 @@ impl ReedPerformance {
             ));
         }
         let mut row = r.row("reed")?;
-        let reed = BeatingReed {
-            rest_opening_m: row.positive()?,
-            width_m: row.positive()?,
-            closing_pressure_pa: row.positive()?,
-            mass_kg: row.scalar()?,
-            stiffness_n_m: row.scalar()?,
-            damping_ratio: row.scalar()?,
-            blowing_pressure_pa: 0.0,
-            attack_s: 0.0,
+        let reed = if row.words.clone().next() == Some("source") {
+            row.word()?;
+            let reed = source_reed.ok_or_else(|| {
+                bad(row.line, "reed source requires an admitted BeatingReedSource")
+            })?;
+            if reed.mass_kg <= 0.0 || reed.stiffness_n_m <= 0.0
+                || reed.blowing_pressure_pa != 0.0 || reed.attack_s != 0.0
+            {
+                return Err(bad(row.line,
+                    "source reed requires positive mass/stiffness and schedule-owned pressure/attack"));
+            }
+            reed
+        } else {
+            if source_reed.is_some() {
+                return Err(bad(row.line,
+                    "an admitted reed source requires reed source instead of numeric mechanics"));
+            }
+            BeatingReed {
+                rest_opening_m: row.positive()?,
+                width_m: row.positive()?,
+                closing_pressure_pa: row.positive()?,
+                mass_kg: row.scalar()?,
+                stiffness_n_m: row.scalar()?,
+                damping_ratio: row.scalar()?,
+                blowing_pressure_pa: 0.0,
+                attack_s: 0.0,
+            }
         };
         // Optional measured lay: stiffness [N/m^alpha], exponent, onset opening [m]
         // and Hunt-Crossley loss [s/m]; absent, the default slit lay applies.
@@ -591,6 +623,10 @@ impl ReedPerformance {
         let tongue_contact = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("tongue_contact") {
             let mut row = r.row("tongue_contact")?;
+            if source_reed.is_some() {
+                return Err(bad(row.line,
+                    "source reed tongue_contact requires a source-projected contact map"));
+            }
             let area_m2 = row.positive()?;
             let effective_area_m2 = row.positive()?;
             let force_n = row.positive()?;

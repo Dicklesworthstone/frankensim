@@ -1,0 +1,21 @@
+frankensim-reed-performance-v1
+audio 48000 4096 1
+ambient mixture 293.15 100000 mole 2 N2 0.8 O2 0.2
+reed source
+baffled_outlet 0 0 0.5 4 16 1000
+observer_law stokes-kirchhoff
+termination flanged
+segments 1
+cylinder 0.0015 0.5
+compile_limits 100000 1024
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	1000
+tracks	1
+track	blow	blowing-pressure
+initial	pressure-pa	0e0
+events	4
+event	0e0	8e-3	pressure-pa	1e2
+event	2.5e-2	0e0	pressure-pa	0e0
+event	5e-2	5e-3	pressure-pa	1e2
+event	7.5e-2	0e0	pressure-pa	0e0

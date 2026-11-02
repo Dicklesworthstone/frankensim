@@ -48,6 +48,42 @@ assumption, and this example does not infer melting or transformation laws
 from a material label. Missing data, a source domain exit or ambiguous claims
 refuse; no substitute material is chosen.
 
+## Schedule the same material valve through a physical duct and microphone
+
+The optional `--performance` input connects each cold/heated structural source
+to the existing native reed-performance owner. For example:
+
+```bash
+cargo run --release -p fs-couple --example heated_valve_sound -- \
+  --demo 1 1 10 1 /tmp/heated-valve-scheduled \
+  --performance crates/fs-couple/examples/heated_valve_sound/source.performance
+```
+
+The same option works with `--pack`. The performance explicitly selects
+`reed source`: the material/geometry reducer supplies its opening, width,
+closing pressure, dynamic mass, stiffness and damping. No numerical reed
+coefficients are copied into the file. The existing pressure gesture track
+owns attacks, releases and resumed playing while preserving reed and bore
+state. Its duct, local gases, optional lay/slit, exterior gas and baffled
+microphone use the same physical owners as the ordinary TMM performance.
+For example, changing the file's N2/O2 mixture to CO2/O2 changes excitation,
+propagation and observation without changing any structural code.
+
+This comparison requires `audio 48000 4096` and a physical baffled observation;
+PCM scaling remains the explicitly supplied command-line value. Source-free
+use of `reed source`, numerical mechanics combined with a bound source, and a
+failed first-mode compliance admission refuse. The renderer retains the
+original structural source and reduction policy, separate from the authored
+performance's byte hash. It is an admitted single-mode structural reduction,
+not a resolved double-reed model or measured clarinet/oboe qualification.
+`tongue_contact` also refuses here: its assumed cantilever force projection
+requires replacement by a contact map projected from the actual source mode.
+
+This option declares a frozen acoustic gas in the performance and therefore
+cannot be combined with `--finite-gas`, whose cold and hot acoustic media come
+from the thermal reservoir. The existing finite-gas experiment remains
+available through its own explicit medium binding.
+
 ## Heat the spatial valve from a finite source gas
 
 Add `--finite-gas VOLUME_M3 GAS_DISTANCE_M STEPS` and the shared explicit gas

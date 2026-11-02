@@ -1,4 +1,9 @@
 //! Synthetic regression specimens, not measurements of cane or an instrument.
+use fs_couple::pcm_wav::observation::{ObservationPolicy, PressureRenderer};
+use fs_couple::render::schedule::reed::{
+    ReedPerformance,
+    source::{SourceReedPerformance, SourceReedPerformanceError},
+};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_solid::linear3::{TetElasticMaterial, TetMaterialField};
 use fs_solid::reduce::material_field;
@@ -146,19 +151,137 @@ fn admission() -> SingleModeValveAdmission {
     }
 }
 fn valve(cx: &Cx<'_>, e: f64) -> PressureLoadedValve {
+    valve_properties(cx, e, 1050.0, 0.1)
+}
+fn valve_properties(cx: &Cx<'_>, e: f64, density: f64, loss: f64) -> PressureLoadedValve {
     let mesh = Mesh::new();
-    let mat = material(e, 1050.0, 1);
+    let mat = material(e, density, 1);
     let mut load = vec![[0.0; 3]; mesh.nodes.len()];
     for &n in &mesh.tip {
         load[n][2] = 1e-4 / mesh.tip.len() as f64;
     }
-    material_field::reduce_pressure_loaded_valve(
-        &mesh.request(TetMaterialField::Uniform(&mat)),
-        &load,
-        cx,
-    )
-    .unwrap()
+    let mut request = mesh.request(TetMaterialField::Uniform(&mat));
+    request.loss_factor = loss;
+    material_field::reduce_pressure_loaded_valve(&request, &load, cx).unwrap()
 }
+
+const SOURCE_PERFORMANCE: &str = include_str!("../examples/heated_valve_sound/source.performance");
+
+fn scheduled_source(source: PressureLoadedValve, text: &str, block: usize)
+    -> SourceReedPerformance<PressureLoadedValve>
+{
+    SourceReedPerformance::from_bytes(text.as_bytes(), block,
+        ObservationPolicy::Acceptance, source, admission(), None).unwrap()
+}
+
+fn scheduled_pressure(mut source: SourceReedPerformance<PressureLoadedValve>) -> Vec<f64> {
+    let mut pressure = vec![0.0; source.performance().info().samples as usize];
+    source.validate_sample_count(pressure.len() as u64).unwrap();
+    let block = source.max_block_len();
+    for chunk in pressure.chunks_mut(block) { source.block(chunk).unwrap(); }
+    assert!(pressure.iter().all(|p| p.is_finite()));
+    assert!(pressure.iter().any(|p| p.abs() > 1e-12));
+    assert!(source.validate_sample_count(1).is_err());
+    pressure
+}
+
+#[test]
+fn scheduled_source_density_changes_dynamics_without_changing_static_compliance() {
+    with_cx(|cx| {
+        let light = valve_properties(cx, 1e6, 1050.0, 0.1);
+        let heavy = valve_properties(cx, 1e6, 4200.0, 0.1);
+        let light_performance = scheduled_source(light.clone(), SOURCE_PERFORMANCE, 37);
+        let heavy_performance = scheduled_source(heavy, SOURCE_PERFORMANCE, 113);
+        let a = light_performance.reed();
+        let b = heavy_performance.reed();
+        close(a.rest_opening_m, b.rest_opening_m, 1e-8);
+        close(a.width_m, b.width_m, 1e-8);
+        close(a.closing_pressure_pa, b.closing_pressure_pa, 1e-7);
+        close(a.stiffness_n_m, b.stiffness_n_m, 1e-7);
+        close(b.mass_kg, 4.0 * a.mass_kg, 1e-7);
+        close((b.stiffness_n_m / b.mass_kg).sqrt(),
+            0.5 * (a.stiffness_n_m / a.mass_kg).sqrt(), 1e-7);
+        assert!(light_performance.performance().info().massive_reed);
+        assert_eq!(light_performance.source().identity(), light.identity());
+        let light_pressure = scheduled_pressure(light_performance);
+        let heavy_pressure = scheduled_pressure(heavy_performance);
+        let peak = light_pressure.iter().map(|x| x.abs()).fold(0.0, f64::max);
+        let change = light_pressure.iter().zip(&heavy_pressure)
+            .map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        assert!(change > 1e-5 * peak,
+            "material mass must affect the actual baffled microphone: change={change}, peak={peak}");
+        assert_eq!(light_pressure,
+            scheduled_pressure(scheduled_source(light, SOURCE_PERFORMANCE, 113)));
+    });
+}
+
+#[test]
+fn scheduled_source_stiffness_loss_and_atmosphere_reach_the_same_physical_voice() {
+    with_cx(|cx| {
+        let base = valve(cx, 1e6);
+        let stiff = scheduled_source(valve(cx, 4e6), SOURCE_PERFORMANCE, 37);
+        let lossy = scheduled_source(valve_properties(cx, 1e6, 1050.0, 0.3),
+            SOURCE_PERFORMANCE, 37);
+        let standard = scheduled_source(base.clone(), SOURCE_PERFORMANCE, 37);
+        close(stiff.reed().mass_kg, standard.reed().mass_kg, 1e-7);
+        close(stiff.reed().stiffness_n_m, 4.0 * standard.reed().stiffness_n_m, 1e-7);
+        close(lossy.reed().damping_ratio, 3.0 * standard.reed().damping_ratio, 1e-7);
+        let coefficients = standard.reed();
+        let numeric = SOURCE_PERFORMANCE.replace("reed source", &format!(
+            "reed {} {} {} {} {} {}", coefficients.rest_opening_m,
+            coefficients.width_m, coefficients.closing_pressure_pa,
+            coefficients.mass_kg, coefficients.stiffness_n_m, coefficients.damping_ratio));
+        let mut reference = ReedPerformance::from_bytes_with_policy(numeric.as_bytes(), 37,
+            ObservationPolicy::Acceptance).unwrap();
+        let mut reference_pressure = vec![0.0; 4096];
+        for chunk in reference_pressure.chunks_mut(37) { reference.block(chunk).unwrap(); }
+        let standard_pressure = scheduled_pressure(standard);
+        assert_eq!(standard_pressure, reference_pressure,
+            "source mechanics must reach the original TMM voice without retuning");
+        assert_ne!(standard_pressure, scheduled_pressure(stiff));
+        assert_ne!(standard_pressure, scheduled_pressure(lossy));
+        let changed_gas = SOURCE_PERFORMANCE.replace("N2 0.8 O2 0.2", "CO2 0.8 O2 0.2");
+        let gas_performance = scheduled_source(base.clone(), &changed_gas, 37);
+        assert_eq!(gas_performance.source().identity(), base.identity());
+        assert_eq!(gas_performance.reed(), coefficients);
+        assert_ne!(standard_pressure, scheduled_pressure(gas_performance));
+    });
+}
+
+#[test]
+fn scheduled_source_selection_and_reduction_fail_closed_with_original_diagnostics() {
+    with_cx(|cx| {
+        let source = valve(cx, 1e6);
+        let strict = SingleModeValveAdmission {
+            minimum_opening_compliance_fraction: 1.0,
+            minimum_pressure_compliance_fraction: 1.0,
+            maximum_static_opening_relative_error: 0.0,
+        };
+        let expected = source.beating_reed_checked(0.0, 0.0, strict).unwrap_err();
+        match SourceReedPerformance::from_bytes(SOURCE_PERFORMANCE.as_bytes(), 37,
+            ObservationPolicy::Acceptance, source.clone(), strict, None)
+        {
+            Err(SourceReedPerformanceError::Source(error)) =>
+                assert_eq!(error.to_string(), expected.to_string()),
+            _ => panic!("failed source admission must retain the structural owner's diagnostic"),
+        }
+        let missing = ReedPerformance::from_bytes(SOURCE_PERFORMANCE.as_bytes(), 37);
+        assert!(matches!(missing, Err(fs_couple::render::schedule::reed::ReedPerformanceError::Input { what, .. })
+            if what == "reed source requires an admitted BeatingReedSource"));
+        let unprojected_contact = SOURCE_PERFORMANCE.replace("reed source",
+            "reed source\ntongue_contact 0.000026 0.0000933333 0.35 0.02 0.005");
+        assert!(matches!(SourceReedPerformance::from_bytes(unprojected_contact.as_bytes(), 37,
+            ObservationPolicy::Acceptance, source.clone(), admission(), None),
+            Err(SourceReedPerformanceError::Performance(
+                fs_couple::render::schedule::reed::ReedPerformanceError::Input { what, .. }))
+            if what == "source reed tongue_contact requires a source-projected contact map"));
+        let ambiguous = SOURCE_PERFORMANCE.replace("reed source", "reed 0.0004 0.012 6000 0 0 0.1");
+        assert!(matches!(SourceReedPerformance::from_bytes(ambiguous.as_bytes(), 37,
+            ObservationPolicy::Acceptance, source, admission(), None),
+            Err(SourceReedPerformanceError::Performance(_))));
+    });
+}
+
 fn template() -> AcousticAssembly {
     AcousticAssembly {
         ambient: AmbientGas {

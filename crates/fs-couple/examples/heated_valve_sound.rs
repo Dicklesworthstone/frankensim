@@ -24,6 +24,10 @@ use fs_couple::material_assembly::{
     AcousticMaterialBindings, valve::compile_pressure_loaded_reed_assembly,
 };
 use fs_couple::pcm_wav::encode_pcm16_wav_interleaved;
+use fs_couple::pcm_wav::observation::ObservationPolicy;
+use fs_couple::render::schedule::reed::{
+    MAX_REED_PERFORMANCE_BYTES, source::SourceReedPerformance,
+};
 use fs_couple::solid_enthalpy::{
     SolidEnthalpy, TetCellMaterial, ThermalExpansionModel, ThermalStiffnessModel,
     valve::HeatedValveReduction,
@@ -237,6 +241,21 @@ fn synthesize_with_options(
     inertial: Option<inertial::Options>,
     gate: &CancelGate,
 ) -> Result<Comparison> {
+    synthesize_with_performance(card, power_w, duration_s, reservoir, inertial, None, gate)
+}
+
+fn synthesize_with_performance(
+    card: &MaterialCard,
+    power_w: f64,
+    duration_s: f64,
+    reservoir: Option<&finite_gas::Options>,
+    inertial: Option<inertial::Options>,
+    performance: Option<&[u8]>,
+    gate: &CancelGate,
+) -> Result<Comparison> {
+    if performance.is_some() && reservoir.is_some() {
+        return Err("--performance declares its acoustic gas and cannot replace the evolving --finite-gas medium".into());
+    }
     if !power_w.is_finite()
         || power_w < 0.0
         || !duration_s.is_finite()
@@ -515,46 +534,50 @@ fn synthesize_with_options(
             minimum_pressure_compliance_fraction: 0.9,
             maximum_static_opening_relative_error: 0.1,
         };
-        let template = template();
-        let cold = compile_pressure_loaded_reed_assembly(
-            &template,
-            cold,
-            admission,
-            &AcousticMaterialBindings::default(),
-        )?;
-        let hot = compile_pressure_loaded_reed_assembly(
-            &template,
-            heated_valve,
-            admission,
-            &AcousticMaterialBindings::default(),
-        )?;
-        let cold_card = cold.valve().valve().card();
-        let hot_card = hot.valve().valve().card();
-        let displacement_m = hot
-            .valve()
+        let cold_card = cold.valve().card();
+        let hot_card = heated_valve.valve().card();
+        let cold_values = (cold_card.modes[0].frequency_hz, cold_card.rest_gap_m,
+            cold_card.total_mass_kg, cold.identity());
+        let hot_values = (hot_card.modes[0].frequency_hz, hot_card.rest_gap_m,
+            hot_card.total_mass_kg, heated_valve.identity());
+        let displacement_m = heated_valve
             .equilibrium()
             .displacement_m()
             .iter()
             .map(|u| u[0].hypot(u[1]).hypot(u[2]))
             .fold(0.0, f64::max);
         cx.checkpoint().map_err(|_| "heated valve cancelled")?;
-        let cold_sound = match reservoir {
-            Some(options) => cold.realize_with_gas(options.gas.state().state())?,
-            None => cold.realize()?,
+        let (cold_pressure, hot_pressure) = if let Some(bytes) = performance {
+            (
+                render_scheduled(cold, admission, bytes, gate)?,
+                render_scheduled(heated_valve, admission, bytes, gate)?,
+            )
+        } else {
+            let template = template();
+            let cold = compile_pressure_loaded_reed_assembly(
+                &template, cold, admission, &AcousticMaterialBindings::default())?;
+            let hot = compile_pressure_loaded_reed_assembly(
+                &template, heated_valve, admission, &AcousticMaterialBindings::default())?;
+            let cold_sound = match reservoir {
+                Some(options) => cold.realize_with_gas(options.gas.state().state())?,
+                None => cold.realize()?,
+            };
+            cx.checkpoint().map_err(|_| "heated valve cancelled")?;
+            let hot_sound = match &gas_result {
+                Some((gas, _)) => hot.realize_with_gas(gas.state().state())?,
+                None => hot.realize()?,
+            };
+            if reservoir.is_none() && cold_sound.gas != hot_sound.gas {
+                return Err("cold and heated experiments require the same declared medium".into());
+            }
+            (cold_sound.pressure_pa, hot_sound.pressure_pa)
         };
         cx.checkpoint().map_err(|_| "heated valve cancelled")?;
-        let hot_sound = match &gas_result {
-            Some((gas, _)) => hot.realize_with_gas(gas.state().state())?,
-            None => hot.realize()?,
-        };
-        cx.checkpoint().map_err(|_| "heated valve cancelled")?;
-        if (reservoir.is_none() && cold_sound.gas != hot_sound.gas)
-            || cold_sound.pressure_pa.len() != FRAMES
-            || hot_sound.pressure_pa.len() != FRAMES
-            || cold_sound
-                .pressure_pa
+        if cold_pressure.len() != FRAMES
+            || hot_pressure.len() != FRAMES
+            || cold_pressure
                 .iter()
-                .chain(&hot_sound.pressure_pa)
+                .chain(&hot_pressure)
                 .any(|p| !p.is_finite())
         {
             return Err(
@@ -563,25 +586,45 @@ fn synthesize_with_options(
             );
         }
         Ok(Comparison {
-            cold: cold_sound.pressure_pa,
-            hot: hot_sound.pressure_pa,
-            cold_frequency: cold_card.modes[0].frequency_hz,
-            hot_frequency: hot_card.modes[0].frequency_hz,
-            cold_gap: cold_card.rest_gap_m,
-            hot_gap: hot_card.rest_gap_m,
-            cold_mass: cold_card.total_mass_kg,
-            hot_mass: hot_card.total_mass_kg,
+            cold: cold_pressure,
+            hot: hot_pressure,
+            cold_frequency: cold_values.0,
+            hot_frequency: hot_values.0,
+            cold_gap: cold_values.1,
+            hot_gap: hot_values.1,
+            cold_mass: cold_values.2,
+            hot_mass: hot_values.2,
             temperature: heated_thermal.temperature_k(CellId(0))?,
             heat_j: heat[0],
             stored_heat_j: heat[1],
             residual_j: heat[2],
             displacement_m,
-            cold_identity: cold.valve().identity(),
-            hot_identity: hot.valve().identity(),
+            cold_identity: cold_values.3,
+            hot_identity: hot_values.3,
             gas_history: gas_result.map(|(_, history)| history),
             inertial_history,
         })
     })
+}
+
+fn render_scheduled(
+    valve: fs_solid::reduce::thermal::ThermalPressureLoadedValve,
+    admission: SingleModeValveAdmission,
+    bytes: &[u8],
+    gate: &CancelGate,
+) -> Result<Vec<f64>> {
+    let mut performance = SourceReedPerformance::from_bytes(bytes, 256,
+        ObservationPolicy::Acceptance, valve, admission, None)?;
+    let info = performance.performance().info();
+    if info.sample_rate_hz != RATE || info.samples != FRAMES as u64 {
+        return Err("heated-valve comparison requires audio 48000 4096 in --performance".into());
+    }
+    let mut pressure = vec![0.0; FRAMES];
+    for block in pressure.chunks_mut(256) {
+        if gate.is_requested() { return Err("heated valve cancelled".into()); }
+        performance.pressure_block(block)?;
+    }
+    Ok(pressure)
 }
 
 fn demo(heat_capacity_scale: f64) -> Result<MaterialCard> {
@@ -685,8 +728,16 @@ fn run(args: &[String]) -> Result<()> {
     let requested_gas = args.iter().any(|word| word.starts_with("--gas-"));
     let mut remaining = Vec::new();
     let mut demo_conductivity = None;
+    let mut performance_path = None;
     let mut words = args.iter();
     while let Some(word) = words.next() {
+        if word == "--performance" {
+            if performance_path.is_some() {
+                return Err("--performance may be supplied only once".into());
+            }
+            performance_path = Some(words.next().ok_or("--performance needs a native performance file")?);
+            continue;
+        }
         if word != "--demo-conductivity" {
             remaining.push(word.clone());
             continue;
@@ -709,7 +760,7 @@ fn run(args: &[String]) -> Result<()> {
         return Err("gas source declarations require --finite-gas".into());
     }
     if args.len() != 6 {
-        return Err("usage: heated_valve_sound --demo CP_SCALE POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX | --pack MATERIAL.pack POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX [--finite-gas VOLUME_M3 GAS_DISTANCE_M STEPS --gas-record FILE --gas-component SPECIES.pack NASA9.pack TRANSPORT.pack --gas-water none --gas-phase frozen] [--demo-conductivity K_AT_280 K_AT_300 K_AT_400] [--inertial-history MAX_STEP_S MASS_DAMPING_PER_S]".into());
+        return Err("usage: heated_valve_sound --demo CP_SCALE POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX | --pack MATERIAL.pack POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX [--finite-gas VOLUME_M3 GAS_DISTANCE_M STEPS --gas-record FILE --gas-component SPECIES.pack NASA9.pack TRANSPORT.pack --gas-water none --gas-phase frozen] [--demo-conductivity K_AT_280 K_AT_300 K_AT_400] [--inertial-history MAX_STEP_S MASS_DAMPING_PER_S] [--performance FILE]".into());
     }
     if demo_conductivity.is_some() && (args[0] != "--demo" || gas_options.is_none()) {
         return Err("--demo-conductivity requires --demo and --finite-gas".into());
@@ -717,6 +768,18 @@ fn run(args: &[String]) -> Result<()> {
     if inertial_options.is_some() && gas_options.is_none() {
         return Err("--inertial-history requires --finite-gas".into());
     }
+    if performance_path.is_some() && gas_options.is_some() {
+        return Err("--performance declares its acoustic gas and cannot replace the evolving --finite-gas medium".into());
+    }
+    let performance = performance_path.map(|path| -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?.take(MAX_REED_PERFORMANCE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_REED_PERFORMANCE_BYTES {
+            return Err("performance source exceeds 1 MiB".into());
+        }
+        Ok(bytes)
+    }).transpose()?;
     let card = match args[0].as_str() {
         "--demo" => match demo_conductivity {
             Some(values) => demo_with_conductivity(args[1].parse()?, Some(values))?,
@@ -740,8 +803,12 @@ fn run(args: &[String]) -> Result<()> {
     if !scale.is_finite() || scale <= 0.0 {
         return Err("positive finite PCM full scale in pascals required".into());
     }
-    let result = match &gas_options {
-        Some(options) => synthesize_with_options(
+    let result = match (&gas_options, &performance) {
+        (_, Some(bytes)) => synthesize_with_performance(
+            &card, args[2].parse()?, args[3].parse()?, None, None, Some(bytes),
+            &CancelGate::new(),
+        )?,
+        (Some(options), None) => synthesize_with_options(
             &card,
             args[2].parse()?,
             args[3].parse()?,
@@ -749,7 +816,7 @@ fn run(args: &[String]) -> Result<()> {
             inertial_options,
             &CancelGate::new(),
         )?,
-        None => synthesize(
+        (None, None) => synthesize(
             &card,
             args[2].parse()?,
             args[3].parse()?,
@@ -829,6 +896,28 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn material_heat_history_and_authored_gas_reach_scheduled_physical_pressure() {
+        let bytes = include_bytes!("heated_valve_sound/source.performance");
+        let run = |card: &MaterialCard, text: &[u8]| {
+            synthesize_with_performance(card, 1.0, 10.0, None, None, Some(text),
+                &CancelGate::new()).unwrap()
+        };
+        let a = run(&demo(1.0).unwrap(), bytes);
+        let b = run(&demo(2.0).unwrap(), bytes);
+        assert_eq!(a.cold, b.cold);
+        assert_ne!(a.cold, a.hot);
+        assert_ne!(a.hot, b.hot);
+        assert!(a.hot_frequency < a.cold_frequency);
+        assert!(a.hot.iter().any(|p| p.abs() > 1e-12));
+        let changed_gas = std::str::from_utf8(bytes).unwrap()
+            .replace("N2 0.8 O2 0.2", "CO2 0.8 O2 0.2");
+        let c = run(&demo(1.0).unwrap(), changed_gas.as_bytes());
+        assert_eq!(a.cold_identity, c.cold_identity);
+        assert_eq!(a.hot_identity, c.hot_identity);
+        assert_ne!(a.cold, c.cold);
+        assert_ne!(a.hot, c.hot);
+    }
     #[test]
     fn changing_only_heat_capacity_changes_heating_mechanics_and_actual_pressure() {
         let a = synthesize(&demo(1.0).unwrap(), 1.0, 10.0, &CancelGate::new()).unwrap();
