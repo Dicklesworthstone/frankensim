@@ -81,6 +81,8 @@ pub mod recovery;
 /// Molecular relaxation absorption and dispersion of any gas mixture (M0.1-W2).
 pub mod relaxation;
 pub mod section;
+/// Source-bound particle classification with solids, element and water balances.
+pub mod separation;
 /// Laminate (layered) plate/shell sections (IRP M1.2-W7).
 pub mod laminate;
 /// Source-bound viscoelastic surface films and explicit isotropic tensor lifts.

@@ -32,6 +32,46 @@ and independently displays both contact-time curves. No deconvolution, field
 calibration, aqueous chemistry, segregation, adsorption, coupled reaction rate
 or actual process recovery is inferred by this forward hydraulic model.
 
+## Distributed rates and conservative particle separation
+
+`recovery::distributed::RecoveryCard` extends the source-qualified kinetic
+families to gamma and explicit discrete populations. Batch and ideal plug
+flow evaluate the population expectation of `1-exp(-kt)`. An equal-volume
+steady CSTR cascade evaluates each discrete rate with remaining fraction
+`(1+k*t/N)^(-N)` using TOTAL train residence. A mean rate never substitutes
+for its distribution. Continuous-distribution CSTR requests explicitly refuse.
+The immutable card preserves rate units, original weights, specimen/method,
+provenance and typed source conditions. Its response separately retains
+recovered, recoverable remaining and intrinsically unrecoverable fractions.
+Scaled compensated sums preserve small representable rate populations.
+These steady fractions do not advance the separate transient tank inventories.
+
+`separation::ParticleStream` carries dry particle-class flows, representative
+diameters, explicit solid-phase elemental flows and water. All classes declare
+the same element axes; unknown assay is never zero. `split` requires exactly
+one product/reject partition per homogeneous class and a separate water split.
+Both products retain class and element identities, including zero-flow classes.
+Reported grade uses actual product dry solids and is absent for zero solids.
+Small representable product/reject tails are evaluated independently; arithmetic
+that erases a positive flow refuses without changing the feed.
+
+`ClassifierCard` consumes an original constitutive card for the corrected
+Rosin–Rammler partition `c=1-exp(-ln(2)*(d/d50)^m)` and explicit water bypass
+`b+(1-b)*c`. Version, parameters, dimensions, source hashes and source conditions
+are required. Classification supplies actual particle diameter and stream solids
+mass fraction; caller metadata cannot override them. Near-cut evaluation retains
+adjacent representable sizes even with a sharp curve. Cut size and sharpness
+are declared test parameters, not predictions from cyclone geometry.
+
+Seven separation and nine distributed-recovery tests cover independent analytic
+solutions, element/water/class conservation, reactor distinctions, small tails,
+zero products, source refusals and ordering/scaling behavior. The runnable
+`mineral_separation` example connects Bond dry throughput, authored size/assay
+classes, classifier overflow and separate valuable/gangue kinetic populations.
+It prints concentrate/tailings grades and complete one-pass balance residuals.
+Underflow remains a separate outlet: recycle convergence, breakage, liberation,
+aqueous inventories, entrainment and reagent response are separate capabilities.
+
 ## Source-bound mineral slurry streams
 
 `slurry::SlurryStream` converts explicit dry constituent and carrier-liquid

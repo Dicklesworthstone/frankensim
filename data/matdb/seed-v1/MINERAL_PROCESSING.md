@@ -392,6 +392,57 @@ reverses pressure while retaining positive dissipation. Solids mass fraction
 scenario results, not measured mineral rheology. Turbulence, settling, entrance
 losses, fittings, elevation and pump efficiency require separate closures.
 
+## Particle classification and component recovery
+
+`fs_material::separation` supplies size-resolved `ParticleStream` values with
+explicit dry solids, water and solid-phase element inventories. Every class
+declares the same element axes, so an unassayed element cannot become zero.
+Splits carry each class and its composition into both outlets. Water uses its
+own partition, and product grade is calculated from actual product dry mass.
+A zero-solids outlet has no defined grade.
+
+`ClassifierCard` uses an original source card with corrected cut size d50,
+sharpness m and water-bypass fraction b. The corrected underflow fraction is
+`1-exp(-ln(2)*(d/d50)^m)`; actual underflow is `b+(1-b)*corrected`.
+It evaluates the stream's actual solids mass fraction and each class diameter
+against the source domain. Geometry, liberation or missing test conditions are
+not inferred. Independent product/reject evaluation retains small tails.
+
+`fs_material::recovery::distributed` adds single, rectangular, gamma and
+explicit discrete rate distributions. Batch and ideal plug flow integrate
+the rate distribution; a steady train of N equal mixed tanks instead uses
+`(1+k*t/N)^(-N)` for each population's remaining fraction, where t is total
+mean residence. Mixed tanks accept single or discrete rates; continuous
+distributions refuse that unsupported closure. All rates, ultimate recoveries,
+specimen contexts and typed conditions must be supplied explicitly.
+
+```bash
+cargo run -p fs-material --example mineral_separation -- 120
+```
+
+This authored single-pass example combines Bond grinding with four explicit
+valuable/gangue and fine/coarse classes, a classifier and two mixed recovery
+tanks. Valuable particles have two rate populations; gangue has its own rate.
+No ore name supplies these parameters. With the example's default inputs:
+
+| Stream | Dry solids, kg/s | Cu, kg/s | Water, kg/s | Cu grade, dry mass |
+| --- | ---: | ---: | ---: | ---: |
+| Mill product | 32.866187724 | 3.286618772 | 32.866187724 | 10.000000% |
+| Classifier underflow | 27.388489770 | 2.662161206 | 6.573237545 | 9.720000% |
+| Classifier overflow / recovery feed | 5.477697954 | 0.624457567 | 26.292950179 | 11.400000% |
+| Concentrate | 1.171076732 | 0.330523973 | 2.629295018 | 28.223938% |
+| Tailings | 4.306621222 | 0.293933593 | 23.663655161 | 6.825155% |
+
+Underflow plus concentrate plus tailings close the feed balances: displayed
+residuals are zero for dry solids and water and 4.44e-16 kg/s for copper.
+The throughput uses Wi=15 kWh/dry metric tonne, F80=2500 µm, P80=200 µm,
+1 MW net pinion power and 0.9 utilization. The full PSD is an explicit authored
+input consistent with that discrete P80; the Bond equation does not predict it.
+Zero residence produces no recovered solids and an undefined concentrate grade.
+Residence beyond the declared 3600 s refuses. This example leaves underflow as
+an outlet; a closed recycle circuit, liberation/entrainment and reagent response
+still need their own models and site evidence.
+
 ## Recovery curves and material held in process tanks
 
 `fs_material::recovery::RecoveryKinetics` evaluates two explicitly selected

@@ -9,6 +9,11 @@
 //! 10 (2020), 1027, Table 1, <https://doi.org/10.3390/min10111027>. This is a
 //! model-family reference; it does not supply a rate or recovery for an ore.
 
+/// Explicit distributed-rate recovery with gamma/discrete populations, separate
+/// recovered/residual accounts, and steady equal-CSTR cascade response.
+#[path = "recovery/distributed.rs"]
+pub mod distributed;
+
 #[path = "recovery/residence.rs"]
 pub mod residence;
 
