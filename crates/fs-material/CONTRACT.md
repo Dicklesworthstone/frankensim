@@ -7886,6 +7886,33 @@ unloading, seals, amount conservation and transactional cancellation. Source
 regressions check original receipts, local domains, ordered identities and
 unsupported coefficient bases without claiming measured membrane accuracy.
 
+### Accuracy-controlled transient membrane windows
+
+`membrane::transient::slab::adaptive` supplies bounded backward-Euler
+step-doubling windows for layered membranes with fixed prescribed pressures
+or finite molar pressure capacities. Acceptance compares every cell/reservoir
+pressure, stored amount and integrated face transfer. Accepted half steps alone
+advance inventory. Compensated signed/gross face totals are audited against
+original-to-final cell, reservoir and whole-window balances.
+
+Every native probe retains its original admission and additionally reserves
+1% algebraic residual allowances below pressure/storage accuracy and
+duration-weighted window balance shares. Separate reusable full/half caches
+retain the native O(n) factorizations. Work includes rejected probes, and the
+exact representable requested endpoint is reached or the complete window
+refuses without changing accepted state. An immediately adjacent final clock
+remainder is included before solving, never silently discarded.
+
+`ResolvedMembraneDiffusion::advance_candidate` uses that same driver and the
+original source-bound step on every probe, preserving selected D/S/interface
+laws and treating source failures as hard refusals. Temperature and constitutive
+coefficients remain fixed; callers split windows at prescribed boundary events.
+Local temporal estimates do not certify spatial or accumulated global error.
+Authored tests compare Fourier breakthrough/cumulative permeation and exact
+finite-reservoir eigenmodes, amount sensitivity, sealed equilibria,
+loading/unloading, cache reuse and atomic work/accuracy/algebraic/cancellation
+refusal, with separate source-bound receipt and support regressions.
+
 ## Debye dielectric temperature and thermal potentials
 
 `field_storage::dielectric::thermal::ThermalDebyeCapacitor` binds the original

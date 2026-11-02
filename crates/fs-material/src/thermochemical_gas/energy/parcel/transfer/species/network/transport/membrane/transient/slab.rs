@@ -548,3 +548,5 @@ mod tests;
 
 /// Sorbed inventory coupled implicitly to two finite isothermal reservoirs.
 pub mod finite;
+/// Accuracy-controlled windows over the original implicit diffusion steps.
+pub mod adaptive;

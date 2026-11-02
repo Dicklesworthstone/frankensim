@@ -76,6 +76,56 @@ fn breakthrough_retains_both_original_coefficient_sources_and_actual_pressure_su
     }
 }
 
+fn advance_controls()->slab::adaptive::MembraneDiffusionAdvanceControls {
+    slab::adaptive::MembraneDiffusionAdvanceControls {
+        step:controls(),initial_step_s:10.0,minimum_step_s:1e-8,maximum_step_s:10.0,
+        maximum_evaluations:10000,absolute_pressure_tolerance_pa:100.0,
+        absolute_amount_tolerance_mol:1e-9,relative_tolerance:0.0,
+        amount_balance_tolerance_mol:1e-12,
+    }
+}
+
+#[test]
+fn adaptive_breakthrough_uses_the_original_source_owner_on_the_shared_physical_timeline() {
+    let card=material("adaptive layer",[0.0,1e5]);let context=point(50000.0);
+    let state=ResolvedMembraneDiffusion::new(300.0,0.01,&[layer(&card,&context,8)],&[],
+        &[0.0;8],[1e5,0.0],||false).unwrap();
+    let mut work=state.adaptive_workspace().unwrap();
+    let accepted=state.advance_candidate([1e5,0.0],10.0,advance_controls(),&mut work,||false).unwrap();
+    let mut raw_work=state.state().adaptive_workspace().unwrap();
+    let raw=state.state().advance_candidate([1e5,0.0],10.0,advance_controls(),&mut raw_work,||false).unwrap();
+    assert_eq!(accepted.state().state(),raw.state());
+    assert_eq!(accepted.report(),raw.report());
+    assert!(accepted.report().rejected_intervals>0);
+    assert_eq!(accepted.state().state().elapsed_s(),10.0);
+    assert_eq!(state.state().stored_amount_mol().unwrap(),0.0);
+    for source in &accepted.state().source_support().layers[0] {
+        assert_eq!(source.card_identity(),card.content_hash());
+        for name in [MEMBRANE_DIFFUSIVITY_PROPERTY,MOLAR_HENRY_SOLUBILITY_PROPERTY] {
+            assert_eq!(source.property(name).unwrap().answer().receipt.selected,
+                state.source_support().layers[0][0].property(name).unwrap().answer().receipt.selected);
+        }
+    }
+}
+
+#[test]
+fn adaptive_source_refusals_remain_hard_and_preserve_original_state_and_receipts() {
+    use slab::adaptive::MembraneDiffusionAdvanceError as AdvanceError;
+    let card=material("adaptive bounded layer",[0.0,1e5]);let context=point(50000.0);
+    let state=ResolvedMembraneDiffusion::new(300.0,0.01,&[layer(&card,&context,4)],&[],
+        &[50000.0;4],[50000.0;2],||false).unwrap();
+    let saved=state.state().clone();let receipts=state.source_support().clone();
+    let mut work=state.adaptive_workspace().unwrap();let mut c=advance_controls();
+    c.maximum_evaluations=3;
+    // Reducing time cannot make the unsupported boundary a valid source.
+    assert!(matches!(state.advance_candidate([2e5,0.0],10.0,c,&mut work,||false),
+        Err(AdvanceError::Native(Error::Source(_)))));
+    assert!(matches!(state.advance_candidate([1e5,0.0],10.0,c,&mut work,||true),
+        Err(AdvanceError::Cancelled)));
+    assert_eq!(state.state(),&saved);
+    assert_eq!(state.source_support(),&receipts);
+}
+
 #[test]
 fn unsupported_boundary_or_candidate_refuses_even_when_initial_cells_and_anchor_are_supported() {
     let context=point(50000.0);let narrow=material("narrow",[0.0,90000.0]);
