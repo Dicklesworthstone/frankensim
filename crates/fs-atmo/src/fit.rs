@@ -1,4 +1,4 @@
-//! Complete Hermitian fit of the mode basis to the Mann target (bead
+//! One-point stress fit of the mode basis to the Mann target (bead
 //! wf-root-guzez.4.6.2.2, E3.3b-ii-b). Round-3 Q2: diagonal-only may
 //! INITIALIZE, never ACCEPT — and in this basis that law is a theorem:
 //! with independent amplitude components the wall-compatible curl gives
@@ -14,6 +14,8 @@
 //! is capacity-limited, and the achieved errors are RECORDED as the
 //! per-truncation artifact. Deterministic coordinate descent (fixed
 //! sweep count, fixed step schedule) — bitwise repeatable.
+//! Only (u², v², w², uw) at the declared reference height are fitted;
+//! this is not a fit of the full two-point spectral tensor or coherence.
 //!
 //! Per-mode ensemble closed forms (θ uniform, amplitudes zero-mean):
 //!   E[u²]  = ch²·(k_y²·s_z² + k_h²·s_y²)/2
@@ -38,15 +40,23 @@ pub const FIT_SWEEPS: usize = 120;
 /// The fitted, PSD-constrained amplitude model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FittedAmplitudes {
+    /// Seed whose spatial mode geometry was fitted.
+    pub seed: u64,
+    /// The admitted target used by the fit, retained for builder consistency.
+    pub parameters: MannParams,
+    /// Target streamwise/vertical covariance [m²/s²]. Retaining this avoids
+    /// repeating the complete Mann quadrature when constructing a realization.
+    pub target_uw_m2_s2: f64,
     /// E[a_x²] scale (per unit spectral weight).
     pub sx2: f64,
     /// E[a_y²] scale.
     pub sy2: f64,
     /// E[a_z²] scale.
     pub sz2: f64,
-    /// Cross-correlation budget used, ρ ∈ (0, RHO_MAX].
+    /// Cross-correlation budget used, ρ ∈ [0, RHO_MAX]. Zero for Γ = 0.
     pub rho: f64,
-    /// Fraction of the target |uw| the truncation realizes ∈ (0, 1].
+    /// Fraction of the target |uw| the truncation realizes ∈ [0, 1].
+    /// Zero when the target shear stress is zero (Γ = 0).
     pub uw_fraction: f64,
     /// Scale-normalized errors on (u2, v2, w2, uw) — the V-04b1 fit
     /// receipt AND the per-truncation artifact.
@@ -141,7 +151,7 @@ pub fn fit_amplitudes(
     h_ref_m: f64,
 ) -> Result<FittedAmplitudes, Refusal> {
     p.admit()?;
-    if n_modes == 0 || n_modes > MAX_FIT_MODES || !(h_ref_m > 0.0) {
+    if n_modes == 0 || n_modes > MAX_FIT_MODES || !h_ref_m.is_finite() || h_ref_m <= 0.0 {
         return Err(Refusal {
             code: "fit-params-invalid",
             message: format!("n_modes {n_modes}, h_ref {h_ref_m:?}"),
@@ -149,7 +159,20 @@ pub fn fit_amplitudes(
         });
     }
     let t = stress_integrals(p)?;
-    let target = [t[0][0], t[1][1], t[2][2], -t[0][2]]; // |uw| in slot 3
+    // At Γ = 0 the exact isotropic shear stress vanishes. Do not fit the
+    // quadrature's roundoff residue or divide by that zero target.
+    let target = [
+        t[0][0],
+        t[1][1],
+        t[2][2],
+        if p.gamma == 0.0 { 0.0 } else { -t[0][2] },
+    ]; // |uw| in slot 3
+    if !target[..3].iter().all(|v| v.is_finite() && *v > 0.0)
+        || !target[3].is_finite()
+        || target[3] < 0.0
+    {
+        return Err(invalid_fit("Mann target stresses are not representable"));
+    }
     let geo = mode_geometry(seed, n_modes, p.length_m);
     let weights: Vec<f64> = geo
         .iter()
@@ -166,7 +189,11 @@ pub fn fit_amplitudes(
             j += e * e;
         }
         let uw_real = r[3].min(target[3]);
-        let e = (uw_real - target[3]) / target[3];
+        let e = if target[3] > 0.0 {
+            (uw_real - target[3]) / target[3]
+        } else {
+            0.0
+        };
         j + e * e
     };
     // Deterministic start: equal variances scaled to the trace.
@@ -174,7 +201,7 @@ pub fn fit_amplitudes(
         .map(|r| (0..3).map(|c| pc.diag[r][c]).sum::<f64>())
         .sum();
     let s0 = (target[0] + target[1] + target[2]) / trace_coeff.max(1e-300);
-    if !(s0 > 0.0) {
+    if !s0.is_finite() || s0 <= 0.0 {
         return Err(Refusal {
             code: "fit-degenerate",
             message: "zero diagonal capacity".into(),
@@ -182,7 +209,7 @@ pub fn fit_amplitudes(
         });
     }
     let mut s = [s0, s0, s0];
-    let mut rho = RHO_MAX;
+    let mut rho = if target[3] > 0.0 { RHO_MAX } else { 0.0 };
     let mut j = cost(&s, rho);
     // Fixed multiplicative coordinate descent.
     let mut step = 0.30f64;
@@ -214,14 +241,28 @@ pub fn fit_amplitudes(
         (r[0] - target[0]) / target[0],
         (r[1] - target[1]) / target[1],
         (r[2] - target[2]) / target[2],
-        (uw_real - target[3]) / target[3],
+        if target[3] > 0.0 {
+            (uw_real - target[3]) / target[3]
+        } else {
+            0.0
+        },
     ];
+    if !errors.iter().all(|v| v.is_finite()) {
+        return Err(invalid_fit("fitted stresses are not representable"));
+    }
     Ok(FittedAmplitudes {
+        seed,
+        parameters: *p,
+        target_uw_m2_s2: -target[3],
         sx2: s[0],
         sy2: s[1],
         sz2: s[2],
         rho,
-        uw_fraction: uw_real / target[3],
+        uw_fraction: if target[3] > 0.0 {
+            uw_real / target[3]
+        } else {
+            0.0
+        },
         errors,
         n_modes,
         h_ref_m,
@@ -240,6 +281,27 @@ pub fn build_fitted_field(
     p: &MannParams,
     u_adv_mps: f64,
 ) -> Result<TurbulenceField, Refusal> {
+    p.admit()?;
+    if seed != fit.seed || *p != fit.parameters {
+        return Err(invalid_fit(
+            "the fit belongs to a different seed or Mann target",
+        ));
+    }
+    if !(1..=MAX_FIT_MODES).contains(&fit.n_modes)
+        || ![fit.sx2, fit.sy2, fit.sz2, fit.h_ref_m]
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0)
+        || !(0.0..=RHO_MAX).contains(&fit.rho)
+        || !(0.0..=1.0).contains(&fit.uw_fraction)
+        || !fit.errors.iter().all(|v| v.is_finite())
+        || !fit.target_uw_m2_s2.is_finite()
+        || fit.target_uw_m2_s2 > 0.0
+        || !u_adv_mps.is_finite()
+    {
+        return Err(invalid_fit(
+            "invalid fitted covariance, mode count, height or advection",
+        ));
+    }
     let geo = mode_geometry(seed, fit.n_modes, p.length_m);
     let weights: Vec<f64> = geo
         .iter()
@@ -250,8 +312,7 @@ pub fn build_fitted_field(
     let pc = precompute(&geo, &weights, fit.h_ref_m);
     let s = [fit.sx2, fit.sy2, fit.sz2];
     let cap = realize(&pc, &s, fit.rho)[3];
-    let t = stress_integrals(p)?;
-    let uw_wanted = (-t[0][2]) * fit.uw_fraction;
+    let uw_wanted = -fit.target_uw_m2_s2 * fit.uw_fraction;
     let scale = if cap > 0.0 {
         (uw_wanted / cap).min(1.0)
     } else {
@@ -307,7 +368,24 @@ pub fn build_fitted_field(
             phi,
         });
     }
+    if modes.iter().any(|m| {
+        ![m.kx, m.ky, m.kh, m.a[0], m.a[1], m.a[2]]
+            .iter()
+            .all(|v| v.is_finite())
+    }) {
+        return Err(invalid_fit("fitted spatial modes are not representable"));
+    }
     Ok(TurbulenceField { modes, u_adv_mps })
+}
+
+fn invalid_fit(message: &str) -> Refusal {
+    Refusal {
+        code: "fit-params-invalid",
+        message: message.into(),
+        ranked_repairs: vec![
+            "use a finite, admitted Mann target and its mode/height-specific fit".into(),
+        ],
+    }
 }
 
 /// EXACT per-realization stress: the θ-averaged one-point tensor of a

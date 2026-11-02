@@ -11,8 +11,9 @@ above the aerodynamic ground plane.
 L2. The atmosphere foundation: FlatSiteLogLaw mean wind, wall-compatible
 solenoidal modal turbulence with exact analytic derivatives, and the
 provenance-bound `sample_air_state` API. E3.3b adds the exact-discrete OU
-amplitude evolution (sequential checkpointed state) and the Mann-class
-spectral-tensor fit; E3.3c the optional FetchAdjustedMassConsistent mode.
+amplitude evolution (sequential checkpointed state) and a fit of selected
+one-point stresses from the Mann-class spectral tensor; E3.3c the optional
+FetchAdjustedMassConsistent mode.
 
 ## Public types and semantics
 
@@ -48,6 +49,13 @@ spectral-tensor fit; E3.3c the optional FetchAdjustedMassConsistent mode.
   — the same mean law and provenance-bound air properties with the evolved
   vector velocity and analytic gradient, so dynamic pressure and Reynolds
   use that same instantaneous field.
+- `fit::{fit_amplitudes, build_fitted_field}` fits (u², v², w², uw) at a
+  declared reference height, with a positive-semidefinite amplitude covariance
+  and explicit finite-basis residuals. The fit retains its seed, Mann target
+  and target shear stress. Building a realization checks that binding and
+  reuses the retained stress instead of repeating the target quadrature.
+  Γ = 0 fits the variances with zero cross-correlation, without dividing by a
+  zero shear-stress target. Nonfinite heights/covariances/advection refuse.
 
 ## Invariants
 
@@ -128,6 +136,11 @@ independent paths (0.07 normalized tolerance), exact wall parity, analytic
 divergence below 1e-14 on the fixture, gradient finite-difference order
 2 ± 0.05, read-only query/batch equivalence, bitwise checkpoint/resume, and
 velocity/gradient/air-property consistency.
+
+`tests/fit_battery.rs` additionally checks the finite Γ = 0 limit, seed/target
+binding, input refusal, and the unchanged nonzero-shear fit golden. The
+existing per-truncation and bootstrap checks concern the fitted one-point
+stresses, not full spectral/coherence agreement.
 
 ## No-claim boundaries
 

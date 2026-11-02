@@ -238,6 +238,68 @@ fn caps_and_infeasibility_are_typed() {
 }
 
 #[test]
+fn zero_shear_limit_fits_variance_without_nan_or_spurious_correlation() {
+    let mut target = MANN_TARGET_V1;
+    target.gamma = 0.0;
+    let fit = fit_amplitudes(SEED, 64, &target, H_REF).unwrap();
+    assert!(fit.errors.iter().all(|v| v.is_finite()));
+    assert!(fit.sx2 > 0.0 && fit.sy2 > 0.0 && fit.sz2 > 0.0);
+    assert_eq!(fit.rho, 0.0);
+    assert_eq!(fit.uw_fraction, 0.0);
+    assert_eq!(fit.target_uw_m2_s2, 0.0);
+    assert_eq!(fit.errors[3], 0.0);
+    let field = build_fitted_field(SEED, &fit, &target, 9.7).unwrap();
+    let sample = field.sample(0.3, -0.2, H_REF, 40);
+    assert!(sample.u.iter().all(|v| v.is_finite()));
+    assert!(sample.grad.iter().flatten().all(|v| v.is_finite()));
+    assert!(sample.u.iter().any(|v| v.abs() > 1e-6));
+    assert_eq!(field.sample(0.3, -0.2, 0.0, 40).u[2], 0.0);
+}
+
+#[test]
+fn fitted_realization_is_bound_to_its_seed_target_and_admitted_covariance() {
+    let fit = fit_amplitudes(SEED, 32, &MANN_TARGET_V1, H_REF).unwrap();
+    assert_eq!(fit.seed, SEED);
+    assert_eq!(fit.parameters, MANN_TARGET_V1);
+    assert_eq!(
+        build_fitted_field(SEED + 1, &fit, &MANN_TARGET_V1, 9.7)
+            .unwrap_err()
+            .code,
+        "fit-params-invalid"
+    );
+    let mut changed = MANN_TARGET_V1;
+    changed.alpha_eps23 *= 1.1;
+    assert_eq!(
+        build_fitted_field(SEED, &fit, &changed, 9.7)
+            .unwrap_err()
+            .code,
+        "fit-params-invalid"
+    );
+    for value in [f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            fit_amplitudes(SEED, 32, &MANN_TARGET_V1, value)
+                .unwrap_err()
+                .code,
+            "fit-params-invalid"
+        );
+        assert_eq!(
+            build_fitted_field(SEED, &fit, &MANN_TARGET_V1, value)
+                .unwrap_err()
+                .code,
+            "fit-params-invalid"
+        );
+    }
+    let mut invalid = fit;
+    invalid.sx2 = -1.0;
+    assert_eq!(
+        build_fitted_field(SEED, &invalid, &MANN_TARGET_V1, 9.7)
+            .unwrap_err()
+            .code,
+        "fit-params-invalid"
+    );
+}
+
+#[test]
 fn determinism_and_golden() {
     let a = fit_amplitudes(SEED, 64, &MANN_TARGET_V1, H_REF).unwrap();
     let b = fit_amplitudes(SEED, 64, &MANN_TARGET_V1, H_REF).unwrap();
