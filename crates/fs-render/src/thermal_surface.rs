@@ -42,6 +42,12 @@ pub use spectral::{DiffuseThermalSurface, SpectralDiffuseThermalSurface, Spectra
 mod coating_emission;
 pub use coating_emission::{CoatingEmissionError, CoatingEmissionSample, CoatingThermalEmission};
 
+mod coating_exchange;
+pub use coating_exchange::{
+    CoatingExchangeBudget, CoatingExchangeError, CoatingExchangeQuadrature,
+    CoatingExchangeRates, CoatingExchangeResponse,
+};
+
 /// Physical incident surface absorption on the original native thermal clock.
 #[cfg(feature = "optical-heating")]
 pub mod heating;

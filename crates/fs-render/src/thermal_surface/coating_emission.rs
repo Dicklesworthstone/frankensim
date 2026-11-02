@@ -48,6 +48,7 @@ pub struct CoatingThermalEmission {
     exit: Exit,
     source_identity: ContentHash,
     identity: ContentHash,
+    optical_identity: ContentHash,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -154,6 +155,26 @@ impl CoatingThermalEmission {
         for &temperature in temperatures {
             validate_temperature(temperature)?;
         }
+        // A temperature change with fixed optical laws does not invalidate an
+        // angular/spectral absorption response. Keep the existing complete
+        // emission identity's byte sequence unchanged.
+        let mut optical_hash =
+            DomainHasher::new("org.frankensim.render.coating-emission-optics.v1");
+        optical_hash.update(source_identity.as_bytes());
+        optical_hash.update(stack.content_identity().as_bytes());
+        match exit {
+            Exit::Opaque { substrate, .. } => {
+                optical_hash.update(&[0]);
+                optical_hash.update(substrate.content_identity().as_bytes());
+            }
+            Exit::Transmitting {
+                opposite_ior,
+                reverse,
+            } => {
+                optical_hash.update(&[1, u8::from(reverse)]);
+                hash_ior(&mut optical_hash, opposite_ior);
+            }
+        }
         let mut hash = DomainHasher::new("org.frankensim.render.coating-thermal-emission.v1");
         hash.update(source_identity.as_bytes());
         hash.update(stack.content_identity().as_bytes());
@@ -193,6 +214,7 @@ impl CoatingThermalEmission {
             exit,
             source_identity,
             identity: hash.finalize(),
+            optical_identity: optical_hash.finalize(),
         })
     }
 
@@ -215,16 +237,65 @@ impl CoatingThermalEmission {
         if !outgoing_cosine.is_finite() || outgoing_cosine <= 0.0 || outgoing_cosine > 1.0 {
             return Err(CoatingEmissionError::EmissionDirection);
         }
+        self.with_layers(|layers| self.evaluate_layers(layers, wavelength_nm, outgoing_cosine))
+    }
+
+    fn with_layers<T>(
+        &self,
+        evaluate: impl FnOnce(&[CoatingLayer<'_>]) -> Result<T, CoatingEmissionError>,
+    ) -> Result<T, CoatingEmissionError> {
         // Store references only: full spectral laws stay in their shared owned
         // allocation. The empty stack needs no placeholder physical layer.
         if self.films.is_empty() {
-            return self.evaluate_layers(&[], wavelength_nm, outgoing_cosine);
+            return evaluate(&[]);
         }
         let mut layers = [self.films[0].optics.borrowed(); MAX_COHERENT_STACK_LAYERS];
         for (slot, film) in layers.iter_mut().zip(self.films.iter()) {
             *slot = film.optics.borrowed();
         }
-        self.evaluate_layers(&layers[..self.films.len()], wavelength_nm, outgoing_cosine)
+        evaluate(&layers[..self.films.len()])
+    }
+
+    /// Positive reciprocal work for preparing exchange; no Planck source is
+    /// evaluated and no temperature is substituted into the original optics.
+    pub(super) fn reciprocal_absorbed_fraction(
+        &self,
+        wavelength_nm: f64,
+        cosine: f64,
+    ) -> Result<[f64; 2], CoatingEmissionError> {
+        self.with_layers(|layers| match self.exit {
+            Exit::Opaque { substrate, .. } => {
+                let work = CoherentCoatingStack::try_new(layers)?.layer_power_balance(
+                    &substrate,
+                    wavelength_nm,
+                    1.0,
+                    cosine,
+                )?;
+                let mut absorbed = [PositiveSum::default(); 2];
+                for fraction in work
+                    .layer_absorbed()
+                    .iter()
+                    .chain(core::iter::once(&work.substrate_absorbed))
+                {
+                    for pol in 0..2 {
+                        absorbed[pol].add(fraction[pol]);
+                    }
+                }
+                Ok(absorbed.map(PositiveSum::value))
+            }
+            Exit::Transmitting {
+                opposite_ior,
+                reverse,
+            } => Ok(DielectricCoatingStack::try_mixed(layers)?
+                .layer_power_balance(
+                    wavelength_nm,
+                    reverse,
+                    cosine,
+                    1.0,
+                    opposite_ior.eval(wavelength_nm)?,
+                )?
+                .absorbed),
+        })
     }
 
     fn evaluate_layers(
@@ -353,6 +424,15 @@ impl CoatingThermalEmission {
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
+    }
+
+    /// Original optical sources, films, geometry and selected vacuum side,
+    /// excluding temperatures. A native-state consumer may reuse an absorption
+    /// response while this identity is unchanged; temperature-dependent optics
+    /// must first be resolved at the actual accepted state.
+    #[must_use]
+    pub const fn optical_identity(&self) -> ContentHash {
+        self.optical_identity
     }
 }
 

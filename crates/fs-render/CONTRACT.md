@@ -5149,3 +5149,50 @@ states with direct coherent absorption and independent SI Planck radiance, check
 snapshot immutability and identities, preserve distinct equal-temperature latent
 states under reverse observation and shared-law budgets, and exercise material,
 caloric, domain and cancellation refusals without altering native heat.
+
+<!-- coating-exchange:start -->
+### Finite-band isothermal coating exchange reuses reciprocal absorption
+
+`CoatingExchangeResponse::from_emitter` prepares one physical vacuum-facing
+port of an existing `CoatingThermalEmission`. All finite films and the opaque
+substrate must have exactly the same temperature; a nonisothermal stack needs
+internal radiative exchange before its outward emission can define full cooling.
+An empty transmitting interface has no emitter and remains exactly dark.
+Transmitting responses account for only the selected port; another exposed port
+is a separately authored physical exchange.
+
+`CoatingExchangeQuadrature` declares composite-midpoint wavelength and cosine
+counts over exactly 380--780 nm and outward cosine `(0,1)`. Preparation sums the
+original positive film/substrate absorptances and integrates
+`2*pi*mu*(A_s+A_p)/2 dmu` at each wavelength. The azimuthal factor, projected area
+and polarization average enter exactly once; a black interface recovers pi
+steradians. Original dispersive laws, source identity, film order and observed
+side remain binding. Explicit spectral-storage and coherent-solve budgets are
+checked before allocation, and checkpoints precede each bounded optical solve.
+Both quadrature counts require refinement for coherent spectral/angular features;
+they are approximation controls, not a certified integration error.
+
+The immutable response then returns signed outward watts and a positive W/K
+secant from the original stable scaled Planck difference owner. The body has one
+common temperature; the environment is an isotropic blackbody hemisphere or an
+explicit empty incoming vacuum bath. Equal temperatures give exactly zero heat
+and the analytic tangent. Reversing two temperatures reverses heat while retaining
+the secant for the same frozen optics. Changing temperatures performs no optical
+solve or allocation. Separate or balanced positive scale factors preserve
+representable exchange when an intermediate area/absorptance product would
+underflow or overflow; unrepresentable heat or stability slope refuses.
+
+The response's optical identity excludes temperature while retaining the original
+optical laws and physical port declaration. A state-dependent law must be resolved
+at the accepted state before comparing that identity and reusing a response.
+The secant is a frozen-optics exchange conductance, without an inferred derivative
+of the constitutive optical law. Existing emission identity bytes are preserved.
+No infrared continuation, bolometric emissivity, roughness average, internal
+nonisothermal exchange or exposure/display factor is introduced.
+
+Five G1/G3 groups verify the independent finite-band blackbody/hemisphere limit,
+integrated reciprocal emission through asymmetric transmitting ports, fixed-optics
+reuse, positive weak-loss exchange at adjacent temperatures, representable heat
+and secant with underflowed scale products, three spectral/angular refinements,
+and nonisothermal/domain/budget/cancellation refusals without partial publication.
+<!-- coating-exchange:end -->
