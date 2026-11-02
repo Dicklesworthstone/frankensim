@@ -36,9 +36,16 @@
 //!   only (the lab works in lattice units), so every dimensional number
 //!   comes from the geometry chart and the medium;
 //! - the transverse acoustic velocity at the mouth, `v = q / S_m`,
-//!   displaces the jet root by its time integral (receptivity is a
-//!   displacement, so its `1/omega` cancels the drive derivative's
-//!   `omega` and the pipe's resonance alone selects the mode); the
+//!   drives a leaky integral, the jet root's displacement. Behind the
+//!   band's high-pass at `omega_h = omega_c / 2` that chain is
+//!   `1 / (s + omega_h)`: a ZERO-PHASE receptivity of the kind de la Cuadra
+//!   (2005, sec. 4.3) measured ("phase difference between Vac and eta0 has
+//!   been measured to be zero"), not Fletcher's integral. An integral's
+//!   `1/omega` cancels the drive derivative's `omega` only for
+//!   `omega >> omega_h`, that is for `x = omega / omega_c` well above 1;
+//!   the cards run at x of about 0.4-0.55, so the derivative's quarter cycle
+//!   stays in the loop (non-delay loop phase +0.27 to +0.31 cycles for x of
+//!   0.1-0.55, bead pexfp.135.6); the
 //!   displacement convects to the labium in
 //!   `tau = W / c_p` with `c_p / U` DERIVED from the card's stage-I lock
 //!   (`St = f * 2b / U` at `h / delta`, phase condition
@@ -636,9 +643,10 @@ pub struct FlueVoice {
     band_hp: [f64; 2],
     momentum_thickness_m: f64,
     // Jet root displacement: the leaky integral of the band-limited,
-    // delayed mouth velocity (receptivity is displacement, so the
-    // integral's 1/omega cancels the drive derivative's omega and the
-    // pipe's resonance alone selects the mode).
+    // delayed mouth velocity. Behind the high-pass above it is a zero-phase
+    // receptivity, 1/(s + omega_h), not Fletcher's integral: its 1/omega
+    // cancels the drive derivative's omega only for omega >> omega_h (see
+    // the module doc and bead pexfp.135.6).
     displacement_state: f64,
     // Opt-in published jet transfer; its source memory commits with the mouth
     // solve, and both feedback flows belong to the same mechanical interval.
