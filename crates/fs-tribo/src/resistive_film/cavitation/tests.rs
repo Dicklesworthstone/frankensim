@@ -283,7 +283,7 @@ fn g0_another_liquid_or_geometry_cannot_reinterpret_retained_mass() {
     let other = CavitatingFilm::new(geometry(false), other_liquid, config()).unwrap();
     assert!(other.advance(&old, &[0.0], &[0.0], 0.1, || false).is_err());
     let mut other_geometry = geometry(false);
-    other_geometry.cells[0].area_m2 *= 2.0;
+    std::sync::Arc::make_mut(&mut other_geometry.cells)[0].area_m2 *= 2.0;
     let other = CavitatingFilm::new(other_geometry, liquid(), config()).unwrap();
     assert!(other.advance(&old, &[0.0], &[0.0], 0.1, || false).is_err());
     // A clone is the SAME immutable physical owner and can continue its state.
@@ -496,10 +496,11 @@ fn g0_viscosity_continuation_keeps_state_ownership_and_refuses_invalid_values() 
 
 #[test]
 fn g1_g3_channel_viscosities_keep_retained_cavities_and_conserve_separate_refill_fluxes() {
-    let mut graph = geometry(false);
-    graph.channels.push(graph.channels[0].clone());
+    let graph = geometry(false);
+    let mut channels = graph.channels.to_vec();
+    channels.push(channels[0].clone());
     // Construct the complete original graph before any state acquires ownership.
-    let graph = ResistiveFilm::new(graph.cells, graph.channels, 1, 0.01, graph.limits).unwrap();
+    let graph = ResistiveFilm::new(graph.cells.to_vec(), channels, 1, 0.01, graph.limits).unwrap();
     let original = CavitatingFilm::new(graph, liquid(), config()).unwrap();
     let old = original.initialize(&[-0.001], &[0.2]).unwrap();
     let saved = old.clone();
