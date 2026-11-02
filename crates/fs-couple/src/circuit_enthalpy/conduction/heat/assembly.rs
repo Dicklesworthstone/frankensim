@@ -46,6 +46,11 @@ fn assembly_heat_error<E: From<HeatNetworkError>>(
 /// radiation remain internal exchange; external non-electrical heat is
 /// `report.non_electrical_heat_j - dt * report.source.as_ref().radiation_net_power_w()`.
 ///
+/// The drive accepts existing voltage/current-density traces or equipotential
+/// total-current electrodes. Under total-current drive, the original refreshed
+/// bulk and contact sources determine voltage and local current on every trial;
+/// their actual I²R work joins the same finite-cell residual and heat assembly.
+///
 /// This keeps the existing fixed geometry, matching electrical traces, confined
 /// phase charts and field-independent thermal-source requirements. An assembly
 /// must resolve the supplied trial state without publishing side effects. Source
@@ -55,6 +60,7 @@ fn assembly_heat_error<E: From<HeatNetworkError>>(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn step_spatial_conduction_candidate<
     't,
+    'd,
     A: HeatAssembly + ?Sized,
     C: SpatialConductorMaterial,
 >(
@@ -63,7 +69,7 @@ pub fn step_spatial_conduction_candidate<
     thermal: &DepositionSimulation<'t>,
     target_s: f64,
     problem: &SpatialConduction<C>,
-    boundary: &SpatialConductionBoundary,
+    drive: impl Into<SpatialConductionDrive<'d>>,
     contacts: &[contacts::ConductionContactThermal<'_>],
     regions: &[SpatialConductionRegion],
     volume_tolerance_m3: f64,
@@ -94,7 +100,7 @@ pub fn step_spatial_conduction_candidate<
         thermal,
         target_s,
         problem,
-        boundary,
+        drive,
         contacts,
         assembly,
         field_controls,

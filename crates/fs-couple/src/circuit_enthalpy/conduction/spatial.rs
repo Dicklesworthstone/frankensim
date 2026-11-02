@@ -3,6 +3,8 @@
 //! Each proposed endpoint refreshes the complete original source bundles at
 //! the actual T/liquid mass fraction, rebuilds only the conductivity Hodge, and
 //! deposits native bulk and explicitly partitioned interface Joule work once.
+//! Equipotential total-current drive is resolved anew on that actual operator,
+//! including the trial bulk and contact resistance, before its heat is deposited.
 //! Native thermal storage,
 //! source/conductance resolution, Newton work limits, events and acceptance
 //! remain with the existing circuit/enthalpy and material-network owners.
@@ -35,6 +37,52 @@ use std::{cell::RefCell, collections::BTreeMap};
 pub struct SpatialConductionRegion {
     pub tetrahedron: usize,
     pub cell: CellId,
+}
+
+/// Electrical drive held fixed over one coupled enthalpy interval.
+///
+/// Existing voltage/current-density traces remain available through `From`.
+/// Total current instead fixes equipotential electrodes and lets the native
+/// heterogeneous field determine their current-density distribution. Every
+/// enthalpy trial rebuilds its terminal response after refreshing the original
+/// bulk and contact sources; no accepted-state resistance is frozen in time.
+#[derive(Clone, Copy, Debug)]
+pub enum SpatialConductionDrive<'a> {
+    Boundary(&'a SpatialConductionBoundary),
+    /// Signed amperes entering `positive_faces`; `negative_faces` is grounded.
+    /// Both sets contain complete exterior triangles and must be disjoint and
+    /// electrically connected under the native terminal admission rules.
+    /// `reference_voltage_v` is a finite positive numerical probe amplitude,
+    /// not the imposed terminal voltage or a second source of Joule work.
+    TotalCurrent {
+        positive_faces: &'a [usize],
+        negative_faces: &'a [usize],
+        current_a: f64,
+        reference_voltage_v: f64,
+    },
+}
+
+impl<'a> SpatialConductionDrive<'a> {
+    /// Use the native one-volt reference probe. Current may be negative or zero;
+    /// zero drive still requires an admitted, conducting electrode topology.
+    pub fn total_current(
+        positive_faces: &'a [usize],
+        negative_faces: &'a [usize],
+        current_a: f64,
+    ) -> Self {
+        Self::TotalCurrent {
+            positive_faces,
+            negative_faces,
+            current_a,
+            reference_voltage_v: 1.0,
+        }
+    }
+}
+
+impl<'a> From<&'a SpatialConductionBoundary> for SpatialConductionDrive<'a> {
+    fn from(boundary: &'a SpatialConductionBoundary) -> Self {
+        Self::Boundary(boundary)
+    }
 }
 
 /// Every original tetrahedron has exactly one finite thermal receiver. Several
@@ -125,6 +173,9 @@ fn field_error(error: SpatialConductionError) -> Error {
 impl SpatialConductionThermalNetwork<'_> {
     /// Close the actual 3D current field, source sigma/rho(T,f), finite-cell
     /// enthalpy and all original material heat links at one common endpoint.
+    /// Pass an existing boundary by reference or [`SpatialConductionDrive`] for
+    /// equipotential total-current electrodes. Current is held fixed over the
+    /// interval while the actual endpoint source laws determine terminal voltage.
     /// Scalar and fixed-orientation principal transport share the same solve.
     /// A confined phase chart needs equal, constant density and an explicit
     /// liquid-MASS-fraction coordinate; its original source owns sigma(f), not
@@ -136,12 +187,12 @@ impl SpatialConductionThermalNetwork<'_> {
     /// leave both inputs untouched. Backward Euler and the declared tolerances
     /// do not establish unconditional convergence or temporal/spatial accuracy.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_candidate<'t, C: SpatialConductorMaterial>(
+    pub fn step_candidate<'t, 'd, C: SpatialConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &SpatialConduction<C>,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
         controls: CircuitEnthalpySolve,
@@ -152,7 +203,7 @@ impl SpatialConductionThermalNetwork<'_> {
             thermal,
             target_s,
             problem,
-            boundary,
+            drive,
             &[],
             assembly,
             field_controls,
@@ -176,12 +227,12 @@ impl SpatialConductionThermalNetwork<'_> {
     /// Fixed matching traces, zero interface storage and the confined-phase
     /// density rules still apply. Rejected trials publish neither state.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_contact_candidate<'t, C: SpatialConductorMaterial>(
+    pub fn step_contact_candidate<'t, 'd, C: SpatialConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &SpatialConduction<C>,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         contacts: &[ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -211,7 +262,7 @@ impl SpatialConductionThermalNetwork<'_> {
             thermal,
             target_s,
             problem,
-            boundary,
+            drive,
             contacts,
             assembly,
             field_controls,
@@ -273,6 +324,7 @@ impl SpatialConductionThermalNetwork<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn step_resolved_candidate<
         't,
+        'd,
         C: SpatialConductorMaterial,
         S,
         E: From<ConductionThermalError>,
@@ -281,7 +333,7 @@ impl SpatialConductionThermalNetwork<'_> {
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &SpatialConduction<C>,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         contact_bindings: &[ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -294,9 +346,20 @@ impl SpatialConductionThermalNetwork<'_> {
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
         self.step_resolved_candidate_with_geometry(
-            thermal, target_s, problem, boundary, contact_bindings, assembly,
-            field_controls, controls, initial_energy_increments_j, resolve, sample,
-            None, |_| Ok(None), cancel,
+            thermal,
+            target_s,
+            problem,
+            drive,
+            contact_bindings,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            resolve,
+            sample,
+            None,
+            |_| Ok(None),
+            cancel,
         )
     }
 
@@ -306,6 +369,7 @@ impl SpatialConductionThermalNetwork<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn step_resolved_candidate_with_geometry<
         't,
+        'd,
         C: SpatialConductorMaterial,
         S,
         E: From<ConductionThermalError>,
@@ -314,7 +378,7 @@ impl SpatialConductionThermalNetwork<'_> {
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &SpatialConduction<C>,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         contact_bindings: &[ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -328,6 +392,7 @@ impl SpatialConductionThermalNetwork<'_> {
         trial_positions: impl Fn(&S) -> Result<Option<Vec<[f64; 3]>>, CircuitEnthalpyError<E>>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
+        let drive = drive.into();
         check(cancel).map_err(map_conduction_error)?;
         let dt = self
             .admit_step(
@@ -379,14 +444,14 @@ impl SpatialConductionThermalNetwork<'_> {
             volumes.to_vec()
         } else {
             (0..problem.mesh().tets.len())
-            .map(|cell| {
-                check(cancel)?;
-                problem
-                    .cell_volume_m3(cell)
-                    .ok_or_else(|| invalid("original tetrahedral volume is missing"))
-            })
-            .collect::<Result<Vec<_>, Error>>()
-            .map_err(map_conduction_error)?
+                .map(|cell| {
+                    check(cancel)?;
+                    problem
+                        .cell_volume_m3(cell)
+                        .ok_or_else(|| invalid("original tetrahedral volume is missing"))
+                })
+                .collect::<Result<Vec<_>, Error>>()
+                .map_err(map_conduction_error)?
         };
         let routes = route_owner
             .admit_volume_routes(thermal, &volumes, cancel)
@@ -476,8 +541,8 @@ impl SpatialConductionThermalNetwork<'_> {
                         source,
                     })
                     .collect();
-                let conductors = refresh(sample(&coefficients.source))
-                    .map_err(map_conduction_error)?;
+                let conductors =
+                    refresh(sample(&coefficients.source)).map_err(map_conduction_error)?;
                 let positions = trial_positions(&coefficients.source)?;
                 if positions.is_some() != reference_volumes_m3.is_some() {
                     return Err(map_conduction_error(invalid(
@@ -486,21 +551,45 @@ impl SpatialConductionThermalNetwork<'_> {
                 }
                 let next = if let Some(positions) = positions {
                     SpatialConduction::new(
-                        positions, problem.mesh().tets.clone(), conductors, assembly,
+                        positions,
+                        problem.mesh().tets.clone(),
+                        conductors,
+                        assembly,
                         &mut || (*cancel.borrow_mut())(),
                     )
                 } else {
                     problem.with_conductors_and_contacts(
-                        conductors, refreshed_contacts, assembly,
+                        conductors,
+                        refreshed_contacts,
+                        assembly,
                         &mut || (*cancel.borrow_mut())(),
                     )
                 }
                 .map_err(field_error)
                 .map_err(map_conduction_error)?;
-                let field = next
-                    .solve(boundary, field_controls, &mut || (*cancel.borrow_mut())())
-                    .map_err(field_error)
-                    .map_err(map_conduction_error)?;
+                // A total-current source changes its terminal voltage at every
+                // nonlinear trial. Solve on the refreshed native operator so
+                // bulk/contact I²R(T,f) feeds back into this same endpoint.
+                let field = match drive {
+                    SpatialConductionDrive::Boundary(boundary) => {
+                        next.solve(boundary, field_controls, &mut || (*cancel.borrow_mut())())
+                    }
+                    SpatialConductionDrive::TotalCurrent {
+                        positive_faces,
+                        negative_faces,
+                        current_a,
+                        reference_voltage_v,
+                    } => next.solve_current_with_reference_voltage(
+                        positive_faces,
+                        negative_faces,
+                        current_a,
+                        reference_voltage_v,
+                        field_controls,
+                        &mut || (*cancel.borrow_mut())(),
+                    ),
+                }
+                .map_err(field_error)
+                .map_err(map_conduction_error)?;
                 let heat_j = finite(dt * field.power_w)?;
                 let supplied_work_j = finite(dt * field.supplied_power_w)?;
                 if (field.power_w > 0.0 && heat_j == 0.0)

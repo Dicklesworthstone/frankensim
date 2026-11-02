@@ -3,6 +3,8 @@
 mod common;
 #[path = "spatial_conduction_enthalpy/contacts.rs"]
 mod contacts;
+#[path = "spatial_conduction_enthalpy/current.rs"]
+mod current;
 #[path = "spatial_conduction_enthalpy/heat.rs"]
 mod heat;
 use common::{config, initial, near};
@@ -201,6 +203,20 @@ fn boundary<C: SpatialConductorMaterial>(
         }
     }
     result
+}
+
+fn electrodes<C: SpatialConductorMaterial>(
+    problem: &SpatialConduction<C>,
+    length: f64,
+) -> [Vec<usize>; 2] {
+    [length, 0.0].map(|x| {
+        problem
+            .exterior_faces()
+            .filter(|&face| {
+                problem.mesh().faces[face].map(|v| problem.positions_m()[v as usize][0]) == [x; 3]
+            })
+            .collect()
+    })
 }
 fn bindings<'a>(
     cards: &'a [MaterialCard; 2],
@@ -596,6 +612,7 @@ fn original_phase_surface_changes_three_dimensional_scalar_and_tensor_current_he
                 2.0 * supply / (a + (a * a + 4.0 * slope * supply / 100.0).sqrt())
             };
             let boundary = boundary(&scalar, 1.0, 2.0, None);
+            let [positive, negative] = electrodes(&scalar, 1.0);
             let next = network
                 .step_candidate(
                     &thermal,
@@ -634,6 +651,62 @@ fn original_phase_surface_changes_three_dimensional_scalar_and_tensor_current_he
             );
             near(next.report().electrical.heat_j, heat);
             near(next.report().total_energy_residual_j, 0.0);
+            // A terminal current must rebuild the resistance at the actual
+            // latent fraction, even when temperature stays exactly constant.
+            for current_a in [2.0, -2.0] {
+                let drive = SpatialConductionDrive::total_current(&positive, &negative, current_a);
+                let current_scalar = network
+                    .step_candidate(
+                        &thermal,
+                        0.5,
+                        &scalar,
+                        drive,
+                        limits(),
+                        field_controls(),
+                        config(),
+                        &[0.0],
+                        || false,
+                    )
+                    .unwrap();
+                let current_tensor = network
+                    .step_candidate(
+                        &thermal,
+                        0.5,
+                        &tensor,
+                        drive,
+                        limits(),
+                        field_controls(),
+                        config(),
+                        &[0.0],
+                        || false,
+                    )
+                    .unwrap();
+                for candidate in [current_scalar.report(), current_tensor.report()] {
+                    near(candidate.electrical.heat_j, heat);
+                    near(candidate.electrical.supplied_work_j, heat);
+                    near(candidate.total_energy_residual_j, 0.0);
+                    for density in &candidate.electrical.field.current_density_a_m2 {
+                        near(density[0], -current_a);
+                        near(density[1], 0.0);
+                        near(density[2], 0.0);
+                    }
+                }
+                near(
+                    current_scalar.thermal().energy_j(),
+                    next.thermal().energy_j(),
+                );
+                near(
+                    current_tensor.thermal().energy_j(),
+                    next.thermal().energy_j(),
+                );
+                near(
+                    current_tensor.problem().conductors()[0]
+                        .material()
+                        .query()
+                        .axes()["f"],
+                    0.2 + heat / 100.0,
+                );
+            }
         }
     }
 }

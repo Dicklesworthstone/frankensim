@@ -14,7 +14,8 @@ use super::circuit::response::{
 };
 use super::response::ConductionResponseEnthalpyCandidate;
 use super::spatial::{
-    SpatialConductionEnthalpyCandidate, SpatialConductionRegion, SpatialConductionThermalNetwork,
+    SpatialConductionDrive, SpatialConductionEnthalpyCandidate, SpatialConductionRegion,
+    SpatialConductionThermalNetwork,
 };
 use super::*;
 use crate::circuit_enthalpy::contacts::heat::{
@@ -22,7 +23,7 @@ use crate::circuit_enthalpy::contacts::heat::{
 };
 use crate::circuit_enthalpy::{ResistorCell, field_storage::FieldThermalBinding};
 use fs_em::conduction::response::{ConductionResponseControls, PlanarConductionResponse};
-use fs_em::spatial::conduction::{SpatialConduction, SpatialConductionBoundary};
+use fs_em::spatial::conduction::SpatialConduction;
 use fs_exec::Cx;
 use fs_material::conductor::spatial::SpatialConductorMaterial;
 
@@ -44,6 +45,9 @@ impl PreparedHeatNetwork<'_, '_> {
     /// re-evaluated from their pinned source laws on every nonlinear trial.
     /// Neither a second thermal timeline nor a fitted electrical resistor is
     /// introduced. Source failures and cancellation publish neither endpoint.
+    /// Voltage/current-density traces and equipotential total-current electrodes
+    /// use this same owner; current drive refreshes its terminal response after
+    /// every material/contact trial, so local I²R feedback is fully implicit.
     ///
     /// The original fixed-geometry and confined phase-chart restrictions of
     /// [`SpatialConductionThermalNetwork::step_candidate`] apply. Thermal-contact
@@ -55,13 +59,13 @@ impl PreparedHeatNetwork<'_, '_> {
     /// Its signed numerical net is checked against the original energy allowance.
     /// This first-order coupling still requires temporal/spatial refinement.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_spatial_conduction_candidate<'t, C: SpatialConductorMaterial>(
+    pub fn step_spatial_conduction_candidate<'t, 'd, C: SpatialConductorMaterial>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &SpatialConduction<C>,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         regions: &[SpatialConductionRegion],
         volume_tolerance_m3: f64,
         assembly: WeightedAssemblyLimits,
@@ -74,7 +78,7 @@ impl PreparedHeatNetwork<'_, '_> {
             thermal,
             target_s,
             problem,
-            boundary,
+            drive,
             &[],
             regions,
             volume_tolerance_m3,
@@ -99,13 +103,13 @@ impl PreparedHeatNetwork<'_, '_> {
     /// restrictions of `step_spatial_conduction_candidate` still apply. Neither
     /// source failure nor a rejected/cancelled nonlinear trial publishes state.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_spatial_conduction_contact_candidate<'t, C: SpatialConductorMaterial>(
+    pub fn step_spatial_conduction_contact_candidate<'t, 'd, C: SpatialConductorMaterial>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &SpatialConduction<C>,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         contacts: &[contacts::ConductionContactThermal<'_>],
         regions: &[SpatialConductionRegion],
         volume_tolerance_m3: f64,
@@ -120,7 +124,7 @@ impl PreparedHeatNetwork<'_, '_> {
             thermal,
             target_s,
             problem,
-            boundary,
+            drive,
             contacts,
             regions,
             volume_tolerance_m3,

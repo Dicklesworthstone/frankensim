@@ -272,14 +272,15 @@ fn full_heat_assembly_closes_independent_three_dimensional_current_and_body_bala
             2000.0,
             |cx, _, heat, thermal, field, regions| {
                 let prepared = heat.prepare(cx, &thermal).unwrap();
-                let drive = boundary(&field, 2.0, 2.0, None);
+                let [positive, negative] = electrodes(&field, 2.0);
+                let drive = SpatialConductionDrive::total_current(&positive, &negative, 2.0);
                 let next = prepared
                     .step_spatial_conduction_candidate(
                         cx,
                         &thermal,
                         0.5,
                         &field,
-                        &drive,
+                        drive,
                         regions,
                         1e-12,
                         limits(),
@@ -288,6 +289,31 @@ fn full_heat_assembly_closes_independent_three_dimensional_current_and_body_bala
                         &[0.0; 2],
                     )
                     .unwrap();
+                let trace_next = prepared
+                    .step_spatial_conduction_candidate(
+                        cx,
+                        &thermal,
+                        0.5,
+                        &field,
+                        &boundary(&field, 2.0, 2.0, None),
+                        regions,
+                        1e-12,
+                        limits(),
+                        field_controls(),
+                        config(),
+                        &[0.0; 2],
+                    )
+                    .unwrap();
+                for cell in [CellId(30), CellId(10)] {
+                    near(
+                        trace_next.thermal().temperature_k(cell).unwrap(),
+                        next.thermal().temperature_k(cell).unwrap(),
+                    );
+                }
+                near(
+                    trace_next.report().electrical.supplied_work_j,
+                    next.report().electrical.supplied_work_j,
+                );
                 // Independent two-body energy elimination and scalar bisection,
                 // unrelated to the field assembly and coupled Newton implementation.
                 let resistance = 2.0 - 1.8 * (pressure - 100000.0) / 100000.0;
@@ -350,7 +376,7 @@ fn full_heat_assembly_closes_independent_three_dimensional_current_and_body_bala
                         next.thermal(),
                         1.0,
                         next.problem(),
-                        &drive,
+                        drive,
                         regions,
                         1e-12,
                         limits(),

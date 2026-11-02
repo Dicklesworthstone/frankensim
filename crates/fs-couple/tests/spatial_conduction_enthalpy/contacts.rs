@@ -312,6 +312,8 @@ fn two_source_side_temperatures_and_pressure_close_both_native_heat_entry_points
             volume_tolerance_m3: 1e-12,
         };
         let drive = boundary(&field, 2.0, 2.0, None);
+        let [positive, negative] = electrodes(&field, 2.0);
+        let current_drive = SpatialConductionDrive::total_current(&positive, &negative, 2.0);
         let bare = layout
             .step_contact_candidate(
                 &thermal,
@@ -327,6 +329,21 @@ fn two_source_side_temperatures_and_pressure_close_both_native_heat_entry_points
             )
             .unwrap();
         assert_balance(&bare, &thermal, r0, 1.0);
+        let current_bare = layout
+            .step_contact_candidate(
+                &thermal,
+                0.5,
+                &field,
+                current_drive,
+                &surface,
+                limits(),
+                field_controls(),
+                config(),
+                &[0.0; 2],
+                || false,
+            )
+            .unwrap();
+        assert_balance(&current_bare, &thermal, r0, 1.0);
         assert!(
             layout
                 .step_candidate(
@@ -389,7 +406,7 @@ fn two_source_side_temperatures_and_pressure_close_both_native_heat_entry_points
                     &thermal,
                     0.5,
                     &field,
-                    &drive,
+                    current_drive,
                     &surface,
                     &regions,
                     1e-12,
@@ -436,7 +453,7 @@ fn two_source_side_temperatures_and_pressure_close_both_native_heat_entry_points
                     next.thermal(),
                     1.0,
                     next.problem(),
-                    &drive,
+                    current_drive,
                     &surface,
                     &regions,
                     1e-12,
@@ -603,13 +620,14 @@ fn both_latent_fractions_refresh_contacts_without_a_temperature_change() {
     for surface in &mut surfaces {
         surface.point.liquid_fraction_axes = [Some("fa"), Some("fb")];
     }
-    let drive = boundary(&field, 2.0, 2.0, None);
+    let [positive, negative] = electrodes(&field, 2.0);
+    let drive = SpatialConductionDrive::total_current(&positive, &negative, 2.0);
     let next = layout
         .step_contact_candidate(
             &thermal,
             0.5,
             &field,
-            &drive,
+            drive,
             &surfaces,
             limits(),
             field_controls(),
@@ -618,6 +636,31 @@ fn both_latent_fractions_refresh_contacts_without_a_temperature_change() {
             || false,
         )
         .unwrap();
+    let trace_next = layout
+        .step_contact_candidate(
+            &thermal,
+            0.5,
+            &field,
+            &boundary(&field, 2.0, 2.0, None),
+            &surfaces,
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || false,
+        )
+        .unwrap();
+    near(trace_next.thermal().energy_j(), next.thermal().energy_j());
+    for (trace, total) in trace_next
+        .report()
+        .electrical
+        .field
+        .voltage_v
+        .iter()
+        .zip(&next.report().electrical.field.voltage_v)
+    {
+        near(*trace, *total);
+    }
     // Independent latent balances: 99 fa - 1.5 fb = 24.5,
     // -3 fa + 95.5 fb = 25.5. Both temperatures stay at 400 K.
     let det = 99.0 * 95.5 - 4.5;
@@ -654,7 +697,7 @@ fn both_latent_fractions_refresh_contacts_without_a_temperature_change() {
                 &thermal,
                 0.5,
                 &field,
-                &drive,
+                drive,
                 &surfaces,
                 limits(),
                 field_controls(),

@@ -99,6 +99,36 @@ electrical source role and heat-transport binding at its actual endpoint
 temperature and liquid mass fraction. Scalar and fixed-orientation orthotropic
 sources use the same field, thermal residual and source work account.
 
+`SpatialConductionDrive` accepts the original voltage/current-density traces
+or signed total current through two equipotential sets of exterior triangles.
+The original `&SpatialConductionBoundary` calls remain accepted. Every nonlinear
+trial rebuilds the native terminal response after refreshing all bulk and
+electrical-contact sources at its actual temperature and liquid mass fraction.
+The terminal voltage and heterogeneous local current therefore respond to
+`R(T,f)` inside the same enthalpy residual; the accepted-state resistance is
+never frozen. The same drive reaches the complete `HeatAssembly` entry point,
+including sourced thermal contacts, layers, radiation and finite coolant.
+
+The reference voltage is a finite positive numerical probe, not an additional
+source of heat. Only the recovered actual-current bulk and contact powers enter
+the cells; terminal reactions independently check the signed current and `I V`
+work. Negative current reverses voltage/current while preserving Joule heat.
+Zero current deposits no electrical heat but still requires an admitted finite
+terminal resistance. The native terminal owner refuses unresolved, touching or
+disconnected electrode sets. Current is held fixed over the authored interval;
+drive changes require the existing interval/event splitting. Each native
+reference solve counts against the original circuit-trial work budget, and all
+source/cancellation/field refusals preserve the jointly accepted histories.
+
+`tests/spatial_conduction_enthalpy/current.rs` constructs an exact two-body
+backward-Euler endpoint for thermally linked, electrically parallel 3D conductors
+with temperature-dependent resistance. It checks unequal current redistribution,
+local cell work, terminal voltage, reversal, reference-amplitude independence,
+zero drive and malformed-electrode refusal. The original latent scalar/tensor,
+two-sided contact-temperature/phase and full contact/radiation regressions also
+exercise total-current drive. These are authored synthetic numerical oracles,
+not measured material/device validation.
+
 Each original tetrahedron maps to exactly one thermal receiver; several tets
 may cover one receiver only with matching full volume and original mass/density.
 The existing planar/volume-independent receiving-inventory and heat-summing
@@ -161,7 +191,7 @@ integrate nonuniform triangle voltage jumps and their work.
 
 This fixed-geometry, memoryless DC closure adds no thermal spatial-resolution
 claim beyond its authored finite cells, phase-density motion, contact-layer
-storage, opening/arcing, induction, dielectric storage, total-current equipotential terminal,
+storage, opening/arcing, induction, dielectric storage,
 unconditional nonlinear convergence or empirical material validation.
 
 ## Original latent fractions in constitutive graph feedback
