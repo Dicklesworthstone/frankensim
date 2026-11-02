@@ -156,17 +156,6 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         let span = self.span();
         let boundary = if heating { span[1] } else { span[0] };
         let target = change.abs();
-        if let Ok(available) = self.energy_change(initial, boundary) {
-            let available = available.abs();
-            if target > available {
-                return Err(invalid(
-                    "storage target exceeds the source temperature support",
-                ));
-            }
-            if target == available {
-                return Ok(boundary);
-            }
-        }
         let mut current = initial;
         let mut cumulative = 0.0;
         let mut correction = 0.0;
@@ -223,6 +212,25 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                 }
                 return Ok(temperature);
             }
+            // A step resolved on its initial segment already has bounded
+            // source support. Do not integrate the entire remaining table on
+            // every local heat update: that made even an infinitesimal step
+            // linear in the number of unrelated source knots. Only a crossing
+            // needs the whole-span check, which also preserves the canonical
+            // endpoint integral's rounding for reverse (cooling) traversal.
+            if current == initial {
+                if let Ok(available) = self.energy_change(initial, boundary) {
+                    let available = available.abs();
+                    if target > available {
+                        return Err(invalid(
+                            "storage target exceeds the source temperature support",
+                        ));
+                    }
+                    if target == available {
+                        return Ok(boundary);
+                    }
+                }
+            }
             correction = (next - cumulative) - corrected;
             cumulative = next;
             current = end;
@@ -267,4 +275,94 @@ fn entropy_weights(low: f64, high: f64) -> [f64; 2] {
 
 fn invalid(reason: &'static str) -> ThermalTransportError {
     ThermalTransportError::Invalid(reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct CountedKnot<'a> {
+        values: [f64; 2],
+        queries: &'a Cell<usize>,
+    }
+
+    impl CapacityKnot for CountedKnot<'_> {
+        fn temperature(&self) -> f64 {
+            self.values[0]
+        }
+
+        fn capacity(&self) -> f64 {
+            self.queries.set(self.queries.get() + 1);
+            self.values[1]
+        }
+    }
+
+    #[test]
+    fn g1_local_nonlinear_calorimetry_does_not_scan_unvisited_source_intervals() {
+        for count in [64, 4096] {
+            let queries = Cell::new(0);
+            let knots: Vec<_> = (0..count)
+                .map(|i| CountedKnot {
+                    values: [250.0 + f64::from(i), 1000.0 + 0.5 * f64::from(i)],
+                    queries: &queries,
+                })
+                .collect();
+            let curve = CapacityCurve::new(&knots);
+            let initial = 250.25 + f64::from(count / 2);
+            let initial_capacity = 1000.0 + 0.5 * (initial - 250.0);
+            for delta in [-0.125, 0.125] {
+                // Independent exact integral of C(T)=1000+0.5*(T-250).
+                let heat = initial_capacity * delta + 0.25 * delta * delta;
+                queries.set(0);
+                let final_t = curve
+                    .temperature_after_energy_change(initial, heat)
+                    .unwrap();
+                assert_eq!(final_t, initial + delta);
+                assert!(
+                    queries.get() <= 16,
+                    "local heat read {} capacities",
+                    queries.get()
+                );
+                let recovered = curve.energy_change(initial, final_t).unwrap();
+                assert!((recovered - heat).abs() <= 4.0 * f64::EPSILON * heat.abs());
+            }
+        }
+    }
+
+    #[test]
+    fn g1_crossing_inverse_retains_exact_knots_support_and_signed_caloric_balance() {
+        let knots = [
+            [200.0, 1000.0],
+            [300.0, 2000.0],
+            [400.0, 3000.0],
+            [500.0, 2000.0],
+        ];
+        let curve = CapacityCurve::new(&knots);
+        for initial in [200.0, 250.0, 300.0, 350.0, 400.0, 500.0] {
+            for final_t in [200.0, 275.0, 300.0, 350.0, 400.0, 425.0, 500.0] {
+                let heat = curve.energy_change(initial, final_t).unwrap();
+                let recovered = curve
+                    .temperature_after_energy_change(initial, heat)
+                    .unwrap();
+                assert!((recovered - final_t).abs() <= 2.0 * f64::EPSILON * final_t);
+                if final_t == 200.0 || final_t == 500.0 {
+                    assert_eq!(recovered, final_t);
+                }
+            }
+            for boundary in [200.0, 500.0] {
+                let available = curve.energy_change(initial, boundary).unwrap();
+                let beyond = if boundary == 500.0 {
+                    available.next_up()
+                } else {
+                    available.next_down()
+                };
+                assert!(
+                    curve
+                        .temperature_after_energy_change(initial, beyond)
+                        .is_err()
+                );
+            }
+        }
+    }
 }

@@ -5614,6 +5614,15 @@ evaluation allocates nothing and performs no source query, content hashing or
 numerical root iteration. Integrals traverse relative temperature intervals to
 retain small changes; finite representability limits can still refuse.
 
+Local caloric inversions now use one logarithmic knot lookup and constant
+segment work. They no longer integrate every unvisited source interval before
+inverting a small heat increment. Cross-knot updates retain the original
+compensated whole-support admission and analytic quadratic inverse, including
+the canonical cooling endpoint. The same kernel serves specific isobaric,
+volumetric, tabulated and assembled capacities. G1 regressions check signed
+nonlinear calorimetry, source-boundary refusal and source-query counts on
+64- and 4096-knot curves; this is a work bound, not a general throughput claim.
+
 `HeatStorageThermalLaw` binds this total storage to the existing thermal
 timeline's specific-energy coordinate with an explicit total mass and datum.
 Mass-only assemblies must match their known total mass; mixed assemblies require
