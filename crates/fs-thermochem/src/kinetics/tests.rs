@@ -10,10 +10,10 @@ use fs_matdb::{ConstitutiveModelCard, LawId, LawParameter, Provenance};
 use fs_qty::{Amount, MolarMass, Volume};
 use std::collections::BTreeMap;
 
-#[path = "pressure/tests.rs"]
-mod pressure_rates;
 #[path = "tests/electron_impact.rs"]
 mod electron_impact;
+#[path = "pressure/tests.rs"]
+mod pressure_rates;
 
 fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()
@@ -132,6 +132,178 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
         (actual - expected).abs() <= tolerance,
         "actual={actual:.17e}, expected={expected:.17e}, tol={tolerance:e}"
     );
+}
+
+#[test]
+fn g3_reaction_calorics_cancel_only_conserved_formation_references() {
+    // A and A2 carry one and two nuclei. The arbitrary elemental reference
+    // cancels, while changing molecular count retains the ideal-gas RT term.
+    let temperature = Temperature::new(500.0);
+    for offset in [0.0, 2.0_f64.powi(50), -2.0_f64.powi(50)] {
+        for binding in [1024.0, 2048.0] {
+            let bank = thermo(
+                vec![
+                    source("A", 0.01, 2.5, offset * R, 0.0),
+                    source("A2", 0.02, 3.5, (2.0 * offset - binding) * R, 0.0),
+                ],
+                vec![1, 2],
+            );
+            // Use the retained coefficients, including their authored f64
+            // representation, as the independent formation-energy oracle.
+            let formation_r = 2.0 * bank.models()[0].regions()[0].coefficients()[7]
+                - bank.models()[1].regions()[0].coefficients()[7];
+            let mechanism = IdealGasKineticsV1::new(
+                bank,
+                "reference-shifted-dissociation",
+                1,
+                vec![reaction(
+                    "split",
+                    &[("A2", 1)],
+                    &[("A", 2)],
+                    rate(3.0, 0.0, 0.0),
+                )],
+                1e-12,
+            )
+            .unwrap();
+            let expected = R * (0.5 * temperature.value() + formation_r);
+            let mut reaction_energy = [0.0];
+            mechanism
+                .reaction_internal_energies_at(temperature, &mut reaction_energy, || false)
+                .unwrap();
+            close(reaction_energy[0], expected, 2e-11);
+            let mut workspace = KineticWorkspaceV1::new(&mechanism).unwrap();
+            let result = mechanism
+                .evaluate(temperature, &[0.1, 1.0], &mut workspace, || false)
+                .unwrap();
+            close(workspace.reaction_internal_energies()[0], expected, 2e-11);
+            let expected_rate = -expected * workspace.reaction_rates()[0] / (R * (0.1 * 1.5 + 2.5));
+            close(
+                result.adiabatic_temperature_rate_k_s,
+                expected_rate,
+                expected_rate.abs() * 2e-14,
+            );
+            assert!(
+                mechanism
+                    .reaction_internal_energies_at(temperature, &mut [], || false)
+                    .is_err()
+            );
+            assert_eq!(
+                mechanism.reaction_internal_energies_at(temperature, &mut reaction_energy, || true),
+                Err(KineticsErrorV1::Cancelled)
+            );
+        }
+    }
+}
+
+#[test]
+fn g0_reaction_calorics_admit_original_spectator_sources() {
+    let low_cv = source("X", 0.01, 0.5, 0.0, 0.0);
+    let ordinary = source("X", 0.01, 4.0, 0.0, 0.0);
+    let mut card = ordinary.regions()[0].card().clone();
+    card.validity = ValidityDomain::unconstrained().with("T", 200.0, 400.0);
+    let limited = Nasa9StandardStateModelV1::new(
+        id("X"),
+        ordinary.molar_mass(),
+        ordinary.convention().clone(),
+        vec![Nasa9RegionV1::from_card(card).unwrap()],
+    )
+    .unwrap();
+    for spectator in [low_cv, limited] {
+        let mechanism = IdealGasKineticsV1::new(
+            thermo(
+                vec![
+                    source("A", 0.01, 4.0, 0.0, 0.0),
+                    source("B", 0.01, 4.0, -2000.0, 0.0),
+                    spectator,
+                ],
+                vec![1, 1, 1],
+            ),
+            "spectator-caloric-admission",
+            1,
+            vec![reaction(
+                "A-B",
+                &[("A", 1)],
+                &[("B", 1)],
+                rate(1.0, 0.0, 0.0),
+            )],
+            1e-12,
+        )
+        .unwrap();
+        let temperature = Temperature::new(500.0);
+        let mut workspace = KineticWorkspaceV1::new(&mechanism).unwrap();
+        let expected = mechanism
+            .evaluate_thermodynamics(temperature, &[1.0, 0.0, 0.0], &mut workspace, || false)
+            .unwrap_err();
+        assert_eq!(
+            mechanism
+                .reaction_internal_energies_at(temperature, &mut [0.0], || false)
+                .unwrap_err(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn g0_reaction_calorics_retain_raw_region_jumps_and_explicit_corrections() {
+    let a = source("A", 0.01, 3.5, 0.0, 0.0);
+    let b = source("B", 0.01, 4.0, -2000.0, 0.0);
+    let mut low = b.regions()[0].card().clone();
+    low.validity = ValidityDomain::unconstrained().with("T", 200.0, 1000.0);
+    let mut high = low.clone();
+    high.validity = ValidityDomain::unconstrained().with("T", 1000.0, 6000.0);
+    high.parameters.get_mut("a2").unwrap().value = 5.0;
+    high.parameters.get_mut("a7").unwrap().value += 100.0;
+    let raw = Nasa9StandardStateModelV1::new(
+        id("B"),
+        b.molar_mass(),
+        b.convention().clone(),
+        vec![
+            Nasa9RegionV1::from_card(low).unwrap(),
+            Nasa9RegionV1::from_card(high).unwrap(),
+        ],
+    )
+    .unwrap();
+    let reconciled = raw
+        .with_caloric_continuity(
+            Temperature::new(500.0),
+            MolarEnergyQuantityV1::new(20000.0),
+            crate::MolarThermalQuantityV1::new(100.0),
+        )
+        .unwrap();
+    assert_ne!(
+        raw.evaluate_properties(Temperature::new(1000.0))
+            .unwrap()
+            .u(),
+        reconciled
+            .evaluate_properties(Temperature::new(1000.0))
+            .unwrap()
+            .u()
+    );
+    for b in [raw, reconciled] {
+        let mechanism = IdealGasKineticsV1::new(
+            thermo(vec![a.clone(), b.clone()], vec![1, 1]),
+            "region-calorics",
+            1,
+            vec![reaction(
+                "A-B",
+                &[("A", 1)],
+                &[("B", 1)],
+                rate(1.0, 0.0, 0.0),
+            )],
+            1e-12,
+        )
+        .unwrap();
+        for t in [750.0, 1000.0, 1200.0] {
+            let temperature = Temperature::new(t);
+            let expected = b.evaluate_properties(temperature).unwrap().u().value()
+                - a.evaluate_properties(temperature).unwrap().u().value();
+            let mut energy = [0.0];
+            mechanism
+                .reaction_internal_energies_at(temperature, &mut energy, || false)
+                .unwrap();
+            close(energy[0], expected, 3e-11);
+        }
+    }
 }
 
 #[test]

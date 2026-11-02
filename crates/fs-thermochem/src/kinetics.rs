@@ -52,7 +52,7 @@ pub const MAX_KINETIC_REACTIONS_V1: usize = 512;
 /// Maximum sum of elementary exponents on either side of one reaction.
 pub const MAX_ELEMENTARY_ORDER_V1: u32 = 32;
 /// Fixed operation-tree version of the concentration-based kinetic closure.
-pub const IDEAL_GAS_KINETICS_VERSION_V1: u32 = 4;
+pub const IDEAL_GAS_KINETICS_VERSION_V1: u32 = 5;
 
 /// Invalid source declaration, input domain, arithmetic range or cancellation.
 #[derive(Clone, Debug, PartialEq)]
@@ -440,8 +440,12 @@ impl IdealGasKineticsV1 {
         }
         for reaction in &self.reactions {
             if matches!(reaction.forward_rate, ForwardRateV1::ElectronImpact(_)) {
-                reaction.forward_rate.log_rate(lower.value(), &mut cancelled)?;
-                reaction.forward_rate.log_rate(upper.value(), &mut cancelled)?;
+                reaction
+                    .forward_rate
+                    .log_rate(lower.value(), &mut cancelled)?;
+                reaction
+                    .forward_rate
+                    .log_rate(upper.value(), &mut cancelled)?;
             }
         }
         Ok(())
@@ -491,7 +495,6 @@ impl IdealGasKineticsV1 {
             }
             work.u[i] = p.u().value();
             work.cv[i] = cvi;
-            work.g[i] = p.g().value();
             work.log_c[i] = if concentrations[i] == 0.0 {
                 f64::NEG_INFINITY
             } else {
@@ -546,6 +549,7 @@ impl IdealGasKineticsV1 {
         work.rate_jacobian.fill(0.0);
         let mut entropy_rate = Sum::default();
         let mut infinite_entropy_rate = false;
+        let caloric_basis = caloric::ReactionCaloricBasis::new(temperature);
         let standard_c_log = fs_math::det::ln(
             self.thermodynamics
                 .convention()
@@ -555,14 +559,11 @@ impl IdealGasKineticsV1 {
             - fs_math::det::ln(t);
         for (j, (source, reaction)) in self.reactions.iter().zip(&self.bound).enumerate() {
             poll(&mut cancelled)?;
-            let mut dg = Sum::default();
-            let mut du = Sum::default();
-            for &(i, coefficient) in &reaction.net {
-                dg.add(coefficient * work.g[i]);
-                du.add(coefficient * work.u[i]);
-            }
-            let log_kc = -dg.value() / (R * t) + reaction.delta_molecules * standard_c_log;
-            let dlog_kc = (du.value() / (R * t)) / t;
+            let (du, dg) =
+                caloric::reaction_calorics(&self.thermodynamics, reaction, &caloric_basis)?;
+            work.reaction_internal_energies[j] = du;
+            let log_kc = -dg / (R * t) + reaction.delta_molecules * standard_c_log;
+            let dlog_kc = (du / (R * t)) / t;
             let scale = pressure::effective_rate(source, reaction, t, &work.log_c, &mut cancelled)?;
             let log_forward_scale = scale.log_forward;
             let dlog_forward_scale = scale.dlog_temperature;
@@ -680,7 +681,16 @@ impl IdealGasKineticsV1 {
             if !work.species_rates[i].is_finite() {
                 return Err(KineticsErrorV1::Arithmetic("species production reduction"));
             }
-            energy_rate.add(work.u[i] * work.species_rates[i]);
+        }
+        // The reaction coordinates cancel conserved formation references
+        // before multiplying by progress. A species-rate reduction would
+        // amplify its harmless conservation roundoff by those references.
+        for (&du, &rate) in work
+            .reaction_internal_energies
+            .iter()
+            .zip(&work.reaction_rates)
+        {
+            energy_rate.add(du * rate);
         }
         let temperature_rate = -energy_rate.value() / state.heat_capacity_v_density_j_m3_k;
         if !temperature_rate.is_finite() {
@@ -723,9 +733,9 @@ impl IdealGasKineticsV1 {
 pub struct KineticWorkspaceV1 {
     u: Vec<f64>,
     cv: Vec<f64>,
-    g: Vec<f64>,
     log_c: Vec<f64>,
     reaction_rates: Vec<f64>,
+    reaction_internal_energies: Vec<f64>,
     species_rates: Vec<f64>,
     species_rate_correction: Vec<f64>,
     rate_jacobian: Vec<f64>,
@@ -741,9 +751,9 @@ impl KineticWorkspaceV1 {
         Ok(Self {
             u: zeros(ns)?,
             cv: zeros(ns)?,
-            g: zeros(ns)?,
             log_c: zeros(ns)?,
             reaction_rates: zeros(nr)?,
+            reaction_internal_energies: zeros(nr)?,
             species_rates: zeros(ns)?,
             species_rate_correction: zeros(ns)?,
             rate_jacobian: zeros(nr * ns)?,
@@ -759,9 +769,9 @@ impl KineticWorkspaceV1 {
         let scalars = [
             &self.u,
             &self.cv,
-            &self.g,
             &self.log_c,
             &self.reaction_rates,
+            &self.reaction_internal_energies,
             &self.species_rates,
             &self.species_rate_correction,
             &self.rate_jacobian,
@@ -777,6 +787,12 @@ impl KineticWorkspaceV1 {
     /// Canonical signed net reaction progress, mol/(m3 s).
     pub fn reaction_rates(&self) -> &[f64] {
         &self.reaction_rates
+    }
+    /// Original molar reaction internal-energy changes, J/mol of progress.
+    /// Populated by a successful full kinetic `evaluate`, in reaction order.
+    /// Conserved source references cancel before caloric evaluation.
+    pub fn reaction_internal_energies(&self) -> &[f64] {
+        &self.reaction_internal_energies
     }
     /// Canonical signed species production, mol/(m3 s).
     pub fn species_rates(&self) -> &[f64] {

@@ -78,6 +78,22 @@ allocate nothing and reversing endpoints negates the result exactly. G0/G1
 tests cover every caloric term, reference shifts, region jumps, variable heat
 capacity, mixture mass basis and physical/numerical refusal boundaries.
 
+### Reaction caloric differences
+
+Kinetic evaluator version 5 combines the original NASA-9 coefficients under
+each exact stoichiometric column before evaluating reaction internal and Gibbs
+energies. Conserved elemental formation references cancel in that reduction;
+distinct formation energies, molecular-count pressure-work differences, raw
+regional jumps and explicitly declared continuity offsets remain. One shared
+temperature basis serves all reactions without additional per-reaction logs.
+The same reaction energy drives reverse-rate temperature derivatives,
+adiabatic temperature rates and the gas reactor's caloric Jacobian. Successful
+evaluations reuse prepared storage. `reaction_internal_energies_at` exposes
+the original reaction energies for conservative evolution; they are not an
+additional heat source in a total-chemical-energy balance. G0/G3 regressions
+cover elemental-reference shifts, changed binding energies, molecular-count
+changes and raw versus explicitly reconciled source seams.
+
 ### Thermodynamic mass-action entropy
 
 The declared stoichiometric mass-action evaluator uses A/(R T) =
