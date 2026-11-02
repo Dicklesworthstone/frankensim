@@ -1937,6 +1937,36 @@ residual accompany a separate numerical balance of external input, complete
 viscous heat and exact P1 pressure-jump work. Raw signed boundary work is not
 clipped, symmetrized or presented as a continuum passivity certificate.
 
+`OpenScreenLoadedModes::from_shell_molecular` derives the equilibrium medium
+from the original evaluated gas. The prepared owner's
+`harmonic_molecular_response_batch` binds that same equilibrium density/speed
+to the complete molecular compression law at the physical frequency. It uses
+the original source K/C, exact P1 work map and shared mechanical solver; only
+the source-owned boundary matrix changes to H(k(omega)). Every source column
+shares one boundary LU and every complete force case shares one mechanical LU.
+Self/mutual terms, free-edge velocity and the original modal basis remain intact.
+`MolecularOpenScreenHarmonicResponse` reports actual motion, reaction, structural
+energy and original row residuals, with the signed pressure-jump input in
+`power.exterior_w`. That includes molecular gas heat and outgoing energy once;
+separate sheet loss and structural Maxwell memory are absent from this screen
+owner and their power fields are zero. No far-field flux is inferred from it.
+
+`MolecularOpenScreenHarmonicBatch::prepare_receivers` retains one adaptive
+complex P1 row bank borrowed from that original solved source. Every case uses
+its actual loaded modal velocity for coherent pressure and all three particle
+velocity components on either side, without another boundary solve or receiver
+quadrature. Independent receiver storage/work/depth/clearance limits remain
+explicit. Absolute estimates describe integration of the fixed solved jumps,
+not mesh/material uncertainty or cancellation-relative accuracy. The original
+full mechanical batch limits still apply before boundary work begins. Two
+focused regressions compare native empty-reservoir response, independent 2x2
+mechanical inversion, complete mutual reaction, coherent fields, signed power,
+source mismatch and cancellation. They are authored and syntax checked; native
+execution remains pending the existing missing dependency/build-runner blocker.
+This frozen harmonic model does not add cavity backing, finite acoustic
+thickness, shear/thermal boundary layers, a time-domain realization or molecular
+loaded-pole discovery.
+
 `OpenScreenHarmonicBatch` retains the original unit-source jump solutions.
 `pressure_jump`, `pressure_at`, `far_field` and `radiated_power_w` combine them
 with the actual loaded modal velocities before the original field integration,

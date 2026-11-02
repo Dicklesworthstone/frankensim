@@ -24,6 +24,9 @@ pub use poles::{
     OpenScreenResonancePencil,
 };
 
+/// Original gas compression memory in the same two-sided shell reaction.
+pub mod molecular;
+
 /// Source geometry/tangent limits, separate from BEM and driven-solve limits.
 #[derive(Clone, Copy, Debug)]
 pub struct OpenScreenModesOptions {
@@ -284,7 +287,42 @@ impl<'s> PreparedOpenScreenModes<'s> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<OpenScreenHarmonicBatch<'p, 's>, BemModesError> {
         poll(&mut cancelled)?;
-        let m = self.source.mode_count();
+        self.source.admit_harmonic_batch(omega, forces, options)?;
+        let rows: Vec<_> = self.source.weights.iter().map(Vec::as_slice).collect();
+        let radiation = self
+            .screen
+            .solve_velocity_ports(
+                omega / self.source.medium.sound_speed,
+                self.source.medium,
+                &rows,
+                options.boundary,
+                &mut cancelled,
+            )
+            .map_err(BemModesError::ScreenBoundary)?;
+        let responses = self.source.solve_harmonic_batch(
+            omega,
+            forces,
+            options,
+            radiation.impedance(),
+            radiation.maximum_backward_residual(),
+            |velocity| radiation.resisting_efforts(velocity),
+            &mut cancelled,
+        )?;
+        Ok(OpenScreenHarmonicBatch {
+            radiation,
+            responses,
+        })
+    }
+}
+
+impl OpenScreenLoadedModes {
+    fn admit_harmonic_batch(
+        &self,
+        omega: f64,
+        forces: &[&[C64]],
+        options: OpenScreenHarmonicOptions,
+    ) -> Result<(), BemModesError> {
+        let m = self.mode_count();
         let cases = forces.len();
         let omega_sq = omega * omega;
         if !omega.is_finite()
@@ -319,28 +357,33 @@ impl<'s> PreparedOpenScreenModes<'s> {
                 "open-screen harmonic batch exceeds its response/work allowance",
             ));
         }
-        let rows: Vec<_> = self.source.weights.iter().map(Vec::as_slice).collect();
-        let radiation = self
-            .screen
-            .solve_velocity_ports(
-                omega / self.source.medium.sound_speed,
-                self.source.medium,
-                &rows,
-                options.boundary,
-                &mut cancelled,
-            )
-            .map_err(BemModesError::ScreenBoundary)?;
-        let impedance = radiation.impedance();
+        Ok(())
+    }
+
+    /// The original full mechanical solve is shared by nondispersive and
+    /// molecular exteriors. Only their source-owned boundary operator differs.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_harmonic_batch(
+        &self,
+        omega: f64,
+        forces: &[&[C64]],
+        options: OpenScreenHarmonicOptions,
+        impedance: &[C64],
+        boundary_residual: f64,
+        mut resisting_efforts: impl FnMut(&[C64]) -> Result<Vec<C64>, fs_bem::helmholtz::HelmholtzError>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<OpenScreenHarmonicResponse>, BemModesError> {
+        let m = self.mode_count();
+        let cases = forces.len();
+        let omega_sq = omega * omega;
         let s = C64::new(0.0, -omega);
         let mut matrix = vec![C64::ZERO; m * m];
         for i in 0..m {
             poll(&mut cancelled)?;
             for j in 0..m {
                 let at = i * m + j;
-                matrix[at] = C64::new(
-                    self.source.stiffness[at],
-                    -omega * self.source.viscosity[at],
-                ) + s * impedance[at];
+                matrix[at] =
+                    C64::new(self.stiffness[at], -omega * self.viscosity[at]) + s * impedance[at];
                 if i == j {
                     matrix[at] = matrix[at] - C64::from_re(omega_sq);
                 }
@@ -381,8 +424,8 @@ impl<'s> PreparedOpenScreenModes<'s> {
                 for j in 0..m {
                     let at = i * m + j;
                     lhs = lhs + matrix[at] * displacement[j];
-                    envelope += (self.source.stiffness[at].abs()
-                        + omega * self.source.viscosity[at].abs()
+                    envelope += (self.stiffness[at].abs()
+                        + omega * self.viscosity[at].abs()
                         + omega * impedance[at].abs())
                         * displacement[j].abs();
                 }
@@ -400,14 +443,12 @@ impl<'s> PreparedOpenScreenModes<'s> {
             if residual > options.physical_residual_tolerance {
                 return Err(BemModesError::PhysicalResidual {
                     mechanical: residual,
-                    boundary: radiation.maximum_backward_residual(),
+                    boundary: boundary_residual,
                     memory: 0.0,
                 });
             }
-            let efforts = radiation
-                .resisting_efforts(&velocity)
-                .map_err(BemModesError::ScreenBoundary)?;
-            let (power, energy) = self.source.response_power(
+            let efforts = resisting_efforts(&velocity).map_err(BemModesError::ScreenBoundary)?;
+            let (power, energy) = self.response_power(
                 force,
                 &displacement,
                 &velocity,
@@ -423,15 +464,12 @@ impl<'s> PreparedOpenScreenModes<'s> {
                 fluid_reaction: efforts.into_iter().map(|z| -z).collect(),
                 mean_structural_energy_j: energy,
                 mechanical_residual: residual,
-                maximum_boundary_residual: radiation.maximum_backward_residual(),
+                maximum_boundary_residual: boundary_residual,
                 power,
             });
         }
         poll(&mut cancelled)?;
-        Ok(OpenScreenHarmonicBatch {
-            radiation,
-            responses,
-        })
+        Ok(responses)
     }
 }
 

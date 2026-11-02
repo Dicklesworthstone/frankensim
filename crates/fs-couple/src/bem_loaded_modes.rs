@@ -85,6 +85,8 @@ pub enum BemModesError {
     Boundary(ComplexError),
     /// Original two-sided pressure-jump boundary refusal.
     ScreenBoundary(fs_bem::helmholtz::HelmholtzError),
+    /// Original molecular gas or two-sided screen refusal, retaining its owner.
+    MolecularScreen(fs_bem::helmholtz::molecular::MolecularError),
     /// Original shell/midsurface source refusal, without string conversion.
     ScreenSource(fs_plate::PlateError),
     Pole(NonlinearEigError),
