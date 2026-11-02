@@ -1634,6 +1634,14 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   residual gate. Both line-search acceptance branches
   require admitted material stresses as well as positive sampled gaps;
   an energy decrease alone cannot bypass the material's stretch domain.
+  At satisfied pin equations, the residual-decrease shortcut also requires
+  energy nonincrease within a scaled floating-point allowance, preventing
+  alternating energy/residual merit cycles. A tiny admitted Newton correction
+  may terminate despite unresolved potential differences only if its actual
+  force residual already meets the unchanged tolerance; its coordinate size
+  is bounded by `sqrt(EPSILON)` times the shortest reference edge in max norm.
+  This numerical-resolution rule is not an energy-error certificate. Pending
+  prescribed displacement equations retain their boundary-work path.
   `eps_v` is a displacement smoothing
   width; this regularized law permits small creep and does not claim exact
   set-valued static friction. Solutions expose separate normal and
@@ -1644,6 +1652,20 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   These products are not trajectory-integrated heat or actuator work;
   thermal deposition and rigorous continuous-trajectory CCD remain separate
   capabilities.
+  `solve_timed_from` additionally admits a positive physical interval and a
+  declared slip-speed regularization. Its displacement smoothing width is
+  `dt * regularization_speed`, so subthreshold creep follows elapsed time
+  rather than the number of equilibrium solves. Existing entry points retain
+  their displacement-width semantics. `ContactTrajectory` binds one unchanged
+  problem, holds accepted displacement and physical time, and accumulates body,
+  relative and support work with backward-Euler endpoint quadrature. A failed
+  solve or nonrepresentable time/work update changes none of that state.
+  The cumulative ports retain `body + relative = support` up to roundoff;
+  body work is independently evaluated from actual displacement increments.
+  This is quasistatic velocity-regularized friction: it adds no inertia,
+  recoverable tangential state, ideal static-friction constraint, thermal
+  partition or continuous-trajectory accuracy claim. Changing physical loads
+  and slip directions still require temporal refinement.
 - `accept_scenario_bc`: fs-scenario integration — `Dirichlet` and
   `Traction` under `Physics::Elasticity` accepted; dimensioned-value
   resolution stays with the scenario consumer.
@@ -2301,7 +2323,12 @@ structured invalid-input returns; cnt-008 fixed-reference friction balance;
 cnt-009 unpinned conveyor transport, common-translation invariance, motion
 reversal and signed endpoint work closure, zero-motion equivalence, and invalid
 surface-displacement refusal (G1/G3, force/translation tolerance 1e-9 and
-endpoint work balance 1e-14).
+endpoint work balance 1e-14); cnt-010 fixed-duration 1/2/4/8-step friction
+against an independent force-balance creep oracle (1e-10), timed conveyor
+reversal and cumulative work closure (1e-14), held-state zero work and
+prescribed boundary work;
+cnt-011 timed/default equivalence, invalid time/speed/product admission,
+representable-clock progression and atomic nonlinear-failure behavior.
 
 `tests/structural.rs` (bead tfz.14): str-001 objectivity; str-002
 elastica vs shooting oracle; str-003 circle/twist/helix; str-004 RC

@@ -6,7 +6,7 @@
 use fs_cutfem::sdf::{Circle, CutSdf, HalfPlane};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_solid::SolidError;
-use fs_solid::contact::{Barrier, ContactProblem, ContactSolution, Friction};
+use fs_solid::contact::{Barrier, ContactProblem, ContactSolution, ContactTrajectory, Friction};
 use fs_solid::hyper2d::{HyperProblem, NewtonSettings};
 use fs_solid::mesh2::{Mesh2, Patch};
 
@@ -219,6 +219,202 @@ fn cnt_009_prescribed_surface_motion_and_work() {
         problem.solve_from_with_surface_displacement(1.0, &reference, &motion[..1]),
         Err(SolidError::InvalidInput { what }) if what.contains("surface displacement")
     ));
+}
+
+/// G1/G3: a declared creep velocity depends on physical time, not how many
+/// times the caller requests an equilibrium solve over the same duration.
+#[test]
+fn cnt_010_physical_time_friction_subdivision() {
+    let mesh = Mesh2::quads(1.0, 1.0, 2, 2);
+    let material = card();
+    let pull = |_: f64, _: f64| [0.02, -0.2];
+    let hyper = HyperProblem {
+        mesh: &mesh,
+        material: &material,
+        dirichlet: vec![],
+        traction: vec![(Patch::Top, &pull)],
+        settings: NewtonSettings::default(),
+    };
+    let floor = HalfPlane {
+        normal: [0.0, 1.0],
+        offset: -0.02,
+    };
+    let mut problem = timed_problem(&hyper, &floor);
+    let initial = problem.solve(1.0).expect("preloaded block");
+    let duration = 0.8;
+    let speed = 0.001;
+    for divisions in [1, 2, 4, 8] {
+        let dt = duration / f64::from(divisions);
+        let motion = vec![[0.01 * dt, 0.0]; mesh.nodes.len()];
+        let mut path = ContactTrajectory::new(&problem, 0.0, &initial.u, speed)
+            .expect("accepted initial contact state");
+        let mut weighted_slip = 0.0;
+        let mut body_work = 0.0;
+        let mut relative_work = 0.0;
+        let mut support_work = 0.0;
+        for interval in 0..divisions {
+            let old = path.displacement().to_vec();
+            let step = path
+                .advance(dt, 1.0, &motion)
+                .unwrap_or_else(|e| panic!("{divisions} subdivisions, interval {interval}: {e:?}"));
+            let normal: f64 = step.reactions.iter().map(|r| r[1]).sum();
+            let mut increment = 0.0;
+            for (i, force) in step.friction_reactions.iter().enumerate() {
+                let dx = step.u[2 * i] - old[2 * i];
+                let dy = step.u[2 * i + 1] - old[2 * i + 1];
+                let slip = dx - motion[i][0];
+                if step.reactions[i][1] > 0.0 {
+                    assert!(slip.abs() < dt * speed, "fixture remains below sliding");
+                }
+                increment += step.reactions[i][1] * slip;
+                body_work += force[0] * dx + force[1] * dy;
+                relative_work -= force[0] * slip + force[1] * dy;
+                support_work += force[0] * motion[i][0];
+            }
+            assert!((normal - 0.2).abs() < 1e-8);
+            weighted_slip += increment / normal;
+        }
+        // Sum of mu*N*relative_velocity = applied tangential force. This
+        // independent oracle includes nonuniform contact loads and deformation.
+        let expected = duration * speed * 0.02 / (0.6 * 0.2);
+        assert!(
+            (weighted_slip - expected).abs() < 1e-10,
+            "{divisions}: {weighted_slip:e}"
+        );
+        assert!((path.time_s() - duration).abs() < 1e-15);
+        let work = path.work();
+        assert!(work.relative > 0.0 && work.support < 0.0);
+        assert!((work.body - body_work).abs() < 1e-14);
+        assert!((work.relative - relative_work).abs() < 1e-14);
+        assert!((work.support - support_work).abs() < 1e-14);
+        assert!(work.balance_residual().abs() < 1e-14);
+        // Reversal preserves the accumulated accounts, including signed support work.
+        let before = path.work();
+        let reverse = vec![[-0.01 * dt, 0.0]; mesh.nodes.len()];
+        let reversed = path.advance(dt, 1.0, &reverse).expect("timed reversal");
+        assert!(reversed.friction_support_work > 0.0);
+        assert!(
+            (path.work().support - before.support - reversed.friction_support_work).abs() < 1e-14
+        );
+        assert!(path.work().relative >= before.relative);
+        assert!(path.work().balance_residual().abs() < 1e-14);
+    }
+
+    // A held, fully supported equilibrium with no relative motion performs no
+    // friction work regardless of the physical interval's duration.
+    problem.pins = initial.u.iter().enumerate().map(|(i, &u)| (i, u)).collect();
+    let mut held = ContactTrajectory::new(&problem, 2.0, &initial.u, speed).unwrap();
+    held.advance(3.0, 1.0, &vec![[0.0; 2]; mesh.nodes.len()])
+        .unwrap();
+    assert_eq!(held.displacement(), initial.u);
+    assert_eq!(held.time_s(), 5.0);
+    assert_eq!(held.work(), Default::default());
+    // Prescribed displacement changes can supply elastic energy. A merit
+    // safeguard must retain that boundary-work path while pins are unsatisfied.
+    held.advance(0.1, 1.01, &vec![[0.0; 2]; mesh.nodes.len()])
+        .expect("boundary-driven elastic work");
+    for (&actual, &reference) in held.displacement().iter().zip(&initial.u) {
+        assert!((actual - 1.01 * reference).abs() < 1e-13);
+    }
+    assert!(held.work().balance_residual().abs() < 1e-14);
+}
+
+fn timed_problem<'a>(hyper: &'a HyperProblem<'a>, floor: &'a dyn CutSdf) -> ContactProblem<'a> {
+    ContactProblem {
+        hyper,
+        sdf: floor,
+        barrier: Barrier {
+            kappa: 10.0,
+            dhat: 0.05,
+        },
+        friction: Some(Friction {
+            mu: 0.6,
+            eps_v: 0.001,
+            rounds: 20,
+        }),
+        pins: vec![],
+        max_newton: 100,
+        tol: 1e-9,
+    }
+}
+
+#[test]
+fn cnt_011_timed_contact_transaction_and_refusals() {
+    let mesh = Mesh2::quads(1.0, 1.0, 2, 2);
+    let material = card();
+    let pull = |_: f64, _: f64| [0.02, -0.2];
+    let hyper = HyperProblem {
+        mesh: &mesh,
+        material: &material,
+        dirichlet: vec![],
+        traction: vec![(Patch::Top, &pull)],
+        settings: NewtonSettings::default(),
+    };
+    let floor = HalfPlane {
+        normal: [0.0, 1.0],
+        offset: -0.02,
+    };
+    let mut problem = timed_problem(&hyper, &floor);
+    let reference = vec![0.0; 2 * mesh.nodes.len()];
+    let stationary = vec![[0.0; 2]; mesh.nodes.len()];
+    let direct = problem
+        .solve_timed_from(1.0, &reference, &stationary, 1.0, 0.001)
+        .expect("one second reproduces the original displacement width");
+    let old = problem.solve(1.0).unwrap();
+    assert_eq!(direct.u, old.u);
+    assert_eq!(direct.friction_work, old.friction_work);
+
+    for (dt, speed) in [
+        (0.0, 0.001),
+        (-1.0, 0.001),
+        (f64::NAN, 0.001),
+        (f64::INFINITY, 0.001),
+        (1.0, 0.0),
+        (1.0, -1.0),
+        (1.0, f64::NAN),
+        (1.0, f64::INFINITY),
+        (f64::MAX, 2.0),
+        (f64::MIN_POSITIVE, f64::MIN_POSITIVE),
+    ] {
+        assert!(matches!(
+            problem.solve_timed_from(1.0, &reference, &stationary, dt, speed),
+            Err(SolidError::InvalidInput { .. })
+        ));
+    }
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(ContactTrajectory::new(&problem, 0.0, &reference, bad).is_err());
+    }
+    for bad in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(ContactTrajectory::new(&problem, bad, &reference, 0.001).is_err());
+    }
+    let mut path = ContactTrajectory::new(&problem, 0.0, &direct.u, 0.001).unwrap();
+    path.advance(0.1, 1.0, &stationary).unwrap();
+    let accepted = path.displacement().to_vec();
+    let work = path.work();
+    for dt in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(path.advance(dt, 1.0, &stationary).is_err());
+    }
+    assert!(path.advance(0.1, 1.0, &stationary[..1]).is_err());
+    assert_eq!(path.time_s(), 0.1);
+    assert_eq!(path.displacement(), accepted);
+    assert_eq!(path.work(), work);
+    let mut huge = ContactTrajectory::new(&problem, f64::MAX, &reference, 0.001).unwrap();
+    assert!(huge.advance(1.0, 1.0, &stationary).is_err());
+    assert!(huge.advance(f64::MAX, 1.0, &stationary).is_err());
+    assert_eq!(huge.time_s(), f64::MAX);
+    assert_eq!(huge.displacement(), reference);
+    assert_eq!(huge.work(), Default::default());
+
+    // Actual nonlinear refusal, not just invalid input, must be atomic too.
+    problem.friction.as_mut().unwrap().rounds = 1;
+    let mut refused = ContactTrajectory::new(&problem, 2.0, &reference, 0.001).unwrap();
+    assert!(matches!(
+        refused.advance(1.0, 1.0, &stationary),
+        Err(SolidError::NewtonStalled { .. })
+    ));
+    assert_eq!(refused.time_s(), 2.0);
+    assert_eq!(refused.displacement(), reference);
+    assert_eq!(refused.work(), Default::default());
 }
 
 /// Bottom-middle x-pins so a frictionless floor cannot let the block

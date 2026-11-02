@@ -195,6 +195,159 @@ pub struct ContactSolution {
     pub residual: f64,
 }
 
+/// Accepted-time endpoint quadrature of the friction work ports.
+/// Units are force times the problem's displacement unit. These are numerical
+/// work integrals, not exact trajectory integrals or allocated thermal energy.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ContactWork {
+    /// Signed friction work on the solid.
+    pub body: f64,
+    /// Nonnegative work against relative tangential motion.
+    pub relative: f64,
+    /// Signed work supplied by prescribed obstacle material motion.
+    pub support: f64,
+}
+
+impl ContactWork {
+    /// Independent port closure; roundoff may leave a small signed residual.
+    #[must_use]
+    pub fn balance_residual(&self) -> f64 {
+        self.body + self.relative - self.support
+    }
+}
+
+/// Quasistatic physical-time progression on one unchanged contact problem.
+/// Each accepted interval uses velocity-regularized Coulomb friction with
+/// displacement width `dt * regularization_speed`. The body displacement and
+/// work integrals advance together only after the equilibrium solve succeeds.
+/// There is no inertia, exact static-friction constraint, thermal allocation,
+/// or inferred obstacle trajectory. The finite regularization permits creep.
+pub struct ContactTrajectory<'p, 'a> {
+    problem: &'p ContactProblem<'a>,
+    regularization_speed: f64,
+    time_s: f64,
+    u: Vec<f64>,
+    work: ContactWork,
+}
+
+impl<'p, 'a> ContactTrajectory<'p, 'a> {
+    /// Start from a finite, feasible body state at a nonnegative physical time.
+    /// `regularization_speed` is positive, in displacement units per second.
+    /// The supplied initial state need not already equilibrate the next load;
+    /// resolving such a load jump is a quasistatic approximation.
+    ///
+    /// # Errors
+    /// Invalid problem, time, speed, or initial displacement/gap.
+    pub fn new(
+        problem: &'p ContactProblem<'a>,
+        time_s: f64,
+        reference_u: &[f64],
+        regularization_speed: f64,
+    ) -> Result<Self, SolidError> {
+        problem.validate_inputs(0.0)?;
+        if !time_s.is_finite() || time_s < 0.0 {
+            return Err(SolidError::InvalidInput {
+                what: "contact initial time must be finite and non-negative".to_string(),
+            });
+        }
+        if !regularization_speed.is_finite() || regularization_speed <= 0.0 {
+            return Err(SolidError::InvalidInput {
+                what: "contact regularization speed must be finite and positive".to_string(),
+            });
+        }
+        if problem.min_gap(reference_u)? <= 0.0 {
+            return Err(SolidError::InvalidInput {
+                what: "contact trajectory needs an intersection-free initial state".to_string(),
+            });
+        }
+        Ok(Self {
+            problem,
+            regularization_speed,
+            time_s,
+            u: reference_u.to_vec(),
+            work: ContactWork::default(),
+        })
+    }
+
+    /// Last accepted physical time [s].
+    #[must_use]
+    pub const fn time_s(&self) -> f64 {
+        self.time_s
+    }
+
+    /// Last accepted body displacement, flat with two entries per node.
+    #[must_use]
+    pub fn displacement(&self) -> &[f64] {
+        &self.u
+    }
+
+    /// Sum of endpoint friction-force/displacement products since construction.
+    #[must_use]
+    pub const fn work(&self) -> ContactWork {
+        self.work
+    }
+
+    /// Advance one physical interval with the prescribed surface displacement
+    /// over that interval and the load factor evaluated at its endpoint.
+    /// Work uses backward-Euler endpoint quadrature; temporal refinement is
+    /// still required when loads, geometry or slip direction vary.
+    ///
+    /// # Errors
+    /// All timed-solve refusals, unrepresentable time progression or work sums.
+    /// Any refusal leaves the accepted time, displacement and work unchanged.
+    pub fn advance(
+        &mut self,
+        dt_s: f64,
+        load: f64,
+        surface_displacement: &[[f64; 2]],
+    ) -> Result<ContactSolution, SolidError> {
+        let time_s = self.time_s + dt_s;
+        if !dt_s.is_finite() || dt_s <= 0.0 || !time_s.is_finite() || time_s <= self.time_s {
+            return Err(SolidError::InvalidInput {
+                what: "contact time step must advance finite physical time".to_string(),
+            });
+        }
+        let solution = self.problem.solve_timed_from(
+            load,
+            &self.u,
+            surface_displacement,
+            dt_s,
+            self.regularization_speed,
+        )?;
+        let body: f64 = solution
+            .friction_reactions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                f[0] * (solution.u[2 * i] - self.u[2 * i])
+                    + f[1] * (solution.u[2 * i + 1] - self.u[2 * i + 1])
+            })
+            .sum();
+        let work = ContactWork {
+            body: self.work.body + body,
+            relative: self.work.relative + solution.friction_work,
+            support: self.work.support + solution.friction_support_work,
+        };
+        if ![
+            work.body,
+            work.relative,
+            work.support,
+            work.balance_residual(),
+        ]
+        .iter()
+        .all(|x| x.is_finite())
+        {
+            return Err(SolidError::InvalidInput {
+                what: "contact cumulative friction work is not finite".to_string(),
+            });
+        }
+        self.u.clone_from(&solution.u);
+        self.time_s = time_s;
+        self.work = work;
+        Ok(solution)
+    }
+}
+
 impl ContactProblem<'_> {
     fn node_count(&self) -> usize {
         self.hyper.mesh.nodes.len()
@@ -497,7 +650,7 @@ impl ContactProblem<'_> {
         load: f64,
         reference_u: &[f64],
     ) -> Result<ContactSolution, SolidError> {
-        self.solve_increment(load, reference_u, None)
+        self.solve_increment(load, reference_u, None, self.friction)
     }
 
     /// Solve with prescribed obstacle material displacement at each solid node.
@@ -522,7 +675,47 @@ impl ContactProblem<'_> {
         reference_u: &[f64],
         surface_displacement: &[[f64; 2]],
     ) -> Result<ContactSolution, SolidError> {
-        self.solve_increment(load, reference_u, Some(surface_displacement))
+        self.solve_increment(load, reference_u, Some(surface_displacement), self.friction)
+    }
+
+    /// Solve a quasistatic physical interval using relative-velocity friction.
+    /// The positive `regularization_speed` is in displacement units per second;
+    /// this interval uses Huber width `dt_s * regularization_speed` instead of
+    /// the problem's displacement-based `Friction::eps_v`. All other friction
+    /// settings, geometry and solver tolerances are unchanged. The surface input
+    /// is displacement over this interval, not velocity. With friction disabled,
+    /// the speed is admitted but does not affect equilibrium.
+    ///
+    /// The returned work is an endpoint quadrature over this interval, not an
+    /// exact continuous-trajectory integral. [`ContactTrajectory`] accumulates
+    /// these products and advances accepted state transactionally.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::solve_from_with_surface_displacement`], plus
+    /// nonpositive/nonfinite time or speed, or an unrepresentable smoothing width.
+    pub fn solve_timed_from(
+        &self,
+        load: f64,
+        reference_u: &[f64],
+        surface_displacement: &[[f64; 2]],
+        dt_s: f64,
+        regularization_speed: f64,
+    ) -> Result<ContactSolution, SolidError> {
+        let width = dt_s * regularization_speed;
+        if !dt_s.is_finite()
+            || dt_s <= 0.0
+            || !regularization_speed.is_finite()
+            || regularization_speed <= 0.0
+            || !width.is_finite()
+            || width <= 0.0
+        {
+            return Err(SolidError::InvalidInput {
+                what: "contact time, regularization speed and their product must be finite and positive"
+                    .to_string(),
+            });
+        }
+        let friction = self.friction.map(|f| Friction { eps_v: width, ..f });
+        self.solve_increment(load, reference_u, Some(surface_displacement), friction)
     }
 
     #[allow(clippy::too_many_lines)] // contact Newton + audited line search is one proof path
@@ -531,6 +724,7 @@ impl ContactProblem<'_> {
         load: f64,
         reference_u: &[f64],
         surface_displacement: Option<&[[f64; 2]]>,
+        friction: Option<Friction>,
     ) -> Result<ContactSolution, SolidError> {
         self.validate_inputs(load)?;
         self.validate_state_len(reference_u)?;
@@ -564,13 +758,32 @@ impl ContactProblem<'_> {
             });
         }
         let mut min_gap_ever = initial_gap;
+        // A translation-independent reference length for admitting only a
+        // converged, tiny Newton correction when potential differences are
+        // unresolved numerically. This is not an energy-error certificate.
+        let mut minimum_edge = f64::INFINITY;
+        for element in &self.hyper.mesh.elems {
+            for edge in 0..element.len() {
+                let a = self.hyper.mesh.nodes[element[edge]];
+                let b = self.hyper.mesh.nodes[element[(edge + 1) % element.len()]];
+                let length = (a[0] - b[0]).abs().max((a[1] - b[1]).abs());
+                if length.is_finite() && length > 0.0 {
+                    minimum_edge = minimum_edge.min(length);
+                }
+            }
+        }
+        let terminal_step_limit = if minimum_edge.is_finite() {
+            f64::EPSILON.sqrt() * minimum_edge
+        } else {
+            0.0
+        };
         let mut iterations = 0u32;
-        let rounds = self.friction.map_or(1, |f| f.rounds);
+        let rounds = friction.map_or(1, |f| f.rounds);
         // The lag starts from the INITIAL state: the barrier is
         // already active there in any sensible fixture, so friction
         // grounds tangential rigid modes from the first round (a
         // frictionless first round with no pins was measured singular).
-        let mut lag: Option<FrictionLag> = match self.friction {
+        let mut lag: Option<FrictionLag> = match friction {
             Some(fr) => Some(FrictionLag::capture(
                 self,
                 reference_u,
@@ -647,6 +860,32 @@ impl ContactProblem<'_> {
                 // Armijo on the total energy with the φ > 0 audit.
                 let e0 = self.total_energy(&u, load, lag.as_ref())?;
                 let slope: f64 = r.iter().zip(&du).map(|(a, b)| a * b).sum();
+                let pins_pending = self.pins.iter().any(|&(d, _)| r[d].abs() >= self.tol);
+                let admits = |trial: &[f64], armijo_limit: f64, terminal_step: bool| {
+                    let Ok(e1) = self.total_energy(trial, load, lag.as_ref()) else {
+                        return false;
+                    };
+                    let energy_decreased = e1 <= armijo_limit;
+                    // Switching freely between energy and residual decrease
+                    // can cycle. At satisfied constraints, the residual route
+                    // may increase energy only within scaled roundoff. Pending
+                    // prescribed displacements can legitimately supply work.
+                    let roundoff = 64.0 * f64::EPSILON * e0.abs().max(e1.abs());
+                    let residual_route = pins_pending || e1 - e0 <= roundoff;
+                    if !energy_decreased && !residual_route && !terminal_step {
+                        return false;
+                    }
+                    // Forces also admit the material stretch domain, which
+                    // the potential-energy probe alone does not check. Only
+                    // an already converged tiny Newton correction may bypass
+                    // unresolved energy differences; no unconverged cycle can.
+                    self.residual_norm_at(trial, load, lag.as_ref())
+                        .is_ok_and(|rr| {
+                            energy_decreased
+                                || (residual_route && rr <= 0.9 * residual)
+                                || (terminal_step && rr < self.tol)
+                        })
+                };
                 let mut accepted = false;
                 for _ in 0..40 {
                     let trial: Vec<f64> = u
@@ -655,22 +894,16 @@ impl ContactProblem<'_> {
                         .map(|(a, b)| alpha.mul_add(*b, *a))
                         .collect();
                     let gap = self.min_gap(&trial)?;
-                    if gap > 0.0 {
-                        let energy_decreased = self
-                            .total_energy(&trial, load, lag.as_ref())
-                            .is_ok_and(|e1| e1 <= (1e-4 * alpha).mul_add(slope, e0));
-                        // The energy probe only checks positive determinant.
-                        // Forces additionally admit the material stretch domain,
-                        // which every accepted Newton state must satisfy.
-                        if let Ok(trial_residual) =
-                            self.residual_norm_at(&trial, load, lag.as_ref())
-                            && (energy_decreased || trial_residual <= 0.9 * residual)
-                        {
-                            u = trial;
-                            min_gap_ever = min_gap_ever.min(gap);
-                            accepted = true;
-                            break;
-                        }
+                    let terminal_step = trial
+                        .iter()
+                        .zip(&u)
+                        .all(|(a, b)| (a - b).abs() <= terminal_step_limit);
+                    if gap > 0.0 && admits(&trial, (1e-4 * alpha).mul_add(slope, e0), terminal_step)
+                    {
+                        u = trial;
+                        min_gap_ever = min_gap_ever.min(gap);
+                        accepted = true;
+                        break;
                     }
                     alpha *= 0.5;
                 }
@@ -700,19 +933,13 @@ impl ContactProblem<'_> {
                             .map(|(a, b)| alpha_sd.mul_add(*b, *a))
                             .collect();
                         let gap = self.min_gap(&trial)?;
-                        if gap > 0.0 {
-                            let energy_decreased = self
-                                .total_energy(&trial, load, lag.as_ref())
-                                .is_ok_and(|e1| e1 <= (1e-4 * alpha_sd).mul_add(slope_sd, e0));
-                            if let Ok(trial_residual) =
-                                self.residual_norm_at(&trial, load, lag.as_ref())
-                                && (energy_decreased || trial_residual <= 0.9 * residual)
-                            {
-                                u = trial;
-                                min_gap_ever = min_gap_ever.min(gap);
-                                accepted = true;
-                                break;
-                            }
+                        if gap > 0.0
+                            && admits(&trial, (1e-4 * alpha_sd).mul_add(slope_sd, e0), false)
+                        {
+                            u = trial;
+                            min_gap_ever = min_gap_ever.min(gap);
+                            accepted = true;
+                            break;
                         }
                         alpha_sd *= 0.5;
                     }
@@ -726,7 +953,7 @@ impl ContactProblem<'_> {
             }
             // Refresh only the normal load and tangent frame. Numerical
             // iterations must never advance the physical slip reference.
-            if let Some(fr) = self.friction {
+            if let Some(fr) = friction {
                 lag = Some(FrictionLag::capture(
                     self,
                     reference_u,
