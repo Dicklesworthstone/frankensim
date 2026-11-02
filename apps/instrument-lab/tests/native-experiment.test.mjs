@@ -6,12 +6,48 @@ import {posix} from 'node:path';
 import {editableAttachmentText, editedAttachmentBytes, prepareNativeTextExperiment, serializeNativeExperiment, validateInput,
   MAX_SOURCE_BYTES, MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES} from '../src/native-experiment.mjs';
 import {renderNativePerformance} from '../src/native-wind-client.mjs';
+import {nativeGasRegions, editNativeGasRegion} from '../src/native-gas-records.mjs';
 import {validateInput as serviceInput} from '../tools/native-wind-protocol.mjs';
 
 const encode = text => new TextEncoder().encode(text);
 const decode = bytes => new TextDecoder('utf-8', {fatal:true, ignoreBOM:true}).decode(bytes);
 const root = new URL('../../../', import.meta.url);
 const readOriginal = async path => decode(await readFile(new URL(path, root)));
+
+test('mesh plates preserve original geometry and force data while material and atmosphere edits reach the native request', async () => {
+  const original = await readOriginal('crates/fs-couple/examples/plate-mesh.performance');
+  const untouched = serviceInput(encode(serializeNativeExperiment(original, [], {renderer:'plate'})), true);
+  assert.equal(decode(untouched.source), original);
+  assert.equal(untouched.renderer, 'plate'); assert.equal(untouched.decimate, false);
+  const [ambient] = nativeGasRegions(original);
+  assert.equal(ambient.key, 'ambient');
+  const edited = editNativeGasRegion(original, ambient, {kind:'thermochemical', temperature:'310', pressure:'90000',
+    basis:'mole', components:[{species:'supplied-N2', fraction:'0.7'}, {species:'supplied-He', fraction:'0.3'}]});
+  const originalSection = original.split('\n').find(line => line.startsWith('section '));
+  const source = edited.replace(originalSection, 'section material isotropic 0.003 materials/plate.fsmatpk source-state T=310');
+  const components = ['nitrogen', 'helium'].map(name => ({speciesPath:`gas/${name}.species`,
+    nasa9Path:`gas/${name}.nasa9`, transportPath:`gas/${name}.transport`}));
+  const paths = ['materials/plate.fsmatpk', ...components.flatMap(component => Object.values(component))];
+  const files = paths.map((path, i) => ({path, bytes:new Uint8Array([0, 255, i, 13, 10])}));
+  const options = {renderer:'plate', gasSources:{components, phase:'frozen', waterSpecies:null}};
+  const restored = serviceInput(encode(serializeNativeExperiment(source, files, options)), true);
+  assert.equal(decode(restored.source), source);
+  assert.equal(source.slice(source.indexOf('nodes ')), original.slice(original.indexOf('nodes ')),
+    'material and atmosphere edits keep the exact mesh, supports, force footprint and force timeline');
+  assert.ok(source.includes('audio 48000 4801 1.0\n'));
+  assert.deepEqual(restored.attachments, files); assert.deepEqual(restored.gasSources, options.gasSources);
+  assert.deepEqual(validateInput(encode(serializeNativeExperiment(source, restored.attachments, restored)), true), restored);
+  const status = {available:true, renderers:{plate:true}, token:'test-session', supportsGasSources:true,
+    maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes:16 * 1024 * 1024,
+    maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
+    maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES};
+  await assert.rejects(renderNativePerformance(source, files, status, options, undefined, async (_, request) => {
+    assert.deepEqual(serviceInput(encode(request.body), true), restored);
+    return new Response(JSON.stringify({error:'native plate boundary witness'}), {
+      status:400, headers:{'Content-Type':'application/json'},
+    });
+  }), /native plate boundary witness/);
+});
 
 test('complete canonical string and reed starters reach the native request with original physical sources', async () => {
   const strings = JSON.parse(await readFile(new URL('../src/native-string-starters.json', import.meta.url), 'utf8'));

@@ -13,6 +13,7 @@ export const RESOLVED_SCHEMAS: readonly string[];
 export const FINITE_GAS_STRING_SCHEMAS: readonly string[];
 export const LIP_SCHEMAS: readonly string[];
 export const VOICE_SCHEMAS: readonly string[];
+export const PLATE_SCHEMAS: readonly string[];
 export class NativeWindError extends Error { status: number; constructor(status: number, message: string); }
 export interface NativeExperiment {
   source: Uint8Array;

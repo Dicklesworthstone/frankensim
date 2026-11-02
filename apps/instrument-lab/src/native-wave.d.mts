@@ -9,7 +9,7 @@ export interface NativeWaveInfo {
 }
 export interface NativePressureReceipt {
   readonly format: string;
-  readonly renderer: 'wind' | 'strings' | 'resolved' | 'finite-gas-string' | 'lip' | 'voice';
+  readonly renderer: 'wind' | 'strings' | 'resolved' | 'finite-gas-string' | 'lip' | 'voice' | 'plate';
   readonly sampleRateHz: number;
   readonly samples: number;
   readonly fullScalePa: number;

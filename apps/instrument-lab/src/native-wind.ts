@@ -45,6 +45,7 @@ import layeredStringSource from "../../../crates/fs-couple/examples/material_str
 import shearStringSource from "../../../crates/fs-couple/examples/material_strings/shear-layer-bow.material-strings?raw";
 import compliantRibbonSource from "../../../crates/fs-couple/examples/material_strings/compliant-ribbon.material-strings?raw";
 import finiteGasStringSource from "../../../crates/fs-couple/examples/finite_gas_string/browser-feedback-flow.string?raw";
+import plateMeshSource from "../../../crates/fs-couple/examples/plate-mesh.performance?raw";
 import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles, type NativeCoatingStrainGuard, type NativeFiniteGasStringSources, type NativeMaterialManifest, type NativeRenderer } from "./native-wind-client.mjs";
 import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
@@ -485,6 +486,15 @@ const EXAMPLES = [
     help: "Layer shear modulus, yield stress and plastic viscosity control retained elastic/plastic history and the actual pressure output. The native instructions describe geometric stretching, longitudinal waves and optional contact heat. Heat feedback requires the same materials to supply caloric and transport data; this isothermal fixture does not invent them.",
   },
   {
+    name: "plate-mesh.performance",
+    label: "Plate — triangular mesh, material sections and force history",
+    renderer: "plate",
+    source: plateMeshSource,
+    decimate: false,
+    intro: "Starter: the original two-region flat plate, with explicit mesh, supports and a distributed force history. Change the geometry, material sections or ambient gas, then render through the native plate solver. Frequencies and radiation areas derive from the assembled plate.",
+    help: "The supplied sections are labelled illustrative fixtures, not measured material. Replace a section with section material isotropic THICKNESS_M PACK STATE [AXIS=VALUE ...], or the native orthotropic form, and attach its material pack or original compilation sources. The ambient record controls the compact baffled observer. Add radiation-load baffled-piston immediately after observer to include the existing gas-dependent mechanical reaction. This linear flat-plate model does not establish full-instrument realism, mutual radiation or continuum convergence; its declared damping remains an explicit research input. The original 48 kHz clock is retained.",
+  },
+  {
     name: "finite_gas_string/browser-feedback-flow.string",
     label: "Heated string — electrical feedback and finite gas",
     renderer: "finite-gas-string",
@@ -508,10 +518,11 @@ export function createNativeWindPanel(): HTMLElement {
     el("option", {value: "voice"}, "Voice — glottal source and vocal tract"),
     el("option", {value: "resolved"}, "Resolved flow — physical gas fields and spatial duct"),
     el("option", {value: "strings"}, "Strings — materials, bow/contact and shared body"),
+    el("option", {value: "plate"}, "Plate — mesh, material sections and physical forces"),
     el("option", {value: "finite-gas-string"}, "Heated string — electrical, thermal and finite-gas feedback"));
   const selectedRenderer = (): NativeRenderer =>
     renderer.value === "strings" || renderer.value === "resolved" || renderer.value === "finite-gas-string"
-      || renderer.value === "lip" || renderer.value === "voice" ? renderer.value : "wind";
+      || renderer.value === "lip" || renderer.value === "voice" || renderer.value === "plate" ? renderer.value : "wind";
   const rendererAvailable = (next: NativeWindStatus | null): boolean => {
     const selected = selectedRenderer();
     return Boolean(next?.available && (selected === "wind"
@@ -645,7 +656,7 @@ export function createNativeWindPanel(): HTMLElement {
     renderer.disabled = locked;
     attach.disabled = locked;
     const heated = selectedRenderer() === "finite-gas-string";
-    const sourceClock = heated || selectedRenderer() === "lip" || selectedRenderer() === "voice";
+    const sourceClock = heated || ["lip", "voice", "plate"].includes(selectedRenderer());
     decimate.disabled = locked || sourceClock;
     decimation.hidden = sourceClock;
     gas.setDisabled(locked);
@@ -895,7 +906,7 @@ export function createNativeWindPanel(): HTMLElement {
     void loadExample(selected);
   });
   renderer.addEventListener("change", () => {
-    if (["finite-gas-string", "lip", "voice"].includes(selectedRenderer())) decimate.checked = false;
+    if (["finite-gas-string", "lip", "voice", "plate"].includes(selectedRenderer())) decimate.checked = false;
     edited(); void checkConnection();
   });
   const refreshSourcePaths = (): void => {

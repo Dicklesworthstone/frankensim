@@ -2,7 +2,7 @@
 import type {NativePressureReceipt} from './native-wave.mjs';
 export interface NativeWindStatus {
   available: boolean;
-  renderers?: { wind: boolean; strings: boolean; resolved?: boolean; 'finite-gas-string'?: boolean; lip?: boolean; voice?: boolean };
+  renderers?: { wind: boolean; strings: boolean; resolved?: boolean; 'finite-gas-string'?: boolean; lip?: boolean; voice?: boolean; plate?: boolean };
   busy: boolean;
   token?: string;
   maximumSourceBytes: number;
@@ -47,7 +47,7 @@ export interface NativeMaterialManifest {
   materialState?: {chemistry: string; phase: string; process: string; revision: number};
 }
 export interface NativeFiniteGasStringSources { solidPath: string; gasRecordPath: string; }
-export type NativeRenderer = 'wind' | 'strings' | 'resolved' | 'finite-gas-string' | 'lip' | 'voice';
+export type NativeRenderer = 'wind' | 'strings' | 'resolved' | 'finite-gas-string' | 'lip' | 'voice' | 'plate';
 export interface NativeWindOptions {
   renderer?: NativeRenderer;
   decimate?: boolean;

@@ -119,8 +119,8 @@ export async function renderNativePerformance(source, attachments, status, optio
 
 async function sendNativeWind(source, attachments, status, options, signal, request) {
   const renderer = options.renderer === undefined ? 'wind' : options.renderer;
-  if (!['wind', 'strings', 'resolved', 'finite-gas-string', 'lip', 'voice'].includes(renderer)) throw new Error("Choose a supported native physical performer.");
-  if ((renderer === 'lip' || renderer === 'voice') && status.renderers?.[renderer] !== true) {
+  if (!['wind', 'strings', 'resolved', 'finite-gas-string', 'lip', 'voice', 'plate'].includes(renderer)) throw new Error("Choose a supported native physical performer.");
+  if (['lip', 'voice', 'plate'].includes(renderer) && status.renderers?.[renderer] !== true) {
     throw new Error(`The ${renderer} renderer is unavailable. Update music_render and the local server.`);
   }
   if (renderer === 'strings' && status.renderers?.strings !== true) {
@@ -153,8 +153,8 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
   if (options.decimate !== undefined && typeof options.decimate !== 'boolean') {
     throw new Error("Choose whether to use native decimation explicitly.");
   }
-  if (options.decimate && (renderer === 'lip' || renderer === 'voice'))
-    throw new Error('Lip and voice performances keep their declared native output clock; external decimation is unavailable.');
+  if (options.decimate && ['lip', 'voice', 'plate'].includes(renderer))
+    throw new Error('Lip, voice and plate performances keep their declared native output clock; external decimation is unavailable.');
   if (options.gasSources !== undefined) {
     if (!options.gasSources || typeof options.gasSources !== "object"
         || !Array.isArray(options.gasSources.components) || !options.gasSources.components.length) {
@@ -198,7 +198,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     if (new TextEncoder().encode(body).byteLength > status.maximumRequestBytes) {
       throw new Error("The complete experiment exceeds the renderer's request limit.");
     }
-    if (renderer === 'finite-gas-string' || renderer === 'lip' || renderer === 'voice'
+    if (['finite-gas-string', 'lip', 'voice', 'plate'].includes(renderer)
         || options.finiteGasString !== undefined || options.coatingStrainGuard !== undefined || options.materialManifests !== undefined)
       validateInput(new TextEncoder().encode(body), true);
   }

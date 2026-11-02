@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MAX_LOG_BYTES, MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES,
   MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES,
   MAX_HISTORY_BYTES, FINITE_GAS_STRING_RESULT_FORMAT, FINITE_GAS_STRING_SCHEMAS,
-  NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, RESOLVED_SCHEMAS, LIP_SCHEMAS, VOICE_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
+  NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, RESOLVED_SCHEMAS, LIP_SCHEMAS, VOICE_SCHEMAS, PLATE_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
 
 import {nativePressureReceipt} from './native-pressure-receipt.mjs';
 import {PRESSURE_RECEIPT_HEADER} from '../src/native-wave.mjs';
@@ -97,10 +97,11 @@ function runNative(engine, input, output, dir, signal, outputLimit, experiment, 
     const args = experiment.renderer === 'finite-gas-string'
       ? [input, finiteGasString.solidPath, output, '--gas-record', finiteGasString.gasRecordPath,
         '--self-contained', '--history-output', history, '--require-sample-rate', '48000', ...sourceArgs, ...gasArgs]
-      // These performers parse inline geometry/gestures only. Their sole
-      // external inputs are the exact gas paths admitted above and staged in
-      // this private directory; neither accepts wind's attachment flags.
-      : experiment.renderer === 'lip' || experiment.renderer === 'voice'
+      // These commands do not accept wind's attachment or decimation flags.
+      // Gas packs use the exact admitted paths. Plate sections additionally
+      // use native MaterialRecord's confined relative material-pack paths;
+      // all bytes are already staged or compiled in this private directory.
+      : ['lip', 'voice', 'plate'].includes(experiment.renderer)
         ? [...command, input, output, ...gasArgs]
       : [...command, input, output,
         '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs, ...profileArgs, ...coatingArgs];
@@ -247,10 +248,10 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
         return send(200,
         {available:!closing && (wind || strings || finiteGasString),
           renderers:{wind:!closing && wind, strings:!closing && strings, resolved:!closing && wind,
-            lip:!closing && wind, voice:!closing && wind,
+            lip:!closing && wind, voice:!closing && wind, plate:!closing && wind,
             'finite-gas-string':!closing && finiteGasString}, busy:active !== null, token,
           maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, maximumHistoryBytes, timeoutMs,
-          supportedSchemas:[...(wind ? [...SUPPORTED_SCHEMAS, ...RESOLVED_SCHEMAS, ...LIP_SCHEMAS, ...VOICE_SCHEMAS] : []), ...(strings ? STRING_SCHEMAS : []),
+          supportedSchemas:[...(wind ? [...SUPPORTED_SCHEMAS, ...RESOLVED_SCHEMAS, ...LIP_SCHEMAS, ...VOICE_SCHEMAS, ...PLATE_SCHEMAS] : []), ...(strings ? STRING_SCHEMAS : []),
             ...(finiteGasString ? FINITE_GAS_STRING_SCHEMAS : [])],
           maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
           maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true, supportsPressureReceipts:true,

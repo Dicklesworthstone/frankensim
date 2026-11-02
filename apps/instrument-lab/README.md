@@ -61,9 +61,10 @@ changed gets a new URL, so no visitor pairs new code with an hour-old `strandbar
 
 ## Native wind and string renderer
 
-The instrument-family section can edit and render wind, resolved-flow, string and heated-string
-performances with their original material packs using the **native `music_render wind`,
-`music_render resolved`, `material_strings` and `finite_gas_string` solvers**. Build the local executables and the app, then serve that app through the optional loopback
+The instrument-family section can edit and render wind, resolved-flow, string, heated-string,
+lip, voice and mesh-plate performances with their original material packs using the
+**native `music_render wind`, `music_render resolved`, `music_render lip`, `music_render voice`,
+`music_render plate`, `material_strings` and `finite_gas_string` solvers**. Build the local executables and the app, then serve that app through the optional loopback
 companion. From the repository root:
 
 ```sh
@@ -120,6 +121,40 @@ which its native observer handles directly.
 Playback never peak-normalizes or retunes the native result. Original model
 limits and missing-source refusals still apply; attaching a pack does not
 qualify an instrument as measured or realistic.
+
+### Mesh plates with material sections and a shared atmosphere
+
+Select **Plate — triangular mesh, material sections and force history** to open
+the unchanged [native plate example](../../crates/fs-couple/examples/plate-mesh.performance).
+Its mesh, per-triangle section assignments, supports, nodal force footprint and
+sample-addressed force history reach `music_render plate` directly. The native
+DKT plate assembly derives the retained modes and signed radiation areas.
+
+The starter's two material regions are explicitly labelled illustrative fixtures.
+For a source-backed material substitution, use `section material isotropic
+THICKNESS_M PACK STATE [AXIS=VALUE ...]` or the
+[native orthotropic record](../../crates/fs-couple/examples/PLATE_PERFORMANCES.md).
+Attach the exact material-card pack under `PACK`, or attach its original tables
+and manifest and select that output path in **Compile material sources**.
+The existing native compiler and material resolver retain the named state,
+query point and property domains. Replacing the source data rebuilds the plate;
+the browser does not translate it into oscillator or filter parameters.
+
+**Regional atmosphere** edits the plate's `ambient` record using the same
+moist-air, named-mixture or attached thermochemical-source route as the other
+performers. Its density and sound speed reach the compact baffled pressure
+observer. The optional `radiation-load baffled-piston` record immediately after
+`observer` also applies the existing gas-dependent mechanical reaction. The
+original fixture omits that reaction; loading the starter does not change it.
+Save/open experiments retain the source, material bindings and arbitrary gas
+source associations together. The native output remains mono PCM16 at its
+required 48 kHz clock with its declared pressure full scale and calibrated A/B
+comparison; external decimation and implicit gain changes are unavailable.
+
+This is a linear flat-plate model with a compact observer and optional per-mode
+piston loading. The declared damping, retained frequency window, mesh accuracy,
+missing mutual radiation and lack of measured full-instrument validation remain
+the native model's explicit limitations.
 
 ### String starters with their original material sources
 

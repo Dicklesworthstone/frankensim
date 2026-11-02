@@ -120,7 +120,7 @@ test('no hidden calibration conversion and no calibrated comparison of clipped s
   }
 });
 
-test('wind calibration comes from the native sidecar and strings from the output-clock summary', async () => {
+test('music_render calibration comes from the native sidecar and strings from the output-clock summary', async () => {
   const dir = await scratch(), output = join(dir, 'result.wav'), bytes = wave();
   assert.equal(await nativePressureReceipt('wind', output, {stderr:''}, bytes), null);
   const native = {schema:'frankensim-music-render-provenance-v1', sample_rate_hz:48000,
@@ -129,6 +129,8 @@ test('wind calibration comes from the native sidecar and strings from the output
   assert.deepEqual(await nativePressureReceipt('wind', output, {stderr:'irrelevant'}, bytes), receipt(bytes));
   assert.deepEqual(await nativePressureReceipt('resolved', output, {stderr:'irrelevant'}, bytes),
     receipt(bytes, {renderer:'resolved'}));
+  assert.deepEqual(await nativePressureReceipt('plate', output, {stderr:'irrelevant'}, bytes),
+    receipt(bytes, {renderer:'plate'}));
   assert.deepEqual(await nativePressureReceipt('strings', output,
     {stderr:'unrelated\nsamples=4; rate_Hz=48000; clips=0; full_scale_Pa=200\nobstacle_resolves=0\n'}, bytes),
     receipt(bytes, {renderer:'strings'}));
