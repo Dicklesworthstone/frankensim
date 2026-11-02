@@ -105,6 +105,20 @@ and expansion, unequal cell Jacobians, and original native impulse/hydrostatic
 motion. Synthetic density fields verify these numerical consequences; they
 do not establish experimental material validity.
 
+`density_field::motion` projects reference or deformed P1 nodal velocities into
+the existing `PrincipalFrame` and native `RigidBodyState`. Positive cubic
+tetrahedral integration retains original cell masses, full density-weighted
+linear/angular momenta and source lineage, including unequal deformation
+Jacobians. The best rigid velocity uses P/M and the existing full-inertia inverse;
+direct residual-velocity integration reports and bounds unresolved internal
+kinetic energy independently of a common translational boost. That account is
+never silently converted to heat. The output feeds unchanged native stepping
+and impulse APIs. This is explicit kinematic model projection; it supplies no
+solidification, fracture, elastic-energy or reciprocal thermal transfer law.
+Cancellation/refusal returns no partial candidate. Focused regressions use
+independent analytic moments, deformation/subdivision, unequal Jacobians,
+actual native stepping/impulses, boost invariance and atomic refusal.
+
 ## Heat transport to mechanical configuration
 
 `thermal::heating::HeatedBody` binds each original region to its source-resolved

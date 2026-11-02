@@ -22,6 +22,10 @@ use crate::{
     MAX_BODY_REGIONS, MaterialInertiaError, VolumeMoments, merge_inertias, poll, positive,
 };
 
+/// Density-weighted nodal motion projected into the existing rigid-body owner.
+#[path = "density_field/motion.rs"]
+pub mod motion;
+
 /// Maximum reference vertices; the original body-region budget caps cells.
 pub const MAX_DENSITY_VERTICES: usize = 4 * MAX_BODY_REGIONS;
 

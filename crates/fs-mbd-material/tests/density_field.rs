@@ -1,6 +1,9 @@
 //! Sourced continuous density -> exact moments -> actual native mechanics.
 mod common;
 
+#[path = "density_field/motion.rs"]
+mod motion;
+
 use common::{close, density_card, point};
 use fs_ga::{Mat3, Se3, So3, Twist, Vec3};
 use fs_material::fluid_transport::FluidTransportState;
