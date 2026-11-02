@@ -28,8 +28,9 @@ test('complete canonical string and reed starters reach the native request with 
   for (const [name, inputs] of Object.entries(starters)) {
     const source = await readOriginal('crates/fs-couple/examples/' + name);
     const reed = Object.hasOwn(reeds, name);
-    const decimate = reed && !['material_modal_valve/paired-walls.performance',
-      'material_modal_valve/paired-spatial.performance'].includes(name);
+    const decimate = name === 'material_strings/cannone-dominant-g3.material-strings'
+      || reed && !['material_modal_valve/paired-walls.performance',
+        'material_modal_valve/paired-spatial.performance'].includes(name);
     const options = {renderer:reed ? 'wind' : 'strings', decimate, materialManifests:inputs.materialManifests,
       stringProfiles:inputs.stringProfiles};
     const prepared = await prepareNativeTextExperiment(source, inputs.sources, options, readOriginal);
@@ -148,6 +149,34 @@ test('complete string experiments retain original moving contact, thermal, mater
   assert.deepEqual(variant.source, restored.source);
   assert.deepEqual(variant.stringProfiles, restored.stringProfiles);
   assert.deepEqual(variant.coatingStrainGuard, restored.coatingStrainGuard);
+});
+
+test('original shell geometry and assembly selections survive round trips and data-only swaps', () => {
+  const source = 'frankensim-material-strings-v3\n# original performance\n';
+  const files = [
+    {path:'body/shell.tsv', bytes:encode('original shell geometry\r\n')},
+    {path:'body/choices.assembly', bytes:encode('original material bindings and assembly choices\n')},
+    {path:'body/legacy.profile', bytes:encode('original lowered comparison\n')},
+  ];
+  const profiles = {shellTablePath:files[0].path, shellOptionsPath:files[1].path};
+  const options = {renderer:'strings', stringProfiles:profiles,
+    coatingStrainGuard:{maximumBytes:536870912, maximumWork:1000000000000}};
+  const packet = JSON.parse(serializeNativeExperiment(source, files, options));
+  const original = serviceInput(encode(JSON.stringify(packet)), true);
+  assert.deepEqual(original.attachments, files);
+  assert.deepEqual(original.stringProfiles, profiles);
+  assert.deepEqual(original.coatingStrainGuard, options.coatingStrainGuard);
+  files[0].bytes = encode('changed original shell geometry\n');
+  const changed = serviceInput(encode(serializeNativeExperiment(source, files, options)), true);
+  assert.notDeepEqual(changed.attachments[0].bytes, original.attachments[0].bytes);
+  assert.deepEqual(changed.source, original.source);
+  assert.deepEqual(changed.stringProfiles, profiles);
+  for (const invalid of [{shellTablePath:profiles.shellTablePath},
+    {shellOptionsPath:profiles.shellOptionsPath}, {...profiles, bodyPath:files[2].path},
+    {...profiles, shellTablePath:'unlisted.tsv'}]) {
+    assert.throws(() => serviceInput(encode(JSON.stringify({...packet, stringProfiles:invalid})), true),
+      /shell assembly|String profiles/);
+  }
 });
 
 test('coating strain budgets require explicit exact limits and a material-string body profile', () => {

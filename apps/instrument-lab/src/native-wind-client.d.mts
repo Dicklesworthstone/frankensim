@@ -33,7 +33,13 @@ export interface NativeWindGasSources {
   waterSpecies: string | null;
   phase: "frozen" | "liquid-water";
 }
-export interface NativeStringProfiles { bodyPath?: string; stopPath?: string; contactThermalPath?: string; }
+export interface NativeStringProfiles {
+  bodyPath?: string;
+  shellTablePath?: string;
+  shellOptionsPath?: string;
+  stopPath?: string;
+  contactThermalPath?: string;
+}
 export interface NativeCoatingStrainGuard { maximumBytes: number; maximumWork: number; }
 export interface NativeMaterialManifest {
   packPath: string;

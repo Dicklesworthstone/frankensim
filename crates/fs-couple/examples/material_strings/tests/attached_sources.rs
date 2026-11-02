@@ -101,6 +101,78 @@ fn g3_attached_gas_sources_share_the_same_string_and_cavity_state() {
 }
 
 #[test]
+fn g3_original_shell_table_rebuilds_body_and_cavity_through_the_same_native_sources() {
+    const TABLE: &str = include_str!("../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv");
+    const OPTIONS: &str = include_str!("../cannone-h8.assembly");
+    const PERFORMANCE: &str = include_str!("../cannone-dominant-g3.material-strings");
+    let dir = directory();
+    std::fs::write(dir.join("shell.tsv"), TABLE).unwrap();
+    std::fs::write(dir.join("shell.assembly"), OPTIONS).unwrap();
+    let command = args(&dir, "unused.wav", Some(&["shell.tsv", "shell.assembly"]));
+    let (_, options) = native_input::SourceOptions::extract(&command).unwrap();
+    let sources = options.load(&dir).unwrap();
+    let lowered = body::ShellTableOptions::parse(OPTIONS).unwrap().convert(TABLE).unwrap();
+    let loaded = body_source::load(None, Some(Path::new("shell.tsv")),
+        Some(Path::new("shell.assembly")), &sources).unwrap();
+    assert_eq!(loaded.profile.as_ref().unwrap().bytes, lowered.profile.as_bytes());
+    let mut spec = input::Spec::parse(PERFORMANCE.as_bytes()).unwrap();
+    let original_cavity = spec.cavity.as_ref().unwrap().clone();
+    spec.body.length = 1.0;
+    spec.body.width = 2.0;
+    spec.body.thickness = 0.01;
+    loaded.geometry.unwrap().bind(&mut spec).unwrap();
+    assert_eq!((spec.body.length, spec.body.width, spec.body.thickness),
+        (lowered.length_m, lowered.width_m, 0.003));
+    let cavity = spec.cavity.as_ref().unwrap();
+    let [volume, radius, length] = lowered.cavity.unwrap();
+    assert_eq!((cavity.cavity.geometry().volume_m3, cavity.cavity.geometry().neck_radius_m,
+        cavity.cavity.geometry().neck_length_m), (volume, radius, length));
+    assert_eq!(cavity.cavity.loss(), original_cavity.cavity.loss());
+    assert_eq!(cavity.cavity.gas(), original_cavity.cavity.gas());
+    assert_eq!(spec.bytes, PERFORMANCE.as_bytes(), "the authored performance remains original data");
+
+    // The source table, not a second cavity field or old modal coefficients,
+    // owns the physical geometry. A volume-only data swap has the independent
+    // Helmholtz limit omega proportional to 1/sqrt(V) at fixed neck and gas.
+    let changed = TABLE.lines().map(|line| if line.starts_with("cavity\t") {
+        format!("cavity\t{}\t{radius}\t{length}", 2.0 * volume)
+    } else { line.to_owned() }).collect::<Vec<_>>().join("\n") + "\n";
+    assert_ne!(changed, TABLE);
+    std::fs::write(dir.join("shell.tsv"), &changed).unwrap();
+    let replacement = options.load(&dir).unwrap();
+    let loaded = body_source::load(None, Some(Path::new("shell.tsv")),
+        Some(Path::new("shell.assembly")), &replacement).unwrap();
+    let before = spec.cavity.as_ref().unwrap().cavity.isolated_omega_rad_s();
+    loaded.geometry.as_ref().unwrap().bind(&mut spec).unwrap();
+    let after = spec.cavity.as_ref().unwrap().cavity.isolated_omega_rad_s();
+    assert!((after / before - 0.5_f64.sqrt()).abs() < 1e-12);
+    spec.cavity = None;
+    loaded.geometry.unwrap().bind(&mut spec).unwrap();
+    assert!(spec.cavity.is_none(), "an explicit cavity-none comparison stays cavity-free");
+}
+
+#[test]
+fn g0_shell_source_selection_is_complete_exclusive_and_restricted_to_attached_files() {
+    let dir = directory();
+    std::fs::write(dir.join("shell.tsv"), b"unlisted original table").unwrap();
+    std::fs::write(dir.join("shell.assembly"), b"unlisted original options").unwrap();
+    let command = args(&dir, "unused.wav", Some(&[]));
+    let (_, options) = native_input::SourceOptions::extract(&command).unwrap();
+    let sources = options.load(&dir).unwrap();
+    let table = Some(Path::new("shell.tsv"));
+    let assembly = Some(Path::new("shell.assembly"));
+    for (profile, table, assembly, reason) in [
+        (None, table, None, "together"),
+        (None, None, assembly, "together"),
+        (Some(Path::new("body.profile")), table, assembly, "not both"),
+        (None, table, assembly, "unlisted source"),
+    ] {
+        let error = body_source::load(profile, table, assembly, &sources).err().unwrap().to_string();
+        assert!(error.contains(reason), "{error}");
+    }
+}
+
+#[test]
 fn g3_decimated_attached_strings_preserve_output_clock_and_callback_identity() {
     let dir = directory(); fixture(&dir);
     let original = std::fs::read_to_string(dir.join("input.performance")).unwrap();

@@ -36,15 +36,52 @@ class MaterialPreparation(unittest.TestCase):
             self.assertEqual([r[:-1] for r in commands], [r[:-1] for r in old])
             self.assertTrue(all(r[-1] == "7.707571801566581e-1" for r in commands))
 
-    def test_assembly_dimensions_come_from_the_native_conversion(self):
-        original = (EXAMPLES / "cannone-dominant-g3.material-strings").read_text()
-        report = "body-length-m 0.4\nbody-width-m 0.2\nreference-thickness-m 0.003\nbridge-snap-m 0 0.001\ncavity-volume-m3 0.002\ncavity-neck-radius-m 0.03\ncavity-neck-length-m 0.004\n"
-        changed = R.assembly_geometry(original, report)
-        self.assertIn("body violin-spruce-norway-viala2020-shell.fsmatpk 0.4 0.2 0.003 30 1", changed)
-        self.assertIn("cavity physical-neck 0.002 0.03 0.004 flanged flanged 1", changed)
-        self.assertEqual(changed.split("\nschedule\n")[1], original.split("\nschedule\n")[1])
-        with self.assertRaises(KeyError):
-            R.assembly_geometry(original, "body-length-m 0.4\n")
+    def test_original_shell_sources_reach_native_render_and_portable_export_without_python_lowering(self):
+        root = Path(tempfile.mkdtemp())
+        source = EXAMPLES / "cannone-dominant-g3.material-strings"
+        table = REPO / "data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv"
+        assembly = EXAMPLES / "cannone-h8.assembly"
+        packs = ["violin-spruce-norway-viala2020-shell", "violin-maple-sycamore-sonderegger2013-shell",
+                 *[f"violin-string-dominant-{note}-pickering1985-section" for note in "gdae"]]
+        for pack in packs:
+            (root / f"{pack}.fsmatpk").write_bytes(f"original {pack}".encode())
+        executable = root / "material_strings"
+        # Subprocess I/O witness only; Rust owns geometry and acoustic tests.
+        executable.write_text("""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+source = Path(sys.argv[1])
+table = Path(sys.argv[sys.argv.index('--shell-table') + 1])
+options = Path(sys.argv[sys.argv.index('--assembly-options') + 1])
+print(json.dumps({'performance': source.read_text(), 'table': table.read_bytes().hex(),
+                  'options': options.read_bytes().hex(), 'args': sys.argv[3:]}))
+""")
+        executable.chmod(0o755)
+        for mode in ("prepared", "rendered"):
+            output = root / mode
+            args = ["--performance", str(source), "--out", str(output), "--pack-root", str(root),
+                    "--shell-table", str(table), "--assembly-options", str(assembly), "--decimate"]
+            if mode == "prepared":
+                with mock.patch.object(R.subprocess, "run", side_effect=AssertionError("preparation must not lower or render")):
+                    self.assertEqual(R.main(["--prepare-only", *args]), 0)
+            else:
+                self.assertEqual(R.main(["--renderer", str(executable), "--lab-experiment", *args]), 0)
+                witness = json.loads((output / "render.log").read_text())
+                self.assertEqual(witness["performance"], source.read_text())
+                self.assertEqual(witness["table"], table.read_bytes().hex())
+                self.assertEqual(witness["options"], assembly.read_bytes().hex())
+                self.assertEqual(witness["args"], ["--shell-table", str(output / "shell-table.tsv"),
+                    "--assembly-options", str(output / "shell-options.assembly"), "--decimate"])
+            packet = json.loads((output / "experiment.native.json").read_text())
+            self.assertEqual(base64.b64decode(packet["source"]), source.read_bytes())
+            self.assertEqual(packet["stringProfiles"], {"shellTablePath": "shell-table.tsv",
+                                                       "shellOptionsPath": "shell-options.assembly"})
+            files = {item["path"]: base64.b64decode(item["bytes"]) for item in packet["attachments"]}
+            self.assertEqual(files["shell-table.tsv"], table.read_bytes())
+            self.assertEqual(files["shell-options.assembly"], assembly.read_bytes())
+            self.assertFalse((output / "body.profile").exists())
+            for pack in packs:
+                self.assertEqual(files[f"{pack}.fsmatpk"], (root / f"{pack}.fsmatpk").read_bytes())
 
     def test_independent_cavity_gas_preserves_mechanics_and_original_record_order(self):
         original = (EXAMPLES / "pluck.material-strings").read_text()

@@ -7,7 +7,7 @@ import {randomBytes} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import {dirname, extname, isAbsolute, join, relative, resolve, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {DEFAULT_TIMEOUT_MS, MAX_LOG_BYTES, MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES,
+import {DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MAX_LOG_BYTES, MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES,
   MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES,
   MAX_HISTORY_BYTES, FINITE_GAS_STRING_RESULT_FORMAT, FINITE_GAS_STRING_SCHEMAS,
   NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, RESOLVED_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
@@ -87,7 +87,8 @@ function runNative(engine, input, output, dir, signal, outputLimit, experiment, 
     const gasArgs = gasSources ? ['--gas-water', gasSources.waterSpecies ?? 'none',
       '--gas-phase', gasSources.phase, ...gasSources.components.flatMap(component =>
         ['--gas-component', component.speciesPath, component.nasa9Path, component.transportPath])] : [];
-    const profileArgs = [['bodyPath', '--body-profile'], ['stopPath', '--stop-profile'], ['contactThermalPath', '--contact-thermal']]
+    const profileArgs = [['bodyPath', '--body-profile'], ['shellTablePath', '--shell-table'],
+      ['shellOptionsPath', '--assembly-options'], ['stopPath', '--stop-profile'], ['contactThermalPath', '--contact-thermal']]
       .flatMap(([key, flag]) => stringProfiles?.[key] ? [flag, stringProfiles[key]] : []);
     const coatingArgs = coatingStrainGuard ? ['--coating-strain-guard',
       String(coatingStrainGuard.maximumBytes), String(coatingStrainGuard.maximumWork)] : [];
@@ -214,7 +215,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
   dist = resolve(here, '../dist'), timeoutMs = DEFAULT_TIMEOUT_MS,
   maximumOutputBytes = MAX_OUTPUT_BYTES, maximumHistoryBytes = MAX_HISTORY_BYTES, tempRoot = tmpdir()} = {}) {
   if ([engine, stringsEngine, finiteGasStringEngine, materialCompiler].some(path => path && !isAbsolute(path))) throw new Error('Native executables must be absolute paths.');
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS
       || !Number.isInteger(maximumOutputBytes) || maximumOutputBytes < 44 || maximumOutputBytes > MAX_OUTPUT_BYTES
       || !Number.isInteger(maximumHistoryBytes) || maximumHistoryBytes < 1 || maximumHistoryBytes > MAX_HISTORY_BYTES)
     throw new Error('Invalid local rendering budget.');
@@ -332,7 +333,7 @@ async function cli() {
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--help') {
-      console.log('node tools/serve-native-wind.mjs [--engine /absolute/path/music_render] [--strings-engine /absolute/path/material_strings] [--finite-gas-string-engine /absolute/path/finite_gas_string] [--material-compiler /absolute/path/xtask] [--dist DIST] [--port 8787] [--timeout-ms 60000]\nFSIM_MUSIC_RENDER, FSIM_MATERIAL_STRINGS, FSIM_FINITE_GAS_STRING and FSIM_MATDB_COMPILER select the local executables. --timeout-ms admits 1..600000 milliseconds per render. Build the app first with npm run build.'); return;
+      console.log(`node tools/serve-native-wind.mjs [--engine /absolute/path/music_render] [--strings-engine /absolute/path/material_strings] [--finite-gas-string-engine /absolute/path/finite_gas_string] [--material-compiler /absolute/path/xtask] [--dist DIST] [--port 8787] [--timeout-ms 60000]\nFSIM_MUSIC_RENDER, FSIM_MATERIAL_STRINGS, FSIM_FINITE_GAS_STRING and FSIM_MATDB_COMPILER select the local executables. --timeout-ms admits 1..${MAX_TIMEOUT_MS} milliseconds per render; the default is ${DEFAULT_TIMEOUT_MS}. Build the app first with npm run build.`); return;
     }
     if (!['--engine', '--strings-engine', '--finite-gas-string-engine', '--material-compiler', '--dist', '--port', '--timeout-ms'].includes(args[i]) || !args[i + 1]) throw new Error('Unknown or incomplete local-server option.');
     const option = args[i], value = args[++i];

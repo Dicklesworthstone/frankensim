@@ -80,7 +80,7 @@ Open `http://127.0.0.1:8787`. `FSIM_MUSIC_RENDER`, `FSIM_MATERIAL_STRINGS` and `
 supply the respective absolute executable paths; use the actual Cargo output
 paths if your target directory differs. `--dist` selects an existing app build
 and `--port` changes the loopback port. `--timeout-ms` sets the execution allowance
-for each render, from 1 to 600000 milliseconds (default 60000). For a longer
+for each render, from 1 to 14400000 milliseconds (four hours; default 60000). For a longer
 resolved-flow calculation, use an explicit allowance such as `--timeout-ms 300000`;
 the panel displays it and Cancel still terminates the native calculation.
 Each executable can be configured on its
@@ -345,9 +345,10 @@ NOTES=G3 data/instruments/descriptions/violin/render.sh \
 ```
 
 Open `/path/to/new-violin-input/G3/experiment.native.json` in the panel. The
-native shell converter still prepares the body from its source geometry;
-`--prepare-only` skips audio rendering. The packet carries the resulting body
-profile and all original material packs, so the browser needs no manual
+native shell converter prepares the body from its source geometry when rendering;
+`--prepare-only` stages inputs without lowering geometry or rendering audio.
+The packet carries the original shell table, assembly options and material
+sources, so the browser needs no manual
 reattachment of those files. Render it, keep the result as A, replace a material
 pack at its existing path or edit the gas record, and render B. Save each variant
 to reopen the same complete configuration later. The declared pressure scale,
@@ -355,9 +356,10 @@ tensions, mechanical clock and source bytes remain part of the experiment.
 
 For other supplied string assemblies, use
 `tools/render_material_strings.py --performance ... --out ... --prepare-only`
-with the appropriate `--pack-root`, `--body-profile`, `--stop-profile` and
-`--contact-thermal` inputs. A prepared body profile needs no executable during
-this staging step; generating a shell profile still requires `--renderer`.
+with the appropriate `--pack-root`, `--body-profile` or paired `--shell-table`
+and `--assembly-options`, plus any `--stop-profile` and `--contact-thermal`
+inputs. Staging either body form needs no renderer executable. Native source
+manifest compilation still requires its explicitly selected material compiler.
 `--stop-profile` includes the original finger, fret and material bow-contact
 data, including moving contacts. Material-derived normal contacts retain their
 receiver bulk `.fsmatpk`, ordered interface `.fsintpk` and normal-law
@@ -669,12 +671,29 @@ profile additionally requires genuine caloric and transport claims for its
 declared material; this isothermal example does not supply those missing data.
 
 The optional **String specimen profiles** selectors associate exact attached paths with
-the native body, stop and contact-thermal profiles. The companion forwards them
-as `--body-profile`, `--stop-profile` and `--contact-thermal`. Attach every material
+the native body, stop and contact-thermal profiles. A body may instead select
+its original shell table and assembly options together; the native assembler
+rebuilds the shell and declared cavity dimensions on each render. The companion
+forwards these as `--body-profile` or `--shell-table` with `--assembly-options`,
+plus independent `--stop-profile` and `--contact-thermal` selections. Attach every material
 or geometry artifact referenced by a profile too; the same frozen byte map serves
 the profile, material, contact, body and radiation loaders. These selectors add no
 browser coefficients or alternate synthesis model. Strings use the same gas-source
 controls below, with their atmosphere record kept in the performance.
+
+**Violin — il Cannone shell and four material strings** loads the existing
+8 mm geometry, assembly choices and six original material manifest/table pairs.
+It retains the original two-second, 144 kHz performance, four coupled strings
+and 30 body modes in the 15–2000 Hz window. Geometry and material edits now
+rebuild the same native body without an external preprocessing step. Its
+substitute tonewoods, homogenized string sections, authored Stribeck friction,
+lumped cavity and compact pressure observer retain their existing limitations;
+this is not a new full-band instrument validation. This is an offline physical
+study: the documented three-second violin recipe takes an hour or more on its
+reported host. Select an explicit local execution budget such
+as `--timeout-ms 7200000` (two hours) for this supplied study. The default remains
+one minute, and the server still admits one cancellable render at a time with
+its original output and diagnostic byte limits.
 
 Explicit string decimation runs the existing pressure observer through the shared
 native downsampler and writes 48 kHz PCM, retaining the original mechanical clock,

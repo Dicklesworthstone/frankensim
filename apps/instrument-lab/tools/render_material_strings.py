@@ -9,6 +9,8 @@ its output enters the native solve, while portable Lab experiments retain the
 original editable manifests and source tables for recompilation.
 Contact profiles reach that same native solve. Optional native decimation changes
 only the observed audio clock, retaining the authored mechanical resolution.
+Original shell tables and assembly options are staged unchanged; the native
+performer lowers them and binds their body/cavity dimensions when it runs.
 The output directory must be new. Python's standard library suffices for native
 rendering and harmonic analysis; --analysis additionally uses the existing
 instrgrade dependencies for listening exports.
@@ -129,21 +131,6 @@ def bow_schedule(text: str, card: str, string: int, distance_from_bridge: float)
     audio[2] = str(samples)
     lines[i] = " ".join(audio)
     return "\n".join(lines) + "\nschedule\n" + "\n".join("\t".join(r) for r in records) + "\n"
-
-
-def assembly_geometry(text: str, report: str) -> str:
-    """Bind the native shell converter's dimensions, with no parallel geometry calculation."""
-    values = {r[0]: r[1] for line in report.splitlines() if len(r := line.split()) == 2}
-    header, schedule = text.split("\nschedule\n", 1)
-    lines = header.splitlines()
-    i, body = row(lines, "body")
-    body[2:5] = [values[k] for k in ("body-length-m", "body-width-m", "reference-thickness-m")]
-    lines[i] = " ".join(body)
-    i, cavity = row(lines, "cavity")
-    if cavity[1] != "none":
-        cavity[2:5] = [values[k] for k in ("cavity-volume-m3", "cavity-neck-radius-m", "cavity-neck-length-m")]
-        lines[i] = " ".join(cavity)
-    return "\n".join(lines) + "\nschedule\n" + schedule
 
 
 def material_state_bindings(bindings: list[list[str]], manifests: list[str]) -> dict[str, list[str]]:
@@ -352,7 +339,7 @@ def main(argv=None) -> int:
     # for an option. Numerical/source admission still belongs to the native CLI.
     parser._negative_number_matcher = re.compile(r"^-(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
 
-    parser.add_argument("--renderer", help="path to material_strings; required for rendering, harmonic analysis or shell assembly")
+    parser.add_argument("--renderer", help="path to material_strings; required for rendering or harmonic analysis")
     parser.add_argument("--performance", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True, help="new directory for staged sources, native output and log")
     parser.add_argument("--pack-root", type=Path)
@@ -420,7 +407,7 @@ def main(argv=None) -> int:
         if not (args.body_profile or args.shell_table):
             parser.error("--loaded-response-only requires a shell body profile or shell table")
     renderer = shutil.which(args.renderer) if args.renderer else None
-    if (args.renderer and renderer is None) or (renderer is None and (not args.prepare_only or args.shell_table)):
+    if (args.renderer and renderer is None) or (renderer is None and not args.prepare_only):
         parser.error("--renderer must name an available material_strings executable")
     renderer = str(Path(renderer).resolve()) if renderer else None
     export_experiment = args.lab_experiment or args.prepare_only
@@ -467,18 +454,19 @@ def main(argv=None) -> int:
     output.mkdir(parents=True, exist_ok=False)
     profile_bytes = args.body_profile.read_bytes() if args.body_profile else b""
     profile = profile_bytes.decode("utf-8")
+    assembly = ""
     profiles = {}
     attachments = []
     if args.shell_table:
-        result = subprocess.run([renderer, "assemble-shell", str(args.shell_table.resolve()),
-                                 str(args.assembly_options.resolve()), str(output / "body.profile")],
-                                check=True, capture_output=True, text=True)
-        (output / "assembly.log").write_text(result.stdout + result.stderr)
-        profile = (output / "body.profile").read_bytes().decode("utf-8")
-        text = assembly_geometry(text, result.stdout)
-    elif profile:
-        (output / "body.profile").write_bytes(profile_bytes)
+        table_bytes = args.shell_table.read_bytes()
+        options_bytes = args.assembly_options.read_bytes()
+        (output / "shell-table.tsv").write_bytes(table_bytes)
+        (output / "shell-options.assembly").write_bytes(options_bytes)
+        assembly = options_bytes.decode("utf-8")
+        profiles.update(shellTablePath="shell-table.tsv", shellOptionsPath="shell-options.assembly")
+        attachments.extend(("shell-table.tsv", "shell-options.assembly"))
     if profile:
+        (output / "body.profile").write_bytes(profile_bytes)
         profiles["bodyPath"] = "body.profile"
         attachments.append("body.profile")
     if stop_profile is not None:
@@ -492,7 +480,7 @@ def main(argv=None) -> int:
     # Thermal cells refer to the SAME assembly packs. Do not introduce an
     # independent thermal pack loader or bypass the native card-identity check.
     material_inputs = {} if export_experiment else None
-    attachments += stage_packs([text, profile, (stop_profile or b"").decode("utf-8")],
+    attachments += stage_packs([text, profile, assembly, (stop_profile or b"").decode("utf-8")],
                               args.pack_root or args.performance.parent, args.pack, output,
                               args.pack_manifest, compiler, args.pack_material_state, material_inputs)
     source = output / "performance.material-strings"
@@ -527,6 +515,9 @@ def main(argv=None) -> int:
         command.append(str(wav))
     if profile:
         command += ["--body-profile", str(output / "body.profile")]
+    if args.shell_table:
+        command += ["--shell-table", str(output / "shell-table.tsv"),
+                    "--assembly-options", str(output / "shell-options.assembly")]
     if stop_profile is not None:
         command += ["--stop-profile", str(output / "stops.profile")]
     if thermal_profile is not None:

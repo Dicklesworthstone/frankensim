@@ -5,6 +5,8 @@ import type { NativeStringProfiles, NativeCoatingStrainGuard } from "./native-wi
 export function createNativeStringProfiles(changed: () => void) {
   const fields = [
     ["bodyPath", "Body geometry/material profile"],
+    ["shellTablePath", "Original shell assembly table"],
+    ["shellOptionsPath", "Shell assembly options"],
     ["stopPath", "Finger, fret and contact profile"],
     ["contactThermalPath", "Contact thermal profile"],
   ] as const;
@@ -20,7 +22,7 @@ export function createNativeStringProfiles(changed: () => void) {
   };
   const element = el("fieldset", {class: "nw-gas-fields"},
     el("legend", {}, "String specimen profiles"),
-    el("p", {class: "small muted"}, "Select any optional body, contact or thermal profiles from the attached files. All materials referenced inside these profiles must also be attached. Leave a choice empty to use the performance's existing description."),
+    el("p", {class: "small muted"}, "Select a body profile, or an original shell table with its assembly options. The native assembler rebuilds the body and declared cavity dimensions from that table each time you render. Contact and thermal profiles are independent choices. All referenced material sources must also be attached."),
     el("div", {class: "nw-gas-component"}, ...inputs.map(({input, label}) => el("label", {}, label, input))),
     el("label", {}, coatingEnabled, " Check coating strain during playback"),
     el("p", {class: "small muted"}, "For a coated curved or assembled shell body, check the sourced coating limits at every mechanical endpoint. Supply explicit memory and work budgets; the native renderer admits the body and coating material."),
@@ -47,11 +49,17 @@ export function createNativeStringProfiles(changed: () => void) {
     read(): NativeStringProfiles | undefined {
       const selected = values();
       if (Object.values(selected).some(path => !paths.includes(path))) throw new Error("Select an attached file for each string specimen profile.");
+      if (Boolean(selected.shellTablePath) !== Boolean(selected.shellOptionsPath))
+        throw new Error("Select both the original shell table and its assembly options.");
+      if (selected.bodyPath && selected.shellTablePath)
+        throw new Error("Select a body profile or an original shell assembly, not both.");
       return Object.keys(selected).length ? selected : undefined;
     },
     readCoatingStrainGuard(): NativeCoatingStrainGuard | undefined {
       if (!coatingEnabled.checked) return undefined;
-      if (!values().bodyPath) throw new Error("Select an attached body profile for coating strain checks.");
+      const selected = values();
+      if (!selected.bodyPath && !(selected.shellTablePath && selected.shellOptionsPath))
+        throw new Error("Select an attached body profile or shell assembly for coating strain checks.");
       const limits = [maximumBytes, maximumWork].map(input => {
         const text = input.value.trim();
         const value = Number(text);

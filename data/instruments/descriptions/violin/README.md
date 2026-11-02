@@ -14,7 +14,7 @@ data/instruments/descriptions/violin/render.sh \
 ```
 
 Each `G3`, `D4`, `A4` and `E5` directory contains its complete prepared
-performance, body profile, original binary material packs, native construction
+performance, original shell table and assembly options, binary material packs, native construction
 and rendering logs, and `render.wav`. Set `NOTES="G3"` to render one note.
 Existing note directories refuse; completed or partial work is never overwritten.
 The native solver remains responsible for admitting all source data and physics.
@@ -473,7 +473,8 @@ argument is needed for this analysis:
 ```bash
 target/release/material_strings \
   /path/to/new-varnished-violin-run/G3/performance.material-strings \
-  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --shell-table /path/to/new-varnished-violin-run/G3/shell-table.tsv \
+  --assembly-options /path/to/new-varnished-violin-run/G3/shell-options.assembly \
   --body-response-only /path/to/new-varnished-violin-run/G3/body-response.tsv 101 2000 128 0
 ```
 
@@ -500,7 +501,8 @@ preparing playback or creating a WAV:
 ```bash
 target/release/material_strings \
   /path/to/new-varnished-violin-run/G3/performance.material-strings \
-  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --shell-table /path/to/new-varnished-violin-run/G3/shell-table.tsv \
+  --assembly-options /path/to/new-varnished-violin-run/G3/shell-options.assembly \
   --loaded-body-response-only /path/to/new-varnished-violin-run/G3/loaded-response.tsv 101 2000 128 0
 ```
 
@@ -580,7 +582,8 @@ original bridge ports. Select `coherent` and repeat
 ```bash
 target/release/material_strings \
   /path/to/new-varnished-violin-run/G3/performance.material-strings \
-  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --shell-table /path/to/new-varnished-violin-run/G3/shell-table.tsv \
+  --assembly-options /path/to/new-varnished-violin-run/G3/shell-options.assembly \
   --loaded-body-response-only /path/to/new-varnished-violin-run/G3/coherent-response.tsv 101 2000 32 coherent \
   --body-response-force 0 0.01 0 \
   --body-response-force 1 -0.01 0 \
@@ -630,7 +633,7 @@ python3 apps/instrument-lab/tools/render_material_strings.py \
   --out /path/to/new-bare-coherent-response
 ```
 
-The new directory contains the staged performance, body profile, material
+The new directory contains the staged performance, original shell table and assembly options, material
 packs, `loaded-response.tsv` and `loaded-response.log`. For the coated
 comparison, select `cannone-h8-varnish-memory.assembly`, supply its compiled
 varnish pack with the earlier `--pack` binding, and use another new output
@@ -655,7 +658,8 @@ The native renderer and common violin launcher accept
 target/release/material_strings \
   /path/to/new-varnished-violin-run/G3/performance.material-strings \
   /path/to/new-varnished-violin-run/G3/guarded.wav \
-  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --shell-table /path/to/new-varnished-violin-run/G3/shell-table.tsv \
+  --assembly-options /path/to/new-varnished-violin-run/G3/shell-options.assembly \
   --coating-strain-guard 536870912 100000000000000
 ```
 
@@ -685,7 +689,8 @@ bounds. For a complete bridge matrix with this observation:
 ```bash
 target/release/material_strings \
   /path/to/new-varnished-violin-run/G3/performance.material-strings \
-  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --shell-table /path/to/new-varnished-violin-run/G3/shell-table.tsv \
+  --assembly-options /path/to/new-varnished-violin-run/G3/shell-options.assembly \
   --loaded-body-response-only /path/to/new-varnished-violin-run/G3/strain-response.tsv 101 2000 32 all \
   --body-response-strain 536870912 1000000000000
 ```

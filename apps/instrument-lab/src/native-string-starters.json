@@ -1,4 +1,31 @@
 {
+  "material_strings/cannone-dominant-g3.material-strings": {
+    "sources": {
+      "shell-assembly.tsv": "data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv",
+      "shell.assembly": "crates/fs-couple/examples/material_strings/cannone-h8.assembly",
+      "spruce/manifest.tsv": "data/matdb/seed-v1/violin-spruce-norway-viala2020-shell/manifest.tsv",
+      "spruce/properties.tsv": "data/matdb/seed-v1/violin-spruce-norway-viala2020-shell/properties.tsv",
+      "maple/manifest.tsv": "data/matdb/seed-v1/violin-maple-sycamore-sonderegger2013-shell/manifest.tsv",
+      "maple/properties.tsv": "data/matdb/seed-v1/violin-maple-sycamore-sonderegger2013-shell/properties.tsv",
+      "string-g/manifest.tsv": "data/matdb/seed-v1/violin-string-dominant-g-pickering1985-section/manifest.tsv",
+      "string-g/properties.tsv": "data/matdb/seed-v1/violin-string-dominant-g-pickering1985-section/properties.tsv",
+      "string-d/manifest.tsv": "data/matdb/seed-v1/violin-string-dominant-d-pickering1985-section/manifest.tsv",
+      "string-d/properties.tsv": "data/matdb/seed-v1/violin-string-dominant-d-pickering1985-section/properties.tsv",
+      "string-a/manifest.tsv": "data/matdb/seed-v1/violin-string-dominant-a-pickering1985-section/manifest.tsv",
+      "string-a/properties.tsv": "data/matdb/seed-v1/violin-string-dominant-a-pickering1985-section/properties.tsv",
+      "string-e/manifest.tsv": "data/matdb/seed-v1/violin-string-dominant-e-pickering1985-section/manifest.tsv",
+      "string-e/properties.tsv": "data/matdb/seed-v1/violin-string-dominant-e-pickering1985-section/properties.tsv"
+    },
+    "materialManifests": [
+      {"packPath": "violin-spruce-norway-viala2020-shell.fsmatpk", "manifestPath": "spruce/manifest.tsv"},
+      {"packPath": "violin-maple-sycamore-sonderegger2013-shell.fsmatpk", "manifestPath": "maple/manifest.tsv"},
+      {"packPath": "violin-string-dominant-g-pickering1985-section.fsmatpk", "manifestPath": "string-g/manifest.tsv"},
+      {"packPath": "violin-string-dominant-d-pickering1985-section.fsmatpk", "manifestPath": "string-d/manifest.tsv"},
+      {"packPath": "violin-string-dominant-a-pickering1985-section.fsmatpk", "manifestPath": "string-a/manifest.tsv"},
+      {"packPath": "violin-string-dominant-e-pickering1985-section.fsmatpk", "manifestPath": "string-e/manifest.tsv"}
+    ],
+    "stringProfiles": {"shellTablePath": "shell-assembly.tsv", "shellOptionsPath": "shell.assembly"}
+  },
   "material_strings/pluck-and-bow.material-strings": {
     "sources": {
       "wire-manifest.tsv": "crates/fs-couple/examples/material_strings/wire-manifest.tsv",

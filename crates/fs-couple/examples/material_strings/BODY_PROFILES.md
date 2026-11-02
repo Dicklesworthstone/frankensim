@@ -8,6 +8,24 @@ The performance's `body` record still supplies its pack, dimensions, thickness,
 mode count and observer distance. String layers, support prescriptions, torsion,
 loads, plucks, bow tracks, shared gas and optional cavity are unchanged.
 
+Alternatively, `--shell-table ORIGINAL.tsv --assembly-options OPTIONS.assembly`
+selects an original `frankensim.shell-assembly.v1` table and the choices documented
+under **A table from the command line** below. The native performer invokes that
+same converter and admits its generated v4 profile before material construction.
+The converter's dimensions replace the performance's body length, width and
+reference thickness together. If the performance selects a cavity, its volume
+and neck dimensions come from the table and its inertia, compression and loss
+are rebuilt by the original cavity owner, retaining the declared gas, end
+conditions, loss model and listener. A table without the required cavity row
+refuses; `cavity none` remains an explicit cavity-free comparison.
+
+Supply both source flags, or `--body-profile`, exclusively. Original tables
+use the existing 4 MiB shell limit and options use the 64 KiB profile limit.
+In `--self-contained` mode both paths must be explicit attachments, just like
+their material packs. This route also supports the existing body-response and
+coating-strain selections. The standalone `assemble-shell` command remains
+available for exporting a lowered profile.
+
 V3/v4 profiles can also supply an explicit tetrahedral interior with the
 `interior-fe-v1` trailer below. Its gas is the performance's original resolved
 atmosphere; its standing waves and uniform compression load the same material

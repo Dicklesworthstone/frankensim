@@ -97,18 +97,22 @@ function validateGasSources(value, attachedNames) {
 
 function validateStringProfiles(value, renderer, attachedNames) {
   if (value === undefined) return undefined;
-  const keys = ['bodyPath', 'stopPath', 'contactThermalPath'];
+  const keys = ['bodyPath', 'shellTablePath', 'shellOptionsPath', 'stopPath', 'contactThermalPath'];
   if (renderer !== 'strings' || !value || typeof value !== 'object' || Array.isArray(value)
       || Object.keys(value).some(key => !keys.includes(key))
       || Object.values(value).some(path => typeof path !== 'string' || !attachedNames.has(path)))
-    throw new NativeWindError(400, 'String profiles must name attached body, stop or contact-thermal source files.');
+    throw new NativeWindError(400, 'String profiles must name attached body, shell assembly, stop or contact-thermal source files.');
+  if ((value.shellTablePath !== undefined) !== (value.shellOptionsPath !== undefined))
+    throw new NativeWindError(400, 'A shell assembly needs both its original table and assembly options.');
+  if (value.bodyPath !== undefined && value.shellTablePath !== undefined)
+    throw new NativeWindError(400, 'Select a body profile or an original shell assembly, not both.');
   return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
 }
 
 function validateCoatingStrainGuard(value, renderer, profiles) {
   if (value === undefined) return undefined;
   const keys = ['maximumBytes', 'maximumWork'];
-  if (renderer !== 'strings' || !profiles?.bodyPath || !value || typeof value !== 'object'
+  if (renderer !== 'strings' || !(profiles?.bodyPath || profiles?.shellTablePath) || !value || typeof value !== 'object'
       || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))
       || keys.some(key => !Number.isSafeInteger(value[key]) || value[key] <= 0))
     throw new NativeWindError(400, 'Coating strain checks require a material-string body profile and positive safe-integer byte/work limits.');

@@ -33,6 +33,7 @@ import hereditarySolidReedSource from "../../../crates/fs-couple/examples/materi
 import surfaceSolidReedSource from "../../../crates/fs-couple/examples/material_modal_valve/solid-surface-dg.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
 import measuredStringSource from "../../../crates/fs-couple/examples/material_strings/measured-cello-g.material-strings?raw";
+import cannoneStringSource from "../../../crates/fs-couple/examples/material_strings/cannone-dominant-g3.material-strings?raw";
 import nonlinearPreloadStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-preload.material-strings?raw";
 import stoppedNonlinearStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-stopped-preload.material-strings?raw";
 import tensorBodyStringSource from "../../../crates/fs-couple/examples/material_strings/tensor-body.material-strings?raw";
@@ -61,9 +62,13 @@ const starterSourceFiles = import.meta.glob<string>([
   "../../../crates/fs-couple/examples/material_strings/*.tsv",
   "../../../crates/fs-couple/examples/material_strings/*.body",
   "../../../crates/fs-couple/examples/material_strings/*.stops",
+  "../../../crates/fs-couple/examples/material_strings/*.assembly",
   "../../../crates/fs-couple/examples/material_modal_valve/*.tsv",
   "../../../data/matdb/seed-v1/cello-g-strings-whole-lampis-2024/*.tsv",
   "../../../data/matdb/seed-v1/bow-hair-horse-pitteroff-woodhouse-acustica1998/*.tsv",
+  "../../../data/matdb/seed-v1/violin-*-shell/*.tsv",
+  "../../../data/matdb/seed-v1/violin-string-dominant-*-pickering1985-section/*.tsv",
+  "../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv",
 ], {query: "?raw", import: "default"});
 const materialStarters: Readonly<Record<string, {
   sources: Readonly<Record<string, string>>;
@@ -368,6 +373,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: one material-derived string, body and cavity, with a physical preload and bow gesture. The original wire and body sources are included and compile when you render. Edit their attached tables or open your own complete material-string performance.",
     help: "The string performer accepts the same full material cards as the reed and wall solvers, along with legacy claim packs. Replace an attached source at its declared path to change the solved material without browser coefficients. Optional profiles add body geometry, fingers/frets and contact heat. This is a numerical integration fixture, not a measured violin, cello or bass.",
+  },
+  {
+    name: "material_strings/cannone-dominant-g3.material-strings",
+    label: "Violin — il Cannone shell and four material strings",
+    renderer: "strings",
+    source: cannoneStringSource,
+    decimate: true,
+    intro: "Offline il Cannone G3 study, with its original 8 mm shell assembly, four material strings and six material-source tables. Change the shell geometry, assembly choices, material data or atmosphere; the native renderer rebuilds their shared physical response.",
+    help: "The original two-second study retains 144 kHz mechanics, 30 body modes in the 15–2000 Hz window, and all four coupled strings. It uses sourced substitute tonewoods, homogenized string sections, an authored Stribeck bow law, a lumped cavity and a compact pressure observer. This is an existing bounded model, not full-band or measured-instrument qualification. Full violin runs can take an hour or more on the documented host; configure an explicit offline budget such as --timeout-ms 7200000 (two hours, within the four-hour cap). The source table and assembly options own body and cavity dimensions.",
   },
   {
     name: "material_strings/measured-cello-g.material-strings",

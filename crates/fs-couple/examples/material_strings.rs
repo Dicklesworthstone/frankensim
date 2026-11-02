@@ -10,6 +10,8 @@ mod measured;
 mod material_inputs;
 #[path = "material_strings/body.rs"]
 mod body;
+#[path = "material_strings/body_source.rs"]
+mod body_source;
 #[path = "material_strings/body_response.rs"]
 mod body_response;
 #[path = "material_strings/coating_strain.rs"]
@@ -860,11 +862,14 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     }
     let thermal_profile=thermal_path.map(|p|contact_thermal::Profile::parse(
         &sources.read_option(p,contact_thermal::MAX_BYTES)?)).transpose()?;
+    let (shell_table_path,options)=path_option(&options,"--shell-table")?;
+    let (shell_options_path,options)=path_option(&options,"--assembly-options")?;
     let (body_path,stop_path)=stops::profile_paths(&options)?;
     if response_only && stop_path.is_some() {
         return Err("response-only commands do not admit --stop-profile; no nonlinear contact linearization is selected".into());
     }
-    let mut profile=body_path.map(|p|body::Profile::parse(&sources.read_option(p,body::MAX_SHELL_BYTES)?)).transpose()?;
+    let body_source::LoadedBody { mut profile, geometry }=
+        body_source::load(body_path,shell_table_path,shell_options_path,&sources)?;
     if response_options.is_some() && !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
         return Err("--body-response requires --body-profile with curved or assembled shell mechanics".into());
     }
@@ -883,6 +888,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     let gas_registry=gas_sources.registry(&gas_bindings);
     let mut spec=input::Spec::parse_with_gas_sources(
         &read_bounded(path,input::MAX_INPUT_BYTES)?,gas_registry.as_ref())?;
+    if let Some(geometry)=geometry { geometry.bind(&mut spec)?; }
     if response_options.as_ref().is_some_and(body_response::Options::loaded)
         && spec.plate_observer.is_some() {
         return Err("loaded shell response requires its shell or acoustic-skin receiver; a planar microphone is incompatible".into());
@@ -1029,7 +1035,11 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if let Some(motion)=ready.performance.fiber_normal_support_program() {
         eprintln!("bow_fiber_normal_support_motion={motion:?}; normal material inertia and solved contact load on the same physical clock");
     }
-    if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
+    if let Some(profile)=&ready.body_profile {
+        eprintln!("body_profile_bytes={}; body_profile_hash={}; shell_material_basis={}; body_dimensions_m=[{},{},{}]",
+            profile.bytes.len(),fs_blake3::hash_bytes(&profile.bytes),profile.has_shell_material_basis(),
+            ready.spec.body.length,ready.spec.body.width,ready.spec.body.thickness);
+    }
     if let Some(memory)=ready.performance.bank().source().bank().material_shell_coating_relaxation() {
         let band=memory.source_band_rad_s();
         eprintln!("coating_memory=prony-continuation; body_modes={}; histories={}; source_fit_band_Hz=[{},{}]; continuation=passive_model_outside_measured_band; initial_history=relaxed; full_modal_cross_terms=true",
@@ -1069,7 +1079,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             None => "no air reaction enters the mechanics",
         };
         let exterior=if report.molecular.is_some() {
-            "material molecular compression in triangle-CBIE boundary and receiver; no exterior shear/thermal diffusion"
+            "material molecular compression in the declared boundary formulation and receiver; no exterior shear/thermal diffusion"
         } else { "homogeneous exterior without molecular absorption" };
         eprintln!("one_way_observer={:?}; body_modes={}; apertures={}; surface_panels={}; two_way_load={:?}; two_way_modes={}; largest_anchor_distance_m={}; plain_cbie_limit_rad_per_m={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; boundary_terms={}; replay_terms={}; rule={:?}; setup_key={}; setup_loaded={}; setup_entry={:?}; skin finite-distance pressure replaces compact pressure; {feedback}; {exterior}",
             report.options.receiver,report.body_modes,report.apertures,report.surface_panels,
@@ -1079,7 +1089,8 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             report.boundary_terms,report.replay_terms,report.options.rule,report.setup_key.to_hex(),
             report.setup_loaded,ready.body_profile.as_ref().and_then(|body|body.observer_store_entry(&report.setup_key)));
         if let Some(molecular)=&report.molecular {
-            eprintln!("observer_molecular={molecular:?}");
+            eprintln!("observer_molecular={molecular:?}; observer_molecular_formulation={:?}",
+                report.molecular_formulation().map(|formulation| formulation.label()));
         }
         for (mode,bound) in report.modes.iter().enumerate() {
             eprintln!("one_way_mode={mode}; f_Hz={}; wood_zeta={}; radiation_zeta={}; added_mass_shift={}; half_power_bandwidth_Hz={}; nearest_spacing_Hz={}; largest_mixing={}; mixing_mode={:?}; one_way={}",

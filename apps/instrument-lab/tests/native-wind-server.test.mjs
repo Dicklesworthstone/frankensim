@@ -117,6 +117,32 @@ test('material strings reuse the exact source packet, gas associations and expli
   } finally { await app.cleanup(); }
 });
 
+test('original shell assembly sources reach the same native string renderer without browser lowering', native, async () => {
+  const app = await setup({withStrings:true, engine:null, timeoutMs:7200000});
+  try {
+    assert.equal(app.initial.timeoutMs, 7200000, 'a declared full-body budget is not capped at ten minutes');
+    const names = ['geometry/shell.tsv', 'geometry/choices.assembly', 'materials/body.pack'];
+    const bytes = Buffer.from('frankensim-material-strings-v3\n# read-files ' + JSON.stringify(names) + '\n');
+    const files = names.map((name, index) => [name, Buffer.from(`original source ${index}\r\n`)]);
+    const packet = JSON.parse(bundle(bytes, files));
+    packet.renderer = 'strings'; packet.decimate = true;
+    packet.stringProfiles = {shellTablePath:names[0], shellOptionsPath:names[1]};
+    packet.coatingStrainGuard = {maximumBytes:536870912, maximumWork:1000000000000};
+    const response = await app.runBundle(JSON.stringify(packet));
+    assert.equal(response.status, 200);
+    assert.equal((await response.arrayBuffer()).byteLength, 48);
+    const receipt = JSON.parse(await readFile(app.receipt, 'utf8'));
+    assert.equal(receipt.bytes, bytes.toString('base64'));
+    assert.deepEqual(receipt.args, [join(receipt.cwd, 'input.performance'), join(receipt.cwd, 'output.wav'),
+      '--self-contained', '--decimate', ...names.flatMap(name => ['--attached-source', name]),
+      '--shell-table', names[0], '--assembly-options', names[1],
+      '--coating-strain-guard', '536870912', '1000000000000']);
+    assert.deepEqual(receipt.files.map(file => [file.path, file.bytes]),
+      files.map(([path, content]) => [path, content.toString('base64')]));
+  } finally { await app.cleanup(); }
+  assert.throws(() => createNativeWindServer({timeoutMs:14400001}), /Invalid local rendering budget/);
+});
+
 test('resolved gas fields and material sources run through their own native command unchanged', native, async () => {
   const app = await setup({timeoutMs:120000});
   try {
