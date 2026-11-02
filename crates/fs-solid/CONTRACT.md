@@ -3732,11 +3732,67 @@ focused native-source lane passed four tests: the three-rung time order was
 1.99 and 2.00, and the 48-step free-body energy/momentum discrepancies were at
 floating-point roundoff. The native inertia unit lane passed nine tests.
 
-This initial formulation is displacement-only. A very large bulk modulus may
-still lock; no incompressible mixed constraint, pressure gauge, general
-finite-bulk mixed integrator, nonlinear modal reduction, contact, viscoelastic
-dissipation or frequency-matched linear propagator is claimed here. Centered
-time integration has phase error even when its discrete work balance closes.
-The finite fixtures above do not satisfy the separate 10,000-step/long-horizon,
-frequency-matching and complete port/checkpoint obligations of bead
-`frankensim-irp-v5-instrument-realism-pexfp.62`.
+`FullMaterial` is displacement-only and a very large bulk modulus may still
+lock. The exact mixed formulation below avoids a bulk penalty; general
+finite-bulk conservative mixing, nonlinear modal reduction, contact,
+viscoelastic dissipation and a frequency-matched linear propagator remain
+separate. Centered time integration has phase error even when its discrete work
+balance closes. The finite fixtures above do not satisfy the separate
+10,000-step/long-horizon, frequency-matching and complete port/checkpoint
+obligations of bead `frankensim-irp-v5-instrument-realism-pexfp.62`.
+
+## Conservative exact-incompressible P2/P1 motion
+
+`ConservativeFormulation::ExactIncompressible` extends the retained elastic
+motion owner with continuous corner-node P1 interval pressure and endpoint
+constraints `integral N_p (J_after - 1) dV = 0`. The original bulk-free
+remainder supplies physical storage and elastic work. No bulk penalty is
+evaluated, subtracted or approximated; the pressure carries neither mass nor
+stored energy. Original full-invariant fibre dependence is retained.
+
+Momentum uses the objective discrete volume derivative, while the endpoint
+constraint uses the endpoint cofactor. The two Jacobian cross-blocks are therefore
+distinct at finite motion. The pressure contribution to the displacement block
+includes the full derivative of the discrete cofactor. Native Newton-FGMRES
+retains all these nonsymmetric derivatives. Its symmetric saddle preconditioner
+uses the endpoint constraint derivative in both cross-blocks, keeping redundant
+endpoint constraints singular instead of hiding them by averaging the crosses.
+
+Preparation admits both the initial weak volume and the initial weak volume
+rate `integral N_p cof(F_initial):grad_X(v_initial) dV`. Their explicit
+controls are `maximum_relative_volume_residual` and
+`maximum_initial_relative_volume_rate_per_s`, normalized by total reference
+volume. Inconsistent initial velocities are refused without a pressure impulse
+or silent projection. This is an initial compatibility check; subsequent
+centered velocities are not claimed to satisfy a separate exact endpoint
+tangency constraint.
+
+`maximum_point_volume_work_defect` bounds each dimensionless local
+discrete-volume identity. The accepted step separately reports actual pressure
+work, its discrepancy from pressure dotted with the weak-volume change, and
+the endpoint pressure residuals in cubic metres. Pressure work, local and
+cumulative physical energy, and weak volume are all admitted before publishing
+the new state. `algorithmic_pressure_pa()` returns the last interval's
+algebraic work multipliers, initialized at zero; these are not endpoint Cauchy
+pressures. `pressure_nodes()` identifies their sorted corner-node layout.
+
+Independent endpoint pressure rows on the free displacement space are required.
+The final factorization checks this even for a zero-iteration Newton solution.
+There is no pressure-pin/gauge API; closed fully prescribed displacement cases
+with redundant volume equations refuse. This method enforces weak P1 volume
+constraints, not pointwise J=1; a coarse element can retain local volume
+variation even when every weak moment closes. It is not a conservative
+finite-bulk mixed formulation.
+
+G0/G1 regressions in `tests/mixed_conservative.rs` use independently integrated
+Mooney-Rivlin remainder energy, rational consistent P2 mass, momenta and weak
+volume. The free nonaffinely strained, spinning body changes shape substantially
+over 32 intervals while preserving energy and both momenta to roundoff and
+normalized weak volume within `2e-15` in this fixture. Separate checks cover
+bitwise trajectory independence from unused bulk moduli `60` and `1e300`,
+incompatible initial volume/velocity, invalid rate controls, and redundant
+pressure-row refusal without state mutation. Full-material regression tests
+remain green. `examples/conservative_elastic_motion.rs` runs both formulations
+and prints deformation, energy, work, sampled J, weak volume and interval
+pressure with explicit SI controls. These bounded tests do not establish a
+mesh-independent inf-sup constant or the remaining long-horizon/render contract.

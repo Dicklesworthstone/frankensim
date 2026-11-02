@@ -40,11 +40,41 @@ pub use crate::inertia::InertialEnergy;
 mod assembly;
 
 /// Explicit material/spatial formulation; no inferred bulk penalty or defaults.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ConservativeFormulation {
     /// Original full elastic energy on P2 displacement. Nearly incompressible
     /// displacement-only locking is not removed by the time discretization.
     FullMaterial,
+    /// P2 displacement / continuous P1 pressure enforcing endpoint weak J=1.
+    /// Pressure is the interval's algebraic work multiplier, not an endpoint
+    /// Cauchy pressure. Native remainder energy is independent of bulk modulus.
+    /// Each weak pressure moment is bounded relative to total reference volume.
+    ExactIncompressible {
+        maximum_relative_volume_residual: f64,
+        /// Initial weak volume-rate allowance / total reference volume (1/s).
+        /// Admits DAE-compatible input; later velocities satisfy the centered
+        /// position update, not an extra endpoint tangent-velocity equation.
+        maximum_initial_relative_volume_rate_per_s: f64,
+        /// Dimensionless absolute local allowance for Gd:DeltaF = DeltaJ.
+        maximum_point_volume_work_defect: f64,
+    },
+}
+
+impl ConservativeFormulation {
+    fn volume_controls(self) -> Option<(f64, f64, f64)> {
+        match self {
+            Self::FullMaterial => None,
+            Self::ExactIncompressible {
+                maximum_relative_volume_residual,
+                maximum_initial_relative_volume_rate_per_s,
+                maximum_point_volume_work_defect,
+            } => Some((
+                maximum_relative_volume_residual,
+                maximum_initial_relative_volume_rate_per_s,
+                maximum_point_volume_work_defect,
+            )),
+        }
+    }
 }
 
 /// Original reference inputs and explicit preparation/constitutive budgets.
@@ -66,6 +96,16 @@ pub struct ConservativeTetDefinition<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConservativeTetError {
     Native(MixedUpError),
+    InitialVolumeRateGate {
+        pressure_node: usize,
+        rate_m3_s: f64,
+        maximum_abs_m3_s: f64,
+    },
+    VolumeGate {
+        pressure_node: usize,
+        residual_m3: f64,
+        maximum_abs_m3: f64,
+    },
     EnergyGate {
         quantity: &'static str,
         value_j: f64,
@@ -82,6 +122,22 @@ impl core::fmt::Display for ConservativeTetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Native(error) => error.fmt(f),
+            Self::InitialVolumeRateGate {
+                pressure_node,
+                rate_m3_s,
+                maximum_abs_m3_s,
+            } => write!(
+                f,
+                "initial conservative volume rate at node {pressure_node}: {rate_m3_s:e} m^3/s exceeds {maximum_abs_m3_s:e} m^3/s"
+            ),
+            Self::VolumeGate {
+                pressure_node,
+                residual_m3,
+                maximum_abs_m3,
+            } => write!(
+                f,
+                "conservative volume moment at node {pressure_node}: {residual_m3:e} m^3 exceeds {maximum_abs_m3:e} m^3"
+            ),
             Self::EnergyGate {
                 quantity,
                 value_j,
@@ -141,6 +197,11 @@ fn deformation(element: &PreparedMixedElement, point: &MixedPoint, u: &[[f64; 3]
     f
 }
 
+fn determinant(f: &[f64; 9]) -> f64 {
+    f[0] * (f[4] * f[8] - f[5] * f[7]) - f[1] * (f[3] * f[8] - f[5] * f[6])
+        + f[2] * (f[3] * f[7] - f[4] * f[6])
+}
+
 fn law_at<'a>(
     field: MixedLawField<'a>,
     element: usize,
@@ -164,6 +225,19 @@ impl<'a> ConservativeTetDefinition<'a> {
         cx: &Cx<'_>,
     ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
         checkpoint(cx)?;
+        if self
+            .formulation
+            .volume_controls()
+            .is_some_and(|(relative, rate, local)| {
+                [relative, rate, local]
+                    .iter()
+                    .any(|v| !v.is_finite() || *v < 0.0)
+            })
+        {
+            return Err(invalid(
+                "finite nonnegative exact-volume allowances required",
+            ));
+        }
         if displacement_m.len() != self.nodes_m.len()
             || velocity_mps.len() != self.nodes_m.len()
             || displacement_m
@@ -213,7 +287,11 @@ impl<'a> ConservativeTetDefinition<'a> {
             )
             .map_err(inertia_error)?,
         );
-        let (frozen, stored_energy_j) = self.freeze_points(&mesh, displacement_m, cx)?;
+        let (frozen, stored_energy_j, pressure_residual_m3) =
+            self.freeze_points(&mesh, displacement_m, cx)?;
+        self.admit_volume(&mesh, &pressure_residual_m3)?;
+        self.admit_initial_volume_rate(&mesh, &frozen, velocity_mps, cx)?;
+        let algorithmic_pressure_pa = vec![0.0; pressure_residual_m3.len()];
         let momentum = mass
             .action(velocity_mps.as_flattened(), cx)
             .map_err(inertia_error)?;
@@ -238,6 +316,8 @@ impl<'a> ConservativeTetDefinition<'a> {
             points: frozen,
             displacement_m: displacement_m.to_vec(),
             velocity_mps: velocity_mps.to_vec(),
+            algorithmic_pressure_pa,
+            pressure_residual_m3,
             stored_energy_j,
             kinetic_energy_j,
             initial_total_energy_j,
@@ -252,28 +332,124 @@ impl<'a> ConservativeTetDefinition<'a> {
         mesh: &PreparedMixedMesh,
         u: &[[f64; 3]],
         cx: &Cx<'_>,
-    ) -> Result<(Vec<DiscreteGradientPoint<'a>>, f64), ConservativeTetError> {
+    ) -> Result<(Vec<DiscreteGradientPoint<'a>>, f64, Vec<f64>), ConservativeTetError> {
         let mut points = Vec::with_capacity(mesh.elements.len() * mesh.points_per_element);
         let mut energy = 0.0;
+        let exact = self.formulation.volume_controls().is_some();
+        let mut pressure_residual_m3 = vec![0.0; if exact { mesh.pressure_nodes.len() } else { 0 }];
         for (e, element) in mesh.elements.iter().enumerate() {
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
                 let law = law_at(self.material, e, q, mesh.points_per_element);
+                let f = deformation(element, point, u);
                 let frozen = DiscreteGradientPoint::try_new(
                     law,
-                    EnergyPart::Full,
-                    deformation(element, point, u),
+                    if exact {
+                        EnergyPart::Remainder
+                    } else {
+                        EnergyPart::Full
+                    },
+                    f,
                     self.material_settings,
                 )
                 .map_err(|error| material_error(e, q, error))?;
                 energy += point.weight_m3 * frozen.energy_before_pa();
+                if exact {
+                    let residual = determinant(&f) - 1.0;
+                    for a in 0..4 {
+                        pressure_residual_m3[element.pressure_indices[a]] +=
+                            point.weight_m3 * point.pressure_shapes[a] * residual;
+                    }
+                }
                 points.push(frozen);
             }
         }
         if !energy.is_finite() {
             return Err(invalid("physical elastic storage is unrepresentable"));
         }
-        Ok((points, energy))
+        Ok((points, energy, pressure_residual_m3))
+    }
+
+    fn admit_volume(
+        &self,
+        mesh: &PreparedMixedMesh,
+        residual: &[f64],
+    ) -> Result<(), ConservativeTetError> {
+        if let Some((relative, _, _)) = self.formulation.volume_controls() {
+            let maximum_abs_m3 = relative * mesh.total_volume_m3;
+            if !maximum_abs_m3.is_finite() {
+                return Err(invalid("exact-volume allowance is unrepresentable"));
+            }
+            for (a, &residual_m3) in residual.iter().enumerate() {
+                if !residual_m3.is_finite() || residual_m3.abs() > maximum_abs_m3 {
+                    return Err(ConservativeTetError::VolumeGate {
+                        pressure_node: mesh.pressure_nodes[a],
+                        residual_m3,
+                        maximum_abs_m3,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn admit_initial_volume_rate(
+        &self,
+        mesh: &PreparedMixedMesh,
+        points: &[DiscreteGradientPoint<'a>],
+        velocity_mps: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<(), ConservativeTetError> {
+        let Some((_, relative_rate, local)) = self.formulation.volume_controls() else {
+            return Ok(());
+        };
+        let maximum_abs_m3_s = relative_rate * mesh.total_volume_m3;
+        if !maximum_abs_m3_s.is_finite() {
+            return Err(invalid(
+                "initial exact-volume rate allowance is unrepresentable",
+            ));
+        }
+        let mut rates = vec![0.0; mesh.pressure_nodes.len()];
+        for (e, element) in mesh.elements.iter().enumerate() {
+            for (q, point) in element.points.iter().enumerate() {
+                checkpoint(cx)?;
+                let frozen = &points[e * mesh.points_per_element + q];
+                // Reuse the native volume derivative owner at the admitted
+                // initial F. No bulk modulus or penalty enters this constraint.
+                let volume = frozen
+                    .volume_state(frozen.accepted_deformation(), local)
+                    .map_err(|error| material_error(e, q, error))?;
+                let mut f_rate = [0.0; 9];
+                for a in 1..10 {
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            f_rate[3 * i + j] += (velocity_mps[element.connectivity[a]][i]
+                                - velocity_mps[element.connectivity[0]][i])
+                                * point.gradients[a][j];
+                        }
+                    }
+                }
+                let rate = volume
+                    .endpoint_cofactor
+                    .iter()
+                    .zip(f_rate)
+                    .fold(0.0, |s, (cofactor, velocity)| cofactor.mul_add(velocity, s));
+                for a in 0..4 {
+                    rates[element.pressure_indices[a]] +=
+                        point.weight_m3 * point.pressure_shapes[a] * rate;
+                }
+            }
+        }
+        for (a, rate_m3_s) in rates.into_iter().enumerate() {
+            if !rate_m3_s.is_finite() || rate_m3_s.abs() > maximum_abs_m3_s {
+                return Err(ConservativeTetError::InitialVolumeRateGate {
+                    pressure_node: mesh.pressure_nodes[a],
+                    rate_m3_s,
+                    maximum_abs_m3_s,
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -286,6 +462,8 @@ pub struct ConservativeTetSolid<'a> {
     points: Vec<DiscreteGradientPoint<'a>>,
     displacement_m: Vec<[f64; 3]>,
     velocity_mps: Vec<[f64; 3]>,
+    algorithmic_pressure_pa: Vec<f64>,
+    pressure_residual_m3: Vec<f64>,
     stored_energy_j: f64,
     kinetic_energy_j: f64,
     initial_total_energy_j: f64,
@@ -303,6 +481,8 @@ pub struct ConservativeTetEnergy {
     pub dead_load_work_j: f64,
     pub support_work_j: f64,
     pub constitutive_work_error_j: f64,
+    /// Actual pressure work minus p dotted with the endpoint weak-volume change.
+    pub constraint_work_error_j: f64,
     pub equilibrium_work_error_j: f64,
     /// External/support work minus physical stored and kinetic changes.
     pub balance_error_j: f64,
@@ -313,12 +493,14 @@ pub struct ConservativeTetEnergy {
 #[derive(Debug)]
 pub struct ConservativeTetStep<'a> {
     pub solid: ConservativeTetSolid<'a>,
-    /// None only when every displacement is prescribed.
+    /// None only for fully prescribed FullMaterial motion. Exact volume always
+    /// has algebraic pressure equations and admits their independent rank.
     pub newton: Option<NewtonReport>,
     pub reactions_n: Vec<(usize, f64)>,
     pub energy: ConservativeTetEnergy,
     pub inertia: InertialEnergy,
     pub min_det_f: f64,
+    pub pressure_residual_m3: Vec<f64>,
 }
 
 struct Evaluation {
@@ -326,6 +508,8 @@ struct Evaluation {
     tangent: Option<Csr>,
     stored_j: f64,
     material_work_j: f64,
+    pressure_work_j: f64,
+    pressure_residual_m3: Vec<f64>,
     min_det_f: f64,
 }
 
@@ -335,6 +519,19 @@ impl<'a> ConservativeTetSolid<'a> {
     }
     pub fn velocity_mps(&self) -> &[[f64; 3]] {
         &self.velocity_mps
+    }
+    /// Sorted reference corner-node IDs, empty for FullMaterial motion.
+    pub fn pressure_nodes(&self) -> &[usize] {
+        if self.algorithmic_pressure_pa.is_empty() {
+            &[]
+        } else {
+            &self.mesh.pressure_nodes
+        }
+    }
+    /// Algebraic multipliers for the last accepted interval, initialized at zero.
+    /// These are not endpoint Cauchy pressures and carry no inertia or storage.
+    pub fn algorithmic_pressure_pa(&self) -> &[f64] {
+        &self.algorithmic_pressure_pa
     }
     pub fn stored_energy_j(&self) -> f64 {
         self.stored_energy_j
@@ -392,15 +589,18 @@ impl<'a> ConservativeTetSolid<'a> {
             .map_err(MixedUpError::NewtonConfiguration)?;
         // Actual/symmetric-preconditioning COO, sorting, CSR, vectors. The
         // independent native factor budget bounds numeric factor and scratch.
+        let np = self.algorithmic_pressure_pa.len();
+        let local_dofs = if np == 0 { 30 } else { 34 };
         let estimated = self
             .mesh
             .elements
             .len()
-            .checked_mul((30 * 30 + 3 * 10 * 10) * 256)
+            .checked_mul((local_dofs * local_dofs + 3 * 10 * 10) * 256)
             .and_then(|n| {
                 self.mesh
                     .nodes_count
-                    .checked_mul(1024)
+                    .checked_add(np)
+                    .and_then(|n| n.checked_mul(1024))
                     .and_then(|v| n.checked_add(v))
             })
             .ok_or_else(|| invalid("conservative assembly size overflow"))?;
@@ -420,6 +620,7 @@ impl<'a> ConservativeTetSolid<'a> {
         .map_err(inertia_error)?;
         let ndofs = self.mesh.nodes_count * 3;
         let mut u = self.displacement_m.clone();
+        let mut pressure_pa = self.algorithmic_pressure_pa.clone();
         let mut constrained = vec![false; ndofs];
         for &(d, value) in prescribed_m {
             if d >= ndofs || !value.is_finite() || constrained[d] {
@@ -430,11 +631,16 @@ impl<'a> ConservativeTetSolid<'a> {
             constrained[d] = true;
             u[d / 3][d % 3] = value;
         }
-        let free: Vec<_> = (0..ndofs).filter(|&d| !constrained[d]).collect();
+        let free: Vec<_> = (0..ndofs)
+            .filter(|&d| !constrained[d])
+            .chain(ndofs..ndofs + np)
+            .collect();
         if free.len() > self.definition.budget.maximum_free_dofs {
-            return Err(invalid("conservative free displacement budget exceeded"));
+            return Err(invalid(
+                "conservative free displacement/pressure budget exceeded",
+            ));
         }
-        let mut free_index = vec![None; ndofs];
+        let mut free_index = vec![None; ndofs + np];
         for (i, &d) in free.iter().enumerate() {
             free_index[d] = Some(i);
         }
@@ -484,7 +690,13 @@ impl<'a> ConservativeTetSolid<'a> {
             };
             let initial = free
                 .iter()
-                .map(|&d| u[d / 3][d % 3] / settings.length_scale_m)
+                .map(|&d| {
+                    if d < ndofs {
+                        u[d / 3][d % 3] / settings.length_scale_m
+                    } else {
+                        pressure_pa[d - ndofs] / settings.stress_scale_pa
+                    }
+                })
                 .collect();
             let mut newton =
                 NewtonKrylovState::new(&endpoint, initial, settings.newton).map_err(|error| {
@@ -513,14 +725,16 @@ impl<'a> ConservativeTetSolid<'a> {
                 }
                 .into());
             }
-            let next_u = endpoint.physical_state(&newton.x)?;
-            let final_state = self.evaluate(&next_u, false, &inertia, cx)?;
+            // A solved initial residual does not establish independent pressure
+            // equations. The endpoint constraint block must still have full rank.
+            if np > 0 {
+                endpoint.ensure_linearization(&newton.x)?;
+            }
+            let (next_u, next_p) = endpoint.physical_state(&newton.x)?;
+            let final_state = self.evaluate(&next_u, &next_p, false, &inertia, cx)?;
             let residual: Vec<_> = free
                 .iter()
-                .map(|&d| {
-                    (final_state.forces_n[d] - external_n[d]) * settings.length_scale_m
-                        / work_scale_j
-                })
+                .map(|&d| endpoint.scaled_residual(&final_state, d))
                 .collect();
             if fs_solver::norm2(&residual) > target {
                 return Err(MixedUpError::NewtonStalled {
@@ -531,8 +745,11 @@ impl<'a> ConservativeTetSolid<'a> {
             }
             report = Some(result.report);
             u = next_u;
+            pressure_pa = next_p;
         }
-        let evaluation = self.evaluate(&u, false, &inertia, cx)?;
+        let evaluation = self.evaluate(&u, &pressure_pa, false, &inertia, cx)?;
+        self.definition
+            .admit_volume(&self.mesh, &evaluation.pressure_residual_m3)?;
         let reactions_n: Vec<_> = prescribed_m
             .iter()
             .map(|&(d, _)| (d, evaluation.forces_n[d] - external_n[d]))
@@ -558,16 +775,23 @@ impl<'a> ConservativeTetSolid<'a> {
         let increment = work_j - self.work_correction_j;
         let cumulative_work_j = self.cumulative_work_j + increment;
         let work_correction_j = (cumulative_work_j - self.cumulative_work_j) - increment;
+        let algebraic_pressure_work_j = pressure_pa
+            .iter()
+            .zip(&evaluation.pressure_residual_m3)
+            .zip(&self.pressure_residual_m3)
+            .fold(0.0, |s, ((p, after), before)| p.mul_add(after - before, s));
         let energy = ConservativeTetEnergy {
             stored_before_j: self.stored_energy_j,
             stored_after_j: evaluation.stored_j,
             material_work_j: evaluation.material_work_j,
-            pressure_work_j: 0.0,
+            pressure_work_j: evaluation.pressure_work_j,
             dead_load_work_j,
             support_work_j,
             constitutive_work_error_j: evaluation.material_work_j - stored_change_j,
+            constraint_work_error_j: evaluation.pressure_work_j - algebraic_pressure_work_j,
             equilibrium_work_error_j: work_j
                 - evaluation.material_work_j
+                - evaluation.pressure_work_j
                 - inertia_energy.inertial_work_j,
             balance_error_j: work_j - stored_change_j - inertia_energy.kinetic_change_j,
             cumulative_balance_error_j: cumulative_work_j
@@ -576,6 +800,8 @@ impl<'a> ConservativeTetSolid<'a> {
         };
         for (quantity, value) in [
             ("constitutive work", energy.constitutive_work_error_j),
+            ("constraint work identity", energy.constraint_work_error_j),
+            ("exact-volume pressure work", energy.pressure_work_j),
             ("momentum work", energy.equilibrium_work_error_j),
             ("kinetic work", inertia_energy.balance_error_j),
             ("total work", energy.balance_error_j),
@@ -583,7 +809,10 @@ impl<'a> ConservativeTetSolid<'a> {
         ] {
             gate(quantity, value, maximum_work_error_j)?;
         }
-        let (points, stored_energy_j) = self.definition.freeze_points(&self.mesh, &u, cx)?;
+        let (points, stored_energy_j, pressure_residual_m3) =
+            self.definition.freeze_points(&self.mesh, &u, cx)?;
+        self.definition
+            .admit_volume(&self.mesh, &pressure_residual_m3)?;
         gate(
             "accepted physical storage",
             stored_energy_j - evaluation.stored_j,
@@ -598,6 +827,8 @@ impl<'a> ConservativeTetSolid<'a> {
                 points,
                 displacement_m: u,
                 velocity_mps,
+                algorithmic_pressure_pa: pressure_pa,
+                pressure_residual_m3,
                 stored_energy_j,
                 kinetic_energy_j: inertia_energy.kinetic_after_j,
                 initial_total_energy_j: self.initial_total_energy_j,
@@ -610,6 +841,7 @@ impl<'a> ConservativeTetSolid<'a> {
             energy,
             inertia: inertia_energy,
             min_det_f: evaluation.min_det_f,
+            pressure_residual_m3: evaluation.pressure_residual_m3,
         })
     }
 }
@@ -637,18 +869,42 @@ struct Endpoint<'p, 'a, 'c, 'scope> {
 }
 
 impl Endpoint<'_, '_, '_, '_> {
-    fn physical_state(&self, x: &[f64]) -> Result<Vec<[f64; 3]>, ConservativeTetError> {
+    fn variable_scale(&self, dof: usize) -> f64 {
+        if dof < 3 * self.solid.mesh.nodes_count {
+            self.settings.length_scale_m
+        } else {
+            self.settings.stress_scale_pa
+        }
+    }
+
+    fn scaled_residual(&self, state: &Evaluation, dof: usize) -> f64 {
+        let nu = 3 * self.solid.mesh.nodes_count;
+        let physical = if dof < nu {
+            state.forces_n[dof] - self.external_n[dof]
+        } else {
+            state.pressure_residual_m3[dof - nu]
+        };
+        physical * self.variable_scale(dof) / self.work_scale_j
+    }
+
+    fn physical_state(&self, x: &[f64]) -> Result<(Vec<[f64; 3]>, Vec<f64>), ConservativeTetError> {
         if x.len() != self.free.len() || x.iter().any(|v| !v.is_finite()) {
             return Err(invalid("invalid native conservative Newton state"));
         }
         let mut u = self.base_u.to_vec();
+        let nu = 3 * self.solid.mesh.nodes_count;
+        let mut p = vec![0.0; self.solid.algorithmic_pressure_pa.len()];
         for (&d, &v) in self.free.iter().zip(x) {
-            u[d / 3][d % 3] = v * self.settings.length_scale_m;
+            if d < nu {
+                u[d / 3][d % 3] = v * self.settings.length_scale_m;
+            } else {
+                p[d - nu] = v * self.settings.stress_scale_pa;
+            }
         }
-        if u.iter().flatten().any(|v| !v.is_finite()) {
+        if u.iter().flatten().chain(&p).any(|v| !v.is_finite()) {
             return Err(invalid("unrepresentable physical conservative state"));
         }
-        Ok(u)
+        Ok((u, p))
     }
 
     fn ensure_linearization(&self, x: &[f64]) -> Result<(), ConservativeTetError> {
@@ -662,14 +918,13 @@ impl Endpoint<'_, '_, '_, '_> {
             return Ok(());
         }
         *self.linearization.borrow_mut() = None;
-        let u = self.physical_state(x)?;
+        let (u, p) = self.physical_state(x)?;
         let full = self
             .solid
-            .evaluate(&u, true, self.inertia, self.cx)?
+            .evaluate(&u, &p, true, self.inertia, self.cx)?
             .tangent
             .expect("requested tangent");
         let mut actual = Coo::new(self.free.len(), self.free.len());
-        let scale = self.settings.length_scale_m * self.settings.length_scale_m / self.work_scale_j;
         for (row, &d) in self.free.iter().enumerate() {
             if row % 128 == 0 {
                 checkpoint(self.cx)?;
@@ -677,12 +932,15 @@ impl Endpoint<'_, '_, '_, '_> {
             let (columns, values) = full.row(d);
             for (&col, &value) in columns.iter().zip(values) {
                 if let Some(j) = self.free_index[col] {
+                    let scale =
+                        self.variable_scale(d) * self.variable_scale(col) / self.work_scale_j;
                     actual.push(row, j, value * scale);
                 }
             }
         }
         let matrix = actual.assemble();
         let mut symmetric = Coo::new(self.free.len(), self.free.len());
+        let nu = 3 * self.solid.mesh.nodes_count;
         for row in 0..matrix.nrows() {
             if row % 128 == 0 {
                 checkpoint(self.cx)?;
@@ -692,8 +950,16 @@ impl Endpoint<'_, '_, '_, '_> {
                 if !value.is_finite() {
                     return Err(invalid("scaled conservative tangent is unrepresentable"));
                 }
-                symmetric.push(row, col, 0.5 * value);
-                symmetric.push(col, row, 0.5 * value);
+                if self.free[row] < nu && self.free[col] < nu {
+                    symmetric.push(row, col, 0.5 * value);
+                    symmetric.push(col, row, 0.5 * value);
+                } else if self.free[row] >= nu && self.free[col] < nu {
+                    // Precondition with the ENDPOINT constraint derivative in
+                    // both crosses, not the average of two distinct derivatives.
+                    // A redundant endpoint constraint then remains singular.
+                    symmetric.push(row, col, value);
+                    symmetric.push(col, row, value);
+                }
             }
         }
         let preconditioning_matrix = symmetric.assemble();
@@ -739,12 +1005,11 @@ impl NonlinearProblem for Endpoint<'_, '_, '_, '_> {
     fn residual(&self, x: &[f64], residual: &mut [f64]) {
         let value = self
             .physical_state(x)
-            .and_then(|u| self.solid.evaluate(&u, false, self.inertia, self.cx));
+            .and_then(|(u, p)| self.solid.evaluate(&u, &p, false, self.inertia, self.cx));
         match value {
             Ok(state) => {
                 for (r, &d) in residual.iter_mut().zip(self.free) {
-                    *r = (state.forces_n[d] - self.external_n[d]) * self.settings.length_scale_m
-                        / self.work_scale_j;
+                    *r = self.scaled_residual(&state, d);
                 }
                 *self.trial_error.borrow_mut() = None;
             }
