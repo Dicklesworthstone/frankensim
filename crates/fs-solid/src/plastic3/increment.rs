@@ -1,4 +1,4 @@
-//! One Newton/load-path owner for the native small-strain 3D elements.
+//! One Newton/load-path owner for native small- and finite-strain 3D elements.
 //!
 //! Element operators own geometry, quadrature and constitutive history. This
 //! module owns frozen-history trials, prescribed increments, force scaling,
@@ -12,7 +12,7 @@ use fs_exec::Cx;
 use fs_material::Voigt;
 use fs_sparse::{Coo, Csr};
 
-pub(super) trait IncrementOperator {
+pub(crate) trait IncrementOperator {
     type State: Clone + PartialEq;
 
     fn initial_states(&self) -> Vec<Self::State>;
@@ -55,7 +55,7 @@ pub(super) trait IncrementOperator {
     }
 }
 
-pub(super) struct IncrementControls<'a> {
+pub(crate) struct IncrementControls<'a> {
     pub dofs: usize,
     pub prescribed_m: &'a [(usize, f64)],
     pub nodal_forces_n: &'a [(usize, f64)],
@@ -63,7 +63,7 @@ pub(super) struct IncrementControls<'a> {
     pub settings: IncrementSettings,
 }
 
-pub(super) struct IncrementSolution<S> {
+pub(crate) struct IncrementSolution<S> {
     pub displacement_m: Vec<f64>,
     pub point_stress: Vec<Voigt>,
     pub point_states: Vec<S>,
@@ -73,7 +73,7 @@ pub(super) struct IncrementSolution<S> {
 /// The wrapper validates topology, budgets, controls and initial array shapes
 /// before entry. Candidate state stays private until the entire path succeeds.
 #[allow(clippy::too_many_lines)] // shared increment / Newton / backtracking loop
-pub(super) fn solve<O: IncrementOperator>(
+pub(crate) fn solve<O: IncrementOperator>(
     operator: &O,
     controls: IncrementControls<'_>,
     initial: Option<(&[f64], &[O::State])>,

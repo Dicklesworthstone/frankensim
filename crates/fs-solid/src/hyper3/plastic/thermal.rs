@@ -85,7 +85,7 @@ impl FiniteThermoplasticElementEnergy {
         self.free_after_j_m3 - self.free_before_j_m3 + self.thermoelastic_storage_change_j_m3
     }
 
-    fn from_increment(value: &FiniteJ2ThermalIncrement) -> Self {
+    pub(super) fn from_increment(value: &FiniteJ2ThermalIncrement) -> Self {
         Self {
             free_before_j_m3: value.old.free_energy_j_m3,
             free_after_j_m3: value.new.free_energy_j_m3,

@@ -62,7 +62,7 @@ pub mod creep;
 /// Inertial increments using the same constitutive assembly and Newton owner.
 pub mod dynamics;
 
-mod increment;
+pub(crate) mod increment;
 
 /// Fully integrated eight-node hexahedra with optional volumetric B-bar projection.
 pub mod hex;

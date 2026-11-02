@@ -38,6 +38,8 @@ use crate::linear3::TetAssemblyBudget;
 
 /// Consistent reference inertia with atomic finite-plastic motion acceptance.
 pub mod dynamics;
+/// Fully integrated finite Hex8 plasticity with optional mean dilatation.
+pub mod hex;
 /// Retained finite plastic history with evolving thermal coefficients and stretch.
 pub mod thermal;
 
