@@ -62,7 +62,10 @@ use transport::{MassLocation3, MassTransport3};
 /// Version 2 replaces the legacy global conversion pool with neighbor-local
 /// transfers. This intentionally changes evolving fill, pressure and pour bits;
 /// the core collision/streaming surface and its goldens are unchanged.
-pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 2;
+/// Version 3 initializes ingress and newly wet cells in the full Guo source
+/// frame, interpolating physical velocity across unequal neighbor densities.
+/// Explicit `LegacyGlobal` replay retains its historical conversion arithmetic.
+pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 3;
 
 /// Conversion semantics for new simulations versus historical trajectory replay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1376,11 +1379,15 @@ impl FreeSurface3 {
                 if self.tiles[&nb_key].cells[nb_lane] != Cell3::Gas {
                     continue;
                 }
-                // Initialize from the average of wet neighbors (2-D port).
+                // Interpolate physical velocity, not raw momentum/rho: the
+                // half-force correction differs across unequal densities even
+                // with a uniform force. Reapply the new cell's source once.
                 let mut rho_avg = 0.0;
                 let mut u_avg = [0.0f64; 3];
                 let mut force_avg = [0.0f64; 3];
                 let mut cnt = 0.0;
+                let base_force = self.grid.collision().1;
+                let legacy = self.redistribution == ConversionRedistribution3::LegacyGlobal;
                 for q2 in 1..Q3 {
                     if let Neighbor::Active(nn_key, nn_lane, nn_cell) =
                         self.neighbor_state(nb_key, nb_lane, q2)
@@ -1395,13 +1402,15 @@ impl FreeSurface3 {
                             u_avg[1] += fq * f64::from(E3[q3].1) / r;
                             u_avg[2] += fq * f64::from(E3[q3].2) / r;
                         }
-                        if self.local_force.is_some() {
-                            let force = self.force_at_lane(nn_key, nn_lane);
-                            let base = self.grid.collision().1;
-                            for axis in 0..3 {
-                                u_avg[axis] += 0.5 * (force[axis] - base[axis]) / r;
-                                force_avg[axis] += force[axis];
-                            }
+                        let force = self.force_at_lane(nn_key, nn_lane);
+                        for axis in 0..3 {
+                            let correction = if legacy {
+                                force[axis] - base_force[axis]
+                            } else {
+                                force[axis]
+                            };
+                            u_avg[axis] += 0.5 * correction / r;
+                            force_avg[axis] += force[axis];
                         }
                         cnt += 1.0;
                     }
@@ -1412,9 +1421,7 @@ impl FreeSurface3 {
                 } else {
                     rho_avg = 1.0;
                 }
-                let base_force = self.grid.collision().1;
-                let mut initial = equilibrium3(rho_avg, u_avg);
-                if let Some(forces) = &mut self.local_force {
+                let force = if self.local_force.is_some() {
                     if cnt > 0.0 {
                         for axis in 0..3 {
                             force_avg[axis] /= cnt;
@@ -1424,10 +1431,19 @@ impl FreeSurface3 {
                             "new forced interface needs a wet source neighbor",
                         ));
                     }
-                    let physical_velocity =
-                        core::array::from_fn(|d| u_avg[d] + 0.5 * base_force[d] / rho_avg);
-                    initial = forcing::reframe(initial, physical_velocity, base_force, force_avg)?;
-                    forces.insert((nb_key, nb_lane), force_avg);
+                    force_avg
+                } else {
+                    self.grid.collision().1
+                };
+                let mut initial = equilibrium3(rho_avg, u_avg);
+                if !legacy {
+                    initial = forcing::reframe(initial, u_avg, [0.0; 3], force)?;
+                } else if self.local_force.is_some() {
+                    let physical = core::array::from_fn(|d| u_avg[d] + 0.5 * base_force[d] / rho_avg);
+                    initial = forcing::reframe(initial, physical, base_force, force)?;
+                }
+                if let Some(forces) = &mut self.local_force {
+                    forces.insert((nb_key, nb_lane), force);
                 }
                 let nb_slot = self.grid.slot_of(nb_key).expect("active");
                 self.grid.set_populations(nb_slot, nb_lane, initial);
@@ -1660,6 +1676,121 @@ enum Neighbor {
 #[cfg(test)]
 mod capillary_boundary_tests {
     use super::*;
+
+    fn with_cx<T>(run: impl FnOnce(&fs_exec::Cx<'_>) -> T) -> T {
+        let gate = CancelGate::new_clock_free();
+        let arenas = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        arenas.scope(|arena| run(&fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey { seed: 0xD3_0019, kernel_id: 0, tile: 0, iteration: 0 },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        )))
+    }
+
+    fn assert_physical_equilibrium(surface: &FreeSurface3, p: [usize; 3], velocity: [f64; 3]) {
+        let actual = surface.sample_at(p[0], p[1], p[2]).unwrap();
+        let force = surface.force_density_at(p[0], p[1], p[2]).unwrap();
+        let (slot, lane) = surface.grid.resolve_source(p[0] as i64, p[1] as i64, p[2] as i64).unwrap();
+        let populations = surface.grid.populations(slot, lane);
+        for a in 0..3 {
+            assert!((actual.velocity[a] - velocity[a]).abs() < 2e-14);
+            for b in 0..3 {
+                let raw = populations.iter().zip(E3).map(|(f, e)| {
+                    let e = [f64::from(e.0), f64::from(e.1), f64::from(e.2)];
+                    f * e[a] * e[b]
+                }).sum::<f64>();
+                let physical = raw + 0.5 * (actual.velocity[a] * force[b] + actual.velocity[b] * force[a]);
+                let expected = actual.density
+                    * (velocity[a] * velocity[b] + if a == b { CS2_3 } else { 0.0 });
+                assert!((physical - expected).abs() < 2e-14 * actual.density,
+                    "cell {p:?}, tensor ({a},{b}): {physical} != {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn g1_ingress_has_no_force_squared_pressure_at_nonunit_density() {
+        with_cx(|cx| {
+            let velocity = [0.02, -0.01, 0.03];
+            let initial: Vec<_> = [0.4, 0.7, 1.3, 2.5].into_iter().enumerate().map(|(i, density)| {
+                FreeSurfaceInitialCell3 {
+                    coordinates: [i + 1, 3, 3],
+                    fill_fraction: if i % 2 == 0 { 1.0 } else { 0.35 },
+                    density,
+                    velocity,
+                }
+            }).collect();
+            let surface = FreeSurface3::from_cells(
+                [8; 3], 0.8, [0.008, -0.006, 0.004], 0.0,
+                ContactModel3::Neutral, &[], &initial, cx,
+            ).unwrap();
+            let expected_mass = initial.iter().map(|s| s.density * s.fill_fraction).sum::<f64>();
+            assert!((surface.ledger_mass() - expected_mass).abs() < 2e-14);
+            for state in initial {
+                assert_physical_equilibrium(&surface, state.coordinates, velocity);
+                let actual = surface.sample_at(state.coordinates[0], 3, 3).unwrap();
+                assert!((actual.density - state.density).abs() < 2e-14);
+                assert!((actual.fill_fraction - state.fill_fraction).abs() < 2e-14);
+            }
+        });
+    }
+
+    #[test]
+    fn g1_conversion_interpolates_physical_velocity_across_density_and_force_fields() {
+        with_cx(|cx| {
+            for local in [false, true] {
+                let velocity = [0.02, -0.01, 0.03];
+                let mut initial = Vec::new();
+                for z in 2..5 {
+                    for y in 2..5 {
+                        for x in 2..5 {
+                            initial.push(FreeSurfaceInitialCell3 {
+                                coordinates: [x, y, z], fill_fraction: 1.0,
+                                density: 0.7 + 0.1 * ((x + 2 * y + z) % 7) as f64,
+                                velocity,
+                            });
+                        }
+                    }
+                }
+                let mut surface = FreeSurface3::from_cells(
+                    [8; 3], 0.8, [0.008, -0.006, 0.004], 0.0,
+                    ContactModel3::Neutral, &[], &initial, cx,
+                ).unwrap();
+                if local {
+                    let mut forces = BTreeMap::new();
+                    for state in &initial {
+                        let [x, y, z] = state.coordinates;
+                        let (slot, lane) = surface.grid.resolve_source(x as i64, y as i64, z as i64).unwrap();
+                        let key = surface.grid.active_keys()[slot];
+                        forces.insert((key, lane), [0.002 * x as f64, -0.003 * y as f64, 0.001 * z as f64]);
+                    }
+                    surface.rebind_force_field(forces, &CancelGate::new_clock_free()).unwrap();
+                }
+                let (slot, lane) = surface.grid.resolve_source(4, 3, 3).unwrap();
+                let key = surface.grid.active_keys()[slot];
+                assert_eq!(surface.tiles[&key].cells[lane], Cell3::Interface);
+                surface.tiles.get_mut(&key).unwrap().mass[lane] =
+                    1.2 * surface.grid.populations(slot, lane).iter().sum::<f64>();
+                let mass = surface.ledger_mass();
+                surface.apply_conversions(None).unwrap();
+                assert!((surface.ledger_mass() - mass).abs() < 2e-12);
+                let mut created = 0;
+                for (&key, tile) in &surface.tiles {
+                    for (lane, &cell) in tile.cells.iter().enumerate() {
+                        if cell == Cell3::Gas { continue; }
+                        let (x, y, z) = FreeSurface3::global_of(key, lane);
+                        let p = [x as usize, y as usize, z as usize];
+                        if initial.iter().any(|s| s.coordinates == p) { continue; }
+                        created += 1;
+                        assert_physical_equilibrium(&surface, p, velocity);
+                    }
+                }
+                assert!(created > 0);
+            }
+        });
+    }
 
     fn separated_drops() -> FreeSurface3 {
         FreeSurface3::new(

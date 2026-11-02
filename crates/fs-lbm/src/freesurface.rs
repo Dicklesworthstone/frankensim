@@ -698,7 +698,22 @@ impl FreeSurface {
                     } else {
                         rho_avg = 1.0;
                     }
-                    self.grid.f[nb] = equilibrium(rho_avg, u_avg[0], u_avg[1]);
+                    // Neighbors supply physical (half-force corrected)
+                    // velocity. Initialize the receiving cell in its own Guo
+                    // frame, including its density-dependent gravity and
+                    // independently prescribed force density. An unshifted
+                    // equilibrium would add another F/(2 rho) velocity; merely
+                    // shifting u would leave a spurious F F/(4 rho) stress.
+                    let force = core::array::from_fn(|d| {
+                        rho_avg * self.grid.g[d] + self.grid.fext[nb][d]
+                    });
+                    let mut populations = equilibrium(rho_avg, u_avg[0], u_avg[1]);
+                    if force != [0.0; 2] {
+                        crate::thermal::forcing::reframe2(
+                            &mut populations, u_avg, [0.0; 2], force,
+                        );
+                    }
+                    self.grid.f[nb] = populations;
                     self.grid.flags[nb] = Cell::Interface;
                     self.mass[nb] = 0.0;
                     self.conversions.gas_to_interface += 1;
@@ -860,6 +875,62 @@ pub fn surge_front(fs: &FreeSurface) -> usize {
 #[cfg(test)]
 mod capillary_tests {
     use super::*;
+
+    #[test]
+    fn g1_conversion_preserves_physical_velocity_and_stress_at_unequal_density() {
+        for density_scale in [0.4, 1.0, 2.5] {
+            let mut sim = separated_drops();
+            let velocity = [0.03, -0.01];
+            sim.grid.g = [0.005, -0.003];
+            for cell in 0..sim.grid.f.len() {
+                sim.grid.fext[cell] = [0.002 * (1.0 + (cell % 3) as f64), -0.003];
+                if matches!(sim.grid.flags[cell], Cell::Fluid | Cell::Interface) {
+                    let rho = density_scale * (0.9 + 0.05 * (cell % 5) as f64);
+                    let force = core::array::from_fn(|d| {
+                        rho * sim.grid.g[d] + sim.grid.fext[cell][d]
+                    });
+                    let mut f = equilibrium(rho, velocity[0], velocity[1]);
+                    crate::thermal::forcing::reframe2(&mut f, velocity, [0.0; 2], force);
+                    sim.grid.f[cell] = f;
+                    sim.mass[cell] = 0.5 * f.iter().sum::<f64>();
+                }
+            }
+            let donor = sim.grid.idx(7, 5);
+            sim.mass[donor] = 1.2 * sim.grid.f[donor].iter().sum::<f64>();
+            let old_flags = sim.grid.flags.clone();
+            let mass = sim.ledger_mass();
+            sim.apply_conversions();
+            assert!((sim.ledger_mass() - mass).abs() < 2e-12);
+            let mut created = 0;
+            for (cell, &old) in old_flags.iter().enumerate() {
+                if old != Cell::Gas || sim.grid.flags[cell] != Cell::Interface {
+                    continue;
+                }
+                created += 1;
+                let actual = sim.grid.moments(cell);
+                let force: [f64; 2] = core::array::from_fn(|d| {
+                    actual.rho * sim.grid.g[d] + sim.grid.fext[cell][d]
+                });
+                for a in 0..2 {
+                    assert!((actual.u[a] - velocity[a]).abs() < 2e-14);
+                    for b in 0..2 {
+                        // Independent physical second moment: restore the
+                        // Guo half-source tensor, then compare with rho(cs²I+uu).
+                        let raw = sim.grid.f[cell].iter().zip(E).map(|(f, e)| {
+                            let e = [f64::from(e.0), f64::from(e.1)];
+                            f * e[a] * e[b]
+                        }).sum::<f64>();
+                        let physical = raw
+                            + 0.5 * (actual.u[a] * force[b] + actual.u[b] * force[a]);
+                        let expected = actual.rho
+                            * (velocity[a] * velocity[b] + if a == b { CS2 } else { 0.0 });
+                        assert!((physical - expected).abs() < 2e-14 * density_scale);
+                    }
+                }
+            }
+            assert!(created > 0);
+        }
+    }
 
     fn separated_drops() -> FreeSurface {
         let mut grid = Grid::uniform(24, 12, 0.8);

@@ -5432,8 +5432,11 @@ New D3Q19 constructors select `ConversionRedistribution3::Local`.
 version-1 trajectories, including their nonlocal pooling. The frozen pour
 sentinel selects this replay mode and retains its original four-quadrant hash;
 new locality and thermal regressions exercise the corrected default. The
-independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 2 for the new default,
-leaving the unchanged D3Q19 core, boundary and sparse goldens untouched.
+independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 3 for the current default;
+version 2 introduced local redistribution, and version 3 corrects the density
+and force handling of fresh-cell initialization described below. Explicit
+`LegacyGlobal` replay retains its historical conversion arithmetic, leaving the
+unchanged D3Q19 core, boundary and sparse goldens untouched.
 
 D3Q19 records direct donor/recipient mass routes, including reversed routes for
 conversion debt. The original extensive enthalpy transport consumes these same
@@ -5448,6 +5451,27 @@ Focused G0 tests cover both conversion signs, disconnected-drop locality,
 per-node mass-route balances, orphan carry retention and scalar D3Q19 tension
 admission. The G1 enthalpy regression compares two independent conversion
 components and reverse-debt cycles against analytic local energy balances.
+
+### Density-consistent physical state at free-surface ingress and conversion
+
+Newly wet D2Q9 cells and default D3Q19 cells average their neighbors' physical
+velocities, including each neighbor's own `F/(2 rho)` correction. They then
+initialize `f = feq(rho,u) - S(u,F)/2` in the receiving cell's force frame.
+D2Q9 uses that cell's `rho*g + fext`; D3Q19 retains its uniform reference-density
+force or the existing averaged local-force field. Averaging raw velocities and
+then dividing a force by averaged density would create a false velocity jump
+at unequal density. An unshifted equilibrium instead adds an extra half-force
+impulse; shifting only the equilibrium velocity leaves a false `F F/(4 rho)`
+physical stress. The same full source transform now initializes explicit D3Q19
+`from_cells` ingress, preserving its supplied fill, density and velocity.
+
+The existing mass redistribution and source-force owners remain unchanged.
+Focused G1/G3 tests independently check physical velocity and the full second
+moment `rho*(cs^2 I + u u)` at nonunit and unequal densities, with uniform and
+spatial forces, and close the original mass ledger after conversion. This
+removes force-frame artifacts; it does not claim a globally momentum-conserving
+VOF remap, transferred nonequilibrium stress or a physical liquid equation of
+state. Frozen version-1 replay continues to expose its historical behavior.
 
 ### Finite-slope thermocapillary height graphs
 

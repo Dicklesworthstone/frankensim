@@ -38,9 +38,10 @@ impl FreeSurface3 {
     /// half-filled shell or resets transferred velocity to rest. A full cell
     /// bordering gas is an interface cell with fill ONE; interior partial cells
     /// also remain interface cells. Initial mass is rho*fill (to floating-point
-    /// precision), with zero redistribution carry. Populations are equilibrium
-    /// at `velocity - force/(2*rho)` so native sampling returns the supplied
-    /// Guo-corrected velocity. This projects stress to equilibrium; it does not
+    /// precision), with zero redistribution carry. Populations are physical
+    /// equilibrium minus the Guo half source `S(velocity, force)/2`, so native
+    /// sampling returns the supplied velocity without an artificial force-squared
+    /// pressure/stress. This projects physical stress to equilibrium; it does not
     /// transfer unresolved stress, caloric state or subcell velocity moments.
     ///
     /// Input order does not affect allocation, initialization or later sweeps.
@@ -147,10 +148,12 @@ impl FreeSurface3 {
                     "initial velocity exceeds the lattice Mach domain",
                 ));
             }
-            let raw_velocity = core::array::from_fn(|axis| {
-                state.velocity[axis] - 0.5 * gravity[axis] / state.density
-            });
-            let populations = equilibrium3(state.density, raw_velocity);
+            let populations = forcing::reframe(
+                equilibrium3(state.density, state.velocity),
+                state.velocity,
+                [0.0; 3],
+                gravity,
+            )?;
             if populations.iter().any(|f| !f.is_finite() || *f <= 0.0)
                 || !populations.iter().sum::<f64>().is_finite()
             {
