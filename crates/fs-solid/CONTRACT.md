@@ -4141,3 +4141,48 @@ the same production geometry, assembly, spectrum and dynamics. This is
 represented-pencil temporal evidence, not mesh convergence or measured-material
 validation. The previous nine held/affine and five viscosity regressions pass
 alongside these new tests.
+
+
+## Exact cubic force histories on the complete elastic spectrum
+
+`CompleteSpectralSolid::prepare_cubic_forces_with_basis` explicitly prepares
+piecewise cubic physical forces while retaining every generalized mode and the
+original consistent mass and stiffness. `advance_cubic([F0, F1, F2, F3], cx)`
+uses `F(s) = F0 + F1*s + F2*s^2 + F3*s^3` for normalized interval time
+`s = t/dt`; every coefficient has units of newtons, not newtons per second.
+Initial state, mode admission, the fixed time grid and force coordinates retain
+the complete-spectrum contract above. No mode truncation, mass lumping, physical
+damping, or nonlinear stiffness is introduced by this owner.
+
+Cold preparation caches the entire oscillator functions through E8. A compensated
+series handles zero and small phase, including exact rigid polynomial motion;
+trigonometric recurrence handles larger phase. The fixed-clock step projects the
+four force coefficients, advances all modal positions and velocities, and
+reconstructs physical endpoint acceleration and three normalized displacement
+moments `Ik = integral_0^1 s^k*u(dt*s) ds`, k = 0, 1, 2, in metres. These moments
+allow support work and other polynomial coupling observations to be integrated
+without subdividing the physical interval or evaluating extra force samples.
+
+The applied work is independently evaluated as
+`F0 dot (u1-u0) + sum_(r=1..3) Fr dot (u1-r*I_(r-1))`. It is compared with
+original-coordinate strain plus kinetic energy both per interval and
+cumulatively. The accepted state, moments, work accumulation and clock publish
+only after all finite-value, work-budget and cancellation checks pass. Internal
+read-only trial evaluation permits an enclosing physical coupling to impose its
+own full-system gates before the same infallible state publication.
+
+The explicit cubic capacities are `64*n^2 + 2048*n` bytes,
+`4*n^3 + 32*n^2 + 4096*n` cold multiplication terms and
+`24*n^2 + 1024*n` warm multiplication terms. Existing held and affine preparation
+capacities and their arithmetic are unchanged. Source coefficients, candidate
+moments and acceleration are finite-checked; refusal preserves accepted history.
+
+`solid_spectral_polynomial` checks the zero/small/series-switch/multiple-period
+phase regimes against independent continuous solutions, all 96 coupled
+coordinates with a non-diagonal mass, independent physical work, affine
+agreement, interval partitioning of all three moments, exact capacity boundaries,
+and invalid, overflowing, cancelled and energy-refused candidate rollback.
+Focused native source-closure validation also reruns the held, affine, viscous and
+complete-spectrum tests. This is floating-point exact linear propagation subject
+to admitted source/basis and balance tolerances, not an interval certificate or a
+finite-rotation nonlinear dynamics claim.

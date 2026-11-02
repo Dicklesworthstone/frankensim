@@ -13,6 +13,9 @@ use fs_exec::Cx;
 use fs_math::det;
 use fs_sparse::Csr;
 
+/// Exact cubic forces and continuous displacement moments for moving supports.
+pub mod polynomial;
+
 /// Required capacities and numerical allowances; no implicit defaults.
 #[derive(Clone, Copy, Debug)]
 pub struct CompleteSpectralSolidControls {
@@ -176,6 +179,7 @@ pub struct CompleteSpectralSolid {
     basis: Vec<f64>,
     free_dofs: Vec<usize>,
     oscillators: Vec<Oscillator>,
+    polynomial_oscillators: Option<Vec<polynomial::PolynomialOscillator>>,
     displacement: Vec<f64>,
     velocity: Vec<f64>,
     modal_displacement: Vec<f64>,
@@ -351,6 +355,7 @@ impl CompleteSpectralSolid {
             basis,
             free_dofs,
             oscillators,
+            polynomial_oscillators: None,
             displacement: copy(initial_displacement_m)?,
             velocity: copy(initial_velocity_mps)?,
             modal_displacement,
