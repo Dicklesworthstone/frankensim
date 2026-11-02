@@ -1305,3 +1305,37 @@ refusals. The production fixture is
 card and finite heat inventory are numerical verification, not measured rosin,
 wood or other specimen validation.
 
+## Coupled adhesive translation and spin
+
+`adhesive::spinning::AdhesiveSlidingPatch` integrates uniform junction shear
+over the actual circular solid-contact area. One local velocity field,
+`u + omega cross r`, supplies force, spin moment and positive dissipated power.
+No signed normal load or Coulomb coefficient is substituted for the independently
+declared shear strength. The pure limits are `F=tau*pi*a^2` and
+`M=2*tau*pi*a^3/3`; combined slip and spin share the same capacity set.
+
+The uniform-disk closed forms from Antali (2024), DOI
+`10.1007/s11071-024-09462-6`, use paired convergent series near pure motion and
+a bounded complete-elliptic AGM evaluation elsewhere. The zero-slip point at
+the rim uses its finite analytic limit. Evaluation is allocation-free, with
+32 series terms or at most 16 AGM iterations. Six direct groups in
+`tests/adhesive_spinning.rs` check independent positive surface integrals,
+pure and detached limits, rim continuity, frame/rate covariance, the convex
+dissipation support and invalid input. The instantaneous leaf chooses zero
+at complete rest; its separate mechanical owner selects static reactions.
+Normal evolution, peeling, elastic microslip and heat allocation remain outside
+this frozen-area uniform-junction model.
+
+`adhesive::spinning::contact::AdhesiveWrenchContact` uses this same integral to
+solve static support and kinetic motion against the complete three-coordinate
+body compliance. It shares the existing bounded circular-support projection
+with the Hertz owner while retaining the uniform adhesive distribution and its
+`2a/3` first-moment radius. Original static and kinetic strengths stay distinct;
+an accepted moving phase cannot gain the larger static capacity. Force, torque,
+motion, native dissipation, dual gap and body-work residuals must all pass their
+declared budgets. No contact elasticity or numerical heat is introduced.
+Five focused groups in `tests/adhesive_wrench.rs` check finite torsional recoil,
+all translation/spin cross responses, the joint static capacity, moving-phase
+admission, covariance, zero strength, cancellation and retry. The original
+Hertz and multiple-contact regression targets exercise the shared projection.
+

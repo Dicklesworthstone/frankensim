@@ -19,6 +19,9 @@ use crate::{
     checked_add, checked_mul, finite, nonnegative_finite, positive_finite,
 };
 
+/// Circular junction shear with coupled translational and spinning slip.
+pub mod spinning;
+
 /// Geometry and repulsive load of one already-resolved adhesive contact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdhesiveContactState {

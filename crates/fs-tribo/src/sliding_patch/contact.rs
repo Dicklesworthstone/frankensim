@@ -323,141 +323,175 @@ impl HertzWrenchContact {
         &self,
         input: &HertzWrenchInput,
         config: HertzWrenchConfig,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<HertzWrenchStep, HertzWrenchError> {
-        config.validate()?;
-        if cancelled() {
-            return Err(HertzWrenchError::Cancelled);
-        }
-        let radius = self.parameters.contact_radius_m;
-        let free = [
-            input.free_displacement_m[0],
-            input.free_displacement_m[1],
-            radius * input.free_spin_angle_rad,
-        ];
-        finite_vector(free, "released_motion")?;
-        if !input.free_spin_angle_rad.is_finite() {
-            return Err(HertzWrenchError::Invalid("free_spin_angle_rad"));
-        }
-        if input.free_spin_angle_rad != 0.0 && free[2] == 0.0 {
-            return Err(HertzWrenchError::Invalid("scaled_spin_underflow"));
-        }
-        let (matrix, factor) = admit_matrix(input.scaled_compliance_m_per_n, config)?;
-        let mut problem = Problem {
-            law: self,
-            input,
-            free,
-            config,
-            evaluations: 0,
-            cancelled: &mut cancelled,
-        };
-        if self.static_patch.sliding_capacity_n() == 0.0 {
-            return problem.finish([0.0; 3], free, [0.0; 3], HertzWrenchMode::Frictionless, 0);
-        }
-        if free == [0.0; 3] {
-            return problem.finish([0.0; 3], free, [0.0; 3], HertzWrenchMode::Sticking, 0);
-        }
-        if let Some(factor) = factor {
-            let requested = factor
-                .solve(free)
-                .ok_or(HertzWrenchError::Invalid("static_reaction_overflow"))?;
-            if problem.static_feasible(requested)? {
-                // An admitted static reaction that exceeds the effort budget is
-                // refused here; a lower kinetic branch must not hide that error.
-                return problem.finish(
-                    requested,
-                    [0.0; 3],
-                    requested,
-                    HertzWrenchMode::Sticking,
-                    0,
-                );
-            }
-        }
-        let first = problem.support(free)?;
-        if factor.is_none() {
-            return problem.finish(first, free, first, HertzWrenchMode::Sliding, 0);
-        }
-        let mut active = Active::new(first);
-        for iteration in 0..=config.maximum_iterations {
-            let actual = sub(
-                free,
-                multiply(input.scaled_compliance_m_per_n, active.point),
-            );
-            finite_vector(actual, "actual_motion")?;
-            let support = problem.support(actual)?;
-            let step = problem.candidate(
-                active.point,
-                actual,
-                support,
-                HertzWrenchMode::Sliding,
-                iteration,
-            )?;
-            if problem.resolved(&step) {
-                return problem.accept(step);
-            }
-            if iteration == config.maximum_iterations
-                || problem.evaluations == config.maximum_evaluations
-            {
-                return Err(unresolved(&step));
-            }
-            if (problem.cancelled)() {
-                return Err(HertzWrenchError::Cancelled);
-            }
-            let mut next = active.correct(support, matrix, free);
-            let energy_scale = dot(active.point, free).abs()
-                + dot(active.point, multiply(matrix, active.point)).abs();
-            if next.point == active.point
-                || step.duality_gap_j.abs() <= 128.0 * f64::EPSILON * energy_scale
-            {
-                // At the floating-point objective floor, an O(eps) energy gap
-                // can still hide O(sqrt(eps)) wrench error. Refine the native
-                // residual itself. Every trial is a convex combination of two
-                // feasible points, so this adds no friction regularization.
-                // For r=w-support(u-Cw), its derivative is I+H*C with H>=0.
-                // Thus -r decreases ||r||_C locally; bounded backtracking can
-                // refine the wrench even when quadratic scores cannot rank it.
-                let merit = residual_metric(sub(active.point, support), matrix);
-                let mut fraction = 1.0;
-                for _ in 0..32 {
-                    if problem.evaluations == config.maximum_evaluations {
-                        break;
-                    }
-                    let trial = core::array::from_fn(|i| {
-                        (1.0 - fraction) * active.point[i] + fraction * support[i]
-                    });
-                    fraction *= 0.5;
-                    if trial == active.point {
-                        break;
-                    }
-                    let motion = sub(free, multiply(input.scaled_compliance_m_per_n, trial));
-                    let native = problem.support(motion)?;
-                    let refined = problem.candidate(
-                        trial,
-                        motion,
-                        native,
-                        HertzWrenchMode::Sliding,
-                        iteration + 1,
-                    )?;
-                    if problem.resolved(&refined) {
-                        return problem.accept(refined);
-                    }
-                    if residual_metric(sub(trial, native), matrix) < merit {
-                        next = Active::new(trial);
-                        break;
-                    }
-                }
-            }
-            if next.point == active.point {
-                return Err(unresolved(&step));
-            }
-            active = next;
-        }
-        unreachable!("bounded correction loop returns at its last iteration")
+        advance_circular(self, input, config, cancelled)
     }
 }
 
-struct Problem<'a, F: FnMut() -> bool> {
-    law: &'a HertzWrenchContact,
+/// A circular traction distribution supplies its own joint support surface.
+/// Sharing the mechanical projection never substitutes a Hertz pressure profile
+/// for a uniform adhesive junction or infers shear strength from normal load.
+pub(crate) trait CircularWrenchLaw {
+    fn radius(&self) -> f64;
+    fn static_capacity(&self) -> f64;
+    fn kinetic_capacity(&self) -> f64;
+    /// First radial moment divided by the outer radius.
+    fn spin_radius_fraction(&self) -> f64;
+    /// Force and moment normalized by their respective pure-motion capacities.
+    fn shape(&self, speed: f64, edge_speed: f64) -> Result<(f64, f64), TriboError>;
+}
+
+impl CircularWrenchLaw for HertzWrenchContact {
+    fn radius(&self) -> f64 {
+        self.parameters.contact_radius_m
+    }
+    fn static_capacity(&self) -> f64 {
+        self.static_patch.sliding_capacity_n()
+    }
+    fn kinetic_capacity(&self) -> f64 {
+        self.kinetic_patch.sliding_capacity_n()
+    }
+    fn spin_radius_fraction(&self) -> f64 {
+        SPIN_RADIUS
+    }
+    fn shape(&self, speed: f64, edge_speed: f64) -> Result<(f64, f64), TriboError> {
+        Ok(shape_factors(speed, edge_speed))
+    }
+}
+
+pub(crate) fn advance_circular<L: CircularWrenchLaw>(
+    law: &L,
+    input: &HertzWrenchInput,
+    config: HertzWrenchConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<HertzWrenchStep, HertzWrenchError> {
+    config.validate()?;
+    if cancelled() {
+        return Err(HertzWrenchError::Cancelled);
+    }
+    let radius = law.radius();
+    let free = [
+        input.free_displacement_m[0],
+        input.free_displacement_m[1],
+        radius * input.free_spin_angle_rad,
+    ];
+    finite_vector(free, "released_motion")?;
+    if !input.free_spin_angle_rad.is_finite() {
+        return Err(HertzWrenchError::Invalid("free_spin_angle_rad"));
+    }
+    if input.free_spin_angle_rad != 0.0 && free[2] == 0.0 {
+        return Err(HertzWrenchError::Invalid("scaled_spin_underflow"));
+    }
+    let (matrix, factor) = admit_matrix(input.scaled_compliance_m_per_n, config)?;
+    let mut problem = Problem {
+        law,
+        input,
+        free,
+        config,
+        evaluations: 0,
+        cancelled: &mut cancelled,
+    };
+    if law.static_capacity() == 0.0 {
+        return problem.finish([0.0; 3], free, [0.0; 3], HertzWrenchMode::Frictionless, 0);
+    }
+    if free == [0.0; 3] {
+        return problem.finish([0.0; 3], free, [0.0; 3], HertzWrenchMode::Sticking, 0);
+    }
+    if let Some(factor) = factor {
+        let requested = factor
+            .solve(free)
+            .ok_or(HertzWrenchError::Invalid("static_reaction_overflow"))?;
+        if problem.static_feasible(requested)? {
+            // An admitted static reaction that exceeds the effort budget is
+            // refused here; a lower kinetic branch must not hide that error.
+            return problem.finish(requested, [0.0; 3], requested, HertzWrenchMode::Sticking, 0);
+        }
+    }
+    let first = problem.support(free)?;
+    if factor.is_none() {
+        return problem.finish(first, free, first, HertzWrenchMode::Sliding, 0);
+    }
+    let mut active = Active::new(first);
+    for iteration in 0..=config.maximum_iterations {
+        let actual = sub(
+            free,
+            multiply(input.scaled_compliance_m_per_n, active.point),
+        );
+        finite_vector(actual, "actual_motion")?;
+        let support = problem.support(actual)?;
+        let step = problem.candidate(
+            active.point,
+            actual,
+            support,
+            HertzWrenchMode::Sliding,
+            iteration,
+        )?;
+        if problem.resolved(&step) {
+            return problem.accept(step);
+        }
+        if iteration == config.maximum_iterations
+            || problem.evaluations == config.maximum_evaluations
+        {
+            return Err(unresolved(&step));
+        }
+        if (problem.cancelled)() {
+            return Err(HertzWrenchError::Cancelled);
+        }
+        let mut next = active.correct(support, matrix, free);
+        let energy_scale =
+            dot(active.point, free).abs() + dot(active.point, multiply(matrix, active.point)).abs();
+        if next.point == active.point
+            || step.duality_gap_j.abs() <= 128.0 * f64::EPSILON * energy_scale
+        {
+            // At the floating-point objective floor, an O(eps) energy gap
+            // can still hide O(sqrt(eps)) wrench error. Refine the native
+            // residual itself. Every trial is a convex combination of two
+            // feasible points, so this adds no friction regularization.
+            // For r=w-support(u-Cw), its derivative is I+H*C with H>=0.
+            // Thus -r decreases ||r||_C locally; bounded backtracking can
+            // refine the wrench even when quadratic scores cannot rank it.
+            let merit = residual_metric(sub(active.point, support), matrix);
+            let mut fraction = 1.0;
+            for _ in 0..32 {
+                if problem.evaluations == config.maximum_evaluations {
+                    break;
+                }
+                let trial = core::array::from_fn(|i| {
+                    (1.0 - fraction) * active.point[i] + fraction * support[i]
+                });
+                fraction *= 0.5;
+                if trial == active.point {
+                    break;
+                }
+                let motion = sub(free, multiply(input.scaled_compliance_m_per_n, trial));
+                let native = problem.support(motion)?;
+                let refined = problem.candidate(
+                    trial,
+                    motion,
+                    native,
+                    HertzWrenchMode::Sliding,
+                    iteration + 1,
+                )?;
+                if problem.resolved(&refined) {
+                    return problem.accept(refined);
+                }
+                if residual_metric(sub(trial, native), matrix) < merit {
+                    next = Active::new(trial);
+                    break;
+                }
+            }
+        }
+        if next.point == active.point {
+            return Err(unresolved(&step));
+        }
+        active = next;
+    }
+    unreachable!("bounded correction loop returns at its last iteration")
+}
+
+struct Problem<'a, F: FnMut() -> bool, L: CircularWrenchLaw = HertzWrenchContact> {
+    law: &'a L,
     input: &'a HertzWrenchInput,
     free: Vector,
     config: HertzWrenchConfig,
@@ -465,7 +499,7 @@ struct Problem<'a, F: FnMut() -> bool> {
     cancelled: &'a mut F,
 }
 
-impl<F: FnMut() -> bool> Problem<'_, F> {
+impl<F: FnMut() -> bool, L: CircularWrenchLaw> Problem<'_, F, L> {
     fn poll(&mut self) -> Result<(), HertzWrenchError> {
         if (self.cancelled)() {
             return Err(HertzWrenchError::Cancelled);
@@ -484,7 +518,7 @@ impl<F: FnMut() -> bool> Problem<'_, F> {
         if !speed.is_finite() {
             return Err(HertzWrenchError::Invalid("support_motion_norm"));
         }
-        let capacity = self.law.kinetic_patch.sliding_capacity_n();
+        let capacity = self.law.kinetic_capacity();
         if motion == [0.0; 3] || capacity == 0.0 {
             return Ok([0.0; 3]);
         }
@@ -495,7 +529,9 @@ impl<F: FnMut() -> bool> Problem<'_, F> {
         } else if speed == 0.0 {
             (0.0, 1.0)
         } else {
-            shape_factors(speed, motion[2].abs())
+            self.law
+                .shape(speed, motion[2].abs())
+                .map_err(HertzWrenchError::Law)?
         };
         let force = capacity * force;
         let output = [
@@ -509,7 +545,7 @@ impl<F: FnMut() -> bool> Problem<'_, F> {
             } else {
                 force * (motion[1] / speed)
             },
-            (capacity * SPIN_RADIUS * moment).copysign(motion[2]),
+            (capacity * self.law.spin_radius_fraction() * moment).copysign(motion[2]),
         ];
         finite_vector(output, "native_support")?;
         Ok(output)
@@ -518,8 +554,8 @@ impl<F: FnMut() -> bool> Problem<'_, F> {
     fn static_feasible(&mut self, requested: Vector) -> Result<bool, HertzWrenchError> {
         let force = det::hypot(requested[0], requested[1]);
         let moment = requested[2].abs();
-        let capacity = self.law.static_patch.sliding_capacity_n();
-        let spin_capacity = capacity * SPIN_RADIUS;
+        let capacity = self.law.static_capacity();
+        let spin_capacity = capacity * self.law.spin_radius_fraction();
         if force > capacity || moment > spin_capacity {
             return Ok(false);
         }
@@ -549,7 +585,10 @@ impl<F: FnMut() -> bool> Problem<'_, F> {
             if parameter == lower.0 || parameter == upper.0 {
                 break;
             }
-            let (f, m) = shape_factors(parameter, 1.0 - parameter);
+            let (f, m) = self
+                .law
+                .shape(parameter, 1.0 - parameter)
+                .map_err(HertzWrenchError::Law)?;
             let boundary = (parameter, capacity * f, spin_capacity * m);
             if force == boundary.1 {
                 return Ok(moment <= boundary.2);
@@ -570,7 +609,7 @@ impl<F: FnMut() -> bool> Problem<'_, F> {
         }
         Err(HertzWrenchError::StaticBoundaryUnresolved {
             force_bracket_n: upper.1 - lower.1,
-            moment_bracket_nm: (lower.2 - upper.2) * self.law.parameters.contact_radius_m,
+            moment_bracket_nm: (lower.2 - upper.2) * self.law.radius(),
             evaluations: self.evaluations,
         })
     }
@@ -583,7 +622,7 @@ impl<F: FnMut() -> bool> Problem<'_, F> {
         mode: HertzWrenchMode,
         iterations: usize,
     ) -> Result<HertzWrenchStep, HertzWrenchError> {
-        let radius = self.law.parameters.contact_radius_m;
+        let radius = self.law.radius();
         let compatibility = sub(
             actual,
             sub(
