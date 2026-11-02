@@ -7,6 +7,8 @@ use fs_gas::multicomponent::dissipation::{
 use fs_qty::DynViscosity;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
+mod dynamic;
+
 const PERIODIC: Boundaries3d = Boundaries3d {
     x: AxisBoundaries::Periodic,
     y: AxisBoundaries::Periodic,
@@ -467,12 +469,10 @@ fn sgs_mixture_total_diffusion_bounds_include_small_schmidt_and_atomic_refusals(
     assert_eq!(flow.states(), state);
     assert_eq!(op.boundary_impulses, loads);
     assert_eq!(op.last_step(), Some(&report));
-    op.sgs
-        .as_mut()
-        .unwrap()
-        .config
-        .transport
-        .maximum_eddy_to_molecular = 0.0;
+    let ViscosityClosure::Local { config, .. } = &mut op.sgs.as_mut().unwrap().closure else {
+        unreachable!()
+    };
+    config.transport.maximum_eddy_to_molecular = 0.0;
     assert!(
         op.advance(
             &mut flow,

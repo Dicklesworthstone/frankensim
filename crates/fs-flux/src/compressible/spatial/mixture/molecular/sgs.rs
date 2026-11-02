@@ -22,12 +22,17 @@
 
 use super::super::sum;
 use super::*;
-pub use crate::compressible::spatial::molecular::sgs::{SgsModel, SgsUse, SubgridConfig};
+pub use crate::compressible::spatial::molecular::sgs::{
+    DynamicAveraging, DynamicSgsConfig, DynamicSubgridConfig, SgsModel, SgsUse, SubgridConfig,
+};
 use fs_gas::multicomponent::dissipation::{MaxwellStefanSolveV1, TransportFaceReport};
 use fs_gas::multicomponent::{Error as FlowError, MAX_SPECIES};
 use fs_lbm::sgs3::{eddy_viscosity, vreman_eddy_viscosity};
 use fs_qty::Temperature;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+
+mod dynamic;
+pub use dynamic::MixtureDynamicSubgridConfig;
 
 /// Explicit stress/heat controls shared with frozen gas, plus species mixing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,14 +98,24 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     }
 
     pub fn subgrid_config(&self) -> Option<MixtureSubgridConfig> {
-        self.sgs.as_ref().map(|s| s.config)
+        match &self.sgs.as_ref()?.closure {
+            ViscosityClosure::Local { config, .. } => Some(*config),
+            ViscosityClosure::Dynamic(_) => None,
+        }
     }
 }
 
+enum ViscosityClosure {
+    Local {
+        config: MixtureSubgridConfig,
+        widths: [f64; 3],
+        filter_width: f64,
+    },
+    Dynamic(dynamic::DynamicTransport),
+}
+
 pub(super) struct SubgridTransport {
-    config: MixtureSubgridConfig,
-    widths: [f64; 3],
-    filter_width: f64,
+    closure: ViscosityClosure,
     dynamic_viscosity: Vec<f64>,
     heat_capacity_v_density: Vec<f64>,
 }
@@ -117,9 +132,11 @@ impl SubgridTransport {
             ));
         }
         Ok(Self {
-            config,
-            widths,
-            filter_width,
+            closure: ViscosityClosure::Local {
+                config,
+                widths,
+                filter_width,
+            },
             dynamic_viscosity: allocated(grid.len(), 0.0)?,
             heat_capacity_v_density: allocated(grid.len(), 0.0)?,
         })
@@ -128,6 +145,10 @@ impl SubgridTransport {
     pub(super) fn workspace_bytes(&self) -> usize {
         (self.dynamic_viscosity.capacity() + self.heat_capacity_v_density.capacity())
             * size_of::<f64>()
+            + match &self.closure {
+                ViscosityClosure::Local { .. } => 0,
+                ViscosityClosure::Dynamic(dynamic) => dynamic.workspace_bytes(),
+            }
     }
 
     pub(super) fn prepare(
@@ -138,8 +159,23 @@ impl SubgridTransport {
         gradient: &[[[f64; 3]; 3]],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DissipationError> {
-        if self.config.transport.model.coefficient() == 0.0 {
-            return Ok(());
+        match &mut self.closure {
+            ViscosityClosure::Local { config, .. } => {
+                if config.transport.model.coefficient() == 0.0 {
+                    return Ok(());
+                }
+            }
+            ViscosityClosure::Dynamic(dynamic) => {
+                if dynamic.prepare(primitive, cancelled)? == 0.0 {
+                    // A fit can become zero after a nonzero earlier SSP stage.
+                    // Preserve molecular face arithmetic without stale stress.
+                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                        poll(cancelled)?;
+                        values.fill(0.0);
+                    }
+                    return Ok(());
+                }
+            }
         }
         let n = gas.species_count();
         for (i, ((p, g), state)) in primitive
@@ -149,19 +185,29 @@ impl SubgridTransport {
             .enumerate()
         {
             poll(cancelled)?;
-            // The field stores derivative-first; the shared SGS tensor is
-            // velocity-component-first. Vreman's directional metric needs this.
-            let velocity_gradient =
-                std::array::from_fn(|component| std::array::from_fn(|axis| g[axis][component]));
-            let nu = match self.config.transport.model {
-                SgsModel::Vreman { cv } => {
-                    vreman_eddy_viscosity(cv, self.widths, velocity_gradient)
+            let nu = match &self.closure {
+                ViscosityClosure::Local {
+                    config,
+                    widths,
+                    filter_width,
+                } => {
+                    // The field is derivative-first; the shared local tensor
+                    // is component-first. Vreman retains its directional metric.
+                    let velocity_gradient = std::array::from_fn(|component| {
+                        std::array::from_fn(|axis| g[axis][component])
+                    });
+                    match config.transport.model {
+                        SgsModel::Vreman { cv } => {
+                            vreman_eddy_viscosity(cv, *widths, velocity_gradient)
+                        }
+                        model => eddy_viscosity(model, *filter_width, velocity_gradient),
+                    }
+                    .map_err(|_| {
+                        DissipationError::Invalid("mixture subgrid velocity gradient or viscosity")
+                    })?
                 }
-                model => eddy_viscosity(model, self.filter_width, velocity_gradient),
-            }
-            .map_err(|_| {
-                DissipationError::Invalid("mixture subgrid velocity gradient or viscosity")
-            })?;
+                ViscosityClosure::Dynamic(dynamic) => dynamic.viscosities()[i],
+            };
             let mut cv = [0.0; MAX_SPECIES];
             for (k, model) in gas.source().models().iter().enumerate() {
                 if k % 16 == 0 {
@@ -213,8 +259,20 @@ impl SubgridTransport {
             return Ok(receipt);
         }
         poll(cancelled)?;
+        let (prandtl, schmidt, maximum_ratio) = match &self.closure {
+            ViscosityClosure::Local { config, .. } => (
+                config.transport.turbulent_prandtl,
+                config.turbulent_schmidt,
+                config.transport.maximum_eddy_to_molecular,
+            ),
+            ViscosityClosure::Dynamic(dynamic) => (
+                dynamic.config.transport.turbulent_prandtl,
+                dynamic.config.turbulent_schmidt,
+                dynamic.config.transport.model.maximum_eddy_to_molecular,
+            ),
+        };
         let ratio = mu / receipt.dynamic_viscosity_pa_s;
-        if !ratio.is_finite() || ratio > self.config.transport.maximum_eddy_to_molecular {
+        if !ratio.is_finite() || ratio > maximum_ratio {
             return Err(DissipationError::Invalid(
                 "mixture subgrid eddy/molecular viscosity ratio exceeded",
             ));
@@ -226,7 +284,7 @@ impl SubgridTransport {
         let temperature = receipt.enthalpy_temperature_k;
         let mut y = [0.0; MAX_SPECIES];
         let mut species_flux = [0.0; MAX_SPECIES];
-        let mass_diffusion = mu / self.config.turbulent_schmidt;
+        let mass_diffusion = mu / schmidt;
         for k in 0..n {
             let yl = states[left * width + k] / pl.density;
             let yr = states[right * width + k] / pr.density;
@@ -270,7 +328,7 @@ impl SubgridTransport {
                     + R * temperature);
         }
         let cp = sum(cp[..n].iter().copied());
-        let conductivity = mu * (cp / self.config.transport.turbulent_prandtl);
+        let conductivity = mu * (cp / prandtl);
         let heat = -conductivity * ((pr.temperature - pl.temperature) / distance);
         let mut energy = heat + sum((0..n).map(|k| enthalpy[k] * species_flux[k]));
         for k in 0..n {
