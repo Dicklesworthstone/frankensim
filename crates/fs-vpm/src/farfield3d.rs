@@ -3,7 +3,8 @@
 //! age aggregate into multipole cells (monopole + dipole + quadrupole
 //! about the circulation-weighted centroid); the near wake stays an
 //! exact filament lattice, so the hybrid evaluation is
-//! `near.induced_velocity(p) + far.eval(p)`.
+//! `hybrid_velocity(near, far, p)`, applying the far field's declared
+//! viscosity and shedding interval to retained near-row ages too.
 //!
 //! Pruning is CELL-BOUNDED and AUDITED: a cell may be dropped only
 //! when its rigorous contribution bound at ALL registered probe
@@ -15,20 +16,21 @@
 //!
 //! `WakeCoreEvolutionMode` is a registered enum that ENTERS IDENTITY
 //! (its bytes are hashed into the far-field digest) and physically
-//! feeds the pruning bounds through the spread radius.
+//! feeds near/exact and far velocities as well as the pruning bounds.
 
-use crate::filament3d::{FilamentWake, Refusal, segment_velocity};
+use crate::filament3d::{FilamentWake, Refusal, segment_velocity_with_core};
 use fs_blake3::hash_domain;
 
 /// Registered core-evolution mode (enters identity).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WakeCoreEvolutionMode {
-    /// Cores frozen at their shed/coarsened second moment.
+    /// Cores frozen at their shed/coarsened width squared.
     Frozen,
-    /// Lamb–Oseen-class viscous spreading: a row of age `t` gains
-    /// `4·nu_eff·t` of core second moment [m²].
+    /// Reduced algebraic core spreading: a row of age `t` gains
+    /// `4·nu_eff·t` of Rosenhead–Moore core width squared [m²].
+    /// This is not exact Gaussian Lamb–Oseen diffusion.
     CoreSpreading {
-        /// Effective eddy viscosity [m²/s].
+        /// Effective kinematic viscosity [m²/s], molecular plus any declared eddy term.
         nu_eff_m2ps: f64,
     },
 }
@@ -40,22 +42,31 @@ impl WakeCoreEvolutionMode {
     /// Admit the mode.
     ///
     /// # Errors
-    /// `core-mode-invalid` (nu_eff must be finite, > 0, <= cap —
-    /// refused at cap AND cap+ulp class; Frozen always admits).
+    /// `core-mode-invalid` (nu_eff must be finite, >= 0, <= cap;
+    /// the exact cap admits and larger values refuse; Frozen always admits).
     pub fn admit(&self) -> Result<(), Refusal> {
         match self {
             WakeCoreEvolutionMode::Frozen => Ok(()),
             WakeCoreEvolutionMode::CoreSpreading { nu_eff_m2ps } => {
-                if nu_eff_m2ps.is_finite() && *nu_eff_m2ps > 0.0 && *nu_eff_m2ps <= MAX_NU_EFF {
+                if nu_eff_m2ps.is_finite() && *nu_eff_m2ps >= 0.0 && *nu_eff_m2ps <= MAX_NU_EFF {
                     Ok(())
                 } else {
                     Err(Refusal {
                         code: "core-mode-invalid",
                         message: format!("nu_eff {nu_eff_m2ps}"),
-                        ranked_repairs: vec![format!("nu_eff in (0, {MAX_NU_EFF}]")],
+                        ranked_repairs: vec![format!("nu_eff in [0, {MAX_NU_EFF}]")],
                     })
                 }
             }
+        }
+    }
+
+    /// Core-width-squared growth over an elapsed interval [s].
+    pub(crate) fn core_growth_m2(&self, dt_s: f64) -> f64 {
+        match self {
+            Self::Frozen => 0.0,
+            Self::CoreSpreading { nu_eff_m2ps } if *nu_eff_m2ps == 0.0 => 0.0,
+            Self::CoreSpreading { nu_eff_m2ps } => (4.0 * nu_eff_m2ps) * dt_s,
         }
     }
 
@@ -88,8 +99,19 @@ pub struct FarCell {
     pub dip: [[f64; 3]; 3],
     /// Quadrupole moment Q[j][l][m] = Σ w_j·δ_l·δ_m.
     pub quad: [[[f64; 3]; 3]; 3],
-    /// Core second moment carried into the cell [m²] (mode-evolved).
+    /// Circulation-length-weighted mean expansion core width squared [m²].
+    /// Exact evaluation retains each source's own core below.
     pub core2_m2: f64,
+    /// Source core width squared for each entry of `segs`, in the same order.
+    pub source_core2_m2: Vec<f64>,
+    /// Σ Γ dl (source_core² - core2_m2), the leading core-variation moment.
+    pub core_moment: [f64; 3],
+    /// Largest absolute deviation from the expansion's common core [m²].
+    pub max_abs_core_delta_m2: f64,
+    /// Common extra diffusion after this cell was aggregated [m²].
+    pub diffusion_offset_m2: f64,
+    /// Maximum base source core [m²], for O(1) advance validation.
+    pub max_source_core2_m2: f64,
     /// Exact source segments (a, b, Γ) RETAINED for the audit's exact
     /// spot-check — the audit never trusts the expansion.
     pub segs: Vec<([f64; 3], [f64; 3], f64)>,
@@ -122,15 +144,25 @@ impl FarCell {
             p[1] - self.centroid[1],
             p[2] - self.centroid[2],
         ];
-        let rho2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+        let distance2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+        // A far expansion is not a near-field solver.
+        if distance2 <= self.radius_m * self.radius_m {
+            return self.exact(p);
+        }
+        let rho2 = distance2 + self.core2_m2;
+        // Expansion-domain guard only, not a certified total-velocity error.
+        // Δcore² counts as spatial order two; large spreads need exact sources.
+        if self.max_abs_core_delta_m2 > rho2 / 16.0 {
+            return self.exact(p);
+        }
         let rho = rho2.sqrt();
-        if rho < 1e-9 {
+        if rho == 0.0 {
             return [0.0; 3];
         }
         let rho3 = rho2 * rho;
         let rho5 = rho3 * rho2;
         let rho7 = rho5 * rho2;
-        // f(r) = r/ρ³ and its first/second derivatives.
+        // f(r) = r/(|r|² + core²)^(3/2) and its spatial derivatives.
         let f0 = [r[0] / rho3, r[1] / rho3, r[2] / rho3];
         let kd = |i: usize, j: usize| -> f64 { if i == j { 1.0 } else { 0.0 } };
         let jmat = |k: usize, l: usize| -> f64 { kd(k, l) / rho3 - 3.0 * r[k] * r[l] / rho5 };
@@ -161,6 +193,10 @@ impl FarCell {
             }
             v[i] += 0.5 * acc;
         }
+        let core_correction = cross(self.core_moment, r);
+        for i in 0..3 {
+            v[i] -= 1.5 * core_correction[i] / rho5;
+        }
         let k = 1.0 / (4.0 * core::f64::consts::PI);
         [k * v[0], k * v[1], k * v[2]]
     }
@@ -169,9 +205,14 @@ impl FarCell {
     /// (audit path — bypasses the expansion entirely).
     #[must_use]
     pub fn exact(&self, p: [f64; 3]) -> [f64; 3] {
+        assert_eq!(
+            self.segs.len(),
+            self.source_core2_m2.len(),
+            "one core per source segment"
+        );
         let mut v = [0.0f64; 3];
-        for (a, b, g) in &self.segs {
-            let sv = segment_velocity(p, *a, *b);
+        for ((a, b, g), core2) in self.segs.iter().zip(&self.source_core2_m2) {
+            let sv = segment_velocity_with_core(p, *a, *b, *core2 + self.diffusion_offset_m2);
             v[0] += g * sv[0];
             v[1] += g * sv[1];
             v[2] += g * sv[2];
@@ -209,6 +250,8 @@ pub struct PruneReceipt {
 pub struct FarField {
     /// Registered core-evolution mode (enters identity).
     pub mode: WakeCoreEvolutionMode,
+    /// Seconds per shedding interval used by retained near-row ages.
+    pub shed_dt_s: f64,
     /// Multipole cells, oldest first.
     pub cells: Vec<FarCell>,
 }
@@ -250,19 +293,65 @@ impl FarField {
                 ],
             });
         }
+        let growth_per_tick = mode.core_growth_m2(dt_s);
+        if !growth_per_tick.is_finite() {
+            return Err(Refusal {
+                code: "farfield-core-invalid",
+                message: "viscosity × shedding interval is not representable".into(),
+                ranked_repairs: vec!["use a representable viscosity and shedding interval".into()],
+            });
+        }
+        for (ri, row) in wake.rows.iter().enumerate() {
+            let grown = if growth_per_tick == 0.0 {
+                row.core2_m2
+            } else {
+                row.core2_m2 + growth_per_tick * row.age_ticks
+            };
+            if !row.age_ticks.is_finite()
+                || row.age_ticks < 0.0
+                || !row.core2_m2.is_finite()
+                || row.core2_m2 < 0.0
+                || !grown.is_finite()
+            {
+                return Err(Refusal {
+                    code: "farfield-core-invalid",
+                    message: format!("row {ri}: invalid age or evolved core"),
+                    ranked_repairs: vec![
+                        "retain finite nonnegative row ages and core widths".into(),
+                    ],
+                });
+            }
+        }
         let n_st = wake.cert.n_stations;
         let total = wake.rows.len();
         let mut cells = Vec::with_capacity(n_rows / rows_per_cell);
         for c0 in (0..n_rows).step_by(rows_per_cell) {
             // Collect the cell's exact segments (spanwise + trailing).
-            let mut segs: Vec<([f64; 3], [f64; 3], f64)> = Vec::new();
-            let mut core2_num = 0.0;
-            let mut core2_den = 0.0;
+            let mut segs = Vec::new();
+            let mut source_core2_m2 = Vec::new();
             for ri in c0..c0 + rows_per_cell {
                 let row = &wake.rows[ri];
+                let core2 = if growth_per_tick == 0.0 {
+                    row.core2_m2
+                } else {
+                    row.core2_m2 + growth_per_tick * row.age_ticks
+                };
+                if !row.core2_m2.is_finite() || row.core2_m2 < 0.0 || !core2.is_finite() {
+                    return Err(Refusal {
+                        code: "farfield-core-invalid",
+                        message: format!(
+                            "row {ri}: initial core² {}, evolved core² {core2}",
+                            row.core2_m2
+                        ),
+                        ranked_repairs: vec![
+                            "use finite nonnegative cores and representable viscosity × age".into(),
+                        ],
+                    });
+                }
                 for s in 0..n_st {
                     if row.gamma[s] != 0.0 {
                         segs.push((row.nodes[s], row.nodes[s + 1], row.gamma[s]));
+                        source_core2_m2.push(core2);
                     }
                 }
                 let next_nodes = if ri + 1 < total {
@@ -276,25 +365,103 @@ impl FarField {
                     let g = left - right;
                     if g != 0.0 {
                         segs.push((row.nodes[e], next_nodes[e], g));
+                        source_core2_m2.push(core2);
                     }
                 }
-                // Mode-evolved core second moment (age = ticks since
-                // shed; oldest rows are oldest).
-                let age_s = (total - ri) as f64 * dt_s;
-                let spread = match mode {
-                    WakeCoreEvolutionMode::Frozen => 0.0,
-                    WakeCoreEvolutionMode::CoreSpreading { nu_eff_m2ps } => {
-                        4.0 * nu_eff_m2ps * age_s
-                    }
-                };
-                let w_row: f64 = row.gamma.iter().map(|g| g.abs()).sum::<f64>().max(1e-12);
-                core2_num += w_row * (row.core2_m2 + spread);
-                core2_den += w_row;
             }
-            cells.push(cell_from_segs(segs, core2_num / core2_den.max(1e-12)));
+            let cell = cell_from_segs_with_cores(segs, source_core2_m2);
+            let scalars = [
+                cell.radius_m,
+                cell.w_abs_sum,
+                cell.core2_m2,
+                cell.max_abs_core_delta_m2,
+            ];
+            let finite = cell
+                .centroid
+                .iter()
+                .chain(cell.w_sum.iter())
+                .chain(cell.core_moment.iter())
+                .chain(scalars.iter())
+                .chain(cell.dip.iter().flatten())
+                .chain(cell.quad.iter().flatten().flatten())
+                .all(|x| x.is_finite());
+            if !finite {
+                return Err(Refusal {
+                    code: "farfield-core-invalid",
+                    message: format!("cell starting at row {c0}: non-finite source/core moments"),
+                    ranked_repairs: vec![
+                        "reduce cell size or rescale circulation and length units".into(),
+                    ],
+                });
+            }
+            cells.push(cell);
         }
         wake.rows.drain(0..n_rows);
-        Ok(FarField { mode, cells })
+        Ok(FarField {
+            mode,
+            shed_dt_s: dt_s,
+            cells,
+        })
+    }
+
+    /// Add 4ν dt to every retained source core without rebuilding moments.
+    /// Spatial sources remain fixed. Callers advance geometry separately.
+    /// Zero dt, Frozen, and zero viscosity are exact identity operations.
+    ///
+    /// # Errors
+    /// Invalid elapsed time/mode, invalid cached core state, or any width
+    /// overflow. Every refusal leaves all cells unchanged.
+    pub fn advance_core(&mut self, dt_s: f64) -> Result<(), Refusal> {
+        if !dt_s.is_finite() || dt_s < 0.0 {
+            return Err(Refusal {
+                code: "core-advance-invalid",
+                message: format!("elapsed time must be finite and nonnegative: {dt_s}"),
+                ranked_repairs: vec!["supply elapsed seconds >= 0".into()],
+            });
+        }
+        self.mode.admit()?;
+        let growth = self.mode.core_growth_m2(dt_s);
+        if !growth.is_finite() {
+            return Err(Refusal {
+                code: "core-advance-overflow",
+                message: "viscosity × elapsed time is not representable".into(),
+                ranked_repairs: vec!["reduce the elapsed interval or rescale units".into()],
+            });
+        }
+        if growth == 0.0 {
+            return Ok(());
+        }
+        for (ci, cell) in self.cells.iter().enumerate() {
+            let next_core = cell.core2_m2 + growth;
+            let next_offset = cell.diffusion_offset_m2 + growth;
+            let max_effective_core = cell.max_source_core2_m2 + next_offset;
+            let scalars = [
+                cell.core2_m2,
+                cell.diffusion_offset_m2,
+                cell.max_source_core2_m2,
+                cell.max_abs_core_delta_m2,
+            ];
+            if cell.segs.len() != cell.source_core2_m2.len()
+                || scalars.iter().any(|v| !v.is_finite() || *v < 0.0)
+                || cell.core_moment.iter().any(|v| !v.is_finite())
+                || !next_core.is_finite()
+                || !next_offset.is_finite()
+                || !max_effective_core.is_finite()
+            {
+                return Err(Refusal {
+                    code: "core-advance-overflow",
+                    message: format!("cell {ci}: invalid or unrepresentable evolved core"),
+                    ranked_repairs: vec![
+                        "use valid cell cores and a representable elapsed interval".into(),
+                    ],
+                });
+            }
+        }
+        for cell in &mut self.cells {
+            cell.core2_m2 += growth;
+            cell.diffusion_offset_m2 += growth;
+        }
+        Ok(())
     }
 
     /// Far-field induced velocity at `p` (sum of cell expansions).
@@ -404,10 +571,11 @@ impl FarField {
         })
     }
 
-    /// Content digest (mode identity bytes + all cell moments).
+    /// Content digest: mode, moments, and every retained source and its core.
     #[must_use]
     pub fn digest(&self) -> String {
         let mut b = self.mode.id_bytes();
+        b.extend_from_slice(&self.shed_dt_s.to_bits().to_le_bytes());
         for c in &self.cells {
             for v in c
                 .centroid
@@ -425,15 +593,34 @@ impl FarField {
                     }
                 }
             }
+            for value in c.core_moment {
+                b.extend_from_slice(&value.to_bits().to_le_bytes());
+            }
+            b.extend_from_slice(&c.max_abs_core_delta_m2.to_bits().to_le_bytes());
+            b.extend_from_slice(&c.diffusion_offset_m2.to_bits().to_le_bytes());
+            b.extend_from_slice(&c.max_source_core2_m2.to_bits().to_le_bytes());
+            assert_eq!(
+                c.segs.len(),
+                c.source_core2_m2.len(),
+                "one core per source segment"
+            );
+            b.extend_from_slice(&(c.segs.len() as u64).to_le_bytes());
+            for ((a, end, gamma), core2) in c.segs.iter().zip(&c.source_core2_m2) {
+                for value in a.iter().chain(end.iter()) {
+                    b.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+                b.extend_from_slice(&gamma.to_bits().to_le_bytes());
+                b.extend_from_slice(&core2.to_bits().to_le_bytes());
+            }
         }
-        hash_domain("org.frankensim.fs-vpm.farfield3d.v1", &b).to_hex()
+        hash_domain("org.frankensim.fs-vpm.farfield3d.v2", &b).to_hex()
     }
 }
 
 /// Hybrid induced velocity: exact near wake + far multipoles.
 #[must_use]
 pub fn hybrid_velocity(near: &FilamentWake, far: &FarField, p: [f64; 3]) -> [f64; 3] {
-    let nv = near.induced_velocity(p);
+    let nv = near.induced_velocity_with_core_growth(p, far.mode.core_growth_m2(far.shed_dt_s));
     let fv = far.eval(p);
     [nv[0] + fv[0], nv[1] + fv[1], nv[2] + fv[2]]
 }
@@ -548,43 +735,96 @@ pub fn emit_v10_receipt(
 /// on this).
 #[must_use]
 pub fn cell_from_segs(segs: Vec<([f64; 3], [f64; 3], f64)>, core2_m2: f64) -> FarCell {
-    // Circulation-weighted centroid over segment midpoints.
-    let mut cw = [0.0f64; 3];
-    let mut wt = 0.0;
-    for (a, b, g) in &segs {
-        let w = g.abs() * dist(*a, *b);
-        for k in 0..3 {
-            cw[k] += w * 0.5 * (a[k] + b[k]);
+    let cores = vec![core2_m2; segs.len()];
+    cell_from_segs_with_cores(segs, cores)
+}
+
+/// Build a cell while retaining the finite nonnegative core of every source.
+/// `segs` and `source_core2_m2` must have the same length. The infallible
+/// constructor has the existing trusted-data semantics; checked aggregation
+/// additionally rejects unrepresentable moments before mutating its wake.
+///
+/// # Panics
+/// Unequal vector lengths, or non-finite/negative source core widths.
+#[must_use]
+pub fn cell_from_segs_with_cores(
+    segs: Vec<([f64; 3], [f64; 3], f64)>,
+    source_core2_m2: Vec<f64>,
+) -> FarCell {
+    assert_eq!(
+        segs.len(),
+        source_core2_m2.len(),
+        "one core per source segment"
+    );
+    assert!(
+        source_core2_m2.iter().all(|c| c.is_finite() && *c >= 0.0),
+        "finite nonnegative source cores"
+    );
+    let weight_scale = segs
+        .iter()
+        .map(|(a, b, g)| g.abs() * dist(*a, *b))
+        .fold(0.0_f64, f64::max);
+    let core_scale = source_core2_m2.iter().copied().fold(0.0_f64, f64::max);
+    let minimum_core = source_core2_m2.iter().copied().fold(core_scale, f64::min);
+    let normalized_weight = |a: [f64; 3], b: [f64; 3], g: f64| {
+        if weight_scale == 0.0 {
+            0.0
+        } else {
+            (g.abs() * dist(a, b)) / weight_scale
         }
-        wt += w;
+    };
+    let weight_sum: f64 = segs
+        .iter()
+        .map(|(a, b, g)| normalized_weight(*a, *b, *g))
+        .sum();
+    let mut centroid = [0.0; 3];
+    let mut scaled_core_sum = 0.0;
+    if weight_sum > 0.0 {
+        for ((a, b, g), core2) in segs.iter().zip(&source_core2_m2) {
+            let weight = normalized_weight(*a, *b, *g) / weight_sum;
+            for k in 0..3 {
+                centroid[k] += weight * (0.5 * a[k] + 0.5 * b[k]);
+            }
+            if core_scale > 0.0 {
+                scaled_core_sum += weight * (*core2 / core_scale);
+            }
+        }
     }
-    let wt = wt.max(1e-12);
-    let centroid = [cw[0] / wt, cw[1] / wt, cw[2] / wt];
-    // Moments about the centroid.
-    let mut w_sum = [0.0f64; 3];
+    let core2_m2 = if minimum_core == core_scale {
+        // A common source core remains exact, without a roundoff-only spread.
+        core_scale
+    } else if weight_sum == 0.0 {
+        source_core2_m2.first().copied().unwrap_or(0.0)
+    } else {
+        // The exact normalized sum is in [0,1]; cap roundoff at its endpoint.
+        core_scale * scaled_core_sum.min(1.0)
+    };
+    let mut w_sum = [0.0; 3];
     let mut w_abs_sum = 0.0;
-    let mut dip = [[0.0f64; 3]; 3];
-    let mut quad = [[[0.0f64; 3]; 3]; 3];
-    let mut radius: f64 = 0.0;
-    for (a, b, g) in &segs {
-        let w = [g * (b[0] - a[0]), g * (b[1] - a[1]), g * (b[2] - a[2])];
-        let mid = [
-            0.5 * (a[0] + b[0]),
-            0.5 * (a[1] + b[1]),
-            0.5 * (a[2] + b[2]),
-        ];
+    let mut dip = [[0.0; 3]; 3];
+    let mut quad = [[[0.0; 3]; 3]; 3];
+    let mut core_moment = [0.0; 3];
+    let mut max_abs_core_delta_m2 = 0.0_f64;
+    let mut radius = 0.0_f64;
+    for ((a, b, g), source_core2) in segs.iter().zip(&source_core2_m2) {
+        let dl = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let w = [g * dl[0], g * dl[1], g * dl[2]];
         let d = [
-            mid[0] - centroid[0],
-            mid[1] - centroid[1],
-            mid[2] - centroid[2],
+            0.5 * a[0] + 0.5 * b[0] - centroid[0],
+            0.5 * a[1] + 0.5 * b[1] - centroid[1],
+            0.5 * a[2] + 0.5 * b[2] - centroid[2],
         ];
+        let delta_core = *source_core2 - core2_m2;
+        max_abs_core_delta_m2 = max_abs_core_delta_m2.max(delta_core.abs());
         w_abs_sum += g.abs() * dist(*a, *b);
         for j in 0..3 {
             w_sum[j] += w[j];
+            core_moment[j] += w[j] * delta_core;
             for l in 0..3 {
                 dip[j][l] += w[j] * d[l];
                 for m in 0..3 {
-                    quad[j][l][m] += w[j] * d[l] * d[m];
+                    // Exact line moment: mean(s²)=1/12 for s∈[-1/2,1/2].
+                    quad[j][l][m] += w[j] * (d[l] * d[m] + dl[l] * dl[m] / 12.0);
                 }
             }
         }
@@ -598,13 +838,18 @@ pub fn cell_from_segs(segs: Vec<([f64; 3], [f64; 3], f64)>, core2_m2: f64) -> Fa
         dip,
         quad,
         core2_m2,
+        source_core2_m2,
+        core_moment,
+        max_abs_core_delta_m2,
+        diffusion_offset_m2: 0.0,
+        max_source_core2_m2: core_scale,
         segs,
     }
 }
 
 fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
     let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    d[0].hypot(d[1]).hypot(d[2])
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {

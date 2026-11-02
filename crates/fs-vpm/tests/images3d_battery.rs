@@ -87,6 +87,7 @@ fn conversion_symmetry_mirror_commutes_with_coarsen() {
     // lawful constructor, then coarsen/aggregate the twin.
     let empty_far = FarField {
         mode: WakeCoreEvolutionMode::Frozen,
+        shed_dt_s: DT,
         cells: Vec::new(),
     };
     let img_base = ImageSystem::build(&base, &empty_far, PLANE).unwrap();
@@ -277,8 +278,10 @@ fn ground_effect_direction_and_determinism_golden() {
             free[2], grounded[2]
         ),
     );
+    // Finite-core velocities and exact interior evaluation intentionally change this field.
+    // The physical oracles in viscosity3d and this replay battery verify the change.
     assert_eq!(
-        a, "cebf414b1ba1b5086b71afb372ab0b3f8bebf39f056e066d34f334b3d827f503",
+        a, "ca47c28777c23cc6d78ea2dae3f46109e9d71b338a782a84bf63b3253e125b29",
         "grounded-hybrid golden moved — determinism regression or an \
          intentional image/multipole change requiring the golden-bump protocol"
     );

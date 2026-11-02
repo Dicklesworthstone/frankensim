@@ -33,9 +33,6 @@ pub struct Refusal {
     pub ranked_repairs: Vec<String>,
 }
 
-/// Segment kernel core guard [m].
-const CORE: f64 = 1.0e-8;
-
 /// Wake-rate certificate budget: segments the near-wake may hold.
 pub const NEAR_WAKE_SEGMENT_BUDGET: usize = 2_000_000;
 
@@ -96,10 +93,13 @@ pub struct ShedRow {
     pub nodes: Vec<[f64; 3]>,
     /// Bound circulations captured at shed time (n_stations).
     pub gamma: Vec<f64>,
-    /// Streamwise core second moment [m²] accumulated by coarsening
-    /// (0 for freshly shed rows; parallel-axis bookkeeping — the
-    /// E4.7-iii WakeCoreEvolutionMode consumes it).
+    /// Base core width squared [m²], including the streamwise geometric
+    /// smoothing added by coarsening. Zero for newly shed rows; viscous
+    /// growth is applied separately using retained elapsed age.
     pub core2_m2: f64,
+    /// Elapsed shedding intervals since emission; fractional after coarsening.
+    /// A newly shed row is age zero. Conversion never resets this age.
+    pub age_ticks: f64,
 }
 
 /// The connected near-wake.
@@ -174,7 +174,27 @@ impl FilamentWake {
                 ],
             });
         }
+        let next_tick = self.ticks.checked_add(1).ok_or_else(|| Refusal {
+            code: "filament-age-invalid",
+            message: "the shedding tick counter is exhausted".into(),
+            ranked_repairs: vec!["start a new explicitly timed wake interval".into()],
+        })?;
+        if self.rows.iter().any(|row| {
+            !row.age_ticks.is_finite()
+                || row.age_ticks < 0.0
+                || !(row.age_ticks + 1.0).is_finite()
+                || row.age_ticks + 1.0 == row.age_ticks
+        }) {
+            return Err(Refusal {
+                code: "filament-age-invalid",
+                message: "row age must admit one further finite shedding interval".into(),
+                ranked_repairs: vec![
+                    "retain finite nonnegative ages with adequate time resolution".into(),
+                ],
+            });
+        }
         for row in &mut self.rows {
+            row.age_ticks += 1.0;
             for n in &mut row.nodes {
                 n[0] += convect[0];
                 n[1] += convect[1];
@@ -185,8 +205,9 @@ impl FilamentWake {
             nodes: self.line_nodes.clone(),
             gamma: gamma.to_vec(),
             core2_m2: 0.0,
+            age_ticks: 0.0,
         });
-        self.ticks += 1;
+        self.ticks = next_tick;
         Ok(())
     }
 
@@ -218,9 +239,21 @@ impl FilamentWake {
 
     /// Induced velocity at a probe: every spanwise segment plus every
     /// trailing segment (running spanwise difference between adjacent
-    /// rows), Biot–Savart with a fixed core guard.
+    /// rows), using each row's finite Rosenhead–Moore core.
     #[must_use]
     pub fn induced_velocity(&self, p: [f64; 3]) -> [f64; 3] {
+        self.induced_velocity_with_core_growth(p, 0.0)
+    }
+
+    /// Evaluate stored row cores plus `growth_per_tick_m2 * age_ticks`.
+    /// Growth and retained ages must be finite/nonnegative; the checked
+    /// aggregate/image entry points validate their complete input state.
+    #[must_use]
+    pub fn induced_velocity_with_core_growth(
+        &self,
+        p: [f64; 3],
+        growth_per_tick_m2: f64,
+    ) -> [f64; 3] {
         let mut v = [0.0f64; 3];
         let add = |v: &mut [f64; 3], seg_v: [f64; 3], g: f64| {
             v[0] += g * seg_v[0];
@@ -228,11 +261,16 @@ impl FilamentWake {
             v[2] += g * seg_v[2];
         };
         for (ri, row) in self.rows.iter().enumerate() {
+            let core2 = if growth_per_tick_m2 == 0.0 {
+                row.core2_m2
+            } else {
+                row.core2_m2 + growth_per_tick_m2 * row.age_ticks
+            };
             // Spanwise segments at this row.
             for s in 0..self.cert.n_stations {
                 add(
                     &mut v,
-                    segment_velocity(p, row.nodes[s], row.nodes[s + 1]),
+                    segment_velocity_with_core(p, row.nodes[s], row.nodes[s + 1], core2),
                     row.gamma[s],
                 );
             }
@@ -254,7 +292,11 @@ impl FilamentWake {
                 };
                 let g = left - right;
                 if g != 0.0 {
-                    add(&mut v, segment_velocity(p, row.nodes[e], next_nodes[e]), g);
+                    add(
+                        &mut v,
+                        segment_velocity_with_core(p, row.nodes[e], next_nodes[e], core2),
+                        g,
+                    );
                 }
             }
         }
@@ -275,35 +317,68 @@ impl FilamentWake {
                 b.extend_from_slice(&g.to_bits().to_le_bytes());
             }
             b.extend_from_slice(&row.core2_m2.to_bits().to_le_bytes());
+            b.extend_from_slice(&row.age_ticks.to_bits().to_le_bytes());
         }
-        hash_domain("org.frankensim.fs-vpm.filament3d.v1", &b).to_hex()
+        hash_domain("org.frankensim.fs-vpm.filament3d.v2", &b).to_hex()
     }
 }
 
-/// Biot–Savart velocity of a finite straight segment a→b, unit Γ, at p
-/// (local exact-path kernel; fs-vpm stays dependency-light).
+/// Biot–Savart velocity of a finite straight segment a→b, unit Γ, at p.
+/// Coincident endpoints and exactly axial points return zero.
 #[must_use]
 pub fn segment_velocity(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    segment_velocity_with_core(p, a, b, 0.0)
+}
+
+/// Analytic finite-segment integral of the Rosenhead–Moore kernel
+/// `dl × r / (4π (|r|² + core2_m2)^(3/2))`, for unit circulation.
+///
+/// `core2_m2` must be a finite nonnegative regularization length squared [m²].
+/// An infinite straight filament has speed `r / (2π (r² + core2_m2))`.
+/// Growing this parameter as `a² = a₀² + 4νt` models viscous core spreading;
+/// the algebraic profile is a reduced model, not exact Lamb–Oseen diffusion.
+/// No absolute length cutoff is used: scaling all lengths by `s` scales
+/// velocity by `1/s` at fixed circulation. Exactly axial or degenerate
+/// segments contribute zero, including the zero-core singular convention.
+#[must_use]
+pub fn segment_velocity_with_core(
+    p: [f64; 3],
+    a: [f64; 3],
+    b: [f64; 3],
+    core2_m2: f64,
+) -> [f64; 3] {
+    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let length = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).sqrt();
+    if length == 0.0 {
+        return [0.0; 3];
+    }
+    let t = ab.map(|v| v / length);
     let r1 = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
     let r2 = [p[0] - b[0], p[1] - b[1], p[2] - b[2]];
     let c = [
-        r1[1] * r2[2] - r1[2] * r2[1],
-        r1[2] * r2[0] - r1[0] * r2[2],
-        r1[0] * r2[1] - r1[1] * r2[0],
+        t[1] * r1[2] - t[2] * r1[1],
+        t[2] * r1[0] - t[0] * r1[2],
+        t[0] * r1[1] - t[1] * r1[0],
     ];
-    let c2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
-    if c2 < CORE {
+    let h2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+    if h2 == 0.0 {
         return [0.0; 3];
     }
-    let l1 = (r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2]).sqrt();
-    let l2 = (r2[0] * r2[0] + r2[1] * r2[1] + r2[2] * r2[2]).sqrt();
-    if l1 < CORE || l2 < CORE {
-        return [0.0; 3];
-    }
-    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let dot = ab[0] * (r1[0] / l1 - r2[0] / l2)
-        + ab[1] * (r1[1] / l1 - r2[1] / l2)
-        + ab[2] * (r1[2] / l1 - r2[2] / l2);
-    let k = dot / (4.0 * core::f64::consts::PI * c2);
+    let z1 = t[0] * r1[0] + t[1] * r1[1] + t[2] * r1[2];
+    let z2 = t[0] * r2[0] + t[1] * r2[1] + t[2] * r2[2];
+    let transverse2 = h2 + core2_m2;
+    let l1 = (z1 * z1 + transverse2).sqrt();
+    let l2 = (z2 * z2 + transverse2).sqrt();
+    // Work with a unit tangent: all squared lengths have units m²,
+    // avoiding the old dimensionally inconsistent cross-product cutoff.
+    let coefficient = if (z1 > 0.0 && z2 > 0.0) || (z1 < 0.0 && z2 < 0.0) {
+        // Rationalize the endpoint difference outside the segment. Directly
+        // subtracting z1/l1 - z2/l2 loses the small finite field near the axis
+        // or far beyond an endpoint, especially for a short segment.
+        length / (l1 * l2) * ((z1 + z2) / (z1 * l2 + z2 * l1))
+    } else {
+        (z1 / l1 - z2 / l2) / transverse2
+    };
+    let k = coefficient / (4.0 * core::f64::consts::PI);
     [k * c[0], k * c[1], k * c[2]]
 }

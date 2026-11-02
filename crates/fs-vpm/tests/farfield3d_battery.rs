@@ -127,7 +127,7 @@ fn core_mode_enters_identity_and_feeds_bounds() {
         .admit()
         .is_ok()
     );
-    for bad in [MAX_NU_EFF * 1.0000000001, 0.0, -1.0, f64::NAN] {
+    for bad in [MAX_NU_EFF * 1.0000000001, -f64::EPSILON, -1.0, f64::NAN] {
         assert_eq!(
             WakeCoreEvolutionMode::CoreSpreading { nu_eff_m2ps: bad }
                 .admit()
@@ -398,8 +398,10 @@ fn determinism_golden() {
     let a = run();
     assert_eq!(a, run(), "bit-identical twice");
     jlog("golden", &format!("\"digest\":\"{a}\""));
+    // The v2 identity includes original source cores, elapsed-age scaling and diffusion state.
+    // The physical oracles in viscosity3d and this replay battery verify the change.
     assert_eq!(
-        a, "d55b9ef65b16d42e5bc85f838e8ba79a6d84932dba4211cd2beb4f7ace8f863f",
+        a, "570377cdf7d5f49b66c58c81791533f682ed3d113f56db75225334a2c7135d56",
         "far-field golden moved — determinism regression or an \
          intentional multipole/prune change requiring the golden-bump protocol"
     );

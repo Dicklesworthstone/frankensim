@@ -36,8 +36,17 @@ pub struct CoarsenMetric {
 /// Circulation-weighted streamwise centroid shift and weights for one
 /// row pair (span-aggregate: rows share their node line).
 fn pair_weights(a: &ShedRow, b: &ShedRow) -> (f64, f64) {
-    let wa: f64 = a.gamma.iter().map(|g| g.abs()).sum::<f64>().max(1e-12);
-    let wb: f64 = b.gamma.iter().map(|g| g.abs()).sum::<f64>().max(1e-12);
+    let scale = a
+        .gamma
+        .iter()
+        .chain(&b.gamma)
+        .map(|g| g.abs())
+        .fold(0.0_f64, f64::max);
+    if scale == 0.0 {
+        return (1.0, 1.0);
+    }
+    let wa = a.gamma.iter().map(|g| g.abs() / scale).sum();
+    let wb = b.gamma.iter().map(|g| g.abs() / scale).sum();
     (wa, wb)
 }
 
@@ -144,13 +153,26 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
             .map(|(ga, gb)| (ga * dx_a + gb * dx_b) / dx_new)
             .collect();
         // Invariant 5: parallel-axis core bookkeeping (streamwise).
-        let core2 = (wa * (a.core2_m2 + (xa - x_new) * (xa - x_new))
-            + wb * (b.core2_m2 + (xb - x_new) * (xb - x_new)))
-            / wt;
+        let core2 = (wa / wt) * (a.core2_m2 + (xa - x_new).powi(2))
+            + (wb / wt) * (b.core2_m2 + (xb - x_new).powi(2));
+        let age_ticks = (wa / wt) * a.age_ticks + (wb / wt) * b.age_ticks;
+        if !a.age_ticks.is_finite()
+            || a.age_ticks < 0.0
+            || !b.age_ticks.is_finite()
+            || b.age_ticks < 0.0
+            || !age_ticks.is_finite()
+        {
+            return Err(Refusal {
+                code: "coarsen-age-invalid",
+                message: "the source or weighted merged wake age is invalid".into(),
+                ranked_repairs: vec!["retain finite nonnegative source ages".into()],
+            });
+        }
         merged.push(ShedRow {
             nodes: merged_nodes[pair].clone(),
             gamma,
             core2_m2: core2,
+            age_ticks,
         });
     }
     let tail = wake.rows.split_off(2 * k);

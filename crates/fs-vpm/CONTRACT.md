@@ -107,8 +107,9 @@ cost/poll refusal without partial publication.
 - v0 is the INVISCID 2-D core by DIRECT `O(N²)` Biot–Savart. The FMM /
   treecode acceleration for large particle counts (the whole point of the
   method at scale) is the fuller deliverable, staged.
-- VISCOUS diffusion via PARTICLE STRENGTH EXCHANGE (Lamb–Oseen evolution) and
-  3-D vortex filaments / rings with stretching are staged.
+- Particle-strength-exchange viscosity and dynamically stretched 3-D
+  filaments/rings remain deferred. The connected 3-D wake's prescribed
+  geometry and reduced finite-core model are specified below.
 - The HYBRID BEM+VPM airfoil (pitching/plunging unsteady lift vs Theodorsen —
   the flapping credential) composes this core with fs-bem downstream.
 - Spatial adaptivity (particle insertion/merging, remeshing) is a follow-on.
@@ -125,3 +126,66 @@ cost/poll refusal without partial publication.
   FMM-accelerated Biot–Savart, particle-strength-exchange viscosity, remeshing,
   and the BEM+VPM hybrid are NOT scheduled; the promise is preserved in deferred
   epic frankensim-rc-root-q61wp.43 and un-parks only behind a consumer journey.
+
+## Finite-core connected 3-D wake
+
+The connected filament, aggregation, and image lanes use the Rosenhead--Moore
+kernel `dl cross r / [4 pi (|r|^2 + a^2)^(3/2)]`. Straight-segment integration
+is analytic. Its unit-tangent form avoids comparing incompatible length powers,
+and its exterior endpoint difference is rationalized to retain the small field
+near the segment's extended axis. There is no absolute length cutoff. Exactly
+axial or degenerate segments return zero, including the singular zero-core
+convention. Geometry and core radius scaled by s give velocity scaled by 1/s
+at fixed circulation.
+
+`WakeCoreEvolutionMode::CoreSpreading` admits finite effective kinematic
+viscosity in `[0, MAX_NU_EFF]`, in m^2/s. For a fixed declared viscosity,
+`a^2 = a0^2 + 4 nu t`; zero viscosity recovers Frozen velocities. This is a
+reduced algebraic core-spreading model, not exact Gaussian Lamb--Oseen
+diffusion, particle-strength exchange, or resolved Navier--Stokes diffusion.
+The core width is a regularization scale; it is not a finite physical second
+moment of the algebraic profile. Coarsening also contributes a geometric
+smoothing scale without changing that interpretation.
+
+Each shed row retains elapsed `age_ticks`, starting at zero and increasing
+only on a successful shed. Coarsening preserves circulation-weighted age
+alongside position and core width. Relative weights are normalized without a
+dimensional circulation floor, so changing circulation units cannot alter
+geometry, core width, or age. Aggregation uses retained age and its declared
+`shed_dt_s`; removing rows never resets the ages of those left near. Public
+hybrid evaluation and image snapshots apply the same viscosity and shedding
+interval to the remaining near wake and the aggregated sources.
+
+Every far cell retains each original source segment and its own squared core.
+Exact evaluation, near-field fallback, and prune audits use those individual
+cores. The far expansion uses a circulation-length-weighted common core,
+exact line monopole/dipole/quadrupole moments (including the intrinsic
+line quadrupole), and the leading core-variation moment. Spatial/core mixed
+terms remain in the truncation. Probes inside the geometric bounding sphere,
+or with maximum squared-core deviation greater than
+`(|r|^2 + common_core^2)/16`, use exact retained sources. This is an expansion
+domain guard, not a certified total-velocity error bound. Separated mixed-core
+cells retain constant work per cell rather than always scanning their sources.
+The existing singular contribution bound remains conservative for regularized
+sources; pruning still independently audits the exact contribution.
+
+`FarField::advance_core(dt)` adds continued diffusion to already aggregated
+cells in O(number of cells), without scanning their segments or rebuilding
+moments. A common offset and cached maximum base core provide transactional
+finite checks; zero time, Frozen, and zero viscosity preserve state exactly.
+The method does not convect geometry. Callers keep near shedding and far
+diffusion on the same elapsed-time schedule, and advance existing far cells
+before appending newly aggregated cells to avoid aging those new cells twice.
+Images are evaluation snapshots and must be rebuilt after geometry, diffusion,
+or mode changes. Mirroring preserves source cores, diffusion offsets and the
+axial-vector core moment.
+
+The filament and far-field digest domains are v2 because retained age and
+individual source/core assignment now affect physical evaluation. The updated
+replay goldens cover that intentional identity and kernel change.
+`tests/viscosity3d.rs` checks independent line quadrature, the analytic long
+filament, length scaling, thin exterior fields, exact/near/far/image agreement,
+mixed-core convergence and fallback, chronology through conversion, continued
+diffusion and transactional refusals. These checks do not establish free-wake
+stretching, a viscous particle solver, cross-ISA bit stability, or a wall-clock
+performance guarantee.

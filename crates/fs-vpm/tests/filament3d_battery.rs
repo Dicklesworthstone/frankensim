@@ -185,8 +185,10 @@ fn shed_determinism_golden() {
     let a = run();
     assert_eq!(a, run(), "bit-identical twice");
     jlog("golden", &format!("\"digest\":\"{a}\""));
+    // Retained elapsed age is part of the v2 physical wake identity.
+    // The physical oracles in viscosity3d and this replay battery verify the change.
     assert_eq!(
-        a, "50b186032a5e875793063557fc5336e9a55ad011ae5128d4ff467adf0dd53b55",
+        a, "ff0bbc5849dee0a593d7d32f94fdbf49ccd1cd3373505102431b7decfd6cc412",
         "filament shed golden moved — determinism regression or an \
          intentional lattice change requiring the golden-bump protocol"
     );

@@ -194,8 +194,10 @@ fn caps_and_determinism() {
     let a = run();
     assert_eq!(a, run(), "bit-identical twice");
     jlog("golden", &format!("\"digest\":\"{a}\""));
+    // The v2 identity retains weighted age; weights are independent of circulation units.
+    // The physical oracles in viscosity3d and this replay battery verify the change.
     assert_eq!(
-        a, "8f1e9a12690e2cd76b4062c2f7979f06616ed122d801b8cc2811f8d5207c2022",
+        a, "ae0854814c404f0aa26e18f606f5ea4f35b6cfde75cb9419d5ae5b84689f6b00",
         "coarsen golden moved — determinism regression or an \
          intentional merge-rule change requiring the golden-bump protocol"
     );

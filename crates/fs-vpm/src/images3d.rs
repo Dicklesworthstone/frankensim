@@ -19,11 +19,11 @@
 //!
 //! Conversion symmetry: mirroring COMMUTES with the near→mid→far
 //! conversion chain (coarsening and multipole aggregation), because
-//! image cells are built by the SAME `cell_from_segs` arithmetic as
+//! image cells are built by the SAME `cell_from_segs_with_cores` arithmetic as
 //! real cells. The battery asserts the commutation per station and
 //! per cell, never as a totals-only sum.
 
-use crate::farfield3d::{FarCell, FarField, cell_from_segs};
+use crate::farfield3d::{FarCell, FarField, cell_from_segs_with_cores};
 use crate::filament3d::{FilamentWake, Refusal, ShedRow};
 use fs_blake3::hash_domain;
 
@@ -104,7 +104,7 @@ fn mirror_wake(wake: &FilamentWake, plane: ImagePlane) -> FilamentWake {
 }
 
 /// The image of one far cell, built from its mirrored exact segments
-/// through the SAME `cell_from_segs` arithmetic as real aggregation
+/// through the SAME `cell_from_segs_with_cores` arithmetic as real aggregation
 /// (this is what makes conversion symmetry hold).
 #[must_use]
 pub fn mirror_cell(cell: &FarCell, plane: ImagePlane) -> FarCell {
@@ -113,7 +113,18 @@ pub fn mirror_cell(cell: &FarCell, plane: ImagePlane) -> FarCell {
         .iter()
         .map(|(a, b, g)| (plane.mirror(*a), plane.mirror(*b), -*g))
         .collect();
-    cell_from_segs(segs, cell.core2_m2)
+    let mut image = cell_from_segs_with_cores(segs, cell.source_core2_m2.clone());
+    image.diffusion_offset_m2 = cell.diffusion_offset_m2;
+    image.core2_m2 = cell.core2_m2;
+    image.max_source_core2_m2 = cell.max_source_core2_m2;
+    image.max_abs_core_delta_m2 = cell.max_abs_core_delta_m2;
+    // Circulation-weighted vector moments are axial vectors under reflection.
+    image.core_moment = [
+        -cell.core_moment[0],
+        -cell.core_moment[1],
+        cell.core_moment[2],
+    ];
+    image
 }
 
 /// The complete image system for a hybrid wake (near + far).
@@ -127,16 +138,46 @@ pub struct ImageSystem {
     near_image: FilamentWake,
     /// Mirrored far cells (boundary devices).
     far_image: Vec<FarCell>,
+    core_growth_per_tick_m2: f64,
 }
 
 impl ImageSystem {
     /// Build the image system. The ONLY lawful constructor: it admits
-    /// the plane first and never touches the source wake.
+    /// the plane first and never touches the source wake. This is a snapshot:
+    /// rebuild after source geometry, diffusion state, or core mode changes.
     ///
     /// # Errors
-    /// Plane refusals (`image-plane-invalid`).
+    /// Plane refusals (`image-plane-invalid`), invalid mode, or invalid
+    /// shedding interval/age/evolved core (`image-core-invalid`).
     pub fn build(near: &FilamentWake, far: &FarField, plane: ImagePlane) -> Result<Self, Refusal> {
         plane.admit(near)?;
+        far.mode.admit()?;
+        let core_growth_per_tick_m2 = far.mode.core_growth_m2(far.shed_dt_s);
+        let invalid_row = near.rows.iter().any(|row| {
+            let evolved = if core_growth_per_tick_m2 == 0.0 {
+                row.core2_m2
+            } else {
+                row.core2_m2 + core_growth_per_tick_m2 * row.age_ticks
+            };
+            !row.age_ticks.is_finite()
+                || row.age_ticks < 0.0
+                || !row.core2_m2.is_finite()
+                || row.core2_m2 < 0.0
+                || !evolved.is_finite()
+        });
+        if !far.shed_dt_s.is_finite()
+            || far.shed_dt_s <= 0.0
+            || !core_growth_per_tick_m2.is_finite()
+            || invalid_row
+        {
+            return Err(Refusal {
+                code: "image-core-invalid",
+                message: "invalid shedding interval, age, or evolved image core".into(),
+                ranked_repairs: vec![
+                    "build images from finite nonnegative wake cores and ages".into(),
+                ],
+            });
+        }
         let mut src = near.digest().into_bytes();
         src.extend_from_slice(far.digest().as_bytes());
         let identity = image_identity(core::str::from_utf8(&src).unwrap_or(""), plane);
@@ -145,13 +186,16 @@ impl ImageSystem {
             identity,
             near_image: mirror_wake(near, plane),
             far_image: far.cells.iter().map(|c| mirror_cell(c, plane)).collect(),
+            core_growth_per_tick_m2,
         })
     }
 
     /// Induced velocity of the IMAGES alone at `p`.
     #[must_use]
     pub fn eval(&self, p: [f64; 3]) -> [f64; 3] {
-        let mut v = self.near_image.induced_velocity(p);
+        let mut v = self
+            .near_image
+            .induced_velocity_with_core_growth(p, self.core_growth_per_tick_m2);
         for c in &self.far_image {
             let cv = c.eval(p);
             v[0] += cv[0];
@@ -184,7 +228,7 @@ pub fn grounded_hybrid_velocity(
     images: &ImageSystem,
     p: [f64; 3],
 ) -> [f64; 3] {
-    let nv = near.induced_velocity(p);
+    let nv = near.induced_velocity_with_core_growth(p, far.mode.core_growth_m2(far.shed_dt_s));
     let fv = far.eval(p);
     let iv = images.eval(p);
     [
