@@ -217,8 +217,9 @@ mod polarized_conductor {
     use super::super::{sample_ggx_vndf_reflection, smith_g1};
 
     impl PolarizedBeam {
-        /// Sample an isotropic rough metal with the native visible-normal GGX
-        /// proposal. The two explicit uniform samples must lie in `[0,1)`.
+        /// Sample a metal with the native visible-normal GGX proposal, or the
+        /// exact mirror event for [`ConductorSurface::SMOOTH`]. The two
+        /// explicit uniform samples must lie in `[0,1)` even for the mirror.
         /// Invalid samples return `ConductorError::InvalidSample`, not a miss.
         ///
         /// The geometric normal is normalized and face-forwarded. No separate
@@ -250,6 +251,12 @@ mod polarized_conductor {
             let wo = self.frame().direction().scale(-1.0);
             if normal.dot(wo) < 0.0 { normal = normal.scale(-1.0); }
             if normal.dot(wo) <= 0.0 { return Err(BeamError::InvalidFrame.into()); }
+            if surface.is_delta() {
+                let beam = self.reflect_conductor(normal, optics)?.beam;
+                return Ok(Some(BeamSample {
+                    beam, event: DielectricEvent::Reflection, pdf: 1.0, delta: true,
+                }));
+            }
             let alpha = surface.roughness_alpha();
             let Some((direction, pdf)) = sample_ggx_vndf_reflection(
                 normal, wo, alpha, samples[0], samples[1],
@@ -321,6 +328,26 @@ mod polarized_conductor {
         }
         fn near(a: f64, b: f64) {
             assert!((a-b).abs() <= 2e-10*a.abs().max(b.abs()).max(1.0), "{a:.17e} != {b:.17e}");
+        }
+
+        #[test]
+        fn smooth_conductor_dispatch_retains_native_polarized_reflection() {
+            let normal = Vec3::new(0.0, 0.0, 1.0);
+            let wo = Vec3::new(0.6, 0.0, 0.8);
+            for law in optics() {
+                for state in [Stokes::unpolarized(2.0), Stokes { i: 2.0, q: 0.4, u: 0.7, v: 0.9 }] {
+                    let incident = beam(wo, Vec3::new(0.0, 1.0, 0.0), state);
+                    let reference = incident.reflect_conductor(normal, &law).unwrap().beam;
+                    for samples in [[0.0, 0.0], [0.93, 0.51]] {
+                        let sampled = incident.sample_rough_conductor(normal, &law,
+                            ConductorSurface::SMOOTH, samples).unwrap().unwrap();
+                        assert!(sampled.delta);
+                        assert_eq!(sampled.pdf, 1.0);
+                        assert_eq!(sampled.event, DielectricEvent::Reflection);
+                        assert_eq!(sampled.beam, reference);
+                    }
+                }
+            }
         }
 
         #[test]

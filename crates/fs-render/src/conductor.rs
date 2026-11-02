@@ -427,13 +427,18 @@ impl ConductorOptics {
     }
 }
 
-/// Validated isotropic single-scattering GGX surface for conductor optics.
+/// Smooth-delta or validated isotropic single-scattering GGX conductor surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConductorSurface {
     roughness_alpha: f64,
 }
 
 impl ConductorSurface {
+    /// Ideal smooth metal: one exact mirror direction, weighted by the native
+    /// spectral/coated Fresnel response. This is a discrete scattering event,
+    /// not a GGX lobe with an arbitrarily small width.
+    pub const SMOOTH: Self = Self { roughness_alpha: 0.0 };
+
     /// Construct an isotropic GGX surface.  Roughness changes the microfacet
     /// distribution but never rewrites optical constants.
     pub fn try_rough(roughness_alpha: f64) -> Result<Self, ConductorError> {
@@ -447,7 +452,14 @@ impl ConductorSurface {
         })
     }
 
-    /// Isotropic GGX alpha.
+    /// Whether scattering has a discrete mirror direction.
+    #[must_use]
+    pub const fn is_delta(self) -> bool {
+        self.roughness_alpha == 0.0
+    }
+
+    /// Isotropic GGX alpha, or exactly zero for [`Self::SMOOTH`]. Consumers
+    /// must handle the delta event separately before evaluating a GGX density.
     #[must_use]
     pub const fn roughness_alpha(self) -> f64 {
         self.roughness_alpha

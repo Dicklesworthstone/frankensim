@@ -321,6 +321,16 @@ differentiable lift). Pure Rust throughout.
   incident medium, and validated isotropic-GGX roughness. Built-in tungsten and
   stainless-steel tables are explicitly representative look-development data;
   table/source/material identities prove replay binding, not specimen fidelity.
+  `ConductorSurface::SMOOTH` selects exact delta reflection without a numerical
+  roughness floor. Camera packets, bidirectional radiance/importance paths and
+  the polarized surface adapter retain the same spectral/coated Fresnel power
+  and the actual incident host index. The mirror event has unit discrete
+  probability, zero continuous BSDF/PDF and no finite-direction NEE competitor;
+  emitter/environment hits keep their full delta-path contribution. Rough
+  surfaces and their content identities retain their original semantics.
+  Material-state conductor bindings admit explicit zero alpha and preserve it
+  across optical-state refresh. This geometric-optics limit supplies no
+  diffraction, finite-roughness approximation or mirror-caustic connector.
   Scalar complex square roots compute the larger component first and recover
   the smaller from `2uv=y`, retaining weak absorption on the total-reflection
   side. Optical semantics version 2 changes evaluation identities to distinguish

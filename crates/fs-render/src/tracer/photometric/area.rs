@@ -793,6 +793,11 @@ impl Receiver<'_> {
                 frame,
                 ..
             } => !surface.is_delta() && frame.oriented.dot(direction) != 0.0,
+            Self::Surface {
+                material: Material::Conductor { surface, .. },
+                frame,
+                ..
+            } => !surface.is_delta() && frame.oriented.dot(direction) > 0.0,
             Self::Surface { frame, .. } => frame.oriented.dot(direction) > 0.0,
             Self::Probe { normal, .. } => normal.dot(direction) > 0.0,
             Self::Phase { .. } => true,

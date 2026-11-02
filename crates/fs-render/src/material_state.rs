@@ -210,7 +210,9 @@ pub struct MaterialOpticalBinding {
 
 impl MaterialOpticalBinding {
     /// Bind the family already selected by the material resolver, with an
-    /// explicit positive isotropic GGX roughness for either family.
+    /// explicit positive isotropic GGX roughness for either family. Exactly
+    /// zero additionally selects a smooth mirror for a conductor; smooth
+    /// dielectrics use the dedicated constructor's `None` surface argument.
     pub fn try_visible(
         mechanical: &ResolvedMaterialStatePoint,
         optical: &VisibleOpticalStatePoint,
@@ -243,6 +245,8 @@ impl MaterialOpticalBinding {
     }
 
     /// Bind the card's nine complex-index samples to the conductor model.
+    /// Exactly zero roughness explicitly selects the smooth mirror; positive
+    /// values retain the original admitted GGX interval.
     pub fn try_conductor(
         mechanical: &ResolvedMaterialStatePoint,
         optical: &VisibleConductorStatePoint,
@@ -257,7 +261,11 @@ impl MaterialOpticalBinding {
             surface_state_identity,
             OpticalAppearance::Conductor {
                 optics,
-                surface: ConductorSurface::try_rough(roughness_alpha)?,
+                surface: if roughness_alpha == 0.0 {
+                    ConductorSurface::SMOOTH
+                } else {
+                    ConductorSurface::try_rough(roughness_alpha)?
+                },
             },
         ))
     }

@@ -278,12 +278,12 @@ impl<'scene> Vertex<'scene> {
             VertexKind::Surface { primitive_index } => {
                 match scene.primitives[primitive_index].material {
                     Material::Dielectric { surface, .. } => !surface.is_delta(),
+                    Material::Conductor { surface, .. } => !surface.is_delta(),
                     Material::Lambertian { .. }
                     | Material::SpectralDiffuse { .. }
                     | Material::GrayDiffuseThermal { .. }
                     | Material::SpectralDiffuseThermal { .. }
                     | Material::Ggx { .. }
-                    | Material::Conductor { .. }
                     | Material::BrushedConductor { .. } => true,
                 }
             }
@@ -617,6 +617,20 @@ fn sample_surface(
         Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
         Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
             Err(TracerError::ThermalSurfaceUnsupported)
+        }
+        Material::Conductor { optics, surface } if surface.is_delta() => {
+            let direction = smooth_conductor_direction(normal, wo)?;
+            let incident = vertex.medium_toward(wo).map(|entry| *entry.glass);
+            let eta = medium_ior(incident, wavelength_nm)?;
+            let weight = optics.fresnel(wavelength_nm, eta, normal.dot(wo).clamp(0.0, 1.0))?;
+            Ok((weight > 0.0).then_some(ScatterSample {
+                direction,
+                weight,
+                pdf_fwd_solid_angle: 0.0,
+                pdf_rev_solid_angle: 0.0,
+                delta: true,
+                event: None,
+            }))
         }
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
@@ -3020,6 +3034,47 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn smooth_conductor_bdpt_preserves_host_fresnel_and_discrete_measure() {
+        use crate::conductor::{ConductorDataStatus, ConductorIorSample, ConductorSource};
+        use crate::dielectric::GlassProvenance;
+        let source = ConductorSource::try_new(
+            hash_domain("org.frankensim.test.mirror-bdpt", b"synthetic-metal"),
+            ConductorDataStatus::Representative,
+        ).unwrap();
+        let optics = ConductorOptics::try_new(core::array::from_fn(|i|
+            ConductorIorSample::try_new(380.0 + 50.0 * i as f64, 2.0, 3.0).unwrap()), source).unwrap();
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let (mut scene, _, _) = direct_emitter_scene(true);
+        scene.primitives[0].material = Material::Conductor { optics, surface: ConductorSurface::SMOOTH };
+        scene.primitives[0].emission = None;
+        for eta in [1.0_f64, 1.5] {
+            let glass = DielectricGlass::new(CauchyIor::try_constant(eta).unwrap(),
+                BeerLambertAbsorption::CLEAR, GlassProvenance::Custom);
+            let medium = Some(MediumEntry { boundary_primitive: 0, glass: &glass });
+            let vertex = Vertex {
+                kind: VertexKind::Surface { primitive_index: 0 }, point: Point3::new(0.0, 0.0, 0.0),
+                geometric_normal: Some(normal), wo: Some(normal), beta: 1.0, pdf_fwd: 1.0,
+                pdf_rev: 0.0, delta: false, positive_medium: medium, negative_medium: medium,
+            };
+            // Independent normal-incidence conductor Fresnel, absolute n/k.
+            let expected = ((eta - 2.0) * (eta - 2.0) + 9.0)
+                / ((eta + 2.0) * (eta + 2.0) + 9.0);
+            assert!(!vertex.is_connectible(&scene));
+            for mode in [TransportMode::Radiance, TransportMode::Importance] {
+                let sampled = sample_surface(&scene, &vertex, 550.0, mode, [0.3; 4]).unwrap().unwrap();
+                assert_eq!(sampled.direction, normal);
+                assert!((sampled.weight - expected).abs() < 2.0e-15);
+                assert!(sampled.delta);
+                assert_eq!(sampled.pdf_fwd_solid_angle, 0.0);
+                assert_eq!(sampled.pdf_rev_solid_angle, 0.0);
+                assert_eq!(sampled.event, None); // the incident host is retained
+                assert_eq!(surface_scattering(&scene, &vertex, normal, normal, 550.0, mode).unwrap(), 0.0);
+                assert_eq!(surface_pdf_solid_angle(&scene, &vertex, normal, normal, 550.0).unwrap(), 0.0);
+            }
+        }
     }
 
     #[test]

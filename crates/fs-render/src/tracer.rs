@@ -926,12 +926,12 @@ pub enum Material {
         alpha: f64,
     },
     /// Opaque spectral conductor using exact complex-IOR Fresnel, optional
-    /// coherent transparent or absorbing-film interference, and an isotropic
-    /// single-scattering GGX microfacet surface.
+    /// coherent transparent or absorbing-film interference, and either an
+    /// exact smooth mirror or an isotropic single-scattering GGX surface.
     Conductor {
         /// Validated absolute complex-index table and honest provenance.
         optics: ConductorOptics,
-        /// Validated isotropic GGX roughness.
+        /// Explicit smooth-delta or validated isotropic GGX surface.
         surface: ConductorSurface,
     },
     /// Brushed conductor: the same exact complex-IOR Fresnel over the
@@ -14345,13 +14345,15 @@ fn trace_path_with_regions<'scene>(
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => None,
         };
+        let smooth_conductor = matches!(prim.material,
+            Material::Conductor { surface, .. } if surface.is_delta());
         #[cfg(feature = "volumes")]
         let transmitted_region = dielectric_boundary.map(|boundary| {
             MediumRegion::transmitted(&medium_stack, boundary.transition, medium, scene_media)
         });
 
         #[cfg(feature = "photometry")]
-        if let Some(fixtures) = fixtures {
+        if !smooth_conductor && let Some(fixtures) = fixtures {
             let direct = photometric::surface_contribution(
                 scene,
                 fixtures,
@@ -14427,7 +14429,7 @@ fn trace_path_with_regions<'scene>(
                             surface,
                             source_side,
                         }),
-                    (_, None) => Some(volume_emission::Receiver::Surface {
+                    (_, None) if !smooth_conductor => Some(volume_emission::Receiver::Surface {
                         material: &prim.material,
                         frame,
                         outgoing: ray.dir.scale(-1.0),
@@ -14468,7 +14470,7 @@ fn trace_path_with_regions<'scene>(
         }
 
         // Next-event estimation.
-        if s.strategy != DirectStrategy::BsdfOnly {
+        if !smooth_conductor && s.strategy != DirectStrategy::BsdfOnly {
             let moving_receiver = match prim.material {
                 Material::Dielectric { surface, .. } => surface.roughness_alpha().is_some(),
                 _ => true,
@@ -15561,6 +15563,29 @@ fn trace_path_with_regions<'scene>(
                 ray = Ray {
                     origin: dielectric_spawn_origin(hit.point, frame.geometric, sampled.direction),
                     dir: sampled.direction,
+                };
+            }
+            Material::Conductor { optics, surface } if surface.is_delta() => {
+                let wi = smooth_conductor_direction(n, wo)?;
+                for (lane, &lambda) in lambdas.iter().enumerate() {
+                    let eta = medium_ior(medium_stack.last().map(|entry| *entry.glass), lambda)?;
+                    throughput[lane] *= optics.fresnel(lambda, eta, n.dot(wo).clamp(0.0, 1.0))?;
+                }
+                // The single reflected event has unit probability. Fresnel
+                // power stays in throughput, while its solid-angle density
+                // is zero. An emitter reached from here has no NEE competitor.
+                previous_bsdf = Some(PreviousBsdf {
+                    #[cfg(feature = "volumes")]
+                    volume_emission_competitor: false,
+                    pdf: DirectionalPdfPair::delta(),
+                    opaque_source_geometric_normal: Some(n),
+                    smooth_slab: None,
+                });
+                prev_origin = hit.point;
+                segment_origin = hit.point;
+                ray = Ray {
+                    origin: dielectric_spawn_origin(hit.point, frame.geometric, wi),
+                    dir: wi,
                 };
             }
             Material::Lambertian { .. }
@@ -19353,6 +19378,110 @@ mod tests {
     }
 
     #[test]
+    fn smooth_conductor_camera_paths_retain_fresnel_and_delta_mis() {
+        use crate::conductor::CoherentDielectricCoating;
+
+        let bare = ConductorOptics::representative_tungsten();
+        let coated = bare.with_coating(CoherentDielectricCoating::try_new(
+            CauchyIor::try_constant(1.45).unwrap(), 125.0e-9, bare.source(),
+        ).unwrap());
+        let white = lift_rgb([1.0; 3]);
+        with_test_cx(|cx| {
+            for optics in [bare, coated] {
+                for cosine in [1.0_f64, 0.2, 0.01] {
+                    let sine = (1.0 - cosine * cosine).sqrt();
+                    for finite_emitter in [false, true] {
+                        let mut scene = Scene {
+                            primitives: vec![Primitive {
+                                shape: Shape::Mesh(TriMesh::new(
+                                    vec![[-10.0, -10.0, 0.0], [10.0, -10.0, 0.0],
+                                        [10.0, 10.0, 0.0], [-10.0, 10.0, 0.0]],
+                                    vec![[0, 1, 2], [0, 2, 3]],
+                                )),
+                                material: Material::Conductor { optics, surface: ConductorSurface::SMOOTH },
+                                emission: None,
+                            }],
+                            lights: Vec::new(),
+                            environment: if finite_emitter { None } else { Some(
+                                crate::lighting::EnvironmentMap::try_from_linear_srgb(
+                                    1, 1, vec![[1.0; 3]], 0.0,
+                                ).unwrap()
+                            ) },
+                            camera: Camera {
+                                eye: Point3::new(-sine, 0.0, cosine),
+                                forward: Vec3::new(sine, 0.0, -cosine),
+                                up: Vec3::new(0.0, 1.0, 0.0), half_tan: 0.2,
+                            },
+                        };
+                        if finite_emitter {
+                            // Only the exact mirror ray reaches this small source.
+                            // Its straight connection is not a competing proposal.
+                            let x = 2.0 * sine / cosine;
+                            scene.primitives.push(Primitive {
+                                shape: Shape::Mesh(TriMesh::new(
+                                    vec![[x - 0.5, -0.5, 2.0], [x + 0.5, -0.5, 2.0],
+                                        [x + 0.5, 0.5, 2.0], [x - 0.5, 0.5, 2.0]],
+                                    vec![[0, 1, 2], [0, 2, 3]],
+                                )),
+                                material: Material::Lambertian { reflectance: white },
+                                emission: Some((white, 1.0)),
+                            });
+                            scene.lights.push(RectLight {
+                                corner: Point3::new(x - 0.5, -0.5, 2.0),
+                                edge_u: Vec3::new(1.0, 0.0, 0.0), edge_v: Vec3::new(0.0, 1.0, 0.0),
+                                prim: 1, emission: (white, 1.0),
+                            });
+                        }
+                        let lighting = validate_scene(&scene, cx, None).unwrap();
+                        for hero in [0.0, 0.173] {
+                            let wavelengths = hero_wavelength_packet::<PACKET>(
+                                LAMBDA_MIN + hero * (LAMBDA_MAX - LAMBDA_MIN), LAMBDA_MIN, LAMBDA_MAX,
+                            );
+                            let expected = packet_radiance_to_xyz(wavelengths.map(|lambda|
+                                optics.fresnel(lambda, 1.0, cosine).unwrap() * white.eval(lambda)),
+                                &wavelengths, 1.0);
+                            for strategy in [DirectStrategy::BsdfOnly, DirectStrategy::NeeOnly,
+                                DirectStrategy::Mis, DirectStrategy::PowerMis] {
+                                let settings = Settings { width: 1, height: 1, spp: 1,
+                                    max_depth: 2, sampler: Sampler::Iid, strategy, seed: 73 };
+                                for sample in [0, 17] {
+                                    let actual = trace_path(&scene, &lighting, cx, &settings, 1.0,
+                                        0, sample, 0.5, 0.5, hero, None, CameraPath::Legacy,
+                                        false, None, None).unwrap();
+                                    for (observed, expected) in actual.xyz.into_iter().zip(expected) {
+                                        assert!(expected > 0.0);
+                                        assert_near(observed, expected, 2.0e-11 * expected,
+                                            "smooth metal must retain every spectral Fresnel power without MIS loss");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn smooth_conductor_is_discrete_and_distinct_from_polished_ggx() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = Vec3::new(0.6, 0.0, 0.8);
+        let wi = smooth_conductor_direction(normal, wo).unwrap();
+        assert_eq!(wi, Vec3::new(-0.6, 0.0, 0.8));
+        let optics = ConductorOptics::representative_tungsten();
+        let mirror = Material::Conductor { optics, surface: ConductorSurface::SMOOTH };
+        let polished = Material::Conductor { optics,
+            surface: ConductorSurface::try_rough(1.0e-4).unwrap() };
+        assert_ne!(mirror.content_identity(), polished.content_identity());
+        assert!(ConductorSurface::SMOOTH.is_delta());
+        assert!(ConductorSurface::try_rough(0.0).is_err());
+        assert_eq!(opaque_bsdf_eval(&mirror, normal, wo, wi, 550.0, None, None).unwrap(), 0.0);
+        assert_eq!(bsdf_pdf(&mirror, normal, wo, wi, None), 0.0);
+        assert!(bsdf_sample(&mirror, normal, wo, 0.2, 0.7, None).is_none());
+        assert!(opaque_bsdf_eval(&polished, normal, wo, wi, 550.0, None, None).unwrap() > 0.0);
+    }
+
+    #[test]
     fn conductor_material_identity_binds_optics_and_surface_independently() {
         let smooth = ConductorSurface::try_rough(0.08).unwrap();
         let rough = ConductorSurface::try_rough(0.24).unwrap();
@@ -21766,6 +21895,10 @@ fn opaque_bsdf_eval(
         // adding the conductor family must not perturb legacy image bits.
         return Ok(bsdf_eval(mat, n, wo, wi, lambda));
     };
+    if surface.is_delta() {
+        // A finite-direction proposal cannot sample the mirror's delta peak.
+        return Ok(0.0);
+    }
     let (cos_o, cos_i) = (n.dot(wo), n.dot(wi));
     if cos_o <= 0.0 || cos_i <= 0.0 {
         return Ok(0.0);
@@ -21814,6 +21947,9 @@ fn bsdf_pdf(
             ggx_vndf_reflection_pdf(*alpha, n, wo, m)
         }
         Material::Conductor { surface, .. } => {
+            if surface.is_delta() {
+                return 0.0;
+            }
             let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
             let hn = hsum.norm();
             if hn < 1e-12 {
@@ -21854,6 +21990,18 @@ fn bsdf_pdf(
     }
 }
 
+// PBRT 4e §9.4: exact specular reflection has a unit discrete proposal and
+// Fresnel throughput, with no continuous solid-angle BSDF/PDF.
+// https://pbr-book.org/4ed/Reflection_Models/Conductor_BRDF
+fn smooth_conductor_direction(normal: Vec3, wo: Vec3) -> Result<Vec3, TracerError> {
+    let cosine = normal.dot(wo);
+    let direction = vec_add(normal.scale(2.0 * cosine), wo.scale(-1.0));
+    if cosine <= 0.0 || !finite_unit_direction(direction) {
+        return Err(TracerError::InvalidInput);
+    }
+    Ok(direction)
+}
+
 fn bsdf_sample(
     mat: &Material,
     n: Vec3,
@@ -21872,6 +22020,11 @@ fn bsdf_sample(
         }
         Material::Ggx { alpha, .. } => sample_ggx_vndf_reflection(n, wo, *alpha, u1, u2),
         Material::Conductor { surface, .. } => {
+            if surface.is_delta() {
+                // Delta conductors use the explicit throughput path rather
+                // than this continuous BSDF-value/PDF interface.
+                return None;
+            }
             sample_ggx_vndf_reflection(n, wo, surface.roughness_alpha(), u1, u2)
         }
         Material::BrushedConductor { detail, .. } => {

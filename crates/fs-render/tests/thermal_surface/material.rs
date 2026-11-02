@@ -648,6 +648,12 @@ fn g3_optical_continuation_changes_native_conductor_response_and_rejects_substit
         .unwrap();
     let (heated, optical) = binding.at_material_state(&original, &card, &hot).unwrap();
     assert_eq!(heated.accepted_state_identity(), hot.identity());
+    let mirror = MaterialOpticalBinding::try_visible(&cold, &original, 0.0, ContentHash([29; 32])).unwrap();
+    for value in [mirror, mirror.at_material_state(&original, &card, &hot).unwrap().0] {
+        let Material::Conductor { surface, .. } = value.material() else { panic!("expected conductor"); };
+        assert!(surface.is_delta(), "optical refresh must preserve the explicit smooth surface");
+        assert_eq!(surface.roughness_alpha(), 0.0);
+    }
     let mut reflectances = Vec::new();
     for (bound, eta, k) in [(binding, 1.5_f64, 2.0_f64), (heated, 11.0 / 6.0, 8.0 / 3.0)] {
         let Material::Conductor { optics, surface } = bound.material() else {
