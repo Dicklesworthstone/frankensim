@@ -5,7 +5,11 @@
 //! conductivity, current and irreversible E.J power keep electrical units.
 //! Cellwise fields are not smoothed across material interfaces. This is a
 //! stationary, fixed-geometry, symmetric positive DC law, without induction,
-//! Hall response, dielectric storage, contact layers or field-dependent sigma.
+//! Hall response, dielectric storage or field-dependent sigma. Matching material
+//! contacts use the same operator with exact triangular voltage-jump traces.
+
+mod contact;
+pub use contact::{SpatialConductionContact, SpatialConductionContactResponse};
 
 use super::{
     ScalarBoundary, SpatialGeometry, SpatialMagneticError, dot, prepare_geometry,
@@ -23,7 +27,7 @@ use fs_material::conductor::{
 use fs_rep_mesh::TetComplex;
 use fs_solver::SolveReport;
 use fs_sparse::Csr;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 /// P1 voltage trace on one original EXTERIOR face. Values follow the mesh's
 /// sorted face vertices; adjacent traces must agree at shared vertices.
@@ -105,6 +109,14 @@ pub struct SpatialConduction<C = ResolvedConductorState> {
     conductors: Vec<C>,
     conductivity: Vec<SpatialConductivity>,
     stiffness: Csr,
+    contacts: Vec<SpatialConductionContact>,
+    contact_liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
+    contact_faces: BTreeSet<usize>,
+    contact_cells: Vec<[usize; 2]>,
+    contact_conductance_s: Vec<f64>,
+    /// Electrical connectivity includes conducting contacts between disjoint
+    /// volume complexes; the geometry itself retains its original components.
+    components: Vec<usize>,
 }
 
 impl<C: SpatialConductorMaterial> SpatialConduction<C> {
@@ -138,7 +150,12 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
-        Self::assemble(Arc::clone(&self.geometry), conductors, limits, cancelled)
+        Self::assemble(Arc::clone(&self.geometry), conductors, limits, cancelled)?.bind_contacts(
+            self.contacts.clone(),
+            self.contact_liquid_mass_fraction_axes.clone(),
+            limits,
+            cancelled,
+        )
     }
 
     fn assemble(
@@ -195,11 +212,18 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                 finite(value)?;
             }
         }
+        let components = geometry.components.clone();
         Ok(Self {
             geometry,
             conductors,
             conductivity,
             stiffness,
+            contacts: Vec::new(),
+            contact_liquid_mass_fraction_axes: Vec::new(),
+            contact_faces: BTreeSet::new(),
+            contact_cells: Vec::new(),
+            contact_conductance_s: Vec::new(),
+            components,
         })
     }
 
@@ -223,13 +247,15 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
             .faces
             .iter()
             .enumerate()
-            .filter_map(|(id, face)| (face.cells.len() == 1).then_some(id))
+            .filter_map(|(id, face)| {
+                (face.cells.len() == 1 && !self.contact_faces.contains(&id)).then_some(id)
+            })
     }
     pub fn exterior_normal(&self, face: usize) -> Option<[f64; 3]> {
         self.geometry
             .faces
             .get(face)
-            .filter(|f| f.cells.len() == 1)
+            .filter(|f| f.cells.len() == 1 && !self.contact_faces.contains(&face))
             .map(|f| f.outward_normal)
     }
     pub fn face_area_m2(&self, face: usize) -> Option<f64> {
@@ -261,6 +287,19 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                 "positive finite electrical controls and bounded face traces required",
             ));
         }
+        for face in boundary
+            .voltage
+            .iter()
+            .map(|b| b.face)
+            .chain(boundary.current.iter().map(|b| b.face))
+        {
+            check(cancelled)?;
+            if self.contact_faces.contains(&face) {
+                return Err(SpatialConductionError::Invalid(
+                    "an internal material contact cannot also be an external electrical trace",
+                ));
+            }
+        }
         let g = &self.geometry;
         let ScalarBoundary {
             prescribed,
@@ -271,7 +310,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         } = prepare_scalar_boundary_traces(
             &g.mesh,
             &g.faces,
-            &g.components,
+            &self.components,
             boundary.voltage.iter().map(|t| (t.face, t.voltage_v)),
             boundary
                 .current
@@ -349,6 +388,11 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
             current_density_a_m2.push(j);
             cell_power_w.push(power);
         }
+        let contacts = self.contact_response(&relative, cancelled)?;
+        for contact in &contacts {
+            check(cancelled)?;
+            power_w = finite(power_w + contact.power_w)?;
+        }
         let power_residual_w = finite(power_w - supplied_power_w)?;
         let hodge_power_residual_w = finite(power_w - hodge_power_w)?;
         if current_residual_a.abs() > controls.current_tolerance_a
@@ -366,7 +410,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         let voltage_v = relative
             .iter()
             .enumerate()
-            .map(|(v, &value)| finite(value + references[g.components[v]]))
+            .map(|(v, &value)| finite(value + references[self.components[v]]))
             .collect::<Result<Vec<_>>>()?;
         check(cancelled)?;
         Ok(SpatialConductionField {
@@ -374,6 +418,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
             electric_field_v_m,
             current_density_a_m2,
             cell_power_w,
+            contacts,
             power_w,
             supplied_power_w,
             nodal_boundary_current_a,
@@ -396,7 +441,11 @@ pub struct SpatialConductionField {
     pub voltage_v: Vec<f64>,
     pub electric_field_v_m: Vec<[f64; 3]>,
     pub current_density_a_m2: Vec<[f64; 3]>,
+    /// Bulk Joule heat only; surface contact heat is retained separately below.
     pub cell_power_w: Vec<f64>,
+    /// Exact contact trace work in the same canonical order as `contacts()`.
+    pub contacts: Vec<SpatialConductionContactResponse>,
+    /// Total irreversible power, including bulk and contact contributions once.
     pub power_w: f64,
     pub supplied_power_w: f64,
     pub nodal_boundary_current_a: Vec<Option<f64>>,

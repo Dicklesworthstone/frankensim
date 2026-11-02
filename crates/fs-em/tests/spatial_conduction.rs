@@ -1,5 +1,8 @@
 //! G1/G3/G4: independent 3D series, anisotropic and current-trace solutions.
 //! Manufactured source laws test implementation, not empirical material data.
+#[path = "spatial_conduction/contacts.rs"]
+mod contacts;
+
 use fs_em::{conduction::ConductionControls, spatial::conduction::*};
 use fs_evidence::ValidityDomain;
 use fs_feec::weighted::WeightedAssemblyLimits;

@@ -18,6 +18,7 @@
 //! for prescribed in-plane velocity in an imposed normal magnetic field.
 
 mod contact;
+pub(crate) use contact::admit_contact_source;
 pub use contact::{ConductionContact, ConductionContactResponse};
 pub mod motion;
 /// Memoryless source response at the actual spatial electric/current fields.

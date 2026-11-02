@@ -39,6 +39,53 @@ fn edge_key(mut vertices: [usize; 2]) -> [usize; 2] {
     vertices
 }
 
+// Planar and tetrahedral traces share the same original interface-source law.
+// Only their geometry and trace quadrature differ.
+pub(crate) fn admit_contact_source(
+    source: &ResolvedElectricalInterface,
+    axes: &[Option<String>; 2],
+) -> Result<f64, ConductionError> {
+    let mut owned: Vec<(&str, QuantitySpec)> = Vec::new();
+    for axis in axes.iter().flatten() {
+        if axis.trim().is_empty()
+            || owned.iter().any(|(previous, _)| *previous == axis.as_str())
+            || source.resolved().axis_quantities().get(axis)
+                != Some(&QuantitySpec::dimensional(Dims::NONE))
+            || !source
+                .resolved()
+                .state_coordinate(axis)
+                .is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+        {
+            return Err(ConductionError::Invalid(
+                "owned contact phase needs a unique existing dimensional mass fraction in [0,1]",
+            ));
+        }
+        owned.push((axis.as_str(), QuantitySpec::dimensional(Dims::NONE)));
+    }
+    if !source
+        .resolved()
+        .property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
+        .is_some_and(|property| {
+            if owned.is_empty() {
+                property.is_static_at_fixed_external_conditions()
+            } else {
+                property.has_only_owned_coordinates_and_fixed_external_conditions(&owned)
+            }
+        })
+    {
+        return Err(ConductionError::Invalid(
+            "contact resistance requires static source support at fixed external conditions",
+        ));
+    }
+    let resistance = source.resistance_ohm_m2();
+    if !positive(resistance) {
+        return Err(ConductionError::Invalid(
+            "positive specific contact resistance required; perfect contact needs shared mesh vertices",
+        ));
+    }
+    Ok(resistance)
+}
+
 impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     /// Assemble bulk and source-backed surface conduction in one native field.
     /// The specific contact resistance R'' [ohm m2] is divided by actual area,
@@ -228,46 +275,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                         "contact source must match both ordered adjacent material states",
                     )
                 })?;
-            let mut owned: Vec<(&str, QuantitySpec)> = Vec::new();
-            for axis in axes.iter().flatten() {
-                if axis.trim().is_empty()
-                    || owned.iter().any(|(previous, _)| *previous == axis.as_str())
-                    || contact.source.resolved().axis_quantities().get(axis)
-                        != Some(&QuantitySpec::dimensional(Dims::NONE))
-                    || !contact
-                        .source
-                        .resolved()
-                        .state_coordinate(axis)
-                        .is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(&value))
-                {
-                    return Err(ConductionError::Invalid(
-                        "owned contact phase needs a unique existing dimensional mass fraction in [0,1]",
-                    ));
-                }
-                owned.push((axis.as_str(), QuantitySpec::dimensional(Dims::NONE)));
-            }
-            if !contact
-                .source
-                .resolved()
-                .property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
-                .is_some_and(|property| {
-                    if owned.is_empty() {
-                        property.is_static_at_fixed_external_conditions()
-                    } else {
-                        property.has_only_owned_coordinates_and_fixed_external_conditions(&owned)
-                    }
-                })
-            {
-                return Err(ConductionError::Invalid(
-                    "contact resistance requires static source support at fixed external conditions",
-                ));
-            }
-            let resistance = contact.source.resistance_ohm_m2();
-            if !positive(resistance) {
-                return Err(ConductionError::Invalid(
-                    "positive specific contact resistance required; perfect contact needs shared mesh vertices",
-                ));
-            }
+            let resistance = admit_contact_source(&contact.source, axes)?;
             let area = problem.mesh.edge_measure(first_edge.global_edge).ok_or(
                 ConductionError::Invalid("contact trace lacks physical area"),
             )?;
