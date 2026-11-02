@@ -1,5 +1,7 @@
 //! Temperature-dependent contact with primary enthalpy and immutable history.
 
+pub mod pointwise;
+
 use fs_exec::Cx;
 use crate::{AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationReport,
     ConductionProblem, ThermalBoundary};
@@ -32,7 +34,10 @@ pub struct ContactEnthalpyStep {
     /// Exact secant boundary used by the final radiative enthalpy response.
     /// The separate `physical` audit uses the actual endpoint radiation law.
     pub combined_boundary: Option<ThermalBoundary>,
-    /// All radiation trials across every contact iteration, not just the last.
+    /// All outer radiation trials across every contact iteration, not just the
+    /// last. Coupled pointwise radiation uses no outer trials; its physical
+    /// reports are retained in `conduction.pointwise_radiation` or
+    /// `conduction.pointwise_enclosure_radiation`.
     pub radiation_iterations: usize,
 }
 
@@ -52,6 +57,44 @@ pub struct ContactEnthalpyNewtonConfig {
     pub residual_tolerance_j: f64,
 }
 
+fn accept_coupled_endpoint(
+    cx: &Cx<'_>,
+    solved: EnthalpyStepSolution,
+    actual: TemperatureContactEvaluation,
+    physical: EnthalpyEndpointEvaluation,
+    config: ContactEnthalpyNewtonConfig,
+) -> Result<ContactEnthalpyStep, EnthalpyError> {
+    if !physical.residual_norm_j.is_finite()
+        || physical.residual_norm_j > config.residual_tolerance_j
+        || !physical.energy_residual_j.is_finite()
+        || physical.energy_residual_j.abs() > config.step.energy_tolerance_j
+    {
+        return Err(invalid("<contact-enthalpy-newton>", format!(
+            "coupled enthalpy endpoint fails physical gates: residual {:e} J (target {:e}), energy {:e} J (target {:e})",
+            physical.residual_norm_j, config.residual_tolerance_j,
+            physical.energy_residual_j, config.step.energy_tolerance_j,
+        )).into());
+    }
+    let nonlinear_iterations = solved.newton.iterations;
+    let krylov_iterations = solved.newton.history.iter().try_fold(0usize, |work, row| {
+        work.checked_add(row.linear_iterations)
+            .ok_or(EnthalpyError::InvalidInput("contact enthalpy Krylov counter overflows"))
+    })?;
+    poll(cx, nonlinear_iterations)?;
+    Ok(ContactEnthalpyStep {
+        conduction: solved,
+        applied_contacts: actual.clone(),
+        physical_contacts: actual,
+        physical,
+        iterations: 1,
+        nonlinear_iterations,
+        krylov_iterations,
+        radiation: None,
+        combined_boundary: None,
+        radiation_iterations: 0,
+    })
+}
+
 impl TemperatureContacts<'_, '_> {
     /// Solve primary enthalpy and source-backed contact resistance together.
     ///
@@ -64,8 +107,9 @@ impl TemperatureContacts<'_, '_> {
     ///
     /// Matching and nonmatching interfaces retain their original quadrature,
     /// pinned source laws and fixed geometry/pressure. Source-domain misses
-    /// backtrack through the existing Armijo owner. Constitutive corners that
-    /// lack the contact owner's unique tangent refuse without extrapolation.
+    /// backtrack through the existing Armijo owner. Piecewise-linear resistance
+    /// curves use the owner's one-sided generalized Newton tangent at knots;
+    /// other source surfaces retain their unique-tangent admission rules.
     /// Prescribed temperatures must select unique enthalpies on their charts.
     /// No radiation or airflow feedback is added by this entry point.
     #[allow(clippy::too_many_arguments)]
@@ -85,35 +129,78 @@ impl TemperatureContacts<'_, '_> {
             cx, problem, Some(actual.frozen_interfaces()), old_h,
             &solved.specific_enthalpy_j_kg, dt_s, config.step, None,
         )?;
-        if !physical.residual_norm_j.is_finite()
-            || physical.residual_norm_j > config.residual_tolerance_j
-            || !physical.energy_residual_j.is_finite()
-            || physical.energy_residual_j.abs() > config.step.energy_tolerance_j
-        {
-            return Err(invalid("<contact-enthalpy-newton>", format!(
-                "coupled enthalpy endpoint fails physical gates: residual {:e} J (target {:e}), energy {:e} J (target {:e})",
-                physical.residual_norm_j, config.residual_tolerance_j,
-                physical.energy_residual_j, config.step.energy_tolerance_j,
-            )).into());
-        }
-        let nonlinear_iterations = solved.newton.iterations;
-        let krylov_iterations = solved.newton.history.iter().try_fold(0usize, |work, row| {
-            work.checked_add(row.linear_iterations)
-                .ok_or(EnthalpyError::InvalidInput("contact enthalpy Krylov counter overflows"))
-        })?;
-        poll(cx, nonlinear_iterations)?;
-        Ok(ContactEnthalpyStep {
-            conduction: solved,
-            applied_contacts: actual.clone(),
-            physical_contacts: actual,
-            physical,
-            iterations: 1,
-            nonlinear_iterations,
-            krylov_iterations,
-            radiation: None,
-            combined_boundary: None,
-            radiation_iterations: 0,
-        })
+        accept_coupled_endpoint(cx, solved, actual, physical, config)
+    }
+
+    /// Solve source-backed contact, local ambient radiation and primary
+    /// enthalpy together in one Newton-FGMRES system.
+    ///
+    /// The prepared radiation owner integrates `epsilon sigma (T_h^4-T_a^4)`
+    /// over the actual P1 trace and supplies its analytic tangent. Retained
+    /// emissivity, geometry and bath temperature remain fixed; original source
+    /// support applies to every surface node. Contact resistance is re-queried
+    /// at each trial's own temperatures, with its complete source derivative.
+    ///
+    /// Reference-mass storage remains active on latent plateaus. Prescribed
+    /// convection, flux and fixed-temperature reactions retain their separate
+    /// energy accounts. Acceptance reassembles the complete nodal residual and
+    /// signed external heat with both physical laws at the unchanged endpoint.
+    /// The radiation owner must borrow this exact mesh and boundary. Physical
+    /// radiation reports are in `conduction.pointwise_radiation`; no secant
+    /// boundary or outer radiation iteration is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_enthalpy_newton_with_pointwise_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+        problem: ConductionProblem<'_>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: ContactEnthalpyNewtonConfig,
+        radiation: &crate::PointwiseAmbientRadiation<'_>,
+    ) -> Result<ContactEnthalpyStep, EnthalpyError> {
+        let (solved, actual) = engine.advance_with_temperature_contacts_and_pointwise_ambient_radiation(
+            cx, problem, self, old_h, dt_s, config, radiation,
+        )?;
+        let physical = engine.evaluate_endpoint_with_pointwise_ambient_radiation(
+            cx, problem, Some(actual.frozen_interfaces()), old_h,
+            &solved.specific_enthalpy_j_kg, dt_s, config.step, radiation,
+        )?;
+        accept_coupled_endpoint(cx, solved, actual, physical, config)
+    }
+
+    /// Solve local emission, enclosure reflection and source-backed contact
+    /// together with primary enthalpy in the same bounded Newton solve.
+    ///
+    /// The original enclosure operator retains pointwise P1 emission and its
+    /// generally nonsymmetric reflected-radiation tangent. Its prepared view
+    /// factors, fixed emissivities and patch irradiation model are unchanged.
+    /// Closed-enclosure exchange and contact transfer remain internal heat;
+    /// an open enclosure retains its explicit external black bath. Local
+    /// residual acceptance still applies when the total exchanged heat is zero.
+    ///
+    /// The owner must borrow this exact mesh and boundary. Reports remain in
+    /// `conduction.pointwise_enclosure_radiation`; original convection, flux,
+    /// prescribed-node reactions and latent storage retain their own accounts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_enthalpy_newton_with_pointwise_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+        problem: ConductionProblem<'_>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: ContactEnthalpyNewtonConfig,
+        radiation: &crate::PointwiseEnclosureRadiation<'_>,
+    ) -> Result<ContactEnthalpyStep, EnthalpyError> {
+        let (solved, actual) = engine.advance_with_temperature_contacts_and_pointwise_enclosure_radiation(
+            cx, problem, self, old_h, dt_s, config, radiation,
+        )?;
+        let physical = engine.evaluate_endpoint_with_pointwise_enclosure_radiation(
+            cx, problem, Some(actual.frozen_interfaces()), old_h,
+            &solved.specific_enthalpy_j_kg, dt_s, config.step, radiation,
+        )?;
+        accept_coupled_endpoint(cx, solved, actual, physical, config)
     }
 
     /// Advance heterogeneous enthalpy with source-backed R(T_interface).
@@ -365,7 +452,9 @@ impl TemperatureContacts<'_, '_> {
         max_face_pairs: usize,
     ) -> Result<ContactEnthalpyLinearization<'m>, crate::transient::enthalpy::adjoint::EnthalpyAdjointError> {
         poll(cx, 0)?;
-        if accepted.radiation.is_some() || accepted.combined_boundary.is_some() {
+        if accepted.radiation.is_some() || accepted.combined_boundary.is_some()
+            || accepted.conduction.pointwise_radiation.is_some()
+            || accepted.conduction.pointwise_enclosure_radiation.is_some() {
             return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
                 "radiative temperature-contact enthalpy needs the radiative contact adjoint owner",
             ));

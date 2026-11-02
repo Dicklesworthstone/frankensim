@@ -20,6 +20,8 @@ struct Tangent {
     h: Vec<f64>,
     matrix: Csr,
     inverse: Vec<f64>,
+    slope: Vec<f64>,
+    radiation: Option<PointwiseBoundaryAssembly>,
 }
 
 struct CoupledProblem<'a, 'm, 'c, 'cx> {
@@ -47,7 +49,7 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
             problem: self.base.problem,
             old: self.base.old,
             dt: self.base.dt,
-            pointwise_radiation: None,
+            pointwise_radiation: self.base.pointwise_radiation,
         }
     }
 
@@ -77,6 +79,11 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
                     source: PhaseStateError::OutsideEnthalpyDomain { .. },
                     ..
                 } | EnthalpyError::Conduction(ConductionError::OutsideTemperatureSpan { .. })
+            ) || matches!(
+                &error,
+                EnthalpyError::Conduction(ConductionError::MaterialQuery { property, .. })
+                    if self.base.pointwise_radiation.is_some()
+                        && property == crate::SURFACE_EMISSIVITY_PROPERTY
             );
             (error, domain)
         };
@@ -174,6 +181,8 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
             h: h.to_vec(),
             matrix: full.assemble(),
             inverse: stage.inverse,
+            slope: stage.slope,
+            radiation: stage.radiation,
         });
         Ok(())
     }
@@ -227,7 +236,8 @@ impl NonlinearProblem for CoupledProblem<'_, '_, '_, '_> {
             return;
         }
         let tangent = self.tangent.borrow();
-        let matrix = &tangent.as_ref().expect("prepared contact tangent").matrix;
+        let tangent = tangent.as_ref().expect("prepared contact tangent");
+        let matrix = &tangent.matrix;
         for (row, value) in output.iter_mut().enumerate() {
             if row % ASSEMBLY_TILE == 0 && self.stopped() {
                 return;
@@ -238,6 +248,19 @@ impl NonlinearProblem for CoupledProblem<'_, '_, '_, '_> {
                 .zip(entries)
                 .map(|(&c, &entry)| entry * direction[c])
                 .sum();
+        }
+        if let Some(radiation) = &tangent.radiation
+            && let Err(error) = radiation.add_scaled_tangent(
+                self.base.cx,
+                direction,
+                Some(&tangent.slope),
+                self.base.dt,
+                |row| !self.base.is_prescribed(row),
+                output,
+            )
+        {
+            self.fail(error.into());
+            output.fill(f64::NAN);
         }
     }
 
@@ -269,6 +292,7 @@ impl NonlinearProblem for CoupledProblem<'_, '_, '_, '_> {
 }
 
 impl EnthalpyBackwardEuler<'_, '_> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn advance_with_temperature_contacts(
         &self,
         cx: &Cx<'_>,
@@ -277,9 +301,24 @@ impl EnthalpyBackwardEuler<'_, '_> {
         old_h: &[f64],
         dt_s: f64,
         config: ContactEnthalpyNewtonConfig,
+        pointwise_radiation: Option<PointwiseBoundary<'_>>,
     ) -> Result<(EnthalpyStepSolution, TemperatureContactEvaluation), EnthalpyError> {
         self.admit_step(cx, problem, old_h, dt_s, config.step)?;
         contacts.check_mesh(problem.mesh)?;
+        let radiation_matches = match pointwise_radiation {
+            Some(PointwiseBoundary::Ambient(owner)) => {
+                owner.matches(problem.mesh, problem.boundary)
+            }
+            Some(PointwiseBoundary::Enclosure(owner)) => {
+                owner.matches(problem.mesh, problem.boundary)
+            }
+            None => true,
+        };
+        if !radiation_matches {
+            return Err(EnthalpyError::InvalidInput(
+                "pointwise radiation must retain the exact transport mesh and boundary",
+            ));
+        }
         if config.max_residual_evaluations == 0
             || config.max_face_pairs == 0
             || !config.residual_tolerance_j.is_finite()
@@ -302,7 +341,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             interfaces: None,
             old: old_h,
             dt: dt_s,
-            pointwise_radiation: None,
+            pointwise_radiation,
         };
         let initial = base.initial_values()?;
         let coupled = CoupledProblem {

@@ -130,9 +130,56 @@ G1 tests compare spatial melting with independent eight-node enthalpy roots
 and a stiff R(T) case with an independent 60-digit scalar/matrix root inside
 source support that the frozen-contact response leaves. G4 tests exercise
 bounded residual work, chart-domain refusal and cancellation without changing
-history. This is fixed-geometry, fixed-pressure, non-radiative thermal contact;
-it asserts neither arbitrary-law convergence nor uniqueness or experimental
+history. The original entry point is fixed-geometry, fixed-pressure,
+non-radiative thermal contact; it asserts neither arbitrary-law convergence
+nor uniqueness or experimental
 validation of the synthetic constitutive fixtures.
+
+## Coupled enthalpy contact and pointwise radiation
+
+`TemperatureContacts::advance_enthalpy_newton_with_pointwise_ambient_radiation`
+and `advance_enthalpy_newton_with_pointwise_enclosure_radiation` compose the
+original local-radiation owners with source-backed contact inside one primary-
+enthalpy Newton solve. Each residual uses its actual chart-resolved P1
+surface temperatures. The complete Jacobian adds the original analytic
+radiation action, column-scaled by `dT/dh` and multiplied by `dt`, to the full
+contact/transport tangent. Reflected patch coupling remains matrix-free;
+the original positive local-emission diagonal remains the preconditioner.
+There is no outer secant-radiation response or patch-mean replacement for
+local emission.
+
+The prepared radiation owner must retain the exact mesh and current boundary.
+Fixed emissivity snapshots retain their original nodal temperature support;
+enclosure view factors and uniform patch irradiation retain the owner's
+existing model. Contact and closed-enclosure exchange are internal transfers;
+ambient/open-enclosure heat, convection, prescribed flux and fixed-temperature
+reactions keep distinct signed accounts. The unchanged endpoint is independently
+reassembled under both physical laws before local residual and energy acceptance.
+Physical pointwise reports remain in `ContactEnthalpyStep.conduction`; legacy
+outer-radiation counters and secant-boundary fields remain empty.
+
+The explicit `linearize_accepted_enthalpy_with_pointwise_ambient_radiation` and
+enclosure counterpart rebind the original accepted state, source contacts and
+radiation model before retaining one complete physical Jacobian and transpose.
+`pullback_with_pointwise_radiation_controls` uses one transpose solve for
+history, heat-source, reference-density, whole-resistance-law, emissivity and
+reservoir-temperature controls. Outward radiation contracts the negative
+incoming-load dual. Frozen contact conduction and contact-temperature feedback
+are each included once; no derivative of solver iterations is substituted.
+Geometry, view factors and source emissivity snapshots stay fixed. Accepted
+adjoints retain strict source/chart smoothness admission, including refusal
+of ambiguous source corners. The nonradiative binder rejects radiative results.
+
+G1 references manufacture immutable histories from exact triangle polynomial
+moments and analytic two-patch radiosity, then recover nonuniform latent
+endpoints with unequal reference masses, heating/cooling baths, independent
+material enthalpy offsets and separate Robin convection. A closed-enclosure
+case checks local exchange despite zero total radiative heat. Complete
+ambient/enclosure adjoints are compared with independently perturbed primal
+solves for resistance, emissivity, bath, history and source controls. G4 cases
+check exact owner binding, unsupported local source temperatures and
+cancellation without advancing history. These are numerical-model checks,
+not geometry-derived view-factor or experimental material validation.
 
 ## Primal contact tangents at tabulated source knots
 

@@ -411,7 +411,37 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         dt_s: f64,
         config: crate::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig,
     ) -> Result<(EnthalpyStepSolution, crate::interface::temperature::TemperatureContactEvaluation), EnthalpyError> {
-        self.inner.advance_with_temperature_contacts(cx, problem, contacts, old_h, dt_s, config)
+        self.inner.advance_with_temperature_contacts(cx, problem, contacts, old_h, dt_s, config, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn advance_with_temperature_contacts_and_pointwise_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        contacts: &crate::interface::temperature::TemperatureContacts<'_, '_>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: crate::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig,
+        radiation: &crate::PointwiseAmbientRadiation<'_>,
+    ) -> Result<(EnthalpyStepSolution, crate::interface::temperature::TemperatureContactEvaluation), EnthalpyError> {
+        self.inner.advance_with_temperature_contacts(cx, problem, contacts, old_h, dt_s, config,
+            Some(super::PointwiseBoundary::Ambient(radiation)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn advance_with_temperature_contacts_and_pointwise_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        contacts: &crate::interface::temperature::TemperatureContacts<'_, '_>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: crate::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig,
+        radiation: &crate::PointwiseEnclosureRadiation<'_>,
+    ) -> Result<(EnthalpyStepSolution, crate::interface::temperature::TemperatureContactEvaluation), EnthalpyError> {
+        self.inner.advance_with_temperature_contacts(cx, problem, contacts, old_h, dt_s, config,
+            Some(super::PointwiseBoundary::Enclosure(radiation)))
     }
 
     /// Evaluate one supplied physical endpoint using its assigned phase charts

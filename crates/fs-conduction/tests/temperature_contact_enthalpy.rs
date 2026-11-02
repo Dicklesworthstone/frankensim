@@ -1,6 +1,10 @@
 //! Heterogeneous phase-change contact: independent eight-node P1 references.
 #[path = "temperature_contact_enthalpy/radiation.rs"]
 mod radiation;
+#[path = "temperature_contact_enthalpy/pointwise.rs"]
+mod pointwise;
+#[path = "temperature_contact_enthalpy/pointwise_adjoint.rs"]
+mod pointwise_adjoint;
 #[path = "temperature_contact_enthalpy/adjoint.rs"]
 mod adjoint;
 use fs_alloc::{ArenaConfig, ArenaPool};
