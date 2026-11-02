@@ -22489,7 +22489,8 @@ returned cache without changing already deposited energy. Original conduction,
 authored heat, boundary events, latent storage and continuation remain native;
 late source-domain or cancellation failure publishes neither candidate.
 
-The model assumes rigid-frame, normal-incidence quasisteady harmonic acoustics,
+The default model assumes rigid-frame, normal-incidence quasisteady harmonic acoustics;
+the opt-in conserved-tangential-wavenumber mode is specified below. Both assume
 prescribed isobaric background composition and pressure, and a justified common
 gas/skeleton temperature. The authored caloric law must represent storage under
 that background. Finite gas inventory, reservoir mass transport, evolving mean
@@ -22800,3 +22801,43 @@ shared gas/composition work, latent heat, events/continuation and atomic
 refusals, plus independent direct `H C H*` spatial work and native temperature/
 energy refinement against a two-frequency RK4 reference.
 <!-- porous-covariance-feedback:end -->
+
+<!-- porous-oblique-feedback:start -->
+### Oblique porous absorption on the shared native thermal trajectory
+
+`TemperaturePorousHeating`, `PorousSpectrumHeating` and
+`PorousCrossSpectrumHeating` expose opt-in `try_new_oblique` constructors.
+A single drive supplies one conserved tangential wavenumber [rad/m]; a spectrum
+supplies one per INPUT frequency bin. Frequency canonicalization carries each
+wavenumber with its original drive/covariance, and duplicate frequencies still
+refuse. Public drive/bin literals retain their existing shape. Tangential
+wavenumbers are finite and nonnegative, including for zero incident power, and
+all original bin, cell-product, composition and cancellation budgets apply.
+
+Every frequency uses the original `PorousLayer::try_new_oblique` and existing
+stack/positive-work owners. Both normal and tangential viscous work reach the
+original native heat source; pressure-relaxation heat and the harmonic factor
+are unchanged. Covariance components at a frequency share the same tangential
+mode and one composed stack. Changed-cell gas evaluation is still shared across
+frequencies, and accepted-start deposition and endpoint refresh retain the
+original thermal timeline, per-bin diagnostics and atomic candidate semantics.
+
+The exterior tangential wavenumber and positive real NORMAL wave reference stay
+fixed during internal temperature feedback. The caller supplies a physical
+propagating exterior mode; no angle is recomputed from a changing internal gas
+speed. Full specimen area and normal thickness are unchanged. Source support,
+rigid isotropic frame, prescribed isobaric gas, common gas/skeleton temperature
+and original finite thermal mass/caloric identities remain binding. This does
+not infer angular diffusion, finite-face diffraction, anisotropy, poroelastic
+frame motion, exterior evanescence or transient acoustic storage.
+
+The native spectrum tests retain exact zero-tangent arithmetic, per-bin angle
+association, coherent/covariance equivalence, independent two-port RMS work,
+shared refresh counts and atomic refusal. The independent
+`porous_oblique_heating/refinement.rs` witness reconstructs normal and transverse
+velocities from original constitutive coefficients and interface continuity,
+checks separate volume losses against normal exterior flux, and refines the
+native temperatures, enthalpy and per-bin/local energy against independent RK4
+for two distinct frequency/angle bins. Its transverse viscous term is material,
+so replacing vector work with the normal component alone fails the witness.
+<!-- porous-oblique-feedback:end -->

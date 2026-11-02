@@ -59,7 +59,8 @@ fn poll(cancelled: &mut impl FnMut() -> bool, completed_steps: usize) -> Result<
 
 impl<'l, 'm> PorousLayerStack<'l, 'm> {
     /// Bind an admitted nonempty physical stack with one frequency, full face
-    /// area and positive real wave reference. Every original layer is retained.
+    /// area, conserved tangential wavenumber and positive real wave reference.
+    /// Every original layer is retained.
     /// Native `maximum_blocks` and `maximum_condition` bound work/feedback;
     /// reconstruction uses the native Redheffer star in every composition mode.
     /// Cancellation or refusal publishes no partial stack.
@@ -78,6 +79,7 @@ impl<'l, 'm> PorousLayerStack<'l, 'm> {
         let reference = first.two_port().reference_impedance;
         let area = first.area_m2();
         let frequency = first.material_response().angular_frequency_rad_s();
+        let tangential = first.tangential_wavenumber_rad_m();
         let mut depths_m = Vec::with_capacity(n + 1);
         depths_m.push(0.0);
         for (i, layer) in layers.iter().enumerate() {
@@ -85,9 +87,10 @@ impl<'l, 'm> PorousLayerStack<'l, 'm> {
             if layer.area_m2() != area
                 || layer.two_port().reference_impedance != reference
                 || layer.material_response().angular_frequency_rad_s() != frequency
+                || layer.tangential_wavenumber_rad_m() != tangential
             {
                 return Err(bad(
-                    "porous stack needs one full area, frequency and real wave reference",
+                    "porous stack needs one area, frequency, tangential wavenumber and real reference",
                 ));
             }
             let depth = depths_m[i] + layer.thickness_m();

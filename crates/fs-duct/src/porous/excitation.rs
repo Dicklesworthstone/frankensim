@@ -1,7 +1,9 @@
 //! Interior pressure, flow and heating from the original equivalent-fluid law.
 //!
-//! In exp(-i omega t), p'=i omega rho_eff v and v'=i omega p/K_eff.
-//! Hence -d Re(p v*)/dx / 2 = omega/2 [Im(rho_eff)|v|²
+//! In exp(-i omega t), grad(p)=i omega rho_eff v and div(v)=i omega p/K_eff.
+//! A real tangential wavenumber gives v_t=k_t*p/(omega*rho_eff), with no
+//! tangential divergence of cycle-mean intensity in the homogeneous plane.
+//! Hence -d Re(p v_n*)/dx / 2 = omega/2 [Im(rho_eff)(|v_n|²+|v_t|²)
 //! + Im(1/K_eff)|p|²]. These are viscous and thermal dissipation per TOTAL
 //! specimen volume; porosity is already in the original material coefficients.
 
@@ -14,8 +16,11 @@ use fs_math::{c64::C64, det};
 pub struct PorousLayerField {
     /// Total acoustic pressure [Pa].
     pub pressure_pa: C64,
-    /// Superficial velocity on the full face area, not pore velocity [m/s].
+    /// Normal superficial velocity on the full face area, not pore velocity [m/s].
     pub superficial_velocity_m_s: C64,
+    /// Tangential superficial velocity along the authored +k_t direction [m/s].
+    /// All fields share the omitted common in-plane phase exp(i*k_t*y).
+    pub tangential_superficial_velocity_m_s: C64,
     /// Axial volume flow [m3/s].
     pub volume_flow_m3_s: C64,
     /// Cycle-mean pore-viscous dissipation per total specimen volume [W/m3].
@@ -46,6 +51,7 @@ pub struct PorousLayerExcitation<'layer, 'material> {
     backward_right: C64,
     impedance: C64,
     wavenumber: C64,
+    tangential_admittance: C64,
     viscous_weight: f64,
     thermal_weight: f64,
 }
@@ -62,8 +68,13 @@ impl<'material> PorousLayer<'material> {
         incident_pressure_pa: [C64; 2],
     ) -> Result<PorousLayerExcitation<'_, 'material>, DuctError> {
         let boundary = self.power_for_incident_pressure(incident_pressure_pa)?;
-        let (z, k) = self.response.characteristic();
-        let impedance = z.conj();
+        let impedance = self.normal_specific_impedance;
+        let tangential_admittance = if self.tangential_wavenumber_rad_m == 0.0 {
+            C64::ZERO
+        } else {
+            C64::from_re(self.tangential_wavenumber_rad_m / self.response.angular_frequency_rad_s())
+                / self.response.dynamic_density_kg_m3().conj()
+        };
         let amplitudes = std::array::from_fn::<_, 2, _>(|i| {
             // Both face flows point into the slab: at the right face this
             // combination selects the left-travelling internal pressure.
@@ -75,6 +86,7 @@ impl<'material> PorousLayer<'material> {
         let viscous_weight = -omega_half * self.response.dynamic_density_kg_m3().im;
         let thermal_weight = -omega_half * self.response.dynamic_bulk_modulus_pa().recip().im;
         if !amplitudes.into_iter().all(finite)
+            || !finite(tangential_admittance)
             || [viscous_weight, thermal_weight]
                 .into_iter()
                 .any(|v| !v.is_finite() || v < 0.0)
@@ -89,7 +101,8 @@ impl<'material> PorousLayer<'material> {
             forward_left: amplitudes[0],
             backward_right: amplitudes[1],
             impedance,
-            wavenumber: k.conj(),
+            wavenumber: self.normal_wavenumber,
+            tangential_admittance,
             viscous_weight,
             thermal_weight,
         })
@@ -126,10 +139,18 @@ impl<'layer, 'material> PorousLayerExcitation<'layer, 'material> {
             self.backward_right * travel(self.wavenumber, self.layer.thickness_m - depth_m)?;
         let pressure = forward + backward;
         let velocity = (forward - backward) / self.impedance;
+        let tangential = pressure * self.tangential_admittance;
         let flow = velocity.scale(self.layer.area_m2);
-        let viscous = self.viscous_weight * velocity.norm_sq();
+        let viscous = self.viscous_weight
+            * if self.layer.tangential_wavenumber_rad_m == 0.0 {
+                velocity.norm_sq()
+            } else {
+                velocity.norm_sq() + tangential.norm_sq()
+            };
         let thermal = self.thermal_weight * pressure.norm_sq();
-        if ![pressure, velocity, flow].into_iter().all(finite)
+        if ![pressure, velocity, tangential, flow]
+            .into_iter()
+            .all(finite)
             || !viscous.is_finite()
             || !thermal.is_finite()
         {
@@ -138,6 +159,7 @@ impl<'layer, 'material> PorousLayerExcitation<'layer, 'material> {
         Ok(PorousLayerField {
             pressure_pa: pressure,
             superficial_velocity_m_s: velocity,
+            tangential_superficial_velocity_m_s: tangential,
             volume_flow_m3_s: flow,
             viscous_dissipation_w_m3: viscous,
             thermal_dissipation_w_m3: thermal,
@@ -177,8 +199,12 @@ impl<'layer, 'material> PorousLayerExcitation<'layer, 'material> {
         let sum = forward + backward;
         let difference = forward - backward;
         let pressure_integral = plus * sum.norm_sq() + minus * difference.norm_sq();
-        let velocity_integral = minus * (sum / self.impedance).norm_sq()
+        let mut velocity_integral = minus * (sum / self.impedance).norm_sq()
             + plus * (difference / self.impedance).norm_sq();
+        if self.layer.tangential_wavenumber_rad_m != 0.0 {
+            velocity_integral += plus * (sum * self.tangential_admittance).norm_sq()
+                + minus * (difference * self.tangential_admittance).norm_sq();
+        }
         let viscous = self.layer.area_m2 * (self.viscous_weight * velocity_integral);
         let thermal = self.layer.area_m2 * (self.thermal_weight * pressure_integral);
         let absorbed = viscous + thermal;

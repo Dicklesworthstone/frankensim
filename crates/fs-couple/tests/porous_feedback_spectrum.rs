@@ -13,6 +13,9 @@ use fs_thermal::enthalpy::*;
 #[path = "porous_feedback_spectrum/refinement.rs"]
 mod refinement;
 
+#[path = "porous_feedback_spectrum/oblique.rs"]
+mod oblique;
+
 const AREA: f64 = 0.003_906_25;
 const LENGTHS: [f64; 2] = [0.031_25, 0.046_875];
 const CP: f64 = 200.0;

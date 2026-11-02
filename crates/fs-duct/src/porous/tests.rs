@@ -5,6 +5,8 @@ use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::porous::PorousCard;
 
+mod oblique;
+
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
 }

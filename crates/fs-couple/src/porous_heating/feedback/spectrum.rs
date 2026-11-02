@@ -148,6 +148,42 @@ impl<'a> PorousSpectrumHeating<'a> {
         gas: IsobaricPorousGas<'a>,
         bins: &[PorousHarmonicDrive],
         options: PorousSpectrumOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(thermal, cells, gas, bins, None, options, checkpoint)
+    }
+
+    /// Resolve one conserved real tangential wavenumber [rad/m] per input bin.
+    /// The slice has exactly the input bin order, BEFORE canonical frequency
+    /// sorting; each drive retains its own normal exterior wave reference.
+    /// Both quantities remain fixed through native temperature feedback.
+    pub fn try_new_oblique(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        bins: &[PorousHarmonicDrive],
+        tangential_wavenumbers_rad_m: &[f64],
+        options: PorousSpectrumOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(
+            thermal,
+            cells,
+            gas,
+            bins,
+            Some(tangential_wavenumbers_rad_m),
+            options,
+            checkpoint,
+        )
+    }
+
+    fn prepare(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        bins: &[PorousHarmonicDrive],
+        tangential: Option<&[f64]>,
+        options: PorousSpectrumOptions,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
         checkpoint()?;
@@ -167,6 +203,17 @@ impl<'a> PorousSpectrumHeating<'a> {
         {
             return Err(DepositionError::Budget("porous spectrum cells and frequencies").into());
         }
+        if let Some(values) = tangential {
+            if values.len() != bins.len() {
+                return Err(PorousHeatingError::Invalid(
+                    "one tangential wavenumber per frequency required",
+                ));
+            }
+            for &value in values {
+                checkpoint()?;
+                admit_tangential_wavenumber(value)?;
+            }
+        }
         for &drive in bins {
             checkpoint()?;
             admit_drive(drive)?;
@@ -176,14 +223,18 @@ impl<'a> PorousSpectrumHeating<'a> {
                 ));
             }
         }
-        let mut drives = bins.to_vec();
+        let mut drives: Vec<_> = bins
+            .iter()
+            .enumerate()
+            .map(|(i, &drive)| (drive, tangential.map_or(0.0, |values| values[i])))
+            .collect();
         drives.sort_by(|a, b| {
-            a.angular_frequency_rad_s
-                .total_cmp(&b.angular_frequency_rad_s)
+            a.0.angular_frequency_rad_s
+                .total_cmp(&b.0.angular_frequency_rad_s)
         });
         if drives
             .windows(2)
-            .any(|pair| pair[0].angular_frequency_rad_s == pair[1].angular_frequency_rad_s)
+            .any(|pair| pair[0].0.angular_frequency_rad_s == pair[1].0.angular_frequency_rad_s)
         {
             return Err(PorousHeatingError::Invalid(
                 "duplicate frequency: combine coherent phasors in one authored bin",
@@ -195,13 +246,14 @@ impl<'a> PorousSpectrumHeating<'a> {
             states.push(gas.evaluate(thermal.temperature_k(cell.cell)?)?);
         }
         let mut prepared = Vec::with_capacity(drives.len());
-        for drive in drives {
+        for (drive, tangential) in drives {
             checkpoint()?;
             prepared.push(TemperaturePorousHeating::prepare(
                 thermal,
                 cells,
                 gas,
                 drive,
+                tangential,
                 options.composition,
                 Some(&states),
                 &mut checkpoint,

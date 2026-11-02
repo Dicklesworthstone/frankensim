@@ -7,8 +7,9 @@
 //! flow is superficial velocity times the FULL exposed face area, with no
 //! additional porosity factor. All port phasors use exp(-i omega t).
 //!
-//! This is a homogeneous, normally incident equivalent-fluid layer with a
-//! motionless frame and open-pore pressure/volume-flow continuity. The caller
+//! This is a homogeneous isotropic equivalent-fluid layer with a motionless
+//! frame and open-pore pressure/normal-volume-flow continuity. Oblique plane
+//! waves retain one real tangential wavenumber across parallel layers. The caller
 //! must justify the plane-wave and rigid-frame regimes and retain the source
 //! support. Finite lateral diffraction, frame waves, contact skins, mean flow,
 //! anisotropy and transient temperature evolution are outside this adapter.
@@ -43,6 +44,9 @@ pub struct PorousLayer<'a> {
     response: PorousFluidResponse,
     thickness_m: f64,
     area_m2: f64,
+    tangential_wavenumber_rad_m: f64,
+    normal_wavenumber: C64,
+    normal_specific_impedance: C64,
     two_port: TwoPort,
 }
 
@@ -89,16 +93,74 @@ impl<'a> PorousLayer<'a> {
         area_m2: f64,
         reference_impedance: f64,
     ) -> Result<Self, FluidDuctError> {
+        Self::try_new_oblique(
+            material,
+            fluid,
+            omega,
+            thickness_m,
+            area_m2,
+            reference_impedance,
+            0.0,
+        )
+    }
+
+    /// Prepare an oblique plane wave with conserved real `k_t >= 0` [rad/m].
+    /// The normal propagation constant is `q=sqrt(k²-k_t²)` on the forward-
+    /// decaying branch, and normal specific impedance is `omega*rho_eff/q`.
+    /// This is the isotropic motionless-frame plane-wave construction used in
+    /// Sgard, Atalla and Robin (2024), section 2.2.1,
+    /// <https://doi.org/10.3389/facou.2024.1414356>. Interior heating includes
+    /// both normal and tangential superficial velocity; multiplying a normal-
+    /// incidence absorption coefficient by a geometric cosine is insufficient.
+    ///
+    /// Area and thickness are measured on/normal to the specimen face, not
+    /// along the slanted ray. For a physical propagating exterior plane wave,
+    /// supply its NORMAL reference `rho_0*omega/(q_0*area)` with
+    /// `q_0=sqrt((omega/c_0)²-k_t²)>0`. This reference and `k_t` must describe
+    /// both exterior faces. Internally evanescent normal waves are admitted;
+    /// exact `q=0` is a singular modal normalization and is refused. The zero
+    /// tangential limit preserves the original normal-incidence arithmetic.
+    pub fn try_new_oblique<M: ThermoviscousFluid + ?Sized>(
+        material: &'a PorousFluidLaw,
+        fluid: &M,
+        omega: f64,
+        thickness_m: f64,
+        area_m2: f64,
+        reference_impedance: f64,
+        tangential_wavenumber_rad_m: f64,
+    ) -> Result<Self, FluidDuctError> {
         if !thickness_m.is_finite() || thickness_m <= 0.0 || !area_m2.is_finite() || area_m2 <= 0.0
         {
             return Err(
                 bad("porous layer needs positive finite thickness and full face area").into(),
             );
         }
+        if !tangential_wavenumber_rad_m.is_finite() || tangential_wavenumber_rad_m < 0.0 {
+            return Err(bad("porous tangential wavenumber must be finite and nonnegative").into());
+        }
         TwoPort::through(reference_impedance)?;
         let response = material.effective_fluid(fluid, omega)?;
         let (specific, wavenumber) = response.characteristic();
-        let specific = specific.conj();
+        let mut specific = specific.conj();
+        let mut wavenumber = wavenumber.conj();
+        if tangential_wavenumber_rad_m != 0.0 {
+            // Scale before squaring: k² and k_t² can overflow even when q is
+            // representable. Factoring the difference also retains cutoff
+            // accuracy without subtracting two independently rounded squares.
+            let scale = wavenumber
+                .re
+                .abs()
+                .max(wavenumber.im.abs())
+                .max(tangential_wavenumber_rad_m);
+            let k = C64::new(wavenumber.re / scale, wavenumber.im / scale);
+            let t = C64::from_re(tangential_wavenumber_rad_m / scale);
+            let q = ((k - t) * (k + t)).sqrt().scale(scale);
+            if !finite(q) || q.abs() == 0.0 || q.im < 0.0 || q.re < 0.0 {
+                return Err(bad("porous normal wavenumber is singular or unrepresentable").into());
+            }
+            specific = specific * (wavenumber / q);
+            wavenumber = q;
+        }
         let characteristic = specific.scale(1.0 / area_m2);
         // Uniform plane-wave propagation depends only on area. This equivalent
         // radius supplies that area to the original cylindrical wave owner;
@@ -120,7 +182,7 @@ impl<'a> PorousLayer<'a> {
                 length: thickness_m,
             },
             &SegmentWave {
-                wavenumber: wavenumber.conj(),
+                wavenumber,
                 characteristic_impedance: characteristic,
                 specific_impedance: specific,
                 // Pore losses belong to JCA(L), not an additional tube model.
@@ -133,6 +195,13 @@ impl<'a> PorousLayer<'a> {
             response,
             thickness_m,
             area_m2,
+            tangential_wavenumber_rad_m: if tangential_wavenumber_rad_m == 0.0 {
+                0.0
+            } else {
+                tangential_wavenumber_rad_m
+            },
+            normal_wavenumber: wavenumber,
+            normal_specific_impedance: specific,
             two_port,
         })
     }
@@ -148,6 +217,19 @@ impl<'a> PorousLayer<'a> {
     }
     pub const fn area_m2(&self) -> f64 {
         self.area_m2
+    }
+
+    /// Conserved real tangential wavenumber [rad/m], zero at normal incidence.
+    pub const fn tangential_wavenumber_rad_m(&self) -> f64 {
+        self.tangential_wavenumber_rad_m
+    }
+    /// Forward-decaying normal wavenumber in the exp(-i omega t) convention.
+    pub const fn normal_wavenumber_rad_m(&self) -> C64 {
+        self.normal_wavenumber
+    }
+    /// Pressure divided by normal superficial velocity [Pa s/m].
+    pub const fn normal_specific_impedance_pa_s_m(&self) -> C64 {
+        self.normal_specific_impedance
     }
 
     /// Existing stable pressure/volume-flow block, suitable for duct chains,

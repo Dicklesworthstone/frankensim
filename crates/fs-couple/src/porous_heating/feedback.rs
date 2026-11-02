@@ -129,6 +129,7 @@ pub struct TemperaturePorousHeating<'a> {
     cells: Vec<PorousTemperatureCell<'a>>,
     gas: IsobaricPorousGas<'a>,
     drive: PorousHarmonicDrive,
+    tangential_wavenumber_rad_m: f64,
     options: ComposeOptions,
     states: Vec<GasState>,
     layers: Vec<PorousLayer<'a>>,
@@ -176,6 +177,16 @@ fn acoustic<T>(
     }
 }
 
+fn admit_tangential_wavenumber(value: f64) -> Result<(), PorousHeatingError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(PorousHeatingError::Invalid(
+            "porous tangential wavenumber must be finite and nonnegative",
+        ))
+    }
+}
+
 impl<'a> TemperaturePorousHeating<'a> {
     /// Bind the complete ordered specimen and evaluate its actual initial
     /// temperatures. Every cell becomes one original porous acoustic sublayer.
@@ -189,23 +200,52 @@ impl<'a> TemperaturePorousHeating<'a> {
         gas: IsobaricPorousGas<'a>,
         drive: PorousHarmonicDrive,
         options: ComposeOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::try_new_oblique(thermal, cells, gas, drive, 0.0, options, checkpoint)
+    }
+
+    /// Bind an oblique plane-wave drive to the same native thermal specimen.
+    /// `k_t` [rad/m] and the drive's NORMAL exterior wave reference stay fixed
+    /// while internal gas temperature changes. The caller supplies a physical
+    /// propagating exterior mode; original normal thickness/full area apply.
+    /// Each layer retains its normal and transverse viscous absorption.
+    pub fn try_new_oblique(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        drive: PorousHarmonicDrive,
+        tangential_wavenumber_rad_m: f64,
+        options: ComposeOptions,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
-        Self::prepare(thermal, cells, gas, drive, options, None, &mut checkpoint)
+        Self::prepare(
+            thermal,
+            cells,
+            gas,
+            drive,
+            tangential_wavenumber_rad_m,
+            options,
+            None,
+            &mut checkpoint,
+        )
     }
 
     // Spectral bins share gas evaluations while retaining the same original
     // single-frequency preparation and complete physical thermal admission.
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
         gas: IsobaricPorousGas<'a>,
         drive: PorousHarmonicDrive,
+        tangential_wavenumber_rad_m: f64,
         options: ComposeOptions,
         shared_states: Option<&[GasState]>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
         checkpoint()?;
+        admit_tangential_wavenumber(tangential_wavenumber_rad_m)?;
         if cells.is_empty()
             || cells.len() > MAX_POROUS_HEATING_CELLS
             || cells.len() > options.maximum_blocks
@@ -234,13 +274,14 @@ impl<'a> TemperaturePorousHeating<'a> {
             } else {
                 gas.evaluate(thermal.temperature_k(cell.cell)?)?
             };
-            layers.push(PorousLayer::try_new(
+            layers.push(PorousLayer::try_new_oblique(
                 cell.material,
                 &state,
                 drive.angular_frequency_rad_s,
                 length,
                 drive.area_m2,
                 drive.reference_impedance_pa_s_m3,
+                tangential_wavenumber_rad_m,
             )?);
             states.push(state);
             partitions.push([PorousHeatCell {
@@ -285,6 +326,11 @@ impl<'a> TemperaturePorousHeating<'a> {
             cells: cells.to_vec(),
             gas,
             drive,
+            tangential_wavenumber_rad_m: if tangential_wavenumber_rad_m == 0.0 {
+                0.0
+            } else {
+                tangential_wavenumber_rad_m
+            },
             options,
             states,
             layers,
@@ -312,6 +358,10 @@ impl<'a> TemperaturePorousHeating<'a> {
     /// Original coherent pressure drive and FIXED exterior normalization.
     pub const fn drive(&self) -> PorousHarmonicDrive {
         self.drive
+    }
+    /// Fixed conserved tangential wavenumber of this physical frequency [rad/m].
+    pub const fn tangential_wavenumber_rad_m(&self) -> f64 {
+        self.tangential_wavenumber_rad_m
     }
     /// Current physical work, after coherent illumination from both exteriors.
     pub const fn dissipation(&self) -> PorousLayerDissipation {
@@ -359,13 +409,14 @@ impl<'a> TemperaturePorousHeating<'a> {
         }
         for &(i, state) in changed {
             checkpoint()?;
-            let layer = PorousLayer::try_new(
+            let layer = PorousLayer::try_new_oblique(
                 self.cells[i].material,
                 &state,
                 self.drive.angular_frequency_rad_s,
                 self.layers[i].thickness_m(),
                 self.drive.area_m2,
                 self.drive.reference_impedance_pa_s_m3,
+                self.tangential_wavenumber_rad_m,
             )?;
             self.states[i] = state;
             self.layers[i] = layer;

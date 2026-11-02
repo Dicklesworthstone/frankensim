@@ -9,7 +9,7 @@
 //! instead combine phasors or include their cross correlation. This is a
 //! stationary ensemble/long-time mean, not finite-time beating, noise-driven
 //! thermal fluctuations or acoustic transients. All original isobaric gas,
-//! rigid-frame, normal-incidence and thermally lumped storage assumptions apply.
+//! rigid-frame, parallel plane-wave and thermally lumped storage assumptions apply.
 
 use super::spectrum::{
     MAX_POROUS_SPECTRUM_BINS, MAX_POROUS_SPECTRUM_CELL_BINS, PorousSpectrumOptions,
@@ -35,6 +35,7 @@ pub struct PorousCovarianceBin {
 #[derive(Clone)]
 struct BinResponse<'a> {
     layers: Vec<PorousLayer<'a>>,
+    tangential_wavenumber_rad_m: f64,
     heat: PreparedHeat,
 }
 
@@ -138,6 +139,42 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
         gas: IsobaricPorousGas<'a>,
         bins: &[PorousCovarianceBin],
         options: PorousSpectrumOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(thermal, cells, gas, bins, None, options, checkpoint)
+    }
+
+    /// Attach one conserved real tangential wavenumber [rad/m] to each INPUT
+    /// frequency bin before canonical sorting. Both covariance components use
+    /// that same spatial mode. The fixed real reference is the exterior normal
+    /// pressure/volume-flow wave impedance; all original area/storage rules apply.
+    pub fn try_new_oblique(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        bins: &[PorousCovarianceBin],
+        tangential_wavenumbers_rad_m: &[f64],
+        options: PorousSpectrumOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(
+            thermal,
+            cells,
+            gas,
+            bins,
+            Some(tangential_wavenumbers_rad_m),
+            options,
+            checkpoint,
+        )
+    }
+
+    fn prepare(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        bins: &[PorousCovarianceBin],
+        tangential: Option<&[f64]>,
+        options: PorousSpectrumOptions,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
         checkpoint()?;
@@ -159,6 +196,17 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                 DepositionError::Budget("porous cross-spectrum cells and frequencies").into(),
             );
         }
+        if let Some(values) = tangential {
+            if values.len() != bins.len() {
+                return Err(PorousHeatingError::Invalid(
+                    "one tangential wavenumber per covariance frequency required",
+                ));
+            }
+            for &value in values {
+                checkpoint()?;
+                admit_tangential_wavenumber(value)?;
+            }
+        }
         for bin in bins {
             checkpoint()?;
             if ![
@@ -175,14 +223,18 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                 ));
             }
         }
-        let mut bins = bins.to_vec();
-        bins.sort_by(|a, b| {
-            a.angular_frequency_rad_s
-                .total_cmp(&b.angular_frequency_rad_s)
+        let mut ordered: Vec<_> = bins
+            .iter()
+            .enumerate()
+            .map(|(i, &bin)| (bin, tangential.map_or(0.0, |values| values[i])))
+            .collect();
+        ordered.sort_by(|a, b| {
+            a.0.angular_frequency_rad_s
+                .total_cmp(&b.0.angular_frequency_rad_s)
         });
-        if bins
+        if ordered
             .windows(2)
-            .any(|p| p[0].angular_frequency_rad_s == p[1].angular_frequency_rad_s)
+            .any(|p| p[0].0.angular_frequency_rad_s == p[1].0.angular_frequency_rad_s)
         {
             return Err(PorousHeatingError::Invalid(
                 "duplicate frequency: author one total covariance per frequency",
@@ -194,7 +246,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
             states.push(gas.evaluate(thermal.temperature_k(cell.cell)?)?);
         }
         let mut responses = Vec::with_capacity(bins.len());
-        for bin in &bins {
+        for &(bin, tangential) in &ordered {
             let mut layers = Vec::with_capacity(cells.len());
             let mut partitions = Vec::with_capacity(cells.len());
             for (cell, state) in cells.iter().zip(&states) {
@@ -206,13 +258,14 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                 let length = finite(norm(std::array::from_fn(|i| {
                     original.geometry.end_m[i] - original.geometry.start_m[i]
                 })))?;
-                layers.push(PorousLayer::try_new(
+                layers.push(PorousLayer::try_new_oblique(
                     cell.material,
                     state,
                     bin.angular_frequency_rad_s,
                     length,
                     bin.area_m2,
                     bin.reference_impedance_pa_s_m3,
+                    tangential,
                 )?);
                 partitions.push([PorousHeatCell {
                     cell: cell.cell,
@@ -252,7 +305,11 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                 component_heat(&mut heat, &fields, &mut checkpoint)?;
                 heat
             };
-            responses.push(BinResponse { layers, heat });
+            responses.push(BinResponse {
+                layers,
+                heat,
+                tangential_wavenumber_rad_m: if tangential == 0.0 { 0.0 } else { tangential },
+            });
         }
         let mut heat = responses[0].heat.clone();
         sum_heat_sources(
@@ -262,7 +319,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
         )?;
         checkpoint()?;
         Ok(Self {
-            bins,
+            bins: ordered.into_iter().map(|(bin, _)| bin).collect(),
             responses,
             states,
             gas,
@@ -274,6 +331,12 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
     /// Original covariance bins in increasing physical frequency order.
     pub fn bins(&self) -> &[PorousCovarianceBin] {
         &self.bins
+    }
+    /// Conserved tangential wavenumber of a canonically ordered bin [rad/m].
+    pub fn tangential_wavenumber_rad_m(&self, index: usize) -> Option<f64> {
+        self.responses
+            .get(index)
+            .map(|response| response.tangential_wavenumber_rad_m)
     }
     /// Common native physical heat cells with all positive bin/component watts.
     pub fn cells(&self) -> &[PorousCellHeating] {
@@ -329,13 +392,14 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
         for (bin, response) in self.bins.iter().zip(&mut self.responses) {
             for &i in &changed {
                 checkpoint()?;
-                response.layers[i] = PorousLayer::try_new(
+                response.layers[i] = PorousLayer::try_new_oblique(
                     response.layers[i].material(),
                     &self.states[i],
                     bin.angular_frequency_rad_s,
                     response.layers[i].thickness_m(),
                     bin.area_m2,
                     bin.reference_impedance_pa_s_m3,
+                    response.tangential_wavenumber_rad_m,
                 )?;
             }
             let stack = acoustic(checkpoint, |cancelled| {

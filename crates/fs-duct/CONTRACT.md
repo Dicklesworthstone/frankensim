@@ -2611,8 +2611,9 @@ coherent node heating, and cover zero thermal coupling, exposed-area scaling,
 opaque layers, zero drive and depth refusal.
 
 The layer is homogeneous, rigid-frame and plane-wave, with open-pore pressure
-and volume-flow continuity. Moving frames, finite-face diffraction, oblique
-incidence, skins/interface resistances, anisotropy and mean flow need their own
+and normal volume-flow continuity. The opt-in oblique equivalent-fluid mode is
+specified below. Moving frames, finite-face diffraction, skins/interface
+resistances, anisotropy and mean flow need their own
 admitted owners. `porous/tests.rs` independently solves interface continuity,
 checks coherent absorbed power against the original viscous/thermal volume-loss
 integral, composes split layers and an actual fluid air gap, recovers the existing
@@ -2623,7 +2624,7 @@ rigid-backed material impedance, and exercises thin/opaque limits and refusal.
 `porous::PorousLayerStack` retains an ordered nonempty slice of original
 `PorousLayer` objects, including each material and saturating-fluid response.
 All layers must have exactly the same admitted angular frequency, full face
-area and positive real pressure/flow wave reference. Native `ComposeOptions`
+area, conserved tangential wavenumber and positive real pressure/flow wave reference. Native `ComposeOptions`
 bound layer count and feedback conditioning before publication. Preparation is
 O(layers) in time/storage and is cancellable during admission, composition and
 local-drive reconstruction. Unrepresentable total depth refuses.
@@ -2876,3 +2877,45 @@ remain authoritative. Three focused groups cover strict PSD refusals, weak and
 extreme-scale factors, an independent four-phase ensemble of original fields
 and powers, angular weighting and exact coherent-witness parity.
 <!-- porous-pressure-covariance:end -->
+
+<!-- porous-oblique:start -->
+### Conserved oblique modes in the original porous layers
+
+`PorousLayer::try_new_oblique` adds one finite nonnegative tangential wavenumber
+`k_t` [rad/m] to the original isotropic equivalent-fluid layer. In the native
+`exp(-i omega t)` convention it uses the forward decaying normal wavenumber
+`q = sqrt(k_bulk^2 - k_t^2)` and normal specific impedance
+`Z_n = omega rho_eff / q`. The original stable scattering, interface maps and
+analytic cell integrals retain normal thickness and full physical face area.
+A common `k_t` is required at every parallel interface. The square-root argument
+is scaled and factored; internally evanescent modes are admitted, while exact
+zero or unrepresentable normal wavenumber refuses. The zero-tangent branch
+retains the original normal-incidence arithmetic exactly.
+
+The fixed positive real port reference describes an exterior propagating mode's
+pressure divided by NORMAL volume flow: for a lossless exterior it is
+`rho_0 omega / (q_0 area) = rho_0 c_0 / (area cos(theta))`, with `q_0 > 0`.
+The caller supplies that physical reference and conserved tangential wavenumber;
+the abstract positive reference alone does not certify an exterior medium.
+Exterior grazing/evanescent excitation is not inferred from real power waves.
+
+Prepared fields expose normal and tangential superficial velocity. The latter
+is `v_t = k_t p / (omega rho_eff)`, and positive viscous work contains BOTH
+`|v_n|^2` and `|v_t|^2`; bulk relaxation remains proportional to `|p|^2`.
+The original positive analytic pressure integral also supplies transverse
+viscous work, without spatial quadrature, boundary-deficit heating or another
+material query. Repeated field/cell queries allocate nothing. Coherent and
+partially coherent stack excitation share this same owner and spatial mode.
+
+`porous/tests/oblique.rs` checks independent interface-continuity reflection
+and transmission, independently reconstructed vector-velocity volume loss,
+normal flux closure, exact normal-limit parity, opaque and internally
+evanescent layers, and mode-domain refusal. The derivation follows linear
+isotropic momentum/continuity; the oblique equivalent-fluid setting is also
+summarized by Sgard, Atalla and Robin (2024), section 2.2.1,
+[doi:10.3389/facou.2024.1414356](https://doi.org/10.3389/facou.2024.1414356).
+This is a laterally homogeneous rigid-frame slab mode. Moving-frame coupling,
+anisotropy, finite-face diffraction and a diffuse-angle quadrature remain
+outside this owner. Viscous versus relaxation work does not identify the
+separate fluid and skeleton thermal stores.
+<!-- porous-oblique:end -->
