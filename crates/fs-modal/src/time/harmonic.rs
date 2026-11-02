@@ -9,8 +9,10 @@ use fs_math::det;
 
 mod affine;
 mod integrals;
+mod modulation;
 mod runtime;
 mod tones;
+pub use modulation::ToneModulationStep;
 pub use runtime::PreparedModalHarmonic;
 pub use tones::{MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalTones};
 

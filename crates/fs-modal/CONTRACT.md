@@ -685,3 +685,31 @@ incomplete nullspaces, factor/border budgets and cancellation. This remains an
 instantaneous fixed-frame update; it does not infer support impulses, finite
 rotations, remeshing or constitutive-history transfer.
 
+
+## Phase-continuous prescribed frequency modulation
+
+`time::harmonic::ToneModulationStep` prepares one immutable, allocation-free
+proposal for a force with linearly varying instantaneous frequency and signed
+gain. It integrates the desired source phase and supplies four endpoint
+coefficients to the existing affine tone propagator, all in the same
+interval-start carrier basis. `advance_force_phase` advances the unscaled
+source through zero gain, release and re-attack only when the caller accepts
+the complete physical/observation step. No natural mode, material parameter,
+mechanical state or receiver memory is retuned or reset.
+
+The fixed-carrier affine reconstruction has a dimensionless complex-envelope
+error bound from `h^2 sup |z''|/8`; callers multiply it by their original force
+coefficient norm and admit an explicit physical error allowance. Frequency,
+gain and interval inputs and all resulting phases/bounds must be finite and
+representable. Source users retain the original clock's frequency guard and
+bandwidth obligations. This is exact propagation of a reconstructed force,
+with second-order approximation to the prescribed chirp; the estimate does
+not enclose floating-point roundoff or certify bandlimiting. String retuning
+still requires the physical tension/geometry owner.
+
+`tests/tone_modulation.rs` checks signed-gain/DC phase and envelope bounds,
+zero-detuning parity, 1,000 silent phase advances followed by re-attack,
+invalid/overflow refusals, and a 32/64/128 interval chirp crossing resonance
+against an independently integrated physical ODE. Displacement, velocity,
+signed input work and positive heat each converge at second order while the
+existing reconstructed-force energy account closes.
