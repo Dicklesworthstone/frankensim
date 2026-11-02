@@ -1,5 +1,57 @@
 # CONTRACT: fs-couple
 
+## Nonlinear resonance branches through the original pHS
+
+`phs_orbit::continue_forced_frequency_response` connects the complete original
+port-Hamiltonian ODE to fs-orbit's existing forced pseudo-arclength continuation.
+The continuation parameter and forcing fundamental are the same angular
+frequency. Original DC inputs, complex multiport Fourier amplitudes and relative
+phases remain fixed; no modal coupling, resistance or material-memory coordinate
+is removed. This traverses frequency folds rather than restarting isolated
+frequency solves. It preserves native branch order, which can reverse frequency,
+and the terminal accepted point may pass the requested end frequency.
+
+Each `PhsFrequencyResponsePoint` carries the unmodified native continuation
+point, including original-state Fourier coefficients, residual, AFT sampling
+defect and step size, plus an independent `PhsOrbitAudit` at that point's accepted
+frequency. The audit uses the original Hamiltonian, port work and full resistance
+matrix. Invalid endpoints, work settings, physical port shape, unresolved
+authored forcing, source refusal or continuation exhaustion return an error
+without a partial branch. Authored bandwidth is admitted before source sampling.
+
+The retained harmonic order is fixed along one branch. AFT refinement checks
+retained-row sampling, not missing response harmonics; callers must repeat
+retained orders and physical-audit quadratures to measure convergence. Cycle
+power balance does not establish waveform completeness or Floquet stability.
+The branch can include unstable periodic orbits; no physical jump threshold or
+hysteresis width is certified by continuation alone. This synchronous path uses
+the native step/Newton/AFT budgets and 32..=65536 audit samples, and has no
+cooperative cancellation hook or time integrator.
+
+Focused regressions cover analytic complex multiport response across linear
+resonance, DC and higher forcing harmonics, original work, Maxwell memory and
+frequency-dependent loss, both folds of a cubic-storage response with generated
+higher harmonics, admission before source evaluation, and source refusal.
+
+## Continuous physical impedance on accepted loaded assemblies
+
+`assembly_harmonic::PreparedAssemblyMimoHarmonicResponse` borrows the original
+admitted `PreparedMimoLoad`, enforces its continuous source band, and evaluates
+the original proper rational matrix at `s=-i*omega`. It attaches the full self
+and mutual load through `AssemblyHarmonicPorts`, retaining the accepted body's
+original M/K, glue C, physical force/flow maps and static loaded mean shape.
+Reused frequency factors return full component perturbations and external
+reaction forces. Independently reconstructed physical input, glue loss and
+external load work must balance.
+
+The original source clock, accepted pole history, port ordering and both
+passivity report classes remain unchanged. No fitting, sampled-transfer
+substitution, acoustic surface, external storage/heat or broadband certificate
+is inferred. The focused MIMO test covers the analytic two-port Maxwell source,
+Fourier axis, original band, resource/cancellation refusals and unchanged
+history/reports. Loaded-shell port regressions separately cover resonance,
+nonmatching ties, physical reaction work and mutual-load falsifiers.
+
 ## Finite load-resistor feedback on three-dimensional winding histories
 
 `SpatialWindingThermalNetwork::step_material_candidate` binds every ordinary

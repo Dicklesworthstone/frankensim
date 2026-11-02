@@ -9,6 +9,9 @@ use fs_exec::Cx;
 use fs_math::c64::C64;
 use fs_modal::harmonic::{HarmonicResponse, HarmonicResponseControls, PreparedHarmonicResponse};
 
+/// Frequency-dependent loads at original work-conjugate physical attachments.
+pub mod ports;
+
 /// Cold projection limits, independent of each frequency factor's controls.
 #[derive(Clone, Copy, Debug)]
 pub struct AssemblyHarmonicBudget {

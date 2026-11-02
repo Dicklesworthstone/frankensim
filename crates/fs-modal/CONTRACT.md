@@ -120,6 +120,32 @@ cluster damping, antiresonant port cancellation, a full two-coordinate pencil,
 reciprocity, unit-coordinate changes over 100 orders, physical power balance,
 free motion, singular limits, PSD refusal, budgets, cancellation and replay.
 
+`try_with_port_impedance` and `try_modal_with_port_impedance` attach the complete
+frequency-dependent physical load `Z(omega)` through a real force map B. Flow is
+`B^T v`, opposing effort is `Z flow`, and the dynamic operator receives
+`-i omega B Z B^T` BEFORE factorization. No inverse of the bare structure or of
+the load is formed: physical loss/reactance can resolve bare resonances, and
+singular load channels remain admissible. Projection uses `O(n*p*(n+p))` work,
+exact binary port/coordinate scaling and the original shared LU/scalar solve.
+The complete complex Hermitian part `(Z + Z^H)/2` passes the same numerical
+PSD owner through its real representation; mutual, reactive, nonreciprocal and
+exact lossless channels are retained without clipping or a damping floor.
+
+`HarmonicPortControls` separately bounds ports, projection work and additional
+numerical payload. The response's `port_load` reports original physical flow,
+effort and `Re(flow^H effort)/2`. The overall balance subtracts that work and
+original structural viscosity exactly once. Net boundary work is not an
+inferred split into heat, storage or radiation. Finite velocity impedance
+contributes zero at DC; a singular static impedance needs its owner's physical
+limit, not an implicit regularization. Source frequency support, causality,
+broadband passivity, physical attachment units and fit uncertainty remain
+upstream responsibilities. Pointwise PSD is not a broadband certificate.
+G1/G3 tests cover analytic added-mass/stiffness resonance shifts, bare-pole
+regularization, full complex mutual/nonreciprocal response, power-conjugate
+unit changes, rank-deficient and lossless loads, tiny physical damping, complex
+Hermitian refusal, physical work, budgets and cancellation. Existing unloaded
+harmonic regressions retain their original behavior and `port_load = None`.
+
 ### `time` (IRP M1.1-W1a; moved from `fs-couple::modal_acoustic_time`)
 
 `ModalAcousticTimeModel` is the generic fixed-rate realization of independent,

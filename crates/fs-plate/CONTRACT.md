@@ -31,6 +31,25 @@ and demonstrate the error from dropping cross-mode damping. G0/G4 tests cover
 nonmatching slave loads, caps, malformed data, cancellation and deterministic
 factor reuse. These are synthetic numerical checks, not specimen validation.
 
+`harmonic::ports::AssemblyHarmonicPorts` additionally binds original physical
+unit-effort attachment shapes and caches their complete `Phi^T T^T` force map.
+Each supplied complex impedance maps conjugate port flow to resisting effort;
+the shared solver assembles its full reactive, mutual and nonreciprocal loading
+before factorization. The source M/K and glue C remain unchanged. Original
+component reaction forces, physical port flows and load work are reconstructed
+independently from the physical velocities, including supported and eliminated
+slave DOFs. Physical applied power must equal glue dissipation plus external
+load work. A Maxwell-port oscillator test checks frequency-dependent stiffness,
+phase and power around the original loaded resonance; a tied-body test retains
+mutual loading and tests the error from dropping those entries.
+
+The port owner consumes the caller's attachment vectors without copying them,
+with separate cold projection/payload limits and common per-frequency factor
+limits. Pointwise Hermitian PSD admission is a numerical check only. Port order,
+units, impedance provenance, source band, and ownership of each physical loss
+remain explicit caller responsibilities. No acoustic surface, material law,
+external storage/heat decomposition, or broadband validity is inferred.
+
 ## Purpose and layer
 Orthotropic thin-plate bending for instrument bodies: DKT (discrete
 Kirchhoff triangle) elements with an orthotropic bending-rigidity matrix

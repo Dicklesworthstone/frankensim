@@ -27,6 +27,10 @@ use fs_math::c64::C64;
 
 use crate::{ModalError, quadratic_fraction, quadratic_power_scale};
 
+mod impedance;
+use impedance::PreparedPortImpedance;
+pub use impedance::{HarmonicPortControls, HarmonicPortResponse};
+
 /// Explicit size, numerical payload and solve-residual limits.
 #[derive(Clone, Copy, Debug)]
 pub struct HarmonicResponseControls {
@@ -54,8 +58,10 @@ pub struct HarmonicResponse {
     /// `Re(v^H C v)/2` [W], evaluated with the original complete damping matrix.
     /// Small signed roundoff is retained, never clipped into a passivity claim.
     pub average_viscous_power_w: f64,
-    /// Input power minus viscous power [W]. Radiation counts here only when
-    /// its loading has actually been included in the supplied physical pencil.
+    /// Physical load-port flow, effort and absorbed work, when a load is supplied.
+    pub port_load: Option<HarmonicPortResponse>,
+    /// Input power minus structural viscous and supplied load-port power [W].
+    /// Absorbed boundary work is not automatically radiation or material heat.
     pub power_balance_residual_w: f64,
 }
 
@@ -121,6 +127,7 @@ pub struct PreparedHarmonicResponse {
     operator: Vec<C64>,
     damping: Vec<f64>,
     factor: Option<LuComplex>,
+    port_load: Option<PreparedPortImpedance>,
     maximum_relative_residual: f64,
 }
 
@@ -152,6 +159,47 @@ impl PreparedHarmonicResponse {
             controls,
             cx,
             None,
+            None,
+        )
+    }
+
+    /// Prepare `(K - omega^2 M - i omega C - i omega B Z B^T) q = F`.
+    /// `B` is the real row-major `n x ports` force map; the conjugate flow
+    /// is `B^T v`. The full complex `Z` maps that flow to opposing load effort
+    /// under `exp(-i omega t)`. All mutual and reactive entries are retained.
+    ///
+    /// The finite impedance's Hermitian part must pass pointwise numerical PSD
+    /// admission. This is not a broadband causality/passivity certificate. The
+    /// caller owns the source frequency band, physical port units and any fit.
+    /// Load and structure are assembled before factorization: a physical load
+    /// can resolve an otherwise singular bare resonance without inverting it.
+    #[allow(clippy::too_many_arguments)] // physical pencil, ports and separate explicit budgets
+    pub fn try_with_port_impedance(
+        mass: &[f64],
+        damping: &[f64],
+        stiffness: &[f64],
+        n: usize,
+        force_map: &[f64],
+        ports: usize,
+        impedance: &[C64],
+        angular_frequency_rad_s: f64,
+        controls: HarmonicResponseControls,
+        port_controls: HarmonicPortControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
+        poll(cx)?;
+        admit_size(n, controls)?;
+        let load = PreparedPortImpedance::new(n, force_map, ports, impedance, port_controls, cx)?;
+        Self::prepare(
+            mass,
+            damping,
+            stiffness,
+            n,
+            angular_frequency_rad_s,
+            controls,
+            cx,
+            None,
+            Some(load),
         )
     }
 
@@ -165,6 +213,7 @@ impl PreparedHarmonicResponse {
         controls: HarmonicResponseControls,
         cx: &Cx<'_>,
         modal_frequencies: Option<&[f64]>,
+        port_load: Option<PreparedPortImpedance>,
     ) -> Result<Self, HarmonicResponseError> {
         poll(cx)?;
         admit_size(n, controls)?;
@@ -207,6 +256,19 @@ impl PreparedHarmonicResponse {
                 }
             }
         }
+        // A finite velocity impedance contributes exactly zero at DC. In
+        // particular it must not rescale an unrelated static stiffness solve.
+        let port_scaling = if angular_frequency_rad_s == 0.0 {
+            None
+        } else {
+            port_load
+                .as_ref()
+                .map(|load| load.scaling(&coordinate_exponents, cx))
+                .transpose()?
+        };
+        if let Some(scaling) = &port_scaling {
+            time_exponent = time_exponent.max(scaling.minimum_time_exponent);
+        }
         if time_exponent == i32::MIN {
             time_exponent = 0;
         }
@@ -232,7 +294,6 @@ impl PreparedHarmonicResponse {
         require_psd(&k, n, "stiffness", cx)?;
         let mu = scale(angular_frequency_rad_s, -time_exponent)?;
         let mut operator = vec![C64::ZERO; n * n];
-        let mut diagonal = true;
         for i in 0..n {
             poll(cx)?;
             for j in 0..n {
@@ -254,9 +315,19 @@ impl PreparedHarmonicResponse {
                 if !finite(operator[index]) {
                     return Err(invalid("dynamic stiffness is not representable"));
                 }
-                diagonal &= i == j || operator[index] == C64::ZERO;
             }
         }
+        if let (Some(load), Some(scaling)) = (&port_load, &port_scaling) {
+            load.add_to_operator(
+                &mut operator,
+                &coordinate_exponents,
+                time_exponent,
+                mu,
+                scaling,
+                cx,
+            )?;
+        }
+        let diagonal = (0..n).all(|i| (0..n).all(|j| i == j || operator[i * n + j] == C64::ZERO));
         let factor = if diagonal {
             for i in 0..n {
                 if operator[i * n + i] == C64::ZERO {
@@ -283,6 +354,7 @@ impl PreparedHarmonicResponse {
             operator,
             damping: damping.to_vec(),
             factor,
+            port_load,
             maximum_relative_residual: controls.maximum_relative_residual,
         })
     }
@@ -296,6 +368,58 @@ impl PreparedHarmonicResponse {
         angular_frequency_rad_s: f64,
         controls: HarmonicResponseControls,
         cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
+        Self::prepare_modal(
+            natural_frequencies_rad_s,
+            damping_per_s,
+            angular_frequency_rad_s,
+            controls,
+            cx,
+            None,
+        )
+    }
+
+    /// Mass-normalized modal convenience with the same complete physical load.
+    /// Retains factored modal detuning at narrow and exact bare resonances.
+    #[allow(clippy::too_many_arguments)] // original modal source and physical ports
+    pub fn try_modal_with_port_impedance(
+        natural_frequencies_rad_s: &[f64],
+        damping_per_s: &[f64],
+        force_map: &[f64],
+        ports: usize,
+        impedance: &[C64],
+        angular_frequency_rad_s: f64,
+        controls: HarmonicResponseControls,
+        port_controls: HarmonicPortControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
+        poll(cx)?;
+        admit_size(natural_frequencies_rad_s.len(), controls)?;
+        let load = PreparedPortImpedance::new(
+            natural_frequencies_rad_s.len(),
+            force_map,
+            ports,
+            impedance,
+            port_controls,
+            cx,
+        )?;
+        Self::prepare_modal(
+            natural_frequencies_rad_s,
+            damping_per_s,
+            angular_frequency_rad_s,
+            controls,
+            cx,
+            Some(load),
+        )
+    }
+
+    fn prepare_modal(
+        natural_frequencies_rad_s: &[f64],
+        damping_per_s: &[f64],
+        angular_frequency_rad_s: f64,
+        controls: HarmonicResponseControls,
+        cx: &Cx<'_>,
+        port_load: Option<PreparedPortImpedance>,
     ) -> Result<Self, HarmonicResponseError> {
         let n = natural_frequencies_rad_s.len();
         poll(cx)?;
@@ -320,6 +444,7 @@ impl PreparedHarmonicResponse {
             controls,
             cx,
             Some(natural_frequencies_rad_s),
+            port_load,
         )
     }
 
@@ -397,7 +522,15 @@ impl PreparedHarmonicResponse {
             }
             dissipation += 0.5 * real_inner(velocity[i], cv);
         }
-        let balance = input - dissipation;
+        let port_load = self
+            .port_load
+            .as_ref()
+            .map(|load| load.response(&velocity, cx))
+            .transpose()?;
+        let load_power = port_load
+            .as_ref()
+            .map_or(0.0, |load| load.average_absorbed_power_w);
+        let balance = input - dissipation - load_power;
         if ![input, dissipation, balance]
             .into_iter()
             .all(f64::is_finite)
@@ -411,6 +544,7 @@ impl PreparedHarmonicResponse {
             relative_residual,
             average_input_power_w: input,
             average_viscous_power_w: dissipation,
+            port_load,
             power_balance_residual_w: balance,
         })
     }
