@@ -3,6 +3,9 @@ use super::*;
 
 const OPEN_BODY: &str = include_str!("../../open-shell-cavity.body");
 const OPEN_PERFORMANCE: &str = include_str!("../../open-shell-cavity.material-strings");
+// The card's observer latency, 515 samples, is the bake's printed kernel need
+// (kernel_latency_samples) at 9 kHz, 60..180 Hz. The admission's closed form, a
+// flat-transfer bound, needs only 400; this radiation transfer rises with f.
 
 fn open_source_text() -> String {
     OPEN_PERFORMANCE.replace("audio 9000 4096", "audio 9000 1024")
@@ -20,10 +23,7 @@ fn declared_opening_faces_reach_joint_bem_and_actual_flow_observation() {
     scoped(|cx,gate| {
         // The declared frequency-entry budget is this card's exact need: 2 observed
         // sources x 4 x (16384/2 + 1) = 65544 entries. One entry less refuses.
-        // Parse admits the window first, so this negative declares L_w = 400
-        // (9 kHz, 60..180 Hz) to reach the binding's Cap check, independent of L.
-        let short = open_source_text().replace("1e-4 65544 80000000000","1e-4 65543 80000000000")
-            .replace(" 60 180 256 5 "," 60 180 400 5 ");
+        let short = open_source_text().replace("1e-4 65544 80000000000","1e-4 65543 80000000000");
         assert_ne!(short, open_source_text());
         let refused = input::Spec::parse(short.as_bytes()).unwrap().compile_with_body(cx,gate,
             Some(body::Profile::parse(OPEN_BODY.as_bytes()).unwrap()),
@@ -101,12 +101,18 @@ fn opening_inertia_and_internal_loss_reserve_the_complete_network_before_pack_io
         radiation.maximum_hz = 120.0;
         narrow.body_radiation = Some(input::BodyRadiation::ShellBem(radiation));
         narrow.shell_observer = None;
-        for source in [absent,narrow] {
+        // Each refuses for its own named reason (body/cavity.rs preflight), before
+        // any material read.
+        for (source,reason) in [
+            (absent,"interior air openings require the original shell BEM radiation owner"),
+            (narrow,"shell BEM band must cover the complete selected interior pressure window"),
+        ] {
             let mut reads = 0;
-            assert!(source.compile_with_body::<NormalizedPack>(cx,gate,Some(profile.clone()),|_| {
+            let refused = source.compile_with_body::<NormalizedPack>(cx,gate,Some(profile.clone()),|_| {
                 reads += 1;
                 Err("material source must not be read before opening/exterior admission".into())
-            }).is_err());
+            }).err().unwrap();
+            assert_eq!(refused.to_string(),reason);
             assert_eq!(reads,0);
         }
     });

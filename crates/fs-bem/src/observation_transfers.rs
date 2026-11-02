@@ -160,8 +160,9 @@ pub enum TransferError {
     /// Refused at admission: the declared reconstruction window alone cannot
     /// meet `tail_energy_tolerance` at this rate. Either its own energy more
     /// than the declared latency before its arrival, or its spread past the
-    /// finest rung's quarter, exceeds the tolerance. This is necessary, not
-    /// sufficient: a producer adds its own ringing at the bake.
+    /// finest rung's quarter, exceeds the tolerance. The bound is for a flat
+    /// transfer, so it is necessary, not sufficient: a producer whose transfer
+    /// rises with frequency, or rings, adds energy at the bake.
     /// `required_latency_samples` is the smallest admitting latency at this
     /// rate (`None`: none up to `MAX_OBSERVATION_FFT / 4`). `required_finest_fft`
     /// is the smallest power-of-two rung whose quarter holds that latency plus

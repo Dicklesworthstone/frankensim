@@ -1875,9 +1875,12 @@ that 8 kHz admits, below the 25447 rad/s that 9 kHz admits. Those three terms do
 not depend on the rate. The minimum rate is 8291 Hz; 9 kHz is that minimum with
 a 5 % margin (8706 Hz) rounded up, a choice and not a repository rule. At 9 kHz
 the observer's FFT ladder covers n/4 = 4096 samples of its 16384 finest rung,
-0.455 s, and its 256-sample latency is 28.4 ms (0.512 s and 32 ms at 8 kHz).
-Admitting the load is not converging the observer's FIR bake, which stays
-pending native execution.
+0.455 s, and its latency is 515 samples, 57.2 ms. 515 is the FIR bake's own
+printed kernel need when the card declares 400, the window admission's
+closed-form requirement at this rate and band. That bound assumes a flat
+transfer; this radiation transfer rises with frequency and so weights the C4
+transition's time-domain skirt. At 515 the bake converges and the focused test
+passes natively.
 
 The joint load now uses the existing symmetric P1/P0 Galerkin source; the
 receiver evaluates that same source's P1 pressure and P0 auxiliary density.
@@ -1895,7 +1898,8 @@ work ceilings, not time estimates or relaxed error tolerances.
 `shell_angular_refinement 0` and `shell_quadrature 1e-7 14 2000000` expose the
 existing owners' refinement controls as input data.
 
-The integration inputs and command remain pending native execution. Their test
+The focused test executed natively at 52240fb0f and passes; the render command
+below remains pending native execution. The test
 retains all construction, matrix, fit, field and sample-level assertions as hard
 gates; this implementation is not measured-instrument qualification.
 
