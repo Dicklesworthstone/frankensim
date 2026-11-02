@@ -18,6 +18,56 @@ fn solve() -> RheologySolve {
     }
 }
 
+#[test]
+fn g0_pressure_owned_source_cannot_enter_a_fixed_pressure_thermal_owner() {
+    let card = card(0.1, 1000.0);
+    let law = LiquidTemperatureLaw::try_new(
+        &card,
+        &query_point(),
+        "T",
+        LiquidViscosityBasis::Dynamic,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    // Even a locally constant pressure response must retain its ownership
+    // marker; inspecting response curves alone would silently freeze this axis.
+    let source = ResolvedLiquidSurfaceState::try_for_pressure_shear_rate_evolution(
+        law.reference_state().material().clone(),
+        LiquidViscosityBasis::Dynamic,
+        LiquidCapillarity::Neglected,
+        "T",
+        "rate",
+        "pressure",
+    )
+    .unwrap();
+    let scaling = plan_free_surface_from_material(&source, 0.001, 0.001, 0.1).unwrap();
+    let chart = caloric(&card);
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        assert!(
+            scaling
+                .free_surface3_from_cells(domain(), &initial(false), cx)
+                .is_err()
+        );
+        assert!(matches!(
+            scaling.free_surface3_from_cells_with_rheology(
+                domain(),
+                &initial(false),
+                &law,
+                &chart,
+                FreeSurfaceEnthalpyControls::default(),
+                solve(),
+                |_| 800_000.0,
+                cx,
+                &gate,
+            ),
+            Err(FreeSurfaceEnthalpyError::Invalid(
+                "thermal rheology does not own evolving source pressure or its caloric pressure-work convention"
+            ))
+        ));
+    });
+}
+
 fn query_point() -> QueryPoint {
     point(400.0)
         .with_quantity("rate", QuantitySpec::dimensional(Frequency::DIMS), 0.0)

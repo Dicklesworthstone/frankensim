@@ -4,6 +4,9 @@
 #[path = "liquid_surface/contact_line.rs"]
 mod contact_line;
 
+#[path = "liquid_surface/pressure_rheology.rs"]
+mod pressure_rheology;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

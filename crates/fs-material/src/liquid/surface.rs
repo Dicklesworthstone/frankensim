@@ -49,8 +49,9 @@ pub enum LiquidCapillarity {
 /// evolution. A coefficient reported for an unknown surface environment stays
 /// unknown; it is not promoted to an arbitrary liquid/gas pairing.
 /// The ordinary constructor admits frozen coefficients. The explicit rheology
-/// constructor instead requires an evolving temperature/shear owner; consumers
-/// must refuse that bundle when they cannot supply that evolution.
+/// constructors instead require an evolving temperature/shear owner, with
+/// explicitly opted-in absolute pressure where marked; consumers must refuse
+/// that bundle when they cannot supply every declared evolution coordinate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedLiquidSurfaceState {
     material: ResolvedMaterialStatePoint,
@@ -60,6 +61,7 @@ pub struct ResolvedLiquidSurfaceState {
     kinematic_viscosity_m2_s: f64,
     surface_tension_n_m: Option<f64>,
     rheology_axes: Option<(String, String)>,
+    rheology_pressure_axis: Option<String>,
 }
 
 impl ResolvedLiquidSurfaceState {
@@ -112,6 +114,7 @@ impl ResolvedLiquidSurfaceState {
             kinematic_viscosity_m2_s,
             surface_tension_n_m,
             rheology_axes: None,
+            rheology_pressure_axis: None,
         })
     }
 
@@ -156,7 +159,78 @@ impl ResolvedLiquidSurfaceState {
         temperature_axis: &str,
         shear_rate_axis: &str,
     ) -> Result<Self, MaterialStatePointError> {
+        Self::try_for_rheology(
+            material,
+            viscosity_basis,
+            capillarity,
+            temperature_axis,
+            shear_rate_axis,
+            None,
+        )
+    }
+
+    /// Admit viscosity evaluated at temperature, physical shear rate and
+    /// positive absolute mechanical pressure [Pa]. The receiving runtime must
+    /// reconstruct that pressure from its actual flow state and retain its
+    /// fixed absolute datum; a pressure perturbation is not a source coordinate.
+    ///
+    /// This grants no compressible storage or thermal pressure-work law. The
+    /// consumer must independently admit any density/capillary dependence and
+    /// refuse it when its represented state cannot evolve those coefficients.
+    /// The original source selections, validity intervals and receipts remain
+    /// authoritative. Other response axes still refuse.
+    pub fn try_for_pressure_shear_rate_evolution(
+        material: ResolvedMaterialStatePoint,
+        viscosity_basis: LiquidViscosityBasis,
+        capillarity: LiquidCapillarity,
+        temperature_axis: &str,
+        shear_rate_axis: &str,
+        pressure_axis: &str,
+    ) -> Result<Self, MaterialStatePointError> {
+        Self::try_for_rheology(
+            material,
+            viscosity_basis,
+            capillarity,
+            temperature_axis,
+            shear_rate_axis,
+            Some(pressure_axis),
+        )
+    }
+
+    fn try_for_rheology(
+        material: ResolvedMaterialStatePoint,
+        viscosity_basis: LiquidViscosityBasis,
+        capillarity: LiquidCapillarity,
+        temperature_axis: &str,
+        shear_rate_axis: &str,
+        pressure_axis: Option<&str>,
+    ) -> Result<Self, MaterialStatePointError> {
         let quantities = material.axis_quantities();
+        if let Some(axis) = pressure_axis {
+            let pressure_quantity = quantities.get(axis).copied();
+            let pressure_ok = pressure_quantity
+                == Some(QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
+                    QuantityKind::Pressure,
+                    fs_qty::semantic::ValueForm::Static,
+                )))
+                || axis == "pressure"
+                    && (pressure_quantity.is_none()
+                        || pressure_quantity
+                            == Some(QuantitySpec::dimensional(fs_qty::Pressure::DIMS)));
+            if axis == temperature_axis
+                || axis == shear_rate_axis
+                || !pressure_ok
+                || !material
+                    .query_point()
+                    .iter()
+                    .find(|(name, _)| name == axis)
+                    .is_some_and(|(_, pressure)| pressure.is_finite() && *pressure > 0.0)
+            {
+                return Err(MaterialStatePointError::InvalidDerived {
+                    quantity: "liquid pressure rheology requires a distinct positive absolute-pressure coordinate",
+                });
+            }
+        }
         let temperature_quantity = quantities.get(temperature_axis).copied();
         let temperature_ok = temperature_quantity
             == Some(QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
@@ -188,11 +262,12 @@ impl ResolvedLiquidSurfaceState {
         for property in material.properties() {
             if property.source_axes().iter().any(|(axis, dims)| {
                 !(axis == temperature_axis && *dims == fs_qty::Temperature::DIMS
-                    || axis == shear_rate_axis && *dims == Frequency::DIMS)
+                    || axis == shear_rate_axis && *dims == Frequency::DIMS
+                    || pressure_axis == Some(axis.as_str()) && *dims == fs_qty::Pressure::DIMS)
             }) {
                 return Err(MaterialStatePointError::InvalidRequirement {
                     property: property.requirement().name().to_owned(),
-                    reason: "liquid rheology evolves only its declared temperature and shear rate",
+                    reason: "liquid rheology evolves only its declared temperature, shear rate and optional pressure",
                 });
             }
             require_no_unowned_dynamic_axes(property, Some(shear_rate_axis))?;
@@ -238,16 +313,26 @@ impl ResolvedLiquidSurfaceState {
             kinematic_viscosity_m2_s,
             surface_tension_n_m,
             rheology_axes: Some((temperature_axis.to_owned(), shear_rate_axis.to_owned())),
+            rheology_pressure_axis: pressure_axis.map(str::to_owned),
         })
     }
 
     /// Required evolving coordinates `(temperature, physical shear rate)`.
     /// `Some` is a prohibition on frozen use, not a grant of static authority.
+    /// Also inspect [`Self::rheology_pressure_axis`] before binding a runtime.
     #[must_use]
     pub fn rheology_axes(&self) -> Option<(&str, &str)> {
         self.rheology_axes
             .as_ref()
             .map(|(temperature, rate)| (temperature.as_str(), rate.as_str()))
+    }
+
+    /// Additional absolute mechanical pressure coordinate required by the
+    /// explicitly pressure-dependent rheology admission. A consumer unable to
+    /// evolve this coordinate must refuse the bundle, even at fixed temperature.
+    #[must_use]
+    pub fn rheology_pressure_axis(&self) -> Option<&str> {
+        self.rheology_pressure_axis.as_deref()
     }
 
     /// Complete source bundle, including original viscosity and interface context.

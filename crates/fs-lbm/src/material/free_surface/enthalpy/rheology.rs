@@ -68,6 +68,11 @@ impl RheologyBinding {
         solve
             .validate()
             .map_err(|_| Error::Invalid("invalid liquid rheology controls"))?;
+        if source.rheology_pressure_axis().is_some() {
+            return Err(Error::Invalid(
+                "thermal rheology does not own evolving source pressure or its caloric pressure-work convention",
+            ));
+        }
         let (temperature_axis, rate_axis) = source.rheology_axes().ok_or(Error::Invalid(
             "moving-liquid rheology needs an explicitly evolving source bundle",
         ))?;

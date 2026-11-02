@@ -1,5 +1,8 @@
 //! Synthetic material data exercise the native VOF, not experimental accuracy.
 
+#[path = "material_free_surface_rheology/pressure.rs"]
+mod pressure;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

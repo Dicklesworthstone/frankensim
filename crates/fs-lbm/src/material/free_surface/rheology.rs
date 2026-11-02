@@ -76,16 +76,18 @@ type Error = FreeSurfaceRheologyError;
 
 /// One immutable material assignment at fixed temperature and external context.
 ///
-/// Only the declared nonnegative physical shear-rate coordinate changes during
-/// flow. Density and surface tension cannot depend on that coordinate. Source
-/// temperature curves are sampled at the original absolute temperature; the
-/// original pressure, composition, environment, selections and receipts remain
-/// fixed. This is an isothermal approximation, not a finite heat reservoir.
+/// The default law evolves only nonnegative physical shear rate. The explicit
+/// [`Self::try_new_with_pressure`] law additionally resolves viscosity at the
+/// actual absolute mechanical pressure. Density and surface tension cannot
+/// depend on either evolving coordinate. Temperature, composition, environment
+/// and source selections stay fixed. This is an isothermal approximation, not
+/// a finite heat reservoir or a compressible liquid equation of state.
 pub struct IsothermalRheologyLaw<'m> {
     card: &'m MaterialCard,
     reference: ResolvedLiquidSurfaceState,
     temperature_axis: String,
     rate_axis: String,
+    pressure_axis: Option<String>,
     surface_tension_n_m: Option<f64>,
 }
 
@@ -103,17 +105,83 @@ impl<'m> IsothermalRheologyLaw<'m> {
         temperature_axis: &str,
         shear_rate_axis: &str,
     ) -> Result<Self, Error> {
+        Self::try_new_inner(
+            card,
+            material,
+            viscosity_basis,
+            capillarity,
+            temperature_axis,
+            shear_rate_axis,
+            None,
+        )
+    }
+
+    /// Evolve the same local shear law at solved absolute liquid pressure [Pa].
+    ///
+    /// This opt-in uses `p_ref + cs²*(rho_lattice-1)*rho_source*(dx/dt)²`
+    /// solely as the mechanical pressure coordinate of the viscosity source.
+    /// Physical density stays fixed; pressure-dependent density or surface
+    /// tension refuses rather than implying compressibility or unsupported
+    /// surface-stress evolution. No analytic pressure-viscosity law or floor
+    /// substitutes for the original material data.
+    ///
+    /// The flow must be constructed with an explicit pressure reference equal
+    /// to this bundle's initial absolute pressure. Every accepted endpoint
+    /// re-queries the SAME source selections at its own pressure and shear rate.
+    /// Therefore a physical common shift of pressure/reference can change
+    /// viscosity; it is not a gauge symmetry of a pressure-dependent material.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_pressure(
+        card: &'m MaterialCard,
+        material: ResolvedMaterialStatePoint,
+        viscosity_basis: LiquidViscosityBasis,
+        capillarity: LiquidCapillarity,
+        temperature_axis: &str,
+        shear_rate_axis: &str,
+        pressure_axis: &str,
+    ) -> Result<Self, Error> {
+        Self::try_new_inner(
+            card,
+            material,
+            viscosity_basis,
+            capillarity,
+            temperature_axis,
+            shear_rate_axis,
+            Some(pressure_axis),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_new_inner(
+        card: &'m MaterialCard,
+        material: ResolvedMaterialStatePoint,
+        viscosity_basis: LiquidViscosityBasis,
+        capillarity: LiquidCapillarity,
+        temperature_axis: &str,
+        shear_rate_axis: &str,
+        pressure_axis: Option<&str>,
+    ) -> Result<Self, Error> {
         if material.card_identity() != card.content_hash() {
             return Err(Error::Invalid(
                 "rheology requires the original material card",
             ));
         }
-        let reference = ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
-            material,
-            viscosity_basis,
-            temperature_axis,
-            shear_rate_axis,
-        )?;
+        let reference = match pressure_axis {
+            Some(axis) => ResolvedLiquidSurfaceState::try_for_pressure_shear_rate_evolution(
+                material,
+                viscosity_basis,
+                LiquidCapillarity::Neglected,
+                temperature_axis,
+                shear_rate_axis,
+                axis,
+            )?,
+            None => ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+                material,
+                viscosity_basis,
+                temperature_axis,
+                shear_rate_axis,
+            )?,
+        };
         let material = reference.material();
         // The reference-density momentum/VOF owner has no compressible storage
         // law, and its capillary boundary has no variable-sigma traction law.
@@ -125,10 +193,10 @@ impl<'m> IsothermalRheologyLaw<'m> {
                 property
                     .source_axes()
                     .iter()
-                    .any(|(axis, _)| axis == shear_rate_axis)
+                    .any(|(axis, _)| axis == shear_rate_axis || pressure_axis == Some(axis.as_str()))
             }) {
                 return Err(Error::Invalid(
-                    "isothermal VOF needs shear-independent density and surface tension",
+                    "isothermal VOF needs density and surface tension independent of evolving shear and pressure",
                 ));
             }
         }
@@ -138,6 +206,7 @@ impl<'m> IsothermalRheologyLaw<'m> {
             reference,
             temperature_axis: temperature_axis.to_owned(),
             rate_axis: shear_rate_axis.to_owned(),
+            pressure_axis: pressure_axis.map(str::to_owned),
             surface_tension_n_m,
         })
     }
@@ -154,19 +223,50 @@ impl<'m> IsothermalRheologyLaw<'m> {
         self.surface_tension_n_m
     }
 
-    fn resolve(&self, rate: f64) -> Result<ResolvedLiquidSurfaceState, Error> {
-        let point = self
+    /// Named source coordinate evolved from solved absolute pressure, if opted in.
+    #[must_use]
+    pub fn pressure_axis(&self) -> Option<&str> {
+        self.pressure_axis.as_deref()
+    }
+
+    fn resolve(
+        &self,
+        rate: f64,
+        pressure: Option<f64>,
+    ) -> Result<ResolvedLiquidSurfaceState, Error> {
+        let mut point = self
             .material()
             .query()
             .with(&self.rate_axis, rate)
             .map_err(|_| Error::Invalid("unrepresentable physical shear coordinate"))?;
+        if let Some(axis) = &self.pressure_axis {
+            let pressure = pressure.ok_or(Error::Invalid("missing solved absolute pressure"))?;
+            if !pressure.is_finite() || pressure <= 0.0 {
+                return Err(Error::Invalid(
+                    "solved absolute pressure must be finite and positive",
+                ));
+            }
+            point = point
+                .with(axis, pressure)
+                .map_err(|_| Error::Invalid("unrepresentable absolute pressure coordinate"))?;
+        }
         let material = self.material().at_query_point(self.card, &point)?;
-        let resolved = ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
-            material,
-            self.reference.viscosity_basis(),
-            &self.temperature_axis,
-            &self.rate_axis,
-        )?;
+        let resolved = match &self.pressure_axis {
+            Some(axis) => ResolvedLiquidSurfaceState::try_for_pressure_shear_rate_evolution(
+                material,
+                self.reference.viscosity_basis(),
+                LiquidCapillarity::Neglected,
+                &self.temperature_axis,
+                &self.rate_axis,
+                axis,
+            )?,
+            None => ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+                material,
+                self.reference.viscosity_basis(),
+                &self.temperature_axis,
+                &self.rate_axis,
+            )?,
+        };
         let capillarity = if self.surface_tension_n_m.is_some() {
             LiquidCapillarity::Sourced
         } else {
@@ -252,10 +352,11 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
     /// density one represents `reference_pressure_pa`; initial populations,
     /// velocities and mass are otherwise identical to [`Self::from_cells`].
     /// This does not initialize a hydrostatic or capillary pressure field.
-    /// The caller owns initial pressure/load compatibility and applicability
-    /// of the unchanged source pressure context. Only shear rate evolves in
-    /// the material law; the numerical pressure is not a liquid equation of
-    /// state. This datum cannot be rebound on an accepted trajectory.
+    /// The caller owns initial pressure/load compatibility. For the default law
+    /// the source pressure context stays fixed. An explicitly pressure-dependent
+    /// law requires this datum to equal its initial source pressure and samples
+    /// the actual local pressure on every accepted state. Numerical pressure is
+    /// not a liquid equation of state. The datum cannot be rebound later.
     ///
     /// # Errors
     /// The ordinary ingress/source gates apply. Nonpositive or nonfinite
@@ -304,6 +405,19 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
         solve
             .validate()
             .map_err(|_| Error::Invalid("invalid liquid rheology controls"))?;
+        if let Some(axis) = law.pressure_axis() {
+            let initial_pressure = law
+                .material()
+                .query_point()
+                .iter()
+                .find(|(name, _)| name == axis)
+                .map(|(_, pressure)| *pressure);
+            if reference_pressure_pa != initial_pressure {
+                return Err(Error::Invalid(
+                    "pressure-dependent rheology requires a fixed datum equal to the initial source pressure",
+                ));
+            }
+        }
         let mut scaling = plan_free_surface_from_material(
             &law.reference,
             cell_size_m,
@@ -337,7 +451,7 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
         &self.flow.lattice
     }
 
-    /// Source assignment, fixed external coordinates and original claim receipts.
+    /// Source assignment, declared evolving coordinates and original claim receipts.
     #[must_use]
     pub const fn law(&self) -> &'s IsothermalRheologyLaw<'m> {
         self.law
@@ -407,11 +521,15 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
     /// stress supplies the next bounded constitutive solve before either flow
     /// or material samples publish. No unused thermal mass routes are allocated.
     /// Zero/reference loading retains the ordinary rheology trajectory, and a
-    /// common shift of reference and gas pressure leaves that trajectory intact.
+    /// common shift of reference and gas pressure leaves that trajectory intact
+    /// only when the law keeps its original fixed pressure context.
     ///
-    /// Pressure is a mechanical boundary load, not a source-pressure rebind or
-    /// physical compressibility model. Gas evolution, pressure-volume work and
-    /// heat are outside this isothermal, fixed-source-context owner.
+    /// For the opt-in pressure-dependent law, actual endpoint liquid pressure
+    /// also sets the source viscosity coordinate. The external gas pressure is
+    /// never substituted for interior liquid pressure. This is an explicit
+    /// pressure/shear coefficient update, not an implicit time solve. Gas
+    /// evolution, physical compressibility, pressure-volume work and heat remain
+    /// outside this isothermal owner.
     ///
     /// # Errors
     /// Invalid pressure or density bounds, source-domain/convergence failure,
@@ -478,6 +596,11 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
             let native = lattice
                 .sample_at(x, y, z)
                 .ok_or(Error::Invalid("missing wet-cell physical state"))?;
+            let pressure = if self.law.pressure_axis().is_some() {
+                Some(scaling.absolute_pressure_si(native.density)?)
+            } else {
+                None
+            };
             let speed = native.velocity[0]
                 .hypot(native.velocity[1])
                 .hypot(native.velocity[2]);
@@ -497,7 +620,7 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
                 self.solve,
                 || poll(gate),
                 |rate| {
-                    let material = self.law.resolve(rate)?;
+                    let material = self.law.resolve(rate, pressure)?;
                     let (plan, _) = plan_momentum_scaling(
                         material.kinematic_viscosity_m2_s(),
                         scaling.cell_size_m,

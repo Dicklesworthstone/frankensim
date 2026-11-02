@@ -3499,6 +3499,20 @@ enthalpy/rheology owner in `fs-lbm` provides that integration. Focused admission
 tests cover dynamic/kinematic viscosity bases, source retention and refusal of
 unowned axes; caloric response with shear-dependent storage remains unsupported.
 
+`try_for_pressure_shear_rate_evolution` additionally marks an explicitly named,
+positive absolute mechanical pressure coordinate in Pascals. Pressure/stress
+semantics are distinct; the canonical legacy `pressure` coordinate retains its
+Pascal convention. Only declared temperature, shear and pressure response axes
+are admitted. The returned `rheology_pressure_axis` is a required evolution
+owner, not permission for a thermal or frozen consumer to hold pressure fixed.
+Source selections and validity intervals remain pinned on every re-query.
+This admission supplies no liquid compressibility or caloric pressure-work law;
+consumers must independently admit density and surface-tension evolution.
+The isothermal `fs-lbm` pressure/shear owner requires both coefficients invariant
+in its evolving axes and uses the actual solved absolute liquid pressure for
+viscosity. Tests cover source retention, explicit owner markers, unowned pressure
+response, pressure/stress distinction and original source-domain refusal.
+
 ## Source-backed planar orthotropic electrical response
 
 `conductor::planar` resolves two independent principal conductivity or

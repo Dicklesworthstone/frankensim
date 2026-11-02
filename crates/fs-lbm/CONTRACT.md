@@ -5022,7 +5022,7 @@ regressions, not measured material or contact validation.
 
 ## Isothermal source rheology with native capillarity
 
-`material::free_surface::rheology::IsothermalRheologyLaw` binds one immutable
+`material::free_surface::rheology::IsothermalRheologyLaw::try_new` binds one immutable
 material card and complete resolved bundle to fixed temperature, pressure,
 composition and source environment. Only the explicitly named physical shear
 rate `sqrt(2 D:D)` changes. The dynamic/kinematic viscosity basis and sourced
@@ -5057,14 +5057,44 @@ one native step without allocating unused thermal transport routes. The actual
 new stress closes the next constitutive samples before joint publication;
 pressure, endpoint source, convergence, speed or cancellation refusal rolls
 back flow and all material/rate receipts together. Zero/reference loading keeps
-the ordinary path's population bits; a common pressure/reference shift keeps
-the same dynamics. Numerical density retains its original incompressible
-meaning: this does not rebind the material's fixed source-pressure context,
+the ordinary path's population bits; with the default fixed-context law, a
+common pressure/reference shift keeps the same dynamics. Numerical density
+retains its original incompressible meaning: this default law does not rebind
+the material's fixed source-pressure context,
 evolve a gas reservoir, or add pressure-volume heat/work. Three focused
 regressions specify Newtonian pressure-loaded parity, gauge invariance, actual
 pressure-driven thinning/thickening with independent stress/constitutive roots,
 mass retention, reference-load identity and late pressure/source rollback.
 Their native execution remains a separate, unverified gate.
+
+`IsothermalRheologyLaw::try_new_with_pressure` explicitly owns viscosity
+dependence on absolute mechanical pressure as well as shear. It uses the shared
+material admission's pressure marker and the SAME selected source claims. The
+trajectory's fixed pressure datum must equal the initial source pressure; every
+wet-cell query then uses `p_ref + cs²*(rho_lattice-1)*rho_source*(dx/dt)²` from
+the actual liquid populations. External gas loading is not substituted for
+interior pressure. That pressure is held within each local shear root; the
+resulting viscosity drives the next native collision. Pressure is reconstructed
+once per wet endpoint, with no second momentum solve or thermal route storage.
+This is explicit coefficient feedback, not an implicit pressure/shear time solve.
+
+Density and active surface tension must have no pressure/shear response axes
+and must remain exactly invariant at every source sample. This excludes physical
+liquid compression and variable-sigma traction. Positive absolute pressure,
+original source validity, local rheology convergence and speed must all pass
+before flow and material receipts publish together. Temperature, composition
+and other context remain fixed. Shifting actual pressure and its datum can now
+change viscosity and motion, as required by a pressure-dependent source.
+Frozen and thermal T/shear consumers refuse this explicit pressure owner; the
+thermal path has not gained a pressure-dependent caloric/work chart.
+G0/G1/G3/G4 regressions specify the actual interior pressure coordinate, an
+independent pressure/shear constitutive root, constant-law native bit parity,
+absolute-pressure-dependent motion, source-domain rollback, cancellation and
+unsupported density/sigma or thermal-owner refusal. No new runtime execution,
+continuum convergence, physical calibration or total-energy claim is made.
+For the incompressible pressure/shear-dependent constitutive model family see
+Bulíček, Majdoub and Málek (2010), <https://arxiv.org/abs/1004.0835>; its analytic
+existence results are not asserted for this discrete LBM/VOF implementation.
 
 This is isothermal generalized-Newtonian response on stationary walls, with the
 explicit numerical contact ghost inherited from the domain. It does not add
