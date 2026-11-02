@@ -158,6 +158,7 @@ button.ghost:hover { border-color: var(--sim); }
 .play.small { width: 38px; height: 38px; }
 .play.small svg { width: 16px; height: 16px; }
 .play.busy svg { opacity: 0.4; }
+.play.failed { background: #c0473a; box-shadow: none; }
 .transport .time { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.84rem; }
 .transport .loop { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--muted); font-size: 0.86rem; cursor: pointer; min-height: 32px; }
 .transport .loop input { accent-color: var(--sim); width: 16px; height: 16px; }

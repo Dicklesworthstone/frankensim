@@ -73,7 +73,6 @@ export class Player {
     this.listeners = new Set();
     this.knownDuration = meta.duration || 0;
     this._ready = null;
-    this.generation = generation;
   }
 
   load() {
@@ -90,6 +89,7 @@ export class Player {
           return g;
         });
         this.loading = false;
+        this.error = null;
         this.emit();
         return this;
       }, err => {
@@ -139,7 +139,10 @@ export class Player {
 
   /** Start playing (after loading, the first time). Never rejects: a load failure shows as `error`. */
   async play() {
-    if (this.generation !== generation) return;
+    // The page this play was asked from. Players outlive pages (phrase players are shared and cached), so the check is
+    // against the page at the time of the click, never the page the player was made on: a cached player must always
+    // play when clicked, and only a play whose audio finished loading after the reader left is dropped.
+    const page = generation;
     if (current && current !== this) current.pause();
     setCurrent(this);
     const want = {};
@@ -150,6 +153,10 @@ export class Player {
       await this.load();
       await resumed;
     } catch (err) {
+      if (this.wanted === want) this.wanted = null;
+      return;
+    }
+    if (page !== generation) {
       if (this.wanted === want) this.wanted = null;
       return;
     }
@@ -246,8 +253,11 @@ export function playButton(player, { small = false, label } = {}) {
   const name = label || player.meta.title || 'clip';
   const draw = p => {
     b.innerHTML = p.playing ? ICON.pause : ICON.play;
-    b.setAttribute('aria-label', `${p.playing ? 'Pause' : 'Play'} ${name}`);
+    // A failed load is shown on the button itself (cards have no status line), and a click retries it.
+    b.setAttribute('aria-label', p.error ? `Audio unavailable for ${name}: click to retry` : `${p.playing ? 'Pause' : 'Play'} ${name}`);
+    b.title = p.error ? `Audio unavailable (${p.error.message}). Click to retry.` : '';
     b.classList.toggle('busy', p.loading);
+    b.classList.toggle('failed', !!p.error && !p.loading);
   };
   b.addEventListener('click', e => {
     e.stopPropagation();
