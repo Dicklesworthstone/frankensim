@@ -9569,3 +9569,34 @@ after nontrivial history, unchanged accepted states under repeated trial queries
 and the distinct potential/storage/heat accounts during held-strain relaxation.
 The spatial consumer is `fs-solid::hyper3::visco`; its physical endpoint-work
 quadrature discrepancy belongs to that consumer and must not be booked as heat.
+
+## Original-energy mixed displacement/pressure materials
+
+`hyper::mixed::MixedFiniteStrainPotential` supplies the original bulk-free
+remainder plus `p*(J-1)-U_star(p)`, with tensile-positive `p=U'(J)`.
+`Hyperelastic` and an immutable `FrozenViscoHyperelastic` implement the same
+state-only and full-Hessian queries. Pressure coupling is exactly `cof(F)`;
+the displacement block retains `p*d²J/dF²`, and pressure compliance is the
+negative inverse original bulk curvature. Preparation admits parameters/history;
+actual point queries retain the native deformation and stretch limits.
+
+`OriginalMaterial` preserves the supplied quadratic or log-squared bulk law.
+The latter uses only its locally convex branch `ln(J)<1`, including an explicit
+bounded pressure inverse; neither its other branch nor a global Legendre
+certificate is claimed. `ExactIncompressible` supplies `J-1`, zero compliance
+and zero bulk storage without penalty arithmetic. Coupled Neo-Hookean refuses.
+Full-invariant HGO fibres remain in their original remainder, so this multiplier
+represents only the separable bulk contribution, not necessarily mean stress.
+
+The response distinguishes the saddle potential, remainder potential, original
+bulk storage at pressure-reconstructed volume, and complementary potential.
+`mixed_remainder_free_energy` evaluates physical equilibrium/branch storage
+directly, avoiding subtraction of large native bulk energies. A frozen viscous
+incremental potential is never relabeled as stored energy or heat. Spatial
+owners must use their weak pressure discretization's bulk storage and establish
+their own stability, quadrature and convergence evidence.
+
+`tests/hyper_mixed.rs` verifies independent pressure-dual derivatives, recovery
+of original energy/stress/tangent by pressure elimination, every mixed Hessian
+block, exact-constraint bulk independence, physical versus incremental storage,
+original isochoric histories, rotation/unit scaling and domain refusals.

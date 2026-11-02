@@ -16,6 +16,8 @@ pub mod acoustic;
 pub mod cards;
 /// Exact incompressibility with traction-free thickness and transverse shears.
 pub mod incompressible_plane_stress;
+/// Original decoupled energies in a mixed displacement/pressure potential.
+pub mod mixed;
 /// Traction-free finite-strain thickness and transverse-shear relaxation.
 pub mod plane_stress;
 mod spectral;

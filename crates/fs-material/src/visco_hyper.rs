@@ -166,6 +166,58 @@ impl crate::hyper::cards::FiniteStrainPotential for FrozenViscoHyperelastic<'_> 
     }
 }
 
+impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoHyperelastic<'_> {
+    fn equilibrium_law(&self) -> &Hyperelastic {
+        &self.law.equilibrium
+    }
+
+    fn validate_mixed(&self) -> Result<(), MaterialError> {
+        self.law.equilibrium.validate_mixed()?;
+        self.law.check_inputs(
+            self.accepted,
+            &self.accepted.deformation_gradient,
+            self.dt_s,
+        )?;
+        if self.law.branches.len() > MAX_FINITE_STRAIN_BRANCHES {
+            return Err(parameters(
+                "mixed viscous branch count exceeds its original cap".into(),
+            ));
+        }
+        for branch in &self.law.branches {
+            branch.energy.validate()?;
+            if !(branch.tau_s.is_finite() && branch.tau_s > 0.0) {
+                return Err(parameters(
+                    "mixed viscous relaxation time must be finite and positive".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn remainder_stress_and_potential(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        crate::hyper::mixed::check_split_state(&self.law.equilibrium, f)?;
+        let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
+        let (value, stress) = fs_ad::gradient::<9>(*f, |x| {
+            self.law.equilibrium.isochoric_energy(&x) + prepared.potential(&x)
+        });
+        crate::hyper::mixed::checked_stress(value, stress)
+    }
+
+    fn remainder_response(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<crate::hyper::mixed::RemainderResponse, MaterialError> {
+        crate::hyper::mixed::check_split_state(&self.law.equilibrium, f)?;
+        let prepared = self.law.prepare(self.accepted, f, self.dt_s)?;
+        crate::hyper::mixed::response_from_energy(f, |x| {
+            self.law.equilibrium.isochoric_energy(x) + prepared.potential(x)
+        })
+    }
+}
+
 fn parameters(what: String) -> MaterialError {
     MaterialError::Parameters { what }
 }
@@ -1080,6 +1132,36 @@ impl ViscoHyperelastic {
             Ok(total)
         } else {
             Err(state_error("nonfinite stored energy".to_string()))
+        }
+    }
+
+    /// Physical original equilibrium remainder plus branch storage, with no
+    /// bulk penalty and no subtraction of a potentially huge `U(det F)`.
+    /// A mixed spatial ledger adds its pressure-reconstructed bulk storage.
+    /// This is NOT the frozen step's incremental remainder potential.
+    pub fn mixed_remainder_free_energy(
+        &self,
+        s: &ViscoState,
+        f: &[f64; 9],
+    ) -> Result<f64, MaterialError> {
+        crate::hyper::mixed::check_split_state(&self.equilibrium, f)?;
+        self.check_inputs(s, f, 0.0)?;
+        let mut total = self.equilibrium.isochoric_energy(f);
+        for (branch, cv6) in self.branches.iter().zip(&s.inverse_viscous_cauchy_green) {
+            let (_, d, _) = Self::trial_spectrum(&sym_expand(cv6), f)?;
+            let x = expand(reduce([
+                0.5 * det::ln(d[0]),
+                0.5 * det::ln(d[1]),
+                0.5 * det::ln(d[2]),
+            ]));
+            total += branch.energy.terms(&x).0;
+        }
+        if total.is_finite() {
+            Ok(total)
+        } else {
+            Err(state_error(
+                "nonfinite mixed physical remainder storage".into(),
+            ))
         }
     }
 
