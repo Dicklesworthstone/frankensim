@@ -10,6 +10,8 @@ use fs_material::porous::{PorousCard, PorousFluidLaw};
 use fs_math::c64::C64;
 use fs_thermal::enthalpy::*;
 
+#[path = "porous_feedback_covariance/angular.rs"]
+mod angular;
 #[path = "porous_feedback_covariance/refinement.rs"]
 mod refinement;
 

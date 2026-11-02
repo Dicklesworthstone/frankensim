@@ -22954,3 +22954,57 @@ native temperatures, enthalpy and per-bin/local energy against independent RK4
 for two distinct frequency/angle bins. Its transverse viscous term is material,
 so replacing vector work with the normal component alone fails the witness.
 <!-- porous-oblique-feedback:end -->
+
+<!-- porous-angular-feedback:start -->
+### Independent angular ensembles and diffuse porous heating
+
+`PorousCrossSpectrumHeating::try_new_independent_modes` accepts explicit
+`angular::PorousAngularMode` entries with zero cross-covariance between entries.
+Distinct tangential wavenumbers may share a physical frequency; each mode keeps
+its original two-face Hermitian pressure covariance. Canonical order is
+`(omega, nonnegative k_t)`. Duplicate keys refuse: independent emitters with the
+same key, including isotropic equal-angle azimuths, must first combine their
+covariances. The existing frequency-only constructors continue to reject any
+repeated frequency. No coherent cross-angle interference is silently discarded.
+
+The original oblique layers, one stack solve per mode, positive normal plus
+transverse viscous work, pressure-relaxation work, and compensated native heat
+sum are unchanged. The shared gas still evaluates once per changed thermal
+cell, independent of the mode count. Original `bin_power`, `bin_cells` and
+`bin_energy` now refer to canonical mode entries for this opt-in constructor;
+per-mode accounts remain diagnostics, not extra deposited energy. Existing
+mode/cell-product budgets, accepted-start rates, endpoint refresh, conduction,
+latent heat, events, continuation and transactional refusal remain native.
+
+`angular::DiffuseHemisphere` binds a checked original exterior acoustic state,
+one frequency/band, full face area and independent left/right normal incoming
+irradiances E [W/m2]. The exterior is modeled as lossless. Positive quadrature
+nodes use `mu=cos(theta)` and weights w in `dmu`. Full-hemisphere weights must
+integrate both 1 and `2*mu` to unity within 64 binary64 epsilons, checked with
+compensated sums. The builder applies no empirical grazing cutoff, hidden
+azimuth factor or renormalization. The caller refines angular quadrature.
+
+An isotropic hemisphere has normal flux measure `2*mu*dmu`: a mode receives
+`area*E*2*mu*w` watts and normal reference `R=Z0/(area*mu)`. RMS pressure
+variance is formed directly as `2*Z0*E*w`, cancelling the grazing cosine before
+arithmetic. Thus pressure variance stays finite as incidence approaches grazing.
+Exact grazing, invalid moments/weights, nonfinite inputs, unrepresentable normal
+references and numerically lost positive variances refuse, including zero-drive
+geometry checks. Irradiance is already integrated over its frequency band; no
+extra bandwidth, peak/RMS factor or `2*pi` is inferred. The external mode and
+reference stay fixed while the internal pore gas changes temperature.
+
+This is a stationary independent plane-wave ensemble on laterally homogeneous
+isotropic rigid-frame layers. It does not certify a finite reverberant room,
+finite-face diffraction, nearby-source absorption, coherent angular speckle,
+anisotropy, frame motion or fluctuating temperature. The random-incidence
+plane-wave definition is discussed by Sgard, Atalla and Robin (2024), section
+2.2.3, [doi:10.3389/facou.2024.1414356](https://doi.org/10.3389/facou.2024.1414356).
+
+Focused tests retain exact normal-mode/native parity, frequency and mode
+association, duplicate refusal, hemispherical irradiance, finite near-grazing
+pressure, shared refresh work, continuation and atomic cancellation. An
+independent original-rho/K transfer-matrix and vector-velocity volume integral
+checks per-angle R/T and separate viscous/thermal losses, angular quadrature
+refinement, and two-frequency many-angle thermal/energy convergence against RK4.
+<!-- porous-angular-feedback:end -->
