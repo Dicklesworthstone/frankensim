@@ -5022,3 +5022,44 @@ parity, reverse illumination of independently evolving films against a separate
 RK4 integration of native work and outgoing R/T energy over three refinements,
 latent forward/reverse cache sharing, canonical permutation/split advances,
 domain/caloric refusal and late cancellation followed by an identical retry.
+
+### Reciprocal coating emission retains each physical layer temperature
+
+`CoatingThermalEmission` owns the original ordered absorbing/lossless film laws
+and one uniform thermodynamic temperature per film. Opaque stacks additionally
+retain the substrate's complex-index law and uniform half-space temperature.
+The selected outgoing port is vacuum, with radiance in W/(m² sr nm) per vacuum
+wavelength. A transmitting stack retains the other port's original real
+dispersive index; that port has no assigned temperature or emission source.
+Reverse observation traverses the optical stack in reverse while preserving
+every authored film/temperature association. The observed physical port must
+be vacuum for either selected side.
+
+For a mode at wavelength 380--780 nm and outward cosine in `(0,1]`, the native
+coherent owner resolves positive per-film work under reciprocal illumination
+from vacuum. Each layer contributes `A_s B_lambda(T)/2` and
+`A_p B_lambda(T)/2`; the original Planck owner already includes both independent
+polarizations. This is the layer integral of Greffet, Bouchon, Brucoli and
+Marquier's local Kirchhoff law, Phys. Rev. X 8, 021008 (2018), equations (5)--(6),
+<https://doi.org/10.1103/PhysRevX.8.021008>. Isotropic reciprocal local optical
+response and local thermal equilibrium within each uniform layer are required.
+The coherent fields determine extraction, while independent thermal sources add
+radiances. Positive work preserves weak emission below the rounded R+T deficit.
+
+The sample returns original film contributions, optional substrate contribution,
+and physical Stokes radiance with `I=L_s+L_p`, `Q=L_s-L_p`, and U=V=0 in the
+outgoing interface frame. Reciprocal R/T/A fractions remain separate from emitted
+radiance; transmitted light is never reassigned as emissivity. Immutable storage
+copies at most 64 full laws once and shares them on clone; each query uses fixed
+reference storage and allocates nothing. Temperature/source/domain admission
+precedes publication, with no extrapolation, averaged temperature, infrared or
+bolometric emissivity, interior-medium index correction, roughness average,
+near-field exchange or inferred thermal cooling. This is a physical spectral
+observation API; existing diffuse scene-material/light-sampling behavior is
+unchanged.
+
+Four G1/G3 regressions cover a nonisothermal matched-index stack against
+independent Beer--Lambert depth losses and SI Planck radiance, polarized
+isothermal Kirchhoff closure with the original dispersive optical owners,
+asymmetric reverse temperature routing, positive emission at k=1e-20 when R+T
+rounds to one, and empty/lossless/zero-thickness and support-refusal limits.

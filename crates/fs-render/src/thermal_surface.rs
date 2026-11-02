@@ -1,4 +1,4 @@
-//! Opaque diffuse surfaces in local thermal equilibrium.
+//! Physical spectral surface emission in local thermal equilibrium.
 //!
 //! The gray law is an explicit constitutive approximation: one emissivity applies at
 //! every wavelength and direction, with diffuse reflectance `1 - emissivity`.
@@ -9,9 +9,10 @@
 //! Spectral radiance is W/(m² sr nm). No RGB lift, exposure or display mapping
 //! enters the physical spectrum. The tracer integrates its visible band only;
 //! cooling retains the complete Stefan--Boltzmann spectrum in its own owner.
-//! Like the existing opaque tracer materials, the surface is two-sided: each
-//! face emits into its outward hemisphere. Exitance is per emitting side, so a
-//! sheet exposing both sides has twice its one-face area for thermal accounting.
+//! The gray and spectral diffuse surfaces are two-sided: each face emits into
+//! its outward hemisphere. Exitance is per emitting side, so a sheet exposing
+//! both sides has twice its one-face area for thermal accounting. A coherent
+//! stack instead selects one physical observation side explicitly.
 //! This spectrum is for emission into vacuum (the tracer's exterior air
 //! approximation). A thermal hit within an active dielectric medium refuses;
 //! no refractive-index correction is invented for the original cooling model.
@@ -20,6 +21,11 @@
 //! emissivity curve and uses it for both reciprocal reflection and emission.
 //! That finite-band law makes no claim about bolometric cooling or infrared
 //! continuation; its thermal owner remains responsible for total energy.
+//!
+//! [`CoatingThermalEmission`] resolves reciprocal directional emission from
+//! passive coherent films at separate temperatures. Its selected outgoing port
+//! is vacuum, its spectrum remains inside the original optical support, and
+//! its film order and polarization are explicit rather than diffuse or gray.
 
 #[cfg(feature = "material-state")]
 mod entropy;
@@ -32,6 +38,9 @@ pub(crate) use planck::{
 
 mod spectral;
 pub use spectral::{DiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity};
+
+mod coating_emission;
+pub use coating_emission::{CoatingEmissionError, CoatingEmissionSample, CoatingThermalEmission};
 
 /// Physical incident surface absorption on the original native thermal clock.
 #[cfg(feature = "optical-heating")]
