@@ -910,6 +910,30 @@ capillarity, phase change or compressible EOS is inferred. Focused regressions
 check independent two-liquid mass/energy integrals, force and torque gradients,
 native interfacial heave, uniform identity and source/rollback behavior.
 
+`FiniteLayeredHydrostaticTank::rebind_sources_at_pose` updates one externally
+supplied source state per retained liquid at a held body pose. Each individual
+mass and the original total are copied exactly across repeated updates;
+`layer_masses_kg` exposes those inventories without a `rho_new*V_new` round trip.
+The new volumes `V_i=M_i/rho_i` feed the same cumulative interface solves.
+All source snapshots are queried once. Unchanged densities retain volume bits;
+an entirely unchanged density stack reuses interface records with zero
+gravitational-storage change.
+Density-order inversions refuse without rearranging, mixing or relabeling matter.
+
+`FiniteLayeredTankDensityChange` adds the native displacement-potential change
+to `sum_i M_i*|g|*Delta[(h_empty,i-1+h_empty,i)/2]`. This empty-stack reference
+term includes lifting upper liquids when a lower liquid expands, even with a
+dry displacement envelope. The sum is the complete fluid gravitational-storage
+change at the fixed floor datum; the world-elevation constant cancels because
+each material mass is conserved. The external source owner accounts for this
+storage together with its thermal/EOS closure and caloric/ambient-pressure work;
+no heat or momentum transfer is synthesized. Original and proposed sources remain
+available on their respective immutable tanks. Same-liquid identity remains a
+caller obligation. Count, source, ordering, volume, overflow, geometry, energy or
+cancellation failure returns neither new tank nor audit. Focused cases exercise
+independent two-liquid energy/interface changes, continued native motion, upper
+liquid lift, repeated mass preservation, exact one-layer parity and atomic refusal.
+
 ## Buoyancy through gas and layered liquid reservoirs
 
 `hydrostatic::LayeredHydrostaticMedium` accepts an optional upper

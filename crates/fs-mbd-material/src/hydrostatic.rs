@@ -33,7 +33,10 @@ mod linear_density;
 mod step;
 mod finite_tank;
 mod finite_layered;
-pub use finite_layered::{FiniteHydrostaticLayer, FiniteLayeredHydrostaticTank, FiniteTankInterface};
+pub use finite_layered::{
+    FiniteHydrostaticLayer, FiniteLayerDensityChange, FiniteLayeredHydrostaticTank,
+    FiniteLayeredTankDensityChange, FiniteTankInterface,
+};
 pub use finite_tank::{
     FiniteHydrostaticTank, FiniteTankControls, FiniteTankDensityChange, FiniteTankFill,
     HydrostaticTankGeometry,

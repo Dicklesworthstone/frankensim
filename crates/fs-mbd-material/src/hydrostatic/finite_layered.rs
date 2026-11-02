@@ -16,6 +16,9 @@ use fs_ga::{Se3, Vec3};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_mbd::{Gravity, RigidBodyState};
 
+mod density_change;
+pub use density_change::{FiniteLayerDensityChange, FiniteLayeredTankDensityChange};
+
 /// One conserved immiscible liquid, supplied in bottom-to-top order.
 #[derive(Clone, Copy)]
 pub struct FiniteHydrostaticLayer<'a> {
@@ -30,6 +33,8 @@ struct ResolvedFiniteLayer<'a> {
     // This private cumulative-volume solve retains the actual source snapshot.
     // Its fictitious cumulative mass is never reported as a layer's inventory.
     cumulative: FiniteHydrostaticTank<'a, dyn FluidTransport + 'a>,
+    // Closed material inventory, never reconstructed after a density update.
+    liquid_mass_kg: f64,
     density_jump: f64,
 }
 
@@ -128,16 +133,11 @@ impl<'a> FiniteLayeredHydrostaticTank<'a> {
             resolved.push(ResolvedFiniteLayer {
                 input,
                 cumulative,
+                liquid_mass_kg: layer_mass,
                 density_jump: 0.0,
             });
         }
-        for index in 0..resolved.len() {
-            let above = resolved
-                .get(index + 1)
-                .map_or(0.0, |layer| layer.cumulative.transport().density_kg_m3());
-            resolved[index].density_jump =
-                resolved[index].cumulative.transport().density_kg_m3() - above;
-        }
+        set_density_jumps(&mut resolved);
         poll(&mut cancelled)?;
         Ok(Self {
             layers: resolved,
@@ -145,14 +145,20 @@ impl<'a> FiniteLayeredHydrostaticTank<'a> {
         })
     }
 
-    /// Original inputs and checked snapshots, in bottom-to-top order.
-    /// Each unchanged layer mass is its retained volume times this density.
+    /// Current source bindings and checked snapshots, in bottom-to-top order.
+    /// Use `layer_masses_kg` for exact conserved inventories: after a source
+    /// update, multiplying the new density and volume can round differently.
     pub fn layers(
         &self,
     ) -> impl ExactSizeIterator<Item = (FiniteHydrostaticLayer<'a>, FluidTransportState)> + '_ {
         self.layers
             .iter()
             .map(|layer| (layer.input, layer.cumulative.transport()))
+    }
+
+    /// Exact closed masses, in the same bottom-to-top order as `layers` [kg].
+    pub fn layer_masses_kg(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.layers.iter().map(|layer| layer.liquid_mass_kg)
     }
 
     /// Sum of the individual conserved source-derived liquid masses [kg].
@@ -191,19 +197,33 @@ impl<'a> FiniteLayeredHydrostaticTank<'a> {
         world_from_body: Se3,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<FiniteTankInterface>, HydrostaticError> {
-        poll(&mut cancelled)?;
+        self.interfaces_and_potential_at_pose(mesh, world_from_body, &mut cancelled)
+            .map(|(interfaces, _)| interfaces)
+    }
+
+    fn interfaces_and_potential_at_pose(
+        &self,
+        mesh: &DisplacementMesh,
+        world_from_body: Se3,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<FiniteTankInterface>, f64), HydrostaticError> {
+        poll(cancelled)?;
         let mut interfaces = Vec::with_capacity(self.layers.len());
-        let mut previous_height = 0.0;
-        for layer in &self.layers {
+        let mut above_height = f64::INFINITY;
+        let mut potential = 0.0;
+        // Same positive contributions and reduction order as native loading.
+        for layer in self.layers.iter().rev() {
             let fill = layer
                 .cumulative
-                .fill_at_pose(mesh, world_from_body, &mut cancelled)?;
-            if fill.surface_height_m <= previous_height {
+                .fill_at_pose(mesh, world_from_body, &mut *cancelled)?;
+            if fill.surface_height_m >= above_height {
                 return Err(HydrostaticError::Invalid(
                     "finite liquid interfaces are unresolved at the volume tolerance",
                 ));
             }
-            previous_height = fill.surface_height_m;
+            above_height = fill.surface_height_m;
+            let weight = layer.density_jump / layer.cumulative.transport().density_kg_m3();
+            potential = finite(potential + weight * fill.liquid_gravitational_energy_change_j)?;
             interfaces.push(FiniteTankInterface {
                 surface_height_m: fill.surface_height_m,
                 surface_point_world_m: fill.surface_point_world_m,
@@ -212,8 +232,9 @@ impl<'a> FiniteLayeredHydrostaticTank<'a> {
                 volume_evaluations: fill.volume_evaluations,
             });
         }
-        poll(&mut cancelled)?;
-        Ok(interfaces)
+        interfaces.reverse();
+        poll(cancelled)?;
+        Ok((interfaces, potential))
     }
 
     /// Density-weighted buoyancy and torque, excluding body weight.
@@ -240,6 +261,15 @@ impl<'a> FiniteLayeredHydrostaticTank<'a> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<HydrostaticStep, HydrostaticStepError> {
         self.step_frame(mesh, body.frame(), state, controls, cancelled)
+    }
+}
+
+fn set_density_jumps(layers: &mut [ResolvedFiniteLayer<'_>]) {
+    for index in 0..layers.len() {
+        let above = layers
+            .get(index + 1)
+            .map_or(0.0, |layer| layer.cumulative.transport().density_kg_m3());
+        layers[index].density_jump = layers[index].cumulative.transport().density_kg_m3() - above;
     }
 }
 

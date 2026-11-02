@@ -3,7 +3,7 @@
 use super::{FiniteHydrostaticTank, FiniteTankFill, HydrostaticError, finite, poll};
 use crate::hydrostatic::DisplacementMesh;
 use fs_ga::Se3;
-use fs_material::fluid_transport::FluidTransport;
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
 /// Proposed density change at one fixed displacement-envelope pose.
 ///
@@ -36,6 +36,51 @@ pub struct FiniteTankDensityChange {
 }
 
 impl<'a, F: FluidTransport + ?Sized> FiniteHydrostaticTank<'a, F> {
+    /// Retain validated tank geometry while consuming one actual source snapshot.
+    /// The caller owns the inventory relation: either M=rho*V for a new volume
+    /// or V=M/rho with the original mass copied exactly. No source is re-queried.
+    pub(in crate::hydrostatic) fn with_snapshot_inventory<'b, G: FluidTransport + ?Sized>(
+        &self,
+        source: &'b G,
+        transport: FluidTransportState,
+        liquid_volume_m3: f64,
+        liquid_mass_kg: f64,
+    ) -> Result<FiniteHydrostaticTank<'b, G>, HydrostaticError> {
+        if finite(liquid_volume_m3)? <= 0.0 || finite(liquid_mass_kg)? <= 0.0 {
+            return Err(HydrostaticError::Invalid(
+                "updated finite tank inventory is unrepresentable",
+            ));
+        }
+        let capacity = finite(self.area_m2 * self.geometry.inside_dimensions_m.z)?;
+        if liquid_volume_m3 > capacity {
+            return Err(HydrostaticError::TankOverflow {
+                excess_volume_m3: liquid_volume_m3 - capacity,
+            });
+        }
+        let empty_height_m = if liquid_volume_m3.to_bits() == self.liquid_volume_m3.to_bits() {
+            self.empty_height_m
+        } else {
+            finite(liquid_volume_m3 / self.area_m2)?
+        };
+        if empty_height_m <= 0.0 {
+            return Err(HydrostaticError::Invalid(
+                "updated empty-tank height is unrepresentable",
+            ));
+        }
+        Ok(FiniteHydrostaticTank {
+            source,
+            transport,
+            gravity: self.gravity,
+            gravity_magnitude: self.gravity_magnitude,
+            geometry: self.geometry,
+            area_m2: self.area_m2,
+            liquid_volume_m3,
+            liquid_mass_kg,
+            empty_height_m,
+            controls: self.controls,
+        })
+    }
+
     /// Propose another source state for the SAME homogeneous liquid inventory.
     ///
     /// The immutable original tank remains available. The new source is
@@ -77,40 +122,13 @@ impl<'a, F: FluidTransport + ?Sized> FiniteHydrostaticTank<'a, F> {
         } else {
             finite(self.liquid_mass_kg / density)?
         };
-        if liquid_volume_m3 <= 0.0 {
-            return Err(HydrostaticError::Invalid(
-                "updated finite tank volume is unrepresentable",
-            ));
-        }
-        let capacity = finite(self.area_m2 * self.geometry.inside_dimensions_m.z)?;
-        if liquid_volume_m3 > capacity {
-            return Err(HydrostaticError::TankOverflow {
-                excess_volume_m3: liquid_volume_m3 - capacity,
-            });
-        }
-        let empty_height_m = if same_density {
-            self.empty_height_m
-        } else {
-            finite(liquid_volume_m3 / self.area_m2)?
-        };
-        if empty_height_m <= 0.0 {
-            return Err(HydrostaticError::Invalid(
-                "updated empty-tank height is unrepresentable",
-            ));
-        }
-        let next = FiniteHydrostaticTank {
+        let next = self.with_snapshot_inventory(
             source,
             transport,
-            gravity: self.gravity,
-            gravity_magnitude: self.gravity_magnitude,
-            geometry: self.geometry,
-            area_m2: self.area_m2,
             liquid_volume_m3,
             // Never round-trip the inventory through rho_new*V_new.
-            liquid_mass_kg: self.liquid_mass_kg,
-            empty_height_m,
-            controls: self.controls,
-        };
+            self.liquid_mass_kg,
+        )?;
         let fill_before = self.fill_at_pose(mesh, world_from_body, &mut cancelled)?;
         let fill_after = if same_density {
             fill_before
@@ -123,7 +141,7 @@ impl<'a, F: FluidTransport + ?Sized> FiniteHydrostaticTank<'a, F> {
         } else {
             finite(
                 (0.5 * self.liquid_mass_kg * self.gravity_magnitude)
-                    * (empty_height_m - self.empty_height_m),
+                    * (next.empty_height_m - self.empty_height_m),
             )?
         };
         let displacement_change = finite(
