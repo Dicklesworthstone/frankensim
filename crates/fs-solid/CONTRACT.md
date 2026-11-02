@@ -4186,3 +4186,79 @@ Focused native source-closure validation also reruns the held, affine, viscous a
 complete-spectrum tests. This is floating-point exact linear propagation subject
 to admitted source/basis and balance tolerances, not an interval certificate or a
 finite-rotation nonlinear dynamics claim.
+
+
+## Moving supports with original consistent inertia and reaction work
+
+`dynamics::supported::SupportedSpectralSolid` advances the conservative linear
+solid with explicitly prescribed support motion. Supply an original assembly
+that still contains the prescribed rows and columns. Support labels must be a
+nonempty, strictly increasing proper subset of the assembly's represented global
+DOF labels; at least one free coordinate is required. Initial displacement,
+velocity and applied-force endpoints use the original represented order; support
+accelerations and reactions use the supplied support order. Coordinates already
+omitted by assembly remain homogeneous stationary supports, and their omitted
+reaction rows cannot be recovered by this owner.
+
+`partition_free_pencil` extracts the entire free/free K and M blocks for a native
+complete generalized eigensolve. `prepare_with_basis` requires all free modes,
+checks the whole source mass for positive definiteness and the whole source
+stiffness for numerical positive semidefiniteness, and admits the same source
+symmetry allowance as the complete-spectrum owner. A valid free block alone
+cannot hide indefinite support inertia or a zero-diagonal indefinite stiffness
+coupling. The full K check uses complete diagonal pivoting and the infinity norm
+of the entire unresolved Schur residual; no eigenvalues are clipped and retained
+operators are not replaced by the admission factors. These floating-point
+operator checks are not interval-certified positivity claims.
+
+Each `advance_affine_supports` linearly interpolates retained support acceleration
+to the supplied endpoint and integrates it to continuous support velocity and
+cubic displacement. It linearly interpolates the full physical applied force.
+The free equation uses
+`M_ff*a_f + K_ff*u_f = f_f - K_fs*u_s - M_fs*a_s`, retaining the ORIGINAL
+consistent cross mass. This effective cubic force is advanced through every free
+mode by the exact polynomial spectral kernel. There is no mass lumping, omitted
+mode, velocity impulse or repeated dense eigensolve in an interval.
+
+Reported endpoint reactions are the forces exerted BY prescribed supports ON the
+solid, `r_s = (M*a + K*u - f)_s`. The original free-row equation residual must fit
+its explicit absolute newton allowance. Strain and kinetic energies use full
+original-coordinate K/M, including free/support cross terms. Applied work is
+integrated from the continuous trajectory. Reaction work is separately integrated
+using the exact displacement moments and twice integrating its inertial term by
+parts; it is never inferred from the energy difference. Applied loads on prescribed
+rows correctly change the reaction and the two work accounts without changing the
+prescribed trajectory. The physical closure is
+`Delta H = W_applied + W_support` both per interval and cumulatively.
+
+The inner free candidate, original-row residual, independent full work balance,
+finite values and physical endpoint energy all pass before either owner's accepted
+state changes. Materially negative original strain energy is refused even if a
+numerically tolerated stiffness residual produces matching negative support work.
+The final cancellation checkpoint precedes infallible joint publication of modal
+state, full motion, support acceleration, compensated work histories and clock.
+No prepared matrix is cloned during an interval.
+
+Separate whole-system caps admit n represented coordinates, preparation storage
+`192*n^2 + 8192*n + 8*element_count` bytes, cold multiplication work
+`12*n^3 + 128*n^2 + 16384*n` and warm multiplication work
+`64*n^2 + 8192*n`. The inner cubic spectral controls also apply. Preparation is
+O(n^3), while retained matrices and intervals are O(n^2). Cancellation is polled
+through preparation, positivity factors and interval rows. The basis remains
+caller-supplied; the example's small native dense eigensolve is an explicitly
+bounded cold operation without internal cancellation polls.
+
+Five `solid_supported_dynamics` regressions check an independently solved
+moving-base oscillator with non-diagonal consistent mass, separately integrated
+applied and actuator powers, uniform accelerating translation, partition invariance,
+constrained-load invariance, original full-pencil rejection, capacities, invalid
+sources, cancellation, energy refusal and bitwise rollback. The independent
+oscillator's cumulative balance defect is below 3.886e-16 J.
+`examples/supported_elastic_motion.rs` assembles an actual 30-coordinate TET10
+specimen, prescribes 18 base-face coordinates and retains all 12 free modes. Two
+opposite triangular acceleration pulses move the base 62.5 micrometres and stop it;
+480 intervals at 48 kHz retain independently observed actuator work and original
+physical energy within 9.672e-17 J. Geometry and material are synthetic. This is a
+native assembly/solve/motion consumer, not spatial convergence or experimental
+calibration evidence. Viscosity, hereditary loss, finite rotations, changing
+supports/topology and impulsive support motion are outside this conservative owner.

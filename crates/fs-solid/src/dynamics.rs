@@ -32,6 +32,7 @@ use fs_sparse::Csr;
 
 /// Exact all-mode propagation from a validated complete elastic eigenbasis.
 pub mod spectral;
+pub mod supported;
 
 /// Explicit complete-state capacity and numerical allowances. No defaults.
 #[derive(Clone, Copy, Debug)]
