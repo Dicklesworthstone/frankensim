@@ -52,6 +52,8 @@ impl FreeSurface3 {
     /// interface map after liquid advances or new sparse tiles activate.
     /// Gas-pressure refusal or observed cancellation precedes population/mass
     /// publication; existing post-publication conversion error semantics remain.
+    /// With ConservativeLocal, the complete pressure/flow/conversion candidate
+    /// publishes together, and any refusal preserves the prior native state.
     pub fn step_with_gas_pressure(
         &mut self,
         gate: &CancelGate,
@@ -60,6 +62,13 @@ impl FreeSurface3 {
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
         let boundary = GasPressure3::new(maximum_density_excursion, &pressure)?;
+        if self.redistribution == ConversionRedistribution3::ConservativeLocal {
+            let mut candidate = self.clone();
+            candidate.step_inner(gate, None, None, Some(&boundary))?;
+            check_cancel(gate)?;
+            *self = candidate;
+            return Ok(());
+        }
         self.step_inner(
             gate,
             None,

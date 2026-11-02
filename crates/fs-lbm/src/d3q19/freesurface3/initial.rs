@@ -219,6 +219,7 @@ impl FreeSurface3 {
             geometry_epoch: 0,
             carry: 0.0,
             conversions: ConversionStats3::default(),
+            conversion_momentum: None,
             worst_step_violation: 0.0,
             fill_smooth: BTreeMap::new(),
             local_force: None,

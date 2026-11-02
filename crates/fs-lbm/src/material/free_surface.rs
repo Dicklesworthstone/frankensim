@@ -17,7 +17,7 @@ use fs_material::liquid::surface::{ResolvedLiquidSurfaceState, ResolvedLiquidWet
 use fs_material::state_point::MaterialStatePointError;
 
 use super::{MaterialLbmError, finite, plan_momentum_scaling, positive};
-use crate::d3q19::freesurface3::{Cell3, ContactModel3, FreeSurface3, PlanarWall3};
+use crate::d3q19::freesurface3::{Cell3, ContactModel3, ConversionRedistribution3, FreeSurface3, PlanarWall3};
 use crate::d3q19::sparse::MORTON_COORD_BITS;
 use crate::d3q19::{Q3, TILE};
 use crate::{CS2, ScalingPlan};
@@ -346,6 +346,17 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
 }
 
 impl<'a> MaterialFreeSurface3<'a> {
+    /// Select native conversion semantics before binding the thermal or
+    /// rheological owner. ConservativeLocal retains actual adjacent mass and
+    /// physical momentum; it refuses unsupported remaps transactionally and
+    /// exposes its numerical kinetic change through lattice().
+    /// The separate resolved thermocapillary fill owner still requires Local.
+    #[must_use]
+    pub fn with_conversion_redistribution(mut self, model: ConversionRedistribution3) -> Self {
+        self.lattice = self.lattice.with_conversion_redistribution(model);
+        self
+    }
+
     /// Read-only access to the actual sparse VOF owner.
     #[must_use]
     pub const fn lattice(&self) -> &FreeSurface3 { &self.lattice }

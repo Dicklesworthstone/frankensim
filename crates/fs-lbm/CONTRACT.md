@@ -5656,6 +5656,39 @@ per-node mass-route balances, orphan carry retention and scalar D3Q19 tension
 admission. The G1 enthalpy regression compares two independent conversion
 components and reverse-debt cycles against analytic local energy balances.
 
+### Bounded local conversion carries physical liquid momentum
+
+`ConversionRedistribution3::ConservativeLocal` is an explicit native timestep
+option, also selectable on `MaterialFreeSurface3` before binding enthalpy or
+rheology. Existing Local and LegacyGlobal trajectories retain their arithmetic.
+The new mode completes signed over/undershoots at zero conversion tolerance and
+routes each excess/debt only to adjacent interfaces with actual available
+capacity/mass. Dry ghosts cannot pay debt, full cells cannot overfill, and no
+unlocated carry or distant component supplies a missing recipient.
+
+The converted cell's physical pre-conversion velocity accompanies every signed
+represented mass delta. This includes negative old `m*u`: reversing a debt's
+scalar route does not substitute the receiving cell's velocity. Contributions
+are accumulated relative to each recipient's old velocity, then its population
+velocity is updated once in the actual Guo frame. Canonical density and pressure
+remain exact, and physical nonequilibrium stress is retained to roundoff.
+The SAME actual routes feed the original extensive enthalpy transport.
+
+`conversion_momentum_report()` records mass and component momentum defects,
+redistributed mass, route count and signed numerical kinetic change. Remap
+kinetic change is never physical heating. Local representation defects must fit
+population-roundoff bounds; insufficient adjacent storage, inadmissible Mach,
+nonpositive populations or unrepresentable residual momentum refuse. Public
+normal and prescribed-pressure steps publish the complete candidate atomically.
+
+This closes conversion's represented linear momentum, not the full streaming
+integrator's momentum/energy balance, angular momentum, capillary surface energy
+or phase-density volume sources. The separate resolved thermocapillary fill
+owner still requires Local. Native regressions cover unequal densities, Guo
+forces, advancing/receding and disconnected fronts, actual before/routes/after
+mass continuity, a real collision/stream/conversion step, zero-pressure replay,
+co-moving identity and late public-step rollback.
+
 ### Density-consistent physical state at free-surface ingress and conversion
 
 Newly wet D2Q9 cells and default D3Q19 cells average their neighbors' physical

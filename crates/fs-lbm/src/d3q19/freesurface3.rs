@@ -50,6 +50,8 @@ pub use initial::FreeSurfaceInitialCell3;
 mod pressure;
 mod curvature;
 mod forcing;
+mod conversion_momentum;
+pub use conversion_momentum::ConversionMomentumReport3;
 mod geometry;
 mod motion;
 pub use motion::{PlanarPistonRemapReport3, PlanarWallMotionReport3};
@@ -75,6 +77,10 @@ pub enum ConversionRedistribution3 {
     /// Transfer excess and debt only to surviving neighboring interface cells.
     #[default]
     Local,
+    /// Bound each local route by actual mass/capacity and carry its physical
+    /// momentum. Refuse unlocated carry or unsupported geometry; report signed
+    /// numerical kinetic change without turning it into heat. Opt-in.
+    ConservativeLocal,
     /// Reproduce version-1 global pooling, including its nonlocal mass and heat
     /// mixing between disconnected drops. Intended only for historical replay.
     LegacyGlobal,
@@ -329,6 +335,8 @@ pub struct FreeSurface3 {
     /// It remains in the ledger; no location is available to redistribute it.
     carry: f64,
     conversions: ConversionStats3,
+    /// Accepted conversion-only account for the explicitly conservative mode.
+    conversion_momentum: Option<ConversionMomentumReport3>,
     /// Worst single-step relative ledger violation observed so far —
     /// the bead demands this be logged, not assumed.
     worst_step_violation: f64,
@@ -555,6 +563,7 @@ impl FreeSurface3 {
             geometry_epoch: 0,
             carry: 0.0,
             conversions: ConversionStats3::default(),
+            conversion_momentum: None,
             worst_step_violation: 0.0,
             fill_smooth: BTreeMap::new(),
             local_force: None,
@@ -721,10 +730,21 @@ impl FreeSurface3 {
     /// Select conversion semantics explicitly. Constructors use [`ConversionRedistribution3::Local`].
     /// The legacy choice exists to replay previously frozen version-1 results;
     /// it does not provide spatially local drop or thermal transport.
+    /// ConservativeLocal additionally transports physical conversion momentum,
+    /// bounds actual receiving inventories, and refuses unlocated carry. Its
+    /// numerical kinetic change is available through conversion_momentum_report.
     #[must_use]
     pub fn with_conversion_redistribution(mut self, model: ConversionRedistribution3) -> Self {
         self.redistribution = model;
+        self.conversion_momentum = None;
         self
+    }
+
+    /// Most recent accepted conservative conversion account in lattice units.
+    /// It excludes the momentum/energy evolution of collision and streaming.
+    #[must_use]
+    pub const fn conversion_momentum_report(&self) -> Option<&ConversionMomentumReport3> {
+        self.conversion_momentum.as_ref()
     }
 
     /// Cumulative conversion statistics.
@@ -1077,7 +1097,17 @@ impl FreeSurface3 {
     /// publication. Cancellation preserves populations, tracked mass and all
     /// conversion counters. Once publication begins its conversion cascade
     /// finishes; a later cancellation request is observed by the next step.
+    /// ConservativeLocal evaluates the entire step on a private candidate;
+    /// conversion/cancellation refusal also preserves its populations and receipt.
     pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
+        if self.redistribution == ConversionRedistribution3::ConservativeLocal {
+            check_cancel(gate)?;
+            let mut candidate = self.clone();
+            candidate.step_inner(gate, None, None, None)?;
+            check_cancel(gate)?;
+            *self = candidate;
+            return Ok(());
+        }
         self.step_inner(gate, None, None, None)
     }
 
@@ -1345,6 +1375,12 @@ impl FreeSurface3 {
         mut transport: Option<&mut MassTransport3>,
         tolerance: f64,
     ) -> Result<(), FreeSurfaceError3> {
+        let mut momentum = if self.redistribution == ConversionRedistribution3::ConservativeLocal {
+            Some(conversion_momentum::ConversionMomentum3::new(self)?)
+        } else { None };
+        // Capacity routing needs physical recipient inventories. The opt-in
+        // mode finishes ALL signed over/undershoots in this same conversion.
+        let tolerance = if momentum.is_some() { 0.0 } else { tolerance };
         let mut excess = Vec::new();
         let keys: Vec<u64> = self.tiles.keys().copied().collect();
         let mut to_fluid: Vec<(u64, usize)> = Vec::new();
@@ -1370,6 +1406,9 @@ impl FreeSurface3 {
         for &(key, lane) in &to_fluid {
             let slot = self.grid.slot_of(key).expect("active");
             let rho: f64 = self.grid.populations(slot, lane).iter().sum();
+            if let Some(momentum) = &mut momentum {
+                momentum.capture_source(self, key, lane, self.tiles[&key].mass[lane] - rho)?;
+            }
             {
                 let tile = self.tiles.get_mut(&key).expect("active");
                 excess.push((key, lane, tile.mass[lane] - rho));
@@ -1483,6 +1522,9 @@ impl FreeSurface3 {
             if self.tiles[&key].cells[lane] != Cell3::Interface {
                 continue; // re-flagged by the cascade
             }
+            if let Some(momentum) = &mut momentum {
+                momentum.capture_source(self, key, lane, self.tiles[&key].mass[lane])?;
+            }
             {
                 let tile = self.tiles.get_mut(&key).expect("active");
                 excess.push((key, lane, tile.mass[lane]));
@@ -1506,6 +1548,14 @@ impl FreeSurface3 {
                     self.ensure_interface_neighborhood(nb_key, nb_lane)?;
                 }
             }
+        }
+
+        if let Some(mut momentum) = momentum {
+            for (key, lane, amount) in excess {
+                momentum.redistribute(self, key, lane, amount, transport.as_deref_mut())?;
+            }
+            self.conversion_momentum = Some(momentum.finish(self)?);
+            return Ok(());
         }
 
         if self.redistribution == ConversionRedistribution3::LegacyGlobal {
