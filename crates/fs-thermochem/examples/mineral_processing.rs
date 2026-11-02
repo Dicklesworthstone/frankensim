@@ -2,6 +2,9 @@
 //!
 //! Usage: `cargo run -p fs-thermochem --example mineral_processing -- \
 //! cao.fsmatpk water.fsmatpk caoh2.fsmatpk 56.077`
+//! Or explicit malachite inventory accounting, with all four inputs in moles:
+//! `cargo run -p fs-thermochem --example mineral_processing -- \
+//! --malachite-inventory 10 12 100 3`
 //!
 //! The final argument is kilograms of pure CaO actually reacted. It is not
 //! commercial feed mass; feed purity and conversion require separate evidence.
@@ -12,7 +15,7 @@ use std::{error::Error, path::Path};
 
 use fs_matdb::{MatDbError, NormalizedPack, PropertyKey, QueryPoint, SelectionPolicy};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Dims, Mass, MolarMass, QuantitySpec};
+use fs_qty::{Amount, Dims, Mass, MolarMass, QuantitySpec};
 use fs_thermochem::{
     SpeciesId,
     stoichiometry::{FormationEnthalpySource, minerals::MineralReaction},
@@ -72,8 +75,57 @@ fn reference_point(liquid: bool) -> Result<QueryPoint, MatDbError> {
     Ok(point)
 }
 
+fn malachite_inventory(args: &[String]) -> Result<(), Box<dyn Error>> {
+    if args.len() != 5 {
+        return Err("usage: mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL".into());
+    }
+    let reaction = MineralReaction::MalachiteAcidLeach.build()?;
+    let initial = [
+        (
+            SpeciesId::new("Cu2CO3(OH)2(s)")?,
+            Amount::new(args[1].parse()?),
+        ),
+        (SpeciesId::new("H+(aq)")?, Amount::new(args[2].parse()?)),
+        (SpeciesId::new("H2O(l)")?, Amount::new(args[3].parse()?)),
+        (SpeciesId::new("Cu[2+](aq)")?, Amount::new(0.0)),
+        (SpeciesId::new("CO2(aq)")?, Amount::new(0.0)),
+    ];
+    let extent = Amount::new(args[4].parse()?);
+    let bound = reaction.limiting_extent(&initial[..2])?;
+    let final_inventory = reaction.advance_inventory(&initial, extent)?;
+    println!("Cu2CO3(OH)2(s) + 4 H+(aq) -> 2 Cu[2+](aq) + CO2(aq) + 3 H2O(l)");
+    println!(
+        "material-availability extent bound [mol]: {}",
+        bound.value()
+    );
+    println!("caller-declared extent [mol]: {}", extent.value());
+    for (species, remaining) in final_inventory {
+        let before = initial
+            .iter()
+            .find(|(name, _)| *name == species)
+            .ok_or("final species is absent from initial inventory")?
+            .1;
+        println!(
+            "{} [mol]: {} -> {}",
+            species.as_str(),
+            before.value(),
+            remaining.value()
+        );
+    }
+    println!(
+        "Extent is an input, not predicted recovery. Proton inventory is not a commercial acid dose."
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--malachite-inventory")
+    {
+        return malachite_inventory(&args);
+    }
     if args.len() != 4 {
         return Err(
             "usage: mineral_processing CAO_PACK WATER_PACK CAOH2_PACK REACTED_PURE_CAO_KG".into(),

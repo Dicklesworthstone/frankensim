@@ -13,12 +13,20 @@
 //! model is inferred. Net power means power at the grinding drive pinion,
 //! excluding auxiliaries; motor nameplate power needs explicit conversion.
 //!
-//! All operations are bounded scalar arithmetic with correctly rounded square
-//! roots and no IO, iteration, mutable history, or cancellation work to drain.
+//! Single-source operations use bounded scalar arithmetic with correctly
+//! rounded square roots. Explicit additive-energy blends traverse their declared
+//! feed list; no operation performs IO or maintains mutable material history.
 
 use fs_matdb::Provenance;
 use fs_math::det;
 use fs_qty::{Acceleration, Dimensionless, Frequency, Length, MassFlowRate, Power, Qty};
+
+#[path = "comminution/blend.rs"]
+mod blend;
+pub use blend::{AdditiveGrindingBlend, GrindingFeed};
+
+#[path = "comminution/inverse.rs"]
+mod inverse;
 
 /// Grinding energy per dry mass, in coherent SI joules per kilogram.
 pub type SpecificGrindingEnergy = Qty<2, 0, -2, 0, 0, 0>;

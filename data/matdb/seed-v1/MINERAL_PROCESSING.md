@@ -149,6 +149,18 @@ applies an explicitly supplied extent to every active species, including
 initially absent products entered as zero. It returns canonical inventories
 without mutating the inputs and refuses extents exceeding available reagents.
 
+The same example binary can run inventory accounting without property packs:
+
+```bash
+cargo run -p fs-thermochem --example mineral_processing -- --malachite-inventory 10 12 100 3
+```
+
+The inputs are 10 mol malachite, 12 mol protons, 100 mol initial water and a
+caller-declared extent of 3 mol. The final inventory contains 7 mol malachite,
+0 mol protons, 6 mol dissolved Cu(II), 3 mol dissolved CO2 and 109 mol water.
+An extent above 3 mol refuses. This is a declared material-flow calculation;
+the availability bound does not predict reaction progress or a commercial dose.
+
 `MineralReaction::build` provides ten explicit endpoint choices:
 
 | Reference | What the equation accounts for |
@@ -195,6 +207,39 @@ At 12 MW net pinion power and utilization 0.9, the corresponding arithmetic
 throughput is 250 kg/s, or 900 dry t/h. A real site needs its own measured work
 index and applicable circuit corrections; this example is not a plant forecast.
 
+### Grinding a declared ore blend
+
+`AdditiveGrindingBlend::new` accepts `GrindingFeed` records containing each
+feed's original `BondGrindingCard`, dry mass and F80. It explicitly selects
+an additive-specific-energy approximation at a common P80:
+`E_blend = sum(m_i * E_i) / sum(m_i)`. Each source's feed and product bounds
+remain enforced. The resulting energy is used to calculate throughput;
+averaging work indices, feed sizes or individual throughputs is not the rule.
+
+An authored two-feed example at P80=100 µm makes the difference concrete:
+
+| Feed | Dry mass share | Wi, kWh/t | F80, µm | Energy, kWh/t |
+| --- | ---: | ---: | ---: | ---: |
+| A | 25% | 10 | 2500 | 8 |
+| B | 75% | 20 | 400 | 10 |
+
+The blend requires 9.5 kWh/t, or 34200 J/kg. At 1 MW net pinion power and
+0.9 utilization, this is approximately 26.316 kg/s, or 94.737 dry t/h.
+The approximation preserves each measured or authored test context but does
+not prove that real ores grind independently when mixed. A site must establish
+the additive regime or supply a different supported blend model.
+
+### Solving for grind size from energy or throughput
+
+The original `BondGrindingCard` also exposes
+`product_size_for_specific_energy(feed, energy)` and
+`product_size_for_throughput(feed, pinion_power, utilization, dry_mass_flow)`.
+They invert the same relation with the original test context and validity
+window. For Wi=15 kWh/t and F80=2500 µm, either 43200 J/kg or 12 MW at 0.9
+utilization and 250 kg/s returns P80=100 µm. Higher flow at fixed power implies
+coarser grinding within this model. A target outside the card's supported
+size window, or positive flow during zero utilization, refuses.
+
 `ball_mill_critical_speed` returns the ideal single-ball centrifuging frequency
 from inside-liner diameter, ball diameter and explicit gravity:
 `n = sqrt(2*g/(D-d))/(2*pi)` revolutions/second.
@@ -206,7 +251,7 @@ Normal workspace commands for these slices:
 
 ```bash
 cargo test -p xtask --test mining_mineral_sources --test mining_mineral_coverage --test mining_reagent_sources --test mining_reagent_references --test mining_reaction_balances
-cargo test -p fs-material comminution::tests
+cargo test -p fs-material comminution
 cargo test -p fs-thermochem stoichiometry::tests
 ```
 

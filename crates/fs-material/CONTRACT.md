@@ -16,11 +16,41 @@ utilization; critical speed is revolutions/second from the inside-liner and
 ball diameters and caller-supplied gravity. Motor nameplate power cannot stand
 in for net pinion power. Finite/positive admission, out-of-domain inputs and
 unrepresentable arithmetic return `ComminutionError`; nothing is clamped.
-Fixed scalar operation order has no mutable state, IO or unbounded work.
+Fixed scalar operation order has no mutable state or IO. Blend work is linear
+in the number of explicitly declared feeds.
+
+`AdditiveGrindingBlend` explicitly selects the approximation
+`E_blend = sum(m_i * E_i) / sum(m_i)` for one common circuit and target P80.
+Every `GrindingFeed` retains its own dry mass, F80 and original
+`BondGrindingCard`; every source admits the requested product independently.
+Admission requires positive masses and a nonempty common product window,
+with strict size reduction for each feed. The weighted energy is converted
+to throughput only after summation, rather than averaging work indices,
+F80 values or individual throughputs. Scaling the extensive factors avoids
+overflow of a finite mean; unrepresentable nonzero contributions refuse.
+This opt-in rule does not establish physical additivity of an actual ore blend
+or estimate interaction, liberation or classification effects.
+
+`BondGrindingCard::product_size_for_specific_energy` inverts the original
+Bond relation for P80; `product_size_for_throughput` first obtains energy
+from explicit pinion power, utilization and dry-solids flow. Both retain the
+same source/test context and require the resulting P80 to lie in the original
+size window, with actual reduction. Positive flow with zero utilization
+refuses. Exact forward endpoint energies round-trip to their declared sizes;
+values outside that energy window refuse rather than clamping. Rationalized
+small reductions and scaled power/flow arithmetic avoid loss through
+intermediate cancellation, overflow or underflow. No recovery or circuit
+efficiency is inferred by inversion.
 
 G0/G1/G3 tests cover hand-calculated energy/tonnage, the published GMG 2021
 stage-energy example, metric/short-ton equivalence, monotonicity, one-ULP
 size reductions, validity refusal and critical-speed force balance/scaling.
+Blend tests independently reproduce 8 and 10 kWh/t feeds yielding 9.5 kWh/t
+at 25%/75% dry mass, reject incompatible source windows, and preserve energy
+under dry-mass scaling, feed permutation and lot splitting.
+Inverse tests recover 100 micrometres from 43200 J/kg or 12 MW at 0.9
+utilization and 250 kg/s, cover domain endpoints and one-ULP reductions,
+and reject unsupported grind targets, invalid inputs and downtime.
 These establish reference-formula behavior, not site predictive validity.
 There is no SAG/AG, circuit correction, slurry rheology, liberation, recovery,
 wear, DEM trajectory or recommended operating-speed claim. Source and
