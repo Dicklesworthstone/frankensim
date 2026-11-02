@@ -11,6 +11,27 @@ pub(super) struct GasPressure3<'a> {
     maximum_density_excursion: f64,
 }
 
+impl<'a> GasPressure3<'a> {
+    pub(super) fn new(
+        maximum_density_excursion: f64,
+        field: &'a dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>,
+    ) -> Result<Self, FreeSurfaceError3> {
+        if !maximum_density_excursion.is_finite()
+            || maximum_density_excursion <= 0.0
+            || maximum_density_excursion >= 1.0
+        {
+            return Err(FreeSurfaceError3::InvalidGasPressure {
+                coordinates: None,
+                reason: "density-excursion bound must be finite and in (0,1)",
+            });
+        }
+        Ok(Self {
+            field,
+            maximum_density_excursion,
+        })
+    }
+}
+
 impl FreeSurface3 {
     /// Advance with an externally prescribed gas-pressure field in lattice
     /// pressure units, relative to the same reference as liquid density one.
@@ -38,23 +59,12 @@ impl FreeSurface3 {
         pressure: impl Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
-        if !maximum_density_excursion.is_finite()
-            || maximum_density_excursion <= 0.0
-            || maximum_density_excursion >= 1.0
-        {
-            return Err(FreeSurfaceError3::InvalidGasPressure {
-                coordinates: None,
-                reason: "density-excursion bound must be finite and in (0,1)",
-            });
-        }
+        let boundary = GasPressure3::new(maximum_density_excursion, &pressure)?;
         self.step_inner(
             gate,
             None,
             None,
-            Some(&GasPressure3 {
-                field: &pressure,
-                maximum_density_excursion,
-            }),
+            Some(&boundary),
         )
     }
 

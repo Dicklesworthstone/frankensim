@@ -259,6 +259,7 @@ impl FreeSurface3 {
 
     /// The caller owns candidate publication: conversion or companion refusal
     /// may occur after native populations have advanced on this private clone.
+    #[cfg(test)]
     pub(crate) fn step_with_mass_transport(
         &mut self,
         gate: &CancelGate,
@@ -266,11 +267,28 @@ impl FreeSurface3 {
         forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
         max_routes: usize,
     ) -> Result<MassTransport3, FreeSurfaceError3> {
+        self.step_with_mass_transport_and_pressure(gate, tau, forces, max_routes, None)
+    }
+
+    /// Prescribed pressure and thermal transport share the exact same native
+    /// mass routes. The enclosing thermal owner publishes the complete candidate.
+    pub(crate) fn step_with_mass_transport_and_pressure(
+        &mut self,
+        gate: &CancelGate,
+        tau: &BTreeMap<(u64, usize), f64>,
+        forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
+        max_routes: usize,
+        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
+    ) -> Result<MassTransport3, FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let boundary = gas_pressure
+            .map(|(maximum, field)| super::pressure::GasPressure3::new(maximum, field))
+            .transpose()?;
         if let Some(forces) = forces {
             self.rebind_force_field(forces, gate)?;
         }
         let mut trace = MassTransport3::new(self.mass_snapshot(), max_routes);
-        self.step_inner(gate, Some(&mut trace), Some(tau), None)?;
+        self.step_inner(gate, Some(&mut trace), Some(tau), boundary.as_ref())?;
         trace.after = self.mass_snapshot();
         Ok(trace)
     }

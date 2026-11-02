@@ -275,6 +275,7 @@ impl From<fs_material::thermochemical_gas::energy::GasEnergyError> for FreeSurfa
 }
 
 type Error = FreeSurfaceEnthalpyError;
+type GasPressureField<'a> = dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3> + 'a;
 
 /// Native moving liquid, original caloric chart and pinned source law.
 ///
@@ -539,6 +540,61 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         self.advance_prepared_enthalpy(heated, external, 0.0, 0.0, absolute_heat, None, gate)
     }
 
+    /// Apply cell heat and prescribed absolute gas pressure in one accepted
+    /// flow/enthalpy transaction. The pressure field is sampled at exposed
+    /// liquid cell centers [m] and held over this step, exactly as in
+    /// [`MaterialFreeSurface3::step_with_gas_pressure`]. The initial scaling
+    /// must carry an explicit fixed pressure reference.
+    ///
+    /// Heated source viscosity, optional buoyancy/rheology and native capillary
+    /// traction act in the same collision. The resulting native mass routes
+    /// transport `mass*h` once, including interface conversion. Any pressure,
+    /// source, transport or cancellation refusal preserves all accepted state
+    /// and the liquid clock. A pressure equal to the reference retains the
+    /// ordinary heat-step arithmetic.
+    ///
+    /// Pressure drives momentum; it is not deposited as heat. This retains the
+    /// existing constant-reference-density, fixed source-pressure caloric law;
+    /// it does not evolve a gas reservoir, infer compressive heating or claim
+    /// total-energy/pressure-work closure. Source-pressure applicability remains
+    /// with the caller. Bound surface-temperature/electrical owners still need
+    /// their complete thermal entry points and cannot be skipped by this call.
+    pub fn step_with_heat_and_gas_pressure(
+        &mut self,
+        heat: &[FreeSurfaceCellHeat],
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn([f64; 3]) -> f64,
+    ) -> Result<FreeSurfaceEnthalpyReport, Error> {
+        poll(gate)?;
+        let reference = self
+            .flow
+            .scaling
+            .reference_pressure_pa
+            .ok_or(Error::Invalid(
+                "absolute gas loading requires an explicit fixed pressure reference",
+            ))?;
+        let field = super::pressure::lattice_pressure_field(
+            reference,
+            self.flow.scaling.cell_size_m,
+            self.flow.scaling.pressure_unit_pa,
+            pressure_pa,
+        );
+        let (heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
+        self.advance_prepared_enthalpy_with_boundary(
+            heated,
+            external,
+            0.0,
+            0.0,
+            absolute_heat,
+            None,
+            None,
+            None,
+            Some((maximum_density_excursion, &field)),
+            gate,
+        )
+    }
+
     fn prepare_heat(
         &self,
         heat: &[FreeSurfaceCellHeat],
@@ -616,8 +672,36 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         body_heat: f64,
         absolute_heat: f64,
         additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
+        surface: Option<&mut SurfaceTensionResolver<'_>>,
+        wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceEnthalpyReport, Error> {
+        self.advance_prepared_enthalpy_with_boundary(
+            heated,
+            external,
+            viscous,
+            body_heat,
+            absolute_heat,
+            additional_forces,
+            surface,
+            wetting_outer_gas,
+            None,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_prepared_enthalpy_with_boundary(
+        &mut self,
+        heated: BTreeMap<MassLocation3, f64>,
+        external: f64,
+        viscous: f64,
+        body_heat: f64,
+        absolute_heat: f64,
+        additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
         mut surface: Option<&mut SurfaceTensionResolver<'_>>,
         wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
+        gas_pressure: Option<(f64, &GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
         poll(gate)?;
@@ -674,11 +758,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let prepared_wetting = self.prepare_wetting(
             &mut lattice, &resolved.states, wetting_outer_gas, gate,
         )?;
-        let mut trace = lattice.step_with_mass_transport(
+        let mut trace = lattice.step_with_mass_transport_and_pressure(
             gate,
             &resolved.tau,
             resolved.forces,
             self.controls.max_mass_routes,
+            gas_pressure,
         )?;
         if self.thermocapillary.is_some() {
             // Resolve native conversion hysteresis through the SAME mass

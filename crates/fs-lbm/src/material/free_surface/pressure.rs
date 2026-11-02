@@ -3,6 +3,32 @@
 use super::*;
 use crate::d3q19::freesurface3::FreeSurfaceError3;
 
+// One physical-coordinate and pressure conversion for frozen and evolving
+// liquids; captures scalars so a thermal candidate need not borrow its owner.
+pub(super) fn lattice_pressure_field(
+    reference_pressure_pa: f64,
+    dx: f64,
+    pressure_unit: f64,
+    pressure_pa: impl Fn([f64; 3]) -> f64,
+) -> impl Fn([usize; 3]) -> Result<f64, FreeSurfaceError3> {
+    move |coordinates| {
+        let position = coordinates.map(|c| (c as f64 + 0.5) * dx);
+        let absolute = pressure_pa(position);
+        let perturbation = (absolute - reference_pressure_pa) / pressure_unit;
+        if position.iter().any(|x| !x.is_finite())
+            || !absolute.is_finite()
+            || absolute <= 0.0
+            || !perturbation.is_finite()
+        {
+            return Err(FreeSurfaceError3::InvalidGasPressure {
+                coordinates: Some(coordinates),
+                reason: "absolute gas pressure must be positive with finite physical coordinates and lattice conversion",
+            });
+        }
+        Ok(perturbation)
+    }
+}
+
 impl MaterialFreeSurfaceScaling<'_> {
     /// Assign the positive absolute pressure [Pa] represented by density one,
     /// before constructing a trajectory. Without an explicit reference the
@@ -81,27 +107,15 @@ impl MaterialFreeSurface3<'_> {
                 .ok_or(MaterialLbmError::Invalid(
                     "absolute gas loading requires an explicit fixed pressure reference",
                 ))?;
-        let dx = self.scaling.cell_size_m;
-        let pressure_unit = self.scaling.pressure_unit_pa;
         self.lattice.step_with_gas_pressure(
             gate,
             maximum_density_excursion,
-            |coordinates| {
-                let position = coordinates.map(|c| (c as f64 + 0.5) * dx);
-                let absolute = pressure_pa(position);
-                let perturbation = (absolute - reference_pressure_pa) / pressure_unit;
-                if position.iter().any(|x| !x.is_finite())
-                    || !absolute.is_finite()
-                    || absolute <= 0.0
-                    || !perturbation.is_finite()
-                {
-                    return Err(FreeSurfaceError3::InvalidGasPressure {
-                        coordinates: Some(coordinates),
-                        reason: "absolute gas pressure must be positive with finite physical coordinates and lattice conversion",
-                    });
-                }
-                Ok(perturbation)
-            },
+            lattice_pressure_field(
+                reference_pressure_pa,
+                self.scaling.cell_size_m,
+                self.scaling.pressure_unit_pa,
+                pressure_pa,
+            ),
         )?;
         Ok(())
     }

@@ -346,6 +346,23 @@ carry, heat and material history. Zero-mass interface ghosts store no energy;
 new unconnected ghosts receive a mass-weighted one-ring extension only for their
 collision coefficients. Their enthalpy is never a heat reservoir.
 
+`step_with_heat_and_gas_pressure` combines declared cell heat and an imposed
+absolute gas-pressure field on this same timeline. An explicit pressure
+reference fixes the Pascal datum; physical cell-center samples lower through
+the same checked pressure-unit conversion as the isothermal material owner.
+Temperature-dependent viscosity and the admitted local force field enter the
+original native pressure reconstruction, while enthalpy follows that step's
+actual mass routes. The pressure callback does not introduce a separate flow
+solve, caloric source or heat term. Invalid pressure, density-excursion bounds,
+source paths and observed cancellation leave flow, enthalpy, material states
+and clock unpublished together. Reference pressure retains the ordinary heat
+step's arithmetic; a common pressure-datum shift retains its physical load.
+Focused regressions cover heated pressure-driven motion, the temperature's
+effect on viscosity, mass and extensive-enthalpy budgets, reference/gauge
+identity and late callback/cancellation refusal. This remains incompressible
+thermal enthalpy transport: compressive heating, gas-reservoir evolution and a
+total mechanical-plus-thermal energy closure are not supplied by this entry.
+
 This bounded rung requires one pure liquid, unchanged physical density,
 stationary walls and explicitly neglected capillarity. Negative accepted native
 interface/carry mass refuses. Phase conversion, volume change, conduction,

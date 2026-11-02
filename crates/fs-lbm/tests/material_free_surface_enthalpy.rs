@@ -40,6 +40,9 @@ mod height_graph;
 #[path = "material_free_surface_enthalpy/mass_exchange.rs"]
 mod mass_exchange;
 
+#[path = "material_free_surface_enthalpy/pressure.rs"]
+mod pressure;
+
 fn card(hot_viscosity: f64, hot_density: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [
