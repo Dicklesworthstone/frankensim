@@ -10,9 +10,23 @@ bounded layouts and exactly convertible coefficients make the calculation
 deterministic; missing/duplicate species, nonfinite inputs, imbalance and
 unrepresentable nonzero arithmetic refuse. It owns no evolving reactor state.
 
-`stoichiometry::minerals::MineralReaction` provides five explicit reference
+`limiting_extent` rounds a ratio down when an FMA residual reveals that its
+coefficient product would exceed available stock. `advance_inventory` applies
+an explicit forward extent to a complete inventory of active species, including
+zero for absent products. It returns canonical finite nonnegative inventories
+without mutating inputs; excessive extent, overflow and nonzero changes below
+inventory resolution refuse rather than clipping or disappearing. The exact
+certificate proves the integer equation; binary64 final amounts are separately
+evaluated, with no claim of exact numerical mass conservation.
+
+`stoichiometry::minerals::MineralReaction` provides ten explicit reference
 endpoints: lime hydration, calcite/dolomite acid neutralization to dissolved
-CO2, and pyrite oxidation to either ferrous ions or ideal ferric hydroxide.
+CO2 or retained bicarbonate, hydrated-lime neutralization, malachite acid
+leaching to dissolved copper and CO2, the net ionic Elsner gold-cyanidation
+balance, and pyrite oxidation to either ferrous ions or ideal ferric hydroxide.
+The bicarbonate pathways consume half as many protons per mole of carbonate
+mineral as the CO2 pathways. The equations do not assign a universal measured
+acid consumption to an ore, nor infer gas transfer or commercial reagent purity.
 Pyrite equations use integer multiples of two/four FeS2; extent is per equation
 as written. Endpoint choice is declared, never inferred from pH, Eh or time.
 `faraday_yield` converts integrated charge, positive electron count, supplied
@@ -30,7 +44,8 @@ band is asserted. Multiplying by extent must not double-count chemical energy
 already present in a total-energy formulation.
 
 G0/G1/G3 tests cover exact balances, source-backed CaO hydration through the real
-pack compiler, distinct pyrite endpoints, inventories, Faraday copper yield,
+pack compiler, distinct pyrite and carbonate endpoints, acid-limited malachite
+inventory advancement, Elsner reagent ratios, Faraday copper yield,
 unit/extent scaling and invalid/mislabelled reference states. This slice does
 not extend the ideal-gas EOS/species model, select thermodynamic pathways,
 authenticate caller species-to-pack associations, solve aqueous speciation,

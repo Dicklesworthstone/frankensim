@@ -42,6 +42,13 @@ pub enum ReactionBalanceError {
         /// Required repair at the caller boundary.
         reason: &'static str,
     },
+    /// A declared forward extent would consume more material than is present.
+    ExtentExceedsInventory {
+        /// Requested amount of the integer reaction as written [mol].
+        requested: Amount,
+        /// Conservatively admitted material-availability bound [mol].
+        maximum: Amount,
+    },
     /// A finite nonzero result cannot be represented without range loss.
     Arithmetic(&'static str),
 }
@@ -204,6 +211,8 @@ impl ConservedReaction {
 
     /// Stoichiometric upper bound from all and only the reactant inventories.
     /// This is a material-availability bound, not an equilibrium or recovery.
+    /// A nearest-rounded ratio is moved down one binary64 step when its exact
+    /// coefficient product exceeds stock, so the returned extent is feasible.
     pub fn limiting_extent(&self, inventories: &[(SpeciesId, Amount)]) -> Result<Amount> {
         let reactants: Vec<_> = self
             .terms
@@ -234,11 +243,91 @@ impl ConservedReaction {
                         species: term.species.clone(),
                         reason: "missing reactant inventory",
                     })?;
-            let extent = amount / -(term.coefficient as f64);
+            let scale = -(term.coefficient as f64);
+            let mut extent = amount / scale;
+            representable(extent, *amount > 0.0, "inventory extent")?;
+            // Ordinary multiplication can round an overspend back onto stock.
+            // FMA preserves its sign. The coefficient is an exact integer, so
+            // a nonzero residual cannot be smaller than the least subnormal.
+            if extent.mul_add(scale, -*amount) > 0.0 {
+                extent = extent.next_down();
+            }
             representable(extent, *amount > 0.0, "inventory extent")?;
             limit = limit.min(extent);
         }
         Ok(Amount::new(limit))
+    }
+
+    /// Advance a complete inventory by a declared nonnegative forward extent.
+    ///
+    /// Supply exactly one amount for every active species, including explicit
+    /// zero for absent products. Spectators are managed outside this reaction.
+    /// Input order is arbitrary; the returned inventory is canonical. Inputs
+    /// are never mutated, and an excessive extent is refused rather than
+    /// clipped. Element/charge conservation is exact for the equation; final
+    /// amounts are binary64 evaluations of `initial + coefficient * extent`.
+    /// Nonzero changes below inventory resolution refuse instead of vanishing.
+    pub fn advance_inventory(
+        &self,
+        inventories: &[(SpeciesId, Amount)],
+        extent: Amount,
+    ) -> Result<Vec<(SpeciesId, Amount)>> {
+        nonnegative(extent.value(), "extent must be finite and nonnegative")?;
+        if inventories.len() != self.terms.len() {
+            return Err(ReactionBalanceError::Invalid(
+                "supply exactly one inventory per active species",
+            ));
+        }
+        let mut by_species = BTreeMap::new();
+        for (species, amount) in inventories {
+            nonnegative(amount.value(), "inventory must be finite and nonnegative")?;
+            if by_species.insert(species, amount.value()).is_some() {
+                return Err(ReactionBalanceError::Species {
+                    species: species.clone(),
+                    reason: "duplicate inventory",
+                });
+            }
+        }
+        let mut initial = Vec::with_capacity(self.terms.len());
+        let mut reactants = Vec::new();
+        for term in &self.terms {
+            let amount =
+                *by_species
+                    .get(&term.species)
+                    .ok_or_else(|| ReactionBalanceError::Species {
+                        species: term.species.clone(),
+                        reason: "missing active-species inventory",
+                    })?;
+            initial.push((term.species.clone(), Amount::new(amount)));
+            if term.coefficient < 0 {
+                reactants.push((term.species.clone(), Amount::new(amount)));
+            }
+        }
+        if extent.value() == 0.0 {
+            return Ok(initial);
+        }
+        let maximum = self.limiting_extent(&reactants)?;
+        if extent.value() > maximum.value() {
+            return Err(ReactionBalanceError::ExtentExceedsInventory {
+                requested: extent,
+                maximum,
+            });
+        }
+        let mut result = Vec::with_capacity(initial.len());
+        for ((species, before), flow) in initial.into_iter().zip(self.amounts(extent)?) {
+            let after = (flow.term.coefficient as f64).mul_add(extent.value(), before.value());
+            representable(after, false, "final species inventory")?;
+            if after < 0.0 {
+                return Err(ReactionBalanceError::Arithmetic("negative final inventory"));
+            }
+            if after == before.value() {
+                return Err(ReactionBalanceError::Arithmetic(
+                    "reaction advance is below inventory resolution",
+                ));
+            }
+            result.push((species, Amount::new(after)));
+        }
+        Ok(result)
     }
 
     /// Sum standard formation enthalpies in canonical species order.

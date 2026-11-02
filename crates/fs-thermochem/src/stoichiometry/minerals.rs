@@ -5,8 +5,18 @@
 //! combine mineral dissolution with CO3(2-) + 2 H+ -> CO2(aq) + H2O from
 //! the USGS PHREEQC database:
 //! <https://wwwbrr.cr.usgs.gov/projects/GWC_coupled/phreeqc.v1/html/phqc_66.htm>.
+//! Distinct bicarbonate endpoints follow USGS WRIR 95-4097, equations 4-5:
+//! <https://pubs.usgs.gov/wri/1995/4097/report.pdf>. A carbonate's acid capacity
+//! is therefore endpoint-dependent, not a universal measured ore property.
 //! Lime hydration is CaO + H2O -> Ca(OH)2; source-bound formation enthalpies
-//! are supplied separately.
+//! are supplied separately. Hydrated-lime neutralization follows the EPA acid
+//! mine drainage design manual:
+//! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=20007H0I.TXT>.
+//! Malachite's net ionic acid balance is equation 10 in
+//! <https://doi.org/10.3390/met10060833>; the pathway here retains dissolved CO2.
+//! Net ionic Elsner cyanidation follows
+//! <https://doi.org/10.1038/s41598-019-43383-4> and the EPA 1994 report
+//! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=2000EF6J.TXT>.
 //! These equations conserve atoms and charge; they do not select pH/Eh,
 //! dissolved speciation, precipitates, gas transfer, rates or conversion.
 
@@ -25,6 +35,18 @@ pub enum MineralReaction {
     CalciteAcidNeutralization,
     /// CaMg(CO3)2(s) + 4 H+ -> Ca2+ + Mg2+ + 2 CO2(aq) + 2 H2O(l).
     DolomiteAcidNeutralization,
+    /// CaCO3(s) + H+ -> Ca2+ + HCO3-; bicarbonate remains in solution.
+    CalciteBicarbonateNeutralization,
+    /// CaMg(CO3)2(s) + 2 H+ -> Ca2+ + Mg2+ + 2 HCO3-.
+    DolomiteBicarbonateNeutralization,
+    /// Ca(OH)2(s) + 2 H+ -> Ca2+ + 2 H2O(l).
+    HydratedLimeNeutralization,
+    /// Cu2CO3(OH)2(s) + 4 H+ -> 2 Cu2+ + CO2(aq) + 3 H2O(l).
+    /// Stoichiometric dissolved-copper endpoint, not an ore-recovery prediction.
+    MalachiteAcidLeach,
+    /// 4 Au(s) + 8 CN- + O2(g) + 2 H2O(l) -> 4 Au(CN)2- + 4 OH-.
+    /// Net ionic Elsner balance; gas supply does not imply a dissolution rate.
+    GoldCyanidation,
     /// 2 FeS2(s) + 7 O2(g) + 2 H2O(l) -> 2 Fe2+ + 4 SO4(2-) + 4 H+.
     PyriteOxidationFerrous,
     /// 4 FeS2(s) + 15 O2(g) + 14 H2O(l) -> 4 Fe(OH)3(s) + 8 SO4(2-) + 16 H+.
@@ -71,6 +93,60 @@ impl MineralReaction {
                     ("Mg[2+](aq)", &[0, 1, 0, 0, 0], 2, 1),
                     ("CO2(aq)", &[0, 0, 1, 0, 2], 0, 2),
                     ("H2O(l)", &[0, 0, 0, 2, 1], 0, 2),
+                ],
+            ),
+            Self::CalciteBicarbonateNeutralization => (
+                "calcite-acid-bicarbonate",
+                &["Ca", "C", "H", "O"],
+                &[
+                    ("CaCO3(s)", &[1, 1, 0, 3], 0, -1),
+                    ("H+(aq)", &[0, 0, 1, 0], 1, -1),
+                    ("Ca[2+](aq)", &[1, 0, 0, 0], 2, 1),
+                    ("HCO3[-](aq)", &[0, 1, 1, 3], -1, 1),
+                ],
+            ),
+            Self::DolomiteBicarbonateNeutralization => (
+                "dolomite-acid-bicarbonate",
+                &["Ca", "Mg", "C", "H", "O"],
+                &[
+                    ("CaMg(CO3)2(s)", &[1, 1, 2, 0, 6], 0, -1),
+                    ("H+(aq)", &[0, 0, 0, 1, 0], 1, -2),
+                    ("Ca[2+](aq)", &[1, 0, 0, 0, 0], 2, 1),
+                    ("Mg[2+](aq)", &[0, 1, 0, 0, 0], 2, 1),
+                    ("HCO3[-](aq)", &[0, 0, 1, 1, 3], -1, 2),
+                ],
+            ),
+            Self::HydratedLimeNeutralization => (
+                "hydrated-lime-neutralization",
+                &["Ca", "H", "O"],
+                &[
+                    ("Ca(OH)2(s)", &[1, 2, 2], 0, -1),
+                    ("H+(aq)", &[0, 1, 0], 1, -2),
+                    ("Ca[2+](aq)", &[1, 0, 0], 2, 1),
+                    ("H2O(l)", &[0, 2, 1], 0, 2),
+                ],
+            ),
+            Self::MalachiteAcidLeach => (
+                "malachite-acid-leach",
+                &["Cu", "C", "H", "O"],
+                &[
+                    ("Cu2CO3(OH)2(s)", &[2, 1, 2, 5], 0, -1),
+                    ("H+(aq)", &[0, 0, 1, 0], 1, -4),
+                    ("Cu[2+](aq)", &[1, 0, 0, 0], 2, 2),
+                    ("CO2(aq)", &[0, 1, 0, 2], 0, 1),
+                    ("H2O(l)", &[0, 0, 2, 1], 0, 3),
+                ],
+            ),
+            Self::GoldCyanidation => (
+                "gold-cyanidation-elsner",
+                &["Au", "C", "N", "O", "H"],
+                &[
+                    ("Au(s)", &[1, 0, 0, 0, 0], 0, -4),
+                    ("CN[-](aq)", &[0, 1, 1, 0, 0], -1, -8),
+                    ("O2(g)", &[0, 0, 0, 2, 0], 0, -1),
+                    ("H2O(l)", &[0, 0, 0, 1, 2], 0, -2),
+                    ("Au(CN)2[-](aq)", &[1, 2, 2, 0, 0], -1, 4),
+                    ("OH[-](aq)", &[0, 0, 0, 1, 1], -1, 4),
                 ],
             ),
             Self::PyriteOxidationFerrous => (
