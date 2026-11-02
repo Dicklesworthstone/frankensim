@@ -320,6 +320,8 @@ pub enum NormalPatchError {
     },
     /// A finite in-envelope elliptic-integral solve did not converge.
     EllipticShapeSolveFailure,
+    /// The bounded monotone cylinder inverse or its forward check did not resolve.
+    CylinderApproachSolveFailure,
     Overflow {
         field: &'static str,
     },
@@ -360,6 +362,10 @@ impl fmt::Display for NormalPatchError {
                 f,
                 "elliptic Hertz aspect-ratio solve did not converge within its declared numerical envelope"
             ),
+            Self::CylinderApproachSolveFailure => write!(
+                f,
+                "cylinder indentation-to-load solve did not resolve on its monotone branch"
+            ),
             Self::Overflow { field } => write!(f, "finite-patch derived value overflowed: {field}"),
         }
     }
@@ -368,6 +374,8 @@ impl std::error::Error for NormalPatchError {}
 
 impl NormalPatchRequest {
     /// Evaluates one bounded request without mutating solver or history state.
+    /// Cylinder contact is load controlled through `line_load_n_per_m`; mechanical
+    /// gap consumers should use [`Self::evaluate_displacement_controlled`].
     pub fn evaluate(&self) -> Result<NormalPatchReceipt, NormalPatchError> {
         self.validate()?;
         let request_id = self.request_id();
@@ -458,6 +466,38 @@ impl NormalPatchRequest {
                 })
             }
         }
+    }
+
+    /// Evaluate the original law at the prescribed `indentation_m`.
+    ///
+    /// Cylinder contact inverts its logarithmic approach on the positive-stiffness
+    /// branch, then uses the original evaluator for every response and applicability
+    /// check. `line_load_n_per_m` remains validated but does not set or seed the
+    /// mechanical force. Other laws retain their original displacement evaluation.
+    /// No iteration publishes a receipt or changes material/history state.
+    pub fn evaluate_displacement_controlled(&self) -> Result<NormalPatchReceipt, NormalPatchError> {
+        let NormalPatchLaw::HertzCylinderPlane {
+            effective_radius_m,
+            reduced_modulus_pa,
+        } = self.law else {
+            return self.evaluate();
+        };
+        self.validate()?;
+        let mut query = self.clone();
+        query.line_load_n_per_m = cylinder_load_for_approach(
+            self.indentation_m,
+            effective_radius_m,
+            reduced_modulus_pa,
+        )?;
+        let receipt = query.evaluate()?;
+        if let NormalPatchReceipt::Line(line) = &receipt {
+            if (line.approach_m - self.indentation_m).abs()
+                > 64.0 * f64::EPSILON * self.indentation_m
+            {
+                return Err(NormalPatchError::CylinderApproachSolveFailure);
+            }
+        }
+        Ok(receipt)
     }
 
     fn sphere(
@@ -1493,6 +1533,58 @@ impl NormalPatchRequest {
         .expect("writing to DomainHasher cannot fail");
         hasher.finalize()
     }
+}
+
+// With s = 2 ln(4R/a) > 0, the original law gives
+// delta/(2R) = (1+s) exp(-s). Its logarithm is monotone, and the unique
+// root of s-ln(1+s)=L lies in [L, 2L+2]. Work is bounded and allocation free.
+fn cylinder_load_for_approach(
+    approach: f64,
+    radius: f64,
+    modulus: f64,
+) -> Result<f64, NormalPatchError> {
+    if approach == 0.0 {
+        return Ok(0.0);
+    }
+    let ratio = approach / radius;
+    if !(ratio < 2.0) {
+        return Err(NormalPatchError::OutsideApplicability {
+            ratio: "cylinder monotone approach/radius",
+            value: ratio,
+            limit: 2.0,
+        });
+    }
+    let target = if ratio >= f64::MIN_POSITIVE {
+        core::f64::consts::LN_2 - ratio.ln()
+    } else {
+        core::f64::consts::LN_2 + radius.ln() - approach.ln()
+    };
+    let (mut lower, mut upper) = (target, 2.0 * target + 2.0);
+    let mut s = target + target.ln_1p() + 1.0;
+    for _ in 0..64 {
+        let residual = s - s.ln_1p() - target;
+        if residual.abs() <= 8.0 * f64::EPSILON * (1.0 + target) {
+            let load = (2.0 * core::f64::consts::PI / (1.0 + s) * modulus) * approach;
+            if load.is_finite() && load > 0.0 {
+                return Ok(load);
+            }
+            return Err(NormalPatchError::Overflow {
+                field: "cylinder inverse load",
+            });
+        }
+        if residual > 0.0 {
+            upper = s;
+        } else {
+            lower = s;
+        }
+        let newton = s - residual * (1.0 + s) / s;
+        s = if newton > lower && newton < upper {
+            newton
+        } else {
+            lower + 0.5 * (upper - lower)
+        };
+    }
+    Err(NormalPatchError::CylinderApproachSolveFailure)
 }
 
 fn checked(value: f64, field: &'static str) -> Result<f64, NormalPatchError> {

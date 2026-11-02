@@ -137,6 +137,94 @@ fn npe_002_line_port_preserves_per_length_units() {
     );
     assert_eq!(port.residual_force_n_per_m, [0.0; 3]);
     assert_eq!(port.tangent_pa, receipt.tangent_pa);
+    assert!((receipt.approach_m / 1.0e-5 - 1.0).abs() < 1e-13);
+}
+
+/// G1: prescribed indentation generates the same force, tangent and energy
+/// as the original load-controlled law, independently of the old load field.
+#[test]
+fn cylinder_mechanical_gap_drives_force_tangent_and_elastic_work() {
+    let law = NormalPatchLaw::HertzCylinderPlane {
+        effective_radius_m: 0.02,
+        reduced_modulus_pa: 2.0e9,
+    };
+    let state = NormalPatchEmbedState::new(0.0, 0.01).unwrap();
+    let evaluate = |approach| {
+        let transition = request(law, "line-gap", approach).evaluate(&state).unwrap();
+        let NormalPatchReceipt::Line(receipt) = transition.receipt else { panic!("line") };
+        receipt
+    };
+    for load in [1e-12, 1e-6, 1.0, 100.0, 10_000.0] {
+        let mut direct = law_request(law);
+        direct.line_load_n_per_m = load;
+        direct.indentation_rate_m_per_s = 0.0;
+        let NormalPatchReceipt::Line(reference) = direct.evaluate().unwrap() else { panic!("line") };
+        let center = evaluate(reference.approach_m);
+        assert!((center.normal_line_load_n_per_m / load - 1.0).abs() < 1e-12);
+        assert!((center.reversible_energy_j_per_m / reference.reversible_energy_j_per_m - 1.0).abs() < 1e-12);
+        let h = center.approach_m * 1e-4;
+        let plus = evaluate(center.approach_m + h);
+        let minus = evaluate(center.approach_m - h);
+        let tangent = (plus.normal_line_load_n_per_m - minus.normal_line_load_n_per_m) / (2.0 * h);
+        let force = (plus.reversible_energy_j_per_m - minus.reversible_energy_j_per_m) / (2.0 * h);
+        assert!((tangent / center.tangent_pa - 1.0).abs() < 1e-8);
+        assert!((force / load - 1.0).abs() < 1e-8);
+    }
+    let mut sample = request(law, "line-gap", 1e-5);
+    let first = sample.evaluate(&state).unwrap();
+    sample.law_request.line_load_n_per_m = 1e12;
+    let second = sample.evaluate(&state).unwrap();
+    assert_eq!(first, second);
+
+    let start = evaluate(1e-7);
+    let end = evaluate(1e-5);
+    let storage = end.reversible_energy_j_per_m - start.reversible_energy_j_per_m;
+    let work = |steps| {
+        let mut previous = start.clone();
+        let mut sum = 0.0;
+        for i in 1..=steps {
+            let current = evaluate(1e-7 + (1e-5 - 1e-7) * i as f64 / steps as f64);
+            sum += 0.5 * (previous.normal_line_load_n_per_m + current.normal_line_load_n_per_m)
+                * (current.approach_m - previous.approach_m);
+            previous = current;
+        }
+        sum
+    };
+    let coarse = (work(32) - storage).abs();
+    let medium = (work(64) - storage).abs();
+    let fine = (work(128) - storage).abs();
+    assert!(medium < 0.3 * coarse && fine < 0.3 * medium);
+    assert!(fine < 4e-6 * storage);
+}
+
+/// G0/G4: zero penetration unloads the cylinder; refused inverse samples
+/// consume no work key and preserve the original material applicability limits.
+#[test]
+fn cylinder_gap_control_unloads_and_refuses_outside_its_source_atomically() {
+    let law = NormalPatchLaw::HertzCylinderPlane {
+        effective_radius_m: 0.02,
+        reduced_modulus_pa: 2.0e9,
+    };
+    let state = NormalPatchEmbedState::new(0.0, 0.01).unwrap();
+    let checkpoint = state.checkpoint();
+    let mut sample = request(law, "line-retry", 0.0);
+    sample.kinematics.declared_gap_m = 0.1;
+    let zero = sample.evaluate(&state).unwrap();
+    let NormalPatchReceipt::Line(receipt) = zero.receipt else { panic!("line") };
+    assert_eq!(receipt.normal_line_load_n_per_m, 0.0);
+    assert_eq!(receipt.tangent_pa, 0.0);
+    assert_eq!(receipt.reversible_energy_j_per_m, 0.0);
+    assert!(matches!(request(law, "line-retry", 0.04).evaluate(&state),
+        Err(NormalPatchEmbedError::Law(NormalPatchError::OutsideApplicability { .. }))));
+    let mut outside = request(law, "line-retry", 1e-5);
+    outside.law_request.limits.max_pressure_to_yield = 1e-6;
+    assert!(matches!(outside.evaluate(&state),
+        Err(NormalPatchEmbedError::Law(NormalPatchError::OutsideApplicability {
+            ratio: "pressure_to_yield", .. }))));
+    assert_eq!(state.checkpoint(), checkpoint);
+    let retry = request(law, "line-retry", 1e-5).evaluate(&state).unwrap();
+    assert_eq!(retry, request(law, "line-retry", 1e-5)
+        .evaluate(&NormalPatchEmbedState::rollback(&checkpoint)).unwrap());
 }
 
 #[test]

@@ -315,7 +315,7 @@ fn line_contact_preserves_line_units_and_elastic_storage() {
     let result = evaluate_normal_contact(&input(
         PatchContactStatus::Touching,
         (10.0, 0.0),
-        0.0,
+        -1.0e-5,
         0.0,
         EulerNormalGeometry::CylinderPlane {
             line_load_n_per_m: 100.0,
@@ -331,6 +331,8 @@ fn line_contact_preserves_line_units_and_elastic_storage() {
         NormalPatchReceipt::Line(_)
     ));
     assert!(matches!(&active.generic.port, NormalPatchPort::Line(_)));
+    let NormalPatchReceipt::Line(receipt) = &active.generic.receipt else { panic!("line") };
+    assert!((receipt.approach_m / 1.0e-5 - 1.0).abs() < 1e-13);
     assert!(
         matches!(active.elastic_storage, NormalElasticStorage::LineJoulesPerMetre(value) if value > 0.0)
     );
@@ -341,6 +343,14 @@ fn line_contact_preserves_line_units_and_elastic_storage() {
             power_w_per_m: 0.0
         }
     ));
+    let touching = evaluate_normal_contact(&input(
+        PatchContactStatus::Touching, (10.0, 0.0), 0.0, 0.0,
+        EulerNormalGeometry::CylinderPlane { line_load_n_per_m: 100.0 }, None,
+    )).unwrap();
+    let EulerNormalContactOutcome::Active(touching) = touching else { panic!("active line") };
+    assert_eq!(touching.elastic_storage, NormalElasticStorage::LineJoulesPerMetre(0.0));
+    let NormalPatchReceipt::Line(receipt) = touching.generic.receipt else { panic!("line") };
+    assert_eq!(receipt.normal_line_load_n_per_m, 0.0);
 }
 
 #[test]

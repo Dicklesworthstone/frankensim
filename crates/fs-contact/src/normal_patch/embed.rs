@@ -1,6 +1,6 @@
 //! Transactional embedding of public normal-patch receipts into generic ports.
 //!
-//! This module deliberately consumes only [`NormalPatchRequest::evaluate`]. It
+//! This module consumes [`NormalPatchRequest::evaluate_displacement_controlled`]. It
 //! neither inspects nor reconstructs private constitutive-law state.
 
 use core::fmt::Write as _;
@@ -357,7 +357,7 @@ impl NormalPatchEmbedRequest {
         query.indentation_rate_m_per_s = self.kinematics.approach_rate_m_per_s;
         query.step_s = self.kinematics.step_s;
         query.identity.state_id = self.mapped_law_state_id();
-        let receipt = query.evaluate()?;
+        let receipt = query.evaluate_displacement_controlled()?;
         let (port, applicability, uncertainty) = self.port_from_receipt(&receipt);
         let embedding_id = hash_embedding_id(
             &work_key,

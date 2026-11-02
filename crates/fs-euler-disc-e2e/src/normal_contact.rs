@@ -184,7 +184,10 @@ pub enum EulerNormalGeometry {
     /// One retained principal curvature must be flat within retained geometry
     /// uncertainty; the supplied line load is per unit axial length in N/m.
     CylinderPlane {
-        /// Caller/outer-solver resolved line load in N/m.
+        /// Retained caller line-load datum in N/m, validated for input integrity.
+        /// Mechanical embedding derives the actual elastic load from the gap;
+        /// this datum does not impose or seed the force. Load-controlled queries
+        /// use `fs_contact::normal_patch::NormalPatchRequest::evaluate` directly.
         line_load_n_per_m: f64,
     },
     /// Both retained principal curvatures must be strictly positive *relative

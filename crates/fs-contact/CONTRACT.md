@@ -262,6 +262,18 @@ differentiate receipt storage and refine independent force/approach work
 quadrature across four decades of line load. This does not extend the declared
 half-space, curvature or small-strain applicability of the approach law.
 
+`NormalPatchRequest::evaluate_displacement_controlled` drives the same laws
+from `indentation_m`; the generic mechanical embedding uses this path. For
+cylinders it solves `s - ln(1+s) = ln(2R/delta)`, with
+`s = 2 ln(4R/a) > 0`, by bracketed Newton iteration capped at 64 steps. The
+original evaluator then supplies every response, source-envelope check and
+identity; an unresolved inverse or forward residual refuses. The supplied
+line-load field neither sets nor seeds mechanical force. Zero penetration
+gives zero elastic force and storage. Direct `evaluate` retains its explicitly
+load-controlled cylinder query. G1 embedding tests check both control paths,
+force/tangent/storage derivatives and work refinement; G0/G4 checks retain
+source limits, lift-off, deterministic replay and atomic refusal/retry.
+
 ### Source-backed Hertz--Mindlin tangential contact
 
 `interface_binding::mindlin::SourceMindlinContact` implements the shared
