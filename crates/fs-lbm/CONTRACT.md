@@ -1785,6 +1785,19 @@ trace/deviatoric relaxation against prescribed physical moments, including
 unequal rates, nonparallel velocity/forcing, and the equal-rate limit. These
 local identities do not extend the existing Mach or transport envelopes.
 
+**Reservoir density and forced stress (`NSF3_BIT_SEMANTICS_VERSION` 7).**
+Incoming reservoir links now extrapolate `post - feq(rho,u) - S(u,F)/2`
+and add `feq(rho_boundary,u_boundary) + S(u_boundary,F)/2`. Post-collision
+velocity is recovered with the negative half-force correction. This retains
+the physical shear/bulk nonequilibrium without the artificial
+`F tensor F * (1/rho_boundary - 1/rho)/4` stress caused by shifting equilibrium
+velocities. Each encountered cell/face builds its ghost populations once;
+existing face selection, streamed mass and finite-volume energy accounting
+remain the owners. Zero-force reconstruction retains its previous bits.
+Focused tests cover unequal densities and viscous rates, all six prescribed
+faces, worker counts, and native mass/energy closure. This changes forced
+reservoir trajectories; it does not qualify a wider flow or acoustic regime.
+
 **Physical initialization and boundary rebinding (`NSF3_BIT_SEMANTICS_VERSION`
 5).** Initial populations now use `feq(rho,u) - S(u,F)/2`. A shifted-velocity
 equilibrium alone introduced an artificial `F tensor F/(4 rho)` second moment.

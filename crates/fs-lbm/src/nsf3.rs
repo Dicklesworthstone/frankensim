@@ -107,7 +107,9 @@ pub const MAX_QUALIFIED_MACH: f64 = 0.2;
 /// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits).
 /// 6: source-driven gas energy uses the original temperature-anchored Cv integral,
 /// keeping formation-energy offsets out of thermal-flow arithmetic.
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 6;
+/// 7: prescribed reservoirs extrapolate the physical post-collision distribution
+/// in the full Guo source frame, without density-dependent force-squared stress.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 7;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -429,6 +431,27 @@ fn rebase_force<L: Lattice3<27>>(f: &mut [f64; Q], u: [f64; 3], difference: [f64
         let cu = (0..3).map(|a| f64::from(c[a]) * u[a]).sum::<f64>();
         f[q] += 0.5 * L::W[q] * ((cf - uf) / THETA0 + cu * cf / (THETA0 * THETA0));
     }
+}
+
+/// Extrapolate physical post-collision nonequilibrium to a prescribed reservoir.
+/// Collision changes the Guo frame from `feq - S/2` to `feq + S/2`: its first
+/// moment is rho*u + F/2, and its physical stress subtracts (uF + Fu)/2.
+/// Shifting equilibrium velocity alone would instead add F*F/(4*rho), whose
+/// unequal local/ghost densities prevent cancellation at the boundary.
+fn reservoir_postcollision<L: Lattice3<27>>(
+    post: &[f64; Q],
+    force: [f64; 3],
+    ghost_density: f64,
+    ghost_velocity: [f64; 3],
+) -> [f64; Q] {
+    let (rho, momentum) = raw_moments::<L>(post);
+    let velocity = half_force_velocity(rho, momentum, force.map(|value| -value));
+    let mut local = equilibrium::<L>(rho, velocity, THETA0);
+    let mut ghost = equilibrium::<L>(ghost_density, ghost_velocity, THETA0);
+    // Both are POST-collision populations, hence the positive half source.
+    rebase_force::<L>(&mut local, velocity, force);
+    rebase_force::<L>(&mut ghost, ghost_velocity, force);
+    core::array::from_fn(|q| ghost[q] + post[q] - local[q])
 }
 
 /// Isothermal regularised collision with Guo forcing: shear relaxation `ws`, trace relaxation `wb`. The first-moment
@@ -1336,6 +1359,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             let x = self.at(i);
             let mut out = [0.0; Q];
+            // All incoming links on one face share its physical ghost. Compute
+            // the two equilibria/source transforms once per encountered face.
+            let mut reservoir_populations = [None; 6];
             for q in 0..Q {
                 let c = L::E[q];
                 let mut y = x;
@@ -1362,14 +1388,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     Some((a, side)) if self.reservoir_ghost(i, a, side).is_some()
                         && self.reservoir_link_is_open(x, c, -1, a, side) => {
                         let b = self.reservoir_ghost(i, a, side).expect("guarded reservoir boundary");
-                        let (rho, mom) = raw_moments::<L>(&post[i]);
-                        let local_u = mom.map(|m| m / rho);
-                        // Post-collision populations carry rho*u + F/2. Extrapolate
-                        // that half-force shift as well as the non-equilibrium part.
-                        let ghost_u =
-                            core::array::from_fn(|k| b.u[k] + 0.5 * self.force[i][k] / b.rho);
-                        equilibrium::<L>(b.rho, ghost_u, THETA0)[q] + post[i][q]
-                            - equilibrium::<L>(rho, local_u, THETA0)[q]
+                        reservoir_populations[2 * a + side].get_or_insert_with(|| {
+                            reservoir_postcollision::<L>(&post[i], self.force[i], b.rho, b.u)
+                        })[q]
                     }
                     _ => {
                         let mut v = post[i][L::OPP[q]];
@@ -2039,6 +2060,144 @@ mod tests {
             0.5 * (u[0] * force[2] + u[2] * force[0]),
             0.5 * (u[1] * force[2] + u[2] * force[1]),
         ]
+    }
+
+    #[test]
+    fn g1_reservoir_extrapolation_preserves_physical_stress_across_density_changes() {
+        let velocity = [0.04, -0.03, 0.02];
+        let ghost_velocity = [-0.02, 0.05, -0.01];
+        let physical = [2e-4, -1e-4, 3e-4, 1.5e-4, -2.5e-4, 5e-5];
+        let trace = physical[0] + physical[1] + physical[2];
+        let axes = [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)];
+        for (rho, ghost_rho) in [(0.4, 1.7), (2.5, 0.6), (1.3, 1.3)] {
+            for force in [[0.004, -0.003, 0.002], [0.0; 3]] {
+                let eq = equilibrium::<D3q27>(rho, velocity, THETA0);
+                let source = raw_source(velocity, force);
+                let initial = core::array::from_fn(|q| {
+                    let [x, y, z] = D3q27::E[q].map(f64::from);
+                    let cpc = x * x * physical[0] + y * y * physical[1]
+                        + z * z * physical[2]
+                        + 2.0 * (x * y * physical[3] + x * z * physical[4]
+                            + y * z * physical[5]);
+                    eq[q] + D3q27::W[q] * (cpc - THETA0 * trace)
+                        / (2.0 * THETA0.powi(2)) - 0.5 * source[q]
+                });
+                for (ws, wb) in [(1.82, 1.15), (0.75, 1.95), (1.2, 1.2)] {
+                    let post = collide::<D3q27>(&initial, force, ws, wb);
+                    let ghost = reservoir_postcollision::<D3q27>(
+                        &post, force, ghost_rho, ghost_velocity,
+                    );
+                    let (mass, momentum) = raw_moments::<D3q27>(&ghost);
+                    assert!((mass - ghost_rho).abs() < 2e-14);
+                    for axis in 0..3 {
+                        assert!((momentum[axis] - ghost_rho * ghost_velocity[axis]
+                            - 0.5 * force[axis]).abs() < 2e-14);
+                    }
+                    // Reduce the full tensor independently of the production
+                    // equilibrium and source transforms. Both shear and bulk
+                    // stress must retain their actual collision relaxation.
+                    for (component, &(a, b)) in axes.iter().enumerate() {
+                        let second: f64 = ghost.iter().enumerate().map(|(q, value)| {
+                            value * f64::from(D3q27::E[q][a]) * f64::from(D3q27::E[q][b])
+                        }).sum();
+                        let isotropic = if a == b { trace / 3.0 } else { 0.0 };
+                        let expected = ghost_rho * (ghost_velocity[a] * ghost_velocity[b]
+                            + if a == b { THETA0 } else { 0.0 })
+                            + (1.0 - ws) * (physical[component] - isotropic)
+                            + (1.0 - wb) * isotropic;
+                        let physical_second = second - 0.5
+                            * (ghost_velocity[a] * force[b] + ghost_velocity[b] * force[a]);
+                        assert!((physical_second - expected).abs() < 2e-14,
+                            "rho={rho}, ghost_rho={ghost_rho}, component={component}: \
+                             {physical_second} != {expected}");
+                    }
+                    if force == [0.0; 3] {
+                        let (local_rho, local_momentum) = raw_moments::<D3q27>(&post);
+                        let local = equilibrium::<D3q27>(
+                            local_rho, local_momentum.map(|m| m / local_rho), THETA0,
+                        );
+                        let boundary = equilibrium::<D3q27>(ghost_rho, ghost_velocity, THETA0);
+                        let previous: [f64; Q] = core::array::from_fn(|q| {
+                            boundary[q] + post[q] - local[q]
+                        });
+                        assert_eq!(ghost.map(f64::to_bits), previous.map(f64::to_bits));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_native_reservoir_stream_uses_full_postcollision_force_frame() {
+        let velocity = [0.012, -0.007, 0.009];
+        for axis in 0..3 {
+            for high in [false, true] {
+                for workers in [1, 3] {
+                    let mut periodic = [true; 3];
+                    periodic[axis] = false;
+                    let spec = NsfSpec {
+                        dims: [4; 3], periodic,
+                        gas: GasSpec::dry_air_ussa1976(),
+                        temperature_k: 293.15, pressure_pa: 101325.0, dx_m: 5e-5,
+                        temperature_window_k: [273.15, 333.15],
+                        maximum_mach: MAX_QUALIFIED_MACH, maximum_temperature_ratio: 0.2,
+                        bulk_to_shear_ratio: 0.73,
+                        bulk_ratio_source: "Cramer 2012, N2 at 293 K",
+                        maximum_cells: 64, wall: WallThermal::Adiabatic,
+                        workers, transport_points: 17,
+                    };
+                    let mut grid = NsfGrid3::<D3q27>::new(
+                        spec, |_| false, |_| (1.2, velocity, 293.15),
+                    ).unwrap();
+                    let ghost_velocity = [-0.008, 0.006, 0.004];
+                    let ghost_rho = 0.85;
+                    grid.set_open_face(axis, high, Some(NsfOpenState {
+                        density_kg_m3: ghost_rho * grid.law.rho_ref_kg_m3,
+                        velocity_m_s: ghost_velocity.map(|v| v * grid.law.dx_m / grid.law.dt_s),
+                        temperature_k: 303.15,
+                    })).unwrap();
+                    let post: Vec<_> = (0..grid.n).map(|i| {
+                        let (rho, _) = raw_moments::<D3q27>(&grid.f[i]);
+                        let (ws, wb) = grid.rates(rho, grid.theta[i], None);
+                        collide::<D3q27>(&grid.f[i], grid.force[i], ws, wb)
+                    }).collect();
+                    let next = grid.stream(&post, None);
+                    let boundary = equilibrium::<D3q27>(ghost_rho, ghost_velocity, THETA0);
+                    let local = equilibrium::<D3q27>(1.2, velocity, THETA0);
+                    let mut checked = 0;
+                    let mut entering_mass = 0.0;
+                    for i in 0..grid.n {
+                        if grid.at(i)[axis] != if high { 3 } else { 0 } { continue; }
+                        assert!(grid.force[i][axis].abs() > 1e-4);
+                        let source = raw_source(ghost_velocity, grid.force[i]);
+                        let local_source = raw_source(velocity, grid.force[i]);
+                        for q in 0..Q {
+                            if D3q27::E[q][axis] != if high { -1 } else { 1 } { continue; }
+                            // Retain the actual post-collision higher moments;
+                            // zero physical second moment alone does not make
+                            // the regularized postcollision vector equilibrium.
+                            let nonequilibrium = post[i][q] - local[q] - 0.5 * local_source[q];
+                            let expected = boundary[q] + 0.5 * source[q] + nonequilibrium;
+                            assert!((next[i][q] - expected).abs() < 2e-14,
+                                "axis={axis}, high={high}, workers={workers}, cell={i}, q={q}");
+                            entering_mass += next[i][q] - post[i][D3q27::OPP[q]];
+                            checked += 1;
+                        }
+                    }
+                    assert_eq!(checked, 16 * 9);
+                    // The corrected stream participates in the original total-
+                    // energy update; no separate boundary supply is introduced.
+                    let before = grid.total_energy_j();
+                    let mass_before: f64 = grid.f.iter().flatten().sum();
+                    let ledger = grid.step().unwrap();
+                    let mass_after: f64 = grid.f.iter().flatten().sum();
+                    assert!((mass_after - mass_before - entering_mass).abs() < 2e-12);
+                    let change = grid.total_energy_j() - before;
+                    assert!((change - ledger.open_energy_j).abs() < 2e-12 * before.abs());
+                    assert!(ledger.residual_rel < 2e-12);
+                }
+            }
+        }
     }
 
     #[test]
