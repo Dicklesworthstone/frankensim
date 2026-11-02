@@ -5,6 +5,9 @@ use super::*;
 /// Allocation-free one-species limit and its analytic rate derivative.
 pub mod scalar;
 pub use scalar::{ScalarSiteError, ScalarSiteStep, backward_euler_site};
+/// Allocation-free common-site evaluation for spatial transport consumers.
+mod prepared;
+pub use prepared::{CompetitiveSiteBuffer, backward_euler_sites_into};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompetitiveSiteStep {
@@ -24,86 +27,15 @@ pub fn backward_euler_sites(
     initial: &[f64], capacity: f64, adsorption: &[f64], desorption: &[f64],
     duration: f64, mut cancelled: impl FnMut() -> bool,
 ) -> Result<CompetitiveSiteStep> {
-    poll(&mut cancelled)?;
-    let n = initial.len();
-    if n == 0 || n > MAX_COMPETITIVE_SPECIES || adsorption.len() != n
-        || desorption.len() != n || !positive(capacity) || !nonnegative(duration)
-        || initial.iter().chain(adsorption).chain(desorption).any(|&x| !nonnegative(x)) {
-        return Err(invalid("bounded matched competitive inventories and finite nonnegative rates required"));
-    }
-    let vacancy0 = finite(capacity - sum(initial.iter().copied())?)?;
-    if vacancy0 < 0.0 { return Err(invalid("competitive loadings exceed their ONE shared site capacity")); }
-    if n == 1 {
-        let step = backward_euler_site(initial[0], capacity, adsorption[0], desorption[0], duration)
-            .map_err(|error| invalid(error.message()))?;
-        poll(&mut cancelled)?;
-        return Ok(CompetitiveSiteStep { initial_moles: initial.to_vec(),
-            final_moles: vec![step.occupied_moles], gross_adsorption_mol: vec![step.gross_adsorption_mol],
-            gross_desorption_mol: vec![step.gross_desorption_mol], vacancy_moles: [vacancy0, step.vacancy_moles],
-            maximum_balance_residual_mol: step.maximum_balance_residual_mol });
-    }
-    let mut result = CompetitiveSiteStep { initial_moles: initial.to_vec(),
-        final_moles: initial.to_vec(), gross_adsorption_mol: vec![0.0; n],
-        gross_desorption_mol: vec![0.0; n], vacancy_moles: [vacancy0; 2],
-        maximum_balance_residual_mol: 0.0 };
-    if duration == 0.0 { poll(&mut cancelled)?; return Ok(result); }
-    let mut qa = [0.0; MAX_COMPETITIVE_SPECIES];
-    let mut qd = [0.0; MAX_COMPETITIVE_SPECIES];
-    let mut retained = [0.0; MAX_COMPETITIVE_SPECIES];
-    let mut released = [0.0; MAX_COMPETITIVE_SPECIES];
-    for i in 0..n {
-        poll(&mut cancelled)?;
-        qa[i] = finite(duration * adsorption[i])?;
-        qd[i] = finite(duration * desorption[i])?;
-        if (adsorption[i] > 0.0 && qa[i] == 0.0) || (desorption[i] > 0.0 && qd[i] == 0.0) {
-            return Err(invalid("nonzero competitive kinetic interval underflow"));
-        }
-        let denominator = finite(1.0 + qd[i])?;
-        retained[i] = qa[i] / denominator;
-        released[i] = initial[i] * (qd[i] / denominator);
-        if (qa[i] > 0.0 && retained[i] == 0.0)
-            || (initial[i] > 0.0 && qd[i] > 0.0 && released[i] == 0.0) {
-            return Err(invalid("competitive vacancy solve lost a nonzero contribution"));
-        }
-    }
-    // Derive vacancy from old vacancies PLUS desorbed old sites, avoiding
-    // capacity - sum(theta/(1+dt*d)) cancellation near complete saturation.
-    let numerator = sum(std::iter::once(vacancy0).chain(released[..n].iter().copied()))?;
-    let denominator = finite(1.0 + sum(retained[..n].iter().copied())?)?;
-    let vacancy1 = numerator / denominator;
-    if !nonnegative(vacancy1) || (numerator > 0.0 && vacancy1 == 0.0) {
-        return Err(invalid("competitive vacancy inventory is unrepresentable"));
-    }
-    for i in 0..n {
-        poll(&mut cancelled)?;
-        let incoming = finite(qa[i] * vacancy1)?;
-        // Rational positive form for large unloading; incremental form for
-        // tiny changes. Neither clips occupancy nor renormalizes a species.
-        let delta = finite((incoming - qd[i] * initial[i]) / (1.0 + qd[i]))?;
-        let next = if delta.abs() < 0.5 * initial[i] { initial[i] + delta }
-            else { (initial[i] + incoming) / (1.0 + qd[i]) };
-        let outgoing = finite(qd[i] * next)?;
-        if !nonnegative(next) || next > capacity
-            || ((initial[i] > 0.0 || incoming > 0.0) && next == 0.0)
-            || (qa[i] > 0.0 && vacancy1 > 0.0 && incoming == 0.0)
-            || (qd[i] > 0.0 && next > 0.0 && outgoing == 0.0) {
-            return Err(invalid("competitive occupied sites or gross streams are unrepresentable"));
-        }
-        result.final_moles[i] = next;
-        result.gross_adsorption_mol[i] = incoming;
-        result.gross_desorption_mol[i] = outgoing;
-        let residual = finite((next - initial[i]) - (incoming - outgoing))?;
-        result.maximum_balance_residual_mol = result.maximum_balance_residual_mol.max(residual.abs());
-    }
-    let residual = finite(sum(result.final_moles.iter().copied())? + vacancy1 - capacity)?;
-    result.maximum_balance_residual_mol = result.maximum_balance_residual_mol.max(residual.abs());
-    let roundoff = 128.0 * f64::EPSILON * capacity;
-    if result.maximum_balance_residual_mol > roundoff {
-        return Err(invalid("original competitive site equations failed their roundoff balance"));
-    }
-    result.vacancy_moles[1] = vacancy1;
-    poll(&mut cancelled)?;
-    Ok(result)
+    let mut work = CompetitiveSiteBuffer::default();
+    backward_euler_sites_into(initial, capacity, adsorption, desorption, duration,
+        &mut work, &mut cancelled)?;
+    Ok(CompetitiveSiteStep { initial_moles: initial.to_vec(),
+        final_moles: work.final_moles().to_vec(),
+        gross_adsorption_mol: work.gross_adsorption_mol().to_vec(),
+        gross_desorption_mol: work.gross_desorption_mol().to_vec(),
+        vacancy_moles: work.vacancy_moles(),
+        maximum_balance_residual_mol: work.maximum_balance_residual_mol() })
 }
 
 #[cfg(test)]
