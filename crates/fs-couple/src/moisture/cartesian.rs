@@ -5,6 +5,8 @@
 //! repeated source key is an explicit equal-diffusivity assignment, never an
 //! inferred tensor. Internal faces use harmonic series resistance. All six
 //! external faces use the original sorption/surface-transfer owner.
+//! A moisture-independent source may explicitly assign zero to a principal
+//! diffusivity: that direction is impermeable, including its external faces.
 //!
 //! Backward Euler resolves local source diffusivities at its accepted endpoint
 //! using bounded Picard iteration and the native checked-CG solver. The compact
@@ -220,9 +222,11 @@ impl MoistureCartesian {
             .iter()
             .map(|&m| {
                 poll(cx)?;
-                Ok(self
-                    .transport
-                    .at_query_point(&self.card, &self.field().point_at(m)?)?)
+                binding::resolve_transport_state(
+                    &self.card,
+                    &self.transport,
+                    &self.field().point_at(m)?,
+                )
             })
             .collect()
     }
@@ -281,8 +285,11 @@ impl MoistureCartesian {
                     "Cartesian surface exceeds bound-water applicability",
                 ));
             }
-            self.transport
-                .at_query_point(&self.card, &self.field().point_at(m)?)?;
+            binding::resolve_transport_state(
+                &self.card,
+                &self.transport,
+                &self.field().point_at(m)?,
+            )?;
         }
         let start = self.transport_states(&self.moisture, cx)?;
         let mut system = self.system(dt_s, &boundaries, &start, cx)?;
@@ -370,8 +377,11 @@ impl MoistureCartesian {
                         face.fraction
                             .mul_add(equilibrium - solution.x[face.cell], solution.x[face.cell])
                     };
-                    self.transport
-                        .at_query_point(&self.card, &self.field().point_at(m)?)?;
+                    binding::resolve_transport_state(
+                        &self.card,
+                        &self.transport,
+                        &self.field().point_at(m)?,
+                    )?;
                     surface_moisture[face.side].push((face.cell, m));
                 }
                 let report = MoistureCartesianReport {
@@ -459,14 +469,7 @@ impl MoistureCartesian {
                         .property(&self.properties[k])
                         .expect("pinned principal diffusivity")
                         .value_si();
-                    let lo = d.min(other);
-                    let hi = d.max(other);
-                    let a = scale[k] * (lo / (0.5 + 0.5 * (lo / hi)));
-                    if !positive(a) {
-                        return Err(MoistureError::Invalid(
-                            "Cartesian internal face coefficient overflow or underflow",
-                        ));
-                    }
+                    let a = interior_coupling(scale[k], d, other)?;
                     system.operator.forward[i][k] = a;
                     system.operator.diagonal[i] += a;
                     system.operator.diagonal[j] += a;
@@ -482,7 +485,9 @@ impl MoistureCartesian {
                         let (coefficient, fraction) =
                             faces[side].coupling(dt, spacing[k], d, scale[k])?;
                         if !coefficient.is_finite()
-                            || (faces[side].coefficient_m_s != Some(0.0) && !positive(coefficient))
+                            || (d > 0.0
+                                && faces[side].coefficient_m_s != Some(0.0)
+                                && !positive(coefficient))
                         {
                             return Err(MoistureError::Invalid(
                                 "Cartesian boundary coefficient overflow or underflow",

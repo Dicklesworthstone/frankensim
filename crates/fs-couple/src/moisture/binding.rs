@@ -54,7 +54,7 @@ pub(super) fn bind_source(
             requirements.push(ScalarPropertyRequirement::try_new(
                 name,
                 MOISTURE_DIFFUSIVITY_DIMS,
-                ScalarAdmissibility::StrictlyPositive,
+                ScalarAdmissibility::NonNegative,
             )?);
         }
     }
@@ -94,6 +94,7 @@ pub(super) fn bind_source(
         &requirements,
         MaterialPropertySelection::PinnedByProperty(pins),
     )?;
+    admit_transport_state(&transport)?;
     let dry_density = reference
         .property("density")
         .expect("required density")
@@ -105,6 +106,34 @@ pub(super) fn bind_source(
         ));
     }
     Ok((reference, transport, dry_density))
+}
+
+/// A zero value is an impermeable direction only when the source is independent
+/// of evolving moisture. A degenerate D(M)=0 at a dry front is not an infinite
+/// material resistance; freezing its harmonic face value would prevent wetting.
+fn admit_transport_state(state: &ResolvedMaterialStatePoint) -> Result<(), MoistureError> {
+    if state.properties().iter().any(|property| {
+        property.value_si() == 0.0
+            && property
+                .source_axes()
+                .iter()
+                .any(|(axis, _)| axis == "moisture_content")
+    }) {
+        return Err(MoistureError::Invalid(
+            "zero diffusivity requires a moisture-independent impermeable source",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn resolve_transport_state(
+    card: &MaterialCard,
+    binding: &ResolvedMaterialStatePoint,
+    point: &QueryPoint,
+) -> Result<ResolvedMaterialStatePoint, MoistureError> {
+    let state = binding.at_query_point(card, point)?;
+    admit_transport_state(&state)?;
+    Ok(state)
 }
 
 /// Geometry-independent view of an accepted equal-reference-volume inventory.

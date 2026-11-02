@@ -2,12 +2,15 @@
 //!
 //! A homogeneous, isothermal slab stores kg water/kg dry solid in reference
 //! finite volumes. Fick transport uses the selected material diffusivity;
-//! backward Euler uses the existing checked-CG owner by default. Optional
+//! backward Euler uses the existing checked tridiagonal LU owner. Optional
 //! implicit diffusivity resolves the original source at the nonlinear endpoint
 //! with bounded Picard iteration and the native tridiagonal solver. Otherwise
 //! diffusivity is lagged at the accepted start, then re-evaluated at every
 //! proposed endpoint. No clipped water, inferred wood diffusivity,
 //! instantaneous bulk equilibration or second material evaluator is used.
+//! An explicitly moisture-independent zero diffusivity denotes impermeability.
+//! Degenerate moisture-dependent laws that reach zero need a different wetting-
+//! front discretization and are refused, rather than pinning a dry front.
 //!
 //! Transport uses fixed reference dry-skeleton volumes and dilute bound moisture.
 //! The solid consumer resolves quasistatic swelling in that reference chart.
@@ -149,6 +152,23 @@ impl From<crate::acoustic_realize::AcousticRealizeError> for MoistureError {
 fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0
 }
+/// Harmonic series conductance, including an explicitly impermeable direction.
+/// Positive source values that underflow the numerical coefficient still refuse.
+fn interior_coupling(scale: f64, left: f64, right: f64) -> Result<f64, MoistureError> {
+    let lo = left.min(right);
+    if lo == 0.0 {
+        return Ok(0.0);
+    }
+    let hi = left.max(right);
+    // This ordering avoids both D_left*D_right and 2*D_min overflow.
+    let coefficient = scale * (lo / (0.5 + 0.5 * (lo / hi)));
+    if !positive(coefficient) {
+        return Err(MoistureError::Invalid(
+            "internal diffusion coefficient overflow or underflow",
+        ));
+    }
+    Ok(coefficient)
+}
 fn poll(cx: &Cx<'_>) -> Result<(), MoistureError> {
     cx.checkpoint().map_err(|_| MoistureError::Cancelled)
 }
@@ -242,8 +262,7 @@ pub struct MoistureSlabGeometry {
 /// Explicit linear work, conservation and step-admission limits.
 #[derive(Clone, Copy, Debug)]
 pub struct MoistureStepConfig {
-    /// Native checked-CG controls for the lagged slab and Cartesian schemes.
-    /// In the slab's implicit mode,
+    /// Native checked-CG controls for the Cartesian scheme. In both slab modes,
     /// tolerance is the true linear residual target, max_iterations bounds
     /// tridiagonal solves per Picard iteration, and max_corrections bounds
     /// additional defect solves using the same factorization.
@@ -467,9 +486,7 @@ impl MoistureSlab {
             .iter()
             .map(|&m| {
                 poll(cx)?;
-                Ok(self
-                    .transport
-                    .at_query_point(&self.card, &self.point_at(m)?)?)
+                binding::resolve_transport_state(&self.card, &self.transport, &self.point_at(m)?)
             })
             .collect()
     }
@@ -530,8 +547,7 @@ impl MoistureSlab {
                 ));
             }
             // Admission at the actual interface state, not just the interior.
-            self.transport
-                .at_query_point(&self.card, &self.point_at(m)?)?;
+            binding::resolve_transport_state(&self.card, &self.transport, &self.point_at(m)?)?;
         }
         let start = self.transport_states(&self.moisture, cx)?;
         let (solution, endpoint, coupling, nonlinear) =
@@ -539,11 +555,7 @@ impl MoistureSlab {
                 self.solve_implicit(dt_s, &faces, &start, config, controls, cx)?
             } else {
                 let (operator, rhs, coupling) = self.transport_system(dt_s, &faces, &start, cx)?;
-                let solution = checked_cg(&operator, &operator, &rhs, config.linear, |_| poll(cx))
-                    .map_err(|e| match e {
-                        CheckedCgError::Interrupted(error) => error,
-                        CheckedCgError::InvalidInput(what) => MoistureError::Invalid(what),
-                    })?;
+                let solution = operator.solve_direct(&rhs, config.linear, cx)?;
                 if !solution.report.converged_euclidean() {
                     return Err(MoistureError::NotConverged(solution.report));
                 }
@@ -596,8 +608,11 @@ impl MoistureSlab {
                 };
                 // The real surface, not just the reservoir and cell center,
                 // must be inside the original transport source domain.
-                self.transport
-                    .at_query_point(&self.card, &self.point_at(value)?)?;
+                binding::resolve_transport_state(
+                    &self.card,
+                    &self.transport,
+                    &self.point_at(value)?,
+                )?;
                 actual_surface[side] = Some(value);
             }
         }
@@ -673,10 +688,7 @@ impl MoistureSlab {
             off: Vec::with_capacity(n - 1),
         };
         for pair in d.windows(2) {
-            // Stable harmonic mean avoids D_i*D_j overflow.
-            let lo = pair[0].min(pair[1]);
-            let hi = pair[0].max(pair[1]);
-            operator.off.push(scale * (2.0 * lo / (1.0 + lo / hi)));
+            operator.off.push(interior_coupling(scale, pair[0], pair[1])?);
         }
         for (i, &a) in operator.off.iter().enumerate() {
             operator.diagonal[i] += a;
@@ -695,12 +707,12 @@ impl MoistureSlab {
             }
         }
         if operator.diagonal.iter().any(|v| !positive(*v))
-            || operator.off.iter().any(|v| !positive(*v))
             || rhs.iter().any(|v| !v.is_finite())
             || boundary.iter().any(|v| !v.is_finite())
             || (0..2).any(|side| {
                 surface[side].is_some()
                     && faces[side].coefficient_m_s != Some(0.0)
+                    && d[if side == 0 { 0 } else { n - 1 }] > 0.0
                     && !positive(boundary[side])
             })
         {
@@ -744,13 +756,6 @@ impl LinearOp for DiffusionStep {
         for (i, &a) in self.off.iter().enumerate() {
             y[i] -= a * x[i + 1];
             y[i + 1] -= a * x[i];
-        }
-    }
-}
-impl Precond for DiffusionStep {
-    fn apply(&self, r: &[f64], z: &mut [f64]) {
-        for ((z, &r), &a) in z.iter_mut().zip(r).zip(&self.diagonal) {
-            *z = r / a;
         }
     }
 }

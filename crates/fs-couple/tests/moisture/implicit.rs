@@ -48,7 +48,8 @@ fn g1_fine_stiff_grid_uses_one_linear_sweep_and_preserves_sealed_inventory() {
         let diffusion = 0.01;
         let wave = |i: usize| (std::f64::consts::PI * (i as f64 + 0.5) / n as f64).cos();
         let initial = (0..n).map(|i| 0.15 + 0.05 * wave(i)).collect();
-        let state = slab(card([diffusion; 2], 0.3), length, initial, cx)
+        let linear = slab(card([diffusion; 2], 0.3), length, initial, cx);
+        let implicit = linear.clone()
             .with_implicit_diffusivity(MoistureNonlinearConfig {
                 maximum_iterations: 1,
                 ..nonlinear()
@@ -57,26 +58,30 @@ fn g1_fine_stiff_grid_uses_one_linear_sweep_and_preserves_sealed_inventory() {
         let mut controls = config();
         controls.linear.max_iterations = 1;
         controls.linear.max_corrections = 0;
-        let (next, report) = state
-            .advance(
-                dt,
-                &[MoistureFace::Sealed, MoistureFace::Sealed],
-                controls,
-                cx,
-            )
-            .unwrap();
         // Independent Neumann cosine eigenmode of the cell-centered Laplacian.
         let dx = length / n as f64;
         let decay = 1.0
             / (1.0
                 + 4.0 * dt * diffusion / (dx * dx)
                     * (std::f64::consts::PI / (2.0 * n as f64)).sin().powi(2));
-        for (i, value) in next.moisture().iter().enumerate() {
-            near(*value, 0.15 + 0.05 * decay * wave(i), 2e-13);
+        for state in [linear, implicit] {
+            let (next, report) = state
+                .advance(
+                    dt,
+                    &[MoistureFace::Sealed, MoistureFace::Sealed],
+                    controls,
+                    cx,
+                )
+                .unwrap();
+            for (i, value) in next.moisture().iter().enumerate() {
+                near(*value, 0.15 + 0.05 * decay * wave(i), 2e-13);
+            }
+            near(next.water_mass_kg(), state.water_mass_kg(), 1e-12);
+            if let Some(nonlinear) = report.nonlinear {
+                assert_eq!(nonlinear.tridiagonal_solves, 1);
+            }
+            assert_eq!(report.linear.iters, 1);
         }
-        near(next.water_mass_kg(), state.water_mass_kg(), 1e-12);
-        assert_eq!(report.nonlinear.unwrap().tridiagonal_solves, 1);
-        assert_eq!(report.linear.iters, 1);
     });
 }
 

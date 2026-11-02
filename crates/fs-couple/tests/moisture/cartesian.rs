@@ -35,11 +35,19 @@ fn directional_card(values: [f64; 3]) -> MaterialCard {
     {
         let mut claim = template.clone();
         claim.key = PropertyKey::new(key, MOISTURE_DIFFUSIVITY_DIMS);
-        claim.value = PropertyValue::Curve {
-            abscissa: "moisture_content".into(),
-            abscissa_dims: Dims::NONE,
-            knots: vec![(0.0, value), (0.3, value)],
-            dims: MOISTURE_DIFFUSIVITY_DIMS,
+        claim.value = if value == 0.0 {
+            // An explicitly impermeable principal direction, independent of M.
+            PropertyValue::Scalar {
+                value,
+                dims: MOISTURE_DIFFUSIVITY_DIMS,
+            }
+        } else {
+            PropertyValue::Curve {
+                abscissa: "moisture_content".into(),
+                abscissa_dims: Dims::NONE,
+                knots: vec![(0.0, value), (0.3, value)],
+                dims: MOISTURE_DIFFUSIVITY_DIMS,
+            }
         };
         claims.insert_claim(claim).unwrap();
     }
@@ -64,6 +72,122 @@ fn grid(
 }
 fn sealed() -> [MoistureFace; 6] {
     std::array::from_fn(|_| MoistureFace::Sealed)
+}
+
+#[test]
+fn g1_impermeable_principal_directions_preserve_independent_slab_evolution() {
+    with_cx(|cx| {
+        let geometry = grid_geometry([1.0, 0.2, 0.1], [8, 3, 2]);
+        let [nx, ny, nz] = geometry.cells;
+        let initial = (0..nx * ny * nz)
+            .map(|i| 0.08 + 0.02 * (i / nx) as f64
+                + 0.03 * (std::f64::consts::PI * (i % nx) as f64 / nx as f64).cos())
+            .collect::<Vec<_>>();
+        let field = MoistureCartesian::new(
+            directional_card([0.01, 0.0, 0.0]),
+            point(0.1),
+            ["diffusion_x", "diffusion_y", "diffusion_z"],
+            MaterialPropertySelection::SingleClaimOnly,
+            geometry,
+            initial.clone(),
+            cx,
+        ).unwrap();
+        // A strong transverse environmental gradient cannot penetrate either
+        // impermeable direction, including the faces with finite emission.
+        let mut boundaries = sealed();
+        boundaries[2] = MoistureFace::PrescribedDryBasis(0.3);
+        boundaries[3] = MoistureFace::PrescribedDryBasis(0.0);
+        boundaries[4] = MoistureFace::SourceSorption {
+            law: super::surface::law([0.004; 2]),
+            relative_humidity: 0.8,
+        };
+        boundaries[5] = MoistureFace::SourceSorption {
+            law: super::surface::law([0.0; 2]),
+            relative_humidity: 0.2,
+        };
+        let (next, report) = field.advance(2.0, &boundaries, config(), nonlinear(), cx).unwrap();
+        for row in 0..ny * nz {
+            let initial_row = initial[row * nx..(row + 1) * nx].to_vec();
+            let old = slab(card([0.01; 2], 0.3), 1.0, initial_row, cx);
+            let expected = old.advance(
+                2.0,
+                &[MoistureFace::Sealed, MoistureFace::Sealed],
+                config(),
+                cx,
+            ).unwrap().0;
+            for i in 0..nx {
+                near(next.moisture()[row * nx + i], expected.moisture()[i], 3e-13);
+            }
+        }
+        assert_eq!(report.boundary_water_kg, [0.0; 6]);
+        near(next.water_mass_kg(), field.water_mass_kg(), 2e-13);
+        near(report.water_balance_residual_kg, 0.0, 2e-13);
+        for (_, m) in &report.surface_moisture[4] {
+            near(*m, 0.2, 1e-14);
+        }
+        for (cell, m) in &report.surface_moisture[5] {
+            near(*m, next.moisture()[*cell], 0.0);
+        }
+    });
+}
+
+#[test]
+fn g0_impermeable_slab_keeps_nonuniform_water_and_finite_reservoir_unchanged() {
+    with_cx(|cx| {
+        let state = MoistureSlab::new(
+            directional_card([0.0; 3]),
+            point(0.1),
+            "diffusion_x",
+            MaterialPropertySelection::SingleClaimOnly,
+            super::geometry(1.0),
+            vec![0.05, 0.1, 0.2, 0.15],
+            cx,
+        ).unwrap();
+        for original in [state.clone(), state.clone().with_implicit_diffusivity(nonlinear()).unwrap()] {
+            let (next, report) = original.advance(10.0, &faces(0.25), config(), cx).unwrap();
+            assert_eq!(next.moisture(), state.moisture());
+            assert_eq!(report.boundary_water_kg, [0.0; 2]);
+            assert_eq!(report.water_balance_residual_kg, 0.0);
+            assert_eq!(report.surface_moisture, [Some(0.25); 2]);
+        }
+        let gas = atmosphere::atmosphere(0.8, 1.0);
+        let law = super::surface::law([0.004; 2]);
+        let candidate = gas.advance(
+            &state,
+            10.0,
+            &[Some(law.clone()), Some(law)],
+            config(),
+            atmosphere::controls(),
+            cx,
+        ).unwrap();
+        assert_eq!(candidate.moisture().moisture(), state.moisture());
+        assert_eq!(candidate.step().transport.boundary_water_kg, [0.0; 2]);
+        near(candidate.atmosphere().gas().mass_kg(), gas.gas().mass_kg(), 1e-13);
+        near(candidate.atmosphere().relative_humidity().unwrap(), 0.8, 1e-12);
+    });
+}
+
+#[test]
+fn g0_negative_and_moisture_dependent_degenerate_diffusivity_remain_refused() {
+    with_cx(|cx| {
+        for material in [card([-0.01; 2], 0.3), card([0.0, 0.03], 0.3)] {
+            assert!(MoistureSlab::new(
+                material,
+                point(0.1),
+                "moisture_diffusivity",
+                MaterialPropertySelection::SingleClaimOnly,
+                super::geometry(1.0),
+                vec![0.0, 0.2],
+                cx,
+            ).is_err());
+        }
+        // The dry boundary must refuse too: treating its vanishing D(M) as an
+        // impermeable barrier would pin a physically mobile wetting front.
+        let state = slab(card([0.0, 0.03], 0.3), 1.0, vec![0.1; 2], cx);
+        assert!(state.advance(1.0, &faces(0.0), config(), cx).is_err());
+        assert_eq!(state.time_s(), 0.0);
+        assert_eq!(state.moisture(), &[0.1; 2]);
+    });
 }
 
 #[test]

@@ -131,6 +131,19 @@ impl MoistureSlab {
 }
 
 impl DiffusionStep {
+    /// The linear slab has the same tridiagonal structure as each nonlinear
+    /// iterate; one factorization and bounded defect corrections suffice.
+    pub(super) fn solve_direct(
+        &self,
+        rhs: &[f64],
+        controls: CheckedCgConfig,
+        cx: &Cx<'_>,
+    ) -> Result<CheckedCgSolution, MoistureError> {
+        poll(cx)?;
+        let mut workspace = TridiagonalWorkspace::new(rhs.len()).map_err(linear_error)?;
+        self.solve_tridiagonal(rhs, controls, &mut workspace, cx)
+    }
+
     /// Residual against the original conservative operator. Scaled Euclidean
     /// norms avoid squaring the physical load magnitude directly.
     fn defect(

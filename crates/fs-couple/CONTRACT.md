@@ -9074,16 +9074,26 @@ selects a number. Its original claim is pinned and re-evaluated locally.
 By default, backward Euler uses harmonic interior-face diffusivities evaluated at the
 accepted start and half-cell resistance at prescribed surfaces. This lagged
 nonlinear coefficient is a first-order approximation, with explicit interval,
-content-increment, true-residual, conservation and work limits. The tridiagonal
-SPD operator in that mode uses the original `fs-solver::checked_cg` and original
-`fs-sparse::Precond` interface, not a second linear solver. Its identity
-term and nonnegative graph conductances establish SPD. Source, numerical
+content-increment, true-residual, conservation and work limits. Both lagged and
+endpoint-dependent slab modes use the original adjacent-pivot tridiagonal LU
+owner in O(N) work and storage. Bounded defect corrections reuse the same
+factorization, and the original Euclidean residual remains authoritative. The
+operator's identity term and nonnegative graph conductances establish SPD.
+Source, numerical
 maximum-principle, increment and water balance admissions precede publication.
 No water is clipped or silently renormalized. Sealed ends carry zero transfer;
 prescribed dry-basis values are infinite reservoirs. The explicit FPL wood
 sorption boundary calls the existing coefficient-card owner at matching
 temperature and actual RH; it changes the surface condition, never every
 interior cell at once.
+
+Slab and Cartesian source bindings accept an explicitly moisture-independent
+zero diffusivity as an impermeable direction. Its internal and external bulk
+fluxes are exactly zero; finite positive surface emission still equilibrates
+the massless interface. Missing or negative coefficients refuse. A
+moisture-dependent law reaching zero also refuses: the harmonic discretization
+does not establish a degenerate wetting-front model. This admission does not
+infer permeability or experimental authority from a material name.
 
 `moisture::plate::MoisturePlate` maps that same inventory to the existing
 rectangular DKT mesh: diffusion is along in-plane x, while width and thickness

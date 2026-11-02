@@ -143,6 +143,11 @@ impl ResolvedMoistureFace {
         if h == 0.0 {
             return Ok((0.0, 0.0));
         }
+        if diffusivity == 0.0 {
+            // Infinite bulk resistance prevents transport; a finite positive
+            // emission coefficient still equilibrates the massless surface.
+            return Ok((0.0, 1.0));
+        }
         let diffusion_speed = 2.0 * diffusivity / dx;
         if !positive(diffusion_speed) || !positive(h) {
             return Err(MoistureError::Invalid(
