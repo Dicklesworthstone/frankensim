@@ -1,5 +1,6 @@
 //! Staggered volumetric face fluxes, their discrete projection onto the
-//! divergence-free subspace, and the steady D3Q19 duct-flow producer.
+//! divergence-free or prescribed-volume subspace, and the steady D3Q19 duct-flow
+//! producer.
 
 // Local face numbers index both the neighbour stencil and the face-rule
 // table; iterating them as integers is the clearest form.
@@ -16,6 +17,10 @@ use crate::d3q19::{
     BoundaryGrid3, BoundarySpec3, BoundaryStepError3, CollisionModel3, E3, Face3, FaceBoundary3,
     TILE,
 };
+
+mod density_projection;
+use density_projection::FrozenDensity;
+pub use density_projection::{DensityProjection, DensityProjectionControls, DensityProjectionReport};
 
 /// Mass-flow role of one domain face for flux construction and projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,7 +335,6 @@ impl FlowField {
     /// the fluid cells: corrected flux `F - (A/d)(phi_N - phi_P)` on interior
     /// faces and `F + (A/d_boundary) phi_P` on outflow faces (`phi = 0` there).
     /// Distances are between centres or from the centre to the boundary plane.
-    #[allow(clippy::too_many_lines)] // components, assembly, solve, correction
     fn project(
         &mut self,
         domain: &VoxelDomain,
@@ -338,6 +342,23 @@ impl FlowField {
         tolerance: f64,
         gate: &CancelGate,
     ) -> Result<ProjectionReport, ChtError> {
+        self.project_with_density(domain, faces, tolerance, None, gate)
+            .map(|(report, _, _)| report)
+    }
+
+    // The old geometric potential and the frozen-density pressure share one
+    // graph, compatibility test, native Krylov solve and face correction.
+    // Return the already allocated cell map and potential for pressure-work
+    // readback; the original entry allocates no additional audit storage.
+    #[allow(clippy::too_many_lines)] // components, assembly, solve, correction
+    fn project_with_density(
+        &mut self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        tolerance: f64,
+        density: Option<&FrozenDensity<'_>>,
+        gate: &CancelGate,
+    ) -> Result<(ProjectionReport, Vec<usize>, Vec<f64>), ChtError> {
         let max_divergence_before_m3_s = self.max_divergence(domain);
         let fluid: Vec<usize> = (0..domain.cell_count())
             .filter(|&c| domain.is_fluid(c))
@@ -347,7 +368,8 @@ impl FlowField {
             row_of[c] = row;
         }
         let n = fluid.len();
-        // A Neumann component needs zero total prescribed boundary flux.
+        // A Neumann component needs its total prescribed boundary flux to
+        // equal its total volume source (zero in the original projection).
         // Pinning removes its constant potential nullspace; it cannot remove
         // a mass source. Check EACH component, since distinct sealed regions
         // cannot exchange fluid even when their global imbalances cancel.
@@ -364,11 +386,22 @@ impl FlowField {
             let mut boundary_flux = 0.0f64;
             let mut boundary_compensation = 0.0f64;
             let mut boundary_scale = 0.0f64;
+            let mut source_flux = 0.0f64;
+            let mut source_compensation = 0.0f64;
+            let mut source_scale = 0.0f64;
             let mut visited = 0usize;
             while let Some(row) = stack.pop() {
                 poll_every(gate, visited)?;
                 visited += 1;
                 let c = fluid[row];
+                if let Some(density) = density {
+                    let source = density.target_outflow_m3_s[c];
+                    let corrected = source - source_compensation;
+                    let next = source_flux + corrected;
+                    source_compensation = (next - source_flux) - corrected;
+                    source_flux = next;
+                    source_scale += source.abs();
+                }
                 for f in 0..6 {
                     match domain.neighbor(c, f) {
                         Some(nb) if domain.is_fluid(nb) => {
@@ -393,17 +426,28 @@ impl FlowField {
                     }
                 }
             }
+            let incompatibility = boundary_flux - source_flux;
+            let compatibility_scale = boundary_scale + source_scale;
             if !drains
                 && (!boundary_flux.is_finite()
                     || !boundary_scale.is_finite()
-                    || boundary_flux.abs() > 128.0 * f64::EPSILON * boundary_scale)
+                    || !source_flux.is_finite()
+                    || !source_scale.is_finite()
+                    || !incompatibility.is_finite()
+                    || !compatibility_scale.is_finite()
+                    || incompatibility.abs() > 128.0 * f64::EPSILON * compatibility_scale)
             {
                 return Err(ChtError::InvalidInput {
-                    field: "flow.fixed_boundary_flux",
+                    field: if density.is_some() {
+                        "flow.volume_source_compatibility"
+                    } else {
+                        "flow.fixed_boundary_flux"
+                    },
                     reason: format!(
                         "fluid component containing cell {} has net prescribed outflow \
-                         {boundary_flux:e} m^3/s and no free face; balance its fixed \
-                         inflow/outflow or supply a Free boundary",
+                         {boundary_flux:e} m^3/s, volume source {source_flux:e} m^3/s \
+                         and no free face; balance its fixed inflow/outflow with \
+                         its source or supply a Free boundary",
                         fluid[start]
                     ),
                 });
@@ -419,6 +463,9 @@ impl FlowField {
             }
         }
         let conductance = |c: usize, f: usize, neighbor: Option<usize>| {
+            if let Some(density) = density.filter(|d| d.uniform_density.is_none()) {
+                return density.conductance(domain, c, f, neighbor);
+            }
             if domain.is_uniform() {
                 // Keep the uniform path's exact arithmetic (A / dx = dx).
                 return if neighbor.is_some() {
@@ -439,7 +486,12 @@ impl FlowField {
         for (row, &c) in fluid.iter().enumerate() {
             poll_every(gate, row)?;
             let mut diag = 0.0;
-            let rhs = -self.net_outflow(domain, c);
+            let rhs = match density {
+                Some(density) if density.target_outflow_m3_s[c] != 0.0 => {
+                    density.target_outflow_m3_s[c] - self.net_outflow(domain, c)
+                }
+                _ => -self.net_outflow(domain, c),
+            };
             for f in 0..6 {
                 match domain.neighbor(c, f) {
                     Some(nb) if domain.is_fluid(nb) => {
@@ -457,10 +509,14 @@ impl FlowField {
                 }
             }
             // A pinned cell regularizes its otherwise singular Neumann
-            // component; a component with zero net boundary flux then
+            // component; compatible source and boundary sums then
             // solves to phi_pin = 0 exactly and loses no equation.
             if is_pinned[row] {
-                let pin = if domain.is_uniform() {
+                let pin = if density.is_some_and(|d| d.uniform_density.is_none()) {
+                    // A virtual half-cell fixes the gauge without sampling
+                    // a solid neighbour's undefined fluid density.
+                    conductance(c, 0, None)
+                } else if domain.is_uniform() {
                     domain.dx()
                 } else {
                     conductance(c, 0, domain.neighbor(c, 0))
@@ -484,6 +540,7 @@ impl FlowField {
         )?;
         let mut max_correction_m3_s = 0.0f64;
         for (row, &c) in fluid.iter().enumerate() {
+            poll_every(gate, row)?;
             for f in 0..6 {
                 let correction = match domain.neighbor(c, f) {
                     // Each interior face once, from its minus-side cell.
@@ -498,7 +555,7 @@ impl FlowField {
                 max_correction_m3_s = max_correction_m3_s.max(correction.abs());
             }
         }
-        Ok(ProjectionReport {
+        let report = ProjectionReport {
             fluid_cells: n,
             pinned_components,
             iterations: outcome.iterations,
@@ -507,7 +564,8 @@ impl FlowField {
             max_divergence_before_m3_s,
             max_divergence_after_m3_s: self.max_divergence(domain),
             max_correction_m3_s,
-        })
+        };
+        Ok((report, fluid, phi))
     }
 }
 

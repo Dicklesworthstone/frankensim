@@ -2603,6 +2603,38 @@ electronics cooling (the wedge's second physics after steady conduction).
   tests exercise both flow directions, uniform and graded grids, separated
   pockets, and preservation of uniform temperature under balanced forced
   convection with both upwind and power-law energy schemes.
+- `FlowField::project_density_volume_source` projects an existing native face
+  field with a positive frozen density per fluid cell and an authored net
+  outward volume rate per cell (m^3/s). It uses the same component graph,
+  native ILU(0)/BiCGStab solve, and face-correction path. Face inertia is the
+  actual staggered dual mass `M = A (rho_L h_L/2 + rho_R h_R/2)`; the pressure
+  coefficient is `dt A^2/M`, including boundary half-cells and graded grids.
+  Uniform density retains the original geometric-potential arithmetic exactly
+  and converts the solved potential to physical correction pressure afterward.
+  `Wall`/solid flux is zero, `Fixed` flux stays prescribed and `Free` correction
+  pressure is zero. Each component without a free face must independently
+  balance its volume source with its prescribed boundary outflow; pinning only
+  removes the pressure gauge and never subtracts an incompatible source mean.
+  The result contains actual corrected fluxes, cell pressure correction, and
+  independent per-cell volume-defect and mechanical-work evidence. Before
+  publication it admits `delta_K + sum(M delta_u^2/2) = dt sum(p source) -
+  dt sum_fixed_boundary(p Q_out)` within explicit caller budgets; kinetic
+  change is evaluated from the actual flux increment without subtracting
+  large energy totals. The nonnegative projection loss remains numerical and
+  never becomes heat. The public method leaves its input unchanged on invalid
+  source/density/flux, incompatible components, failed solve, exceeded budgets
+  or cancellation. Dimensions/minimum spacing and held-face semantics are
+  checked; original domain geometry/occupancy identity remains the caller's
+  obligation because `FlowField` does not retain a complete domain snapshot.
+  This is a working frozen-density pressure/continuity component, not a phase
+  or density timestep: the caller still owns density evolution, mass/momentum
+  sources and source/boundary energy. At constant density a volume source
+  implies mass source `rho source`; closed-material phase expansion needs a
+  compatible evolving-density and enthalpy owner. Existing fixed-density
+  phase/thermal gates remain unchanged. Focused native regressions cover
+  analytic graded two-density pressure/flux/work on all axes, exact homogeneous
+  legacy parity, fixed-boundary work, sealed source/sink compatibility,
+  disconnected components, independent readback budgets and refusal rollback.
 - `lbm_duct_flow` -> `LbmFlow { field, velocity_m_s, pressure_pa, report }`:
   velocity inlet on `x-min`, pressure outlet on `x-max`,
   no-slip elsewhere and on solid voxels; derives `nu_lat`/`tau` from the

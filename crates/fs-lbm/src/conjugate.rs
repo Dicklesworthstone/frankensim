@@ -129,8 +129,8 @@ pub use energy::{
     ThermalSetup, solve_energy,
 };
 pub use flow::{
-    FlowFace, FlowField, LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport,
-    ProjectionReport, lbm_duct_flow,
+    DensityProjection, DensityProjectionControls, DensityProjectionReport, FlowFace, FlowField,
+    LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport, ProjectionReport, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{
