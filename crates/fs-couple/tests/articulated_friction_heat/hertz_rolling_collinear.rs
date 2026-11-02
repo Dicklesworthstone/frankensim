@@ -3,6 +3,9 @@
 //! the original two-capacity heat balance; no native trajectory report enters
 //! their heat, stopping-time or endpoint reconstruction.
 
+#[path = "hertz_rolling_collinear/driven.rs"]
+mod driven;
+
 use super::*;
 use fs_contact::interface_binding::bind_dry_interface_system_card;
 use fs_contact::interface_binding::thermal_friction::ThermalFrictionAxes;

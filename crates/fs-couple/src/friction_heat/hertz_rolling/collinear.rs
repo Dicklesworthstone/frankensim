@@ -25,7 +25,7 @@ use fs_mbd::tangential_friction::hertz_rolling::collinear::{
     RigidHertzRollingCollinearControls, RigidHertzRollingCollinearError,
     RigidHertzRollingCollinearHistory,
 };
-use fs_mbd::{MassProperties, RigidBodyState};
+use fs_mbd::{MassProperties, RigidBodyState, Wrench};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
@@ -103,11 +103,13 @@ pub struct HeatedRigidHertzRollingCollinearCandidate<'m, P> {
     pub trials: usize,
     pub target_time_s: f64,
     pub external_heat_j: f64,
+    /// Actual held-wrench work on both finite bodies, separate from friction heat.
+    pub external_mechanical_work_j: f64,
     pub sphere_temperature_before_k: f64,
     pub sphere_temperature_after_k: f64,
     /// Actual caloric change minus outside heat and integrated physical losses.
     pub heat_transfer_residual_j: f64,
-    /// Actual native kinetic plus original caloric change minus outside heat.
+    /// Actual native kinetic plus caloric change minus outside heat and drive work.
     pub combined_energy_residual_j: f64,
     pub summed_energy_residual_j: f64,
 }
@@ -151,6 +153,59 @@ pub fn propose_rigid_hertz_rolling_collinear_heat<'m, P, E>(
     properties: &[MassProperties],
     history: &RigidHertzRollingCollinearHistory,
     contact: RigidHertzRollingHeatContact<'_>,
+    thermal: &DepositionSimulation<'m>,
+    route: &FrictionHeatRoute,
+    bulk_binding: RigidRollingHeatBinding,
+    accepted_time_s: f64,
+    dt_s: f64,
+    controls: RigidHertzRollingCollinearHeatControls,
+    energy_guess_j: &[f64],
+    temperature_guess_k: f64,
+    resolve: impl Fn(&DepositionSimulation<'m>, f64) -> Result<RigidHertzHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<HeatedRigidHertzRollingCollinearCandidate<'m, P>, RigidHertzRollingCollinearHeatError<E>>
+{
+    propose_rigid_hertz_rolling_collinear_driven_heat(
+        bodies,
+        properties,
+        history,
+        contact,
+        [Wrench::ZERO; 2],
+        thermal,
+        route,
+        bulk_binding,
+        accepted_time_s,
+        dt_s,
+        controls,
+        energy_guess_j,
+        temperature_guess_k,
+        resolve,
+        gate,
+    )
+}
+
+/// Propose driven sliding/rolling events and finite heat from the same sources.
+///
+/// External wrenches use contact A/B order, world forces and body-frame torques
+/// about the original COMs. They are held continuously throughout every native
+/// trajectory trial; no pre-kick selects the friction branch. The original
+/// mechanical owner admits the longitudinal-shear/lateral-rolling subspace and
+/// resolves driven static retention, breakaway, arrest and reversal.
+///
+/// Integrated surface and bulk losses retain their distinct original caloric
+/// destinations. Continuous drive work remains an external supply, including
+/// work on complementary common-body motion: it is never injected as heat.
+/// Each thermal trial restarts the same accepted bodies and opaque history;
+/// endpoint source/thermal sampling retains the refinement and fixed-geometry
+/// limits of `propose_rigid_hertz_rolling_collinear_heat`. Failure publishes no
+/// mechanical history, source receipt or thermal endpoint.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn propose_rigid_hertz_rolling_collinear_driven_heat<'m, P, E>(
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    history: &RigidHertzRollingCollinearHistory,
+    contact: RigidHertzRollingHeatContact<'_>,
+    external: [Wrench; 2],
     thermal: &DepositionSimulation<'m>,
     route: &FrictionHeatRoute,
     bulk_binding: RigidRollingHeatBinding,
@@ -222,7 +277,7 @@ pub fn propose_rigid_hertz_rolling_collinear_heat<'m, P, E>(
         radius,
     )?;
     let temperature_before = thermal.temperature_k(bulk_binding.cell_id)?;
-    let prepared = PreparedRigidHertzRollingCollinear::new(
+    let prepared = PreparedRigidHertzRollingCollinear::new_driven(
         bodies,
         properties,
         history,
@@ -237,6 +292,7 @@ pub fn propose_rigid_hertz_rolling_collinear_heat<'m, P, E>(
             excitation_frequency_hz: contact.excitation_frequency_hz,
             work: contact.work,
         },
+        external,
         duration_s,
         controls.mechanical,
         gate,
@@ -421,7 +477,9 @@ pub fn propose_rigid_hertz_rolling_collinear_heat<'m, P, E>(
         caloric_change - staged.external_heat_j - native.surface_heat_j - native.bulk_heat_j,
     )?;
     let combined = finite(
-        native.kinetic_after_j - native.kinetic_before_j + caloric_change - staged.external_heat_j,
+        native.kinetic_after_j - native.kinetic_before_j + caloric_change
+            - staged.external_heat_j
+            - native.external_work_j,
     )?;
     let summed = finite(native.total_energy_residual_j + trial.report().total_energy_residual_j)?;
     if transfer.abs() > controls.heat.total_j
@@ -435,6 +493,7 @@ pub fn propose_rigid_hertz_rolling_collinear_heat<'m, P, E>(
     let (thermal, staged, heat) = trial.accept(controls.heat, checkpoint)?;
     checkpoint()?;
     Ok(HeatedRigidHertzRollingCollinearCandidate {
+        external_mechanical_work_j: staged.mechanical.report.external_work_j,
         mechanical: staged.mechanical,
         thermal,
         heat,

@@ -21140,3 +21140,30 @@ volume integration and partition invariance, distinct native material storage,
 cross-material conduction with authored heat and events, one-layer bit parity,
 continuation/cancellation, and complete physical mapping. They establish the
 adapter's numerical behavior without extending material source validity.
+
+## Driven Hertz sliding, spin and rolling with finite thermal feedback
+
+`friction_heat::hertz_rolling::propose_rigid_hertz_rolling_driven_heat` admits
+held world forces and body-frame COM torques through the original five-coordinate
+native contact response. The coupled thermal root resolves the selected surface
+friction at actual interface temperature and admits bulk rolling at the original
+sphere temperature. Surface heat enters the original common face; rolling heat
+enters the original whole-sphere caloric cell. Full-body actuator work remains a
+separate mechanical supply in `delta_K + delta_H - Q_external - W_drive`.
+
+The corresponding `collinear::propose_rigid_hertz_rolling_collinear_driven_heat`
+uses the existing continuous invariant-subspace trajectory. Static retention,
+breakaway, arrest and reversal keep their original event times and opaque
+continuation. Each thermal trial starts from accepted bodies/history, and exact
+phase-integrated surface/bulk losses retain the same caloric destinations.
+Common-body acceleration changes actuator work without creating friction heat.
+Both original unforced APIs delegate with zero wrenches.
+
+The full five-coordinate branch retains its frozen-geometry held-effort model
+and unresolved-event refusals. The collinear branch retains its admitted
+invariant subspace and held coefficients/load. Neither adds pose/normal
+integration or changes heat partition. Endpoint thermal sampling still requires
+time refinement. Seven new physical groups cover an independent forced
+mechanical/thermal reference, mixed shear/spin/rolling, driven reversal and
+thermal weakening, common-acceleration/static limits, exact zero-drive behavior
+and late atomic source/cancellation refusal; eleven existing tests also pass.
