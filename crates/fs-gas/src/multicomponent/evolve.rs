@@ -98,10 +98,12 @@ pub(super) struct Workspace {
     pub(super) candidate: Vec<f64>,
 }
 
-/// Conservative variable-composition finite-volume flow on a stationary mesh.
+/// Conservative variable-composition finite-volume flow with optional axial
+/// moving-wall evolution through [`Self::step_with_moving_walls`].
 ///
 /// A contiguous cell-major species/momentum/energy buffer and preallocated RK
-/// and face buffers keep successful numerical steps allocation-free. All
+/// and face buffers keep stationary steps allocation-free. Moving geometry
+/// scratch is allocated on first use and retained for later steps. All
 /// species share each face's wave speeds and one conservative energy flux.
 /// No species clipping, trace seeding or composition normalization is applied.
 /// Periodic, reflecting and transmissive boundaries are supported. The shared
@@ -115,6 +117,7 @@ pub struct MixtureEuler1d {
     pub(super) boundaries: Boundaries,
     pub(super) time: f64,
     pub(super) work: Workspace,
+    pub(super) moving: Option<crate::dynamics::MovingWorkspace>,
 }
 impl MixtureEuler1d {
     /// Construct a uniform fixed-area flow from complete conservative cells.
@@ -198,6 +201,7 @@ impl MixtureEuler1d {
             boundaries,
             time,
             work,
+            moving: None,
         })
     }
     /// Source bank, formation-energy gauge and caloric domain.
@@ -216,7 +220,7 @@ impl MixtureEuler1d {
         }
         Some(cell(&self.states[index * m..(index + 1) * m], m - 2))
     }
-    /// Original stationary physical geometry.
+    /// Accepted physical geometry, including accepted axial wall motion.
     pub const fn mesh(&self) -> &Mesh1d {
         &self.mesh
     }
@@ -677,6 +681,37 @@ pub(super) fn operator(
     endpoint_fluxes: [Option<EndpointFlux<'_>>; 2],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, Error> {
+    operator_with_face_motion(
+        gas,
+        states,
+        mesh,
+        boundaries,
+        reconstruction,
+        primitive,
+        slopes,
+        faces,
+        face_data,
+        endpoint_fluxes,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn operator_with_face_motion(
+    gas: &MixtureGas,
+    states: &[f64],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    reconstruction: Reconstruction,
+    primitive: &mut [Primitive],
+    slopes: &mut [f64],
+    faces: &mut [f64],
+    face_data: &mut [Face],
+    endpoint_fluxes: [Option<EndpointFlux<'_>>; 2],
+    face_velocity: Option<&[f64]>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, Error> {
     let n = gas.species_count();
     let m = n + 2;
     let primitive_width = n + 3;
@@ -842,13 +877,14 @@ pub(super) fn operator(
         };
         let flux = &mut faces[face * m..(face + 1) * m];
         let data = if wall {
-            gas.wall_flux(
-                cell(&left[..m], n),
-                pl,
-                if face == 0 { -1.0 } else { 1.0 },
-                flux,
-                cancelled,
-            )?
+            let normal = if face == 0 { -1.0 } else { 1.0 };
+            if let Some(velocity) = face_velocity {
+                gas.moving_wall_flux(cell(&left[..m], n), pl, normal, velocity[face], flux, cancelled)?
+            } else {
+                gas.wall_flux(cell(&left[..m], n), pl, normal, flux, cancelled)?
+            }
+        } else if let Some(velocity) = face_velocity {
+            gas.moving_interface(&left[..m], pl, &right[..m], pr, velocity[face], flux, cancelled)?
         } else {
             gas.interface(&left[..m], pl, &right[..m], pr, flux, cancelled)?
         };

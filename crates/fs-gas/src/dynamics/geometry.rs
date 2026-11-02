@@ -128,7 +128,7 @@ impl Mesh1d {
 
     /// Constant-area GCL: the volume change uses the same face speeds as the
     /// ALE flux, not a separately rounded difference of displaced coordinates.
-    pub(super) fn prepare_motion(
+    pub(crate) fn prepare_motion(
         &mut self,
         original: &Self,
         velocity: &[f64],

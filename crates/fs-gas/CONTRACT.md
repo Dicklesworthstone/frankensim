@@ -786,7 +786,7 @@ This remains an Estimated inviscid engineering lane. Fully conservative moving
 material interfaces with differing caloric laws can exhibit pressure
 oscillations; exact moving-interface pressure-equilibrium preservation is not
 claimed. There is no fully discrete entropy-stability certificate, physical
-species diffusion, viscosity, moving mesh, arbitrary junction or multi-D flow
+species diffusion, viscosity, general moving geometry, arbitrary junction or multi-D flow
 claim.
 
 ### Shared planar faces for evolving species
@@ -1083,6 +1083,32 @@ open ends, bound gravitational atmospheres or multidimensional moving meshes.
 The face-frame conservation convention follows Springel (2010), §3.3,
 <https://doi.org/10.1111/j.1365-2966.2009.15715.x>; it does not claim that paper's
 Voronoi mesh algorithm or its full accuracy properties.
+
+`MixtureEuler1d::step_with_moving_walls` supplies the same bounded axial motion
+for the original evolving-composition field. It shares the geometry workspace,
+affine face velocities and swept-volume preparation with the frozen owner,
+while retaining its own compatible mass-fraction reconstruction, canonical
+species storage, source calorics and shared HLLC/HLL waves. Every partial
+density advances extensively on the same RK2 volumes. Face-frame species
+fluxes are unchanged by the laboratory transformation; their compensated sum
+is the mass flux used in both momentum and kinetic-energy transformations.
+There is no independently rounded mass-flux field, composition normalization
+or absent-species seeding. Each species keeps its own formation-energy datum.
+All wall species fluxes are zero, and the returned original mixture report
+accounts for the pressure impulse and mechanical work at both ends.
+
+The shared geometry's cancellation is translated into the mixture's native
+`Cancelled` refusal before retry handling. Accepted mesh, all species, energy
+and clock remain atomic. Five focused regressions cover independent species
+Reynolds-transport fluxes, stationary identity, co-moving unequal-caloric
+contacts, nonuniform-composition piston work and independent species gauges,
+single-species agreement with the original frozen owner, structural zeros,
+and early/late geometry or source refusal. These are authored but unexecuted
+under the same worker resource limit. This standalone entry does not advance
+the separately bound stationary reaction, diffusion, heat or network owners.
+Generally advecting unequal-caloric material contacts retain the original
+conservative scheme's pressure-oscillation limitation; no exact general
+pressure-equilibrium or entropy-stability claim follows from this extension.
 
 
 ## Conservative molecular, thermal and viscous field evolution

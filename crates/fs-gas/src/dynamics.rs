@@ -15,6 +15,7 @@ mod flux;
 mod geometry;
 mod hydrostatic;
 mod moving;
+pub(crate) use moving::MovingWorkspace;
 /// Synchronized shock propagation through passages and finite rigid gas volumes.
 pub mod network;
 pub(crate) mod wall;

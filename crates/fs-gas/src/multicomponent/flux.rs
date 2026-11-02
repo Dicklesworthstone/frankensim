@@ -1,6 +1,6 @@
 use super::{
     Cell, Error, MAX_COMPONENTS, MAX_SPATIAL_COMPONENTS, MixtureGas, NormalCell, Primitive,
-    SpatialCell, poll, positive,
+    SpatialCell, poll, positive, sum,
 };
 
 /// Wave-speed receipt accompanying an allocation-free species/energy face flux.
@@ -60,6 +60,57 @@ impl MixtureGas {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Face, Error> {
         self.interface_components::<0>(left, pl, right, pr, out, cancelled)
+    }
+
+    /// Laboratory ALE flux through a face translating at the supplied axial
+    /// speed. Every species retains its own original energy reference.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn moving_interface(
+        &self,
+        left: &[f64],
+        pl: Primitive,
+        right: &[f64],
+        pr: Primitive,
+        velocity: f64,
+        out: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Face, Error> {
+        if velocity == 0.0 {
+            return self.interface(left, pl, right, pr, out, cancelled);
+        }
+        let n = self.species_count();
+        let m = n + 2;
+        if !velocity.is_finite() || left.len() != m || right.len() != m || out.len() != m {
+            return Err(Error::Invalid("moving mixture face speed or dimensions"));
+        }
+        let mut ql = [0.0; MAX_COMPONENTS];
+        let mut qr = [0.0; MAX_COMPONENTS];
+        poll(cancelled)?;
+        let pl = self.state_at(
+            &left[..n],
+            pl.velocity - velocity,
+            pl.pressure,
+            &mut ql[..m],
+        )?;
+        poll(cancelled)?;
+        let pr = self.state_at(
+            &right[..n],
+            pr.velocity - velocity,
+            pr.pressure,
+            &mut qr[..m],
+        )?;
+        let face = self.interface(&ql[..m], pl, &qr[..m], pr, out, cancelled)?;
+        // Total mass has no independently evolved field. Use the same ordered
+        // species-flux sum in both Galilean momentum and energy transformations.
+        let mass_flux = sum(out[..n].iter().copied());
+        let relative_momentum = out[n];
+        out[n] = relative_momentum + velocity * mass_flux;
+        out[n + 1] += velocity * relative_momentum + (0.5 * velocity * velocity) * mass_flux;
+        if out.iter().any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("moving mixture laboratory flux overflow"));
+        }
+        poll(cancelled)?;
+        Ok(face)
     }
 
     // Axial, planar and volumetric consumers use these same wave speeds, star

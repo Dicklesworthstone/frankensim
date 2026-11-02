@@ -11,13 +11,13 @@ use super::{
 };
 use fs_qty::Time;
 
-pub(super) struct MovingWorkspace {
-    mesh: Mesh1d,
-    velocity: Vec<f64>,
+pub(crate) struct MovingWorkspace {
+    pub(crate) mesh: Mesh1d,
+    pub(crate) velocity: Vec<f64>,
 }
 
 impl MovingWorkspace {
-    fn new(mesh: &Mesh1d) -> Result<Self, Error> {
+    pub(crate) fn new(mesh: &Mesh1d) -> Result<Self, Error> {
         let area = mesh.uniform_cross_section().ok_or(Error::Invalid(
             "moving interval requires constant cross section",
         ))?;
@@ -39,6 +39,36 @@ impl MovingWorkspace {
             mesh: mesh.try_copy()?,
             velocity: allocated(mesh.cell_count() + 1, 0.0)?,
         })
+    }
+
+    /// Shared geometry-only preparation for frozen and evolving mixtures.
+    pub(crate) fn prepare_velocities(
+        &mut self,
+        mesh: &Mesh1d,
+        wall_velocity: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, f64), Error> {
+        let n = mesh.cell_count();
+        let positions = mesh.positions();
+        let length = positions[n] - positions[0];
+        let difference = wall_velocity[1] - wall_velocity[0];
+        if !difference.is_finite() {
+            return Err(Error::Invalid("moving-wall velocity difference overflow"));
+        }
+        for (i, speed) in self.velocity.iter_mut().enumerate() {
+            poll(cancelled)?;
+            *speed = if i == 0 {
+                wall_velocity[0]
+            } else if i == n {
+                wall_velocity[1]
+            } else {
+                wall_velocity[0] + ((positions[i] - positions[0]) / length) * difference
+            };
+            if !speed.is_finite() {
+                return Err(Error::Invalid("affine face velocity overflow"));
+            }
+        }
+        Ok((length, difference))
     }
 }
 
@@ -114,26 +144,8 @@ impl Euler1d {
             self.moving = Some(MovingWorkspace::new(&self.mesh)?);
         }
         let moving = self.moving.as_mut().expect("moving workspace initialized");
-        let n = self.states.len();
-        let positions = self.mesh.positions();
-        let length = positions[n] - positions[0];
-        let difference = wall_velocity[1] - wall_velocity[0];
-        if !difference.is_finite() {
-            return Err(Error::Invalid("moving-wall velocity difference overflow"));
-        }
-        for (i, speed) in moving.velocity.iter_mut().enumerate() {
-            poll(&mut cancelled)?;
-            *speed = if i == 0 {
-                wall_velocity[0]
-            } else if i == n {
-                wall_velocity[1]
-            } else {
-                wall_velocity[0] + ((positions[i] - positions[0]) / length) * difference
-            };
-            if !speed.is_finite() {
-                return Err(Error::Invalid("affine face velocity overflow"));
-            }
-        }
+        let (length, difference) =
+            moving.prepare_velocities(&self.mesh, wall_velocity, &mut cancelled)?;
         let area = self.mesh.face_areas()[0];
         let mut signal_rate = 0.0_f64;
         for (i, &state) in self.states.iter().enumerate() {
