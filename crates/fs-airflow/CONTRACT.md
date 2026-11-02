@@ -1,5 +1,28 @@
 # CONTRACT: fs-airflow
 
+## Material-dependent enclosure heat in stored cooling
+
+`StoredContactRadiation::MaterialClosedEnclosure` and
+`MaterialOpenEnclosure` compose original source-dependent gray emissivity
+with the stored solid, temperature-dependent contact, pump and finite coolant
+transaction. Every mapped boundary receives its exact prepared trace owner.
+Each joint h endpoint refreshes nodal emissivity and the actual reflected
+irradiation system through the original conduction Newton solve.
+
+The cooling adapter preserves source/card/chart identity and work allowances.
+It returns only coolant convection to the fluid stream. Closed surface
+exchange remains internal; the signed physical-surface sum from an explicit
+black bath enters the solid external account once. Rejected thermal,
+hydraulic, source or cancellation trials publish neither history.
+
+The G1/G3 coupled regression checks closed and open cases against exact P1
+moments of epsilon(T)*T^4 and independent two-surface radiosity elimination,
+then checks the combined solid/tank first law and coolant return energy.
+The current static geometry, patch-uniform irradiation, quasi-steady flow and
+single-phase coolant assumptions remain. Native integration execution is
+pending the shared thermal dependency build.
+
+
 ## Hydraulic and wall feedback on transient convection
 
 With `transient-transport`, `transport::transient::coupled::advance_quasi_steady_graph`

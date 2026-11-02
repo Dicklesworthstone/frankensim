@@ -628,10 +628,12 @@ pub fn step_candidate(
         .map(f64::abs)
         .fold(0.0, f64::max);
     let graph_heat_j = dt_s * trial.graph_power_w;
-    let closed = matches!(
-        radiation,
-        EnthalpyRadiation::Enclosure { .. } | EnthalpyRadiation::PointwiseEnclosure(_)
-    );
+    let closed = match radiation {
+        EnthalpyRadiation::Enclosure { .. } => true,
+        EnthalpyRadiation::PointwiseEnclosure(owner) => owner.is_closed(),
+        EnthalpyRadiation::MaterialEnclosure(owner) => owner.is_closed(),
+        _ => false,
+    };
     let closed_radiation_net_j = if closed {
         dt_s * trial.physical.radiation_out_w
     } else {

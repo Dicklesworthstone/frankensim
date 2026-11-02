@@ -234,6 +234,85 @@ fn resistor_sample(vertices: Vec<(usize, f64)>) -> [GraphSpatialTemperature; 1] 
     }]
 }
 
+#[test]
+fn open_pointwise_enclosure_supplies_graph_coupled_enthalpy_as_external_heat() {
+    use fs_conduction::radiation::{OpenDiffuseEnclosure, RadiationSurface,
+        ViewFactorEvidence, ViewFactorTolerance};
+    use fs_conduction::{EMISSIVITY_DIMS, PointwiseEnclosureRadiation,
+        PointwiseEnclosureTolerance, STEFAN_BOLTZMANN_W_M2_K4,
+        SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity};
+    with_cx(|cx, _| {
+        let mesh = mesh(false);
+        let (card, caloric) = material(2.0, 2.0, 1.0);
+        let storage = prepare(cx, &mesh, &[ReferenceEnthalpyMaterial {
+            curve: caloric.curve(), reference_density_kg_m3: 1.0,
+        }], &[0]);
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .remainder("radiator", ThermalBc::adiabatic()).unwrap().finish().unwrap();
+        let conductivity = conductivity(&card);
+        let source = ScalarField::Uniform(0.0);
+        let graph = ohmic_graph(&card);
+        let feedback = voltage_feedback();
+        let samples = resistor_sample(vec![(0, 0.75), (1, 0.25)]);
+        let heat = [GraphSpatialHeatPort {
+            output: key("resistor", "heat"), distribution: ScalarField::Uniform(1.0),
+        }];
+        let mut claims = ClaimSet::new();
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS),
+            value: PropertyValue::Scalar { value: 0.6, dims: EMISSIVITY_DIMS },
+            validity: ValidityDomain::unconstrained().with("T", 200.0, 800.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![],
+            provenance: Provenance { source: "manufactured black-bath heat oracle".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+        let finish = MaterialCard::assemble(MaterialStateId { chemistry: "gray finish".into(),
+            phase: "solid".into(), process: "analytic fixture".into(), revision: 0 },
+            claims, vec![]).unwrap();
+        let surface = RadiationSurface::new(&mesh, "radiator", |_| true,
+            SurfaceEmissivity::from_card("radiator", &finish, 300.0,
+                SelectionPolicy::SingleClaimOnly).unwrap()).unwrap();
+        let open = OpenDiffuseEnclosure::new(cx, vec![surface], vec![vec![0.0]],
+            ViewFactorEvidence::Analytic { geometry: "one gray trace sees a black reservoir".into() },
+            ViewFactorTolerance::default()).unwrap();
+        let radiation = PointwiseEnclosureRadiation::new_open(cx, &mesh, &boundary,
+            &open, 360.0, PointwiseEnclosureTolerance::default()).unwrap();
+        assert!(!radiation.is_closed());
+        let dt = 0.001;
+        let old = [200.0; 4];
+        let candidate = spatial_coupling::step_candidate(
+            cx, &storage, problem(&mesh, &boundary, &conductivity, &source),
+            None, &old, dt, EnthalpyRadiation::PointwiseEnclosure(&radiation),
+            input(&graph, &[], &feedback, &samples, &heat), spatial_controls(), &[0.0; 4],
+        ).unwrap();
+        let report = candidate.report();
+        // Exact fourth simplex moment on every triangle, independent of the
+        // production quadrature, radiosity solve and graph energy account.
+        let outward: f64 = mesh.boundary().iter().map(|face| {
+            let t = face.vertices.map(|v| report.thermal.temperature[v as usize]);
+            let mut moment = 0.0;
+            for a in 0..=4 {
+                for b in 0..=4-a {
+                    moment += t[0].powi(a) * t[1].powi(b) * t[2].powi(4-a-b);
+                }
+            }
+            face.area * 0.6 * STEFAN_BOLTZMANN_W_M2_K4
+                * (moment / 15.0 - 360.0_f64.powi(4))
+        }).sum();
+        assert!(outward < 0.0);
+        close(report.thermal.radiation_out_w, outward);
+        close(report.closed_radiation_net_j, 0.0);
+        close(report.other_external_heat_j, -dt * outward);
+        close(report.thermal.stored_energy_change_j,
+            report.graph_heat_j - dt * outward);
+        assert!(report.maximum_node_residual_j < 1e-8);
+        assert!(report.thermal.energy_residual_j.abs() < 1e-8);
+        assert_eq!(old, [200.0; 4]);
+    });
+}
+
 // V=1/6, mass=1/24 per vertex, grad N0=(-1,-1,-1), grad Nj=e_j.
 // The normalized P1 shape N0 supplies loads P*(2,1,1,1)/5, NOT P*(1,0,0,0).
 // Conservation fixes mean T at each scalar power trial, hence k(mean T).

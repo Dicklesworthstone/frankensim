@@ -13,7 +13,8 @@ use fs_conduction::interface::temperature::{
 use fs_conduction::radiation::{GrayDiffuseEnclosure, OpenDiffuseEnclosure};
 use fs_conduction::{
     AmbientRadiationPatch, ConductionError, MaterialAmbientRadiationPatch,
-    MaterialPointwiseAmbientRadiation, PointwiseAmbientRadiation, PointwiseEnclosureRadiation,
+    MaterialEnclosureRadiationPatch, MaterialPointwiseAmbientRadiation,
+    MaterialPointwiseEnclosureRadiation, PointwiseAmbientRadiation, PointwiseEnclosureRadiation,
     PointwiseEnclosureTolerance, ThermalBoundary,
 };
 use fs_convection::CorrelationRobinBoundary;
@@ -42,9 +43,23 @@ pub enum StoredContactRadiation<'a> {
         enclosure: &'a GrayDiffuseEnclosure,
         tolerance: PointwiseEnclosureTolerance,
     },
+    /// Reflected internal exchange with original nodal emissivity resolved
+    /// from the current temperature and liquid fraction on each surface.
+    MaterialClosedEnclosure {
+        enclosure: &'a GrayDiffuseEnclosure,
+        patches: &'a [MaterialEnclosureRadiationPatch<'a>],
+        tolerance: PointwiseEnclosureTolerance,
+    },
     /// Internal reflection plus one explicit external black reservoir.
     OpenEnclosure {
         enclosure: &'a OpenDiffuseEnclosure,
+        ambient_temperature_k: f64,
+        tolerance: PointwiseEnclosureTolerance,
+    },
+    /// Evolving material emission/reflection and one external black reservoir.
+    MaterialOpenEnclosure {
+        enclosure: &'a OpenDiffuseEnclosure,
+        patches: &'a [MaterialEnclosureRadiationPatch<'a>],
         ambient_temperature_k: f64,
         tolerance: PointwiseEnclosureTolerance,
     },
@@ -86,12 +101,14 @@ impl StoredContactRadiation<'_> {
                 }
                 Ok(names)
             }
-            Self::ClosedEnclosure { enclosure, .. } => Ok(enclosure
+            Self::ClosedEnclosure { enclosure, .. }
+            | Self::MaterialClosedEnclosure { enclosure, .. } => Ok(enclosure
                 .surfaces()
                 .iter()
                 .map(|surface| surface.name())
                 .collect()),
-            Self::OpenEnclosure { enclosure, .. } => Ok(enclosure
+            Self::OpenEnclosure { enclosure, .. }
+            | Self::MaterialOpenEnclosure { enclosure, .. } => Ok(enclosure
                 .surfaces()
                 .iter()
                 .map(|surface| surface.name())
@@ -132,8 +149,9 @@ impl<'n, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'n, 'a, 'car
     /// coolant convection heats the return stream. Enclosure exchange between
     /// solid patches is internal; its signed net surface power, including any
     /// explicit black bath, enters the external account exactly once.
-    /// Material ambient patches also refresh their pinned emissivity at every
-    /// trial h, retaining temperature and latent-fraction feedback in Newton.
+    /// Material patches refresh their pinned emissivity at every trial h,
+    /// retaining temperature and latent-fraction feedback in Newton. Material
+    /// enclosures also refactor their actual reflection system at that state.
     ///
     /// One joint enthalpy solve is counted per solid trial. Work exhaustion or
     /// any physics/cancellation refusal publishes neither history. Fixed
@@ -264,6 +282,33 @@ impl<'n, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'n, 'a, 'car
                             tolerance,
                         )?;
                         contacts.advance_enthalpy_newton_with_pointwise_enclosure_radiation(
+                            cx, storage, mapped, old, dt, config, &pointwise,
+                        )?
+                    }
+                    StoredContactRadiation::MaterialClosedEnclosure {
+                        enclosure, patches, tolerance,
+                    } => {
+                        let fixed = PointwiseEnclosureRadiation::new(
+                            cx, mapped.mesh, mapped.boundary, enclosure, tolerance,
+                        )?;
+                        let pointwise = MaterialPointwiseEnclosureRadiation::new(
+                            cx, &fixed, patches,
+                        )?;
+                        contacts.advance_enthalpy_newton_with_material_enclosure_radiation(
+                            cx, storage, mapped, old, dt, config, &pointwise,
+                        )?
+                    }
+                    StoredContactRadiation::MaterialOpenEnclosure {
+                        enclosure, patches, ambient_temperature_k, tolerance,
+                    } => {
+                        let fixed = PointwiseEnclosureRadiation::new_open(
+                            cx, mapped.mesh, mapped.boundary, enclosure,
+                            ambient_temperature_k, tolerance,
+                        )?;
+                        let pointwise = MaterialPointwiseEnclosureRadiation::new(
+                            cx, &fixed, patches,
+                        )?;
+                        contacts.advance_enthalpy_newton_with_material_enclosure_radiation(
                             cx, storage, mapped, old, dt, config, &pointwise,
                         )?
                     }
