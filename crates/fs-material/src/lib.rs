@@ -87,6 +87,8 @@ pub mod coating;
 pub mod section_temperature;
 /// Source-bound effective sheet mass, membrane and independent bending response.
 pub mod sheet;
+/// Source-bound constituent mass, volume and water accounting for mineral slurries.
+pub mod slurry;
 pub mod state_point;
 /// Bounded solid-vapor pressure and latent-heat laws for shared phase transfer.
 pub mod sublimation;

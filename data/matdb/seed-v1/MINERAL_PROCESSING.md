@@ -307,6 +307,58 @@ from inside-liner diameter, ball diameter and explicit gravity:
 `n = sqrt(2*g/(D-d))/(2*pi)` revolutions/second.
 It is not an operating-speed recommendation, power-draw model or DEM solver.
 
+## From dry mill throughput to slurry and process water
+
+`fs_material::slurry` combines dry constituent mass flows with one liquid
+carrier. `DensitySource::resolve` selects a real pack claim at its original
+typed conditions and retains the material evidence and verified usage receipt.
+The explicitly selected additive-volume model computes
+`Q = sum(mass_flow_i / density_i)` and `pulp_density = total_mass_flow / Q`.
+It exposes solids mass and volume fractions separately. Unknown mineral test
+temperatures stay unknown; this engineering reference mixture does not become
+a measured bulk ore or a qualified common-temperature material.
+
+`dilute_to_mass_fraction` computes carrier addition to reach an explicit mass
+fraction. Requests requiring removal return `WaterRemovalRequired` with the
+removal rate. `split` is nonselective and `mix` conserves each named constituent;
+conflicting source/query contexts cannot silently merge. Zero flow is valid,
+with density and composition absent instead of NaN or invented defaults.
+
+The runnable example uses the Bond scenario above, a declared 50% magnetite /
+20% pyrite / 30% dolomite dry blend, an initial 50 kg/s water flow, and a target
+of 65% solids by mass. Its outputs are:
+
+| Output | Authored reference scenario |
+| --- | ---: |
+| Dry solids | 250 kg/s |
+| Added water | 84.615384615 kg/s |
+| Total water | 134.615384615 kg/s |
+| Total slurry volume | 0.195356574114 m³/s |
+| Pulp density | 1968.786493931 kg/m³ |
+| Solids mass fraction | 0.65 |
+| Solids volume fraction | 0.308883870454 |
+
+The water density comes from the existing IAPWS liquid-water pack at 298.15 K
+and 100000 Pa. This is an explicit reference calculation, not a site forecast.
+
+```bash
+for pack in magnetite-handbook-mineralogy-reference pyrite-handbook-mineralogy-reference dolomite-handbook-mineralogy-reference water-liquid-iapws-sr6-08; do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
+    --out "$mining_pack_dir/$pack.fsmatpk"
+done
+cargo run -p fs-material --example mineral_slurry -- \
+  "$mining_pack_dir/magnetite-handbook-mineralogy-reference.fsmatpk" \
+  "$mining_pack_dir/pyrite-handbook-mineralogy-reference.fsmatpk" \
+  "$mining_pack_dir/dolomite-handbook-mineralogy-reference.fsmatpk" \
+  "$mining_pack_dir/water-liquid-iapws-sr6-08.fsmatpk" \
+  0.65
+```
+
+The optional final argument is a solids mass fraction, not a percentage.
+The executable checks pack identities and prints every source hash. It does
+not infer packing, settling, entrained gas, viscosity or a separation recovery.
+
 ## Focused verification
 
 Normal workspace commands for these slices:
@@ -314,6 +366,8 @@ Normal workspace commands for these slices:
 ```bash
 cargo test -p xtask --test mining_mineral_sources --test mining_mineral_coverage --test mining_reagent_sources --test mining_reagent_references --test mining_oxide_sources --test mining_reaction_balances
 cargo test -p fs-material comminution
+cargo test -p fs-material slurry::tests
+cargo test -p xtask --test mining_slurry_sources
 cargo test -p fs-thermochem stoichiometry::tests
 ```
 

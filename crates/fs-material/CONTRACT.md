@@ -1,5 +1,34 @@
 # fs-material — CONTRACT
 
+## Source-bound mineral slurry streams
+
+`slurry::SlurryStream` converts explicit dry constituent and carrier-liquid
+mass flows into additive volume flow, pulp density, solids mass fraction and
+solids volume fraction. Each `DensitySource` is a typed query against an
+actual normalized material pack; the complete pack identity, original query,
+evidence, uncertainty and verified usage receipt survive all flow operations.
+Reported density ranges require an explicitly selected endpoint. Grain-density
+references do not become bulk-ore measurements or common-temperature evidence.
+
+The caller explicitly selects additive constituent volumes with no entrained
+gas. `dilute_to_mass_fraction` adds the original carrier while preserving dry
+constituent flows. A concentration target reports required liquid removal;
+it never silently clips the request. Nonselective splitting and canonical
+mixing conserve each component to binary64 rounding. Identical component names
+with different source/query contexts refuse to merge. Zero-flow streams retain
+zero extensive rates and `None` for undefined density/composition. Distinct
+mass- and volume-fraction types prevent accidental basis substitution.
+
+There are at most 128 solids or mixing inlets. Fixed sorted/compensated sums,
+finite positive density checks and explicit overflow/underflow refusals keep
+these synchronous operations bounded. They own no evolving plant inventory.
+G0/G1/G3 tests include a real pack/compiler journey from Bond dry throughput
+through magnetite/pyrite/dolomite/water densities, dilution and split/recombine.
+The runnable `mineral_slurry` example exposes the complete source-backed flow
+calculation. No dissolution, reaction, thermal equilibration, volume contraction,
+settling, rheology, liberation, separation efficiency or field calibration is
+inferred; source uncertainty is retained without inventing a mixture interval.
+
 ## Source-specific comminution references
 
 `comminution` supplies a typed, uncorrected Bond grinding-energy closure,

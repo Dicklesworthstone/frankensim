@@ -12,6 +12,8 @@ executable source-backed lime-hydration, carbonate-calcination and iron-oxide
 oxidation example. Shared physics now provide
 typed Bond milling energy/throughput, ideal ball-mill critical speed, exact
 reaction amounts, standard reaction enthalpy and Faraday product yield.
+Source-bound slurry streams connect dry throughput to carrier-water demand,
+pulp density and volumetric flow, with conservative mixing and splitting.
 Mineral/reference data retain their own conditions; site work indices,
 conversion, recovery and process calibration remain explicit inputs.
 
