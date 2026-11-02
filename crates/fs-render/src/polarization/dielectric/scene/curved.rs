@@ -47,6 +47,9 @@ use crate::polarization::Stokes;
 /// Native geometry walks retaining the original launch-angle derivatives.
 pub mod bundle;
 
+/// Reciprocal scalar camera radiance through the same curved native paths.
+pub mod camera;
+
 /// Molecular scattering through the same native curved surface traversal.
 #[cfg(feature = "volumes")]
 pub mod participating;

@@ -318,9 +318,10 @@ differentiable lift). Pure Rust throughout.
   Geometry/frame identities are checked through separate numerical contacts,
   without constructing certified straight-ray hits. Fresh launches on
   unresolved surfaces refuse, and limited results are not resume tokens.
-  This is numerical forward power transport with a required material-field
-  contact collar; it adds no scalar camera/BDPT curved visibility or ray-bundle
-  Jacobians. Analytic slab-to-finite-receiver and weighted reflection/transmission
+  This core walk is numerical forward power transport with a required
+  material-field contact collar. The separate `camera` consumer below supplies
+  scalar radiance; general curved BDPT/MIS remains outside this walk.
+  Analytic slab-to-finite-receiver and weighted reflection/transmission
   regressions check exit position/direction, optical lengths, attenuation,
   received watts and Stokes components through the actual native scene.
   Native unmeshed sphere regressions additionally cover off-axis dispersive
@@ -328,6 +329,33 @@ differentiable lift). Pure Rust throughout.
   gradient-index trajectory refracting out of a sphere, and exact-tangent
   refusal before interface sampling. Their receiving geometry and optical
   lengths use independent analytic references.
+
+- `polarization::dielectric::scene::curved::camera::CurvedCameraScene` consumes
+  native curved visibility, full smooth reciprocal Fresnel/frame transport and
+  Beer integrals as scalar unpolarized camera radiance. It retains the native
+  branch importance weights and applies one actual local phase-index factor
+  `(n_camera/n_endpoint)^2`. No source-distance or bundle-area factor is added.
+  Validated finite spectral radiance binds original opaque object IDs with
+  explicit emitting sides. Environment maps require caller radiometric
+  calibration and are sampled only after proven homogeneous escape. Any
+  positive absorption on the remaining infinite tail gives exact zero before
+  source evaluation. Rough/brushed/detector interactions refuse. Numerical
+  limits and indistinguishable native extinction/underflow are unresolved
+  errors. This covers reciprocal isotropic stationary media and intensity-only
+  endpoints, not general polarized adjoints, diffuse/volume emission or
+  point-light connections.
+  `camera::raster::CurvedCameraRaster` prepares the original physical
+  pinhole/thin-lens camera and traces each of four stratified wavelengths along
+  its own curved path. Raster, lens, wavelength and boundary streams retain
+  absolute pixel/sample identities across scheduling and batches. The returned
+  sample retains SI spectral radiances, native paths and renderer-normalized
+  CIE XYZ, using fixed stack storage and once-prepared color normalization.
+  XYZ represents pixel/aperture-averaged scene radiance, not sensor irradiance
+  or exposure. Diffraction refuses; every wavelength retains its native path
+  limits and cancellation. Twelve focused regressions cover curved visibility,
+  phase-index radiance, Beer, branch averaging, emitting sides, calibrated
+  directional backgrounds, reciprocal noncoplanar interfaces, independent
+  dispersive paths, physical camera sampling and refusal boundaries.
 
 - `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
   absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
