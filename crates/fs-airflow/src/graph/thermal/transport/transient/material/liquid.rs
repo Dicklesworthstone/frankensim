@@ -1,5 +1,6 @@
 //! Original liquid calorics and transport on distributed finite graph storage.
 
+use super::conduction::{GraphConductionError, GraphConductiveLink, ResolvedGraphConduction};
 use super::convection::{GraphConvectionError, GraphConvectiveLink, GraphSourceHeat};
 use super::*;
 use crate::graph::thermal::medium::series::enthalpy::admit_liquid_caloric_source;
@@ -60,6 +61,21 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
             .resolve(cx, thermal, trial_volume_flows_m3_s, |t| {
                 self.law.at_temperature(t).map_err(SourceGraphError::Liquid)
             })
+    }
+
+    /// Axial fluid conduction between explicitly linked adjacent pipe cells.
+    /// The same candidate's retained bulk source states supply conductivity;
+    /// native thermal links own reciprocal heat and its integration. This
+    /// remains active at rest and is independent of the flow direction.
+    pub fn evaluate_conduction_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        bindings: &[GraphConductiveLink],
+        maximum_links: usize,
+    ) -> Result<ResolvedGraphConduction<ResolvedLiquidState>, GraphConductionError> {
+        conduction::evaluate_links(&self.core, cx, thermal, sources, bindings, maximum_links)
     }
 
     /// Run this with the actual native PHS report inside the driver's exchange

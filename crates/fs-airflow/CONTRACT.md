@@ -2869,3 +2869,30 @@ trajectories; they do not certify global error or locate events exactly. The
 caller still authors spatial resolution, maximum interval and scheduled-event
 splits. All thermal conservation, source support and momentum work gates remain
 on the original native reports.
+
+### Source-backed axial conduction in distributed fluid storage
+
+Liquid and gas graph source owners expose `evaluate_conduction_links` for
+explicit native zero-baseline links between consecutive cells of the same
+original branch. Each cell's own bulk source conductivity and actual half length
+and cross-sectional area determine the series resistance
+`L_a/(2 k_a A_a) + L_b/(2 k_b A_b)`. The adapter reuses the original thermal
+series-conductance kernel and reciprocal link integration. Conduction remains
+active at rest and independent of advective direction; diagnostic signed heat
+must not also be supplied as an external cell source.
+
+The declared face must cover the smaller adjacent whole pipe section. Partial
+apertures, junctions, cross-branch links and duplicate whole-face owners refuse.
+Stepped sections use a one-dimensional held-cell model with no inferred
+spreading, constriction, contact resistance or turbulent dispersion. Exact
+candidate-temperature and original source-binding admission prevent stale
+coefficients. Immutable source sections are shared with the accepted payload
+without copying source receipts per face. Explicit link budgets bound selected
+links and the linear scan of active native links; cancellation and conflicting
+coefficient ownership leave the destination map unchanged.
+
+Regression sources cover variable conductivity and unequal sections, independent
+Fourier-profile mesh refinement, stagnant native equilibration, signed advection
+with conduction, original nonlinear gas calorics, and geometry/ownership refusal.
+Time and spatial resolution remain caller responsibilities.
+

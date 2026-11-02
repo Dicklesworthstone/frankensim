@@ -5,6 +5,7 @@
 //! selections supply each local transport state. This is a low-Mach,
 //! fixed-reference-inventory approximation, not compressible pressure evolution.
 
+use super::conduction::{GraphConductionError, GraphConductiveLink, ResolvedGraphConduction};
 use super::convection::{GraphConvectionError, GraphConvectiveLink, GraphSourceHeat};
 use super::*;
 use fs_material::thermochemical_gas::{
@@ -81,6 +82,21 @@ impl<'a> GasGraphSources<'a> {
     }
     pub const fn maximum_mach(&self) -> f64 {
         self.maximum_mach
+    }
+
+    /// Axial conduction uses both actual bulk source states at the native
+    /// thermal candidate, retaining original gas pressure and composition.
+    /// Existing reciprocal links own heat independently of advective direction;
+    /// no stagnant-flow conductivity floor or extra caloric law is introduced.
+    pub fn evaluate_conduction_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        bindings: &[GraphConductiveLink],
+        maximum_links: usize,
+    ) -> Result<ResolvedGraphConduction<ResolvedThermochemicalGasState>, GraphConductionError> {
+        conduction::evaluate_links(&self.core, cx, thermal, sources, bindings, maximum_links)
     }
 
     fn admit_mach(

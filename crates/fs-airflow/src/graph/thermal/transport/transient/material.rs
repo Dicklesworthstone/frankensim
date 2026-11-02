@@ -17,6 +17,7 @@
 //! concern the admitted discrete, endpoint-held model, not unresolved spatial or
 //! continuous-time temperature extrema.
 
+pub mod conduction;
 pub mod convection;
 mod flow;
 pub mod gas;
@@ -144,7 +145,7 @@ pub struct GraphSourceState<M> {
     binding: Arc<()>,
     temperatures_k: Vec<f64>,
     node_materials: Vec<M>,
-    sections: Vec<Vec<DistributedMaterialSection<M>>>,
+    sections: Arc<Vec<Vec<DistributedMaterialSection<M>>>>,
     branch_densities_kg_m3: Vec<f64>,
     section_anomalous_heads_pa: Vec<Vec<f64>>,
     gravity_heads_pa: Vec<f64>,
@@ -540,12 +541,27 @@ impl<'a> BoundGraphCore<'a> {
                 binding: self.binding.clone(),
                 temperatures_k: temperatures,
                 node_materials,
-                sections: compiled.sections,
+                sections: Arc::new(compiled.sections),
                 branch_densities_kg_m3: branch_densities,
                 section_anomalous_heads_pa: heads,
                 gravity_heads_pa,
             },
         })
+    }
+
+    fn admit_sources<M>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<M>,
+    ) -> Result<(), SourceGraphError> {
+        let temperatures = self.temperatures(cx, thermal)?;
+        if !Arc::ptr_eq(&self.binding, &sources.binding) || temperatures != sources.temperatures_k {
+            return Err(SourceGraphError::Invalid(
+                "foreign prepared source binding or stale thermal source payload",
+            ));
+        }
+        Ok(())
     }
 
     fn admit_flow<M>(
@@ -555,12 +571,7 @@ impl<'a> BoundGraphCore<'a> {
         sources: &GraphSourceState<M>,
         flow: GraphFlow<'_>,
     ) -> Result<GraphSourceAdmission, SourceGraphError> {
-        let temperatures = self.temperatures(cx, thermal)?;
-        if !Arc::ptr_eq(&self.binding, &sources.binding) || temperatures != sources.temperatures_k {
-            return Err(SourceGraphError::Invalid(
-                "foreign prepared source binding or stale thermal source payload",
-            ));
-        }
+        self.admit_sources(cx, thermal, sources)?;
         let count = self.laws.len();
         flow.admit(cx, self)?;
         let mut actual_losses = Vec::with_capacity(count);

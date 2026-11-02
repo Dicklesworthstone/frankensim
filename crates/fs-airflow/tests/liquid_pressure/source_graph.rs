@@ -1197,3 +1197,7 @@ fn original_liquid_source_advances_distributed_momentum_and_reciprocal_wall_heat
         near(initial.temperature_k(CellId(6)).unwrap(), 400.0);
     });
 }
+
+#[path = "source_graph/axial_conduction.rs"]
+mod axial_conduction;
+
