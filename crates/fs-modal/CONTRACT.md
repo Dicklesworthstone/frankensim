@@ -116,6 +116,26 @@ resonant growth under a sampled linear forcing interpolant. G3 checks temporal
 subdivision and replay, including both sides of critical damping and a strongly
 overdamped slow pole. Existing ZOH stepping and energy arithmetic are unchanged.
 
+`time::HarmonicForceTransition` advances the same scalar oscillator under a
+continuous load `Fc cos(Omega t) + Fs sin(Omega t)`. It shares the homogeneous
+transition and prepares the exact force convolution by an entire series and
+block composition. No division by detuning or pole separation occurs: exact
+undamped resonance retains secular growth, and free/critical/overdamped modes
+use the same formula. A separately evaluated cosine-minus-constant remainder
+retains tiny resolved velocities about static equilibrium near zero forcing
+frequency. Warm motion, phase advancement and zero-state harmonic responses
+allocate nothing and call no transcendentals. Multiple harmonics superpose
+after advancing the homogeneous state once; the public coupled-time reexport
+exposes the same owner. Invalid or unrepresentable trials return no motion.
+G1 checks analytic secular resonance, continuous complex amplitude and phase,
+the free-coordinate and DC limits, and independent 115-digit dimensional
+matrix exponentials; G3 checks Fourier superposition, temporal subdivision
+and bitwise checkpoint replay. This is prescribed linear forcing, not a
+nonlinear harmonic-balance solver. It supplies no work/heat or broadband
+radiation account, and exact endpoints do not resolve unsampled observations.
+Long oscillatory intervals and repeated cached phase rotations accumulate
+floating-point error; no amplitude normalization is applied.
+
 `LinearForceTransition::pullback` returns `LinearForcePullback` cotangents for
 initial displacement/velocity and both endpoint forces, with frequency, damping
 and duration fixed. It transposes the same cached flow and force moments;

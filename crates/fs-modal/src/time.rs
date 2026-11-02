@@ -38,6 +38,10 @@ use heat::{DampedTransition, ViscousIntegral};
 pub mod forcing;
 pub use forcing::{LinearForcePullback, LinearForceTransition};
 
+/// Prepared exact motion under a continuous sinusoidal generalized force.
+pub mod harmonic;
+pub use harmonic::HarmonicForceTransition;
+
 /// Maximum number of modes admitted by one runtime model.
 pub const MAX_TIME_DOMAIN_ACOUSTIC_MODES: usize = 4_096;
 
