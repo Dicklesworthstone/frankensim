@@ -1,4 +1,6 @@
 //! G0/G1/G3/G4: exact source segments, common nonlinear flux and bounded refusal.
+#[path = "layered_nonlinear/generation.rs"]
+mod generation;
 mod support;
 
 use fs_conduction::layered::{LayeredWall, NonlinearWallOptions, PlanarThermalLayer};
@@ -258,6 +260,30 @@ fn g0_g3_real_query_owner_preserves_source_knots_context_and_receipts() {
         card.claims().verify_receipt(receipt).unwrap();
         assert!(receipt.query_point.contains(&("moisture".into(), 0.12)));
     }
+    let generated = with_cx(|cx| {
+        wall.solve_temperature_dependent_with_generation(
+            cx,
+            [300.0; 2],
+            1.0,
+            &[40_000.0],
+            fs_conduction::layered::NonlinearGenerationOptions {
+                temperature_interval_k: [300.0, 500.0],
+                solver: options(),
+            },
+        )
+    })
+    .unwrap();
+    // Source integral300..400 is200, equal to s*L²/8.
+    close(generated.layer_temperatures[0].maximum_temperature_k, 400.0);
+    assert_eq!(generated.wall, wall);
+    assert_eq!(
+        generated.wall.layers()[0].material_card(),
+        Some(card.content_hash())
+    );
+    assert_eq!(
+        generated.wall.layers()[0].conductivity().receipts(),
+        receipts.as_slice()
+    );
 }
 
 #[test]
@@ -269,6 +295,28 @@ fn g0_full_reservoir_support_is_explicit_and_constant_path_is_unchanged() {
         with_cx(|cx| wall.solve_temperature_dependent(cx, [290.0, 510.0], 1.0, options(),)),
         Err(ConductionError::OutsideTemperatureSpan { .. })
     ));
+    let generated = with_cx(|cx| {
+        wall.solve_temperature_dependent_with_generation(
+            cx,
+            [290.0, 510.0],
+            1.0,
+            &[0.0],
+            fs_conduction::layered::NonlinearGenerationOptions {
+                temperature_interval_k: [300.0, 500.0],
+                solver: options(),
+            },
+        )
+    })
+    .unwrap();
+    close(generated.boundary_fluxes_w_per_m2[0], -220.0 / 3.0);
+    close(
+        generated.layer_temperatures[0].face_temperatures_k[0],
+        290.0 + 220.0 / 3.0,
+    );
+    close(
+        generated.layer_temperatures[0].face_temperatures_k[1],
+        510.0 - 220.0 / 3.0,
+    );
 }
 
 #[test]

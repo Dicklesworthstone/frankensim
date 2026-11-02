@@ -431,8 +431,8 @@ Signed source densities declare production/removal without inventing a Joule,
 reaction or refrigeration mechanism. Fourier/film/contact residuals recomputed
 from the rounded temperatures and the final boundary defect are numerical
 diagnostics, not material uncertainty or an experimental validation claim.
-The existing nonlinear and spatial owners remain necessary for k(T),
-temperature-dependent generation and lateral heat spreading.
+The nonlinear generation entry point below handles k(T). Temperature-dependent
+generation and lateral heat spreading still require the spatial/coupled owners.
 
 Seven focused G0/G1/G3/G4 regressions in `tests/layered/generation.rs` encode
 the independently derived heated-slab parabola, unequal reservoir heat split,
@@ -450,6 +450,31 @@ interval at its original fixed nonthermal context. Caller-declared iteration,
 temperature and constitutive-flux limits gate the returned candidate. Cancellation
 is checked between layers and every 128 source segments. Effective resistance and
 transmittance belong to this boundary pair; they are not tangent conductances.
+`LayeredWall::solve_temperature_dependent_with_generation` combines the same
+source-segment integral/inverse with `dq/dx=s` for finite, signed, uniform
+per-layer production/removal. The Kirchhoff potential is quadratic, while
+temperature is recovered from the original positive piecewise-linear k(T).
+Its possible interior extremum is recovered analytically and admitted before
+a candidate can be returned. The inlet flux is determined by bounded monotone
+shooting; face fluxes, contact jumps and surface films all use local flux.
+`NonlinearGenerationOptions` declares a positive common material-temperature
+interval supported by every source table plus the existing work/residual
+limits. This is conservative admission, not extrapolation; reservoirs may lie
+outside that interval behind explicit nonzero films. No rejected trial evaluates
+an unsupported conductivity. A single O(layers) trial buffer is reused, and
+source inversion begins at the active segment found by binary search.
+The result retains material-card identities and receipts, both outward reservoir
+heat rates, signed generation and energy balance, local face fluxes, extrema,
+the numerical inlet-flux bracket and independently recovered constitutive
+residuals. `temperature_at` recovers the nonlinear interior profile from the
+retained segment integrals without a mesh or new material queries. Five G1/G3/G4
+tests in `tests/layered_nonlinear/generation.rs` add affine/kinked source oracles,
+internal removal, heterogeneous contact/film balance, reversal, subdivision,
+area scaling, constant/zero-source parity and interior-domain/budget refusal;
+existing source/card and film-support tests exercise the new path too.
+Generation is prescribed independently of temperature; neither this path nor
+its roundoff residuals claim Joule/reaction feedback, material-error enclosure,
+transient accuracy or experimental qualification.
 Seven cases in `tests/layered_nonlinear.rs` cover affine and interior-knot laws,
 contacts/films, reversal, equal temperatures, original source receipts and bounded
 refusal. No density/Cp, transient history, lateral spreading,
@@ -915,7 +940,7 @@ re-derives it. Assembly stages triplets into `fs_sparse::Coo`.
 
 | integral | rule | exact for |
 | --- | --- | --- |
-| `∫_e ∇λ_a·K∇λ_b dV` | `V · gᵀ_a K g_b` | any constant `K` on the element — the P₁ gradients are constant, so this is not a quadrature at all |
+| `∫_e ∇λ_a·K∇λ_b dV` | `V · gᵀ_a K_bar_e g_b` | retained piecewise-linear `K(T_h)` in a fixed principal frame; its material moments integrate the entire P₁ temperature field, including crossed source knots |
 | `∫_e λ_a f dV` | `Σ_b V(1+δ_ab)/20 · f_b` | `f` linear on the element (second-order otherwise) |
 | `∫_F λ_a q_n dA` | `Σ_b A(1+δ_ab)/12 · q_b` | `q_n` linear on the face |
 | `∫_F h λ_a λ_b dA` | `Σ_c h_c ∫_F λ_a λ_b λ_c dA` | `h` linear on the face; cubic simplex moments are integrated exactly |

@@ -11,6 +11,8 @@ use super::{LayeredWall, checkpoint, finite, invalid, positive};
 use crate::{ConductionError, ConductivityTable};
 use fs_exec::Cx;
 
+mod segment;
+
 /// Explicit work and numerical residual limits for one nonlinear wall solve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NonlinearWallOptions {
@@ -25,7 +27,7 @@ pub struct NonlinearWallOptions {
 }
 
 impl NonlinearWallOptions {
-    fn validate(self) -> Result<(), ConductionError> {
+    pub(super) fn validate(self) -> Result<(), ConductionError> {
         if self.max_iterations == 0 || self.max_iterations > 256 {
             return Err(invalid("nonlinear wall iterations must lie in 1..=256"));
         }
@@ -48,7 +50,7 @@ impl NonlinearWallOptions {
         Ok(())
     }
 
-    fn flux_tolerance(self, flux: f64) -> Result<f64, ConductionError> {
+    pub(super) fn flux_tolerance(self, flux: f64) -> Result<f64, ConductionError> {
         finite(
             "nonlinear wall flux tolerance",
             self.flux_relative_tolerance
@@ -107,12 +109,13 @@ pub struct NonlinearLayeredWallSolution {
     pub options: NonlinearWallOptions,
 }
 
-struct ConductivityIntegral {
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ConductivityIntegral {
     knots: Vec<(f64, f64)>,
 }
 
 impl ConductivityIntegral {
-    fn new(
+    pub(super) fn new(
         cx: &Cx<'_>,
         table: &ConductivityTable,
         low: f64,
@@ -150,7 +153,12 @@ impl ConductivityIntegral {
         ((temperature - t0) / (t1 - t0)).mul_add(k1 - k0, k0)
     }
 
-    fn integral(&self, cx: &Cx<'_>, low: f64, high: f64) -> Result<f64, ConductionError> {
+    pub(super) fn integral(
+        &self,
+        cx: &Cx<'_>,
+        low: f64,
+        high: f64,
+    ) -> Result<f64, ConductionError> {
         if low == high {
             return Ok(0.0);
         }
@@ -172,55 +180,69 @@ impl ConductivityIntegral {
         Ok(sum)
     }
 
-    // Returns None if this positive heat flow crosses the cold reservoir.
-    // No unsupported temperature is evaluated even in rejected shooting trials.
+    // The source-free solver only cools; generated heat uses the same inverse
+    // in either direction. No trial evaluates outside the admitted interval.
     fn cool(&self, cx: &Cx<'_>, start: f64, amount: f64) -> Result<Option<f64>, ConductionError> {
-        if amount == 0.0 {
+        self.shift(cx, start, amount)
+    }
+
+    /// Return T with integral(k, T..start) = drop, including negative drops.
+    /// None means the required temperature leaves this law's admitted interval.
+    pub(super) fn shift(
+        &self,
+        cx: &Cx<'_>,
+        start: f64,
+        drop: f64,
+    ) -> Result<Option<f64>, ConductionError> {
+        finite("conductivity integral drop", drop)?;
+        if drop == 0.0 {
             return Ok(Some(start));
         }
-        let mut remaining = amount;
-        for (index, pair) in self.knots.windows(2).enumerate().rev() {
-            if index % 128 == 0 {
-                checkpoint(cx, index)?;
+        if self.knots.len() < 2 {
+            return Ok(None);
+        }
+        let cooling = drop > 0.0;
+        let mut remaining = drop.abs();
+        let first = self
+            .knots
+            .partition_point(|&(temperature, _)| temperature <= start)
+            .saturating_sub(1)
+            .min(self.knots.len() - 2);
+        let count = if cooling {
+            first + 1
+        } else {
+            self.knots.len() - 1 - first
+        };
+        for step in 0..count {
+            if step % 128 == 0 {
+                checkpoint(cx, step)?;
             }
-            let high = start.min(pair[1].0);
-            let low = pair[0].0;
-            if high <= low {
+            let index = if cooling { first - step } else { first + step };
+            let pair = &self.knots[index..=index + 1];
+            let (origin, edge) = if cooling {
+                (start.min(pair[1].0), pair[0].0)
+            } else {
+                (start.max(pair[0].0), pair[1].0)
+            };
+            let width = (origin - edge).abs();
+            if width == 0.0 {
                 continue;
             }
-            let k_high = self.value(index, high);
-            let k_low = pair[0].1;
-            let width = high - low;
-            let capacity = segment_area(width, k_high, k_low)?;
+            let k_origin = self.value(index, origin);
+            let k_edge = if cooling { pair[0].1 } else { pair[1].1 };
+            let capacity = segment_area(width, k_origin, k_edge)?;
+            positive("conductivity inverse segment capacity", capacity)?;
             if remaining > capacity {
                 remaining -= capacity;
                 continue;
             }
             if remaining == capacity {
-                return Ok(Some(low));
+                return Ok(Some(edge));
             }
-            // Scale conductivity and energy before taking the discriminant:
-            // a*y + (b-a)*y^2/2 = z, y = cooling distance / segment width.
-            // The rationalized positive root avoids subtracting nearby roots.
-            let scale = k_high.max(k_low);
-            let a = k_high / scale;
-            let b = k_low / scale;
-            let z = (remaining / capacity) * (0.5 * a + 0.5 * b);
-            positive("scaled segment energy", z)?;
-            let discriminant = (2.0 * (b - a)).mul_add(z, a * a);
-            if !discriminant.is_finite() || discriminant < 0.0 {
-                return Err(invalid(
-                    "conductivity inverse discriminant is not representable",
-                ));
-            }
-            let denominator = a + fs_math::det::sqrt(discriminant);
-            positive("conductivity inverse denominator", denominator)?;
-            let fraction = (2.0 * z) / denominator;
-            if !fraction.is_finite() || fraction <= 0.0 || fraction > 1.0 {
-                return Err(invalid("conductivity inverse left its admitted segment"));
-            }
-            let temperature = (-width).mul_add(fraction, high);
-            if temperature < low || temperature > high {
+            let fraction = segment::inverse_fraction(remaining, capacity, k_origin, k_edge)
+                .map_err(invalid)?;
+            let temperature = (edge - origin).mul_add(fraction, origin);
+            if temperature < pair[0].0 || temperature > pair[1].0 {
                 return Err(invalid(
                     "conductivity inverse temperature left its source interval",
                 ));
