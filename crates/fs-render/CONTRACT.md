@@ -4882,3 +4882,34 @@ original film without allocation. Source identities retain every endpoint and
 cannot promote representative data to caller-asserted measured optics.
 Focused G0/G1/G3 tests exercise original coherent absorption after interpolation,
 weak/transparent/subnormal limits, exact latent-state binding and domain refusal.
+
+### Independent film and substrate states drive coherent absorption
+
+`SurfaceOpticalHeating::try_new_coated_with_stateful` binds each film and the
+opaque substrate to its own original native heat receiver and constitutive law.
+Fixed absorbing films, original dispersive clear films and state-dependent
+films may coexist. Each temperature or enthalpy law reads that receiver's actual
+material/caloric state. The complete coherent stack is then solved through the
+original optical owner; local changes may redistribute heat in every layer.
+Original source schedules, total R/T/A accounting, material/domain admission,
+native storage/conduction and transactional acceptance remain authoritative.
+
+Receiver/material/law pairs resolve once per interval. Exactly matching ordered
+stack, receiver and incidence bindings share immutable response packets across
+illumination sources. Only changed optical values invalidate dependent packets;
+constant rows retain static behavior, and dark intervals defer optical solves
+while still checking all state domains at accepted endpoints. Shared packet
+identity never combines different physical thermal receivers. The program
+identity includes the laws and geometry rather than its initial temperature.
+The existing source budgets bound work, and the additional row budget counts
+each distinct film/substrate law once.
+
+The coefficients use each accepted interval's start state. This is an explicit
+coupling discretization requiring time refinement, with fixed film geometry and
+the original whole-film thermal lumping and prompt-thermalization assumptions.
+No phase-mixture rule, thermal expansion or endpoint-implicit optics is inferred.
+Four integration regressions cover bit-identical constant-row/static behavior,
+independent film/substrate temperatures and coherent first-step work, three
+temporal refinements against an independently integrated RK4 thermal ODE,
+equal-temperature latent states, shared packet counts, permutation/continuation,
+dark-domain refusal and late cancellation followed by identical retry.

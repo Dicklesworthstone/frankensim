@@ -33,6 +33,9 @@ mod surface;
 #[path = "optical_heating/coating.rs"]
 mod coating;
 
+#[path = "optical_heating/coating_state.rs"]
+mod coating_state;
+
 #[path = "optical_heating/surface_feedback.rs"]
 mod surface_feedback;
 

@@ -5,7 +5,9 @@
 //! receiver, followed by the opaque substrate. Receiver cells may coincide;
 //! their powers add without duplicating incident or reflected energy.
 //!
-//! Coefficients and geometry are frozen over the declared temperature domains.
+//! Each compiled response freezes its coefficients and geometry. Fixed sources
+//! retain them over their declared temperature domains; stateful coating sources
+//! replace the packet from the original native state before each needed interval.
 //! One cell represents each whole film's absorbed power, not its depth profile.
 //! Callers justify that thermal lumping and the optical/material association;
 //! an optical source identity alone does not certify that association. Cooling,

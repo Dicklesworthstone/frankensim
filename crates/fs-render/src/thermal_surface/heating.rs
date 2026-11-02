@@ -6,8 +6,8 @@
 //! absorption. Only absorption heats the explicitly assigned thermal cell.
 //! Outgoing light remains the responsibility of its original transport owner.
 //!
-//! Responses are fixed or supplied by an explicit native-temperature/enthalpy
-//! conductor law. Coated sources can assign the original coherent film and
+//! Responses are fixed or supplied by explicit native-temperature/enthalpy
+//! substrate, film or diffuse laws. Coated sources assign the original coherent film and
 //! substrate absorption to separate native cells. No phase mixing, within-film
 //! deposition depth, emission or cooling law is inferred. Native caloric storage,
 //! conduction and independently composed boundary owners remain authoritative.
@@ -22,6 +22,13 @@ pub use coating::{
 /// Finite-film optical constants on the original temperature or enthalpy state.
 pub mod coating_feedback;
 pub use coating_feedback::SurfaceCoatingLaw;
+/// Independently evolving film/substrate optics on the native thermal timeline.
+pub mod coating_state;
+use coating_state::CoatingFeedbackState;
+pub use coating_state::{
+    CoatingOpticsModel, StatefulCoatedSurfaceIlluminationSource, StatefulCoatingLayer,
+    SubstrateOpticsModel,
+};
 
 /// Explicit conductor optical constants versus native temperature or enthalpy.
 pub mod feedback;
@@ -219,6 +226,7 @@ pub struct SurfaceOpticalHeating<const N: usize> {
     model: Arc<Model<N>>,
     feedback: Option<SurfaceFeedbackState<N>>,
     diffuse_feedback: Option<SurfaceDiffuseFeedbackState<N>>,
+    coating_feedback: Option<CoatingFeedbackState<N>>,
     time_s: f64,
     evaluations: usize,
     response_evaluations: usize,
@@ -345,6 +353,7 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
             }),
             feedback: None,
             diffuse_feedback: None,
+            coating_feedback: None,
             time_s: thermal.time_s(),
             evaluations: 0,
             response_evaluations: 0,
@@ -423,6 +432,9 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
         if let Some(feedback) = &self.diffuse_feedback {
             feedback.validate(thermal, checkpoint)?;
         }
+        if let Some(feedback) = &self.coating_feedback {
+            feedback.validate(thermal, checkpoint)?;
+        }
         Ok(())
     }
 }
@@ -490,6 +502,9 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
         if let Some(feedback) = &mut self.diffuse_feedback {
             feedback.refresh(thermal, checkpoint)?;
         }
+        if let Some(feedback) = &mut self.coating_feedback {
+            feedback.refresh(thermal, checkpoint)?;
+        }
         let mut sums = self.sums.clone();
         let mut receiving = BTreeMap::<CellId, CheckedSum>::new();
         let mut absorbed = CheckedSum::default();
@@ -499,14 +514,38 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
                 .power
                 .mean_power_w(start_s, duration_s, end_s, &mut *checkpoint)?;
             let illuminated = mean.iter().any(|watts| *watts > 0.0);
-            let response = match &mut self.diffuse_feedback {
-                Some(feedback) => match feedback.response(
+            let coating_packet = match &mut self.coating_feedback {
+                Some(feedback) => feedback.response(
                     index,
                     illuminated,
                     &mut self.response_evaluations,
                     checkpoint,
-                )? {
-                    Some(response) => response,
+                )?,
+                None => None,
+            };
+            let response = if let Some(packet) = &coating_packet {
+                packet.total
+            } else {
+                match &mut self.diffuse_feedback {
+                    Some(feedback) => match feedback.response(
+                        index,
+                        illuminated,
+                        &mut self.response_evaluations,
+                        checkpoint,
+                    )? {
+                        Some(response) => response,
+                        None => match &mut self.feedback {
+                            Some(feedback) => feedback
+                                .response(
+                                    index,
+                                    illuminated,
+                                    &mut self.response_evaluations,
+                                    checkpoint,
+                                )?
+                                .unwrap_or(source.response),
+                            None => source.response,
+                        },
+                    },
                     None => match &mut self.feedback {
                         Some(feedback) => feedback
                             .response(
@@ -518,19 +557,17 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
                             .unwrap_or(source.response),
                         None => source.response,
                     },
-                },
-                None => match &mut self.feedback {
-                    Some(feedback) => feedback
-                        .response(
-                            index,
-                            illuminated,
-                            &mut self.response_evaluations,
-                            checkpoint,
-                        )?
-                        .unwrap_or(source.response),
-                    None => source.response,
-                },
+                }
             };
+            let coating_receivers = coating_packet
+                .as_ref()
+                .map(|packet| packet.receivers.as_ref())
+                .or_else(|| {
+                    self.model
+                        .coating_receivers
+                        .get(&source.source_id)
+                        .map(|receivers| receivers.as_ref())
+                });
             for lane in 0..N {
                 let incident = mean[lane];
                 let reflected = physical_product(incident, response.reflected_fraction()[lane])?;
@@ -559,7 +596,7 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
                 }
                 residuals[lane].add(residual)?;
                 absorbed.add(heat)?;
-                if let Some(receivers) = self.model.coating_receivers.get(&source.source_id) {
+                if let Some(receivers) = coating_receivers {
                     for receiver in receivers {
                         checkpoint()?;
                         let local_heat = physical_product(incident, receiver.absorbed[lane])?;
