@@ -609,6 +609,26 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             Some(PointwiseBoundary::MaterialAmbient(radiation)))
     }
 
+    /// Advance original-material local emission and freshly updated reflected
+    /// irradiation in the same h solve, including isothermal phase response.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_material_enclosure_radiation(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old_h: &[f64], dt_s: f64,
+        config: EnthalpyStepConfig, radiation: &crate::MaterialPointwiseEnclosureRadiation<'_>,
+    ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        poll(cx, 0)?;
+        if !std::ptr::eq(self.mesh, problem.mesh)
+            || !radiation.matches(problem.mesh, problem.boundary)
+            || !radiation.matches_curves(cx, |vertex| self.curve_for_vertex(vertex))? {
+            return Err(EnthalpyError::InvalidInput(
+                "material enclosure requires the original mesh, boundary and nodal caloric objects",
+            ));
+        }
+        self.advance_radiative(cx, problem, interfaces, old_h, dt_s, config,
+            Some(PointwiseBoundary::MaterialEnclosure(radiation)))
+    }
+
     /// Advance local P1 emission and reflected enclosure exchange in the SAME
     /// nonlinear enthalpy solve. The complete generally nonsymmetric radiation
     /// tangent uses the existing Newton-FGMRES lane. No outer frozen-radiation

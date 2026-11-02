@@ -12,6 +12,11 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use std::{collections::BTreeMap, sync::Arc};
 
+/// Original-material emissivity with freshly factored reflected exchange.
+pub mod material;
+pub use material::{MaterialEnclosureRadiationPatch, MaterialPointwiseEnclosureAssembly,
+    MaterialPointwiseEnclosureRadiation};
+
 use super::{
     GrayDiffuseEnclosure, OpenDiffuseEnclosure, PreparedRadiosity, RadiationSurface,
     ViewFactorMatrix, STEFAN_BOLTZMANN_W_M2_K4 as SIGMA,
@@ -58,6 +63,14 @@ pub struct PointwiseEnclosurePatchReport {
     pub radiosity_w_m2: f64,
     pub irradiation_w_m2: f64,
     pub outward_heat_w: f64,
+    /// Actual nodal material states for a source-dependent gray trace. Empty
+    /// for fixed gray/spectral data. When present, `emissivity` retains only
+    /// the original preparation snapshot, not the evolving trace law.
+    pub material_states: Vec<super::MaterialRadiationNodeState>,
+    /// Numerical area mean of the P1 nodal emissivity, not a material claim.
+    /// Present only with `material_states` and used by the current reflection
+    /// operator. Local emitted power retains the full correlated epsilon*T^4.
+    pub material_mean_emissivity: Option<f64>,
 }
 
 /// Explicit black bath, independently evaluated from its own reciprocal row.
@@ -453,6 +466,9 @@ impl PointwiseEnclosureAssembly {
     }
 
     pub(crate) fn admit_adjoint(&self, cx: &Cx<'_>) -> Result<(), ConductionError> {
+        if self.report.patches.iter().any(|patch| !patch.material_states.is_empty()) {
+            return Err(invalid("source-dependent enclosure emissivity cannot be rebound as fixed data"));
+        }
         for (patch, report) in self.report.patches.iter().enumerate() {
             poll(cx, patch)?;
             if let Some((low, high)) = report.emissivity.temperature_validity_k() {
@@ -842,6 +858,9 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
 
     pub(crate) fn patch_count(&self) -> usize { self.geometry.patches.len() }
 
+    /// Closed internal exchange has no external black-bath heat account.
+    pub const fn is_closed(&self) -> bool { self.ambient_temperature_k.is_none() }
+
     pub(crate) fn band_count(&self) -> usize { 1 + self.additional_bands.len() }
 
     pub(crate) fn matches(&self, mesh: &ConductionMesh, boundary: &ThermalBoundary) -> bool {
@@ -1183,6 +1202,8 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 radiosity_w_m2: radiosity,
                 irradiation_w_m2: irradiation,
                 outward_heat_w: heat,
+                material_states: Vec::new(),
+                material_mean_emissivity: None,
             });
         }
         let ambient = if let Some(temperature_k) = self.ambient_temperature_k {

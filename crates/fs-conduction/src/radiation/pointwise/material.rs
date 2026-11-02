@@ -10,10 +10,14 @@ use std::collections::BTreeSet;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
 use fs_material::thermal::source::ThermalMaterialPoint;
-use fs_matdb::{ClaimId, InterpolationPolicy, PropertyValue};
 
 use super::*;
 use crate::SurfaceEmissivity;
+
+pub(in crate::radiation) mod source;
+pub mod adjoint;
+pub use source::MaterialRadiationSmoothnessError;
+use source::{DerivativeMode, MaterialEmissivitySource};
 
 /// One homogeneous material trace and its independently declared black bath.
 /// Different material charts require different named traces. Other conditions
@@ -38,22 +42,10 @@ pub struct MaterialRadiationNodeState {
     pub material: ResolvedMaterialStatePoint,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Coordinate { Temperature, LiquidFraction }
-
-#[derive(Debug)]
-enum Response<'a> {
-    Constant,
-    Curve { coordinate: Coordinate, knots: &'a [(f64, f64)] },
-}
-
 #[derive(Debug)]
 struct PreparedPatch<'a> {
     snapshot: AmbientRadiationPatch,
-    curve: &'a EquilibriumEnthalpyPhaseCurve,
-    material: ThermalMaterialPoint<'a>,
-    claim: ClaimId,
-    response: Response<'a>,
+    source: MaterialEmissivitySource<'a>,
     vertices: Vec<usize>,
 }
 
@@ -88,28 +80,9 @@ impl<'a> MaterialPointwiseAmbientRadiation<'a> {
         let mut curves: Vec<Option<&'a EquilibriumEnthalpyPhaseCurve>> = vec![None; mesh.vertex_count()];
         for (index, patch) in patches.iter().enumerate() {
             poll(cx, index)?;
-            if patch.curve.material_card_identity() != patch.material.material.content_hash() {
-                return Err(invalid("surface emissivity and enthalpy require the same original material card"));
-            }
-            let (emissivity, _) = SurfaceEmissivity::from_condition(
-                patch.region, patch.material, patch.selection.clone(),
+            let source = MaterialEmissivitySource::prepare(
+                patch.region, patch.curve, patch.material, patch.selection.clone(),
             )?;
-            let claim = emissivity.receipt().selected;
-            let source = patch.material.material.claims().claim(claim)
-                .ok_or_else(|| invalid("prepared emissivity claim disappeared"))?;
-            let response = match (&source.value, &source.interpolation) {
-                (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) => Response::Constant,
-                (PropertyValue::Curve { abscissa, knots, .. }, InterpolationPolicy::LinearInside) => {
-                    let coordinate = if abscissa == patch.material.temperature_axis { Coordinate::Temperature }
-                        else if Some(abscissa.as_str()) == patch.material.liquid_fraction_axis { Coordinate::LiquidFraction }
-                        else { return Err(invalid("material emissivity curves require the declared temperature or liquid mass fraction axis")); };
-                    if knots.len() < 2 {
-                        return Err(invalid("material emissivity requires at least two source curve knots"));
-                    }
-                    Response::Curve { coordinate, knots }
-                }
-                _ => return Err(invalid("material ambient radiation supports static scalars and one-dimensional linear thermal source curves")),
-            };
             let local: Vec<_> = vertices[index].iter().copied().collect();
             for (index, &vertex) in local.iter().enumerate() {
                 if index % ASSEMBLY_TILE == 0 { poll(cx, index)?; }
@@ -119,8 +92,8 @@ impl<'a> MaterialPointwiseAmbientRadiation<'a> {
                 curves[vertex] = Some(patch.curve);
             }
             prepared.push(PreparedPatch {
-                snapshot: AmbientRadiationPatch::new(patch.region, emissivity, patch.ambient_temperature_k)?,
-                curve: patch.curve, material: patch.material, claim, response, vertices: local,
+                snapshot: AmbientRadiationPatch::new(patch.region, source.snapshot().clone(), patch.ambient_temperature_k)?,
+                source, vertices: local,
             });
         }
         let mut face_samples = Vec::with_capacity(faces.len());
@@ -190,61 +163,14 @@ impl<'a> MaterialPointwiseAmbientRadiation<'a> {
             let mut maximum = f64::NEG_INFINITY;
             for &vertex in &patch.vertices {
                 poll(cx, vertex)?;
-                let failure = |error: String| ConductionError::MaterialQuery {
-                    property: SURFACE_EMISSIVITY_PROPERTY.into(),
-                    temperature: supplied_temperature.map_or(f64::NAN, |temperature| temperature[vertex]),
-                    upstream: error,
-                };
-                let phase = patch.curve.state_at_specific_enthalpy(specific_h[vertex])
-                    .map_err(|error| failure(error.to_string()))?;
-                let temperature = phase.temperature_k();
-                if supplied_temperature.is_some_and(|values| values[vertex] != temperature) {
-                    return Err(invalid("material radiation temperature differs from its original caloric state"));
-                }
-                let (emissivity, material) = SurfaceEmissivity::from_thermal_state(
-                    patch.snapshot.region(), patch.material, phase,
-                    MaterialPropertySelection::PinnedByProperty(vec![(SURFACE_EMISSIVITY_PROPERTY.into(), patch.claim)]),
-                ).map_err(|error| match error {
-                    // The prepared binding and claim are unchanged. A trial
-                    // may leave physical epsilon support as well as the card's
-                    // condition support; both belong to the source-domain
-                    // line search, without clipping or changing the source.
-                    ConductionError::MaterialQuery { .. } => error,
-                    _ => ConductionError::MaterialQuery {
-                        property: SURFACE_EMISSIVITY_PROPERTY.into(), temperature,
-                        upstream: error.to_string(),
-                    },
-                })?;
-                let mut derivative = 0.0;
-                if WITH_TANGENT {
-                    let dt_dh = patch.curve.temperature_derivative_at_specific_enthalpy(specific_h[vertex])
-                        .map_err(|error| failure(error.to_string()))?;
-                    temperature_slopes[vertex] = dt_dh;
-                    if let Response::Curve { coordinate, knots } = &patch.response {
-                        let (value, coordinate_slope) = match coordinate {
-                            Coordinate::Temperature => (temperature, dt_dh),
-                            Coordinate::LiquidFraction => (phase.liquid_mass_fraction(),
-                                patch.curve.liquid_mass_fraction_derivative_at_specific_enthalpy(specific_h[vertex])
-                                    .map_err(|error| failure(error.to_string()))?),
-                        };
-                        if value < knots[0].0 || value > knots[knots.len() - 1].0 {
-                            return Err(failure("emissivity derivative is outside its original source segments".into()));
-                        }
-                        let upper = knots.partition_point(|knot| knot.0 <= value).min(knots.len() - 1);
-                        let a = knots[upper - 1]; let b = knots[upper];
-                        let slope = finite((b.1 - a.1) / (b.0 - a.0))?;
-                        if a.1 != b.1 && slope == 0.0 {
-                            return Err(invalid("nonzero emissivity source derivative is unrepresentable"));
-                        }
-                        derivative = finite(slope * coordinate_slope)?;
-                        if slope != 0.0 && coordinate_slope != 0.0 && derivative == 0.0 {
-                            return Err(invalid("nonzero emissivity enthalpy derivative is unrepresentable"));
-                        }
-                    }
-                }
+                let response = patch.source.resolve(vertex, specific_h[vertex],
+                    supplied_temperature.map(|temperature| temperature[vertex]),
+                    if WITH_TANGENT { DerivativeMode::Primal } else { DerivativeMode::None })?;
+                let temperature = response.state.phase.temperature_k();
+                if WITH_TANGENT { temperature_slopes[vertex] = response.dt_dh; }
                 minimum = minimum.min(temperature); maximum = maximum.max(temperature);
-                values.push((temperature, emissivity.value(), derivative));
-                states.push(MaterialRadiationNodeState { vertex, phase, emissivity, material });
+                values.push((temperature, response.state.emissivity.value(), response.depsilon_dh));
+                states.push(response.state);
             }
             coefficients.push(values);
             reports.push(PointwiseRadiationPatchReport {
@@ -303,7 +229,8 @@ impl<'a> MaterialPointwiseAmbientRadiation<'a> {
         poll(cx, self.faces.len())?;
         Ok(PointwiseRadiationAssembly { outward_load_w: load, temperature_diagonal_w_k: diagonal,
             report: PointwiseRadiationReport { patches: reports, outward_heat_w }, tangent,
-            enthalpy_feedback, material_temperature_slopes: WITH_TANGENT.then_some(temperature_slopes) })
+            enthalpy_feedback, material_temperature_slopes: WITH_TANGENT.then_some(temperature_slopes),
+            material_parameters: None })
     }
 }
 
@@ -317,7 +244,7 @@ const GAUSS_FOUR: [(f64, f64); 4] = [
     (0.6699905217924281, 0.32607257743127307),
     (0.9305681557970262, 0.17392742256872692),
 ];
-const TRIANGLE_DEGREE_SIX: [([f64; 3], f64); 16] = {
+pub(in crate::radiation) const TRIANGLE_DEGREE_SIX: [([f64; 3], f64); 16] = {
     let mut result = [([0.0; 3], 0.0); 16];
     let mut i = 0;
     while i < 16 {

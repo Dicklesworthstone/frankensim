@@ -141,6 +141,27 @@ impl EnthalpyBackwardEuler<'_, '_> {
             candidate_specific_h, dt_s, config, None, Some(PointwiseBoundary::MaterialAmbient(radiation)))
     }
 
+    /// Measure actual material-state local emission and reflected irradiation
+    /// without advancing history or requesting a derivative at phase corners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_material_enclosure_radiation(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old_h: &[f64], candidate_h: &[f64],
+        dt_s: f64, config: EnthalpyStepConfig,
+        radiation: &crate::MaterialPointwiseEnclosureRadiation<'_>,
+    ) -> Result<EnthalpyEndpointEvaluation, EnthalpyError> {
+        poll(cx, 0)?;
+        if !std::ptr::eq(self.mesh, problem.mesh)
+            || !radiation.matches(problem.mesh, problem.boundary)
+            || !radiation.matches_curves(cx, |vertex| self.curve_for_vertex(vertex))? {
+            return Err(EnthalpyError::InvalidInput(
+                "material enclosure requires the original mesh, boundary and nodal caloric objects",
+            ));
+        }
+        self.evaluate_endpoint_radiative(cx, problem, interfaces, old_h, candidate_h,
+            dt_s, config, None, Some(PointwiseBoundary::MaterialEnclosure(radiation)))
+    }
+
     /// Measure a supplied endpoint with local emission and fresh reflected
     /// enclosure exchange. The same radiosity and enclosure-closure gates as
     /// the primal apply; net internal radiation stays separate from convection.

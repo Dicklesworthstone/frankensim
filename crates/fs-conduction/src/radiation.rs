@@ -65,6 +65,7 @@ pub use spectral::{
     SpectralSurfaceEmissivity, SurfaceSpectralBand, SurfaceSpectralBands,
 };
 pub use pointwise_enclosure::{
+    MaterialEnclosureRadiationPatch, MaterialPointwiseEnclosureAssembly, MaterialPointwiseEnclosureRadiation,
     PointwiseBlackBathReport, PointwiseEnclosureAssembly, PointwiseEnclosurePatchReport, PointwiseEnclosureRadiation,
     PointwiseEnclosureReport, PointwiseEnclosureTolerance,
 };

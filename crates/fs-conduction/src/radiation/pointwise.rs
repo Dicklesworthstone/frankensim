@@ -98,6 +98,7 @@ pub struct PointwiseRadiationAssembly {
     // Additional columns already expressed in h, never multiplied by dT/dh.
     enthalpy_feedback: Vec<FaceTangent>,
     material_temperature_slopes: Option<Vec<f64>>,
+    material_parameters: Option<material::adjoint::MaterialRadiationParameterData>,
 }
 
 impl PointwiseRadiationAssembly {
@@ -259,6 +260,9 @@ impl PointwiseRadiationAssembly {
         cx: &Cx<'_>,
         outward_load_weights: &[f64],
     ) -> Result<PointwiseRadiationParameterGradient, ConductionError> {
+        if self.material_temperature_slopes.is_some() {
+            return Err(invalid("material emissivity controls require their original scalar or curve-ordinate pullback"));
+        }
         self.check_fields(outward_load_weights.len(), outward_load_weights.len())?;
         self.admit_adjoint(cx)?;
         for (vertex, &weight) in outward_load_weights.iter().enumerate() {
@@ -290,7 +294,8 @@ impl PointwiseRadiationAssembly {
 
     pub(crate) fn admit_adjoint(&self, cx: &Cx<'_>) -> Result<(), ConductionError> {
         if self.report.patches.iter().any(|patch| !patch.material_states.is_empty()) {
-            return Err(invalid("material emissivity cannot be differentiated as a fixed snapshot"));
+            return if self.material_parameters.is_some() { poll(cx, 0) }
+                else { Err(invalid("material emissivity cannot be differentiated as a fixed snapshot")) };
         }
         for (patch, report) in self.report.patches.iter().enumerate() {
             poll(cx, patch)?;
@@ -535,6 +540,7 @@ impl<'a> PointwiseAmbientRadiation<'a> {
             tangent,
             enthalpy_feedback: Vec::new(),
             material_temperature_slopes: None,
+            material_parameters: None,
         })
     }
 }

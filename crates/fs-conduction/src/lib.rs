@@ -120,6 +120,7 @@ pub use radiation::{
     CoupledRadiationSolution, EMISSIVITY_DIMS,
     GrayDiffuseEnclosure, LinearizedRadiationPoint, LinearizedSurfaceRadiation, RadiationSurface,
     MaterialAmbientRadiationPatch, MaterialPointwiseAmbientRadiation, MaterialRadiationNodeState,
+    MaterialEnclosureRadiationPatch, MaterialPointwiseEnclosureAssembly, MaterialPointwiseEnclosureRadiation,
     PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationParameterGradient,
     PointwiseRadiationPatchReport,
     PointwiseRadiationReport,
@@ -300,6 +301,10 @@ pub enum ConductionError {
         /// The upstream refusal, rendered.
         upstream: String,
     },
+    /// A material-radiation source or phase branch lacks a two-sided derivative.
+    RadiationMaterialSmoothness(
+        radiation::pointwise::material::MaterialRadiationSmoothnessError,
+    ),
     /// A `fs-scenario` boundary row cannot be lowered into a thermal
     /// condition this crate solves.
     ScenarioRow {
@@ -460,6 +465,7 @@ impl fmt::Display for ConductionError {
                 f,
                 "fs-matdb refused {property:?} at T = {temperature} K: {upstream}"
             ),
+            ConductionError::RadiationMaterialSmoothness(source) => source.fmt(f),
             ConductionError::ScenarioRow { region, what, fix } => write!(
                 f,
                 "scenario row on {region:?} cannot be lowered: {what}; fix: {fix}"
@@ -532,6 +538,7 @@ impl ConductionError {
             ConductionError::AmbientRadiationNotConverged { .. } => "conduction-ambient-radiation-budget",
             ConductionError::OutsideTemperatureSpan { .. } => "conduction-outside-span",
             ConductionError::MaterialQuery { .. } => "conduction-material-query",
+            ConductionError::RadiationMaterialSmoothness(_) => "conduction-radiation-material-smoothness",
             ConductionError::ScenarioRow { .. } => "conduction-scenario-row",
             ConductionError::FieldLength { .. } => "conduction-field-length",
             ConductionError::Config { .. } => "conduction-config",

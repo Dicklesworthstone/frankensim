@@ -171,8 +171,80 @@ impl DenseRadiosityFactorization {
         poll(cx, "radiation-radiosity-backsolve", n)?;
         Ok(x)
     }
+
+    /// Transpose of the same pivoted operator, without another factorization.
+    /// If U = R A for the retained interleaved elimination/swap operations,
+    /// A^-T b = R^T U^-T b. Reverse replay must eliminate before undoing each
+    /// swap; treating the multipliers as an ordinary row-permuted L is wrong.
+    pub(super) fn solve_transpose(&self, cx: &Cx<'_>, rhs: &[f64]) -> Result<Vec<f64>, ConductionError> {
+        let n = self.upper.len();
+        if rhs.len() != n || rhs.iter().any(|v| !v.is_finite()) {
+            return Err(radiation_error("radiosity-system", "invalid prepared transpose right-hand side",
+                "supply one finite cotangent per prepared surface"));
+        }
+        let mut x = vec![0.0; n];
+        for row in 0..n {
+            poll(cx, "radiation-radiosity-transpose", row)?;
+            let mut value = rhs[row];
+            for (column, &known) in x.iter().enumerate().take(row) {
+                value = (-self.upper[column][row]).mul_add(known, value);
+            }
+            x[row] = value / self.upper[row][row];
+            if !x[row].is_finite() {
+                return Err(radiation_error("radiosity-system", "nonfinite transpose triangular solution",
+                    "repair the enclosure inputs"));
+            }
+        }
+        for column in (0..n).rev() {
+            poll(cx, "radiation-radiosity-transpose", column)?;
+            let mut value = x[column];
+            for (offset, &factor) in self.multipliers[column].iter().enumerate() {
+                value = (-factor).mul_add(x[column + offset + 1], value);
+            }
+            if !value.is_finite() {
+                return Err(radiation_error("radiosity-system", "nonfinite transpose elimination replay",
+                    "repair the enclosure inputs"));
+            }
+            x[column] = value;
+            x.swap(column, self.pivots[column]);
+        }
+        poll(cx, "radiation-radiosity-transpose", n)?;
+        Ok(x)
+    }
 }
 
 fn poll(cx: &Cx<'_>, stage: &'static str, at: usize) -> Result<(), ConductionError> {
     cx.checkpoint().map_err(|_| ConductionError::Cancelled { stage, at })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+
+    #[test]
+    fn transpose_replays_interleaved_elimination_and_pivots_in_reverse_order() {
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(&gate, arena,
+                StreamKey { seed: 7, kernel_id: 51, tile: 0, iteration: 0 },
+                Budget::INFINITE, ExecMode::Deterministic);
+            // Both elimination columns require swaps, so a conventional L^T
+            // solve without the recorded ordering produces the wrong result.
+            let matrix = vec![vec![0.01, 2.0, -1.0], vec![3.0, 0.02, 4.0], vec![-2.0, 5.0, 0.03]];
+            let factors = DenseRadiosityFactorization::new(&cx, &matrix).unwrap();
+            assert_eq!(factors.pivots, vec![1, 2, 2]);
+            let expected = [0.5, -0.8, 1.3];
+            let rhs: Vec<_> = (0..3).map(|i| (0..3).map(|j| matrix[j][i] * expected[j]).sum()).collect();
+            let solved = factors.solve_transpose(&cx, &rhs).unwrap();
+            for (actual, expected) in solved.iter().zip(expected) {
+                assert!((actual - expected).abs() < 2e-14);
+            }
+            for i in 0..3 {
+                let original: f64 = (0..3).map(|j| matrix[j][i] * solved[j]).sum();
+                assert!((original - rhs[i]).abs() < 2e-14);
+            }
+        });
+    }
 }

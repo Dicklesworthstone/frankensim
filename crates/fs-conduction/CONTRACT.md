@@ -1,5 +1,62 @@
 # CONTRACT: fs-conduction
 
+## Enthalpy-dependent spatial enclosure emissivity
+
+`MaterialPointwiseEnclosureRadiation` binds original material/card/claim
+emissivity to the exact caloric chart of every existing gray trace. It wraps
+the original pointwise closed or open enclosure: geometry, ordered surfaces,
+view factors, explicit black bath and watt gates retain their owners.
+At every h candidate it integrates P1 epsilon and temperature separately,
+retaining the full correlated mean of epsilon*sigma*T^4. The numerical
+area-mean epsilon updates the reflection matrix; it is not a material claim.
+Degree-six face quadrature is exact for the declared P1 fields.
+
+Every candidate factors its actual radiosity system. The full h action and
+transpose include the derivative of reflection as well as local emission and
+material emissivity. The existing small factorization is reused per Krylov
+action, with quadratic patch work and no dense nodal matrix. Original centered
+radiance differences preserve small near-equilibrium exchanges. The positive
+emission-only diagonal supplies preconditioning; it does not replace signed
+material feedback. Actual nodal source receipts remain in patch reports.
+
+Uniform and heterogeneous primary-h solvers, independent endpoint audits,
+source contact Newton and adaptive time stepping all retain this same owner.
+Adaptive comparisons still gate h, temperature and liquid fraction separately:
+emissivity can evolve and redistribute latent energy while temperature stays
+constant. Closed exchange remains internal; the physical surface sum of an
+open enclosure supplies its signed external heat once. No phase kinetics,
+moving geometry, spectral material emissivity or material-enclosure parameter
+adjoint is inferred.
+
+Focused G1/G3 fixtures use exact simplex moments, explicit two-surface
+radiosity, full derivative/transpose pairing, two distinct latent materials,
+energy-datum shifts and an independent continuous-time latent exchange
+integral. Source/domain and cancellation refusals retain immutable history.
+
+## Original-material ambient radiation adjoints
+
+Explicit accepted-state material-ambient binders retain the complete h
+action/transpose, including liquid-fraction emissivity feedback on isothermal
+latent plateaus. Binding rechecks original source-state receipts, exact
+storage/boundary ownership, the physical nodal residual and total energy.
+Within explicit numerical-entry allowances, one existing transpose supplies
+history/source, heterogeneous reference-density, optional contact-resistance,
+original scalar or curve-ordinate emissivity, and independent bath-temperature
+pullbacks. Shared claim controls are summed by original card/claim identity.
+
+Geometry, caloric knots, source abscissae, source selection and nonthermal
+conditions stay fixed. Unsupported two-sided source/phase neighborhoods
+return typed smoothness errors. Forward one-sided Newton slopes do not admit
+an adjoint. Material-dependent reports cannot be rebound as frozen-emissivity
+adjoints. Focused G1/G3 regressions compare analytic latent action/gradients
+and independent five-point source-resolved differences; G4 covers budget,
+altered-receipt and cancellation refusal.
+
+Native compilation/execution of these spatial increments remains pending the
+shared thermal dependency build. Rust parsing and independent numerical
+references are not reported as native integration-test passes.
+
+
 ## Spatial resistance maps on independently meshed interfaces
 
 `NonmatchingSurface::new_mapped` binds one positive, source-backed resistance

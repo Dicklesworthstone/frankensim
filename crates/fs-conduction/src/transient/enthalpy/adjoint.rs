@@ -37,6 +37,8 @@ use fs_sparse::{Coo, Csr};
 pub mod robin;
 /// Accepted-state adjoints of spatially resolved radiation.
 pub mod pointwise;
+/// Original-source derivatives of state-dependent ambient emissivity.
+pub mod material;
 pub use robin::{EnthalpyRobinGradient, EnthalpyRobinResponse};
 mod conductivity;
 
@@ -270,7 +272,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             ));
         }
         self.linearize_accepted_model_with_target(
-            cx, problem, interfaces, old_h, dt_s, config, accepted, physical_target, None,
+            cx, problem, interfaces, old_h, dt_s, config, accepted, physical_target, None, None,
         )
     }
 
@@ -286,6 +288,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         accepted: EnthalpyStepSolution,
         physical_target: Option<f64>,
         pointwise_radiation: Option<PointwiseBoundary<'_>>,
+        material_radiation_entries: Option<usize>,
     ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
         poll(cx, 0)?;
         let n = self.masses.len();
@@ -307,7 +310,20 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             dt: dt_s,
             pointwise_radiation,
         };
-        let stage = context.stage(&accepted.specific_enthalpy_j_kg)?;
+        let mut stage = context.stage(&accepted.specific_enthalpy_j_kg)?;
+        if let (Some(PointwiseBoundary::MaterialAmbient(owner)),
+            Some(PointwiseBoundaryAssembly::Ambient(assembly))) = (pointwise_radiation, &mut stage.radiation)
+        {
+            if accepted.pointwise_radiation.as_ref() != Some(&assembly.report) {
+                return Err(EnthalpyAdjointError::InvalidInput(
+                    "material radiation source receipts differ from the accepted endpoint",
+                ));
+            }
+            owner.bind_adjoint(cx, &accepted.specific_enthalpy_j_kg, assembly,
+                material_radiation_entries.ok_or(EnthalpyAdjointError::InvalidInput(
+                    "material radiation adjoint requires its explicit original-source entry allowance",
+                ))?)?;
+        }
         if let Some(radiation) = &stage.radiation {
             radiation.admit_adjoint(cx)?;
         }

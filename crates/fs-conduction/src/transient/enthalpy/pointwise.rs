@@ -5,6 +5,7 @@ use crate::{
     ConductionError, PointwiseAmbientRadiation, PointwiseEnclosureAssembly,
     PointwiseEnclosureRadiation, PointwiseEnclosureReport, PointwiseRadiationAssembly,
     PointwiseRadiationReport, MaterialPointwiseAmbientRadiation,
+    MaterialPointwiseEnclosureRadiation, MaterialPointwiseEnclosureAssembly,
 };
 use fs_exec::Cx;
 
@@ -13,12 +14,14 @@ pub(super) enum PointwiseBoundary<'a> {
     Ambient(&'a PointwiseAmbientRadiation<'a>),
     MaterialAmbient(&'a MaterialPointwiseAmbientRadiation<'a>),
     Enclosure(&'a PointwiseEnclosureRadiation<'a>),
+    MaterialEnclosure(&'a MaterialPointwiseEnclosureRadiation<'a>),
 }
 
 #[derive(Debug)]
 pub(super) enum PointwiseBoundaryAssembly {
     Ambient(PointwiseRadiationAssembly),
     Enclosure(PointwiseEnclosureAssembly),
+    MaterialEnclosure(MaterialPointwiseEnclosureAssembly),
 }
 
 pub(super) enum PointwiseBoundaryReport {
@@ -43,6 +46,9 @@ impl PointwiseBoundary<'_> {
             Self::Enclosure(owner) => owner
                 .assemble(cx, temperature)
                 .map(PointwiseBoundaryAssembly::Enclosure),
+            Self::MaterialEnclosure(owner) => owner
+                .assemble_at_temperature(cx, specific_h, temperature)
+                .map(PointwiseBoundaryAssembly::MaterialEnclosure),
         }
     }
 
@@ -62,6 +68,9 @@ impl PointwiseBoundary<'_> {
             Self::Enclosure(owner) => owner
                 .load_and_report(cx, temperature)
                 .map(|(load, report)| (load, PointwiseBoundaryReport::Enclosure(report))),
+            Self::MaterialEnclosure(owner) => owner
+                .load_and_report(cx, specific_h, temperature)
+                .map(|(load, report)| (load, PointwiseBoundaryReport::Enclosure(report))),
         }
     }
 }
@@ -71,6 +80,7 @@ impl PointwiseBoundaryAssembly {
         match self {
             Self::Ambient(assembly) => assembly.admit_adjoint(cx),
             Self::Enclosure(assembly) => assembly.admit_adjoint(cx),
+            Self::MaterialEnclosure(assembly) => assembly.admit_adjoint(cx),
         }
     }
 
@@ -82,6 +92,7 @@ impl PointwiseBoundaryAssembly {
         match self {
             Self::Ambient(assembly) => assembly.parameter_pullback(cx, outward_load_weights),
             Self::Enclosure(assembly) => assembly.parameter_pullback(cx, outward_load_weights),
+            Self::MaterialEnclosure(assembly) => assembly.parameter_pullback(cx, outward_load_weights),
         }
     }
 
@@ -101,6 +112,10 @@ impl PointwiseBoundaryAssembly {
             Self::Enclosure(assembly) => assembly.add_scaled_tangent_transpose(
                 cx, direction, column_scale, scale, include_row, output,
             ),
+            // Material columns already include the original T'(h) and epsilon'(h).
+            Self::MaterialEnclosure(assembly) => assembly.add_scaled_tangent_transpose(
+                cx, direction, scale, include_row, output,
+            ),
         }
     }
 
@@ -110,6 +125,7 @@ impl PointwiseBoundaryAssembly {
         match self {
             Self::Ambient(assembly) => assembly.temperature_diagonal_w_k[vertex],
             Self::Enclosure(assembly) => assembly.emission_diagonal()[vertex],
+            Self::MaterialEnclosure(assembly) => assembly.emission_temperature_diagonal_w_k[vertex],
         }
     }
 
@@ -128,6 +144,9 @@ impl PointwiseBoundaryAssembly {
             }
             Self::Enclosure(assembly) => {
                 assembly.add_scaled_tangent(cx, direction, column_scale, scale, include_row, output)
+            }
+            Self::MaterialEnclosure(assembly) => {
+                assembly.add_scaled_tangent(cx, direction, scale, include_row, output)
             }
         }
     }

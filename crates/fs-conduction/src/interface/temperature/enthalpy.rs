@@ -2,6 +2,7 @@
 
 pub mod pointwise;
 pub mod material;
+pub mod material_adjoint;
 
 use fs_exec::Cx;
 use crate::{AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationReport,

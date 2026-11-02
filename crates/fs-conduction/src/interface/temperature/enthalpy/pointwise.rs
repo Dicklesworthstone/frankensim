@@ -29,7 +29,7 @@ pub struct ContactEnthalpyPointwiseGradient {
 }
 
 impl TemperatureContacts<'_, '_> {
-    fn rebind_pointwise_enthalpy_contacts(
+    pub(super) fn rebind_pointwise_enthalpy_contacts(
         &self,
         cx: &Cx<'_>,
         problem: ConductionProblem<'_>,

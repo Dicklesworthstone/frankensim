@@ -111,7 +111,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         }
         self.linearize_accepted_model_with_target(
             cx, problem, interfaces, old_h, dt_s, config, accepted,
-            Some(physical_target_j), Some(PointwiseBoundary::Ambient(radiation)),
+            Some(physical_target_j), Some(PointwiseBoundary::Ambient(radiation)), None,
         )
     }
 
@@ -133,6 +133,12 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         physical_target_j: f64,
         max_radiation_entries: usize,
     ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        if accepted.pointwise_enclosure_radiation.as_ref().is_some_and(|report|
+            report.patches.iter().any(|patch| !patch.material_states.is_empty())) {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "state-dependent material emissivity cannot be rebound as a fixed enclosure radiation adjoint",
+            ));
+        }
         admit(cx, problem, radiation.patch_count(), radiation.band_count(), physical_target_j, max_radiation_entries)?;
         if !radiation.matches(problem.mesh, problem.boundary)
             || accepted.pointwise_enclosure_radiation.is_none()
@@ -144,7 +150,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         }
         self.linearize_accepted_model_with_target(
             cx, problem, interfaces, old_h, dt_s, config, accepted,
-            Some(physical_target_j), Some(PointwiseBoundary::Enclosure(radiation)),
+            Some(physical_target_j), Some(PointwiseBoundary::Enclosure(radiation)), None,
         )
     }
 }

@@ -12,7 +12,7 @@ use crate::interface::temperature::enthalpy::{
     ContactEnthalpyNewtonConfig, check_coupled_endpoint,
 };
 use crate::transient::enthalpy::PointwiseBoundary;
-use crate::MaterialPointwiseAmbientRadiation;
+use crate::{MaterialPointwiseAmbientRadiation, MaterialPointwiseEnclosureRadiation};
 
 /// Contact controls added to the adaptive state's unchanged endpoint policy.
 ///
@@ -237,6 +237,7 @@ enum ContactRadiation<'a> {
     Ambient(&'a PointwiseAmbientRadiation<'a>),
     MaterialAmbient(&'a MaterialPointwiseAmbientRadiation<'a>),
     Enclosure(&'a PointwiseEnclosureRadiation<'a>),
+    MaterialEnclosure(&'a MaterialPointwiseEnclosureRadiation<'a>),
 }
 
 impl<'a> ContactRadiation<'a> {
@@ -246,6 +247,7 @@ impl<'a> ContactRadiation<'a> {
             Self::Ambient(owner) => Some(PointwiseBoundary::Ambient(owner)),
             Self::MaterialAmbient(owner) => Some(PointwiseBoundary::MaterialAmbient(owner)),
             Self::Enclosure(owner) => Some(PointwiseBoundary::Enclosure(owner)),
+            Self::MaterialEnclosure(owner) => Some(PointwiseBoundary::MaterialEnclosure(owner)),
         }
     }
 }
@@ -456,6 +458,46 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         )
     }
 
+    /// Adapt source contact and evolving reflected emissivity together. Each
+    /// trial includes the full h derivative of emission and reflection, even
+    /// when melting changes emissivity at constant temperature.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to_with_temperature_contacts_and_material_enclosure_radiation(
+        &mut self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        contacts: &TemperatureContacts<'_, '_>,
+        config: AdaptiveContactEnthalpyConfig,
+        radiation: &MaterialPointwiseEnclosureRadiation<'_>,
+        end_time_s: f64,
+        max_trials: usize,
+    ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
+        self.advance_to_with_temperature_contacts_and_material_enclosure_radiation_observed(
+            cx, problem, contacts, config, radiation, end_time_s, max_trials,
+            |_| ControlFlow::Continue(()),
+        )
+    }
+
+    /// Observe accepted material-enclosure/contact endpoints with their actual
+    /// nodal source receipts and independently checked local energy balances.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to_with_temperature_contacts_and_material_enclosure_radiation_observed(
+        &mut self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        contacts: &TemperatureContacts<'_, '_>,
+        config: AdaptiveContactEnthalpyConfig,
+        radiation: &MaterialPointwiseEnclosureRadiation<'_>,
+        end_time_s: f64,
+        max_trials: usize,
+        observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
+    ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
+        self.advance_contact(
+            cx, problem, contacts, config, ContactRadiation::MaterialEnclosure(radiation),
+            end_time_s, max_trials, observe,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn advance_contact(
         &mut self,
@@ -523,6 +565,10 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
                             dt,
                             config.step,
                             owner,
+                        ),
+                    ContactRadiation::MaterialEnclosure(owner) => storage
+                        .evaluate_endpoint_with_material_enclosure_radiation(
+                            cx, problem, interfaces, old, candidate, dt, config.step, owner,
                         ),
                 }?;
                 check_coupled_endpoint(&physical, config)?;

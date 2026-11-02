@@ -316,6 +316,10 @@ impl EnthalpyBackwardEuler<'_, '_> {
             Some(PointwiseBoundary::Enclosure(owner)) => {
                 owner.matches(problem.mesh, problem.boundary)
             }
+            Some(PointwiseBoundary::MaterialEnclosure(owner)) => {
+                owner.matches(problem.mesh, problem.boundary)
+                    && owner.matches_curves(cx, |vertex| self.curve_for_vertex(vertex))?
+            }
             None => true,
         };
         if !radiation_matches {
