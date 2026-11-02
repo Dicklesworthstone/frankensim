@@ -2919,3 +2919,47 @@ anisotropy, finite-face diffraction and a diffuse-angle quadrature remain
 outside this owner. Viscous versus relaxation work does not identify the
 separate fluid and skeleton thermal stores.
 <!-- porous-oblique:end -->
+
+<!-- porous-passive-termination:start -->
+### Passive rear loads on resolved porous volume fields
+
+`PassivePorousTermination` admits an exact rigid cap or finite complex
+pressure/volume-flow impedance `Z_L` [Pa s/m3] with nonnegative real part, in
+`exp(-i omega t)`. The load is evaluated at the physical rear face for one
+frequency and conserved tangential mode; its source support, backing/gap
+geometry and mode dependence remain the caller's responsibility. Zero impedance
+is pressure release. Finite-frequency passivity does not supply a causal
+transient load realization. Existing material rigid-backed reflection owners
+remain unchanged.
+
+`PorousLayerStack::prepare_terminated_excitation` takes only the authored left
+peak pressure. It solves the rear counter-wave
+`a_R = Gamma*S21*a_L/(1-Gamma*S22)`, with
+`Gamma=(Z_L-R)/(Z_L+R)` and rigid `Gamma=1`. The original composition feedback
+condition guard applies, using the prepared stack's original maximum condition.
+The result reuses all existing decaying-wave incident maps, per-layer fields,
+and positive normal-plus-transverse viscous and thermal work. No inverse
+transmission, material re-query, growing-wave propagation or boundary-deficit
+heat is introduced. The matched finite load returns the original open-right
+field and porous work. Covariance preparation admits only zero authored right
+components and applies the same solve to the original positive source witness.
+
+`PorousStackExcitation::boundary_power` retains the raw two-face diagnostic,
+including returned rear pressure. `source_power` instead counts only authored
+input and outgoing waves at source faces, and separately reports positive load
+work, original porous work and their signed balance residual. Load absorption
+uses `Re(Z_L)*|U_load|^2/2`, with `U_load=2*b_R/(Z_L+R)` evaluated in scaled
+power coordinates. It does not subtract rounded reflectance from unity.
+Weak positive real impedance remains a positive load loss; unrepresentable or
+erased positive loss refuses. Rigid and reactive loads give exact zero load
+heat. Terminal heat is never part of the porous volume dissipation.
+
+Independent original-density/bulk-modulus transfer matrices and volume
+quadrature check three heterogeneous thermal states, normal and near-grazing
+modes, per-layer vector-velocity loss, terminal flux, and source/load closure.
+Further focused checks cover rigid single-layer impedance parity, bit-identical
+matched fields/work, weak terminal loss, opaque layers, zero drive, active-load
+and ambiguous-source refusal, cancellation, and the original feedback bound.
+These establish numerical composition within the rigid-frame plane-wave model,
+not experimental qualification or finite-room/frame-wave behavior.
+<!-- porous-passive-termination:end -->

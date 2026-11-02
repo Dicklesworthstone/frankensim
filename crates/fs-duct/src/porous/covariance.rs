@@ -3,7 +3,9 @@
 //! phasor p has C = p p*/2. C_LR is the LEFT amplitude times conjugate RIGHT.
 //! Components represent one frequency, never extra independent frequencies.
 
-use super::{DuctError, PorousLayerStack, PorousStackExcitation, bad, finite};
+use super::{
+    DuctError, PassivePorousTermination, PorousLayerStack, PorousStackExcitation, bad, finite,
+};
 use fs_math::{c64::C64, dd::Dd, det};
 
 /// Admitted Hermitian positive-semidefinite 2×2 RMS pressure covariance [Pa²].
@@ -255,6 +257,36 @@ impl PressureCovariance {
 }
 
 impl<'l, 'm> PorousLayerStack<'l, 'm> {
+    /// One-sided stationary illumination of a passive rear-loaded stack.
+    /// The original covariance's positive pressure components remain the source
+    /// witness. A nonzero right component refuses: the rear wave is determined
+    /// by the passive boundary, not an independently prescribed illumination.
+    pub fn prepare_terminated_covariance(
+        &self,
+        covariance: PressureCovariance,
+        termination: PassivePorousTermination,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<PorousStackExcitation<'_, 'l, 'm>>, DuctError> {
+        if covariance
+            .peak_components()
+            .iter()
+            .any(|p| p[1] != C64::ZERO)
+        {
+            return Err(bad(
+                "terminated porous covariance requires one-sided left illumination",
+            ));
+        }
+        let mut components = Vec::with_capacity(covariance.peak_components().len());
+        for &pressure in covariance.peak_components() {
+            components.push(self.prepare_terminated_excitation(
+                pressure[0],
+                termination,
+                &mut cancelled,
+            )?);
+        }
+        Ok(components)
+    }
+
     /// Prepare one covariance on the already-composed original stack.
     /// At most two original coherent excitations reuse its same incident maps;
     /// no second composition or material evaluation is performed. The returned

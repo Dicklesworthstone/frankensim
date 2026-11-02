@@ -27,6 +27,8 @@ mod stack;
 pub use stack::{PorousLayerStack, PorousStackExcitation, PorousStackField};
 mod covariance;
 pub use covariance::PressureCovariance;
+mod termination;
+pub use termination::{PassivePorousTermination, PorousSourcePower};
 
 fn bad(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }

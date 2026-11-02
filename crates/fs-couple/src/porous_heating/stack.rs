@@ -112,9 +112,9 @@ impl<'e, 's, 'l, 'm> PorousStackHeating<'e, 's, 'l, 'm> {
             whole.absorbed_power_w.max(dissipation.absorbed_power_w),
             count + layers.len(),
         )?;
-        let boundary = excitation.boundary_power();
+        let boundary = excitation.source_power();
         let power_residual_w = close_power(
-            boundary.absorbed_power_w,
+            boundary.incident_power_w - boundary.outgoing_power_w - boundary.load_absorbed_power_w,
             dissipation.absorbed_power_w,
             boundary
                 .incident_power_w
@@ -131,6 +131,7 @@ impl<'e, 's, 'l, 'm> PorousStackHeating<'e, 's, 'l, 'm> {
                 dissipation,
                 power_residual_w,
                 boundary_power_w: [boundary.incident_power_w, boundary.outgoing_power_w],
+                load_absorbed_power_w: boundary.load_absorbed_power_w,
             },
             layer_cells: layer_cells.into_boxed_slice(),
         })

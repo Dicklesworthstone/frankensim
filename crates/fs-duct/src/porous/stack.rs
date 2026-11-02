@@ -8,7 +8,7 @@
 
 use super::{
     DuctError, PorousLayer, PorousLayerDissipation, PorousLayerExcitation, PorousLayerField,
-    PorousLayerPower, bad, finite, power_for_port,
+    PorousLayerPower, PorousSourcePower, bad, finite, power_for_port,
 };
 use crate::compose::{ComposeOptions, TwoPort, feedback};
 use fs_math::{c64::C64, dd::Dd};
@@ -24,6 +24,7 @@ pub struct PorousLayerStack<'l, 'm> {
     incident_maps: Vec<[C64; 4]>,
     two_port: TwoPort,
     condition_estimate: f64,
+    pub(super) maximum_condition: f64,
 }
 
 /// A single coherent two-sided drive on the entire physical stack.
@@ -36,6 +37,8 @@ pub struct PorousStackExcitation<'s, 'l, 'm> {
     boundary: PorousLayerPower,
     dissipation: PorousLayerDissipation,
     power_residual_w: f64,
+    pub(super) source_power: PorousSourcePower,
+    pub(super) condition_estimate: f64,
 }
 
 /// A global depth query with its original local material association.
@@ -150,6 +153,7 @@ impl<'l, 'm> PorousLayerStack<'l, 'm> {
             incident_maps,
             two_port: prefix,
             condition_estimate: condition,
+            maximum_condition: options.maximum_condition,
         })
     }
 
@@ -243,6 +247,14 @@ impl<'l, 'm> PorousLayerStack<'l, 'm> {
                 absorbed_power_w,
             },
             power_residual_w,
+            source_power: PorousSourcePower {
+                incident_power_w: boundary.incident_power_w,
+                outgoing_power_w: boundary.outgoing_power_w,
+                load_absorbed_power_w: 0.0,
+                porous_absorbed_power_w: absorbed_power_w,
+                residual_w: power_residual_w,
+            },
+            condition_estimate: self.condition_estimate,
         })
     }
 }
@@ -256,8 +268,8 @@ impl<'s, 'l, 'm> PorousStackExcitation<'s, 'l, 'm> {
     pub fn layer_excitations(&self) -> &[PorousLayerExcitation<'l, 'm>] {
         &self.layers
     }
-    /// External incoming/outgoing acoustic pressure, flow and power only.
-    /// Internal interface powers are never counted as additional source power.
+    /// Raw incoming/outgoing acoustic pressure, flow and power at both faces.
+    /// A rear load's returning wave is included here; `source_power` excludes it.
     pub const fn boundary_power(&self) -> &PorousLayerPower {
         &self.boundary
     }
@@ -268,6 +280,16 @@ impl<'s, 'l, 'm> PorousStackExcitation<'s, 'l, 'm> {
     /// External incoming minus outgoing minus physical layer heat [W].
     pub const fn power_residual_w(&self) -> f64 {
         self.power_residual_w
+    }
+    /// Prescribed-source account, excluding a terminated rear face's returning
+    /// wave. Load dissipation is exported separately from the original pore heat.
+    /// For an open stack this is the original two-face boundary account.
+    pub const fn source_power(&self) -> &PorousSourcePower {
+        &self.source_power
+    }
+    /// Largest admitted internal or terminal feedback condition estimate.
+    pub const fn condition_estimate(&self) -> f64 {
+        self.condition_estimate
     }
 
     fn admit_depth(&self, depth_m: f64) -> Result<(), DuctError> {

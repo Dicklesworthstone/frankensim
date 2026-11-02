@@ -65,6 +65,7 @@ pub struct PorousCovarianceBin {
 struct BinResponse<'a> {
     layers: Vec<PorousLayer<'a>>,
     tangential_wavenumber_rad_m: f64,
+    termination: Option<PassivePorousTermination>,
     heat: PreparedHeat,
 }
 
@@ -98,6 +99,7 @@ fn power(heat: &PreparedHeat) -> PorousSpectrumPower {
     PorousSpectrumPower {
         incident_power_w: heat.boundary_power_w[0],
         outgoing_power_w: heat.boundary_power_w[1],
+        load_absorbed_power_w: heat.load_absorbed_power_w,
         dissipation: heat.dissipation,
         residual_w: heat.power_residual_w,
     }
@@ -133,15 +135,17 @@ fn component_heat(
     }
     heat.dissipation = first.dissipation();
     heat.boundary_power_w = [
-        first.boundary_power().incident_power_w,
-        first.boundary_power().outgoing_power_w,
+        first.source_power().incident_power_w,
+        first.source_power().outgoing_power_w,
     ];
-    heat.power_residual_w = first.power_residual_w();
+    heat.load_absorbed_power_w = first.source_power().load_absorbed_power_w;
+    heat.power_residual_w = first.source_power().residual_w;
     if fields.len() == 2 {
         let next = fields[1].dissipation();
-        let b = fields[1].boundary_power();
+        let b = fields[1].source_power();
         let incoming = Dd::from_f64(heat.boundary_power_w[0]) + Dd::from_f64(b.incident_power_w);
         let outgoing = Dd::from_f64(heat.boundary_power_w[1]) + Dd::from_f64(b.outgoing_power_w);
+        let load = Dd::from_f64(heat.load_absorbed_power_w) + Dd::from_f64(b.load_absorbed_power_w);
         let absorbed =
             Dd::from_f64(heat.dissipation.absorbed_power_w) + Dd::from_f64(next.absorbed_power_w);
         heat.dissipation.viscous_power_w =
@@ -150,13 +154,95 @@ fn component_heat(
             finite(heat.dissipation.thermal_power_w + next.thermal_power_w)?;
         heat.dissipation.absorbed_power_w = finite(absorbed.to_f64())?;
         heat.boundary_power_w = [finite(incoming.to_f64())?, finite(outgoing.to_f64())?];
-        heat.power_residual_w = finite((incoming - outgoing - absorbed).to_f64())?;
+        heat.load_absorbed_power_w = finite(load.to_f64())?;
+        heat.power_residual_w = finite((incoming - outgoing - load - absorbed).to_f64())?;
     }
     checkpoint()?;
     Ok(())
 }
 
+fn prepare_components<'s, 'l, 'm>(
+    stack: &'s PorousLayerStack<'l, 'm>,
+    covariance: PressureCovariance,
+    termination: Option<PassivePorousTermination>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<Vec<PorousStackExcitation<'s, 'l, 'm>>, DuctError> {
+    match termination {
+        Some(load) => stack.prepare_terminated_covariance(covariance, load, cancelled),
+        None => stack.prepare_covariance(covariance, cancelled),
+    }
+}
+
 impl<'a> PorousCrossSpectrumHeating<'a> {
+    /// One-sided stationary normal-incidence covariance bins with passive rear
+    /// loads, paired in INPUT order before canonical frequency sorting.
+    pub fn try_new_terminated(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        bins: &[PorousCovarianceBin],
+        terminations: &[PassivePorousTermination],
+        options: PorousSpectrumOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(
+            thermal,
+            cells,
+            gas,
+            Inputs::Frequencies(bins, None),
+            Some(terminations),
+            options,
+            checkpoint,
+        )
+    }
+
+    /// Oblique one-sided covariance bins and passive normal-mode loads, paired
+    /// with their conserved tangential wavenumbers in INPUT frequency order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_oblique_terminated(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        bins: &[PorousCovarianceBin],
+        tangential_wavenumbers_rad_m: &[f64],
+        terminations: &[PassivePorousTermination],
+        options: PorousSpectrumOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(
+            thermal,
+            cells,
+            gas,
+            Inputs::Frequencies(bins, Some(tangential_wavenumbers_rad_m)),
+            Some(terminations),
+            options,
+            checkpoint,
+        )
+    }
+
+    /// Mutually independent one-sided angular modes with passive rear loads.
+    /// Loads follow INPUT mode order, including distinct angles at one frequency.
+    /// Diffuse modes from `DiffuseHemisphere` must have zero right irradiance.
+    pub fn try_new_independent_modes_terminated(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        modes: &[PorousAngularMode],
+        terminations: &[PassivePorousTermination],
+        options: PorousSpectrumOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(
+            thermal,
+            cells,
+            gas,
+            Inputs::IndependentModes(modes),
+            Some(terminations),
+            options,
+            checkpoint,
+        )
+    }
+
     /// Admit the complete physical thermal partition and a nonempty covariance
     /// spectrum. Frequencies are canonicalized; duplicates refuse rather than
     /// being interpreted as uncorrelated same-frequency drives. Bin/cell-product
@@ -175,6 +261,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
             cells,
             gas,
             Inputs::Frequencies(bins, None),
+            None,
             options,
             checkpoint,
         )
@@ -198,6 +285,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
             cells,
             gas,
             Inputs::Frequencies(bins, Some(tangential_wavenumbers_rad_m)),
+            None,
             options,
             checkpoint,
         )
@@ -228,6 +316,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
             cells,
             gas,
             Inputs::IndependentModes(modes),
+            None,
             options,
             checkpoint,
         )
@@ -238,6 +327,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
         cells: &[PorousTemperatureCell<'a>],
         gas: IsobaricPorousGas<'a>,
         inputs: Inputs<'_>,
+        terminations: Option<&[PassivePorousTermination]>,
         options: PorousSpectrumOptions,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
@@ -262,6 +352,11 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                 DepositionError::Budget("porous cross-spectrum cells and frequencies").into(),
             );
         }
+        if terminations.is_some_and(|loads| loads.len() != count) {
+            return Err(PorousHeatingError::Invalid(
+                "one passive load per covariance input mode required",
+            ));
+        }
         if let Inputs::Frequencies(_, Some(values)) = inputs {
             if values.len() != count {
                 return Err(PorousHeatingError::Invalid(
@@ -278,6 +373,17 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
             checkpoint()?;
             let mode = inputs.mode(i);
             let bin = mode.bin;
+            if terminations.is_some()
+                && bin
+                    .covariance
+                    .peak_components()
+                    .iter()
+                    .any(|p| p[1] != C64::ZERO)
+            {
+                return Err(PorousHeatingError::Invalid(
+                    "terminated covariance requires one-sided left illumination",
+                ));
+            }
             admit_tangential_wavenumber(mode.tangential_wavenumber_rad_m)?;
             if ![
                 bin.angular_frequency_rad_s,
@@ -297,7 +403,11 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
             .map(|i| {
                 let mode = inputs.mode(i);
                 let kt = mode.tangential_wavenumber_rad_m;
-                (mode.bin, if kt == 0.0 { 0.0 } else { kt })
+                (
+                    mode.bin,
+                    if kt == 0.0 { 0.0 } else { kt },
+                    terminations.map(|loads| loads[i]),
+                )
             })
             .collect();
         ordered.sort_by(|a, b| {
@@ -327,7 +437,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
             states.push(gas.evaluate(thermal.temperature_k(cell.cell)?)?);
         }
         let mut responses = Vec::with_capacity(count);
-        for &(bin, tangential) in &ordered {
+        for &(bin, tangential, termination) in &ordered {
             let mut layers = Vec::with_capacity(cells.len());
             let mut partitions = Vec::with_capacity(cells.len());
             for (cell, state) in cells.iter().zip(&states) {
@@ -358,7 +468,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                     PorousLayerStack::try_new(&layers, options.composition, cancelled)
                 })?;
                 let fields = acoustic(&mut checkpoint, |cancelled| {
-                    stack.prepare_covariance(bin.covariance, cancelled)
+                    prepare_components(&stack, bin.covariance, termination, cancelled)
                 })?;
                 let partition_refs: Vec<&[PorousHeatCell]> =
                     partitions.iter().map(|p| p.as_slice()).collect();
@@ -379,9 +489,10 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                     dissipation: bound.dissipation(),
                     power_residual_w: bound.power_residual_w(),
                     boundary_power_w: [
-                        fields[0].boundary_power().incident_power_w,
-                        fields[0].boundary_power().outgoing_power_w,
+                        fields[0].source_power().incident_power_w,
+                        fields[0].source_power().outgoing_power_w,
                     ],
+                    load_absorbed_power_w: fields[0].source_power().load_absorbed_power_w,
                 };
                 component_heat(&mut heat, &fields, &mut checkpoint)?;
                 heat
@@ -390,6 +501,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                 layers,
                 heat,
                 tangential_wavenumber_rad_m: if tangential == 0.0 { 0.0 } else { tangential },
+                termination,
             });
         }
         let mut heat = responses[0].heat.clone();
@@ -400,7 +512,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
         )?;
         checkpoint()?;
         Ok(Self {
-            bins: ordered.into_iter().map(|(bin, _)| bin).collect(),
+            bins: ordered.into_iter().map(|(bin, _, _)| bin).collect(),
             responses,
             states,
             gas,
@@ -419,6 +531,13 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
         self.responses
             .get(index)
             .map(|response| response.tangential_wavenumber_rad_m)
+    }
+    /// Original fixed load for a canonical mode, or `None` for an open mode.
+    /// An out-of-range index also returns `None`.
+    pub fn termination(&self, index: usize) -> Option<PassivePorousTermination> {
+        self.responses
+            .get(index)
+            .and_then(|response| response.termination)
     }
     /// Common native physical heat cells with all positive bin/component watts.
     pub fn cells(&self) -> &[PorousCellHeating] {
@@ -488,7 +607,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                 PorousLayerStack::try_new(&response.layers, self.options, cancelled)
             })?;
             let fields = acoustic(checkpoint, |cancelled| {
-                stack.prepare_covariance(bin.covariance, cancelled)
+                prepare_components(&stack, bin.covariance, response.termination, cancelled)
             })?;
             component_heat(&mut response.heat, &fields, checkpoint)?;
             work.stack_solves = work

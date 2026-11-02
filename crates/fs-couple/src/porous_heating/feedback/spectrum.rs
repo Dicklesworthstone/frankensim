@@ -101,13 +101,15 @@ pub fn angular_pressure_density_bin(
 /// There is no aggregate complex pressure or aggregate reflection coefficient.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PorousSpectrumPower {
-    /// Prescribed incident power through the two exterior faces [W].
+    /// Prescribed incident power, excluding any load's returning wave [W].
     pub incident_power_w: f64,
-    /// Outgoing power through those same exterior faces [W].
+    /// Outgoing power at prescribed-source faces [W].
     pub outgoing_power_w: f64,
+    /// Positive power exported into attached passive loads, never cell heat [W].
+    pub load_absorbed_power_w: f64,
     /// Native positive viscous and thermal work across all original cells [W].
     pub dissipation: PorousLayerDissipation,
-    /// Incident minus outgoing minus deposited power; never used as cell heat.
+    /// Incident minus outgoing minus load work minus deposited; never cell heat.
     pub residual_w: f64,
 }
 
@@ -150,7 +152,7 @@ impl<'a> PorousSpectrumHeating<'a> {
         options: PorousSpectrumOptions,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
-        Self::prepare(thermal, cells, gas, bins, None, options, checkpoint)
+        Self::prepare(thermal, cells, gas, bins, None, None, options, checkpoint)
     }
 
     /// Resolve one conserved real tangential wavenumber [rad/m] per input bin.
@@ -172,17 +174,68 @@ impl<'a> PorousSpectrumHeating<'a> {
             gas,
             bins,
             Some(tangential_wavenumbers_rad_m),
+            None,
             options,
             checkpoint,
         )
     }
 
+    /// Normal-incidence one-sided bins with one passive rear load per INPUT
+    /// frequency, before sorting. Each authored right pressure must be zero.
+    pub fn try_new_terminated(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        bins: &[PorousHarmonicDrive],
+        terminations: &[PassivePorousTermination],
+        options: PorousSpectrumOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(
+            thermal,
+            cells,
+            gas,
+            bins,
+            None,
+            Some(terminations),
+            options,
+            checkpoint,
+        )
+    }
+
+    /// Oblique one-sided bins with paired tangential wavenumbers and passive
+    /// rear loads in INPUT order. Each load already describes its normal mode.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_oblique_terminated(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        bins: &[PorousHarmonicDrive],
+        tangential_wavenumbers_rad_m: &[f64],
+        terminations: &[PassivePorousTermination],
+        options: PorousSpectrumOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(
+            thermal,
+            cells,
+            gas,
+            bins,
+            Some(tangential_wavenumbers_rad_m),
+            Some(terminations),
+            options,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
         gas: IsobaricPorousGas<'a>,
         bins: &[PorousHarmonicDrive],
         tangential: Option<&[f64]>,
+        terminations: Option<&[PassivePorousTermination]>,
         options: PorousSpectrumOptions,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
@@ -203,6 +256,11 @@ impl<'a> PorousSpectrumHeating<'a> {
         {
             return Err(DepositionError::Budget("porous spectrum cells and frequencies").into());
         }
+        if terminations.is_some_and(|loads| loads.len() != bins.len()) {
+            return Err(PorousHeatingError::Invalid(
+                "one passive load per spectral input bin required",
+            ));
+        }
         if let Some(values) = tangential {
             if values.len() != bins.len() {
                 return Err(PorousHeatingError::Invalid(
@@ -217,6 +275,11 @@ impl<'a> PorousSpectrumHeating<'a> {
         for &drive in bins {
             checkpoint()?;
             admit_drive(drive)?;
+            if terminations.is_some() && drive.incident_pressure_pa[1] != C64::ZERO {
+                return Err(PorousHeatingError::Invalid(
+                    "terminated spectrum requires one-sided left illumination",
+                ));
+            }
             if drive.area_m2 != bins[0].area_m2 {
                 return Err(PorousHeatingError::Invalid(
                     "all frequency bins must illuminate the same full specimen area",
@@ -226,7 +289,13 @@ impl<'a> PorousSpectrumHeating<'a> {
         let mut drives: Vec<_> = bins
             .iter()
             .enumerate()
-            .map(|(i, &drive)| (drive, tangential.map_or(0.0, |values| values[i])))
+            .map(|(i, &drive)| {
+                (
+                    drive,
+                    tangential.map_or(0.0, |values| values[i]),
+                    terminations.map(|loads| loads[i]),
+                )
+            })
             .collect();
         drives.sort_by(|a, b| {
             a.0.angular_frequency_rad_s
@@ -246,7 +315,7 @@ impl<'a> PorousSpectrumHeating<'a> {
             states.push(gas.evaluate(thermal.temperature_k(cell.cell)?)?);
         }
         let mut prepared = Vec::with_capacity(drives.len());
-        for (drive, tangential) in drives {
+        for (drive, tangential, termination) in drives {
             checkpoint()?;
             prepared.push(TemperaturePorousHeating::prepare(
                 thermal,
@@ -254,6 +323,7 @@ impl<'a> PorousSpectrumHeating<'a> {
                 gas,
                 drive,
                 tangential,
+                termination,
                 options.composition,
                 Some(&states),
                 &mut checkpoint,
@@ -289,6 +359,7 @@ impl<'a> PorousSpectrumHeating<'a> {
         PorousSpectrumPower {
             incident_power_w: self.heat.boundary_power_w[0],
             outgoing_power_w: self.heat.boundary_power_w[1],
+            load_absorbed_power_w: self.heat.load_absorbed_power_w,
             dissipation: self.heat.dissipation,
             residual_w: self.heat.power_residual_w,
         }
@@ -424,11 +495,13 @@ pub(super) fn sum_heat_sources<'h>(
         }
     }
     let mut boundary = [Dd::ZERO; 2];
+    let mut load = Dd::ZERO;
     for bin in bins.clone() {
         checkpoint()?;
         for (sum, value) in boundary.iter_mut().zip(bin.boundary_power_w) {
             *sum = *sum + Dd::from_f64(value);
         }
+        load = load + Dd::from_f64(bin.load_absorbed_power_w);
     }
     heat.dissipation = PorousLayerDissipation {
         viscous_power_w: finite(total[0].to_f64())?,
@@ -436,10 +509,11 @@ pub(super) fn sum_heat_sources<'h>(
         absorbed_power_w: finite(total[2].to_f64())?,
     };
     heat.boundary_power_w = [finite(boundary[0].to_f64())?, finite(boundary[1].to_f64())?];
+    heat.load_absorbed_power_w = finite(load.to_f64())?;
     // Check boundary closure independently of the positive local sources.
     // Do not recover absorption by subtracting nearly equal boundary watts.
     let count = heat.cells.len() * bins.len();
-    let residual = finite((boundary[0] - boundary[1] - total[2]).to_f64())?;
+    let residual = finite((boundary[0] - boundary[1] - load - total[2]).to_f64())?;
     let tolerance = finite(
         512.0
             * f64::EPSILON

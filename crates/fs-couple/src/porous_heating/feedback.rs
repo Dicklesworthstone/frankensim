@@ -22,7 +22,10 @@
 
 use super::*;
 use fs_duct::compose::ComposeOptions;
-use fs_duct::porous::{PorousLayer, PorousLayerPower, PorousLayerStack};
+use fs_duct::porous::{
+    PassivePorousTermination, PorousLayer, PorousLayerPower, PorousLayerStack,
+    PorousStackExcitation,
+};
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::porous::PorousFluidLaw;
 use fs_math::c64::C64;
@@ -130,6 +133,7 @@ pub struct TemperaturePorousHeating<'a> {
     gas: IsobaricPorousGas<'a>,
     drive: PorousHarmonicDrive,
     tangential_wavenumber_rad_m: f64,
+    termination: Option<PassivePorousTermination>,
     options: ComposeOptions,
     states: Vec<GasState>,
     layers: Vec<PorousLayer<'a>>,
@@ -187,7 +191,71 @@ fn admit_tangential_wavenumber(value: f64) -> Result<(), PorousHeatingError> {
     }
 }
 
+fn prepare_stack_drive<'s, 'l, 'm>(
+    stack: &'s PorousLayerStack<'l, 'm>,
+    incident: [C64; 2],
+    termination: Option<PassivePorousTermination>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<PorousStackExcitation<'s, 'l, 'm>, DuctError> {
+    match termination {
+        Some(load) => stack.prepare_terminated_excitation(incident[0], load, cancelled),
+        None => stack.prepare_excitation(incident, cancelled),
+    }
+}
+
 impl<'a> TemperaturePorousHeating<'a> {
+    /// One-sided normal-incidence illumination with a passive rear load.
+    /// The authored right pressure must be zero. The fixed load's counter-wave
+    /// is recomputed with every changed-temperature stack; its dissipated work
+    /// is exported separately from the original porous thermal cells.
+    pub fn try_new_terminated(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        drive: PorousHarmonicDrive,
+        termination: PassivePorousTermination,
+        options: ComposeOptions,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::try_new_oblique_terminated(
+            thermal,
+            cells,
+            gas,
+            drive,
+            0.0,
+            termination,
+            options,
+            checkpoint,
+        )
+    }
+
+    /// Conserved oblique mode with a passive rear pressure/volume-flow load.
+    /// The load impedance must describe this normal mode at the rear face;
+    /// neither incidence geometry nor an air gap is inferred from it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_oblique_terminated(
+        thermal: &DepositionSimulation<'_>,
+        cells: &[PorousTemperatureCell<'a>],
+        gas: IsobaricPorousGas<'a>,
+        drive: PorousHarmonicDrive,
+        tangential_wavenumber_rad_m: f64,
+        termination: PassivePorousTermination,
+        options: ComposeOptions,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        Self::prepare(
+            thermal,
+            cells,
+            gas,
+            drive,
+            tangential_wavenumber_rad_m,
+            Some(termination),
+            options,
+            None,
+            &mut checkpoint,
+        )
+    }
+
     /// Bind the complete ordered specimen and evaluate its actual initial
     /// temperatures. Every cell becomes one original porous acoustic sublayer.
     /// The native layer/stack heat adapters admit full-area prismatic geometry,
@@ -225,6 +293,7 @@ impl<'a> TemperaturePorousHeating<'a> {
             gas,
             drive,
             tangential_wavenumber_rad_m,
+            None,
             options,
             None,
             &mut checkpoint,
@@ -240,12 +309,18 @@ impl<'a> TemperaturePorousHeating<'a> {
         gas: IsobaricPorousGas<'a>,
         drive: PorousHarmonicDrive,
         tangential_wavenumber_rad_m: f64,
+        termination: Option<PassivePorousTermination>,
         options: ComposeOptions,
         shared_states: Option<&[GasState]>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
         checkpoint()?;
         admit_tangential_wavenumber(tangential_wavenumber_rad_m)?;
+        if termination.is_some() && drive.incident_pressure_pa[1] != C64::ZERO {
+            return Err(PorousHeatingError::Invalid(
+                "terminated porous drive requires one-sided left illumination",
+            ));
+        }
         if cells.is_empty()
             || cells.len() > MAX_POROUS_HEATING_CELLS
             || cells.len() > options.maximum_blocks
@@ -294,7 +369,7 @@ impl<'a> TemperaturePorousHeating<'a> {
                 PorousLayerStack::try_new(&layers, options, cancelled)
             })?;
             let excitation = acoustic(checkpoint, |cancelled| {
-                stack.prepare_excitation(drive.incident_pressure_pa, cancelled)
+                prepare_stack_drive(&stack, drive.incident_pressure_pa, termination, cancelled)
             })?;
             let partitions: Vec<&[PorousHeatCell]> =
                 partitions.iter().map(|p| p.as_slice()).collect();
@@ -306,6 +381,7 @@ impl<'a> TemperaturePorousHeating<'a> {
                 &mut *checkpoint,
             )?;
             let boundary = *excitation.boundary_power();
+            let source = excitation.source_power();
             (
                 PreparedHeat {
                     cells: bound.cells().to_vec(),
@@ -315,8 +391,9 @@ impl<'a> TemperaturePorousHeating<'a> {
                         .map(|cell| (cell.cell, cell.dissipation.absorbed_power_w))
                         .collect(),
                     dissipation: bound.dissipation(),
-                    power_residual_w: bound.power_residual_w(),
-                    boundary_power_w: [boundary.incident_power_w, boundary.outgoing_power_w],
+                    power_residual_w: source.residual_w,
+                    boundary_power_w: [source.incident_power_w, source.outgoing_power_w],
+                    load_absorbed_power_w: source.load_absorbed_power_w,
                 },
                 boundary,
             )
@@ -326,6 +403,7 @@ impl<'a> TemperaturePorousHeating<'a> {
             cells: cells.to_vec(),
             gas,
             drive,
+            termination,
             tangential_wavenumber_rad_m: if tangential_wavenumber_rad_m == 0.0 {
                 0.0
             } else {
@@ -367,9 +445,24 @@ impl<'a> TemperaturePorousHeating<'a> {
     pub const fn dissipation(&self) -> PorousLayerDissipation {
         self.heat.dissipation
     }
-    /// Exterior power only; local interface exchanges are never external sources.
+    /// Raw pressure/flow power at both stack faces. With a rear load this
+    /// includes its returning wave; use `power` for prescribed-source energy.
     pub const fn boundary_power(&self) -> &PorousLayerPower {
         &self.boundary
+    }
+    /// Original fixed rear load, or `None` for two prescribed open faces.
+    pub const fn termination(&self) -> Option<PassivePorousTermination> {
+        self.termination
+    }
+    /// Prescribed-source power and separately exported terminal work.
+    pub fn power(&self) -> spectrum::PorousSpectrumPower {
+        spectrum::PorousSpectrumPower {
+            incident_power_w: self.heat.boundary_power_w[0],
+            outgoing_power_w: self.heat.boundary_power_w[1],
+            load_absorbed_power_w: self.heat.load_absorbed_power_w,
+            dissipation: self.heat.dissipation,
+            residual_w: self.heat.power_residual_w,
+        }
     }
 
     fn refresh(
@@ -425,7 +518,12 @@ impl<'a> TemperaturePorousHeating<'a> {
             PorousLayerStack::try_new(&self.layers, self.options, cancelled)
         })?;
         let excitation = acoustic(checkpoint, |cancelled| {
-            stack.prepare_excitation(self.drive.incident_pressure_pa, cancelled)
+            prepare_stack_drive(
+                &stack,
+                self.drive.incident_pressure_pa,
+                self.termination,
+                cancelled,
+            )
         })?;
         for (bound, local) in self
             .heat
@@ -442,12 +540,13 @@ impl<'a> TemperaturePorousHeating<'a> {
                 .expect("original admitted cell source") = bound.dissipation.absorbed_power_w;
         }
         self.heat.dissipation = excitation.dissipation();
-        self.heat.power_residual_w = excitation.power_residual_w();
+        self.heat.power_residual_w = excitation.source_power().residual_w;
         self.boundary = *excitation.boundary_power();
         self.heat.boundary_power_w = [
-            self.boundary.incident_power_w,
-            self.boundary.outgoing_power_w,
+            excitation.source_power().incident_power_w,
+            excitation.source_power().outgoing_power_w,
         ];
+        self.heat.load_absorbed_power_w = excitation.source_power().load_absorbed_power_w;
         work.stack_solves = work
             .stack_solves
             .checked_add(1)

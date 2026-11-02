@@ -23156,3 +23156,49 @@ source clock, and source-domain, temperature-excursion, mass/volume, resource an
 cancellation refusal. These are authored constitutive model tests, not
 experimental material qualification, a spatial thermal-uniformity proof, or
 verification of an implicit/transient electromagnetic feedback scheme.
+
+<!-- porous-terminated-feedback:start -->
+### Passive-backed porous heating on the shared thermal trajectory
+
+The existing harmonic and spectral porous heating owners provide opt-in
+`try_new_terminated` and `try_new_oblique_terminated` constructors. Covariance
+heating also provides `try_new_independent_modes_terminated`, including the
+original flux-normalized diffuse hemisphere. The authored right-face pressure
+or covariance component must be zero: a passive rear load determines the
+counter-wave. A diffuse source therefore has zero right irradiance.
+
+Each finite passive pressure/volume-flow load or exact rigid cap remains paired
+with its INPUT frequency/angular mode before canonical sorting. Original
+normal-mode references, tangential wavenumbers, and loads stay fixed while
+accepted cell temperatures update the original gas and JCA(L) coefficients.
+Each changed mode solves its terminal feedback again through the existing
+conditioned stack. The original positive local work and physical cell binding
+remain authoritative. There is still one gas evaluation per changed physical
+cell, independent of frequency/angular count, and one stack solve per changed
+mode. Unchanged temperatures reuse the complete cache.
+
+The frozen `PorousStackHeating` adapter and all native feedback paths consume
+the same prescribed-source account. Raw two-face boundary diagnostics remain
+available, but reflected rear pressure is not counted as fresh source power.
+`PorousSpectrumPower::load_absorbed_power_w` and
+`PorousHeatingEnergy::load_absorbed_j` report work exported into a passive load.
+The native acoustic balance is incident minus outgoing minus load work minus
+deposited pore work. The load is outside the bound porous control volumes;
+its loss never enters their source map or enthalpy. Existing open-face APIs
+retain a zero load channel and their original fields, source powers and heat.
+
+Native accepted-start timing remains unchanged: source, reflected, load and
+positive cell watts integrate over the same accepted substep, then endpoint
+temperature refresh prepares the next rates. Original thermal storage,
+conduction, authored heat, events, continuation and transactional refusal stay
+native. The backing is a fixed quasisteady acoustic load, not a new thermally
+evolving reservoir, structural wall model or transient acoustic energy store.
+
+Focused tests compare native source/load/cell powers with an independent
+rho/K transfer solve and direct vector-velocity volume integration, verify
+accepted-start load joules and refreshed endpoint rates, and refine the coupled
+two-cell thermal trajectory against independent RK4. Frozen/harmonic/spectral/
+covariance/angular one-mode paths agree, load-to-mode association survives
+sorting, and rigid-backed diffuse heat converges with angular refinement while
+preserving exact hemispherical input flux and shared gas work.
+<!-- porous-terminated-feedback:end -->

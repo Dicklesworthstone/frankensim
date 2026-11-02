@@ -125,6 +125,7 @@ struct PreparedHeat {
     dissipation: PorousLayerDissipation,
     power_residual_w: f64,
     boundary_power_w: [f64; 2],
+    load_absorbed_power_w: f64,
 }
 
 /// Acoustic energy over the exact accepted native thermal substeps.
@@ -134,13 +135,16 @@ pub struct PorousHeatingEnergy {
     pub incident_j: f64,
     /// Integrated coherent outgoing acoustic power [J]; never deposited as heat.
     pub outgoing_j: f64,
+    /// Positive work exported into an attached passive acoustic load [J].
+    /// This is separate from the bound porous cells and is never deposited there.
+    pub load_absorbed_j: f64,
     /// Original pore-viscous work [J].
     pub viscous_j: f64,
     /// Original thermal-relaxation work [J].
     pub thermal_j: f64,
     /// Positive heat delivered once to the bound cells, already in heat_report.
     pub deposited_j: f64,
-    /// Incident minus outgoing minus deposited; never used to manufacture heat.
+    /// Incident minus outgoing minus load work minus deposited; never cell heat.
     pub residual_j: f64,
 }
 
@@ -322,6 +326,7 @@ impl<'e, 'l, 'm> PorousHeating<'e, 'l, 'm> {
                 dissipation,
                 power_residual_w,
                 boundary_power_w: [boundary.incident_power_w, boundary.outgoing_power_w],
+                load_absorbed_power_w: 0.0,
             },
         })
     }
@@ -423,6 +428,7 @@ struct HeatAccount {
     energy: Vec<Dd>,
     mechanisms: [Dd; 2],
     boundary: [Dd; 2],
+    load: Dd,
 }
 impl HeatAccount {
     fn new(cells: usize) -> Self {
@@ -430,6 +436,7 @@ impl HeatAccount {
             energy: vec![Dd::ZERO; cells],
             mechanisms: [Dd::ZERO; 2],
             boundary: [Dd::ZERO; 2],
+            load: Dd::ZERO,
         }
     }
     fn record(
@@ -451,6 +458,7 @@ impl HeatAccount {
         for (sum, power) in self.boundary.iter_mut().zip(heat.boundary_power_w) {
             *sum = *sum + Dd::from_f64(finite(power * dt)?);
         }
+        self.load = self.load + Dd::from_f64(finite(heat.load_absorbed_power_w * dt)?);
         Ok(())
     }
     fn acoustic_energy(&self) -> Result<PorousHeatingEnergy, PorousHeatingError> {
@@ -458,10 +466,13 @@ impl HeatAccount {
         Ok(PorousHeatingEnergy {
             incident_j: finite(self.boundary[0].to_f64())?,
             outgoing_j: finite(self.boundary[1].to_f64())?,
+            load_absorbed_j: finite(self.load.to_f64())?,
             viscous_j: finite(self.mechanisms[0].to_f64())?,
             thermal_j: finite(self.mechanisms[1].to_f64())?,
             deposited_j: finite(deposited.to_f64())?,
-            residual_j: finite((self.boundary[0] - self.boundary[1] - deposited).to_f64())?,
+            residual_j: finite(
+                (self.boundary[0] - self.boundary[1] - self.load - deposited).to_f64(),
+            )?,
         })
     }
     fn finish<'t>(

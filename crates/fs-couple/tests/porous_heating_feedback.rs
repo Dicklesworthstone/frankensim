@@ -11,6 +11,8 @@ use fs_thermal::enthalpy::*;
 
 #[path = "porous_heating_feedback/refinement.rs"]
 mod refinement;
+#[path = "porous_heating_feedback/termination.rs"]
+mod termination;
 
 const AREA: f64 = 0.004;
 const CP: f64 = 200.0;
