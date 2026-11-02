@@ -1,5 +1,8 @@
 //! Real traction-controlled incompressible creep with retained P2/P1 histories.
 //! Run `cargo run -p fs-solid --example mixed_viscoelastic_creep`.
+//! Add `-- --dynamic` to release the loaded solid with consistent P2 inertia:
+//! density 1000 kg/m³, 40 backward-Euler intervals of 0.01 s. Physical relaxation
+//! and numerical kinetic losses are printed separately, with explicit gates.
 //! The unused bulk modulus is deliberately huge; pressure enforces the volume
 //! constraint and is determined by lateral equilibrium. CSV is written to stdout.
 
@@ -9,6 +12,7 @@ use fs_material::hyper::mixed::VolumetricTreatment;
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_material::visco_hyper::{BranchEnergy, FiniteStrainBranch, ViscoHyperelastic};
 use fs_solid::hyper3::mixed::MixedUpSettings;
+use fs_solid::hyper3::mixed::visco::dynamics::{FiniteViscoMotionControls, MixedViscoTetMotion};
 use fs_solid::hyper3::mixed::visco::{MixedViscoLawField, MixedViscoTetSolid};
 use fs_solid::hyper3::visco::FiniteViscoStepControls;
 use fs_solid::linear3::TetAssemblyBudget;
@@ -49,6 +53,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut solid = MixedViscoTetSolid::try_new(&nodes, &elements,
             MixedViscoLawField::Uniform(&material), VolumetricTreatment::ExactIncompressible,
             TetAssemblyBudget::standard(), 4, 64, &cx)?;
+        if std::env::args().any(|argument| argument == "--dynamic") {
+            let loaded = solid.advance(0.0, &rollers, &forces, [0.; 3], None,
+                settings, controls, &cx)?;
+            let mut motion = MixedViscoTetMotion::try_new(loaded.solid, &[1000.0],
+                &vec![[0.; 3]; nodes.len()], 2 * 1024 * 1024, &cx)?;
+            let motion_controls = FiniteViscoMotionControls {
+                material: FiniteViscoStepControls {
+                    maximum_endpoint_work_defect_j: 0.1, ..controls
+                },
+                maximum_numerical_kinetic_loss_j: 1.0,
+            };
+            println!("time_s,corner_x_displacement_m,corner_x_velocity_mps,stored_j,kinetic_j,interval_viscous_loss_j,interval_be_kinetic_loss_j,signed_endpoint_defect_j,min_det_f");
+            for _ in 0..40 {
+                // Coordinate-plane rollers remain; the loading face is released.
+                let accepted = motion.advance(0.01, &rollers, &[], [0.; 3], None,
+                    settings, motion_controls, &cx)?;
+                println!("{:.3},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9}",
+                    accepted.motion.solid().time_s(), accepted.motion.solid().displacement_m()[1][0],
+                    accepted.motion.velocity_mps()[1][0], accepted.material_energy.stored_after_j,
+                    accepted.inertia.kinetic_after_j, accepted.material_energy.dissipated_j,
+                    accepted.inertia.numerical_loss_j, accepted.material_energy.endpoint_work_defect_j,
+                    accepted.equilibrium.min_det_f);
+                motion = accepted.motion;
+            }
+            return Ok(());
+        }
         println!("time_s,axial_stretch,pressure_pa,stored_j,interval_viscous_loss_j,signed_endpoint_defect_j");
         for step in 0..=8 {
             let accepted = solid.advance(if step == 0 { 0.0 } else { 0.05 }, &rollers,

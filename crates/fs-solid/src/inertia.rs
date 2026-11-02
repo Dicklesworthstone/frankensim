@@ -281,6 +281,105 @@ impl ReferenceMass {
         Self::from_matrix(mass.assemble(), reference_mass_kg, ndofs, cx)
     }
 
+    /// Consistent P2 mass from the caller's cached, admitted Tet10 geometry.
+    /// Each positive reference weight multiplies the actual signed shape pair;
+    /// row-sum lumping is invalid because quadratic corner integrals are negative.
+    /// Density is original mass per reference volume in the same element order.
+    pub(crate) fn from_tet10_quadrature<Q>(
+        geometry: impl ExactSizeIterator<Item = ([usize; 10], Q)>,
+        densities: &[f64],
+        ndofs: usize,
+        maximum_assembly_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, InertiaError>
+    where
+        Q: IntoIterator<Item = ([f64; 10], f64)>,
+    {
+        checkpoint(cx)?;
+        if geometry.len() == 0
+            || densities.len() != geometry.len()
+            || densities.iter().any(|rho| !rho.is_finite() || *rho <= 0.0)
+            || ndofs == 0
+            || !ndofs.is_multiple_of(3)
+        {
+            return Err(invalid(
+                "one positive reference density per Tet10 and complete nodal components required",
+            ));
+        }
+        // Three uncoupled component blocks, with conservative room for COO
+        // growth, stable-sort scratch, CSR and its row offsets. Quadrature is
+        // borrowed and accumulated into one fixed local upper triangle.
+        let estimated = geometry
+            .len()
+            .checked_mul(10 * 10 * 3 * 128)
+            .and_then(|entries| {
+                ndofs
+                    .checked_add(1)
+                    .and_then(|rows| rows.checked_mul(core::mem::size_of::<usize>()))
+                    .and_then(|rows| entries.checked_add(rows))
+            })
+            .and_then(|bytes| bytes.checked_add(core::mem::size_of::<[[f64; 10]; 10]>()))
+            .ok_or_else(|| invalid("Tet10 reference mass assembly size overflow"))?;
+        if estimated > maximum_assembly_bytes {
+            return Err(invalid(
+                "Tet10 reference mass exceeds its assembly byte cap",
+            ));
+        }
+        let mut mass = Coo::new(ndofs, ndofs);
+        let mut reference_mass_kg = 0.0;
+        for ((nodes, points), &density) in geometry.zip(densities) {
+            checkpoint(cx)?;
+            if nodes.iter().any(|&node| node >= ndofs / 3)
+                || (0..10).any(|a| nodes[..a].contains(&nodes[a]))
+            {
+                return Err(invalid(
+                    "distinct original Tet10 nodes required for reference mass",
+                ));
+            }
+            let mut local = [[0.0; 10]; 10];
+            for (shapes, weight) in points {
+                checkpoint(cx)?;
+                let partition = shapes.iter().sum::<f64>();
+                if !weight.is_finite()
+                    || weight <= 0.0
+                    || shapes.iter().any(|n| !n.is_finite())
+                    || !partition.is_finite()
+                    || (partition - 1.0).abs() > 64.0 * f64::EPSILON
+                {
+                    return Err(invalid(
+                        "positive Tet10 reference quadrature with finite partition of unity required",
+                    ));
+                }
+                let point_mass = finite(density * weight)?;
+                if point_mass <= 0.0 {
+                    return Err(invalid("consistent Tet10 mass underflowed"));
+                }
+                reference_mass_kg = finite(reference_mass_kg + point_mass)?;
+                for a in 0..10 {
+                    for b in a..10 {
+                        local[a][b] = (point_mass * shapes[a]).mul_add(shapes[b], local[a][b]);
+                    }
+                }
+            }
+            for a in 0..10 {
+                if !local[a][a].is_finite() || local[a][a] <= 0.0 {
+                    return Err(invalid(
+                        "every Tet10 shape needs positive reference inertia",
+                    ));
+                }
+                for b in 0..10 {
+                    let value = finite(local[a.min(b)][a.max(b)])?;
+                    if value != 0.0 {
+                        for component in 0..3 {
+                            mass.push(3 * nodes[a] + component, 3 * nodes[b] + component, value);
+                        }
+                    }
+                }
+            }
+        }
+        Self::from_matrix(mass.assemble(), reference_mass_kg, ndofs, cx)
+    }
+
     fn from_matrix(
         matrix: Csr,
         reference_mass_kg: f64,
@@ -387,7 +486,7 @@ impl<'a> BackwardEulerInertia<'a> {
 
     // Normalize only physical forces on free rows. Elastic stiffness times
     // rigid travel is unrelated to momentum balance and can accept v_next=0.
-    // The positive mass action retains a reference under momentum cancellation;
+    // The absolute mass action retains a reference under momentum cancellation;
     // unrelated prescribed-support forces cannot inflate the stopping gate.
     pub(crate) fn force_scale(
         &self,
@@ -407,15 +506,26 @@ impl<'a> BackwardEulerInertia<'a> {
                 (finite(u - old_u)?.abs() * self.inverse_dt + old_v.abs()) * self.inverse_dt,
             )?);
         }
-        // Both admitted consistent reference mass rules have nonnegative entries,
-        // so its existing action is exactly |M| times this positive vector.
-        let force = self.action(&acceleration_scale, cx)?;
+        // Signed P2 entries must not cancel this bound. For the original
+        // positive P1/Hex8 rules, abs retains the identical multiply-add order.
         let mut inertial_norm = 0.0_f64;
-        for &d in free {
-            let force = force
-                .get(d)
-                .ok_or_else(|| invalid("free inertia row is outside the mesh"))?;
-            inertial_norm = inertial_norm.hypot(*force);
+        for (i, &d) in free.iter().enumerate() {
+            if i % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if d >= self.mass.ndofs() {
+                return Err(invalid("free inertia row is outside the mesh"));
+            }
+            let (columns, values) = self.mass.matrix.row(d);
+            let force = finite(
+                columns
+                    .iter()
+                    .zip(values)
+                    .fold(0.0, |sum, (&column, &value)| {
+                        value.abs().mul_add(acceleration_scale[column], sum)
+                    }),
+            )?;
+            inertial_norm = inertial_norm.hypot(force);
         }
         Ok(finite(inertial_norm)?
             .max(finite(elastic_free_norm)?)
@@ -458,8 +568,11 @@ impl<'a> BackwardEulerInertia<'a> {
             }
             let (columns, values) = self.mass.matrix.row(row);
             for (&column, &value) in columns.iter().zip(values) {
+                if value == 0.0 {
+                    continue;
+                }
                 let scaled = finite(coefficient * value)?;
-                if scaled <= 0.0 {
+                if scaled == 0.0 {
                     return Err(invalid("scaled consistent inertia underflowed"));
                 }
                 matrix.push(row, column, scaled);
@@ -724,6 +837,269 @@ mod density_tests {
             }
             assert!(nodal.action(&[1.0; 11], cx).is_err());
             assert!(nodal.action(&[f64::INFINITY; 12], cx).is_err());
+        });
+    }
+}
+
+#[cfg(test)]
+mod tet10_tests {
+    use super::*;
+    use crate::linear3::tet10::{TET10_EDGES, tet10_shapes};
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+    use fs_feec::highorder::simplex::duffy_quadrature;
+
+    const NODES: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    fn with_cx(cancelled: bool, run: impl FnOnce(&Cx<'_>)) {
+        let gate = CancelGate::new_clock_free();
+        if cancelled {
+            gate.request();
+        }
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            run(&Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 31,
+                    kernel_id: 8,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            ));
+        });
+    }
+    fn quadrature() -> Vec<([f64; 10], f64)> {
+        duffy_quadrature(4)
+            .into_iter()
+            .map(|(lambda, weight)| (tet10_shapes(lambda).0, weight))
+            .collect()
+    }
+    fn mass(cx: &Cx<'_>) -> ReferenceMass {
+        ReferenceMass::from_tet10_quadrature(
+            [(NODES, quadrature())].into_iter(),
+            &[6.0],
+            30,
+            1 << 20,
+            cx,
+        )
+        .unwrap()
+    }
+    fn close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 2e-13 * expected.abs().max(1.0),
+            "{actual:.17e} != {expected:.17e}"
+        );
+    }
+    // Independent exact unit-mass P2 simplex integrals. Expanding each pair of
+    // barycentric polynomials and using integral(product(lambda_i^p_i)) =
+    // product(p_i!)/(3+sum(p_i))! gives these rational coefficients / 420.
+    fn exact_entry(a: usize, b: usize) -> f64 {
+        let coefficient = match (a < 4, b < 4) {
+            (true, true) => {
+                if a == b {
+                    6.0
+                } else {
+                    1.0
+                }
+            }
+            (true, false) => {
+                if TET10_EDGES[b - 4].contains(&a) {
+                    -4.0
+                } else {
+                    -6.0
+                }
+            }
+            (false, true) => return exact_entry(b, a),
+            (false, false) => {
+                if a == b {
+                    32.0
+                } else if TET10_EDGES[a - 4]
+                    .iter()
+                    .any(|v| TET10_EDGES[b - 4].contains(v))
+                {
+                    16.0
+                } else {
+                    8.0
+                }
+            }
+        };
+        coefficient / 420.0
+    }
+
+    #[test]
+    fn quadratic_mass_matches_rational_integrals_and_linear_velocity_moments() {
+        with_cx(false, |cx| {
+            let mass = mass(cx);
+            close(mass.reference_mass_kg(), 1.0);
+            for a in 0..10 {
+                for b in 0..10 {
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            close(
+                                mass.matrix.get(3 * a + i, 3 * b + j),
+                                if i == j { exact_entry(a, b) } else { 0.0 },
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        mass.matrix.get(3 * a, 3 * b).to_bits(),
+                        mass.matrix.get(3 * b, 3 * a).to_bits()
+                    );
+                }
+            }
+            let constant = mass.action(&[1.0; 30], cx).unwrap();
+            for node in 0..10 {
+                close(
+                    constant[3 * node],
+                    if node < 4 { -1.0 / 20.0 } else { 1.0 / 5.0 },
+                );
+            }
+            // v(X)=X on the reference unit tetrahedron: each mean square
+            // coordinate is 1/10. This exercises the complete quadratic mass.
+            let positions = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.5, 0.0, 0.0],
+                [0.5, 0.5, 0.0],
+                [0.0, 0.5, 0.0],
+                [0.0, 0.0, 0.5],
+                [0.5, 0.0, 0.5],
+                [0.0, 0.5, 0.5],
+            ];
+            let v = positions.as_flattened();
+            close(0.5 * dot(v, &mass.action(v, cx).unwrap()), 3.0 / 20.0);
+        });
+    }
+
+    #[test]
+    fn signed_mass_keeps_tangent_force_bound_and_kinetic_identity() {
+        with_cx(false, |cx| {
+            let mass = mass(cx);
+            let (old_u, old_v, u) = ([0.0; 30], [1.0; 30], [0.1; 30]);
+            let inertia = BackwardEulerInertia::new(&mass, &old_u, &old_v, 0.5, cx).unwrap();
+            let mut tangent = Coo::new(30, 30);
+            inertia.add_tangent(&mut tangent, cx).unwrap();
+            let tangent = tangent.assemble();
+            assert!(tangent.get(0, 12) < 0.0);
+            for a in 0..10 {
+                for b in 0..10 {
+                    close(tangent.get(3 * a, 3 * b), 4.0 * exact_entry(a, b));
+                }
+            }
+            let direction: [f64; 30] = core::array::from_fn(|d| (d as f64 - 15.0) * 0.01);
+            let (mut plus, mut minus) = ([0.0; 30], [0.0; 30]);
+            let h = 1e-6;
+            inertia
+                .add_force(
+                    &core::array::from_fn::<_, 30, _>(|d| u[d] + h * direction[d]),
+                    &mut plus,
+                    cx,
+                )
+                .unwrap();
+            inertia
+                .add_force(
+                    &core::array::from_fn::<_, 30, _>(|d| u[d] - h * direction[d]),
+                    &mut minus,
+                    cx,
+                )
+                .unwrap();
+            for row in 0..30 {
+                let expected: f64 = (0..30)
+                    .map(|col| tangent.get(row, col) * direction[col])
+                    .sum();
+                assert!(((plus[row] - minus[row]) / (2.0 * h) - expected).abs() < 1e-9);
+            }
+            let bound = (0.1_f64 * 2.0 + 1.0) * 2.0;
+            let absolute_row: f64 = (0..10).map(|b| exact_entry(0, b).abs()).sum();
+            close(
+                inertia.force_scale(&u, &[0], 0.0, 0.0, cx).unwrap(),
+                bound * absolute_row,
+            );
+            assert!(absolute_row > 0.05); // |M| bound exceeds the cancelled row sum.
+            let (_, energy) = inertia.motion(&u, cx).unwrap();
+            close(energy.kinetic_before_j, 1.5);
+            close(energy.kinetic_after_j, 0.06);
+            close(energy.numerical_loss_j, 0.96);
+            close(energy.inertial_work_j, -0.48);
+            close(energy.balance_error_j, 0.0);
+
+            // Original positive P1 and full Hex8 rules retain the old
+            // mass-action accumulation and precisely the old force-scale bits.
+            let p1 = ReferenceMass::new([([0, 1, 2, 3], 1.0 / 6.0)].into_iter(), &[6.0], 12, cx)
+                .unwrap();
+            let g = 1.0 / 3.0_f64.sqrt();
+            let points = core::array::from_fn(|q| {
+                let shapes = core::array::from_fn(|a| {
+                    (0..3)
+                        .map(|i| {
+                            let sign = if ((a ^ q) >> i) & 1 == 0 { 1.0 } else { -1.0 };
+                            0.5 * (1.0 + sign * g)
+                        })
+                        .product()
+                });
+                (shapes, 1.0)
+            });
+            let hex = ReferenceMass::from_hex8_quadrature(
+                [([0, 1, 2, 3, 4, 5, 6, 7], points)].into_iter(),
+                &[6.0],
+                24,
+                cx,
+            )
+            .unwrap();
+            for positive in [p1, hex] {
+                let n = positive.ndofs();
+                let original = positive
+                    .action(&vec![bound; n], cx)
+                    .unwrap()
+                    .into_iter()
+                    .fold(0.0_f64, f64::hypot);
+                let (old_u, old_v) = (vec![0.0; n], vec![1.0; n]);
+                let positive_inertia =
+                    BackwardEulerInertia::new(&positive, &old_u, &old_v, 0.5, cx).unwrap();
+                let actual = positive_inertia
+                    .force_scale(&vec![0.1; n], &(0..n).collect::<Vec<_>>(), 0.0, 0.0, cx)
+                    .unwrap();
+                assert_eq!(actual.to_bits(), original.to_bits());
+            }
+        });
+    }
+
+    #[test]
+    fn quadratic_mass_refuses_bad_quadrature_budget_and_cancellation() {
+        with_cx(false, |cx| {
+            let q = quadrature();
+            let build = |nodes, points: Vec<([f64; 10], f64)>, rho, cap| {
+                ReferenceMass::from_tet10_quadrature(
+                    [(nodes, points)].into_iter(),
+                    &[rho],
+                    30,
+                    cap,
+                    cx,
+                )
+            };
+            assert!(build(NODES, q.clone(), 6.0, 0).is_err());
+            assert!(build(NODES, q.clone(), 0.0, 1 << 20).is_err());
+            assert!(build([0; 10], q.clone(), 6.0, 1 << 20).is_err());
+            assert!(build(NODES, vec![], 6.0, 1 << 20).is_err());
+            for bad in [([0.0; 10], 1.0), ([f64::NAN; 10], 1.0), (q[0].0, -1.0)] {
+                assert!(build(NODES, vec![bad], 6.0, 1 << 20).is_err());
+            }
+        });
+        with_cx(true, |cx| {
+            assert!(matches!(
+                ReferenceMass::from_tet10_quadrature(
+                    [(NODES, quadrature())].into_iter(),
+                    &[6.0],
+                    30,
+                    1 << 20,
+                    cx,
+                ),
+                Err(InertiaError::Cancelled)
+            ));
         });
     }
 }

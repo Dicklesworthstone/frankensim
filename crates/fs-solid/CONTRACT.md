@@ -3639,5 +3639,54 @@ transactional work-gate refusal. Exact-mode relaxation is bitwise independent
 of unused bulk moduli `1e3` and `1e300`. The runnable
 `mixed_viscoelastic_creep` example applies exact quadratic-face loads and reports
 stretch, pressure, storage, interval viscous loss and signed endpoint defect.
-This owner is isothermal and quasistatic; it does not add mixed inertia, thermal
-closure, a general mesh inf-sup certificate or the full M1.3-W2b acceptance ladder.
+The standalone solid advance is isothermal and quasistatic; the retained motion
+owner below adds consistent inertia. Neither path supplies thermal closure, a
+general mesh inf-sup certificate or the full M1.3-W2b acceptance ladder.
+
+## Consistent TET10/P1 mixed viscoelastic motion
+
+`hyper3::mixed::visco::dynamics::MixedViscoTetMotion` binds an accepted mixed
+solid to explicit original per-element density and initial nodal velocity.
+Its immutable consistent reference mass is integrated from the same cached
+quadratic shapes and positive reference weights. Signed corner/edge entries
+are retained; row-sum lumping and deformation-dependent mass changes are not
+used. The matrix is exact for affine TET10 geometry and uses the caller's
+explicit quadrature approximation for curved geometry. Mass assembly has a
+separate byte cap and cancellation checkpoints.
+
+The existing native backward-Euler inertia enters the same mixed Newton solve:
+`M*a` augments displacement forces and `M/dt^2` augments only the displacement
+tangent. The pressure equations are unchanged and pressure carries no mass.
+Residuals, final admission, support reactions and the KKT inertia check use the
+complete incremental system. The reported mixed potential remains the material
+saddle potential. Static entry points continue to omit inertia.
+
+The original reference mass owner also supports signed consistent entries in
+its tangent and uses `abs(M)` for its positive momentum reference bound; existing
+positive P1 and Hex8 actions retain their accumulation order. Density-weighted
+mass, not current volume, defines kinetic energy and momentum.
+
+A returned motion candidate advances displacement, pressure, velocity, material
+history and time together. Physical branch loss, signed material endpoint-work
+defect and nonnegative backward-Euler kinetic loss remain separate. Existing
+`FiniteViscoMotionControls` independently bound material work and numerical
+kinetic loss. Refusal leaves the complete accepted endpoint unchanged.
+
+Exact pressure enforces endpoint volume weakly. Velocity is the backward-Euler
+displacement chord; there is no separate tangent-velocity projection. This is
+a first-order convergent motion path with explicitly budgeted numerical damping,
+not the instrument-render doctrine's zero-algorithmic-damping or discrete-gradient
+integrator. Closed work accounts do not establish timestep accuracy or general
+mesh inf-sup stability. Thermal evolution, follower loads and contact retain
+their separate owners.
+
+`tests/mixed_visco_dynamics.rs` checks exact-incompressible free-body
+acceleration, a genuine quadratic shear mode against its independent scalar
+backward-Euler recurrence and continuous solution on 20/40/80 intervals,
+released finite-bulk versus exact-pressure viscoelastic motion, signed moving-
+support reactions and complete rollback after numerical-loss refusal. Native
+inertia unit tests check rational P2 coefficients, linear-velocity kinetic
+moments, tangent finite differences, the absolute-mass bound, original positive
+P1/Hex8 arithmetic, budget and cancellation. The existing creep example also
+offers `--dynamic` to release the deformed body and report physical and
+numerical losses independently.

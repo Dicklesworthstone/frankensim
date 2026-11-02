@@ -7,8 +7,10 @@
 //! A positive work-conjugate scaling preserves the saddle-point inertia and
 //! prevents forces [N] from being compared directly with volumes [m³].
 //!
-//! This is a bounded quasistatic discretization, not a general inf-sup or mesh
-//! convergence certificate. Exact incompressibility is imposed weakly in the
+//! This is a bounded spatial discretization, not a general inf-sup or mesh
+//! convergence certificate. The retained motion owner adds the native consistent
+//! reference inertia to displacement rows; pressure has no fictitious mass.
+//! Exact incompressibility is imposed weakly in the
 //! continuous P1 pressure space. Current Jacobians are checked at quadrature
 //! points; that does not certify injectivity between samples. The sparse direct
 //! factorization is one bounded, non-interruptible kernel between checkpoints.
@@ -234,6 +236,15 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), MixedUpError> {
     cx.checkpoint().map_err(|_| MixedUpError::Cancelled)
 }
 
+fn inertia_error(error: crate::inertia::InertiaError) -> MixedUpError {
+    match error {
+        crate::inertia::InertiaError::Cancelled => MixedUpError::Cancelled,
+        crate::inertia::InertiaError::InvalidInput { what } => {
+            invalid(format!("mixed reference inertia: {what}"))
+        }
+    }
+}
+
 /// Immutable shared geometry; constitutive histories remain borrowed and fixed.
 pub struct PreparedMixedUpProblem<'a, L: MixedFiniteStrainPotential = Hyperelastic> {
     problem: MixedUpProblem<'a, L>,
@@ -265,12 +276,18 @@ impl<'a, L: MixedFiniteStrainPotential> MixedUpProblem<'a, L> {
         s.newton
             .validate()
             .map_err(MixedUpError::NewtonConfiguration)?;
+        self.validate_assembly_budget(false)
+    }
+
+    fn validate_assembly_budget(&self, with_inertia: bool) -> Result<(), MixedUpError> {
         // COO, stable-sort scratch, CSR and vectors. Count element blocks once,
-        // not once per quadrature point. Native factor storage has its own cap.
+        // not once per quadrature point. Inertia adds three scalar 10x10 blocks.
+        // Native factor storage has its own cap.
+        let entries = 34 * 34 + if with_inertia { 3 * 10 * 10 } else { 0 };
         let estimated = self
             .elements
             .len()
-            .checked_mul(34 * 34 * 128)
+            .checked_mul(entries * 128)
             .and_then(|v| {
                 self.nodes_m
                     .len()
@@ -278,10 +295,10 @@ impl<'a, L: MixedFiniteStrainPotential> MixedUpProblem<'a, L> {
                     .and_then(|n| v.checked_add(n))
             })
             .ok_or_else(|| invalid("mixed assembly size overflow"))?;
-        if estimated > s.maximum_assembly_bytes {
+        if estimated > self.settings.maximum_assembly_bytes {
             return Err(invalid(format!(
                 "mixed assembly needs at most {estimated} payload bytes; cap {}",
-                s.maximum_assembly_bytes
+                self.settings.maximum_assembly_bytes
             )));
         }
         Ok(())
@@ -474,6 +491,19 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
         with_tangent: bool,
         cx: &Cx<'_>,
     ) -> Result<MixedUpEvaluation, MixedUpError> {
+        self.evaluate_with_inertia(displacement_m, pressure_pa, with_tangent, None, cx)
+    }
+
+    // The motion owner solves the same mixed system, adding M*a and M/dt^2
+    // only to displacement rows. The reported potential remains material-only.
+    fn evaluate_with_inertia(
+        &self,
+        displacement_m: &[[f64; 3]],
+        pressure_pa: &[f64],
+        with_tangent: bool,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<MixedUpEvaluation, MixedUpError> {
         checkpoint(cx)?;
         self.validate_state(displacement_m, pressure_pa)?;
         let nu = self.mesh.nodes_count * 3;
@@ -600,6 +630,14 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
                 }
             }
         }
+        if let Some(inertia) = inertia {
+            inertia
+                .add_force(displacement_m.as_flattened(), &mut residual[..nu], cx)
+                .map_err(inertia_error)?;
+            if let Some(coo) = matrix.as_mut() {
+                inertia.add_tangent(coo, cx).map_err(inertia_error)?;
+            }
+        }
         if !potential_j.is_finite() || residual.iter().any(|v| !v.is_finite()) {
             return Err(invalid(
                 "assembled mixed residual or potential is unrepresentable",
@@ -642,8 +680,26 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
         pressure_pa: &[f64],
         cx: &Cx<'_>,
     ) -> Result<MixedUpSolution, MixedUpError> {
+        self.solve_loaded_from(displacement_m, pressure_pa, None, cx)
+    }
+
+    fn solve_loaded_from(
+        &self,
+        displacement_m: &[[f64; 3]],
+        pressure_pa: &[f64],
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<MixedUpSolution, MixedUpError> {
         checkpoint(cx)?;
         self.validate_state(displacement_m, pressure_pa)?;
+        if inertia.is_some() {
+            if self.problem.settings.load_steps != 1 {
+                return Err(invalid(
+                    "one physical endpoint per mixed momentum solve required",
+                ));
+            }
+            self.problem.validate_assembly_budget(true)?;
+        }
         let nu = 3 * self.mesh.nodes_count;
         let mut u = displacement_m.to_vec();
         let mut p = pressure_pa.to_vec();
@@ -673,6 +729,7 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
                 base_u: &u,
                 base_p: &p,
                 load,
+                inertia,
                 cx,
                 symbolic: &symbolic,
                 linearization: RefCell::new(None),
@@ -720,7 +777,7 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
             // Zero-residual initial states also need the stability/gauge gate.
             endpoint.ensure_linearization(&newton.x)?;
             let (next_u, next_p) = endpoint.physical_state(&newton.x)?;
-            let state = self.evaluate(&next_u, &next_p, false, cx)?;
+            let state = self.evaluate_with_inertia(&next_u, &next_p, false, inertia, cx)?;
             let force_residual: Vec<_> = self
                 .free
                 .iter()
@@ -761,7 +818,7 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
             u = next_u;
             p = next_p;
         }
-        let state = self.evaluate(&u, &p, false, cx)?;
+        let state = self.evaluate_with_inertia(&u, &p, false, inertia, cx)?;
         let reactions_n = self
             .problem
             .prescribed_m
@@ -793,6 +850,7 @@ struct Endpoint<'p, 'a, 'c, 'scope, L: MixedFiniteStrainPotential> {
     base_u: &'p [[f64; 3]],
     base_p: &'p [f64],
     load: f64,
+    inertia: Option<&'p crate::inertia::BackwardEulerInertia<'p>>,
     cx: &'c Cx<'scope>,
     symbolic: &'p RefCell<Option<SymbolicLdlt>>,
     linearization: RefCell<Option<Linearization>>,
@@ -834,7 +892,9 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
         // matrix/factor before allocating the next numeric factor and scratch.
         *self.linearization.borrow_mut() = None;
         let (u, p) = self.physical_state(x)?;
-        let evaluation = self.prepared.evaluate(&u, &p, true, self.cx)?;
+        let evaluation =
+            self.prepared
+                .evaluate_with_inertia(&u, &p, true, self.inertia, self.cx)?;
         let full = evaluation.tangent.expect("requested original tangent");
         let nu = 3 * u.len();
         if let Some((node, _)) = self.prepared.problem.pressure_gauge {
@@ -918,9 +978,10 @@ impl<L: MixedFiniteStrainPotential> NonlinearProblem for Endpoint<'_, '_, '_, '_
     }
 
     fn residual(&self, x: &[f64], residual: &mut [f64]) {
-        let result = self
-            .physical_state(x)
-            .and_then(|(u, p)| self.prepared.evaluate(&u, &p, false, self.cx));
+        let result = self.physical_state(x).and_then(|(u, p)| {
+            self.prepared
+                .evaluate_with_inertia(&u, &p, false, self.inertia, self.cx)
+        });
         match result {
             Ok(state) => {
                 let nu = state.internal_forces_n.len();
