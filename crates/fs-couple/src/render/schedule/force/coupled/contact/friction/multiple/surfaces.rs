@@ -79,6 +79,17 @@ impl MultiFrictionModalSystem {
     pub(super) fn prepare_surface_maps(&self, ports: Vec<ModalFrictionPort>, gate: &CancelGate)
         -> Result<(Vec<Point>, Vec<f64>, Vec<f64>), ModalFrictionError>
     {
+        self.prepare_surface_maps_with_corrections(ports, None, gate)
+    }
+
+    // A support Schur complement can add a third retained participant without
+    // replacing either actual contact surface. Its signed displacement map is
+    // also its force map: both enter the SAME global column before any response
+    // or cross-port compliance is computed.
+    pub(super) fn prepare_surface_maps_with_corrections(&self,
+        ports: Vec<ModalFrictionPort>, corrections: Option<&[ModalAttachment]>, gate: &CancelGate)
+        -> Result<(Vec<Point>, Vec<f64>, Vec<f64>), ModalFrictionError>
+    {
         if self.friction_residual.is_some() {
             return Err(invalid("friction residual compliance requires its original fixed attachment maps").into());
         }
@@ -86,10 +97,27 @@ impl MultiFrictionModalSystem {
         if ports.len() != p {
             return Err(invalid("surface maps must retain every original friction port").into());
         }
+        if corrections.is_some_and(|maps| maps.len() != p) {
+            return Err(invalid("condensed friction needs one signed retained correction per port").into());
+        }
         let mut columns = Vec::with_capacity(p);
-        for (port, point) in ports.iter().zip(&self.points) {
+        for (index, (port, point)) in ports.iter().zip(&self.points).enumerate() {
             poll(Some(gate))?;
-            columns.push(scalar::admit_port(&self.core.network, port, point.config)?);
+            let mut column = scalar::admit_port(&self.core.network, port, point.config)?;
+            if let Some(corrections) = corrections {
+                let correction = &corrections[index];
+                let model = self.core.network.models.get(correction.component)
+                    .ok_or_else(|| invalid("condensed friction correction names an unknown retained component"))?;
+                if correction.shapes.len() != model.modes().len()
+                    || correction.shapes.iter().any(|shape| !shape.is_finite()) {
+                    return Err(invalid("condensed friction correction must match its finite retained basis").into());
+                }
+                let offset = self.core.network.offsets[correction.component];
+                for (local, shape) in correction.shapes.iter().enumerate() {
+                    column[offset+local] = finite(column[offset+local]+shape)?;
+                }
+            }
+            columns.push(column);
         }
         // The original p,n,k setup bound still applies: no modes or ports are
         // added. Recompute every cross-term; diagonal-only updates would leave

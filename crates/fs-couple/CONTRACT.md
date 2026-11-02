@@ -3086,7 +3086,18 @@ heat. Finite-cell thermal trials retain the same accepted film and traction
 histories, then publish the mechanical and thermal endpoints together. Either
 attachment order reaches the same solver.
 
-Normal contacts, moving maps, receiving resolved fibers, extra bridge maps,
+Fixed linear resolved fibers also compose with this string residual. Each
+contact retains its original receiving fiber and adds the condensed bridge/body
+correction to the same signed virtual-work column; the resulting column measures
+slip and distributes reciprocal forces. Only omitted string bending modes enter
+the residual compliance. Retained fiber modes, material losses, finite film heat
+and the original body stay with their existing owners. String truncation, fiber
+span/width discretization and time step require independent refinement. Tests
+compare an independent five-oscillator solution, an explicit omitted-mode sine
+series, receiving-fiber and body reactions, and fiber-modulus/film-heat-capacity
+substitutions with thermal rollback.
+
+Normal contacts, moving maps, nonlinear fiber strain, extra bridge maps,
 nonlinear string storage, Mindlin and dry-interface source histories still
 refuse. This composition adds no film opening/transport or measured rosin law.
 Focused tests compare independent two-port elastic/plastic/Maxwell and compliant

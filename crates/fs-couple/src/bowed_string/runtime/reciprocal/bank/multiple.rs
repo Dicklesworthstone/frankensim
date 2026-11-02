@@ -142,15 +142,17 @@ impl MultiBowStringBank {
     /// string tail's storage and numerical loss. Fixed material shear films
     /// use the same corrected slip for elastic, plastic and Maxwell histories,
     /// including their finite-cell thermal continuation. Only physical film
-    /// loss heats the film. Normal contacts, migrating bows, nonlinear
-    /// stretching, receiving fibers, Mindlin contacts and dry-interface source
-    /// histories remain outside this lane.
+    /// loss heats the film. Resolved linear fibers retain their original
+    /// opposite traction while the same condensed bridge correction loads the
+    /// retained body. Only the string's omitted bending modes enter this tail;
+    /// fiber-span and width refinement remain independent. Normal contacts,
+    /// migrating bows, nonlinear stretching, Mindlin contacts and dry-interface
+    /// source histories remain outside this lane.
     pub fn with_bow_residual_flexibility(mut self, gate: &CancelGate)
         -> Result<Self, ReciprocalStringError>
     {
         poll(gate)?;
         if !self.source.bank.residual_flexibility() || self.bow_stations.is_some()
-            || self.source.fiber_ribbon.is_some()
             || !self.source.bank.translational_body_connections().is_empty() {
             return Err(invalid("bow residual flexibility requires condensed single bridges and fixed bow maps"));
         }
@@ -164,12 +166,10 @@ impl MultiBowStringBank {
         // bow point forces use the SAME Green function and Schur complement.
         let (cross, compliance) = residual::stop_residual(&bridges, &points)?;
         let mut geometry = Vec::with_capacity(points.len());
+        let mut corrections = Vec::with_capacity(points.len());
         for (i, (point, factor)) in points.iter().zip(cross).enumerate() {
             poll(gate)?;
             let original = self.system.port(i).ok_or_else(|| invalid("missing material bow port"))?;
-            if original.right.is_some() {
-                return Err(invalid("bow residual flexibility does not include a receiving surface's omitted modes"));
-            }
             let member = &strings[point.string];
             let connection = &member.connections[0];
             let bridge = member.source.bridge_shape(&self.cards[point.string], connection.station_fraction)?;
@@ -178,13 +178,18 @@ impl MultiBowStringBank {
                 return Err(invalid("bow and bridge maps must use the same material string basis"));
             }
             for (shape, b) in left.shapes.iter_mut().zip(&bridge) { *shape -= factor*b; }
+            // The Schur complement changes the string-side displacement by
+            // -factor*(bridge_string - bridge_body). Preserve the actual
+            // receiving surface; its reciprocal -F must not become a body
+            // reaction merely because the local port has two participants.
             geometry.push(crate::render::schedule::force::coupled::contact::friction::multiple::surfaces::geometry::FrictionGeometry {
-                left,
-                right: Some(ModalAttachment { component: self.cards.len()+connection.body.component,
-                    shapes: connection.body.shapes.iter().map(|b| -factor*b).collect() }),
+                left, right: original.right.clone(),
+            });
+            corrections.push(ModalAttachment { component: self.cards.len()+connection.body.component,
+                shapes: connection.body.shapes.iter().map(|b| factor*b).collect(),
             });
         }
-        self.system = self.system.with_friction_residual_ports(geometry, compliance, gate)
+        self.system = self.system.with_friction_residual_ports_and_corrections(geometry, corrections, compliance, gate)
             .map_err(ReciprocalStringError::Friction)?;
         Ok(self)
     }

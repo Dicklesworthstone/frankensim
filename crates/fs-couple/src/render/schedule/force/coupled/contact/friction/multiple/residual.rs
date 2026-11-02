@@ -101,8 +101,34 @@ impl MultiFrictionModalSystem {
     /// Mindlin or dry-interface source histories (whose omitted endpoint
     /// velocities are not reconstructed), invalid maps/matrix, budget or
     /// cancellation. Fixed material films use interval slip and are admitted.
-    pub fn with_friction_residual_ports(mut self, geometry: Vec<FrictionGeometry>,
+    pub fn with_friction_residual_ports(self, geometry: Vec<FrictionGeometry>,
         compliance: Vec<f64>, gate: &CancelGate) -> Result<Self, ModalFrictionError>
+    {
+        self.bind_friction_residual_ports(geometry, None, compliance, gate)
+    }
+
+    /// Bind the same omitted-mode tail while retaining both physical contact
+    /// surfaces and one additional signed support map per port. A condensed
+    /// string against resolved fibers, for example, still applies the opposite
+    /// traction to the actual fiber while its bridge reacts on the body.
+    ///
+    /// The complete retained map is `b_left - b_right + b_correction`.
+    /// It supplies BOTH displacement and force in the original joint solver;
+    /// every cross-port term is recomputed from that complete map. The producer
+    /// must derive this correction and `compliance` from the SAME support Schur
+    /// complement. A correction has no independent force law, state or heat.
+    /// The local contact attachments returned by `port` retain their original
+    /// participant identities. All fixed-map restrictions above still apply.
+    pub fn with_friction_residual_ports_and_corrections(self,
+        geometry: Vec<FrictionGeometry>, corrections: Vec<ModalAttachment>,
+        compliance: Vec<f64>, gate: &CancelGate) -> Result<Self, ModalFrictionError>
+    {
+        self.bind_friction_residual_ports(geometry, Some(corrections), compliance, gate)
+    }
+
+    fn bind_friction_residual_ports(mut self, geometry: Vec<FrictionGeometry>,
+        corrections: Option<Vec<ModalAttachment>>, compliance: Vec<f64>, gate: &CancelGate)
+        -> Result<Self, ModalFrictionError>
     {
         poll(Some(gate))?;
         if self.samples_rendered() != 0 || self.friction_residual.is_some() {
@@ -116,7 +142,8 @@ impl MultiFrictionModalSystem {
         let ports = geometry.into_iter().zip(&self.points).map(|(map, old)| ModalFrictionPort {
             left: map.left, right: map.right, law: old.port.law.clone(),
         }).collect();
-        let (points, compliance, endpoint) = self.prepare_surface_maps(ports, gate)?;
+        let (points, compliance, endpoint) =
+            self.prepare_surface_maps_with_corrections(ports, corrections.as_deref(), gate)?;
         poll(Some(gate))?;
         self.points = points;
         self.compliance = compliance;

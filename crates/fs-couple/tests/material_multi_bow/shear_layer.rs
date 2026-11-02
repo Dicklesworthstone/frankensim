@@ -6,6 +6,8 @@ use fs_material::state_point::ResolvedShearLayer;
 
 #[path = "shear_layer/residual.rs"]
 mod residual;
+#[path = "shear_layer/receiving_residual.rs"]
+mod receiving_residual;
 
 fn layer(g: f64, yield_stress: f64, viscosity: f64, maximum_omega: f64) -> ResolvedShearLayer {
     layer_with_memory(g, yield_stress, viscosity, maximum_omega, false)

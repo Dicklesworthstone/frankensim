@@ -14,6 +14,8 @@ use fs_material::section::{
 mod normal_motion;
 #[path = "fiber_relaxation.rs"]
 mod relaxation;
+#[path = "fiber_ribbon/residual.rs"]
+mod residual;
 
 fn support_program(knots: &[(u64, f64)]) -> FiberSupportProgram {
     FiberSupportProgram {
