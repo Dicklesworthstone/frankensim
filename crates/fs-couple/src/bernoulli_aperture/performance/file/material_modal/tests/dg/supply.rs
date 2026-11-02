@@ -1,10 +1,16 @@
 //! Data-selected supply momentum stays inside the original material/DG solve.
 use super::{
-    CancelGate, LoadedAperture, MaterialModalDgValvePerformance, build, input, pack, render, valve,
+    CancelGate, LoadedAperture, MaterialModalDgValvePerformance, PlateValveInputError, build, input, pack, render,
+    valve,
 };
 
 const SLIT: &str = "supply slit 0.004 0.002 0.0002 16\n";
-const CIRCULAR: &str = "supply circular 0.004 0.0002 16\n";
+/// Shortened from 4 mm: `supply circular 0.004 0.0002 16` is now refused on this reed (added-mass ratio 60.30, parasitic
+/// root 0.9679 against 0.9570), see `heavy_circular_supply_is_refused_by_name_through_the_file_path`. The radius and the
+/// cell count are unchanged.
+const CIRCULAR: &str = "supply circular 0.0023 0.0002 16\n";
+/// The previous fixture geometry, kept to show that the check refuses it.
+const HEAVY_CIRCULAR: &str = "supply circular 0.004 0.0002 16\n";
 const TRACT: &str = "upstream_tract\ndg_tube 0.04 0.001 closed 1 2 8 50 2000 0.01 1e-11 256\n";
 
 #[test]
@@ -84,6 +90,32 @@ fn both_native_geometries_reach_original_material_modes_and_are_block_invariant(
             };
             assert_eq!(reference_valve.modal_states(), other_valve.modal_states());
         }
+    }
+}
+
+#[test]
+fn heavy_circular_supply_is_refused_by_name_through_the_file_path() {
+    // The DG host calls `admit_parasitic_root` from its own constructor, separately from the two-sided build, so this
+    // refusal is asserted here as well as in `material_modal::tests`.
+    let text = input().replace("slit_length", &format!("{HEAVY_CIRCULAR}slit_length"));
+    let Err(refusal) = MaterialModalDgValvePerformance::from_bytes_with_sources(
+        text.as_bytes(), 37, &CancelGate::new_clock_free(), None, |_| Ok(pack(900.0, false)),
+    ) else {
+        panic!("{HEAVY_CIRCULAR} must be refused by its parasitic root");
+    };
+    let PlateValveInputError::Physics(
+        crate::acoustic_realize::AcousticRealizeError::SupplyParasiticRoot { mass_ratio, root, maximum_root }
+    ) = &refusal else {
+        panic!("must be refused by name as a supply parasitic root, got {refusal}");
+    };
+    assert!((mass_ratio - 60.30).abs() < 0.60, "added-mass ratio {mass_ratio}");
+    assert_eq!(*root, mass_ratio / (mass_ratio + 2.0));
+    let maximum = (1.0e-3_f64).powf(0.04 / std::f64::consts::TAU);
+    assert!((maximum_root - maximum).abs() < 1e-12 && root > maximum_root);
+    let message = refusal.to_string();
+    for part in ["FS-COUPLE-SUPPLY-PARASITIC-ROOT".to_string(), format!("{mass_ratio:.4}"),
+        format!("{root:.6}"), format!("{maximum_root:.6}")] {
+        assert!(message.contains(&part), "message must carry {part}: {message}");
     }
 }
 

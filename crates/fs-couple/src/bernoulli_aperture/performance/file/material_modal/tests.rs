@@ -166,14 +166,19 @@ fn g3_data_only_material_and_pressure_changes_reach_the_actual_microphone() {
         encode_pcm16_wav(&partitioned, 48000, 0.005).unwrap());
 }
 
+/// The shortest circular passage this fixture used to declare, 20 mm x 0.5 mm radius, is now refused (added-mass ratio
+/// 48.24 on this reed, parasitic root 0.9602 against 0.9570, see `supply::maximum_parasitic_root`). The length is
+/// shortened to 12 mm; radius and cells are unchanged, so everything asserted below about the geometry still holds.
+const CIRCULAR_SUPPLY: &str = "supply circular 0.012 0.0005 32";
+
 #[test]
 fn g3_circular_supply_geometry_gas_and_reed_material_reach_the_same_microphone() {
-    let text = input().replace("supply none", "supply circular 0.02 0.0005 32");
+    let text = input().replace("supply none", CIRCULAR_SUPPLY);
     let source = build(&text, 37);
     let system = source.renderer().source().system();
     let channel = system.supply_channel().unwrap().circular().unwrap();
     assert_eq!(channel.spec().radial_cells, 32);
-    assert_eq!(channel.spec().length_m, 0.02);
+    assert_eq!(channel.spec().length_m, 0.012);
     assert_eq!(channel.spec().radius_m, 0.0005);
     assert_eq!(channel.gas(), &system.source(ValveSide::Upstream).gases[0]);
     let (pressure, source) = render(source);
@@ -187,7 +192,7 @@ fn g3_circular_supply_geometry_gas_and_reed_material_reach_the_same_microphone()
         LoadedAperture::Modal(valve) => valve.modal_states().to_vec(),
         _ => panic!("original modal material source must remain active"),
     };
-    for changed in [text.replace("0.02 0.0005 32", "0.02 0.0007 32"),
+    for changed in [text.replace("0.012 0.0005 32", "0.012 0.0007 32"),
         text.replace("101325", "65000"),
         text.replacen("section blade.matpack", "section altered.matpack", 1)] {
         let (altered_pressure, altered) = render(build(&changed, 37));
@@ -199,6 +204,37 @@ fn g3_circular_supply_geometry_gas_and_reed_material_reach_the_same_microphone()
     assert_eq!(pressure, partitioned);
     assert_eq!(states(&source), states(&partitioned_source));
     assert_eq!(channel.last_step(), partitioned_source.source().system().supply_channel().unwrap().last_step());
+}
+
+#[test]
+fn g3_a_heavy_circular_supply_is_refused_by_name_with_its_added_mass_ratio_and_root() {
+    // The two geometries this crate's fixtures used to declare (4 mm x 0.2 mm radius, 20 mm x 0.5 mm radius) are too heavy
+    // for this reed: the passage's added mass is 60.3 (48.2) times the moving mass in the sense of
+    // `supply::admit_parasitic_root`, so the coupling's parasitic root is 0.968 (0.960) per step, above the 0.957 that
+    // decays by 60 dB within one period of the fastest admitted mode. The file must refuse them by name, through
+    // `from_bytes_with_sources`, with the ratio and both roots in the message.
+    let maximum = (1.0e-3_f64).powf(0.04 / std::f64::consts::TAU);
+    for (supply, ratio) in [("supply circular 0.004 0.0002 16", 60.30), ("supply circular 0.02 0.0005 32", 48.24)] {
+        let text = input().replace("supply none", supply);
+        let Err(refusal) = MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
+            &CancelGate::new_clock_free(), None, |_| Ok(pack(900.0, false))) else {
+            panic!("{supply} must be refused by its parasitic root");
+        };
+        let PlateValveInputError::Physics(
+            crate::acoustic_realize::AcousticRealizeError::SupplyParasiticRoot { mass_ratio, root, maximum_root }
+        ) = &refusal else {
+            panic!("{supply} must be refused by name as a supply parasitic root, got {refusal}");
+        };
+        assert!((mass_ratio - ratio).abs() < 0.01 * ratio, "{supply}: added-mass ratio {mass_ratio}");
+        assert_eq!(*root, mass_ratio / (mass_ratio + 2.0));
+        assert!((maximum_root - maximum).abs() < 1e-12, "maximum root {maximum_root} vs {maximum}");
+        assert!(root > maximum_root, "{supply}: root {root} must exceed {maximum_root}");
+        let message = refusal.to_string();
+        for part in ["FS-COUPLE-SUPPLY-PARASITIC-ROOT".to_string(), format!("{mass_ratio:.4}"),
+            format!("{root:.6}"), format!("{maximum_root:.6}")] {
+            assert!(message.contains(&part), "message must carry {part}: {message}");
+        }
+    }
 }
 
 #[test]

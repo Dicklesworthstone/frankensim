@@ -124,6 +124,11 @@ pub struct ModalAperture {
     viscosity: Option<viscosity::ApertureViscosity>,
     exact: Option<exact::ExactModes>,
     relaxation: Option<relaxation::ModalRelaxation>,
+    // Added-mass impedance of a fixed supply passage, installed by the coupling after construction (zero otherwise).
+    // `spec.impedance_pa_s_m3` stays the DECLARED load (ducts plus wall friction); the mechanical solve sees the sum
+    // (`load_impedance_pa_s_m3`). Inertance, not loss: the band admission never counts it; the coupling bounds its
+    // parasitic mode instead.
+    supply_inertance_pa_s_m3: f64,
     ports: crate::port_adoption::ModulePorts,
 }
 
@@ -264,6 +269,7 @@ impl ModalAperture {
             viscosity: None,
             exact,
             relaxation: None,
+            supply_inertance_pa_s_m3: 0.0,
             ports,
         };
         model.admit_linear_clock()?;
@@ -343,6 +349,24 @@ impl ModalAperture {
     #[must_use]
     pub const fn viscous_slit(&self) -> Option<super::viscous::ViscousSlit> {
         self.viscous_slit
+    }
+
+    // A fixed supply passage's added mass joins an unadvanced valve that was built (and band-admitted) with the
+    // declared load: the duct load plus the passage's wall friction. The declared load itself is not rewritten.
+    pub(super) fn install_supply_inertance(&mut self, inertance_pa_s_m3: f64) -> Result<(), AcousticRealizeError> {
+        if self.samples != 0 || self.supply_inertance_pa_s_m3 != 0.0
+            || !(inertance_pa_s_m3.is_finite() && inertance_pa_s_m3 > 0.0)
+        {
+            return Err(invalid("supply inertance installs once, on an unadvanced valve, as a finite positive impedance"));
+        }
+        self.supply_inertance_pa_s_m3 = inertance_pa_s_m3;
+        self.admit_linear_clock()
+    }
+    // The load the mechanical solve sees: declared load plus the supply passage's added mass [Pa s/m^3].
+    fn load_impedance_pa_s_m3(&self) -> f64 { self.spec.impedance_pa_s_m3 + self.supply_inertance_pa_s_m3 }
+    // Sum of A_i^2/m_i over the structural modes [m^4/kg]: the term the supply's added-mass ratio multiplies.
+    pub(super) fn pressure_area_squared_over_mass(&self) -> f64 {
+        self.spec.modes.iter().map(|m| m.pressure_area_m2 * m.pressure_area_m2 / m.mass_kg).sum()
     }
 
     pub(super) fn rebind_exact_gas_load(
@@ -581,7 +605,7 @@ impl ModalAperture {
             }
         }
         let gap = self.gap(&self.state);
-        let z = self.spec.impedance_pa_s_m3;
+        let z = self.load_impedance_pa_s_m3();
         let trial = if let Some(closure) = &self.closure {
             if let Some(exact) = &self.exact {
                 exact.free_velocity(

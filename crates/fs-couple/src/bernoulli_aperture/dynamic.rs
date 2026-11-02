@@ -160,6 +160,11 @@ pub struct DynamicAperture {
     viscous_slit: Option<ViscousSlit>,
     relaxation: Option<ApertureRelaxation>,
     exact: Option<super::paired::ExactBlade>,
+    // The added-mass impedance of a fixed supply passage, installed by the coupling after construction (zero
+    // otherwise). `spec.impedance_pa_s_m3` stays the DECLARED load (ducts plus wall friction); the mechanical solve
+    // sees the sum (`load_impedance_pa_s_m3`). It is inertance, not loss: the band admission never counts it and the
+    // coupling's parasitic-root admission bounds it instead.
+    supply_inertance_pa_s_m3: f64,
     state: ApertureState,
     accepted_steps: u64,
     ports: crate::port_adoption::ModulePorts,
@@ -276,6 +281,7 @@ impl DynamicAperture {
             viscous_slit: None,
             relaxation: None,
             exact,
+            supply_inertance_pa_s_m3: 0.0,
             state,
             accepted_steps: 0,
             ports,
@@ -315,6 +321,25 @@ impl DynamicAperture {
     /// Explicit fluid wall-loss choice; None retains the original Bernoulli law.
     #[must_use]
     pub const fn viscous_slit(&self) -> Option<ViscousSlit> { self.viscous_slit }
+
+    // A fixed supply passage's added mass joins an unadvanced valve that was built (and band-admitted) with the
+    // declared load: the duct load plus the passage's wall friction. The declared load itself is not rewritten.
+    pub(super) fn install_supply_inertance(&mut self, inertance_pa_s_m3: f64) -> Result<(), AcousticRealizeError> {
+        if self.accepted_steps != 0 || self.supply_inertance_pa_s_m3 != 0.0
+            || !(inertance_pa_s_m3.is_finite() && inertance_pa_s_m3 > 0.0)
+        {
+            return Err(invalid("supply inertance installs once, on an unadvanced valve, as a finite positive impedance"));
+        }
+        self.supply_inertance_pa_s_m3 = inertance_pa_s_m3;
+        self.admit_linear_clock()
+    }
+    // The load the mechanical solve sees: declared load plus the supply passage's added mass [Pa s/m^3].
+    fn load_impedance_pa_s_m3(&self) -> f64 { self.spec.impedance_pa_s_m3 + self.supply_inertance_pa_s_m3 }
+    // A^2/m of the single coordinate [m^4/kg]: the term the supply's added-mass ratio multiplies.
+    pub(super) fn pressure_area_squared_over_mass(&self) -> f64 {
+        let area = reed_pressure_face(self.reed);
+        area * area / self.spec.mass_kg
+    }
 
     // The DG transaction prepares all acoustic participants first. This final
     // source update changes only the algebraic gas/load law: structural mass,
@@ -576,35 +601,35 @@ impl DynamicAperture {
                 None => crate::reed_bore::OpeningPropagator::Midpoint,
             };
             propagator.step_with_junction(self.reed, self.spec.density_kg_m3,
-                self.spec.impedance_pa_s_m3, drive.incoming_pressure_pa, drive.upstream_pressure_pa,
+                self.load_impedance_pa_s_m3(), drive.incoming_pressure_pa, drive.upstream_pressure_pa,
                 old.opening_m, old.opening_velocity_m_s, dt, drive.body_flow_m3_s, &self.lay,
                 |opening| Ok(opening),
                 if self.exact.is_none() && (has_memory || force_n != 0.0) { Some(&material_force) } else { None },
                 |opening, moving| match &self.closure {
                     Some(closure) => super::viscous::profiled_characteristic_pressure(
-                        self.spec.impedance_pa_s_m3, drive.incoming_pressure_pa, drive.upstream_pressure_pa, moving,
+                        self.load_impedance_pa_s_m3(), drive.incoming_pressure_pa, drive.upstream_pressure_pa, moving,
                         |dp| closure.viscous_flow(law, opening, self.spec.density_kg_m3, dp)),
                     None => law.characteristic_pressure(self.reed.width_m, opening.max(0.0),
-                        self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
+                        self.spec.density_kg_m3, self.load_impedance_pa_s_m3(),
                         drive.incoming_pressure_pa, drive.upstream_pressure_pa, moving),
                 })?
         } else if let Some(blade) = &self.exact {
             // The prescribed force is held with the contact and pressure forces.
             crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
-                self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
+                self.load_impedance_pa_s_m3(),drive.incoming_pressure_pa,drive.upstream_pressure_pa,
                 old.opening_m,old.opening_velocity_m_s,dt,drive.body_flow_m3_s,&self.lay,
                 |opening| self.flow_opening(opening), None,
                 crate::reed_bore::OpeningPropagator::Exact { blade, external_n: force_n, memory: arm_memory })?
         } else if self.closure.is_some() || has_memory || force_n != 0.0 {
             crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
-                self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
+                self.load_impedance_pa_s_m3(),drive.incoming_pressure_pa,drive.upstream_pressure_pa,
                 old.opening_m,old.opening_velocity_m_s,dt,drive.body_flow_m3_s,&self.lay,
                 |opening| self.flow_opening(opening),
                 if has_memory || force_n != 0.0 {Some(&material_force)} else {None},
                 crate::reed_bore::OpeningPropagator::Midpoint)?
         } else {
             crate::reed_bore::step_massive_reed(
-                self.reed, self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
+                self.reed, self.spec.density_kg_m3, self.load_impedance_pa_s_m3(),
                 drive.incoming_pressure_pa, drive.upstream_pressure_pa,
                 old.opening_m, old.opening_velocity_m_s, dt, drive.body_flow_m3_s,
                 Some(&self.lay), ReedSolverMode::Strict, &mut FastSolveStats::default(),
@@ -638,7 +663,7 @@ impl DynamicAperture {
             ),
         };
         let swept = -reed_pressure_face(self.reed) * vm;
-        let wave = (outgoing - drive.incoming_pressure_pa) / self.spec.impedance_pa_s_m3;
+        let wave = (outgoing - drive.incoming_pressure_pa) / self.load_impedance_pa_s_m3();
         let contact = ApertureContactStep::new(&self.lay, old.opening_m)
             .and_then(|law| law.response(opening, vm))
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
@@ -758,6 +783,10 @@ impl DynamicAperture {
         let area = reed_pressure_face(self.reed);
         // The passive characteristic load contributes at most Z*A² to C;
         // positive jet admittance can only reduce that instantaneous load.
+        // `s.impedance_pa_s_m3` is the declared load: ducts plus a supply passage's wall friction. The passage's added
+        // mass (`supply_inertance_pa_s_m3`) is not a loss: it only lowers omega and every resistive rate, so leaving it
+        // out while keeping the valve's own m in omega and in Z*A²/m is the conservative side (an upper bound on the
+        // rate). Its parasitic mode is admitted separately, by the coupling.
         let damping_rate = 2.0 * s.damping_ratio * omega
             + s.impedance_pa_s_m3 * area * area / s.mass_kg;
         let mut rate = omega + damping_rate;

@@ -101,7 +101,7 @@ impl ModalAperture {
         let before = displacements(&self.state);
         let contact_step = closure.contact_step(&before[..n])?;
         let dt = self.spec.time_step_s;
-        let z = self.spec.impedance_pa_s_m3;
+        let z = self.load_impedance_pa_s_m3();
         let mut pressure = [0.0; MAX_MODES];
         self.force_velocity(areas, mobility, &mut pressure[..n])?;
         let pressure_mobility: f64 = areas.iter().zip(&pressure).map(|(a, p)| a * p).sum();

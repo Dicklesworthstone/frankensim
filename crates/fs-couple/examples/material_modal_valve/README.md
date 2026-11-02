@@ -956,11 +956,25 @@ supply slit 0.004 0.002 0.0002 16
 ```
 
 The slit fields are length, width, height in metres and transverse cell count.
-For an axisymmetric passage, use `supply circular 0.004 0.0002 16`: length,
+For an axisymmetric passage, use `supply circular 0.0023 0.0002 16`: length,
 radius and radial cell count. Omission or `supply none` preserves the source's
 existing response. This passage describes additional fixed geometry between
 the source pressure/tract and moving valve. Its length must not also appear
 in a duct or in the moving reed's `slit_length`.
+
+A passage that is too heavy for the moving mass is refused by name
+(`FS-COUPLE-SUPPLY-PARASITIC-ROOT`), whatever the propagator. The passage steps
+on the reed's step-mean flow, which leaves one real parasitic root
+`-mu/(mu+2)` per step, with `mu = (rho L / A_t) * sum(A_i^2 / m_i)` the fluid's
+added mass against the moving masses. Its magnitude must not exceed
+`rho_max = (1e-3)^(0.04 / (2 pi)) = 0.956977`, that is `mu <= 44.5`. This limit
+is derived from a chosen criterion: the parasitic mode must decay by 60 dB (the
+reverberation-time convention, ISO 3382-1; a convention, not a measurement)
+within one period of the fastest mode the one-cent band admits, 0.04 rad per
+step. The message names `mu`, the root and `rho_max`; shorten the passage,
+widen it, or use a lighter reed. For example `supply circular 0.004 0.0002 16`
+is refused on the reed used by this crate's tests (`mu` = 60.3), which is why the
+example above is shorter.
 
 Both declarations use the original no-slip fluid momentum solver, shared with
 network valves and DG terminal passages. The actual inlet `GasState` supplies

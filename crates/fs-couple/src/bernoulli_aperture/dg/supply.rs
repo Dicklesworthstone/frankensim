@@ -96,6 +96,11 @@ impl ApertureDg<LoadedAperture> {
                 "DG supply mechanics require cold ExactZoh state and the actual combined inlet impedance, complete gas and clock",
             ));
         }
+        // The exact block has no band admission, but the passage still steps on the reed's step-mean flow: bound the
+        // coupling's parasitic root exactly as the two-sided path does.
+        crate::bernoulli_aperture::two_sided::supply::admit_parasitic_root(
+            &aperture, channel.inertial_impedance_pa_s_m3(),
+        )?;
         Ok(Self {
             aperture,
             load,

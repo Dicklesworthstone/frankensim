@@ -104,6 +104,10 @@ impl CircularChannel {
     pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
         self.profile.pressure_load()
     }
+    /// Added-mass part rho L / (A dt) of the next-step impedance [Pa s/m^3]; the rest of
+    /// `pressure_load().impedance_pa_s_m3` is wall friction.
+    #[must_use]
+    pub fn inertial_impedance_pa_s_m3(&self) -> f64 { self.profile.inertial_impedance() }
     /// Candidate field at shared through-flow, leaving original state unchanged.
     pub fn preview_at_flow(&self, flow: f64) -> Result<Self, AcousticRealizeError> {
         let pressure = self.pressure_load()?.pressure_drop_pa(flow)?;

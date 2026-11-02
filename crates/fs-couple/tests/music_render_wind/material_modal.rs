@@ -14,9 +14,11 @@ const ARTIFACT: &str = include_str!("../../examples/material_modal_valve/mutual.
 #[test]
 fn circular_supply_reaches_cli_pcm_and_geometry_metadata_without_an_instrument_solver() {
     let dir = directory();
+    // 12 mm, shortened from 20 mm: 20 mm x 0.5 mm radius is refused on this reed by the supply parasitic-root admission
+    // (added-mass ratio 48.24, root 0.9602 against 0.9570). Radius and cells are unchanged, so the metadata tokens below hold.
     let text = include_str!("../../examples/material_modal_valve/paired.performance")
         .replace("audio 768000 48000 2400 0.005", "audio 768000 48000 512 0.005")
-        .replace("supply none", "supply circular 0.02 0.0005 32");
+        .replace("supply none", "supply circular 0.012 0.0005 32");
     let input = dir.join("circular-supply.performance");
     let material = pack();
     std::fs::write(&input, &text).unwrap();

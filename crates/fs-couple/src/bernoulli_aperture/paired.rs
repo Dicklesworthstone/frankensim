@@ -349,6 +349,11 @@ pub struct PairedAperture {
     relaxation: [Option<ApertureRelaxation>; 2],
     closure: Option<Rc<PairedPlateClosure>>,
     exact: Option<[ExactBlade; 2]>,
+    // Added-mass impedance of a fixed supply passage, installed by the coupling after construction (zero otherwise).
+    // `spec.impedance_pa_s_m3` stays the DECLARED load (ducts plus wall friction); the mechanical solve sees the sum
+    // (`load_impedance_pa_s_m3`). Inertance, not loss: the band admission never counts it; the coupling bounds its
+    // parasitic mode instead.
+    supply_inertance_pa_s_m3: f64,
     samples: u64,
 }
 
@@ -417,7 +422,7 @@ impl PairedAperture {
             BladePropagator::ExactZoh => Some([ExactBlade::new(&spec.blades[0], spec.time_step_s)?,
                 ExactBlade::new(&spec.blades[1], spec.time_step_s)?]),
         };
-        let model = Self { spec, blades, contact, contact_storage: contact_storage.into(), plates: None, gas: None, viscous_slit: None, relaxation: [None, None], closure: None, exact, samples: 0 };
+        let model = Self { spec, blades, contact, contact_storage: contact_storage.into(), plates: None, gas: None, viscous_slit: None, relaxation: [None, None], closure: None, exact, supply_inertance_pa_s_m3: 0.0, samples: 0 };
         model.admit_linear_clock()?;
         model.validate_state(blades)?;
         Ok(model)
@@ -504,6 +509,24 @@ impl PairedAperture {
     pub fn set_material_viscous_slit(&mut self, length_m: f64) -> Result<(), AcousticRealizeError> {
         let gas = self.gas.as_ref().ok_or_else(|| invalid("paired channel requires its retained material gas"))?;
         self.set_viscous_slit(super::viscous::ViscousSlit::from_gas(gas, length_m)?)
+    }
+
+    // A fixed supply passage's added mass joins an unadvanced valve that was built (and band-admitted) with the
+    // declared load: the duct load plus the passage's wall friction. The declared load itself is not rewritten.
+    pub(super) fn install_supply_inertance(&mut self, inertance_pa_s_m3: f64) -> Result<(), AcousticRealizeError> {
+        if self.samples != 0 || self.supply_inertance_pa_s_m3 != 0.0
+            || !(inertance_pa_s_m3.is_finite() && inertance_pa_s_m3 > 0.0)
+        {
+            return Err(invalid("supply inertance installs once, on an unadvanced valve, as a finite positive impedance"));
+        }
+        self.supply_inertance_pa_s_m3 = inertance_pa_s_m3;
+        self.admit_linear_clock()
+    }
+    // The load the mechanical solve sees: declared load plus the supply passage's added mass [Pa s/m^3].
+    fn load_impedance_pa_s_m3(&self) -> f64 { self.spec.impedance_pa_s_m3 + self.supply_inertance_pa_s_m3 }
+    // Sum of A_i^2/m_i over the two blades [m^4/kg]: the term the supply's added-mass ratio multiplies.
+    pub(super) fn pressure_area_squared_over_mass(&self) -> f64 {
+        self.spec.blades.iter().map(|b| b.pressure_area_m2 * b.pressure_area_m2 / b.mass_kg).sum()
     }
 
     pub(super) fn rebind_exact_gas_load(&mut self, gas: &GasState, impedance_pa_s_m3: f64)
@@ -720,7 +743,7 @@ impl PairedAperture {
             if !d.is_finite() || d <= 0.0 || !mobility[i].is_finite() || mobility[i] <= 0.0
                 || !free[i].is_finite() { return Err(invalid("paired blade midpoint response is not representable")); }
         }
-        let z = self.spec.impedance_pa_s_m3;
+        let z = self.load_impedance_pa_s_m3();
         let trial = if let Some(closure) = &self.closure {
             self.solve_profiled(drive, free, mobility, closure)?
         } else {
@@ -904,6 +927,10 @@ impl PairedAperture {
         let blades = self.spec.blades;
         let weights = blades.map(|b| b.pressure_area_m2 / fs_math::det::sqrt(b.mass_kg));
         let weight_sum = weights.iter().map(|a| a.abs()).sum::<f64>();
+        // `spec.impedance_pa_s_m3` is the declared load: ducts plus a supply passage's wall friction. The passage's
+        // added mass is not a loss: it only lowers every mechanical rate, so leaving it out while keeping each
+        // blade's own m is the conservative side (an upper bound). Its parasitic mode is admitted separately, by the
+        // coupling.
         let mut rate = 0.0_f64;
         for (i,b) in blades.iter().enumerate() {
             let loss = b.damping_n_s_m / b.mass_kg

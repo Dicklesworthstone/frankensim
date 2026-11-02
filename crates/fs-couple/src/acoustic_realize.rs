@@ -147,6 +147,17 @@ pub enum AcousticRealizeError {
         /// Which check failed.
         what: &'static str,
     },
+    /// A fixed supply passage is so heavy against the moving reed that the three-level coupling (the passage steps
+    /// on the reed's step-mean flow) leaves a parasitic alternating mode that decays too slowly. The mode's root is
+    /// -mu/(mu+2) per step; it must fall to the declared decay within one period of the fastest admitted mode.
+    SupplyParasiticRoot {
+        /// Added-mass ratio mu = (rho L / A_t) sum(A_i^2 / m_i) of the passage against the moving masses.
+        mass_ratio: f64,
+        /// Magnitude of the parasitic root, mu / (mu + 2).
+        root: f64,
+        /// Largest admitted magnitude, decay^(max angular step / tau).
+        maximum_root: f64,
+    },
     /// WAV encode refusal.
     Wav(WavError),
 }
@@ -201,6 +212,13 @@ impl core::fmt::Display for AcousticRealizeError {
                  cells: {min_admissible_cells})"
             ),
             Self::Reed { what } => write!(f, "FS-COUPLE-REED: {what}"),
+            Self::SupplyParasiticRoot { mass_ratio, root, maximum_root } => write!(
+                f,
+                "FS-COUPLE-SUPPLY-PARASITIC-ROOT: supply channel added-mass ratio {mass_ratio:.4} gives a \
+                 parasitic step root of magnitude {root:.6}, above {maximum_root:.6} (the -60 dB decay \
+                 within one period of the fastest admitted mode). Shorten the passage, widen it, or use a \
+                 lighter reed"
+            ),
             Self::Wav(e) => write!(f, "{e}"),
         }
     }

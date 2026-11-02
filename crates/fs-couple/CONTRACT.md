@@ -7039,6 +7039,30 @@ condensation, material single/paired reeds, initial fluid momentum, viscosity
 interventions, physical microphone output and transactional refusals; native
 execution and measured clarinet/oboe validation remain separate requirements.
 
+The passage's discrete impedance has two parts: the added mass `rho*L/(A*dt)` of
+its fluid column, and the wall friction on top of it
+(`FixedChannel::inertial_impedance_pa_s_m3` exposes the first). The moving valve
+is declared, and clock-admitted, with the duct load plus the wall friction, as
+`combined_inlet_state_with_supply` returns it; `with_supply_channel` installs the
+added mass on the unadvanced valve. The one-cent band therefore counts only the
+friction as a rate. That is an upper bound: added mass lowers every mechanical
+rate, and the valve's own mass stays in omega and in `Z*A^2/m`. Because the
+channel steps on the reed's step-mean flow, the coupled recursion has one more
+real root, `-mu/(mu+2)` per step, with `mu = (rho*L/A_t) * sum(A_i^2/m_i)` the
+added-mass ratio. It lies inside the unit circle for every finite `mu`, so the
+scheme is stable, but it tends to -1 as the passage gets heavy and then rings at
+the Nyquist rate. `AcousticRealizeError::SupplyParasiticRoot` refuses a passage
+whose root exceeds `rho_max = decay^(max_angular_step/tau)`, where `decay` = 1e-3
+is a CHOICE (-60 dB, the T60 convention of ISO 3382-1; no source says the
+parasitic mode must meet it) and `max_angular_step` is the 0.04 of the one-cent
+band, so `rho_max` is derived from them: the alternating mode must fall to -60 dB
+within one period of the fastest mode the band admits (rho_max 0.956977, `mu` at
+most 44.5). The check
+applies to every propagator, exact ZOH included, on the two-sided and the DG
+attachments. No claim: the root is the free-mass, shut-jet worst case (an open jet
+moves it toward zero), and the bound has not been compared with a measured reed
+channel.
+
 `SteadyAxialGas::solve` in fs-material can feed its source-retaining `AxialGasField` directly to the existing regional duct, reed-bore and scheduled ReedPerformance field constructors. Wall cooling and explicit gas injections therefore change the same EOS/transport medium used for bore propagation, reed inlet loading and physical termination. The shared thermal owner supplies stationary enthalpy/species balances; the emitted field is frozen for acoustics. Its grid, caloric, conservation and low-Mach limits remain explicit and do not imply resolved transient breath evolution or measured clarinet/oboe equivalence.
 
 ### Explicit prepared propagation for complete modal networks

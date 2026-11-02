@@ -130,6 +130,23 @@ impl LoadedAperture {
             Self::Modal(a) => (a.spec().density_kg_m3, a.spec().impedance_pa_s_m3),
         }
     }
+    /// Install a fixed supply passage's added mass on an unadvanced valve built with the declared load (the duct
+    /// load plus the passage's wall friction). The declared load is not rewritten; the solve sees the sum.
+    pub(super) fn install_supply_inertance(&mut self, inertance_pa_s_m3: f64) -> Result<(), AcousticRealizeError> {
+        match self {
+            Self::Single(a) => a.install_supply_inertance(inertance_pa_s_m3),
+            Self::Paired(a) => a.install_supply_inertance(inertance_pa_s_m3),
+            Self::Modal(a) => a.install_supply_inertance(inertance_pa_s_m3),
+        }
+    }
+    /// Sum of A_i^2 / m_i over the moving coordinates [m^4/kg].
+    pub(super) fn pressure_area_squared_over_mass(&self) -> f64 {
+        match self {
+            Self::Single(a) => a.pressure_area_squared_over_mass(),
+            Self::Paired(a) => a.pressure_area_squared_over_mass(),
+            Self::Modal(a) => a.pressure_area_squared_over_mass(),
+        }
+    }
     pub(super) fn rebind_exact_gas_load(&mut self, gas: &GasState, impedance_pa_s_m3: f64)
         -> Result<(), AcousticRealizeError>
     {
@@ -360,10 +377,14 @@ impl TwoSidedAperture {
         poll(gate)?;
         limits.validate()?;
         let (gas, duct_z) = combined_inlet_state(&sources)?;
-        let z = match &supply_channel {
-            Some(channel) => supply::combined_inlet_state_with_supply(&sources, channel)?.1,
-            None => duct_z,
+        // With a supply passage the valve is declared with the RESISTIVE load (ducts plus the passage's wall
+        // friction); the passage's added mass joins it below, once the valve is known to be unadvanced.
+        let supply_load = match &supply_channel {
+            Some(channel) => Some(supply::supply_load(&sources, channel)?),
+            None => None,
         };
+        let z = supply_load.as_ref().map_or(duct_z, |l| l.resistive_pa_s_m3);
+        let mut valve = valve;
         let (density, declared_z) = valve.load();
         if valve.accepted_steps() != 0 || density.to_bits() != gas.density.to_bits()
             || declared_z.to_bits() != z.to_bits()
@@ -374,7 +395,11 @@ impl TwoSidedAperture {
         if supply_channel.as_ref().is_some_and(|c| c.sample_period_s().to_bits() != dt.to_bits()) {
             return Err(invalid("supply passage and moving valve must share the exact physical clock"));
         }
-        let prepare = |source: ApertureDuctSpec, policy: Option<FractionalTubePolicy>| -> Result<DuctSide, AcousticRealizeError> {
+        if let Some(load) = &supply_load {
+            valve.install_supply_inertance(load.inertance_pa_s_m3)?;
+            supply::admit_parasitic_root(&valve, load.inertance_pa_s_m3)?;
+        }
+        let prepare =|source: ApertureDuctSpec, policy: Option<FractionalTubePolicy>| -> Result<DuctSide, AcousticRealizeError> {
             poll(gate)?;
             let (graph, gases, losses) = match policy {
                 Some(policy) => with_regional_fractional_viscothermal_sections(

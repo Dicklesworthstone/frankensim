@@ -263,6 +263,10 @@ impl ModalAperture {
             .iter()
             .map(|m| m.pressure_area_m2.abs() / fs_math::det::sqrt(m.mass_kg))
             .sum::<f64>();
+        // `spec.impedance_pa_s_m3` is the declared load: ducts plus a supply passage's wall friction. The passage's
+        // added mass is not a loss: it only lowers every mechanical rate, so leaving it out while keeping each
+        // mode's own m is the conservative side (an upper bound). Its parasitic mode is admitted separately, by the
+        // coupling.
         for (i, m) in modes.iter().enumerate() {
             let root_mass = fs_math::det::sqrt(m.mass_kg);
             let resistance = if let Some(c) = matrix {

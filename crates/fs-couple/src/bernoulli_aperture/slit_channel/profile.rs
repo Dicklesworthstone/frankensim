@@ -178,6 +178,14 @@ impl MomentumProfile {
         self.area.iter().zip(velocity).map(|(a, v)| a * v).sum::<f64>() / self.total_area
     }
 
+    /// The added-mass part of the discrete impedance, Z_in = rho L / (A_t dt) = sum(M_i) / (A_t^2 dt) [Pa s/m^3].
+    /// With no wall friction the next-step law dp = Z Q - H has Z = Z_in exactly; viscous diffusion only raises Z
+    /// (the implicit operator (M + dt G)^-1 is below M^-1), so Z - Z_in >= 0 is the resistive excess. Z_in is inertance
+    /// per step, not a loss: it stores kinetic energy and returns it.
+    pub(super) fn inertial_impedance(&self) -> f64 {
+        self.mass.iter().sum::<f64>() / (self.total_area * self.total_area * self.dt)
+    }
+
     pub(super) fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
         if self.exit != SlitExit::StaticPressure {
             return Err(invalid("affine channel condensation requires the actual static-pressure terminal"));

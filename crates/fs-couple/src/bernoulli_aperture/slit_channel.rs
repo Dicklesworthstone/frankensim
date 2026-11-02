@@ -169,6 +169,14 @@ impl FixedChannel {
     pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
         match self { Self::Slit(v) => v.pressure_load(), Self::Circular(v) => v.pressure_load() }
     }
+    /// Added-mass part of [`Self::pressure_load`]'s impedance, rho L / (A dt) [Pa s/m^3].
+    #[must_use]
+    pub fn inertial_impedance_pa_s_m3(&self) -> f64 {
+        match self {
+            Self::Slit(v) => v.inertial_impedance_pa_s_m3(),
+            Self::Circular(v) => v.inertial_impedance_pa_s_m3(),
+        }
+    }
     /// Candidate original field at the common through-flow; no state publishes.
     pub fn preview_at_flow(&self, flow: f64) -> Result<Self, AcousticRealizeError> {
         match self {
@@ -256,6 +264,12 @@ impl SlitChannel {
     pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
         self.profile.pressure_load()
     }
+
+    /// Added-mass part rho L / (A_t dt) of the next-step impedance [Pa s/m^3]; the rest of
+    /// `pressure_load().impedance_pa_s_m3` is wall friction. A coupled valve must count the first as inertance
+    /// (it lowers every mechanical rate) and only the second as loss.
+    #[must_use]
+    pub fn inertial_impedance_pa_s_m3(&self) -> f64 { self.profile.inertial_impedance() }
 
     /// Prepare the next channel state at a requested signed volume flow.
     ///

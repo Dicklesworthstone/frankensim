@@ -48,11 +48,16 @@ fn valve(plates: &[PlateApertureReduction;2], paired: bool, g: GasState, z: f64)
     // is additional physical geometry, not a second copy of this slit.
     let slit = ViscousSlit::from_gas(&g, 0.001).unwrap();
     if paired {
-        let mut a = PairedAperture::from_plates((*plates).clone(), g, z, DT, 4096,
+        // Exact ZOH: this pair spends 87 % of the one-cent midpoint band on its two ducts alone (rate 6680 of
+        // 7680 rad/s), so the channel's own friction (about 1e6 Pa s/m^3 at the reed's frequency against the
+        // 9.6e5 left) cannot fit the midpoint band. These tests are about the shared flow and the work account,
+        // not the midpoint band; the supply admission (parasitic root) still applies on this propagator.
+        let mut a = PairedAperture::from_plates_with_propagator((*plates).clone(), g, z, DT, 4096,
             PairedApertureLimits { maximum_abs_displacement_m: 0.01,
                 maximum_abs_velocity_m_s: 100.0, maximum_energy_j: 1.0,
                 max_evaluations: 256, velocity_tolerance_m_s: 1e-13,
-                relative_tolerance: 1e-11 }, [BladeState::default();2], lay).unwrap();
+                relative_tolerance: 1e-11 }, [BladeState::default();2], lay,
+            fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh).unwrap();
         a.set_viscous_slit(slit).unwrap();
         a.into()
     } else {
@@ -215,6 +220,38 @@ fn rejected_or_cancelled_trials_publish_neither_channel_nor_valve_nor_network() 
     assert_eq!(m.valve().accepted_steps(), 2);
 }
 
+// The paired fixture spends 87 % of the one-cent midpoint band on its two ducts alone (rate 6680 of 7680 rad/s at
+// dt = 1/192 kHz). The channel's own friction at the plates' frequency (about 1.04e6 Pa s/m^3; 1.32e6 at the band
+// edge) exceeds the 9.6e5 left, so the MIDPOINT propagator is correctly refused. `valve()` therefore builds this pair
+// on exact ZOH; this test pins the refusal on the very same case so the band is covered, not walked around.
+#[test]
+fn the_paired_fixture_on_the_midpoint_propagator_is_refused_by_the_band_with_its_supply() {
+    use fs_couple::acoustic_realize::AcousticRealizeError;
+    let plates = plates();
+    let g = gas(1.0);
+    let sides = ducts(g);
+    let lay = || Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0,
+        "synthetic supply/reed integration contact".into()).unwrap();
+    let limits = || PairedApertureLimits { maximum_abs_displacement_m: 0.01,
+        maximum_abs_velocity_m_s: 100.0, maximum_energy_j: 1.0, max_evaluations: 256,
+        velocity_tolerance_m_s: 1e-13, relative_tolerance: 1e-11 };
+    // Ducts alone: admitted, inside the band.
+    let (_, duct_z) = combined_inlet_state(&sides).unwrap();
+    assert!(PairedAperture::from_plates(plates.clone(), g, duct_z, DT, 4096, limits(),
+        [BladeState::default(); 2], lay()).is_ok());
+    // With the passage's wall friction on top: refused, with the rate above 0.04 / dt.
+    let (_, z) = combined_inlet_state_with_supply(&sides, &channel(g, 32)).unwrap();
+    match PairedAperture::from_plates(plates, g, z, DT, 4096, limits(), [BladeState::default(); 2], lay()) {
+        Err(AcousticRealizeError::TimeResolution(fs_phs::linear_exact::ResolvedBandError::Outside {
+            rate_rad_s, dt_s, maximum_angular_step, .. })) => {
+            assert_eq!(dt_s, DT);
+            assert_eq!(maximum_angular_step, 0.04);
+            assert!(rate_rad_s > maximum_angular_step / dt_s, "rate {rate_rad_s}");
+        }
+        other => panic!("the midpoint pair with its supply must leave the band, got {:?}", other.map(|_| ())),
+    }
+}
+
 #[test]
 fn supply_selection_refuses_stale_load_gas_clock_and_nonlinear_terminal() {
     let plates = plates();
@@ -263,4 +300,138 @@ fn supplied_initial_fluid_momentum_is_retained_and_can_drive_an_unforced_materia
     }
     assert!(flow, "retained channel momentum must react on the actual valve");
     assert!((m.stored_energy_j() + loss - initial_energy).abs() < 1e-13);
+}
+
+// ---- The passage's added mass against the reed: the parasitic root of the three-level coupling ----
+//
+// The passage steps on the reed's step-mean flow, so the coupled recursion has one real root besides the physical
+// pair. For a free mass m with face area A against a passage of inertance I = rho L / A_t, mu = I A^2 / m, that root
+// is -mu/(mu+2) per step (a rank-1 coupling gives mu = I sum(A_i^2 / m_i)). It is inside the unit circle for every
+// finite mu, but tends to -1: a heavy passage rings at the Nyquist rate. The admission bounds it.
+//
+// Known answer: this root is -mu/(mu+2); here the jet is shut (a 2 um gap with a laminar slit law has admittance
+// ~1e-4 of I/dt), which is the worst case. The reed is exact-ZOH, so the band admission does not apply.
+mod added_mass {
+    use super::*;
+    use fs_couple::acoustic_realize::AcousticRealizeError;
+    use fs_couple::bernoulli_aperture::{BernoulliAperture, dynamic::DynamicApertureSpec,
+        paired::BladePropagator, two_sided::supply::maximum_parasitic_root};
+
+    const M_REED: f64 = 1.0e-5;
+    const K_REED: f64 = 500.0;
+    const A_FACE: f64 = 1.25e-4;
+    const H_REST: f64 = 2.0e-6;
+    const V0: f64 = 2.0e-4;
+
+    fn free_reed(inlet: GasState, z: f64) -> LoadedAperture {
+        let lay = Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0,
+            "synthetic supply added-mass contact".into()).unwrap();
+        let mut a = DynamicAperture::new_with_propagator(DynamicApertureSpec {
+            aperture: BernoulliAperture { rest_opening_m: H_REST, width_m: 0.013,
+                closing_pressure_pa: K_REED * H_REST / A_FACE },
+            mass_kg: M_REED, stiffness_n_m: K_REED, damping_ratio: 0.02,
+            density_kg_m3: inlet.density, impedance_pa_s_m3: z, time_step_s: DT, max_steps: 4096,
+        }, ApertureState { opening_m: H_REST, opening_velocity_m_s: V0 }, lay, BladePropagator::ExactZoh).unwrap();
+        a.set_viscous_slit(ViscousSlit::from_gas(&inlet, 0.001).unwrap()).unwrap();
+        a.into()
+    }
+    fn long_ducts(g: GasState) -> [ApertureDuctSpec; 2] {
+        // Reflections return after 8192 steps: outside every window below.
+        [4096, 4096].map(|delay| ApertureDuctSpec { graph: TubeNetworkSpec {
+            nodes: vec![NetworkNode::Inlet, NetworkNode::Termination { reflection: -0.8 }],
+            sections: vec![TubeSection { nodes: [0,1],
+                length_m: f64::from(delay) * g.sound_speed * DT,
+                radius_m: 0.007, max_length_error_m: 1e-12 }],
+            sound_speed_m_s: g.sound_speed, max_wave_memory_bytes: 1 << 20,
+        }, gases: vec![g], viscothermal: vec![] })
+    }
+    /// A passage whose added-mass ratio against the reed is `mu`: L = mu m A_t / (rho A^2).
+    fn passage(g: GasState, mu: f64) -> SlitChannel {
+        let (width, height) = (0.01, 0.001);
+        SlitChannel::from_gas(&g, SlitChannelSpec { length_m: mu * M_REED * (width * height) / (g.density * A_FACE * A_FACE),
+            width_m: width, height_m: height, transverse_cells: 8, sample_period_s: DT,
+            exit: SlitExit::StaticPressure }).unwrap()
+    }
+    fn system(mu: f64) -> Result<TwoSidedAperture, AcousticRealizeError> {
+        let g = gas(1.0);
+        let sides = long_ducts(g);
+        let supply = passage(g, mu);
+        let (inlet, z) = combined_inlet_state_with_supply(&sides, &supply).unwrap();
+        TwoSidedAperture::with_supply_channel(free_reed(inlet, z), sides, supply, limits(), None,
+            &CancelGate::new_clock_free())
+    }
+    /// Reed velocity and shared flow of `n` free steps after the velocity kick.
+    fn free_run(mu: f64, n: usize) -> (Vec<f64>, Vec<f64>) {
+        let mut m = system(mu).unwrap();
+        let gate = CancelGate::new_clock_free();
+        let (mut v, mut q) = (Vec::new(), Vec::new());
+        for _ in 0..n {
+            let f = m.step_under_gate(drive(0.0), &gate).unwrap();
+            v.push(f.aperture.state.opening_velocity_m_s);
+            q.push(f.aperture.bore_flow_m3_s);
+        }
+        (v, q)
+    }
+    /// Second difference: a geometric alternating component a r^n has D2_n = a r^(n-2) (r-1)^2, so D2_n / D2_(n-1)
+    /// is r, while the smooth reed motion contributes only O((omega dt)^2).
+    fn d2(x: &[f64], n: usize) -> f64 { x[n] - 2.0 * x[n - 1] + x[n - 2] }
+    fn alternating_ratio(x: &[f64], from: usize, to: usize) -> f64 {
+        let (mut num, mut den) = (0.0, 0.0);
+        for n in from..to { num += d2(x, n) * d2(x, n - 1); den += d2(x, n - 1) * d2(x, n - 1); }
+        num / den
+    }
+    fn maximum_mass_ratio() -> f64 {
+        // Independent of the crate: rho_max = (1e-3)^(0.04 / tau), mu_max = 2 rho / (1 - rho).
+        let rho = 1.0e-3_f64.powf(0.04 / core::f64::consts::TAU);
+        2.0 * rho / (1.0 - rho)
+    }
+
+    #[test]
+    fn the_parasitic_root_is_minus_mu_over_mu_plus_two_in_reed_velocity_and_flow() {
+        // mu = 60 would be refused (mu_max = 44.5), which is the next test's point.
+        for (mu, window) in [(10.0, 3..13), (40.0, 3..33)] {
+            let (v, q) = free_run(mu, 64);
+            let expected = -mu / (mu + 2.0);
+            for (name, series) in [("velocity", &v), ("flow", &q)] {
+                let r = alternating_ratio(series, window.start, window.end);
+                assert!((r / expected - 1.0).abs() < 0.01,
+                    "mu {mu}: measured {name} root {r:.5}, expected {expected:.5}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_supply_too_heavy_for_its_parasitic_root_is_refused_on_the_exact_propagator_too() {
+        let maximum = maximum_parasitic_root();
+        assert!((maximum - 1.0e-3_f64.powf(0.04 / core::f64::consts::TAU)).abs() < 1e-14);
+        // Both sides of the bound: 1.02 mu_max is refused, 0.98 mu_max is admitted (below). mu = 60, the value the
+        // first design note carried before the decay was fixed at -60 dB, is above mu_max = 44.5 and refused too.
+        for mu in [1.02 * maximum_mass_ratio(), 60.0, 100.0, 1000.0] {
+            match system(mu) {
+                Err(AcousticRealizeError::SupplyParasiticRoot { mass_ratio, root, maximum_root }) => {
+                    assert!((mass_ratio / mu - 1.0).abs() < 1e-9, "mu {mu}: reported {mass_ratio}");
+                    assert!((root - mu / (mu + 2.0)).abs() < 1e-9);
+                    assert_eq!(maximum_root, maximum);
+                    assert!(root > maximum_root);
+                }
+                other => panic!("mu {mu} must be refused by its parasitic root, got {:?}", other.map(|_| ())),
+            }
+        }
+        // Just inside the same bound the very same build is admitted.
+        let inside = 0.98 * maximum_mass_ratio();
+        assert!(inside / (inside + 2.0) < maximum);
+        assert!(system(inside).is_ok());
+    }
+
+    #[test]
+    fn at_the_bound_the_parasitic_mode_has_decayed_to_the_declared_decay_in_one_fast_period() {
+        let steps = (core::f64::consts::TAU / 0.04).ceil() as usize; // one period of the fastest admitted mode
+        let (v, q) = free_run(0.98 * maximum_mass_ratio(), 2 + steps + 8);
+        for (name, series) in [("velocity", &v), ("flow", &q)] {
+            let start = d2(series, 2).abs();
+            let end = d2(series, 2 + steps).abs();
+            assert!(end <= 1.0e-3 * start,
+                "{name}: the alternating component kept {:.3e} of its start after {steps} steps", end / start);
+        }
+    }
 }
