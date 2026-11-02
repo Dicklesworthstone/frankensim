@@ -2767,3 +2767,46 @@ Regression sources couple temperature-dependent source viscosity to finite pipe
 residence and reverse flushing, checking an independent ordered cell recurrence
 and scalar flow root. Geometry, caloric identity, node/density/topology, actual
 gravity and connection-budget refusals preserve the original thermal timeline.
+
+### Original liquid and gas sources on distributed graph storage
+
+`transient::material::{LiquidGraphSources, GasGraphSources}` bind original source
+laws to the exact native caloric object registered for every fluid cell. Each
+junction and pipe temperature is resolved through the existing material owner.
+Liquid pressure and source coordinates remain intact; gas NASA enthalpy,
+formation datum, thermodynamic pressure and composition remain intact. Reference
+rho0 owns conserved mass, continuity and inertia. Local viscosity owns drag;
+local density departure owns Boussinesq gravity. This remains a bounded low-Mach,
+low-Eckert approximation with explicit original source support.
+
+Each hydraulic branch has one original adiabatic resistance law per pipe cell.
+The source adapter currently requires straight, monotone branch paths, for which
+length-weighted density represents the held integrated body head. Bent paths
+refuse. Construct retained momentum from the initially resolved source graph,
+using the distributed inventory's equivalent geometry, so its reference density,
+gravity chart and admission cap are already fixed before the first coupled step.
+The source payload belongs in the inertial driver's resolve result; its exchange
+callback calls `admit_actual` or `evaluate_links` before returning coefficients.
+
+Actual-flow admission rechecks original section laws at native old, new and
+average rates, including zero-crossing support. Maximum speed independently
+bounds gas Mach and omitted mechanical work. Absolute local anomalous-gravity
+work is summed before sections can cancel, then combined with hydraulic
+dissipation under separate power and energy caps. Prepared source payloads are
+tied to the exact binding and candidate temperature field. The coupled driver's
+final actual-flow refresh retains these original source checks.
+
+`material::convection` reuses original reciprocal finite-cell heat links. Forced
+speed is the actual reference-volume rate divided by authored native pipe area.
+Bulk/film rho, mu, k and Cp come from the same original source and correlation.
+Support is re-admitted at both endpoint speeds and any signed crossing; an
+admissible average or maximum alone cannot establish a lower Reynolds limit.
+Samples are associated by native link identity regardless of caller ordering.
+Pure natural cards require a quiescent bulk-flow envelope; moving mixed
+convection requires a separately supported relation. Apply returned conductances
+to the native link map once, without duplicating their heat as cell sources.
+
+Regression sources cover spatial viscosity, original EOS/calorics, source and
+payload identity, non-cancelling local work, endpoint Reynolds/Mach support,
+reciprocal wall exchange and native coupled operation. No new experimental
+coverage or material/correlation claim is inferred by the adapter.

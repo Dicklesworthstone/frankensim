@@ -472,6 +472,7 @@ pub mod coupled;
 pub mod distributed;
 pub mod implicit;
 pub mod inertial;
+pub mod material;
 
 #[cfg(test)]
 mod tests;

@@ -539,3 +539,7 @@ fn gas_reversal_checks_endpoint_mach_and_preserves_both_histories_on_refusal() {
         assert_eq!(thermal.time_s(), dt);
     });
 }
+
+#[cfg(feature = "transient-transport")]
+#[path = "finite_gas_loop/source_graph.rs"]
+mod source_graph;

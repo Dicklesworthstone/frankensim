@@ -1,0 +1,179 @@
+//! Original isobaric, fixed-composition gas sources on finite graph storage.
+//!
+//! The exact registered GasEnthalpyLaw owns NASA h(T), T(h), caloric support and
+//! formation-energy datum. Its original pressure, mole composition and source
+//! selections supply each local transport state. This is a low-Mach,
+//! fixed-reference-inventory approximation, not compressible pressure evolution.
+
+use super::convection::{GraphConvectionError, GraphConvectiveLink, GraphSourceHeat};
+use super::*;
+use fs_material::thermochemical_gas::{
+    ResolvedThermochemicalGasState, energy::enthalpy::GasEnthalpyLaw,
+};
+
+pub struct GasGraphSources<'a> {
+    source: &'a GasEnthalpyLaw,
+    reference: ResolvedThermochemicalGasState,
+    maximum_mach: f64,
+    core: BoundGraphCore<'a>,
+}
+
+fn resolve_gas(
+    source: &GasEnthalpyLaw,
+    temperature: Temperature,
+) -> Result<ResolvedThermochemicalGasState, SourceGraphError> {
+    let point = source
+        .context()
+        .clone()
+        .with("temperature", temperature.value())
+        .map_err(|_| SourceGraphError::Invalid("invalid original gas temperature coordinate"))?;
+    source
+        .model()
+        .evaluate(&point)
+        .map_err(SourceGraphError::Material)
+}
+
+impl<'a> GasGraphSources<'a> {
+    /// Reference rho comes from the unchanged original source context and must
+    /// equal the distributed inventory's conserved reference density exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        cx: &Cx<'_>,
+        source: &'a GasEnthalpyLaw,
+        thermal: &DepositionSimulation<'_>,
+        binding: SourceGraphBinding<'a>,
+        limits: SourceGraphLimits,
+        maximum_mach: f64,
+    ) -> Result<Self, SourceGraphError> {
+        poll(cx)?;
+        if !positive(maximum_mach) || maximum_mach > 0.3 {
+            return Err(SourceGraphError::Invalid(
+                "source gas graph requires a Mach limit in (0,0.3]",
+            ));
+        }
+        let reference = source
+            .model()
+            .evaluate(source.context())
+            .map_err(SourceGraphError::Material)?;
+        source
+            .enthalpy_at_temperature(reference.state().temperature)
+            .map_err(SourceGraphError::GasCaloric)?;
+        let transport = reference
+            .transport_state()
+            .map_err(SourceGraphError::Material)?;
+        let core = BoundGraphCore::try_new(cx, source, transport, thermal, binding, limits)?;
+        Ok(Self {
+            source,
+            reference,
+            maximum_mach,
+            core,
+        })
+    }
+
+    pub const fn source(&self) -> &'a GasEnthalpyLaw {
+        self.source
+    }
+    pub const fn reference(&self) -> &ResolvedThermochemicalGasState {
+        &self.reference
+    }
+    pub fn inventory(&self) -> &'a DistributedGraphInventory {
+        self.core.inventory
+    }
+    pub const fn maximum_mach(&self) -> f64 {
+        self.maximum_mach
+    }
+
+    fn admit_mach(
+        &self,
+        cx: &Cx<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        flows: &[f64],
+    ) -> Result<(), SourceGraphError> {
+        if flows.len() != self.core.section_areas.len() {
+            return Err(SourceGraphError::Invalid(
+                "complete original gas flow vector required",
+            ));
+        }
+        for (branch, sections) in sources.sections.iter().enumerate() {
+            for (section, source) in sections.iter().enumerate() {
+                poll(cx)?;
+                let sound = source.momentum.medium.state().sound_speed;
+                let speed = flows[branch].abs() / self.core.section_areas[branch][section];
+                let mach = speed / sound;
+                if !positive(sound) || !nonnegative(mach) || mach > self.maximum_mach {
+                    return Err(SourceGraphError::GasMach {
+                        branch,
+                        section,
+                        value: mach,
+                        maximum: self.maximum_mach,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve original source conditions at actual native caloric temperatures.
+    /// The trial viscosity, Boussinesq departure, Reynolds and Mach limits all
+    /// apply. Source failures are terminal proposals, never absent flow roots.
+    pub fn resolve(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        trial_volume_flows_m3_s: &[f64],
+    ) -> Result<ResolvedSourceGraph<ResolvedThermochemicalGasState>, SourceGraphError> {
+        let resolved = self
+            .core
+            .resolve(cx, thermal, trial_volume_flows_m3_s, |t| {
+                resolve_gas(self.source, t)
+            })?;
+        self.admit_mach(cx, &resolved.sources, trial_volume_flows_m3_s)?;
+        Ok(resolved)
+    }
+
+    /// Re-admit original section laws at actual average, old and new flow,
+    /// including zero-crossing support. The largest absolute old/new/average
+    /// flow independently bounds Mach and omitted mechanical work. Neither
+    /// lower Reynolds limits nor fast endpoints can hide behind an average.
+    pub fn admit_actual(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        report: &InertialGraphReport,
+    ) -> Result<GraphSourceAdmission, SourceGraphError> {
+        let admission = self.core.admit_actual(cx, thermal, sources, report)?;
+        self.admit_mach(cx, sources, &admission.speed_envelope_m3_s)?;
+        Ok(admission)
+    }
+
+    /// Reciprocal wall heat uses original gas k, mu and Cp at the declared
+    /// bulk/film temperature, retaining this law's pressure and composition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        report: &InertialGraphReport,
+        bindings: &[GraphConvectiveLink],
+        maximum_links: usize,
+    ) -> Result<GraphSourceHeat<ResolvedThermochemicalGasState>, GraphConvectionError> {
+        let admission = self
+            .admit_actual(cx, thermal, sources, report)
+            .map_err(GraphConvectionError::Source)?;
+        let convection = convection::evaluate_links(
+            &self.core,
+            cx,
+            thermal,
+            report,
+            bindings,
+            maximum_links,
+            |t| resolve_gas(self.source, t),
+        )?;
+        Ok(GraphSourceHeat {
+            admission,
+            convection,
+        })
+    }
+}

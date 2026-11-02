@@ -577,3 +577,7 @@ fn finite_inventory_does_not_invent_circulation_without_density_contrast() {
         assert_eq!(tank,original);
     });
 }
+
+#[cfg(feature = "transient-transport")]
+#[path = "liquid_pressure/source_graph.rs"]
+mod source_graph;

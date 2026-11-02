@@ -261,7 +261,7 @@ impl<'a> MaterialFlowPath<'a> {
     }
 }
 
-fn admit_liquid_caloric_source(
+pub(crate) fn admit_liquid_caloric_source(
     cx: &Cx<'_>, liquid: &fs_material::liquid::ResolvedLiquidState,
     source: &ResolvedHeatCapacityCurve, axis: &str,
 ) -> Result<(), LiquidEnthalpyError> {
