@@ -8,8 +8,10 @@
 //! is explicit and every storage cell must balance mass, including datums.
 //!
 //! Node storage is perfectly mixed; resolving pipe residence time requires
-//! caller-declared spatial control volumes. This is frozen-density, prescribed
-//! flow transport, not compressible storage, evolving buoyancy or momentum.
+//! caller-declared spatial control volumes. The base binding prescribes flow;
+//! [`coupled`] resolves quasi-steady hydraulic and wall feedback at each native
+//! implicit endpoint. Reference density stays fixed, with no compressible
+//! storage or inertial momentum added.
 
 use std::collections::BTreeMap;
 
@@ -265,6 +267,8 @@ fn root(parents: &[usize], mut node: usize) -> usize {
 fn thermal_checkpoint(cx: &Cx<'_>) -> Result<(), DepositionError> {
     poll(cx).map_err(|_| DepositionError::Cancelled)
 }
+
+pub mod coupled;
 
 #[cfg(test)]
 mod tests;

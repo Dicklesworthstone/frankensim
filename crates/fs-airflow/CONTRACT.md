@@ -1,5 +1,28 @@
 # CONTRACT: fs-airflow
 
+## Hydraulic and wall feedback on transient convection
+
+With `transient-transport`, `transport::transient::coupled::advance_quasi_steady_graph`
+resolves the native hydraulic graph and optional wall coefficients at every actual
+thermal endpoint trial. Native Newton-Krylov and fallible directional differences
+solve the original backward-Euler cell-energy residual. Hydraulic and heat payloads
+are returned from an independent final evaluation at the accepted enthalpy field;
+source refusals, cancellation and bounded endpoint-evaluation work remain active.
+
+The existing thermal owner retains cell mass, caloric inversion, latent storage,
+event boundaries, authored sources and independent local/global joule gates.
+Explicit external mass streams supply their native enthalpy sources once; internal
+upwind transfers remain conservative. The callback supplies only nonadvective
+source/link/boundary coefficients and must be repeatable during derivative probes.
+Hydraulic topology and branch identities are fixed. Original source applicability,
+reference-density storage admission and complete cellwise mass balance still apply.
+
+This is quasi-steady momentum with finite thermal inventory. Reversals update the
+endpoint upwind direction; locating a within-step reversal, fluid inertance and
+compressible storage require their respective owners. Omitted dissipative and
+anomalous buoyancy work have explicit watt and joule allowances. Algebraic closure
+does not replace time/control-volume refinement or experimental validation.
+
 ## Material-dependent graph drag and wall exchange
 
 The natural-circulation material-response adapter rebuilds native graph loss
