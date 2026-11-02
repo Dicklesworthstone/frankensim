@@ -260,9 +260,10 @@ impl AxialGasField {
     /// Resolve the physical medium at one position, preserving exact supplied
     /// knots and uniform spans. Cellwise fields return their cached source state;
     /// linear fields interpolate only primitive T and mole fractions.
-    /// A bounded roundoff residual is added to the largest interpolated fraction
-    /// so the existing thermochemistry owner receives a unit simplex. Authored
-    /// station fractions are never normalized or repaired.
+    /// The roundoff of the interpolated fractions is closed by the shared
+    /// generated-simplex helper so the existing thermochemistry owner receives
+    /// an exact unit simplex. Authored station fractions are never normalized
+    /// or repaired.
     pub fn state_at(&self, x_m: f64) -> Result<ResolvedThermochemicalGasState, MaterialError> {
         if !x_m.is_finite() || x_m < 0.0 || x_m > self.length_m() {
             return Err(invalid(
@@ -297,26 +298,14 @@ impl AxialGasField {
                 .zip(b.composition.fractions())
                 .map(|(&a, &b)| a + w * (b - a))
                 .collect::<Vec<_>>();
-            let largest = fractions
-                .iter()
-                .enumerate()
-                .max_by(|(ia, a), (ib, b)| a.total_cmp(b).then_with(|| ib.cmp(ia)))
-                .map(|(i, _)| i)
-                .expect("validated active composition");
-            for _ in 0..4 {
-                let sum: f64 = fractions.iter().sum();
-                if sum == 1.0 {
-                    break;
-                }
-                let residual = 1.0 - sum;
-                if !sum.is_finite() || residual.abs() > 32.0 * f64::EPSILON * fractions.len() as f64
-                {
-                    return Err(invalid(
-                        "gas field interpolation left the composition simplex",
-                    ));
-                }
-                fractions[largest] += residual;
-            }
+            // The interpolated fractions are GENERATED, so only their roundoff is closed, by the shared helper. Adding the
+            // residual to the largest fraction alone can alternate between sums just below and just above one and then
+            // leaves an inexact sum for the exact-unit-sum owner to refuse (about 1.5 % of random three-species
+            // interpolations); the helper falls back to closing a component against its prefix.
+            fs_thermal::enthalpy::advection::species::close_generated_simplex(&mut fractions)
+                .map_err(|error| {
+                    invalid(format!("gas field interpolation left the composition simplex: {error}"))
+                })?;
             Composition::new(CompositionBasis::MoleFraction, fractions)
                 .map_err(|error| invalid(format!("gas field interpolated composition: {error}")))?
         };
