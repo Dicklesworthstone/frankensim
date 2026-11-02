@@ -895,6 +895,30 @@ late cancellation returns neither a new tank nor a partial audit. Focused
 regressions exercise analytic energy/waterline changes, continued native body
 motion, the dry-body datum, same-density exactness and atomic refusal.
 
+### Several moving bodies in one finite liquid inventory
+
+`FiniteHydrostaticTank::load_bodies` and `step_bodies` admit 1..=64 independently
+moving material frames/envelopes within the original total displacement-cell
+budget. One surface solves `A*h - sum(V_sub,i) = V_liquid`; the original source
+density supplies each body's displaced-fluid mass, buoyancy and torque. The
+liquid potential is `rho*|g|*(sum(I_depth,i) - sum(V_sub,i)^2/(2*A))`, retaining
+the cross-body displacement term and appearing exactly once in batch storage.
+`HydrostaticBuoyancy` carries force/moments without a duplicated fluid potential.
+Prepared frame maps and accepted clipped moments are reused; no combined mesh
+or source refresh is performed.
+
+Native `RigidBodyIntegrator::begin_verlet` / `VerletStage::finish` split the
+existing callback integrator without changing its arithmetic. All initial loads
+precede every native half-kick/drift; one shared endpoint waterline supplies every
+final half-kick. One absolute total-energy gate and final cancellation precede
+publication of the entire batch. Original single-body loading and callback
+stepping remain supported. Bodies must remain disjoint and retain the same
+bindings/source/inventory during the accounting window; contact, collision
+detection, fluid inertia, waves and damping are not inferred. Regressions check
+independent shared volume/energy and cross-body loading, each body's force/torque
+potential gradient, both collective heave modes with time refinement, exact
+singleton parity, collective-only overflow, frozen sources and batch rollback.
+
 ### Conserved finite immiscible layers
 
 `FiniteLayeredHydrostaticTank` retains one checked source snapshot and one

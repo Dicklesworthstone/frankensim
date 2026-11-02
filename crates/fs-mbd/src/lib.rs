@@ -55,6 +55,9 @@ pub mod tangential_friction;
 pub mod tri_wheel_cluster;
 pub mod versatran;
 
+mod verlet;
+pub use verlet::VerletStage;
+
 use core::fmt;
 
 /// A three-dimensional vector in an explicitly documented frame.
@@ -1720,55 +1723,9 @@ impl RigidBodyIntegrator {
     where
         E: From<DynamicsError>,
     {
-        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
-            return Err(DynamicsError::InvalidStepDuration.into());
-        }
-        self.gravity.validate()?;
-        state.validate()?;
-        properties.validate()?;
-        wrench_before.validate()?;
-        let diagnostics_before = self.diagnostics(state, properties)?;
-        let half = 0.5 * duration_seconds;
-        let weight_world = self.gravity.acceleration_world().scale(properties.mass);
-        let linear_mid = state
-            .linear_momentum_world
-            .add(wrench_before.force_world.add(weight_world).scale(half));
-        let angular_kicked = state
-            .angular_momentum_body
-            .add(wrench_before.torque_body.scale(half));
-        let (orientation_after, angular_drifted) = free_rotation_step(
-            state.pose.orientation,
-            angular_kicked,
-            properties,
-            duration_seconds,
-        )?;
-        let position_after = state
-            .pose
-            .position_world
-            .add(linear_mid.scale(duration_seconds / properties.mass));
-        let drifted = RigidBodyState::new(
-            Pose::new(position_after, orientation_after)?,
-            linear_mid,
-            angular_drifted,
-        )?;
-        let (wrench_after, endpoint) = endpoint_load(drifted)?;
-        wrench_after.validate()?;
-        let state_after = RigidBodyState::new(
-            drifted.pose,
-            linear_mid.add(wrench_after.force_world.add(weight_world).scale(half)),
-            angular_drifted.add(wrench_after.torque_body.scale(half)),
-        )?;
-        let diagnostics_after = self.diagnostics(state_after, properties)?;
-        Ok((
-            StepReceipt {
-                duration_seconds,
-                state_before: state,
-                state_after,
-                diagnostics_before,
-                diagnostics_after,
-            },
-            endpoint,
-        ))
+        let stage = self.begin_verlet(state, properties, wrench_before, duration_seconds)?;
+        let (wrench_after, endpoint) = endpoint_load(stage.drifted_state())?;
+        Ok((stage.finish(wrench_after)?, endpoint))
     }
 
     /// Performs one deterministic kick-drift Lie-group step.

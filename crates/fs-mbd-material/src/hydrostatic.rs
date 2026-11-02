@@ -38,9 +38,9 @@ pub use finite_layered::{
     FiniteLayeredTankDensityChange, FiniteTankInterface,
 };
 pub use finite_tank::{
-    FiniteHydrostaticTank, FiniteTankControls, FiniteTankDensityChange, FiniteTankFill,
-    HydrostaticTankGeometry,
-    MAX_TANK_VOLUME_EVALUATIONS,
+    FiniteHydrostaticTank, FiniteTankBodiesLoad, FiniteTankBodiesStep, FiniteTankBody,
+    FiniteTankControls, FiniteTankDensityChange, FiniteTankFill, FiniteTankSurface,
+    HydrostaticTankGeometry, MAX_TANK_BODIES, MAX_TANK_VOLUME_EVALUATIONS,
 };
 pub use step::{HydrostaticStep, HydrostaticStepControls, HydrostaticStepError};
 pub use geometry::{DisplacedVolume, DisplacementMesh, MAX_DISPLACEMENT_CELLS};
@@ -208,19 +208,19 @@ impl<F: FluidTransport + ?Sized> HydrostaticReservoir for HydrostaticMedium<'_, 
     }
 }
 
-/// Immutable hydrostatic load. Its center of buoyancy is weighted by the
-/// displaced fluid mass; this equals the volume centroid in a uniform medium.
+/// One body's displaced-fluid mass, buoyancy center and native wrench.
+/// A shared finite bath owns its gravitational potential once for all bodies;
+/// this force component does not duplicate that storage on each body.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HydrostaticLoad {
+pub struct HydrostaticBuoyancy {
     displaced: DisplacedVolume,
     displaced_mass_kg: f64,
     center_world: Option<Vec3>,
-    pressure_potential_j: f64,
     wrench: Wrench,
 }
-impl HydrostaticLoad {
+impl HydrostaticBuoyancy {
     fn from_mass_moments(displaced: DisplacedVolume, mass: f64,
-        center_body: Option<Vec3>, pressure_potential_j: f64, gravity: Gravity,
+        center_body: Option<Vec3>, gravity: Gravity,
         body: &PrincipalFrame, state: RigidBodyState) -> Result<Self, HydrostaticError> {
         let force = gravity.acceleration_world().scale(-mass);
         finite_vec(ga(force))?;
@@ -234,7 +234,7 @@ impl HydrostaticLoad {
                 (Some(ga(state.pose().point_world_from_body(arm)?)), torque)
             }
         };
-        Ok(Self { displaced, displaced_mass_kg: mass, center_world, pressure_potential_j,
+        Ok(Self { displaced, displaced_mass_kg: mass, center_world,
             wrench: Wrench { force_world: force, torque_body: torque } })
     }
     /// Integrated immersed geometry in the original body frame.
@@ -245,6 +245,36 @@ impl HydrostaticLoad {
     pub const fn center_of_buoyancy_world(&self) -> Option<Vec3> { self.center_world }
     /// Buoyancy alone, in the exact frames accepted by `RigidBodyIntegrator`.
     pub const fn wrench(&self) -> Wrench { self.wrench }
+}
+
+/// Immutable hydrostatic load and its reservoir displacement potential.
+/// Its buoyancy center is weighted by displaced fluid mass; this equals the
+/// volume centroid in a uniform medium.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HydrostaticLoad {
+    buoyancy: HydrostaticBuoyancy,
+    pressure_potential_j: f64,
+}
+impl HydrostaticLoad {
+    fn from_mass_moments(displaced: DisplacedVolume, mass: f64,
+        center_body: Option<Vec3>, pressure_potential_j: f64, gravity: Gravity,
+        body: &PrincipalFrame, state: RigidBodyState) -> Result<Self, HydrostaticError> {
+        Ok(Self {
+            buoyancy: HydrostaticBuoyancy::from_mass_moments(displaced, mass, center_body,
+                gravity, body, state)?,
+            pressure_potential_j,
+        })
+    }
+    /// Original native force and mass moments without a duplicate energy account.
+    pub const fn buoyancy(&self) -> HydrostaticBuoyancy { self.buoyancy }
+    /// Integrated immersed geometry in the original body frame.
+    pub const fn displaced(&self) -> DisplacedVolume { self.buoyancy.displaced() }
+    /// Actual displaced fluid mass [kg], including all declared density layers.
+    pub const fn displaced_mass_kg(&self) -> f64 { self.buoyancy.displaced_mass_kg() }
+    /// World-space center of buoyancy [m], or None when completely dry.
+    pub const fn center_of_buoyancy_world(&self) -> Option<Vec3> { self.buoyancy.center_of_buoyancy_world() }
+    /// Buoyancy alone, in the exact frames accepted by `RigidBodyIntegrator`.
+    pub const fn wrench(&self) -> Wrench { self.buoyancy.wrench() }
     /// Hydrostatic reservoir displacement potential [J]; zero when dry.
     /// With an overlying fluid, the reference plane fixes a signed datum.
     /// A finite tank uses the actual liquid's gravitational-energy change

@@ -1,4 +1,6 @@
 //! G1/G3/G4 finite-volume buoyancy through the actual material/dynamics APIs.
+#[path = "finite_tank/bodies.rs"]
+mod bodies;
 use super::*;
 use fs_mbd_material::hydrostatic::{
     FiniteHydrostaticTank, FiniteTankControls, HydrostaticStepControls, HydrostaticTankGeometry,

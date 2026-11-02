@@ -23,8 +23,12 @@ use fs_ga::{Se3, Vec3};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_mbd::{Gravity, RigidBodyState};
 
+mod bodies;
 mod density_change;
+mod solve;
+pub use bodies::{FiniteTankBodiesLoad, FiniteTankBodiesStep, FiniteTankBody, MAX_TANK_BODIES};
 pub use density_change::FiniteTankDensityChange;
+pub use solve::FiniteTankSurface;
 
 /// Hard bound on geometry evaluations per finite-bath load query.
 pub const MAX_TANK_VOLUME_EVALUATIONS: usize = 128;
@@ -190,9 +194,31 @@ impl<'a, F: FluidTransport + ?Sized> FiniteHydrostaticTank<'a, F> {
         world_from_body: Se3,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<FiniteTankFill, HydrostaticError> {
-        poll(&mut cancelled)?;
-        // Subtract origins before rotating, avoiding inversion of a large
-        // world translation followed by cancellation of equally large values.
+        let prepared = self.prepare_displacement(mesh, world_from_body, &mut cancelled)?;
+        self.check_open_area(prepared.lower, prepared.upper)?;
+        let mut displaced = DisplacedVolume::dry();
+        let surface = self.solve_surface(mesh.volume_m3(), &mut cancelled, |height, cancel| {
+            displaced = prepared.at_height(height, cancel)?;
+            Ok((displaced.volume_m3(), displaced.depth_integral_m4))
+        })?;
+        Ok(FiniteTankFill {
+            surface_height_m: surface.surface_height_m,
+            surface_point_world_m: surface.surface_point_world_m,
+            displaced,
+            liquid_volume_defect_m3: surface.liquid_volume_defect_m3,
+            volume_evaluations: surface.volume_evaluations,
+            liquid_gravitational_energy_change_j: surface.liquid_gravitational_energy_change_j,
+        })
+    }
+
+    fn prepare_displacement<'m>(
+        &self,
+        mesh: &'m DisplacementMesh,
+        world_from_body: Se3,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedDisplacement<'m>, HydrostaticError> {
+        poll(cancelled)?;
+        // Subtract origins before rotating to retain small tank-relative offsets.
         let inverse_rotation = self.geometry.world_from_tank.rotation().inverse();
         let tank_from_body = Se3::from_parts(
             inverse_rotation.compose(world_from_body.rotation())?,
@@ -204,7 +230,7 @@ impl<'a, F: FluidTransport + ?Sized> FiniteHydrostaticTank<'a, F> {
         let mut lower = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
         let mut upper = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         for cell in mesh.cells() {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             for &point in cell {
                 let p = finite_vec(tank_from_body.transform_point(point)?)?;
                 if p.x <= -0.5 * sides.x
@@ -221,132 +247,24 @@ impl<'a, F: FluidTransport + ?Sized> FiniteHydrostaticTank<'a, F> {
                 upper = Vec3::new(upper.x.max(p.x), upper.y.max(p.y), upper.z.max(p.z));
             }
         }
-        // The footprint bound guarantees positive open area at EVERY height
-        // for the caller's non-overlapping tetrahedral partition. A sealing
-        // piston needs a moving-boundary/pressure model, not this free surface.
+        Ok(PreparedDisplacement {
+            mesh,
+            tank_from_body,
+            lower,
+            upper,
+        })
+    }
+
+    fn check_open_area(&self, lower: Vec3, upper: Vec3) -> Result<(), HydrostaticError> {
+        // The complete envelope footprint leaves an open waterplane at every
+        // height. A sealing piston requires a different pressure model.
         let footprint = finite((upper.x - lower.x) * (upper.y - lower.y))?;
         if finite(self.area_m2 - footprint)? <= 0.0 {
             return Err(HydrostaticError::Invalid(
                 "finite tank has no representable open waterplane area",
             ));
         }
-        let mut evaluations = 0;
-        let mut evaluate = |height: f64| -> Result<(DisplacedVolume, f64), HydrostaticError> {
-            poll(&mut cancelled)?;
-            evaluations += 1;
-            let surface = Vec3::new(0.0, 0.0, height);
-            let down = Vec3::new(0.0, 0.0, -1.0);
-            let displaced = if height <= lower.z {
-                DisplacedVolume::dry()
-            } else if height >= upper.z {
-                mesh.whole(tank_from_body, down, surface)?
-            } else {
-                mesh.submerged(tank_from_body, down, surface, &mut cancelled)?
-            };
-            let residual =
-                finite(self.area_m2 * (height - self.empty_height_m) - displaced.volume_m3())?;
-            Ok((displaced, residual))
-        };
-        let mut low = self.empty_height_m;
-        let (low_displaced, mut f_low) = evaluate(low)?;
-        if f_low.abs() <= self.controls.maximum_volume_defect_m3 {
-            drop(evaluate);
-            return self.finish_fill(low, low_displaced, f_low, evaluations, &mut cancelled);
-        }
-        let unconstrained_high = finite(self.empty_height_m + mesh.volume_m3() / self.area_m2)?;
-        let mut high = unconstrained_high.min(sides.z);
-        let (high_displaced, mut f_high) = evaluate(high)?;
-        if f_high.abs() <= self.controls.maximum_volume_defect_m3 {
-            drop(evaluate);
-            return self.finish_fill(high, high_displaced, f_high, evaluations, &mut cancelled);
-        }
-        if f_high < 0.0 {
-            drop(evaluate);
-            if high == sides.z {
-                return Err(HydrostaticError::TankOverflow {
-                    excess_volume_m3: -f_high,
-                });
-            }
-            return Err(HydrostaticError::TankVolumeNotConverged {
-                defect_m3: f_high,
-                maximum_m3: self.controls.maximum_volume_defect_m3,
-                evaluations,
-            });
-        }
-        let mut best_defect = if f_low.abs() < f_high.abs() {
-            f_low
-        } else {
-            f_high
-        };
-        for evaluation in 3..=self.controls.maximum_volume_evaluations {
-            let span = high - low;
-            let fraction = -f_low / (f_high - f_low);
-            // Secants solve an upright prismatic body's linear interval in one
-            // evaluation. Periodic bisection also bounds progress near tiny
-            // caps where an endpoint secant can otherwise stagnate.
-            let trial = if evaluation % 4 == 0 || !(0.01..0.99).contains(&fraction) {
-                low + 0.5 * span
-            } else {
-                low + fraction * span
-            };
-            if trial <= low || trial >= high {
-                break;
-            }
-            let (displaced, residual) = evaluate(trial)?;
-            if residual.abs() <= self.controls.maximum_volume_defect_m3 {
-                drop(evaluate);
-                return self.finish_fill(trial, displaced, residual, evaluations, &mut cancelled);
-            }
-            if residual.abs() < best_defect.abs() {
-                best_defect = residual;
-            }
-            if residual < 0.0 {
-                low = trial;
-                f_low = residual;
-            } else {
-                high = trial;
-                f_high = residual;
-            }
-        }
-        Err(HydrostaticError::TankVolumeNotConverged {
-            defect_m3: best_defect,
-            maximum_m3: self.controls.maximum_volume_defect_m3,
-            evaluations,
-        })
-    }
-
-    fn finish_fill(
-        &self,
-        height: f64,
-        displaced: DisplacedVolume,
-        residual: f64,
-        evaluations: usize,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<FiniteTankFill, HydrostaticError> {
-        let volume = displaced.volume_m3();
-        let geometric_potential =
-            finite(displaced.depth_integral_m4 - 0.5 * volume * (volume / self.area_m2))?;
-        if geometric_potential < 0.0 {
-            return Err(HydrostaticError::Invalid(
-                "finite tank pressure potential is unrepresentable",
-            ));
-        }
-        let liquid_gravitational_energy_change_j =
-            finite(self.transport.density_kg_m3() * self.gravity_magnitude * geometric_potential)?;
-        let surface_point_world_m = finite_vec(
-            self.geometry
-                .world_from_tank
-                .transform_point(Vec3::new(0.0, 0.0, height))?,
-        )?;
-        poll(cancelled)?;
-        Ok(FiniteTankFill {
-            surface_height_m: height,
-            surface_point_world_m,
-            displaced,
-            liquid_volume_defect_m3: residual,
-            volume_evaluations: evaluations,
-            liquid_gravitational_energy_change_j,
-        })
+        Ok(())
     }
 
     /// Buoyancy at the conserved-inventory waterline, excluding body weight.
@@ -406,5 +324,31 @@ impl<F: FluidTransport + ?Sized> HydrostaticReservoir for FiniteHydrostaticTank<
         )?;
         poll(&mut cancelled)?;
         Ok(load)
+    }
+}
+
+/// Prepared original mesh/frame, retaining the native dry/full clipping paths.
+struct PreparedDisplacement<'a> {
+    mesh: &'a DisplacementMesh,
+    tank_from_body: Se3,
+    lower: Vec3,
+    upper: Vec3,
+}
+impl PreparedDisplacement<'_> {
+    fn at_height(
+        &self,
+        height: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DisplacedVolume, HydrostaticError> {
+        let surface = Vec3::new(0.0, 0.0, height);
+        let down = Vec3::new(0.0, 0.0, -1.0);
+        if height <= self.lower.z {
+            Ok(DisplacedVolume::dry())
+        } else if height >= self.upper.z {
+            self.mesh.whole(self.tank_from_body, down, surface)
+        } else {
+            self.mesh
+                .submerged(self.tank_from_body, down, surface, cancelled)
+        }
     }
 }
