@@ -1463,17 +1463,21 @@ pub(super) fn run_with_gas_sources(
     run_with_prepared_sources(args, sources, None, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_resolved_thermoviscous(
     bytes: &[u8], output: &Path, sidecar: &Path, block: usize, decimate: bool,
     policy: ObservationPolicy,
+    sources: Option<&ThermochemicalSources<'_>>,
+    load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
 ) -> Result<(), String> {
     if policy == ObservationPolicy::Acceptance {
         return Err("resolved thermoviscous fields remain a manufactured integration path; --acceptance requires specimen geometry and convergence qualification".into());
     }
-    let input = fs_couple::nsf_dg::thermoviscous::performance::file::ResolvedThermoviscousDgInput::from_bytes(
-        bytes, block, std::sync::Arc::new(CancelGate::new()),
+    let input = fs_couple::nsf_dg::thermoviscous::performance::file::ResolvedThermoviscousDgInput::from_bytes_with_sources(
+        bytes, block, std::sync::Arc::new(CancelGate::new()), sources, load_material,
     ).map_err(|e| e.to_string())?;
     let info = input.info();
+    let resolved_source_json = resolved_provenance(input.source());
     if !decimate && info.sample_rate_hz != RATE {
         return Err("non-48000-Hz thermoviscous observation requires explicit --decimate; no implicit resampling".into());
     }
@@ -1503,25 +1507,25 @@ fn render_resolved_thermoviscous(
         let input_hash = info.input_hash.to_hex();
         let wav_hash = rendered.hash.to_hex();
         let source_json = format!(
-            "\\\"resolved_thermoviscous_input\\\":{{\\\"schema\\\":\\\"{}\\\",\\\"blake3\\\":\\\"{}\\\",\\\"vertices\\\":{},\\\"tetrahedra\\\":{},\\\"wall_faces\\\":{},\\\"isothermal_faces\\\":{},\\\"source_port\\\":{},\\\"primary_duct_port\\\":{},\\\"band_hz\\\":[{:e},{:e}],\\\"bulk_to_shear_ratio\\\":{:e},\\\"model_scope\\\":\\\"original nonlinear NSF source into complete 3-D thermoviscous field and original DG radiation; manufactured geometry, no measured-flute qualification\\\"}}",
+            "\"resolved_thermoviscous_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"vertices\":{},\"tetrahedra\":{},\"wall_faces\":{},\"isothermal_faces\":{},\"source_port\":{},\"primary_duct_port\":{},\"band_hz\":[{:e},{:e}],\"bulk_to_shear_ratio\":{:e},\"model_scope\":\"original nonlinear NSF source into complete 3-D thermoviscous field and original DG radiation; manufactured geometry, no measured-flute qualification\"}}",
             fs_couple::nsf_dg::thermoviscous::performance::file::RESOLVED_THERMOVISCOUS_DG_PERFORMANCE_SCHEMA,
             input_hash, info.vertices, info.tetrahedra, info.wall_faces, info.isothermal_faces,
             info.source_port, info.primary_duct_port, info.band_hz[0], info.band_hz[1],
             info.bulk_to_shear_ratio,
         );
         let observation_json = format!(
-            "{{\\\"observation_sample_rate_hz\\\":{},\\\"observation_samples\\\":{},\\\"output_sample_rate_hz\\\":{RATE},\\\"ratio\\\":{},\\\"filter\\\":\\\"{}\\\",\\\"delay_output_samples\\\":{},\\\"first_output_source_index\\\":{},\\\"initial_history\\\":\\\"zero\\\",\\\"delay_compensated\\\":false,\\\"tail\\\":\\\"no-flush-declared-window\\\"}}",
+            "{{\"observation_sample_rate_hz\":{},\"observation_samples\":{},\"output_sample_rate_hz\":{RATE},\"ratio\":{},\"filter\":\"{}\",\"delay_output_samples\":{},\"first_output_source_index\":{},\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
             info.sample_rate_hz, info.samples, observation.ratio, observation.filter_profile,
             observation.delay_output_samples, observation.first_output_source_index,
         );
         let provenance = format!(
-            "{{\\\"schema\\\":\\\"frankensim-music-render-provenance-v1\\\",\\\"fixture\\\":\\\"resolved-thermoviscous-input\\\",\\\"sample_rate_hz\\\":{RATE},\\\"samples\\\":{samples},\\\"block\\\":{block},\\\"full_scale_pa\\\":{:e},\\\"clipped_samples\\\":{},\\\"peak_pa\\\":{:e},\\\"rms_pa\\\":{:e},\\\"wav_blake3\\\":\\\"{wav_hash}\\\",\\\"encoder\\\":\\\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\\\",{source_json},\\\"observation\\\":{observation_json}}}",
+            "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"resolved-thermoviscous-input\",\"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\"wav_blake3\":\"{wav_hash}\",\"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{source_json},{resolved_source_json},\"observation\":{observation_json}}}",
             info.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         );
         writeln!(metadata, "{provenance}").and_then(|_| metadata.flush())
             .map_err(|e| fs_couple::nsf_dg::thermoviscous::performance::file::ResolvedThermoviscousInputError::Build(
                 format!("sidecar write failed: {e}")))?;
-        println!("{{\\\"suite\\\":\\\"music-render\\\",\\\"verdict\\\":\\\"rendered\\\",\\\"fixture\\\":\\\"resolved-thermoviscous-input\\\",\\\"wav\\\":{},\\\"samples\\\":{samples},\\\"clipped\\\":{},\\\"peak_pa\\\":{:e},\\\"rms_pa\\\":{:e},\\\"wav_blake3\\\":\\\"{wav_hash}\\\",\\\"input_blake3\\\":\\\"{input_hash}\\\"}}",
+        println!("{{\"suite\":\"music-render\",\"verdict\":\"rendered\",\"fixture\":\"resolved-thermoviscous-input\",\"wav\":{},\"samples\":{samples},\"clipped\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\"wav_blake3\":\"{wav_hash}\",\"input_blake3\":\"{input_hash}\"}}",
             json_string(&output.display().to_string()), rendered.clipped, rendered.peak_pa, rendered.rms_pa);
         Ok(())
     }).map_err(|e| e.to_string())
@@ -1559,18 +1563,12 @@ fn run_with_prepared_sources(
             return Err("resolved command requires frankensim-resolved-dg-performance-v1 or frankensim-resolved-thermoviscous-dg-performance-v1 source bytes".into());
         }
     }
-    if bytes.starts_with(b"frankensim-resolved-thermoviscous-dg-performance-v1\n") {
-        if !attached_names.is_empty() || sources.is_some() || prepared.is_some() {
-            return Err("resolved thermoviscous native files do not yet accept external source attachments; use the embedded dry-air source rung".into());
-        }
-        return render_resolved_thermoviscous(&bytes, output, &sidecar, block, decimate, policy);
-    }
     let parent = Path::new(input).parent().unwrap_or(Path::new("."));
     let attached_sources = match prepared {
         Some(snapshot) => snapshot,
         None => attachments::AttachedSources::load(parent, &attached_names)?,
     };
-    let loaded = load_with_all_sources(&bytes, block, policy, sources, |name| {
+    let load_material = |name: &str| {
         // Restricted callbacks can only read eagerly admitted input snapshots.
         // A missing name never falls through to ambient filesystem access.
         if self_contained {
@@ -1589,7 +1587,15 @@ fn run_with_prepared_sources(
         }
         NormalizedMaterialCardPack::from_bytes(&pack_bytes)
             .map_err(|e| format!("material-card pack {name:?}: {e}"))
-    }, |name| {
+    };
+    if bytes.starts_with(b"frankensim-resolved-thermoviscous-dg-performance-v1\n") {
+        if flow_tap.is_some() {
+            return Err("resolved thermoviscous flow does not provide the flue aperture-flow export".into());
+        }
+        return render_resolved_thermoviscous(&bytes, output, &sidecar, block, decimate, policy,
+            sources, load_material);
+    }
+    let loaded = load_with_all_sources(&bytes, block, policy, sources, load_material, |name| {
         if self_contained {
             return attached_sources.get(name).map(<[u8]>::to_vec).ok_or_else(||
                 format!("--self-contained refuses external radiation artifact {name:?}"));

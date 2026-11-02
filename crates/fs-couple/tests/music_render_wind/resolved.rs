@@ -1,11 +1,21 @@
 //! The native entry point must use the same original physical owners and PCM.
 use super::{directory, success};
 use fs_couple::nsf_dg::performance::file::ResolvedDgFilePerformance;
+use fs_couple::nsf_dg::thermoviscous::performance::file::ResolvedThermoviscousDgInput;
 use fs_couple::pcm_wav::encode_pcm16_wav;
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_exec::CancelGate;
+use fs_material::gas_species::input::{ThermochemicalPhase, ThermochemicalSources};
 use std::process::Command;
 use std::sync::Arc;
+
+#[path = "../../src/render/schedule/reed/field_input/tests/support.rs"]
+mod support;
+// Reuse the existing strict receipt reader; no extra runtime dependency or
+// second JSON grammar is needed to verify the native application's output.
+#[path = "../../../fs-cli/src/json_read.rs"]
+#[allow(dead_code)]
+mod json;
 
 fn input() -> String {
     include_str!("../../examples/resolved-dg.performance")
@@ -136,8 +146,8 @@ fn resolved_command_accepts_native_thermoviscous_field_schema() {
     let dir = directory();
     let text = include_str!("../../examples/resolved-thermoviscous.performance")
         .replace("output 1920 1", "output 16 1")
-        .replace("ramp 384 0 293.15 20 295\nhold 768 20 295\nramp 1152 20 295 0 293.15\nhold 1920 0 293.15",
-            "hold 16 0 293.15");
+        .replace("boundary pressure-temperature 4\nramp 384 0 293.15 20 295\nhold 768 20 295\nramp 1152 20 295 0 293.15\nhold 1920 0 293.15",
+            "boundary pressure-temperature 1\nhold 16 0 293.15");
     let input = dir.join("resolved-thermoviscous.performance");
     let output = dir.join("resolved-thermoviscous.wav");
     std::fs::write(&input, text).unwrap();
@@ -146,12 +156,81 @@ fn resolved_command_accepts_native_thermoviscous_field_schema() {
         .args(["--block", "4", "--decimate", "--self-contained"]).output().unwrap());
     assert!(output.exists());
     let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
-    for token in ["\\\"fixture\\\":\\\"resolved-thermoviscous-input\\\"",
-        "\\\"resolved_thermoviscous_input\\\":{",
+    json::JsonValue::parse(&metadata).expect("native sidecar must be a JSON object, not escaped JSON text");
+    for token in ["\"fixture\":\"resolved-thermoviscous-input\"",
+        "\"resolved_thermoviscous_input\":{", "\"resolved_input\":{",
         "frankensim-resolved-thermoviscous-dg-performance-v1",
-        "\\\"vertices\\\":8", "\\\"tetrahedra\\\":6",
+        "\"vertices\":8", "\"tetrahedra\":6",
         "original nonlinear NSF source into complete 3-D thermoviscous field"]
     {
         assert!(metadata.contains(token), "{token}: {metadata}");
     }
+}
+
+#[test]
+fn native_thermoviscous_breath_keeps_attached_gas_owners_and_original_microphone_pcm() {
+    let dir = directory();
+    let packs = support::packs("custom-breath", 0.028, 3.5, 200.0);
+    let names = ["species.pack", "nasa9.pack", "transport.pack"];
+    for (name, bytes) in names.into_iter().zip([
+        packs.species.to_bytes(), packs.nasa9.to_bytes(), packs.transport.to_bytes(),
+    ]) { std::fs::write(dir.join(name), bytes).unwrap(); }
+    let text = include_str!("../../examples/resolved-thermoviscous-breath.performance")
+        .replace("output 1920 1", "output 384 1")
+        .replace("boundary finite-reservoir-actuation 0 0.01 4\nramp 384 0 0 -1e-7 0.0005\nhold 768 -1e-7 0.0005\nramp 1152 -1e-7 0.0005 1e-7 0\nhold 1920 1e-7 0",
+            "boundary finite-reservoir-actuation 0 0.01 1\nhold 384 -1e-7 0.0005")
+        .replace("mixture 300 95000 mole 4 N2 0.75 O2 0.20 CO2 0.04 H2O 0.01",
+            "thermochemical 300 95000 mole 1 custom-breath 1")
+        .replace("\nbulk_viscosity", "\nenergy_solve 1e-8 96\nbulk_viscosity");
+    let bindings = [packs.binding()];
+    let sources = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    let reference = ResolvedThermoviscousDgInput::from_bytes_with_sources(text.as_bytes(), 37,
+        Arc::new(CancelGate::new_clock_free()), Some(&sources),
+        |_| Err("fixture has no material wall".into())).unwrap();
+    let expected = reference.with_renderer(|renderer, info| {
+        let mut observed = DecimatedRenderer::new(renderer, info.sample_rate_hz, 48000, 37).unwrap();
+        let mut pressure = vec![0.0; observed.output_samples_for(info.samples).unwrap() as usize];
+        for chunk in pressure.chunks_mut(37) { observed.block(chunk).unwrap(); }
+        assert!(pressure.iter().all(|p| p.is_finite()));
+        assert!(pressure.iter().any(|p| *p != 0.0));
+        Ok(encode_pcm16_wav(&pressure, 48000, info.full_scale_pa).unwrap().0)
+    }).unwrap();
+    std::fs::write(dir.join("input.performance"), text).unwrap();
+    for block in [1, 37] {
+        let output_name = format!("thermoviscous-{block}-\"source\".wav");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_music_render"));
+        command.current_dir(&dir).args(["resolved", "input.performance", &output_name,
+            "--block", &block.to_string(), "--decimate", "--self-contained",
+            "--gas-component", names[0], names[1], names[2], "--gas-water", "none",
+            "--gas-phase", "frozen"]);
+        for name in names { command.args(["--attached-source", name]); }
+        let result = command.output().unwrap();
+        let status = json::JsonValue::parse(std::str::from_utf8(&result.stdout).unwrap()).unwrap();
+        assert_eq!(status.str_field("verdict"), Some("rendered"));
+        assert_eq!(status.str_field("wav"), Some(output_name.as_str()));
+        success(result);
+        let output = dir.join(&output_name);
+        assert_eq!(std::fs::read(&output).unwrap(), expected);
+        let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        let receipt = json::JsonValue::parse(&metadata).unwrap();
+        assert_eq!(receipt.str_field("fixture"), Some("resolved-thermoviscous-input"));
+        let source = receipt.get("resolved_input").unwrap();
+        assert_eq!(source.get("finite_reservoir").unwrap().str_field("source_kind"), Some("thermochemical"));
+        assert!(source.get("reservoir_observation").is_some());
+        assert!(source.get("observer_gas").unwrap().as_object().is_some());
+        assert!(metadata.contains(&packs.transport.content_hash().to_hex()));
+        assert!(metadata.contains(&packs.nasa9.content_hash().to_hex()));
+    }
+    // A pack on disk is not an admission to a restricted request.
+    let refused = Command::new(env!("CARGO_BIN_EXE_music_render"))
+        .current_dir(&dir).args(["resolved", "input.performance", "unlisted.wav",
+            "--decimate", "--self-contained", "--gas-component", names[0], names[1], names[2],
+            "--gas-water", "none", "--gas-phase", "frozen"])
+        .output().unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("--self-contained refuses external gas source files"));
+    assert!(!dir.join("unlisted.wav").exists());
+    assert!(!dir.join("unlisted.provenance.json").exists());
 }

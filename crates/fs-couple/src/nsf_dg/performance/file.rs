@@ -823,8 +823,8 @@ impl ResolvedDgFilePerformance {
     pub fn upstream_wall_layout(&self) -> Option<&DgMaterialWallLayout> { self.upstream_wall.as_ref() }
     pub fn into_renderer(self) -> NsfDgPerformance<D3q27> { self.renderer }
     /// Transfer a completely cold parsed source into another physical coupler.
-    /// Optional direct-renderer observers and attachments refuse in the shared
-    /// handoff rather than being discarded.
+    /// Its finite material inventory and unchanged exterior observers transfer
+    /// as original owners; unsupported acoustic topology still refuses.
     pub(crate) fn into_cold_performance(self)
         -> Result<super::NsfDgColdPerformance<D3q27>, RenderError>
     {

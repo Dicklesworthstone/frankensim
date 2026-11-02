@@ -307,15 +307,15 @@ pub struct NsfDg<L: Lattice3<27>> {
 
 /// Cold ownership handoff used by higher-level physical couplers.
 ///
-/// This deliberately exposes only the original core owners needed to replace
-/// the acoustic load before any step is accepted. Optional upstream loads,
-/// exterior mouth reactions and finite source inventories are not representable
-/// in this handoff and therefore refuse instead of being discarded.
+/// The original fluid and any finite source inventory move together before
+/// any step is accepted. Optional upstream loads and exterior mouth reactions
+/// change the acoustic port basis and still refuse instead of being discarded.
 pub(crate) struct NsfDgColdParts<L: Lattice3<27>> {
     pub zone: NsfGrid3<L>,
     pub load: DgPortLoad,
     pub limits: NsfDgLimits,
     pub high: bool,
+    finite_reservoir: Option<finite_reservoir::FiniteReservoir>,
 }
 
 fn poll(gate: &CancelGate) -> Result<(), NsfDgError> {
@@ -473,19 +473,20 @@ impl<L: Lattice3<27>> NsfDg<L> {
     /// Consume a completely cold direct NSF/DG binding for reuse by a more
     /// complete acoustic owner. No physical history is reconstructed.
     ///
-    /// This is intentionally narrower than a generic decompose operation: any
-    /// optional owner whose state could be lost makes the handoff refuse.
+    /// The finite reservoir is the same owned inventory, not a reconstruction
+    /// from its pressure and temperature. Optional acoustic participants whose
+    /// port basis cannot transfer still make the handoff refuse.
     pub(crate) fn into_cold_parts(self) -> Result<NsfDgColdParts<L>, NsfDgError> {
         if self.steps != 0 || self.zone.steps() != 0 || self.load.state().step_count() != 0
             || self.upstream.is_some() || self.reservoir_radiation.is_some()
-            || self.reservoir_radiations.is_some() || self.finite_reservoir.is_some()
+            || self.reservoir_radiations.is_some()
         {
             return Err(NsfDgError::Input(
                 "cold resolved ownership handoff refuses advanced or optionally attached owners",
             ));
         }
         Ok(NsfDgColdParts { zone: self.zone, load: self.load,
-            limits: self.limits, high: self.high })
+            limits: self.limits, high: self.high, finite_reservoir: self.finite_reservoir })
     }
 
     /// Advance the explicitly located source against its retained participants.

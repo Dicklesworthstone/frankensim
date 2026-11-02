@@ -11,7 +11,7 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::cavity_modal::interior::thermoviscous::dg::ThermoviscousDg;
 use crate::nsf_dg::{NsfDgDrive, NsfDgError, same_clock};
-use crate::nsf_dg::performance::{ReservoirObservation, clock::IntervalClock, source_intervals_for};
+use crate::nsf_dg::performance::{NsfDgColdObservers, ReservoirObservation, clock::IntervalClock, source_intervals_for};
 use crate::nsf_dg::performance::reservoir::{self, ReservoirPressure};
 use crate::pcm_wav::baffled::BaffledPressure;
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
@@ -84,6 +84,27 @@ pub struct NsfThermoviscousDgPerformance<'a, 'c, L: Lattice3<27>> {
 }
 
 impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
+    /// The native cold handoff inserts an interior field while retaining the
+    /// exact original terminal load, fluid tiles, observation and sample clock.
+    /// Move those already prepared surface owners, including source-bound gas
+    /// kernels and common numerical padding. No source is inferred from a receipt.
+    fn with_cold_observers(mut self, observers: NsfDgColdObservers) -> Result<Self, RenderError> {
+        if self.gate.is_requested() { return Err(RenderError::Voice(AcousticRealizeError::Cancelled)); }
+        if self.poisoned || self.output_cursor != 0 || self.system.accepted_steps() != 0
+            || self.last.is_some() || self.observer_gas.is_some() || !self.reservoirs.is_empty()
+            || self.projected_observer != observers.projected_observer
+            || self.receiver.is_some() != observers.receiver.is_some()
+            || self.terminal_flows.len() != observers.terminal_flows.len()
+        {
+            return Err(sizing("cold exterior transfer requires the original unadvanced ports and observation clock"));
+        }
+        self.receiver = observers.receiver;
+        self.observer_gas = observers.observer_gas;
+        self.reservoirs = observers.reservoirs;
+        self.terminal_flows = observers.terminal_flows;
+        Ok(self)
+    }
+
     /// One physical interval per output sample. `observation_port` is the FE
     /// identity of an attached DG, not the external NSF connection or an ordinal.
     #[allow(clippy::too_many_arguments)]

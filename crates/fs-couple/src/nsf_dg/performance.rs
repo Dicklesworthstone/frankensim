@@ -47,7 +47,8 @@ pub fn source_intervals_for(physical_dt_s: f64, output_rate_hz: u32, output_samp
 /// poisons playback, retaining any already accepted prefix and observer state.
 /// Cold source package for another in-crate physical composition.
 /// The caller receives exact original owners and the complete authored control
-/// history; observer histories are deliberately rebuilt by the new composition.
+/// history. Cold exterior observers can follow the SAME fluid tiles, original
+/// terminal load and observation clock through an added interior field.
 pub(crate) struct NsfDgColdPerformance<L: Lattice3<27>> {
     pub system: super::NsfDgColdParts<L>,
     pub boundary: Vec<NsfDgDrive>,
@@ -56,6 +57,18 @@ pub(crate) struct NsfDgColdPerformance<L: Lattice3<27>> {
     pub output_samples: u64,
     pub maximum_block: usize,
     pub gate: Arc<CancelGate>,
+    pub(in crate::nsf_dg) observers: NsfDgColdObservers,
+}
+
+/// Original unadvanced surface receivers and their material propagation.
+/// This is an ownership transfer within the same exterior geometry and clock,
+/// not a recipe for reconstructing observers from numerical state snapshots.
+pub(in crate::nsf_dg) struct NsfDgColdObservers {
+    pub receiver: Option<BaffledPressure>,
+    pub observer_gas: Option<GasPropagationReport>,
+    pub reservoirs: Vec<reservoir::ReservoirPressure>,
+    pub terminal_flows: Vec<f64>,
+    pub projected_observer: bool,
 }
 
 pub struct NsfDgPerformance<L: Lattice3<27>> {
@@ -273,15 +286,16 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
     /// Consume an unadvanced resolved performance so another physical owner can
     /// reuse its exact NSF state, DG inlet, controls and observation clock.
     ///
-    /// Prepared gas/tile observers are not transferable because they retain
-    /// histories tied to this direct acoustic topology. Callers must attach
-    /// those observers after constructing the replacement topology.
+    /// Prepared gas/tile receivers move with the unchanged original terminal
+    /// load, fluid tiles and output clock. No accepted history may transfer,
+    /// and an acoustic topology with new exterior ports needs its own binding.
     pub(crate) fn into_cold_parts(self) -> Result<NsfDgColdPerformance<L>, RenderError> {
-        if self.poisoned || self.output_cursor != 0 || self.last.is_some()
-            || self.observer_gas.is_some() || !self.reservoirs.is_empty()
-        {
+        if self.gate.is_requested() {
+            return Err(RenderError::Voice(AcousticRealizeError::Cancelled));
+        }
+        if self.poisoned || self.output_cursor != 0 || self.last.is_some() {
             return Err(sizing(
-                "resolved ownership handoff requires a cold source before material or reservoir observers",
+                "resolved ownership handoff requires unadvanced physical and observation histories",
             ));
         }
         let system = self.system.into_cold_parts().map_err(|error|
@@ -289,7 +303,11 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         Ok(NsfDgColdPerformance { system, boundary: self.boundary,
             observation: self.observation, sample_rate_hz: self.sample_rate_hz,
             output_samples: self.output_samples, maximum_block: self.maximum_block,
-            gate: self.gate })
+            gate: self.gate, observers: NsfDgColdObservers {
+                receiver: self.receiver, observer_gas: self.observer_gas,
+                reservoirs: self.reservoirs, terminal_flows: self.terminal_flows,
+                projected_observer: self.projected_observer,
+            } })
     }
 
     /// Original exterior material, selected physical law and individual path responses.

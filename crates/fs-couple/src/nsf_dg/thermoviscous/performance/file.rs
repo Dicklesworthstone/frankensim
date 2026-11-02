@@ -6,12 +6,11 @@
 //! load becomes a duct attached to the complete three-dimensional field; the NSF
 //! zone couples to a separate declared field port. No source state is rebuilt.
 //!
-//! First-rung scope is intentionally strict: the embedded direct source must not
-//! already own upstream DG, finite-reservoir, reciprocal-mouth or prepared
-//! observer histories, because those owners cannot be silently discarded during
-//! a topology replacement. The field itself is a two-port volume: one NSF port
-//! and the original primary DG port. Additional field ducts and source-owned
-//! molecular/wall memories remain subsequent explicit extensions.
+//! The original finite gas inventory and prepared cold duct/mouth/gas receivers
+//! follow the unchanged fluid tiles, exterior and output clock. The field itself
+//! is a two-port volume: one NSF port and the original primary DG port. Upstream
+//! DG and reciprocal-mouth attachments still refuse because their direct port
+//! basis is not the replacement field's basis. No optional owner is discarded.
 
 use super::NsfThermoviscousDgPerformance;
 use crate::cavity_modal::interior::thermoviscous::{ThermoviscousInterior, source_medium};
@@ -27,6 +26,8 @@ use fs_feec::acoustics::thermoviscous::{ThermoviscousBoundary, ThermoviscousFe, 
 use fs_feec::acoustics::thermoviscous::time::ThermoviscousTimeLimits;
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::NsfGrid3;
+use fs_matdb::NormalizedMaterialCardPack;
+use fs_material::gas_species::input::ThermochemicalSources;
 use fs_rep_mesh::TetComplex;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -118,6 +119,20 @@ impl ResolvedThermoviscousDgInput {
     pub fn from_bytes(bytes: &[u8], maximum_block: usize, gate: Arc<CancelGate>)
         -> Result<Self, ResolvedThermoviscousInputError>
     {
+        Self::from_bytes_with_sources(bytes, maximum_block, gate, None,
+            |_| Err("solid duct walls require an explicit material source loader".into()))
+    }
+
+    /// Resolve the embedded source through the same caller-loaded gas and solid
+    /// material catalogue as the direct NSF/DG route. The complete field uses
+    /// that original inlet gas; no air snapshot or alternate material parser
+    /// substitutes for the source's EOS, calorics, transport or wall mechanics.
+    pub fn from_bytes_with_sources(
+        bytes: &[u8], maximum_block: usize, gate: Arc<CancelGate>,
+        sources: Option<&ThermochemicalSources<'_>>,
+        load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, ResolvedThermoviscousInputError>
+    {
         if bytes.len() > MAX_RESOLVED_THERMOVISCOUS_BYTES || gate.is_requested() {
             return Err(bad("resolved thermoviscous source exceeds its byte budget or was cancelled"));
         }
@@ -130,8 +145,8 @@ impl ResolvedThermoviscousDgInput {
         let (field_text, source_text) = rest.split_once(marker)
             .ok_or_else(|| bad("field source requires one embedded resolved_source"))?;
         if source_text.contains(marker) { return Err(bad("resolved_source may occur only once")); }
-        let source = ResolvedDgFilePerformance::from_bytes(source_text.as_bytes(), maximum_block,
-            Arc::clone(&gate))?;
+        let source = ResolvedDgFilePerformance::from_bytes_with_sources(
+            source_text.as_bytes(), maximum_block, Arc::clone(&gate), sources, load_material)?;
         let source_info = source.info();
 
         let mut reader = Reader { lines: field_text.lines(), line: 1 };
@@ -247,6 +262,9 @@ impl ResolvedThermoviscousDgInput {
 
     pub const fn info(&self) -> ResolvedThermoviscousDgInfo { self.info }
 
+    /// Original source material, geometry, controls and exterior declarations.
+    pub const fn source(&self) -> &ResolvedDgFilePerformance { &self.source }
+
     /// Build the complete borrowed field only for the duration of the callback.
     /// This avoids self-referential storage and keeps the original source/mesh
     /// lifetimes honest. The callback receives the ordinary pressure renderer.
@@ -255,11 +273,22 @@ impl ResolvedThermoviscousDgInput {
             -> Result<T, ResolvedThermoviscousInputError>)
         -> Result<T, ResolvedThermoviscousInputError>
     {
+        self.with_physical_renderer(|renderer, info| callback(renderer, info))
+    }
+
+    /// Observe the original physical participants and their accepted balances
+    /// as well as microphone pressure. Borrowed field owners cannot escape the
+    /// callback; the ordinary erased pressure interface remains available above.
+    pub fn with_physical_renderer<T>(self,
+        callback: impl FnOnce(&mut NsfThermoviscousDgPerformance<'_, '_, D3q27>, ResolvedThermoviscousDgInfo)
+            -> Result<T, ResolvedThermoviscousInputError>)
+        -> Result<T, ResolvedThermoviscousInputError>
+    {
         let info = self.info;
         let cold = self.source.into_cold_performance().map_err(build)?;
         let NsfDgColdPerformance {
-            system: NsfDgColdParts { zone, load: primary, limits, high }, boundary,
-            observation, sample_rate_hz, output_samples, maximum_block, gate,
+            system: NsfDgColdParts { zone, load: primary, limits, high, finite_reservoir }, boundary,
+            observation, sample_rate_hz, output_samples, maximum_block, gate, observers,
         } = cold;
         validate_source_geometry(&zone, high, &self.points, &self.ports[info.source_port])?;
         if gate.is_requested() { return Err(bad("field assembly cancelled")); }
@@ -281,19 +310,26 @@ impl ResolvedThermoviscousDgInput {
         let load = ThermoviscousDgLoad::new(acoustic, info.source_port, &gate).map_err(build)?;
         let downstream_patch = zone.characteristic_patch_on(high).is_some();
         let source_patch = zone.characteristic_patch_on(!high).is_some();
-        let system = match (downstream_patch, source_patch) {
+        let mut system = match (downstream_patch, source_patch) {
             (false, false) => crate::nsf_dg::thermoviscous::NsfThermoviscousDg::new(zone, load, high, limits, &gate),
             (true, false) => crate::nsf_dg::thermoviscous::NsfThermoviscousDg::new_on_patch(zone, load, high, limits, &gate),
             (false, true) => crate::nsf_dg::thermoviscous::NsfThermoviscousDg::new_with_source_patch(zone, load, high, limits, &gate),
             (true, true) => crate::nsf_dg::thermoviscous::NsfThermoviscousDg::new_on_patches(zone, load, high, limits, &gate),
         }.map_err(build)?;
+        // Both this exact zone and its admitted source inventory moved from
+        // one unadvanced owner. Preserve the material storage itself, including
+        // caloric chart and source identities; do not rebind from p/T scalars.
+        system.finite_reservoir = finite_reservoir;
         let mut renderer = NsfThermoviscousDgPerformance::new_resampled_with_drives(
             system, info.primary_duct_port, observation, sample_rate_hz, boundary,
             output_samples, maximum_block, Arc::clone(&gate),
-        ).map_err(build)?;
+        ).map_err(build)?.with_cold_observers(observers).map_err(build)?;
         callback(&mut renderer, info)
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 fn validate_source_geometry(zone: &NsfGrid3<D3q27>, high: bool, points: &[[f64; 3]],
     port: &[[u32; 3]]) -> Result<(), ResolvedThermoviscousInputError>

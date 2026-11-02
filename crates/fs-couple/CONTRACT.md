@@ -15495,6 +15495,31 @@ callback partition, source molecular memory and transactional refusal. This is
 an exploratory fixed-composition, local-linear boundary capability; it does
 not qualify a measured flute, a finite player airway or nonlinear transparency.
 
+The native `ResolvedThermoviscousDgInput::from_bytes_with_sources` forwards
+the same original thermochemical catalogue and solid-material callback into
+its embedded resolved source. Its cold composition moves the actual finite
+supply inventory, NSF zone, primary DG load and unadvanced exterior receivers
+into the complete field. The inventory is never reconstructed from pressure
+and temperature; duct/mouth receivers retain their original geometry, signed
+flow, material propagation kernels and output clock. Advanced histories,
+upstream acoustic loads and reciprocal-mouth attachments still refuse because
+their acoustic port basis needs an explicit complete-field binding.
+`with_physical_renderer` exposes the original live participants and balances
+within the same borrowed-field callback. `music_render` uses its existing
+restricted attachment loader and emits both the complete-field and original
+embedded-source information as valid JSON.
+
+`resolved-thermoviscous-breath.performance` composes the existing manufactured
+field geometry with a finite supply, volume/heat actuation and an observed
+escape aperture. Native regression sources cover inventory/energy retention,
+the independent original receiver-kernel sum, material caloric substitutions,
+callback identity, source refusals and cancellation. These physics regressions
+remain unexecuted here; only the extracted original JSON formatting and strict
+JSON-reader check executed. The inserted thermoviscous field remains linear
+about its reference gas; it does not transport mean breath mass or enthalpy.
+Finite-source coupling retains the original held-state first-order partition
+and still requires physical-clock and observation-clock refinement.
+
 ## Simultaneous retained modal contacts and shared finite-cell thermal feedback
 
 `friction::tangential::multiple::heat` connects the original

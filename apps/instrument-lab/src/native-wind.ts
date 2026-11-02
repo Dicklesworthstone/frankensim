@@ -7,6 +7,7 @@ import clarinetG3Source from "../../../data/instruments/descriptions/clarinet/pe
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import resolvedThermoviscousSource from "../../../crates/fs-couple/examples/resolved-thermoviscous.performance?raw";
+import resolvedThermoviscousBreathSource from "../../../crates/fs-couple/examples/resolved-thermoviscous-breath.performance?raw";
 import pressureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-pressure.performance?raw";
 import warmRampResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-warm-ramp.performance?raw";
 import splitApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-split-aperture.performance?raw";
@@ -138,7 +139,16 @@ const EXAMPLES = [
     source: resolvedThermoviscousSource,
     decimate: true,
     intro: "Starter: warm resolved nonlinear flow drives a complete three-dimensional thermoviscous acoustic volume before the original radiating DG bore. Edit the tetrahedral field, wall partition, source geometry or breath history and render through the same native resolved performer.",
-    help: "The field mesh is explicit SI geometry and must sit outside the nonlinear NSF volume. Its source port must coincide with the selected NSF interface; its downstream port receives the original DG load. This first native rung deliberately refuses finite-source, upstream-field and reciprocal-mouth attachments rather than dropping them. It is manufactured integration geometry, not a measured flute or convergence claim.",
+    help: "The field mesh is explicit SI geometry and must sit outside the nonlinear NSF volume. Its source port must coincide with the selected NSF interface; its downstream port receives the original DG load. The native assembly retains attached finite gas inventories, prepared duct and escape microphones, and their material atmosphere response. Upstream-field and reciprocal-mouth attachments still require their own supported binding. This is manufactured integration geometry, not a measured flute or convergence claim.",
+  },
+  {
+    name: "resolved-thermoviscous-breath.performance",
+    label: "Resolved breath — finite gas through 3-D acoustics",
+    renderer: "resolved",
+    source: resolvedThermoviscousBreathSource,
+    decimate: true,
+    intro: "Starter: prescribed chamber volume motion and heat change a finite gas inventory, driving the original nonlinear flow, complete thermoviscous volume and radiating bore. A separate escape opening reaches the same microphone through its own physical flow and propagation path.",
+    help: "Edit the original gas records, chamber actuation, field geometry or microphone placement. Source and exterior gases remain independently declared; attached thermochemical sources and duct-wall materials use the shared controls. Pressure and temperature follow the same finite inventory's mass and energy balances. Its existing first-order source/flow and heat/volume partition requires clock refinement. The original 96 kHz observation is explicitly decimated to 48 kHz. This manufactured integration specimen does not establish measured flute or reed accuracy.",
   },
   {
     name: "resolved-dg.performance",
