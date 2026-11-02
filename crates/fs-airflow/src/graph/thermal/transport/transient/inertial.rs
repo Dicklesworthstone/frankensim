@@ -7,6 +7,8 @@
 //! Source callbacks resolve temperature-dependent losses, gravity and exchange;
 //! neither accepted owner changes until both independent physical gates pass.
 
+pub mod adaptive;
+
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
