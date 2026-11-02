@@ -17,6 +17,12 @@ pub(super) fn run(
         return Err("broadband mechanics require the same explicit --decimate clock opt-in as ordinary modal files".into());
     }
     let compiled_controls = performance.compiled_controls();
+    let continuous_force_tones = performance.continuous_force_tones();
+    let integrator = if continuous_force_tones == 0 {
+        "augmented continuous mode/filter exact ZOH"
+    } else {
+        "augmented continuous mode/filter/forcing exact exponential"
+    };
     let reports=performance.reports().iter().map(|r|format!(
         "{{\"producer_id\":{},\"authority\":\"EstimateOnly\",\"producer_relative_error_estimate\":{:e},\"fit_order\":{},\"fit_iterations\":{},\"delay_kernel_half_len\":{},\"delay_samples\":{:e},\"held_out_max_rel\":{:e},\"tolerance\":{:e},\"input_batches\":{},\"constant_narrow_band_compatibility\":{}}}",
         json_string(&r.source_id),r.producer_relative_error_estimate,r.controls.fit_order,
@@ -43,7 +49,7 @@ pub(super) fn run(
         info.full_scale_pa,
     )?;
     let provenance = format!(
-        "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"modal-broadband\",\"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\"wav_blake3\":\"{}\",\"modal_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"voices\":{},\"modes\":{},\"force_events\":{},\"compiled_controls\":{compiled_controls},\"broadband\":[{reports}],\"integrator\":\"augmented continuous mode/filter exact ZOH\",\"delay_scope\":\"bandlimited interpolation of sampled pressure; zero acoustic history\",\"mechanics_sample_rate_hz\":{},\"observation_ratio\":{},\"observation_filter\":\"{}\",\"observation_delay_output_samples\":{},\"radiation\":\"producer transfer samples, gas-invariant\",\"model_scope\":\"authored modal model and declared computed receiver; EstimateOnly\"}}}}",
+        "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"modal-broadband\",\"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\"wav_blake3\":\"{}\",\"modal_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"voices\":{},\"modes\":{},\"force_events\":{},\"compiled_controls\":{compiled_controls},\"continuous_force_tones\":{continuous_force_tones},\"force_phase_origin_s\":0,\"broadband\":[{reports}],\"integrator\":\"{integrator}\",\"delay_scope\":\"bandlimited interpolation of sampled pressure; zero acoustic history\",\"mechanics_sample_rate_hz\":{},\"observation_ratio\":{},\"observation_filter\":\"{}\",\"observation_delay_output_samples\":{},\"radiation\":\"producer transfer samples, gas-invariant\",\"model_scope\":\"authored modal model and declared computed receiver; EstimateOnly\"}}}}",
         info.full_scale_pa,
         rendered.clipped,
         rendered.peak_pa,

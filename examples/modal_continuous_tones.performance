@@ -1,0 +1,24 @@
+frankensim-modal-performance-v1
+sample_rate_hz 48000
+samples 4800
+full_scale_pa 0.0001
+limits 0.9 1 100000 1000000000 10000000
+compile_limits 32 100000
+voices 1
+voice retain-state 1 2
+mode 3141.592653589793 0.01 0 0 0 0
+port 0 1
+port 0 -0.25
+events 2
+force 0 0 0 0.05
+force 2400 0 0 0
+tone_limits 8 1048576 10000000 100000
+tones 3
+tone 0 0 18851.126718870616 0.1 -0.03
+tone 0 1 18958.726267252467 0.08 0.02
+tone 0 0 37702.25343774123 0.005 0.001
+broadband 1
+transfer example:instantaneous-velocity-gain 0 0 1 4 1 0.000001 2 1
+frequency 100 2 0
+frequency 30000 2 0
+withheld 10000 2 0

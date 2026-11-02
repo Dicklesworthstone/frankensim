@@ -1,5 +1,27 @@
 # CONTRACT: fs-couple
 
+## Continuous physical tones in modal performance files
+
+The v1 broadband performance-file path now accepts optional `tone_limits`,
+`tones`, and `tone VOICE PORT OMEGA_RAD_S COSINE_N SINE_N` source records before
+the receiver block. These prescribe continuous physical newtons through the
+original signed work-conjugate port columns; they do not author acoustic output
+partials. Existing held assignments remain the DC channel, and static preload
+retains its pre-window held-load meaning. Frequencies and phase remain on the
+original mechanical clock, referenced to performance time zero across callbacks.
+The existing continuous multi-tone mechanical/receiver owner retains all cross
+terms in work, viscous heat and pressure. Candidate phase advances only after
+an accepted complete observation step. Tone/driver storage and setup/step work
+are explicitly bounded across affected voices, with conservative equal shares;
+projection is charged against the existing force compiler's work allowance.
+The original clock/Nyquist guard and physical model/receiver limits still apply.
+Held-only files retain their original stepping path. Complex constant legacy
+quadrature refuses continuous forcing. Native source regressions compare with
+an independent continuous-force response, expose held-sampling bias, and cover
+signed-port cancellation, rejected-step phase/work/heat preservation and invalid
+source/clock/resource refusal. The example and record semantics are documented
+in `examples/MODAL_CONTINUOUS_FORCES.md`; they make no instrument-realism claim.
+
 ## Nonlinear resonance branches through the original pHS
 
 `phs_orbit::continue_forced_frequency_response` connects the complete original

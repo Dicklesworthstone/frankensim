@@ -15,6 +15,9 @@ use crate::render::{
 };
 use fs_math::c64::C64;
 
+#[path = "broadband/tones.rs"]
+mod tones;
+
 /// Existing mechanical performance with one declared receiver per source voice.
 /// The appended block's exact bytes, including computed transfer samples, are
 /// bound into the input hash. All sources retain EstimateOnly authority.
@@ -24,6 +27,8 @@ pub struct BroadbandModalPerformance {
     reports: Vec<BroadbandModalReport>,
     forces: Vec<Vec<f64>>,
     events: Vec<ProjectedForceEvent>,
+    tones: Vec<Option<tones::ToneDriver>>,
+    tone_count: usize,
     next_event: usize,
     completed: u64,
     max_block: usize,
@@ -40,6 +45,12 @@ impl BroadbandModalPerformance {
     /// ITERATIONS DELAY_HALF MAX_REL_ERROR TRAINING_COUNT HELD_OUT_COUNT`, then
     /// mode-complete `frequency OMEGA H_RE H_IM ...` and `withheld ...` rows.
     /// Counts, full-file bytes and operator budgets are checked before fitting.
+    /// Optional `tone_limits MAX_TONES STORAGE_BYTES PREPARATION_WORK STEP_WORK`,
+    /// `tones COUNT`, and `tone VOICE PORT OMEGA_RAD_S COSINE_N SINE_N` records
+    /// may precede `broadband`. These are physical forces, continuous from t=0
+    /// over the declared window, alongside the existing held-force schedule.
+    /// Static preload still uses the pre-window held loads. Tone limits include
+    /// a DC column and share storage/work across affected voices conservatively.
     /// Coupled/nonlinear performances refuse: their within-step trajectories
     /// cannot be replaced by this independent-mode exponential.
     pub fn from_bytes(bytes: &[u8], max_block: usize) -> Result<Self, String> {
@@ -50,11 +61,29 @@ impl BroadbandModalPerformance {
         let offset = text
             .find("\nbroadband ")
             .ok_or("explicit broadband block required")?;
-        let parsed = ParsedPerformance::from_bytes(&bytes[..offset], max_block)
+        let tone_section = tones::section(&text[..offset]);
+        let mechanical_end = tone_section.map_or(offset, |(at, _)| at);
+        let mut parsed = ParsedPerformance::from_bytes(&bytes[..mechanical_end], max_block)
             .map_err(|e| e.to_string())?;
         if parsed.info.schema != MODAL_PERFORMANCE_SCHEMA || parsed.coupled.is_some() {
             return Err("broadband receiver requires independent exact-ZOH v1 mechanics; coupled/nonlinear trajectories need their own within-step observer".into());
         }
+        let source_program = tone_section
+            .map(|(start, line)| {
+                let columns: Vec<&[Vec<f64>]> = parsed
+                    .voices
+                    .iter()
+                    .map(|voice| voice.port_shapes.as_slice())
+                    .collect();
+                tones::ToneProgram::read(
+                    &text[start..offset],
+                    line,
+                    &columns,
+                    parsed.info.sample_rate_hz,
+                    &mut parsed.force_config.max_projection_terms,
+                )
+            })
+            .transpose()?;
         let mut reader = Reader {
             lines: text[offset + 1..].lines(),
             line: text[..offset].lines().count(),
@@ -141,12 +170,28 @@ impl BroadbandModalPerformance {
         let mut info = parsed.info;
         info.input_hash =
             fs_blake3::hash_domain("org.frankensim.modal-performance.broadband.v1", bytes);
+        let tone_count = source_program.as_ref().map_or(0, |program| program.count);
+        let tone_drivers = match source_program {
+            Some(program) => program
+                .sources
+                .into_iter()
+                .zip(&observers)
+                .map(|(source, observer)| {
+                    source
+                        .map(|source| source.prepare(observer, program.budget))
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            None => (0..count).map(|_| None).collect(),
+        };
         Ok(Self {
             info,
             observers,
             reports,
             forces,
             events,
+            tones: tone_drivers,
+            tone_count,
             next_event: 0,
             completed: 0,
             max_block,
@@ -161,6 +206,10 @@ impl BroadbandModalPerformance {
     }
     pub fn compiled_controls(&self) -> usize {
         self.events.len()
+    }
+    /// Authored physical tone records; existing held assignments are separate.
+    pub const fn continuous_force_tones(&self) -> usize {
+        self.tone_count
     }
 }
 fn read_frequency(
@@ -218,8 +267,17 @@ impl PressureRenderer for BroadbandModalPerformance {
                 self.next_event += 1;
             }
             let mut pressure = 0.0;
-            for (observer, force) in self.observers.iter_mut().zip(&self.forces) {
-                match observer.step(force) {
+            for ((observer, force), tones) in self
+                .observers
+                .iter_mut()
+                .zip(&self.forces)
+                .zip(&mut self.tones)
+            {
+                let observed = match tones {
+                    Some(driver) => driver.step(observer, force),
+                    None => observer.step(force).map_err(|e| e.to_string()),
+                };
+                match observed {
                     Ok(p) => pressure += p,
                     Err(_) => {
                         self.poisoned = true;
@@ -265,6 +323,54 @@ mod tests {
             assert_eq!(x.to_bits(), y.to_bits());
         }
         assert!(b.block(&mut [0.0]).is_err());
+    }
+    #[test]
+    fn continuous_force_example_keeps_phase_across_callbacks_and_preserves_held_events() {
+        let text = include_str!("../../../../../../../examples/modal_continuous_tones.performance");
+        let mut whole = BroadbandModalPerformance::from_bytes(text.as_bytes(), 4800).unwrap();
+        let mut partitioned = BroadbandModalPerformance::from_bytes(text.as_bytes(), 37).unwrap();
+        assert_eq!(whole.continuous_force_tones(), 3);
+        assert_eq!(whole.compiled_controls(), 2);
+        let mut a = vec![0.0; 4800];
+        let mut b = a.clone();
+        whole.block(&mut a).unwrap();
+        for block in b.chunks_mut(37) {
+            partitioned.block(block).unwrap();
+        }
+        assert!(a.iter().any(|p| p.abs() > 1e-8));
+        assert!(a.iter().zip(&b).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert_eq!(whole.forces[0], vec![0.0]);
+        assert_eq!(
+            whole.observers[0].model().states(),
+            partitioned.observers[0].model().states()
+        );
+        assert_eq!(
+            whole.observers[0].last_modal_frame(),
+            partitioned.observers[0].last_modal_frame()
+        );
+        assert_ne!(
+            whole.info.input_hash,
+            fs_blake3::hash_domain(
+                "org.frankensim.modal-performance.broadband.v1",
+                text.replace("0.1 -0.03", "0.2 -0.03").as_bytes(),
+            )
+        );
+    }
+    #[test]
+    fn continuous_file_refuses_legacy_quadrature_and_oversized_source_before_rendering() {
+        let tones = "tone_limits 8 1048576 10000000 100000\ntones 1\ntone 0 0 1000 1 0\n";
+        let complex = constant_input().replace("broadband 1", &format!("{tones}broadband 1"));
+        assert!(BroadbandModalPerformance::from_bytes(complex.as_bytes(), 17).is_err());
+        let real = complex.replace("2 -0.3", "2 0");
+        assert!(BroadbandModalPerformance::from_bytes(real.as_bytes(), 17).is_ok());
+        for bad in [
+            real.replace("tones 1", "tones 33"),
+            real.replace("tone 0 0", "tone 0 5"),
+            real.replace("1048576", "1"),
+            real.replace("tone 0 0 1000", "tone 0 0 999999"),
+        ] {
+            assert!(BroadbandModalPerformance::from_bytes(bad.as_bytes(), 17).is_err());
+        }
     }
     #[test]
     fn malformed_or_missing_operator_never_silently_uses_legacy() {
