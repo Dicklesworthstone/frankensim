@@ -127,6 +127,21 @@ impl PreparedMolecularScreenReceivers<'_, '_, '_> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<near_field::VectorObservation, HelmholtzError> {
         let jump = self.source.pressure_jump(rates, &mut cancelled)?;
+        self.evaluate_jump(&jump, cancelled)
+    }
+
+    /// Internal matched jump observation for an incident-plus-motion owner.
+    /// The immutable geometry/wave rows remain those of this source.
+    pub(super) fn evaluate_jump(
+        &self,
+        jump: &[C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<near_field::VectorObservation, HelmholtzError> {
+        if jump.len() != self.source.prepared.surface.vertices.len() {
+            return Err(bad(
+                "molecular screen receiver jump extent differs from its source",
+            ));
+        }
         self.rows.evaluate(
             |panel| {
                 self.source.prepared.facets[panel]

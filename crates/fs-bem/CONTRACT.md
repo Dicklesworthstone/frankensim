@@ -1338,6 +1338,37 @@ absorbing P1 field/gradient references, coherence and admission/cancellation.
 They are authored and syntax checked; native execution remains pending the
 existing missing dependency and unavailable build-runner blockers.
 
+`MolecularExterior::prepare_incident` retains one evaluated molecular wave and
+the original coherent source declaration. Its reusable analytic sampler and
+`with_field` avoid repeated material evaluation at quadrature points or across
+incident cases. Physical plane pressure, monopole volume flow and force-dipole
+strengths use the original shared kernels and real `rho*omega`; whole point
+batches have explicit source-point work admission and transactional refusal.
+
+`PreparedScreen::solve_molecular_illumination` adds reciprocal sound excitation
+of the same two-sided screen. One original H/LU serves every mechanical source
+column and every blocked incident case. The blocked drive is the weak integral
+of `-incident_velocity.dot(normal)` at the original triangle quadrature points.
+It is not a centroid or free-edge-clamped velocity. Incoming analytic pressure
+is continuous across this zero-thickness surface, so the blocked scattered
+jump alone supplies force `-G*jump` on structural coordinates. Finite emitters
+may lie on either side but must clear every retained triangle face and edge.
+Declared quadrature order and source clearance do not certify incident-load
+spatial accuracy; that remains a separate source/mesh/quadrature refinement.
+
+The result retains original blocked jumps, forces and immutable illuminations.
+Its prepared receivers cache analytic incident fields and reuse one P1 row
+bank for the coherent blocked-plus-motion jump; incident pressure and velocity
+are added exactly once. Budgets include whole-batch boundary, sampling,
+projection and receiver payloads, with bounded cancellation and no partial
+publication. Signed total interface work under illumination is not outgoing
+scattered power or gas absorption alone. Five focused sampler/screen regressions
+cover independent source pressure/gradient, native blocked-screen recovery,
+independent weak drive/work and total-field integration, interference and
+resource/source-clearance/cancellation boundaries. They are authored and syntax
+checked; native execution remains blocked by the existing unavailable runner
+and missing sibling dependency.
+
 `reciprocal_radiation::pipe_end` (IRP .100, RULING (2)) measures the open
 end of a thin unflanged pipe on this owner, in Levine and Schwinger's own
 geometry.

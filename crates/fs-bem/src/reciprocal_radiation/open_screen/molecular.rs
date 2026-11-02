@@ -11,10 +11,15 @@
 //! medium it contains exterior molecular heat as well as outgoing energy, and
 //! is not far-field flux or a causal time-domain realization.
 use super::*;
-use crate::helmholtz::molecular::{MolecularError, MolecularExterior};
+use crate::helmholtz::molecular::{MolecularError, MolecularExterior, PreparedMolecularIncident};
 
 mod receivers;
 pub use receivers::PreparedMolecularScreenReceivers;
+mod incident;
+pub use incident::{
+    MolecularScreenIllumination, MolecularScreenIlluminationLimits,
+    PreparedMolecularScreenIlluminationReceivers,
+};
 
 /// Whole source-batch limits in addition to the original geometry admission.
 #[derive(Debug, Clone, Copy)]
@@ -83,8 +88,39 @@ impl<'s> PreparedScreen<'s> {
         omega: f64,
         rows: &[&[[f64; 3]]],
         limits: MolecularScreenPortLimits,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularScreenVelocityPortSolution<'p, 's>, MolecularError> {
+        self.solve_molecular_ports_with(
+            source,
+            omega,
+            rows,
+            limits,
+            None,
+            |_, _, _, _, _| Ok(()),
+            cancelled,
+        )
+        .map(|(motion, ())| motion)
+    }
+
+    /// Keep the original H/LU alive while an admitted companion batch solves
+    /// its own weak drives. All callbacks finish before either result escapes.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_molecular_ports_with<'p, T, C: FnMut() -> bool>(
+        &'p self,
+        source: &MolecularExterior,
+        omega: f64,
+        rows: &[&[[f64; 3]]],
+        limits: MolecularScreenPortLimits,
+        prepared_incident: Option<&PreparedMolecularIncident<'_>>,
+        mut finish: impl FnMut(
+            Vec<Vec<f64>>,
+            &[C64],
+            &fs_la::eigen_complex::LuComplex,
+            f64,
+            &mut C,
+        ) -> Result<T, MolecularError>,
+        mut cancelled: C,
+    ) -> Result<(MolecularScreenVelocityPortSolution<'p, 's>, T), MolecularError> {
         poll(&mut cancelled)?;
         let ports = rows.len();
         let count = limits.ports;
@@ -108,20 +144,7 @@ impl<'s> PreparedScreen<'s> {
         let jumps = ports
             .checked_mul(self.surface.vertices.len())
             .ok_or_else(|| bad("molecular screen jump extent overflows"))?;
-        let n = self.n as u128;
-        let p = ports as u128;
-        let v = self.surface.vertices.len() as u128;
-        let lu_scratch =
-            fs_la::eigen_complex::lu_complex_blocked_workspace_bytes(self.n, self.options.workers)
-                .ok_or_else(|| bad("molecular screen LU scratch extent overflows"))?;
-        let bytes = 32 * n * n
-            + 8 * p * n
-            + 16 * p * v
-            + 16 * p * p
-            + 40 * n
-            + 128 * p
-            + 4096
-            + lu_scratch as u128;
+        let bytes = self.molecular_port_payload(ports)?;
         if entries > count.maximum_matrix_entries
             || jumps > count.maximum_jump_entries
             || frequency_work > count.maximum_work
@@ -139,7 +162,16 @@ impl<'s> PreparedScreen<'s> {
             }
         }
         let rho_omega = source.source().gas().density * omega;
-        let k = source.source().relaxing_wavenumber(omega)?;
+        let k = if let Some(incident) = prepared_incident {
+            // Only the original source's private illumination call supplies
+            // this owner; its evaluated gas and frequency remain immutable.
+            if incident.angular_frequency_rad_s().to_bits() != omega.to_bits() {
+                return Err(bad("molecular incident frequency differs from its screen").into());
+            }
+            incident.wavenumber_per_m()
+        } else {
+            source.source().relaxing_wavenumber(omega)?
+        };
         if !finite(k) || k.re <= 0.0 || k.im < 0.0 || !rho_omega.is_finite() || rho_omega <= 0.0 {
             return Err(bad(
                 "molecular screen requires passive outgoing k and representable rho*omega",
@@ -177,71 +209,116 @@ impl<'s> PreparedScreen<'s> {
                     return Err(bad("molecular screen physical drive is unrepresentable").into());
                 }
             }
-            let mut x = rhs.clone();
-            lu.solve_with_cancel(&mut x, &mut cancelled)?;
-            let mut residual = 0.0_f64;
-            let mut scale = 0.0_f64;
-            for i in 0..self.n {
-                poll(&mut cancelled)?;
-                let mut lhs = C64::ZERO;
-                let mut envelope = rhs[i].abs();
-                for j in 0..self.n {
-                    lhs = lhs + h[i * self.n + j] * x[j];
-                    envelope += h[i * self.n + j].abs() * x[j].abs();
-                }
-                if !finite(lhs) || !envelope.is_finite() {
-                    return Err(bad("molecular screen original residual is unrepresentable").into());
-                }
-                residual = residual.max((lhs - rhs[i]).abs());
-                scale = scale.max(envelope);
-            }
-            let backward = residual / scale.max(f64::MIN_POSITIVE);
-            if !backward.is_finite() || backward > 1e-10 || x.iter().any(|&z| !finite(z)) {
-                return Err(bad("molecular screen original pressure residual failed").into());
-            }
+            let (jump, backward) = self.solve_molecular_rhs(&rhs, &h, &lu, &mut cancelled)?;
             maximum_backward_residual = maximum_backward_residual.max(backward);
-            let mut jump = zeroed(self.surface.vertices.len(), C64::ZERO)?;
-            for (i, dof) in self.dof.iter().enumerate() {
-                if i % 256 == 0 {
-                    poll(&mut cancelled)?;
-                }
-                if let Some(u) = dof {
-                    jump[i] = x[*u];
-                }
-            }
             fields.push(jump);
         }
         let mut impedance = zeroed(entries, C64::ZERO)?;
         for (j, jump) in fields.iter().enumerate() {
             for (i, row) in weak.iter().enumerate() {
                 poll(&mut cancelled)?;
-                let mut effort = Sum::default();
-                for (vertex, dof) in self.dof.iter().enumerate() {
-                    if vertex % 256 == 0 {
-                        poll(&mut cancelled)?;
-                    }
-                    if let Some(u) = dof {
-                        effort.add(jump[vertex].scale(row[*u]));
-                    }
-                }
-                let value = effort.value();
-                if !finite(value) {
-                    return Err(bad("molecular screen full work projection overflows").into());
-                }
-                impedance[i * ports + j] = value;
+                impedance[i * ports + j] = self.molecular_jump_effort(row, jump, &mut cancelled)?;
             }
         }
+        let extra = finish(weak, &h, &lu, rho_omega, &mut cancelled)?;
         poll(&mut cancelled)?;
-        Ok(MolecularScreenVelocityPortSolution {
-            prepared: self,
-            source: source.clone(),
-            omega,
-            k,
-            jumps: fields,
-            impedance,
-            maximum_backward_residual,
-            frequency_work,
-        })
+        Ok((
+            MolecularScreenVelocityPortSolution {
+                prepared: self,
+                source: source.clone(),
+                omega,
+                k,
+                jumps: fields,
+                impedance,
+                maximum_backward_residual,
+                frequency_work,
+            },
+            extra,
+        ))
+    }
+
+    fn molecular_port_payload(&self, ports: usize) -> Result<u128, HelmholtzError> {
+        let (n, p, v) = (
+            self.n as u128,
+            ports as u128,
+            self.surface.vertices.len() as u128,
+        );
+        let scratch =
+            fs_la::eigen_complex::lu_complex_blocked_workspace_bytes(self.n, self.options.workers)
+                .ok_or_else(|| bad("molecular screen LU scratch extent overflows"))?;
+        Ok(32 * n * n
+            + 8 * p * n
+            + 16 * p * v
+            + 16 * p * p
+            + 40 * n
+            + 128 * p
+            + 4096
+            + scratch as u128)
+    }
+
+    /// Original physical residual and nodal reconstruction shared by the
+    /// real mechanical columns and complex blocked-illumination drives.
+    fn solve_molecular_rhs(
+        &self,
+        rhs: &[C64],
+        h: &[C64],
+        lu: &fs_la::eigen_complex::LuComplex,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<C64>, f64), MolecularError> {
+        let mut x = rhs.to_vec();
+        lu.solve_with_cancel(&mut x, &mut *cancelled)?;
+        let mut residual = 0.0_f64;
+        let mut scale = 0.0_f64;
+        for i in 0..self.n {
+            poll(cancelled)?;
+            let mut lhs = C64::ZERO;
+            let mut envelope = rhs[i].abs();
+            for j in 0..self.n {
+                lhs = lhs + h[i * self.n + j] * x[j];
+                envelope += h[i * self.n + j].abs() * x[j].abs();
+            }
+            if !finite(lhs) || !envelope.is_finite() {
+                return Err(bad("molecular screen original residual is unrepresentable").into());
+            }
+            residual = residual.max((lhs - rhs[i]).abs());
+            scale = scale.max(envelope);
+        }
+        let backward = residual / scale.max(f64::MIN_POSITIVE);
+        if !backward.is_finite() || backward > 1e-10 || x.iter().any(|&z| !finite(z)) {
+            return Err(bad("molecular screen original pressure residual failed").into());
+        }
+        let mut jump = zeroed(self.surface.vertices.len(), C64::ZERO)?;
+        for (i, dof) in self.dof.iter().enumerate() {
+            if i % 256 == 0 {
+                poll(cancelled)?;
+            }
+            if let Some(u) = dof {
+                jump[i] = x[*u];
+            }
+        }
+        Ok((jump, backward))
+    }
+
+    fn molecular_jump_effort(
+        &self,
+        row: &[f64],
+        jump: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<C64, HelmholtzError> {
+        let mut effort = Sum::default();
+        for (vertex, dof) in self.dof.iter().enumerate() {
+            if vertex % 256 == 0 {
+                poll(cancelled)?;
+            }
+            if let Some(u) = dof {
+                effort.add(jump[vertex].scale(row[*u]));
+            }
+        }
+        let value = effort.value();
+        if !finite(value) {
+            return Err(bad("molecular screen full work projection overflows"));
+        }
+        Ok(value)
     }
 }
 
@@ -373,4 +450,4 @@ impl Sum {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

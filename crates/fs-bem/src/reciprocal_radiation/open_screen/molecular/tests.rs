@@ -8,7 +8,7 @@ use fs_material::{
     relaxation::{RelaxingMedium, input::read_relaxation},
 };
 
-fn exterior(relaxing: bool) -> MolecularExterior {
+pub(super) fn exterior(relaxing: bool) -> MolecularExterior {
     let input = if relaxing {
         "declared 1 synthetic 1 vibration 1 900 1 power 101.325 293.15 0 200 500"
     } else {
@@ -20,7 +20,7 @@ fn exterior(relaxing: bool) -> MolecularExterior {
     MolecularExterior::new(law.evaluate(&medium).unwrap(), [100.0, 2000.0]).unwrap()
 }
 
-fn surface() -> OpenPanels {
+pub(super) fn surface() -> OpenPanels {
     let mut vertices = Vec::new();
     for j in 0..4 {
         for i in 0..4 {
@@ -40,7 +40,7 @@ fn surface() -> OpenPanels {
     OpenPanels::new(vertices, triangles).unwrap()
 }
 
-fn options(workers: usize) -> OpenOptions {
+pub(super) fn options(workers: usize) -> OpenOptions {
     OpenOptions {
         edge_level: 0,
         maximum_edge_level: 0,
@@ -53,7 +53,7 @@ fn options(workers: usize) -> OpenOptions {
     }
 }
 
-fn operator_limits() -> ScreenComplexValueLimits {
+pub(super) fn operator_limits() -> ScreenComplexValueLimits {
     ScreenComplexValueLimits {
         maximum_matrix_entries: 1024,
         maximum_workspace_bytes: 4_000_000,
@@ -71,7 +71,7 @@ fn derivative_limits() -> ScreenComplexLimits {
     }
 }
 
-fn limits(surface: &OpenPanels) -> MolecularScreenPortLimits {
+pub(super) fn limits(surface: &OpenPanels) -> MolecularScreenPortLimits {
     MolecularScreenPortLimits {
         ports: ScreenPortLimits {
             maximum_ports: 2,
@@ -84,7 +84,7 @@ fn limits(surface: &OpenPanels) -> MolecularScreenPortLimits {
     }
 }
 
-fn area_normal(surface: &OpenPanels, facet: usize) -> (f64, Point) {
+pub(super) fn area_normal(surface: &OpenPanels, facet: usize) -> (f64, Point) {
     let t = surface.triangles()[facet].map(|v| surface.vertices()[v]);
     let a: Point = core::array::from_fn(|i| t[1][i] - t[0][i]);
     let b: Point = core::array::from_fn(|i| t[2][i] - t[0][i]);
@@ -97,7 +97,7 @@ fn area_normal(surface: &OpenPanels, facet: usize) -> (f64, Point) {
     (0.5 * length, cross.map(|v| v / length))
 }
 
-fn velocity_rows(surface: &OpenPanels) -> Vec<Vec<[f64; 3]>> {
+pub(super) fn velocity_rows(surface: &OpenPanels) -> Vec<Vec<[f64; 3]>> {
     [[0.4, -0.2, 1.0], [0.2, 0.7, 0.4]]
         .iter()
         .enumerate()
@@ -148,7 +148,7 @@ fn pairing(surface: &OpenPanels, dofs: &[Option<usize>], trace: &[[f64; 3]]) -> 
     row
 }
 
-fn effort(surface: &OpenPanels, trace: &[[f64; 3]], jump: &[C64]) -> C64 {
+pub(super) fn effort(surface: &OpenPanels, trace: &[[f64; 3]], jump: &[C64]) -> C64 {
     let mut value = C64::ZERO;
     for (f, ids) in surface.triangles().iter().enumerate() {
         let (area, _) = area_normal(surface, f);
@@ -161,7 +161,7 @@ fn effort(surface: &OpenPanels, trace: &[[f64; 3]], jump: &[C64]) -> C64 {
     value
 }
 
-fn close(actual: &[C64], expected: &[C64], tolerance: f64) {
+pub(super) fn close(actual: &[C64], expected: &[C64], tolerance: f64) {
     assert_eq!(actual.len(), expected.len());
     let scale = expected.iter().map(|z| z.abs()).fold(0.0, f64::max);
     let error = actual

@@ -19,7 +19,8 @@ mod complex;
 pub use complex::{ScreenComplexLimits, ScreenComplexOperator, ScreenComplexValueLimits};
 mod molecular;
 pub use molecular::{
-    MolecularScreenPortLimits, MolecularScreenVelocityPortSolution,
+    MolecularScreenIllumination, MolecularScreenIlluminationLimits, MolecularScreenPortLimits,
+    MolecularScreenVelocityPortSolution, PreparedMolecularScreenIlluminationReceivers,
     PreparedMolecularScreenReceivers,
 };
 

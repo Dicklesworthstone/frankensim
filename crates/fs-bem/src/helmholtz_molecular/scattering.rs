@@ -80,7 +80,7 @@ fn admit_source_work(terms: usize, points: usize, maximum: u64) -> Result<(), Mo
 }
 
 impl MolecularExterior {
-    fn incident_wave(&self, omega: f64) -> Result<DampedWaveNumber, MolecularError> {
+    pub(super) fn incident_wave(&self, omega: f64) -> Result<DampedWaveNumber, MolecularError> {
         if !omega.is_finite() || omega < self.band_rad_s[0] || omega > self.band_rad_s[1] {
             return Err(bad(
                 "molecular incident frequency is outside its declared band",
@@ -112,18 +112,8 @@ impl MolecularExterior {
         point_m: [f64; 3],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<IncidentSample, MolecularError> {
-        poll(&mut cancelled)?;
-        field.validate()?;
-        let wave = self.incident_wave(omega)?;
-        let out = field.sample_wave(
-            wave,
-            self.source.gas().density * omega,
-            None,
-            point_m,
-            &mut cancelled,
-        )?;
-        poll(&mut cancelled)?;
-        Ok(out)
+        let prepared = self.prepare_incident(omega, field, &mut cancelled)?;
+        Ok(prepared.pressure_velocity_at(point_m, &mut cancelled)?)
     }
 
     /// Scatter coherent plane waves, finite monopoles and compact force sources

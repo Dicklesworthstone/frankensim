@@ -29,6 +29,10 @@ pub use scattering::{
     MolecularScatteredField, MolecularScatteringOptions, MolecularScatteringSolution,
 };
 
+#[path = "helmholtz_molecular/incident.rs"]
+mod incident;
+pub use incident::PreparedMolecularIncident;
+
 #[path = "helmholtz_molecular/near_field.rs"]
 mod adaptive;
 pub use adaptive::{MolecularNearFieldOptions, PreparedMolecularNearField};

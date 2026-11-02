@@ -39,7 +39,7 @@ fn midpoint(a: Point, b: Point) -> Point { std::array::from_fn(|i| a[i]+0.5*(b[i
 
 // The input coordinate envelope prevents products here from overflowing. Work
 // near a far-away tiny body is additionally refused at its roundoff clearance.
-fn distance(x: Point, t: Triangle) -> f64 {
+pub(crate) fn distance(x: Point, t: Triangle) -> f64 {
     let [a,b,c]=t; let u=sub(b,a); let v=sub(c,a); let w=sub(x,a);
     let n=cross(u,v); let nn=dot(n,n);
     let beta=dot(cross(w,v),n)/nn; let gamma=dot(cross(u,w),n)/nn;
