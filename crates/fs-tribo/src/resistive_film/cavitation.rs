@@ -133,6 +133,9 @@ impl CavitatingFilm {
         liquid: CavitationLiquid,
         solve: CavitationSolveConfig,
     ) -> Result<Self, FilmError> {
+        if geometry.pressure_viscosity_coefficient_per_pa() != 0.0 {
+            return fail("cavitating film requires pressure-independent viscosity");
+        }
         if !liquid.density_kg_m3.is_finite()
             || liquid.density_kg_m3 <= 0.0
             || !liquid.cavitation_pressure_pa.is_finite()

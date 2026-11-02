@@ -54,6 +54,9 @@ impl IsothermalFilm {
     /// The geometry's gauge-pressure limit still applies, but is not restricted
     /// to the small-pressure approximation required by the incompressible image.
     pub fn at_ambient(geometry: ResistiveFilm, q: &[f64], gas: AmbientGas) -> Result<Self, FilmError> {
+        if geometry.pressure_viscosity_coefficient_per_pa() != 0.0 {
+            return fail("isothermal gas film requires pressure-independent viscosity");
+        }
         geometry.validate_configuration(q)?;
         let rt=gas.temperature_k*gas.specific_gas_constant_j_kg_k;
         if !gas.pressure_pa.is_finite() || gas.pressure_pa<=0.0 || !gas.pressure_pa.powi(2).is_finite()

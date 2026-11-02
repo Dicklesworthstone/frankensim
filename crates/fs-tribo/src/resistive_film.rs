@@ -2,8 +2,10 @@
 //!
 //! This is an orthogonal image to the compressible 1-D gas-film time solver.
 //! It has no clock or pressure history. At every caller-supplied configuration,
-//! `L(h) p = A B v`, and the positive resisting force is `B^T A p`.
-//! Thus mechanical power equals `sum_edges G (p_i-p_j)^2 >= 0`.
+//! `L(h) psi = A B v`, and the positive resisting force is `B^T A p`.
+//! With constant viscosity, `psi=p`. The optional Barus pressure-viscosity law
+//! uses `psi=(1-exp(-alpha*p))/alpha`, without another pressure iteration.
+//! Mechanical power is `sum_edges G (psi_i-psi_j) (p_i-p_j) >= 0`.
 //! A caller must evaluate this port *inside* its implicit mechanical equation.
 //!
 //! Poiseuille conductance is `width * h_+^3 / (12 * viscosity * length)`.
@@ -13,10 +15,10 @@
 //! Reservoir pressures are zero gauge. Suction is retained within the supplied
 //! pressure limit. Compressibility, gas inertia, thermal effects, slip, moving
 //! topology and fluid acoustic radiation are not part of this image.
-/// Compressible mass storage and transport on the same geometric pressure graph.
-pub mod isothermal;
 /// Mass-conserving liquid-film rupture, starvation and reformation on this graph.
 pub mod cavitation;
+/// Compressible mass storage and transport on the same geometric pressure graph.
+pub mod isothermal;
 
 use core::fmt;
 
@@ -47,7 +49,7 @@ pub struct FilmCell {
 /// One Poiseuille passage between two cells or to zero-gauge ambient pressure.
 #[derive(Debug, Clone)]
 pub struct FilmChannel {
-    /// Upstream cell (the law itself is reciprocal).
+    /// Orientation of positive volume flow out of this cell.
     pub from: usize,
     /// Adjacent cell, or `None` for an ambient boundary.
     pub to: Option<usize>,
@@ -59,14 +61,17 @@ pub struct FilmChannel {
     pub gap: GapPort,
 }
 
-/// Caller-declared domain of this low-pressure, thin-gap viscous image.
+/// Caller-declared domain of this incompressible, thin-gap viscous image.
 #[derive(Debug, Clone, Copy)]
 pub struct FilmLimits {
     /// Positive minimum retained VOLUME-cell gap [m]. Never a replacement gap.
     pub minimum_cell_gap_m: f64,
     /// Maximum admitted cell/channel gap [m].
     pub maximum_gap_m: f64,
-    /// Maximum absolute GAUGE pressure [Pa]; choose small relative to ambient.
+    /// Maximum absolute GAUGE pressure [Pa]. The caller independently bounds
+    /// liquid incompressibility and any pressure-viscosity fit over this interval.
+    /// A gas in this pressure-eliminated image additionally needs excursions
+    /// small relative to its absolute reservoir pressure.
     pub maximum_pressure_pa: f64,
 }
 
@@ -91,7 +96,7 @@ pub struct FilmReport {
     pub dissipated_power_w: f64,
 }
 
-/// Immutable film geometry. Evaluation and analytic tangent use bounded stack
+/// Immutable film geometry and transport law. Evaluation and tangent use bounded stack
 /// scratch, never mutate pressure history, and allocate only at construction.
 #[derive(Debug, Clone)]
 pub struct ResistiveFilm {
@@ -99,6 +104,7 @@ pub struct ResistiveFilm {
     channels: Vec<FilmChannel>,
     factors: Vec<f64>,
     viscosity_pa_s: f64,
+    pressure_viscosity_coefficient_per_pa: f64,
     ports: usize,
     limits: FilmLimits,
 }
@@ -172,32 +178,74 @@ impl ResistiveFilm {
             channels,
             factors,
             viscosity_pa_s,
+            pressure_viscosity_coefficient_per_pa: 0.0,
             ports,
             limits,
         })
     }
 
-    /// Dynamic viscosity used by every channel conductance [Pa s].
+    /// Dynamic viscosity at the zero-gauge reservoir pressure [Pa s].
     #[must_use]
     pub const fn viscosity_pa_s(&self) -> f64 {
         self.viscosity_pa_s
     }
 
-    /// Recompile only the Newtonian transport coefficient on this exact graph.
+    /// Exponential pressure-viscosity coefficient [1/Pa], zero for a constant law.
+    #[must_use]
+    pub const fn pressure_viscosity_coefficient_per_pa(&self) -> f64 {
+        self.pressure_viscosity_coefficient_per_pa
+    }
+
+    /// Retain this graph with the Barus law `mu(p)=mu_0 exp(alpha*p)`.
     ///
-    /// Cells, apertures, force ports and validity limits remain unchanged. This
-    /// stateless resistance has no stored energy to remap. The caller must hold
+    /// `p` is GAUGE pressure relative to every zero-gauge reservoir; the existing
+    /// viscosity is `mu_0` there. The caller supplies a nonnegative coefficient
+    /// and a pressure range supporting this constitutive approximation. This
+    /// does not infer a material source, elastic deformation, liquid density,
+    /// cavitation or thermal evolution. It remains the classical isothermal
+    /// incompressible Reynolds reduction, not a general high-pressure fluid law.
+    ///
+    /// Integrating fluidity exactly along each passage gives
+    /// `Q=G_0 (psi_i-psi_j)`, where `psi=(1-exp(-alpha*p))/alpha`.
+    /// The original Cholesky solve therefore remains valid. If `alpha*psi>=1`,
+    /// the requested flow has no finite pressure in this model and refuses.
+    /// Zero alpha restores the original constant-viscosity arithmetic exactly.
+    /// Gas-storage and cavitating owners require their own derivation and refuse
+    /// this pressure-dependent image.
+    pub fn with_barus_viscosity(
+        &self,
+        pressure_viscosity_coefficient_per_pa: f64,
+    ) -> Result<Self, FilmError> {
+        if !pressure_viscosity_coefficient_per_pa.is_finite()
+            || pressure_viscosity_coefficient_per_pa < 0.0
+            || !(pressure_viscosity_coefficient_per_pa * self.limits.maximum_pressure_pa)
+                .is_finite()
+        {
+            return fail("invalid Barus pressure-viscosity coefficient or pressure interval");
+        }
+        let mut result = self.clone();
+        result.pressure_viscosity_coefficient_per_pa = pressure_viscosity_coefficient_per_pa;
+        Ok(result)
+    }
+
+    /// Recompile the reference viscosity on this exact graph and pressure law.
+    ///
+    /// Cells, apertures, force ports, pressure-viscosity coefficient and limits
+    /// remain unchanged. This stateless resistance has no stored energy to remap.
+    /// The caller must hold
     /// the returned coefficient fixed during its mechanical solve and account
     /// for the resulting viscous work with that same operator. This does not
     /// update a compressible film's gas storage or infer thermal expansion.
     pub fn with_viscosity(&self, viscosity_pa_s: f64) -> Result<Self, FilmError> {
-        Self::new(
+        let mut result = Self::new(
             self.cells.clone(),
             self.channels.clone(),
             self.ports,
             viscosity_pa_s,
             self.limits,
-        )
+        )?;
+        result.pressure_viscosity_coefficient_per_pa = self.pressure_viscosity_coefficient_per_pa;
+        Ok(result)
     }
 
     /// Number of work-conjugate mechanical coordinates.
@@ -261,6 +309,27 @@ impl ResistiveFilm {
         }
         s.factor()?;
         solve_factored(&s.lower, &s.scale, n, &mut s.pressure)?;
+        s.potential = s.pressure;
+        let alpha = self.pressure_viscosity_coefficient_per_pa;
+        if alpha != 0.0 {
+            for (p, psi) in s.pressure[..n].iter_mut().zip(&s.potential[..n]) {
+                let scaled = alpha * psi;
+                if !scaled.is_finite() || scaled >= 1.0 {
+                    return fail("Barus film flow exceeds its finite-pressure limit");
+                }
+                // ln_1p retains the constant-viscosity limit. An underflowed
+                // alpha*psi has no representable pressure-viscosity correction.
+                *p = if scaled == 0.0 {
+                    *psi
+                } else {
+                    -(-scaled).ln_1p() / alpha
+                };
+                let viscosity = self.viscosity_pa_s / (1.0 - scaled);
+                if !p.is_finite() || !viscosity.is_finite() || viscosity <= 0.0 {
+                    return fail("Barus film pressure or viscosity is unrepresentable");
+                }
+            }
+        }
         if s.pressure[..n]
             .iter()
             .any(|p| p.abs() > self.limits.maximum_pressure_pa)
@@ -289,11 +358,13 @@ impl ResistiveFilm {
         let mut power = 0.0;
         for (k, edge) in self.channels.iter().enumerate() {
             let dp = s.pressure[edge.from] - edge.to.map_or(0.0, |j| s.pressure[j]);
-            power += s.conductance[k] * dp * dp;
+            let dpsi = s.potential[edge.from] - edge.to.map_or(0.0, |j| s.potential[j]);
+            power += s.conductance[k] * dpsi * dp;
         }
         let work = dot(velocity, &candidate[..self.ports]);
         if candidate[..self.ports].iter().any(|x| !x.is_finite())
             || !power.is_finite()
+            || power < 0.0
             || !work.is_finite()
             || (work - power).abs() > 1e-9 * (work.abs() + power.abs()).max(1e-30)
         {
@@ -310,8 +381,11 @@ impl ResistiveFilm {
 
     /// Exact directional action of the resisting port, with independently
     /// supplied configuration and effort directions. Differentiates hydraulic
-    /// apertures too: `L dp = A B dv - (dL) p`. At a shut channel, h_+^3 has
-    /// derivative zero. The same pressure factorization is reused for dp.
+    /// apertures too: `L dpsi = A B dv - (dL) psi`, followed by
+    /// `dp_i=dpsi_i/(1-alpha*psi_i)`. At a shut channel, h_+^3 has derivative
+    /// zero. The same pressure factorization is reused. For pressure-dependent
+    /// viscosity the complete mechanical tangent is generally NONSYMMETRIC;
+    /// it must not be replaced by a symmetric constant damping matrix.
     pub fn tangent_into(
         &self,
         q: &[f64],
@@ -340,13 +414,19 @@ impl ResistiveFilm {
             } else {
                 0.0
             };
-            let change = dg * (s.pressure[edge.from] - edge.to.map_or(0.0, |j| s.pressure[j]));
+            let change = dg * (s.potential[edge.from] - edge.to.map_or(0.0, |j| s.potential[j]));
             rhs[edge.from] -= change;
             if let Some(j) = edge.to {
                 rhs[j] += change;
             }
         }
         solve_factored(&s.lower, &s.scale, self.cells.len(), &mut rhs)?;
+        let alpha = self.pressure_viscosity_coefficient_per_pa;
+        if alpha != 0.0 {
+            for (dp, psi) in rhs[..self.cells.len()].iter_mut().zip(&s.potential) {
+                *dp /= 1.0 - alpha * psi;
+            }
+        }
         let mut candidate = [0.0; MAX_PORTS];
         self.project(&rhs, &mut candidate);
         if candidate[..self.ports].iter().any(|x| !x.is_finite()) {
@@ -372,6 +452,7 @@ struct Solution {
     lower: [f64; MAX_CELLS * MAX_CELLS],
     scale: [f64; MAX_CELLS],
     pressure: [f64; MAX_CELLS],
+    potential: [f64; MAX_CELLS],
     conductance: [f64; MAX_CHANNELS],
     n: usize,
     minimum_gap: f64,
@@ -383,6 +464,7 @@ impl Solution {
             lower: [0.0; MAX_CELLS * MAX_CELLS],
             scale: [0.0; MAX_CELLS],
             pressure: [0.0; MAX_CELLS],
+            potential: [0.0; MAX_CELLS],
             conductance: [0.0; MAX_CHANNELS],
             n,
             minimum_gap,
@@ -452,4 +534,3 @@ fn solve_factored(
 
 #[cfg(test)]
 mod viscosity_tests;
-

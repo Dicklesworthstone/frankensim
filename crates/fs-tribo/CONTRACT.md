@@ -747,12 +747,29 @@ unsupported shear and exhausted solve budgets.
 
 `resistive_film` owns the solver-independent incompressible thin-film pressure
 law shared with the compatibility surface `fs-flux::resistive_film`. At each
-configuration it solves the bounded pressure island `L(h) p = A B v` and applies
-the reciprocal resisting force `B^T A p`. The analytic tangent includes both
-gap-dependent conductance and independent mechanical effort changes. Cell areas,
-port weights and Poiseuille conductances are never independently normalized.
+configuration it solves `L(h) psi = A B v` and applies `B^T A p`. Constant
+viscosity gives `psi=p` and the reciprocal Newtonian resistance. The optional
+`with_barus_viscosity(alpha)` uses `mu(p)=mu_0 exp(alpha*p)`, where `p` is
+gauge pressure and `mu_0` is the reservoir viscosity. The exact fluidity
+transform `psi=(1-exp(-alpha*p))/alpha` preserves the existing single Cholesky
+factorization; `p=-log1p(-alpha*psi)/alpha`. Physical dissipation is
+`sum Q*(p_i-p_j)`. The complete tangent differentiates gaps and the inverse
+transform and is generally nonsymmetric; callers must retain that full action.
+Cell areas, port weights and conductances are never independently normalized.
 This law carries no clock or pressure history; the mechanical caller owns
 stepping, cancellation between calls and integrated energy accounting.
+
+`with_viscosity` refreshes `mu_0` while retaining `alpha`. Zero `alpha`
+preserves the original arithmetic. Flow beyond `alpha*psi<1`, unrepresentable
+pressure or viscosity, and existing domain limits refuse atomically. The
+coefficient and its supported pressure interval are caller declarations for the
+classical incompressible isothermal Reynolds reduction, with no general
+high-pressure or elastohydrodynamic accuracy or sourced-material claim.
+Gas-storage and cavitating owners explicitly refuse nonzero `alpha`. Four
+new test groups check integrated fluidity, positive and suction branches,
+volume/force/work balance, the finite-difference nonsymmetric tangent,
+coefficient continuation, zero-alpha identity, barriers and incompatible
+storage owners.
 
 The fixed limits are 64 pressure cells, 256 channels and 256 mechanical ports.
 Nonpositive channel apertures close exactly; collapsed volume cells, trapped
