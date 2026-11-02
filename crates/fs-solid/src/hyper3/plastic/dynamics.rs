@@ -49,6 +49,7 @@ pub struct FinitePlasticTetMotion<'a, L: FiniteJ2Material = FiniteJ2> {
     solid: FinitePlasticTetSolid<'a, L>,
     velocity_mps: Vec<[f64; 3]>,
     reference_density_kg_m3: Arc<[f64]>,
+    reference_nodal_density_kg_m3: Option<Arc<[f64]>>,
     mass: Arc<P1ReferenceMass>,
 }
 
@@ -110,6 +111,55 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
             solid,
             velocity_mps: velocity_mps.to_vec(),
             reference_density_kg_m3: Arc::from(reference_density_kg_m3),
+            reference_nodal_density_kg_m3: None,
+            mass: Arc::new(mass),
+        })
+    }
+
+    /// Bind positive nodal reference density to the SAME native momentum owner.
+    ///
+    /// Density is interpolated with the original P1 material coordinates.
+    /// The consistent matrix integrates rho*N_a*N_b exactly, rather than
+    /// replacing the field by its cell mean. The immutable nodal values and
+    /// mass operator survive every accepted deformation and plastic step.
+    /// This is an authored reference inventory, not a source/calibration claim.
+    ///
+    /// # Errors
+    /// Invalid nodal density/velocity, unrepresentable mass, or cancellation.
+    pub fn try_new_with_nodal_density(
+        solid: FinitePlasticTetSolid<'a, L>,
+        reference_nodal_density_kg_m3: &[f64],
+        velocity_mps: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Self, FinitePlasticTetError> {
+        checkpoint(cx)?;
+        if velocity_mps.len() != solid.state.displacement_m.len()
+            || velocity_mps
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid(
+                "one finite initial velocity vector per original node required",
+            ));
+        }
+        let (mass, means) = P1ReferenceMass::from_nodal_density(
+            solid
+                .state
+                .elements
+                .iter()
+                .map(|element| (element.nodes, element.volume)),
+            reference_nodal_density_kg_m3,
+            solid.state.displacement_m.as_flattened().len(),
+            cx,
+        )
+        .map_err(inertia_error)?;
+        checkpoint(cx)?;
+        Ok(Self {
+            solid,
+            velocity_mps: velocity_mps.to_vec(),
+            reference_density_kg_m3: Arc::from(means),
+            reference_nodal_density_kg_m3: Some(Arc::from(reference_nodal_density_kg_m3)),
             mass: Arc::new(mass),
         })
     }
@@ -124,14 +174,67 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
         &self.velocity_mps
     }
 
-    /// Exact originally admitted reference density, in tetrahedron order.
+    /// Reference cell means, in original tetrahedron order. The cellwise
+    /// constructor retains its exact supplied values. A nodal-density body
+    /// also retains its complete field through `reference_nodal_density_kg_m3`;
+    /// these means alone do not reproduce its mass operator or mass distribution.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
         &self.reference_density_kg_m3
+    }
+
+    /// Complete original nodal field, or None for the cellwise-density model.
+    pub fn reference_nodal_density_kg_m3(&self) -> Option<&[f64]> {
+        self.reference_nodal_density_kg_m3.as_deref()
     }
 
     /// Total original mass, unchanged by current deformation or plastic flow.
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+
+    /// Project an acceleration field with this body's actual consistent mass.
+    ///
+    /// Supply one world acceleration vector [m/s²] per original node. P1
+    /// interpolation and the retained reference density give the exact nodal
+    /// force projection M*a [N], including uniform gravity on a graded body.
+    /// Returned nonzero DOF/force pairs feed `advance` as held nodal loads.
+    /// Do not also add the same acceleration as a body-force density. This
+    /// assembles a load; position-dependent field evolution and its potential
+    /// or tangent remain with the external field owner.
+    ///
+    /// # Errors
+    /// Wrong shape, nonfinite acceleration/force, or cancellation.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, FinitePlasticTetError> {
+        checkpoint(cx)?;
+        if acceleration_m_s2.len() != self.velocity_mps.len()
+            || acceleration_m_s2
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid(
+                "one finite acceleration vector per original node required",
+            ));
+        }
+        let forces = self
+            .mass
+            .action(acceleration_m_s2.as_flattened(), cx)
+            .map_err(inertia_error)?;
+        let mut loads = Vec::with_capacity(forces.len());
+        for (dof, force) in forces.into_iter().enumerate() {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if force != 0.0 {
+                loads.push((dof, force));
+            }
+        }
+        checkpoint(cx)?;
+        Ok(loads)
     }
 
     /// Advance one physical interval with held dead loads and absolute supports.
@@ -197,6 +300,10 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
             solid: step.solid,
             velocity_mps,
             reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+            reference_nodal_density_kg_m3: self
+                .reference_nodal_density_kg_m3
+                .as_ref()
+                .map(Arc::clone),
             mass: Arc::clone(&self.mass),
         };
         Ok(FinitePlasticMotionStep {

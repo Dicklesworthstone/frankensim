@@ -4,6 +4,9 @@
 //! A free body exercises the actual dynamic Newton solve; a one-free-coordinate
 //! finite stretch/reversal path checks complete history and each work term.
 
+#[path = "hyper_plastic_dynamics/nodal_density.rs"]
+mod nodal_density;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::finite::{FiniteJ2, FiniteJ2Limits, FiniteJ2Parameters};

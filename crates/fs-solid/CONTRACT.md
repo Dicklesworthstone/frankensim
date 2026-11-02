@@ -2719,6 +2719,21 @@ unrepresentable element/assembled mass refuses. Consumers must retain that
 mass during deformation instead of multiplying updated volume by a fixed
 reference density. These accessors introduce no constitutive or time solver.
 
+`FinitePlasticTetMotion::try_new_with_nodal_density` also admits an authored
+positive P1 reference density on the original shared vertices. Its consistent
+matrix integrates rho*N_a*N_b analytically through degree three and retains
+the complete nodal inventory across the existing finite-plastic momentum
+steps. The cell-density accessor reports cell means; the separate nodal
+accessor preserves the actual distribution. `reference_acceleration_load_n`
+uses this SAME mass action to project held nodal accelerations, including
+uniform gravity, into the existing nodal-load input. No current-volume mass
+refresh or one-quarter-per-node lumping is introduced. Uniform nodal density
+delegates to the original cellwise mass path. Independent simplex moments,
+rigid kinetic energy and native backward-Euler work checks cover the mass
+operator; the finite-plastic regression exercises the native free-body Newton
+step. This is not material-source inference or a new nonlinear-gravity
+quadrature, deformation-field solver, or thermal mass-transfer model.
+
 
 ### Reference-aware finite-deformation response
 

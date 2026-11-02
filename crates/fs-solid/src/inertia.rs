@@ -126,6 +126,89 @@ impl ReferenceMass {
         Self::from_matrix(mass.assemble(), reference_mass_kg, ndofs, cx)
     }
 
+    /// Exact consistent tetrahedral mass for a positive P1 reference density.
+    /// Nodal density belongs to the original mesh; current volume never enters.
+    /// Return cell means separately for inventory reporting, not as a substitute
+    /// for the retained nodal field or its consistent operator.
+    pub(crate) fn from_nodal_density(
+        geometry: impl ExactSizeIterator<Item = ([usize; 4], f64)>,
+        densities: &[f64],
+        ndofs: usize,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, Vec<f64>), InertiaError> {
+        checkpoint(cx)?;
+        if ndofs == 0
+            || !ndofs.is_multiple_of(3)
+            || densities.len() != ndofs / 3
+            || densities.iter().any(|rho| !rho.is_finite() || *rho <= 0.0)
+        {
+            return Err(invalid(
+                "one positive reference density per node and complete nodal components required",
+            ));
+        }
+        if densities
+            .iter()
+            .all(|rho| rho.to_bits() == densities[0].to_bits())
+        {
+            let means = vec![densities[0]; geometry.len()];
+            return Self::new(geometry, &means, ndofs, cx).map(|mass| (mass, means));
+        }
+        let mut matrix = Coo::new(ndofs, ndofs);
+        let mut means = Vec::with_capacity(geometry.len());
+        let mut reference_mass_kg = 0.0;
+        for (nodes, volume) in geometry {
+            checkpoint(cx)?;
+            if !volume.is_finite() || volume <= 0.0 || nodes.iter().any(|&node| node >= ndofs / 3) {
+                return Err(invalid(
+                    "valid reference connectivity and positive volume required",
+                ));
+            }
+            let rho = nodes.map(|node| densities[node]);
+            let uniform = rho.iter().all(|value| value.to_bits() == rho[0].to_bits());
+            let scale = rho.into_iter().fold(0.0_f64, f64::max);
+            let normalized = rho.map(|value| value / scale);
+            let total: f64 = normalized.iter().sum();
+            let mean = if uniform {
+                rho[0]
+            } else {
+                scale * (0.25 * total)
+            };
+            let element_mass = finite(volume * mean)?;
+            if element_mass <= 0.0 {
+                return Err(invalid(
+                    "each tetrahedron needs representable positive reference mass",
+                ));
+            }
+            means.push(mean);
+            reference_mass_kg = finite(reference_mass_kg + element_mass)?;
+            let fractions = normalized.map(|value| value / total);
+            // Integral rho*N_a*N_b has degree three. Its off-diagonal entry
+            // is V*(sum(rho)+rho_a+rho_b)/120, and its diagonal entry is
+            // V*(sum(rho)+2*rho_a)/60. Normalization avoids overflowing the
+            // density sum; every entry remains strictly nonnegative.
+            let uniform_mass =
+                uniform.then(|| crate::linear3::p1_tet_consistent_mass(volume, rho[0]));
+            for a in 0..4 {
+                for b in 0..4 {
+                    let value = finite(if let Some(local) = &uniform_mass {
+                        local[3 * a][3 * b]
+                    } else if a == b {
+                        (element_mass / 15.0) * (1.0 + 2.0 * fractions[a])
+                    } else {
+                        (element_mass / 30.0) * (1.0 + (fractions[a] + fractions[b]))
+                    })?;
+                    if value <= 0.0 {
+                        return Err(invalid("consistent graded-density mass underflowed"));
+                    }
+                    for component in 0..3 {
+                        matrix.push(3 * nodes[a] + component, 3 * nodes[b] + component, value);
+                    }
+                }
+            }
+        }
+        Self::from_matrix(matrix.assemble(), reference_mass_kg, ndofs, cx).map(|mass| (mass, means))
+    }
+
     /// Consistent Hex8 mass at the original full eight-point quadrature.
     /// The admitted geometry supplies positive reference weights and the native
     /// trilinear shapes; neither current volume nor assumed dilatation enters.
@@ -230,6 +313,27 @@ impl ReferenceMass {
     pub(crate) fn ndofs(&self) -> usize {
         self.matrix.nrows()
     }
+
+    /// The same immutable mass action used by momentum and acceleration loads.
+    pub(crate) fn action(&self, x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>, InertiaError> {
+        if x.len() != self.ndofs() {
+            return Err(invalid("inertia requires every nodal component"));
+        }
+        let mut output = Vec::with_capacity(x.len());
+        for row in 0..x.len() {
+            if row % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let (columns, values) = self.matrix.row(row);
+            output.push(finite(
+                columns
+                    .iter()
+                    .zip(values)
+                    .fold(0.0, |sum, (&column, &value)| value.mul_add(x[column], sum)),
+            )?);
+        }
+        Ok(output)
+    }
 }
 
 /// One endpoint momentum equation borrowing the immutable accepted motion/mass.
@@ -320,21 +424,7 @@ impl<'a> BackwardEulerInertia<'a> {
     }
 
     pub(crate) fn action(&self, x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>, InertiaError> {
-        self.check_length(x)?;
-        let mut output = Vec::with_capacity(x.len());
-        for row in 0..x.len() {
-            if row % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            let (columns, values) = self.mass.matrix.row(row);
-            output.push(finite(
-                columns
-                    .iter()
-                    .zip(values)
-                    .fold(0.0, |sum, (&column, &value)| value.mul_add(x[column], sum)),
-            )?);
-        }
-        Ok(output)
+        self.mass.action(x, cx)
     }
 
     pub(crate) fn add_force(
@@ -458,5 +548,182 @@ impl<'a> BackwardEulerInertia<'a> {
                 balance_error_j,
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod density_tests {
+    use super::*;
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+
+    fn with_cx(run: impl FnOnce(&Cx<'_>)) {
+        let gate = CancelGate::new_clock_free();
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            run(&Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 31,
+                    kernel_id: 7,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            ));
+        });
+    }
+    fn graded(cx: &Cx<'_>) -> ReferenceMass {
+        ReferenceMass::from_nodal_density(
+            [([0, 1, 2, 3], 1.0 / 6.0)].into_iter(),
+            &[3.0, 15.0, 3.0, 3.0],
+            12,
+            cx,
+        )
+        .unwrap()
+        .0
+    }
+    fn close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 2e-13 * expected.abs().max(1.0),
+            "{actual:.17e} != {expected:.17e}"
+        );
+    }
+    // Independent simplex monomial integral: 6V*product(p_i!)/(sum(p_i)+3)!.
+    fn exact_entry(a: usize, b: usize) -> f64 {
+        let factorial = [1.0, 1.0, 2.0, 6.0];
+        [3.0, 15.0, 3.0, 3.0]
+            .into_iter()
+            .enumerate()
+            .map(|(k, rho)| {
+                let mut powers = [0; 4];
+                powers[a] += 1;
+                powers[b] += 1;
+                powers[k] += 1;
+                rho * powers.into_iter().map(|p| factorial[p]).product::<f64>() / 720.0
+            })
+            .sum()
+    }
+
+    #[test]
+    fn graded_mass_matches_cubic_integrals_and_density_weighted_rigid_energy() {
+        with_cx(|cx| {
+            let mass = graded(cx);
+            close(mass.reference_mass_kg(), 1.0);
+            for a in 0..4 {
+                for b in 0..4 {
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            close(
+                                mass.matrix.get(3 * a + i, 3 * b + j),
+                                if i == j { exact_entry(a, b) } else { 0.0 },
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        mass.matrix.get(3 * a, 3 * b).to_bits(),
+                        mass.matrix.get(3 * b, 3 * a).to_bits()
+                    );
+                }
+            }
+            // v = translation + omega cross x; the complete rigid kinetic
+            // energy depends on COM and every inertia cross term, not just M.
+            let v = [
+                [0.3, -0.4, 0.2],
+                [0.3, 0.1, 0.5],
+                [-0.2, -0.4, 0.4],
+                [0.0, -0.6, 0.2],
+            ];
+            let momentum = mass.action(v.as_flattened(), cx).unwrap();
+            let actual = 0.5 * dot(v.as_flattened(), &momentum);
+            let mut expected = 0.0;
+            for a in 0..4 {
+                for b in 0..4 {
+                    expected +=
+                        0.5 * exact_entry(a, b) * (0..3).map(|i| v[a][i] * v[b][i]).sum::<f64>();
+                }
+            }
+            close(actual, expected);
+            let uniform =
+                ReferenceMass::new([([0, 1, 2, 3], 1.0 / 6.0)].into_iter(), &[6.0], 12, cx)
+                    .unwrap();
+            let averaged = 0.5
+                * dot(
+                    v.as_flattened(),
+                    &uniform.action(v.as_flattened(), cx).unwrap(),
+                );
+            assert!((actual - averaged).abs() > 1e-3);
+        });
+    }
+
+    #[test]
+    fn graded_gravity_uses_native_momentum_and_kinetic_work_with_conserved_mass() {
+        with_cx(|cx| {
+            let mass = graded(cx);
+            let acceleration = [1.2, -9.81, 0.4];
+            let load = mass.action([acceleration; 4].as_flattened(), cx).unwrap();
+            for (node, share) in [0.225, 0.325, 0.225, 0.225].into_iter().enumerate() {
+                for i in 0..3 {
+                    close(load[3 * node + i], share * acceleration[i]);
+                }
+            }
+            let old_v = [[0.2, -0.1, 0.05]; 4];
+            let old_u = [0.0; 12];
+            let dt = 0.02;
+            let v: [f64; 3] = core::array::from_fn(|i| old_v[0][i] + dt * acceleration[i]);
+            let displacement = [v.map(|value| dt * value); 4];
+            let inertia =
+                BackwardEulerInertia::new(&mass, &old_u, old_v.as_flattened(), dt, cx).unwrap();
+            let mut force = [0.0; 12];
+            inertia
+                .add_force(displacement.as_flattened(), &mut force, cx)
+                .unwrap();
+            for (a, b) in force.into_iter().zip(load) {
+                close(a, b);
+            }
+            let (velocity, energy) = inertia.motion(displacement.as_flattened(), cx).unwrap();
+            for actual in velocity {
+                for i in 0..3 {
+                    close(actual[i], v[i]);
+                }
+            }
+            close(energy.reference_mass_kg, 1.0);
+            close(energy.kinetic_before_j, 0.5 * dot(&old_v[0], &old_v[0]));
+            close(energy.kinetic_after_j, 0.5 * dot(&v, &v));
+            close(
+                energy.numerical_loss_j,
+                0.5 * dt * dt * dot(&acceleration, &acceleration),
+            );
+            close(energy.inertial_work_j, dt * dot(&v, &acceleration));
+            close(energy.balance_error_j, 0.0);
+        });
+    }
+
+    #[test]
+    fn uniform_nodal_admission_keeps_existing_mass_bits_and_invalid_fields_refuse() {
+        with_cx(|cx| {
+            let geometry = [([0, 1, 2, 3], 0.17)];
+            let uniform = ReferenceMass::new(geometry.into_iter(), &[7.3], 12, cx).unwrap();
+            let (nodal, means) =
+                ReferenceMass::from_nodal_density(geometry.into_iter(), &[7.3; 4], 12, cx).unwrap();
+            assert_eq!(means, [7.3]);
+            assert_eq!(
+                uniform.reference_mass_kg.to_bits(),
+                nodal.reference_mass_kg.to_bits()
+            );
+            assert_eq!(uniform.matrix, nodal.matrix);
+            for rho in [
+                &[1.0, 2.0, 3.0][..],
+                &[1.0, 0.0, 2.0, 3.0],
+                &[1.0, f64::NAN, 2.0, 3.0],
+            ] {
+                assert!(
+                    ReferenceMass::from_nodal_density(geometry.into_iter(), rho, 12, cx).is_err()
+                );
+            }
+            assert!(nodal.action(&[1.0; 11], cx).is_err());
+            assert!(nodal.action(&[f64::INFINITY; 12], cx).is_err());
+        });
     }
 }
