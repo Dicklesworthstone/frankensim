@@ -1,7 +1,11 @@
 //! Render one drum-kit piece to a 48 kHz float WAV.
 //!
-//! usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads]
+//! usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv]
 //! PIECE: kick | snare | snare-off | tom-12 | tom-14 | hihat-closed | hihat-open | splash | crash | crash-shaft | ride
+//!
+//! `--observer` hears a drum's overhead as one closed body on its floor (pexfp.378), from a table
+//! baked for that drum by fs-bem's `examples/drum_observer.rs` (crates/fs-vkplate/data/closed-body);
+//! it is refused for any other piece, and for a table baked for another drum, clock or gas.
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -14,11 +18,27 @@ use std::time::Instant;
 
 mod drum_cards;
 
+const OBSERVER_FLAG: &str = "--observer";
+
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
-    let a: Vec<String> = std::env::args().filter(|a| a != drum_cards::PRESET_HEADS_FLAG).collect();
+    let all: Vec<String> = std::env::args().collect();
+    let observer = all.iter().position(|a| a == OBSERVER_FLAG).map(|i| {
+        all.get(i + 1).cloned().unwrap_or_else(|| {
+            eprintln!("usage: {OBSERVER_FLAG} TABLE.tsv");
+            std::process::exit(2)
+        })
+    });
+    let a: Vec<String> = all
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| {
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && !(*i > 0 && all[i - 1] == OBSERVER_FLAG)
+        })
+        .map(|(_, a)| a.clone())
+        .collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv]");
         std::process::exit(2);
     }
     let speed = a.get(3).map(|s| s.parse::<f64>().expect("speed")).filter(|v| *v > 0.0);
@@ -53,6 +73,27 @@ fn main() {
         eprintln!("refused: {e}");
         std::process::exit(1)
     });
+    if let Some(path) = &observer {
+        let spec = match a[1].as_str() {
+            "kick" => kit::kick(),
+            "snare" => kit::snare(),
+            "snare-off" => kit::snare_wires_off(),
+            "tom-12" => kit::tom(12.0),
+            "tom-14" => kit::tom(14.0),
+            other => {
+                eprintln!("refused: {OBSERVER_FLAG} hears a drum as one closed body; {other} is not a drum");
+                std::process::exit(1)
+            }
+        };
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("refused: cannot read {path}: {e}");
+            std::process::exit(1)
+        });
+        if let Err(e) = kit::attach_closed_body(&mut p, &spec, &text) {
+            eprintln!("refused: {e}");
+            std::process::exit(1)
+        }
+    }
     let dur = secs.unwrap_or(dur);
     for n in &p.notes {
         eprintln!("{n}");
@@ -85,7 +126,19 @@ fn main() {
             }
         }
     }
+    for m in &p.instrument.mics {
+        if let Some(o) = m.closed_body() {
+            eprintln!("{}", o.report());
+        }
+    }
     eprintln!("{dur} s rendered in {wall:.1} s ({:.1}x real time); peak {peak:.3} Pa", wall / dur);
     assert!(peak.is_finite(), "non-finite output");
     std::fs::write(&a[2], fs_vkplate::wav_f32(&out, kit::OUT_RATE as u32)).expect("write");
 }
+
+#[cfg(test)]
+#[path = "kit_tests/identity.rs"]
+mod identity_tests;
+#[cfg(test)]
+#[path = "kit_tests/closed_body_tables.rs"]
+mod closed_body_tables_tests;

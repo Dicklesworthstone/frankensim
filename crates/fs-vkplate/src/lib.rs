@@ -46,6 +46,10 @@ pub mod materials;
 /// Baked exterior modal loading of drum heads' motion beyond their compact volume model.
 pub mod radiation;
 
+/// What an overhead microphone hears from a drum as one closed body on its floor (pexfp.378): an
+/// fs-bem observation table replayed outside the loop, the baffled path above its band.
+pub mod closed_body;
+
 /// Air loss laws read from the gas record: oscillating-cylinder drag and the
 /// viscous layer on a plate's faces.
 pub mod air_loss;
@@ -2336,6 +2340,8 @@ pub struct Mic {
     /// can still reach it by reflection (the snare's underside heard overhead).
     pub floor: Option<Floor>,
     hp: (f64, f64),
+    /// The drum heard as one closed body below the table's band (`Instrument::attach_closed_body`).
+    closed: Option<Box<closed_body::ClosedBodyObserver>>,
 }
 
 /// A rigid plane: the point `point` on it and its unit `normal`, pointing into the air.
@@ -2369,7 +2375,16 @@ impl Floor {
 
 impl Mic {
     pub fn new(pos: [f64; 3]) -> Mic {
-        Mic { pos, taps: vec![], ptaps: vec![], ring: vec![], unbaffled: None, floor: None, hp: (0.0, 0.0) }
+        Mic { pos, taps: vec![], ptaps: vec![], ring: vec![], unbaffled: None, floor: None, hp: (0.0, 0.0), closed: None }
+    }
+    /// The closed-body observer on this microphone, if one is attached.
+    pub fn closed_body(&self) -> Option<&closed_body::ClosedBodyObserver> {
+        self.closed.as_deref()
+    }
+    /// Samples by which this microphone's output lags the instrument's clock: the closed-body
+    /// observer's latency, else 0. `kit::render` trims it.
+    pub fn output_latency(&self) -> usize {
+        self.closed.as_ref().map_or(0, |c| c.latency())
     }
 }
 
@@ -2935,6 +2950,66 @@ impl Instrument {
     pub const fn gas(&self) -> &GasState {
         &self.gas
     }
+    /// Hear microphone `mic` as fs-bem's closed body (pexfp.378): the drum whose batter and
+    /// resonant heads are bodies `batter` and `resonant`, its shell rigid, on the table's floor.
+    /// Refused unless the table was baked for this clock, gas, microphone position and floor, and
+    /// for heads placed as the kit builder places them; refused after the first step and on an
+    /// unbaffled microphone. The head motion is unchanged: the observer is outside the loop. Returns
+    /// the route receipt.
+    pub fn attach_closed_body(
+        &mut self,
+        mic: usize,
+        table: &closed_body::ClosedBodyTable,
+        batter: usize,
+        resonant: usize,
+    ) -> Result<String, String> {
+        let refuse = |what: String| Err(format!("closed-body observer ({}): {what}", table.piece));
+        if self.step_index != 0 {
+            return refuse("the instrument has already stepped".into());
+        }
+        let Some(m) = self.mics.get(mic) else {
+            return refuse(format!("no microphone {mic}"));
+        };
+        if table.rate.to_bits() != self.rate.to_bits() {
+            return refuse(format!("baked at {} Hz, the instrument steps at {} Hz", table.rate, self.rate));
+        }
+        if table.gas != (self.gas.density, self.gas.sound_speed) {
+            return refuse(format!(
+                "baked for gas ({}, {}), the instrument's is ({}, {})",
+                table.gas.0, table.gas.1, self.gas.density, self.gas.sound_speed
+            ));
+        }
+        if table.mic != m.pos {
+            return refuse(format!("baked for a microphone at {:?}, this one is at {:?}", table.mic, m.pos));
+        }
+        if m.floor.map(|f| (f.point, f.normal)) != Some(table.floor) {
+            return refuse("baked for another floor".into());
+        }
+        if m.unbaffled.is_some() {
+            return refuse("the microphone hears an unbaffled source".into());
+        }
+        let n = self.bodies.len();
+        if batter == resonant || batter >= n || resonant >= n {
+            return refuse("the head bodies are not two distinct bodies of this instrument".into());
+        }
+        let (b, r) = (&self.bodies[batter], &self.bodies[resonant]);
+        if b.origin != [0.0, 0.0, 0.0]
+            || b.facing != 1.0
+            || r.origin != [0.0, 0.0, -table.depth]
+            || r.facing != -1.0
+            || !b.radiates
+            || !r.radiates
+        {
+            return refuse(format!(
+                "the heads are not placed as the table's: the batter at the origin facing +z, the resonant head {} m below it facing -z, both radiating",
+                table.depth
+            ));
+        }
+        let observer = closed_body::ClosedBodyObserver::new(table, [(batter, b), (resonant, r)])?;
+        self.mics[mic].closed = Some(Box::new(observer));
+        self.prepared = false;
+        Ok(table.receipt())
+    }
     pub fn add(&mut self, b: Body) -> usize {
         self.bodies.push(b);
         self.bodies.len() - 1
@@ -3186,6 +3261,9 @@ impl Instrument {
                 }
             }
             m.ring = vec![0.0; (dmax + 2).next_power_of_two()];
+            if let Some(observer) = m.closed.as_mut() {
+                observer.prepare(&m.taps, m.ring.len());
+            }
         }
         self.prepared = true;
     }
@@ -3325,6 +3403,9 @@ impl Instrument {
                 m.hp = (y, yn);
                 y = yn;
             }
+            if let Some(observer) = m.closed.as_mut() {
+                y = observer.step(y, &self.bodies, k, base);
+            }
             out[mi] = y;
             m.ring[slot] = 0.0;
         }
@@ -3339,7 +3420,8 @@ impl Instrument {
     /// on are not in it, so such a stepper must refuse them (render-gpu's plan does). Exporting changes nothing the steps compute, and
     /// `step` stays the reference that stepper is checked against. It prepares the microphones' taps as the
     /// first step would, so place microphones and bodies before exporting (a later move would no longer
-    /// re-prepare them).
+    /// re-prepare them). A microphone's closed-body observer (pexfp.378) is not in it either, so
+    /// render-gpu's plan refuses a microphone that has one.
     pub fn image(&mut self) -> InstrumentImage {
         if !self.prepared {
             self.prepare();

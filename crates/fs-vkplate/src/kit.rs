@@ -1087,6 +1087,32 @@ fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64,
     Ok(Piece { instrument: ins, oversample: os, settle, notes })
 }
 
+/// Hear a drum piece's overhead as one closed body on its floor (pexfp.378), from a table baked by
+/// fs-bem's `examples/drum_observer.rs` for this drum: refused unless the table's radius, depth and
+/// microphone are the spec's bit for bit and `Instrument::attach_closed_body` admits it (clock, gas,
+/// floor, head placement). The baffled microphone's batter-only receipt no longer holds; the table's
+/// route receipt replaces it.
+pub fn attach_closed_body(p: &mut Piece, spec: &DrumSpec, text: &str) -> Result<(), String> {
+    let table = crate::closed_body::ClosedBodyTable::parse(text)?;
+    if table.radius.to_bits() != spec.radius.to_bits() || table.depth.to_bits() != spec.depth.to_bits() || table.mic != spec.mic {
+        return Err(format!(
+            "closed-body table {} was baked for radius {} m, depth {} m, microphone {:?}; {} is {} m, {} m, {:?}",
+            table.piece, table.radius, table.depth, table.mic, spec.name, spec.radius, spec.depth, spec.mic
+        ));
+    }
+    if p.instrument.mics.len() != 1 {
+        return Err(format!("closed-body table {}: a drum piece has one microphone, this one has {}", table.piece, p.instrument.mics.len()));
+    }
+    let find = |head: &str| p.instrument.bodies.iter().position(|b| b.name == format!("{} {head}", spec.name));
+    let (Some(batter), Some(resonant)) = (find("batter"), find("resonant")) else {
+        return Err(format!("closed-body table {}: {} has no batter and resonant head bodies", table.piece, spec.name));
+    };
+    let receipt = p.instrument.attach_closed_body(0, &table, batter, resonant)?;
+    p.notes.retain(|n| n != OVERHEAD_HEARS_BATTER_ONLY_RECEIPT);
+    p.notes.push(receipt);
+    Ok(())
+}
+
 /// Run a piece for `seconds` of output after its settling time; returns 48 kHz pressure [Pa].
 pub fn render(p: &mut Piece, seconds: f64, mut progress: impl FnMut(f64)) -> Vec<Vec<f64>> {
     let ins = &mut p.instrument;
@@ -1096,12 +1122,17 @@ pub fn render(p: &mut Piece, seconds: f64, mut progress: impl FnMut(f64)) -> Vec
     // Keep the FIR's left support across the settling boundary. No additional
     // physical steps or output latency are introduced.
     let retained_from = skip.saturating_sub(DECIMATION_RADIUS_FRAMES * p.oversample);
+    // A closed-body observer (pexfp.378) delays its microphone by its latency: run that many more
+    // steps and keep each channel's own window, so every channel stays on the physical clock.
+    // Without one every latency is 0 and this is the plain loop.
+    let latency: Vec<usize> = ins.mics.iter().map(Mic::output_latency).collect();
+    let extra = latency.iter().copied().max().unwrap_or(0);
     let mut raw = vec![Vec::with_capacity(total - retained_from); nm];
     let mut buf = vec![0.0; nm];
-    for s in 0..total {
+    for s in 0..total + extra {
         ins.step(&mut buf);
-        if s >= retained_from {
-            for (c, v) in raw.iter_mut().zip(&buf) {
+        for ((c, v), &l) in raw.iter_mut().zip(&buf).zip(&latency) {
+            if s >= retained_from + l && s < total + l {
                 c.push(*v);
             }
         }

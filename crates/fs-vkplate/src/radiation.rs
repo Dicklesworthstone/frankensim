@@ -3,7 +3,7 @@
 //!
 //! The table holds `zhat_rs(ka) = Z_rs / (rho c a^2)` for clamped-membrane
 //! shapes on a unit disk in an infinite rigid baffle, computed with
-//! `fs_bem::modal_loading` by `examples/bake_head_radiation.rs`. A head of
+//! `fs_bem::modal_loading` by fs-bem's `examples/membrane_head_radiation.rs`. A head of
 //! radius `a` in the current gas sees `Z_rs(omega) = rho c a^2 zhat_rs(omega a / c)`,
 //! so density and sound speed always come from the instrument's gas. The
 //! volume (`m = 0`) motion keeps the kit builder's compact monopole, piston
@@ -30,7 +30,7 @@
 use crate::GasState;
 use std::fmt::Write as _;
 
-/// The shipped table, baked by `examples/bake_head_radiation.rs`.
+/// The shipped table, baked by fs-bem's `examples/membrane_head_radiation.rs`.
 pub const SHIPPED_TABLE: &str = include_str!("../data/head-radiation-planar-baffled.tsv");
 
 pub const TABLE_FORMAT: &str = "frankensim.vkplate-head-radiation.v1";

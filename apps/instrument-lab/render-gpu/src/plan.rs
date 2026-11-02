@@ -380,6 +380,9 @@ impl Plan {
         if ins.load_is_coming_on() {
             return Err("this piece's static load comes on from rest and the GPU kernel holds it constant: render the instrument natively".into());
         }
+        if ins.mics.iter().any(|m| m.closed_body().is_some()) {
+            return Err("a microphone hears its drum as one closed body (fs_vkplate::closed_body, pexfp.378), an observer the GPU kernel does not replay: render the instrument natively".into());
+        }
         if img.rate != ins.rate || img.bodies.len() != ins.bodies.len() {
             return Err("exported and live instrument clocks or bodies differ".into());
         }
