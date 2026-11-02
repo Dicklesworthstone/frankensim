@@ -2659,6 +2659,28 @@ electronics cooling (the wedge's second physics after steady conduction).
   analytic graded two-density pressure/flux/work on all axes, exact homogeneous
   legacy parity, fixed-boundary work, sealed source/sink compatibility,
   disconnected components, independent readback budgets and refusal rollback.
+- `FlowField::predict_density_body_force` supplies native staggered momentum
+  prediction from frozen physical density, uniform acceleration and an explicit
+  cell body-force density. Each face integrates the same two half-cells as the
+  pressure dual mass: `F = M*g + A*(h_L*b_L/2 + h_R*b_R/2)` and
+  `delta_Q = A*dt*F/M`. Boundary and solid interfaces use their fluid half-cell.
+  Wall/solid and prescribed `Fixed` fluxes remain held, with the balancing
+  constraint impulse and its work reported explicitly. Actual returned fluxes
+  pass independent impulse and kinetic-work budgets; no density mean or
+  Boussinesq substitution replaces the admitted inertias.
+  `force_and_project_density` composes that predictor with the original density
+  pressure/volume constraint. It reports predictor-stage and endpoint-midpoint
+  force/constraint work separately, plus the signed force-pressure split term.
+  At resolved hydrostatic rest the endpoint force work vanishes and this cross
+  term cancels the intermediate projection loss; neither is material heat.
+  Original source-pressure work, fixed-boundary pressure work and projection
+  loss retain their separate native accounts. The predictor can directly feed
+  material or thermal-volume transport. This is a frozen-density force/pressure
+  split: advective face inertia, cell/face reconstruction, force constitutive
+  closure and gravitational-potential transport remain with their physical
+  owners. Native G1/G3/G4 tests cover graded stratified hydrostatics, sharp
+  density contrasts, independently derived density-driven circulation, held
+  boundary reactions/work, zero-force parity and atomic budget/cancel refusal.
 - `FlowField::project_and_advect_material` consumes that pressure projection
   through conservative backward-Euler donor transport on the SAME native face
   volume fluxes. Cell mass is the authoritative inventory; `rho=M/V` supplies

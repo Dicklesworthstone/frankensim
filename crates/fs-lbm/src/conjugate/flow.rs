@@ -20,7 +20,11 @@ use crate::d3q19::{
 
 mod density_projection;
 use density_projection::FrozenDensity;
-pub use density_projection::{DensityProjection, DensityProjectionControls, DensityProjectionReport};
+pub use density_projection::{
+    DensityForceControls, DensityForceInput, DensityForcePrediction, DensityForceReport,
+    DensityProjection, DensityProjectionControls, DensityProjectionReport, ForcedDensityProjection,
+    ForcedDensityProjectionReport,
+};
 mod density_transport;
 pub use density_transport::{
     AdvectedMaterial, MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,

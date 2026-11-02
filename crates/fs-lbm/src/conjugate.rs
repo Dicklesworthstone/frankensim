@@ -130,8 +130,10 @@ pub use energy::{
 };
 pub use flow::{
     AdvectedMaterial, CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
-    CoexistenceVolumeStep, DensityProjection, DensityProjectionControls, DensityProjectionReport,
-    FlowFace, FlowField, LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport,
+    CoexistenceVolumeStep, DensityForceControls, DensityForceInput, DensityForcePrediction,
+    DensityForceReport, DensityProjection, DensityProjectionControls, DensityProjectionReport,
+    FlowFace, FlowField, ForcedDensityProjection, ForcedDensityProjectionReport, LbmCollisionChoice,
+    LbmFlow, LbmFlowConfig, LbmFlowReport,
     MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
     MaterialAdvectionStep, MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport,
     MaterialMomentumStep, MaterialVolumeSource, ProjectionReport, ThermalVolumeControls,

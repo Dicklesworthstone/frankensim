@@ -3,6 +3,12 @@
 use super::{CancelGate, ChtError, FlowFace, FlowField, ProjectionReport, VoxelDomain};
 use super::{finite, finite_positive, poll, poll_every};
 
+mod forcing;
+pub use forcing::{
+    DensityForceControls, DensityForceInput, DensityForcePrediction, DensityForceReport,
+    ForcedDensityProjection, ForcedDensityProjectionReport,
+};
+
 /// Physical step and independent readback budgets for a density projection.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DensityProjectionControls {
@@ -65,12 +71,7 @@ pub(super) struct FrozenDensity<'a> {
 
 impl FrozenDensity<'_> {
     fn face_mass(&self, domain: &VoxelDomain, c: usize, f: usize, nb: Option<usize>) -> f64 {
-        let axis = f / 2;
-        let half_c = 0.5 * domain.widths(c)[axis];
-        let half_nb = nb.map_or(0.0, |n| 0.5 * domain.widths(n)[axis]);
-        let mass_per_area =
-            self.density_kg_m3[c] * half_c + nb.map_or(0.0, |n| self.density_kg_m3[n] * half_nb);
-        domain.face_area(c, axis) * mass_per_area
+        face_dual_mass(domain, self.density_kg_m3, c, f, nb)
     }
 
     pub(super) fn conductance(
@@ -83,6 +84,20 @@ impl FrozenDensity<'_> {
         let area = domain.face_area(c, f / 2);
         self.duration_s * area * (area / self.face_mass(domain, c, f, nb))
     }
+}
+
+fn face_dual_mass(
+    domain: &VoxelDomain,
+    density_kg_m3: &[f64],
+    c: usize,
+    f: usize,
+    nb: Option<usize>,
+) -> f64 {
+    let axis = f / 2;
+    let half_c = 0.5 * domain.widths(c)[axis];
+    let half_nb = nb.map_or(0.0, |n| 0.5 * domain.widths(n)[axis]);
+    let mass_per_area = density_kg_m3[c] * half_c + nb.map_or(0.0, |n| density_kg_m3[n] * half_nb);
+    domain.face_area(c, axis) * mass_per_area
 }
 
 impl FlowField {
@@ -186,6 +201,55 @@ impl FlowField {
             "flow.maximum_energy_defect_j",
             controls.maximum_energy_defect_j,
         )?;
+        let uniform_density = self.admit_density_field(
+            domain,
+            faces,
+            density_kg_m3,
+            Some(target_outflow_m3_s),
+            gate,
+        )?;
+        let density = FrozenDensity {
+            density_kg_m3,
+            target_outflow_m3_s,
+            duration_s: controls.duration_s,
+            uniform_density,
+        };
+        if let Some(reference) = uniform_density {
+            finite_positive("flow.pressure_scale", reference / controls.duration_s)?;
+        }
+        for c in 0..domain.cell_count() {
+            poll_every(gate, c)?;
+            if !domain.is_fluid(c) {
+                continue;
+            }
+            for f in 0..6 {
+                let nb = domain.neighbor(c, f);
+                if active_face(domain, faces, f, nb) {
+                    finite_positive(
+                        "flow.face_dual_mass_kg",
+                        density.face_mass(domain, c, f, nb),
+                    )?;
+                    finite_positive(
+                        "flow.pressure_conductance",
+                        density.conductance(domain, c, f, nb),
+                    )?;
+                }
+            }
+        }
+        Ok(density)
+    }
+
+    /// Shared layout, occupancy and frozen-density admission. A force predictor
+    /// has no prescribed continuity source yet and does not allocate a dummy one.
+    fn admit_density_field(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        density_kg_m3: &[f64],
+        target_outflow_m3_s: Option<&[f64]>,
+        gate: &CancelGate,
+    ) -> Result<Option<f64>, ChtError> {
+        poll(gate)?;
         let [nx, ny, nz] = domain.dims();
         if self.dims != domain.dims()
             || self.dx != domain.min_width()
@@ -193,7 +257,7 @@ impl FlowField {
             || self.fy.len() != nx * (ny + 1) * nz
             || self.fz.len() != nx * ny * (nz + 1)
             || density_kg_m3.len() != domain.cell_count()
-            || target_outflow_m3_s.len() != domain.cell_count()
+            || target_outflow_m3_s.is_some_and(|source| source.len() != domain.cell_count())
         {
             return Err(refuse(
                 "flow.density_projection_shape",
@@ -204,11 +268,13 @@ impl FlowField {
         let mut homogeneous = true;
         for c in 0..domain.cell_count() {
             poll_every(gate, c)?;
-            finite("flow.target_outflow_m3_s", target_outflow_m3_s[c])?;
+            if let Some(source) = target_outflow_m3_s {
+                finite("flow.target_outflow_m3_s", source[c])?;
+            }
             if domain.is_fluid(c) {
                 finite_positive("flow.density_kg_m3", density_kg_m3[c])?;
                 homogeneous &= *reference.get_or_insert(density_kg_m3[c]) == density_kg_m3[c];
-            } else if target_outflow_m3_s[c] != 0.0 {
+            } else if target_outflow_m3_s.is_some_and(|source| source[c] != 0.0) {
                 return Err(refuse(
                     "flow.solid_volume_source",
                     "a solid cell cannot carry a fluid volume source",
@@ -236,35 +302,7 @@ impl FlowField {
                 "projection needs at least one fluid cell",
             )
         })?;
-        let density = FrozenDensity {
-            density_kg_m3,
-            target_outflow_m3_s,
-            duration_s: controls.duration_s,
-            uniform_density: homogeneous.then_some(reference),
-        };
-        if homogeneous {
-            finite_positive("flow.pressure_scale", reference / controls.duration_s)?;
-        }
-        for c in 0..domain.cell_count() {
-            poll_every(gate, c)?;
-            if !domain.is_fluid(c) {
-                continue;
-            }
-            for f in 0..6 {
-                let nb = domain.neighbor(c, f);
-                if active_face(domain, faces, f, nb) {
-                    finite_positive(
-                        "flow.face_dual_mass_kg",
-                        density.face_mass(domain, c, f, nb),
-                    )?;
-                    finite_positive(
-                        "flow.pressure_conductance",
-                        density.conductance(domain, c, f, nb),
-                    )?;
-                }
-            }
-        }
-        Ok(density)
+        Ok(homogeneous.then_some(reference))
     }
 }
 
