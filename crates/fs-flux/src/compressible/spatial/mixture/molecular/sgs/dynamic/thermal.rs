@@ -5,6 +5,8 @@
 //! fitted scalar; this remains a low-Mach gradient-diffusion heat model for
 //! evolving mixtures, not a closure for all compressible SGS energy terms.
 //! Species mixing retains the explicitly authored common Schmidt number.
+//! Momentum and temperature gradients share the actual directional Cartesian
+//! cell widths; scalar and momentum test filters use the same physical box.
 
 use super::*;
 use fs_lbm::sgs3::dynamic::scalar::PeriodicDynamicScalar;
@@ -119,7 +121,7 @@ impl DynamicThermalTransport {
             PeriodicDynamicScalar::required_bytes(grid.len()).map_err(dynamic_error)?;
         Ok(Self {
             config,
-            momentum: PeriodicDynamicSgs::new(grid.shape, grid.spacing[0], momentum_bytes)
+            momentum: PeriodicDynamicSgs::new_cartesian(grid.shape, grid.spacing, momentum_bytes)
                 .map_err(dynamic_error)?,
             heat: PeriodicDynamicScalar::new(grid.shape, heat_bytes).map_err(dynamic_error)?,
             density: allocated(grid.len(), 0.0)?,

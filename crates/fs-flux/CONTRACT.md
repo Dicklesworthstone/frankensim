@@ -1640,9 +1640,13 @@ viscosity, so heat-ratio admission requires no second transport-law query.
 Total energy, referenced species enthalpies, Maxwell--Stefan diffusion and the
 reactive splitter retain their existing owners. The combined field/operator
 budget includes 264 nominal additional numerical bytes/cell. This independent
-heat closure has the same periodic, isotropic and low-Mach applicability as
-the frozen-gas dynamic thermal model; no dynamic species or chemistry closure
-or complete compressible SGS-energy qualification is implied.
+heat closure has the same periodic, uniform Cartesian and low-Mach
+applicability as the frozen-gas dynamic thermal model. Both mixture dynamic
+constructors pass all three physical cell widths to the shared fit; the
+original directional face distances and combined species/heat stability
+estimate remain in force. Rectangular cells add no per-cell storage. This
+does not establish accuracy at arbitrary aspect ratios, dynamic species or
+chemistry closure, or complete compressible SGS-energy qualification.
 
 With `experimental-sgs`, the existing spatial mixture molecular owner admits
 `sgs::MixtureSubgridConfig { transport: SubgridConfig, turbulent_schmidt }`

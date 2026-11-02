@@ -19,25 +19,29 @@ fn dynamic_config() -> MixtureDynamicSubgridConfig {
 }
 
 fn dynamic_field(formation: f64) -> MixtureEuler3d {
-    field(
-        material(formation),
+    dynamic_field_on_grid(
+        formation,
         CartesianGrid::new(7, 7, 7, 1.0 / 7.0, 1.0 / 7.0, 1.0 / 7.0).unwrap(),
-        PERIODIC,
-        |x| {
-            let [x, y, z] = x.map(|v| std::f64::consts::TAU * v);
-            let rho = 1.2 + 0.2 * x.sin() + 0.1 * y.cos();
-            let fraction = 0.5 + 0.15 * (x + y).sin();
-            (
-                [rho * fraction, rho * (1.0 - fraction), 0.0],
-                [
-                    0.3 * x.sin() + 0.2 * (y + z).sin() + 0.1 * (2.0 * x - y).cos(),
-                    0.2 * y.cos() + 0.3 * (z + x).sin() + 0.1 * (x - 2.0 * z).sin(),
-                    0.2 * z.sin() + 0.1 * (x + y).cos() + 0.3 * (2.0 * y - z).sin(),
-                ],
-                1.0 + 0.05 * z.cos(),
-            )
-        },
     )
+}
+
+fn dynamic_field_on_grid(formation: f64, grid: CartesianGrid) -> MixtureEuler3d {
+    field(material(formation), grid, PERIODIC, |point| {
+        let [x, y, z] = std::array::from_fn(|axis| {
+            std::f64::consts::TAU * point[axis] / (grid.shape[axis] as f64 * grid.spacing[axis])
+        });
+        let rho = 1.2 + 0.2 * x.sin() + 0.1 * y.cos();
+        let fraction = 0.5 + 0.15 * (x + y).sin();
+        (
+            [rho * fraction, rho * (1.0 - fraction), 0.0],
+            [
+                0.3 * x.sin() + 0.2 * (y + z).sin() + 0.1 * (2.0 * x - y).cos(),
+                0.2 * y.cos() + 0.3 * (z + x).sin() + 0.1 * (x - 2.0 * z).sin(),
+                0.2 * z.sin() + 0.1 * (x + y).cos() + 0.3 * (2.0 * y - z).sin(),
+            ],
+            1.0 + 0.05 * z.cos(),
+        )
+    })
 }
 
 fn dynamic_operator(
@@ -57,15 +61,20 @@ fn dynamic_operator(
 #[test]
 fn g0_dynamic_mixture_uses_actual_favre_density_and_conservative_species_faces() {
     let flow = dynamic_field(0.0);
+    check_dynamic_species_faces(&flow);
+}
+
+fn check_dynamic_species_faces(flow: &MixtureEuler3d) -> MolecularTransport3d<ConstantTransport> {
     let cfg = dynamic_config();
-    let mut op = dynamic_operator(&flow, cfg);
-    let mut molecular = operator(&flow, None);
-    let modeled_rate = faces(&mut op, &flow).rate;
-    let molecular_rate = faces(&mut molecular, &flow).rate;
+    let mut op = dynamic_operator(flow, cfg);
+    let mut molecular = operator(flow, None);
+    let modeled_rate = faces(&mut op, flow).rate;
+    let molecular_rate = faces(&mut molecular, flow).rate;
     assert!(modeled_rate > molecular_rate);
     let rho: Vec<_> = op.work.primitive.iter().map(|p| p.density).collect();
     let velocity: Vec<_> = op.work.primitive.iter().map(|p| p.velocity).collect();
-    let mut reference = PeriodicDynamicSgs::new([7; 3], 1.0 / 7.0, usize::MAX).unwrap();
+    let mut reference =
+        PeriodicDynamicSgs::new_cartesian(flow.grid.shape, flow.grid.spacing, usize::MAX).unwrap();
     let fit = reference
         .prepare(cfg.transport.model, &rho, &velocity, || false)
         .unwrap();
@@ -95,7 +104,7 @@ fn g0_dynamic_mixture_uses_actual_favre_density_and_conservative_species_faces()
     for axis in 0..3 {
         for left in 0..flow.cell_count() {
             let mut c = flow.grid.coordinates(left);
-            c[axis] = (c[axis] + 1) % 7;
+            c[axis] = (c[axis] + 1) % flow.grid.shape[axis];
             let right = flow.grid.index(c);
             let face = flow.grid.cell_face(axis, c);
             let mu = 0.5 * modeled[left] + 0.5 * modeled[right];
@@ -113,6 +122,34 @@ fn g0_dynamic_mixture_uses_actual_favre_density_and_conservative_species_faces()
         }
     }
     assert!(active_faces > 0);
+    op
+}
+
+#[test]
+fn g3_dynamic_mixture_rectangular_cells_conserve_species_energy_and_source_gauge() {
+    let grid = CartesianGrid::new(5, 7, 9, 0.16, 0.09, 0.12).unwrap();
+    let mut flow = dynamic_field_on_grid(0.0, grid);
+    let mut shifted = dynamic_field_on_grid(1e12, grid);
+    let mut laminar = dynamic_field_on_grid(0.0, grid);
+    let mut op = check_dynamic_species_faces(&flow);
+    let mut shifted_op = dynamic_operator(&shifted, dynamic_config());
+    let mut molecular = operator(&laminar, None);
+    let bytes = op.workspace_bytes() + flow.workspace_bytes();
+    let controls = DissipationControl::default();
+    let report = op
+        .advance(&mut flow, Time::new(0.001), controls, || false)
+        .unwrap();
+    balance(&report);
+    shifted_op
+        .advance(&mut shifted, Time::new(0.001), controls, || false)
+        .unwrap();
+    molecular
+        .advance(&mut laminar, Time::new(0.001), controls, || false)
+        .unwrap();
+    assert_eq!(flow.states(), shifted.states());
+    assert_ne!(flow.states(), laminar.states());
+    assert_eq!(op.workspace_bytes() + flow.workspace_bytes(), bytes);
+    assert!(flow.states().chunks_exact(7).all(|row| row[2] == 0.0));
 }
 
 #[test]
@@ -207,10 +244,6 @@ fn g4_dynamic_mixture_budgets_topology_and_cancel_refuse_without_publication() {
     );
     for (grid, boundary) in [
         (CartesianGrid::new(7, 7, 7, 0.1, 0.1, 0.1).unwrap(), WALLS),
-        (
-            CartesianGrid::new(7, 7, 7, 0.1, 0.2, 0.1).unwrap(),
-            PERIODIC,
-        ),
         (
             CartesianGrid::new(7, 2, 7, 0.1, 0.1, 0.1).unwrap(),
             PERIODIC,

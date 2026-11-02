@@ -2,15 +2,18 @@
 //!
 //! The shared periodic 27-cell test filter fits the deviatoric coefficient
 //! from the same-stage mixture density and momentum/density. The physical
-//! filter widths are `h` and `3h`; neither a species average nor a constant
-//! reference density replaces the source-admitted local density. The fit
-//! supplies only `nu_t`. The parent retains the original Maxwell--Stefan
+//! directional filter widths are `h_i` and `3h_i`, with effective width
+//! `Delta = (hx*hy*hz)^(1/3)` and physical directional derivatives. Neither a
+//! species average nor a constant reference density replaces the local density.
+//! The fit supplies only `nu_t`. The parent retains the original Maxwell--Stefan
 //! fluxes, adds `rho*nu_t` stress/work, source-Cp heat and common-Schmidt
 //! species/partial-enthalpy transport, and checks their summed stability rate.
 //!
-//! This explicit exploration rung requires a fully periodic isotropic grid
-//! with at least three cells per axis. It supplies no wall filter, dynamic
-//! Prandtl/Schmidt model, reaction-rate closure, pressure dilatation, or SGS
+//! This explicit exploration rung requires a fully periodic uniform Cartesian
+//! grid with at least three cells per axis; rectangular cells are supported.
+//! The eddy viscosity remains scalar, not a tensor anisotropy closure.
+//! It supplies no wall filter, dynamic Prandtl/Schmidt model, reaction-rate
+//! closure, pressure dilatation, or SGS
 //! energy equation. Negative fitted coefficients use the shared no-backscatter
 //! policy; excessive positive coefficients or viscosity ratios refuse.
 //! Every original SSP stage and retry recomputes the fit. Scratch is reused
@@ -113,11 +116,9 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 fn admit_domain(flow: &MixtureEuler3d) -> Result<(), DissipationError> {
     if (0..3).any(|axis| flow.boundaries.axis(axis) != AxisBoundaries::Periodic)
         || flow.grid.shape.into_iter().any(|n| n < 3)
-        || flow.grid.spacing[0] != flow.grid.spacing[1]
-        || flow.grid.spacing[0] != flow.grid.spacing[2]
     {
         return Err(DissipationError::Invalid(
-            "dynamic mixture SGS requires periodic isotropic axes with at least three cells each",
+            "dynamic mixture SGS requires periodic Cartesian axes with at least three cells each",
         ));
     }
     Ok(())
@@ -138,7 +139,7 @@ impl DynamicTransport {
         let core_bytes = PeriodicDynamicSgs::required_bytes(grid.len()).map_err(dynamic_error)?;
         Ok(Self {
             config,
-            filter: PeriodicDynamicSgs::new(grid.shape, grid.spacing[0], core_bytes)
+            filter: PeriodicDynamicSgs::new_cartesian(grid.shape, grid.spacing, core_bytes)
                 .map_err(dynamic_error)?,
             density: allocated(grid.len(), 0.0)?,
             velocity: allocated(grid.len(), [0.0; 3])?,

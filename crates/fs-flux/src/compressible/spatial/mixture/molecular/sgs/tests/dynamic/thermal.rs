@@ -17,21 +17,25 @@ fn config() -> MixtureDynamicThermalSubgridConfig {
 }
 
 fn heat_field(formation: f64) -> MixtureEuler3d {
-    field(
-        material(formation),
+    heat_field_on_grid(
+        formation,
         CartesianGrid::new(9, 9, 9, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0).unwrap(),
-        PERIODIC,
-        |point| {
-            let [x, y, _] = point.map(|v| std::f64::consts::TAU * v);
-            // Exact-zero momentum fit: its Lxx is orthogonal to Mxy. The
-            // oblique temperature field has a nonzero scalar Germano fit.
-            (
-                [0.6, 0.4, 0.0],
-                [0.3 * y.sin(), 0.0, 0.0],
-                1.0 + 0.1 * (x + y).sin(),
-            )
-        },
     )
+}
+
+fn heat_field_on_grid(formation: f64, grid: CartesianGrid) -> MixtureEuler3d {
+    field(material(formation), grid, PERIODIC, |point| {
+        let [x, y, _] = std::array::from_fn(|axis| {
+            std::f64::consts::TAU * point[axis] / (grid.shape[axis] as f64 * grid.spacing[axis])
+        });
+        // Exact-zero momentum fit: its Lxx is orthogonal to Mxy. The
+        // oblique temperature field has a nonzero scalar Germano fit.
+        (
+            [0.6, 0.4, 0.0],
+            [0.3 * y.sin(), 0.0, 0.0],
+            1.0 + 0.1 * (x + y).sin(),
+        )
+    })
 }
 
 fn prepared(
@@ -56,11 +60,15 @@ fn prepared(
 #[test]
 fn g1_dynamic_mixture_heat_survives_zero_eddy_viscosity_and_uses_original_cp() {
     let flow = heat_field(0.0);
+    check_heat_faces(&flow);
+}
+
+fn check_heat_faces(flow: &MixtureEuler3d) -> (MolecularTransport3d<ConstantTransport>, f64) {
     let cfg = config();
-    let mut op = prepared(&flow, cfg);
-    let mut molecular = operator(&flow, None);
-    let dynamic_rate = faces(&mut op, &flow).rate;
-    let molecular_rate = faces(&mut molecular, &flow).rate;
+    let mut op = prepared(flow, cfg);
+    let mut molecular = operator(flow, None);
+    let dynamic_rate = faces(&mut op, flow).rate;
+    let molecular_rate = faces(&mut molecular, flow).rate;
     assert!(dynamic_rate > molecular_rate);
     assert!(
         op.sgs
@@ -73,8 +81,9 @@ fn g1_dynamic_mixture_heat_survives_zero_eddy_viscosity_and_uses_original_cp() {
     let rho: Vec<_> = op.work.primitive.iter().map(|p| p.density).collect();
     let velocity: Vec<_> = op.work.primitive.iter().map(|p| p.velocity).collect();
     let temperature: Vec<_> = op.work.primitive.iter().map(|p| p.temperature).collect();
-    let mut core = PeriodicDynamicSgs::new([9; 3], 1.0 / 9.0, usize::MAX).unwrap();
-    let mut heat = PeriodicDynamicScalar::new([9; 3], usize::MAX).unwrap();
+    let mut core =
+        PeriodicDynamicSgs::new_cartesian(flow.grid.shape, flow.grid.spacing, usize::MAX).unwrap();
+    let mut heat = PeriodicDynamicScalar::new(flow.grid.shape, usize::MAX).unwrap();
     let (momentum, scalar) = core
         .prepare_with_scalar(
             cfg.transport.momentum,
@@ -92,7 +101,7 @@ fn g1_dynamic_mixture_heat_survives_zero_eddy_viscosity_and_uses_original_cp() {
     for axis in 0..3 {
         for left in 0..flow.cell_count() {
             let mut coordinates = flow.grid.coordinates(left);
-            coordinates[axis] = (coordinates[axis] + 1) % 9;
+            coordinates[axis] = (coordinates[axis] + 1) % flow.grid.shape[axis];
             let right = flow.grid.index(coordinates);
             let face = flow.grid.cell_face(axis, coordinates);
             let pl = op.work.primitive[left];
@@ -125,6 +134,44 @@ fn g1_dynamic_mixture_heat_survives_zero_eddy_viscosity_and_uses_original_cp() {
         }
     }
     assert!(active > 0);
+    (op, dynamic_rate)
+}
+
+#[test]
+fn g3_dynamic_mixture_rectangular_heat_uses_directional_stability_and_conserves() {
+    let grid = CartesianGrid::new(9, 7, 5, 0.09, 0.14, 0.20).unwrap();
+    let thin_grid = CartesianGrid::new(9, 7, 5, 0.09, 0.14, 0.05).unwrap();
+    let mut flow = heat_field_on_grid(0.0, grid);
+    let thin = heat_field_on_grid(0.0, thin_grid);
+    let (mut op, rate) = check_heat_faces(&flow);
+    let (_, thin_rate) = check_heat_faces(&thin);
+
+    // The resolved state is independent of z. Changing only hz leaves the
+    // dimensional fitted heat coefficient and molecular diffusivity unchanged;
+    // the owner must still include the narrower axis in its diffusion bound.
+    let inverse_square_sum =
+        |grid: CartesianGrid| grid.spacing.iter().map(|h| h.recip().powi(2)).sum::<f64>();
+    assert!(thin_rate > rate);
+    close(
+        thin_rate / rate,
+        inverse_square_sum(thin_grid) / inverse_square_sum(grid),
+        2e-12,
+    );
+
+    let mut molecular_flow = heat_field_on_grid(0.0, grid);
+    let mut molecular = operator(&molecular_flow, None);
+    let bytes = op.workspace_bytes() + flow.workspace_bytes();
+    let controls = DissipationControl::default();
+    let report = op
+        .advance(&mut flow, Time::new(0.001), controls, || false)
+        .unwrap();
+    balance(&report);
+    molecular
+        .advance(&mut molecular_flow, Time::new(0.001), controls, || false)
+        .unwrap();
+    assert_ne!(flow.states(), molecular_flow.states());
+    assert_eq!(op.workspace_bytes() + flow.workspace_bytes(), bytes);
+    assert!(flow.states().chunks_exact(7).all(|row| row[2] == 0.0));
 }
 
 #[test]
