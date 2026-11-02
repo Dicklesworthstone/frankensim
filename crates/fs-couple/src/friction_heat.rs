@@ -123,7 +123,16 @@ impl FrictionHeatRoute {
             let g = geometry[side];
             let delta = std::array::from_fn::<_, 3, _>(|i| g.end_m[i] - g.start_m[i]);
             let length = finite(det::hypot(det::hypot(delta[0], delta[1]), delta[2]))?;
-            if length <= 0.0 || patch.link.area_m2 > g.volume_m3 / length {
+            if length <= 0.0
+                || {
+                    // Subtracting decimal endpoints and reconstructing A=V/L
+                    // can differ from the original physical face by roundoff.
+                    // This admits arithmetic noise only, not geometric overlap.
+                    let face_area = finite(g.volume_m3 / length)?;
+                    patch.link.area_m2 - face_area
+                        > 64.0 * f64::EPSILON * patch.link.area_m2.max(face_area)
+                }
+            {
                 return Err(invalid(
                     "friction heat patch exceeds its prismatic cell face",
                 ));

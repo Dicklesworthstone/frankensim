@@ -36,7 +36,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 const DT: f64 = 0.05;
-const HALF_LENGTH: f64 = 0.05;
+const HALF_LENGTH: f64 = 0.0625;
 const MASS: [f64; 3] = [2.0, 3.0, 4.0];
 const INERTIA: [f64; 3] = [0.08, 0.12, 0.15];
 const SPIN: [f64; 3] = [4.0, 0.0, 1.0];
@@ -282,12 +282,20 @@ impl ThermalLaw for Caloric {
 static CALORIC: Caloric = Caloric;
 
 fn thermal(initial: [f64; 3], areas: [f64; 2]) -> DepositionSimulation<'static> {
+    thermal_with_geometry(initial, areas, HALF_LENGTH, areas[0].max(areas[1]))
+}
+
+fn thermal_with_geometry(
+    initial: [f64; 3],
+    areas: [f64; 2],
+    half_length: f64,
+    face: f64,
+) -> DepositionSimulation<'static> {
     let endpoints = [
-        [-HALF_LENGTH, HALF_LENGTH],
-        [-3.0 * HALF_LENGTH, -HALF_LENGTH],
-        [HALF_LENGTH, 3.0 * HALF_LENGTH],
+        [-half_length, half_length],
+        [-3.0 * half_length, -half_length],
+        [half_length, 3.0 * half_length],
     ];
-    let face = areas[0].max(areas[1]);
     let mut events: Vec<_> = (0..3)
         .map(|i| TimedEvent {
             time_s: 0.0,
@@ -301,8 +309,8 @@ fn thermal(initial: [f64; 3], areas: [f64; 2]) -> DepositionSimulation<'static> 
                 geometry: CellGeometry {
                     start_m: [0.0, 0.0, endpoints[i][0]],
                     end_m: [0.0, 0.0, endpoints[i][1]],
-                    volume_m3: face * 2.0 * HALF_LENGTH,
-                    surface_area_m2: 2.0 * face + 8.0 * face.sqrt() * HALF_LENGTH,
+                    volume_m3: face * 2.0 * half_length,
+                    surface_area_m2: 2.0 * face + 8.0 * face.sqrt() * half_length,
                 },
                 boundary: Boundary {
                     ambient_k: 300.0,
@@ -323,7 +331,7 @@ fn thermal(initial: [f64; 3], areas: [f64; 2]) -> DepositionSimulation<'static> 
                 area_m2: areas[i],
                 conductance_w_k: series_conductance_w_k(
                     areas[i],
-                    [HALF_LENGTH; 2],
+                    [half_length; 2],
                     [K[0], K[i + 1]],
                 )
                 .unwrap(),
@@ -684,6 +692,26 @@ fn compare(
     assert!(candidate.summed_energy_residual_j.abs() <= controls().combined_energy_tolerance_j);
     assert_eq!(candidate.heat.external_heat_j, 0.0);
     assert_eq!(candidate.thermal.time_s(), DT);
+}
+
+#[test]
+fn decimal_prismatic_faces_admit_only_arithmetic_roundoff_not_physical_overcoverage() {
+    let sources = Sources::new();
+    let areas = sources.areas();
+    let face = areas[0].max(areas[1]);
+    let half: f64 = 0.05;
+    let volume = face * (2.0 * half);
+    let reconstructed_length = (-half - (-3.0 * half)).abs();
+    // Independent reproduction of the original strict-greater-than refusal.
+    assert!(face > volume / reconstructed_length);
+    let admitted = thermal_with_geometry(INITIAL, areas, half, face);
+    for i in 0..2 {
+        let route = FrictionHeatRoute::from_link(&admitted, LINK[i], [K[0], K[i + 1]])
+            .expect("roundoff-consistent original physical face");
+        assert_eq!(route.contact_area_m2(), areas[i]);
+    }
+    let oversized = thermal_with_geometry(INITIAL, areas, half, 0.99 * face);
+    assert!(FrictionHeatRoute::from_link(&oversized, LINK[0], [K[0], K[1]]).is_err());
 }
 
 #[test]

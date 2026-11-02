@@ -21286,10 +21286,12 @@ and poses remain with their existing owners. The perfect-face orthogonal-cell
 backward-Euler approximation needs spatial/time refinement; convergence does not
 establish uniqueness or validation. Event-resolved stopping, thermal expansion,
 normal thermal feedback and evolving attachment topology are not supplied here.
-Three G1/G3/G4 groups in `tests/adhesive_friction_heat.rs` compare shared-inertia
+Four G1/G3/G4 groups in `tests/adhesive_friction_heat.rs` compare shared-inertia
 pure-spin work and a two-face/three-cell heat solve with independent analytical
 elimination, including zero/tensile load, source feedback, signed ordinary
-conduction, permutation and domain/geometry/cancellation rollback.
+conduction, permutation and domain/geometry/cancellation rollback. Prismatic
+face-area admission tolerates only arithmetic roundoff in reconstructed volume
+over length; a separate decimal-coordinate case still refuses physical excess.
 
 ## Source-bound wear on the actual directional friction and heat trajectory
 
