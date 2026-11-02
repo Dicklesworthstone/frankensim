@@ -14,8 +14,11 @@
 //! These source coordinates carry no physical stored energy or inertia.
 //! Fixed supports are homogeneous and stationary; the reduced assembly cannot
 //! supply constrained reactions or moving-support coupling. Force inputs and
-//! outputs explicitly use `free_dofs()` order. Material damping, nonlinear
-//! finite rotations and incomplete modal approximations have separate owners.
+//! outputs explicitly use `free_dofs()` order. An explicitly supplied symmetric
+//! PSD viscosity C adds -C v and independently integrated v^T C v dissipation.
+//! It is a memoryless physical law, not numerical damping or a replacement for
+//! hereditary material models. Nonlinear finite rotations and incomplete modal
+//! approximations have separate owners.
 
 use crate::linear3::TetElasticAssembly;
 use fs_exec::Cx;
@@ -35,7 +38,8 @@ pub struct ExactLinearSolidControls {
     pub maximum_preparation_bytes: usize,
     /// The native exponential's declared scalar-product work cap.
     pub maximum_exponential_multiply_terms: u64,
-    /// Admits source symmetry, max entry of M M^-1 - I, and affine force
+    /// Admits source symmetry, negative viscosity eigenvalue roundoff relative
+    /// to its matrix scale, max entry of M M^-1 - I, and affine force
     /// endpoint error scaled by max(force_scale_n, |f_start|, |f_end|).
     pub maximum_relative_operator_error: f64,
     /// Absolute allowance for each interval and cumulative work balance [J].
@@ -88,6 +92,10 @@ pub struct ExactLinearSolidEnergy {
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
     pub supplied_work_j: f64,
+    /// Integral v(t)^T C v(t) dt from the original physical viscosity [J].
+    pub dissipated_j: f64,
+    /// Compensated sum of the same accepted physical losses [J].
+    pub cumulative_dissipated_j: f64,
     pub balance_error_j: f64,
     pub cumulative_balance_error_j: f64,
 }
@@ -119,6 +127,9 @@ pub struct ExactLinearSolid {
     cumulative_work_j: f64,
     work_correction_j: f64,
     affine_force_scale_n: Option<f64>,
+    viscous: bool,
+    cumulative_dissipated_j: f64,
+    dissipation_correction_j: f64,
 }
 
 impl ExactLinearSolid {
@@ -139,6 +150,7 @@ impl ExactLinearSolid {
             dt_s,
             initial_displacement_m,
             initial_velocity_mps,
+            None,
             None,
             controls,
             cx,
@@ -167,6 +179,60 @@ impl ExactLinearSolid {
             initial_displacement_m,
             initial_velocity_mps,
             Some(force_scale_n),
+            None,
+            controls,
+            cx,
+        )
+    }
+
+    /// Exact held-force motion with an explicitly supplied memoryless viscosity
+    /// C [N s/m], in the assembly's same complete free-DOF order. C must be
+    /// symmetric PSD to the declared operator allowance; its entries are never
+    /// fitted, diagonalized away, or clipped. This can represent a distributed
+    /// boundary dashpot or an admitted linear viscous constitutive operator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_viscous(
+        assembly: &TetElasticAssembly,
+        damping_ns_m: &Csr,
+        dt_s: f64,
+        initial_displacement_m: &[f64],
+        initial_velocity_mps: &[f64],
+        controls: ExactLinearSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, ExactLinearSolidError> {
+        Self::prepare_source(
+            assembly,
+            dt_s,
+            initial_displacement_m,
+            initial_velocity_mps,
+            None,
+            Some(damping_ns_m),
+            controls,
+            cx,
+        )
+    }
+
+    /// Same physical viscosity with exactly affine force histories. Work and
+    /// viscous dissipation are independently integrated along the full coupled
+    /// trajectory, including non-proportional C and off-diagonal consistent M.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_viscous_affine_forces(
+        assembly: &TetElasticAssembly,
+        damping_ns_m: &Csr,
+        dt_s: f64,
+        initial_displacement_m: &[f64],
+        initial_velocity_mps: &[f64],
+        force_scale_n: f64,
+        controls: ExactLinearSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, ExactLinearSolidError> {
+        Self::prepare_source(
+            assembly,
+            dt_s,
+            initial_displacement_m,
+            initial_velocity_mps,
+            Some(force_scale_n),
+            Some(damping_ns_m),
             controls,
             cx,
         )
@@ -179,6 +245,7 @@ impl ExactLinearSolid {
         initial_displacement_m: &[f64],
         initial_velocity_mps: &[f64],
         affine_force_scale_n: Option<f64>,
+        damping_ns_m: Option<&Csr>,
         controls: ExactLinearSolidControls,
         cx: &Cx<'_>,
     ) -> Result<Self, ExactLinearSolidError> {
@@ -228,17 +295,21 @@ impl ExactLinearSolid {
             });
         }
         // The held native flow reserves 24*d² doubles; its affine extension with
-        // one quadratic work form reserves 38*d². Reserve the same amount again
+        // one quadratic work form reserves 38*d². Each additional viscosity
+        // form needs another 2*d² native doubles. Reserve the same amount again
         // for the physical pencil, source map, inverse, eigen work and state.
         // Cholesky above its panel size also packs the native GEMM panels.
         let bytes = d
             .checked_mul(d)
             .and_then(|v| {
-                v.checked_mul(if affine_force_scale_n.is_some() {
-                    80 * 8
-                } else {
-                    48 * 8
-                })
+                v.checked_mul(
+                    (if affine_force_scale_n.is_some() {
+                        80
+                    } else {
+                        48
+                    } + if damping_ns_m.is_some() { 4 } else { 0 })
+                        * 8,
+                )
             })
             .and_then(|v| v.checked_add(if n > 32 { 2 * 1024 * 1024 } else { 0 }))
             .ok_or_else(|| invalid("complete exponential byte overflow"))?;
@@ -251,6 +322,25 @@ impl ExactLinearSolid {
         let tolerance = controls.maximum_relative_operator_error;
         let stiffness = symmetric_matrix(&assembly.stiffness, n, tolerance, cx)?;
         let mass = symmetric_matrix(&assembly.mass, n, tolerance, cx)?;
+        let damping = damping_ns_m
+            .map(|matrix| symmetric_matrix(matrix, n, tolerance, cx))
+            .transpose()?;
+        if let Some(damping) = &damping {
+            // The original dimensional C, not its mass-scaled congruence, owns
+            // passivity admission. Scaling avoids an absolute SI-unit floor.
+            let scale = damping.iter().fold(0.0_f64, |s, v| s.max(v.abs()));
+            if scale != 0.0 {
+                let normalized: Vec<_> = damping.iter().map(|v| v / scale).collect();
+                let (eigenvalues, _) = fs_la::eigen::jacobi_eigh(&normalized, n);
+                if eigenvalues
+                    .iter()
+                    .any(|v| !v.is_finite() || *v < -tolerance)
+                {
+                    return Err(invalid("viscosity must be positive semidefinite"));
+                }
+            }
+            poll(cx)?;
+        }
         let factor = cholesky(&mass, n).map_err(ExactLinearSolidError::Mass)?;
         let mut inverse = vec![0.0; n * n];
         let mut column = vec![0.0; n];
@@ -294,6 +384,36 @@ impl ExactLinearSolid {
         let mut q = vec![0.0; state_dim * state_dim];
         let mut j = vec![0.0; state_dim * state_dim];
         let mut g = vec![0.0; state_dim * n];
+        let mut resistance = vec![0.0; state_dim * state_dim];
+        let mut inverse_damping = Vec::new();
+        if let Some(damping) = &damping {
+            inverse_damping = vec![0.0; n * n];
+            for a in 0..n {
+                poll(cx)?;
+                for b in 0..n {
+                    inverse_damping[a * n + b] = (0..n).fold(0.0, |s, k| {
+                        inverse[a * n + k].mul_add(damping[k * n + b], s)
+                    });
+                }
+            }
+            for a in 0..n {
+                poll(cx)?;
+                for b in 0..=a {
+                    let left = (0..n).fold(0.0, |s, k| {
+                        inverse_damping[a * n + k].mul_add(inverse[k * n + b], s)
+                    });
+                    let right = (0..n).fold(0.0, |s, k| {
+                        inverse_damping[b * n + k].mul_add(inverse[k * n + a], s)
+                    });
+                    let value = 0.5 * left + 0.5 * right;
+                    if !value.is_finite() {
+                        return Err(invalid("unrepresentable viscosity congruence"));
+                    }
+                    resistance[(n + a) * state_dim + n + b] = value;
+                    resistance[(n + b) * state_dim + n + a] = value;
+                }
+            }
+        }
         for a in 0..n {
             for b in 0..n {
                 q[a * state_dim + b] = stiffness[a * n + b];
@@ -307,7 +427,7 @@ impl ExactLinearSolid {
             state_dim,
             n,
             j,
-            vec![0.0; state_dim * state_dim],
+            resistance,
             g,
             Box::new(QuadraticStorage::new(q, state_dim)?),
         )?;
@@ -344,7 +464,14 @@ impl ExactLinearSolid {
                         inverse[a * n + k].mul_add(stiffness[k * n + b], s)
                     });
                     generator[(n + a) * extended + 2 * n + b] = inverse[a * n + b];
+                    if damping.is_some() {
+                        generator[(n + a) * extended + n + b] = -inverse_damping[a * n + b];
+                    }
                 }
+            }
+            let mut observations = vec![work];
+            if let Some(damping) = &damping {
+                observations.push(viscous_form(damping, n, extended));
             }
             PreparedQuadraticFlow::new_extended_input_controlled(
                 &system,
@@ -353,17 +480,22 @@ impl ExactLinearSolid {
                 &vec![1.0 / force_scale_n; n],
                 &source,
                 dt_s,
-                &[work],
+                &observations,
                 &[],
                 flow_budget,
                 || cx.checkpoint().is_err(),
             )?
         } else {
+            let observations: Vec<_> = damping
+                .as_ref()
+                .map(|c| viscous_form(c, n, state_dim))
+                .into_iter()
+                .collect();
             PreparedQuadraticFlow::new_controlled(
                 &system,
                 &split,
                 dt_s,
-                &[],
+                &observations,
                 &[],
                 flow_budget,
                 || cx.checkpoint().is_err(),
@@ -390,6 +522,9 @@ impl ExactLinearSolid {
             cumulative_work_j: 0.0,
             work_correction_j: 0.0,
             affine_force_scale_n,
+            viscous: damping.is_some(),
+            cumulative_dissipated_j: 0.0,
+            dissipation_correction_j: 0.0,
         })
     }
 
@@ -417,6 +552,10 @@ impl ExactLinearSolid {
     pub fn kinetic_energy_j(&self) -> f64 {
         quadratic(&self.mass, self.velocity_mps())
     }
+    /// Physical viscosity loss accumulated only from accepted intervals [J].
+    pub fn cumulative_dissipated_energy_j(&self) -> f64 {
+        self.cumulative_dissipated_j
+    }
 
     /// One complete exact held-force interval. Every force is in N, in the
     /// source free-DOF order. Cancellation/refusal leaves all accepted fields.
@@ -436,12 +575,21 @@ impl ExactLinearSolid {
                 "finite complete held forces and representable clock required",
             ));
         }
-        let candidate = self.flow.evaluate(&self.state, held_force_n)?.state;
+        let response = self.flow.evaluate(&self.state, held_force_n)?;
+        let dissipated_j = if self.viscous {
+            *response
+                .integrals
+                .first()
+                .ok_or_else(|| invalid("missing independently integrated viscosity loss"))?
+        } else {
+            0.0
+        };
+        let candidate = response.state;
         poll(cx)?;
         let supplied_work_j = (0..n).fold(0.0, |s, i| {
             held_force_n[i].mul_add(candidate[i] - self.state[i], s)
         });
-        self.accept(candidate, supplied_work_j, step, time_s, cx)
+        self.accept(candidate, supplied_work_j, dissipated_j, step, time_s, cx)
     }
 
     /// Advance one exactly linearly interpolated force interval. Start and end
@@ -497,9 +645,17 @@ impl ExactLinearSolid {
             .integrals
             .first()
             .ok_or_else(|| invalid("missing independently integrated force work"))?;
+        let dissipated_j = if self.viscous {
+            *response
+                .integrals
+                .get(1)
+                .ok_or_else(|| invalid("missing independently integrated viscosity loss"))?
+        } else {
+            0.0
+        };
         let mut candidate = response.state;
         candidate.truncate(2 * n);
-        self.accept(candidate, supplied_work_j, step, time_s, cx)
+        self.accept(candidate, supplied_work_j, dissipated_j, step, time_s, cx)
     }
 
     fn next_interval(&self) -> Result<(u64, f64), ExactLinearSolidError> {
@@ -519,6 +675,7 @@ impl ExactLinearSolid {
         &mut self,
         candidate: Vec<f64>,
         supplied_work_j: f64,
+        dissipated_j: f64,
         step: u64,
         time_s: f64,
         cx: &Cx<'_>,
@@ -535,15 +692,22 @@ impl ExactLinearSolid {
         let increment = supplied_work_j - self.work_correction_j;
         let cumulative_work_j = self.cumulative_work_j + increment;
         let correction = (cumulative_work_j - self.cumulative_work_j) - increment;
+        let loss_increment = dissipated_j - self.dissipation_correction_j;
+        let cumulative_dissipated_j = self.cumulative_dissipated_j + loss_increment;
+        let loss_correction =
+            (cumulative_dissipated_j - self.cumulative_dissipated_j) - loss_increment;
         let energy = ExactLinearSolidEnergy {
             stored_before_j,
             stored_after_j,
             kinetic_before_j,
             kinetic_after_j,
             supplied_work_j,
-            balance_error_j: supplied_work_j - change,
+            dissipated_j,
+            cumulative_dissipated_j,
+            balance_error_j: supplied_work_j - change - dissipated_j,
             cumulative_balance_error_j: cumulative_work_j
-                - (stored_after_j + kinetic_after_j - self.initial_energy_j),
+                - (stored_after_j + kinetic_after_j - self.initial_energy_j)
+                - cumulative_dissipated_j,
         };
         if [
             stored_before_j,
@@ -553,11 +717,22 @@ impl ExactLinearSolid {
             supplied_work_j,
             cumulative_work_j,
             correction,
+            dissipated_j,
+            cumulative_dissipated_j,
+            loss_correction,
         ]
         .iter()
         .any(|v| !v.is_finite())
         {
             return Err(invalid("unrepresentable physical energy/work"));
+        }
+        if dissipated_j < -self.controls.maximum_work_error_j
+            || cumulative_dissipated_j < -self.controls.maximum_work_error_j
+        {
+            return Err(ExactLinearSolidError::Energy {
+                defect_j: dissipated_j.min(cumulative_dissipated_j),
+                allowance_j: self.controls.maximum_work_error_j,
+            });
         }
         for defect_j in [energy.balance_error_j, energy.cumulative_balance_error_j] {
             if !defect_j.is_finite() || defect_j.abs() > self.controls.maximum_work_error_j {
@@ -578,6 +753,8 @@ impl ExactLinearSolid {
         self.steps = step;
         self.cumulative_work_j = cumulative_work_j;
         self.work_correction_j = correction;
+        self.cumulative_dissipated_j = cumulative_dissipated_j;
+        self.dissipation_correction_j = loss_correction;
         Ok(ExactLinearSolidStep {
             step,
             time_s,
@@ -585,6 +762,16 @@ impl ExactLinearSolid {
             energy,
         })
     }
+}
+
+fn viscous_form(damping: &[f64], n: usize, state_dim: usize) -> Vec<f64> {
+    let mut observation = vec![0.0; state_dim * state_dim];
+    for a in 0..n {
+        for b in 0..n {
+            observation[(n + a) * state_dim + n + b] = damping[a * n + b];
+        }
+    }
+    observation
 }
 
 fn symmetric_matrix(

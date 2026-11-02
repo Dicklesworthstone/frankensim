@@ -3956,3 +3956,39 @@ work integral. One interval and four subintervals agree through continuous
 ramps and finite force jumps. Affine-specific dimension/overflow boundaries,
 wrong mode, cancellation and deterministic replay are covered. All five
 existing held-force tests, including the million-step phase case, remain green.
+
+## Exact coupled viscosity on linear solids
+
+`dynamics::ExactLinearSolid::prepare_viscous` and
+`prepare_viscous_affine_forces` retain the original complete free-coordinate
+stiffness K and consistent mass M while admitting an explicit symmetric
+positive-semidefinite viscosity C [N s/m] in the SAME free-DOF order. They solve
+M vdot + C v + K u = f through the existing fixed-clock quadratic exponential.
+C can include non-proportional coupling; no modal diagonalization or Rayleigh
+assumption replaces its entries. This is a memoryless constitutive resistance
+or boundary impedance, not the hereditary tensor-Prony material owner.
+
+The original-dimensional C is checked for symmetry and negative eigenvalues
+against the caller's explicit relative operator allowance, normalized by C's
+own magnitude with no unit-sized floor. No eigenvalues are clipped. Dynamics
+use R_vv = M^-1 C M^-1, retaining Q = diag(K,M) and the original physical
+energy. An independent quadratic observation integrates D = integral v^T C v dt.
+Held-force work remains f dot Delta u; affine work remains integral f(t) dot v(t) dt.
+Interval and compensated cumulative balances enforce Delta H + D = W before
+state publication. Negative integrated loss beyond the stated energy allowance
+refuses. Energy reports expose interval and cumulative physical dissipation.
+
+Zero viscosity retains the conservative trajectory and existing fixed-clock
+semantics. Observation storage/work are included in the same explicit preparation
+budgets. Clock, forces, overflow, cancellation and work/loss refusals leave all
+accepted physical state, time and cumulative history unchanged. Stationary
+homogeneous supports and the existing dense augmented-dimension limits remain;
+this adds neither support reactions nor moving-support forcing.
+
+Native `tests/solid_linear_viscous.rs` passes five focused tests: underdamped,
+critical and overdamped analytic motion with independently integrated loss;
+rigid drag and terminal velocity; coupled consistent M with noncommuting K/C;
+affine force work and heat against continuous integrals and partitioned motion;
+and invalid/indefinite viscosity, resource limits, zero-C equivalence and
+refused/cancelled-step rollback. The five held-force and four affine-force
+regressions also pass, including the existing million-step phase check.
