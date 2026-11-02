@@ -19,7 +19,10 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
     /// layer flux solve, in EVERY thermal trial and accepted observer epoch.
     ///
     /// The layer bindings must retain this assembly's original cells, caloric
-    /// objects, conductivity keys/claims, full fixed conditions and distances.
+    /// objects, conductivity keys/claims, full fixed conditions and physical
+    /// distances. Radial bindings retain their authored trace/interface radii;
+    /// their equivalent resistance lengths are only the original flux owner's
+    /// internal coordinates, not replacement bulk-cell dimensions.
     /// Their explicit constant contact resistance belongs to the layer solve;
     /// the same link cannot also carry a separate material thermal contact.
     /// Untargeted conduction, electrical interfaces and radiation are unchanged.
@@ -89,9 +92,13 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
         check(cx)?;
         let invalid = HeatNetworkError::Invalid;
         let bulk = self.network.electrical.bulk;
-        for binding in model.bindings() {
+        for (binding, (_, geometry)) in model.bindings().zip(model.geometries()) {
             check(cx)?;
-            if self.electrical.directional_conduction().any(|link| link.link == binding.link) {
+            if self
+                .electrical
+                .directional_conduction()
+                .any(|link| link.link == binding.link)
+            {
                 return Err(invalid(
                     "an isotropic integrated layer cannot replace an explicitly directional conductivity link",
                 ));
@@ -112,9 +119,16 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
                 .ok_or(invalid(
                     "integrated conduction link is absent from the material assembly",
                 ))?;
-            if binding.distances_m != [original.distance_a_m, original.distance_b_m] {
+            // The material owner lowers radial legs to equivalent planar
+            // resistance lengths. Admit the physical a/b widths retained in its
+            // authoritative geometry; never relabel those metrics as cell size.
+            let physical_distances = geometry
+                .radial_coordinates_m()
+                .map(|(radii, contact)| radii.map(|radius| (radius - contact).abs()))
+                .unwrap_or(binding.distances_m);
+            if physical_distances != [original.distance_a_m, original.distance_b_m] {
                 return Err(invalid(
-                    "integrated conduction must retain original layer distances",
+                    "integrated conduction must retain original physical layer distances",
                 ));
             }
             let link = thermal.links().get(&binding.link).ok_or(invalid(

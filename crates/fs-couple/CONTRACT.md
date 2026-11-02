@@ -1439,6 +1439,17 @@ storage, tensor transport or moving phase boundary. Focused synthetic tests
 compare the nonlinear flux with an independent linear-k integral and verify
 that data-only conductivity changes reach finite heat and electrical history.
 
+The same composed owner admits source-backed cylindrical and spherical layer
+links through their retained `LayerGeometry`. Bulk-cell distances remain the
+physical trace-to-contact radial widths; equivalent resistance lengths stay
+inside the material flux owner. The actual interface area, original source
+context and caloric/cell correspondence remain authoritative. Geometry is
+prepared once, and every subsequent thermal/electrical candidate uses the
+original nonlinear radial flux. Focused `material_heat_network` regressions
+cover both geometries and reversed endpoint order, joint finite-store energy,
+and refusal of resistance metrics mislabeled as physical lengths or incorrect
+side widths. This adds no radial storage, symmetry evolution or source law.
+
 M4.1-W1 extends `unilateral_contact` with explicit physical span measures [m],
 per-length stiffness, static/kinetic coefficients and a declared friction ramp
 speed (mandatory for nonzero kinetic friction). No 1/n normalization or hidden

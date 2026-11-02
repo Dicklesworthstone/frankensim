@@ -1,10 +1,12 @@
 //! The existing integrated material flux must reach the actual circuit history.
+#[path = "layers/radial.rs"]
+mod radial;
 use super::*;
 use std::collections::BTreeMap;
 use fs_material::phase::SolidLiquidPhase;
 use fs_material::thermal::conduction::{
-    LayerConductionConfig,
-    network::{LayerLinkBinding, PreparedLayerConduction},
+    LayerConductionConfig, LayerGeometry,
+    network::{GeometricLayerLinkBinding, LayerLinkBinding, PreparedLayerConduction},
     source::ResolvedConductionLayer,
 };
 
@@ -19,6 +21,23 @@ fn layer_controls() -> LayerConductionConfig {
 fn with_layers<R>(
     scale: f64,
     additional_link: bool,
+    run: impl FnOnce(
+        &Cx<'_>,
+        &CancelGate,
+        &MaterialHeatNetwork<'_>,
+        &PreparedLayerConduction<'_, '_>,
+        DepositionSimulation<'_>,
+        MaterialCircuit,
+    ) -> R,
+) -> R {
+    with_layer_geometry(scale, additional_link, None, [0.5; 2], run)
+}
+
+fn with_layer_geometry<R>(
+    scale: f64,
+    additional_link: bool,
+    geometry: Option<LayerGeometry>,
+    physical_distances_m: [f64; 2],
     run: impl FnOnce(
         &Cx<'_>,
         &CancelGate,
@@ -66,8 +85,8 @@ fn with_layers<R>(
     });
     let links = [ConductionLink {
         link: 7,
-        distance_a_m: 0.5,
-        distance_b_m: 0.5,
+        distance_a_m: physical_distances_m[0],
+        distance_b_m: physical_distances_m[1],
     }];
     let bulk = MaterialNetwork {
         cells: &cells,
@@ -119,7 +138,7 @@ fn with_layers<R>(
             id: 7,
             a: ids[0],
             b: ids[1],
-            area_m2: 0.1,
+            area_m2: geometry.map_or(0.1, |geometry| geometry.contact_area_m2()),
             conductance_w_k: 999.0,
         }),
     });
@@ -190,17 +209,30 @@ fn with_layers<R>(
         )
         .unwrap()
     });
-    let integrated = PreparedLayerConduction::new(
-        &thermal,
-        vec![LayerLinkBinding {
-            link: 7,
-            layers: [&layers[0], &layers[1]],
-            distances_m: [0.5; 2],
-            contact_area_resistance_m2_k_w: 0.0,
-        }],
-        1,
-        || Ok(()),
-    )
+    let integrated = match geometry {
+        Some(geometry) => PreparedLayerConduction::new_geometric(
+            &thermal,
+            vec![GeometricLayerLinkBinding {
+                link: 7,
+                layers: [&layers[0], &layers[1]],
+                geometry,
+                contact_area_resistance_m2_k_w: 0.0,
+            }],
+            1,
+            || Ok(()),
+        ),
+        None => PreparedLayerConduction::new(
+            &thermal,
+            vec![LayerLinkBinding {
+                link: 7,
+                layers: [&layers[0], &layers[1]],
+                distances_m: physical_distances_m,
+                contact_area_resistance_m2_k_w: 0.0,
+            }],
+            1,
+            || Ok(()),
+        ),
+    }
     .unwrap();
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
