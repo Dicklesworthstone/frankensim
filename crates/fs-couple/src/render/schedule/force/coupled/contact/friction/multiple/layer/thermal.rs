@@ -827,8 +827,23 @@ impl MultiFrictionModalSystem {
                         if let Some(rates) = material_rates { rates.admit_route(route, endpoint)?; }
                         else { route.admit(endpoint)?; }
                         let linear = match &route.channel {
-                            Some(channel) => number(channel.evaluate_staged(
-                                &system.core.network, gate).map_err(ModalFrictionError::from)?[0])?,
+                            Some(channel) => {
+                                let groups = channel.evaluate_staged(&system.core.network, gate)
+                                    .map_err(ModalFrictionError::from)?;
+                                let (mut sum, mut correction) = (0.0_f64, 0.0_f64);
+                                for heat in groups {
+                                    let heat = number(heat)?;
+                                    if heat < 0.0 {
+                                        return Err(LayerThermalError::Invalid("material source group heat must be nonnegative"));
+                                    }
+                                    let next = number(sum + heat)?;
+                                    correction = number(correction + if sum.abs() >= heat.abs() {
+                                        (sum - next) + heat
+                                    } else { (heat - next) + sum })?;
+                                    sum = next;
+                                }
+                                number(sum + correction)?
+                            },
                             None => 0.0,
                         };
                         let mut nonlinear = 0.0;

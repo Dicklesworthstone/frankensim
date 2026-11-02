@@ -387,7 +387,11 @@ Indices name the original string and radial layer, with the core at layer zero.
 Each receiving cell owns the full layer volume
 `pi * (r_outer^2 - r_inner^2) * supported_length`, including any afterlength.
 It receives every positive bending arm, every retained sine mode, and both
-transverse planes when present. Zero source arms contribute no history or heat.
+transverse planes when present, together with every original shear-memory arm
+and torsional mode of that layer. Bending and torsion may occupy separate native
+history blocks; their independently integrated losses enter this one cell, with
+the physical mass and caloric storage counted once. Zero source arms contribute
+no history or heat.
 The original constitutive selectors determine the rates; the heat declaration
 contains no new damping, modal heat fraction or fitted coefficient. String and
 fiber routes share the declared aggregate work/byte budgets and cannot reuse
@@ -397,16 +401,19 @@ list retain their prior behavior.
 This route admits original bonded `bending-loss prony` sections and explicit
 `bending-memory` selections on homogeneous or bonded sections. The producer
 keeps the native source/body/additional-memory ordering, so the chosen layer
-cannot accidentally heat or update another string's histories. Homogeneous
-intrinsic spectra without the retained section-role binding, torsion, retained
+cannot accidentally heat or update another string's histories. Original elastic
+torsion and `torsion-memory` are supported when parallel shear viscosity is
+explicitly zero. Each additional source group uses the original integral's
+work and memory budget. Homogeneous
+intrinsic spectra without the retained section-role binding, retained
 axial waves, geometric stretching, measured/wound reductions and parallel
-intrinsic viscosity, modal or tension loss refuse. Those cases require their
+intrinsic bending/shear viscosity, modal or tension loss refuse. Those cases require their
 complete physical heat routing, rather than dropping unowned dissipation.
 Gas drag and body/contact/radiation losses keep their separate owners.
 
 `source-temperature` uses exactly the same finite-body transaction and warm
 continuation as the fiber option below. The accepted layer temperature updates
-all of that layer's original bending time properties for the next interval.
+all of that layer's original bending and shear time properties for the next interval.
 Geometry, reference mass, moduli, prestress and material strain storage remain
 fixed; this is not thermal expansion or a temperature-dependent elastic pencil.
 Finite-cell conductivity can carry the actual bending heat into other declared

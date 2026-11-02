@@ -17,7 +17,7 @@ use fs_material::state_point::ResolvedMaterialStatePoint;
 
 /// Explicit native-memory to source-time association for ONE original finite
 /// material body. `cell` names an existing MaterialRelaxationHeatDestination;
-/// `times` covers its complete original linear memory range in native order.
+/// `times` covers all of its original linear memory ranges in native order.
 /// The physical producer supplies these selectors, never a guessed tau name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaterialRelaxationTemperature {
@@ -85,15 +85,15 @@ impl RateContinuation<'_> {
             let channel = route.channel.as_ref().ok_or(bad(
                 "rate feedback requires the original linear heat integral",
             ))?;
-            let [range] = channel.groups() else {
-                return Err(bad(
-                    "rate feedback must retain one complete physical material group",
-                ));
-            };
-            if range.is_empty()
-                || binding.times.len() != range.len()
-                || binding.times.iter().enumerate().any(|(i, (branch, name))| {
-                    *branch != range.start + i
+            let ranges = channel.groups();
+            // Native bending/twist/axial blocks need not be adjacent. The
+            // original integral already admits ordered disjoint ranges; the
+            // source selectors must cover their exact union, including gaps.
+            if ranges.is_empty() || ranges.iter().any(|range| range.is_empty())
+                || binding.times.len() != ranges.iter().map(|range| range.len()).sum::<usize>()
+                || binding.times.iter().zip(ranges.iter().flat_map(|range| range.clone()))
+                    .any(|((branch, name), expected)| {
+                    *branch != expected
                         || name.trim().is_empty()
                         || !branches.insert(*branch)
                 })

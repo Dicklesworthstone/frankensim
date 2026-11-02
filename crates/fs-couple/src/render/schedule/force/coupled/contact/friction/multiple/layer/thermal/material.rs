@@ -16,7 +16,9 @@ use fs_qty::Temperature;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 /// One original material body and its independently integrated branch losses.
-/// The geometry producer must bind the complete branch range for this volume.
+/// The geometry producer must bind every original branch range for this volume.
+/// Different constitutive mechanisms may occupy disjoint native ranges; they
+/// still heat ONE material body, with its mass and caloric storage counted once.
 /// Coefficients remain source-declared constants over the receiving cell's
 /// temperature domain; a temperature-dependent stored modulus requires its
 /// own thermoelastic history continuation and is refused here.
@@ -49,10 +51,10 @@ impl MaterialRelaxationHeatDestination<'_> {
         time_properties: &[&str]) -> Result<(), LayerThermalError<E>> {
         let bad = LayerThermalError::Invalid;
         if self.channel.as_ref().is_some_and(|channel|
-            channel.groups().len() != 1 || channel.groups()[0].is_empty())
+            channel.groups().is_empty() || channel.groups().iter().any(|range| range.is_empty()))
             || self.channel.is_none() && self.nonlinear_channels.is_empty()
             || self.nonlinear_channels.len() > 256 {
-            return Err(bad("one complete nonempty material source group must own each finite body volume"));
+            return Err(bad("complete nonempty original material source ranges must own each finite body volume"));
         }
         let absolute = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature, ValueForm::Static));
@@ -123,8 +125,8 @@ impl MultiFrictionModalSystem {
     }
 
     /// Reuse the original material-group heat owner and its aggregate resource
-    /// budget. Prepare one complete group per finite body destination and bind
-    /// it to the original source geometry/material. External radiation states
+    /// budget. Prepare the complete disjoint ranges of each finite body and bind
+    /// them to its original source geometry/material. External radiation states
     /// retain that owner's explicit refusal; none is replaced with an endpoint
     /// force or silently excluded from the underlying trajectory.
     pub fn prepare_material_heat(
