@@ -82,6 +82,17 @@ fn with_planar<R>(
     controls: FreeSurfaceEnthalpyControls,
     run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
+    with_planar_reference(card, gradient_k, surface, controls, None, run)
+}
+
+fn with_planar_reference<R>(
+    card: &MaterialCard,
+    gradient_k: [f64; 3],
+    surface: PlanarThermocapillarity,
+    controls: FreeSurfaceEnthalpyControls,
+    pressure_reference: Option<f64>,
+    run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
     let source = liquid_source(card, false);
     let law = LiquidTemperatureLaw::try_from_material(
         card,
@@ -93,8 +104,11 @@ fn with_planar<R>(
     let chart = caloric(card);
     let gate = CancelGate::new_clock_free();
     with_cx(&gate, |cx| {
-        let mut thermal = plan_free_surface_from_material(&source, DX, DT, 0.1)
-            .unwrap()
+        let mut scaling = plan_free_surface_from_material(&source, DX, DT, 0.1).unwrap();
+        if let Some(reference) = pressure_reference {
+            scaling = scaling.with_pressure_reference(reference).unwrap();
+        }
+        let mut thermal = scaling
             .free_surface3_from_cells_with_thermocapillarity(
                 domain(),
                 &planar_cells(),

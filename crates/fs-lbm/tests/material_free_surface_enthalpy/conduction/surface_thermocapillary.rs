@@ -1,6 +1,113 @@
 //! Physical surface-temperature gradients drive the original native stress.
 //! Synthetic coefficients check implementation, not experimental calibration.
 use super::*;
+use fs_lbm::material::free_surface::enthalpy::conduction::{
+    FreeSurfaceGasPressure, FreeSurfaceThermalBoundaries,
+};
+
+#[test]
+fn g1_prescribed_pressure_keeps_solved_surface_heat_and_temperature_stress_active() {
+    let card = thermal_card(-0.00001, 500.0);
+    let gas = gas_source::model(0.0, 250000.0, 1000.0);
+    let surfaces = patches();
+    let points: Vec<_> = surfaces
+        .iter()
+        .map(|p| gas_source::point(350.0 + 10.0 * p.face.liquid[0] as f64, 100000.0))
+        .collect();
+    let contacts = contact_field(&gas, &points, &surfaces);
+    with_planar_reference(
+        &card,
+        [0.0; 3],
+        plane(),
+        FreeSurfaceEnthalpyControls::default(),
+        Some(100000.0),
+        |loaded, gate| {
+            let mut ordinary = loaded.clone();
+            let expected = ordinary
+                .step_with_surface_exchange(
+                    &[],
+                    &[],
+                    surface_controls(),
+                    &mut [],
+                    &[],
+                    &[],
+                    &contacts,
+                    FreeSurfaceInterfaceSolve::default(),
+                    false,
+                    gate,
+                )
+                .unwrap()
+                .conduction;
+            let report = loaded
+                .step_with_thermal_boundaries(
+                    &[],
+                    &[],
+                    surface_controls(),
+                    &mut [],
+                    &[],
+                    FreeSurfaceThermalBoundaries {
+                        surfaces: &contacts,
+                        gas_pressure: Some(FreeSurfaceGasPressure {
+                            maximum_density_excursion: 0.05,
+                            pressure_pa: &|_| 100000.5,
+                        }),
+                        ..FreeSurfaceThermalBoundaries::default()
+                    },
+                    false,
+                    gate,
+                )
+                .unwrap()
+                .conduction;
+            let exchange = report.surface.as_ref().unwrap();
+            let unforced_exchange = expected.surface.as_ref().unwrap();
+            assert_eq!(exchange.last_applied, unforced_exchange.last_applied);
+            assert_eq!(
+                exchange.thermal_endpoint,
+                unforced_exchange.thermal_endpoint
+            );
+            assert_eq!(exchange.heat_from_gas_j, unforced_exchange.heat_from_gas_j);
+            assert_eq!(exchange.native_endpoint.len(), 64);
+            assert!(
+                exchange
+                    .native_endpoint
+                    .iter()
+                    .all(|s| s.surface_tension.is_some())
+            );
+            assert!(
+                loaded.flow().lattice().force_density_at(3, 3, 3).unwrap()[0] < 0.0,
+                "solved surface-temperature gradient must still supply tangential stress"
+            );
+            let velocity = |state: &MaterialFreeSurfaceEnthalpy3<'_, '_>| {
+                state
+                    .flow()
+                    .sample_at_si(3, 3, 3)
+                    .unwrap()
+                    .unwrap()
+                    .velocity_m_s[2]
+            };
+            assert!(
+                velocity(loaded) < velocity(&ordinary) - 1e-6,
+                "imposed normal pressure must act beside the solved tangential stress"
+            );
+            near(
+                loaded.total_enthalpy_j().unwrap(),
+                ordinary.total_enthalpy_j().unwrap(),
+                2e-10,
+            );
+            assert!(report.flow.balance_defect_j.abs() < 1e-8);
+
+            // This state now requires its solved surface on every continuation.
+            // The new complete entry has not weakened the existing guard.
+            let bits = loaded.flow().lattice().grid().state_bits();
+            assert!(
+                loaded
+                    .step_with_heat_and_gas_pressure(&[], gate, 0.05, |_| 100000.5)
+                    .is_err()
+            );
+            assert_eq!(loaded.flow().lattice().grid().state_bits(), bits);
+        },
+    );
+}
 
 fn patches() -> Vec<FreeSurfaceInterfaceFace> {
     (0..8)

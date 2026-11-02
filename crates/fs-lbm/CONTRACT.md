@@ -363,6 +363,27 @@ identity and late callback/cancellation refusal. This remains incompressible
 thermal enthalpy transport: compressive heating, gas-reservoir evolution and a
 total mechanical-plus-thermal energy closure are not supplied by this entry.
 
+With `enthalpy-coupling`, `step_with_thermal_boundaries` accepts one borrowed
+`FreeSurfaceThermalBoundaries` input combining contact resistance, prescribed
+gas-film heat, direct radiation, solved interface temperature and optional
+`FreeSurfaceGasPressure`. The original thermal coordinator still advances
+finite solid bodies, attached solid radiation and bound electrical/Joule/Lorentz
+physics; optional molecular heating retains its original account. The same
+native flow candidate receives the imposed pressure alongside temperature-
+dependent surface stress, with no extra thermal or momentum solve. Existing
+entry points pass no prescribed pressure and retain their arithmetic.
+Pressure is sampled in absolute Pascals at physical liquid-cell centers, with
+the same fixed reference and combined density-excursion bound. It does not
+rebind gas-film temperature/pressure source contexts, infer an evolving gas
+volume or enter the thermal heat account. The caller owns compatibility of
+that mechanical load with the declared source conditions. Finite-atmosphere
+storage remains with its existing separate coupled entry points. A late
+pressure or cancellation refusal discards the already-computed thermal stage
+and finite-body candidate along with native flow. Focused regressions cover
+conducting pressure-driven liquid with finite solid heat, reference-pressure
+identity, late rollback and pressure acting beside solved surface-temperature
+capillarity without weakening the complete-boundary continuation guard.
+
 This bounded rung requires one pure liquid, unchanged physical density,
 stationary walls and explicitly neglected capillarity. Negative accepted native
 interface/carry mass refuses. Phase conversion, volume change, conduction,

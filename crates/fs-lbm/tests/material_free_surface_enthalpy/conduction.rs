@@ -18,6 +18,9 @@ mod capillarity;
 #[path = "conduction/phase_conduction.rs"]
 mod phase_conduction;
 
+#[path = "conduction/pressure.rs"]
+mod pressure;
+
 const PAIR: [[usize; 3]; 2] = [[3, 3, 3], [4, 3, 3]];
 
 fn conducting_card(scale: f64) -> MaterialCard {

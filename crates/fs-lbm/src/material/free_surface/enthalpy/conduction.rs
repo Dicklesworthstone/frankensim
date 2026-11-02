@@ -52,7 +52,10 @@ pub mod electrical;
 pub use electrical::{
     FreeSurfaceElectricalExchange, FreeSurfaceElectricalInput, FreeSurfaceElectricalState,
 };
+/// Combined thermal boundaries and prescribed mechanical gas pressure.
+pub mod pressure;
 use fs_material::state_point::ResolvedMaterialStatePoint;
+pub use pressure::{FreeSurfaceGasPressure, FreeSurfaceThermalBoundaries};
 
 /// Source-bound resistance at an ordered liquid/solid thermal contact.
 pub mod interface;
@@ -715,6 +718,42 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
+        self.advance_with_thermal_boundaries_and_pressure(
+            faces,
+            heat,
+            controls,
+            viscous,
+            bodies,
+            contacts,
+            interfaces,
+            environment,
+            radiation,
+            surfaces,
+            surface_solve,
+            finite_atmosphere,
+            None,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_thermal_boundaries_and_pressure(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        viscous: &[viscous::FreeSurfaceViscousCell],
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        environment: &[FreeSurfaceGasContact<'_>],
+        radiation: &[FreeSurfaceRadiationFace],
+        surfaces: &[FreeSurfaceInterfaceContact<'_>],
+        surface_solve: FreeSurfaceInterfaceSolve,
+        finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
+        gas_pressure: Option<(f64, &GasPressureField<'_>)>,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
         let surface_stress = !surfaces.is_empty()
             && (self.temperature_dependent_thermocapillarity()
@@ -1233,14 +1272,15 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 prepared = false;
                 Ok(field)
             };
-            self.advance_prepared_enthalpy_with_surface(
+            self.advance_prepared_enthalpy_with_boundary(
                 heated, external, viscous_heat, body_heat, absolute_exchange,
-                electrical_forces.as_ref(), Some(&mut surface_field), wetting_outer_gas, gate,
+                electrical_forces.as_ref(), Some(&mut surface_field), wetting_outer_gas,
+                gas_pressure, gate,
             )?
         } else {
-            self.advance_prepared_enthalpy_with_surface(
+            self.advance_prepared_enthalpy_with_boundary(
                 heated, external, viscous_heat, body_heat, absolute_exchange,
-                electrical_forces.as_ref(), None, wetting_outer_gas, gate,
+                electrical_forces.as_ref(), None, wetting_outer_gas, gas_pressure, gate,
             )?
         };
         // Every native surface/source/geometry gate has passed. Moving report
