@@ -54,7 +54,7 @@ pub struct ContactThermalPerformance<'p, 't, 'm, 'g, F, S, E> {
 
 impl MultiBowPerformance {
     /// Admit source-selected finite-body relaxation rates without advancing the
-    /// original schedule, mechanics or heat. The linear-memory, prescribed-load scope
+    /// original schedule, mechanics or heat. The original linear-material scope
     /// is checked here and by the same native rate/source admission used at each
     /// step. Other film, dry-footprint and conductive heat routes are retained.
     pub fn admit_material_relaxation_temperature(
@@ -62,9 +62,6 @@ impl MultiBowPerformance {
         material_heat: &[MaterialRelaxationHeatDestination<'_>],
         rates: &[MaterialRelaxationTemperature], gate: &CancelGate,
     ) -> Result<(), RenderError> {
-        if self.stop_motion.is_some() || self.stop_station_motion.is_some() {
-            return Err(render_invalid("source material-rate feedback requires prescribed normal loads without stop motion"));
-        }
         if self.bank.bow_station_motion_limits().is_some() {
             self.bank.admit_bow_station_sources().map_err(RenderError::Friction)?;
         }
@@ -324,12 +321,10 @@ where
                     dry, material_heat, *controls, energy_guess_j, forces, drives,
                     motion.bow_stations, motion.stop_stations, motion.stop_offsets_m, gate, source)?
             } else {
-                if motion.stop_stations.is_some() || motion.stop_offsets_m.is_some() {
-                    return Err(render_invalid("material rate feedback cannot discard scheduled normal/stop motion"));
-                }
-                bank.step_with_material_rate_thermal_motion(thermal, bindings, series_heat,
+                bank.step_with_material_rate_thermal_motion_and_stops(thermal, bindings, series_heat,
                     dry, material_heat, material_rates, *controls, energy_guess_j,
-                    forces, drives, motion.bow_stations, gate, source)?
+                    forces, drives, motion.bow_stations, motion.stop_stations,
+                    motion.stop_offsets_m, gate, source)?
             };
             let pressure = accepted.mechanics.observer_pressure_pa;
             *last_frame = Some(accepted);

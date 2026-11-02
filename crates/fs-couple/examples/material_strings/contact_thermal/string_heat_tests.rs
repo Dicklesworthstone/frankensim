@@ -161,13 +161,14 @@ fn viscous_ready(
     varying_viscosity: bool,
 ) -> Ready {
     viscous_ready_with_motion(cx, gate, profile, cp, explicit, viscosity,
-        only_kelvin, varying_viscosity, false)
+        only_kelvin, varying_viscosity, false, false)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn viscous_ready_with_motion(
     cx: &Cx<'_>, gate: &CancelGate, profile: &Profile, cp: f64, explicit: bool,
     viscosity: [f64; 2], only_kelvin: bool, varying_viscosity: bool, moving: bool,
+    solved_normal: bool,
 ) -> Ready {
     let mut specification = spec(profile, explicit);
     if moving {
@@ -177,9 +178,12 @@ fn viscous_ready_with_motion(
             include_str!("../relaxing-layered-strings.material-strings")
                 .replace("forces preload", &format!("{motion}forces preload")).as_bytes())
             .unwrap().bow_station_motion;
+    }
+    if moving || solved_normal {
         specification.schedule = GestureSchedule::try_new(48_000, vec![GestureTrack {
             id: "bow".into(), target: GestureTarget::BowStroke { string: 1 },
-            initial: GestureValue::Bow { velocity_m_per_s: 0.01, normal_force_n: 0.001, station: 0.2 },
+            initial: GestureValue::Bow { velocity_m_per_s: 0.01,
+                normal_force_n: if solved_normal { 0.0 } else { 0.001 }, station: 0.2 },
             events: vec![],
         }]).unwrap();
     }
@@ -203,8 +207,15 @@ fn viscous_ready_with_motion(
     if only_kelvin {
         specification.bending_memory = None;
     }
+    let normal = solved_normal.then(|| crate::stops::Profile::parse(concat!(
+        "frankensim-string-stops-v1\n",
+        "stop bow_surface 1 0.2 normal 0 -1 fixed -0.000001 5000 1 0 10 0.001\n",
+        "bow-contact 0 bow_surface\n",
+        "motion 0.001 0.1 3\n",
+        "knot 3 -0.0000001\nknot 6 -0.0000002\nknot 12 0\n",
+    ).as_bytes()).unwrap());
     specification
-        .compile(cx, gate, |name| {
+        .compile_with_profiles(cx, gate, None, normal, |name| {
             if name == "body.fsmatpk" {
                 return Ok(material(name, 20.0, None));
             }
@@ -721,7 +732,7 @@ fn v4_source_viscosities_and_times_continue_a_moving_bow_and_warm_annulus() {
             let mut outcomes = Vec::new();
             for cp in [0.001, 0.004] {
                 let mut ready = viscous_ready_with_motion(cx, gate, &profile, cp, true,
-                    [2e9, 2e5], only_kelvin, true, true);
+                    [2e9, 2e5], only_kelvin, true, true, false);
                 assert!(ready.spec.material_body_thermal && !ready.spec.dry_contact_thermal);
                 let initial_map = ready.performance.bank().system().port(0).unwrap().left.clone();
                 let original_modes: Vec<_> = ready.performance.bank().system().components()
@@ -843,6 +854,149 @@ fn v4_source_viscosities_and_times_continue_a_moving_bow_and_warm_annulus() {
             assert!(outcomes[0].1 > outcomes[1].1);
             assert_eq!(outcomes[0].0[0], outcomes[1].0[0]);
             assert_ne!(outcomes[0].0, outcomes[1].0);
+        }
+    });
+}
+
+#[test]
+fn v4_source_mobilities_follow_solved_normal_motion_and_keep_one_energy_clock() {
+    scoped(|cx, gate| {
+        let profile = Profile::parse(text(true).as_bytes()).unwrap();
+        for moving in [false, true] {
+            // The same parsed annular source selects eta_b(T), eta_s(T) and
+            // disjoint bending/torsional clocks. The stop profile supplies an
+            // authored conservative normal spring, never a measured bow law.
+            let mut ready = viscous_ready_with_motion(cx, gate, &profile, 0.001, true,
+                [2e9, 2e5], false, true, moving, true);
+            let system = ready.performance.bank().system();
+            assert_eq!(system.contact_normal_load(0), Some(0));
+            let initial_normal = system.obstacle_normal_column(0).unwrap().to_vec();
+            let original_modes: Vec<_> = system.components().iter().flat_map(|m| m.modes()).copied().collect();
+            let mut balance = system.total_energy_j().unwrap();
+            let prepared = profile.prepare(&ready, gate).unwrap();
+            let mut network = prepared.network(gate).unwrap();
+            let (mut routes, mut rates) = prepared.material_routes(&ready, &network, gate).unwrap();
+            let mut received = 0.0;
+            let mut normal_work = 0.0;
+            let mut loaded = false;
+            // A declared 20 mW heater changes the finite source temperature
+            // enough to expose stale normal responses above root tolerances.
+            // Its external work stays separate from native dissipative heat.
+            let heater = |endpoint: &DepositionSimulation<'_>| -> Result<StepCoefficients<()>> {
+                let mut coefficients = prepared.resolve(endpoint)?;
+                coefficients.sources_w.insert(CellId(30), 0.02);
+                Ok(coefficients)
+            };
+            // Recover and rebind the actual finite bodies at a warm sample
+            // boundary, keeping the original modal, memory and contact state.
+            for _ in 0..2 {
+                let system = ready.performance.bank().system();
+                let warm: Vec<_> = system.components().iter().flat_map(|m| m.states()).copied().collect();
+                let memory = system.material_memory().to_vec();
+                let normal = system.last_obstacle_frames().map(|frames| frames.to_vec());
+                let mut renderer = ready.performance.with_material_contact_thermal_network(
+                    network, vec![], vec![], routes, profile.controls, gate,
+                    heater)
+                    .unwrap().with_material_relaxation_temperature(rates).unwrap();
+                assert_eq!(renderer.performance().bank().system().components().iter()
+                    .flat_map(|m| m.states()).copied().collect::<Vec<_>>(), warm);
+                assert_eq!(renderer.performance().bank().system().material_memory(), memory);
+                assert_eq!(renderer.performance().bank().system().last_obstacle_frames(), normal.as_deref());
+                for _ in 0..3 {
+                    let system = renderer.performance().bank().system();
+                    let before: Vec<_> = system.components().iter().flat_map(|m| m.states())
+                        .map(|s| s.displacement_m_sqrt_kg).collect();
+                    let column = system.obstacle_normal_column(0).unwrap().to_vec();
+                    let offset = system.obstacle_offsets_m().unwrap()[0];
+                    let old_x = column.iter().zip(&before).map(|(n, q)| n*q).sum::<f64>() - offset;
+                    renderer.block(&mut [0.0]).unwrap();
+                    let system = renderer.performance().bank().system();
+                    let after: Vec<_> = system.components().iter().flat_map(|m| m.states())
+                        .map(|s| s.displacement_m_sqrt_kg).collect();
+                    let end = system.obstacle_normal_column(0).unwrap();
+                    let contact = system.last_obstacle_frames().unwrap()[0];
+                    let new_x = end.iter().zip(&after).map(|(n, q)| n*q).sum::<f64>() - contact.support_offset_m;
+                    let (p0, p1) = ((old_x + 1e-6).max(0.0), (new_x + 1e-6).max(0.0));
+                    // Independent secant of U = k max(x-gap,0)^2 / 2.
+                    let reaction = if p0 > 0.0 && p1 > 0.0 { 2500.0 * (p0+p1) }
+                        else if new_x == old_x { 5000.0 * p0 }
+                        else { 2500.0 * (p1*p1-p0*p0) / (new_x-old_x) };
+                    assert!((contact.normal_force_n - reaction).abs() <= contact.force_tolerance_n);
+                    let transport = end.iter().zip(&column).zip(before.iter().zip(&after))
+                        .map(|((b, a), (q0, q1))| 0.5*(b-a)*(q0+q1)).sum::<f64>();
+                    let work = contact.normal_force_n * (transport - (contact.support_offset_m-offset));
+                    assert!((contact.actuator_work_j-work).abs() < 1e-13);
+                    let frame = renderer.last_frame().unwrap();
+                    let mechanical = &frame.mechanics;
+                    assert_eq!(mechanical.ports[0].normal_force_n, contact.normal_force_n);
+                    loaded |= contact.normal_force_n > 0.0 && mechanical.ports[0].traction_n != 0.0;
+                    normal_work += contact.actuator_work_j.abs();
+                    received += frame.routed_material_heat_j;
+                    let external_heat = 0.02 * system.sample_period_s();
+                    assert!((frame.external_heat_j-external_heat).abs() < 1e-13);
+                    balance += mechanical.external_work_j + mechanical.drive_work_j + work + external_heat
+                        - mechanical.network_dissipation_j + frame.routed_material_heat_j
+                        - mechanical.friction_dissipation_j - mechanical.declared_slip_work_j
+                        - mechanical.obstacle_dissipation_j - mechanical.obstacle_residual_loss_j
+                        - mechanical.friction_residual_loss_j;
+                    let cell = &renderer.thermal().cells()[&CellId(30)];
+                    let heat = cell.mass_kg * cell.specific_h_j_kg;
+                    assert!((heat-received-0.02*renderer.thermal().time_s()).abs() < 4e-12);
+                    assert!((system.total_energy_j().unwrap()+heat-balance).abs() < 3e-11);
+                    assert!(frame.total_energy_residual_j.abs() <= profile.controls.total_energy_tolerance_j);
+                }
+                (network, routes, rates) = renderer.into_thermal_with_material_rates();
+            }
+            assert!(loaded && normal_work > 0.0 && received > 0.0);
+            let temperature = network.temperature_k(CellId(30)).unwrap();
+            assert!(temperature > INITIAL);
+            assert_eq!(routes[0].source.state_coordinate("T"), Some(temperature));
+            assert!((routes[0].source.property(ETA).unwrap().value_si()/2e9
+                - (1.0 + (temperature-280.0)/40.0)).abs() < 1e-14);
+            let system = ready.performance.bank().system();
+            assert!(system.components().iter().flat_map(|m| m.modes()).zip(&original_modes)
+                .any(|(a, b)| a.damping_ratio != b.damping_ratio));
+            for (index, name) in &rates[0].times {
+                assert_eq!(system.material_relaxation_branches()[*index].relaxation_time_s,
+                    routes[0].source.property(name).unwrap().value_si());
+            }
+            let normal_map = system.obstacle_normal_column(0).unwrap().to_vec();
+            assert_eq!(normal_map != initial_normal, moving);
+            let tangent = system.port(0).unwrap().left.clone();
+            let normal = system.last_obstacle_frames().unwrap().to_vec();
+            let offsets = system.obstacle_offsets_m().unwrap().to_vec();
+            let state: Vec<_> = system.components().iter().flat_map(|m| m.states()).copied().collect();
+            let modes: Vec<_> = system.components().iter().flat_map(|m| m.modes()).copied().collect();
+            let memory = system.material_memory().to_vec();
+            let times: Vec<_> = system.material_relaxation_branches().iter().map(|b| b.relaxation_time_s).collect();
+            let source = routes[0].source.clone();
+            let clock = network.time_s();
+            let enthalpy = network.cells()[&CellId(30)].specific_h_j_kg;
+            let observed = std::cell::Cell::new(false);
+            let mut renderer = ready.performance.with_material_contact_thermal_network(
+                network, vec![], vec![], routes, profile.controls, gate, |endpoint| {
+                    observed.set(true);
+                    if endpoint.time_s() >= clock { return Err("late solved-normal thermal refusal".into()); }
+                    prepared.resolve(endpoint)
+                }).unwrap().with_material_relaxation_temperature(rates).unwrap();
+            let mut untouched = [123.0];
+            assert!(renderer.block(&mut untouched).is_err());
+            assert!(observed.get());
+            assert_eq!(untouched, [123.0]);
+            let system = renderer.performance().bank().system();
+            assert_eq!(renderer.performance().samples_rendered(), 6);
+            assert_eq!(system.obstacle_normal_column(0).unwrap(), normal_map);
+            assert_eq!(system.port(0).unwrap().left, tangent);
+            assert_eq!(system.last_obstacle_frames().unwrap(), normal);
+            assert_eq!(system.obstacle_offsets_m().unwrap(), offsets);
+            assert_eq!(system.components().iter().flat_map(|m| m.states()).copied().collect::<Vec<_>>(), state);
+            assert_eq!(system.components().iter().flat_map(|m| m.modes()).copied().collect::<Vec<_>>(), modes);
+            assert_eq!(system.material_memory(), memory);
+            assert_eq!(system.material_relaxation_branches().iter().map(|b| b.relaxation_time_s).collect::<Vec<_>>(), times);
+            let (network, routes, _) = renderer.into_thermal_with_material_rates();
+            assert_eq!(network.time_s(), clock);
+            assert_eq!(network.cells()[&CellId(30)].specific_h_j_kg, enthalpy);
+            assert_eq!(routes[0].source, source);
         }
     });
 }

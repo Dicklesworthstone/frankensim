@@ -43,6 +43,79 @@ pub(super) struct GeometryState {
     config: ObstacleGeometryConfig,
 }
 
+// Native responses for the NEXT held interval after a material mobility
+// update. This owns no contact law, reaction, storage or geometry history.
+pub(in super::super) struct PreparedMaterialMobility {
+    nn: Vec<f64>,
+    nt: Vec<f64>,
+    tn: Vec<f64>,
+    tn_end: Vec<f64>,
+    residual_blocks: Option<Vec<Block>>,
+}
+
+impl ObstacleSet {
+    pub(in super::super) fn prepare_material_mobility(
+        &self, network: &CoupledModalSystem, friction: &[Point], gate: &CancelGate,
+    ) -> Result<PreparedMaterialMobility, ModalCouplingError> {
+        // A moving step has not published its endpoint maps yet. The response
+        // needed after that publication uses those END maps on both sides,
+        // never the previous interval's midpoint generalized force columns.
+        let columns: Vec<&[f64]> = match &self.geometry {
+            Some(geometry) => geometry.end_columns.iter().map(Vec::as_slice).collect(),
+            None => self.points.iter().map(|point| point.column.as_slice()).collect(),
+        };
+        let q = columns.len(); let p = friction.len();
+        let mut nn = vec![0.0; q*q]; let mut nt = vec![0.0; q*p];
+        let mut tn = vec![0.0; p*q]; let mut tn_end = vec![0.0; p*q];
+        for j in 0..q {
+            let response = network_response(network, columns[j], gate)?;
+            let velocity = network_velocity_response(network, columns[j], gate)?;
+            for i in 0..q { poll(Some(gate))?; nn[i*q+j] = dot(columns[i], &response)?; }
+            for i in 0..p {
+                poll(Some(gate))?;
+                tn[i*q+j] = dot(&friction[i].column, &response)?;
+                tn_end[i*q+j] = finite(dot(&friction[i].column, &velocity)?*network.dt)?;
+            }
+            if nn[j*q+j] <= 0.0 {
+                return Err(invalid("updated material mobility needs positive normal contact compliance"));
+            }
+        }
+        for j in 0..p {
+            let response = network_response(network, &friction[j].column, gate)?;
+            for i in 0..q { poll(Some(gate))?; nt[i*p+j] = dot(columns[i], &response)?; }
+        }
+        // Fixed omitted-mode storage is unchanged. Its original exact opposed
+        // blocks depend on the COMPLETE compliance, so select them again after
+        // adding the same retained residual; do not carry a stale pairing.
+        let residual_blocks = if let Some(residual) = &self.residual {
+            for (a, g) in nn.iter_mut().zip(&residual.compliance) { *a = finite(*a+g)?; }
+            let mut paired = vec![false; q]; let mut blocks = Vec::with_capacity(q);
+            for i in 0..q {
+                if paired[i] { continue; }
+                let partner = (i+1..q).find(|&j| !paired[j] && opposed(&nn, q, i, j));
+                paired[i] = true;
+                match partner {
+                    Some(j) => { paired[j] = true; blocks.push(Block::Pair(i, j)); },
+                    None => blocks.push(Block::Single(i)),
+                }
+            }
+            Some(blocks)
+        } else { None };
+        poll(Some(gate))?;
+        Ok(PreparedMaterialMobility { nn, nt, tn, tn_end, residual_blocks })
+    }
+
+    // Called only after the same candidate's mechanics/normal geometry publish.
+    // All allocation, response evaluation and admission preceded that boundary.
+    pub(in super::super) fn install_material_mobility(&mut self, next: PreparedMaterialMobility) {
+        self.nn = next.nn; self.nt = next.nt; self.tn = next.tn; self.tn_end = next.tn_end;
+        if let Some(blocks) = next.residual_blocks {
+            self.residual.as_mut().expect("prepared original normal residual").blocks = blocks;
+        }
+        if let Some(geometry) = &mut self.geometry { geometry.matrices_at_accepted = true; }
+    }
+}
+
 impl MultiFrictionModalSystem {
     /// Admit prescribed changing attachment maps before the first sample.
     ///

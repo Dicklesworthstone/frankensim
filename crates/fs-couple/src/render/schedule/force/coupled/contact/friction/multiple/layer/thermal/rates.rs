@@ -41,6 +41,7 @@ struct RatePublication {
 pub(super) struct RateEndpoint {
     native: PreparedMaterialRelaxationTimes,
     maps: Option<(Vec<f64>, Vec<f64>)>,
+    normals: Option<obstacles::geometry::PreparedMaterialMobility>,
     sources: Vec<(usize, ResolvedMaterialStatePoint)>,
     channels: Vec<Option<MaterialHeatIntegral>>,
 }
@@ -62,12 +63,11 @@ impl RateContinuation<'_> {
         let bad = LayerThermalError::Invalid;
         if bindings.is_empty()
             || bindings.len() > routes.len()
-            || system.obstacles.is_some()
             || system.endpoint_controls.is_some()
             || system.core.has_nonlinear_potentials()
         {
             return Err(bad(
-                "material rate feedback requires explicit finite-body routes, original linear storage and prescribed normal loads",
+                "material rate feedback requires explicit finite-body routes and original linear material storage",
             ));
         }
         let mut cells = BTreeSet::new();
@@ -255,7 +255,7 @@ impl RateContinuation<'_> {
             .map_err(ModalFrictionError::from)?;
         let viscosity_changed = routes.iter().zip(&proposal.viscosity).any(|(route, proposed)|
             route.channel.as_ref().is_some_and(|channel| channel.viscosity_sources() != proposed.as_slice()));
-        let (maps, channels) = if native.changed() || viscosity_changed {
+        let (maps, normals, channels) = if native.changed() || viscosity_changed {
             // Use the COMPLETE retained columns: a condensed contact may have
             // string, bridge/body and fiber participants. Reconstructing only
             // the public local left/right geometry would lose bridge work.
@@ -267,17 +267,20 @@ impl RateContinuation<'_> {
             system.core.network.preview_material_relaxation_times(&mut native, |network| {
                 let maps = port_maps(network, &columns, gate,
                     "updated material rates require positive contact compliance and endpoint mobility")?;
+                let normals = system.obstacles.as_ref().map(|set|
+                    set.prepare_material_mobility(network, &system.points, gate)).transpose()?;
                 let channels = routes.iter().zip(&proposal.viscosity).map(|(route, viscosity)| route.channel.as_ref().map(|channel|
                     channel.prepare_after_material_mobility(network, &proposal.times, &proposal.damping, viscosity, gate)
                         .map_err(ModalFrictionError::from)).transpose()).collect::<Result<Vec<_>, ModalFrictionError>>()?;
-                Ok::<_, ModalFrictionError>((Some(maps), channels))
+                Ok::<_, ModalFrictionError>((Some(maps), normals, channels))
             })?
         } else {
-            (None, (0..routes.len()).map(|_| None).collect())
+            (None, None, (0..routes.len()).map(|_| None).collect())
         };
         Ok(RateEndpoint {
             native,
             maps,
+            normals,
             sources: proposal.sources,
             channels,
         })
@@ -293,6 +296,10 @@ impl RateContinuation<'_> {
             system.core.displacement_compliance = compliance[0];
             system.compliance = compliance;
             system.endpoint = mobility;
+        }
+        if let Some(normals) = endpoint.normals {
+            system.obstacles.as_mut().expect("prepared original normal contacts")
+                .install_material_mobility(normals);
         }
         *self.publication.borrow_mut() = Some(RatePublication {
             report,
@@ -336,9 +343,10 @@ impl MultiFrictionModalSystem {
     /// prepare before mechanics, heat, source snapshots or rates publish.
     /// Stored moduli, density, geometry and material internal strains remain
     /// unchanged. No endpoint-power approximation supplies material heat.
-    /// Refine this first-order partition in time. Moving tangential maps use
-    /// `step_with_material_rate_thermal_geometry`; solved normal contacts and
-    /// nonlinear material storage require their separate update compositions.
+    /// Refine this first-order partition in time. Existing solved normal
+    /// contacts retain their laws, stored energy and shared traction solve.
+    /// Moving tangential maps use `step_with_material_rate_thermal_geometry`;
+    /// changing nonlinear material storage needs a separate work composition.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_material_rate_thermal_feedback<'t, S, E>(
         &mut self,
@@ -358,6 +366,26 @@ impl MultiFrictionModalSystem {
             &[FrictionPortFrame],
         ) -> Result<StepCoefficients<S>, E>,
     ) -> Result<(LayerThermalFrame<S>, MaterialRelaxationTimeReport), LayerThermalError<E>> {
+        self.step_with_material_rate_thermal_feedback_and_obstacles(thermal, bindings,
+            series_heat, dry, material_heat, rates, controls, energy_guess_j, external, drives,
+            None, None, gate, resolve)
+    }
+
+    /// The same source-mobility transaction with original normal endpoint maps
+    /// and support translations. Normal force, storage, loss and actuator work
+    /// remain in the existing joint contact solve. A contact-loaded normal may
+    /// migrate only with its tangent through the complete geometry entry point.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_rate_thermal_feedback_and_obstacles<'t, S, E>(
+        &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination], dry: &[DryContactHeat<'_>],
+        material_heat: &mut [MaterialRelaxationHeatDestination<'_>],
+        rates: &[MaterialRelaxationTemperature], controls: LayerThermalSolve,
+        energy_guess_j: &[f64], external: &[f64], drives: &[FrictionDrive],
+        normal_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
+        normal_offsets_m: Option<&[f64]>, gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<(LayerThermalFrame<S>, MaterialRelaxationTimeReport), LayerThermalError<E>> {
         let continuation = RateContinuation::new(self, material_heat, rates, thermal, gate)?;
         let frame = self.step_with_contact_thermal_inner(
             thermal,
@@ -370,8 +398,8 @@ impl MultiFrictionModalSystem {
             energy_guess_j,
             external,
             drives,
-            None,
-            None,
+            normal_geometry,
+            normal_offsets_m,
             false,
             gate,
             resolve,
@@ -387,8 +415,9 @@ impl MultiFrictionModalSystem {
     /// The geometry owner retains source-domain checks at the actual start/end
     /// maps and restores the accepted geometry on every later thermal/source/
     /// cache refusal. Motion is a power-conjugate velocity transformer, not an
-    /// extra displacement or Bdot*q excitation. Prescribed normal loads only;
-    /// retained film patches and all source/body admission remain unchanged.
+    /// extra displacement or Bdot*q excitation. Normal maps and offsets hold
+    /// their accepted values; the complete companion accepts declared normal
+    /// motion. Retained film patches and source/body admission are unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_material_rate_thermal_geometry<'t, S, E>(
         &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
@@ -401,14 +430,37 @@ impl MultiFrictionModalSystem {
         config: surfaces::geometry::FrictionGeometryConfig, gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
     ) -> Result<(LayerThermalFrame<S>, MaterialRelaxationTimeReport), LayerThermalError<E>> {
+        self.step_with_material_rate_thermal_geometry_and_obstacles(thermal, bindings,
+            series_heat, dry, material_heat, rates, controls, energy_guess_j, external, drives,
+            geometry, endpoints, None, None, config, gate, resolve)
+    }
+
+    /// Complete moving normal/tangent patches and source-temperature body heat
+    /// on one accepted clock. Endpoint eta/tau refresh prepares BOTH mixed
+    /// response directions and normal compliance at the accepted endpoint
+    /// geometry; no lagged normal force or previous-midpoint cache is reused.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_rate_thermal_geometry_and_obstacles<'t, S, E>(
+        &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination], dry: &[DryContactHeat<'_>],
+        material_heat: &mut [MaterialRelaxationHeatDestination<'_>],
+        rates: &[MaterialRelaxationTemperature], controls: LayerThermalSolve,
+        energy_guess_j: &[f64], external: &[f64], drives: &[FrictionDrive],
+        geometry: &[surfaces::geometry::FrictionGeometry],
+        endpoints: Option<&[surfaces::geometry::FrictionEndpointGeometry]>,
+        normal_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
+        normal_offsets_m: Option<&[f64]>, config: surfaces::geometry::FrictionGeometryConfig,
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<(LayerThermalFrame<S>, MaterialRelaxationTimeReport), LayerThermalError<E>> {
         // Admit the accepted source/operator before staging endpoint controls.
         // Tangential maps do not change the native linear storage generator;
         // their work-conjugate contact forces enter its actual held input.
         let continuation = RateContinuation::new(self, material_heat, rates, thermal, gate)?;
-        let frame = self.with_friction_geometry_and_endpoints(geometry, endpoints, None,
+        let frame = self.with_friction_geometry_and_endpoints(geometry, endpoints, normal_geometry,
             config, gate, |system| system.step_with_contact_thermal_inner(thermal, bindings,
                 series_heat, dry, material_heat, Some(&continuation), controls, energy_guess_j,
-                external, drives, None, None, false, gate, resolve))?;
+                external, drives, normal_geometry, normal_offsets_m, normal_geometry.is_some(), gate, resolve))?;
         Ok(continuation.complete(material_heat, frame))
     }
 }

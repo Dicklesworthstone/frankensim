@@ -21,8 +21,9 @@ impl MultiBowStringBank {
     /// rates and therefore the next sample's traction, memory and pressure.
     /// The accepted-rate interval/endpoint-rate update is first order in time;
     /// its heat comes from the original full-trajectory source integral.
-    /// Fixed tangent maps, fixed storage and prescribed normal loads are the
-    /// admitted scope. Every body source/cache is retained in `material_heat`.
+    /// Fixed tangent maps and fixed material storage are the admitted scope;
+    /// existing solved normal contacts retain their complete original account.
+    /// Every body source/cache is retained in `material_heat`.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_material_rate_thermal_feedback<'t, S, E>(
         &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
@@ -46,8 +47,8 @@ impl MultiBowStringBank {
     /// actual endpoint source checks, support inertial forces and finite dry
     /// footprints. It accepts its motion cursor only after heat and mechanics
     /// publish together; no source history is rebuilt when the contact moves.
-    /// Prescribed normal loads are required. Normal/stop motion retains its
-    /// separate composition, and a retained film cannot migrate on its body.
+    /// Normal support motion authored by the existing fiber owner participates
+    /// in that same step. A retained film cannot migrate on its body.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_material_rate_thermal_motion<'t, S, E: core::fmt::Display>(
         &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
@@ -58,31 +59,55 @@ impl MultiBowStringBank {
         bow_stations: Option<&[f64]>, gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, RenderError> {
+        self.step_with_material_rate_thermal_motion_and_stops(thermal, bindings, series_heat,
+            dry, material_heat, rates, controls, energy_guess_j, external, drives,
+            bow_stations, None, None, gate, resolve)
+    }
+
+    /// Complete original bow/fiber and independent normal-support programs with
+    /// finite-body eta(T)/tau(T). Solved normal forces load the tangential laws
+    /// during the same mechanical trial. Endpoint mobility and all response
+    /// caches prepare before any support cursor, material or heat state accepts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_rate_thermal_motion_and_stops<'t, S, E: core::fmt::Display>(
+        &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination], dry: &[dry::BowDryContactHeat<'_>],
+        material_heat: &mut [MaterialRelaxationHeatDestination<'_>],
+        rates: &[crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::rates::MaterialRelaxationTemperature],
+        controls: LayerThermalSolve, energy_guess_j: &[f64], external: &[f64], drives: &[FrictionDrive],
+        bow_stations: Option<&[f64]>, stop_stations: Option<&[f64]>, offsets_m: Option<&[f64]>,
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, RenderError> {
+        let normal = stop_stations.map(|stations|
+            self.prepare_stop_station_geometry_with_bows(stations, bow_stations, gate)).transpose()?;
         let failure = |error: LayerThermalError<E>|
             RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string()));
-        if self.bow_station_motion_limits().is_some() {
-            self.with_bow_geometry(external, drives, bow_stations, None, None, gate,
+        let accepted = if self.bow_station_motion_limits().is_some() {
+            self.with_bow_geometry(external, drives, bow_stations, normal.as_deref(), offsets_m, gate,
                 |system, step| {
-                    if step.normal_geometry.is_some() || step.stop_offsets_m.is_some() {
-                        return Err(LayerThermalError::Invalid(
-                            "material mobility motion requires prescribed normal loads"));
-                    }
                     let routes = dry.iter().map(|route| route.at(step.string_centres_m, step.fiber_centre_m))
                         .collect::<Result<Vec<_>, LayerThermalError<E>>>()?;
-                    system.step_with_material_rate_thermal_geometry(thermal, bindings, series_heat,
+                    system.step_with_material_rate_thermal_geometry_and_obstacles(thermal, bindings, series_heat,
                         &routes, material_heat, rates, controls, energy_guess_j, step.external,
-                        step.drives, step.geometry, step.endpoints, step.config, gate, resolve)
+                        step.drives, step.geometry, step.endpoints, step.normal_geometry,
+                        step.stop_offsets_m, step.config, gate, resolve)
                         .map(|accepted| accepted.0)
-                }).map_err(failure)
+                }).map_err(failure)?
         } else {
             if bow_stations.is_some() {
                 return Err(RenderError::Control { what: "bow migration needs admitted station motion" });
             }
             let routes = self.fixed_dry_heat_routes(dry).map_err(failure)?;
-            self.step_with_material_rate_thermal_feedback(thermal, bindings, series_heat, &routes,
-                material_heat, rates, controls, energy_guess_j, external, drives, gate, resolve)
-                .map(|accepted| accepted.0).map_err(failure)
+            self.system.step_with_material_rate_thermal_feedback_and_obstacles(thermal, bindings,
+                series_heat, &routes, material_heat, rates, controls, energy_guess_j, external, drives,
+                normal.as_deref(), offsets_m, gate, resolve)
+                .map(|accepted| accepted.0).map_err(failure)?
+        };
+        if let Some(stations) = stop_stations {
+            self.stop_stations.as_mut().expect("admitted stop geometry").accepted.copy_from_slice(stations);
         }
+        Ok(accepted)
     }
 
     /// Original material/geometry-derived Hertz--Mindlin contacts on the same

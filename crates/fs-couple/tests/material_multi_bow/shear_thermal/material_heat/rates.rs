@@ -307,6 +307,11 @@ fn branch_snapshot(system: &MultiFrictionModalSystem) -> Vec<(f64, f64, Vec<f64>
 
 #[test]
 fn moving_material_rate_source_refusal_restores_warm_geometry_heat_and_history() {
+    use fs_couple::render::schedule::force::coupled::contact::{ModalContact, ModalContactConfig};
+    use fs_couple::render::schedule::force::coupled::contact::friction::multiple::{
+        normal_load::ContactNormalLoad,
+        obstacles::{FrictionObstacleConfig, geometry::{ObstacleGeometry, ObstacleGeometryConfig}},
+    };
     use fs_couple::render::schedule::force::coupled::contact::friction::multiple::surfaces::geometry::{
         FrictionGeometry, FrictionEndpointGeometry, FrictionGeometryConfig,
     };
@@ -322,7 +327,20 @@ fn moving_material_rate_source_refusal_restores_warm_geometry_heat_and_history()
         (300.0, 0.01), (300.0 + 1.5 * first_rise, 0.01),
         (300.0 + 1.6 * first_rise, 1e-310), (320.0, 1e-310),
     ]);
-    let mut system = isolated_memory(1000, &gate);
+    let normal_geometry = |shape| ObstacleGeometry {
+        left: ModalAttachment { component: 0, shapes: vec![shape] },
+        right: ModalAttachment { component: 0, shapes: vec![0.0] },
+    };
+    let mut system = isolated_memory(1000, &gate).with_obstacles(vec![(ModalContact {
+        left: normal_geometry(0.25).left, right: normal_geometry(0.25).right,
+        law: fs_dcontact::Obstacle::new(vec![-1.0], 1, 1, vec![-0.001], vec![1.0],
+            10.0, 1.0, "manufactured normal spring".into()).unwrap(),
+    }, ModalContactConfig { max_iterations: 96, maximum_force_n: 10.0,
+        maximum_penetration_m: 0.01, force_absolute_tolerance_n: 1e-11,
+        force_relative_tolerance: 1e-9 })],
+        FrictionObstacleConfig { max_contacts: 1, max_setup_terms: 100_000 }, &gate).unwrap()
+        .with_contact_normal_loads(vec![ContactNormalLoad { friction_port: 0, obstacle: 0 }], &gate).unwrap()
+        .with_obstacle_geometry_motion(ObstacleGeometryConfig { max_update_terms: 100_000 }, &gate).unwrap();
     let mut heat = isolated_body(caloric.curve(), volume);
     let mut routes = [MaterialRelaxationHeatDestination {
         cell: BODY, material: &card, caloric: caloric.curve(), temperature_axis: "T",
@@ -337,24 +355,32 @@ fn moving_material_rate_source_refusal_restores_warm_geometry_heat_and_history()
     let endpoint = |a, b| FrictionEndpointGeometry { start: geometry(a), end: geometry(b),
         start_speed_m_s: 0.02, end_speed_m_s: 0.02 };
     let config = FrictionGeometryConfig { max_update_terms: 100_000 };
-    system.step_with_material_rate_thermal_geometry(&mut heat, &[], &[], &[], &mut routes,
-        &rates, controls(1), &[0.0], &[0.0], &[drive(0.02, 0.001)], &[geometry(1.5)],
-        Some(&[endpoint(1.0, 2.0)]), config, &gate, |s, _| other(s)).unwrap();
+    system.step_with_material_rate_thermal_geometry_and_obstacles(&mut heat, &[], &[], &[], &mut routes,
+        &rates, controls(1), &[0.0], &[0.0], &[drive(0.02, 0.0)], &[geometry(1.5)],
+        Some(&[endpoint(1.0, 2.0)]), Some(&[normal_geometry(0.3)]), None,
+        config, &gate, |s, _| other(s)).unwrap();
     assert!((heat.temperature_k(BODY).unwrap() - 300.0 - first_rise).abs() < 1e-8);
     let states = system.components()[0].states().to_vec();
     let memory = system.material_memory().to_vec();
     let branches = branch_snapshot(&system);
+    let normal = system.last_obstacle_frames().unwrap().to_vec();
+    let normal_map = system.obstacle_normal_column(0).unwrap().to_vec();
+    assert!(normal[0].normal_force_n > 0.0);
+    assert_eq!(system.last_frame().unwrap().ports[0].normal_force_n, normal[0].normal_force_n);
     let source = routes[0].source.clone();
     let temperature = heat.temperature_k(BODY).unwrap();
     let energy = total_heat(&heat);
     let clock = heat.time_s();
-    let failure = system.step_with_material_rate_thermal_geometry(&mut heat, &[], &[], &[],
-        &mut routes, &rates, controls(1), &[energy], &[0.0], &[drive(0.02, 0.001)],
-        &[geometry(2.5)], Some(&[endpoint(2.0, 3.0)]), config, &gate, |s, _| other(s))
+    let failure = system.step_with_material_rate_thermal_geometry_and_obstacles(&mut heat, &[], &[], &[],
+        &mut routes, &rates, controls(1), &[energy], &[0.0], &[drive(0.02, 0.0)],
+        &[geometry(2.5)], Some(&[endpoint(2.0, 3.0)]), Some(&[normal_geometry(0.35)]), None,
+        config, &gate, |s, _| other(s))
         .err().expect("unrepresentable endpoint relaxation rate must refuse");
     assert!(matches!(failure, LayerThermalError::Invalid(
         "source relaxation time and rate must be positive representable values")));
     assert_eq!(system.port(0).unwrap().left, geometry(1.5).left);
+    assert_eq!(system.obstacle_normal_column(0).unwrap(), normal_map);
+    assert_eq!(system.last_obstacle_frames().unwrap(), normal);
     assert_eq!(system.components()[0].states(), states);
     assert_eq!(system.material_memory(), memory);
     assert_eq!(branch_snapshot(&system), branches);
@@ -368,13 +394,15 @@ fn moving_material_rate_source_refusal_restores_warm_geometry_heat_and_history()
     // on retry. It removes exactly this independent uncoupled arm's heat; no
     // geometry work or artificial energy reset is used to clear the refusal.
     let cooling = 0.5 * memory[0].powi(2) * fraction / dt;
-    system.step_with_material_rate_thermal_geometry(&mut heat, &[], &[], &[], &mut routes,
-        &rates, controls(1), &[energy], &[0.0], &[drive(0.02, 0.001)], &[geometry(2.5)],
-        Some(&[endpoint(2.0, 3.0)]), config, &gate, |_, _| Ok::<_, Infallible>(StepCoefficients {
+    system.step_with_material_rate_thermal_geometry_and_obstacles(&mut heat, &[], &[], &[], &mut routes,
+        &rates, controls(1), &[energy], &[0.0], &[drive(0.02, 0.0)], &[geometry(2.5)],
+        Some(&[endpoint(2.0, 3.0)]), Some(&[normal_geometry(0.35)]), None,
+        config, &gate, |_, _| Ok::<_, Infallible>(StepCoefficients {
             sources_w: BTreeMap::from([(BODY, -cooling)]), conductances_w_k: BTreeMap::new(), payload: (),
         })).unwrap();
     assert_eq!(system.samples_rendered(), 2);
     assert_eq!(system.port(0).unwrap().left, geometry(2.5).left);
+    assert_eq!(system.obstacle_normal_column(0).unwrap(), &[0.35]);
     assert!((system.material_memory()[0] - memory[0] * (-dt/0.01).exp()).abs() < 1e-13);
 }
 
