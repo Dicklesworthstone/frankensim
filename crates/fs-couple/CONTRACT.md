@@ -21468,3 +21468,74 @@ exercise late source/cancellation refusal from loaded histories. All 27 shared
 Hertz/rolling finite-heat tests pass. Native spectator/normal-drive refusals,
 fixed geometry/load, held-effort event limits, original source applicability and
 thermal time-refinement requirements remain.
+
+### Native temperature feedback into coherent porous absorption
+
+`porous_heating::feedback::TemperaturePorousHeating` binds each original thermal
+cell to an unchanged `PorousFluidLaw` and treats its physical length as one
+homogeneous acoustic sublayer. `IsobaricPorousGas` retains the original `GasSpec`,
+prescribed pressure and explicit temperature support; the native `GasState`
+constructor admits the support endpoints and each evaluated temperature. Native
+gas density, sound speed, viscosity, conductivity and pore drag therefore evolve
+together. The original thermal cell supplies its actual caloric temperature,
+geometry, mass and storage law; temperature-dependent pore density never
+replaces the specimen's thermal mass or caloric identity.
+
+Only changed cell temperatures reevaluate their native gas and porous
+coefficients. Any changed layer triggers one shared coherent stack solve, so
+temperature gradients alter interface reflection and the internal drive of all
+layers. Unchanged temperatures, including a latent plateau, reuse the prepared
+analytic sources. Physical admission reuses the complete straight, adjoining,
+full-area stack binding; the existing 4096-cell ceiling, composition budget and
+cancellation gates bound preparation and refresh work.
+
+`PorousHarmonicDrive` fixes the external peak pressure phasors, frequency, face
+area and positive real wave reference. Acoustic source energy counts only the
+two exterior faces. Each native thermal step deposits its accepted-start
+viscous and thermal watts exactly once through the shared heat observer and
+energy account. Endpoint refresh prepares the next rate and validates the
+returned cache without changing already deposited energy. Original conduction,
+authored heat, boundary events, latent storage and continuation remain native;
+late source-domain or cancellation failure publishes neither candidate.
+
+The model assumes rigid-frame, normal-incidence quasisteady harmonic acoustics,
+prescribed isobaric background composition and pressure, and a justified common
+gas/skeleton temperature. The authored caloric law must represent storage under
+that background. Finite gas inventory, reservoir mass transport, evolving mean
+pressure, transient acoustic storage and parametric work are not inferred.
+Native conduction CFL alone does not control nonlinear absorption feedback;
+callers must refine thermal timesteps against their source dynamics.
+
+Five focused physical regressions cover native nonuniform gas-state and
+coherent-loss parity, latent/cache behavior, events and continuation, atomic
+domain/mapping/cancellation refusal, and accepted-start rates plus timestep
+refinement against an independent two-cell direct-owner RK4 reference with
+conduction, authored heat and outgoing acoustic energy. The nine existing
+fixed-source porous thermal regressions remain unchanged and pass.
+
+## Driven Hertz sliding, spin and rolling with finite thermal feedback
+
+`friction_heat::hertz_rolling::propose_rigid_hertz_rolling_driven_heat` admits
+held world forces and body-frame COM torques through the original five-coordinate
+native contact response. The coupled thermal root resolves the selected surface
+friction at actual interface temperature and admits bulk rolling at the original
+sphere temperature. Surface heat enters the original common face; rolling heat
+enters the original whole-sphere caloric cell. Full-body actuator work remains a
+separate mechanical supply in `delta_K + delta_H - Q_external - W_drive`.
+
+The corresponding `collinear::propose_rigid_hertz_rolling_collinear_driven_heat`
+uses the existing continuous invariant-subspace trajectory. Static retention,
+breakaway, arrest and reversal keep their original event times and opaque
+continuation. Each thermal trial starts from accepted bodies/history, and exact
+phase-integrated surface/bulk losses retain the same caloric destinations.
+Common-body acceleration changes actuator work without creating friction heat.
+Both original unforced APIs delegate with zero wrenches.
+
+The full five-coordinate branch retains its frozen-geometry held-effort model
+and unresolved-event refusals. The collinear branch retains its admitted
+invariant subspace and held coefficients/load. Neither adds pose/normal
+integration or changes heat partition. Endpoint thermal sampling still requires
+time refinement. Seven new physical groups cover an independent forced
+mechanical/thermal reference, mixed shear/spin/rolling, driven reversal and
+thermal weakening, common-acceleration/static limits, exact zero-drive behavior
+and late atomic source/cancellation refusal; eleven existing tests also pass.

@@ -1,4 +1,4 @@
-//! Held coherent porous acoustic loss on the original finite thermal timeline.
+//! Coherent porous acoustic loss on the original finite thermal timeline.
 //!
 //! An explicitly ordered, complete depth partition receives the original
 //! `PorousLayerExcitation`'s analytic viscous and thermal work. Thermal cells
@@ -9,10 +9,13 @@
 //! Each cell is an explicitly authored thermally lumped specimen volume. The
 //! caller must justify one temperature/storage law for its fluid and skeleton:
 //! the acoustic mechanism split does NOT partition heat between constituents.
-//! Acoustic coefficients and the coherent peak-pressure drive are frozen over
-//! an advance. This is cycle-averaged, one-way heating, not acoustic startup,
+//! The fixed-source adapters hold acoustic coefficients and the coherent
+//! peak-pressure drive over an advance. They provide one-way cycle-mean heat,
+//! not acoustic startup,
 //! temperature feedback, frame motion or a new material-validity claim. Refresh
 //! the original acoustic/material owner explicitly when that approximation ends.
+//! [`feedback`] instead refreshes the original gas/porous response from accepted
+//! native cell temperatures under an explicit isobaric background.
 
 use fs_duct::DuctError;
 use fs_duct::porous::{PorousLayerDissipation, PorousLayerExcitation};
@@ -25,6 +28,8 @@ use std::collections::BTreeMap;
 
 mod stack;
 pub use stack::PorousStackHeating;
+/// Accepted-state gas-temperature feedback through the original porous stack.
+pub mod feedback;
 
 /// Hard preparation/storage ceiling; callers may declare a smaller cell budget.
 pub const MAX_POROUS_HEATING_CELLS: usize = 4096;
@@ -64,6 +69,8 @@ pub struct PorousCellHeating {
 pub enum PorousHeatingError {
     /// Unchanged original acoustic refusal.
     Acoustic(DuctError),
+    /// Original gas or porous constitutive/source-domain refusal.
+    Material(fs_material::MaterialError),
     /// Unchanged native thermal, domain, budget or cancellation refusal.
     Thermal(DepositionError),
     /// Physical mapping or retained binding is inadmissible.
@@ -87,6 +94,19 @@ impl From<DepositionError> for PorousHeatingError {
         Self::Thermal(value)
     }
 }
+impl From<fs_material::MaterialError> for PorousHeatingError {
+    fn from(value: fs_material::MaterialError) -> Self {
+        Self::Material(value)
+    }
+}
+impl From<fs_duct::fluid::FluidDuctError> for PorousHeatingError {
+    fn from(value: fs_duct::fluid::FluidDuctError) -> Self {
+        match value {
+            fs_duct::fluid::FluidDuctError::Material(error) => Self::Material(error),
+            fs_duct::fluid::FluidDuctError::Duct(error) => Self::Acoustic(error),
+        }
+    }
+}
 
 /// Reusable source bound to the original acoustic solution and existing cells.
 /// Preparation uses one constant-work analytic integral per cell and bounded
@@ -98,6 +118,7 @@ pub struct PorousHeating<'e, 'l, 'm> {
 }
 
 /// The same cached native sources and observer serve a layer or a whole stack.
+#[derive(Clone)]
 struct PreparedHeat {
     cells: Vec<PorousCellHeating>,
     sources_w: BTreeMap<CellId, f64>,
@@ -386,25 +407,72 @@ impl PreparedHeat {
         self.validate(initial, &mut checkpoint)?;
         let observer = HeldHeat {
             owner: self,
-            energy: vec![Dd::ZERO; self.cells.len()],
-            mechanisms: [Dd::ZERO; 2],
-            boundary: [Dd::ZERO; 2],
+            account: HeatAccount::new(self.cells.len()),
         };
         let (thermal, observer, heat_report) =
             initial.advance_observed(&observer, target_s, config, &mut checkpoint)?;
-        let deposited = observer.energy.iter().copied().fold(Dd::ZERO, |a, b| a + b);
+        observer
+            .account
+            .finish(self, thermal, heat_report, &mut checkpoint)
+    }
+}
+
+/// One physical energy accumulator serves frozen and temperature-refreshed heat.
+#[derive(Clone)]
+struct HeatAccount {
+    energy: Vec<Dd>,
+    mechanisms: [Dd; 2],
+    boundary: [Dd; 2],
+}
+impl HeatAccount {
+    fn new(cells: usize) -> Self {
+        Self {
+            energy: vec![Dd::ZERO; cells],
+            mechanisms: [Dd::ZERO; 2],
+            boundary: [Dd::ZERO; 2],
+        }
+    }
+    fn record(
+        &mut self,
+        heat: &PreparedHeat,
+        dt: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), PorousHeatingError> {
+        for (cell, energy) in heat.cells.iter().zip(&mut self.energy) {
+            checkpoint()?;
+            *energy = *energy + Dd::from_f64(finite(cell.dissipation.absorbed_power_w * dt)?);
+            for (sum, power) in self.mechanisms.iter_mut().zip([
+                cell.dissipation.viscous_power_w,
+                cell.dissipation.thermal_power_w,
+            ]) {
+                *sum = *sum + Dd::from_f64(finite(power * dt)?);
+            }
+        }
+        for (sum, power) in self.boundary.iter_mut().zip(heat.boundary_power_w) {
+            *sum = *sum + Dd::from_f64(finite(power * dt)?);
+        }
+        Ok(())
+    }
+    fn finish<'t>(
+        self,
+        heat: &PreparedHeat,
+        thermal: DepositionSimulation<'t>,
+        heat_report: EnergyAudit,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<PorousHeatingStep<'t>, PorousHeatingError> {
+        let deposited = self.energy.iter().copied().fold(Dd::ZERO, |a, b| a + b);
         let acoustic = PorousHeatingEnergy {
-            incident_j: finite(observer.boundary[0].to_f64())?,
-            outgoing_j: finite(observer.boundary[1].to_f64())?,
-            viscous_j: finite(observer.mechanisms[0].to_f64())?,
-            thermal_j: finite(observer.mechanisms[1].to_f64())?,
+            incident_j: finite(self.boundary[0].to_f64())?,
+            outgoing_j: finite(self.boundary[1].to_f64())?,
+            viscous_j: finite(self.mechanisms[0].to_f64())?,
+            thermal_j: finite(self.mechanisms[1].to_f64())?,
             deposited_j: finite(deposited.to_f64())?,
-            residual_j: finite((observer.boundary[0] - observer.boundary[1] - deposited).to_f64())?,
+            residual_j: finite((self.boundary[0] - self.boundary[1] - deposited).to_f64())?,
         };
-        let cell_energy_j = self
+        let cell_energy_j = heat
             .cells
             .iter()
-            .zip(observer.energy)
+            .zip(self.energy)
             .map(|(cell, energy)| (cell.cell, energy.to_f64()))
             .collect();
         checkpoint()?;
@@ -420,9 +488,7 @@ impl PreparedHeat {
 #[derive(Clone)]
 struct HeldHeat<'p> {
     owner: &'p PreparedHeat,
-    energy: Vec<Dd>,
-    mechanisms: [Dd; 2],
-    boundary: [Dd; 2],
+    account: HeatAccount,
 }
 impl DepositionObserver for HeldHeat<'_> {
     type Error = PorousHeatingError;
@@ -445,19 +511,6 @@ impl DepositionObserver for HeldHeat<'_> {
         _: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
-        for (cell, energy) in self.owner.cells.iter().zip(&mut self.energy) {
-            checkpoint()?;
-            *energy = *energy + Dd::from_f64(finite(cell.dissipation.absorbed_power_w * dt)?);
-            for (sum, power) in self.mechanisms.iter_mut().zip([
-                cell.dissipation.viscous_power_w,
-                cell.dissipation.thermal_power_w,
-            ]) {
-                *sum = *sum + Dd::from_f64(finite(power * dt)?);
-            }
-        }
-        for (sum, power) in self.boundary.iter_mut().zip(self.owner.boundary_power_w) {
-            *sum = *sum + Dd::from_f64(finite(power * dt)?);
-        }
-        Ok(())
+        self.account.record(self.owner, dt, checkpoint)
     }
 }
