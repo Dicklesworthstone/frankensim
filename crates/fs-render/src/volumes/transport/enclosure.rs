@@ -21,7 +21,7 @@ pub use bundle::GRID_BUNDLE_ENCLOSURE_SEMANTICS_VERSION;
 mod phase;
 pub use phase::PHASE_ENCLOSURE_SEMANTICS_VERSION;
 mod prepared;
-pub use prepared::{MAX_PREPARED_EXTINCTION_VALUES, PreparedGridExtinction, PreparedGridScattering};
+pub use prepared::{MAX_PREPARED_EXTINCTION_VALUES, PreparedGridExtinction, PreparedGridScattering, VolumeContractionEnvelope, VOLUME_CONTRACTION_ENCLOSURE_VERSION};
 use fs_geom::Point3;
 use fs_ivl::{Interval, decay::exp_neg};
 

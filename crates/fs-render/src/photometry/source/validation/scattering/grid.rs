@@ -10,8 +10,8 @@ use crate::volumes::transport::enclosure::{
 };
 
 pub(super) struct GridScattering<'field> {
-    packet: PreparedGridScattering<'field, 'field, SPECTRAL_BINS>,
-    weights: Vec<[Interval; SPECTRAL_BINS]>,
+    pub(super) packet: PreparedGridScattering<'field, 'field, SPECTRAL_BINS>,
+    pub(super) weights: Vec<[Interval; SPECTRAL_BINS]>,
     budget: GridEnclosureBudget,
     identity: ContentHash,
 }

@@ -21,7 +21,9 @@
 //! a thin layer. This is single scattering, not a total image or replacement tracer. Native nominal calculations
 //! are untouched. Higher scattering orders, surface terms, thermal emission,
 //! finite-source optics, calibration, spectral/field/model discrepancy and the
-//! physical effect of endpoint exclusions remain unbounded. The transport
+//! physical effect of endpoint exclusions remain unbounded. An opt-in finite-grid
+//! envelope can bound volume-only orders two and above, separately from the
+//! single-scattering numerical integral and all excluded terms. The transport
 //! equation is described in PBRT 4e, Light Transport II, Equation of Transfer;
 //! use the native propagation-direction convention, not PBRT's away vectors.
 
@@ -39,6 +41,8 @@ use std::{cmp::Ordering, collections::BinaryHeap, io::{self, Write}};
 mod phase;
 mod grid;
 use grid::GridScattering;
+mod remainder;
+pub use remainder::{GridVolumeRemainder, GRID_VOLUME_REMAINDER_SEMANTICS_VERSION};
 
 /// Version of the target integral, phase enclosure, visibility and output scope.
 pub const SCATTER_ENCLOSURE_SEMANTICS_VERSION: u32 = 2;
@@ -163,7 +167,9 @@ pub struct EnclosedSingleScatter {
     /// Original physical-grid snapshot, or None for the homogeneous gray model.
     /// A grid's thermal/phase metadata may be retained even when irrelevant to a lane.
     pub medium_identity: Option<ContentHash>,
-    /// Higher scattering orders remain unknown, not zero.
+    /// Optional global envelope for volume-only orders; never surface reflection.
+    pub volume_remainder: Option<GridVolumeRemainder>,
+    /// Bound on omitted volume orders when explicitly prepared; otherwise unknown.
     pub omitted_multiple_scattering_bound_cd_m2: Option<f64>,
     /// Calibration, construction, geometry/model discrepancy and total error unknown.
     pub total_error_bound_cd_m2: Option<f64>,
@@ -173,7 +179,8 @@ impl EnclosedSingleScatter {
     pub fn write_csv_header(writer: &mut impl Write) -> io::Result<()> {
         writer.write_all(b"index,scope,luminance_cd_m2,numerical_lower_cd_m2,numerical_upper_cd_m2,numerical_error_bound_cd_m2,requested_error_cd_m2,termination,evaluations,uncertain_visibility_panels,numerical_model_identity,omitted_multiple_scattering_bound_cd_m2,total_physical_error_bound_cd_m2,medium_identity,version\n")
     }
-    /// Stream round-trip values with explicit unknown omitted and physical errors.
+    /// Stream round-trip values with an optional volume-only tail and unknown
+    /// physical error. This preserves the existing 15-column version-2 schema.
     pub fn write_csv_row(self, index: usize, writer: &mut impl Write) -> io::Result<()> {
         let status = match self.termination {
             ScatterEnclosureTermination::ToleranceMet => "tolerance-met",
@@ -181,10 +188,15 @@ impl EnclosedSingleScatter {
             ScatterEnclosureTermination::ResolutionLimit => "resolution-limit",
         };
         let scope = if self.medium_identity.is_some() { "physical-grid-spectral-single-scatter" } else { "homogeneous-gray-single-scatter" };
-        write!(writer, "{index},{scope},{},{},{},{},{},{status},{},{},{},unknown,unknown,",
+        write!(writer, "{index},{scope},{},{},{},{},{},{status},{},{},{},",
             self.luminance_cd_m2, self.numerical.lo, self.numerical.hi,
             self.numerical_error_bound_cd_m2, self.requested_error_cd_m2,
             self.evaluations, self.uncertain_visibility_panels, self.numerical_model_identity)?;
+        match self.omitted_multiple_scattering_bound_cd_m2 {
+            Some(value) => write!(writer, "{value}")?,
+            None => writer.write_all(b"unknown")?,
+        }
+        writer.write_all(b",unknown,")?;
         match self.medium_identity {
             Some(identity) => write!(writer, "{identity}")?,
             None => writer.write_all(b"not-applicable")?,
@@ -200,6 +212,7 @@ pub struct SingleScatterReference<'a, 'scene> {
     visibility: VisibilityIndex,
     medium: ScatteringMedium<'a, 'scene>,
     identity: ContentHash,
+    volume_remainder: Option<GridVolumeRemainder>,
 }
 
 enum ScatteringMedium<'a, 'scene> {
@@ -279,7 +292,7 @@ impl<'a, 'scene> SingleScatterReference<'a, 'scene> {
             }
         };
         cx.checkpoint()?;
-        Ok(Self { scene, visibility, medium, identity: hash.finalize() })
+        Ok(Self { scene, visibility, medium, identity: hash.finalize(), volume_remainder: None })
     }
 
     /// Enclose one camera segment. Jobs amortize frontier allocation across rays.
@@ -374,7 +387,8 @@ impl<'a, 'scene> SingleScatterReference<'a, 'scene> {
             numerical_error_bound_cd_m2: error, requested_error_cd_m2: budget.absolute_error_cd_m2,
             termination, evaluations, uncertain_visibility_panels: uncertain,
             numerical_model_identity: hash.finalize(), medium_identity: self.medium.identity(),
-            omitted_multiple_scattering_bound_cd_m2: None,
+            volume_remainder: self.volume_remainder,
+            omitted_multiple_scattering_bound_cd_m2: self.volume_remainder.map(GridVolumeRemainder::upper_cd_m2),
             total_error_bound_cd_m2: None })
     }
 

@@ -6,6 +6,9 @@
 use super::*;
 use crate::volumes::transport::scattering::PhaseFunction;
 
+mod remainder;
+pub use remainder::{VolumeContractionEnvelope, VOLUME_CONTRACTION_ENCLOSURE_VERSION};
+
 /// Prepared original extinction plus separately retained scattering response.
 /// No density, cell map, angular table or Cartesian palette product is copied.
 /// One extra inline N-lane coefficient packet is needed only for uniform optics;

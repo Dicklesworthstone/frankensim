@@ -13,7 +13,7 @@ use crate::volumes::transport::scattering::{MassScatteringSpectrum, ScatteringGr
 use fs_exec::Cx;
 
 mod scattering;
-pub use scattering::PreparedGridScattering;
+pub use scattering::{PreparedGridScattering, VolumeContractionEnvelope, VOLUME_CONTRACTION_ENCLOSURE_VERSION};
 
 /// Default cap on retained coefficient intervals, across both optical tables.
 /// At 16 bytes per interval this permits 5 MiB of initialized table entries.

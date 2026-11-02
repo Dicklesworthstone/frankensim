@@ -1,7 +1,7 @@
 //! Headless bounds on haze glow in native spectrally selective physical cells.
 //!
 //! cargo run -p fs-render --features photometry --example photometric_grid_scatter
-//! Options: --shadow, --coarse, and one of --blue / --red.
+//! Options: --shadow, --coarse, --volume-tail, and one of --blue / --red.
 //! Authored numerical inputs, not measured fixture/medium calibration. The
 //! single-scattering result excludes surface light, thermal light and higher
 //! scattering orders. Stdout is CSV; independent diagnostics go to stderr.
@@ -27,7 +27,7 @@ mod example {
     use fs_render::volumes::transport::scattering::{ScatteringGrid, ScatteringOptics,
         MassScatteringSpectrum, PhaseFunction};
 
-    fn calculate(cx: &Cx<'_>, shadow: bool, coarse: bool, blue: f64) -> Result<(), Box<dyn Error>> {
+    fn calculate(cx: &Cx<'_>, shadow: bool, coarse: bool, blue: f64, volume_tail: bool) -> Result<(), Box<dyn Error>> {
         let density = [1.0, 2.0, 0.5];
         let cap = CellPaletteBudget { max_models: 2, max_cells: 3 };
         let absorption = CellPalette::try_new(cx, vec![
@@ -58,6 +58,7 @@ mod example {
         let scene = PhotometricScene::try_with_medium(&geometry, &sources,
             PhotometricMedium::Scattering(&medium), TransportOptions::default(), cx)?;
         let reference = SingleScatterReference::new(&scene, cx)?;
+        let reference = if volume_tail { reference.with_volume_remainder(3, cx)? } else { reference };
         let segments = [ScatterSegment::try_new(Point3::new(0.0, 0.0, -1.0), Point3::new(0.0, 0.0, 3.5))?];
         let limits = ScatterEnclosureBudget { absolute_error_cd_m2: 1e-3,
             max_evaluations: if coarse { 1 } else { 16_384 }, max_depth: 40 };
@@ -76,7 +77,13 @@ mod example {
         let analytic = blue * blue_reference + (1.0 - blue) * red_reference;
         eprintln!("authored native-grid single scattering; density and optical/phase maps are shared with physical transport");
         eprintln!("blue_fraction={blue} shadow={shadow} independent_reference_cd_m2={analytic}");
-        eprintln!("calibration, discretization, surface light, higher scattering orders and total physical error remain unknown");
+        eprintln!("calibration, discretization, surface light and total physical error remain unknown");
+        match reference.volume_remainder() {
+            Some(tail) => eprintln!("volume-only orders >=2: upper_cd_m2={} global_first_order_cd_m2={} contraction={} source_distance_lower_m={:?} grid_diameter_upper_m={} proof_version={}",
+                tail.upper_cd_m2(), tail.first_order_upper_cd_m2(), tail.max_contraction(),
+                tail.min_source_distance_m(), tail.grid_diameter_m(), tail.semantics_version()),
+            None => eprintln!("higher-order volume bound unknown or not requested"),
+        }
         let stdout = io::stdout();
         let mut writer = stdout.lock();
         EnclosedSingleScatter::write_csv_header(&mut writer)?;
@@ -86,15 +93,16 @@ mod example {
     }
 
     pub fn run() -> Result<(), Box<dyn Error>> {
-        let (mut shadow, mut coarse, mut color) = (false, false, None);
+        let (mut shadow, mut coarse, mut color, mut volume_tail) = (false, false, None, false);
         for arg in std::env::args().skip(1) {
             match arg.as_str() {
                 "--shadow" if !shadow => shadow = true,
                 "--coarse" if !coarse => coarse = true,
+                "--volume-tail" if !volume_tail => volume_tail = true,
                 "--blue" if color.is_none() => color = Some(1.0),
                 "--red" if color.is_none() => color = Some(0.0),
                 _ => return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                    "usage: photometric_grid_scatter [--shadow] [--coarse] [--blue | --red]").into()),
+                    "usage: photometric_grid_scatter [--shadow] [--coarse] [--volume-tail] [--blue | --red]").into()),
             }
         }
         let gate = CancelGate::new_clock_free();
@@ -102,7 +110,7 @@ mod example {
         pool.scope(|arena| {
             let cx = Cx::new(&gate, arena, StreamKey { seed: 173, kernel_id: 0x4753_4558, tile: 0, iteration: 0 },
                 Budget::INFINITE, ExecMode::Deterministic);
-            calculate(&cx, shadow, coarse, color.unwrap_or(0.75))
+            calculate(&cx, shadow, coarse, color.unwrap_or(0.75), volume_tail)
         })
     }
 }
