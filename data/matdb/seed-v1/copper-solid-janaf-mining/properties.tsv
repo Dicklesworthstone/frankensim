@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	identity	Pure crystalline elemental copper thermochemical reference	NIST Chemistry WebBook CAS 7440-50-8 molecular weight	Cu; source molecular weight 63.546 gives molar mass 63.546 g/mol. The elemental reference at 298.15 K is crystalline metallic copper, not monatomic gas, dissolved Cu(I) or Cu(II), molten copper, an alloy or a certified cathode product. No impurity assay or metal-product qualification is implied.
+observation	standard	Cu(cr) reference at 298.15 K and 100000 Pa standard pressure	NIST-JANAF Cu-002 literal 298.15 K row	Retain formation enthalpy 0 kJ/mol and absolute molar entropy 33.164 J/(mol K), with the JANAF elemental reference convention. Zero formation enthalpy is the reference convention, not zero absolute entropy or zero sensible enthalpy at another temperature. The retained table does not state uncertainty. This point permits reaction sums ending in solid copper; it supplies no electrochemical overpotential, current efficiency, conversion rate or latent heat.
+scalar	mass	identity	molar_mass	63.546	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	298.15	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	0	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	33.164	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1

@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	identity	Pure CO gas standard-state thermochemical reference	NIST Chemistry WebBook CAS 630-08-0 molecular weight	CO; source molecular weight 28.0101 gives molar mass 28.0101 g/mol. Gas identity is explicit: these values are not carbon dioxide, dissolved carbon monoxide, solid carbon or an assayed furnace gas mixture. The pre-existing carbon-monoxide gas-species pack remains an independently identified caloric model; this pack supplies the explicit formation-energy reference for mixed-phase reactions.
+observation	standard	CO(g) at 298.15 K and 100000 Pa standard pressure	NIST-JANAF C-093 literal 298.15 K row	Retain formation enthalpy -110.527 kJ/mol and absolute molar entropy 197.653 J/(mol K), with the JANAF elemental reference and ideal-gas standard-state convention. These are the literal JANAF points, not rounded WebBook values, a Shomate formation curve or an alternate CODATA evaluation. The retained table does not state uncertainty. This permits matched-state reductant and heat balances without asserting high-temperature equilibrium, gas purity, reaction kinetics or furnace operating conditions.
+scalar	mass	identity	molar_mass	28.0101	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	298.15	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	-110.527	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	197.653	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1

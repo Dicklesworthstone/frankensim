@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	identity	Pure crystalline copper(II) oxide CuO thermochemical reference	NIST Chemistry WebBook CAS 1317-38-0 molecular weight	CuO; retain the source molecular weight 79.545 as molar mass 79.545 g/mol. This identifies stoichiometric crystalline copper(II) oxide, not copper(I) oxide, an aqueous copper ion, a copper-bearing bulk ore or a qualified ore specimen. The displayed molecular weight has fewer digits than the oxygen and carbon-dioxide reference packs; rounded molar masses need not close a reaction mass sum exactly even when its element and charge counts are exact.
+observation	standard	CuO(cr) at 298.15 K and 100000 Pa standard pressure	NIST-JANAF Cu-015 literal 298.15 K row	Retain formation enthalpy -156.063 kJ/mol and absolute molar entropy 42.594 J/(mol K), with the JANAF elemental reference convention. The source table does not state uncertainty for these retained points. These values support matched-state oxidation and reduction reaction sums; they do not specify oxygen-transfer kinetics, conversion, smelter heat duty, furnace temperature or aqueous acid-leach enthalpy.
+scalar	mass	identity	molar_mass	79.545	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	298.15	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	-156.063	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	42.594	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1
