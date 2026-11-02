@@ -25,6 +25,7 @@ pub mod cavitation;
 pub mod isothermal;
 
 use core::fmt;
+use std::sync::Arc;
 
 /// Explicit dense pressure-island ceiling, not a real-time performance claim.
 pub const MAX_CELLS: usize = 64;
@@ -114,10 +115,12 @@ pub struct FilmChannelReport {
 
 /// Immutable film geometry and transport law. Evaluation and tangent use bounded stack
 /// scratch, never mutate pressure history, and allocate only at construction.
+/// Clones and viscosity recompilations share the admitted geometry; only transport
+/// coefficients are copied or rebuilt, independent of closure-port storage size.
 #[derive(Debug, Clone)]
 pub struct ResistiveFilm {
-    cells: Vec<FilmCell>,
-    channels: Vec<FilmChannel>,
+    cells: Arc<[FilmCell]>,
+    channels: Arc<[FilmChannel]>,
     factors: Vec<f64>,
     channel_viscosities_pa_s: Vec<f64>,
     pressure_viscosity_coefficient_per_pa: f64,
@@ -191,8 +194,8 @@ impl ResistiveFilm {
         // after motion. The mechanical owner checks its ACTUAL state on attach.
         Ok(Self {
             channel_viscosities_pa_s: vec![viscosity_pa_s; channels.len()],
-            cells,
-            channels,
+            cells: cells.into(),
+            channels: channels.into(),
             factors,
             pressure_viscosity_coefficient_per_pa: 0.0,
             ports,
@@ -266,15 +269,8 @@ impl ResistiveFilm {
     /// for the resulting viscous work with that same operator. This does not
     /// update a compressible film's gas storage or infer thermal expansion.
     pub fn with_viscosity(&self, viscosity_pa_s: f64) -> Result<Self, FilmError> {
-        let mut result = Self::new(
-            self.cells.clone(),
-            self.channels.clone(),
-            self.ports,
-            viscosity_pa_s,
-            self.limits,
-        )?;
-        result.pressure_viscosity_coefficient_per_pa = self.pressure_viscosity_coefficient_per_pa;
-        Ok(result)
+        let viscosities = [viscosity_pa_s; MAX_CHANNELS];
+        self.with_channel_viscosities(&viscosities[..self.channels.len()])
     }
 
     /// Compile one positive dynamic viscosity [Pa s] per ORIGINAL channel.
@@ -286,8 +282,9 @@ impl ResistiveFilm {
     /// thermal profiles require their own momentum integration and are not
     /// represented by substituting a cell or wall viscosity.
     ///
-    /// Original geometry, limits and force ports remain exact. All conductance
-    /// factors are compiled once here; pressure, tangent and work use the same
+    /// Original geometry, limits and force ports remain exact and share their
+    /// admitted storage without another topology/closure validation or copy.
+    /// All conductance factors are compiled once here; pressure, tangent and work use the same
     /// existing solve with no added evaluation allocation or iteration. The
     /// caller owns source/temperature admission and holds these values fixed
     /// inside each mechanical solve. This supplies no heat or mass evolution.
@@ -309,8 +306,8 @@ impl ResistiveFilm {
             factors.push(factor);
         }
         Ok(Self {
-            cells: self.cells.clone(),
-            channels: self.channels.clone(),
+            cells: Arc::clone(&self.cells),
+            channels: Arc::clone(&self.channels),
             factors,
             channel_viscosities_pa_s: viscosities_pa_s.to_vec(),
             pressure_viscosity_coefficient_per_pa: self.pressure_viscosity_coefficient_per_pa,
@@ -341,7 +338,7 @@ impl ResistiveFilm {
             return fail("invalid film configuration");
         }
         let mut minimum = f64::INFINITY;
-        for c in &self.cells {
+        for c in self.cells.iter() {
             let h = c.gap.reference_m - dot(&c.gap.closure, q);
             if !h.is_finite() || h < self.limits.minimum_cell_gap_m || h > self.limits.maximum_gap_m
             {
@@ -349,7 +346,7 @@ impl ResistiveFilm {
             }
             minimum = minimum.min(h);
         }
-        for edge in &self.channels {
+        for edge in self.channels.iter() {
             let h = edge.gap.reference_m - dot(&edge.gap.closure, q);
             if !h.is_finite() || h > self.limits.maximum_gap_m {
                 return fail("film channel outside declared gap domain");

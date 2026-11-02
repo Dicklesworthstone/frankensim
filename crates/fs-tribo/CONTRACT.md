@@ -842,6 +842,14 @@ independent unequal-channel network pressures, Poiseuille mass fluxes, pressure
 work and directional tangents, conserve cavitation refill/squeeze mass, and
 recover uniform coefficients bitwise. Invalid updates leave prior owners intact.
 
+The admitted cells and channels share immutable geometry storage across clones,
+Barus continuations and viscosity recompilations. Updating a uniform or spatial
+viscosity field rebuilds only its two channel coefficient arrays, without copying
+cell/face closure rows or revalidating unchanged topology. Source objects remain
+independent; evaluation still allocates no scratch and uses the original pressure,
+tangent and work arithmetic. This removes graph-size copying from repeated
+thermoviscous refreshes; it is not a measured real-time throughput guarantee.
+
 `evaluate_with_channels_into` returns signed passage volume flows and their
 nonnegative `Q*(p_from-p_to)` work in original channel order, together with the
 same force and pressures from one solve. Physical pressure, not transformed

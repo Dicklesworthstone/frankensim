@@ -82,8 +82,10 @@ fn flow_tangent_includes_density_gap_and_discrete_effort_near_equal_pressure() {
 }
 #[test]
 fn channels_can_close_and_reopen_without_discarding_trapped_mass() {
-    let mut m=model(true);m.geometry.channels[0].gap=gap(0.0,&[0.0;2]);
-    m.geometry.channels[1].gap=gap(0.0001,&[1.0,-1.0]);
+    let mut m=model(true);
+    let channels=std::sync::Arc::make_mut(&mut m.geometry.channels);
+    channels[0].gap=gap(0.0,&[0.0;2]);
+    channels[1].gap=gap(0.0001,&[1.0,-1.0]);
     let z=m.initial_state();let mut flow=[7.0;2];
     m.flow_into(&[0.0002,0.0],z,&[0.02;2],&mut flow).unwrap();assert_eq!(flow,[0.0;2]);
     let closed=m.observe(&[0.0002,0.0],z).unwrap();assert!(closed.maximum_pressure_pa>100000.0);

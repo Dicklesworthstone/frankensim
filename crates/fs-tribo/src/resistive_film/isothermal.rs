@@ -66,7 +66,7 @@ impl IsothermalFilm {
             return fail("isothermal film requires positive finite absolute pressure, temperature and gas constant");
         }
         let mut initial_gap=Vec::with_capacity(geometry.cells.len());let mut scales=Vec::new();
-        for cell in &geometry.cells {
+        for cell in geometry.cells.iter() {
             let h=cell.gap.reference_m-dot(&cell.gap.closure,q);
             let energy=gas.pressure_pa*cell.area_m2*h;
             if !energy.is_finite() || energy<=0.0 || !(energy/rt).is_finite() || energy/rt<=0.0 {

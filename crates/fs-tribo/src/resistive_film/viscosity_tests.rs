@@ -194,7 +194,7 @@ fn barus_network_conserves_volume_and_heat_and_keeps_the_nonsymmetric_tangent() 
     let alpha = law.pressure_viscosity_coefficient_per_pa();
     let mut outflow = [0.0; 2];
     let mut heat = 0.0;
-    for edge in &law.channels {
+    for edge in law.channels.iter() {
         let h = edge.gap.reference_m - dot(&edge.gap.closure, &q);
         let g0 = edge.width_m * h.powi(3) / (12.0 * law.viscosity_pa_s().unwrap() * edge.length_m);
         let a = pressure[edge.from];
@@ -295,8 +295,9 @@ fn passage_reports_close_local_volume_and_physical_work_for_heterogeneous_barus_
 #[test]
 fn passage_reports_keep_closed_channels_zero_and_refuse_without_partial_outputs() {
     let mut law = two_cell_barus();
-    law.channels[0].gap.reference_m = 0.0; // Each cell still drains to ambient.
-    law.channels[0].gap.closure.fill(0.0);
+    let closed_channel = &mut Arc::make_mut(&mut law.channels)[0];
+    closed_channel.gap.reference_m = 0.0; // Each cell still drains to ambient.
+    closed_channel.gap.closure.fill(0.0);
     let mut force = [0.0; 2];
     let mut pressure = [0.0; 2];
     let mut channels = [FilmChannelReport::default(); 3];
