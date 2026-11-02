@@ -2816,3 +2816,75 @@ Independent eight-state real/proper ensemble quadrature matched the analytical
 18-component field/stress/heat/storage fixture to maximum absolute errors
 5.0e-15 (uniform) and 1.0e-14 (triangular). These are mathematical reference
 checks, not execution of the Rust propagation owner.
+
+### Beat-resolved local Ohmic and Debye heat spectra
+
+The original `PreparedAngularSpectrumExposureLayer::heat_spectrum` prepares
+an `AngularSpectrumExposureLayerHeatSpectrum` for one row-major transverse
+sample at a depth in its selected original film. The result borrows that
+prepared layer and exposes its original grid, sample index, depth and reservoir
+selection. `spectrum()` returns the shared analytic product spectrum for
+downstream causal time evolution; scalar-time and Uniform/Triangular detector
+queries are also available, with cancellation.
+
+`AngularSpectrumExposureHeatChannel` selects Ohmic, one DebyePole by original
+material index, Polarization (all original poles), or Total. Ohmic heat is
+sigma |E_real|^2. Each Debye contribution is
+(tau/Delta_epsilon) |Pdot_real|^2, using the original cached
+`PoleTransfer::heat`. No new constitutive evaluation or film solve is added.
+Reversible epsilon-infinity, magnetic and polarization storage rates are
+excluded even when net boundary electrical power is negative. The output is
+local W/m^3, requiring an explicit physical volume/quadrature to become watts;
+it must not be debited again with the same integrated film absorption.
+
+Every actual frequency plane is reconstructed once through the existing
+coherent grouping and internal-field owner; only the requested point is
+retained. Original real/proper bank traversal and joint moments remain in use.
+Reservoir filtering runs once per retained line before lazy Cartesian
+frequency-pair products enter the shared fs-fft engine. Original EM phasors use
+exp(+i omega t): the complete filtered response is conjugated into the shared
+exp(-i omega t) convention. Native angular frequencies remain original DD
+sum/difference frequencies rather than rounded f64 Hz carriers. DD filtering,
+contraction and tone accumulation preserve additional arithmetic precision;
+they add no accuracy to the original field reconstruction.
+
+Square-root Ohmic scaling keeps both operands balanced, with a DD correction
+retaining the authored sigma rather than its rounded square root squared.
+The three Cartesian squared components and separate irreversible reservoirs
+add; no unphysical cross-pole or cross-component square is introduced.
+Proper factors retain difference tones only; phase-locked real factors and
+deterministic means retain carrier sum tones. These are ensemble-expected heat
+waveforms under the original authored joint second moments, without inferred
+Gaussian statistics, independence, stationarity or detector bandwidth.
+
+`AngularSpectrumExposureHeatSpectrumLimits` admits the actual scalar product
+count, generated tone count and conservative peak logical workspace before
+new allocations. Workspace includes the original layer's complete bound plus
+retained point/reservoir fields and shared unsimplified tones. The shared hard
+tone ceiling and original source reconstruction work limits still apply.
+Additional work is original reconstruction plus O(G*R + K log K), with
+O(G*R + K) additional storage for G bank-frequency groups, R selected reservoirs
+and K generated tones. Queries allocate nothing and retain no partial result
+after cancellation or refusal. Invalid depths, points and original pole
+indices refuse. Negative rounded heat observations refuse instead of being
+clipped. No relative error certificate at arbitrary destructive nulls is given.
+
+Two focused G1/G3 tests compare two-pole, three-component mixed-bank heat with
+independent original-ODE currents over the exact eight real/proper states and
+both detector profiles. They also cover proper-as-real quadrature invariance,
+an original high-carrier angular beat and resource/cancellation refusal.
+Three additional native-owner integration tests compare actual internal film
+fields and original finite-window dissipation, including joint illumination
+faces, positive heat during negative reversible storage rate, coherent weak
+residuals, original source/position identity and atomic refusal/replay.
+No switch-on polarization state, temperature-dependent material feedback,
+bulk spatial spectrum API or full thermal evolution is inferred by this owner.
+
+The two focused reservoir/spectrum regressions compiled, linked and executed
+natively with the real fs_math library: 2 passed, 0 failed. Exact new heat
+code, original PoleTransfer and shared spectrum code were used; upstream
+Maxwell/material admission was nominal and was not executed. The three
+actual film-owner integration tests are authored and formatted but were not
+executed or fully typechecked with the complete EM dependency graph here.
+This evidence is scoped to reservoir/filter/product mathematics, not a full
+Maxwell solve, temperature-feedback integration or repository quality gate.

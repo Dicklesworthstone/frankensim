@@ -1,15 +1,17 @@
 //! G1/G3 finite-window vector interference through the actual film operator.
-mod two_sided;
-mod stress;
+mod heat_spectrum;
 mod statistics;
+mod stress;
+mod two_sided;
 use super::*;
 use fs_em::plane_wave::{
     angular_spectrum::{
         AngularSpectrumCoherence, AngularSpectrumCoherenceLimits, AngularSpectrumError,
         AngularSpectrumExposure, AngularSpectrumExposureEnsemble,
-        AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureLimits, AngularSpectrumGrid,
-        AngularSpectrumExposureLayerLimits, AngularSpectrumLayerField, AngularSpectrumLayerLimits,
-        AngularSpectrumLimits, AngularSpectrumSide as Side, PlanarAngularSpectrum,
+        AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureLayerLimits,
+        AngularSpectrumExposureLimits, AngularSpectrumGrid, AngularSpectrumLayerField,
+        AngularSpectrumLayerLimits, AngularSpectrumLimits, AngularSpectrumSide as Side,
+        PlanarAngularSpectrum,
     },
     layers::{DielectricLayer, PlanarDielectricLayers},
 };
@@ -934,7 +936,8 @@ fn heat_material() -> (ResolvedDebyeCapacitor, ResolvedConductorState) {
         }],
         0.03,
         0.002,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(dielectric.high_frequency_permittivity_f_m(), 2.0);
     (dielectric, conductor)
 }
@@ -977,8 +980,13 @@ fn heat_time_reference(
                     pd[c] += real(derivative(polarization));
                 }
             }
-            let weight = if step == 0 || step == steps { 1.0 }
-                else if step % 2 == 0 { 2.0 } else { 4.0 };
+            let weight = if step == 0 || step == steps {
+                1.0
+            } else if step % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
             for c in 0..3 {
                 sum[0] += weight * 0.3 * e[c] * e[c];
                 sum[1] += weight * (0.4 / 0.7) * pd[c] * pd[c];
@@ -1007,13 +1015,22 @@ fn g1_short_window_film_heat_is_positive_while_stored_energy_flows_out() {
     let medium = material(1.0, 1.0);
     let (dielectric, conductor) = heat_material();
     let response = DielectricResponse::DebyeWithOhmic {
-        dielectric: &dielectric, conductor: &conductor,
+        dielectric: &dielectric,
+        conductor: &conductor,
     };
     let frequencies = [2.0, 2.3];
-    let stacks = frequencies.map(|omega| PlanarDielectricLayers::try_new(
-        &medium, DielectricResponse::Lossless(&medium), omega,
-        &[DielectricLayer { response, thickness_m: 0.31 }],
-    ).unwrap());
+    let stacks = frequencies.map(|omega| {
+        PlanarDielectricLayers::try_new(
+            &medium,
+            DielectricResponse::Lossless(&medium),
+            omega,
+            &[DielectricLayer {
+                response,
+                thickness_m: 0.31,
+            }],
+        )
+        .unwrap()
+    });
     let lines = [
         constant(&stacks[0], [C64::new(0.8, 0.2), C64::ZERO]),
         constant(&stacks[1], [C64::new(-0.3, 0.6), C64::ZERO]),
@@ -1022,13 +1039,23 @@ fn g1_short_window_film_heat_is_positive_while_stored_energy_flows_out() {
     let layer = bank.prepare_layer(0, heat_limits(), || false).unwrap();
     let window = HarmonicWindow::new(0.17, 0.12).unwrap();
     let observed = layer.field(0.155, window, || false).unwrap();
-    let reference_fields = lines.iter().map(|line| line.prepare_layer(
-        0, AngularSpectrumLayerLimits {
-            maximum_layer_mode_pairs: 4096,
-            maximum_workspace_bytes: 16 << 20,
-            maximum_fft_work: 1 << 20,
-        }, || false,
-    ).unwrap().field(0.155, || false).unwrap()).collect::<Vec<_>>();
+    let reference_fields = lines
+        .iter()
+        .map(|line| {
+            line.prepare_layer(
+                0,
+                AngularSpectrumLayerLimits {
+                    maximum_layer_mode_pairs: 4096,
+                    maximum_workspace_bytes: 16 << 20,
+                    maximum_fft_work: 1 << 20,
+                },
+                || false,
+            )
+            .unwrap()
+            .field(0.155, || false)
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
     let reference = heat_time_reference(&reference_fields, &frequencies, 0.17, 0.12, &[C64::ONE]);
     for value in observed.dissipation() {
         near(value.ohmic_heat_w_m3, reference[0], 2e-12);
@@ -1045,8 +1072,13 @@ fn g1_short_window_film_heat_is_positive_while_stored_energy_flows_out() {
     for i in 0..=intervals {
         let z = if i == intervals { 0.31 } else { i as f64 * dz };
         let field = layer.field(z, window, || false).unwrap();
-        let weight = if i == 0 || i == intervals { 1.0 }
-            else if i % 2 == 0 { 2.0 } else { 4.0 };
+        let weight = if i == 0 || i == intervals {
+            1.0
+        } else if i % 2 == 0 {
+            2.0
+        } else {
+            4.0
+        };
         heat += weight * field.absorbed_power_per_depth_w_m();
         storage += weight * field.storage_rate_per_depth_w_m();
     }
@@ -1064,40 +1096,76 @@ fn g3_layer_proper_covariance_reuses_frequency_caches_and_adds_mean_heat() {
     let medium = material(1.0, 1.0);
     let (dielectric, conductor) = heat_material();
     let response = DielectricResponse::DebyeWithOhmic {
-        dielectric: &dielectric, conductor: &conductor,
+        dielectric: &dielectric,
+        conductor: &conductor,
     };
     let frequencies = [2.0, 2.3];
-    let stacks = frequencies.map(|omega| PlanarDielectricLayers::try_new(
-        &medium, DielectricResponse::Lossless(&medium), omega,
-        &[DielectricLayer { response, thickness_m: 0.31 }],
-    ).unwrap());
+    let stacks = frequencies.map(|omega| {
+        PlanarDielectricLayers::try_new(
+            &medium,
+            DielectricResponse::Lossless(&medium),
+            omega,
+            &[DielectricLayer {
+                response,
+                thickness_m: 0.31,
+            }],
+        )
+        .unwrap()
+    });
     let lines = [
         constant(&stacks[0], [C64::new(0.8, 0.2), C64::ZERO]),
         constant(&stacks[1], [C64::new(-0.3, 0.6), C64::ZERO]),
     ];
     let mean = AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap();
-    let factors = [AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap()];
+    let factors =
+        [AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap()];
     let ensemble = AngularSpectrumExposureEnsemble::try_new(
-        &lines[0], Some(&mean), &factors, ensemble_limits(), || false,
-    ).unwrap();
+        &lines[0],
+        Some(&mean),
+        &factors,
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap();
     let layer = ensemble.prepare_layer(0, heat_limits(), || false).unwrap();
     assert_eq!(layer.frequency_count(), 2);
     // Two frequencies, four grid modes, two polarizations, one source layer:
     // the mean and covariance factor do not duplicate the constitutive solve.
     assert_eq!(layer.preparation_layer_mode_pairs(), 16);
     assert_eq!(layer.field_fft_work(), 4 * lines[0].field_fft_work());
-    let fields = lines.iter().map(|line| line.prepare_layer(
-        0, AngularSpectrumLayerLimits {
-            maximum_layer_mode_pairs: 4096,
-            maximum_workspace_bytes: 16 << 20,
-            maximum_fft_work: 1 << 20,
-        }, || false,
-    ).unwrap().field(0.155, || false).unwrap()).collect::<Vec<_>>();
+    let fields = lines
+        .iter()
+        .map(|line| {
+            line.prepare_layer(
+                0,
+                AngularSpectrumLayerLimits {
+                    maximum_layer_mode_pairs: 4096,
+                    maximum_workspace_bytes: 16 << 20,
+                    maximum_fft_work: 1 << 20,
+                },
+                || false,
+            )
+            .unwrap()
+            .field(0.155, || false)
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
     // Mean plus one proper factor: 1+z with z equally likely 1,-1,i,-i.
-    let reference = heat_time_reference(&fields, &frequencies, 0.17, 0.12, &[
-        C64::from_re(2.0), C64::ZERO, C64::new(1.0, 1.0), C64::new(1.0, -1.0),
-    ]);
-    let observed = layer.field(0.155, HarmonicWindow::new(0.17, 0.12).unwrap(), || false).unwrap();
+    let reference = heat_time_reference(
+        &fields,
+        &frequencies,
+        0.17,
+        0.12,
+        &[
+            C64::from_re(2.0),
+            C64::ZERO,
+            C64::new(1.0, 1.0),
+            C64::new(1.0, -1.0),
+        ],
+    );
+    let observed = layer
+        .field(0.155, HarmonicWindow::new(0.17, 0.12).unwrap(), || false)
+        .unwrap();
     for value in observed.dissipation() {
         near(value.ohmic_heat_w_m3, reference[0], 3e-12);
         near(value.polarization_heat_w_m3, reference[1], 3e-12);
@@ -1110,20 +1178,33 @@ fn g3_single_tone_finite_layer_heat_agrees_with_original_cycle_mean_absorption()
     let medium = material(1.0, 1.0);
     let (dielectric, conductor) = heat_material();
     let response = DielectricResponse::DebyeWithOhmic {
-        dielectric: &dielectric, conductor: &conductor,
+        dielectric: &dielectric,
+        conductor: &conductor,
     };
     let stack = PlanarDielectricLayers::try_new(
-        &medium, DielectricResponse::Lossless(&medium), 2.0,
-        &[DielectricLayer { response, thickness_m: 0.31 }],
-    ).unwrap();
+        &medium,
+        DielectricResponse::Lossless(&medium),
+        2.0,
+        &[DielectricLayer {
+            response,
+            thickness_m: 0.31,
+        }],
+    )
+    .unwrap();
     let lines = [constant(&stack, [C64::new(0.8, 0.2), C64::new(-0.1, 0.3)])];
     let bank = AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap();
     let layer = bank.prepare_layer(0, heat_limits(), || false).unwrap();
-    let original = lines[0].prepare_layer(0, AngularSpectrumLayerLimits {
-        maximum_layer_mode_pairs: 4096,
-        maximum_workspace_bytes: 16 << 20,
-        maximum_fft_work: 1 << 20,
-    }, || false).unwrap();
+    let original = lines[0]
+        .prepare_layer(
+            0,
+            AngularSpectrumLayerLimits {
+                maximum_layer_mode_pairs: 4096,
+                maximum_workspace_bytes: 16 << 20,
+                maximum_fft_work: 1 << 20,
+            },
+            || false,
+        )
+        .unwrap();
     let window = HarmonicWindow::new(0.17, core::f64::consts::PI).unwrap();
     let intervals = 256;
     let dz = 0.31 / intervals as f64;
@@ -1132,18 +1213,33 @@ fn g3_single_tone_finite_layer_heat_agrees_with_original_cycle_mean_absorption()
         let z = if i == intervals { 0.31 } else { i as f64 * dz };
         let observed = layer.field(z, window, || false).unwrap();
         let reference = original.field(z, || false).unwrap();
-        for (point, expected) in observed.dissipation().iter()
+        for (point, expected) in observed
+            .dissipation()
+            .iter()
             .zip(reference.absorbed_power_density_w_m3())
         {
-            near(point.total_heat_w_m3, *expected, 3e-12 * expected.abs().max(1e-15));
+            near(
+                point.total_heat_w_m3,
+                *expected,
+                3e-12 * expected.abs().max(1e-15),
+            );
             near(point.storage_rate_w_m3, 0.0, 3e-12);
         }
-        let weight = if i == 0 || i == intervals { 1.0 }
-            else if i % 2 == 0 { 2.0 } else { 4.0 };
+        let weight = if i == 0 || i == intervals {
+            1.0
+        } else if i % 2 == 0 {
+            2.0
+        } else {
+            4.0
+        };
         integrated_heat += weight * observed.absorbed_power_per_depth_w_m();
     }
     integrated_heat *= dz / 3.0;
-    near(integrated_heat, original.absorbed_power_w(), 2e-9 * original.absorbed_power_w());
+    near(
+        integrated_heat,
+        original.absorbed_power_w(),
+        2e-9 * original.absorbed_power_w(),
+    );
 }
 
 #[test]
@@ -1151,13 +1247,24 @@ fn g4_layer_exposure_budgets_depth_and_cancellation_remain_explicit() {
     let medium = material(1.0, 1.0);
     let (dielectric, conductor) = heat_material();
     let response = DielectricResponse::DebyeWithOhmic {
-        dielectric: &dielectric, conductor: &conductor,
+        dielectric: &dielectric,
+        conductor: &conductor,
     };
-    let stacks = [2.0, 2.3].map(|omega| PlanarDielectricLayers::try_new(
-        &medium, DielectricResponse::Lossless(&medium), omega,
-        &[DielectricLayer { response, thickness_m: 0.31 }],
-    ).unwrap());
-    let lines = stacks.iter().map(|stack| constant(stack, [C64::ONE, C64::ZERO]))
+    let stacks = [2.0, 2.3].map(|omega| {
+        PlanarDielectricLayers::try_new(
+            &medium,
+            DielectricResponse::Lossless(&medium),
+            omega,
+            &[DielectricLayer {
+                response,
+                thickness_m: 0.31,
+            }],
+        )
+        .unwrap()
+    });
+    let lines = stacks
+        .iter()
+        .map(|stack| constant(stack, [C64::ONE, C64::ZERO]))
         .collect::<Vec<_>>();
     let bank = AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap();
     let admitted = bank.prepare_layer(0, heat_limits(), || false).unwrap();
@@ -1171,21 +1278,31 @@ fn g4_layer_exposure_budgets_depth_and_cancellation_remain_explicit() {
     };
     assert!(bank.prepare_layer(0, exact, || false).is_ok());
     for cap in [
-        AngularSpectrumExposureLayerLimits { maximum_frequency_groups: 1, ..exact },
         AngularSpectrumExposureLayerLimits {
-            maximum_frequency_layer_mode_pairs: exact.maximum_frequency_layer_mode_pairs - 1, ..exact
-        },
-        AngularSpectrumExposureLayerLimits {
-            maximum_point_line_pairs: exact.maximum_point_line_pairs - 1, ..exact
-        },
-        AngularSpectrumExposureLayerLimits {
-            maximum_point_reservoir_frequency_pairs: exact.maximum_point_reservoir_frequency_pairs - 1,
+            maximum_frequency_groups: 1,
             ..exact
         },
         AngularSpectrumExposureLayerLimits {
-            maximum_workspace_bytes: exact.maximum_workspace_bytes - 1, ..exact
+            maximum_frequency_layer_mode_pairs: exact.maximum_frequency_layer_mode_pairs - 1,
+            ..exact
         },
-        AngularSpectrumExposureLayerLimits { maximum_fft_work: exact.maximum_fft_work - 1, ..exact },
+        AngularSpectrumExposureLayerLimits {
+            maximum_point_line_pairs: exact.maximum_point_line_pairs - 1,
+            ..exact
+        },
+        AngularSpectrumExposureLayerLimits {
+            maximum_point_reservoir_frequency_pairs: exact.maximum_point_reservoir_frequency_pairs
+                - 1,
+            ..exact
+        },
+        AngularSpectrumExposureLayerLimits {
+            maximum_workspace_bytes: exact.maximum_workspace_bytes - 1,
+            ..exact
+        },
+        AngularSpectrumExposureLayerLimits {
+            maximum_fft_work: exact.maximum_fft_work - 1,
+            ..exact
+        },
     ] {
         assert!(bank.prepare_layer(0, cap, || false).is_err());
     }
@@ -1194,10 +1311,13 @@ fn g4_layer_exposure_budgets_depth_and_cancellation_remain_explicit() {
         assert!(admitted.field(depth, window, || false).is_err());
     }
     let mut polls = 0;
-    assert!(matches!(admitted.field(0.15, window, || {
-        polls += 1;
-        polls > 5
-    }), Err(AngularSpectrumError::Cancelled)));
+    assert!(matches!(
+        admitted.field(0.15, window, || {
+            polls += 1;
+            polls > 5
+        }),
+        Err(AngularSpectrumError::Cancelled)
+    ));
     let retry = admitted.field(0.15, window, || false).unwrap();
     let replay = admitted.field(0.15, window, || false).unwrap();
     assert_eq!(retry.field().points(), replay.field().points());

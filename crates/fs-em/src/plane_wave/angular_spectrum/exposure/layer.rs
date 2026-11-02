@@ -11,6 +11,12 @@ use crate::plane_wave::layers::{FIELD_PREPARATION_WORKSPACE_BYTES, PreparedLayer
 mod reservoir;
 use reservoir::{LossLaw, PoleTransfer};
 
+mod heat_spectrum;
+pub use heat_spectrum::{
+    AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
+    AngularSpectrumExposureLayerHeatSpectrum,
+};
+
 /// Whole-bank preparation and depth-query limits. A frequency group belongs
 /// to one mean/factor bank; equal frequencies across banks share one film cache.
 /// At most 4096 authored groups are admitted, bounding the preparation sort.
