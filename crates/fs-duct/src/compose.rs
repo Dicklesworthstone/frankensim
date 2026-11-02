@@ -13,7 +13,7 @@
 //! radiation owner. Neither an assumed bell termination nor clipped scalar
 //! changes to individual chimneys can replace that coupled boundary problem.
 use crate::{
-    Duct, DuctError, DuctResponse, HoleState, LoadSpec, LossModel, OpenHoleFlow, Segment,
+    Duct, DuctError, DuctResponse, LoadSpec, LossModel, OpenHoleFlow, Segment,
     SegmentWave, Termination,
 };
 use fs_la::eigen_complex::lu_complex;
@@ -863,6 +863,99 @@ pub(crate) struct PreparedOpenHole {
     pub orifice_quadratic_coeff_pa_s2_m6: f64,
 }
 
+/// Embed a finite chimney through homogeneous pressure/flow coordinates.
+/// A sealed branch's impedance pole is zero shunt flow, and its pressure
+/// node is a perfectly reflecting shunt. Neither requires finite Z or Y.
+/// The open part of a vent retains the original independently radiating
+/// chimney, with its admittance weighted exactly once.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tone_hole_scattering(
+    geometry: &Segment,
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    wall: WallModel<'_>,
+    reference: f64,
+    extra_series_m: f64,
+    compact_corrections: bool,
+    maximum_condition: f64,
+) -> Result<TwoPort, DuctError> {
+    let Segment::ToneHole {
+        hole_radius, chimney_height, bore_radius, state: hs,
+    } = *geometry else {
+        return Err(bad("chimney scattering requires a tone-hole segment"));
+    };
+    geometry.validate()?;
+    let sigma = crate::hole_sigma(hs);
+    // p = n X, reference * U = d X. The sealed chimney uses only the
+    // forward-decaying wave. As in the molecular chimney owner, expm1 and
+    // sin/cos retain both low-frequency compliance and pressure-node limits.
+    let (n, mut d) = if sigma < 1.0 {
+        let chimney_loss = if loss == LossModel::WideTube {
+            LossModel::Bessel
+        } else {
+            loss
+        };
+        let wave = wall.apply(
+            crate::segment_wave(state, hole_radius, omega, chimney_loss)?,
+            hole_radius, omega, 1.0,
+        )?;
+        let phase = wave.wavenumber.scale(chimney_height);
+        if !finite(phase) || phase.im < 0.0 {
+            return Err(bad("chimney phase must be finite and forward-decaying"));
+        }
+        let decay = det::exp(-2.0 * phase.im);
+        let lost = -det::expm1(-2.0 * phase.im);
+        let (s, c) = det::sin_cos(phase.re);
+        let plus = C64::new(lost + 2.0 * decay * c * c, 2.0 * decay * s * c);
+        let minus = C64::new(lost + 2.0 * decay * s * s, -2.0 * decay * s * c);
+        (
+            plus,
+            (C64::from_re(reference) / wave.characteristic_impedance)
+                * minus.scale(1.0 - sigma),
+        )
+    } else {
+        (C64::ONE, C64::ZERO)
+    };
+    if sigma > 0.0 {
+        let inner = if compact_corrections {
+            fs_phs::side_hole_inner_length(hole_radius, bore_radius)
+        } else {
+            0.0
+        };
+        let open = crate::chimney_line_impedance_with_wall(
+            state, exterior, hole_radius, chimney_height + inner, omega,
+            loss, Termination::FlangedOpen, wall,
+        )?;
+        d = d + n * (C64::from_re(reference * sigma) / open);
+    }
+    let denominator = n.scale(2.0) + d;
+    bound(
+        (2.0 * n.abs() + d.abs()) / denominator.abs(),
+        maximum_condition,
+    )?;
+    let reflection = -d / denominator;
+    let transmission = n.scale(2.0) / denominator;
+    let shunt = TwoPort::new(
+        [reflection, transmission, transmission, reflection],
+        reference,
+    )?;
+    let series_length = if sigma > 0.0 && compact_corrections {
+        fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma + extra_series_m
+    } else {
+        0.0
+    };
+    if series_length == 0.0 {
+        return Ok(shunt);
+    }
+    let area = core::f64::consts::PI * bore_radius * bore_radius;
+    let half = C64::new(0.0, -omega * state.density * series_length / area).scale(0.5);
+    let series = TwoPort::from_abcd([C64::ONE, half, C64::ZERO, C64::ONE], reference)?;
+    let (left, _) = series.star(shunt, maximum_condition)?;
+    left.star(series, maximum_condition).map(|(block, _)| block)
+}
+
 /// The same physical chimney/series branch for uniform and continuous-gas
 /// chains. The caller supplies the compact bore-junction length correction;
 /// each mouth retains its independent self-radiation load. The observer uses
@@ -1035,9 +1128,8 @@ pub(crate) fn duct_chain_in_exterior(
             }
             Segment::ToneHole {
                 hole_radius,
-                chimney_height,
-                bore_radius,
                 state: hs,
+                ..
             } => {
                 if matches!(loss, LossModel::WideTube | LossModel::Bessel) {
                     min_shear = min_shear.min(
@@ -1046,81 +1138,32 @@ pub(crate) fn duct_chain_in_exterior(
                 }
                 let sigma = crate::hole_sigma(hs);
                 let block_index = blocks.len();
-                let m = if compact_corrections {
-                    let mut extra = 0.0;
-                    if sigma > 0.0 {
-                        let site = sites[hole_index];
-                        let (xi, bi, ai) = (
-                            site.axial_position_m,
-                            site.effective_radius_m,
-                            site.bore_radius_m,
-                        );
+                let mut extra = 0.0;
+                if sigma > 0.0 {
+                    let site = sites[hole_index];
+                    if compact_corrections {
                         for site_j in &sites {
                             extra += fs_phs::side_hole_mutual_length(
-                                bi,
+                                site.effective_radius_m,
                                 site_j.effective_radius_m,
-                                ai,
-                                (site_j.axial_position_m - xi).abs(),
+                                site.bore_radius_m,
+                                (site_j.axial_position_m - site.axial_position_m).abs(),
                             );
                         }
-                        open_holes.push(prepare_open_hole(
-                            state, exterior, omega, loss, wall, s, site, block_index,
-                            extra, true,
-                        )?);
-                        hole_index += 1;
                     }
-                    crate::tone_hole_t_junction_in_exterior_with_wall(
-                        state,
-                        exterior,
-                        hole_radius,
-                        chimney_height,
-                        hs,
-                        omega,
-                        loss,
-                        bore_radius,
-                        extra,
-                        wall,
-                    )?
-                } else {
-                    if sigma > 0.0 {
-                        let site = sites[hole_index];
-                        open_holes.push(prepare_open_hole(
-                            state, exterior, omega, loss, wall, s, site, block_index,
-                            0.0, false,
-                        )?);
-                        hole_index += 1;
-                    }
-                    let loss = if loss == LossModel::WideTube {
-                        LossModel::Bessel
-                    } else {
-                        loss
-                    };
-                    let impedance = |termination| {
-                        crate::chimney_line_impedance_with_wall(
-                            state,
-                            exterior,
-                            hole_radius,
-                            chimney_height,
-                            omega,
-                            loss,
-                            termination,
-                            wall,
-                        )
-                    };
-                    let y = match hs {
-                        HoleState::Open => impedance(Termination::FlangedOpen)?.recip(),
-                        HoleState::Closed => impedance(Termination::Closed)?.recip(),
-                        HoleState::Vent(sigma) => {
-                            impedance(Termination::FlangedOpen)?.recip().scale(sigma)
-                                + impedance(Termination::Closed)?.recip().scale(1.0 - sigma)
-                        }
-                    };
-                    [C64::ONE, C64::ZERO, y, C64::ONE]
-                };
+                    open_holes.push(prepare_open_hole(
+                        state, exterior, omega, loss, wall, s, site, block_index,
+                        extra, compact_corrections,
+                    )?);
+                    hole_index += 1;
+                }
                 push_block(
                     &mut blocks,
                     options.maximum_blocks,
-                    TwoPort::from_abcd(m, reference)?,
+                    tone_hole_scattering(
+                        s, state, exterior, omega, loss, wall, reference, extra,
+                        compact_corrections, options.maximum_condition,
+                    )?,
                 )?;
             }
             Segment::Cone {

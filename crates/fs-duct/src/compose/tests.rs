@@ -1,5 +1,6 @@
 //! Independent DD analytic ABCD oracles; production never calls this code.
 use super::*;
+use crate::HoleState;
 use fs_material::gas::GasSpec;
 use fs_math::dd::Dd;
 use std::{
@@ -189,6 +190,94 @@ fn dd_response(m: [Dc; 4], load: Option<C64>) -> (C64, C64, C64) {
         (u / d).rounded(),
         (p / d).rounded(),
     )
+}
+
+#[test]
+fn closed_chimney_coordinate_poles_keep_the_physical_scattering_limits() {
+    // G1: a rigid stub has Z = i Zc cot(kh). Use its independent sine/cosine
+    // junction solution, which stays finite at both zeros and poles of Z.
+    let gas = gas();
+    let (a, b, h) = (0.008, 0.003, 0.05);
+    let reference = gas.density * gas.sound_speed / (PI * a * a);
+    let area_ratio = b * b / (a * a);
+    for state in [HoleState::Closed, HoleState::Vent(0.0)] {
+        let duct = Duct { segments: vec![Segment::ToneHole {
+            hole_radius: b, chimney_height: h, bore_radius: a, state,
+        }] };
+        for phase in [0.03, 0.7, 0.5 * PI * (1.0 - 1e-8), 0.5 * PI,
+            0.5 * PI * (1.0 + 1e-8), PI * (1.0 - 1e-8), PI,
+            PI * (1.0 + 1e-8), 1.5 * PI, 2.0 * PI] {
+            let omega = phase * gas.sound_speed / h;
+            let pressure = C64::from_re(phase.cos());
+            let flow = C64::new(0.0, -area_ratio * phase.sin());
+            let denominator = pressure.scale(2.0) + flow;
+            let reflection = -flow / denominator;
+            let transmission = pressure.scale(2.0) / denominator;
+            for compact in [false, true] {
+                let chain = duct_chain(&duct, &gas, omega, LossModel::Lossless,
+                    None, opts(Composition::Scattering), compact, || false).unwrap();
+                for (actual, expected) in chain.blocks[0].scattering.into_iter()
+                    .zip([reflection, transmission, transmission, reflection]) {
+                    assert!((actual - expected).abs() < 2e-12,
+                        "phase={phase}, compact={compact}: {actual:?} != {expected:?}");
+                }
+                let s = chain.blocks[0].scattering;
+                assert!((s[0].norm_sq() + s[2].norm_sq() - 1.0).abs() < 2e-12);
+            }
+            // Exercise the public loaded response as well: the side branch's
+            // impedance pole is not a pole of a bore with this matched load.
+            let response = crate::input_impedance_load(&duct, &gas, omega,
+                LossModel::Lossless, C64::from_re(reference), None).unwrap();
+            let expected_z = (C64::ONE + reflection) / (C64::ONE - reflection);
+            let expected_u = transmission / (C64::ONE - reflection);
+            assert!((response.impedance.scale(1.0 / reference) - expected_z).abs() < 2e-12);
+            assert!((response.u_mouth_over_u_in - expected_u).abs() < 2e-12);
+        }
+    }
+}
+
+#[test]
+fn vented_chimney_closed_fraction_keeps_half_and_quarter_wave_limits() {
+    // G1/G3: at a sealed half wave, only the radiating open fraction remains.
+    // At a sealed quarter wave, the junction pressure is zero even with an
+    // open fraction; the original series correction remains on each side.
+    let gas = gas();
+    let (a, b, h) = (0.008, 0.003, 0.05);
+    let reference = gas.density * gas.sound_speed / (PI * a * a);
+    for sigma in [0.2, 0.7] {
+        let duct = Duct { segments: vec![Segment::ToneHole {
+            hole_radius: b, chimney_height: h, bore_radius: a,
+            state: HoleState::Vent(sigma),
+        }] };
+        for compact in [false, true] {
+            for phase in [0.5 * PI, PI] {
+                let omega = phase * gas.sound_speed / h;
+                let length = if compact { fs_phs::side_hole_series_length(b, a) * sigma } else { 0.0 };
+                let half = C64::new(0.0, -omega * gas.density * length / (2.0 * PI * a * a));
+                let expected = if phase == 0.5 * PI {
+                    let reflection = (half - C64::from_re(reference))
+                        / (half + C64::from_re(reference));
+                    [reflection, C64::ZERO, C64::ZERO, reflection]
+                } else {
+                    let inner = if compact { fs_phs::side_hole_inner_length(b, a) } else { 0.0 };
+                    let wave = crate::segment_wave(&gas, b, omega, LossModel::Lossless).unwrap();
+                    let load = crate::flanged_pipe_impedance(&gas, b, omega,
+                        crate::FLANGED_MODES).unwrap();
+                    let (open, _, _) = dd_response(dd_cylinder(wave, h + inner), Some(load));
+                    let series = [C64::ONE, half, C64::ZERO, C64::ONE];
+                    let shunt = [C64::ONE, C64::ZERO, open.recip().scale(sigma), C64::ONE];
+                    TwoPort::from_abcd(crate::mul2(crate::mul2(series, shunt), series),
+                        reference).unwrap().scattering
+                };
+                let chain = duct_chain(&duct, &gas, omega, LossModel::Lossless,
+                    None, opts(Composition::Scattering), compact, || false).unwrap();
+                for (actual, expected) in chain.blocks[0].scattering.into_iter().zip(expected) {
+                    assert!((actual - expected).abs() < 3e-12,
+                        "sigma={sigma}, phase={phase}, compact={compact}: {actual:?} != {expected:?}");
+                }
+            }
+        }
+    }
 }
 
 #[test]

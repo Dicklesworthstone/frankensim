@@ -544,9 +544,8 @@ impl GasFieldDuct {
             {
                 let Segment::ToneHole {
                     hole_radius,
-                    chimney_height,
-                    bore_radius,
                     state,
+                    ..
                 } = self.duct.segments[hole.segment]
                 else {
                     unreachable!("admitted tone hole")
@@ -567,19 +566,18 @@ impl GasFieldDuct {
                     }
                     open_hole_index += 1;
                 }
-                let matrix = crate::tone_hole_t_junction_in_exterior_with_wall(
+                blocks.push(crate::compose::tone_hole_scattering(
+                    &self.duct.segments[hole.segment],
                     &hole.gas,
                     exterior.unwrap_or(&hole.gas),
-                    hole_radius,
-                    chimney_height,
-                    state,
                     omega,
                     loss,
-                    bore_radius,
-                    hole.extra_series_m,
                     wall,
-                )?;
-                blocks.push(TwoPort::from_abcd(matrix, reference)?);
+                    reference,
+                    hole.extra_series_m,
+                    true,
+                    ComposeOptions::default().maximum_condition,
+                )?);
                 hole_index += 1;
                 continue;
             }

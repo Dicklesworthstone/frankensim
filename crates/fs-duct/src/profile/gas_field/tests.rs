@@ -25,6 +25,44 @@ const LENGTH: f64 = 0.57;
 const RADIUS: f64 = 0.0073;
 const TAU: f64 = core::f64::consts::TAU;
 
+#[test]
+fn nonuniform_gas_closed_chimney_keeps_resonant_limits() {
+    // G3: a half-wave sealed chimney disappears at its local gas state, even
+    // when the downstream bore crosses a temperature/composition gradient.
+    let material = field([285.0, 335.0], [0.8, 0.4], 101325.0);
+    let gas = *material.state_at(0.0).unwrap().state();
+    let h = 0.04;
+    let mut duct = cylinder();
+    duct.segments.insert(0, Segment::ToneHole {
+        hole_radius: 0.0025,
+        chimney_height: h,
+        bore_radius: RADIUS,
+        state: crate::HoleState::Closed,
+    });
+    let with_hole = GasFieldDuct::new(&duct, &material, RiccatiSteps(64)).unwrap();
+    let bare = GasFieldDuct::new(&cylinder(), &material, RiccatiSteps(64)).unwrap();
+    let options = ComposeOptions::default();
+    for phase in [core::f64::consts::PI, 0.5 * core::f64::consts::PI] {
+        let omega = phase * gas.sound_speed / h;
+        let chain = with_hole.chain_controlled(omega, LossModel::Lossless,
+            &mut || false).unwrap();
+        let (actual, _) = compose_scattering(&chain.blocks, options, &mut || false).unwrap();
+        if phase == core::f64::consts::PI {
+            let reference = bare.chain_controlled(omega, LossModel::Lossless,
+                &mut || false).unwrap();
+            let (expected, _) = compose_scattering(&reference.blocks, options,
+                &mut || false).unwrap();
+            for (a, e) in actual.scattering.into_iter().zip(expected.scattering) {
+                assert!((a - e).abs() < 2e-12);
+            }
+        } else {
+            assert!((actual.scattering[0] + C64::ONE).abs() < 2e-12);
+            assert!(actual.scattering[1].abs() < 2e-12);
+            assert!(actual.scattering[2].abs() < 2e-12);
+        }
+    }
+}
+
 fn typed(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
 }
