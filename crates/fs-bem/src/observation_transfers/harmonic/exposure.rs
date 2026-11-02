@@ -27,6 +27,12 @@ pub use readout::{
     MAX_READOUT_RECEIVER_PAIRS, WindowedHarmonicReadout,
 };
 
+mod surface;
+pub use surface::{
+    HarmonicSurfacePowerLimits, HarmonicSurfaceQuadrature, MAX_SURFACE_QUADRATURE_POINTS,
+    PreparedHarmonicSurfacePower,
+};
+
 /// Bounds the deterministic in-place sort used for frequency grouping.
 pub const MAX_EXPOSURE_LINES: usize = 4096;
 /// Empty factors count too: an authored factor bank must be bounded.

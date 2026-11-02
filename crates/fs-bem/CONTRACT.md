@@ -2549,3 +2549,65 @@ layout/admission and the three used error variants; it omits the unused
 product-spectrum export and does not compile or solve the complete BEM crate.
 The 22 shared window tests were filtered from this run. Native rustfmt and
 focused Rust no-codegen analysis also passed.
+
+## Oriented acoustic surface-power spectra
+
+`PreparedHarmonicSurfacePower` contracts the original prepared BEM pressure
+and Cartesian particle velocity on an explicitly authored receiver quadrature.
+Each `HarmonicSurfaceQuadrature` entry names an original physical receiver
+index and a finite oriented area vector [m²]. The expected signed power is
+`P(t) = sum_q area_q dot E[p_q(t) u_q(t)]` [W]. Signed and zero vectors
+remain explicit; repeated receivers support subdivision or separate patches.
+No surface closure, outward orientation, normal interpolation, plane-wave
+pressure-to-intensity substitution, dissipation or absorption is inferred.
+
+The optional mean and each real/proper source factor retain their complete
+frequency and source coherence. For every ordered frequency pair within a
+bank, spatial DD contraction first forms the difference amplitude
+`0.5 * sum_q p_a(q) * conj(area_q dot u_b(q))`.
+Mean/real banks additionally contribute the sum amplitude
+`0.5 * sum_q p_a(q) * (area_q dot u_b(q))`;
+proper banks omit that sum under their original zero pseudocovariance.
+DD angular sums/differences pass directly to the shared spectrum without
+rounding the source clock through f64 Hz. The resulting observable retains DC,
+beats, carrier-sum exchange and negative power. It is an expected power waveform,
+not a random realization or a fourth-moment power-noise spectrum.
+
+The owner exposes its spectrum, instantaneous power [W], normalized Uniform or
+Triangular detector averages [W], and unweighted physical interval energy [J].
+Interval energy uses the shared zero-decay causal integral; a DD source-clock
+entry point preserves an epoch plus elapsed time. A shaped detector average
+is not silently multiplied into physical energy. Original receiver/source
+identity, medium owner, producer uncertainty, clock, quadrature and copied
+factor statistics survive after the source exposure is dropped. Source,
+spatial, quadrature and arbitrary-null relative accuracy remain uncertified.
+
+For Q quadrature entries, F_b retained frequencies in each bank and T generated
+terms, preparation costs O(Q*sum_b(F_b²) + T*log(T)); memory is
+O(Q + T + factors). Spatial products are reduced before emitting terms, so
+there is no receiver-by-frequency-pair spectral expansion. Explicit admission
+bounds quadrature count, Q*sum_b(F_b²), generated terms before coalescing, and
+peak logical workspace including both temporary terms and retained-tone
+capacity. Existing physical fields are borrowed, with no new solve or dense
+covariance. There is a hard 65,536-entry quadrature ceiling plus the shared
+131,072-term ceiling and original fixed work cap. Empty quadrature yields
+explicit zero flux with original physical identity. Cancellation/refusal
+publishes no partial surface or observation.
+
+Five focused G0/G1/G3 regressions exercise an exact eight-state mixed real/proper
+ensemble against independently evaluated real-time surface flux, agreement
+with original finite-window p/u observations, signed standing-wave reactive
+exchange, orientation reversal, subdivision/permutation, copied provenance,
+and explicit silent entries. A high-carrier proper beat and cancelling oriented
+areas test weak flux/energy and frequency-pair storage independent of spatial
+sample count. Admission, cancellation and empty/dark surfaces remain atomic.
+
+Native Rust compilation, linking and execution passed all five new surface
+regressions: 5 passed, 0 failed. The exact surface implementation/tests,
+current exposure implementation and current shared window/spectrum/causal
+implementation were exercised with the real fs_math library; the 43 shared
+tests already passed separately and were filtered here. The bounded harness
+supplies nominal outer identity/medium/hash/error declarations and the original
+prepared-observation layout/admission, while omitting untouched array/readout
+children. This verifies the physical observation algebra, not a complete BEM
+crate build, boundary solve or repository quality gate. Native rustfmt passed.

@@ -38,10 +38,11 @@ pub use harmonic::{
     HarmonicExposureLine, HarmonicExposureMoments, HarmonicField, HarmonicFieldStatistics,
     HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
     HarmonicPressureTap, HarmonicReadoutCovariance, HarmonicReadoutLimits, HarmonicReceiverPair,
-    HarmonicWorkBudget, MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS,
-    MAX_READOUT_RECEIVER_PAIRS, PreparedHarmonicExposure, PreparedHarmonicObservation,
-    PreparedHarmonicPressureArray, PreparedMicrophoneArray, WindowedHarmonicExposure,
-    WindowedHarmonicPressureArray, WindowedHarmonicReadout,
+    HarmonicSurfacePowerLimits, HarmonicSurfaceQuadrature, HarmonicWorkBudget,
+    MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS, MAX_READOUT_RECEIVER_PAIRS,
+    MAX_SURFACE_QUADRATURE_POINTS, PreparedHarmonicExposure, PreparedHarmonicObservation,
+    PreparedHarmonicPressureArray, PreparedHarmonicSurfacePower, PreparedMicrophoneArray,
+    WindowedHarmonicExposure, WindowedHarmonicPressureArray, WindowedHarmonicReadout,
 };
 mod radiation;
 pub use radiation::{PreparedRadiationObservation, PreparedRadiationOptions, RadiatedPowerMoments};

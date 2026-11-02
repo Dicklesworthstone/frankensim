@@ -479,9 +479,10 @@ pub use exposure::{
     HarmonicExposureLine, HarmonicExposureMoments, HarmonicPressureArrayLimits,
     HarmonicPressureChannel, HarmonicPressureChannelMoments, HarmonicPressureTap,
     HarmonicReadoutCovariance, HarmonicReadoutLimits, HarmonicReceiverPair,
-    MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS, MAX_READOUT_RECEIVER_PAIRS,
-    PreparedHarmonicExposure, PreparedHarmonicPressureArray, WindowedHarmonicExposure,
-    WindowedHarmonicPressureArray, WindowedHarmonicReadout,
+    HarmonicSurfacePowerLimits, HarmonicSurfaceQuadrature, MAX_PRESSURE_ARRAY_CHANNELS,
+    MAX_PRESSURE_ARRAY_TAPS, MAX_READOUT_RECEIVER_PAIRS, MAX_SURFACE_QUADRATURE_POINTS,
+    PreparedHarmonicExposure, PreparedHarmonicPressureArray, PreparedHarmonicSurfacePower,
+    WindowedHarmonicExposure, WindowedHarmonicPressureArray, WindowedHarmonicReadout,
 };
 
 #[cfg(test)]
