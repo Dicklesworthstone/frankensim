@@ -44,6 +44,9 @@ pub use thermal_expansion::*;
 mod hygroscopic_expansion;
 pub use hygroscopic_expansion::*;
 
+mod moisture_diffusion;
+pub use moisture_diffusion::KirchhoffMoistureDiffusivity;
+
 pub use fs_matdb::{
     CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
     ElasticTensorOrder, ElasticTensorSymmetry, JointCorrelation, JointUsageReceipt,
