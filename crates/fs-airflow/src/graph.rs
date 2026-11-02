@@ -27,6 +27,7 @@ use crate::LossElement;
 
 mod fan;
 pub use fan::{GraphFanConfig, GraphFanError, GraphOperatingPoint};
+pub mod inertial;
 pub mod sensitivity;
 pub mod thermal;
 pub mod porous;

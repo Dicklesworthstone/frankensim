@@ -2593,3 +2593,34 @@ The original source/Reynolds/correlation restrictions apply at every query;
 unsupported states and over-budget section counts refuse. Regression sources
 cover unequal-viscosity parallel flow, reversal, geometry subdivision, actual
 exponential wall heat and convergence toward independently integrated drag.
+
+### Retained momentum in branched incompressible graphs
+
+`graph::inertial::InertialGraph` retains one branch impulse `L Q` with
+`L = rho0 length / area` and kinetic energy `L Q^2 / 2`. Native
+`DescriptorPortHamiltonian` incidence stamps enforce free-node continuity;
+pressure multipliers have zero storage. Multiple independent circulation modes,
+pressure ports and additional signed branch heads share the existing native
+descriptor step. No pressure penalty or separate momentum integrator is added.
+
+Immutable proposals may resolve new original linear/quadratic coefficients and
+Boussinesq density samples while preserving branch identities, reference
+density, inertia, pressure-node identities and gravity geometry. Native reduced
+pressures retain hydrostatic rest at uniform density. Dedicated reports expose
+interval pressures, actual midpoint flows and final retained flows separately.
+Average rates are the transport interface; final rates retain momentum history.
+
+Acceptance independently gates the original nonlinear branch impulse residual
+and mechanical energy balance. Continuity, cancellation, native Darcy support,
+bounded descriptor dimension and per-branch drag-step limits remain explicit.
+Non-cancelling omitted-work bounds use the largest old/new/average speed, so a
+zero average during reversal cannot erase unresolved dissipation. Broader source,
+phase, Reynolds and correlation admission remains with the original material
+callback. Pressure work, kinetic storage, dissipative loss and anomalous-gravity
+work remain separate accounts.
+
+The current native dense owner is limited to 256 total branch/multiplier states.
+It is an incompressible, fixed-reference-density model, with no inferred acoustic,
+compressible, turbulent or multiphase storage. Native regression sources cover
+branched startup/decay/reversal, nonlinear loss closure, source gas buoyancy and
+viscosity, explicit pressure-port work and transactional refusal.
