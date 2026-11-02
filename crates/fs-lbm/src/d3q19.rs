@@ -31,8 +31,8 @@ pub mod sparse;
 pub(crate) use fma::collision_kernel3;
 
 pub use boundary::{
-    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryGrid3, BoundaryLink3,
-    BoundaryProfileError3, BoundarySgsError3, BoundarySgsReport3, BoundarySpec3,
+    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3,
+    BoundaryLink3, BoundaryProfileError3, BoundarySgsError3, BoundarySgsReport3, BoundarySpec3,
     BoundaryStepError3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, DryBodiesExchange3,
     DryBodyCouplingConfig3, DryBodyExchange3, DryLubricatedPlanesExchange3, Face3, FaceBoundary3,
     FiniteMassWall3, FiniteMassWallReceipt3, ImmersedMomentum3, InletFlux3, LinkMaskTile3,

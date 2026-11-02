@@ -6553,6 +6553,40 @@ composition, with no finite inventory, moving topology or new radiation owner.
 
 The original `MaterialFreeSurfaceEnthalpy3` can retain `LiquidMassFractionConductivity`. Both ordinary and rheological complete-melt release transfer that exact law before publishing the receiving liquid and its clock. One shared helper keeps the pinned raw source, declared phase multiplier and effective conductivity separate. Liquid/liquid, finite-solid contact, gas-film and solved gas/radiation-interface half-cell resistances all consume that same effective coefficient, including thermal CFL admission. Source overflow and cancellation refuse before native publication. Focused regressions independently close each heat balance, preserve identity-law behavior and source claims, and carry the law through real melt/release and viscosity-dependent motion. This owner still admits only pure liquid at fixed caloric density; moving mushy phase, solidification, shrinkage and surface-creation energy remain outside this feature.
 
+### Atomic uniform flow and held fluid loading
+
+`BoundaryGrid3::initialize_uniform_equilibrium` prepares the requested physical
+density and velocity using the original D3Q19 equilibrium and the current
+uniform/per-cell Guo source frame. It deliberately replaces initial fluid
+storage and stress; it is not an impulse or an evolved-flow remap. Solids,
+body states, viscosity, forcing and boundary topology remain unchanged.
+A mismatch with stationary walls or bodies describes a startup transient.
+
+`BoundaryGrid3::rebind_uniform_force` changes only the uniform part of held
+volume forcing. The original `thermal::forcing::reframe3` transformation retains
+mass, physical momentum and force-corrected stress at every fluid cell. It
+therefore applies no artificial half-force impulse when an external load
+switches, and supplies no elapsed-time work. Existing spatial fields and their
+selected scaling shape remain intact; the next step applies the new held force.
+This piecewise-held convention is separate from smooth-history trapezoidal
+`set_force_field_scale`.
+
+Both operations use existing collision scratch, allocate no new population or
+force field, poll cancellation at each native tile and publish only after the
+last check. A late unphysical cell preserves all accepted populations/forcing.
+An unchanged uniform force preserves population bits. Nonzero uniform forcing
+on regularized open boundaries refuses; use the existing interior spatial-force
+law where that boundary reconstruction requires force-free cells.
+The initializer's caller supplies scenario Mach/physical-regime admission.
+These entries add no pressure-reservoir, variable-density or continuum-order claim.
+
+Three focused actual-native-source test groups pass: physical density/velocity
+initialization under a held force, stress-preserving uniform switches with an
+existing spatial field, elapsed impulse, identical-force bits, and atomic late
+invalid-density/cancellation/open-boundary refusal. The original moment observer
+is reached only after typed density admission. The full Cargo workspace remains
+unavailable with missing constellation runtime siblings.
+
 ### Imposed fluid forces through immersed rigid assemblies
 
 The single, simultaneous and moving partial-saturation owners admit the original
