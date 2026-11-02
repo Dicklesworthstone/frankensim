@@ -693,13 +693,20 @@ nonlinear budgets, physical step limits and cancellation publish no endpoint.
 The returned pair retains the accepted source for subsequent continuation.
 
 For starting axial relative velocity v and summed native inverse effective mass g,
-the midpoint impulse on the second body is J=-c*dt*v/(1+c*dt*g/2). The native
-equal-and-opposite point-impulse owner updates both momenta. Independently
-calculated heat D=c*dt*(v/(1+c*dt*g/2))^2 must agree with both its kinetic-energy
-change and midpoint impulse work before it enters thermal storage once.
+the frozen-geometry mode satisfies v_dot=-c*g*v. The exact impulse on the second
+body is J=-v*(1-exp(-c*dt*g))/g. Deterministic `expm1` preserves small losses
+without subtracting nearly equal numbers. The native equal-and-opposite
+point-impulse owner updates both momenta. Independently calculated heat
+D=v²*(1-exp(-2*c*dt*g))/(2*g) must agree with both its kinetic-energy change
+and midpoint impulse work before it enters thermal storage once. The
+implementation factors this heat through J, avoiding squared-velocity overflow
+and cancellation between endpoint kinetic energies.
 Central impulses conserve linear and total angular momentum in exact arithmetic.
-The admitted c*dt*g ceiling is at most 2, refusing scalar slip reversal from an
-excessively coarse damping step. The original frequency domain must include
+Unlike midpoint damping, this subflow does not reverse axial slip at c*dt*g>2.
+The caller still supplies a positive finite c*dt*g ceiling as a coupling-accuracy
+budget for frozen attachment geometry and endpoint-temperature coefficients;
+there is no artificial upper limit of 2 on that authored budget.
+The original frequency domain must include
 zero and the resolved relaxation rate; this does not establish broadband
 physical validity or remove time-refinement obligations.
 
@@ -715,9 +722,13 @@ Spring storage, dry friction, normal contact, connector mass and deformation
 kinetics require their own owners.
 
 The focused regression target is `heating_damping` with
-`--features dissipative-coupling`. Manufactured sources exercise midpoint
+`--features dissipative-coupling`. Manufactured sources exercise exact
 impulse/heat, material-temperature feedback, continuing trajectories and joint
-refusal. These tests specify implementation checks, not measured validation;
+refusal. G1 compares weak and stiff relaxation against the continuous
+exponential solution, including off-centre angular recoil and source-dependent
+heat. G3 checks that constant axial coefficients give the same velocity and
+integrated heat under 1/2/8 timestep partitions; split positions are explicitly
+excluded from that equivalence. These tests specify implementation checks, not measured validation;
 native execution must be reported separately from source review.
 
 ### Ordered thermal exchange through the same damping interface

@@ -5,7 +5,8 @@
 //! proposed endpoint. Existing Newton and enthalpy residual owners close that
 //! feedback before either physical history is returned.
 //!
-//! This is a first-order impulse/free-flight/configuration split. The connector
+//! Frozen-geometry dashpot relaxation is integrated exactly. This remains a
+//! first-order impulse/free-flight/configuration split. The connector
 //! has no spring storage, inertia, contact active set or independent heat store.
 //! Its fixed area and explicit heat partition describe an admitted lumped viscous
 //! interface. Expansion parameter work remains separate; dissipative feedback
@@ -23,6 +24,7 @@ use fs_material::thermal::interface::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, ThermalInterfacePoint,
 };
 use fs_material::thermal::source::ThermalMaterialError;
+use fs_math::det;
 use fs_mbd::{ActionReactionImpulseReceipt, apply_equal_and_opposite_impulse_at_body_points};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
@@ -57,8 +59,9 @@ pub struct DampingSolve {
     pub cell_energy_tolerance_j: f64,
     pub thermal_energy_tolerance_j: f64,
     pub total_energy_tolerance_j: f64,
-    /// Upper bound in (0,2] on c*dt*(1/m_eff,a+1/m_eff,b), refusing scalar
-    /// slip reversal from an excessively coarse midpoint damping substep.
+    /// Positive upper bound on c*dt*(1/m_eff,a+1/m_eff,b). This is an explicit
+    /// coupling-accuracy budget for frozen geometry and endpoint c(T), not a
+    /// stability bound: exact dashpot relaxation never reverses axial slip.
     pub maximum_relaxation_step: f64,
     pub newton: NewtonKrylovConfig,
 }
@@ -130,7 +133,8 @@ pub struct DampingAudit {
     pub contact_heat_to_second_j: f64,
     /// Endpoint A/R'' [W/K], or None for the explicit insulated approximation.
     pub contact_conductance_w_k: Option<f64>,
-    /// c*dt*v_mid^2, independently checked against native impulse work.
+    /// Exact frozen-geometry integral of c*v(t)^2, independently checked
+    /// against native impulse work. Thermal/geometry splitting error is separate.
     pub dissipated_heat_j: f64,
     pub impulse_energy_residual_j: f64,
     pub external_heat_j: f64,
@@ -299,9 +303,10 @@ impl<'a> DampedRigidPair<'a> {
     /// Pending start/interior events refuse; process each body's current-time
     /// events before reconstructing the pair. Target events remain pending.
     ///
-    /// The axial central impulse uses actual starting attachments and proposed
-    /// endpoint c(T). Native free flight advances both bodies; source expansion
-    /// then updates full inertia at conserved world momenta. This split is first
+    /// The axial central impulse integrates exponential relaxation at actual
+    /// starting attachments and proposed endpoint c(T). Native free flight
+    /// advances both bodies; source expansion then updates full inertia at
+    /// conserved world momenta. This split is first
     /// order and requires time refinement independently of Newton convergence.
     pub fn step_to(
         &self,
@@ -333,7 +338,6 @@ impl<'a> DampedRigidPair<'a> {
             || controls.maximum_newton_iterations == 0
             || !controls.maximum_relaxation_step.is_finite()
             || controls.maximum_relaxation_step <= 0.0
-            || controls.maximum_relaxation_step > 2.0
             || [
                 controls.cell_energy_tolerance_j,
                 controls.thermal_energy_tolerance_j,
@@ -642,8 +646,8 @@ impl<'a> DampedRigidPair<'a> {
                 .sub(ka.point_velocity_world)
                 .dot(ea.unit_direction_world),
         )?;
-        let midpoint_velocity = number(velocity / (1.0 + 0.5 * relaxation))?;
-        let magnitude = number(-c * dt * midpoint_velocity)?;
+        let (magnitude, heat_j) =
+            relaxation_impulse_and_heat(velocity, inverse_mass, c, dt, relaxation)?;
         let receipt = apply_equal_and_opposite_impulse_at_body_points(
             a.state(),
             a.principal_frame().properties(),
@@ -653,7 +657,6 @@ impl<'a> DampedRigidPair<'a> {
             arms[1],
             ea.unit_direction_world.scale(magnitude),
         )?;
-        let heat_j = number(c * dt * midpoint_velocity * midpoint_velocity)?;
         let residual_j = number(receipt.kinetic_energy_change_j + heat_j)?;
         if heat_j < 0.0
             || residual_j.abs() > controls.total_energy_tolerance_j
@@ -670,6 +673,39 @@ impl<'a> DampedRigidPair<'a> {
             residual_j,
         })
     }
+}
+
+// Inputs are the admitted source coefficient, positive native effective inverse
+// mass, step duration and their already budgeted dimensionless relaxation.
+fn relaxation_impulse_and_heat(
+    velocity: f64,
+    inverse_mass: f64,
+    c: f64,
+    dt: f64,
+    relaxation: f64,
+) -> Result<(f64, f64), DampingError> {
+    // At fixed attachment geometry g is constant: v_dot=-c*g*v. Integrate
+    // exactly; a midpoint Cayley factor would reverse v for c*g*dt>2.
+    let fraction = -det::expm1(-relaxation);
+    let magnitude = if relaxation <= 1.0 {
+        // Do not underflow fraction*v before division by a small g can recover
+        // a representable impulse. phi has the exact r=0 limit if c*g
+        // underflows before the physical impulse scale does.
+        let phi = if relaxation == 0.0 {
+            1.0
+        } else {
+            fraction / relaxation
+        };
+        number(-c * dt * (velocity * phi))?
+    } else {
+        number(-velocity * (fraction / inverse_mass))?
+    };
+    // Integral c*v(t)^2 dt = v^2/(2g)*(1-exp(-2*c*g*dt)). Factor through the
+    // independent analytic impulse without subtracting endpoint energies.
+    // Multiply the bounded factor into v first: J*v can overflow even when
+    // the final physical heat is representable.
+    let heat = number(-magnitude * (velocity * (1.0 - 0.5 * fraction)))?;
+    Ok((magnitude, heat))
 }
 
 struct Dissipation {
@@ -745,5 +781,49 @@ fn numerical(error: FiniteDifferenceError<DampingError>) -> DampingError {
     match error {
         FiniteDifferenceError::Source(e) => e,
         FiniteDifferenceError::Invalid(s) => DampingError::Invalid(s),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs_mbd::{MassProperties, Pose, Vec3 as RigidVec3};
+
+    fn native_pair_inverse_mass(mass: f64) -> f64 {
+        let properties =
+            MassProperties::new(mass, RigidVec3::ZERO, RigidVec3::new(1., 1., 1.)).unwrap();
+        let state =
+            RigidBodyState::new(Pose::identity(), RigidVec3::ZERO, RigidVec3::ZERO).unwrap();
+        2. * state
+            .directional_effective_mass(properties, RigidVec3::ZERO, RigidVec3::new(1., 0., 0.))
+            .unwrap()
+            .inverse_mass_kg_inverse
+    }
+
+    #[test]
+    fn weak_relaxation_retains_representable_impulse_and_heat_after_scaling() {
+        let g = native_pair_inverse_mass(2e200);
+        let velocity = 1e-150;
+        let (impulse, heat) = relaxation_impulse_and_heat(velocity, g, 1., 1., g).unwrap();
+        // G0: at r=1e-200 the continuum solution differs from J=-c*h*v
+        // and D=c*h*v^2 by far less than one f64 ulp. Forming r*v first
+        // underflows, although both final observables are representable.
+        assert_eq!(g * velocity, 0.);
+        assert!((impulse / -1e-150 - 1.).abs() < 1e-14);
+        assert!((heat / 1e-300 - 1.).abs() < 1e-14);
+    }
+
+    #[test]
+    fn finite_dashpot_heat_does_not_require_representable_twice_energy() {
+        let g = native_pair_inverse_mass(2.);
+        let velocity = 1.5e154;
+        let (impulse, heat) = relaxation_impulse_and_heat(velocity, g, 2., 1., 2. * g).unwrap();
+        // G0: E0=(v/2)*v/g is finite. The independently evaluated exact
+        // energy drop E0*(1-exp(-4)) is finite even though -J*v overflows.
+        let initial_energy = (0.5 * velocity) * velocity / g;
+        let expected = initial_energy * -(-4.0_f64).exp_m1();
+        assert!((-impulse * velocity).is_infinite());
+        assert!(heat.is_finite());
+        assert!((heat / expected - 1.).abs() < 1e-14);
     }
 }

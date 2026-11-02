@@ -31,13 +31,23 @@ use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::{CellId, DepositionError};
 
 fn interface(solid: &MaterialCard, slope: f64, upper: f64, stiffness: f64) -> InterfaceSystemCard {
+    interface_with_damping(solid, 1., slope, upper, stiffness)
+}
+
+fn interface_with_damping(
+    solid: &MaterialCard,
+    damping: f64,
+    slope: f64,
+    upper: f64,
+    stiffness: f64,
+) -> InterfaceSystemCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [
         ("k", interface_stiffness_per_area_dims(), [stiffness; 2]),
         (
             "c",
             interface_viscosity_per_area_dims(),
-            [1., 1. + slope * (upper - 300.)],
+            [damping, damping + slope * (upper - 300.)],
         ),
     ] {
         claims
@@ -190,9 +200,8 @@ fn central_impulse_matches_independent_momentum_heat_and_free_flight() {
     let old = DampedRigidPair::new(bodies, damper).unwrap();
     let saved = old.clone();
     let (next, audit) = old.step_to(0.1, solve(), &[0.3, 0.6], || false).unwrap();
-    // Two 2 kg cubes, c=1 Ns/m: momentum balance gives J and midpoint work.
-    let impulse = 0.1 * 2. / 1.05;
-    let speed = 1. - impulse / 2.;
+    // G1: two 2 kg cubes, c=1 Ns/m. Solve v_dot=-v directly.
+    let speed = (-0.1_f64).exp();
     let heat = 2. * (1. - speed * speed);
     for (i, body) in next.bodies().iter().enumerate() {
         let sign = if i == 0 { 1. } else { -1. };
@@ -220,6 +229,83 @@ fn central_impulse_matches_independent_momentum_heat_and_free_flight() {
 }
 
 #[test]
+fn exact_relaxation_resolves_weak_and_stiff_damping_without_slip_reversal() {
+    let solid = card(10., 0., 500.);
+    let chart = caloric(&solid, 1e5, SolidLiquidPhase::Solid);
+    let reference = reference(&solid, 1);
+    for damping in [1e-12, 1., 40., 1e3] {
+        let interface = interface_with_damping(&solid, damping, 0., 500., 0.);
+        let old = pair(&reference, &solid, &chart, &interface, 0., 0., [0.; 2]);
+        let mut controls = solve();
+        // Deliberately permit c*g*h > 2. This is a frozen-coefficient G1
+        // check, not a claim of accurate coarse thermo-geometric splitting.
+        controls.maximum_relaxation_step = 100.;
+        let expected_heat = -2. * (-0.2_f64 * damping).exp_m1();
+        let expected_speed = (-0.1_f64 * damping).exp();
+        let (next, audit) = old
+            .step_to(0.1, controls, &[expected_heat / 2.; 2], || false)
+            .unwrap();
+        assert!(audit.dissipated_heat_j > 0.);
+        assert!(
+            (audit.dissipated_heat_j - expected_heat).abs() < 2e-12 * expected_heat,
+            "c={damping}: {} != {expected_heat}",
+            audit.dissipated_heat_j,
+        );
+        for (i, body) in next.bodies().iter().enumerate() {
+            let signed_speed = [1., -1.][i] * body.state().linear_momentum_world().x / 2.;
+            assert!(signed_speed >= 0., "c={damping}: artificial slip reversal");
+            assert!((signed_speed - expected_speed).abs() < 3e-15);
+        }
+        close(audit.impulse.kinetic_energy_change_j, -expected_heat);
+        close(audit.combined_residual_j, 0.);
+        let before = old.bodies().each_ref().map(|b| b.diagnostics().unwrap());
+        let after = next.bodies().each_ref().map(|b| b.diagnostics().unwrap());
+        close(
+            after[0].linear_momentum_world.x + after[1].linear_momentum_world.x,
+            before[0].linear_momentum_world.x + before[1].linear_momentum_world.x,
+        );
+    }
+}
+
+#[test]
+fn constant_axial_material_damping_composes_across_step_partitions() {
+    let solid = card(10., 0., 500.);
+    let chart = caloric(&solid, 1e5, SolidLiquidPhase::Solid);
+    let reference = reference(&solid, 1);
+    let interface = interface_with_damping(&solid, 40., 0., 500., 0.);
+    let old = pair(&reference, &solid, &chart, &interface, 0., 0., [0.; 2]);
+    for count in [1, 2, 8] {
+        let mut actual = old.clone();
+        let mut heat = 0.;
+        let mut controls = solve();
+        controls.maximum_relaxation_step = 4.;
+        for step in 1..=count {
+            let (next, audit) = actual
+                .step_to(
+                    0.1 * step as f64 / count as f64,
+                    controls,
+                    &[0.1; 2],
+                    || false,
+                )
+                .unwrap();
+            heat += audit.dissipated_heat_j;
+            actual = next;
+        }
+        // G3 semigroup check on the exact frozen-geometry mode. Positions
+        // retain the documented first-order free-flight split and are not
+        // expected to be independent of the timestep partition.
+        close(
+            actual.bodies()[0].state().linear_momentum_world().x,
+            2. * (-4.0_f64).exp(),
+        );
+        close(heat, 2. * (1. - (-8.0_f64).exp()));
+        for body in actual.bodies() {
+            close(body.thermal().energy_j(), heat / 2.);
+        }
+    }
+}
+
+#[test]
 fn heat_capacity_only_swap_changes_temperature_damping_and_the_continuing_trajectory() {
     let mut endpoints = Vec::new();
     for cp in [0.5, 5.] {
@@ -232,12 +318,12 @@ fn heat_capacity_only_swap_changes_temperature_damping_and_the_continuing_trajec
         let (mut speed, mut rise): (f64, f64) = (1., 0.);
         for step in 1..=4 {
             // Independent scalar bisection: total heat D, C=m Cp per body,
-            // c=1+(T-300), equal partition, midpoint relative velocity.
+            // c=1+(T-300), equal partition, exact exponential relative velocity.
             let (mut lo, mut hi) = (0., 2. * speed * speed);
             for _ in 0..80 {
                 let q = 0.5 * (lo + hi);
                 let c = 1. + rise + q / (4. * cp);
-                let predicted = c * 0.1 * (2. * speed / (1. + 0.05 * c)).powi(2);
+                let predicted = 2. * speed * speed * (1. - (-0.2 * c).exp());
                 if q < predicted {
                     lo = q;
                 } else {
@@ -247,7 +333,7 @@ fn heat_capacity_only_swap_changes_temperature_damping_and_the_continuing_trajec
             let q = 0.5 * (lo + hi);
             rise += q / (4. * cp);
             let c = 1. + rise;
-            speed *= (1. - 0.05 * c) / (1. + 0.05 * c);
+            speed *= (-0.1 * c).exp();
             let (next, audit) = actual
                 .step_to(step as f64 * 0.1, solve(), &[0.1; 2], || false)
                 .unwrap();
@@ -299,8 +385,8 @@ fn off_centre_damping_conserves_world_momenta_and_separates_expansion_work() {
     let old = pair(&reference, &solid, &chart, &interface, 0.25, 1., [0.; 2]);
     let (next, audit) = old.step_to(0.05, solve(), &[0.1; 2], || false).unwrap();
     // I=1/3 kg m²; g=2(1/m+r²/I)=1.375 kg^-1.
-    let impulse = 0.05 * 2. / (1. + 0.5 * 0.05 * 1.375);
-    let heat = 0.05 * (2.0_f64 / (1. + 0.5 * 0.05 * 1.375)).powi(2);
+    let impulse = 2. / 1.375 * (1. - (-0.05_f64 * 1.375).exp());
+    let heat = 2. / 1.375 * (1. - (-0.1_f64 * 1.375).exp());
     let stretch = 1. + 1e-2 * heat / 4.;
     close(audit.dissipated_heat_j, heat);
     let before = old.bodies().each_ref().map(|b| b.diagnostics().unwrap());
@@ -663,7 +749,7 @@ fn resistance_data_changes_both_thermal_states_and_temperature_dependent_motion(
         for _ in 0..80 {
             let d = 0.5 * (lo + hi);
             let damping = 1. + (5. + d) / 2. - second_rise(d);
-            let predicted = 0.1 * damping * (2. / (1. + 0.05 * damping)).powi(2);
+            let predicted = 2. * (1. - (-0.2 * damping).exp());
             if d < predicted {
                 lo = d;
             } else {
@@ -690,7 +776,7 @@ fn resistance_data_changes_both_thermal_states_and_temperature_dependent_motion(
             next.bodies()[1].thermal().temperature_k(CellId(0)).unwrap(),
             300. + tb,
         );
-        let speed = (1. - 0.05 * c) / (1. + 0.05 * c);
+        let speed = (-0.1 * c).exp();
         close(
             next.bodies()[0].state().linear_momentum_world().x,
             2. * speed,

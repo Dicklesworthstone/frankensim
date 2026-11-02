@@ -2104,6 +2104,7 @@ dependencies = [
  "fs-lbm",
  "fs-matdb",
  "fs-material",
+ "fs-math",
  "fs-mbd",
  "fs-modal",
  "fs-qty",

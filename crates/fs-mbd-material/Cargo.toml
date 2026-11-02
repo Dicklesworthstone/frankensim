@@ -26,6 +26,7 @@ fs-exec = { path = "../fs-exec", optional = true }
 fs-lbm = { path = "../fs-lbm", optional = true, features = ["enthalpy-coupling"] }
 fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
 fs-matdb = { path = "../fs-matdb" }
 fs-material = { path = "../fs-material" }
 fs-mbd = { path = "../fs-mbd" }
