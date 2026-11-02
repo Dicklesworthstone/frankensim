@@ -1,6 +1,5 @@
 //! Second moments of a coherently assembled three-dimensional acoustic field.
 
-use super::array::COMPACT_FIELD_SCOPE;
 use crate::AeroacError;
 use fs_math::{c64::C64, dd::Dd};
 
@@ -58,7 +57,7 @@ impl StatisticsSum {
         Ok(())
     }
 
-    pub(super) fn finish(self) -> Result<CompactFieldStatistics, AeroacError> {
+    pub(super) fn finish(self, scope: &'static str) -> Result<CompactFieldStatistics, AeroacError> {
         let squares = self.mean_squares.map(Dd::to_f64);
         let cross = self.cross.map(ComplexSum::value);
         if squares.iter().any(|value| !value.is_finite())
@@ -75,7 +74,7 @@ impl StatisticsSum {
             ],
             active_intensity_w_m2: [cross[0].re, cross[1].re, cross[2].re],
             reactive_intensity_w_m2: [cross[0].im, cross[1].im, cross[2].im],
-            scope: COMPACT_FIELD_SCOPE,
+            scope,
         })
     }
 }

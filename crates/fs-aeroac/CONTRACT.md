@@ -127,6 +127,28 @@ material scaling and domain/representability refusals.
   pressure-null velocity, separated-source and mixed-mechanism interference,
   standing waves, complex partial coherence against dense algebra, material
   density scaling, dynamic-range residuals and bounded admission.
+- `PreparedCompactSourceObserver::new_molecular` retains an original
+  `fs_material::relaxation::RelaxationState` and propagates its relaxing
+  compression law through the same coherent 3D source operator. The original
+  molecular owner supplies `k² = rho omega²/K(omega)`; pressure, radial/angular
+  gradients, particle velocity and every spectral second moment use that same
+  complex `k`. The momentum denominator stays `i omega rho`, so this is
+  inviscid momentum with molecular bulk absorption and dispersion. Shear
+  viscosity, thermal conduction and wall losses are explicitly absent; no
+  plane-wave attenuation coefficient is reinterpreted as a bulk modulus.
+  Source and wave-number accessors retain the actual material and frequency.
+  `source_delay_s` remains the equilibrium `r/c` reference; the new
+  `source_phase_delay_s` exposes `r Re(k)/omega`, which is neither group delay
+  nor a broadband signal-front time. Application retains the same O(N),
+  allocation-free cached transfer and O(N r) coherence paths, with a distinct
+  model scope carried by coherent and statistical outputs. Original material
+  errors survive through `MaterialAeroacError`; nonfinite or underflowed paths
+  refuse instead of silently declaring physical silence. G1/G3 additions in
+  `tests/compact_interference.rs` recover the empty-reservoir lossless limit,
+  compare a one-reservoir gas with independent caloric elimination, check a
+  three-rung pressure-gradient ladder and the exact volumetric absorption /
+  spherical-flux balance, and retain coherence and admission behavior. These
+  are numerical model checks, not experimental gas or source qualification.
 - `bickley::bickley_rayleigh_mode` — Rayleigh-equation shooting
   solver (RK4 + complex secant, half-line with symmetry boundary
   conditions and the exact `phi' = -alpha phi` far-field decay) for

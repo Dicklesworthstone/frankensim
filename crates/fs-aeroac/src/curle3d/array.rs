@@ -13,22 +13,38 @@
 //! Independent or partially coherent sources require explicit statistical
 //! input; an unknown phase is never silently replaced by a common phase.
 //!
-//! This is a homogeneous, stationary, lossless, free-space point-source model.
-//! Source size, motion, scattering, absorption and mutual fluid loading are not
-//! resolved. In particular, an integrated force from a periodic flow cell is
-//! not automatically an isolated radiator. These SI transfers do not turn 2D
+//! The ordinary constructor uses a homogeneous lossless fluid. The molecular
+//! constructor uses the original material's relaxing bulk modulus, with
+//! `k² = rho omega²/K(omega)`, in the SAME Green function and its derivatives.
+//! Momentum remains `grad(p) = i omega rho u`; inserting a lossy wave number
+//! into `rho c`, or filtering only pressure, would change the energy transport.
+//! This molecular path omits shear viscosity, thermal conduction and wall
+//! layers, as does the molecular exterior BEM owner. No extra attenuation
+//! coefficient or fitted absorption filter is introduced.
+//!
+//! Both paths are homogeneous, stationary, free-space point-source models.
+//! Source size, motion, scattering and mutual fluid loading are not resolved.
+//! In particular, an integrated force from a periodic flow cell is not
+//! automatically an isolated radiator. These SI transfers do not turn 2D
 //! force-per-span data into 3D sources or validate a physical source model.
 
 use super::statistics::{ComplexSum, StatisticsSum, finite, invalid, nonfinite};
 use super::{CoherenceBudget, CompactFieldStatistics};
 use crate::AeroacError;
-use fs_material::fluid_acoustics::FluidAcousticState;
+use crate::material::MaterialAeroacError;
+use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
+use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 
 /// Applicability of the prescribed three-dimensional source transfer.
 pub const COMPACT_FIELD_SCOPE: &str = "Prescribed compact 3D volume flow [m³/s] and force on fluid [N]; \
 homogeneous stationary lossless free-space observation, with no source-size validation, \
 moving sources, scattering, absorption, mutual loading or measured-SPL qualification.";
+
+/// Applicability of propagation through the original molecular bulk response.
+pub const MOLECULAR_COMPACT_FIELD_SCOPE: &str = "Prescribed compact 3D volume flow [m³/s] and force on fluid [N]; \
+homogeneous stationary free-space observation with material-owned molecular bulk relaxation and inviscid momentum; \
+no shear/conduction or wall losses, source-size validation, moving sources, scattering, mutual loading or measured-SPL qualification.";
 
 /// One compact source's complex peak amplitudes at a common source time origin.
 ///
@@ -91,6 +107,7 @@ pub struct CoherentCompactField {
 struct Transfer {
     source_m: [f64; 3],
     delay_s: f64,
+    phase_delay_s: f64,
     // Rows: pressure, ux, uy, uz. Columns: Q, Fx, Fy, Fz, with SI units above.
     field: [[C64; 4]; 4],
 }
@@ -105,7 +122,9 @@ struct Transfer {
 #[derive(Clone, Debug)]
 pub struct PreparedCompactSourceObserver {
     acoustic: FluidAcousticState,
+    molecular: Option<RelaxationState>,
     frequency_hz: f64,
+    wavenumber_per_m: C64,
     observer_m: [f64; 3],
     transfers: Vec<Transfer>,
 }
@@ -124,15 +143,76 @@ impl PreparedCompactSourceObserver {
         source_positions_m: &[[f64; 3]],
         max_sources: usize,
     ) -> Result<Self, AeroacError> {
+        let k = C64::from_re(core::f64::consts::TAU * frequency_hz / acoustic.sound_speed_m_s());
+        Self::prepare(
+            acoustic,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            max_sources,
+            k,
+            None,
+        )
+    }
+
+    /// Prepare molecular absorption AND dispersion from one original gas state.
+    ///
+    /// The material's causal reservoir law supplies `K(omega)` and
+    /// `k = omega sqrt(rho/K)`. Density, reservoir strengths and relaxation times
+    /// are retained together; no air law or extra Stokes–Kirchhoff attenuation
+    /// is added. This solves relaxing compression with inviscid momentum, not
+    /// the full thermoviscous equations. Classical shear/conduction losses,
+    /// spatially varying states and source feedback remain outside this model.
+    ///
+    /// A single spectral line has a phase delay, not a broadband propagation
+    /// time: use [`Self::source_phase_delay_s`] for the actual retained phase.
+    /// All original source/observer/work refusals still apply, and material
+    /// refusals remain distinguishable as [`MaterialAeroacError::Material`].
+    pub fn new_molecular(
+        source: RelaxationState,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        max_sources: usize,
+    ) -> Result<Self, MaterialAeroacError> {
+        let acoustic = source
+            .gas()
+            .acoustic_state()
+            .map_err(MaterialAeroacError::Material)?;
+        let k = source
+            .relaxing_wavenumber(core::f64::consts::TAU * frequency_hz)
+            .map_err(MaterialAeroacError::Material)?;
+        Ok(Self::prepare(
+            acoustic,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            max_sources,
+            k,
+            Some(source),
+        )?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        acoustic: FluidAcousticState,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        max_sources: usize,
+        k: C64,
+        molecular: Option<RelaxationState>,
+    ) -> Result<Self, AeroacError> {
         if source_positions_m.len() > max_sources {
             return Err(invalid("compact source count exceeds preparation budget"));
         }
         let omega = core::f64::consts::TAU * frequency_hz;
-        let k = omega / acoustic.sound_speed_m_s();
         let rho_omega = acoustic.density_kg_m3() * omega;
-        if [frequency_hz, omega, k, rho_omega]
+        if [frequency_hz, omega, k.re, rho_omega]
             .iter()
             .any(|v| !v.is_finite() || *v <= 0.0)
+            || !k.im.is_finite()
+            || k.im < 0.0
         {
             return Err(invalid(
                 "compact-source frequency and wave scales must be positive finite",
@@ -151,23 +231,36 @@ impl PreparedCompactSourceObserver {
             }
             let dx = core::array::from_fn::<_, 3, _>(|i| observer_m[i] - source[i]);
             let r = det::hypot(det::hypot(dx[0], dx[1]), dx[2]);
-            let kr = k * r;
+            let kr = k.scale(r);
             let inv_r = 1.0 / r;
             let delay_s = r / acoustic.sound_speed_m_s();
-            if [r, kr, inv_r, delay_s]
+            let phase_delay_s = if molecular.is_some() {
+                r * (k.re / omega)
+            } else {
+                delay_s
+            };
+            if [r, kr.re, inv_r, delay_s, phase_delay_s]
                 .iter()
                 .any(|v| !v.is_finite() || *v <= 0.0)
+                || !kr.im.is_finite()
             {
                 return Err(invalid(
                     "compact source-observer separation is not representable",
                 ));
             }
             let n = dx.map(|v| v / r);
-            let (sin, cos) = det::sin_cos(kr);
-            let green = C64::new(cos, sin).scale((0.25 / core::f64::consts::PI) / r);
+            let (sin, cos) = det::sin_cos(kr.re);
+            let decay = if k.im == 0.0 { 1.0 } else { det::exp(-kr.im) };
+            let green = C64::new(cos, sin).scale(((0.25 / core::f64::consts::PI) / r) * decay);
             // a = -G'; pressure of a force dipole is a (n.F).
-            let radial = green * C64::new(inv_r, -k);
-            let radial_derivative = green * C64::new(k * k - 2.0 * inv_r * inv_r, 2.0 * k * inv_r);
+            let radial = green * C64::new(inv_r + k.im, -k.re);
+            // a' = G (k² + 2 i k/r - 2/r²), including the derivative
+            // of exp(-Im(k) r). The angular derivative remains a/r.
+            let radial_derivative = green
+                * C64::new(
+                    k.re * k.re - k.im * k.im - 2.0 * inv_r * inv_r - 2.0 * k.im * inv_r,
+                    2.0 * k.re * (k.im + inv_r),
+                );
             let tangential_derivative = radial.scale(inv_r);
             let mut field = [[C64::ZERO; 4]; 4];
             field[0][0] = green * C64::new(0.0, -rho_omega);
@@ -192,21 +285,47 @@ impl PreparedCompactSourceObserver {
             transfers.push(Transfer {
                 source_m: *source,
                 delay_s,
+                phase_delay_s,
                 field,
             });
         }
         Ok(Self {
             acoustic,
+            molecular,
             frequency_hz,
+            wavenumber_per_m: k,
             observer_m,
             transfers,
         })
     }
 
-    /// Exact checked homogeneous material used for every path.
+    /// Exact checked equilibrium material used for every path. In the molecular
+    /// path its sound speed is the equilibrium reference, not the phase speed.
     #[must_use]
     pub const fn acoustic(&self) -> FluidAcousticState {
         self.acoustic
+    }
+
+    /// Original evaluated molecular reservoirs, or None for lossless propagation.
+    #[must_use]
+    pub const fn molecular_state(&self) -> Option<&RelaxationState> {
+        self.molecular.as_ref()
+    }
+
+    /// Actual outgoing complex wave number [1/m], in exp(-i omega t) convention.
+    #[must_use]
+    pub const fn wavenumber_per_m(&self) -> C64 {
+        self.wavenumber_per_m
+    }
+
+    /// Physical propagation model and its explicit applicability boundary.
+    #[must_use]
+    pub const fn scope(&self) -> &'static str {
+        if self.molecular.is_some() {
+            MOLECULAR_COMPACT_FIELD_SCOPE
+        } else {
+            COMPACT_FIELD_SCOPE
+        }
     }
 
     /// Frequency shared by every source [Hz]; different bins are separate observations.
@@ -233,16 +352,29 @@ impl PreparedCompactSourceObserver {
         self.transfers.get(index).map(|transfer| transfer.source_m)
     }
 
-    /// Path travel time [s], already present as exp(+i omega delay) in the transfer.
+    /// Equilibrium reference time r/c [s]. This is the path travel time for
+    /// lossless propagation. With molecular dispersion it is only a reference;
+    /// the transfer uses [`Self::source_phase_delay_s`] and is not a pure delay.
     #[must_use]
     pub fn source_delay_s(&self, index: usize) -> Option<f64> {
         self.transfers.get(index).map(|transfer| transfer.delay_s)
     }
 
+    /// Phase delay r Re(k)/omega [s] at this frequency, already included in the
+    /// outgoing transfer. It equals r/c for the lossless constructor. In a
+    /// dispersive gas it is neither the group delay nor the signal-front time;
+    /// broadband propagation requires the frequency-dependent transfer itself.
+    #[must_use]
+    pub fn source_phase_delay_s(&self, index: usize) -> Option<f64> {
+        self.transfers
+            .get(index)
+            .map(|transfer| transfer.phase_delay_s)
+    }
+
     /// Coherently observe source peak phasors on one physical clock.
     ///
     /// Source phasors refer to the emission clock, not already-retarded observer
-    /// time. The prepared outgoing kernel applies the path delay exactly once.
+    /// time. The prepared outgoing kernel applies the path phase exactly once.
     /// No spectral normalization, source correlation or extra gas density is
     /// inserted into a force dipole. Refuses wrong counts or nonfinite results.
     pub fn evaluate(
@@ -260,7 +392,7 @@ impl PreparedCompactSourceObserver {
             particle_velocity_m_s: velocity,
             active_intensity_w_m2: intensity.map(|v| v.re),
             reactive_intensity_w_m2: intensity.map(|v| v.im),
-            scope: COMPACT_FIELD_SCOPE,
+            scope: self.scope(),
         })
     }
 
@@ -299,7 +431,7 @@ impl PreparedCompactSourceObserver {
         for mode in modes {
             statistics.add(self.amplitudes(mode)?)?;
         }
-        statistics.finish()
+        statistics.finish(self.scope())
     }
 
     /// Observe mutually independent sources in O(N), without N sparse N-vector factors.
@@ -319,7 +451,7 @@ impl PreparedCompactSourceObserver {
             transfer.accumulate(*source, &mut sums)?;
             statistics.add(sums.map(ComplexSum::value))?;
         }
-        statistics.finish()
+        statistics.finish(self.scope())
     }
 
     fn check_count(&self, sources: &[CompactSourcePhasor]) -> Result<(), AeroacError> {

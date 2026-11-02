@@ -5,7 +5,13 @@ use fs_aeroac::curle3d::{
 };
 use fs_aeroac::monopole::{CompactMonopoleObserver, MonopoleLimits};
 use fs_material::fluid_acoustics::FluidAcousticState;
+use fs_material::gas::{GasSpec, GasState};
+use fs_material::relaxation::{
+    InternalReservoir, RelaxationAbsorption, RelaxationProcess, RelaxationRateLaw, RelaxationState,
+    RelaxingMedium, SpeciesRelaxation,
+};
 use fs_math::c64::C64;
+use fs_thermochem::SpeciesId;
 use std::f64::consts::{PI, TAU};
 
 fn medium(rho: f64, c: f64) -> FluidAcousticState {
@@ -539,4 +545,258 @@ fn source_admission_and_coherence_work_are_explicit_and_bounded() {
     assert_eq!(zero.velocity_covariance_m2_s2, [[C64::ZERO; 3]; 3]);
     let empty = observe(1.2, 300.0, 500.0, [0.0; 3], &[]);
     assert_eq!(empty.evaluate(&[]).unwrap().pressure_pa, C64::ZERO);
+}
+
+// Synthetic caloric reservoir: an algebraic fixture, not a measured gas claim.
+const RELAXATION_TIME_S: f64 = 3e-4;
+fn relaxing_state(reservoir: bool) -> RelaxationState {
+    let spec = GasSpec {
+        gamma: 1.25,
+        ..GasSpec::dry_air_ussa1976()
+    };
+    let gas = GasState::try_new(&spec, 293.15, 101325.0).unwrap();
+    let species = SpeciesId::new("synthetic").unwrap();
+    let processes = if reservoir {
+        vec![RelaxationProcess {
+            reservoir: InternalReservoir::Rotational {
+                degrees_of_freedom: 2,
+            },
+            rate: RelaxationRateLaw::PartnerIndependent {
+                p_tau_ref_pa_s: gas.pressure * RELAXATION_TIME_S,
+                t_ref_k: gas.temperature,
+                exponent: 0.0,
+                t_min_k: 200.0,
+                t_max_k: 500.0,
+            },
+        }]
+    } else {
+        vec![]
+    };
+    RelaxationAbsorption::new(vec![SpeciesRelaxation {
+        species: species.clone(),
+        processes,
+    }])
+    .unwrap()
+    .evaluate(&RelaxingMedium::new(gas, vec![(species, 1.0)]).unwrap())
+    .unwrap()
+}
+
+// Independently eliminate one caloric reservoir with real arithmetic. The
+// outgoing root uses its positive real part and 2 Re(k) Im(k) = Im(k²).
+fn molecular_wave_and_modulus(state: &RelaxationState, omega: f64) -> (C64, C64) {
+    let gas = state.gas();
+    let cv0 = gas.specific_heat_cp - gas.specific_gas_constant;
+    let cvi = cv0 - gas.specific_gas_constant;
+    let cpi = cvi + gas.specific_gas_constant;
+    let y = omega * RELAXATION_TIME_S;
+    let den = cv0 * cv0 + y * y * cvi * cvi;
+    let bulk = C64::new(
+        gas.pressure * (gas.specific_heat_cp * cv0 + y * y * cpi * cvi) / den,
+        gas.pressure * y * (gas.specific_heat_cp * cvi - cpi * cv0) / den,
+    );
+    let scale = gas.density * omega * omega / bulk.norm_sq();
+    let k2re = scale * bulk.re;
+    let k2im = -scale * bulk.im;
+    let re = ((k2re.hypot(k2im) + k2re) * 0.5).sqrt();
+    (C64::new(re, k2im / (2.0 * re)), bulk)
+}
+
+fn molecular_observer(
+    state: &RelaxationState,
+    f: f64,
+    x: [f64; 3],
+    positions: &[[f64; 3]],
+) -> PreparedCompactSourceObserver {
+    PreparedCompactSourceObserver::new_molecular(state.clone(), f, x, positions, positions.len())
+        .unwrap()
+}
+
+#[test]
+fn molecular_empty_reservoirs_recover_the_lossless_source_field() {
+    let state = relaxing_state(false);
+    let gas = state.gas();
+    let source = CompactSourcePhasor {
+        volume_flow_m3_s: C64::new(2e-4, -3e-4),
+        force_on_fluid_n: [C64::new(0.2, 0.3), C64::new(-0.1, 0.4), C64::new(0.7, -0.2)],
+    };
+    for f in [20.0, 800.0, 12000.0] {
+        for position in [[0.03, 0.02, -0.01], [3.0, -2.0, 1.0]] {
+            let ordinary = observe(gas.density, gas.sound_speed, f, position, &[[0.0; 3]]);
+            let molecular = molecular_observer(&state, f, position, &[[0.0; 3]]);
+            assert!(ordinary.molecular_state().is_none());
+            assert_eq!(molecular.molecular_state(), Some(&state));
+            assert_eq!(molecular.wavenumber_per_m().im, 0.0);
+            assert_eq!(ordinary.source_delay_s(0), ordinary.source_phase_delay_s(0));
+            assert_eq!(ordinary.source_delay_s(0), molecular.source_delay_s(0));
+            let expected = ordinary.evaluate(&[source]).unwrap();
+            let actual = molecular.evaluate(&[source]).unwrap();
+            close_complex(actual.pressure_pa, expected.pressure_pa);
+            for axis in 0..3 {
+                close_complex(
+                    actual.particle_velocity_m_s[axis],
+                    expected.particle_velocity_m_s[axis],
+                );
+            }
+            assert_eq!(actual.scope, molecular.scope());
+        }
+    }
+}
+
+#[test]
+fn molecular_green_derivatives_include_attenuation_and_dispersion() {
+    let state = relaxing_state(true);
+    let rho = state.gas().density;
+    let source = CompactSourcePhasor {
+        volume_flow_m3_s: C64::new(2e-4, -3e-4),
+        force_on_fluid_n: [C64::new(0.2, 0.3), C64::new(-0.1, 0.4), C64::new(0.7, -0.2)],
+    };
+    let x = [0.3, -0.2, 0.1];
+    for f in [30.0, 800.0, 12000.0] {
+        let omega = TAU * f;
+        let (k, _) = molecular_wave_and_modulus(&state, omega);
+        let observer = molecular_observer(&state, f, x, &[[0.0; 3]]);
+        close_complex(observer.wavenumber_per_m(), k);
+        assert!(k.im > 0.0 && k.re < omega / state.gas().sound_speed);
+        let r = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+        close(observer.source_phase_delay_s(0).unwrap(), r * k.re / omega);
+        assert!(observer.source_phase_delay_s(0).unwrap() < observer.source_delay_s(0).unwrap());
+        let pressure = |point: [f64; 3]| {
+            let r = point.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let radial_force = (0..3).fold(C64::ZERO, |s, i| {
+                s + source.force_on_fluid_n[i].scale(point[i] / r)
+            });
+            let g = phase(k.re * r).scale((-k.im * r).exp() / (4.0 * PI * r));
+            g * (source.volume_flow_m3_s * C64::new(0.0, -rho * omega)
+                + radial_force * C64::new(1.0 / r + k.im, -k.re))
+        };
+        let field = observer.evaluate(&[source]).unwrap();
+        close_complex(field.pressure_pa, pressure(x));
+        // G1: an independent three-rung central-difference gradient catches
+        // missing damping derivatives AND the angular dipole Hessian terms.
+        let mut errors = Vec::new();
+        for h in [2e-4, 1e-4, 5e-5] {
+            let mut worst = 0.0_f64;
+            for axis in 0..3 {
+                let mut plus = x;
+                let mut minus = x;
+                plus[axis] += h;
+                minus[axis] -= h;
+                let u =
+                    (pressure(plus) - pressure(minus)).scale(0.5 / h) / C64::new(0.0, rho * omega);
+                worst = worst.max(
+                    (u - field.particle_velocity_m_s[axis]).abs()
+                        / field.particle_velocity_m_s[axis].abs(),
+                );
+            }
+            errors.push(worst);
+        }
+        assert!(
+            errors[1] < 0.26 * errors[0] && errors[2] < 0.26 * errors[1],
+            "f={f}: {errors:?}"
+        );
+        assert!(errors[2] < 3e-5, "f={f}: {errors:?}");
+    }
+}
+
+#[test]
+fn molecular_monopole_power_loss_equals_volumetric_caloric_dissipation() {
+    let state = relaxing_state(true);
+    let rho = state.gas().density;
+    let f = 800.0;
+    let omega = TAU * f;
+    let (k, bulk) = molecular_wave_and_modulus(&state, omega);
+    let q = C64::new(2e-4, -3e-4);
+    let radii = [0.03, 1.0, 6.0];
+    let powers = radii.map(|r| {
+        let field = molecular_observer(&state, f, [r, 0.0, 0.0], &[[0.0; 3]])
+            .evaluate(&[CompactSourcePhasor::monopole(q)])
+            .unwrap();
+        let power = field.active_intensity_w_m2[0] * 4.0 * PI * r * r;
+        close(
+            power,
+            rho * omega * k.re * q.norm_sq() / (8.0 * PI) * (-2.0 * k.im * r).exp(),
+        );
+        close(
+            field.reactive_intensity_w_m2[0],
+            -field.active_intensity_w_m2[0] * (k.im + 1.0 / r) / k.re,
+        );
+        power
+    });
+    assert!(powers[0] > powers[1] && powers[1] > powers[2] && powers[2] > 0.0);
+    // Integrate d = omega Im(1/K) |p|²/2 over each spherical shell.
+    // This thermodynamic balance is independent of the velocity calculation.
+    for i in 0..2 {
+        let radial_integral =
+            ((-2.0 * k.im * radii[i]).exp() - (-2.0 * k.im * radii[i + 1]).exp()) / (2.0 * k.im);
+        let dissipated =
+            0.5 * omega * (-bulk.im / bulk.norm_sq()) * (rho * omega).powi(2) * q.norm_sq()
+                / (4.0 * PI)
+                * radial_integral;
+        close(powers[i] - powers[i + 1], dissipated);
+    }
+}
+
+#[test]
+fn molecular_observation_reuses_coherence_and_preserves_source_refusals() {
+    use fs_aeroac::material::MaterialAeroacError;
+    let state = relaxing_state(true);
+    let x = [2.0, 0.5, 0.3];
+    let positions = [[0.0; 3], [-0.4, 0.2, 0.1]];
+    let observer = molecular_observer(&state, 800.0, x, &positions);
+    let sources = [
+        CompactSourcePhasor::monopole(C64::new(1e-4, 2e-4)),
+        CompactSourcePhasor::force_dipole([C64::new(0.3, -0.2), C64::ONE, C64::ZERO]),
+    ];
+    let coherent = observer.evaluate(&sources).unwrap();
+    let moments = observer
+        .evaluate_coherence_modes(
+            &[&sources],
+            CoherenceBudget {
+                max_modes: 1,
+                max_source_mode_pairs: 2,
+            },
+        )
+        .unwrap();
+    close(
+        moments.mean_square_pressure_pa2,
+        coherent.pressure_pa.norm_sq() * 0.5,
+    );
+    assert_eq!(moments.scope, coherent.scope);
+    let independent = observer.evaluate_independent_sources(&sources).unwrap();
+    let single_power: f64 = (0..2)
+        .map(|i| {
+            molecular_observer(&state, 800.0, x, &positions[i..=i])
+                .evaluate(&sources[i..=i])
+                .unwrap()
+                .pressure_pa
+                .norm_sq()
+                * 0.5
+        })
+        .sum();
+    close(independent.mean_square_pressure_pa2, single_power);
+    assert_eq!(independent.scope, coherent.scope);
+    assert_eq!(observer.source_phase_delay_s(2), None);
+    for f in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            PreparedCompactSourceObserver::new_molecular(state.clone(), f, x, &positions, 2),
+            Err(MaterialAeroacError::Material(_))
+        ));
+    }
+    for (point, budget) in [
+        ([0.0; 3], 1),
+        ([f64::NAN, 0.0, 0.0], 1),
+        ([1e6, 0.0, 0.0], 1),
+        (x, 0),
+    ] {
+        assert!(matches!(
+            PreparedCompactSourceObserver::new_molecular(
+                state.clone(),
+                800.0,
+                point,
+                &[[0.0; 3]],
+                budget
+            ),
+            Err(MaterialAeroacError::Aeroac(_))
+        ));
+    }
 }
