@@ -214,6 +214,59 @@ fn rectangular_source_channels_share_full_forced_dynamics_and_material_compositi
 }
 
 #[test]
+fn exact_zero_source_rows_preserve_admission_matrix_and_heat() {
+    let n = 2;
+    // Two physical loss squares with a small, represented cross resistance.
+    // The previous forced-QR route refused this matrix after zero padding:
+    // residual 7.96e-17 exceeded its unchanged 5.68e-18 componentwise bound.
+    let rows = vec![1.0, 1.0, 1.0, -0.9999];
+    let matrix = source_matrix(n, &rows);
+    let step = |source_rows: Vec<f64>| {
+        let witness =
+            ResistanceWitness::try_from_source_rows(n, matrix.clone(), source_rows).unwrap();
+        let system = PortHamiltonian::new(
+            n,
+            0,
+            vec![0.0; n * n],
+            matrix.clone(),
+            Vec::new(),
+            Box::new(QuadraticStorage::new(identity(n), n).unwrap()),
+        )
+        .unwrap()
+        .with_resistance_witness(witness)
+        .unwrap();
+        assert_eq!(system.structure().1, matrix);
+        let split = split_quadratic(&system, budget(n)).unwrap();
+        step_render(&system, &split, &[0.7, -0.4], &[], 0.1).unwrap()
+    };
+    let reference = step(rows.clone());
+    for placement in 0..3 {
+        let mut padded = Vec::new();
+        if placement == 0 {
+            padded.resize(18 * n, 0.0);
+        }
+        for row in rows.chunks_exact(n) {
+            padded.extend_from_slice(row);
+            if placement == 1 {
+                padded.resize(padded.len() + 9 * n, 0.0);
+            }
+        }
+        if placement == 2 {
+            padded.resize(padded.len() + 18 * n, 0.0);
+        }
+        assert_eq!(source_matrix(n, &padded), matrix);
+        let actual = step(padded);
+        assert_eq!(actual.x, reference.x);
+        assert_eq!(actual.dissipated.to_bits(), reference.dissipated.to_bits());
+    }
+    // Compaction is an exact-zero operation, never a small-loss threshold.
+    let mut weak_rows = vec![1e-100, 0.0, 0.0, 1.0];
+    let weak_matrix = source_matrix(n, &weak_rows);
+    weak_rows.resize(20 * n, 0.0);
+    assert!(ResistanceWitness::try_from_source_rows(n, weak_matrix, weak_rows).is_ok());
+}
+
+#[test]
 fn source_witness_refuses_unsupported_entries_mismatched_laws_and_foreign_splits() {
     let witness = || {
         ResistanceWitness::try_from_source_rows(2, vec![1.0, -2.0, -2.0, 4.0], vec![1.0, -2.0])

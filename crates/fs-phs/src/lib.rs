@@ -618,8 +618,9 @@ impl ResistanceWitness {
     /// is `sum_k (rows[k] dot effort)^2`. Every row has `n` entries, and `matrix`
     /// is the source's already assembled `n x n` resistance, left unchanged.
     /// Rectangular factors are compressed by the existing positive QR owner;
-    /// every represented entry must still pass its componentwise reconstruction
-    /// gate. Zero rows and exact loss nullspaces remain present.
+    /// exact-zero source rows are omitted before deciding whether compression
+    /// is needed. Every represented entry must still pass its componentwise
+    /// reconstruction gate, and exact loss nullspaces remain present.
     ///
     /// # Errors
     /// Refuses malformed/nonfinite source data, asymmetric resistance, or a
@@ -638,6 +639,22 @@ impl ResistanceWitness {
             });
         }
         require_symmetric(&matrix, n, "source resistance R")?;
+        if rows.len() / n > n {
+            // An unrelated physical link contributes an exactly zero local row
+            // when a complete source is restricted to one dynamical island.
+            // Such rows carry no power; their count must not force a previously
+            // exact source factor through a numerically different QR route.
+            // Keep every nonzero row and its order, including arbitrarily weak
+            // losses. The original resistance and its entrywise guard are fixed.
+            let mut retained = 0;
+            for start in (0..rows.len()).step_by(n) {
+                if rows[start..start + n].iter().any(|value| *value != 0.0) {
+                    rows.copy_within(start..start + n, retained);
+                    retained += n;
+                }
+            }
+            rows.truncate(retained);
+        }
         let height = rows.len() / n;
         let root = if height > n {
             linear_exact::positive_heat::compress(&rows, height, n)?
