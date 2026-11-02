@@ -4531,3 +4531,65 @@ Representative constants do not become measured material data, and small
 roundoff closure does not certify optical uncertainty. Independent normal-flux
 and Airy references cover weak absorption, single films, periodic stacks, s/p
 response, grazing and exact zero-thickness/matched-layer identities.
+
+### Native thermal intake for incident surface absorption
+
+Under `optical-heating`, `thermal_surface::heating::SurfacePowerResponse<N>`
+compiles reflected, transmitted and absorbed fractions from the original smooth
+conductor, coherent coating, dielectric or diffuse emissivity owners. Incident
+s/p power fractions resolve polarization at the supplied incidence geometry.
+Opaque conductors use direct boundary flux. Clear dielectric transmission is a
+separate outgoing power channel, never heat; subsequent bulk absorption belongs
+to volume transport. Transmitting absorbing films use their original
+power-normalized Mueller R/T solution without the camera's radiance eta-squared
+factor. Lossless films receive exactly zero heat. Positive film loss must exceed
+the original per-layer floating-point allowance; unresolved weak loss refuses.
+That allowance is not a certified material/numerical error bound.
+
+Explicit gray diffuse absorption equals the original constant emissivity at
+every supplied wavelength. Spectral diffuse absorption uses the original
+finite-band emissivity curve and refuses extrapolation. A visible spectrum does
+not establish an infrared or bolometric law. Optical source identities and
+ordered wavelength packets remain part of response identity.
+
+`SurfaceOpticalHeating<N>` admits bounded scheduled illumination sources, each
+bound to an active native cell, its actual material ID and a declared temperature
+domain. A source supplies physical watts already intercepted and weighted by its
+external spatial/angular/spectral quadrature. This adapter applies no additional
+area, cosine, inverse-square or exposure factor. Source IDs canonicalize sums;
+multiple sources may heat one cell, whose temperature support is their
+intersection. All sources use the same ordered wavelength packet. Immutable
+responses, schedules and receiver maps are shared across candidate clones.
+
+The original `SpectralPowerSchedule` cuts the native clock at exact source
+transitions and supplies interval-mean watts after the final stability cut.
+Absorbed power enters each native receiver exactly once. The original enthalpy
+owner retains phase storage, conduction, boundary cooling and event ordering.
+Dark intervals and perfectly reflecting/transparent sources still validate
+material/temperature support. No optical ray retracing or coating solve occurs
+during these fixed-response thermal steps.
+
+Accepted histories separately retain per-lane incident, reflected, transmitted,
+absorbed and signed residual joules, plus actual combined native heat input.
+Compensated reductions reuse the existing optical heating sum owner. Arithmetic
+power residuals and receiver-map reduction must satisfy the caller's absolute
+watt allowance; that allowance does not remove or reassign energy. Positive
+physical power/energy products that underflow to zero refuse, as do nonfinite
+or overflowing sums. A weak direct-flux absorption may coexist with reflectance
+rounded to one; its representability discrepancy remains visible in the signed
+residual instead of being removed from heat.
+
+Sources, retained profile segments and whole-advance interval evaluations are
+explicitly bounded. Pending energy and receiver maps publish only with the
+accepted native endpoint; cancellation, budgets and domain refusals preserve the
+original thermal and optical state. This fixed constitutive response does not
+infer temperature/phase-dependent optical constants, emitting-surface feedback,
+scene visibility, multiple surface bounces, coherent pulse dynamics, per-layer
+heat or absorption depth. Coating and opaque-substrate losses heat one assigned
+cell. Existing source qualification and optical support remain authoritative.
+
+Native integration checks cover independent conductor/film R/T/A references,
+exact rectangular/triangular pulse fluence into a latent plateau, clear-glass and
+lossless-stack zero heat, polarization, shared receivers, conduction and dark
+cooling, Kirchhoff gray/spectral absorption, weak loss, canonical continuation,
+bounded admission and transactional cancellation/domain/underflow refusals.

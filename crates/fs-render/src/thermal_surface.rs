@@ -33,6 +33,10 @@ pub(crate) use planck::{
 mod spectral;
 pub use spectral::{DiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity};
 
+/// Physical incident surface absorption on the original native thermal clock.
+#[cfg(feature = "optical-heating")]
+pub mod heating;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::det;
 

@@ -427,12 +427,12 @@ fn finite(value: f64) -> Result<f64, OpticalHeatingError> {
 
 /// Compensated reduction, also retaining small accepted durations at long runs.
 #[derive(Clone, Copy, Debug, Default)]
-struct CheckedSum {
+pub(crate) struct CheckedSum {
     sum: f64,
     correction: f64,
 }
 impl CheckedSum {
-    fn add(&mut self, value: f64) -> Result<(), OpticalHeatingError> {
+    pub(crate) fn add(&mut self, value: f64) -> Result<(), OpticalHeatingError> {
         let next = finite(self.sum + value)?;
         let error = if self.sum.abs() >= value.abs() {
             (self.sum - next) + value
@@ -444,7 +444,7 @@ impl CheckedSum {
         self.value()?;
         Ok(())
     }
-    fn value(self) -> Result<f64, OpticalHeatingError> {
+    pub(crate) fn value(self) -> Result<f64, OpticalHeatingError> {
         finite(self.sum + self.correction)
     }
 }
