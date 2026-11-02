@@ -147,6 +147,123 @@ fn flight_sample(majorant: f64, distance: f64) -> f64 {
     1.0 - (-majorant * distance).exp()
 }
 
+#[test]
+fn g1_volume_receiver_survival_ends_at_the_native_point_without_a_surface_event() {
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(9, Point3::new(0.0, 0.0, 4.0))]).unwrap();
+        let material = glass(1.2, 0.17);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![detector()], 100_000)
+            .unwrap();
+        let spectrum = MassScatteringSpectrum::constant(0.4).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let volumes = [Some(
+            CurvedRayleighMedium::try_new(&spectrum, 1.0, &phase).unwrap(),
+        )];
+        let scattering = CurvedRayleighScene::try_new(cx, &scene, &volumes).unwrap();
+        let receiver = BundleConnectionTarget::try_volume_receiver(
+            0,
+            Point3::new(0.0, 0.0, 1.3),
+            Vec3::new(0.0, 0.0, -1.0),
+            2e-7,
+        )
+        .unwrap();
+        let received = scattering
+            .connect_bundle_with_transmittance_samples(
+                cx,
+                launch(Vec3::new(0.0, 0.0, 1.0)),
+                receiver,
+                options(),
+                BundleBranchPolicy::Sequence(&[]),
+                CurvedTransmittanceOptions {
+                    max_free_flight_draws: 0,
+                    max_tracking_candidates: 0,
+                },
+                |_| panic!("uniform source survival must not draw random numbers"),
+            )
+            .unwrap();
+        let path = received.connection().path();
+        assert!(path.is_volume_receiver());
+        assert!(!path.is_diffuse_receiver());
+        assert_eq!(path.medium_index(), 0);
+        assert_eq!(path.surface_events(), 0);
+        assert!(path.last_contact().is_none());
+        assert_eq!(received.free_flight_draws(), 0);
+        assert_eq!(received.tracking_candidates(), 0);
+        assert_eq!(
+            received.trace_evaluations(),
+            received.connection().trace_evaluations() + 1
+        );
+        let propagation = path.bundle().propagation().propagation();
+        near(propagation.distance_m, 1.3, 2e-8);
+        near(propagation.optical_depth, 0.17 * 1.3, 2e-8);
+        near(received.log_scattering_survival(), -0.4 * 1.3, 2e-8);
+    });
+}
+
+#[test]
+fn g1_zero_ratio_sample_still_validates_the_curved_volume_receiver() {
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(9, Point3::new(0.0, 0.0, 4.0))]).unwrap();
+        let material = glass(1.2, 0.15);
+        let field = AffineIndexField::try_new(
+            &material,
+            Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.4, 0.0, 0.0),
+            bounds(),
+        )
+        .unwrap();
+        let media = [SceneMedium::Differentiable {
+            field: &field,
+            identity: FIELD_ID,
+        }];
+        let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![detector()], 100_000)
+            .unwrap();
+        let law = LocalLaw::constant(1.0, 1.0);
+        let volumes = [Some(CurvedRayleighBinding::Field(&law))];
+        let scattering = CurvedRayleighScene::try_new_with_fields(cx, &scene, &volumes).unwrap();
+        let receiver = BundleConnectionTarget::try_volume_receiver(
+            0,
+            affine_point(1.2),
+            Vec3::new(0.0, 0.0, -1.0),
+            2e-7,
+        )
+        .unwrap();
+        let received = scattering
+            .connect_bundle_with_transmittance_samples(
+                cx,
+                launch(Vec3::new(0.0, 0.0, 1.0)),
+                receiver,
+                options(),
+                BundleBranchPolicy::Sequence(&[]),
+                CurvedTransmittanceOptions::default(),
+                |ordinal| {
+                    assert_eq!(ordinal, 0, "exact zero stops stochastic work, not geometry");
+                    flight_sample(1.0, 0.25)
+                },
+            )
+            .unwrap();
+        assert!(received.ratio_tracking_zero());
+        assert_eq!(received.log_scattering_survival(), f64::NEG_INFINITY);
+        assert_eq!(received.tracking_candidates(), 1);
+        assert_eq!(received.free_flight_draws(), 1);
+        assert!(received.connection().path().is_volume_receiver());
+        assert_eq!(received.connection().path().surface_events(), 0);
+        assert!(received.connection().residual_m() <= receiver.position_tolerance_m());
+        near(
+            received
+                .connection()
+                .path()
+                .bundle()
+                .propagation()
+                .propagation()
+                .distance_m,
+            1.2,
+            2e-7,
+        );
+    });
+}
+
 // Closed-form ray for n(x)=n0+g*x launched along +z. The parameter is physical
 // arc length; neither the chord nor optical/group path length gives this point.
 fn affine_point(arc: f64) -> Point3 {

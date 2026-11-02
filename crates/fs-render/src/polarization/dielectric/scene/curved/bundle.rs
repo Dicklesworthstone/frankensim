@@ -23,12 +23,27 @@ use crate::gradient_index::GradientIndexSample;
 use crate::gradient_index::bundle::event::BundleEventOptions;
 use crate::gradient_index::bundle::interface::InterfaceOptions;
 use crate::gradient_index::bundle::{BundleError, BundleOptions, propagate_bundle};
+use crate::gradient_index::event::{
+    BoundaryQuery, BoundaryWitness, DepartureNeighborhood, DepartureRequest, SignedBoundaryDistance,
+};
 use crate::polarization::dielectric::transport::bundle::{
     PolarizedBundleError, PolarizedRayBundle,
 };
 
 /// Bounded local source-to-receiver connections through these native paths.
 pub mod connection;
+
+/// A numerical stopping section is not a scene boundary or optical interaction.
+/// Its medium is always an index into this exact immutable native scene.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BundleReceiver {
+    Diffuse(u64),
+    Volume {
+        medium: usize,
+        position_m: Point3,
+        normal: Vec3,
+    },
+}
 
 /// One central integration envelope and two additional derivative tolerances.
 /// The `trace.event.integration` controls are authoritative for every segment.
@@ -108,6 +123,7 @@ pub struct CurvedBundlePathResult {
     medium_identity: Option<ContentHash>,
     termination: PathTermination,
     diffuse_receiver: bool,
+    volume_receiver: bool,
     surface_events: u32,
     last_contact: Option<CurvedContact>,
     detector_reference_axis: Option<Vec3>,
@@ -136,6 +152,11 @@ impl CurvedBundlePathResult {
     /// applied. An ordinary opaque blocker never sets this marker.
     pub const fn is_diffuse_receiver(&self) -> bool {
         self.diffuse_receiver
+    }
+    /// The numerical section for a point in the selected original medium was
+    /// reached. No surface interaction or event was added at that endpoint.
+    pub const fn is_volume_receiver(&self) -> bool {
+        self.volume_receiver
     }
     pub const fn surface_events(&self) -> u32 {
         self.surface_events
@@ -360,7 +381,7 @@ impl CurvedPolarizedScene<'_> {
         initial_medium: usize,
         settings: CurvedBundleSettings,
         continue_extinguished: bool,
-        diffuse_receiver: Option<u64>,
+        receiver: Option<BundleReceiver>,
         branches: impl FnMut(
             &CurvedContact,
             &CurvedBundleBranchContext,
@@ -372,7 +393,7 @@ impl CurvedPolarizedScene<'_> {
             initial_medium,
             settings,
             continue_extinguished,
-            diffuse_receiver,
+            receiver,
             branches,
             |_, _| Ok(None),
             |_, _, _, _, _| Ok(()),
@@ -391,7 +412,7 @@ impl CurvedPolarizedScene<'_> {
         initial_medium: usize,
         settings: CurvedBundleSettings,
         continue_extinguished: bool,
-        diffuse_receiver: Option<u64>,
+        receiver: Option<BundleReceiver>,
         mut branches: impl FnMut(
             &CurvedContact,
             &CurvedBundleBranchContext,
@@ -410,6 +431,11 @@ impl CurvedPolarizedScene<'_> {
         self.media
             .get(initial_medium)
             .ok_or(SceneError::InvalidInitialMedium)?;
+        if let Some(BundleReceiver::Volume { medium, .. }) = receiver {
+            self.media
+                .get(medium)
+                .ok_or(SceneError::InvalidInitialMedium)?;
+        }
         let initial = bundle.propagation();
         if initial.propagation().distance_m != 0.0
             || initial.interface_events() != 0
@@ -426,6 +452,7 @@ impl CurvedPolarizedScene<'_> {
             medium_identity: self.medium_identity(initial_medium),
             termination: PathTermination::SurfaceLimit,
             diffuse_receiver: false,
+            volume_receiver: false,
             surface_events: 0,
             last_contact: None,
             detector_reference_axis: None,
@@ -485,27 +512,40 @@ impl CurvedPolarizedScene<'_> {
                     });
                 }
             };
-            let (next, segment) = result
-                .bundle
-                .continue_to_boundary_with_control(
+            let section = match receiver {
+                Some(BundleReceiver::Volume {
+                    medium,
+                    position_m,
+                    normal,
+                }) if medium == result.medium => Some((position_m, normal)),
+                _ => None,
+            };
+            let propagation = {
+                let mut endpoint_oracle = TargetSectionOracle {
+                    native: &mut oracle,
+                    section,
+                    surface_tolerance_m: settings.trace.event.surface_tolerance_m,
+                };
+                result.bundle.continue_to_boundary_with_control(
                     field,
-                    &mut oracle,
+                    &mut endpoint_oracle,
                     segment_distance,
                     departure.take(),
                     options,
                     || cx.checkpoint().is_ok(),
                 )
-                .map_err(|error| {
-                    if let Some(geometry) = oracle.last_error() {
-                        CurvedBundleSceneError::from(geometry)
-                    } else if first_segment
-                        && error == PolarizedBundleError::Bundle(BundleError::InitialSampleMismatch)
-                    {
-                        SceneError::InvalidInitialMedium.into()
-                    } else {
-                        error.into()
-                    }
-                })?;
+            };
+            let (next, segment) = propagation.map_err(|error| {
+                if let Some(geometry) = oracle.last_error() {
+                    CurvedBundleSceneError::from(geometry)
+                } else if first_segment
+                    && error == PolarizedBundleError::Bundle(BundleError::InitialSampleMismatch)
+                {
+                    SceneError::InvalidInitialMedium.into()
+                } else {
+                    error.into()
+                }
+            })?;
             first_segment = false;
             remaining_steps = remaining_steps
                 .checked_sub(segment.segment.accepted_steps)
@@ -578,6 +618,17 @@ impl CurvedPolarizedScene<'_> {
                 };
                 break;
             };
+            if witness.boundary_id == TARGET_SECTION_ID {
+                // This is an explicit numerical endpoint, not a physical
+                // surface. In particular it has no BSDF, detector, object ID,
+                // interface derivative, or charge against surface events.
+                result.volume_receiver = true;
+                result.termination = PathTermination::DistanceLimit;
+                signature.update(b"volume-receiver");
+                signature.update(&(result.medium as u64).to_le_bytes());
+                append_medium(&mut signature, result.medium_identity);
+                break;
+            }
             let instance = self
                 .geometry
                 .instances()
@@ -613,7 +664,8 @@ impl CurvedPolarizedScene<'_> {
                     1
                 }
                 Interaction::DepolarizingDiffuse { medium, .. }
-                    if diffuse_receiver == Some(instance.object_id()) =>
+                    if matches!(receiver, Some(BundleReceiver::Diffuse(id))
+                        if id == instance.object_id()) =>
                 {
                     require_medium(instance.object_id(), result.medium, medium)?;
                     result.termination = PathTermination::Opaque;
@@ -774,6 +826,150 @@ impl CurvedPolarizedScene<'_> {
                 Err(CurvedBundleSceneError::MissingSecondOrderField { medium: index })
             }
         }
+    }
+}
+
+// A reserved event identity is consumed here before native instance lookup.
+// It never enters the scene's object/geometry identity namespace.
+const TARGET_SECTION_ID: usize = usize::MAX;
+
+/// Compose a numerical endpoint section with the original geometry oracle.
+/// Every query still visits that original oracle and its original work budget.
+/// The section cannot mask a nearer object or lie inside an unexamined native
+/// departure neighborhood. It supplies no interface or material conversion.
+struct TargetSectionOracle<'a, O: BoundaryOracle + ?Sized> {
+    native: &'a mut O,
+    section: Option<(Point3, Vec3)>,
+    surface_tolerance_m: f64,
+}
+
+impl<O: BoundaryOracle + ?Sized> TargetSectionOracle<'_, O> {
+    fn distance(&self, position: Point3) -> Result<Option<(f64, f64, f64)>, GradientIndexError> {
+        let Some((origin, normal)) = self.section else {
+            return Ok(None);
+        };
+        let signed = position.delta_from(origin).dot(normal);
+        // Include cancellation in world-coordinate subtraction as well as the
+        // dot product. A section below this resolution is refused, not snapped.
+        let roundoff = 16.0
+            * f64::EPSILON
+            * (normal.x.abs() * (position.x.abs() + origin.x.abs())
+                + normal.y.abs() * (position.y.abs() + origin.y.abs())
+                + normal.z.abs() * (position.z.abs() + origin.z.abs()));
+        let upper = (signed.abs() + roundoff).next_up();
+        if !signed.is_finite() || !upper.is_finite() {
+            return Err(GradientIndexError::NumericalRange);
+        }
+        let lower = (signed.abs() - roundoff).next_down().max(0.0);
+        Ok(Some((signed, lower, upper)))
+    }
+
+    fn clip_neighborhood(
+        &self,
+        center: Point3,
+        neighborhood: DepartureNeighborhood,
+    ) -> Result<DepartureNeighborhood, GradientIndexError> {
+        let Some((_, lower, _)) = self.distance(center)? else {
+            return Ok(neighborhood);
+        };
+        let radius = 0.5 * lower;
+        if radius <= 0.0 {
+            return Err(GradientIndexError::BoundaryResolutionLimit);
+        }
+        Ok(match neighborhood {
+            DepartureNeighborhood::Planar { radius_m } => DepartureNeighborhood::Planar {
+                radius_m: radius_m.min(radius),
+            },
+            DepartureNeighborhood::Smooth {
+                radius_m,
+                normal_axis,
+                max_normal_deviation,
+            } => DepartureNeighborhood::Smooth {
+                radius_m: radius_m.min(radius),
+                normal_axis,
+                max_normal_deviation,
+            },
+        })
+    }
+}
+
+impl<O: BoundaryOracle + ?Sized> BoundaryOracle for TargetSectionOracle<'_, O> {
+    fn query(&mut self, position: Point3) -> Result<BoundaryQuery, GradientIndexError> {
+        let mut query = self.native.query(position)?;
+        let Some((signed, lower, upper)) = self.distance(position)? else {
+            return Ok(query);
+        };
+        if upper <= self.surface_tolerance_m && query.clearance_m <= 2.0 * self.surface_tolerance_m
+        {
+            // A volume endpoint cannot claim a side of a physical interface
+            // inside its unresolved numerical contact collar.
+            return Err(GradientIndexError::BoundaryResolutionLimit);
+        }
+        if upper < query.clearance_m {
+            let (_, normal) = self.section.ok_or(GradientIndexError::NumericalRange)?;
+            let radius = if query.clearance_m.is_finite() {
+                0.25 * (query.clearance_m - upper)
+            } else {
+                f64::MAX
+            };
+            query.witness = Some(BoundaryWitness {
+                boundary_id: TARGET_SECTION_ID,
+                feature_id: 0,
+                surface_point: position.offset(normal.scale(-signed)),
+                normal,
+                distance_upper_m: upper,
+                side: if lower == 0.0 {
+                    BoundarySide::OnSurface
+                } else if signed > 0.0 {
+                    BoundarySide::Positive
+                } else {
+                    BoundarySide::Negative
+                },
+                departure_radius_m: (radius > 0.0).then_some(radius),
+            });
+        } else if let Some(witness) = query.witness.as_mut()
+            && let Some(radius) = witness.departure_radius_m
+        {
+            let (_, separation, _) = self
+                .distance(witness.surface_point)?
+                .ok_or(GradientIndexError::NumericalRange)?;
+            witness.departure_radius_m = (separation > 0.0).then_some(radius.min(0.5 * separation));
+        }
+        query.clearance_m = query.clearance_m.min(lower);
+        Ok(query)
+    }
+
+    fn prepare_departure(
+        &mut self,
+        request: DepartureRequest,
+    ) -> Result<DepartureNeighborhood, GradientIndexError> {
+        let neighborhood = self.native.prepare_departure(request)?;
+        self.clip_neighborhood(request.contact.witness.surface_point, neighborhood)
+    }
+
+    fn admit_arrival(
+        &mut self,
+        request: DepartureRequest,
+    ) -> Result<Option<DepartureNeighborhood>, GradientIndexError> {
+        if request.contact.witness.boundary_id == TARGET_SECTION_ID {
+            return Ok(Some(DepartureNeighborhood::planar(
+                request.contact.witness,
+            )?));
+        }
+        self.native
+            .admit_arrival(request)?
+            .map(|neighborhood| {
+                self.clip_neighborhood(request.contact.witness.surface_point, neighborhood)
+            })
+            .transpose()
+    }
+
+    fn signed_departure(
+        &mut self,
+        contact: BoundaryWitness,
+        position: Point3,
+    ) -> Result<SignedBoundaryDistance, GradientIndexError> {
+        self.native.signed_departure(contact, position)
     }
 }
 

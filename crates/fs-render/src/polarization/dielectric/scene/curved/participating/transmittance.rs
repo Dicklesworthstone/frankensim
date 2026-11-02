@@ -238,7 +238,7 @@ impl CurvedRayleighScene<'_, '_, '_> {
             launch.initial_medium,
             options.scene,
             true,
-            target.is_diffuse_receiver().then_some(target.object_id()),
+            target.native_receiver(),
             |_, context| match policy {
                 BundleBranchPolicy::TransmitOrReflectTir => {
                     Ok(if context.total_internal_reflection {
@@ -285,7 +285,8 @@ impl CurvedRayleighScene<'_, '_, '_> {
         let replay = replay?;
         if let BundleBranchPolicy::Sequence(events) = policy
             && (replay.termination() == super::super::PathTermination::Detected
-                || replay.is_diffuse_receiver())
+                || replay.is_diffuse_receiver()
+                || replay.is_volume_receiver())
             && consumed != events.len()
         {
             return Err(BundleConnectionError::BranchPlanNotConsumed {

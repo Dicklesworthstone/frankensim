@@ -1,4 +1,4 @@
-//! Bounded local shooting from a point source to an actual planar receiver.
+//! Bounded local shooting from a point source to a native receiving endpoint.
 //!
 //! Each trial uses the native scene's one-pass differentiated path. The two
 //! analytic arrival columns give a Newton correction in launch solid angle;
@@ -54,9 +54,11 @@ pub enum BundleBranchPolicy<'a> {
     Sequence(&'a [DielectricEvent]),
 }
 
-/// Target point on a named native planar receiver, with a normal toward light.
+/// Target point on a named native planar receiver or in an original medium,
+/// with a section normal toward light.
 /// Position tolerance is a numerical endpoint allowance, not an aperture or an
-/// error bound on irradiance. The scene still supplies the finite aperture.
+/// error bound on irradiance. The scene supplies a surface receiver's finite
+/// aperture; a volume target instead validates the point's original medium.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BundleConnectionTarget {
     object_id: u64,
@@ -71,6 +73,7 @@ pub struct BundleConnectionTarget {
 enum ReceiverKind {
     Detector,
     Diffuse,
+    Volume { medium: usize },
 }
 
 impl BundleConnectionTarget {
@@ -125,6 +128,29 @@ impl BundleConnectionTarget {
         Ok(result)
     }
 
+    /// Receive a source connection at a point in an original scene medium.
+    /// `section_normal` defines only the numerical shooting section, oriented
+    /// toward the source. The native geometry remains authoritative before it;
+    /// no detector, surface interaction, or substituted geometry is created.
+    /// The section is active only while the walk occupies `medium`.
+    ///
+    /// For molecular radiometry use the final ray's transverse area, i.e. a
+    /// projection normal parallel to its direction, not this numerical section.
+    /// Position tolerance bounds the resolved endpoint residual, not irradiance
+    /// error. A point inside an unresolved physical contact collar is refused.
+    pub fn try_volume_receiver(
+        medium: usize,
+        position_m: Point3,
+        section_normal: Vec3,
+        position_tolerance_m: f64,
+    ) -> Result<Self, BundleConnectionError> {
+        let mut result = Self::try_new(0, position_m, section_normal, position_tolerance_m)?;
+        result.kind = ReceiverKind::Volume { medium };
+        Ok(result)
+    }
+
+    /// Native surface identity for detector/diffuse targets. Volume targets
+    /// have no object and return zero; use `volume_medium_index` for them.
     pub const fn object_id(self) -> u64 {
         self.object_id
     }
@@ -143,8 +169,27 @@ impl BundleConnectionTarget {
         matches!(self.kind, ReceiverKind::Diffuse)
     }
 
-    fn diffuse_receiver_id(self) -> Option<u64> {
-        self.is_diffuse_receiver().then_some(self.object_id)
+    pub const fn is_volume_receiver(self) -> bool {
+        matches!(self.kind, ReceiverKind::Volume { .. })
+    }
+
+    pub const fn volume_medium_index(self) -> Option<usize> {
+        match self.kind {
+            ReceiverKind::Volume { medium } => Some(medium),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn native_receiver(self) -> Option<super::BundleReceiver> {
+        match self.kind {
+            ReceiverKind::Detector => None,
+            ReceiverKind::Diffuse => Some(super::BundleReceiver::Diffuse(self.object_id)),
+            ReceiverKind::Volume { medium } => Some(super::BundleReceiver::Volume {
+                medium,
+                position_m: self.position_m,
+                normal: self.normal,
+            }),
+        }
     }
 }
 
@@ -494,7 +539,7 @@ impl CurvedPolarizedScene<'_> {
                     launch.initial_medium,
                     options.scene,
                     true,
-                    target.diffuse_receiver_id(),
+                    target.native_receiver(),
                     |_, context| {
                         Ok(if context.total_internal_reflection {
                             DielectricEvent::Reflection
@@ -513,7 +558,7 @@ impl CurvedPolarizedScene<'_> {
                     launch.initial_medium,
                     options.scene,
                     true,
-                    target.diffuse_receiver_id(),
+                    target.native_receiver(),
                     |_, _| {
                         let event = events.get(consumed).copied().ok_or(
                             CurvedBundleSceneError::BranchPlanExhausted {
@@ -536,7 +581,9 @@ impl CurvedPolarizedScene<'_> {
             .checked_add(path.query_work())
             .ok_or(BundleConnectionError::NumericalRange)?;
         if let Some((planned, consumed)) = branch_plan {
-            if (path.termination() == PathTermination::Detected || path.is_diffuse_receiver())
+            if (path.termination() == PathTermination::Detected
+                || path.is_diffuse_receiver()
+                || path.is_volume_receiver())
                 && consumed != planned
             {
                 return Err(BundleConnectionError::BranchPlanNotConsumed { planned, consumed });
@@ -556,33 +603,38 @@ fn arrival(
         ReceiverKind::Diffuse => {
             path.termination() == PathTermination::Opaque && path.is_diffuse_receiver()
         }
+        ReceiverKind::Volume { medium } => {
+            path.is_volume_receiver() && path.medium_index() == medium
+        }
     };
     if !reached {
         return Err(BundleConnectionError::ReceiverNotReached(
             path.termination(),
         ));
     }
-    let contact = path
-        .last_contact()
-        .ok_or(BundleConnectionError::WrongDetector)?;
-    if contact.object_id != target.object_id {
-        return Err(BundleConnectionError::WrongDetector);
-    }
-    if contact.witness.departure_radius_m.is_none() {
-        return Err(BundleConnectionError::NonPlanarReceiver);
-    }
-    // Native planar normals and the supplied receiver orientation must agree
-    // to roundoff-scale angular resolution; either geometric orientation is valid.
-    if norm(cross(contact.witness.normal, target.normal)) > 1e-8
-        || contact
-            .witness
-            .surface_point
-            .delta_from(target.position_m)
-            .dot(target.normal)
-            .abs()
-            > target.position_tolerance_m
-    {
-        return Err(BundleConnectionError::ReceiverPlaneMismatch);
+    if !target.is_volume_receiver() {
+        let contact = path
+            .last_contact()
+            .ok_or(BundleConnectionError::WrongDetector)?;
+        if contact.object_id != target.object_id {
+            return Err(BundleConnectionError::WrongDetector);
+        }
+        if contact.witness.departure_radius_m.is_none() {
+            return Err(BundleConnectionError::NonPlanarReceiver);
+        }
+        // Native planar normals and the supplied receiver orientation must agree
+        // to roundoff-scale angular resolution; either geometric orientation is valid.
+        if norm(cross(contact.witness.normal, target.normal)) > 1e-8
+            || contact
+                .witness
+                .surface_point
+                .delta_from(target.position_m)
+                .dot(target.normal)
+                .abs()
+                > target.position_tolerance_m
+        {
+            return Err(BundleConnectionError::ReceiverPlaneMismatch);
+        }
     }
     let bundle = path.bundle().propagation();
     let endpoint = bundle.propagation().ray;
@@ -662,3 +714,6 @@ mod tests;
 
 #[cfg(test)]
 mod diffuse_tests;
+
+#[cfg(test)]
+mod volume_tests;

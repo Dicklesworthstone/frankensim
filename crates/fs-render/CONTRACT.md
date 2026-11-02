@@ -347,6 +347,20 @@ differentiable lift). Pure Rust throughout.
   branch plans, visibility, finite support, medium identity, contact resolution,
   planarity, work bounds and cancellation.
 
+- `curved::bundle::connection::BundleConnectionTarget::try_volume_receiver`
+  connects a source to a point inside a named original optical medium. Its
+  numerical target section is composed with the original boundary oracle;
+  nearer geometry, native departure neighborhoods, cancellation and work limits
+  remain authoritative. The endpoint creates no scene object, material, BSDF or
+  physical surface event. A distinct result marker and branch tag retain its
+  original medium, and Newton/replay must resolve the actual unsnapped point.
+  The section normal controls endpoint solving only: molecular radiometry uses
+  the area perpendicular to the actual arriving ray, with no surface cosine.
+  Source transmittance replays this same volume target, including complete
+  endpoint validation after a legitimate zero ratio sample. Detector and
+  diffuse targets retain their existing semantics. This remains a bounded
+  declared-branch solver, not a certificate that every optical image was found.
+
 - With `volumes`, `curved::participating::transmittance` connects a selected
   native source branch with its molecular scattering survival. It first solves
   the original deterministic bundle connection, then replays the solved launch
