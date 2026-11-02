@@ -4806,3 +4806,23 @@ carrier extraction and delayed nonthermal stores require their own owners.
 G1/G3 tests compare distinct-cell heat against an independent matched-index
 Fresnel/Beer-Lambert solution, retain existing external heat, and cover shared
 cells, source permutation, receiver refusal and late transactional failure.
+
+### Finite-film optical constants follow native thermal state
+
+`SurfaceCoatingLaw` binds absolute film n/k to explicit temperature or specific
+enthalpy rows. The native `CoherentAbsorbingCoating` still owns wavelength
+interpolation, passive propagation and absorption. State interpolation precedes
+the coherent solve; reflected or absorbed intensities are never mixed. All rows
+retain the same nine-knot wavelength grid and exact thickness, so no expansion,
+phase-mixture rule or broadband continuation is inferred. Exact transparent
+endpoints and representable subnormal extinction remain intact.
+
+Native resolution checks active cell/material identity and the declared Kelvin
+domain. Enthalpy laws additionally bind the original caloric identity, energy
+datum and enthalpy storage basis, allowing distinct optical states at the same
+latent-plateau temperature. Neither state coordinate is extrapolated. Immutable
+rows are shared; evaluation uses a bounded binary lookup and reconstructs the
+original film without allocation. Source identities retain every endpoint and
+cannot promote representative data to caller-asserted measured optics.
+Focused G0/G1/G3 tests exercise original coherent absorption after interpolation,
+weak/transparent/subnormal limits, exact latent-state binding and domain refusal.

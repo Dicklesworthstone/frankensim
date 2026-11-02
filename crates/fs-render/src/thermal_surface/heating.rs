@@ -19,6 +19,9 @@ pub mod coating;
 pub use coating::{
     CoatedSurfaceIlluminationSource, CoatedSurfacePowerResponse, SurfaceHeatingReceiver,
 };
+/// Finite-film optical constants on the original temperature or enthalpy state.
+pub mod coating_feedback;
+pub use coating_feedback::SurfaceCoatingLaw;
 
 /// Explicit conductor optical constants versus native temperature or enthalpy.
 pub mod feedback;
