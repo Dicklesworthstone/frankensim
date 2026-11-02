@@ -27,6 +27,8 @@ pub mod dielectric;
 /// Retained nonlinear capacitor laws and explicit work on their reconfiguration.
 pub mod capacitance;
 use contacts::{SeriesElectricalContact, ContactHeat};
+mod resistors;
+pub(crate) use resistors::{account_resistor_heat, lower_resistors};
 
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
 use fs_phs::circuit::{
@@ -241,29 +243,19 @@ fn bind_with_mutual(graph: &CircuitGraph, sources: Vec<MaterialResistor>,
     bind_with_storage_laws(graph, sources, contacts, mutual, &[], &[])
 }
 
-fn bind_with_storage_laws(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>,
+fn bind_with_storage_laws(graph: &CircuitGraph, sources: Vec<MaterialResistor>,
     contacts: &[SeriesElectricalContact], mutual: &[MutualInductance],
     capacitor_curves: &[CapacitorCurve], capacitance_blocks: &[CapacitanceBlock])
     -> Result<(CircuitGraph, Vec<MaterialResistor>, CircuitDae), MaterialCircuitError>
 {
     use MaterialCircuitError::Invalid;
-    let n_r = admit_graph(graph)?;
+    admit_graph(graph)?;
     // Every unordered branch pair can occur at most once. Bound caller input
     // before the native owner allocates/factors the complete inductance matrix.
     if mutual.len() > graph.branches.len().saturating_mul(graph.branches.len().saturating_sub(1))/2 {
         return Err(Invalid("mutual inductance exceeds the bounded branch-pair capacity"));
     }
-    if sources.len() != n_r { return Err(Invalid("every resistor requires exactly one material binding")); }
-    sources.sort_by_key(|s| s.branch);
-    let mut lowered = graph.clone();
-    for (i, source) in sources.iter().enumerate() {
-        if i > 0 && sources[i-1].branch == source.branch { return Err(Invalid("duplicate resistor binding")); }
-        let branch = lowered.branches.get_mut(source.branch).ok_or(Invalid("material branch index out of range"))?;
-        if !matches!(branch.2, Branch::Resistor { .. }) { return Err(Invalid("material binding does not name a resistor")); }
-        let r = source.conductor.resistance_ohm();
-        if !positive(r) || !positive(1.0/r) { return Err(Invalid("resistor conductance is unrepresentable")); }
-        branch.2 = Branch::Resistor { ohms: r };
-    }
+    let (mut lowered, sources) = lower_resistors(graph, sources)?;
     contacts::lower(&mut lowered, contacts)?;
     if capacitor_curves.len() > lowered.branches.len()
         || capacitance_blocks.len() > lowered.branches.len()
@@ -312,52 +304,8 @@ fn account_step_with_storage_change(
             .iter().any(|v| !v.is_finite()) || h0 < 0.0 || h1 < 0.0 || record.dissipated < 0.0 {
         return Err(MaterialCircuitError::Balance("nonfinite or negative storage/loss"));
     }
-    let voltage = |node: usize| {
-        if node == 0 { 0.0 } else {
-            let i = node_indices[node-1];
-            f64::midpoint(x0[i], record.x[i])
-        }
-    };
-    let mut heat_j = 0.0;
-    let mut heat = Vec::with_capacity(resistors.len());
-    let mut contact_heat = Vec::with_capacity(contacts.len());
-    for source in resistors {
-        poll(cancelled)?;
-        let (a,b,branch) = graph.branches[source.branch];
-        let terminal_v = voltage(a)-voltage(b);
-        let has_contact = contacts.iter().any(|c| c.branch() == source.branch);
-        // Preserve the exact legacy conductor arithmetic on contact-free branches.
-        let (v,i) = if has_contact {
-            let Branch::Resistor { ohms } = branch else { unreachable!("admitted resistor") };
-            let current = terminal_v/ohms;
-            if !current.is_finite() || (terminal_v != 0.0 && current == 0.0) {
-                return Err(MaterialCircuitError::Balance("series current is unrepresentable"));
-            }
-            (current*source.conductor.resistance_ohm(),current)
-        } else { (terminal_v,source.conductor.current_a_for_drive(OhmicDrive::Voltage(terminal_v))?) };
-        let p = source.conductor.joule_power_w(i)?;
-        let q = dt*p;
-        let defect = v*i-p;
-        if !q.is_finite() || (p != 0.0 && q == 0.0) || !defect.is_finite()
-            || defect.abs() > controls.power_tolerance_w {
-            return Err(MaterialCircuitError::Balance("resistor electrical work and material heat disagree"));
-        }
-        heat_j += q;
-        let mut branch_power = p;
-        for contact in contacts.iter().filter(|c| c.branch() == source.branch) {
-            poll(cancelled)?;
-            let loss = contact.heat(i, dt)?;
-            branch_power += loss.power_w;
-            heat_j += loss.heat_j;
-            contact_heat.push(loss);
-        }
-        let terminal_defect = terminal_v*i-branch_power;
-        if !terminal_defect.is_finite() || terminal_defect.abs() > controls.power_tolerance_w {
-            return Err(MaterialCircuitError::Balance("bulk and contact powers do not close terminal work"));
-        }
-        heat.push(ResistorHeat { material:source.clone(), voltage_v:v, current_a:i, power_w:p, heat_j:q });
-    }
-    contact_heat.sort_by_key(|h| h.contact.id());
+    let (heat, contact_heat, heat_j) = account_resistor_heat(graph, resistors, contacts,
+        node_indices, x0, record, dt, controls, cancelled)?;
     let residual = storage_change_j+heat_j-record.supplied;
     if !heat_j.is_finite() || !residual.is_finite()
         || (heat_j-record.dissipated).abs() > controls.energy_tolerance_j

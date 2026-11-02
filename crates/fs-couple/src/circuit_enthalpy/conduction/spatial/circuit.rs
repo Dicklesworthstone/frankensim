@@ -4,7 +4,11 @@
 
 use super::super::circuit::consistent;
 use super::*;
-use crate::material_circuit::{MaterialCircuitError, MaterialCircuitSolve, admit_graph};
+use crate::circuit_enthalpy::material::CellResistor;
+use crate::material_circuit::{
+    MaterialCircuitError, MaterialCircuitSolve, MaterialResistor, ResistorHeat,
+    account_resistor_heat, lower_resistors,
+};
 use fs_em::spatial::conduction::SpatialConductanceMatrix;
 use fs_phs::{
     StepRecord,
@@ -16,9 +20,10 @@ use fs_phs::{
 use std::collections::BTreeSet;
 
 /// Original electrical storage and spatial source history. The graph contains
-/// fixed authored C/L, source ports and optional ideal transformers. Dissipation
-/// belongs solely to this field; separate graph resistors and source-dependent
-/// storage require their own heat/work bindings and are explicitly excluded.
+/// fixed authored C/L, source ports and optional ideal transformers. Each
+/// ordinary graph resistor requires its original complete material source and
+/// a separate whole-cell thermal receiver; the spatial field retains its own
+/// bulk/contact heat. Source-dependent storage requires a reversible-work owner.
 pub struct SpatialConductionCircuit<C = ResolvedConductorState> {
     problem: SpatialConduction<C>,
     graph: CircuitGraph,
@@ -27,6 +32,7 @@ pub struct SpatialConductionCircuit<C = ResolvedConductorState> {
     fluxes_wb: Vec<f64>,
     charges_c: Vec<f64>,
     time_s: f64,
+    material_resistors: Vec<MaterialResistor>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +43,10 @@ pub struct SpatialConductionCircuitStep {
     pub terminal_voltage_v: Vec<f64>,
     /// Native conductance-block currents INTO the spatial body.
     pub terminal_current_a: Vec<f64>,
+    /// Original lumped material losses, separate from spatial bulk/contact heat.
+    pub resistors: Vec<ResistorHeat>,
+    /// Complete field/contact plus lumped material heat, once per physical loss.
+    pub heat_j: f64,
     pub stored_before_j: f64,
     pub stored_after_j: f64,
     /// Independently evaluated fixed-C/L energy increment, with cancellation
@@ -87,9 +97,9 @@ impl<C: SpatialConductorMaterial> ThermalDriver for CircuitCandidate<C> {
     type Step = SpatialConductionCircuitStep;
     fn account(&self) -> DriverAccount<'_> {
         DriverAccount {
-            resistors: &[],
+            resistors: &self.step.resistors,
             contacts: &[],
-            heat_j: self.step.spatial.heat_j,
+            heat_j: self.step.heat_j,
             numerical_dissipation_j: 0.0,
             stored_change_j: self.step.stored_change_j,
             supplied_j: self.step.supplied_work_j,
@@ -102,6 +112,13 @@ impl<C: SpatialConductorMaterial> ThermalDriver for CircuitCandidate<C> {
 
 fn electrical(error: CircuitError) -> Error {
     CircuitEnthalpyError::Circuit(MaterialCircuitError::Circuit(error))
+}
+
+fn material_circuit(error: MaterialCircuitError) -> Error {
+    match error {
+        MaterialCircuitError::Cancelled => CircuitEnthalpyError::Cancelled,
+        other => CircuitEnthalpyError::Circuit(other),
+    }
 }
 
 fn native_polled<T>(
@@ -197,16 +214,49 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
         field_controls: ConductionControls,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
+        Self::new_with_material_resistors(
+            problem,
+            graph,
+            terminals,
+            nodes,
+            Vec::new(),
+            time_s,
+            fluxes_wb,
+            charges_c,
+            ports,
+            response,
+            field_controls,
+            cancelled,
+        )
+    }
+
+    /// Bind a complete original source to every ordinary resistor branch.
+    /// Authored numeric ohms are replaced by these material/geometry values.
+    /// Sources may be obtained from `MaterialNetwork::resolve_with_bases` at
+    /// the accepted thermal state. Advance with `step_material_circuit_candidate`
+    /// so every source follows its own receiving cell's temperature and phase.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_material_resistors(
+        problem: SpatialConduction<C>,
+        graph: CircuitGraph,
+        terminals: Vec<Vec<usize>>,
+        nodes: Vec<usize>,
+        material_resistors: Vec<MaterialResistor>,
+        time_s: f64,
+        fluxes_wb: Vec<f64>,
+        charges_c: Vec<f64>,
+        ports: &[f64],
+        response: SpatialConductanceControls,
+        field_controls: ConductionControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
-        if !time_s.is_finite()
-            || time_s < 0.0
-            || admit_graph(&graph).map_err(CircuitEnthalpyError::Circuit)? != 0
-        {
-            return Err(invalid(
-                "finite initial time and a bounded graph without separate resistor losses required",
-            ));
+        if !time_s.is_finite() || time_s < 0.0 {
+            return Err(invalid("finite nonnegative initial circuit time required"));
         }
+        let (graph, material_resistors) =
+            lower_resistors(&graph, material_resistors).map_err(material_circuit)?;
         let (matrix, _, dae) = prepare(
             &problem,
             &graph,
@@ -228,6 +278,7 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
             fluxes_wb,
             charges_c,
             time_s,
+            material_resistors,
         })
     }
     pub fn problem(&self) -> &SpatialConduction<C> {
@@ -251,11 +302,16 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
     pub fn time_s(&self) -> f64 {
         self.time_s
     }
+    /// Complete branch-ordered conductor sources at the accepted thermal state.
+    pub fn material_resistors(&self) -> &[MaterialResistor] {
+        &self.material_resistors
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn trial(
         &self,
         problem: SpatialConduction<C>,
+        material_resistors: Vec<MaterialResistor>,
         target_s: f64,
         ports: &[f64],
         response: SpatialConductanceControls,
@@ -276,9 +332,11 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
         if dt <= 0.0 {
             return Err(invalid("positive spatial circuit interval required"));
         }
+        let (graph, material_resistors) =
+            lower_resistors(&self.graph, material_resistors).map_err(material_circuit)?;
         let (matrix, block, dae) = prepare(
             &problem,
-            &self.graph,
+            &graph,
             &self.terminals,
             &self.nodes,
             response,
@@ -369,22 +427,39 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
             }
         }
         drop(matrix);
-        let heat_j = finite(dt * field.power_w)?;
+        let spatial_heat_j = finite(dt * field.power_w)?;
         let terminal_work = finite(dt * terminal_power)?;
-        if (field.power_w > 0.0 && heat_j == 0.0)
+        if (field.power_w > 0.0 && spatial_heat_j == 0.0)
             || finite(terminal_power - factored_power)?.abs() > controls.power_tolerance_w
             || finite(field.power_w - terminal_power)?.abs() > controls.power_tolerance_w
-            || finite(heat_j - terminal_work)?.abs() > controls.energy_tolerance_j
-            || finite(heat_j - native.dissipated)?.abs() > controls.energy_tolerance_j
+            || finite(spatial_heat_j - terminal_work)?.abs() > controls.energy_tolerance_j
         {
             return Err(invalid(
-                "native field/contact heat and circuit dissipation disagree",
+                "native field/contact heat and terminal work disagree",
+            ));
+        }
+        let (resistors, _, resistor_heat_j) = account_resistor_heat(
+            &graph,
+            &material_resistors,
+            &[],
+            &dae.node_potential_index,
+            &x0,
+            &native,
+            dt,
+            controls,
+            &mut || (*cancel.borrow_mut())(),
+        )
+        .map_err(material_circuit)?;
+        let heat_j = finite(spatial_heat_j + resistor_heat_j)?;
+        if finite(heat_j - native.dissipated)?.abs() > controls.energy_tolerance_j {
+            return Err(invalid(
+                "spatial/contact and material resistor heat do not close native dissipation",
             ));
         }
         let fluxes_wb: Vec<_> = dae.flux_index.iter().map(|&i| native.x[i]).collect();
         let charges_c: Vec<_> = dae.charge_index.iter().map(|&i| native.x[i]).collect();
         let (mut l, mut c, mut stored_change_j) = (0, 0, 0.0);
-        for &(_, _, branch) in &self.graph.branches {
+        for &(_, _, branch) in &graph.branches {
             check(cancel)?;
             let work = match branch {
                 Branch::Inductor { henries } => {
@@ -427,7 +502,7 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
             end_s: target_s,
             field,
             contacts: contact_heat,
-            heat_j,
+            heat_j: spatial_heat_j,
             supplied_work_j: terminal_work,
         };
         check(cancel)?;
@@ -435,18 +510,21 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
             CircuitCandidate {
                 circuit: Self {
                     problem,
-                    graph: self.graph.clone(),
+                    graph,
                     terminals: self.terminals.clone(),
                     nodes: self.nodes.clone(),
                     fluxes_wb,
                     charges_c,
                     time_s: target_s,
+                    material_resistors,
                 },
                 step: SpatialConductionCircuitStep {
                     native,
                     spatial,
                     terminal_voltage_v,
                     terminal_current_a,
+                    resistors,
+                    heat_j,
                     stored_before_j,
                     stored_after_j,
                     stored_change_j,
@@ -480,16 +558,54 @@ impl SpatialConductionThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialConductionCircuitEnthalpyCandidate<'t, C>, Error> {
+        self.step_material_circuit_candidate(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            &[],
+            contact_bindings,
+            response,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// Evolve ordinary material resistors and the multi-electrode field in one
+    /// original descriptor/enthalpy step. Each resistor's full source bundle,
+    /// electrical basis, geometry and receiving caloric cell remain explicit.
+    /// Whole-cell resistor volumes cannot also belong to the spatial field.
+    /// Bulk/contact/branch heat stays separate and is deposited exactly once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_material_circuit_candidate<'t, C: SpatialConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &SpatialConductionCircuit<C>,
+        ports: &[f64],
+        material_resistors: &[CellResistor],
+        contact_bindings: &[ConductionContactThermal<'_>],
+        response: SpatialConductanceControls,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialConductionCircuitEnthalpyCandidate<'t, C>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         if thermal.time_s() != circuit.time_s
+            || material_resistors.len() != circuit.material_resistors.len()
             || !controls.circuit.energy_tolerance_j.is_finite()
             || controls.circuit.energy_tolerance_j <= 0.0
             || !controls.circuit.power_tolerance_w.is_finite()
             || controls.circuit.power_tolerance_w <= 0.0
         {
             return Err(invalid(
-                "common accepted time and finite positive circuit work tolerances required",
+                "common accepted time, complete material resistor bindings and finite positive work tolerances required",
             ));
         }
         self.admit_step(
@@ -502,12 +618,45 @@ impl SpatialConductionThermalNetwork<'_> {
         )?;
         let network = MaterialNetwork {
             cells: self.cells,
-            resistors: &[],
+            resistors: material_resistors,
             links: self.links,
         };
+        let bases = circuit
+            .material_resistors
+            .iter()
+            .map(|resistor| (resistor.branch, resistor.conductor.source_basis()))
+            .collect::<Vec<_>>();
         let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .prepare_with_bases(thermal, &bases, || (*cancel.borrow_mut())())
             .map_err(material)?;
+        if !material_resistors.is_empty() {
+            let accepted = prepared
+                .resolve(thermal, || (*cancel.borrow_mut())())
+                .map_err(material)?;
+            for original in &circuit.material_resistors {
+                check(&cancel)?;
+                let next = accepted
+                    .resistors
+                    .iter()
+                    .find(|resistor| resistor.branch == original.branch)
+                    .ok_or_else(|| invalid("accepted material-resistor branch is absent"))?;
+                let (a, b) = (&original.conductor, &next.conductor);
+                if a.source_basis() != b.source_basis()
+                    || a.source_key() != b.source_key()
+                    || a.length_m().to_bits() != b.length_m().to_bits()
+                    || a.area_m2().to_bits() != b.area_m2().to_bits()
+                    || !same_material(a.material(), b.material())
+                {
+                    return Err(invalid(
+                        "accepted graph-resistor geometry and sources must match its actual caloric state",
+                    ));
+                }
+            }
+        }
+        let destinations = material_resistors
+            .iter()
+            .map(|resistor| resistor.destination)
+            .collect::<Vec<_>>();
         let (thermal, circuit, report) = self.step_driver_candidate_with_geometry(
             thermal,
             target_s,
@@ -526,9 +675,11 @@ impl SpatialConductionThermalNetwork<'_> {
             |_| Ok(None),
             &[],
             |_| Ok(Vec::new()),
-            |problem, contacts, remaining| {
+            &destinations,
+            |problem, resistors, contacts, remaining| {
                 circuit.trial(
                     problem,
+                    resistors,
                     target_s,
                     ports,
                     response,

@@ -16639,11 +16639,32 @@ cancellation and joint acceptance remain in the existing owners. The shared
 driver seam preserves the prescribed/moving consumer's accepted and trial
 mechanical contact-pressure inputs.
 
-The initial circuit consumer admits fixed geometry, fixed authored C/L, source
-ports and ideal transformers. Separate graph resistors and source-dependent
-storage require additional heat/reversible-work bindings and refuse here.
+The circuit consumer admits fixed geometry, fixed authored C/L, source ports
+and ideal transformers. `new_with_material_resistors` and
+`step_material_circuit_candidate` additionally admit ordinary graph resistors
+with complete original material sources and explicit whole-cell caloric receivers
+disjoint from spatial FE receiving volumes. Every nonlinear endpoint refreshes
+the original resistivity/conductivity bundle at the receiver's actual T/phase,
+retaining source coordinates and authored geometry. Accepted sources must agree
+with the accepted caloric state before advancement.
+
+The original resistor lowering and native midpoint branch-power accountant are
+shared with `MaterialCircuit`. Spatial bulk, electrical-contact and lumped
+branch heat remain separately reported; each enters the original caloric residual
+once. Their sum independently closes native dissipation and fixed-C/L storage
+plus authored source work. Missing or changed sources, duplicate or missing
+branch routes, overlapping field/resistor volumes, unsupported domains, exhausted
+shared solve budgets and cancellation refuse without publishing either history.
+Source-dependent storage still requires an explicit reversible-work owner.
 Native midpoint electrical work enters the existing backward-Euler thermal
-residual; this does not remove independent spatial and time-refinement needs.
+residual; independent spatial and time refinement remain necessary.
+
+Two additional integration regressions cover signed three-electrode RLC plus
+temperature-dependent resistor feedback and capacitor discharge through spatial
+bulk, two-sided contacts and a conductivity-based resistor retaining its original
+lot coordinate. Independent scalar energy oracles, formatting and source/API
+reviews passed. Native compilation and integration execution remain unverified
+because the shared dependency build exceeded workspace memory/storage capacity.
 
 Synthetic regressions cover signed two-interval three-electrode RLC/source
 feedback and capacitor discharge through temperature-dependent two-sided

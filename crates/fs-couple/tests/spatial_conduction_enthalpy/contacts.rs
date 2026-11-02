@@ -966,3 +966,6 @@ fn capacitor_discharge_refreshes_two_sided_contact_sources_and_deposits_surface_
         near(circuit.charges_c()[0], 4.0);
     }
 }
+
+#[path = "contacts/material_resistors.rs"]
+mod material_resistors;

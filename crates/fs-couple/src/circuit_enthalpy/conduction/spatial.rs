@@ -486,7 +486,8 @@ impl SpatialConductionThermalNetwork<'_> {
             trial_positions,
             accepted_pressures,
             trial_pressures,
-            |next, contact_owner, remaining| {
+            &[],
+            |next, _resistors, contact_owner, remaining| {
                 check(cancel).map_err(map_conduction_error)?;
                 let field_solves = match drive {
                     SpatialConductionDrive::TerminalCurrents { terminals, .. } => terminals
@@ -612,8 +613,10 @@ impl SpatialConductionThermalNetwork<'_> {
         trial_positions: impl Fn(&S) -> Result<Option<Vec<[f64; 3]>>, CircuitEnthalpyError<E>>,
         accepted_pressures: &[SolvedContactPressure<'p>],
         trial_pressures: impl Fn(&S) -> Result<Vec<SolvedContactPressure<'p>>, CircuitEnthalpyError<E>>,
+        resistor_cells: &[crate::circuit_enthalpy::ResistorCell],
         solve: impl Fn(
             SpatialConduction<C>,
+            Vec<crate::material_circuit::MaterialResistor>,
             &contacts::PreparedContacts<'_, '_>,
             usize,
         ) -> Result<(D, usize), CircuitEnthalpyError<E>>,
@@ -682,6 +685,38 @@ impl SpatialConductionThermalNetwork<'_> {
         let routes = route_owner
             .admit_volume_routes(thermal, &volumes, cancel)
             .map_err(map_conduction_error)?;
+        let field_cells = routes
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut resistor_routes = BTreeMap::new();
+        let mut resistor_receivers = std::collections::BTreeSet::new();
+        for destination in resistor_cells {
+            check(cancel).map_err(map_conduction_error)?;
+            if !thermal.cells().contains_key(&destination.cell)
+                || field_cells.contains(&destination.cell)
+                || !resistor_receivers.insert(destination.cell)
+                || resistor_routes
+                    .insert(destination.branch, destination.cell)
+                    .is_some()
+            {
+                return Err(map_conduction_error(invalid(
+                    "each whole-cell resistor needs a unique active receiver outside the spatial field volume",
+                )));
+            }
+        }
+        let admit_resistors = |sources: &[crate::material_circuit::MaterialResistor]|
+            -> Result<(), CircuitEnthalpyError<E>> {
+            let branches = sources.iter().map(|source| source.branch)
+                .collect::<std::collections::BTreeSet<_>>();
+            if sources.len() != resistor_routes.len() || branches.len() != sources.len()
+                || branches.iter().any(|branch| !resistor_routes.contains_key(branch)) {
+                return Err(map_conduction_error(invalid(
+                    "3D circuit resistor sources and thermal receivers must cover the same original branches",
+                )));
+            }
+            Ok(())
+        };
         let bindings: BTreeMap<_, _> = self.cells.iter().map(|c| (c.cell, c)).collect();
         let refresh = |sample: &MaterialNetworkSample| -> Result<Vec<C>, Error> {
             let phases: BTreeMap<_, _> = sample.cells.iter().map(|c| (c.cell, c.phase)).collect();
@@ -712,11 +747,7 @@ impl SpatialConductionThermalNetwork<'_> {
             }).collect()
         };
         let accepted = resolve(thermal)?;
-        if !accepted.resistors.is_empty() {
-            return Err(map_conduction_error(invalid(
-                "3D current cannot silently omit graph electrical work",
-            )));
-        }
+        admit_resistors(&accepted.resistors)?;
         let initial = refresh(sample(&accepted.source)).map_err(map_conduction_error)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b) || !same_material(a.material(), b.material())
@@ -750,11 +781,7 @@ impl SpatialConductionThermalNetwork<'_> {
             |trial, remaining| {
                 check(cancel).map_err(map_conduction_error)?;
                 let coefficients = resolve(trial)?;
-                if !coefficients.resistors.is_empty() {
-                    return Err(map_conduction_error(invalid(
-                        "3D current cannot silently omit graph electrical work",
-                    )));
-                }
+                admit_resistors(&coefficients.resistors)?;
                 let pressures = trial_pressures(&coefficients.source)?;
                 let refreshed_contacts = contact_owner
                     .refresh_sources_with_pressures(
@@ -808,7 +835,8 @@ impl SpatialConductionThermalNetwork<'_> {
                 }
                 .map_err(field_error)
                 .map_err(map_conduction_error)?;
-                let (driver, circuit_trials) = solve(next, &contact_owner, remaining)?;
+                let (driver, circuit_trials) =
+                    solve(next, coefficients.resistors, &contact_owner, remaining)?;
                 Ok(DrivenCoefficients {
                     circuit: driver,
                     sources_w: coefficients.sources_w,
@@ -831,6 +859,25 @@ impl SpatialConductionThermalNetwork<'_> {
                         &mut powers,
                     )
                     .map_err(map_conduction_error)?;
+                }
+                for resistor in candidate.account().resistors {
+                    checkpoint()?;
+                    let cell =
+                        *resistor_routes
+                            .get(&resistor.material.branch)
+                            .ok_or_else(|| {
+                                map_conduction_error(invalid(
+                                    "circuit returned resistor heat without its original receiver",
+                                ))
+                            })?;
+                    let previous = *powers.get(&cell).unwrap_or(&0.0);
+                    let next = finite(previous + resistor.power_w)?;
+                    if resistor.power_w != 0.0 && next == previous {
+                        return Err(map_conduction_error(invalid(
+                            "material resistor heat disappeared in the receiving-cell sum",
+                        )));
+                    }
+                    powers.insert(cell, next);
                 }
                 Ok(powers)
             },
