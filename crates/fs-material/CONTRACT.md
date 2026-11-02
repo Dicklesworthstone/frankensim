@@ -10113,3 +10113,34 @@ The largest relative inverse-compliance finite-difference discrepancy was
 `4.43e-8` for the fixed probe including a near-fold fixture. This is a local
 constitutive closure; spatial stability, pressure-space consistency and temporal
 convergence belong to its mixed consumer.
+
+### Adaptive competitive membrane breakthrough
+
+`membrane::transient::slab::competitive::adaptive` advances all competing
+channels and optional finite molar-pressure reservoirs on one accepted
+timeline through the original shared membrane controller. Every native probe
+retains the coupled shared-site solve. Error estimates compare each species'
+mobile pressure and amount, trapped amount, bath pressure and amount, and
+integrated face transfer. An additional shared-vacancy comparison uses
+compensated occupancy changes, preserving small changes near saturation.
+
+Algebraic residuals, including independent site kinetics, must remain below
+temporal pressure/storage and duration-weighted balance allowances. Native
+tolerances are tightened to the strictest channel capacity, while relative-only
+requests retain their original controls and must pass independent absolute
+audits. Accepted half steps alone contribute signed/gross face totals.
+Original-to-final cell, membrane, bath and closed-species accounts are audited
+separately; a quiet first species cannot hide another species' transient.
+
+`adaptive_workspace(maximum_bytes)` applies its byte ceiling to both retained
+native workspaces together. Work limits, failed native/source checks and
+cancellation publish no partial physical state. The private
+`CompetitiveNative` seam lets source-bound owners retain their physical
+admission on every joint probe. These are local temporal estimates for fixed
+coefficients, geometry and temperature, not spatial or whole-window error
+certificates, mixed-gas source qualification, swelling or sorption calorics.
+
+Focused G1/G3 tests compare competitive loading with an independent Riccati
+solution, finite-bath evolution with continuous-time eigenmodes, nonfirst
+species error control, competitive displacement and original face balances.
+Late work/cancellation refusal preserves the original state and clock.

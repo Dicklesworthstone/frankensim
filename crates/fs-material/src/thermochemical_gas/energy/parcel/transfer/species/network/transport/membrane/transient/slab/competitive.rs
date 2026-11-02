@@ -24,6 +24,8 @@ use crate::adsorption::{
 };
 use fs_thermochem::SpeciesId;
 
+/// One accepted adaptive timeline for every competing species and both baths.
+pub mod adaptive;
 mod solve;
 
 /// One original mobile field, per-layer trap laws and explicit retained loading.
@@ -440,6 +442,11 @@ impl FiniteCompetitiveMembraneDiffusionState {
     }
     pub const fn membrane(&self) -> &CompetitiveMembraneDiffusionState {
         &self.membrane
+    }
+    /// Consume a numerical bath candidate before rebinding its original
+    /// membrane to actual reservoir pressures supplied by a gas owner.
+    pub fn into_membrane(self) -> CompetitiveMembraneDiffusionState {
+        self.membrane
     }
     pub fn reservoir_partial_pressures_pa(&self) -> &[[f64; 2]] {
         &self.pressures

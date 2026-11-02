@@ -169,6 +169,27 @@ pub(crate) trait Native: Clone {
         None
     }
     fn is_cancelled(error: &Self::Error) -> bool;
+    /// Joint native owners may expose additional original fields. The default
+    /// scalar path keeps its original audit and temporal arithmetic unchanged.
+    fn additional_algebraic_balance(
+        &self,
+        _new: &Self,
+        _window: f64,
+        _controls: MembraneDiffusionAdvanceControls,
+        _cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn additional_distance(
+        &self,
+        _coarse: &Self,
+        _first_half: &Self,
+        _fine: &Self,
+        _controls: MembraneDiffusionAdvanceControls,
+        _cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, Self::Error> {
+        Ok(0.0)
+    }
     fn native_step(
         &self,
         reservoirs: [f64; 2],
@@ -339,6 +360,7 @@ fn probe<S: Native>(
             }
         })?;
     algebraic_balance(state, &result.0, &result.1, window, controls, cancelled)?;
+    state.additional_algebraic_balance(&result.0, window, controls, cancelled)?;
     Ok(result)
 }
 // Direct native factorizations admit/refuse measured residuals. Iterative
@@ -348,7 +370,7 @@ fn probe<S: Native>(
 // across inventories so large solubility/capacity contrasts cannot hide a large
 // state error behind a small per-row pressure error. Accepted durations sum to
 // the window, so the balance allowance never grows with the number of steps.
-fn algebraic_budget<S: Native>(
+pub(crate) fn algebraic_budget<S: Native>(
     state: &S,
     duration: f64,
     window: f64,
@@ -367,7 +389,7 @@ fn algebraic_budget<S: Native>(
     }
     Ok((global, per_inventory))
 }
-fn pressure_allowance<E>(
+pub(crate) fn pressure_allowance<E>(
     per_inventory: f64,
     capacity: f64,
     controls: MembraneDiffusionAdvanceControls,
@@ -417,7 +439,7 @@ fn stored_amount<S: Native>(
     }
     Ok(total.value)
 }
-fn algebraic_balance<S: Native>(
+pub(crate) fn algebraic_balance<S: Native>(
     old: &S,
     new: &S,
     report: &MembraneDiffusionStep,
@@ -499,7 +521,7 @@ fn coordinate_error<E>(
 fn face_amount<E>(report: &MembraneDiffusionStep, face: usize, area: f64) -> Result<f64, E> {
     finite((report.face_molar_fluxes_mol_m2_s[face] * area) * report.duration_s)
 }
-fn distance<S: Native>(
+pub(crate) fn distance<S: Native>(
     old: &S,
     a: &S,
     b: &S,
@@ -660,7 +682,14 @@ pub(crate) fn advance<S: Native>(
                 [&full, &first, &second],
                 controls,
                 &mut cancelled,
-            )?;
+            )?
+            .max(state.additional_distance(
+                &coarse,
+                &half,
+                &fine,
+                controls,
+                &mut cancelled,
+            )?);
         if !error.is_finite() || error > 1.0 {
             let smaller = (0.5 * span).max(controls.minimum_step_s);
             if smaller >= span {
