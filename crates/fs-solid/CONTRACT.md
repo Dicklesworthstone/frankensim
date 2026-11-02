@@ -3919,3 +3919,40 @@ OriginalMaterial and ExactIncompressible with explicit controls and reports
 physical bulk storage separately. All three 32-step native example runs passed.
 Contact, material relaxation, moving-support linear exponentials and a
 frequency-exact nonlinear finite-rotation split remain separate capabilities.
+
+## Exact affine-force histories on linear solids
+
+`ExactLinearSolid::prepare_affine_forces` prepares the same complete physical
+pencil for a fixed clock and an explicit positive characteristic force in N.
+`advance_affine(force_start_n, force_end_n, cx)` evolves the force linearly
+over each interval. Native `PreparedQuadraticFlow::new_extended_input_controlled`
+retains source coordinates `[u,v,f]`; a held force increment enters through
+`I/dt`, avoiding a per-step force-slope calculation. These added force
+coordinates carry no structural storage or inertia, and no new exponential
+implementation or modal approximation is introduced.
+
+Supplied work is independently integrated as `integral f(t) dot v(t) dt`
+through the native quadratic observation. It is not inferred from energy change
+or replaced by endpoint-average force dotted with displacement. Returned
+`mean_velocity_mps` remains the kinematic `Delta u/dt`; only held-force
+exchange can use it alone as a work-conjugate flow. The affine source endpoint,
+physical interval/cumulative work and cancellation gates all pass before the
+physical `[u,v]` state is accepted. Force jumps between intervals are explicit
+and change acceleration without introducing a velocity impulse.
+
+The affine complete dimension is `4*N+1 <= 256` (at most 63 free coordinates),
+with a distinct explicit cold-memory estimate and the same multiplication cap.
+The held route retains its original capacity. Wrong prepared mode, malformed
+forces, unrepresentable finite force increments, source error, exhausted budgets
+and cancellation refuse without changing accepted state. Exactness applies to
+the declared affine force history; approximating another continuous history
+still requires temporal refinement.
+
+G0/G1 tests in `tests/solid_linear_force_history.rs` passed all four cases.
+Coupled non-diagonal pencils are checked against analytic oscillator responses,
+with work evaluated independently by integration by parts. Zero-stiffness
+constant-jerk motion uses exact cubic/quadratic trajectories and a polynomial
+work integral. One interval and four subintervals agree through continuous
+ramps and finite force jumps. Affine-specific dimension/overflow boundaries,
+wrong mode, cancellation and deterministic replay are covered. All five
+existing held-force tests, including the million-step phase case, remain green.

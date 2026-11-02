@@ -1,4 +1,4 @@
-//! Exact held-force linear motion of the complete admitted solid pencil.
+//! Exact held or piecewise-affine force motion of the complete solid pencil.
 //!
 //! Every free coordinate in the original P1, TET10 or HEX assembly is retained.
 //! The shared `fs-phs` quadratic-flow owner prepares one exponential for a fixed
@@ -9,6 +9,9 @@
 //! J=[0,M^-1;-M^-1,0] and G=[0;M^-1]. The full consistent mass is inverted once
 //! through native Cholesky and admitted against the original matrix. Held force
 //! work is independently f dot (u_after-u_before). It is never inferred from H.
+//! The affine-force route appends the actual force as a source coordinate and
+//! integrates its original f(t) dot v(t) through the same native Gramian owner.
+//! These source coordinates carry no physical stored energy or inertia.
 //! Fixed supports are homogeneous and stationary; the reduced assembly cannot
 //! supply constrained reactions or moving-support coupling. Force inputs and
 //! outputs explicitly use `free_dofs()` order. Material damping, nonlinear
@@ -32,7 +35,8 @@ pub struct ExactLinearSolidControls {
     pub maximum_preparation_bytes: usize,
     /// The native exponential's declared scalar-product work cap.
     pub maximum_exponential_multiply_terms: u64,
-    /// Admits source symmetry and max entry of M M^-1 - I; dimensionless.
+    /// Admits source symmetry, max entry of M M^-1 - I, and affine force
+    /// endpoint error scaled by max(force_scale_n, |f_start|, |f_end|).
     pub maximum_relative_operator_error: f64,
     /// Absolute allowance for each interval and cumulative work balance [J].
     pub maximum_work_error_j: f64,
@@ -91,15 +95,17 @@ pub struct ExactLinearSolidEnergy {
 pub struct ExactLinearSolidStep {
     pub step: u64,
     pub time_s: f64,
-    /// Work-conjugate interval velocity Delta u / dt, in free-DOF order [m/s].
+    /// Mean kinematic velocity Delta u / dt, in free-DOF order [m/s]. For held
+    /// forces this is work-conjugate; affine-force work uses its full integral.
     pub mean_velocity_mps: Vec<f64>,
     pub energy: ExactLinearSolidEnergy,
 }
 
 /// Retained complete-coordinate motion at one explicitly fixed positive clock.
 /// Preparation is dense and bounded; this owner does not claim a scalable
-/// sparse exponential. Exactness concerns the admitted spatial pencil and held
-/// force, not finite-element continuum accuracy or time-varying input accuracy.
+/// sparse exponential. Exactness concerns the admitted spatial pencil and the
+/// explicitly held or affine source, not finite-element continuum accuracy or
+/// the approximation of another force history by those intervals.
 pub struct ExactLinearSolid {
     flow: PreparedQuadraticFlow,
     stiffness: Vec<f64>,
@@ -112,6 +118,7 @@ pub struct ExactLinearSolid {
     initial_energy_j: f64,
     cumulative_work_j: f64,
     work_correction_j: f64,
+    affine_force_scale_n: Option<f64>,
 }
 
 impl ExactLinearSolid {
@@ -124,6 +131,54 @@ impl ExactLinearSolid {
         dt_s: f64,
         initial_displacement_m: &[f64],
         initial_velocity_mps: &[f64],
+        controls: ExactLinearSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, ExactLinearSolidError> {
+        Self::prepare_source(
+            assembly,
+            dt_s,
+            initial_displacement_m,
+            initial_velocity_mps,
+            None,
+            controls,
+            cx,
+        )
+    }
+
+    /// Prepare exact linearly interpolated forces on the same complete pencil.
+    /// `force_scale_n` is an explicit positive numerical force magnitude [N],
+    /// used only to condition the added source coordinates. It changes neither
+    /// physical source amplitudes nor the structural storage. Each interval is
+    /// supplied with its own start/end forces; finite jumps between intervals
+    /// are allowed and do not apply an impulse to the accepted physical state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_affine_forces(
+        assembly: &TetElasticAssembly,
+        dt_s: f64,
+        initial_displacement_m: &[f64],
+        initial_velocity_mps: &[f64],
+        force_scale_n: f64,
+        controls: ExactLinearSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, ExactLinearSolidError> {
+        Self::prepare_source(
+            assembly,
+            dt_s,
+            initial_displacement_m,
+            initial_velocity_mps,
+            Some(force_scale_n),
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_source(
+        assembly: &TetElasticAssembly,
+        dt_s: f64,
+        initial_displacement_m: &[f64],
+        initial_velocity_mps: &[f64],
+        affine_force_scale_n: Option<f64>,
         controls: ExactLinearSolidControls,
         cx: &Cx<'_>,
     ) -> Result<Self, ExactLinearSolidError> {
@@ -145,6 +200,12 @@ impl ExactLinearSolid {
                 .chain(initial_velocity_mps)
                 .any(|x| !x.is_finite())
             || assembly.free_dofs.windows(2).any(|pair| pair[0] >= pair[1])
+            || affine_force_scale_n.is_some_and(|scale| {
+                !scale.is_finite()
+                    || scale <= 0.0
+                    || !(1.0 / scale).is_finite()
+                    || !(1.0 / dt_s).is_finite()
+            })
         {
             return Err(invalid(
                 "complete finite initial state, sorted free map, positive clock and valid controls required",
@@ -157,7 +218,7 @@ impl ExactLinearSolid {
             });
         }
         let d = n
-            .checked_mul(3)
+            .checked_mul(if affine_force_scale_n.is_some() { 4 } else { 3 })
             .and_then(|v| v.checked_add(1))
             .ok_or_else(|| invalid("complete exponential dimension overflow"))?;
         if d > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
@@ -166,12 +227,19 @@ impl ExactLinearSolid {
                 maximum: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
             });
         }
-        // Native flow reserves 24*d^2 doubles; another 24*d^2 covers original
-        // pencil, inverse, Q/J/G, eigen preparation and retained state. Cholesky
-        // above its panel size additionally packs the native GEMM panels.
+        // The held native flow reserves 24*d² doubles; its affine extension with
+        // one quadratic work form reserves 38*d². Reserve the same amount again
+        // for the physical pencil, source map, inverse, eigen work and state.
+        // Cholesky above its panel size also packs the native GEMM panels.
         let bytes = d
             .checked_mul(d)
-            .and_then(|v| v.checked_mul(48 * 8))
+            .and_then(|v| {
+                v.checked_mul(if affine_force_scale_n.is_some() {
+                    80 * 8
+                } else {
+                    48 * 8
+                })
+            })
             .and_then(|v| v.checked_add(if n > 32 { 2 * 1024 * 1024 } else { 0 }))
             .ok_or_else(|| invalid("complete exponential byte overflow"))?;
         if bytes > controls.maximum_preparation_bytes {
@@ -253,19 +321,54 @@ impl ExactLinearSolid {
             },
         )?;
         poll(cx)?;
-        let flow = PreparedQuadraticFlow::new_controlled(
-            &system,
-            &split,
-            dt_s,
-            &[],
-            &[],
-            DenseExponentialBudget {
-                max_dimension: d,
-                max_dense_bytes: bytes / 2,
-                max_multiply_terms: controls.maximum_exponential_multiply_terms,
-            },
-            || cx.checkpoint().is_err(),
-        )?;
+        let flow_budget = DenseExponentialBudget {
+            max_dimension: d,
+            max_dense_bytes: bytes / 2,
+            max_multiply_terms: controls.maximum_exponential_multiply_terms,
+        };
+        let flow = if let Some(force_scale_n) = affine_force_scale_n {
+            let extended = 3 * n;
+            let mut generator = vec![0.0; extended * extended];
+            let mut source = vec![0.0; extended * n];
+            let mut work = vec![0.0; extended * extended];
+            for a in 0..n {
+                poll(cx)?;
+                generator[a * extended + n + a] = 1.0;
+                // The held input is Delta f [N], not a potentially very large
+                // slope. Only its cold source map divides by the fixed clock.
+                source[(2 * n + a) * n + a] = 1.0 / dt_s;
+                work[(n + a) * extended + 2 * n + a] = 0.5;
+                work[(2 * n + a) * extended + n + a] = 0.5;
+                for b in 0..n {
+                    generator[(n + a) * extended + b] = -(0..n).fold(0.0, |s, k| {
+                        inverse[a * n + k].mul_add(stiffness[k * n + b], s)
+                    });
+                    generator[(n + a) * extended + 2 * n + b] = inverse[a * n + b];
+                }
+            }
+            PreparedQuadraticFlow::new_extended_input_controlled(
+                &system,
+                &split,
+                &generator,
+                &vec![1.0 / force_scale_n; n],
+                &source,
+                dt_s,
+                &[work],
+                &[],
+                flow_budget,
+                || cx.checkpoint().is_err(),
+            )?
+        } else {
+            PreparedQuadraticFlow::new_controlled(
+                &system,
+                &split,
+                dt_s,
+                &[],
+                &[],
+                flow_budget,
+                || cx.checkpoint().is_err(),
+            )?
+        };
         let mut state = Vec::with_capacity(state_dim);
         state.extend_from_slice(initial_displacement_m);
         state.extend_from_slice(initial_velocity_mps);
@@ -286,6 +389,7 @@ impl ExactLinearSolid {
             initial_energy_j,
             cumulative_work_j: 0.0,
             work_correction_j: 0.0,
+            affine_force_scale_n,
         })
     }
 
@@ -322,32 +426,110 @@ impl ExactLinearSolid {
         cx: &Cx<'_>,
     ) -> Result<ExactLinearSolidStep, ExactLinearSolidError> {
         poll(cx)?;
+        if self.affine_force_scale_n.is_some() {
+            return Err(invalid("affine-force preparation requires advance_affine"));
+        }
         let n = self.free_dofs.len();
-        let step = self
-            .steps
-            .checked_add(1)
-            .filter(|v| *v <= self.controls.maximum_steps)
-            .ok_or_else(|| invalid("accepted step budget exhausted"))?;
-        let time_s = step as f64 * self.dt_s;
-        if held_force_n.len() != n
-            || held_force_n.iter().any(|f| !f.is_finite())
-            || !time_s.is_finite()
-            || time_s <= self.time_s()
-        {
+        let (step, time_s) = self.next_interval()?;
+        if held_force_n.len() != n || held_force_n.iter().any(|f| !f.is_finite()) {
             return Err(invalid(
                 "finite complete held forces and representable clock required",
             ));
         }
         let candidate = self.flow.evaluate(&self.state, held_force_n)?.state;
         poll(cx)?;
+        let supplied_work_j = (0..n).fold(0.0, |s, i| {
+            held_force_n[i].mul_add(candidate[i] - self.state[i], s)
+        });
+        self.accept(candidate, supplied_work_j, step, time_s, cx)
+    }
+
+    /// Advance one exactly linearly interpolated force interval. Start and end
+    /// arrays cover every free row. Work is integral f(t) dot v(t) dt, evaluated
+    /// independently by the prepared quadratic form; endpoint-average force
+    /// times displacement change is not substituted. No accepted source force
+    /// is retained, so a finite next-interval jump is explicit and impulse-free.
+    pub fn advance_affine(
+        &mut self,
+        force_start_n: &[f64],
+        force_end_n: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ExactLinearSolidStep, ExactLinearSolidError> {
+        poll(cx)?;
+        let scale = self
+            .affine_force_scale_n
+            .ok_or_else(|| invalid("held-force preparation requires advance"))?;
+        let n = self.free_dofs.len();
+        let (step, time_s) = self.next_interval()?;
+        if force_start_n.len() != n
+            || force_end_n.len() != n
+            || force_start_n
+                .iter()
+                .chain(force_end_n)
+                .any(|f| !f.is_finite())
+        {
+            return Err(invalid("finite complete force endpoints required"));
+        }
+        let increment: Vec<_> = force_start_n
+            .iter()
+            .zip(force_end_n)
+            .map(|(a, b)| b - a)
+            .collect();
+        if increment.iter().any(|f| !f.is_finite()) {
+            return Err(invalid("force increment is unrepresentable"));
+        }
+        let mut initial = Vec::with_capacity(3 * n);
+        initial.extend_from_slice(&self.state);
+        initial.extend_from_slice(force_start_n);
+        let response = self.flow.evaluate(&initial, &increment)?;
+        poll(cx)?;
+        for a in 0..n {
+            let magnitude = scale.max(force_start_n[a].abs()).max(force_end_n[a].abs());
+            let defect = (response.state[2 * n + a] / magnitude - force_end_n[a] / magnitude).abs();
+            if !defect.is_finite() || defect > self.controls.maximum_relative_operator_error {
+                return Err(ExactLinearSolidError::Operator {
+                    defect,
+                    allowance: self.controls.maximum_relative_operator_error,
+                });
+            }
+        }
+        let supplied_work_j = *response
+            .integrals
+            .first()
+            .ok_or_else(|| invalid("missing independently integrated force work"))?;
+        let mut candidate = response.state;
+        candidate.truncate(2 * n);
+        self.accept(candidate, supplied_work_j, step, time_s, cx)
+    }
+
+    fn next_interval(&self) -> Result<(u64, f64), ExactLinearSolidError> {
+        let step = self
+            .steps
+            .checked_add(1)
+            .filter(|v| *v <= self.controls.maximum_steps)
+            .ok_or_else(|| invalid("accepted step budget exhausted"))?;
+        let time_s = step as f64 * self.dt_s;
+        if !time_s.is_finite() || time_s <= self.time_s() {
+            return Err(invalid("representable later clock required"));
+        }
+        Ok((step, time_s))
+    }
+
+    fn accept(
+        &mut self,
+        candidate: Vec<f64>,
+        supplied_work_j: f64,
+        step: u64,
+        time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ExactLinearSolidStep, ExactLinearSolidError> {
+        let n = self.free_dofs.len();
         let u = &candidate[..n];
         let v = &candidate[n..];
         let stored_before_j = self.stored_energy_j();
         let kinetic_before_j = self.kinetic_energy_j();
         let stored_after_j = quadratic(&self.stiffness, u);
         let kinetic_after_j = quadratic(&self.mass, v);
-        let supplied_work_j =
-            (0..n).fold(0.0, |s, i| held_force_n[i].mul_add(u[i] - self.state[i], s));
         let change = quadratic_change(&self.stiffness, self.displacement_m(), u)
             + quadratic_change(&self.mass, self.velocity_mps(), v);
         let increment = supplied_work_j - self.work_correction_j;

@@ -36,10 +36,10 @@ pub mod cohesive;
 pub mod contact;
 pub mod continuation;
 pub mod cutfront;
-/// Complete-coordinate exact held-force dynamics on the original solid pencil.
-pub mod dynamics;
 /// Thermoviscoelastic deposited strips with retained history and release geometry.
 pub mod deposition;
+/// Complete-coordinate exact held/affine force dynamics on the original solid pencil.
+pub mod dynamics;
 /// Signed stress-life histories driven by the original tetrahedral load solver.
 pub mod fatigue;
 pub mod fiber;
