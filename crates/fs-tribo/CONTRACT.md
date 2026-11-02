@@ -560,7 +560,7 @@ The model follows the decoupled Cattaneo--Mindlin approximation, not a full
 three-dimensional elastic-friction solution. Changing normal load/radius,
 foreign-law state, or second-axis motion refuse; line contact, nonproportional
 shear, torsion, normal/tangential elastic coupling, temperature-dependent
-coefficients and local traction/wear reconstruction remain outside this rung.
+coefficients and accumulated local sliding/wear remain outside this rung.
 No material authority is supplied by numerical parameters alone. References:
 Popov, Hess and Willert (2019), sections 4.4 and 4.6.3,
 <https://doi.org/10.1007/978-3-662-58709-6_4>; Lyashenko and Popov (2015),
@@ -1430,4 +1430,33 @@ paths. Seven groups in `tests/adhesive_relaxation.rs` cover independent pure
 translation/spin and full three-coordinate coupled rim solutions, stationary
 dwell, time partition, tangent-gauge/reversal covariance, zero kinetic strength,
 tiny moving states, unchanged dimensional gates and cancellation/atomic retry.
+
+### Analytic local Hertz--Mindlin surface fields
+
+`MindlinDeresiewiczPoint::surface_response` and
+`HertzMindlinContact::surface_response` reconstruct radial Hertz pressure,
+signed tangential traction and relative elastic surface displacement directly
+from the original retained scalar history. The inverse Abel transform integrates
+each piecewise-quadratic spring strain analytically. Evaluation allocates
+nothing and takes O(retained intervals), without a new spatial mesh. Rationalized
+square-root differences preserve thin slip-ring traction; positive angular
+moments and the explicit center limit avoid cancellation in displacement.
+
+The shear field integrates to the accepted endpoint force, not the last step's
+path-average force. Virgin partial slip recovers the Cattaneo difference of two
+Hertz profiles and gross sliding gives `tau = +/-mu*p`. Pressure and shear vanish
+at and outside the current patch, while elastic surface displacement retains
+its physical inverse-distance exterior tail. Changing-load observations use the
+current patch and retained history, including open states and recontact. These
+are relative surface fields in the existing decoupled scalar approximation;
+nonproportional vector friction, per-body displacement, accumulated local
+sliding and wear evolution require their own owners.
+
+The physical reference is Popov, Hess and Willert (2019), section 4.4, equations
+4.25, 4.34 and 4.58, <https://doi.org/10.1007/978-3-662-58709-6_4>.
+Four focused groups verify independent virgin pressure/shear/displacement
+formulas, tiny slip and center/edge/exterior limits, signed reversal
+superposition and area-force convergence, changing normal/shear histories,
+local Coulomb bounds and original ownership/domain/frictionless behavior.
+All 30 surface, fixed-load and changing-load Mindlin tests pass.
 

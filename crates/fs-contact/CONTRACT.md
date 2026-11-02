@@ -1741,3 +1741,19 @@ temperature, native recoil, source receipts and combined sliding/spin heat
 together. Five source regression groups in `tests/adhesive_shear/temperature.rs`
 cover analytic spin power, pinned claims, fixed pressure, typed temperatures,
 source-domain and strength-order refusal, detachment and unchanged originals.
+
+## Original-source Hertz--Mindlin surface observations
+
+`SourceMindlinContact::surface_response` and
+`SourceHertzMindlinContact::surface_response` expose native radial pressure,
+signed endpoint shear traction and relative elastic surface displacement from
+the original source-bound checkpoint. Each adapter requires the original normal
+and friction identities before forwarding, without a material refresh or
+constitutive advance. The native scalar decoupled-model limits and exterior
+elastic displacement remain explicit. Changing-load observations use the
+current sourced patch; separation has zero fields and recontact begins without
+released shear memory.
+
+Three source integration groups check original Hertz/material/Coulomb
+propagation, loading/open/recontact fields and identity, and foreign-source or
+invalid-radius refusal without mutation. All 22 source Mindlin tests pass.

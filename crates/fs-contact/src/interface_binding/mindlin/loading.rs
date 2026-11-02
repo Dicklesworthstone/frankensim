@@ -188,6 +188,24 @@ impl SourceHertzMindlinContact {
         self.source.temperature_kelvin()
     }
 
+    /// Observe the current radial pressure, signed shear traction and relative
+    /// elastic surface displacement through the original retained source state.
+    /// Loaded states use their actual current patch; open states have zero
+    /// fields, and recontact retains the native owner's released-memory rule.
+    /// This performs no material refresh, normal update or shear advancement.
+    pub fn surface_response(
+        &self,
+        state: &SourceHertzMindlinState,
+        radius_m: f64,
+    ) -> Result<fs_tribo::mindlin::surface::MindlinSurfaceResponse, SourceMindlinError> {
+        if !self.owns_state(state) {
+            return Err(invalid(
+                "changing-load Mindlin surface fields require original source identities",
+            ));
+        }
+        Ok(self.law.surface_response(&state.constitutive, radius_m)?)
+    }
+
     /// Move monotonically to an explicit normal indentation while shear is held.
     ///
     /// The declared duration admits the constant segment rate against the same

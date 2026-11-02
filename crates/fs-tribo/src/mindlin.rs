@@ -17,7 +17,9 @@
 //! This is the classical decoupled Cattaneo--Mindlin approximation, for a
 //! circular Hertz point patch at fixed normal load/radius and one fixed tangent
 //! direction. It does not solve changing normal load, nonproportional shear,
-//! torsion, normal/tangential elastic coupling, or spatial traction/wear fields.
+//! torsion, normal/tangential elastic coupling, or accumulated local sliding/wear.
+//! The [`surface`] module reconstructs radial pressure, shear traction and
+//! relative elastic surface displacement from the accepted scalar history.
 //! The continuum representation follows Popov, Hess and Willert, *Handbook of
 //! Contact Mechanics* (2019), sections 4.4 and 4.6.3, equations 4.21--4.25,
 //! 4.57 and 4.59: <https://doi.org/10.1007/978-3-662-58709-6_4>.
@@ -31,6 +33,9 @@ use crate::{
 
 /// Explicit normal loading, unloading and recontact with retained shear memory.
 pub mod loading;
+
+/// Radial traction and elastic surface motion from the retained scalar history.
+pub mod surface;
 
 /// Largest admitted number of retained analytic history intervals.
 pub const MAX_HISTORY_INTERVALS: usize = 4096;

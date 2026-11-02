@@ -186,6 +186,23 @@ impl HertzMindlinContact {
         self.normal_modulus_pa
     }
 
+    /// Reconstruct radial pressure, signed shear traction and relative elastic
+    /// surface displacement from the current patch and retained scalar history.
+    /// The open state has zero fields. Loaded states use the original fixed
+    /// owner's analytic inverse transform, including its exterior displacement.
+    pub fn surface_response(
+        &self,
+        state: &HertzMindlinState,
+        radius_m: f64,
+    ) -> Result<super::surface::MindlinSurfaceResponse, TriboError> {
+        self.check_owner(state)?;
+        nonnegative_finite(radius_m, "mindlin_surface_radius_m")?;
+        match &state.fixed {
+            Some(fixed) => fixed.owner.surface_response(fixed, radius_m),
+            None => Ok(super::surface::MindlinSurfaceResponse::default()),
+        }
+    }
+
     /// Change normal load monotonically while holding macroscopic shear fixed.
     /// Newly contacting regions start with zero shear; detached regions lose
     /// their memory only after its entire recoverable energy is exported.

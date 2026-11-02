@@ -234,6 +234,27 @@ impl SourceMindlinContact {
         self.temperature_kelvin
     }
 
+    /// Observe radial pressure, signed shear traction and relative elastic
+    /// surface displacement from the original source-bound checkpoint.
+    ///
+    /// The native scalar Hertz--Mindlin field owner evaluates the accepted
+    /// history without changing it or refreshing any material query. Exterior
+    /// elastic displacement is retained; it is not local plastic slip or the
+    /// displacement of either body alone. Numerically equal laws from another
+    /// ordered interface or source history cannot borrow this checkpoint.
+    pub fn surface_response(
+        &self,
+        state: &SourceMindlinState,
+        radius_m: f64,
+    ) -> Result<fs_tribo::mindlin::surface::MindlinSurfaceResponse, SourceMindlinError> {
+        if !self.owns_state(state) {
+            return Err(SourceMindlinError::Invalid(
+                "Mindlin surface fields require the original normal and friction sources",
+            ));
+        }
+        Ok(self.law.surface_response(&state.constitutive, radius_m)?)
+    }
+
     fn owns_state(&self, state: &SourceMindlinState) -> bool {
         state.normal_model_identity == self.normal.model().identity()
             && state.friction_state_identity == self.friction.identity()

@@ -8,6 +8,9 @@ mod loading;
 #[path = "source_mindlin/sliding.rs"]
 mod sliding;
 
+#[path = "source_mindlin/surface.rs"]
+mod surface;
+
 use fs_contact::interface_binding::mindlin::{SourceMindlinContact, SourceMindlinError};
 use fs_contact::interface_binding::*;
 use fs_contact::normal_patch::source::*;
