@@ -470,6 +470,31 @@ owner retain energy and both momenta near roundoff for the admitted fixtures.
 Full prepared/Cx/material-card integration regressions are authored but remain
 unexecuted because the required sibling runtime dependencies are unavailable.
 
+### Uniform closed pressure in the objective discrete gradient
+
+`energy_momentum_force_with_uniform_pressure` and its endpoint tangent combine
+the original frozen material with the pressure potential `p det(F)` before
+the same objective strain-space algorithm. Positive pressure is inward. The
+native prepared closed-pressure surface owns reference matching and finite-load
+admission; its original endpoint-volume work remains independently measurable.
+The analytic cofactor stress and Hessian preserve the original material/source
+domain. Zero pressure delegates exactly to the unpressurized algorithm.
+
+The symmetric algorithmic second-Piola stress closes pressure work and midpoint
+torque together. Exact straight-segment averaging of face forces closes work
+alone and can produce a midpoint torque defect; a nontrivial regression exposes
+that difference. This is a finite-step algorithmic volume load. It approaches
+native boundary traction as endpoints coalesce, but its finite-step nodal field
+need not equal midpoint traction or cancel on interior nodes. Nonuniform face
+pressure remains outside this energy/momentum entry.
+
+All six production stress/tangent groups pass, including signed pressure,
+endpoint tangent directions, objectivity/reversal, native face-traction limits
+and the work-versus-torque counterexample. Native time integration also closes
+energy and both momenta and shows resolved second-order refinement. Public
+prepared/Cx integration remains syntax/static reviewed, not an executed Cargo
+qualification in the dependency-incomplete environment.
+
 ## Source-pack mechanical coupons and nonthermal dead loads
 
 `linear3::eigenstrain` admits explicit sorted unique dead nodal forces in

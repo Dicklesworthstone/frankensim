@@ -159,5 +159,95 @@ pub(super) fn evaluate<L: HyperelasticMaterial>(
     })
 }
 
+/// Add the conservative closed-boundary pressure potential to the original
+/// frozen material. Positive pressure is inward, so INTERNAL storage is +p J;
+/// the caller reports external pressure work separately as -p Delta V.
+/// The same symmetric strain-space discrete gradient supplies its force and
+/// endpoint tangent. Integrating face forces along the displacement segment
+/// would close work alone, without ensuring zero torque about midpoint nodes.
+pub(super) fn evaluate_with_uniform_pressure<L: HyperelasticMaterial>(
+    material: &L,
+    before: &[f64; 9],
+    after: &[f64; 9],
+    pressure_pa: f64,
+    tangent: bool,
+) -> Result<AlgorithmicStress, MaterialError> {
+    if !pressure_pa.is_finite() {
+        return Err(invalid("finite uniform pressure required"));
+    }
+    if pressure_pa == 0.0 {
+        return evaluate(material, before, after, tangent);
+    }
+    evaluate(
+        &Pressurized {
+            material,
+            pressure_pa,
+        },
+        before,
+        after,
+        tangent,
+    )
+}
+
+struct Pressurized<'a, L> {
+    material: &'a L,
+    pressure_pa: f64,
+}
+
+// Analytic first/second derivatives of det(F), the material-volume density.
+// Row-major cofactors avoid inverse-F cancellation in the pressure Hessian.
+fn cofactor(f: &[f64; 9]) -> [f64; 9] {
+    core::array::from_fn(|ij| {
+        let (a, b) = ((ij / 3 + 1) % 3, (ij / 3 + 2) % 3);
+        let (c, d) = ((ij % 3 + 1) % 3, (ij % 3 + 2) % 3);
+        f[3 * a + c] * f[3 * b + d] - f[3 * a + d] * f[3 * b + c]
+    })
+}
+fn cofactor_direction(f: &[f64; 9], direction: &[f64; 9]) -> [f64; 9] {
+    core::array::from_fn(|ij| {
+        let (a, b) = ((ij / 3 + 1) % 3, (ij / 3 + 2) % 3);
+        let (c, d) = ((ij % 3 + 1) % 3, (ij % 3 + 2) % 3);
+        direction[3 * a + c] * f[3 * b + d] + f[3 * a + c] * direction[3 * b + d]
+            - direction[3 * a + d] * f[3 * b + c]
+            - f[3 * a + d] * direction[3 * b + c]
+    })
+}
+
+impl<L: HyperelasticMaterial> HyperelasticMaterial for Pressurized<'_, L> {
+    fn hyperelastic(&self) -> &fs_material::hyper::Hyperelastic {
+        self.material.hyperelastic()
+    }
+
+    fn energy_density(&self, f: &[f64; 9]) -> f64 {
+        let cof = cofactor(f);
+        let jacobian = f[0] * cof[0] + f[1] * cof[1] + f[2] * cof[2];
+        self.pressure_pa
+            .mul_add(jacobian, self.material.energy_density(f))
+    }
+
+    fn first_piola(&self, f: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
+        let original = self.material.first_piola(f)?;
+        let cof = cofactor(f);
+        Ok(core::array::from_fn(|i| {
+            self.pressure_pa.mul_add(cof[i], original[i])
+        }))
+    }
+
+    fn consistent_tangent(&self, f: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
+        let mut tangent = self.material.consistent_tangent(f)?;
+        for column in 0..9 {
+            let mut direction = [0.0; 9];
+            direction[column] = 1.0;
+            let derivative = cofactor_direction(f, &direction);
+            for row in 0..9 {
+                tangent[row][column] = self
+                    .pressure_pa
+                    .mul_add(derivative[row], tangent[row][column]);
+            }
+        }
+        Ok(tangent)
+    }
+}
+
 #[cfg(test)]
 mod tests;

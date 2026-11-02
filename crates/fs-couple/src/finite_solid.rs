@@ -618,8 +618,8 @@ impl<'a> FiniteSolidBody<'a> {
     /// Below the documented small-strain threshold the stress takes its
     /// continuous limit; the same measured energy gate remains authoritative.
     /// This is second-order time integration, not frequency-unwarped modal flow.
-    /// Held dead loads are supported. A pressure-bound body refuses because
-    /// this entry point does not supply a discrete pressure-work algorithm.
+    /// Held dead loads are supported. A pressure-bound body uses the explicit
+    /// uniform-pressure energy/momentum entry so each interval declares its load.
     pub fn step_energy_momentum_candidate(
         &self,
         duration_s: f64,
@@ -639,6 +639,53 @@ impl<'a> FiniteSolidBody<'a> {
             nodal_forces_n,
             body_force_n_m3,
             None,
+            true,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance with uniform signed pressure and objective energy/momentum
+    /// compatible material forces on the original closed pressure surface.
+    ///
+    /// The same strain-space discrete gradient acts on W(F)+p det(F), so the
+    /// pressure contribution closes its endpoint-volume work without adding an
+    /// internal midpoint torque. The receipt keeps material storage and native
+    /// pressure work -p Delta V separate. The original nonlinear/energy gates,
+    /// fixed supports, source admission and immutable reference mass apply.
+    /// This is a conservative algorithmic volume load, approaching the native
+    /// face traction as the step shrinks; finite-step interior terms and the
+    /// curved physical trajectory still require time refinement.
+    /// Pressure may change between held intervals; no fluid storage is inferred.
+    /// Zero pressure delegates to the unpressurized algorithm exactly. Nonuniform
+    /// face fields are supported only by the ordinary midpoint pressure entry.
+    pub fn step_energy_momentum_candidate_with_pressure(
+        &self,
+        duration_s: f64,
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_pa: f64,
+        controls: FiniteSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
+        checkpoint(cx)?;
+        let surface = self
+            .pressure_surface
+            .as_deref()
+            .ok_or(FiniteSolidError::Invalid(
+                "body was not initialized with a pressure surface",
+            ))?;
+        let pressure = TetPressure::Uniform(pressure_pa);
+        let pressure = if surface.validate_pressure(pressure, cx)? {
+            None
+        } else {
+            Some((surface, pressure))
+        };
+        self.step_with_loads(
+            duration_s,
+            nodal_forces_n,
+            body_force_n_m3,
+            pressure,
             true,
             controls,
             cx,
@@ -793,12 +840,13 @@ impl<'a> FiniteSolidBody<'a> {
             .map(|(before, after)| 0.5 * before + 0.5 * after)
             .collect();
         let mut internal = if energy_momentum {
-            self.prepared
-                .energy_momentum_internal_force(&before_u, &after_u, cx)?
+            operator.algorithmic_force(&before_u, &after_u)?
         } else {
             self.prepared.internal_force(&midpoint, cx)?
         };
-        subtract_pressure_force(&mut internal, &midpoint, pressure, cx)?;
+        if !energy_momentum {
+            subtract_pressure_force(&mut internal, &midpoint, pressure, cx)?;
+        }
         let mut acceleration = vec![0.0; before_u.len()];
         for ((&dof, before), after) in self.free.iter().zip(&self.state.v).zip(&candidate.state.v) {
             acceleration[dof] = (after - before) / duration_s;
@@ -981,6 +1029,26 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
         output.fill(f64::NAN);
     }
 
+    fn algorithmic_force(&self, before: &[f64], after: &[f64]) -> Result<Vec<f64>, HyperTetError> {
+        match self.pressure {
+            Some((surface, TetPressure::Uniform(pressure_pa))) => {
+                self.problem.energy_momentum_force_with_uniform_pressure(
+                    before,
+                    after,
+                    surface,
+                    pressure_pa,
+                    self.cx,
+                )
+            }
+            None => self
+                .problem
+                .energy_momentum_internal_force(before, after, self.cx),
+            Some(_) => Err(HyperTetError::InvalidInput {
+                what: "energy-momentum pressure must be spatially uniform".into(),
+            }),
+        }
+    }
+
     fn ensure_tangent(&self, q: &[f64]) -> Result<(), HyperTetError> {
         let rebuild = self
             .tangent
@@ -995,12 +1063,31 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
                     .zip(before)
                     .map(|(mid, old)| 2.0 * mid - old)
                     .collect();
-                self.problem
-                    .energy_momentum_tangent(before, &after, self.cx)?
+                match self.pressure {
+                    Some((surface, TetPressure::Uniform(pressure_pa))) => {
+                        self.problem.energy_momentum_tangent_with_uniform_pressure(
+                            before,
+                            &after,
+                            surface,
+                            pressure_pa,
+                            self.cx,
+                        )?
+                    }
+                    None => self
+                        .problem
+                        .energy_momentum_tangent(before, &after, self.cx)?,
+                    Some(_) => {
+                        return Err(HyperTetError::InvalidInput {
+                            what: "energy-momentum pressure must be spatially uniform".into(),
+                        });
+                    }
+                }
             } else {
                 self.problem.tangent_matrix(&displacement, self.cx)?
             };
-            if let Some((surface, pressure_pa)) = self.pressure {
+            if self.energy_momentum_start.is_none()
+                && let Some((surface, pressure_pa)) = self.pressure
+            {
                 let external = surface.force_tangent(&displacement, pressure_pa, self.cx)?;
                 let mut combined = Coo::new(full.nrows(), full.nrows());
                 for row in 0..full.nrows() {
@@ -1092,13 +1179,14 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
                 .zip(before)
                 .map(|(mid, old)| 2.0 * mid - old)
                 .collect();
-            self.problem
-                .energy_momentum_internal_force(before, &after, self.cx)
+            self.algorithmic_force(before, &after)
         } else {
             self.problem.internal_force(&displacement, self.cx)
         }
         .and_then(|mut full| {
-            subtract_pressure_force(&mut full, &displacement, self.pressure, self.cx)?;
+            if self.energy_momentum_start.is_none() {
+                subtract_pressure_force(&mut full, &displacement, self.pressure, self.cx)?;
+            }
             Ok(full)
         });
         match result {

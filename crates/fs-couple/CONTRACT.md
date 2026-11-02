@@ -1487,8 +1487,8 @@ factor of two in both tangent action and preconditioning.
 
 Held nodal and body dead loads retain displacement-conjugate work. Support
 reactions use the same algorithmic force and full consistent-mass acceleration.
-Pressure-bound bodies refuse this entry point because discrete pressure work
-is not supplied. The ordinary midpoint path remains available. Stable midpoint
+Pressure-bound bodies use the explicit uniform-pressure energy/momentum entry
+for each held interval. The ordinary midpoint path remains available. Stable midpoint
 velocity times the mass-applied velocity increment evaluates kinetic change;
 the measured energy gate retains potential-work and nonlinear error instead
 of converting it to heat. Material failure, failed convergence, energy refusal
@@ -1508,8 +1508,42 @@ prepared/Cx/source-card compilation is blocked by unavailable sibling runtime
 dependencies. Integration received static API, lifetime and scaling review;
 no runtime stubs or substitute numerical solver were introduced. The bounded
 midpoint method still requires temporal/mesh refinement and does not supply
-frequency-unwarped modal flow, a follower-pressure work algorithm or completion
-of the broader instrument-realism program.
+frequency-unwarped modal flow, nonuniform pressure work in this algorithm or
+completion of the broader instrument-realism program.
+
+### Uniform pressure with energy and angular-momentum balance
+
+`FiniteSolidBody::step_energy_momentum_candidate_with_pressure` requires the
+original pressure-bound body and one explicit signed uniform pressure for the
+held interval. It consumes the prepared discrete gradient of
+`W_material(F)+p det(F)` and its analytic tangent. Force callbacks, tangent
+actions and support reactions use the same combined algorithmic force; ordinary
+face-force subtraction is bypassed on this path, so pressure is applied once.
+The original pressure surface owns closure/reference admission and independent
+work `-p (V_after-V_before)`. Material storage and pressure-source work remain
+separate. Zero pressure follows the unpressurized arithmetic exactly; the
+ordinary midpoint per-face pressure API retains its existing behavior.
+
+The conservative algorithmic volume load is consistent under time refinement,
+rather than an exact finite-step boundary-traction history. Uniform pressure
+has no resultant force or torque on the free closed body; its algorithmic
+contribution preserves the same midpoint angular balance while doing the
+correct volume work. Pressure may change between intervals; no fluid storage
+or pressure-dynamics model is inferred.
+
+Six native stress/tangent groups pass. A 125-step free-tumbling fixture at
+p=3 and h=0.02 has maximum K+U+pV drift 7.11e-15 J, linear-momentum drift
+5.55e-16 and angular-momentum drift 2.24e-15. Across 470 native steps, the
+resolved h=.01/.005 comparison against h=.00125 over .2 seconds reduces
+state error by 4.1395. The earlier coarse .04/.02 comparison was outside the
+resolved asymptotic regime; energy closure alone does not certify trajectory
+accuracy. These are numerical fixtures, not material calibration.
+
+Three public regressions cover pressure-driven tumbling/refinement, changing
+signed pressure against an independent breathing/work/reaction oracle, and
+zero-pressure/atomic refusal. Their full Cx-bound target remains unexecuted
+because sibling runtime dependencies are unavailable; the actual stress/tangent
+and native generalized-alpha/Newton-FGMRES driver were compiled and run.
 
 ## Material-bound finite bodies under spatial follower pressure
 

@@ -1,5 +1,6 @@
 //! Energy/momentum-compatible forces on the original prepared P1 mesh.
 
+use crate::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use fs_exec::Cx;
 use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_sparse::{Coo, Csr};
@@ -27,7 +28,7 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<Vec<f64>, HyperTetError> {
         Ok(self
-            .energy_momentum_evaluate(before_m, after_m, false, cx)?
+            .energy_momentum_evaluate(before_m, after_m, None, false, cx)?
             .0)
     }
 
@@ -42,7 +43,44 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<Csr, HyperTetError> {
         Ok(self
-            .energy_momentum_evaluate(before_m, after_m, true, cx)?
+            .energy_momentum_evaluate(before_m, after_m, None, true, cx)?
+            .1
+            .expect("requested algorithmic tangent"))
+    }
+
+    /// Material internal force MINUS uniform closed-boundary pressure force,
+    /// using one objective discrete gradient of W(F)+p det(F). Positive signed
+    /// pressure acts inward. Surface identity/closure remain owned by the native
+    /// pressure surface; its endpoint volume work must still be audited by the
+    /// time consumer. This finite-step algorithmic volume potential need not
+    /// equal pointwise midpoint face traction or cancel at interior nodes;
+    /// it approaches the native boundary load as the endpoints coalesce.
+    /// Per-face nonconservative pressure is outside this entry.
+    pub fn energy_momentum_force_with_uniform_pressure(
+        &self,
+        before_m: &[f64],
+        after_m: &[f64],
+        surface: &ClosedTetPressureSurface,
+        pressure_pa: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, HyperTetError> {
+        Ok(self
+            .energy_momentum_evaluate(before_m, after_m, Some((surface, pressure_pa)), false, cx)?
+            .0)
+    }
+
+    /// Endpoint derivative of the combined material/pressure internal force.
+    /// As with the unpressurized tangent, midpoint unknowns require a factor two.
+    pub fn energy_momentum_tangent_with_uniform_pressure(
+        &self,
+        before_m: &[f64],
+        after_m: &[f64],
+        surface: &ClosedTetPressureSurface,
+        pressure_pa: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Csr, HyperTetError> {
+        Ok(self
+            .energy_momentum_evaluate(before_m, after_m, Some((surface, pressure_pa)), true, cx)?
             .1
             .expect("requested algorithmic tangent"))
     }
@@ -51,12 +89,25 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
         &self,
         before_m: &[f64],
         after_m: &[f64],
+        pressure: Option<(&ClosedTetPressureSurface, f64)>,
         tangent: bool,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, Option<Csr>), HyperTetError> {
         checkpoint(cx)?;
         self.problem.check_len(before_m)?;
         self.problem.check_len(after_m)?;
+        let pressure_pa = if let Some((surface, value)) = pressure {
+            if !surface.matches_reference(self.problem.nodes_m, self.problem.tetrahedra) {
+                return Err(HyperTetError::InvalidInput {
+                    what: "algorithmic pressure surface does not match the material reference mesh"
+                        .into(),
+                });
+            }
+            surface.validate_pressure(TetPressure::Uniform(value), cx)?;
+            value
+        } else {
+            0.0
+        };
         let mut force = vec![0.0; after_m.len()];
         let mut matrix = tangent.then(|| Coo::new(after_m.len(), after_m.len()));
         for (index, element) in self.elements.iter().enumerate() {
@@ -71,12 +122,17 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
                     }
                 })?;
             }
-            let response =
-                stress::evaluate(self.problem.material.at(index), &before, &after, tangent)
-                    .map_err(|error| HyperTetError::MaterialRefused {
-                        element: index,
-                        what: error.to_string(),
-                    })?;
+            let response = stress::evaluate_with_uniform_pressure(
+                self.problem.material.at(index),
+                &before,
+                &after,
+                pressure_pa,
+                tangent,
+            )
+            .map_err(|error| HyperTetError::MaterialRefused {
+                element: index,
+                what: error.to_string(),
+            })?;
             for (a, &node) in element.nodes.iter().enumerate() {
                 for i in 0..3 {
                     let value = (0..3).fold(0.0, |s, j| {

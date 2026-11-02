@@ -1,4 +1,7 @@
 //! Independent P1 mass, energy and momentum checks for nonlinear solid motion.
+#[path = "energy_momentum/pressure.rs"]
+mod pressure;
+
 use super::*;
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
