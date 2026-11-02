@@ -556,7 +556,7 @@ fn rates(points: [PointKinematics; 2], axes: [Vec3; 3], radius: f64) -> [f64; 3]
         radius * relative_spin(points).dot(axes[2]),
     ]
 }
-fn finite(value: f64) -> Result<f64, RigidHertzError> {
+pub(super) fn finite(value: f64) -> Result<f64, RigidHertzError> {
     if value.is_finite() {
         Ok(value)
     } else {

@@ -14,6 +14,9 @@ pub mod hertz;
 /// Sourced real-area adhesive sliding and twisting with finite-body recoil.
 pub mod adhesive;
 
+// Law-neutral native mechanics shared by simultaneous circular traction owners.
+mod island;
+
 /// Simultaneous Hertz shear/spin and material-derived rolling on one native pair.
 pub mod hertz_rolling;
 

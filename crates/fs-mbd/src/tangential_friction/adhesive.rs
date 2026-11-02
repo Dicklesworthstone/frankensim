@@ -12,6 +12,9 @@
 //! remain with their existing owners. Endpoint reversals require a refined
 //! physical interval; a zero midpoint is never silently turned into arrest.
 
+/// Simultaneous source-owned junctions sharing actual native body recoil.
+pub mod multiple;
+
 use fs_contact::interface_binding::adhesive_shear::spinning::SourceAdhesiveSlidingPatch;
 use fs_exec::CancelGate;
 use fs_tribo::adhesive::spinning::contact::{

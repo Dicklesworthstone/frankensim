@@ -11,10 +11,11 @@
 
 use super::{
     PreparedRigidHertzPair, RigidHertzContact, RigidHertzControls, RigidHertzError, accepted_phase,
-    finite, points, relative_point, relative_spin,
+    finite, relative_point, relative_spin,
 };
-use crate::tangential_friction::{RigidContactBinding, components, magnitude, poll, totals};
-use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
+use crate::tangential_friction::island::{self, PatchMechanics};
+use crate::tangential_friction::{RigidContactBinding, poll, totals};
+use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_exec::CancelGate;
 use fs_tribo::TriboError;
 use fs_tribo::partial_slip::TangentFrame;
@@ -22,7 +23,7 @@ use fs_tribo::sliding_patch::contact::multiple::{
     HertzContactInput, MultipleHertzConfig, MultipleHertzError, MultipleHertzStep,
     PreparedHertzContacts,
 };
-use fs_tribo::sliding_patch::contact::{HertzWrenchContact, HertzWrenchMode, HertzWrenchStep};
+use fs_tribo::sliding_patch::contact::{HertzWrenchContact, HertzWrenchStep};
 use fs_tribo::sliding_patch::{HertzSlidingPatch, HertzSlidingPatchParameters};
 
 /// One identified original patch. IDs are unique within the prepared island.
@@ -74,7 +75,7 @@ impl RigidHertzIslandControls {
         Ok(())
     }
 
-    fn constitutive(self) -> MultipleHertzConfig {
+    pub(crate) fn constitutive(self) -> MultipleHertzConfig {
         MultipleHertzConfig {
             maximum_contacts: self.maximum_contacts,
             maximum_matrix_terms: self.maximum_matrix_terms,
@@ -145,15 +146,6 @@ pub struct RigidHertzIslandCandidate {
     pub body_indices: Vec<usize>,
     pub bodies_after: Vec<RigidBodyState>,
     pub report: RigidHertzIslandReport,
-}
-
-#[derive(Clone, Debug)]
-struct PatchMechanics {
-    bodies: [usize; 2],
-    arms: [Vec3; 2],
-    axes: [Vec3; 3],
-    before: [PointKinematics; 2],
-    rates_before: [f64; 3],
 }
 
 /// Shared geometry/full-inertia response prepared once for coefficient trials.
@@ -329,30 +321,7 @@ impl PreparedRigidHertzIsland {
                     "loaded held patch requires closed original normal motion",
                 ));
             }
-            let mut factor = [[[0.0; 6]; 3]; 2];
-            for (side, sign) in [(0, 1.0), (1, -1.0)] {
-                let inverse_mass_root = pair_properties[side].mass().sqrt().recip();
-                let orientation = pair[side].pose().orientation();
-                for axis in 0..3 {
-                    let direction = orientation.rotate_world_to_body(prepared.axes[axis]);
-                    let translation = if axis < 2 {
-                        components(prepared.axes[axis].scale(sign * inverse_mass_root))
-                    } else {
-                        [0.0; 3]
-                    };
-                    let torque = if axis < 2 {
-                        prepared.arms[side].cross(direction).scale(sign)
-                    } else {
-                        direction.scale(sign * radius)
-                    };
-                    let rotation =
-                        components(pair_properties[side].angular_mobility_factor(torque));
-                    factor[side][axis][..3].copy_from_slice(&translation);
-                    factor[side][axis][3..].copy_from_slice(&rotation);
-                }
-            }
-            factors.push(factor);
-            mechanics.push(PatchMechanics {
+            let patch_mechanics = PatchMechanics {
                 bodies: local,
                 arms: prepared.arms,
                 axes: prepared.axes,
@@ -362,7 +331,14 @@ impl PreparedRigidHertzIsland {
                     relative.dot(prepared.axes[1]),
                     radius * relative_spin(prepared.points_before).dot(prepared.axes[2]),
                 ],
-            });
+            };
+            factors.push(island::factor(
+                pair,
+                pair_properties,
+                &patch_mechanics,
+                radius,
+            ));
+            mechanics.push(patch_mechanics);
             patches.push(RigidHertzIslandPatch {
                 patch_id: identified.patch_id.to_owned(),
                 binding,
@@ -372,27 +348,7 @@ impl PreparedRigidHertzIsland {
                 contact_radius_m: radius,
             });
         }
-        let mut mobility = vec![0.0; terms];
-        for i in 0..rows {
-            poll(gate)?;
-            for j in 0..=i {
-                let mut value = 0.0;
-                for side_i in 0..2 {
-                    for side_j in 0..2 {
-                        if mechanics[i / 3].bodies[side_i] == mechanics[j / 3].bodies[side_j] {
-                            value += factors[i / 3][side_i][i % 3]
-                                .iter()
-                                .zip(&factors[j / 3][side_j][j % 3])
-                                .map(|(a, b)| a * b)
-                                .sum::<f64>();
-                        }
-                    }
-                }
-                let value = finite(value)?;
-                mobility[i * rows + j] = value;
-                mobility[j * rows + i] = value;
-            }
-        }
+        let mobility = island::mobility(&mechanics, &factors, gate)?;
         let factor = finite(0.5 * dt_s * dt_s)?;
         let compliance: Vec<_> = mobility.iter().map(|&w| w * factor).collect();
         let native =
@@ -485,34 +441,13 @@ impl PreparedRigidHertzIsland {
         let native = self
             .native
             .advance_phases(&inputs, &phases, || gate.is_requested())?;
-        let mut linear = vec![Vec3::ZERO; self.before.len()];
-        let mut angular = vec![Vec3::ZERO; self.before.len()];
-        for (mechanics, contact) in self.mechanics.iter().zip(&native.contacts) {
-            poll(gate)?;
-            let impulse = mechanics.axes[0]
-                .scale(self.dt_s * contact.force_n[0])
-                .add(mechanics.axes[1].scale(self.dt_s * contact.force_n[1]));
-            let couple = mechanics.axes[2].scale(self.dt_s * contact.spin_moment_nm);
-            for (side, sign) in [(0, 1.0), (1, -1.0)] {
-                let body = mechanics.bodies[side];
-                let orientation = self.before[body].pose().orientation();
-                let body_impulse = orientation.rotate_world_to_body(impulse.scale(sign));
-                let body_couple = orientation.rotate_world_to_body(couple.scale(sign));
-                linear[body] = linear[body].add(impulse.scale(sign));
-                angular[body] = angular[body]
-                    .add(mechanics.arms[side].cross(body_impulse))
-                    .add(body_couple);
-            }
-        }
-        let mut after = Vec::with_capacity(self.before.len());
-        for (i, before) in self.before.iter().enumerate() {
-            poll(gate)?;
-            after.push(RigidBodyState::new(
-                before.pose(),
-                before.linear_momentum_world().add(linear[i]),
-                before.angular_momentum_body().add(angular[i]),
-            )?);
-        }
+        let after = island::apply_wrenches(
+            &self.before,
+            &self.mechanics,
+            &native.contacts,
+            self.dt_s,
+            gate,
+        )?;
         let mut reports = Vec::with_capacity(self.patches.len());
         for (((patch, mechanics), keyed), contact) in self
             .patches
@@ -522,181 +457,50 @@ impl PreparedRigidHertzIsland {
             .zip(&native.contacts)
         {
             poll(gate)?;
-            let current = points(
-                [after[mechanics.bodies[0]], after[mechanics.bodies[1]]],
-                [
-                    self.properties[mechanics.bodies[0]],
-                    self.properties[mechanics.bodies[1]],
-                ],
-                mechanics.arms,
+            let report = island::contact_report(
+                &patch.patch_id,
+                mechanics,
+                &after,
+                &self.properties,
+                patch.contact_radius_m,
+                self.dt_s,
+                contact,
+                |slip, spin| {
+                    let parameters = keyed.law.parameters();
+                    let response = HertzSlidingPatch::new(HertzSlidingPatchParameters {
+                        normal_force_n: parameters.normal_force_n,
+                        contact_radius_m: parameters.contact_radius_m,
+                        friction_coefficient: parameters.kinetic_mu,
+                    })?
+                    .evaluate(slip, spin)?;
+                    Ok(island::NativeTraction {
+                        force_n: response.force_n,
+                        spin_moment_nm: response.spin_moment_nm,
+                        dissipated_power_w: response.dissipated_power_w,
+                    })
+                },
             )?;
-            let relative_before = relative_point(mechanics.before);
-            let relative_after = relative_point(current);
-            let spin_before = relative_spin(mechanics.before);
-            let spin_after = relative_spin(current);
-            let midpoint = relative_before.add(relative_after).scale(0.5);
-            let midpoint_spin = spin_before
-                .add(spin_after)
-                .scale(0.5)
-                .dot(mechanics.axes[2]);
-            let force = mechanics.axes[0]
-                .scale(contact.force_n[0])
-                .add(mechanics.axes[1].scale(contact.force_n[1]));
-            let couple = mechanics.axes[2].scale(contact.spin_moment_nm);
-            let impulse = force.scale(self.dt_s);
-            let angular_impulse = couple.scale(self.dt_s);
-            let midpoint_work =
-                impulse.dot(midpoint) + self.dt_s * contact.spin_moment_nm * midpoint_spin;
-            let slip_after = [
-                relative_after.dot(mechanics.axes[0]),
-                relative_after.dot(mechanics.axes[1]),
-            ];
-            let mut heat = 0.0;
-            let mut force_residual = 0.0;
-            let mut moment_residual = 0.0;
-            if contact.mode != HertzWrenchMode::Sticking {
-                let parameters = keyed.law.parameters();
-                let response = HertzSlidingPatch::new(HertzSlidingPatchParameters {
-                    normal_force_n: parameters.normal_force_n,
-                    contact_radius_m: parameters.contact_radius_m,
-                    friction_coefficient: parameters.kinetic_mu,
-                })?
-                .evaluate(
-                    [
-                        midpoint.dot(mechanics.axes[0]),
-                        midpoint.dot(mechanics.axes[1]),
-                    ],
-                    midpoint_spin,
-                )?;
-                heat = finite(self.dt_s * response.dissipated_power_w)?;
-                force_residual = (response.force_n[0] - contact.force_n[0])
-                    .hypot(response.force_n[1] - contact.force_n[1]);
-                moment_residual = (response.spin_moment_nm - contact.spin_moment_nm).abs();
-            }
-            let endpoint_velocity_residual = (slip_after[0]
-                - (2.0 * contact.slip_displacement_m[0] / self.dt_s - mechanics.rates_before[0]))
-                .abs()
-                .max(
-                    (slip_after[1]
-                        - (2.0 * contact.slip_displacement_m[1] / self.dt_s
-                            - mechanics.rates_before[1]))
-                        .abs(),
-                );
-            let endpoint_spin_residual = (spin_after.dot(mechanics.axes[2])
-                - (2.0 * contact.spin_angle_rad / self.dt_s
-                    - mechanics.rates_before[2] / patch.contact_radius_m))
-                .abs();
-            let assisting_work = [
-                force.dot(relative_before),
-                force.dot(relative_after),
-                couple.dot(spin_before),
-                couple.dot(spin_after),
-            ]
-            .into_iter()
-            .fold(0.0, f64::max)
-                * self.dt_s;
-            let report = RigidHertzIslandContactReport {
-                patch_id: patch.patch_id.clone(),
-                contact: *contact,
-                slip_velocity_before_m_s: [mechanics.rates_before[0], mechanics.rates_before[1]],
-                slip_velocity_after_m_s: slip_after,
-                spin_before_rad_s: spin_before.dot(mechanics.axes[2]),
-                spin_after_rad_s: spin_after.dot(mechanics.axes[2]),
-                normal_velocity_before_m_s: relative_before.dot(mechanics.axes[2]),
-                normal_velocity_after_m_s: relative_after.dot(mechanics.axes[2]),
-                actual_midpoint_displacement_m: [
-                    self.dt_s * midpoint.dot(mechanics.axes[0]),
-                    self.dt_s * midpoint.dot(mechanics.axes[1]),
-                ],
-                actual_midpoint_spin_angle_rad: self.dt_s * midpoint_spin,
-                force_impulse_world_ns: impulse,
-                spin_angular_impulse_world_nms: angular_impulse,
-                midpoint_impulse_work_j: midpoint_work,
-                dissipated_energy_j: heat,
-                contact_work_residual_j: midpoint_work + contact.contact_work_j,
-                contact_heat_residual_j: heat - contact.dissipated_energy_j,
-                native_force_residual_n: force_residual,
-                native_spin_moment_residual_nm: moment_residual,
-                endpoint_velocity_residual_m_s: endpoint_velocity_residual,
-                endpoint_spin_residual_rad_s: endpoint_spin_residual,
-                maximum_assisting_work_j: assisting_work,
-            };
             let controls = self.controls.mechanical;
-            if [
-                midpoint_work,
-                heat,
-                force_residual,
-                moment_residual,
-                endpoint_velocity_residual,
-                endpoint_spin_residual,
-                assisting_work,
-                report.normal_velocity_after_m_s,
-            ]
-            .into_iter()
-            .any(|x| !x.is_finite())
-                || [
-                    report.contact_work_residual_j,
-                    report.contact_heat_residual_j,
-                ]
-                .into_iter()
-                .any(|x| !x.is_finite() || x.abs() > controls.energy_tolerance_j)
-                || force_residual > controls.contact.force_tolerance_n
-                || moment_residual > controls.contact.moment_tolerance_nm
-                || endpoint_velocity_residual > controls.velocity_tolerance_m_s
-                || endpoint_spin_residual > controls.angular_velocity_tolerance_rad_s
-                || (patch.normal_force_n > 0.0
-                    && report.normal_velocity_after_m_s.abs() > controls.velocity_tolerance_m_s)
-            {
+            if !island::contact_admitted(&report, controls, patch.normal_force_n > 0.0) {
                 return Err(RigidHertzIslandError::ContactAudit(Box::new(report)));
             }
-            if assisting_work > controls.energy_tolerance_j {
+            if report.maximum_assisting_work_j > controls.energy_tolerance_j {
                 return Err(RigidHertzIslandError::UnresolvedSlipEvent {
                     patch_id: patch.patch_id.clone(),
-                    assisting_work_j: assisting_work,
+                    assisting_work_j: report.maximum_assisting_work_j,
                 });
             }
             reports.push(report);
         }
-        let (energy_after, linear_after, angular_after) = totals(&after, &self.properties, gate)?;
-        let (energy_before, linear_before, angular_before) = self.totals_before;
-        let midpoint_work = reports
-            .iter()
-            .map(|r| r.midpoint_impulse_work_j)
-            .sum::<f64>();
-        let heat = reports.iter().map(|r| r.dissipated_energy_j).sum::<f64>();
-        let report = RigidHertzIslandReport {
-            contacts: reports,
+        let report = island::report(
+            reports,
             native,
-            kinetic_before_j: energy_before,
-            kinetic_after_j: energy_after,
-            midpoint_impulse_work_j: midpoint_work,
-            dissipated_energy_j: heat,
-            work_energy_residual_j: energy_after - energy_before - midpoint_work,
-            total_energy_residual_j: energy_after - energy_before + heat,
-            linear_momentum_change_ns: linear_after.sub(linear_before),
-            angular_momentum_change_nms: angular_after.sub(angular_before),
-        };
-        let cfg = self.controls.mechanical;
-        if [
-            energy_before,
-            energy_after,
-            midpoint_work,
-            heat,
-            magnitude(report.linear_momentum_change_ns),
-            magnitude(report.angular_momentum_change_nms),
-        ]
-        .into_iter()
-        .any(|x| !x.is_finite())
-            || [
-                report.work_energy_residual_j,
-                report.total_energy_residual_j,
-                heat - report.native.dissipated_energy_j,
-            ]
-            .into_iter()
-            .any(|x| !x.is_finite() || x.abs() > cfg.energy_tolerance_j)
-            || magnitude(report.linear_momentum_change_ns) > cfg.linear_momentum_tolerance_ns
-            || magnitude(report.angular_momentum_change_nms) > cfg.angular_momentum_tolerance_nms
-        {
+            self.totals_before,
+            &after,
+            &self.properties,
+            gate,
+        )?;
+        if !island::report_admitted(&report, self.controls.mechanical) {
             return Err(RigidHertzIslandError::Audit(Box::new(report)));
         }
         poll(gate)?;

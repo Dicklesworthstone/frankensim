@@ -3228,3 +3228,42 @@ tangent-frame covariance, stopping-event refusal, detached attraction and
 atomic cancellation/audit retry. This held-geometry impulse owner leaves
 normal evolution, poses, elastic microslip, peeling and heat partition to
 their separate physical owners; the returned junction loss is unpartitioned.
+
+`tangential_friction::adhesive::multiple` extends the same source-owned law to
+simultaneous contacts on shared native bodies. Canonical physical patch IDs
+fix assembly/reduction order. Sparse inverse-mass Gram factors retain complete
+inertias, actual COM-relative arms and every cross-contact term; dependent
+wrench coordinates remain PSD rather than receiving invented compliance.
+One summed impulse updates each participating body once. The Hertz and adhesive
+owners share these native mechanics and work audits, while their original
+constitutive surfaces remain distinct.
+
+`PreparedRigidAdhesiveIsland` retains every original normal/shear source and
+real disk, including detached sources. Attached patches require coincident
+points and closed normal motion at both native endpoints, including at zero or
+tensile normal load. Detached zero-area sources create no constraints, wrench
+rows or heat; detached-only bodies are excluded from the active energy sum.
+An all-detached group returns an exact empty mechanical no-op plus its original
+detached identities. Spectators never dilute microscopic work/momentum gates.
+
+The actual final midpoint motion is independently evaluated through each
+original uniform-junction integral. Local force, torque, native recoil, work
+and heat must agree before the common original-body energy/momentum audit.
+Endpoint assisting work refuses an unresolved stop/reversal interval. Prepared
+state and source receipts remain immutable through trials; application publishes
+every body only after the final cancellation gate. Sweeps are numerical work,
+not physical time or heat. Bounded feasibility/convergence limits of the shared
+constitutive solver remain explicit; trajectory refinement belongs to the caller.
+
+Four G1/G3/G4 groups in `tests/adhesive_multiple.rs` use two distinct symmetric
+disks with independent exact rim-slip integrals, combined point/free-couple
+torque, finite support recoil and complete relative-energy loss. They also
+exercise source/order preservation, dependent mobility, energetic spectators,
+detached/all-detached groups, held-normal admission and atomic event, momentum,
+cancellation and budget refusals. `tests/hertz_multiple.rs` remains the original
+native mechanics regression target for the shared extraction.
+The symmetric microscopic-pad fixture uses a resolved short physical interval
+at unchanged force/work gates. Its much larger interval explicitly exercises
+support-budget refusal; strong translation/spin conditioning is not hidden by
+relaxed tolerances. A separate axial disk isolates the physical stopping-event
+refusal without that numerical conditioning limit.
