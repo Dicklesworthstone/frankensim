@@ -514,6 +514,7 @@ impl HexElasticProblem<'_> {
                             scaled_jacobian: p.scaled_jacobian,
                         })
                     },
+                    |_, _| None,
                     cx,
                 )
             }
@@ -538,6 +539,7 @@ impl HexElasticProblem<'_> {
                             scaled_jacobian: p.scaled_jacobian,
                         })
                     },
+                    |_, _| None,
                     cx,
                 )
             }

@@ -28,6 +28,7 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
     stiffness_rule: &[(R, f64)],
     mass_rule: &[(R, f64)],
     evaluate: impl Fn([[f64; 3]; N], R, usize, usize) -> Result<Point<N>, TetElasticError>,
+    reference_density: impl Fn(usize, R) -> Option<f64>,
     cx: &Cx<'_>,
 ) -> Result<TetElasticAssembly, TetElasticError> {
     debug_assert_eq!(D, 3 * N);
@@ -49,6 +50,8 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
         let mut ke = [[0.0; D]; D];
         let mut me = [[0.0; D]; D];
         let mut volume = 0.0;
+        let mut integrated_mass = 0.0;
+        let mut has_density_profile = false;
         for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
             let p = evaluate(nodes, reference, element, point)?;
@@ -80,9 +83,18 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
             minimum_scaled_jacobian = minimum_scaled_jacobian.min(p.scaled_jacobian);
             let dv = weight * p.determinant;
             volume += dv;
+            let density = reference_density(element, reference);
+            let rho = density.unwrap_or(material.density_kg_m3);
+            if !(rho.is_finite() && rho > 0.0) {
+                return Err(TetElasticError::InvalidMaterial {
+                    what: "quadratic reference density must be finite and positive",
+                });
+            }
+            has_density_profile |= density.is_some();
+            integrated_mass += rho * dv;
             for a in 0..N {
                 for b in a..N {
-                    let v = material.density_kg_m3 * dv * p.shapes[a] * p.shapes[b];
+                    let v = rho * dv * p.shapes[a] * p.shapes[b];
                     for c in 0..3 {
                         me[3 * a + c][3 * b + c] += v;
                     }
@@ -117,7 +129,14 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
             }
         }
         element_volumes_m3.push(volume);
-        total_mass_kg += material.density_kg_m3 * volume;
+        // Retain the original scalar-density operation tree. A graded field
+        // must instead use the same physical quadrature as its consistent mass,
+        // before constrained rows and columns are removed.
+        total_mass_kg += if has_density_profile {
+            integrated_mass
+        } else {
+            material.density_kg_m3 * volume
+        };
     }
     if !(total_mass_kg.is_finite() && total_mass_kg > 0.0) {
         return Err(TetElasticError::InvalidMaterial {

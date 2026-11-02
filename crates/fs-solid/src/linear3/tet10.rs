@@ -344,7 +344,30 @@ impl QuadraticTetProblem<'_> {
     /// Assemble into the same `(K,M)` type as P1. Each element and each
     /// quadrature point is a cancellation boundary. No partial result escapes.
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
-        self.assemble_with_thermal_materials(None, cx)
+        self.assemble_with_thermal_materials(None, None, cx)
+    }
+
+    /// Assemble the consistent mass of a positive P1 reference-density field.
+    ///
+    /// Each element supplies four corner values [kg/m³], in connectivity order;
+    /// `rho(lambda) = sum(lambda[a] * rho[a])`. Interfaces may be discontinuous.
+    /// Density is linear in reference coordinates even on a curved physical
+    /// map. It is NOT interpolated with the ten quadratic displacement shapes,
+    /// whose negative corner lobes cannot preserve positivity.
+    ///
+    /// Four Duffy points per direction integrate affine graded mass exactly.
+    /// An explicit profile on a curved map requires at least six: the product
+    /// `rho * N_i * N_j * det(J)` has degree at most eight. This is a mass
+    /// integration guarantee, not a stiffness or map-injectivity certificate.
+    /// A profile identical to the material density retains the original path.
+    /// Reference densities are frozen inputs; this method never queries a hot
+    /// material state or replaces mass with a current-density/old-volume product.
+    pub fn assemble_with_reference_density(
+        &self,
+        corner_density_kg_m3: &[[f64; 4]],
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_with_thermal_materials(None, Some(corner_density_kg_m3), cx)
     }
 
     /// Assemble the actual temperature-frozen stiffness and ORIGINAL reference
@@ -355,15 +378,59 @@ impl QuadraticTetProblem<'_> {
         field: impl Into<QuadraticThermalStrainField<'t>>,
         cx: &Cx<'_>,
     ) -> Result<TetElasticAssembly, TetElasticError> {
-        self.assemble_with_thermal_materials(Some(field.into()), cx)
+        self.assemble_with_thermal_materials(Some(field.into()), None, cx)
+    }
+
+    /// Temperature-frozen elastic tensors with the same original graded mass
+    /// as [`Self::assemble_with_reference_density`]. Thermal material samples
+    /// may change stiffness; their density does not refresh the supplied field.
+    pub fn assemble_thermoelastic_with_reference_density<'t>(
+        &self,
+        field: impl Into<QuadraticThermalStrainField<'t>>,
+        corner_density_kg_m3: &[[f64; 4]],
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_with_thermal_materials(Some(field.into()), Some(corner_density_kg_m3), cx)
     }
 
     fn assemble_with_thermal_materials(
         &self,
         material_samples: Option<QuadraticThermalStrainField<'_>>,
+        corner_density_kg_m3: Option<&[[f64; 4]]>,
         cx: &Cx<'_>,
     ) -> Result<TetElasticAssembly, TetElasticError> {
         self.validate(true, cx)?;
+        if let Some(densities) = corner_density_kg_m3 {
+            if densities.len() != self.elements.len() {
+                return Err(TetElasticError::MaterialCountMismatch {
+                    expected: self.elements.len(),
+                    got: densities.len(),
+                });
+            }
+            for (element, (tet, density)) in self.elements.iter().zip(densities).enumerate() {
+                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+                if density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
+                    return Err(TetElasticError::InvalidMaterial {
+                        what: "TET10 corner reference densities must be finite and positive",
+                    });
+                }
+                let reference = self.materials.at(element).density_kg_m3;
+                if density.iter().all(|rho| *rho == reference) {
+                    continue;
+                }
+                let affine = TET10_EDGES.iter().enumerate().all(|(edge, &[a, b])| {
+                    (0..3).all(|k| {
+                        self.nodes_m[tet[edge + 4]][k]
+                            == f64::midpoint(self.nodes_m[tet[a]][k], self.nodes_m[tet[b]][k])
+                    })
+                });
+                if !affine && self.quadrature.mass_points_per_dir < 6 {
+                    return Err(TetElasticError::QuadratureInadmissible {
+                        what: "curved TET10 reference density requires at least six mass Duffy points",
+                    });
+                }
+            }
+        }
         let kq = duffy_quadrature(self.quadrature.stiffness_points_per_dir);
         let mq = duffy_quadrature(self.quadrature.mass_points_per_dir);
         super::isoparametric::assemble::<10, 30, _>(
@@ -390,6 +457,19 @@ impl QuadraticTetProblem<'_> {
                     determinant: p.determinant_m3,
                     scaled_jacobian: p.determinant_m3 / (h * h * h),
                 })
+            },
+            |element, lambda| {
+                let density = corner_density_kg_m3?[element];
+                if density
+                    .iter()
+                    .all(|rho| *rho == self.materials.at(element).density_kg_m3)
+                {
+                    None
+                } else if density.iter().all(|rho| *rho == density[0]) {
+                    Some(density[0])
+                } else {
+                    Some((0..4).map(|a| lambda[a] * density[a]).sum())
+                }
             },
             cx,
         )
@@ -584,7 +664,7 @@ impl QuadraticTetProblem<'_> {
             maximum_absolute_mandel_strain,
             cx,
         )?;
-        let pencil = self.assemble_with_thermal_materials(Some(thermal_strains), cx)?;
+        let pencil = self.assemble_with_thermal_materials(Some(thermal_strains), None, cx)?;
         super::isoparametric::thermal_response::prestress::assemble::<10, 30, _>(
             self.nodes_m,
             self.elements,

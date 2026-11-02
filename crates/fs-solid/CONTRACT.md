@@ -609,6 +609,29 @@ thermal/phase refresh; a closed body's reference field must be retained.
 Native modal regression moves density toward the free vertex at identical
 total mass/stiffness and verifies the analytic eigenvalue ratio `2/3`.
 
+`tet10::QuadraticTetProblem::assemble_with_reference_density` carries graded
+reference inertia into the same native quadratic stiffness/mass pencil. Each
+element supplies four positive corner densities, interpolated with P1 reference
+barycentric weights, including on curved physical maps. Material interfaces may
+be discontinuous. The ten quadratic displacement shapes retain the full
+consistent mass; their negative corner lobes are not used to interpolate density
+or to lump mass. Total inventory is integrated before constrained rows are
+removed. `assemble_thermoelastic_with_reference_density` changes stiffness with
+the admitted thermal material field while retaining that original density.
+No temperature-dependent current density refreshes a closed body's mass.
+
+Four mass Duffy points per direction integrate affine graded quadratic mass
+exactly (degree five). A non-default profile on a curved map requires six
+(degree eight including the cubic Jacobian determinant); this guarantees the
+mass quadrature degree, not stiffness accuracy or global map injectivity.
+Existing geometry, work budgets and cancellation still apply. A profile equal
+to the original scalar material density preserves the existing mass bits.
+Native regression checks every mass entry against independent barycentric
+moments, translation/rotation inertia, positive definiteness, curved quadrature,
+and frozen mass under changed thermal tensors. The actual generalized modal
+solve verifies that relocating density at identical total mass and stiffness
+increases a supported edge's mass by 25% and reduces its eigenvalues by 20%.
+
 `linear3::TetElasticMaterial::acoustic_response` exposes the shared
 `fs-material::elastic::acoustic` law using the exact native Mandel stiffness,
 density and material identity. Source-resolved isotropy, oriented orthotropy and
