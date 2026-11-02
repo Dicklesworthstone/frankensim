@@ -858,9 +858,41 @@ pub(crate) struct PreparedOpenHole {
     pub sigma: f64,
     pub half_series_impedance: C64,
     pub open_chimney_impedance: C64,
+    // [p, Z0_port U] for the sealed fraction at the bore junction.
+    pub closed_return_coordinates: [C64; 2],
     pub chimney_u_mouth_over_u_in: C64,
     pub shunt_port_reference_pa_s_m3: f64,
     pub orifice_quadratic_coeff_pa_s2_m6: f64,
+}
+
+/// Homogeneous sealed-chimney pressure and reference-scaled volume flow.
+/// Only the forward-decaying wave is needed; expm1 and sin/cos retain both
+/// the low-frequency compliance and the exact pressure/flow-node limits.
+#[allow(clippy::too_many_arguments)]
+fn closed_chimney_coordinates(
+    state: &GasState,
+    radius: f64,
+    length: f64,
+    omega: f64,
+    loss: LossModel,
+    wall: WallModel<'_>,
+    reference: f64,
+) -> Result<[C64; 2], DuctError> {
+    let chimney_loss = if loss == LossModel::WideTube { LossModel::Bessel } else { loss };
+    let wave = wall.apply(
+        crate::segment_wave(state, radius, omega, chimney_loss)?,
+        radius, omega, 1.0,
+    )?;
+    let phase = wave.wavenumber.scale(length);
+    if !finite(phase) || phase.im < 0.0 {
+        return Err(bad("chimney phase must be finite and forward-decaying"));
+    }
+    let decay = det::exp(-2.0 * phase.im);
+    let lost = -det::expm1(-2.0 * phase.im);
+    let (s, c) = det::sin_cos(phase.re);
+    let plus = C64::new(lost + 2.0 * decay * c * c, 2.0 * decay * s * c);
+    let minus = C64::new(lost + 2.0 * decay * s * s, -2.0 * decay * s * c);
+    Ok([plus, (C64::from_re(reference) / wave.characteristic_impedance) * minus])
 }
 
 /// Embed a finite chimney through homogeneous pressure/flow coordinates.
@@ -888,33 +920,12 @@ pub(crate) fn tone_hole_scattering(
     };
     geometry.validate()?;
     let sigma = crate::hole_sigma(hs);
-    // p = n X, reference * U = d X. The sealed chimney uses only the
-    // forward-decaying wave. As in the molecular chimney owner, expm1 and
-    // sin/cos retain both low-frequency compliance and pressure-node limits.
+    // p = n X, reference * U = d X; each vent fraction weights flow once.
     let (n, mut d) = if sigma < 1.0 {
-        let chimney_loss = if loss == LossModel::WideTube {
-            LossModel::Bessel
-        } else {
-            loss
-        };
-        let wave = wall.apply(
-            crate::segment_wave(state, hole_radius, omega, chimney_loss)?,
-            hole_radius, omega, 1.0,
+        let [p, u] = closed_chimney_coordinates(
+            state, hole_radius, chimney_height, omega, loss, wall, reference,
         )?;
-        let phase = wave.wavenumber.scale(chimney_height);
-        if !finite(phase) || phase.im < 0.0 {
-            return Err(bad("chimney phase must be finite and forward-decaying"));
-        }
-        let decay = det::exp(-2.0 * phase.im);
-        let lost = -det::expm1(-2.0 * phase.im);
-        let (s, c) = det::sin_cos(phase.re);
-        let plus = C64::new(lost + 2.0 * decay * c * c, 2.0 * decay * s * c);
-        let minus = C64::new(lost + 2.0 * decay * s * s, -2.0 * decay * s * c);
-        (
-            plus,
-            (C64::from_re(reference) / wave.characteristic_impedance)
-                * minus.scale(1.0 - sigma),
-        )
+        (p, u.scale(1.0 - sigma))
     } else {
         (C64::ONE, C64::ZERO)
     };
@@ -999,6 +1010,14 @@ pub(crate) fn prepare_open_hole(
     let area_h = core::f64::consts::PI * site.effective_radius_m * site.effective_radius_m;
     let area_b = core::f64::consts::PI * bore_radius * bore_radius;
     let z0_port = state.density * state.sound_speed * (1.0 / area_h + 0.5 * sigma / area_b);
+    let closed_return_coordinates = if sigma < 1.0 {
+        let [p, u] = closed_chimney_coordinates(
+            state, hole_radius, chimney_height, omega, loss, wall, z0_port,
+        )?;
+        [p, u.scale(1.0 - sigma)]
+    } else {
+        [C64::ONE, C64::ZERO]
+    };
     let k_quad = crate::open_hole_orifice_quadratic_coeff(state, loss, site.effective_radius_m);
     Ok(PreparedOpenHole {
         block_index,
@@ -1008,6 +1027,7 @@ pub(crate) fn prepare_open_hole(
         sigma,
         half_series_impedance: half,
         open_chimney_impedance: open.impedance,
+        closed_return_coordinates,
         chimney_u_mouth_over_u_in: open.u_mouth_over_u_in,
         shunt_port_reference_pa_s_m3: z0_port,
         orifice_quadratic_coeff_pa_s2_m6: k_quad,
@@ -1224,6 +1244,66 @@ pub(crate) fn duct_chain_in_exterior(
     Ok((chain, open_holes))
 }
 
+/// Parallel impedances in [p, reference * U] coordinates. A pressure node
+/// is an exact short even if more than one branch has zero pressure; a flow
+/// node remains an open circuit. Neither requires dividing by p or U.
+fn parallel_impedance_coordinates(a: [C64; 2], b: [C64; 2]) -> Result<[C64; 2], DuctError> {
+    let normalize = |[p, u]: [C64; 2]| {
+        let scale = p.abs().max(u.abs());
+        if !finite(p) || !finite(u) || !scale.is_finite() || scale == 0.0 {
+            return Err(DuctError::Singular);
+        }
+        Ok([C64::new(p.re / scale, p.im / scale), C64::new(u.re / scale, u.im / scale)])
+    };
+    let [p, u] = normalize(a)?;
+    let [q, v] = normalize(b)?;
+    if p == C64::ZERO || q == C64::ZERO {
+        return Ok([C64::ZERO, C64::ONE]);
+    }
+    normalize([p * q, u * q + p * v])
+}
+
+/// Physical pressure drop / open volume flow at the nonlinear orifice:
+/// Z_net = Z_open / sigma + 1 / (Y_left + Y_right + (1-sigma) Y_closed).
+/// The sealed fraction returns flow through the same junction as the bore.
+fn open_hole_port_reflection(
+    hole: &PreparedOpenHole,
+    reference: f64,
+    r_left: C64,
+    r_right: C64,
+    maximum_condition: f64,
+) -> Result<C64, DuctError> {
+    let half = hole.half_series_impedance.scale(1.0 / reference);
+    let bore = |r| [
+        C64::ONE + r + half * (C64::ONE - r),
+        C64::ONE - r,
+    ];
+    let [closed_p, closed_u] = hole.closed_return_coordinates;
+    let [p, u] = parallel_impedance_coordinates(
+        parallel_impedance_coordinates(bore(r_left), bore(r_right))?,
+        [closed_p, closed_u.scale(reference / hole.shunt_port_reference_pa_s_m3)],
+    )?;
+    // Multiply through by sigma and the homogeneous denominator before
+    // forming the reflection. The reference is a wave normalization, while
+    // the actual chimney impedance must be divided by its open fraction.
+    let sigma_reference = hole.sigma * reference;
+    let sigma_port = hole.sigma * hole.shunt_port_reference_pa_s_m3;
+    let scale = hole.open_chimney_impedance.abs().max(sigma_reference).max(sigma_port);
+    if !(scale > 0.0 && scale.is_finite()) {
+        return Err(DuctError::Singular);
+    }
+    let chimney = hole.open_chimney_impedance.scale(1.0 / scale) * u;
+    let returned = p.scale(sigma_reference / scale);
+    let port = u.scale(sigma_port / scale);
+    let denominator = chimney + returned + port;
+    bound((chimney.abs() + returned.abs() + port.abs()) / denominator.abs(), maximum_condition)?;
+    let reflection = (chimney + returned - port) / denominator;
+    if !finite(reflection) {
+        return Err(DuctError::Singular);
+    }
+    Ok(reflection)
+}
+
 pub(crate) fn open_hole_flows(
     chain: &PreparedChain,
     open_holes: &[PreparedOpenHole],
@@ -1289,17 +1369,9 @@ pub(crate) fn open_hole_flows(
         if !finite(u_hole_over_u_in) || !finite(u_chimney_in_over_u_in) {
             return Err(DuctError::Singular);
         }
-        let z_left = (C64::ONE + r_left).scale(reference) / (C64::ONE - r_left)
-            + hole.half_series_impedance;
-        let z_right = (C64::ONE + r_right).scale(reference) / (C64::ONE - r_right)
-            + hole.half_series_impedance;
-        let z_bore_mid = ((z_left * z_right) / (z_left + z_right)).scale(hole.sigma);
-        let z_net = hole.open_chimney_impedance + z_bore_mid;
-        let z0_port = C64::from_re(hole.shunt_port_reference_pa_s_m3);
-        let shunt_port_reflection = (z_net - z0_port) / (z_net + z0_port);
-        if !finite(shunt_port_reflection) {
-            return Err(DuctError::Singular);
-        }
+        let shunt_port_reflection = open_hole_port_reflection(
+            hole, reference, r_left, r_right, options.maximum_condition,
+        )?;
         flows.push(OpenHoleFlow {
             axial_position_m: hole.axial_position_m,
             effective_radius_m: hole.effective_radius_m,

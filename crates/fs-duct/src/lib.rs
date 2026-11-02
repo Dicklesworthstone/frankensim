@@ -488,16 +488,20 @@ pub struct OpenHoleFlow {
     pub chimney_length_m: f64,
     /// Outward volume velocity at the flanged chimney mouth over inlet volume velocity.
     pub u_hole_over_u_in: C64,
-    /// Volume velocity entering the open chimney shunt over inlet volume velocity.
+    /// Physical volume velocity entering the open chimney shunt over inlet
+    /// volume velocity; the vent fraction is already included.
     pub u_chimney_in_over_u_in: C64,
     /// Natural geometric WDF port reference impedance
     /// `Z_{0,port} = rho*c / A_h + sigma * rho*c / (2 A_b)` [Pa*s/m^3].
+    /// This positive wave reference does not replace the physical port load.
     pub shunt_port_reference_pa_s_m3: f64,
     /// Orifice quadratic coefficient `K = rho / (2 C_vc^2 A_h^2)` [Pa*s^2/m^6]
     /// (`0.0` when `LossModel::Lossless`).
     pub orifice_quadratic_coeff_pa_s2_m6: f64,
     /// Passive 1-port reflection `S_0(omega) = (Z_net(omega) - Z_{0,port}) / (Z_net(omega) + Z_{0,port})`
     /// looking into the chimney + bore junction from the orifice port.
+    /// `Z_net` relates orifice pressure drop to the physical open volume flow:
+    /// `Z_open / sigma + 1 / (Y_left + Y_right + (1-sigma) Y_closed)`.
     pub shunt_port_reflection: C64,
 }
 

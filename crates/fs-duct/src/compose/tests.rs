@@ -288,7 +288,7 @@ fn two_medium_open_and_vented_holes_match_independent_junction_flow() {
     ).unwrap();
     let (a, b, h) = (0.004, 0.0015, 0.006);
     let (left_length, right_length) = (0.21, 0.31);
-    for sigma in [1.0, 0.25] {
+    for sigma in [1.0, 0.2, 0.7] {
         let duct = Duct { segments: vec![
             Segment::Cylinder { radius: a, length: left_length },
             Segment::ToneHole { hole_radius: b, chimney_height: h, bore_radius: a,
@@ -338,6 +338,23 @@ fn two_medium_open_and_vented_holes_match_independent_junction_flow() {
                 assert!(relative(actual, expected) < 3.0e-11,
                     "sigma={sigma} frequency={frequency}: {actual:?} vs {expected:?}");
             }
+            // The nonlinear port uses physical open volume flow, so its
+            // chimney impedance is Z_open/sigma. With the inlet source
+            // suppressed, both bore arms and the sealed fraction return flow.
+            let reference = local.density * local.sound_speed / (PI * a * a);
+            let (z_left, _, _) = dd_response(
+                dd_mul(series, dd_cylinder(bore, left_length)), Some(C64::from_re(reference)),
+            );
+            let (z_right, _, _) = dd_response(right, Some(load));
+            let return_y = z_left.recip() + z_right.recip()
+                + z_closed.recip().scale(1.0 - sigma);
+            let expected_port = z_open.scale(1.0 / sigma) + return_y.recip();
+            let r_port = holes[0].shunt_port_reflection;
+            let actual_port = ((C64::ONE + r_port) / (C64::ONE - r_port))
+                .scale(holes[0].shunt_port_reference_pa_s_m3);
+            assert!(relative(actual_port, expected_port) < 3.0e-11,
+                "physical port: sigma={sigma}, frequency={frequency}: {actual_port:?} != {expected_port:?}");
+            assert!(r_port.abs() <= 1.0 + 1.0e-12);
             let reflection = crate::exterior::input_reflection(&duct, &local, &exterior,
                 omega, LossModel::Lossless, Termination::FlangedOpen, WallModel::Rigid).unwrap();
             let zc = C64::from_re(reflection.reference_impedance);
@@ -357,6 +374,130 @@ fn two_medium_open_and_vented_holes_match_independent_junction_flow() {
         }
     }
 }
+
+#[test]
+fn vented_orifice_port_keeps_sealed_chimney_node_limits() {
+    let gas = gas();
+    let (a, b, h) = (0.008, 0.003, 0.05);
+    let reference = gas.density * gas.sound_speed / (PI * a * a);
+    let zc = gas.density * gas.sound_speed / (PI * b * b);
+    for sigma in [0.2, 0.7] {
+        let duct = Duct { segments: vec![Segment::ToneHole {
+            hole_radius: b, chimney_height: h, bore_radius: a, state: HoleState::Vent(sigma),
+        }] };
+        for compact in [false, true] {
+            for phase in [0.7, 0.5 * PI * (1.0 - 1e-8), 0.5 * PI,
+                0.5 * PI * (1.0 + 1e-8), PI * (1.0 - 1e-8), PI, PI * (1.0 + 1e-8)] {
+                let omega = phase * gas.sound_speed / h;
+                let options = opts(Composition::Scattering);
+                let (chain, prepared) = duct_chain_with_wall_and_holes(
+                    &duct, &gas, omega, LossModel::Lossless, WallModel::Rigid,
+                    options, compact, || false,
+                ).unwrap();
+                let holes = open_hole_flows(&chain, &prepared, Some(C64::from_re(reference)), options).unwrap();
+                let inner = if compact { fs_phs::side_hole_inner_length(b, a) } else { 0.0 };
+                let series = if compact { fs_phs::side_hole_series_length(b, a) * sigma } else { 0.0 };
+                let half = C64::new(0.0, -omega * gas.density * series / (2.0 * PI * a * a));
+                let wave = crate::segment_wave(&gas, b, omega, LossModel::Lossless).unwrap();
+                let load = crate::flanged_pipe_impedance(&gas, b, omega, crate::FLANGED_MODES).unwrap();
+                let (open, _, _) = dd_response(dd_cylinder(wave, h + inner), Some(load));
+                let bore = C64::from_re(reference) + half;
+                let returned = if phase == 0.5 * PI {
+                    C64::ZERO
+                } else if phase == PI {
+                    bore.scale(0.5)
+                } else {
+                    let sealed_y = C64::new(0.0, -(1.0 - sigma) * phase.sin() / (zc * phase.cos()));
+                    (bore.recip().scale(2.0) + sealed_y).recip()
+                };
+                let expected = open.scale(1.0 / sigma) + returned;
+                let reflection = holes[0].shunt_port_reflection;
+                let actual = ((C64::ONE + reflection) / (C64::ONE - reflection))
+                    .scale(holes[0].shunt_port_reference_pa_s_m3);
+                assert!(relative(actual, expected) < 4e-11,
+                    "sigma={sigma}, phase={phase}, compact={compact}: {actual:?} != {expected:?}");
+                assert!(reflection.abs() <= 1.0 + 1e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn orifice_return_load_accepts_bore_pressure_and_flow_nodes() {
+    // G1: arbitrary passive impedances exercise only the junction algebra.
+    // Exact rigid/pressure-release bore boundaries must remain representable.
+    let reference = 2.0e6;
+    let open = C64::new(0.6, -0.4).scale(reference);
+    let sealed = C64::new(0.25, 0.8).scale(reference);
+    let boundaries = [(C64::ZERO, Some(C64::from_re(reference))),
+        (C64::ONE, None), (-C64::ONE, Some(C64::ZERO))];
+    for sigma in [0.2, 0.7, 1.0] {
+        let port = 4.0 * reference / sigma;
+        for half in [C64::ZERO, C64::new(0.0, -0.2 * reference)] {
+            let hole = PreparedOpenHole {
+                block_index: 0, axial_position_m: 0.0, effective_radius_m: 0.003,
+                chimney_length_m: 0.05, sigma, half_series_impedance: half,
+                open_chimney_impedance: open,
+                closed_return_coordinates: [sealed, C64::from_re(port * (1.0 - sigma))],
+                chimney_u_mouth_over_u_in: C64::ONE,
+                shunt_port_reference_pa_s_m3: port, orifice_quadratic_coeff_pa_s2_m6: 0.0,
+            };
+            for (r_left, z_left) in boundaries {
+                for (r_right, z_right) in boundaries {
+                    let mut y_return = sealed.recip().scale(1.0 - sigma);
+                    let mut short = false;
+                    for impedance in [z_left, z_right].into_iter().flatten() {
+                        let impedance = impedance + half;
+                        if impedance == C64::ZERO { short = true; }
+                        else { y_return = y_return + impedance.recip(); }
+                    }
+                    let expected = if !short && y_return == C64::ZERO {
+                        C64::ONE
+                    } else {
+                        let returned = if short { C64::ZERO } else { y_return.recip() };
+                        let z = open.scale(1.0 / sigma) + returned;
+                        (z - C64::from_re(port)) / (z + C64::from_re(port))
+                    };
+                    let actual = open_hole_port_reflection(&hole, reference, r_left, r_right, 1e12).unwrap();
+                    assert!((actual - expected).abs() < 2e-14,
+                        "sigma={sigma}, r_left={r_left:?}, r_right={r_right:?}, half={half:?}");
+                    assert!(actual.abs() <= 1.0 + 1e-14);
+                }
+            }
+            if sigma == 1.0 && half == C64::ZERO {
+                let mut active = hole;
+                active.open_chimney_impedance = C64::from_re(-port - 0.5 * reference);
+                assert!(matches!(open_hole_port_reflection(
+                    &active, reference, C64::ZERO, C64::ZERO, 1e12,
+                ), Err(DuctError::Singular)));
+            }
+        }
+    }
+}
+
+#[test]
+fn open_and_fully_vented_orifice_ports_are_identical() {
+    let gas = gas();
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        for compact in [false, true] {
+            let mut observations = Vec::new();
+            for state in [HoleState::Open, HoleState::Vent(1.0)] {
+                let duct = Duct { segments: vec![Segment::ToneHole {
+                    hole_radius: 0.003, chimney_height: 0.05, bore_radius: 0.008, state,
+                }] };
+                let options = opts(Composition::Scattering);
+                let (chain, prepared) = duct_chain_with_wall_and_holes(
+                    &duct, &gas, TAU * 731.0, loss, WallModel::Rigid, options, compact, || false,
+                ).unwrap();
+                let holes = open_hole_flows(&chain, &prepared,
+                    Some(C64::from_re(chain.reference_impedance)), options).unwrap();
+                observations.push((chain.blocks[0].scattering, holes));
+            }
+            assert_eq!(observations[0], observations[1]);
+        }
+    }
+}
+
 // Measure today's actual primitive+ABCD operation graph, rather than rounding
 // the independent oracle and calling that a measured legacy defect.
 fn legacy_matrix(
