@@ -1972,6 +1972,7 @@ name = "fs-lbm"
 version = "0.0.1"
 dependencies = [
  "fs-alloc",
+ "fs-atmo",
  "fs-blake3",
  "fs-convection",
  "fs-evidence",
