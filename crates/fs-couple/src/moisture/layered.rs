@@ -14,6 +14,9 @@ use super::*;
 use fs_la::tridiagonal::TridiagonalWorkspace;
 use fs_material::state_point::MonotoneMoistureSorption;
 
+/// Original finite vapor inventory coupled to one or more heterogeneous stacks.
+#[path = "layered/atmosphere.rs"]
+pub mod atmosphere;
 #[path = "layered/interface.rs"]
 mod interface;
 

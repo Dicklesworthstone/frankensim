@@ -9814,12 +9814,44 @@ signed interface transfers, physical boundary transfers, source identities and
 solver evidence. `layers()[i].slab()` exposes the accepted original slab to its
 existing consumers. Exterior ends may be sealed or prescribed RH. This is
 fixed-area, isothermal ideal contact; contact resistance, hysteresis, sorption
-heat, liquid flow, moving geometry and finite-reservoir adapters remain separate.
+heat, liquid flow and moving geometry remain separate. Finite-atmosphere
+exchange uses the explicit adapter below.
 No entropy, continuum-error or experimental-validation certificate is inferred.
 Six authored physical/source tests cover unlike-material equilibrium, transfer
 against the M gradient, nonlinear dry uptake and balanced contact flux, native
 same-material reduction, zero-D barriers, complete held-context compatibility
 and transactional work refusal.
+
+### Finite vapor exchange with heterogeneous material stacks
+
+`FiniteMoistureAtmosphere::advance_layered` and `advance_shared_layered`
+couple either exterior end of one stack, or a stable-ID collection of stacks,
+to the original finite vapor inventory. Each endpoint-humidity trial advances
+the original layered fields from their accepted state, preserving their
+material-specific sorption partition, dry masses and Kirchhoff face fluxes.
+The original atmosphere owner alone reconstructs gas composition and pressure
+and verifies vapor, carrier and total-mass conservation. Signed represented
+cell-water increments are compensated before the shared reservoir debit.
+
+A private transport callback shares the existing finite-RH balance and native
+gas reconstruction with ordinary slab and Cartesian owners; those original
+evaluation paths retain their arithmetic. Accepted candidates publish gas and
+all solid endpoints together. Independent opposing exchanges are summed in
+stable participant-ID order; a sealed stack may redistribute water internally
+without changing the gas. Each exposed surface receipt pins the original
+prepared sorption claim, rather than replacing the material's isotherm.
+
+The model requires fixed temperature/volume, source-supported RH brackets and
+ideal exterior contact. Exposed layers with unowned changing pressure or
+composition source conditions refuse. Bound-water caloric storage, sorption
+heat, condensation and a closed thermal-energy balance are not inferred.
+Focused G0/G1/G3 checks cover an independent coupled two-material/finite-gas
+solution for adsorption/desorption and continuation, shared opposing exchanges
+and order independence, equilibrium/sealed gas retention, and atomic outer-work
+or source-context refusal. Existing ordinary and Kirchhoff finite-vapor cases
+also run against the actual thermochemical and original gas-parcel owners.
+These tests do not establish measured specimen validation or full fs-exec
+application integration.
 
 ### Source-backed finite surface moisture exchange
 

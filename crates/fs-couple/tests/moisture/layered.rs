@@ -7,6 +7,9 @@ use fs_material::state_point::{
     resolve_material_state_point,
 };
 
+#[path = "layered/atmosphere.rs"]
+mod atmosphere;
+
 fn nonlinear() -> MoistureNonlinearConfig {
     MoistureNonlinearConfig {
         relative_tolerance: 1e-12,
