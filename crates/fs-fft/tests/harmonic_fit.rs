@@ -1,7 +1,7 @@
 //! G1/G3: known-frequency harmonic amplitudes, phase, and sampled residuals.
 
 use fs_fft::C64;
-use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitError, HarmonicFitPlan};
+use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitError, HarmonicFitPlan, ToneFitPlan};
 
 fn budget() -> HarmonicFitBudget {
     HarmonicFitBudget {
@@ -39,6 +39,166 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
         (actual - expected).abs() < tolerance,
         "actual {actual:.17e}, expected {expected:.17e}, tolerance {tolerance:e}"
     );
+}
+
+fn tone_signal(
+    n: usize,
+    dt: f64,
+    frequencies: &[f64],
+    phasors: &[C64],
+    dc: f64,
+    t0: f64,
+) -> Vec<f64> {
+    (0..n)
+        .map(|j| {
+            let t = t0 + j as f64 * dt;
+            dc + frequencies
+                .iter()
+                .zip(phasors)
+                .map(|(&f, p)| {
+                    let (s, c) = (core::f64::consts::TAU * f * t).sin_cos();
+                    p.re * c + p.im * s
+                })
+                .sum::<f64>()
+        })
+        .collect()
+}
+
+#[test]
+fn stiff_string_partials_retain_their_physical_inharmonic_frequencies() {
+    // Manufactured Euler--Bernoulli string dispersion. This tests measurement
+    // of supplied frequencies, not identification of tension or stiffness.
+    let orders = [1, 2, 5, 11];
+    let stiffness = 0.0007;
+    let frequencies: Vec<_> = orders
+        .iter()
+        .map(|&h| {
+            111.25 * h as f64 * ((1.0 + stiffness * (h * h) as f64) / (1.0 + stiffness)).sqrt()
+        })
+        .collect();
+    let phasors = [
+        C64::new(1.2, -0.7),
+        C64::new(2e-5, -5e-5),
+        C64::new(-0.31, 0.44),
+        C64::new(0.17, 0.09),
+    ];
+    let dt = 1.0 / 8192.0;
+    for n in [511, 1021, 2047] {
+        let plan = ToneFitPlan::new(n, dt, &frequencies, budget()).unwrap();
+        let samples = tone_signal(n, dt, &frequencies, &phasors, 4.75, 0.0);
+        let fit = plan.fit(&samples).unwrap();
+        assert_eq!(plan.frequencies_hz(), frequencies);
+        close(fit.dc, 4.75, 3e-12);
+        for (actual, expected) in fit.phasors.iter().zip(phasors) {
+            close(actual.re, expected.re, 3e-12);
+            close(actual.im, expected.im, 3e-12);
+        }
+        assert!(fit.residual_rms < 3e-12);
+        let rounded = HarmonicFitPlan::new(n, dt, frequencies[0], &orders, budget())
+            .unwrap()
+            .fit(&samples)
+            .unwrap();
+        assert!(
+            rounded.residual_rms > 0.03,
+            "stiffness must not be rounded away"
+        );
+    }
+}
+
+#[test]
+fn sub_bin_beating_tones_are_jointly_separated_with_their_phase_origin() {
+    let n = 1021;
+    let dt = 1.0 / 8192.0;
+    let frequencies = [432.1, 433.4, 1739.7];
+    assert!(frequencies[1] - frequencies[0] < 1.0 / (n as f64 * dt));
+    let phasors = [
+        C64::new(1.0, -0.4),
+        C64::new(-0.7, 0.9),
+        C64::new(0.01, 0.02),
+    ];
+    let t0 = 0.0173;
+    let plan = ToneFitPlan::new(n, dt, &frequencies, budget()).unwrap();
+    let samples = tone_signal(n, dt, &frequencies, &phasors, -3.0, t0);
+    let fit = plan.fit(&samples).unwrap();
+    for ((actual, expected), frequency) in fit.phasors.iter().zip(phasors).zip(frequencies) {
+        let (s, c) = (core::f64::consts::TAU * frequency * t0).sin_cos();
+        close(actual.re, expected.re * c + expected.im * s, 8e-12);
+        close(actual.im, expected.im * c - expected.re * s, 8e-12);
+    }
+    close(fit.dc, -3.0, 2e-12);
+    assert!(fit.residual_rms < 2e-12);
+}
+
+#[test]
+fn harmonic_and_explicit_tone_fronts_share_the_same_numerical_owner() {
+    let n = 173;
+    let dt = 1.0 / 4096.0;
+    let f0 = 37.25;
+    let orders = [1, 2, 4, 8];
+    let frequencies: Vec<_> = orders.iter().map(|&h| f0 * h as f64).collect();
+    let harmonic = HarmonicFitPlan::new(n, dt, f0, &orders, budget()).unwrap();
+    let tones = ToneFitPlan::new(n, dt, &frequencies, budget()).unwrap();
+    let samples = signal(
+        n,
+        dt,
+        f0,
+        &orders,
+        &[
+            C64::new(0.1, 0.2),
+            C64::new(-0.3, 0.4),
+            C64::new(0.7, -0.2),
+            C64::new(-0.1, -0.05),
+        ],
+        5.0,
+        0.0,
+    );
+    assert_eq!(
+        tones.fit(&samples).unwrap(),
+        harmonic.fit(&samples).unwrap()
+    );
+    assert_eq!(
+        tones.reciprocal_condition(),
+        harmonic.reciprocal_condition()
+    );
+    assert_eq!(tones.workspace_bytes(), harmonic.workspace_bytes());
+    assert_eq!(tones.sample_count(), n);
+    assert_eq!(tones.timestep_s(), dt);
+    let mut scratch = vec![0.0; n];
+    let mut output = vec![C64::default(); orders.len()];
+    let result = tones.fit_into(&samples, &mut scratch, &mut output).unwrap();
+    let allocated = tones.fit(&samples).unwrap();
+    assert_eq!(result.dc, allocated.dc);
+    assert_eq!(result.residual_rms, allocated.residual_rms);
+    assert_eq!(output, allocated.phasors);
+}
+
+#[test]
+fn unresolved_tones_and_invalid_frequency_declarations_refuse() {
+    for frequencies in [
+        vec![],
+        vec![0.0],
+        vec![-1.0],
+        vec![f64::NAN],
+        vec![f64::INFINITY],
+        vec![100.0, 100.0],
+        vec![200.0, 100.0],
+        vec![500.0],
+    ] {
+        assert!(ToneFitPlan::new(100, 0.001, &frequencies, budget()).is_err());
+    }
+    assert!(ToneFitPlan::new(4, 0.001, &[50.0, 100.0], budget()).is_err());
+    assert!(ToneFitPlan::new(100, f64::NAN, &[50.0], budget()).is_err());
+    let mut limits = budget();
+    limits.min_reciprocal_condition = 1e-8;
+    assert!(matches!(
+        ToneFitPlan::new(128, 0.0001, &[100.0, 100.0 + 1e-10], limits),
+        Err(HarmonicFitError::IllConditioned { .. })
+    ));
+    limits.max_workspace_bytes = 1;
+    assert!(matches!(
+        ToneFitPlan::new(100, 0.001, &[50.0], limits),
+        Err(HarmonicFitError::BudgetExceeded { .. })
+    ));
 }
 
 #[test]

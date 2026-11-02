@@ -156,6 +156,20 @@ to fit its constant jointly follow the [NIST sinusoidal-model discussion](https:
 the record-length dependence of FFT leakage is documented in
 [Sandia SAND1993-0518C](https://www.sandia.gov/research/publications/details/the-use-of-dft-windows-in-signal-to-noise-ratio-and-harmonic-distortion-com-1993-03-01/).
 
+### Inharmonic and independent tones
+
+`harmonic::ToneFitPlan` accepts explicit positive, strictly increasing physical
+frequencies and uses the same QR, scaling, residual, admission and buffer owner
+as `HarmonicFitPlan`. Stiff-string dispersion and noncommensurate source tones
+retain their actual frequencies; no integer harmonic labels are invented.
+Close tones retain their relative phase and finite-record cross terms. A short
+record that cannot separate them at the requested conditioning floor refuses.
+Both interfaces retain the same preparation/reuse complexity and storage
+budget. G1/G3 cases cover manufactured stiff-string partials, beating tones
+closer than one FFT bin, phase origin, shared numerical results, and unresolved
+tone refusal. This is known-frequency estimation, not blind source separation
+or a claim that arbitrary close tones can be resolved in noisy records.
+
 ## Determinism class
 The complex stage path is **bit-deterministic cross-ISA**: twiddles come from
 fs-math's strict functions and the transform body uses fixed-order `+`, `−`,

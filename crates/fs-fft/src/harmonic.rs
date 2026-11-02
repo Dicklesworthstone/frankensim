@@ -1,10 +1,13 @@
-//! Joint, known-frequency harmonic estimation for uniformly sampled records.
+//! Joint, known-frequency tone and harmonic estimation for sampled records.
 //!
 //! The model is `x[j] = dc + sum_h (a_h cos(w_h j dt) + b_h sin(w_h j dt))`.
 //! All columns, including DC, are fitted together with the shared Householder
 //! QR owner. Unlike picking a nearest FFT bin or independently projecting
 //! each tone, this does not assume an integer number of periods or orthogonal
-//! sampled harmonics. It does not estimate frequency or remove unmodeled tones.
+//! sampled tones. [`ToneFitPlan`] retains arbitrary physical frequencies,
+//! including inharmonic partials and beating sources. [`HarmonicFitPlan`]
+//! supplies integer multiples of one fundamental to the same numerical owner.
+//! Neither plan estimates frequency or removes unmodeled tones.
 //!
 //! The returned peak phasor is `a_h + i b_h` for `exp(-i w_h t)`, referenced
 //! to the first sample. It is twice the conjugate of the positive-frequency
@@ -89,7 +92,7 @@ fn invalid(what: &'static str) -> HarmonicFitError {
 pub struct HarmonicFit {
     /// Fitted constant term, not the arithmetic mean of a partial-period record.
     pub dc: f64,
-    /// Peak `exp(-i omega t)` phasors in the plan's harmonic order.
+    /// Peak `exp(-i omega t)` phasors in the plan's tone or harmonic order.
     pub phasors: Vec<C64>,
     /// RMS of the unexplained sampled record, with denominator sample count.
     /// This is not a noise, aliasing, or physical model-error certificate.
@@ -114,10 +117,30 @@ pub struct HarmonicFitSummary {
 /// it is not a replacement for broadband O(N log N) spectral analysis.
 #[derive(Debug, Clone)]
 pub struct HarmonicFitPlan {
-    samples: usize,
-    timestep_s: f64,
     fundamental_hz: f64,
     harmonics: Vec<usize>,
+    design: FitDesign,
+}
+
+/// A joint DC/sinusoid fit at explicit, possibly inharmonic frequencies.
+///
+/// Frequencies come from the caller's physical model or independent frequency
+/// estimate. Close tones are fitted simultaneously, preserving their relative
+/// phase and finite-record cross terms; unresolved tones are refused at the
+/// declared conditioning floor. There is no rounding to harmonics or FFT bins.
+/// Preparation and fitting have the same costs as [`HarmonicFitPlan`].
+#[derive(Debug, Clone)]
+pub struct ToneFitPlan {
+    frequencies_hz: Vec<f64>,
+    design: FitDesign,
+}
+
+// One factorization, scaling, and solve owner for both frequency declarations.
+#[derive(Debug, Clone)]
+struct FitDesign {
+    samples: usize,
+    timestep_s: f64,
+    tones: usize,
     factor: Qr,
     reciprocal_condition: f64,
     workspace_bytes: usize,
@@ -146,12 +169,6 @@ impl HarmonicFitPlan {
                 "timestep and fundamental must be positive and finite",
             ));
         }
-        if !(budget.min_reciprocal_condition.is_finite()
-            && budget.min_reciprocal_condition > 0.0
-            && budget.min_reciprocal_condition <= 1.0)
-        {
-            return Err(invalid("reciprocal-condition floor must be in (0, 1]"));
-        }
         if harmonics.is_empty()
             || harmonics[0] == 0
             || harmonics.windows(2).any(|pair| pair[0] >= pair[1])
@@ -160,90 +177,38 @@ impl HarmonicFitPlan {
                 "harmonics must be positive, nonempty and strictly increasing",
             ));
         }
-        let columns = harmonics
-            .len()
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(1))
-            .ok_or_else(|| invalid("harmonic design size overflows"))?;
-        if sample_count < columns {
-            return Err(invalid("need at least 1 + 2 * harmonic_count samples"));
-        }
         let cycles_per_sample = fundamental_hz * timestep_s;
         for &order in harmonics {
-            let cycles = cycles_per_sample * order as f64;
-            if order as u128 > (1_u128 << 53)
-                || !(cycles > 0.0 && cycles < 0.5)
-                || !(fundamental_hz * order as f64).is_finite()
-            {
+            if order as u128 > (1_u128 << 53) || !(fundamental_hz * order as f64).is_finite() {
                 return Err(invalid(
                     "harmonic frequencies must be finite, positive and below Nyquist",
                 ));
             }
         }
-        // QR keeps a copy of the N*p design while constructing its factor.
-        // The conservative sum also covers tau, condition scratch, one fit's
-        // sample scratch/output, and retained harmonic indices (usize <= u64).
-        let entries = sample_count
-            .checked_mul(columns)
-            .ok_or_else(|| invalid("harmonic design size overflows"))?;
-        let workspace_bytes = entries
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(sample_count))
-            .and_then(|n| columns.checked_mul(3).and_then(|p| n.checked_add(p)))
-            .and_then(|n| {
-                harmonics
-                    .len()
-                    .checked_mul(3)
-                    .and_then(|h| n.checked_add(h))
-            })
-            .and_then(|n| n.checked_mul(core::mem::size_of::<f64>()))
-            .ok_or_else(|| invalid("harmonic workspace size overflows"))?;
-        if workspace_bytes > budget.max_workspace_bytes {
-            return Err(HarmonicFitError::BudgetExceeded {
-                required_bytes: workspace_bytes,
-                max_bytes: budget.max_workspace_bytes,
-            });
-        }
-        let mut design = vec![0.0; entries];
-        for (j, row) in design.chunks_exact_mut(columns).enumerate() {
-            row[0] = 1.0;
-            for (k, &order) in harmonics.iter().enumerate() {
-                let theta =
-                    core::f64::consts::TAU * ((cycles_per_sample * order as f64) * j as f64);
-                let (s, c) = det::sin_cos(theta);
-                row[2 * k + 1] = c;
-                row[2 * k + 2] = s;
-            }
-        }
-        let factor = qr(&design, sample_count, columns);
-        let reciprocal_condition = triangular_reciprocal_condition(&factor, columns);
-        if reciprocal_condition < budget.min_reciprocal_condition {
-            return Err(HarmonicFitError::IllConditioned {
-                reciprocal_condition,
-                minimum: budget.min_reciprocal_condition,
-            });
-        }
-        Ok(Self {
-            samples: sample_count,
+        let design = FitDesign::new(
+            sample_count,
             timestep_s,
+            harmonics.len(),
+            |k| cycles_per_sample * harmonics[k] as f64,
+            budget,
+        )?;
+        Ok(Self {
             fundamental_hz,
             harmonics: harmonics.to_vec(),
-            factor,
-            reciprocal_condition,
-            workspace_bytes,
+            design,
         })
     }
 
     /// Required record and scratch length.
     #[must_use]
     pub const fn sample_count(&self) -> usize {
-        self.samples
+        self.design.samples
     }
 
     /// Uniform physical sampling interval in seconds.
     #[must_use]
     pub const fn timestep_s(&self) -> f64 {
-        self.timestep_s
+        self.design.timestep_s
     }
 
     /// Caller-supplied fundamental frequency in hertz.
@@ -261,24 +226,199 @@ impl HarmonicFitPlan {
     /// Measured reciprocal 1-norm condition of the triangular QR factor.
     #[must_use]
     pub const fn reciprocal_condition(&self) -> f64 {
-        self.reciprocal_condition
+        self.design.reciprocal_condition
     }
 
     /// Conservative numeric-array storage admitted at preparation.
     #[must_use]
     pub const fn workspace_bytes(&self) -> usize {
-        self.workspace_bytes
+        self.design.workspace_bytes
     }
 
     /// Fit one record, allocating its scratch and returned phasors.
     pub fn fit(&self, samples: &[f64]) -> Result<HarmonicFit, HarmonicFitError> {
+        self.design.fit(samples)
+    }
+
+    /// Fit without allocation, reusing a length-N scratch slice and K phasors.
+    /// On error, phasors remain unchanged; scratch may have been modified.
+    pub fn fit_into(
+        &self,
+        samples: &[f64],
+        scratch: &mut [f64],
+        phasors: &mut [C64],
+    ) -> Result<HarmonicFitSummary, HarmonicFitError> {
+        self.design.fit_into(samples, scratch, phasors)
+    }
+}
+
+impl ToneFitPlan {
+    /// Prepare a joint fit at positive, strictly increasing finite frequencies
+    /// below Nyquist. The clock is uniform, but record length and tone spacing
+    /// need not coincide with any FFT grid. The complete design, including DC,
+    /// must pass the declared conditioning and storage limits before use.
+    pub fn new(
+        sample_count: usize,
+        timestep_s: f64,
+        frequencies_hz: &[f64],
+        budget: HarmonicFitBudget,
+    ) -> Result<Self, HarmonicFitError> {
+        if frequencies_hz.is_empty()
+            || frequencies_hz.iter().any(|f| !f.is_finite() || *f <= 0.0)
+            || frequencies_hz.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(invalid(
+                "tone frequencies must be finite, positive and strictly increasing",
+            ));
+        }
+        let design = FitDesign::new(
+            sample_count,
+            timestep_s,
+            frequencies_hz.len(),
+            |k| frequencies_hz[k] * timestep_s,
+            budget,
+        )?;
+        Ok(Self {
+            frequencies_hz: frequencies_hz.to_vec(),
+            design,
+        })
+    }
+
+    /// Physical tone frequencies in the same order as the returned phasors.
+    #[must_use]
+    pub fn frequencies_hz(&self) -> &[f64] {
+        &self.frequencies_hz
+    }
+
+    /// Required record and scratch length.
+    #[must_use]
+    pub const fn sample_count(&self) -> usize {
+        self.design.samples
+    }
+
+    /// Uniform physical sampling interval in seconds.
+    #[must_use]
+    pub const fn timestep_s(&self) -> f64 {
+        self.design.timestep_s
+    }
+
+    /// Measured reciprocal 1-norm condition of the joint triangular factor.
+    #[must_use]
+    pub const fn reciprocal_condition(&self) -> f64 {
+        self.design.reciprocal_condition
+    }
+
+    /// Conservative numeric-array storage admitted at preparation.
+    #[must_use]
+    pub const fn workspace_bytes(&self) -> usize {
+        self.design.workspace_bytes
+    }
+
+    /// Fit one record, allocating scratch and peak phasors in input units.
+    pub fn fit(&self, samples: &[f64]) -> Result<HarmonicFit, HarmonicFitError> {
+        self.design.fit(samples)
+    }
+
+    /// Fit with caller-owned scratch and output, without allocation. On error,
+    /// phasors remain unchanged; scratch may have been modified.
+    pub fn fit_into(
+        &self,
+        samples: &[f64],
+        scratch: &mut [f64],
+        phasors: &mut [C64],
+    ) -> Result<HarmonicFitSummary, HarmonicFitError> {
+        self.design.fit_into(samples, scratch, phasors)
+    }
+}
+
+impl FitDesign {
+    fn new(
+        sample_count: usize,
+        timestep_s: f64,
+        tones: usize,
+        cycles_per_sample: impl Fn(usize) -> f64,
+        budget: HarmonicFitBudget,
+    ) -> Result<Self, HarmonicFitError> {
+        if !timestep_s.is_finite() || timestep_s <= 0.0 {
+            return Err(invalid("timestep must be positive and finite"));
+        }
+        if !(budget.min_reciprocal_condition.is_finite()
+            && budget.min_reciprocal_condition > 0.0
+            && budget.min_reciprocal_condition <= 1.0)
+        {
+            return Err(invalid("reciprocal-condition floor must be in (0, 1]"));
+        }
+        let columns = tones
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| invalid("sinusoid design size overflows"))?;
+        if sample_count < columns {
+            return Err(invalid("need at least 1 + 2 * tone_count samples"));
+        }
+        for k in 0..tones {
+            let cycles = cycles_per_sample(k);
+            if !(cycles > 0.0 && cycles < 0.5) {
+                return Err(invalid(
+                    "tone frequencies must be positive and strictly below Nyquist",
+                ));
+            }
+        }
+        // QR keeps a copy of the N*p design while constructing its factor.
+        // The conservative sum also covers tau, condition scratch, one fit's
+        // sample scratch/output, and retained tone frequencies or harmonic
+        // indices (usize <= u64). Admission precedes every numeric allocation.
+        let entries = sample_count
+            .checked_mul(columns)
+            .ok_or_else(|| invalid("harmonic design size overflows"))?;
+        let workspace_bytes = entries
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(sample_count))
+            .and_then(|n| columns.checked_mul(3).and_then(|p| n.checked_add(p)))
+            .and_then(|n| tones.checked_mul(3).and_then(|h| n.checked_add(h)))
+            .and_then(|n| n.checked_mul(core::mem::size_of::<f64>()))
+            .ok_or_else(|| invalid("harmonic workspace size overflows"))?;
+        if workspace_bytes > budget.max_workspace_bytes {
+            return Err(HarmonicFitError::BudgetExceeded {
+                required_bytes: workspace_bytes,
+                max_bytes: budget.max_workspace_bytes,
+            });
+        }
+        let mut design = vec![0.0; entries];
+        for (j, row) in design.chunks_exact_mut(columns).enumerate() {
+            row[0] = 1.0;
+            for k in 0..tones {
+                let theta = core::f64::consts::TAU * (cycles_per_sample(k) * j as f64);
+                let (s, c) = det::sin_cos(theta);
+                row[2 * k + 1] = c;
+                row[2 * k + 2] = s;
+            }
+        }
+        let factor = qr(&design, sample_count, columns);
+        let reciprocal_condition = triangular_reciprocal_condition(&factor, columns);
+        if reciprocal_condition < budget.min_reciprocal_condition {
+            return Err(HarmonicFitError::IllConditioned {
+                reciprocal_condition,
+                minimum: budget.min_reciprocal_condition,
+            });
+        }
+        Ok(Self {
+            samples: sample_count,
+            timestep_s,
+            tones,
+            factor,
+            reciprocal_condition,
+            workspace_bytes,
+        })
+    }
+
+    fn fit(&self, samples: &[f64]) -> Result<HarmonicFit, HarmonicFitError> {
         if samples.len() != self.samples {
             return Err(invalid(
                 "record length differs from the prepared sampling grid",
             ));
         }
         let mut scratch = vec![0.0; self.samples];
-        let mut phasors = vec![C64::default(); self.harmonics.len()];
+        let mut phasors = vec![C64::default(); self.tones];
         let summary = self.fit_into(samples, &mut scratch, &mut phasors)?;
         Ok(HarmonicFit {
             dc: summary.dc,
@@ -290,7 +430,7 @@ impl HarmonicFitPlan {
     /// Fit without allocation, reusing a length-N scratch slice and K phasors.
     /// All inputs are admitted before output mutation. On any later error the
     /// scratch is unspecified; output phasors remain unchanged.
-    pub fn fit_into(
+    fn fit_into(
         &self,
         samples: &[f64],
         scratch: &mut [f64],
@@ -298,7 +438,7 @@ impl HarmonicFitPlan {
     ) -> Result<HarmonicFitSummary, HarmonicFitError> {
         if samples.len() != self.samples
             || scratch.len() != self.samples
-            || phasors.len() != self.harmonics.len()
+            || phasors.len() != self.tones
         {
             return Err(invalid(
                 "record/scratch/phasor lengths differ from the prepared design",
@@ -330,7 +470,7 @@ impl HarmonicFitPlan {
             *out = (x - center) / scale;
         }
         self.factor.apply_qt(scratch);
-        let columns = 2 * self.harmonics.len() + 1;
+        let columns = 2 * self.tones + 1;
         let residual_rms =
             det::sqrt(scratch[columns..].iter().map(|v| v * v).sum::<f64>() / self.samples as f64)
                 * scale;
