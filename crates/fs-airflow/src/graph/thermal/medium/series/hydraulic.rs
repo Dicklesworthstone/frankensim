@@ -132,9 +132,29 @@ impl MaterialFlowResistance {
         self.evaluate_snapshot(transport, mass_flow, transport.density_kg_m3())
     }
 
+    /// Native graph coefficients in dp = A Q + B Q |Q|, using explicit
+    /// Boussinesq momentum density and the original source viscosity.
+    /// Coefficients must themselves be representable; no epsilon drag is added.
+    pub(crate) fn volume_coefficients(
+        &self, transport: FluidTransportState, momentum_density: f64,
+    ) -> Result<(f64, f64), ResistanceError> {
+        if !positive(momentum_density) {
+            return Err(ResistanceError::Invalid("positive momentum density required"));
+        }
+        let linear = self.viscous_geometry * transport.dynamic_viscosity_pa_s();
+        let quadratic = self.inertial_geometry * momentum_density;
+        if !linear.is_finite() || !quadratic.is_finite() || linear < 0.0 || quadratic < 0.0
+            || (self.viscous_geometry > 0.0 && linear == 0.0)
+            || (self.inertial_geometry > 0.0 && quadratic == 0.0)
+        {
+            return Err(ResistanceError::Invalid("native volume-flow coefficients are not representable"));
+        }
+        Ok((linear, quadratic))
+    }
+
     // One loss law for ordinary and Boussinesq hydraulics. The original source
     // snapshot stays visible; reference rho is only a declared momentum model.
-    fn evaluate_snapshot(
+    pub(crate) fn evaluate_snapshot(
         &self, transport: FluidTransportState, mass_flow: MassFlowRate, rho: f64,
     ) -> Result<ResistanceEvaluation, ResistanceError> {
         let mass = mass_flow.value();

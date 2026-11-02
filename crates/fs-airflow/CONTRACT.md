@@ -1,5 +1,19 @@
 # CONTRACT: fs-airflow
 
+## Material-dependent graph drag and wall exchange
+
+The natural-circulation material-response adapter rebuilds native graph loss
+coefficients from explicit MaterialFlowResistance geometry and original material
+states. Linear drag uses source viscosity; quadratic inertia and conserved flow
+use the declared Boussinesq reference density. The original resistance owner
+still admits Reynolds number, tangent and dissipated power. Each exchange uses
+its explicit geometry and the original forced-convection correlation, retaining
+material owners, Nusselt evidence and h. Source or correlation refusal is terminal;
+constant-heat-flux cards cannot silently drive a constant-wall-temperature channel.
+Topology, branch identities and segment ordering are explicit. Bulk/film sampling,
+geometry/calibration support and material uncertainty remain caller-owned. This
+binding is not a new constitutive database or a universal pipe-friction model.
+
 ## Coupled material response in steady natural circulation
 
 natural_circulation::response::solve_circulation_with_response closes changes in
