@@ -163,7 +163,6 @@ fn incompatible_source_profiles_and_invalid_new_records_refuse() {
     let data = nolle_input();
     for refused in [
         data.replace("windway slit 0.005", "windway unsteady 0.005 8 8"),
-        data.replace("windway slit 0.005", "windway slit-developing 0.015"),
         data.replace(NOLLE, &format!("jet_speed card-centreline\n{NOLLE}")),
         data.replace(
             NOLLE,
@@ -191,6 +190,26 @@ fn incompatible_source_profiles_and_invalid_new_records_refuse() {
             "admitted {refused}"
         );
     }
+}
+
+#[test]
+fn nolle_behind_a_developing_windway_takes_the_windways_own_exit_not_the_poiseuille_constant() {
+    // pexfp.135.5: this pairing used to be refused (the transfer assumed a Poiseuille or uniform exit). The
+    // transfer's U0/u is now the developing law's core over bulk speed at the held pressure, which is exactly the
+    // Poiseuille 1.5 only once the layers have met; the developing windway itself still refuses what its law refuses.
+    let data = nolle_input().replace("windway slit 0.005", "windway slit-developing 0.015");
+    let source =
+        FlueDgFilePerformance::from_bytes(data.as_bytes(), 37, &CancelGate::new_clock_free())
+            .unwrap();
+    let voice = source.renderer().voice();
+    let (_, held) = voice.developing_windway().unwrap();
+    held.validity().unwrap();
+    let exit = crate::flue_loop::forced_jet::JetExit::developing(held, 0.001);
+    assert_eq!(voice.nolle_jet().unwrap().centre_over_bulk(), exit.centre_over_bulk);
+    assert!(
+        exit.centre_over_bulk >= 1.0
+            && exit.centre_over_bulk <= crate::flue_loop::nolle_jet::POISEUILLE_CENTRE_OVER_BULK
+    );
 }
 
 #[test]

@@ -48,8 +48,9 @@
 # (thesis Fig. 5.14; laminar vs laminar, it verifies the law in x+ only, laminarity is bounded separately): the thesis states two Reynolds
 # length scales, so the status is split, MET under Re_Dh = 2 Re (2/2) and MISSED under Re_Dh = 4 Re (1/3). Reading II misses by 7 to 9 %
 # at x+ 1.6e-3 to 3.3e-3, which is a6c's x+ (1.68e-3); d7c (x+ 1.26e-3) lies below the graded range. Chen's 0.64 + 38/Re and Shah and
-# London's agreement statement behind the x+ floor are secondary, search snippet only; primary not read. The four *-nolle gate files keep
-# `windway slit` and its pressures: the Nolle/Price transfer refuses this windway. The gesture is 12.5 ms attack, hold, 10.5 ms release.
+# London's agreement statement behind the x+ floor are secondary, search snippet only; primary not read. The four *-nolle gate files carry
+# this windway and the same pressures for d5, d6c, a6c and d7c (pexfp.135.5): the Nolle/Price transfer takes this exit's own core speed over its bulk
+# speed (1.43 on D5 down to 1.23 on D7c), the Poiseuille 1.5 only once the layers have met. The gesture is 12.5 ms attack, hold, 10.5 ms release.
 # Dry air at 20 C is the measurement's own gas, not an omission: the paper blew the whistle from a regulated, metered air supply in an anechoic
 # room at 20 C (specimen.tsv, environment), not by mouth. Do not change it to breath; breath gas belongs to recipes whose data were played.
 # Jet: `jet_response forced-bickley 0.1 90` (pexfp.135.4) puts the forced Bickley jet in place of the relay's band chain and displacement gain

@@ -12,9 +12,12 @@
 //! fixture geometries chosen for a large margin, not instrument claims. (An earlier "no crossing" control was wrong: its scan
 //! stopped at 3 kHz and that flue is unstable above it.)
 use fs_aeroac::jetcard::mint_tonal_interim_card;
+use fs_couple::bernoulli_aperture::developing::DevelopingSlit;
 use fs_couple::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
+use fs_couple::flue_loop::forced_jet::JetExit;
 use fs_couple::flue_loop::network::FlueNetworkSpec;
-use fs_couple::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
+use fs_couple::flue_loop::network::performance::file::FlueFilePerformance;
+use fs_couple::flue_loop::nolle_jet::{ChannelClass, NolleSpec, POISEUILLE_CENTRE_OVER_BULK};
 use fs_couple::flue_loop::{FlueControl, FlueGeometry, FlueVoice};
 use fs_exec::CancelGate;
 use fs_material::gas::{GasSpec, GasState};
@@ -92,4 +95,33 @@ fn g2_default_island_is_not_the_hosted_transfer() {
     let hosted = last_block_rms(0.010, 0.001, 0.008, 800.0, None, true);
     println!("island chain rms {island:.3e} Pa, hosted transfer rms {hosted:.3e} Pa");
     assert!((island - hosted).abs() > 1e-6 * hosted.max(island), "{island} vs {hosted}");
+}
+
+/// The four tin-whistle Nolle/Price gate files (all holes closed, pexfp.135.5): each names the developing windway at its
+/// measured flow's pressure (Davies 2006 Table 1 through Shah's law, the same pressures as the same note's forced-jet card),
+/// so the transfer's U0/u is that exit's own core over bulk, not the fully developed slit's constant 1.5. The last column is
+/// the same note's forced-jet card sidecar value at the site pin (`flue_input.jet_response.centre_over_bulk`, bead comment
+/// 8533 on pexfp.135.7).
+#[test]
+fn g3_tin_whistle_nolle_gate_files_take_the_developing_exit_of_their_measured_flow() {
+    let files = [
+        (include_str!("../../../data/instruments/descriptions/tin-whistle/tin-whistle-d5-nolle.performance"), "9.3447e1", 93.447, 1.4275),
+        (include_str!("../../../data/instruments/descriptions/tin-whistle/tin-whistle-d6c-nolle.performance"), "2.9681e2", 296.81, 1.3145),
+        (include_str!("../../../data/instruments/descriptions/tin-whistle/tin-whistle-a6c-nolle.performance"), "6.0664e2", 606.64, 1.2598),
+        (include_str!("../../../data/instruments/descriptions/tin-whistle/tin-whistle-d7c-nolle.performance"), "1.0165e3", 1016.5, 1.2265),
+    ];
+    let air = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    for (text, literal, pressure, sidecar) in files {
+        assert!(text.contains("\nwindway slit-developing 0.02455\n") && !text.contains("\nwindway slit 0.02455\n"));
+        assert!(text.contains(&format!("pressure-pa\t{literal}\n")), "the gesture's held pressure is {literal} Pa");
+        let held = DevelopingSlit::from_gas(&air, 0.02455).unwrap().held(0.008, 0.00148, pressure).unwrap();
+        held.validity().unwrap();
+        let expected = JetExit::developing(&held, 0.00148).centre_over_bulk;
+        let file = FlueFilePerformance::from_bytes(text.as_bytes(), 256, &CancelGate::new_clock_free()).unwrap();
+        let renderer = file.into_renderer();
+        let ratio = renderer.voice().nolle_jet().unwrap().centre_over_bulk();
+        assert_eq!(ratio, expected, "{pressure} Pa");
+        assert!((ratio - sidecar).abs() < 6e-5, "{pressure} Pa: {ratio} against the forced-jet card's {sidecar}");
+        assert!(ratio < POISEUILLE_CENTRE_OVER_BULK, "{pressure} Pa: the exit is undeveloped, so below the constant 1.5");
+    }
 }

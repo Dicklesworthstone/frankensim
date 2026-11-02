@@ -2764,9 +2764,14 @@ above which plane Poiseuille flow sustains turbulence, Kashyap et al. 2020). The
 sidecar records `x+`, `Re_Dh`, `Re_L`, the core
 speed, displacement thickness and these measures at the held pressure. The
 attack and release pass through the same quasi-steady law and are not covered.
-The Nolle/Price transfer refuses it (its exit profiles assume Poiseuille or
-uniform flow). The forced Bickley jet is matched to its exit at the held pressure
-(see OPT-IN FORCED JET); otherwise pexfp.135.5 owns the core speed. A
+The forced Bickley jet and the Nolle/Price transfer, attached after it, take its
+exit at the held pressure: the law's core speed over its bulk speed, exactly the
+Poiseuille 1.5 once the layers have met (see OPT-IN FORCED JET; pexfp.135.5). A
+windway the law refuses never reaches them, and a transfer attached before this
+windway is refused. Price's jet gain 0.145 was fitted on a Poiseuille jet and is
+applied to this exit's centre speed unchanged; the transit and gain follow the
+held ratio, so the attack and release are not covered. Otherwise the island's
+card reads only the bulk speed unless `jet_speed card-centreline` is named. A
 converging windway declared as its
 exit-height slit most likely overstates the loss.
 

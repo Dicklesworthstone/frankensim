@@ -1020,10 +1020,11 @@ impl FlueVoice {
     /// speed enters the jet as the slit law's does. The held note's pressure must lie
     /// inside the law's validity (x+, Chen's low-Re term, laminarity); the attack
     /// and release pass through the same quasi-steady law and are not covered by it.
-    /// The Nolle/Price transfer is refused: its exit profiles assume Poiseuille or
-    /// uniform flow. The forced jet, attached after this, is matched to this law's exit
-    /// ([`forced_jet::JetExit::developing`]); otherwise its core speed reaches only the
-    /// island's card, through [`FlueVoice::with_card_centreline_speed`] (pexfp.135.5).
+    /// The forced jet or the Nolle/Price transfer, attached after this, takes this law's exit
+    /// ([`forced_jet::JetExit::developing`]: its core speed over its bulk speed at the held
+    /// pressure); otherwise its core speed reaches only the island's card, through
+    /// [`FlueVoice::with_card_centreline_speed`] (pexfp.135.5). A jet transfer attached before
+    /// the windway is refused: the windway sets its exit.
     ///
     /// # Errors
     /// Invalid geometry or gas, repeated/late attachment, another windway, an attached
@@ -1037,7 +1038,7 @@ impl FlueVoice {
             return Err(FlueError::Invalid { what: "developing windway requires one cold attachment and no other windway" });
         }
         if self.nolle.is_some() {
-            return Err(FlueError::Invalid { what: "developing windway refuses the Nolle/Price transfer, whose exit profile it does not supply" });
+            return Err(FlueError::Invalid { what: "developing windway must be attached before the Nolle/Price transfer, whose exit it sets" });
         }
         if self.forced.is_some() {
             return Err(FlueError::Invalid { what: "developing windway must be attached before the forced jet, whose exit it sets" });
@@ -1150,7 +1151,14 @@ impl FlueVoice {
     /// ([`nolle_jet`]) before any accepted sample. The mouth loop, labium cut, windway and wind line
     /// are unchanged; the drive source becomes `M_d dQ_j/dt` with Price's `M_d = 0.88 rho / H`, and
     /// the labium displacement comes from the transfer's own history. A slit windway implies a
-    /// Poiseuille profile (centre speed 1.5 x bulk); no windway keeps the Bernoulli central speed.
+    /// Poiseuille profile (centre speed 1.5 x bulk); no windway keeps the Bernoulli central speed;
+    /// a developing windway ([`FlueVoice::with_developing_windway`], attached first) gives its own
+    /// exit at the held pressure, the core speed over the bulk speed of Shah's law
+    /// ([`forced_jet::JetExit::developing`]), which is exactly the Poiseuille 1.5 once the layers
+    /// have met. The developing windway refuses a held pressure outside its validity (x+, Chen's
+    /// low-Re term, laminarity, and a developed exit above Re_Dh 1760) when it is attached, so
+    /// there is no fallback to the constant 1.5 here, which would exceed the Bernoulli bound
+    /// `sqrt(2P/rho)` where the layers have not met (pexfp.135.5).
     /// The unsteady windway is refused: its evolving profile has no published centre-speed law here.
     /// The authored displacement gain of the card is unused while this transfer is attached.
     ///
@@ -1159,9 +1167,9 @@ impl FlueVoice {
     /// geometry/realisation refusal.
     pub fn with_nolle_jet(mut self, spec: nolle_jet::NolleSpec) -> Result<Self, FlueError> {
         if self.poisoned || self.samples != 0 || self.nolle.is_some()
-            || self.unsteady_windway.is_some() || self.developing_windway.is_some() {
+            || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid {
-                what: "nolle jet requires one cold attachment and no unsteady or developing windway",
+                what: "nolle jet requires one cold attachment and no unsteady windway",
             });
         }
         if self.forced.is_some() {
@@ -1170,7 +1178,9 @@ impl FlueVoice {
         if self.card_centreline.is_some() {
             return Err(FlueError::Invalid { what: "card centreline speed refuses the jet transfers, which own their exit speed" });
         }
-        let centre_over_bulk = if self.viscous_windway.is_some() {
+        let centre_over_bulk = if let Some((_, held)) = &self.developing_windway {
+            forced_jet::JetExit::developing(held, self.geometry.flue_height_m).centre_over_bulk
+        } else if self.viscous_windway.is_some() {
             nolle_jet::POISEUILLE_CENTRE_OVER_BULK
         } else {
             1.0
@@ -2355,13 +2365,62 @@ mod convection_tests {
         // A 1 mm channel at 5 kPa holds x+ below 4e-4: refused, not extrapolated.
         assert!(matches!(voice(air, g, 0.01).with_developing_windway(0.001, 5000.0),
             Err(FlueError::Invalid { what }) if what.contains("x+")));
-        // The Nolle/Price transfer assumes a Poiseuille or uniform exit, in either order.
+        // The Nolle/Price transfer takes this windway's exit when it is attached after it (see
+        // g3_nolle_jet_takes_the_developing_exits_own_centre_over_bulk_not_the_poiseuille_constant);
+        // attached before it, the windway cannot set the exit and is refused.
         let nolle = FlueGeometry { cut_up_m: 0.004, ..g };
         let spec = NolleSpec::price_2015(ChannelClass::Short, 0.0007).unwrap();
-        assert!(voice(air, nolle, 1.0).with_developing_windway(0.015, 100.0).unwrap()
-            .with_nolle_jet(spec).is_err());
         assert!(voice(air, nolle, 1.0).with_nolle_jet(spec).unwrap()
             .with_developing_windway(0.015, 100.0).is_err());
+    }
+
+    #[test]
+    fn g3_nolle_jet_takes_the_developing_exits_own_centre_over_bulk_not_the_poiseuille_constant() {
+        use nolle_jet::{ChannelClass, NolleSpec};
+        let air = gas(101_325.0);
+        let g = FlueGeometry { cut_up_m: 0.004, ..geometry() };
+        let spec = NolleSpec::price_2015(ChannelClass::Short, 0.0007).unwrap();
+        // Planted exit: a 5 mm slit at 100 Pa holds u_c/U near 1.27 with its layers not yet met, so
+        // it is neither the uniform exit (1) nor the Poiseuille exit (1.5) the transfer used to assume.
+        let held = DevelopingSlit::from_gas(&air, 0.005).unwrap()
+            .held(g.flue_width_m, g.flue_height_m, 100.0).unwrap();
+        held.validity().unwrap();
+        assert!(!held.developed);
+        let ratio = held.core_speed_m_s / held.bulk_speed_m_s;
+        assert!(ratio > 1.1 && ratio < 1.4, "planted core over bulk {ratio}");
+        let mut v = voice(air, g, 1.0).with_developing_windway(0.005, 100.0).unwrap()
+            .with_nolle_jet(spec).unwrap();
+        assert_eq!(v.nolle_jet().unwrap().centre_over_bulk(), ratio);
+        // The transit follows the centre speed U0 = ratio x bulk. The constant 1.5 would be faster
+        // than the exit's own core speed, which is bounded by sqrt(2P/rho).
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        assert_eq!(v.jet_speed_m_s(), held.bulk_speed_m_s);
+        let jet = v.nolle_jet().unwrap();
+        assert_eq!(v.transit_s(), jet.transit_s(ratio * held.bulk_speed_m_s));
+        let constant = jet.transit_s(nolle_jet::POISEUILLE_CENTRE_OVER_BULK * held.bulk_speed_m_s);
+        assert!(constant < v.transit_s(), "the constant 1.5 shortens the transit: {constant}");
+        assert!(nolle_jet::POISEUILLE_CENTRE_OVER_BULK * held.bulk_speed_m_s > held.core_speed_m_s,
+            "the constant centre speed exceeds the exit's Bernoulli core speed");
+        let mut out = [0.0; 257];
+        v.step_block(&mut out).unwrap();
+        assert!(out.iter().all(|p| p.is_finite()));
+        assert_work(&v);
+        // A slit whose layers met before the exit is exactly the Poiseuille exit.
+        let developed = DevelopingSlit::from_gas(&air, 0.03).unwrap()
+            .held(g.flue_width_m, g.flue_height_m, 100.0).unwrap();
+        assert!(developed.developed);
+        let v = voice(air, g, 1.0).with_developing_windway(0.03, 100.0).unwrap()
+            .with_nolle_jet(spec).unwrap();
+        assert_eq!(v.nolle_jet().unwrap().centre_over_bulk(), nolle_jet::POISEUILLE_CENTRE_OVER_BULK);
+        // Where the law refuses the held state the windway refuses, so no transfer is ever built on
+        // the constant: a 300 mm slit at 1.5 kPa is developed at Re_Dh near 2500, above 1760.
+        assert!(matches!(voice(air, g, 1.0).with_developing_windway(0.3, 1500.0),
+            Err(FlueError::Invalid { what }) if what.contains("Re_Dh 1760")));
+        // The slit and no-windway exits keep their own constants.
+        let slit = voice(air, g, 1.0).with_viscous_windway(0.015).unwrap().with_nolle_jet(spec).unwrap();
+        assert_eq!(slit.nolle_jet().unwrap().centre_over_bulk(), nolle_jet::POISEUILLE_CENTRE_OVER_BULK);
+        let bare = voice(air, g, 1.0).with_nolle_jet(spec).unwrap();
+        assert_eq!(bare.nolle_jet().unwrap().centre_over_bulk(), 1.0);
     }
 
     #[test]
