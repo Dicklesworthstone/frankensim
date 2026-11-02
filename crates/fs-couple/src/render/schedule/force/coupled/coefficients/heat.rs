@@ -30,6 +30,7 @@ pub struct MaterialHeatIntegral {
     ranges: Vec<Range<usize>>,
     integrals: Vec<PreparedSourceLoss>,
     rest_force: Vec<f64>,
+    budget: MaterialHeatBudget,
 }
 
 struct Signature {
@@ -59,6 +60,10 @@ fn same_branch(a: &RelaxationBranch, b: &RelaxationBranch) -> bool {
 }
 impl Signature {
     fn matches(&self, network: &CoupledModalSystem, gate: &CancelGate) -> Result<bool, ModalCouplingError> {
+        self.matches_rates(network, &[], gate)
+    }
+    fn matches_rates(&self, network: &CoupledModalSystem,
+        rates: &[super::rates::MaterialRelaxationTime], gate: &CancelGate) -> Result<bool, ModalCouplingError> {
         if network.radiation.is_some() || network.harmonic_only
             || network.offsets != self.offsets || network.dt.to_bits() != self.dt.to_bits()
             || network.mode_count() != self.modes.len()
@@ -77,9 +82,14 @@ impl Signature {
                 || network.columns[i] != self.columns[i]
                 || damping_column(network, i) != self.damping[i] { return Ok(false); }
         }
-        for (a, b) in network.relaxation_branches.iter().zip(&self.branches) {
+        for (index, (a, b)) in network.relaxation_branches.iter().zip(&self.branches).enumerate() {
             poll(Some(gate))?;
-            if !same_branch(a,b) { return Ok(false); }
+            if let Ok(at) = rates.binary_search_by_key(&index, |rate| rate.branch) {
+                if a.stiffness.to_bits() != b.stiffness.to_bits() || a.projection != b.projection
+                    || a.relaxation_time_s.to_bits() != rates[at].relaxation_time_s.to_bits() {
+                    return Ok(false);
+                }
+            } else if !same_branch(a,b) { return Ok(false); }
         }
         Ok(true)
     }
@@ -199,13 +209,28 @@ impl CoupledModalSystem {
             laws: self.connections.iter().map(|l| (l.stiffness_n_m,l.damping_n_s_m,l.rest_extension_m)).collect(),
             branches: self.relaxation_branches.clone(), dt: self.dt };
         poll(Some(gate))?;
-        Ok(MaterialHeatIntegral { signature, ranges: ranges.to_vec(), integrals, rest_force })
+        Ok(MaterialHeatIntegral { signature, ranges: ranges.to_vec(), integrals, rest_force, budget })
     }
 }
 
 impl MaterialHeatIntegral {
     pub fn groups(&self) -> &[Range<usize>] { &self.ranges }
     pub const fn duration_s(&self) -> f64 { self.signature.dt }
+
+    /// Reuse the original source groups and resource budget after an explicitly
+    /// owned rate-only update. Every other coefficient and material projection
+    /// must still match; this cannot bless a stale geometry or storage cache.
+    pub(crate) fn prepare_after_material_rates(&self, network: &CoupledModalSystem,
+        rates: &[super::rates::MaterialRelaxationTime], gate: &CancelGate)
+        -> Result<Self, ModalCouplingError> {
+        if rates.windows(2).any(|pair| pair[0].branch >= pair[1].branch)
+            || rates.iter().any(|rate| rate.branch >= self.signature.branches.len()
+                || !rate.relaxation_time_s.is_finite() || rate.relaxation_time_s <= 0.0)
+            || !self.signature.matches_rates(network, rates, gate)? {
+            return Err(invalid("material heat rate refresh must retain every original non-rate coefficient"));
+        }
+        network.prepare_material_heat(&self.ranges, self.budget, gate)
+    }
 
     /// True only while the original complete linear coefficients remain intact.
     /// Mechanical/material states and sample clocks may advance normally.

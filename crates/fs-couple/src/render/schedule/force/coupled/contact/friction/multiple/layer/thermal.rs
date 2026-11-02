@@ -33,6 +33,8 @@ pub mod dry;
 pub mod film_surface;
 /// Original distributed material losses received by their finite bodies.
 pub mod material;
+/// Source-selected linear material-rate feedback from those same finite bodies.
+pub mod rates;
 mod source;
 
 use super::*;
@@ -501,7 +503,7 @@ impl MultiFrictionModalSystem {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
-        self.step_with_contact_thermal_inner(thermal, bindings, series_heat, &[], &[], controls,
+        self.step_with_contact_thermal_inner(thermal, bindings, series_heat, &[], &[], None, controls,
             energy_guess_j, external, drives, obstacle_geometry, obstacle_offsets, false, gate, resolve)
     }
 
@@ -523,7 +525,7 @@ impl MultiFrictionModalSystem {
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
         self.with_friction_geometry_and_endpoints(geometry, endpoints, normal_geometry,
             config, gate, |system| system.step_with_contact_thermal_inner(
-                thermal, bindings, series_heat, &[], &[], controls, energy_guess_j, external,
+                thermal, bindings, series_heat, &[], &[], None, controls, energy_guess_j, external,
                 drives, normal_geometry, normal_offsets_m, normal_geometry.is_some(), gate, resolve))
     }
 
@@ -540,7 +542,7 @@ impl MultiFrictionModalSystem {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
-        self.step_with_contact_thermal_inner(thermal, bindings, series_heat, dry, material_heat,
+        self.step_with_contact_thermal_inner(thermal, bindings, series_heat, dry, material_heat, None,
             controls, energy_guess_j, external, drives, obstacle_geometry, obstacle_offsets, false, gate, resolve)
     }
 
@@ -561,7 +563,7 @@ impl MultiFrictionModalSystem {
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
         self.with_friction_geometry_and_endpoints(geometry, endpoints, normal_geometry,
             config, gate, |system| system.step_with_contact_thermal_inner(thermal, bindings,
-                series_heat, dry, material_heat, controls, energy_guess_j, external, drives,
+                series_heat, dry, material_heat, None, controls, energy_guess_j, external, drives,
                 normal_geometry, normal_offsets_m, normal_geometry.is_some(), gate, resolve))
     }
 
@@ -573,6 +575,7 @@ impl MultiFrictionModalSystem {
         series_heat: &[SeriesDriveHeatDestination],
         dry: &[DryContactHeat<'_>],
         material_heat: &[MaterialRelaxationHeatDestination<'_>],
+        material_rates: Option<&rates::RateContinuation<'_>>,
         controls: LayerThermalSolve,
         energy_guess_j: &[f64],
         external: &[f64],
@@ -651,7 +654,8 @@ impl MultiFrictionModalSystem {
                     return Err(LayerThermalError::Invalid("an original nonlinear material source may heat its body only once"));
                 }
             }
-            route.admit(thermal)?;
+            if let Some(rates) = material_rates { rates.admit_route(route, thermal)?; }
+            else { route.admit(thermal)?; }
         }
         for route in dry {
             checkpoint()?;
@@ -820,7 +824,8 @@ impl MultiFrictionModalSystem {
                         mut nonlinear_material_heat_j) = (0.0, 0.0, 0.0);
                     for route in material_heat {
                         checkpoint()?;
-                        route.admit(endpoint)?;
+                        if let Some(rates) = material_rates { rates.admit_route(route, endpoint)?; }
+                        else { route.admit(endpoint)?; }
                         let linear = match &route.channel {
                             Some(channel) => number(channel.evaluate_staged(
                                 &system.core.network, gate).map_err(ModalFrictionError::from)?[0])?,
@@ -1025,6 +1030,9 @@ impl MultiFrictionModalSystem {
         checkpoint()?;
         let system = mechanics.into_inner();
         system.validate_obstacle_sources(Some(gate))?;
+        let rate_endpoint = material_rates.map(|rates|
+            rates.prepare_endpoint(system, material_heat, &next, gate)).transpose()?;
+        checkpoint()?;
         // All admission is complete. Publish source+strain, original mechanical
         // state/observer, and the existing thermal candidate without fallible work.
         system.shear_layers = layers;
@@ -1034,6 +1042,9 @@ impl MultiFrictionModalSystem {
             else { system.interfaces[port - 1] = Some(source); }
         }
         let mechanics = system.publish_step(frame).clone();
+        if let (Some(rates), Some(endpoint)) = (material_rates, rate_endpoint) {
+            rates.publish(system, endpoint);
+        }
         *thermal = next;
         Ok(LayerThermalFrame {
             mechanics,

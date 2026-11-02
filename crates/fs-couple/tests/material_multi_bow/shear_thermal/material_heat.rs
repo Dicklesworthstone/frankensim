@@ -7,6 +7,9 @@ use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer,
     axial::YOUNG_VISCOSITY_PROPERTY, relaxation::LayerRelaxationProperties};
 use fs_qty::Time;
 
+#[path = "material_heat/rates.rs"]
+mod rates;
+
 const BODY: CellId = CellId(11);
 
 fn fiber(gate: &CancelGate, temperature_dependent_time: bool) -> (MaterialCard, ResolvedHeatCapacityCurve, TensionedFiberRibbon) {

@@ -295,6 +295,39 @@ impl ReciprocalStringBank {
 }
 
 impl MultiBowStringBank {
+    /// Bind finite heat and temperature-dependent Maxwell times for one fixed
+    /// linear fiber strip/layer. Each native axial/bending channel retains its
+    /// original source arm selector; names and rates are never inferred from
+    /// the waveform. Density, moduli, geometry and stored internal strain stay
+    /// fixed. Use `step_with_material_rate_thermal_feedback` to accept the
+    /// source snapshots, original mechanics and receiving heat together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fiber_material_rate_heat_destination<'a>(
+        &self, strip: usize, layer: usize, cell: fs_thermal::enthalpy::CellId,
+        material: &'a fs_matdb::MaterialCard,
+        caloric: &'a fs_material::phase::EquilibriumEnthalpyPhaseCurve,
+        temperature_axis: &'a str,
+        budget: crate::render::schedule::force::coupled::coefficients::heat::MaterialHeatBudget,
+        gate: &CancelGate,
+    ) -> Result<(
+        crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::material::MaterialRelaxationHeatDestination<'a>,
+        crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::rates::MaterialRelaxationTemperature,
+    ), ReciprocalStringError> {
+        use crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::rates::MaterialRelaxationTemperature;
+        let destination = self.fiber_material_heat_destination(strip, layer, cell,
+            material, caloric, temperature_axis, budget, gate)?;
+        let memory = self.source.fiber_ribbon().and_then(|f| f.model().material_relaxation())
+            .ok_or_else(|| invalid("fiber rate feedback requires its original source spectrum"))?;
+        if memory.has_finite_strain() {
+            return Err(invalid("fiber rate feedback currently retains linear axial/bending histories"));
+        }
+        let range = &destination.channel.as_ref().expect("fiber linear heat").groups()[0];
+        let roles = &memory.source().properties()[layer];
+        let times = memory.channels().iter().filter(|channel| channel.layer == layer)
+            .enumerate().map(|(index, channel)| (range.start+index, roles.branches[channel.arm].1.clone())).collect();
+        Ok((destination, MaterialRelaxationTemperature { cell, times }))
+    }
+
     /// Route ONE width strip's original material layer into its actual finite
     /// receiving body. The independently integrated channels include every
     /// axial/bending mode and every Maxwell arm of that layer. Volume is the

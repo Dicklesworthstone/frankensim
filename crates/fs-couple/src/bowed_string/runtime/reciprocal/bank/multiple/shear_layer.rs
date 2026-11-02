@@ -17,6 +17,30 @@ use crate::render::schedule::force::coupled::contact::friction::{FrictionDrive,
         SeriesDriveHeatDestination}};
 
 impl MultiBowStringBank {
+    /// Finite material-body heating updates the original fiber relaxation
+    /// rates and therefore the next sample's traction, memory and pressure.
+    /// The accepted-rate interval/endpoint-rate update is first order in time;
+    /// its heat comes from the original full-trajectory source integral.
+    /// Fixed tangent maps, fixed storage and prescribed normal loads are the
+    /// admitted scope. Every body source/cache is retained in `material_heat`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_rate_thermal_feedback<'t, S, E>(
+        &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination],
+        dry: &[crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::dry::DryContactHeat<'_>],
+        material_heat: &mut [MaterialRelaxationHeatDestination<'_>],
+        rates: &[crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::rates::MaterialRelaxationTemperature],
+        controls: LayerThermalSolve, energy_guess_j: &[f64], external: &[f64], drives: &[FrictionDrive],
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<(LayerThermalFrame<S>, crate::render::schedule::force::coupled::coefficients::rates::MaterialRelaxationTimeReport), LayerThermalError<E>> {
+        if self.bow_station_motion_limits().is_some() {
+            return Err(LayerThermalError::Invalid("material-rate continuation requires fixed fiber/contact maps"));
+        }
+        self.system.step_with_material_rate_thermal_feedback(thermal, bindings, series_heat, dry,
+            material_heat, rates, controls, energy_guess_j, external, drives, gate, resolve)
+    }
+
     /// Original material/geometry-derived Hertz--Mindlin contacts on the same
     /// string/body/cavity and PCM path. The caller owns ordered surface identity
     /// and circular Hertz-patch geometry; no bow-hair geometry is inferred.

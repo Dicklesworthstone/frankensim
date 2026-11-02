@@ -36,8 +36,32 @@ pub(crate) struct PreparedMaterialRelaxationTimes {
     replacement: Option<(Vec<fs_phs::RelaxationBranch>, preparation::PreparedOperator)>,
     report: MaterialRelaxationTimeReport,
 }
+impl PreparedMaterialRelaxationTimes {
+    pub(crate) fn changed(&self) -> bool { self.replacement.is_some() }
+
+    fn exchange(&mut self, network: &mut CoupledModalSystem) {
+        if let Some((branches, operator)) = &mut self.replacement {
+            std::mem::swap(branches, &mut network.relaxation_branches);
+            std::mem::swap(&mut operator.exact, &mut network.exact);
+            std::mem::swap(&mut operator.harmonic_damping_columns, &mut network.harmonic_damping_columns);
+        }
+    }
+}
 
 impl CoupledModalSystem {
+    /// Prepare dependent contact/heat operators against the proposed rates,
+    /// restoring accepted coefficients even when that preparation refuses.
+    /// No mechanical, material or sample-clock state is exchanged.
+    pub(crate) fn preview_material_relaxation_times<R, E>(
+        &mut self, prepared: &mut PreparedMaterialRelaxationTimes,
+        run: impl FnOnce(&Self) -> Result<R, E>,
+    ) -> Result<R, E> {
+        prepared.exchange(self);
+        let result = run(self);
+        prepared.exchange(self);
+        result
+    }
+
     /// Change selected Maxwell relaxation times at one accepted boundary.
     ///
     /// Indices must be unique and strictly increasing; times and reciprocal
