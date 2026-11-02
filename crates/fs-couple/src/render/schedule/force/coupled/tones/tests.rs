@@ -30,7 +30,7 @@ fn budget() -> CoupledToneBudget {
         max_multiply_terms: 100_000_000_000,
     }
 }
-fn fixture(rate: u32, anchored: bool, rest: f64) -> CoupledModalSystem {
+pub(super) fn fixture(rate: u32, anchored: bool, rest: f64) -> CoupledModalSystem {
     let gate = CancelGate::new_clock_free();
     let mut model = ModalAcousticTimeModel::try_new(
         rate,
@@ -127,7 +127,7 @@ fn close(a: f64, b: f64) {
         "{a:e} != {b:e}"
     );
 }
-fn all_states(network: &CoupledModalSystem) -> Vec<f64> {
+pub(super) fn all_states(network: &CoupledModalSystem) -> Vec<f64> {
     let mut states: Vec<_> = network
         .components()
         .iter()

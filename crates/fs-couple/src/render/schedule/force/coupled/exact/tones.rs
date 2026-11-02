@@ -263,6 +263,64 @@ impl PreparedJointTones {
         &self.frequencies
     }
 
+    /// A causal observer uses the exact same original source and grouping.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_observer(
+        &self,
+        states: usize,
+        a: &[f64],
+        b: &[f64],
+        c: &[f64],
+        d: &[f64],
+        budget: DenseExponentialBudget,
+        gate: &CancelGate,
+    ) -> Result<fs_phs::linear_exact::PreparedToneObserver, ModalCouplingError> {
+        fs_phs::linear_exact::PreparedToneObserver::new_controlled(
+            &self.flow,
+            states,
+            1,
+            a,
+            b,
+            c,
+            d,
+            budget,
+            || gate.is_requested(),
+        )
+        .map_err(|error| match error {
+            fs_phs::PreparedStepError::Cancelled => ModalCouplingError::Cancelled,
+            fs_phs::PreparedStepError::Solver(source) => ModalCouplingError::Propagation(source),
+        })
+    }
+
+    /// Preview only after stage has packed this candidate's exact forces and
+    /// initial state. No physical state, work or loss channel is recomputed.
+    pub(crate) fn preview_observer(
+        &self,
+        observer: &mut fs_phs::linear_exact::PreparedToneObserver,
+        initial: &[f64],
+        next: &mut [f64],
+        output: &mut [f64],
+        gate: Option<&CancelGate>,
+    ) -> Result<(), ModalCouplingError> {
+        observer
+            .preview_into_controlled(
+                &self.flow,
+                &self.initial,
+                initial,
+                &self.cosine,
+                &self.sine,
+                next,
+                output,
+                || gate.is_some_and(CancelGate::is_requested),
+            )
+            .map_err(|error| match error {
+                fs_phs::PreparedStepError::Cancelled => ModalCouplingError::Cancelled,
+                fs_phs::PreparedStepError::Solver(source) => {
+                    ModalCouplingError::Propagation(source)
+                }
+            })
+    }
+
     pub(crate) fn advance_force_phase(
         &self,
         tone: usize,

@@ -8,6 +8,8 @@ use super::exact::tones::PreparedJointTones;
 use super::{CoupledModalFrame, CoupledModalSystem, ModalCouplingError, poll};
 use fs_exec::CancelGate;
 
+pub mod broadband;
+
 /// Explicit cold dense resources for the complete state and forcing generator.
 /// Existing mechanical/setup/pressure/energy limits remain binding.
 pub use fs_phs::linear_exact::DenseExponentialBudget as CoupledToneBudget;
@@ -115,12 +117,24 @@ impl CoupledModalTones {
         sine_forces: &[f64],
         gate: Option<&CancelGate>,
     ) -> Result<&CoupledModalFrame, ModalCouplingError> {
-        self.prepared
-            .stage(&mut self.network, cosine_forces, sine_forces, gate)?;
-        self.network.validate_staged_material_points(gate)?;
+        self.stage(cosine_forces, sine_forces, gate)?;
         poll(gate)?;
         self.network.publish_staged();
         Ok(&self.network.frame)
+    }
+
+    // The receiver adds its observation gate to this same candidate without
+    // publishing the physical source before its filter/delay are admitted.
+    fn stage(
+        &mut self,
+        cosine_forces: &[f64],
+        sine_forces: &[f64],
+        gate: Option<&CancelGate>,
+    ) -> Result<(), ModalCouplingError> {
+        self.prepared
+            .stage(&mut self.network, cosine_forces, sine_forces, gate)?;
+        self.network.validate_staged_material_points(gate)?;
+        Ok(())
     }
 }
 

@@ -8,7 +8,7 @@ use super::{
 use crate::modal_acoustic_time::MAX_TIME_DOMAIN_ACOUSTIC_MODES;
 use fs_math::{c64::C64, det};
 use fs_vfit::model::RationalModel;
-use fs_vfit::{FitOptions, WeightPreset, vector_fit};
+use fs_vfit::{FitOptions, WeightPreset, vector_fit_transfer};
 
 /// Maximum per-mode continuous fit order; no high-order model is truncated.
 pub const MAX_MODAL_TRANSFER_ORDER: usize = 128;
@@ -252,8 +252,8 @@ pub(crate) fn fit_modal_velocity_transfers(
                 });
                 continue;
             }
-            let fit =
-                vector_fit(&s.omega_rad_s, &response, &opts).map_err(BroadbandModalError::Fit)?;
+            let fit = vector_fit_transfer(&s.omega_rad_s, &response, &opts)
+                .map_err(BroadbandModalError::Fit)?;
             if !fit.model.is_stable() || fit.model.e != 0.0 || !fit.model.d.is_finite() {
                 return Err(BroadbandModalError::Invalid(
                     "observer fit must be stable, real and proper",

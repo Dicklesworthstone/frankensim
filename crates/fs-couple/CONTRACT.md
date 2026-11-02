@@ -2078,6 +2078,54 @@ port reporting retain their bounded vector allocations. This finite linear
 source path does not establish material, radiation-fit or continuum accuracy.
 
 
+### Causal broadband pressure from complete coupled tone motion
+
+`coupled::tones::broadband::BroadbandCoupledModalTones` owns one causal
+receiver over the complete `CoupledModalTones` trajectory. Its solver-neutral
+`ModalTransferSamples` use the original flattened mechanical-mode order,
+signed velocity normalization and exp(-i*omega*t) convention. Maxwell memory,
+signed inter-component couplings and reciprocal acoustic states remain in the
+source operator and change those velocities; they are not added as duplicate
+radiators. Preparation requires the source's initial sample and exact clock.
+
+The shared modal transfer fitter now uses `fs_vfit::vector_fit_transfer`,
+which permits signed feedthrough while retaining the stable-pole and residual
+gates. The impedance fitter retains its separate nonnegative D/E policy.
+The receiver realizes each proper rational transfer with its actual real
+state space. `PreparedToneObserver` propagates these filter states with the
+complete continuous source and source phases. It does not hold an endpoint
+velocity, use natural-mode quadrature at a different forcing frequency, or
+reconstruct mechanics as uncoupled oscillators. A real constant transfer is
+admitted; a complex constant quadrature refuses.
+
+The same shared sampled-delay owner and independent held-out transfer gate
+used by the original modal receiver remain binding. Integer delay preserves
+sample history exactly; fractional delay retains its explicit interpolation
+error axis. Filter and delay histories start at zero, so startup includes the
+causal filter transient. `transfer_at` reports the fitted velocity-to-pressure
+operator including that actual sampled delay, not a continuum guarantee.
+
+Preparation explicitly clears the original component observation maps on
+accepted and candidate source models, preserving all physical coefficients,
+kernel identity, load reactions and histories. The new receiver owns the
+original network pressure ceiling and returns pressure separately from the
+mechanical frame. It contributes no storage, heat or reciprocal force. Source
+staging, filter preview and delay preview precede one accepted publication;
+any mechanical, material, pressure or cancellation refusal preserves accepted
+mechanics, ledgers, ports, filter history, delay history, clock and last
+pressure together.
+
+An additional explicit byte allowance covers conservative fitting workspace,
+retained rational models, real matrix assembly, filter state and delay
+history. The complete augmented source/filter operator must also satisfy the
+shared dimension and multiplication-work limits. No mode, tone, pole or
+physical memory is removed to fit these bounds. Warm filter propagation uses
+cached matrices; the original source's transactional staging and port
+reporting retain their existing bounded allocations. This one-way receiver
+does not replace the original reciprocal radiation load or establish
+material, radiation-fit or continuum accuracy.
+
+
 ### Continuous loaded modal and cavity response
 
 `CoupledModalSystem::harmonic_response` solves the original continuous linear

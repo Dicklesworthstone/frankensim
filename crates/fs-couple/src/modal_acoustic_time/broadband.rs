@@ -66,13 +66,13 @@ impl ExactFilter {
         })
     }
 }
-struct Delay {
+pub(crate) struct Delay {
     taps: Vec<(usize, f64)>,
     history: Vec<f64>,
     cursor: usize,
 }
 impl Delay {
-    fn new(samples: f64, half_len: usize) -> Result<Self, BroadbandModalError> {
+    pub(crate) fn new(samples: f64, half_len: usize) -> Result<Self, BroadbandModalError> {
         if !samples.is_finite()
             || samples < 0.0
             || samples > MAX_MODAL_OBSERVER_DELAY_SAMPLES as f64
@@ -140,13 +140,13 @@ impl Delay {
             cursor: 0,
         })
     }
-    fn response(&self, w: f64, dt: f64) -> C64 {
+    pub(crate) fn response(&self, w: f64, dt: f64) -> C64 {
         self.taps.iter().fold(C64::ZERO, |sum, &(lag, c)| {
             let phase = w * dt * lag as f64;
             sum + C64::new(det::cos(phase), det::sin(phase)).scale(c)
         })
     }
-    fn preview(&self, new: f64) -> Result<f64, BroadbandModalError> {
+    pub(crate) fn preview(&self, new: f64) -> Result<f64, BroadbandModalError> {
         let len = self.history.len();
         let mut y = 0.0;
         for &(lag, c) in &self.taps {
@@ -163,10 +163,61 @@ impl Delay {
         }
         Ok(y)
     }
-    fn commit(&mut self, new: f64) {
+    pub(crate) fn commit(&mut self, new: f64) {
         self.history[self.cursor] = new;
         self.cursor = (self.cursor + 1) % self.history.len();
     }
+}
+
+/// One shared continuous fit, actual sampled delay and held-out admission.
+/// Both independent and coupled receivers consume exactly this operator gate.
+pub(crate) fn prepare_modal_transfer_observation(
+    s: &ModalTransferSamples,
+    c: BroadbandModalControls,
+    rate: u32,
+) -> Result<
+    (
+        crate::broadband_radiation::modal::ContinuousModalFits,
+        Delay,
+    ),
+    BroadbandModalError,
+> {
+    let mut bank = fit_modal_velocity_transfers(s, c, rate)?;
+    let dt = 1.0 / f64::from(rate);
+    let delay = Delay::new(bank.report.delay_samples, c.delay_kernel_half_len)?;
+    if bank.constant.is_none() {
+        let mut maximum = 0.0_f64;
+        for (w, row) in &s.held_out {
+            let d = delay.response(*w, dt);
+            for (fit, &reference) in bank.models.iter().zip(row) {
+                let actual = fit.eval_iw(*w).conj() * d;
+                let error = if reference == C64::ZERO {
+                    if actual == C64::ZERO {
+                        0.0
+                    } else {
+                        f64::INFINITY
+                    }
+                } else {
+                    (actual - reference).abs() / reference.abs()
+                };
+                if !error.is_finite() {
+                    return Err(BroadbandModalError::HeldOut {
+                        max_rel: error,
+                        budget: c.max_held_out_rel_error,
+                    });
+                }
+                maximum = maximum.max(error);
+            }
+        }
+        bank.report.held_out_max_rel_error = maximum;
+        if maximum > c.max_held_out_rel_error {
+            return Err(BroadbandModalError::HeldOut {
+                max_rel: maximum,
+                budget: c.max_held_out_rel_error,
+            });
+        }
+    }
+    Ok((bank, delay))
 }
 
 /// One-way exact-trajectory receiver; the original mechanical owner is retained.
@@ -205,42 +256,9 @@ impl BroadbandModalObserver {
                 "observer model, source basis and declared sample clock must match",
             ));
         }
-        let bank = fit_modal_velocity_transfers(s, c, rate)?;
+        let (bank, delay) = prepare_modal_transfer_observation(s, c, rate)?;
         let dt = model.sample_period_s();
-        let delay = Delay::new(bank.report.delay_samples, c.delay_kernel_half_len)?;
-        let mut report = bank.report;
-        if bank.constant.is_none() {
-            let mut maximum = 0.0_f64;
-            for (w, row) in &s.held_out {
-                let d = delay.response(*w, dt);
-                for (fit, &reference) in bank.models.iter().zip(row) {
-                    let actual = fit.eval_iw(*w).conj() * d;
-                    let error = if reference == C64::ZERO {
-                        if actual == C64::ZERO {
-                            0.0
-                        } else {
-                            f64::INFINITY
-                        }
-                    } else {
-                        (actual - reference).abs() / reference.abs()
-                    };
-                    if !error.is_finite() {
-                        return Err(BroadbandModalError::HeldOut {
-                            max_rel: error,
-                            budget: c.max_held_out_rel_error,
-                        });
-                    }
-                    maximum = maximum.max(error);
-                }
-            }
-            report.held_out_max_rel_error = maximum;
-            if maximum > c.max_held_out_rel_error {
-                return Err(BroadbandModalError::HeldOut {
-                    max_rel: maximum,
-                    budget: c.max_held_out_rel_error,
-                });
-            }
-        }
+        let report = bank.report;
         let entries = bank
             .models
             .iter()
