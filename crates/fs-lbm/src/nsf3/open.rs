@@ -11,6 +11,9 @@
 use super::{BoundaryFlux, NsfError, NsfGrid3, THETA0, check_state};
 use crate::lattice3::Lattice3;
 
+mod profile;
+pub use profile::NsfReservoirTileState;
+
 /// Maximum independent localized reservoir owners on one resolved grid.
 /// Their cached finite-volume accounts remain bounded and stack-owned.
 pub const MAX_NSF_RESERVOIR_APERTURES: usize = 16;
@@ -139,6 +142,7 @@ pub(super) struct BoundReservoirAperture {
     pub source: NsfReservoirAperture,
     indices: Vec<usize>,
     ghost: OpenGhost,
+    profile: Option<profile::ReservoirProfile>,
 }
 
 #[derive(Clone, Copy)]
@@ -257,7 +261,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             return Err(NsfError::Input("reservoir apertures may not share a physical tile"));
         }
         let ghost = self.admit_open_state(source.state)?;
-        bound.push(BoundReservoirAperture { source, indices, ghost });
+        bound.push(BoundReservoirAperture { source, indices, ghost, profile: None });
         }
         self.reservoir_apertures = bound;
         self.last_reservoir_mass_out_kg = Some(0.0);
@@ -273,7 +277,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         Ok(self)
     }
 
-    /// Original geometry/state when exactly one aperture is attached.
+    /// Original geometry and held uniform reference when exactly one aperture is attached.
+    /// Inspect `reservoir_aperture_tile_states` for an active spatial profile.
     #[must_use]
     pub fn reservoir_aperture(&self) -> Option<&NsfReservoirAperture> {
         if self.reservoir_apertures.len() == 1 { self.reservoir_aperture_at(0) } else { None }
@@ -283,6 +288,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn reservoir_aperture_count(&self) -> usize { self.reservoir_apertures.len() }
 
     /// Stable zero-based owner in the original declared aperture order.
+    /// Its state is the held uniform reference; a spatial profile is inspected
+    /// through `reservoir_aperture_tile_states`.
     #[must_use]
     pub fn reservoir_aperture_at(&self, aperture: usize) -> Option<&NsfReservoirAperture> {
         self.reservoir_apertures.get(aperture).map(|bound| &bound.source)
@@ -335,14 +342,18 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// Atomically rebind independent held conditions. Duplicate/unknown IDs
     /// and invalid states refuse before any ghost changes; unnamed owners
     /// retain their accepted state. All staged ghosts share one original
-    /// Guo force and conservative energy-flux rebase.
+    /// Guo force and conservative energy-flux rebase. A named owner returns
+    /// to a uniform state, clearing any previously accepted spatial profile.
     pub fn set_reservoir_aperture_states(
         &mut self, controls: &[(usize, NsfOpenState)],
     ) -> Result<(), NsfError> {
         if controls.len() > self.reservoir_apertures.len() {
             return Err(NsfError::Input("reservoir controls exceed the attached owner count"));
         }
-        let mut staged = Vec::with_capacity(controls.len());
+        let mut staged = Vec::new();
+        staged.try_reserve_exact(controls.len()).map_err(|_| NsfError::Input(
+            "reservoir control staging allocation failed",
+        ))?;
         let mut seen = [false; MAX_NSF_RESERVOIR_APERTURES];
         for &(owner, state) in controls {
             let aperture = self.reservoir_apertures.get(owner).ok_or(NsfError::Input(
@@ -351,22 +362,28 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if seen[owner] { return Err(NsfError::Input("duplicate reservoir control index")); }
             seen[owner] = true;
             let ghost = self.admit_open_state(state)?;
-            staged.push((owner, state, ghost, aperture.source.state, aperture.ghost));
+            staged.push((owner, state, ghost, aperture.source.state, aperture.ghost, None));
         }
-        if staged.iter().all(|(_, state, _, previous, _)| state == previous) { return Ok(()); }
+        if staged.iter().all(|(owner, state, _, previous, _, _)|
+            state == previous && self.reservoir_apertures[*owner].profile.is_none())
+        { return Ok(()); }
         let drives = self.boundary_drives().ok_or(NsfError::Input(
             "reservoir state control requires its original characteristic axis",
         ))?;
-        for &(owner, state, ghost, _, _) in &staged {
-            self.reservoir_apertures[owner].source.state = state;
-            self.reservoir_apertures[owner].ghost = ghost;
+        for (owner, state, ghost, _, _, previous_profile) in &mut staged {
+            let aperture = &mut self.reservoir_apertures[*owner];
+            *previous_profile = aperture.profile.take();
+            aperture.source.state = *state;
+            aperture.ghost = *ghost;
         }
         // The original owner publishes no populations, force or FV history
         // on failure. Restore every staged boundary in the same transaction.
         if let Err(error) = self.set_boundary_drives(drives) {
-            for (owner, _, _, state, ghost) in staged {
-                self.reservoir_apertures[owner].source.state = state;
-                self.reservoir_apertures[owner].ghost = ghost;
+            for (owner, _, _, state, ghost, profile) in staged {
+                let aperture = &mut self.reservoir_apertures[owner];
+                aperture.source.state = state;
+                aperture.ghost = ghost;
+                aperture.profile = profile;
             }
             return Err(error);
         }
@@ -431,7 +448,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let Some(owner) = self.reservoir_owner(index, axis, usize::from(direction > 0)) else {
             return;
         };
-        let ghost = self.reservoir_apertures[owner].ghost;
+        let ghost = self.reservoir_apertures[owner].ghost_at(index);
         let flux = &mut flux.reservoir[owner];
         flux.total_energy_out_lu += total_energy_out_lu;
         let cell_pressure = self.law.pressure_pa(rho[index], theta[index]);
@@ -504,20 +521,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let axis = aperture.source.axis;
         let sign = if aperture.source.high { 1.0 } else { -1.0 };
         let unit = self.law.dx_m.powi(3) / self.law.dt_s;
-        let ghost_pressure = self.law.pressure_pa(aperture.ghost.rho, aperture.ghost.theta);
         let reference = self.spec.pressure_pa;
         flows.extend(aperture.indices.iter().map(|&index| {
+            let ghost = aperture.ghost_at(index);
+            let ghost_pressure = self.law.pressure_pa(ghost.rho, ghost.theta);
             let pressure0 = 0.5 * (self.law.pressure_pa(rho0[index], theta0[index]) + ghost_pressure);
             let pressure1 = 0.5 * (self.law.pressure_pa(rho1[index], theta1[index]) + ghost_pressure);
             let acoustic0 = pressure0 - reference;
             let acoustic1 = pressure1 - reference;
-            let q0 = sign * unit * 0.5 * (before[index][axis] + aperture.ghost.u[axis]);
-            let q1 = sign * unit * 0.5 * (after[index][axis] + aperture.ghost.u[axis]);
+            let q0 = sign * unit * 0.5 * (before[index][axis] + ghost.u[axis]);
+            let q1 = sign * unit * 0.5 * (after[index][axis] + ghost.u[axis]);
             NsfReservoirFlow {
                 aperture: owner, cell: self.at(index),
                 // Preserve the original flow arithmetic and observer replay.
                 outward_volume_flow_m3_s: sign * unit * 0.25
-                    * (before[index][axis] + after[index][axis] + 2.0 * aperture.ghost.u[axis]),
+                    * (before[index][axis] + after[index][axis] + 2.0 * ghost.u[axis]),
                 mean_pressure_pa: 0.5 * (pressure0 + pressure1),
                 mean_acoustic_pressure_pa: 0.5 * (acoustic0 + acoustic1),
                 pressure_work_out_j: 0.5 * self.law.dt_s * (pressure0 * q0 + pressure1 * q1),
@@ -713,7 +731,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             return Some(ghost);
         }
         let owner = self.reservoir_owner(i, axis, side)?;
-        Some(self.reservoir_apertures[owner].ghost)
+        Some(self.reservoir_apertures[owner].ghost_at(i))
     }
 
     fn reservoir_owner(&self, index: usize, axis: usize, side: usize) -> Option<usize> {
@@ -759,6 +777,7 @@ mod tests {
     use fs_material::gas::{GasSpec, GasState};
 
     mod work;
+    mod profiles;
 
     fn spec(axis: usize, workers: usize) -> NsfSpec {
         let mut dims = [3; 3];

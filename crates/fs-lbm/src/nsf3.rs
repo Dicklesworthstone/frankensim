@@ -76,7 +76,7 @@ mod sgs;
 pub use sgs::{NsfSgsConfig, NsfSgsTransport};
 mod open;
 pub use open::{MAX_NSF_RESERVOIR_APERTURES, NsfOpenState, NsfReservoirAperture,
-    NsfReservoirExchange, NsfReservoirFlow};
+    NsfReservoirExchange, NsfReservoirFlow, NsfReservoirTileState};
 mod open_boundary;
 use open_boundary::{BoundaryFlux, CharacteristicPatchBinding, IncomingPopulations, OpenFaces};
 pub use open_boundary::{
@@ -2022,6 +2022,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             feed(state.density_kg_m3);
             for velocity in state.velocity_m_s { feed(velocity); }
             feed(state.temperature_k);
+            aperture.feed_profile_hash(&mut feed);
         }
         for (side, temperature) in self.characteristic_inflow_temperature_k.iter().enumerate() {
             if let Some(temperature) = temperature {
