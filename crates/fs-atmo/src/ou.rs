@@ -152,6 +152,12 @@ impl StationaryOuPath {
         &self.amplitudes
     }
 
+    // A separately clocked field can retain the current realization without
+    // copying its amplitudes or changing the established 120 Hz path.
+    pub(crate) fn into_amplitudes(self) -> Vec<f64> {
+        self.amplitudes
+    }
+
     // The field owner admits identical immutable models before copying any
     // path. Reuse amplitude storage for staged integration and rollback.
     pub(crate) fn copy_temporal_state_from(&mut self, source: &Self) {

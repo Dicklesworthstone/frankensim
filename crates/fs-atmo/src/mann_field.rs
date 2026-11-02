@@ -32,6 +32,9 @@ use fs_rand::StreamKey;
 pub mod filter;
 use filter::MannBoxFilter;
 
+/// Exact OU evolution on a separately declared fixed physical time step.
+pub mod fixed_step;
+
 /// Independent Philox namespace for homogeneous Mann quadrature geometry.
 pub const MANN_FIELD_KERNEL: u32 = 0x4d41_4e4e;
 
@@ -451,51 +454,14 @@ impl HomogeneousMannField {
         point_m: [f64; 3],
         gains: Option<&[f64]>,
     ) -> Result<FlowSample, Refusal> {
-        finite_vector(point_m)?;
         let time = self.tick() as f64 / TICK_HZ;
-        let position = core::array::from_fn(|i| point_m[i] - self.model.advection_mps[i] * time);
-        let mut sample = FlowSample {
-            u: [0.0; 3],
-            grad: [[0.0; 3]; 3],
-        };
-        for (index, mode) in self.model.modes.iter().enumerate() {
-            let phase = dot(mode.k, position);
-            if !phase.is_finite() {
-                return Err(invalid("sample phase is not representable"));
-            }
-            let (s, c) = (det::sin(phase), det::cos(phase));
-            let a0 = self.paths[0].amplitudes()[index];
-            let b0 = self.paths[1].amplitudes()[index];
-            let a1 = self.paths[2].amplitudes()[index];
-            let b1 = self.paths[3].amplitudes()[index];
-            let mut value = [a0 * c + b0 * s, a1 * c + b1 * s];
-            let mut derivative = [-a0 * s + b0 * c, -a1 * s + b1 * c];
-            if let Some(gains) = gains {
-                for v in value.iter_mut().chain(&mut derivative) {
-                    *v *= gains[index];
-                }
-            }
-            for i in 0..3 {
-                sample.u[i] +=
-                    mode.polarization[0][i] * value[0] + mode.polarization[1][i] * value[1];
-                let gradient = mode.polarization[0][i] * derivative[0]
-                    + mode.polarization[1][i] * derivative[1];
-                for j in 0..3 {
-                    sample.grad[i][j] += gradient * mode.k[j];
-                }
-            }
-        }
-        if !sample
-            .u
-            .iter()
-            .chain(sample.grad.iter().flatten())
-            .all(|v| v.is_finite())
-        {
-            return Err(invalid(
-                "sample coordinates or velocity are not representable",
-            ));
-        }
-        Ok(sample)
+        sample_modes(
+            &self.model,
+            time,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            point_m,
+            gains,
+        )
     }
 
     /// Exact represented covariance `E[u_i(x,t) u_j(x+r,t+lag)]`.
@@ -523,31 +489,13 @@ impl HomogeneousMannField {
         lag_s: f64,
         gains: Option<&[f64]>,
     ) -> Result<[[f64; 3]; 3], Refusal> {
-        finite_vector(separation_m)?;
-        if !lag_s.is_finite() {
-            return Err(invalid("covariance lag must be finite"));
-        }
-        let displacement =
-            core::array::from_fn(|i| separation_m[i] - self.model.advection_mps[i] * lag_s);
-        let mut covariance = [[0.0; 3]; 3];
-        for (index, (mode, tau)) in self
-            .model
-            .modes
-            .iter()
-            .zip(&self.correlation_times_s)
-            .enumerate()
-        {
-            let phase = dot(mode.k, displacement);
-            if !phase.is_finite() {
-                return Err(invalid("space-time covariance phase is not representable"));
-            }
-            let mut multiplier = det::cos(phase) * det::exp(-lag_s.abs() / tau);
-            if let Some(gains) = gains {
-                multiplier *= gains[index] * gains[index];
-            }
-            accumulate_covariance(mode, multiplier, &mut covariance);
-        }
-        finite_covariance(covariance)
+        covariance_modes(
+            &self.model,
+            &self.correlation_times_s,
+            separation_m,
+            lag_s,
+            gains,
+        )
     }
 
     /// Retain every model input and quadrature path for exact restoration.
@@ -599,6 +547,87 @@ impl HomogeneousMannField {
             paths,
         })
     }
+}
+
+// Shared synthesis keeps the legacy operation order while allowing another
+// explicitly declared clock to supply the same modal amplitudes and phase.
+fn sample_modes(
+    model: &MannSpectralModel,
+    time_s: f64,
+    amplitudes: [&[f64]; 4],
+    point_m: [f64; 3],
+    gains: Option<&[f64]>,
+) -> Result<FlowSample, Refusal> {
+    finite_vector(point_m)?;
+    let position = core::array::from_fn(|i| point_m[i] - model.advection_mps[i] * time_s);
+    let mut sample = FlowSample {
+        u: [0.0; 3],
+        grad: [[0.0; 3]; 3],
+    };
+    for (index, mode) in model.modes.iter().enumerate() {
+        let phase = dot(mode.k, position);
+        if !phase.is_finite() {
+            return Err(invalid("sample phase is not representable"));
+        }
+        let (s, c) = (det::sin(phase), det::cos(phase));
+        let a0 = amplitudes[0][index];
+        let b0 = amplitudes[1][index];
+        let a1 = amplitudes[2][index];
+        let b1 = amplitudes[3][index];
+        let mut value = [a0 * c + b0 * s, a1 * c + b1 * s];
+        let mut derivative = [-a0 * s + b0 * c, -a1 * s + b1 * c];
+        if let Some(gains) = gains {
+            for v in value.iter_mut().chain(&mut derivative) {
+                *v *= gains[index];
+            }
+        }
+        for i in 0..3 {
+            sample.u[i] += mode.polarization[0][i] * value[0] + mode.polarization[1][i] * value[1];
+            let gradient =
+                mode.polarization[0][i] * derivative[0] + mode.polarization[1][i] * derivative[1];
+            for j in 0..3 {
+                sample.grad[i][j] += gradient * mode.k[j];
+            }
+        }
+    }
+    if !sample
+        .u
+        .iter()
+        .chain(sample.grad.iter().flatten())
+        .all(|v| v.is_finite())
+    {
+        return Err(invalid(
+            "sample coordinates or velocity are not representable",
+        ));
+    }
+    Ok(sample)
+}
+
+fn covariance_modes(
+    model: &MannSpectralModel,
+    correlation_times_s: &[f64],
+    separation_m: [f64; 3],
+    lag_s: f64,
+    gains: Option<&[f64]>,
+) -> Result<[[f64; 3]; 3], Refusal> {
+    finite_vector(separation_m)?;
+    if !lag_s.is_finite() {
+        return Err(invalid("covariance lag must be finite"));
+    }
+    let displacement = core::array::from_fn(|i| separation_m[i] - model.advection_mps[i] * lag_s);
+    let mut covariance = [[0.0; 3]; 3];
+    for (index, (mode, tau)) in model.modes.iter().zip(correlation_times_s).enumerate() {
+        let phase = dot(mode.k, displacement);
+        if !phase.is_finite() {
+            return Err(invalid("space-time covariance phase is not representable"));
+        }
+        let mut multiplier = det::cos(phase) * det::exp(-lag_s.abs() / tau);
+        if let Some(gains) = gains {
+            multiplier *= gains[index] * gains[index];
+        }
+        accumulate_covariance(mode, multiplier, &mut covariance);
+    }
+    finite_covariance(covariance)
 }
 
 #[cfg(test)]

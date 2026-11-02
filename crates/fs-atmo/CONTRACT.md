@@ -69,6 +69,25 @@ FetchAdjustedMassConsistent mode.
   and all four paths and rebuild the deterministic model on resume. This field
   is homogeneous in all three coordinates and has **no wall condition**; z = 0
   is an ordinary plane. No terrain/flight boundary treatment is implied.
+- `mann_field::fixed_step::FixedStepMannField` starts from a retained homogeneous
+  snapshot and evolves its four quadratures at an explicitly supplied physical
+  time step. Each mode uses the exact OU transition
+  `rho = exp(-dt/tau)`, `sigma = sqrt(-expm1(-2dt/tau))`, following Gillespie
+  (1996), DOI `10.1103/PhysRevE.54.2084`. Its distinct counter-addressed stream
+  is bound to the authored step size and seed; changing the time step does not
+  preserve the same realization or the original 120 Hz path. The original
+  integer-tick owner and its checkpoint semantics remain intact.
+  Sampling reuses the same spectral tensor, transverse polarizations and
+  spatial filters, with advection applied once at the retained phase origin
+  plus elapsed physical time. The immutable model is shared; accepted/trial
+  amplitudes and transition coefficients are prepared once. Transition work
+  and actual numerical capacities are admitted explicitly, and cancelled or
+  refused advances retain the accepted state. Checkpoint/resume and temporal
+  state copying bind the complete model, seed, clock and correlation times.
+  The nominal numerical payload is 88 bytes per mode, excluding immutable
+  spectral geometry and fixed metadata; shared coefficient storage is counted
+  conservatively per owner. Authored OU decorrelation is a synthetic temporal
+  model, not resolved nonlinear eddy turnover, and is not temporally bandlimited.
 
 ## Invariants
 
