@@ -8,6 +8,9 @@
 //! thermal evolution and reversible surface/normal energy remain with the normal
 //! owner, and are not silently inferred from the tangential heat calculation.
 
+/// Curved finite-time slip/spin, arrest and original finite-cell heat together.
+pub mod transient;
+
 use super::FrictionHeatRoute;
 use super::network::{
     FrictionHeatNetworkInput, FrictionHeatNetworkReport, FrictionHeatNetworkStep,

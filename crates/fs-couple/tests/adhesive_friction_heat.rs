@@ -4,6 +4,9 @@
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod common;
 
+#[path = "adhesive_friction_heat/transient.rs"]
+mod transient;
+
 use core::f64::consts::PI;
 use fs_contact::interface_binding::adhesive_shear::spinning::SourceAdhesiveSlidingPatch;
 use fs_contact::interface_binding::adhesive_shear::*;
