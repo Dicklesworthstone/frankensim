@@ -103,7 +103,7 @@ pub(super) fn validate_frequency(k: f64, medium: Medium) -> Result<(), Helmholtz
 }
 
 impl IncidentField<'_> {
-    fn validate(self) -> Result<(), HelmholtzError> {
+    pub(in crate::helmholtz) fn validate(self) -> Result<(), HelmholtzError> {
         match self {
             Self::PlaneWave(plane) => {
                 if plane.direction.iter().any(|v| !v.is_finite())
@@ -181,6 +181,30 @@ impl IncidentField<'_> {
         medium: Medium,
         point: [f64; 3],
     ) -> Result<IncidentSample, HelmholtzError> {
+        self.sample_wave(
+            k,
+            k * medium.sound_speed * medium.density,
+            Some(medium.density * medium.sound_speed),
+            point,
+            &mut || false,
+        )
+    }
+
+    /// The same analytic source engine on the original WaveNumber seam.
+    /// Momentum uses the caller's physical rho*omega, independently of k.
+    /// The optional real impedance preserves the lossless plane-wave operation
+    /// graph; dispersive media use k/(rho*omega) instead.
+    pub(in crate::helmholtz) fn sample_wave<K: WaveNumber>(
+        self,
+        k: K,
+        omega_rho: f64,
+        lossless_impedance: Option<f64>,
+        point: [f64; 3],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<IncidentSample, HelmholtzError> {
+        if cancelled() {
+            return Err(HelmholtzError::Cancelled);
+        }
         if point.iter().any(|v| !v.is_finite() || v.abs() > 1e9) {
             return Err(bad(
                 "incident receiver must have finite resolved coordinates",
@@ -192,21 +216,23 @@ impl IncidentField<'_> {
         };
         match self {
             Self::PlaneWave(plane) => {
-                let phase = k * dot(plane.direction, point);
-                if !phase.is_finite() {
+                let distance = dot(plane.direction, point);
+                if !finite(k.value().scale(distance)) {
                     return Err(bad("incident plane-wave phase overflow"));
                 }
-                out.pressure_pa = plane.amplitude_pa * expik(phase);
-                out.velocity_m_s = plane.direction.map(|d| {
-                    out.pressure_pa
-                        .scale(d / (medium.density * medium.sound_speed))
+                out.pressure_pa = plane.amplitude_pa * k.outgoing(distance);
+                out.velocity_m_s = plane.direction.map(|d| match lossless_impedance {
+                    Some(rho_c) => out.pressure_pa.scale(d / rho_c),
+                    None => (out.pressure_pa * k.value()).scale(d / omega_rho),
                 });
             }
             Self::Monopoles(sources) => {
-                let omega_rho = k * medium.sound_speed * medium.density;
                 let mut pressure = ComplexSum::default();
                 let mut velocity = [ComplexSum::default(); 3];
                 for source in sources {
+                    if cancelled() {
+                        return Err(HelmholtzError::Cancelled);
+                    }
                     let delta = sub(point, source.position_m);
                     let radius = norm(delta);
                     let coordinate_scale = point
@@ -216,16 +242,16 @@ impl IncidentField<'_> {
                     if !radius.is_finite()
                         || radius <= 128.0 * f64::EPSILON * coordinate_scale
                         || radius <= 0.0
-                        || !(k * radius).is_finite()
+                        || !finite(k.value().scale(radius))
                     {
                         return Err(bad(
                             "monopole receiver coincides with its source or is unresolved",
                         ));
                     }
                     let flow_green = source.volume_velocity_m3_s
-                        * expik(k * radius).scale(1.0 / (4.0 * PI * radius));
+                        * k.outgoing(radius).scale(1.0 / (4.0 * PI * radius));
                     pressure.add(flow_green * C64::new(0.0, -omega_rho));
-                    let radial = flow_green * C64::new(1.0 / radius, -k);
+                    let radial = flow_green * -k.radial_factor(radius);
                     for (component, distance) in velocity.iter_mut().zip(delta) {
                         component.add(radial.scale(distance / radius));
                     }
@@ -234,11 +260,13 @@ impl IncidentField<'_> {
                 out.velocity_m_s = velocity.map(ComplexSum::finish);
             }
             Self::ForceDipoles(sources) => {
-                let inverse_momentum =
-                    C64::new(0.0, -1.0 / (k * medium.sound_speed * medium.density));
+                let inverse_momentum = C64::new(0.0, -1.0 / omega_rho);
                 let mut pressure = ComplexSum::default();
                 let mut velocity = [ComplexSum::default(); 3];
                 for source in sources {
+                    if cancelled() {
+                        return Err(HelmholtzError::Cancelled);
+                    }
                     let delta = sub(point, source.position_m);
                     let radius = norm(delta);
                     let coordinate_scale = point
@@ -248,7 +276,7 @@ impl IncidentField<'_> {
                     if !radius.is_finite()
                         || radius <= 128.0 * f64::EPSILON * coordinate_scale
                         || radius <= 0.0
-                        || !(k * radius).is_finite()
+                        || !finite(k.value().scale(radius))
                     {
                         return Err(bad(
                             "force-dipole receiver coincides with its source or is unresolved",
@@ -278,19 +306,17 @@ impl IncidentField<'_> {
                 let mut pressure = ComplexSum::default();
                 let mut velocity = [ComplexSum::default(); 3];
                 for source in sources {
-                    let sample = match source {
-                        IncidentSource::PlaneWave(plane) => {
-                            Self::PlaneWave(*plane).sample(k, medium, point)?
-                        }
+                    let field = match source {
+                        IncidentSource::PlaneWave(plane) => Self::PlaneWave(*plane),
                         IncidentSource::Monopole(source) => {
                             Self::Monopoles(std::slice::from_ref(source))
-                                .sample(k, medium, point)?
                         }
                         IncidentSource::ForceDipole(source) => {
                             Self::ForceDipoles(std::slice::from_ref(source))
-                                .sample(k, medium, point)?
                         }
                     };
+                    let sample =
+                        field.sample_wave(k, omega_rho, lossless_impedance, point, cancelled)?;
                     pressure.add(sample.pressure_pa);
                     for (component, value) in velocity.iter_mut().zip(sample.velocity_m_s) {
                         component.add(value);
@@ -304,6 +330,32 @@ impl IncidentField<'_> {
             return Err(bad("incident pressure or velocity overflow"));
         }
         Ok(out)
+    }
+
+    pub(in crate::helmholtz) fn source_count(self) -> usize {
+        match self {
+            Self::PlaneWave(_) => 1,
+            Self::Monopoles(sources) => sources.len(),
+            Self::ForceDipoles(sources) => sources.len(),
+            Self::Sources(sources) => sources.len(),
+        }
+    }
+
+    /// Only finite source positions need body-interior/clearance admission.
+    pub(in crate::helmholtz) fn source_positions(self) -> Vec<[f64; 3]> {
+        match self {
+            Self::PlaneWave(_) => Vec::new(),
+            Self::Monopoles(sources) => sources.iter().map(|s| s.position_m).collect(),
+            Self::ForceDipoles(sources) => sources.iter().map(|s| s.position_m).collect(),
+            Self::Sources(sources) => sources
+                .iter()
+                .filter_map(|s| match s {
+                    IncidentSource::Monopole(s) => Some(s.position_m),
+                    IncidentSource::ForceDipole(s) => Some(s.position_m),
+                    IncidentSource::PlaneWave(_) => None,
+                })
+                .collect(),
+        }
     }
 
     fn boundary_drive(

@@ -173,6 +173,53 @@ pub fn assemble_values_with_cancel(
     })
 }
 
+/// Admit the original values-only panel, matrix and kernel-work limits before
+/// a consumer prepares incident/source buffers. This shares the assembly's
+/// arithmetic; geometry and wavelength admission still belong to assembly.
+pub(crate) fn admit_values_storage(
+    surface: &SpherePanels,
+    formulation: Formulation,
+    options: &ComplexOptions,
+) -> Result<(), ComplexError> {
+    admit_storage::<false>(surface, formulation, options).map(|_| ())
+}
+
+fn admit_storage<const DERIVATIVES: bool>(
+    surface: &SpherePanels,
+    formulation: Formulation,
+    options: &ComplexOptions,
+) -> Result<usize, ComplexError> {
+    if options.max_panels == 0 || options.max_panels > MAX_DENSE_PANELS {
+        return Err(invalid("panel budget must be in 1..=MAX_DENSE_PANELS"));
+    }
+    let n = surface.centroids().len();
+    if n > options.max_panels {
+        return Err(ComplexError::PanelBudget {
+            required: n,
+            maximum: options.max_panels,
+        });
+    }
+    let entries = n
+        .checked_mul(n)
+        .ok_or_else(|| invalid("matrix dimension overflow"))?;
+    let required_bytes = entries
+        .checked_mul((if DERIVATIVES { 4 } else { 2 }) * core::mem::size_of::<C64>())
+        .ok_or_else(|| invalid("matrix payload overflow"))?;
+    let triangles = formulation == Formulation::PlainCbie && surface.triangles().is_some();
+    let required_work = (entries as u64)
+        .checked_mul(if triangles { 512 } else { 8 })
+        .ok_or_else(|| invalid("matrix work overflow"))?;
+    if required_bytes > options.max_bytes || required_work > options.max_work {
+        return Err(ComplexError::Budget {
+            required_bytes,
+            maximum_bytes: options.max_bytes,
+            required_work,
+            maximum_work: options.max_work,
+        });
+    }
+    Ok(entries)
+}
+
 fn assemble<const DERIVATIVES: bool>(
     surface: &SpherePanels,
     k: C64,
@@ -186,42 +233,17 @@ fn assemble<const DERIVATIVES: bool>(
     if !finite(k) || !k.abs().is_finite() || k.abs() == 0.0 {
         return Err(invalid("wavenumber must be finite and nonzero"));
     }
-    if options.max_panels == 0 || options.max_panels > MAX_DENSE_PANELS {
-        return Err(invalid("panel budget must be in 1..=MAX_DENSE_PANELS"));
-    }
+    let entries = admit_storage::<DERIVATIVES>(surface, formulation, options)?;
     surface
         .validate()
         .map_err(|_| invalid("invalid closed source surface"))?;
     admit_resolution(surface, k.abs())?;
     let n = surface.centroids().len();
-    if n > options.max_panels {
-        return Err(ComplexError::PanelBudget {
-            required: n,
-            maximum: options.max_panels,
-        });
-    }
     let triangles = if formulation == Formulation::PlainCbie {
         surface.triangles()
     } else {
         None
     };
-    let entries = n
-        .checked_mul(n)
-        .ok_or_else(|| invalid("matrix dimension overflow"))?;
-    let required_bytes = entries
-        .checked_mul((if DERIVATIVES { 4 } else { 2 }) * core::mem::size_of::<C64>())
-        .ok_or_else(|| invalid("matrix payload overflow"))?;
-    let required_work = (entries as u64)
-        .checked_mul(if triangles.is_some() { 512 } else { 8 })
-        .ok_or_else(|| invalid("matrix work overflow"))?;
-    if required_bytes > options.max_bytes || required_work > options.max_work {
-        return Err(ComplexError::Budget {
-            required_bytes,
-            maximum_bytes: options.max_bytes,
-            required_work,
-            maximum_work: options.max_work,
-        });
-    }
     let mut out = ComplexOperator {
         dimension: n,
         a: zeros(entries)?,

@@ -1868,6 +1868,47 @@ Those new native regressions are authored but unexecuted in the authoring
 environment: pinned sibling dependencies and shared storage/memory pressure
 blocked compilation. Formatting does not qualify their numerical assertions.
 
+### Coherent finite-source scattering in relaxing gas
+
+`MolecularExterior::solve_scattering_batch` now illuminates the same original
+closed-body Robin operator with coherent plane waves, nearby volume sources,
+compact forces, or mixtures of them. The existing incident sampler shares
+the original `WaveNumber` Green/derivative seam across real and complex k;
+it retains compensated coherent sums and the real-frequency operation graph.
+Source strengths remain physical outward flow [m³/s] and total force on fluid
+[N]. For exp(-i omega t), `p=-i*rho*omega*Q*G-F.grad(G)` and
+`u=grad(p)/(i*rho*omega)`, including angular force-source velocity at pressure
+nodes. A dispersive plane wave therefore has `u=k*p*d/(rho*omega)`, not the
+equilibrium plane-wave ratio. Its amplitude refers to pressure at the origin.
+
+For a stationary surface, `v_total=-Y*p_total` gives the scattered drive
+`-v_incident-Y*p_incident`. Local and complete nonlocal admittances use this
+same equation and one complex assembly/LU for the complete incident batch.
+Only outgoing scattered traces enter its Green representation; analytic
+incident pressure and velocity are added coherently at each total receiver.
+Wall absorption uses total pressure, including all interference terms, and
+is checked against the original active/passive declaration. Signed total
+outward boundary work is separate from the scattered exterior work; neither
+is mislabeled as a far-field cross section in an absorbing medium.
+
+The original matrix panel/storage/work admission is shared with assembly and
+runs before source preparation. Additional source-point work is bounded for
+the whole incident batch and every receiver query. Original closed-component
+winding, source/receiver clearance, cardinality, finite-value and source-law
+identity checks remain. Cancellation reaches source evaluations, boundary
+preparation, the original assembly/LU, total-work reductions and receivers.
+This uses the existing centroid finite receiver quadrature; it introduces no
+near-field convergence certificate, moving-medium model or duplicate loss.
+
+Six new regressions cover complex source gradients and physical momentum,
+lossless-owner parity, coherent nonlocal wall work, early budget and geometry
+refusal, preservation of a weak source between large opposing fields, and a
+three-mesh Robin sphere with independent complex spherical-Bessel/Hankel
+pressure, radial velocity and analytically integrated absorption. The sphere
+series follows NIST DLMF 10.53.1, 10.51.2 and 10.60.7. Native execution remains
+pending for the compilation blockers recorded above; the authored convergence
+thresholds are not measured outcomes.
+
 ## Source-bound gas and liquid acoustic media
 
 `helmholtz::Medium::from_material` consumes the shared checked

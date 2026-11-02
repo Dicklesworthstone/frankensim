@@ -23,6 +23,12 @@ use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
 use fs_material::{MaterialError, relaxation::RelaxationState};
 use std::sync::Arc;
 
+#[path = "helmholtz_molecular/scattering.rs"]
+mod scattering;
+pub use scattering::{
+    MolecularScatteredField, MolecularScatteringOptions, MolecularScatteringSolution,
+};
+
 /// Material, geometric, work-envelope, solve or cancellation refusal.
 #[derive(Debug)]
 pub enum MolecularError {

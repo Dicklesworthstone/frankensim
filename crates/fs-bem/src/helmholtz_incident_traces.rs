@@ -63,19 +63,7 @@ impl IncidentTraces {
             return Err(bad("incident source clearance must be positive and finite"));
         }
         validate_closed(surface)?;
-        let positions: Vec<_> = match field {
-            IncidentField::PlaneWave(_) => Vec::new(),
-            IncidentField::Monopoles(sources) => sources.iter().map(|s| s.position_m).collect(),
-            IncidentField::ForceDipoles(sources) => sources.iter().map(|s| s.position_m).collect(),
-            IncidentField::Sources(sources) => sources
-                .iter()
-                .filter_map(|s| match s {
-                    IncidentSource::Monopole(s) => Some(s.position_m),
-                    IncidentSource::ForceDipole(s) => Some(s.position_m),
-                    IncidentSource::PlaneWave(_) => None,
-                })
-                .collect(),
-        };
+        let positions = field.source_positions();
         if !positions.is_empty() {
             if let Some(gate) = gate {
                 near_field::Geometry::new_iterative(
