@@ -116,7 +116,45 @@ is recorded under No-claim boundaries.
 Size violations (non-power-of-two, mismatched scratch length) panic with
 structured messages naming the size and the remedy. These are programmer
 errors, not runtime conditions — silently computing a wrong-size transform
-would be worse. No other fallible paths.
+would be worse. Separate harmonic-analysis APIs have the typed refusals
+described in their respective sections.
+
+### Known-frequency harmonic estimation
+
+`harmonic::HarmonicFitPlan` jointly fits a constant and the caller's declared
+positive harmonic orders to a uniformly sampled record. Frequencies are not
+rounded to FFT bins; partial-period and non-power-of-two records are admitted.
+The shared `fs-la::factor::qr` Householder owner solves the complete design,
+without normal equations or independent nonorthogonal tone projections.
+`HarmonicFit::phasors` are peak amplitudes under `exp(-i omega t)` with time
+zero at the first sample. The jointly fitted DC and unexplained sampled RMS
+retain the input's units. Reusing `fit_into` needs only caller-provided sample
+scratch and phasor output; it performs no allocation.
+
+Admission checks the explicit storage budget, sample count, harmonic ordering,
+strict Nyquist limit and a caller-set reciprocal-condition floor. Conditioning
+is measured using the complete triangular `R` inverse's 1-norm, not a diagonal
+ratio. Input centering and scaling preserve small changes on a large preload
+and avoid norm overflow across physical unit scales. Invalid data, insufficient
+storage and unresolved columns return `HarmonicFitError`; failed fits do not
+partially overwrite caller phasors.
+
+Preparation is O(N K^2 + K^3) and O(N K) storage for N samples and K tones;
+reuse is O(N K + K^2). This is a known-frequency, finite-dimensional estimate,
+not frequency identification, an anti-alias filter, a statistical uncertainty
+bound or evidence of physical model validity. Omitted tones, noise, transients
+and frequency error can bias fitted components; the sampled residual discloses
+unexplained content without certifying its cause. Existing FFT bit semantics
+are unchanged. This synchronous path has no mid-factorization cancellation;
+same-build replay is tested, with no new cross-ISA certification claim.
+
+G1/G3 tests in `tests/harmonic_fit.rs` recover weak even harmonics on fractional
+period records, verify phase-origin shifts and unit scaling, preserve small
+harmonics on a large preload, measure an analytically known omitted harmonic's
+RMS, and refuse underresolved/invalid fits. The sinusoidal model and the reason
+to fit its constant jointly follow the [NIST sinusoidal-model discussion](https://www.itl.nist.gov/div898/handbook/eda/section3/eda33r3.htm);
+the record-length dependence of FFT leakage is documented in
+[Sandia SAND1993-0518C](https://www.sandia.gov/research/publications/details/the-use-of-dft-windows-in-signal-to-noise-ratio-and-harmonic-distortion-com-1993-03-01/).
 
 ## Determinism class
 The complex stage path is **bit-deterministic cross-ISA**: twiddles come from

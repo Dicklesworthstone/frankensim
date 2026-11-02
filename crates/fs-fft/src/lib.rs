@@ -32,6 +32,10 @@ pub mod harmonic_window;
 
 mod simd_view;
 
+/// Joint harmonic estimation at caller-supplied frequencies, including
+/// records containing a non-integer number of fundamental periods.
+pub mod harmonic;
+
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

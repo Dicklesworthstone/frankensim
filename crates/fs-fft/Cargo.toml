@@ -21,6 +21,7 @@ frontier-sixstep = []
 [dependencies]
 fs-alloc = { path = "../fs-alloc" }
 fs-exec = { path = "../fs-exec" }
+fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-simd = { path = "../fs-simd" }
 

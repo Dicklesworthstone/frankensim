@@ -1626,6 +1626,7 @@ dependencies = [
  "fs-alloc",
  "fs-casebook",
  "fs-exec",
+ "fs-la",
  "fs-math",
  "fs-propcheck",
  "fs-roofline",
