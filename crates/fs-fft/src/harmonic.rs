@@ -22,8 +22,8 @@ use fs_math::det;
 #[path = "harmonic/frequency.rs"]
 mod frequency;
 pub use frequency::{
-    HarmonicFrequencyBudget, HarmonicFrequencyError, HarmonicFrequencyFit,
-    refine_harmonic_frequency,
+    HarmonicFrequencyBudget, HarmonicFrequencyChannelsFit, HarmonicFrequencyError,
+    HarmonicFrequencyFit, refine_harmonic_frequency, refine_harmonic_frequency_channels,
 };
 
 /// Explicit storage and conditioning limits for a prepared harmonic fit.

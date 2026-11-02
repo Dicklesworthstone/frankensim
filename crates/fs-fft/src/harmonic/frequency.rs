@@ -15,7 +15,7 @@ pub struct HarmonicFrequencyBudget {
     /// Maximum QR fits, including the seed and rejected backtracking trials.
     pub max_evaluations: usize,
     /// Conditioning floor and conservative total numeric-array peak storage,
-    /// including refinement scratch and two candidate coefficient vectors.
+    /// including refinement scratch and every channel's two candidate fits.
     pub fit: HarmonicFitBudget,
 }
 
@@ -29,6 +29,21 @@ pub struct HarmonicFrequencyFit {
     /// Number of QR fits performed, including rejected candidate steps.
     pub evaluations: usize,
     /// Untruncated projected correction at the returned frequency, in hertz.
+    pub last_correction_hz: f64,
+}
+
+/// One common fundamental with independently fitted DC and phasors for each
+/// simultaneous channel, retaining the original channel and harmonic order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HarmonicFrequencyChannelsFit {
+    /// Refined fundamental shared by every channel [Hz].
+    pub fundamental_hz: f64,
+    /// Per-channel fits in the caller's common physical units. A constant
+    /// channel retains its DC and zero phasors without inventing frequency data.
+    pub fits: Vec<HarmonicFit>,
+    /// Candidate frequencies evaluated; all channels reuse each candidate QR.
+    pub evaluations: usize,
+    /// Remaining untruncated projected correction [Hz].
     pub last_correction_hz: f64,
 }
 
@@ -51,7 +66,8 @@ pub enum HarmonicFrequencyError {
     NotConverged {
         /// Best accepted frequency in hertz.
         fundamental_hz: f64,
-        /// Unexplained RMS at that iterate, in physical input units.
+        /// Unexplained RMS over all scalar samples/channels at that iterate,
+        /// in the channels' common physical input units.
         residual_rms: f64,
         /// QR fits performed, including rejected trials.
         evaluations: usize,
@@ -101,7 +117,8 @@ fn invalid(what: &'static str) -> HarmonicFrequencyError {
 
 struct Candidate {
     frequency: f64,
-    fit: HarmonicFit,
+    fits: Vec<HarmonicFit>,
+    residual_rms: f64,
     normalized_residual_squared: f64,
     correction_hz: f64,
 }
@@ -110,7 +127,7 @@ impl Candidate {
     fn not_converged(&self, evaluations: usize) -> HarmonicFrequencyError {
         HarmonicFrequencyError::NotConverged {
             fundamental_hz: self.frequency,
-            residual_rms: self.fit.residual_rms,
+            residual_rms: self.residual_rms,
             evaluations,
             last_correction_hz: self.correction_hz,
         }
@@ -142,6 +159,48 @@ pub fn refine_harmonic_frequency(
     harmonics: &[usize],
     budget: HarmonicFrequencyBudget,
 ) -> Result<HarmonicFrequencyFit, HarmonicFrequencyError> {
+    let mut result = refine_harmonic_frequency_channels(
+        &[samples],
+        timestep_s,
+        initial_fundamental_hz,
+        harmonics,
+        budget,
+    )?;
+    Ok(HarmonicFrequencyFit {
+        fundamental_hz: result.fundamental_hz,
+        fit: result.fits.remove(0),
+        evaluations: result.evaluations,
+        last_correction_hz: result.last_correction_hz,
+    })
+}
+
+/// Refine one fundamental from simultaneous equal-length, common-clock
+/// channels. Each channel has independent DC/phasors, while one QR per candidate
+/// supplies every fit and projected derivative. This is the same numerical
+/// owner as [`refine_harmonic_frequency`], not an average of separately inferred
+/// pitches or a choice of one arbitrarily preferred channel.
+///
+/// The objective is the sum of squared residuals in the channels' COMMON units,
+/// with equal weights. Relative channel strength is retained; independently
+/// normalizing channels to unit amplitude would change the physical objective.
+/// In particular, Cartesian vector components retain their Euclidean metric
+/// under orthogonal frame changes. Unrelated units or sensor noise weights must
+/// be converted explicitly by the caller before use. DC preloads do not set the
+/// amplitude scale. Constant channels carry no frequency information but are
+/// retained, and only an entirely unresolved record is unidentifiable.
+///
+/// Storage is O(N K + C K + N) for N samples, K orders and C channels. Work is
+/// O(E (N K^2 + C N K + K^3)); the evaluation cap counts common QR candidates.
+/// Channels stream through two reusable length-N buffers. The same local,
+/// stationary, sub-Nyquist and non-certification boundaries apply as for the
+/// scalar estimator. The memory budget includes every retained channel fit.
+pub fn refine_harmonic_frequency_channels(
+    channels: &[&[f64]],
+    timestep_s: f64,
+    initial_fundamental_hz: f64,
+    harmonics: &[usize],
+    budget: HarmonicFrequencyBudget,
+) -> Result<HarmonicFrequencyChannelsFit, HarmonicFrequencyError> {
     let [lower, upper] = budget.frequency_bounds_hz;
     if !(lower.is_finite() && upper.is_finite() && lower > 0.0 && lower < upper) {
         return Err(invalid(
@@ -163,17 +222,35 @@ pub fn refine_harmonic_frequency(
             "frequency tolerance and evaluation cap must be positive",
         ));
     }
+    let Some(samples) = channels.first() else {
+        return Err(invalid("at least one simultaneous channel is required"));
+    };
+    let sample_count = samples.len();
+    if channels.iter().any(|channel| channel.len() != sample_count) {
+        return Err(invalid(
+            "simultaneous channels must have the same sample count",
+        ));
+    }
+    if channels
+        .iter()
+        .any(|channel| channel.iter().any(|x| !x.is_finite()))
+    {
+        return Err(HarmonicFitError::NonFinite {
+            what: "input sample",
+        }
+        .into());
+    }
     let columns = harmonics
         .len()
         .checked_mul(2)
         .and_then(|n| n.checked_add(1))
         .ok_or_else(|| invalid("harmonic design size overflows"))?;
-    if samples.len() <= columns {
+    if sample_count <= columns {
         return Err(invalid(
             "frequency refinement needs more than 1 + 2 * harmonic_count samples",
         ));
     }
-    let duration = (samples.len() - 1) as f64 * timestep_s;
+    let duration = (sample_count - 1) as f64 * timestep_s;
     if !(duration.is_finite() && duration > 0.0) {
         return Err(invalid("record duration must be positive and finite"));
     }
@@ -186,20 +263,20 @@ pub fn refine_harmonic_frequency(
         ));
     }
     // The fixed-fit owner budgets a plan and one fit. Reserve both persistent
-    // sample vectors and a previous candidate's phasors in addition, so even
-    // preparation of a trial fits inside the declared numeric-array peak.
-    let extra_bytes = samples
+    // sample vectors and both candidates' channel fits/scales in addition, so
+    // even preparation of a trial stays inside the declared storage peak.
+    let channel_bytes = harmonics
         .len()
-        .checked_mul(2)
-        .and_then(|n| {
-            harmonics
-                .len()
-                .checked_mul(4)
-                .and_then(|k| n.checked_add(k))
-        })
-        .and_then(|n| n.checked_mul(core::mem::size_of::<f64>()))
+        .checked_mul(4 * core::mem::size_of::<f64>())
+        .and_then(|n| n.checked_add(2 * core::mem::size_of::<HarmonicFit>()))
+        .and_then(|n| n.checked_add(core::mem::size_of::<f64>()))
+        .and_then(|n| n.checked_mul(channels.len()))
+        .ok_or_else(|| invalid("channel fit workspace size overflows"))?;
+    let extra_bytes = sample_count
+        .checked_mul(2 * core::mem::size_of::<f64>())
+        .and_then(|n| n.checked_add(channel_bytes))
         .ok_or_else(|| invalid("frequency refinement workspace size overflows"))?;
-    let required_bytes = super::fit_workspace_bytes(samples.len(), harmonics.len())?
+    let required_bytes = super::fit_workspace_bytes(sample_count, harmonics.len())?
         .checked_add(extra_bytes)
         .ok_or_else(|| invalid("frequency refinement workspace size overflows"))?;
     if required_bytes > budget.fit.max_workspace_bytes {
@@ -216,30 +293,48 @@ pub fn refine_harmonic_frequency(
     // Validate the seed's harmonic declarations/conditioning before allocating
     // scratch. Only one QR plan is retained at any time, including line search.
     let seed_plan = HarmonicFitPlan::new(
-        samples.len(),
+        sample_count,
         timestep_s,
         initial_fundamental_hz,
         harmonics,
         plan_budget,
     )?;
-    if samples.iter().any(|x| !x.is_finite()) {
-        return Err(HarmonicFitError::NonFinite {
-            what: "input sample",
-        }
-        .into());
-    }
-    if samples.iter().all(|x| *x == samples[0]) {
+    let mut ratios: Vec<f64> = channels
+        .iter()
+        .map(|channel| {
+            let low = channel.iter().copied().fold(f64::INFINITY, f64::min);
+            let high = channel.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let center = low.midpoint(high);
+            channel
+                .iter()
+                .map(|x| (x - center).abs())
+                .fold(0.0, f64::max)
+        })
+        .collect();
+    let physical_scale = ratios.iter().copied().fold(0.0, f64::max);
+    if physical_scale == 0.0 {
         return Err(HarmonicFrequencyError::Unidentifiable);
     }
-    let mut scratch = vec![0.0; samples.len()];
-    let mut derivative = vec![0.0; samples.len()];
-    let mut current = evaluate(samples, seed_plan, duration, &mut scratch, &mut derivative)?;
+    for ratio in &mut ratios {
+        *ratio /= physical_scale;
+    }
+    let mut scratch = vec![0.0; sample_count];
+    let mut derivative = vec![0.0; sample_count];
+    let mut current = evaluate(
+        channels,
+        &ratios,
+        physical_scale,
+        seed_plan,
+        duration,
+        &mut scratch,
+        &mut derivative,
+    )?;
     let mut evaluations = 1;
     loop {
         if current.correction_hz.abs() <= budget.absolute_tolerance_hz {
-            return Ok(HarmonicFrequencyFit {
+            return Ok(HarmonicFrequencyChannelsFit {
                 fundamental_hz: current.frequency,
-                fit: current.fit,
+                fits: current.fits,
                 evaluations,
                 last_correction_hz: current.correction_hz,
             });
@@ -255,14 +350,22 @@ pub fn refine_harmonic_frequency(
                 return Err(current.not_converged(evaluations));
             }
             let plan = HarmonicFitPlan::new(
-                samples.len(),
+                sample_count,
                 timestep_s,
                 trial_frequency,
                 harmonics,
                 plan_budget,
             )?;
             evaluations += 1;
-            let trial = evaluate(samples, plan, duration, &mut scratch, &mut derivative)?;
+            let trial = evaluate(
+                channels,
+                &ratios,
+                physical_scale,
+                plan,
+                duration,
+                &mut scratch,
+                &mut derivative,
+            )?;
             if trial.normalized_residual_squared < current.normalized_residual_squared {
                 current = trial;
                 break;
@@ -275,56 +378,94 @@ pub fn refine_harmonic_frequency(
 // Consumes/drops each plan before the next is prepared. Scratch after fit_into
 // holds normalized solved coefficients followed by the Q^T residual. Thus all
 // derivative/line-search arithmetic is independent of the input's unit scale.
+#[allow(clippy::too_many_arguments)]
 fn evaluate(
-    samples: &[f64],
+    channels: &[&[f64]],
+    ratios: &[f64],
+    physical_scale: f64,
     plan: HarmonicFitPlan,
     duration: f64,
     scratch: &mut [f64],
     derivative: &mut [f64],
 ) -> Result<Candidate, HarmonicFrequencyError> {
-    let mut phasors = vec![C64::default(); plan.harmonics.len()];
-    let summary = plan.fit_into(samples, scratch, &mut phasors)?;
     let columns = 2 * plan.harmonics.len() + 1;
-    let residual_squared: f64 = scratch[columns..].iter().map(|r| r * r).sum();
     let cycles = plan.fundamental_hz * plan.timestep_s();
-    for (j, out) in derivative.iter_mut().enumerate() {
-        // Centering the derivative's time coordinate changes it only by a
-        // fitted sinusoid column, which its orthogonal projection removes.
-        let centered_time = j as f64 / (samples.len() - 1) as f64 - 0.5;
-        let mut value = 0.0;
-        for (k, &h) in plan.harmonics.iter().enumerate() {
-            let theta = core::f64::consts::TAU * ((cycles * h as f64) * j as f64);
-            let (s, c) = det::sin_cos(theta);
-            let slope = (-scratch[2 * k + 1]).mul_add(s, scratch[2 * k + 2] * c);
-            value = (h as f64 * slope).mul_add(centered_time, value);
+    let mut fits = Vec::with_capacity(channels.len());
+    let (mut residual_squared, mut numerator, mut denominator, mut joint_scale) =
+        (0.0, 0.0, 0.0, 0.0_f64);
+    for (&samples, &ratio) in channels.iter().zip(ratios) {
+        let mut phasors = vec![C64::default(); plan.harmonics.len()];
+        let summary = plan.fit_into(samples, scratch, &mut phasors)?;
+        fits.push(HarmonicFit {
+            dc: summary.dc,
+            phasors,
+            residual_rms: summary.residual_rms,
+        });
+        // A constant channel's fit_into returns without filling scratch; it has
+        // exactly zero residual and supplies no derivative. A ratio below f64
+        // representation also cannot affect this common-scale objective.
+        if ratio == 0.0 {
+            continue;
         }
-        *out = core::f64::consts::TAU * value;
+        let local_residual: f64 = scratch[columns..].iter().map(|r| r * r).sum();
+        residual_squared += local_residual * ratio * ratio;
+        for (j, out) in derivative.iter_mut().enumerate() {
+            // Centering the derivative's time coordinate changes it only by a
+            // fitted sinusoid column, which its orthogonal projection removes.
+            let centered_time = j as f64 / (samples.len() - 1) as f64 - 0.5;
+            let mut value = 0.0;
+            for (k, &h) in plan.harmonics.iter().enumerate() {
+                let theta = core::f64::consts::TAU * ((cycles * h as f64) * j as f64);
+                let (s, c) = det::sin_cos(theta);
+                let slope = (-scratch[2 * k + 1]).mul_add(s, scratch[2 * k + 2] * c);
+                value = (h as f64 * slope).mul_add(centered_time, value);
+            }
+            *out = core::f64::consts::TAU * value;
+        }
+        if derivative.iter().any(|d| !d.is_finite()) {
+            return Err(HarmonicFitError::NonFinite {
+                what: "frequency derivative",
+            }
+            .into());
+        }
+        let derivative_scale = derivative.iter().map(|d| d.abs()).fold(0.0, f64::max);
+        let weighted_scale = derivative_scale * ratio;
+        if weighted_scale == 0.0 {
+            continue;
+        }
+        for d in derivative.iter_mut() {
+            *d /= derivative_scale;
+        }
+        plan.design.factor.apply_qt(derivative);
+        let local_denominator: f64 = derivative[columns..].iter().map(|d| d * d).sum();
+        if local_denominator <= samples.len() as f64 * (64.0 * f64::EPSILON).powi(2) {
+            continue;
+        }
+        let local_numerator: f64 = derivative[columns..]
+            .iter()
+            .zip(&scratch[columns..])
+            .map(|(d, r)| d * r)
+            .sum();
+        // Maintain one derivative scale while streaming channels. Both the
+        // gradient and information keep their original amplitude weights; no
+        // independently normalized channel can dominate solely by being weak.
+        if weighted_scale > joint_scale {
+            let change = joint_scale / weighted_scale;
+            numerator *= change;
+            denominator *= change * change;
+            joint_scale = weighted_scale;
+        }
+        let weight = weighted_scale / joint_scale;
+        denominator += local_denominator * weight * weight;
+        numerator += local_numerator * weight * ratio;
     }
-    let derivative_scale = derivative.iter().map(|d| d.abs()).fold(0.0, f64::max);
-    if derivative_scale == 0.0 {
+    if joint_scale == 0.0 || denominator == 0.0 {
         return Err(HarmonicFrequencyError::Unidentifiable);
     }
-    if !derivative_scale.is_finite() {
-        return Err(HarmonicFitError::NonFinite {
-            what: "frequency derivative",
-        }
-        .into());
-    }
-    for d in derivative.iter_mut() {
-        *d /= derivative_scale;
-    }
-    plan.design.factor.apply_qt(derivative);
-    let denominator: f64 = derivative[columns..].iter().map(|d| d * d).sum();
-    if denominator <= samples.len() as f64 * (64.0 * f64::EPSILON).powi(2) {
-        return Err(HarmonicFrequencyError::Unidentifiable);
-    }
-    let numerator: f64 = derivative[columns..]
-        .iter()
-        .zip(&scratch[columns..])
-        .map(|(d, r)| d * r)
-        .sum();
-    let correction_hz = ((numerator / denominator) / derivative_scale) / duration;
-    if !correction_hz.is_finite() || !residual_squared.is_finite() {
+    let correction_hz = ((numerator / denominator) / joint_scale) / duration;
+    let residual_rms =
+        det::sqrt(residual_squared / scratch.len() as f64 / channels.len() as f64) * physical_scale;
+    if !correction_hz.is_finite() || !residual_squared.is_finite() || !residual_rms.is_finite() {
         return Err(HarmonicFitError::NonFinite {
             what: "projected frequency correction",
         }
@@ -332,11 +473,8 @@ fn evaluate(
     }
     Ok(Candidate {
         frequency: plan.fundamental_hz,
-        fit: HarmonicFit {
-            dc: summary.dc,
-            phasors,
-            residual_rms: summary.residual_rms,
-        },
+        fits,
+        residual_rms,
         normalized_residual_squared: residual_squared,
         correction_hz,
     })

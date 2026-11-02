@@ -221,6 +221,26 @@ limits. Same-build deterministic arithmetic is retained; no new cross-ISA or
 mid-factorization cancellation claim is made.
 
 
+### Common-frequency vector records
+
+`harmonic::refine_harmonic_frequency_channels` fits simultaneous channels on
+one physical sample clock with a shared candidate frequency and QR. DC and
+phasors remain independent per channel; the frequency minimizes their total
+squared residual in common physical units. Original amplitude weights are
+retained, so rotating Cartesian force components preserves the Euclidean
+objective. Constant channels retain their DC without supplying frequency
+information. This neither averages independently estimated pitches nor gives
+a weak channel an invented unit-amplitude weight.
+
+Channels stream through two shared sample buffers; all retained candidate
+fits and channel scales are included in storage admission. For C channels,
+work is O(E (N K^2 + C N K + K^3)) and storage O(N K + C K + N).
+The scalar API delegates to this same owner. Tests check scalar identity,
+orthogonal frame changes and phasor rotation, amplitude weighting, common
+unit changes, constants, channel shape and complete storage refusal. Inputs
+with unrelated units or noise metrics require explicit caller conversion;
+the local stationary and uncertainty boundaries above remain unchanged.
+
 ## Determinism class
 The complex stage path is **bit-deterministic cross-ISA**: twiddles come from
 fs-math's strict functions and the transform body uses fixed-order `+`, `−`,
@@ -363,4 +383,5 @@ authority-policy receipt move.
   oracle uses platform trigonometry, so its observed output digests are
   same-run diagnostics rather than cross-ISA goldens.
 - `C64` is not a public complex-arithmetic library; only what the FFT needs.
+
 
