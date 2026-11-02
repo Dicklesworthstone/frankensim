@@ -204,6 +204,64 @@ fn moving_geometry_and_native_fluid_replay_bit_for_bit() {
 }
 
 #[test]
+fn imposed_fluid_force_and_moving_disk_keep_separate_momentum_accounts() {
+    let mut grid = Grid::uniform(72, 72, 0.9);
+    let mut fluid_load = [0.0; 3];
+    for y in 30..36 {
+        for x in 29..36 {
+            let i = grid.idx(x, y);
+            let force = [2e-5 * (x - 28) as f64, -3e-5 * (y - 29) as f64];
+            grid.fext[i] = force;
+            fluid_load[0] += force[0];
+            fluid_load[1] += force[1];
+            fluid_load[2] += x as f64 * force[1] - y as f64 * force[0];
+        }
+    }
+    let initial = body([32.25, 33.125], [0.017, -0.008], 0.006);
+    let mut disk = MovingDisk2::new(&grid, 2.4, initial, -0.2);
+    let mut replay = disk.clone();
+    let mut replay_grid = grid.clone();
+    let mut expected = totals(&grid, initial);
+    for _ in 0..16 {
+        let impulse = [0.002, -0.001];
+        let couple = 0.001;
+        let receipt = disk.step(&mut grid, impulse, couple);
+        let other = replay.step(&mut replay_grid, impulse, couple);
+        assert_eq!(receipt, other);
+        assert_eq!(disk.body(), replay.body());
+        assert_eq!(grid.f, replay_grid.f);
+        let force = receipt.exchange.hydrodynamic.forcing;
+        for a in 0..2 {
+            close(force.impulse[a], fluid_load[a], 2e-16);
+        }
+        close(
+            force.angular_impulse + receipt.collision_center[0] * force.impulse[1]
+                - receipt.collision_center[1] * force.impulse[0],
+            fluid_load[2],
+            2e-15,
+        );
+        expected[1] += impulse[0] + fluid_load[0];
+        expected[2] += impulse[1] + fluid_load[1];
+        expected[3] += receipt.external_angular_impulse_about_origin + fluid_load[2];
+        let actual = totals(&grid, disk.body());
+        close(actual[0], expected[0], 5e-9);
+        for q in 1..4 {
+            close(actual[q], expected[q], 2e-9);
+        }
+        close(
+            receipt.exchange.kinetic_energy_change,
+            receipt.exchange.external_work + receipt.exchange.hydrodynamic.solid_work,
+            2e-13,
+        );
+        // Force support and body remain far from periodic cuts. The held
+        // spatial force is unchanged, so its Guo half shift cancels between
+        // endpoints: these differences are also physical momentum changes.
+    }
+    assert!(disk.body().center[0] > initial.center[0]);
+    assert_ne!(disk.body().angular_velocity, initial.angular_velocity);
+}
+
+#[test]
 fn late_endpoint_refusal_preserves_body_fluid_and_scratch_recovery() {
     let mut grid = Grid::uniform(20, 14, 0.8);
     let initial = PartialSaturationBody2 {

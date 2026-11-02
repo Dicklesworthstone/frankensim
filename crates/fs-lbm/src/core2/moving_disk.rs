@@ -18,7 +18,7 @@ use fs_math::det;
 /// are not silently interpreted as physical solid density times disk volume;
 /// a displaced/interior-fluid inertia closure is not supplied here.
 ///
-/// One disk, fixed radius and inertia, force-free BGK fluid, and lattice
+/// One disk, fixed radius and inertia, BGK/Guo fluid, and lattice
 /// `dx = dt = 1` are admitted. Its swept bounding boxes must contain only
 /// fluid cells and retain a one-cell domain halo. Collision/contact with
 /// permanent walls, periodic seam crossing, multiple disks and free surfaces
@@ -160,6 +160,9 @@ impl MovingDisk2 {
     ///
     /// Body and fluid publish only after the final drift is admitted. Scratch
     /// may change on refusal; subsequent calls rebuild it from accepted state.
+    /// Fluid acceleration and per-cell forces retain their native Guo meaning;
+    /// `exchange.hydrodynamic.forcing` accounts them about `collision_center`,
+    /// separately from the body's external impulse and hydrodynamic reaction.
     /// Native stationary boundaries may exchange further momentum and periodic
     /// fluid seams transport angular momentum; the returned exchange covers
     /// the immersed collision, not those distinct outer-boundary fluxes.

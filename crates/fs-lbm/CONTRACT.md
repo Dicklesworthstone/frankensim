@@ -680,11 +680,13 @@ rollback. Their addition does not establish executed native validation.
   initialize newly uncovered cells from unique surviving one-ring donors, and
   receipt the exact active-population mass/momentum removal and insertion.
   `core2::PartialSaturationCell2`, `core2::PartialSaturationExchange2`, and
-  the paired Grid collision/step methods add a force-free dense-D2Q9
+  the paired Grid collision/step methods add a BGK/Guo dense-D2Q9
   Noble-Torczynski partially saturated cell rung. Caller-supplied solid
   fractions and velocities blend fluid and non-equilibrium-bounce-back solid
   collisions while the receipt retains aggregate equal-and-opposite
   fluid/solid impulse, angular impulse, solid work, and coupling-weight sum.
+  `core2::PartialSaturationForcing2` separately accounts the complete imposed
+  fluid impulse, torque and midpoint work, including occupied cells.
   `core2::PartialSaturationBody2`, `core2::PartialSaturationBodyExchange2`,
   and the paired finite-body collision/step methods couple that same operator
   to finite planar translational and rotational inertia at the midpoint.
@@ -1108,8 +1110,12 @@ rollback. Their addition does not establish executed native validation.
 - D2Q9 partial saturation uses the Noble-Torczynski non-equilibrium-bounce-back
   variant with lattice time step one. For solid fraction `epsilon_s`,
   `B = epsilon_s (tau - 1/2) / ((1 - epsilon_s) + (tau - 1/2))`, and
-  `f_post = f + (1-B) Omega_f + B Omega_s`, where
+  the unforced law is `f_post = f + (1-B) Omega_f + B Omega_s`, where
   `Omega_s[q] = f[opp(q)] - f[q] + feq[q](rho,u_s) - feq[opp(q)](rho,u)`.
+  With imposed Guo force `F = rho*g + fext`, the same operators act on physical
+  populations `h = f + S(u,F)/2`; `B*(Omega_s(h)-Omega_f(h))` is added to the
+  native forced BGK result. The complete fluid force is applied once, without
+  an occupancy multiplier, and its account stays separate from solid reaction.
   The solid-coupling correction conserves population mass to roundoff; its
   fluid momentum and angular-momentum changes are equal and opposite to the
   solid receipt. Cells and directions reduce in fixed row-major order. The
@@ -1213,9 +1219,10 @@ D2Q9 partial-saturation descriptors require a finite solid fraction in
 `[0,1]`, exactly zero velocity at zero fraction, and finite solid velocity
 inside the same low-Mach envelope. The full-grid field may assign positive
 fraction only to `Cell::Fluid`; all populations must be finite, every active
-cell needs positive finite density, finite momentum, and `tau > 0.5`, forcing
-must be exactly zero, and the moment origin must be finite. Collision is built
-in a private proposal and the caller's output/scratch is published only after
+cell needs positive finite density, finite momentum, and `tau > 0.5`. BGK is
+required; imposed acceleration, active-cell external force, the combined force
+and physical velocity must be finite, as must the moment origin. Collision is
+built in a private proposal and the caller's output/scratch is published only after
 every proposed population and the aggregate receipt are finite.
 D2Q9 under-resolved cylinder lubrication descriptors require a finite
 nonnegative gap; positive finite cutoff, floor, reduced radius, and dynamic
@@ -2082,8 +2089,8 @@ Their presence does not claim native execution or empirical gas validation.
 - `PartialSaturationCell2` consumes a caller-supplied cell volume fraction and
   one aggregate solid velocity; it does not rasterize geometry, resolve
   overlapping bodies, or attribute the aggregate receipt among bodies. This
-  first rung is force-free dense D2Q9 and selects the published
-  non-equilibrium-bounce-back variant. It has no stresslet-accuracy,
+  first rung is dense BGK D2Q9 with an additive Guo-force extension and selects
+  the published non-equilibrium-bounce-back variant. It has no stresslet-accuracy,
   convergence-order, free-surface coexistence or high-Re stability claim.
   Its prescribed-velocity entry does not integrate rigid-body inertia; the
   finite-inertia coupling below adds a bounded velocity update, while pose
@@ -5186,11 +5193,12 @@ The receipt reports body kinetic-energy change, midpoint work, and the
 momentum residual using the actual representable endpoint
 velocity differences. There is no repeated fluid solve.
 
-The coupled entry admits only force-free BGK fluid/wall domains. It checks
+The coupled entry admits BGK/Guo fluid/wall domains. It checks
 positive finite inertia, the matrix response, and initial/midpoint/endpoint
 body point speeds before publishing body state or caller scratch. The
 collision exchange conserves fluid-plus-body linear momentum and total
-orbital-plus-spin angular momentum to floating-point roundoff. Streaming
+orbital-plus-spin angular momentum after accounting for the imposed fluid
+force and external body loading, to floating-point roundoff. Streaming
 can additionally transfer momentum to stationary walls or angular momentum
 through periodic seams; those are distinct from immersed-body exchange.
 
@@ -5203,6 +5211,24 @@ free surfaces and physical FSI validation remain outside this entry. Tests in
 mobility, sum actual population/body momentum, verify passive light-body
 collision energy and replay, and exercise common rigid motion, the zero-solid
 limit and atomic early/late refusals.
+
+The physical Guo velocity supplies both the finite-inertia solve and the
+prescribed solid-collision law. `PartialSaturationForcing2` sums the incoming
+held force `rho*g + fext` on all active cells, its moment about the requested
+origin, and its work at mean physical pre/post-collision velocity. Interior
+fluid is retained, so this force is independent of solid fraction. Its work
+does not enter the body's hydrodynamic work or the external solid-work account.
+The force account uses the same held source for both collision endpoints;
+changing a force field or a density-dependent source between steps requires
+the usual Guo half-source accounting. No fluid total-energy or global time-order
+claim follows from the local mechanical work receipt. Zero force retains the
+original arithmetic and zero occupancy retains native forced BGK bits.
+
+The forced cases in `tests/partial_saturation_body.rs` independently reconstruct
+the Guo polynomial and every blended population with nonzero stress, then close
+repeated fluid/body/wall linear and angular momentum, force work and body work.
+They also reject nonfinite sources, combined-force overflow and a late native
+collision overflow without publishing body state, populations or caller scratch.
 
 ### Moving disk geometry on the same finite-inertia operator
 
@@ -5229,8 +5255,8 @@ displaced-fluid inertia closure.
 The whole swept bounding box of each half-drift must contain fluid cells and
 remain within the interior domain halo. The endpoint is admitted before native
 streaming or accepted body publication; a late refusal changes only reusable
-scratch, which the next call rebuilds. Fixed radius/inertia, one disk, force-free
-BGK and lattice `dx = dt = 1` are the supported scope. Multiple bodies, wall
+scratch, which the next call rebuilds. Fixed radius/inertia, one disk,
+BGK/Guo and lattice `dx = dt = 1` are the supported scope. Multiple bodies, wall
 contact, periodic body seam crossing and free surfaces require further owners.
 Native outer-wall reactions and periodic fluid angular flux remain distinct
 from immersed exchange. No global temporal order, physical drag calibration or
@@ -5238,7 +5264,8 @@ complete moving-boundary qualification is inferred.
 
 `tests/moving_disk.rs` checks analytic translated area, common translation over
 many actual steps without stale-cell coupling, independent fluid-plus-body
-linear/orbital/spin balances before outer-boundary transport, bitwise replay,
+linear/orbital/spin balances before outer-boundary transport, imposed force
+through changing occupied cells, separate fluid and body work, bitwise replay,
 and late-endpoint rollback with scratch recovery. The broad moving-boundary
 bead remains open.
 

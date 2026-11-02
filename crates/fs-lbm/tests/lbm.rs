@@ -826,7 +826,7 @@ fn d2q9_partial_saturation_refuses_bad_requests_atomically() {
     assert_eq!(wall_post, sentinel);
 
     grid.flags[wall] = Cell::Fluid;
-    grid.g = [1.0e-5, 0.0];
+    grid.g = [f64::INFINITY, 0.0];
     let zero_cells = vec![PartialSaturationCell2::default(); grid.nx * grid.ny];
     let mut forced_post = sentinel.clone();
     let force_refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

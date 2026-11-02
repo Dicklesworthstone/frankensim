@@ -256,10 +256,11 @@ impl PartialSaturationCell2 {
 ///
 /// The fluid terms are the population mass, momentum, and angular-momentum
 /// changes contributed by the solid-coupling correction relative to ordinary
-/// force-free BGK collision. Solid impulse and angular impulse are their
+/// BGK/Guo collision. Solid impulse and angular impulse are their
 /// equal-and-opposite counterparts. All values are raw lattice quantities for
 /// one collision; physical-unit conversion and body attribution remain with
-/// the caller.
+/// the caller. Imposed fluid forcing is accounted separately in `forcing`;
+/// it is neither a solid reaction nor part of `solid_work`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[must_use]
 pub struct PartialSaturationExchange2 {
@@ -279,6 +280,25 @@ pub struct PartialSaturationExchange2 {
     pub coupled_cells: usize,
     /// Sum of the relaxation-dependent Noble-Torczynski coupling weights.
     pub coupling_weight_sum: f64,
+    /// Imposed fluid force over all active cells, independent of occupancy.
+    pub forcing: PartialSaturationForcing2,
+}
+
+/// Imposed D2Q9 fluid force, separate from immersed-solid and wall reactions.
+///
+/// The partial-saturation model retains fluid inside occupied cells. The
+/// complete held force `rho*g + fext` therefore acts once per active cell;
+/// no solid-fraction multiplier removes it or transfers it to the body.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PartialSaturationForcing2 {
+    /// Sum of the held force densities over one lattice time step.
+    pub impulse: [f64; 2],
+    /// Moment of those impulses about the same origin as the exchange.
+    pub angular_impulse: f64,
+    /// Imposed impulse dotted with the mean physical pre/post-collision
+    /// velocity. This excludes streaming and pressure/internal-energy work;
+    /// it is not a complete fluid energy balance.
+    pub midpoint_work: f64,
 }
 
 /// Finite inertia and accepted velocity of one planar immersed solid.
@@ -1206,9 +1226,18 @@ impl Grid {
     ///
     /// `Omega_s[q] = f[opp(q)] - f[q] + feq[q](rho, u_s) - feq[opp(q)](rho, u)`.
     ///
+    /// With imposed force `F = rho*g + fext`, evaluate these operators on
+    /// physical populations `h = f + S(u,F)/2`, then add
+    /// `B*(Omega_s(h)-Omega_f(h))` to the native BGK/Guo result. Its first
+    /// moment is `B*rho*(u_s-u)`; the full imposed impulse `F` remains separate.
+    /// This is the same retained-fluid additive-force extension used by the
+    /// spatial partial-saturation owner. Zero occupancy keeps native collision
+    /// bits; zero force keeps the original partial-saturation arithmetic.
+    ///
     /// The output and aggregate exchange receipt are published only after the
-    /// full force-free request and resulting proposal are finite. See Noble
-    /// and Torczynski (1998), <https://doi.org/10.1142/S0129183198001084>.
+    /// full request and resulting proposal are finite. See Noble and Torczynski
+    /// (1998), <https://doi.org/10.1142/S0129183198001084>, and the original
+    /// Guo source-frame owner in `thermal::forcing`.
     #[allow(clippy::too_many_lines)] // Keep the auditable collision/receipt order contiguous.
     pub fn collide_into_with_partial_saturation(
         &self,
@@ -1228,64 +1257,109 @@ impl Grid {
             for x in 0..self.nx {
                 let index = self.idx(x, y);
                 let cell = cells[index];
-                if cell.solid_fraction <= 0.0 {
+                if !matches!(self.flags[index], Cell::Fluid | Cell::Interface)
+                    || (cell.solid_fraction <= 0.0
+                        && self.g == [0.0; 2]
+                        && self.fext[index] == [0.0; 2])
+                {
                     continue;
                 }
 
                 let moments = self.moments(index);
-                let fluid_equilibrium = crate::equilibrium(moments.rho, moments.u[0], moments.u[1]);
-                let solid_equilibrium =
-                    crate::equilibrium(moments.rho, cell.solid_velocity[0], cell.solid_velocity[1]);
-                let tau = self.tau[index];
-                let coupling_weight = cell.coupling_weight(tau);
-                assert!(
-                    coupling_weight.is_finite() && (0.0..=1.0).contains(&coupling_weight),
-                    "partial-saturation coupling weight at cell {index} left [0, 1]"
-                );
+                let force = [
+                    self.g[0].mul_add(moments.rho, self.fext[index][0]),
+                    self.g[1].mul_add(moments.rho, self.fext[index][1]),
+                ];
+                if cell.solid_fraction > 0.0 {
+                    let fluid_equilibrium =
+                        crate::equilibrium(moments.rho, moments.u[0], moments.u[1]);
+                    let solid_equilibrium = crate::equilibrium(
+                        moments.rho,
+                        cell.solid_velocity[0],
+                        cell.solid_velocity[1],
+                    );
+                    let mut physical = self.f[index];
+                    if force != [0.0; 2] {
+                        crate::thermal::forcing::reframe2(
+                            &mut physical,
+                            moments.u,
+                            force,
+                            [0.0; 2],
+                        );
+                    }
+                    let tau = self.tau[index];
+                    let coupling_weight = cell.coupling_weight(tau);
+                    assert!(
+                        coupling_weight.is_finite() && (0.0..=1.0).contains(&coupling_weight),
+                        "partial-saturation coupling weight at cell {index} left [0, 1]"
+                    );
 
-                let mut fluid_mass_change = 0.0;
-                let mut fluid_impulse = [0.0; 2];
-                for q in 0..Q {
-                    let fluid_collision = (fluid_equilibrium[q] - self.f[index][q]) / tau;
-                    let solid_collision = self.f[index][OPP[q]] - self.f[index][q]
-                        + solid_equilibrium[q]
-                        - fluid_equilibrium[OPP[q]];
-                    let ordinary_population = proposal[index][q];
-                    let blended_population = self.f[index][q]
-                        + (1.0 - coupling_weight) * fluid_collision
-                        + coupling_weight * solid_collision;
-                    let coupling_correction = blended_population - ordinary_population;
-                    proposal[index][q] = blended_population;
-                    fluid_mass_change += coupling_correction;
-                    fluid_impulse[0] += f64::from(E[q].0) * coupling_correction;
-                    fluid_impulse[1] += f64::from(E[q].1) * coupling_correction;
+                    let mut fluid_mass_change = 0.0;
+                    let mut fluid_impulse = [0.0; 2];
+                    for q in 0..Q {
+                        let fluid_collision = (fluid_equilibrium[q] - physical[q]) / tau;
+                        let solid_collision = physical[OPP[q]] - physical[q] + solid_equilibrium[q]
+                            - fluid_equilibrium[OPP[q]];
+                        let ordinary_population = proposal[index][q];
+                        let blended_population = if force == [0.0; 2] {
+                            self.f[index][q]
+                                + (1.0 - coupling_weight) * fluid_collision
+                                + coupling_weight * solid_collision
+                        } else {
+                            ordinary_population
+                                + coupling_weight * (solid_collision - fluid_collision)
+                        };
+                        let coupling_correction = blended_population - ordinary_population;
+                        proposal[index][q] = blended_population;
+                        fluid_mass_change += coupling_correction;
+                        fluid_impulse[0] += f64::from(E[q].0) * coupling_correction;
+                        fluid_impulse[1] += f64::from(E[q].1) * coupling_correction;
+                    }
+                    assert!(
+                        proposal[index].into_iter().all(f64::is_finite)
+                            && fluid_mass_change.is_finite()
+                            && fluid_impulse.into_iter().all(f64::is_finite),
+                        "partial-saturation collision at cell {index} produced a non-finite proposal"
+                    );
+
+                    let solid_impulse = [-fluid_impulse[0], -fluid_impulse[1]];
+                    let offset = [x as f64 - moment_origin[0], y as f64 - moment_origin[1]];
+                    let fluid_angular_impulse =
+                        offset[0] * fluid_impulse[1] - offset[1] * fluid_impulse[0];
+                    let solid_angular_impulse = -fluid_angular_impulse;
+
+                    receipt.fluid_population_mass_change += fluid_mass_change;
+                    receipt.fluid_population_impulse[0] += fluid_impulse[0];
+                    receipt.fluid_population_impulse[1] += fluid_impulse[1];
+                    receipt.solid_impulse[0] += solid_impulse[0];
+                    receipt.solid_impulse[1] += solid_impulse[1];
+                    receipt.fluid_population_angular_impulse += fluid_angular_impulse;
+                    receipt.solid_angular_impulse += solid_angular_impulse;
+                    receipt.solid_work += solid_impulse[0].mul_add(
+                        cell.solid_velocity[0],
+                        solid_impulse[1] * cell.solid_velocity[1],
+                    );
+                    receipt.coupled_cells += 1;
+                    receipt.coupling_weight_sum += coupling_weight;
                 }
-                assert!(
-                    proposal[index].into_iter().all(f64::is_finite)
-                        && fluid_mass_change.is_finite()
-                        && fluid_impulse.into_iter().all(f64::is_finite),
-                    "partial-saturation collision at cell {index} produced a non-finite proposal"
-                );
 
-                let solid_impulse = [-fluid_impulse[0], -fluid_impulse[1]];
-                let offset = [x as f64 - moment_origin[0], y as f64 - moment_origin[1]];
-                let fluid_angular_impulse =
-                    offset[0] * fluid_impulse[1] - offset[1] * fluid_impulse[0];
-                let solid_angular_impulse = -fluid_angular_impulse;
-
-                receipt.fluid_population_mass_change += fluid_mass_change;
-                receipt.fluid_population_impulse[0] += fluid_impulse[0];
-                receipt.fluid_population_impulse[1] += fluid_impulse[1];
-                receipt.solid_impulse[0] += solid_impulse[0];
-                receipt.solid_impulse[1] += solid_impulse[1];
-                receipt.fluid_population_angular_impulse += fluid_angular_impulse;
-                receipt.solid_angular_impulse += solid_angular_impulse;
-                receipt.solid_work += solid_impulse[0].mul_add(
-                    cell.solid_velocity[0],
-                    solid_impulse[1] * cell.solid_velocity[1],
-                );
-                receipt.coupled_cells += 1;
-                receipt.coupling_weight_sum += coupling_weight;
+                if force != [0.0; 2] {
+                    let (rho_after, momentum_after) = raw_population_moments(&proposal[index]);
+                    assert!(
+                        rho_after.is_finite() && rho_after > 0.0,
+                        "partial-saturation force account requires positive finite density"
+                    );
+                    let midpoint: [f64; 2] = core::array::from_fn(|axis| {
+                        0.5 * (moments.u[axis]
+                            + (momentum_after[axis] + 0.5 * force[axis]) / rho_after)
+                    });
+                    receipt.forcing.impulse[0] += force[0];
+                    receipt.forcing.impulse[1] += force[1];
+                    receipt.forcing.angular_impulse += (x as f64 - moment_origin[0]) * force[1]
+                        - (y as f64 - moment_origin[1]) * force[0];
+                    receipt.forcing.midpoint_work +=
+                        force[0].mul_add(midpoint[0], force[1] * midpoint[1]);
+                }
             }
         }
 
@@ -1304,6 +1378,10 @@ impl Grid {
                 receipt.solid_angular_impulse,
                 receipt.solid_work,
                 receipt.coupling_weight_sum,
+                receipt.forcing.impulse[0],
+                receipt.forcing.impulse[1],
+                receipt.forcing.angular_impulse,
+                receipt.forcing.midpoint_work,
             ]
             .into_iter()
             .all(f64::is_finite),
@@ -1337,7 +1415,7 @@ impl Grid {
     /// External linear impulse acts at the center; angular impulse is a couple.
     ///
     /// # Panics
-    /// Refuses invalid or unresolved inertia, non-BGK/forced/free-surface
+    /// Refuses invalid or unresolved inertia, non-BGK/free-surface
     /// grids, nonfinite data, and body point speeds outside the same low-Mach
     /// envelope as prescribed partial saturation. The body and output buffer
     /// are unchanged on refusal.
@@ -1641,8 +1719,13 @@ impl Grid {
             "partial-saturation moment origin must be finite"
         );
         assert!(
-            self.g == [0.0; 2] && self.fext.iter().all(|&force| force == [0.0; 2]),
-            "partial-saturation collision currently requires a force-free grid"
+            self.g.into_iter().all(f64::is_finite),
+            "partial-saturation acceleration must be finite"
+        );
+        assert_eq!(
+            self.collision,
+            CollisionModel2::Bgk,
+            "partial saturation currently requires BGK collision"
         );
 
         for (index, cell) in cells.iter().copied().enumerate() {
@@ -1661,6 +1744,18 @@ impl Grid {
                 assert!(
                     self.tau[index].is_finite() && self.tau[index] > 0.5,
                     "partial-saturation active cell {index} requires finite tau greater than 0.5"
+                );
+                let force = [
+                    self.g[0].mul_add(density, self.fext[index][0]),
+                    self.g[1].mul_add(density, self.fext[index][1]),
+                ];
+                assert!(
+                    self.fext[index].into_iter().all(f64::is_finite)
+                        && force.into_iter().all(f64::is_finite)
+                        && (0..2).all(|axis| {
+                            ((momentum[axis] + 0.5 * force[axis]) / density).is_finite()
+                        }),
+                    "partial-saturation active cell {index} requires finite force and velocity"
                 );
             }
             assert!(
@@ -2226,7 +2321,7 @@ impl Grid {
         *scratch = post;
     }
 
-    /// One force-free partially saturated collision followed by plain stream.
+    /// One BGK/Guo partially saturated collision followed by plain stream.
     ///
     /// The complete cell field and collision proposal are admitted before the
     /// grid populations advance, so a malformed request leaves both `self`

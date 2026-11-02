@@ -1,6 +1,6 @@
 //! G0/G1/G3/G4 checks of reciprocal immersed-body momentum coupling.
 
-use fs_lbm::core2::{CollisionModel2, PartialSaturationBody2};
+use fs_lbm::core2::{CollisionModel2, PartialSaturationBody2, PartialSaturationCell2};
 use fs_lbm::{Cell, Grid, Q, equilibrium};
 
 const EX: [f64; Q] = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0];
@@ -299,9 +299,238 @@ fn body_bits(body: PartialSaturationBody2) -> [u64; 7] {
     .map(f64::to_bits)
 }
 
+fn close(actual: f64, expected: f64, tolerance: f64) {
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "{actual:e} != {expected:e}"
+    );
+}
+
+fn held_force(grid: &Grid, cell: usize) -> [f64; 2] {
+    let rho = grid.f[cell].iter().sum::<f64>();
+    core::array::from_fn(|a| rho * grid.g[a] + grid.fext[cell][a])
+}
+
+#[test]
+fn g1_forced_prescribed_collision_matches_physical_population_law() {
+    const WEIGHTS: [f64; Q] = [
+        4.0 / 9.0,
+        1.0 / 9.0,
+        1.0 / 9.0,
+        1.0 / 9.0,
+        1.0 / 9.0,
+        1.0 / 36.0,
+        1.0 / 36.0,
+        1.0 / 36.0,
+        1.0 / 36.0,
+    ];
+    const OPPOSITE: [usize; Q] = [0, 3, 4, 1, 2, 7, 8, 5, 6];
+    for tau in [0.55, 0.8, 1.7] {
+        let mut grid = Grid::uniform(3, 2, tau);
+        grid.g = [0.001, -0.002];
+        let origin = [-0.7, 0.3];
+        let mut cells = Vec::new();
+        let mut expected = Vec::new();
+        let mut expected_solid = [0.0; 3];
+        let mut expected_force = [0.0; 3];
+        for i in 0..grid.f.len() {
+            let rho = 0.9 + i as f64 * 0.04;
+            let u = [0.02 - i as f64 * 0.003, -0.01 + i as f64 * 0.002];
+            let solid_u = [-0.012, 0.008];
+            let fraction = [0.0, 0.35, 1.0][i % 3];
+            grid.fext[i] = [i as f64 * 0.0002, 0.0003];
+            let force = [
+                rho * grid.g[0] + grid.fext[i][0],
+                rho * grid.g[1] + grid.fext[i][1],
+            ];
+            let eq = equilibrium(rho, u[0], u[1]);
+            let solid_eq = equilibrium(rho, solid_u[0], solid_u[1]);
+            let mut physical = eq;
+            // Non-equilibrium stress, without changing mass or momentum.
+            physical[0] -= 0.0004;
+            physical[1] += 0.0002;
+            physical[3] += 0.0002;
+            let source: [f64; Q] = core::array::from_fn(|q| {
+                let eu = EX[q] * u[0] + EY[q] * u[1];
+                let ef = EX[q] * force[0] + EY[q] * force[1];
+                WEIGHTS[q] * (3.0 * (ef - u[0] * force[0] - u[1] * force[1]) + 9.0 * eu * ef)
+            });
+            grid.f[i] = core::array::from_fn(|q| physical[q] - 0.5 * source[q]);
+            let b = fraction * (tau - 0.5) / (1.0 - fraction + tau - 0.5);
+            expected.push(core::array::from_fn::<_, Q, _>(|q| {
+                let native =
+                    grid.f[i][q] + (eq[q] - grid.f[i][q]) / tau + (1.0 - 0.5 / tau) * source[q];
+                native
+                    + b * (physical[OPPOSITE[q]] - physical[q] + solid_eq[q]
+                        - eq[OPPOSITE[q]]
+                        - (eq[q] - physical[q]) / tau)
+            }));
+            cells.push(PartialSaturationCell2::new(
+                fraction,
+                if fraction == 0.0 { [0.0; 2] } else { solid_u },
+            ));
+            let j = [b * rho * (u[0] - solid_u[0]), b * rho * (u[1] - solid_u[1])];
+            let arm = [
+                (i % grid.nx) as f64 - origin[0],
+                (i / grid.nx) as f64 - origin[1],
+            ];
+            for a in 0..2 {
+                expected_solid[a] += j[a];
+                expected_force[a] += force[a];
+            }
+            expected_solid[2] += arm[0] * j[1] - arm[1] * j[0];
+            expected_force[2] += arm[0] * force[1] - arm[1] * force[0];
+        }
+        let mut post = Vec::new();
+        let receipt = grid.collide_into_with_partial_saturation(&mut post, &cells, origin);
+        for (actual, expected) in post.iter().flatten().zip(expected.iter().flatten()) {
+            close(*actual, *expected, 3e-15);
+        }
+        for a in 0..2 {
+            close(receipt.solid_impulse[a], expected_solid[a], 2e-15);
+            close(receipt.forcing.impulse[a], expected_force[a], 2e-16);
+        }
+        close(receipt.solid_angular_impulse, expected_solid[2], 5e-15);
+        close(receipt.forcing.angular_impulse, expected_force[2], 2e-16);
+        close(receipt.fluid_population_mass_change, 0.0, 2e-15);
+
+        let mut native = Vec::new();
+        grid.collide_into(&mut native);
+        let zero = vec![PartialSaturationCell2::default(); grid.f.len()];
+        let zero_receipt = grid.collide_into_with_partial_saturation(&mut post, &zero, origin);
+        assert_eq!(post, native, "zero occupancy must preserve forced BGK bits");
+        assert_eq!(zero_receipt.solid_impulse, [0.0; 2]);
+        close(zero_receipt.forcing.impulse[0], expected_force[0], 2e-16);
+    }
+}
+
+#[test]
+fn g0_forced_body_streaming_closes_fluid_body_wall_momentum_and_work() {
+    let mut grid = Grid::uniform(10, 9, 0.8);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    grid.g = [2e-6, -3e-6];
+    let mut fractions = vec![0.0; grid.f.len()];
+    for y in 0..grid.ny {
+        for x in 0..grid.nx {
+            let i = grid.idx(x, y);
+            if x == 0 || y == 0 || x + 1 == grid.nx || y + 1 == grid.ny {
+                grid.flags[i] = Cell::Wall;
+                // Wall cells are not fluid force owners.
+                grid.fext[i] = [f64::NAN; 2];
+            } else {
+                grid.fext[i] = [x as f64 * 2e-6, y as f64 * -1e-6];
+                grid.f[i] = equilibrium(1.0 + 0.003 * x as f64, 0.005, -0.004);
+            }
+        }
+    }
+    for (x, y, fraction) in [(3, 3, 0.3), (5, 4, 0.8), (4, 5, 1.0)] {
+        fractions[grid.idx(x, y)] = fraction;
+    }
+    let mut moving = PartialSaturationBody2 {
+        center: [4.2, 3.7],
+        ..body()
+    };
+    let origin = [-0.3, 0.8];
+    let external = [3e-5, -2e-5];
+    let couple = 7e-5;
+    let mut post = Vec::new();
+    for _ in 0..24 {
+        let before = total_momentum(&grid.f, grid.nx, moving, origin);
+        let mut fluid_force = [0.0; 3];
+        for i in 0..grid.f.len() {
+            if grid.flags[i] == Cell::Fluid {
+                let force = held_force(&grid, i);
+                fluid_force[0] += force[0];
+                fluid_force[1] += force[1];
+                fluid_force[2] += ((i % grid.nx) as f64 - origin[0]) * force[1]
+                    - ((i / grid.nx) as f64 - origin[1]) * force[0];
+            }
+        }
+        let receipt = grid.collide_into_with_partial_saturation_body(
+            &mut post,
+            &fractions,
+            &mut moving,
+            external,
+            couple,
+        );
+        let mut wall = [0.0; 3];
+        let mut force_work = 0.0;
+        for i in 0..grid.f.len() {
+            if grid.flags[i] != Cell::Fluid {
+                continue;
+            }
+            let (x, y) = (i % grid.nx, i / grid.nx);
+            let force = held_force(&grid, i);
+            let before_rho = grid.f[i].iter().sum::<f64>();
+            let after_rho = post[i].iter().sum::<f64>();
+            for a in 0..2 {
+                let e = [EX, EY][a];
+                let u0 = ((0..Q).map(|q| e[q] * grid.f[i][q]).sum::<f64>() + 0.5 * force[a])
+                    / before_rho;
+                let u1 =
+                    ((0..Q).map(|q| e[q] * post[i][q]).sum::<f64>() + 0.5 * force[a]) / after_rho;
+                force_work += force[a] * 0.5 * (u0 + u1);
+            }
+            // Independently follow outgoing populations into the stationary
+            // wall. Their reflection transfers +2 f c to that wall.
+            for q in 1..Q {
+                let destination = grid.idx(
+                    (x as i32 + EX[q] as i32) as usize,
+                    (y as i32 + EY[q] as i32) as usize,
+                );
+                if grid.flags[destination] == Cell::Wall {
+                    let j = [2.0 * post[i][q] * EX[q], 2.0 * post[i][q] * EY[q]];
+                    wall[0] += j[0];
+                    wall[1] += j[1];
+                    wall[2] += (x as f64 - origin[0]) * j[1] - (y as f64 - origin[1]) * j[0];
+                }
+            }
+        }
+        close(
+            receipt.hydrodynamic.forcing.midpoint_work,
+            force_work,
+            2e-17,
+        );
+        close(
+            receipt.kinetic_energy_change,
+            receipt.hydrodynamic.solid_work + receipt.external_work,
+            3e-15,
+        );
+        for residual in receipt.momentum_residual {
+            close(residual, 0.0, 3e-15);
+        }
+        let accounted_force = receipt.hydrodynamic.forcing;
+        close(accounted_force.impulse[0], fluid_force[0], 2e-17);
+        close(accounted_force.impulse[1], fluid_force[1], 2e-17);
+        close(
+            accounted_force.angular_impulse
+                + (moving.center[0] - origin[0]) * accounted_force.impulse[1]
+                - (moving.center[1] - origin[1]) * accounted_force.impulse[0],
+            fluid_force[2],
+            2e-16,
+        );
+        grid.stream_from(&post);
+        let after = total_momentum(&grid.f, grid.nx, moving, origin);
+        let applied = [
+            external[0],
+            external[1],
+            couple + (moving.center[0] - origin[0]) * external[1]
+                - (moving.center[1] - origin[1]) * external[0],
+        ];
+        for a in 0..3 {
+            close(
+                after[a] - before[a],
+                applied[a] + fluid_force[a] - wall[a],
+                2e-13,
+            );
+        }
+    }
+}
+
 #[test]
 fn g4_invalid_body_geometry_and_late_velocity_refusal_publish_nothing() {
-    for case in 0..12 {
+    for case in 0..15 {
         let mut grid = Grid::uniform(5, 5, 0.8);
         let mut moving = body();
         let mut fractions = vec![0.0; grid.f.len()];
@@ -315,11 +544,20 @@ fn g4_invalid_body_geometry_and_late_velocity_refusal_publish_nothing() {
             4 => fractions[12] = -0.1,
             5 => fractions[12] = 1.1,
             6 => fractions[12] = f64::NAN,
-            7 => grid.g = [0.001, 0.0],
+            7 => grid.g = [f64::INFINITY, 0.0],
             8 => grid.collision = CollisionModel2::Regularized,
             9 => grid.flags[0] = Cell::Interface,
             10 => external = [1e4, 0.0],
-            _ => moving.angular_velocity = 1e4,
+            11 => moving.angular_velocity = 1e4,
+            12 => grid.fext[24] = [f64::NAN, 0.0],
+            13 => {
+                grid.g = [0.5 * f64::MAX, 0.0];
+                grid.fext[24] = [f64::MAX, 0.0];
+            }
+            // Finite force and velocity pass admission, but the native
+            // collision overflows at an uncoupled final cell. No partial
+            // body, fluid or scratch update may escape that late refusal.
+            _ => grid.fext[24] = [1e200, 0.0],
         }
         let before_populations = grid.f.clone();
         let before_body = body_bits(moving);
