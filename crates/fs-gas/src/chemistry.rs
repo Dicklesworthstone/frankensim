@@ -3,15 +3,16 @@
 //! The immutable L1 mechanism owns reaction laws and thermodynamics. This L3
 //! owner advances reaction extents with damped backward Euler or the optional
 //! two-stage, second-order L-stable SDIRK method, both with step doubling.
-//! The original entry points fix U,V; `isobaric` fixes H,p using the same
-//! integrator and actual variable volume. Each trial includes formation energy
+//! The adiabatic entry points fix U,V; `isobaric` fixes H,p using the same
+//! integrator and actual variable volume. A declared `HeatBath` exchanges heat
+//! simultaneously with reaction evolution. Each trial includes formation energy
 //! exactly once. Analytic constrained Jacobians handle stiffness; no explicit
 //! positivity clipping, trace seeding or equilibrium projection is used.
 //!
 //! Step error is an estimated local error, not a global error certificate.
 //! Accepted endpoints are nonnegative, conserve the original element and charge
-//! inventories and U within the declared tolerances, and pass the actual ideal-mixture
-//! entropy check. No ignition, flame, transport or empirical mechanism claim is
+//! inventories and the chosen energy balance within declared tolerances, and
+//! pass the parcel-plus-reservoir entropy check. No ignition, flame, transport or empirical mechanism claim is
 //! implied by a successful zero-dimensional homogeneous reactor integration.
 
 use fs_qty::{Amount, Energy, Mass, Pressure, Temperature, Time, Volume};
@@ -23,13 +24,16 @@ use fs_thermochem::{Nasa9EvaluationReceiptV1, SpeciesId};
 
 /// Source-bound frozen-population electron/heavy energy evolution.
 pub mod energy;
+/// Explicit thermal reservoir and conductance for reacting parcels.
+pub mod heat;
 /// Source-bound two-temperature atomic ionization and three-body recombination.
 pub mod ionization;
-/// Adiabatic constant-pressure evolution through the shared extent integrator.
+/// Constant-pressure evolution through the shared extent integrator.
 pub mod isobaric;
 mod prepared;
 mod solve;
 
+pub use heat::{HeatBath, ThermalConductance};
 pub use prepared::{IsochoricKineticsView, IsochoricReactor};
 
 /// Time method for the homogeneous constrained reactor, not its outer coupling.
@@ -39,7 +43,8 @@ pub enum IsochoricKineticsMethod {
     #[default]
     BackwardEuler,
     /// Alexander's two-stage, second-order L-stable SDIRK method, with
-    /// gamma = 1 - 1/sqrt(2). Both stages use the same original fixed U,V.
+    /// gamma = 1 - 1/sqrt(2). Both stages use the original physical constraint,
+    /// including the declared thermal exchange when present.
     ///
     /// Reference: R. Alexander, SIAM J. Numer. Anal. 14(6), 1006–1021 (1977),
     /// <https://doi.org/10.1137/0714068>. The order is for the smooth reactor
@@ -166,11 +171,12 @@ pub struct IsochoricKineticsBalance {
     /// preserved, including a nonzero authored feed; no electrostatic field or
     /// physical admissibility of a net-charged homogeneous parcel is inferred.
     pub maximum_relative_charge_residual: f64,
-    /// Source-integrated sensible plus reaction energy minus the one target, J.
+    /// Source-integrated sensible plus reaction energy minus the original
+    /// target and accepted external heat, J.
     /// Conserved formation references cancel before this physical balance.
     pub energy_residual_j: f64,
-    /// Independent subtraction of the original endpoint absolute energy and
-    /// target [J]. Its f64 resolution can be worse than the physical tolerance.
+    /// Independent subtraction of endpoint absolute energy, original target
+    /// and accepted heat [J]. Resolution may be worse than the physical tolerance.
     pub absolute_energy_residual_j: f64,
     /// Original-reference energy equivalent of represented species-update
     /// roundoff [J]. This is not a physical heat input or a reaction source.
@@ -179,6 +185,16 @@ pub struct IsochoricKineticsBalance {
     pub entropy_change_j_k: f64,
     /// Smallest accepted step entropy increment, J/K; zero for zero duration.
     pub minimum_step_entropy_change_j_k: f64,
+    /// Signed accepted reservoir heat into the parcel [J]; zero if adiabatic.
+    /// This excludes reaction heat, already contained in the source energies.
+    pub heat_input_j: f64,
+    /// Reservoir entropy delivered to the parcel, Q/Tb [J/K].
+    pub entropy_transfer_j_k: f64,
+    /// Parcel entropy change minus Q/Tb [J/K], including chemistry and thermal
+    /// exchange. This is a discrete balance, not a pure dissipation integral.
+    pub entropy_production_j_k: f64,
+    /// Smallest accepted parcel-plus-reservoir entropy increment [J/K].
+    pub minimum_step_entropy_production_j_k: f64,
     /// Maximum admitted dimensionless local species/temperature error estimate.
     pub maximum_estimated_local_error: f64,
     /// Accepted complete steps (each publishes the two-half-step result).
@@ -233,7 +249,8 @@ impl IsochoricKineticsResult {
     pub const fn internal_energy(&self) -> Energy {
         self.internal_energy
     }
-    /// Original single energy target, J.
+    /// Original initial energy target, J. A thermal-bath run satisfies
+    /// Ufinal - target - balance().heat_input_j = 0 within tolerance.
     pub const fn target_internal_energy(&self) -> Energy {
         self.target_energy
     }
@@ -419,6 +436,7 @@ fn advance_prepared<'a>(
         None,
         initial_temperature,
         duration,
+        None,
         cancelled,
     )
 }
@@ -432,6 +450,7 @@ fn advance_prepared_constraint<'a>(
     pressure: Option<Pressure>,
     initial_temperature: Temperature,
     duration: Time,
+    heat_bath: Option<HeatBath>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<IsochoricKineticsView<'a>, IsochoricKineticsError> {
     poll(&mut cancelled)?;
@@ -474,7 +493,12 @@ fn advance_prepared_constraint<'a>(
     half.fill(0.0);
     fine.fill(0.0);
     current_concentrations.copy_from_slice(&reactor.initial);
-    let initial = reactor.resolve(current, initial_temperature.value(), &mut cancelled)?;
+    let initial = reactor.resolve(
+        current,
+        initial_temperature.value(),
+        Sum::default(),
+        &mut cancelled,
+    )?;
     let initial_volume = initial.volume_ratio * volume.value();
     if !positive(initial_volume) {
         return Err(IsochoricKineticsError::Invalid(
@@ -520,6 +544,7 @@ fn advance_prepared_constraint<'a>(
                 full,
                 stage_forcing,
                 accepted,
+                heat_bath,
                 &mut cancelled,
             )?;
             full_concentrations.copy_from_slice(reactor.concentrations());
@@ -529,6 +554,7 @@ fn advance_prepared_constraint<'a>(
                 half,
                 stage_forcing,
                 accepted,
+                heat_bath,
                 &mut cancelled,
             )?;
             let fine_state = reactor.implicit_step(
@@ -537,6 +563,7 @@ fn advance_prepared_constraint<'a>(
                 fine,
                 stage_forcing,
                 half_state,
+                heat_bath,
                 &mut cancelled,
             )?;
             let mut error = ((fine_state.temperature.value() - full_state.temperature.value())
@@ -551,6 +578,21 @@ fn advance_prepared_constraint<'a>(
                     + controls.relative_tolerance * c.abs().max(current_concentrations[i]);
                 error = error.max((c - full_concentrations[i]).abs() / scale);
             }
+            if heat_bath.is_some() {
+                // Use a datum-independent sensible-energy scale; a large
+                // arbitrary formation origin must not loosen heat accuracy.
+                let scale = controls.energy_tolerance_j / volume.value()
+                    + controls.relative_tolerance
+                        * (accepted.heat_capacity_density_j_m3_k * accepted.temperature.value())
+                            .max(
+                                fine_state.heat_capacity_density_j_m3_k
+                                    * fine_state.temperature.value(),
+                            );
+                let heat_error = fine_state
+                    .heat_density_j_m3
+                    .difference(full_state.heat_density_j_m3);
+                error = error.max(heat_error.abs() / scale);
+            }
             // The two-half-step endpoint has estimated local error
             // (fine - full)/(2^p - 1); no Richardson extrapolation is applied
             // to the conserved state or its nonnegative species inventories.
@@ -558,23 +600,32 @@ fn advance_prepared_constraint<'a>(
             let entropy_change = (fine_state.entropy_density_j_m3_k
                 - accepted.entropy_density_j_m3_k)
                 * volume.value();
+            let entropy_production = entropy_change
+                - heat_bath.map_or(0.0, |bath| {
+                    fine_state
+                        .heat_density_j_m3
+                        .difference(accepted.heat_density_j_m3)
+                        * volume.value()
+                        / bath.temperature().value()
+                });
             if !error.is_finite()
                 || !entropy_change.is_finite()
-                || entropy_change < -controls.entropy_tolerance_j_k
+                || !entropy_production.is_finite()
+                || entropy_production < -controls.entropy_tolerance_j_k
             {
                 return Err(IsochoricKineticsError::StepFailure {
                     elapsed_time_s: elapsed,
                     step_s: step,
-                    reason: "trial entropy decreases or error estimate is unrepresentable",
+                    reason: "trial total entropy decreases or error estimate is unrepresentable",
                 });
             }
-            Ok((fine_state, error, entropy_change))
+            Ok((fine_state, error, entropy_change, entropy_production))
         })();
         match attempt {
             Err(IsochoricKineticsError::Cancelled) => {
                 return Err(IsochoricKineticsError::Cancelled);
             }
-            Ok((state, error, entropy_change)) if error <= 1.0 => {
+            Ok((state, error, entropy_change, entropy_production)) if error <= 1.0 => {
                 audit_charge(
                     &reactor.mechanism,
                     |i| reactor.initial[i],
@@ -593,9 +644,13 @@ fn advance_prepared_constraint<'a>(
                 };
                 if balance.accepted_steps == 0 {
                     balance.minimum_step_entropy_change_j_k = entropy_change;
+                    balance.minimum_step_entropy_production_j_k = entropy_production;
                 } else {
                     balance.minimum_step_entropy_change_j_k =
                         balance.minimum_step_entropy_change_j_k.min(entropy_change);
+                    balance.minimum_step_entropy_production_j_k = balance
+                        .minimum_step_entropy_production_j_k
+                        .min(entropy_production);
                 }
                 balance.accepted_steps += 1;
                 balance.maximum_estimated_local_error =
@@ -610,7 +665,9 @@ fn advance_prepared_constraint<'a>(
             other => {
                 balance.rejected_steps += 1;
                 let factor = match other {
-                    Ok((_, error, _)) => (0.8 / controls.method.error_root(error)).clamp(0.1, 0.5),
+                    Ok((_, error, _, _)) => {
+                        (0.8 / controls.method.error_root(error)).clamp(0.1, 0.5)
+                    }
                     _ => 0.5,
                 };
                 step *= factor;
@@ -627,18 +684,29 @@ fn advance_prepared_constraint<'a>(
     // Resolve the exact accepted composition after the last coordinate rebase.
     // Each local update used stoichiometric extents without clipping; the final
     // mass/element/charge audit compares against the untouched original feed.
-    accepted = reactor.resolve(current, accepted.temperature.value(), &mut cancelled)?;
+    accepted = reactor.resolve(
+        current,
+        accepted.temperature.value(),
+        accepted.heat_density_j_m3,
+        &mut cancelled,
+    )?;
     for (amount, concentration) in amounts.iter_mut().zip(reactor.concentrations()) {
         *amount = Amount::new(*concentration * volume.value());
     }
     balance.mass_residual_kg =
         (accepted.mass_density_kg_m3 - initial.mass_density_kg_m3) * volume.value();
     balance.energy_residual_j = reactor.energy_residual_j();
-    balance.absolute_energy_residual_j =
-        accepted.constraint_energy_density_j_m3 * volume.value() - target.value();
+    balance.heat_input_j = accepted.heat_density_j_m3.value() * volume.value();
+    balance.absolute_energy_residual_j = (accepted.constraint_energy_density_j_m3 * volume.value()
+        - target.value())
+        - balance.heat_input_j;
     balance.composition_reference_roundoff_j = reactor.composition_reference_roundoff_j();
     balance.entropy_change_j_k =
         (accepted.entropy_density_j_m3_k - initial.entropy_density_j_m3_k) * volume.value();
+    balance.entropy_transfer_j_k = heat_bath.map_or(0.0, |bath| {
+        balance.heat_input_j / bath.temperature().value()
+    });
+    balance.entropy_production_j_k = balance.entropy_change_j_k - balance.entropy_transfer_j_k;
     balance.nonlinear_iterations = reactor.stats.nonlinear_iterations;
     balance.temperature_evaluations = reactor.stats.temperature_evaluations;
     balance.direct_fallbacks = reactor.stats.direct_fallbacks;
@@ -675,13 +743,17 @@ fn advance_prepared_constraint<'a>(
         || !unexplained_absolute_residual.is_finite()
         || !balance.entropy_change_j_k.is_finite()
         || !balance.minimum_step_entropy_change_j_k.is_finite()
+        || !balance.heat_input_j.is_finite()
+        || !balance.entropy_transfer_j_k.is_finite()
+        || !balance.entropy_production_j_k.is_finite()
+        || !balance.minimum_step_entropy_production_j_k.is_finite()
         || !balance.maximum_estimated_local_error.is_finite()
         || balance.maximum_relative_element_residual > controls.relative_conservation_tolerance
         || balance.mass_residual_kg.abs()
             > controls.relative_conservation_tolerance * initial.mass_density_kg_m3 * volume.value()
         || balance.energy_residual_j.abs() > controls.energy_tolerance_j
         || unexplained_absolute_residual.abs() > controls.energy_tolerance_j + absolute_roundoff
-        || balance.entropy_change_j_k < -controls.entropy_tolerance_j_k
+        || balance.entropy_production_j_k < -controls.entropy_tolerance_j_k
         || amounts
             .iter()
             .any(|n| !n.value().is_finite() || n.value() < 0.0)
@@ -858,6 +930,12 @@ impl Sum {
     }
     fn value(&self) -> f64 {
         self.sum + self.correction
+    }
+    fn difference(self, other: Self) -> f64 {
+        let mut difference = self;
+        difference.add(-other.sum);
+        difference.add(-other.correction);
+        difference.value()
     }
 }
 

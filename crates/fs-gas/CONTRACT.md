@@ -3167,3 +3167,41 @@ whole-call budget boundaries, malformed policies and final cancellation/replay.
 Rustfmt parsed the new source and tests. Native compilation and execution remain
 unverified because the shared build disk is exhausted; no passing native result
 is claimed for this new module.
+
+## Simultaneous reaction and finite reservoir heat exchange
+
+The prepared constant-volume and constant-pressure reactors accept an explicit
+`HeatBath`: nonnegative total conductance G [W/K] and a held positive bath
+temperature Tb. The original extent integrator advances Qdot=G(Tb-T) together
+with the reaction laws. Both backward Euler and SDIRK2 eliminate stage heat
+inside the original caloric root; constrained temperature derivatives use
+original reaction delta-u/(Cv+hG) or delta-h/(Cp+hG), with reference-volume
+scaling. Physical heat-capacity reports remain Cv/Cp. There is no additional
+integrator, split temperature update, reaction heat source or heap workspace.
+
+Original initial U/H targets retain their meanings. Accepted energy balances
+subtract compensated external heat once; fixed-pressure results retain actual
+volume and p delta-V work. Full, half and rejected stages carry independent
+heat state. Step doubling checks heat as well as species and temperature using
+a formation-datum-independent scale. Caloric residuals and local heat
+differences retain the compensation terms.
+
+Parcel entropy may decrease on cooling. Admission uses parcel-plus-reservoir
+production delta-S-Q/Tb; reports retain parcel delta-S, reservoir transfer,
+total production and minimum accepted-step production. Original element,
+charge, mass, nonnegative inventory, source support and energy gates remain.
+Zero conductance preserves adiabatic results. Explicit-energy zero-duration
+calls resolve initial U/H before any exchange.
+
+Six new native tests passed: frozen heating/cooling, simultaneous reaction and
+heat against an independent closed form including resonance, fixed-pressure
+first law/work, large elemental formation-reference shifts, insulated parity,
+cancellation/replay, explicit targets and constrained-Jacobian differences.
+The bounded native fs-gas library run passed 68 tests, with two lengthy existing
+hydrogen/methane reference cases excluded; the SDIRK hydrogen reference passed.
+These are focused G0/G1/G3/G4 checks, not a full repository Gauntlet result.
+
+Scope remains a sealed homogeneous ideal-gas parcel with caller-declared
+constant conductance and an infinite fixed-temperature reservoir. No finite
+wall capacity, evolving wall source, radiation law, streams, spatial transport
+or empirical mechanism validation is implied. Time-error estimates are local.

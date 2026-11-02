@@ -1,12 +1,13 @@
-//! Sealed adiabatic chemistry at one prescribed pressure and total enthalpy.
+//! Sealed chemistry at one prescribed pressure with enthalpy as the energy.
 //!
 //! The original extent integrator, prepared Newton solve, step doubling and
 //! physical admission gates remain the only evolution owner. Actual volume is
 //! V=nRT/p at every trial; concentration dilution and volume-scaled rates enter
 //! its analytic Jacobian. Formation energy occurs once in H. Boundary work is
-//! p(Vfinal-Vinitial), positive outward, so U changes even though H is conserved.
+//! p(Vfinal-Vinitial), positive outward. Adiabatic evolution conserves H;
+//! a declared HeatBath instead satisfies Hfinal-Hinitial=Q and dU=Q-p dV.
 //! This homogeneous quasistatic model does not resolve piston inertia, acoustics,
-//! spatial transport, heat exchange, inflow or outflow.
+//! spatial transport, finite bath capacity, inflow or outflow.
 
 use super::*;
 
@@ -17,7 +18,7 @@ pub use super::{
     IsochoricKineticsSolve as IsobaricKineticsSolve,
 };
 
-/// Prepared constant-H,p adapter over the original constrained reactor.
+/// Prepared constant-pressure adapter over the original constrained reactor.
 /// Successful advances allocate no storage and never mutate caller histories.
 pub struct IsobaricReactor {
     inner: IsochoricReactor,
@@ -60,6 +61,7 @@ impl IsobaricReactor {
             pressure,
             initial_temperature,
             duration,
+            None,
             cancelled,
         )
     }
@@ -84,6 +86,54 @@ impl IsobaricReactor {
             pressure,
             initial_temperature,
             duration,
+            None,
+            cancelled,
+        )
+    }
+
+    /// Evolve reactions and finite reservoir exchange simultaneously at fixed p.
+    /// Formation enthalpy enters once, using the original Cp and reaction Δh.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_heat_bath(
+        &mut self,
+        amounts: &[Amount],
+        pressure: Pressure,
+        initial_temperature: Temperature,
+        duration: Time,
+        bath: HeatBath,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<IsobaricKineticsView<'_>, IsobaricKineticsError> {
+        self.advance(
+            amounts,
+            None,
+            pressure,
+            initial_temperature,
+            duration,
+            Some(bath),
+            cancelled,
+        )
+    }
+
+    /// Resolve an explicit initial H0 before simultaneous thermal/chemical time.
+    /// Boundary work starts at that resolved state's physical initial volume.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_enthalpy_with_heat_bath(
+        &mut self,
+        amounts: &[Amount],
+        initial_enthalpy: Energy,
+        pressure: Pressure,
+        initial_temperature: Temperature,
+        duration: Time,
+        bath: HeatBath,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<IsobaricKineticsView<'_>, IsobaricKineticsError> {
+        self.advance(
+            amounts,
+            Some(initial_enthalpy),
+            pressure,
+            initial_temperature,
+            duration,
+            Some(bath),
             cancelled,
         )
     }
@@ -96,6 +146,7 @@ impl IsobaricReactor {
         pressure: Pressure,
         initial_temperature: Temperature,
         duration: Time,
+        heat_bath: Option<HeatBath>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<IsobaricKineticsView<'_>, IsobaricKineticsError> {
         poll(&mut cancelled)?;
@@ -124,6 +175,7 @@ impl IsobaricReactor {
             Some(pressure),
             initial_temperature,
             duration,
+            heat_bath,
             &mut cancelled,
         )?;
         let view = IsobaricKineticsView { inner, pressure };
@@ -165,6 +217,7 @@ impl IsobaricKineticsView<'_> {
     pub const fn enthalpy(&self) -> Energy {
         self.inner.constrained_energy
     }
+    /// Original initial H target; Hfinal - target = balance().heat_input_j.
     pub const fn target_enthalpy(&self) -> Energy {
         self.inner.target_energy
     }

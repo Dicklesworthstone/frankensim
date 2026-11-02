@@ -14,6 +14,8 @@ use fs_thermochem::{
 };
 use std::collections::BTreeMap;
 
+#[path = "tests/heat.rs"]
+mod heat;
 #[path = "tests/hydrogen.rs"]
 mod hydrogen;
 #[path = "tests/ionization.rs"]

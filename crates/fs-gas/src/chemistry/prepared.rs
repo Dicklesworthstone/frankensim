@@ -1,6 +1,6 @@
 use super::*;
 
-/// Source-owning, prepared reactor for repeated independent fixed-U,V solves.
+/// Source-owning, prepared reactor for repeated independent fixed-volume solves.
 ///
 /// Construction admits the source interval once and reserves all concentration,
 /// reaction-extent, Newton, stage and endpoint storage. Successful advances use
@@ -137,6 +137,59 @@ impl IsochoricReactor {
             cancelled,
         )
     }
+
+    /// Evolve reactions and finite reservoir exchange together at fixed V.
+    /// The initial source temperature supplies U0. Accepted heat is positive
+    /// inward and satisfies Ufinal - U0 = Q; chemical energy is not added twice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_heat_bath(
+        &mut self,
+        amounts: &[Amount],
+        volume: Volume,
+        initial_temperature: Temperature,
+        duration: Time,
+        bath: HeatBath,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<IsochoricKineticsView<'_>, IsochoricKineticsError> {
+        advance_prepared_constraint(
+            self,
+            amounts,
+            None,
+            volume,
+            None,
+            initial_temperature,
+            duration,
+            Some(bath),
+            cancelled,
+        )
+    }
+
+    /// Resolve an explicit initial U0 before finite thermal/chemical evolution.
+    /// `initial_temperature` is only the initial caloric root hint; the bath
+    /// starts exchanging heat after that initial state is resolved.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_energy_with_heat_bath(
+        &mut self,
+        amounts: &[Amount],
+        initial_energy: Energy,
+        volume: Volume,
+        initial_temperature: Temperature,
+        duration: Time,
+        bath: HeatBath,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<IsochoricKineticsView<'_>, IsochoricKineticsError> {
+        advance_prepared_constraint(
+            self,
+            amounts,
+            Some(initial_energy),
+            volume,
+            None,
+            initial_temperature,
+            duration,
+            Some(bath),
+            cancelled,
+        )
+    }
 }
 
 /// Accepted endpoint borrowed from a prepared reactor, with no per-call allocation.
@@ -181,7 +234,8 @@ impl IsochoricKineticsView<'_> {
     pub const fn internal_energy(&self) -> Energy {
         self.internal_energy
     }
-    /// Single original conserved energy target, J.
+    /// Original initial energy target, J. A thermal-bath run satisfies
+    /// Ufinal - target - balance().heat_input_j = 0 within tolerance.
     pub const fn target_internal_energy(&self) -> Energy {
         self.target_energy
     }
