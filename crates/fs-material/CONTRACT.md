@@ -6990,6 +6990,25 @@ responsibility. G1 regressions compare an independent second derivative of the
 closed-form index, finite differences of its first derivative, vacuum, null
 polarizability and the dilute-domain limits.
 
+`gas_scattering::composition::MolecularRefractionModel` prepares component
+polarizabilities and original molar masses from an accepted
+`MolecularRayleighMixture`/`GasState` pair or `ThermochemicalRayleighState`.
+Thermochemical species retain canonical order; ideal-gas rows retain original
+order. Nonnegative partial mass densities [kg/m³] or molecule densities
+[molecules/m³] enter `L = sum_i rho_i K_i = sum_i N_i v_i` before the shared
+nonlinear Lorentz–Lorenz phase law. The result retains `n-1`, `dn/dL` and
+`d²n/dL²`; no fraction normalization or division by total density occurs.
+All-zero rows are vacuum. Empty/mismatched counts, invalid densities,
+unrepresentable positive contributions and out-of-band/dilute-domain queries
+refuse. Preparation retains the original 128-component bound; evaluation uses
+bounded linear work and allocates no memory. The identity binds original
+model sources, component optics, masses and order. Varying concentrations do
+not establish new thermodynamic acceptance, dispersion, absorption or new
+species; the existing constant-polarizability domain applies. G1/G3 fixtures
+cover original ideal/NASA state recovery, mass/number basis equivalence,
+composition sensitivity at fixed total density and analytic nonlinear
+derivatives.
+
 Preparation is bounded by the original 128-component gas limit; spectral and
 phase evaluation are allocation-free constant work. The exact lambda^-4 law
 assumes constant molecular polarizability on 380–780 nm. No dispersion,

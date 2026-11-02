@@ -9,6 +9,11 @@ mod cells;
 pub use cells::MaterialGasScatteringCellGrid;
 mod refraction;
 pub use refraction::{GasDensityJet, GasDensitySecondOrderField};
+mod composition;
+pub use composition::{
+    GasCompositionGradientField, GasCompositionSecondOrderField, GasPartialDensityJet,
+    GasPartialDensitySample, MaterialGasCompositionRefractiveField,
+};
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;

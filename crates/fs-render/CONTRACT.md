@@ -3238,6 +3238,25 @@ spatial gradient differences, exact on-axis focusing/defocusing, independent
 neighboring rays and physical point-source irradiance. Existing smooth-field,
 fixed-composition, molecular-scattering and unresolved-caustic limits remain.
 
+`MaterialGasCompositionRefractiveField` binds a prepared molecular model to
+an immutable `GasCompositionGradientField` with exact model/order identity,
+component count, explicit density basis and nonzero snapshot/reconstruction
+identity. Every query supplies all partial-density values and gradients;
+unwritten entries refuse. The adapter computes
+`grad(L) = sum_i K_i grad(rho_i)` and uses the material phase derivative, so
+composition changes bend rays even at constant total mass density.
+`GasCompositionSecondOrderField` supplies actual component Hessians, retaining
+both terms `Hess(n) = n_L sum_i K_i Hess(rho_i) + n_LL grad(L) grad(L)^T`.
+Queries use bounded stack storage without heap allocation. Native curved rays
+and angular bundles consume the resulting field directly, with phase/group
+equality under the declared nondispersive model and zero true absorption.
+Source mismatches and provider/numerical failures refuse. No EOS
+reconstruction, cell smoothing, chemical-species inference or scattered-radiance
+integration is supplied. Focused regressions cover spatial derivatives in both
+density bases, constant-total-density bending and Snell invariance, analytic
+on-axis focusing/defocusing, neighboring rays, detector irradiance, vacuum and
+invalid/source/missing-row refusals.
+
 `MaterialGasScatteringBinding::bind_cell_grid` borrows accepted gas states and
 their exact density buffer in the native `VolumeGrid` cell order. Temperature
 and pressure may vary by cell while composition and molecular optical sources

@@ -31,6 +31,8 @@
 //! vapour-air mixtures: The benefits of interferometry*, §3.3.1,
 //! <https://doi.org/10.1016/j.ces.2020.116433>.
 
+/// Composition-varying coherent refraction from original molecular sources.
+pub mod composition;
 /// Optical attachment to the original source-backed thermochemical gas state.
 pub mod thermochemical;
 
@@ -446,21 +448,10 @@ impl RayleighGasState {
             return Err(GasScatteringError::RefractivityDomain);
         }
         let lorentz_lorenz = density_kg_m3 * self.mass_refractivity_m3_kg;
-        let max_n2_minus_one = MAX_DILUTE_REFRACTIVITY * (2.0 + MAX_DILUTE_REFRACTIVITY);
-        let limit = max_n2_minus_one / (3.0 + max_n2_minus_one);
-        // One outward ULP admits an exactly-on-limit source after converting
-        // between molecular and mass density. It is only boundary roundoff.
-        if !lorentz_lorenz.is_finite() || lorentz_lorenz > limit.next_up() {
-            return Err(GasScatteringError::RefractivityDomain);
-        }
+        let (phase_index, refractivity, denominator) = phase_from_lorentz_lorenz(lorentz_lorenz)?;
         if density_kg_m3 > 0.0 && self.mass_refractivity_m3_kg > 0.0 && lorentz_lorenz == 0.0 {
             return Err(GasScatteringError::Unrepresentable);
         }
-        let denominator = 1.0 - lorentz_lorenz;
-        let n2_minus_one = 3.0 * lorentz_lorenz / denominator;
-        let phase_index = fs_math::det::sqrt(1.0 + n2_minus_one);
-        // Rationalization preserves n-1 even when n rounds to exactly one.
-        let refractivity = n2_minus_one / (phase_index + 1.0);
         let derivative_density_m3_kg =
             1.5 * self.mass_refractivity_m3_kg / (phase_index * denominator * denominator);
         if !derivative_density_m3_kg.is_finite() {
@@ -591,6 +582,22 @@ impl std::error::Error for GasScatteringError {
             _ => None,
         }
     }
+}
+
+// One scalar constitutive law for frozen and composition-varying gases.
+// Return the denominator too so the original density derivative keeps its bits.
+fn phase_from_lorentz_lorenz(lorentz_lorenz: f64) -> Result<(f64, f64, f64), GasScatteringError> {
+    let max_n2_minus_one = MAX_DILUTE_REFRACTIVITY * (2.0 + MAX_DILUTE_REFRACTIVITY);
+    let limit = max_n2_minus_one / (3.0 + max_n2_minus_one);
+    // One outward ULP admits exactly-on-limit source conversion roundoff.
+    if !lorentz_lorenz.is_finite() || lorentz_lorenz < 0.0 || lorentz_lorenz > limit.next_up() {
+        return Err(GasScatteringError::RefractivityDomain);
+    }
+    let denominator = 1.0 - lorentz_lorenz;
+    let n2_minus_one = 3.0 * lorentz_lorenz / denominator;
+    let phase_index = fs_math::det::sqrt(1.0 + n2_minus_one);
+    // Rationalization retains n-1 even when the phase index rounds to one.
+    Ok((phase_index, n2_minus_one / (phase_index + 1.0), denominator))
 }
 
 fn wavelength(value: f64) -> Result<(), GasScatteringError> {
