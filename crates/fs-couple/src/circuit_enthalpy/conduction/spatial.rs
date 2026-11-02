@@ -21,8 +21,9 @@ use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use fs_em::{
     conduction::ConductionControls,
     spatial::conduction::{
-        SpatialConduction, SpatialConductionBoundary, SpatialConductionContact,
-        SpatialConductionContactResponse, SpatialConductionError, SpatialConductionField,
+        SpatialConductanceControls, SpatialConduction, SpatialConductionBoundary,
+        SpatialConductionContact, SpatialConductionContactResponse, SpatialConductionError,
+        SpatialConductionField,
     },
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
@@ -60,6 +61,15 @@ pub enum SpatialConductionDrive<'a> {
         current_a: f64,
         reference_voltage_v: f64,
     },
+    /// Balanced signed amperes INTO every original equipotential electrode.
+    /// Terminal zero fixes the voltage gauge; a zero-net-current electrode
+    /// floats to its actual potential and may carry current between its faces.
+    /// N-1 native basis solves are charged to the shared work budget per trial.
+    TerminalCurrents {
+        terminals: &'a [&'a [usize]],
+        currents_a: &'a [f64],
+        response: SpatialConductanceControls,
+    },
 }
 
 impl<'a> SpatialConductionDrive<'a> {
@@ -86,6 +96,16 @@ impl<'a> SpatialConductionDrive<'a> {
         problem: &SpatialConduction<C>,
         field: &SpatialConductionField,
     ) -> Result<f64, Error> {
+        // Native admission and the completed solve establish nonempty,
+        // equipotential exterior face sets for either current-driven mode.
+        let potential = |faces: &[usize]| {
+            faces
+                .first()
+                .and_then(|&face| problem.mesh().faces.get(face))
+                .and_then(|vertices| field.voltage_v.get(vertices[0] as usize))
+                .copied()
+                .ok_or_else(|| invalid("current electrode lost its solved potential"))
+        };
         let power = match self {
             Self::Boundary(_) => field.supplied_power_w,
             Self::TotalCurrent {
@@ -93,18 +113,30 @@ impl<'a> SpatialConductionDrive<'a> {
                 negative_faces,
                 current_a,
                 ..
+            } => current_a * finite(potential(positive_faces)? - potential(negative_faces)?)?,
+            Self::TerminalCurrents {
+                terminals,
+                currents_a,
+                ..
             } => {
-                // Native terminal admission and the completed field solve
-                // establish equipotential, nonempty exterior face sets.
-                let potential = |faces: &[usize]| {
-                    faces
-                        .first()
-                        .and_then(|&face| problem.mesh().faces.get(face))
-                        .and_then(|vertices| field.voltage_v.get(vertices[0] as usize))
-                        .copied()
-                        .ok_or_else(|| invalid("current electrode lost its solved potential"))
-                };
-                current_a * finite(potential(positive_faces)? - potential(negative_faces)?)?
+                if terminals.is_empty() || terminals.len() != currents_a.len() {
+                    return Err(invalid(
+                        "current electrodes lost their source correspondence",
+                    ));
+                }
+                let reference = potential(terminals[0])?;
+                let (mut sum, mut correction) = (0.0, 0.0);
+                for (&faces, &current) in terminals.iter().zip(currents_a) {
+                    // Independently authored I*V, with the same voltage gauge
+                    // as the grounded terminal owner. A floating electrode's
+                    // zero net current contributes no source work.
+                    let work = finite(current * finite(potential(faces)? - reference)?)?;
+                    let adjusted = finite(work - correction)?;
+                    let next = finite(sum + adjusted)?;
+                    correction = finite((next - sum) - adjusted)?;
+                    sum = next;
+                }
+                sum
             }
         };
         Ok(finite(power)?)
@@ -552,8 +584,23 @@ impl SpatialConductionThermalNetwork<'_> {
             target_s,
             controls,
             initial_energy_increments_j,
-            |trial, _| {
+            |trial, remaining| {
                 check(cancel).map_err(map_conduction_error)?;
+                let field_solves = match drive {
+                    SpatialConductionDrive::TerminalCurrents { terminals, .. } => terminals
+                        .len()
+                        .checked_sub(1)
+                        .filter(|&n| n > 0)
+                        .ok_or_else(|| {
+                            map_conduction_error(invalid(
+                                "multi-terminal current needs at least two electrodes",
+                            ))
+                        })?,
+                    _ => 1,
+                };
+                if field_solves > remaining {
+                    return Err(CircuitEnthalpyError::CircuitBudget);
+                }
                 let coefficients = resolve(trial)?;
                 if !coefficients.resistors.is_empty() {
                     return Err(map_conduction_error(invalid(
@@ -619,6 +666,24 @@ impl SpatialConductionThermalNetwork<'_> {
                         field_controls,
                         &mut || (*cancel.borrow_mut())(),
                     ),
+                    SpatialConductionDrive::TerminalCurrents {
+                        terminals,
+                        currents_a,
+                        response,
+                    } => {
+                        let matrix = next
+                            .conductance_matrix(terminals, response, field_controls, &mut || {
+                                (*cancel.borrow_mut())()
+                            })
+                            .map_err(field_error)
+                            .map_err(map_conduction_error)?;
+                        matrix.field_at_currents(
+                            currents_a,
+                            field_controls.current_tolerance_a,
+                            field_controls.power_tolerance_w,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                    }
                 }
                 .map_err(field_error)
                 .map_err(map_conduction_error)?;
@@ -653,7 +718,7 @@ impl SpatialConductionThermalNetwork<'_> {
                     sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
                     source: coefficients.source,
-                    circuit_trials: 1,
+                    circuit_trials: field_solves,
                 })
             },
             |candidate, _dt, checkpoint| {

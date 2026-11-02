@@ -12,6 +12,8 @@ mod contact;
 pub use contact::{SpatialConductionContact, SpatialConductionContactResponse};
 mod terminals;
 pub use terminals::SpatialResistance;
+mod matrix;
+pub use matrix::{SpatialConductanceControls, SpatialConductanceMatrix};
 
 use super::{
     ScalarBoundary, SpatialGeometry, SpatialMagneticError, dot, prepare_geometry,

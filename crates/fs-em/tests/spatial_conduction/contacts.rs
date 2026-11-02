@@ -11,7 +11,7 @@ use fs_qty::{
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 
-fn conductor(resistivity: f64) -> ResolvedConductorState {
+pub(super) fn conductor(resistivity: f64) -> ResolvedConductorState {
     ResolvedConductorState::try_from_material_with_basis(
         material(ElectricalPropertyBasis::Resistivity, &[resistivity]),
         ElectricalPropertyBasis::Resistivity,
@@ -19,7 +19,7 @@ fn conductor(resistivity: f64) -> ResolvedConductorState {
     .unwrap()
 }
 
-fn interface(
+pub(super) fn interface(
     first: &ResolvedConductorState,
     second: &ResolvedConductorState,
     pressure: f64,
@@ -96,7 +96,7 @@ fn mesh(area: f64) -> (Vec<[f64; 3]>, Vec<[u32; 4]>) {
     (vertices, tets)
 }
 
-fn contacts(source: ResolvedElectricalInterface) -> Vec<SpatialConductionContact> {
+pub(super) fn contacts(source: ResolvedElectricalInterface) -> Vec<SpatialConductionContact> {
     vec![
         SpatialConductionContact {
             first_vertices: [4, 5, 7],

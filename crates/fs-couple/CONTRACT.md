@@ -285,6 +285,20 @@ drive changes require the existing interval/event splitting. Each native
 reference solve counts against the original circuit-trial work budget, and all
 source/cancellation/field refusals preserve the jointly accepted histories.
 
+`SpatialConductionDrive::TerminalCurrents` adds separately authored balanced
+signed currents on multiple equipotential electrodes. A zero-current terminal
+is a floating electrode, not an insulating boundary: its potential is solved
+while its local faces may exchange current. Every residual trial first refreshes
+the original bulk/contact material state, then extracts the native conductance
+response and recovers the combined local field before depositing bulk and
+contact Joule heat once. All N-1 basis field solves are charged against the
+remaining shared circuit-trial budget before extraction; changing current signs
+does not create another heat source. The existing complete heat-assembly owner
+consumes the same drive without a parallel thermal solver. A focused
+three-terminal regression uses independent backward-Euler elimination to check
+temperature-dependent voltage, cell heating, floating potential, polarity,
+energy and the actual two-solves-per-trial budget.
+
 `tests/spatial_conduction_enthalpy/current.rs` constructs an exact two-body
 backward-Euler endpoint for thermally linked, electrically parallel 3D conductors
 with temperature-dependent resistance. It checks unequal current redistribution,

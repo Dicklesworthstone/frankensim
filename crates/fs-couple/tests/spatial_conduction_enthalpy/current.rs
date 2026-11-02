@@ -2,6 +2,186 @@
 use super::*;
 use std::collections::BTreeSet;
 
+#[test]
+fn multiterminal_currents_close_source_feedback_and_charge_each_native_basis_solve() {
+    let (a, ca) = material(1.0, 1.0, 0.002);
+    let (b, cb) = material(3.0, 2.0, 0.0);
+    let cards = [a, b];
+    let curves = [ca, cb];
+    let context = point(300.0);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let cells = bindings(&cards, &curves, &context, &key);
+    let thermal = initial(&curves, 999.0, None);
+    let conductors = cards.each_ref().map(|card| {
+        resolve_conductor_state_with_basis(
+            card,
+            &context,
+            MaterialPropertySelection::SingleClaimOnly,
+            ElectricalPropertyBasis::Resistivity,
+        )
+        .unwrap()
+    });
+    let (mut positions, mut tets) = slab(&[0.0, 0.5, 1.0]);
+    let (second_positions, second_tets) = slab(&[1.0, 1.5, 2.0]);
+    let offset = positions.len() as u32;
+    positions.extend(second_positions);
+    tets.extend(second_tets.into_iter().map(|t| t.map(|v| v + offset)));
+    let problem = SpatialConduction::new(
+        positions,
+        tets,
+        (0..24).map(|i| conductors[i / 12].clone()).collect(),
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let regions = (0..24)
+        .map(|tetrahedron| SpatialConductionRegion {
+            tetrahedron,
+            cell: cells[tetrahedron / 12].cell,
+        })
+        .collect::<Vec<_>>();
+    let network = SpatialConductionThermalNetwork {
+        cells: &cells,
+        links: &LINKS,
+        regions: &regions,
+        volume_tolerance_m3: 1e-12,
+    };
+    // The middle equipotential electrode joins the two separate volume meshes.
+    // A prescribed middle current changes the two bars' currents independently.
+    let faces = [0.0, 1.0, 2.0].map(|x| {
+        problem
+            .exterior_faces()
+            .filter(|&f| {
+                problem.mesh().faces[f].map(|v| problem.positions_m()[v as usize][0]) == [x; 3]
+            })
+            .collect::<Vec<_>>()
+    });
+    let terminals = faces.each_ref().map(Vec::as_slice);
+    let response = SpatialConductanceControls {
+        maximum_terminals: 3,
+        maximum_field_solves: 2,
+        maximum_response_values: 1000,
+        maximum_dense_work: 1000,
+        reference_voltage_v: 0.5,
+        coefficient_tolerance_s: 1e-10,
+    };
+    for right_current in [1.0, 2.0] {
+        // Independent local BE equations at dt=.5:
+        // (1.5-.004)*dTa-.5*dTb=2, -.5*dTa+2.5*dTb=1.5*I_b².
+        let aa = 1.5 - 0.004;
+        let bb = 2.5;
+        let determinant = aa * bb - 0.25;
+        let rhs_b = 1.5 * right_current * right_current;
+        let theta = [
+            (2.0 * bb + 0.5 * rhs_b) / determinant,
+            (aa * rhs_b + 1.0) / determinant,
+        ];
+        let rho_a = 1.0 + 0.002 * theta[0];
+        let endpoint_voltage = [0.0, 2.0 * rho_a, 2.0 * rho_a + 3.0 * right_current];
+        let heat = 0.5 * (4.0 * rho_a + 3.0 * right_current * right_current);
+        for sign in [1.0, -1.0] {
+            let currents = [
+                -2.0 * sign,
+                (2.0 - right_current) * sign,
+                right_current * sign,
+            ];
+            let drive = SpatialConductionDrive::TerminalCurrents {
+                terminals: &terminals,
+                currents_a: &currents,
+                response,
+            };
+            let next = network
+                .step_candidate(
+                    &thermal,
+                    0.5,
+                    &problem,
+                    drive,
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            near(
+                next.thermal().temperature_k(CellId(30)).unwrap(),
+                300.0 + theta[0],
+            );
+            near(
+                next.thermal().temperature_k(CellId(10)).unwrap(),
+                300.0 + theta[1],
+            );
+            let report = next.report();
+            for (i, terminal) in terminals.iter().enumerate() {
+                near(
+                    terminal_current(&problem, &report.electrical.field, terminal),
+                    currents[i],
+                );
+                for &face in *terminal {
+                    for vertex in problem.mesh().faces[face] {
+                        near(
+                            report.electrical.field.voltage_v[vertex as usize],
+                            sign * endpoint_voltage[i],
+                        );
+                    }
+                }
+            }
+            for (i, density) in report
+                .electrical
+                .field
+                .current_density_a_m2
+                .iter()
+                .enumerate()
+            {
+                near(density[0], -sign * if i < 12 { 2.0 } else { right_current });
+                near(density[1], 0.0);
+                near(density[2], 0.0);
+                near(
+                    report.electrical.field.cell_power_w[i],
+                    if i < 12 {
+                        4.0 * rho_a / 12.0
+                    } else {
+                        3.0 * right_current * right_current / 12.0
+                    },
+                );
+            }
+            near(
+                next.problem().conductors()[0].material().query().axes()["T"],
+                300.0 + theta[0],
+            );
+            near(report.electrical.heat_j, heat);
+            near(report.electrical.supplied_work_j, heat);
+            near(
+                next.thermal().energy_j() - thermal.energy_j(),
+                theta[0] + 2.0 * theta[1],
+            );
+            near(report.total_energy_residual_j, 0.0);
+            assert!(report.circuit_trials >= 2);
+            assert_eq!(report.circuit_trials % 2, 0);
+            let mut bounded = config();
+            bounded.maximum_circuit_trials = 1;
+            assert!(matches!(
+                network.step_candidate(
+                    &thermal,
+                    0.5,
+                    &problem,
+                    drive,
+                    limits(),
+                    field_controls(),
+                    bounded,
+                    &[0.0; 2],
+                    || false,
+                ),
+                Err(CircuitEnthalpyError::CircuitBudget)
+            ));
+        }
+    }
+    assert_eq!(thermal.time_s(), 0.0);
+    for conductor in problem.conductors() {
+        near(conductor.material().query().axes()["T"], 300.0);
+    }
+}
+
 fn terminal_current(
     problem: &SpatialConduction,
     field: &SpatialConductionField,

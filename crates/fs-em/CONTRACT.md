@@ -384,6 +384,28 @@ extension is inferred. G1/G3/G4 regressions cover series resistance, unequal
 parallel current injection, rotated conductivity and SI scaling, separate
 contact heating, current reversal/zero, canonical face order and cancellation.
 
+`SpatialConduction::conductance_matrix` prepares a reusable response for N
+disjoint equipotential electrodes using exactly N-1 native field solves. The
+full reciprocal matrix is the original bulk/contact stiffness energy Gram
+matrix, independently checked against terminal reactions and gauge closure.
+A grounded equilibrated factor from fs-la handles balanced signed terminal
+currents, including a zero-net-current floating electrode that can transfer
+current between its faces. Shared electrode admission retains actual bulk,
+finite-contact and equipotential connectivity; untouched bodies keep the
+original native gauges. Caller controls bound terminal count, basis solves,
+retained values, dense work and coefficient residuals.
+
+`SpatialConductanceMatrix` superposes relative potentials and then recovers the
+combined E, J and bulk/contact powers through the original field owner. It never
+adds isolated basis powers, so simultaneous-drive cross terms and cancellation
+are retained. Voltage/current excitation changes reuse the admitted factor;
+material, contact or geometry changes require a new response. Native current,
+power and cancellation gates remain authoritative. The focused three-terminal
+regression checks an independently derived heterogeneous/contact matrix,
+floating electrodes, polarity, gauge invariance, local heat and work bounds.
+This remains a frozen-source stationary Ohmic response, without induction or
+field-dependent constitutive feedback.
+
 Actual cell E=-grad(V), J=sigma E and volume-integrated E.J remain unsmoothed.
 Acceptance separately checks free-node/current balance, recovered versus Hodge
 power and supplied terminal work. These dimensional residual gates are not

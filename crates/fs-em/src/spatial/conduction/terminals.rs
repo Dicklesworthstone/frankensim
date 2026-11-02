@@ -55,7 +55,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
             ));
         }
         let (faces, vertices) = self.terminal_faces(positive_faces, negative_faces, cancelled)?;
-        let boundary = voltage_boundary(&faces, reference_voltage_v);
+        let boundary = voltage_boundary(&faces, &[reference_voltage_v, 0.0]);
         let traces = self.prepare_boundary(&boundary, controls, cancelled)?;
         let (relative, report) = solve_scalar_system(
             &self.stiffness,
@@ -151,22 +151,52 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         negative_faces: &[usize],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<([Vec<usize>; 2], [Vec<usize>; 2])> {
-        if positive_faces.is_empty()
-            || negative_faces.is_empty()
-            || positive_faces
-                .len()
-                .checked_add(negative_faces.len())
+        let (faces, vertices) =
+            self.electrode_faces(&[positive_faces, negative_faces], cancelled)?;
+        let faces = faces.try_into().map_err(|_| {
+            SpatialConductionError::Invalid("two-terminal admission lost its original face pair")
+        })?;
+        let vertices = vertices.try_into().map_err(|_| {
+            SpatialConductionError::Invalid("two-terminal admission lost its original vertex pair")
+        })?;
+        Ok((faces, vertices))
+    }
+
+    // Shared complete-face admission for two-terminal resistance and the
+    // multi-electrode response. A common electrode may join separate bulk
+    // components, while finite material contacts already join self.components.
+    pub(super) fn electrode_faces(
+        &self,
+        terminals: &[&[usize]],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<Vec<usize>>, Vec<Vec<usize>>)> {
+        check(cancelled)?;
+        if terminals.len() < 2
+            || terminals.iter().any(|faces| faces.is_empty())
+            || terminals
+                .iter()
+                .try_fold(0usize, |n, faces| n.checked_add(faces.len()))
                 .is_none_or(|n| n > self.geometry.faces.len())
         {
             return Err(SpatialConductionError::Invalid(
-                "two nonempty bounded terminal face sets required",
+                "at least two nonempty bounded terminal face sets required",
             ));
         }
-        let mut faces = [BTreeSet::new(), BTreeSet::new()];
-        let mut vertices = [BTreeSet::new(), BTreeSet::new()];
-        let mut component_terminals = vec![0_u8; self.mesh().vertex_count];
-        for (side, input) in [positive_faces, negative_faces].into_iter().enumerate() {
-            for &face in input {
+        let mut faces = Vec::with_capacity(terminals.len());
+        let mut vertices = Vec::with_capacity(terminals.len());
+        let mut vertex_terminal = vec![None; self.mesh().vertex_count];
+        let mut component_terminal: Vec<Option<usize>> = vec![None; self.mesh().vertex_count];
+        let mut parent: Vec<_> = (0..terminals.len()).collect();
+        fn root(parent: &[usize], mut terminal: usize) -> usize {
+            while parent[terminal] != terminal {
+                terminal = parent[terminal];
+            }
+            terminal
+        }
+        for (side, input) in terminals.iter().enumerate() {
+            let mut side_faces = BTreeSet::new();
+            let mut side_vertices = BTreeSet::new();
+            for &face in *input {
                 check(cancelled)?;
                 if self
                     .geometry
@@ -174,7 +204,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                     .get(face)
                     .is_none_or(|f| f.cells.len() != 1)
                     || self.contact_faces.contains(&face)
-                    || !faces[side].insert(face)
+                    || !side_faces.insert(face)
                 {
                     return Err(SpatialConductionError::Invalid(
                         "terminal needs unique exterior faces, excluding internal contacts",
@@ -182,26 +212,33 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                 }
                 for vertex in self.mesh().faces[face] {
                     let vertex = vertex as usize;
-                    if vertices[1 - side].contains(&vertex) {
+                    if vertex_terminal[vertex].is_some_and(|other| other != side) {
                         return Err(SpatialConductionError::Invalid(
-                            "opposite terminal faces must not share vertices",
+                            "different terminal faces must not share vertices",
                         ));
                     }
-                    vertices[side].insert(vertex);
-                    component_terminals[self.components[vertex]] |= 1 << side;
+                    vertex_terminal[vertex] = Some(side);
+                    side_vertices.insert(vertex);
+                    let component = self.components[vertex];
+                    if let Some(other) = component_terminal[component] {
+                        let a = root(&parent, side);
+                        let b = root(&parent, other);
+                        parent[a.max(b)] = a.min(b);
+                    } else {
+                        component_terminal[component] = Some(side);
+                    }
                 }
             }
+            faces.push(side_faces.into_iter().collect());
+            vertices.push(side_vertices.into_iter().collect());
         }
-        if !component_terminals.contains(&3) {
+        if (1..terminals.len()).any(|t| root(&parent, t) != root(&parent, 0)) {
             return Err(SpatialConductionError::Invalid(
-                "terminal pair has no conducting bulk or contact connection",
+                "terminals have no common conducting bulk/contact/electrode connection",
             ));
         }
         check(cancelled)?;
-        Ok((
-            faces.map(|s| s.into_iter().collect()),
-            vertices.map(|s| s.into_iter().collect()),
-        ))
+        Ok((faces, vertices))
     }
 }
 
@@ -240,7 +277,7 @@ impl<C: SpatialConductorMaterial> SpatialResistance<'_, C> {
             check(cancelled)?;
             relative.push(finite((value / self.reference_voltage_v) * voltage_v)?);
         }
-        let boundary = voltage_boundary(&self.faces, voltage_v);
+        let boundary = voltage_boundary(&self.faces, &[voltage_v, 0.0]);
         let g = &self.problem.geometry;
         let traces = prepare_scalar_boundary_traces(
             &g.mesh,
@@ -309,11 +346,14 @@ impl<C: SpatialConductorMaterial> SpatialResistance<'_, C> {
     }
 }
 
-fn voltage_boundary(faces: &[Vec<usize>; 2], positive_voltage: f64) -> SpatialConductionBoundary {
+pub(super) fn voltage_boundary(
+    faces: &[Vec<usize>],
+    voltages: &[f64],
+) -> SpatialConductionBoundary {
     SpatialConductionBoundary {
         voltage: faces
             .iter()
-            .zip([positive_voltage, 0.0])
+            .zip(voltages.iter().copied())
             .flat_map(|(faces, voltage)| {
                 faces.iter().map(move |&face| ConductionVoltageFace {
                     face,
@@ -325,7 +365,7 @@ fn voltage_boundary(faces: &[Vec<usize>; 2], positive_voltage: f64) -> SpatialCo
     }
 }
 
-fn terminal_current(
+pub(super) fn terminal_current(
     field: &SpatialConductionField,
     vertices: &[usize],
     cancelled: &mut impl FnMut() -> bool,
@@ -343,6 +383,6 @@ fn terminal_current(
     Ok(current)
 }
 
-fn positive(value: f64) -> bool {
+pub(super) fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
