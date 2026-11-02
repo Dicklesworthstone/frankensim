@@ -1,4 +1,7 @@
-//! Implicit pressure/viscous loading of one guided translating rigid body.
+//! Implicit pressure/viscous loading of a guided or planar rigid body.
+//!
+//! [`planar`] extends the same native coupling to both translations and rotation.
+//! The guided owner below retains its scalar, three-solve path.
 //!
 //! The original material BDF1 Stokes solver supplies the affine load response
 //! `F(v) = F(0) + Z v`. Its scalar Schur complement closes body inertia, a linear
@@ -26,6 +29,8 @@ use fs_flux::{
 };
 use fs_material::fluid_transport::FluidTransport;
 use fs_mbd::{DynamicsError, MassProperties, MomentumImpulseReceipt, Pose, RigidBodyState, Vec3};
+
+pub mod planar;
 
 /// Fixed physical and approximation data; all mechanical values cover the
 /// explicit out-of-plane depth, rather than being per-unit-depth quantities.
@@ -342,19 +347,15 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedStokesMotion<'s, 'm, 'a, F> {
         dt: f64,
     ) -> Result<MaterialStokesSolution, GuidedStokesError> {
         let motion = |_: [f64; 2]| self.config.direction.map(|d| d * speed);
-        let mut boundaries = Vec::with_capacity(exterior.len() + self.edges.len());
-        boundaries.extend_from_slice(exterior);
-        boundaries.extend(
-            self.edges
-                .iter()
-                .map(|&edge| MaterialStokesBoundary::Velocity {
-                    edge,
-                    value: &motion,
-                }),
-        );
-        Ok(self
-            .fluid
-            .bdf1_stokes_mixed_step(force_density, &boundaries, previous, dt)?)
+        Ok(solve_body_velocity(
+            &self.fluid,
+            &self.edges,
+            &motion,
+            force_density,
+            exterior,
+            previous,
+            dt,
+        )?)
     }
 
     /// Close one implicit fluid/body step with endpoint force and boundary data.
@@ -588,6 +589,25 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedStokesMotion<'s, 'm, 'a, F> {
             mechanical_work_residual_j: work_residual,
         })
     }
+}
+
+/// Keep both rigid lanes on the same original mixed-boundary flow entry.
+fn solve_body_velocity<F: FluidTransport + ?Sized>(
+    fluid: &MaterialFluxSystem<'_, '_, '_, F>,
+    edges: &[usize],
+    motion: &dyn Fn([f64; 2]) -> [f64; 2],
+    force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+    exterior: &[MaterialStokesBoundary<'_>],
+    previous: &[f64],
+    dt: f64,
+) -> Result<MaterialStokesSolution, MaterialFluxError> {
+    let mut boundaries = Vec::with_capacity(exterior.len() + edges.len());
+    boundaries.extend_from_slice(exterior);
+    boundaries.extend(edges.iter().map(|&edge| MaterialStokesBoundary::Velocity {
+        edge,
+        value: motion,
+    }));
+    fluid.bdf1_stokes_mixed_step(force_density, &boundaries, previous, dt)
 }
 
 fn positive(value: f64) -> bool {

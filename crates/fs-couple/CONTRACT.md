@@ -23,6 +23,42 @@ capacitor/inductor restrictions. Graph series contacts and source-dependent
 electrical storage remain unsupported and refuse explicitly. The first-order
 coupled update requires temporal and spatial refinement for accuracy.
 
+## Planar pressure and viscous force/torque driving native rigid motion
+
+`stokes_motion::planar::PlanarStokesMotion`, under the existing
+`experimental-stokes-motion` feature, advances both translations and rotation
+through the original material BDF1 Stokes and `fs-mbd` owners. A loaded base
+solve and three homogeneous rigid unit motions supply the complete 3-by-3
+fluid impedance, including translation/rotation cross terms. A reusable native
+`fs-la::LuWorkspace` solves the mass/inertia-scaled coupled equation. A fifth
+native flow solve uses the actual represented rigid endpoint rates. No fitted
+drag, prescribed body trajectory or assumed rotational added inertia is used.
+
+Depth converts original pressure/viscous force and moment to whole-body N and
+N m; pressure datums remain explicit. Moments and rigid boundary velocities
+share the reference COM. Native mass properties admit a COM pose only; this
+lane additionally requires a world-aligned principal body z axis and planar
+momenta. It retains both BDM normal moments, including rotation's nonzero
+linear moment. Native quaternion drift supplies the accepted orientation.
+
+Actual represented linear/angular momentum residuals have separate force and
+torque tolerances. Spring storage uses represented pose coordinates; physical
+dashpot loss and numerical backward-Euler loss remain distinct. Body work and
+fluid kinetic change are separate accounts, not a complete fluid/body energy
+or passivity claim. Body, fluid history, translation, angle and time publish
+atomically after endpoint gates and cancellation checks. Transport is frozen
+once; five-solve source/boundary callbacks must be pure and fixed.
+
+Reference mesh geometry and torque arms remain fixed. Independently authored
+small-translation and small-angle bounds are enforced; there is no ALE,
+transported volume, convection or finite-motion claim. Every rigid unit mode
+must satisfy the native boundary/flux admission with the exterior owners.
+Four authored regression groups cover independent pressure-driven translation
+and torque with a matching affine inertial body force, two depths, analytic
+off-center reciprocal cross impedances, viscosity response, native pose/work,
+rotation traces, axis admission and atomic late-cancellation continuation.
+Native compilation/test execution remains a separate verification obligation.
+
 ## Implicit pressure and viscous loads driving guided rigid motion
 
 The opt-in `experimental-stokes-motion` feature exposes `GuidedStokesMotion`.

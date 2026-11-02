@@ -10,6 +10,9 @@ use fs_mbd::{MassProperties, Pose, RigidBodyState, Vec3};
 use fs_solid::Mesh2;
 use std::cell::Cell;
 
+#[path = "stokes_motion/planar.rs"]
+mod planar;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
