@@ -147,6 +147,51 @@ impl<'m> ThermoplasticSolid<'m> {
         cx: &Cx<'_>,
     ) -> Result<SpatialElectricalSolidCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
     {
+        self.advance_spatial_electrical_with_motion_candidate(
+            thermal,
+            problem,
+            assembly,
+            boundary,
+            target_s,
+            prescribed_m,
+            nodal_forces_n,
+            settings,
+            controls,
+            guess_j,
+            None,
+            cx,
+        )
+        .map(|(candidate, _)| candidate)
+    }
+
+    // Quasistatic and inertial consumers use this same field/material/enthalpy
+    // residual. Optional velocity selects the original mechanical mass owner;
+    // it does not replace the source material or introduce another heat solve.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(in crate::solid_enthalpy::plastic) fn advance_spatial_electrical_with_motion_candidate<
+        't,
+        A: HeatAssembly + ?Sized,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        problem: &SpatialConduction<ResolvedConductorState>,
+        assembly: &A,
+        boundary: &SpatialConductionBoundary,
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: SpatialElectricalSolidSolve,
+        guess_j: &[f64],
+        velocity_mps: Option<&[[f64; 3]]>,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            SpatialElectricalSolidCandidate<'m, 't, A::Sample>,
+            Option<super::super::dynamics::Motion>,
+        ),
+        ElectricalSolidError<A::Error>,
+    > {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
         let dt = target_s - self.time_s;
@@ -296,7 +341,7 @@ impl<'m> ThermoplasticSolid<'m> {
                             settings,
                             mechanics,
                             dt,
-                            None,
+                            velocity_mps,
                             cx,
                         )
                         .map_err(ElectricalSolidSourceError::Mechanical)?;
@@ -379,6 +424,9 @@ impl<'m> ThermoplasticSolid<'m> {
             + mechanical.thermoelastic_storage_change_j
             + r.thermal.stored_energy_change_j
             + mechanical.numerical_loss_j
+            + mechanical.motion.as_ref().map_or(0.0, |motion| {
+                motion.energy.kinetic_change_j + motion.energy.numerical_loss_j
+            })
             - r.electrical.supplied_work_j
             - mechanical.external_work_j
             - trial.external_heat_j
@@ -435,11 +483,14 @@ impl<'m> ThermoplasticSolid<'m> {
             combined_residual_j,
         };
         checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
-        Ok(SpatialElectricalSolidCandidate {
-            thermal,
-            solid,
-            problem,
-            report,
-        })
+        Ok((
+            SpatialElectricalSolidCandidate {
+                thermal,
+                solid,
+                problem,
+                report,
+            },
+            mechanical.motion,
+        ))
     }
 }

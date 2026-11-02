@@ -6,6 +6,9 @@
 //! Joule, plastic and reversible heat are deposited once; neither constitutive
 //! nor inertial numerical loss heats the material.
 
+/// Native tetrahedral current on the same continuing inertial configuration.
+pub mod spatial;
+
 use super::super::contact::ThermalSupportContact;
 use super::super::electrical::{
     ElectricalSolidError, ElectricalSolidReport, ElectricalSolidSolve, ElectricalSupportContact,

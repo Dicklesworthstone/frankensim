@@ -3,6 +3,8 @@
 //! voltage supplies distributed current; these are NOT insulated two-electrode
 //! rod benchmarks. The heterogeneous loaded case is an independent P1 weak-form
 //! benchmark on this mesh, not an exact continuum transmission solution.
+#[path = "spatial/dynamics.rs"]
+mod dynamics;
 use super::*;
 use fs_couple::solid_enthalpy::plastic::electrical::spatial::*;
 use fs_em::{conduction::ConductionControls, spatial::conduction::*};
@@ -134,6 +136,26 @@ fn check_field(
     expected_e: [[f64; 3]; 2],
     jacobian: [f64; 2],
 ) {
+    check_field_with_current_tolerance(
+        problem,
+        field,
+        temperatures,
+        rho,
+        expected_e,
+        jacobian,
+        2e-9,
+    )
+}
+
+fn check_field_with_current_tolerance(
+    problem: &SpatialConduction,
+    field: &SpatialConductionField,
+    temperatures: [f64; 2],
+    rho: f64,
+    expected_e: [[f64; 3]; 2],
+    jacobian: [f64; 2],
+    current_tolerance_a_m2: f64,
+) {
     let mut expected_power = 0.0;
     for i in 0..2 {
         let sigma = 1.0 / (rho * (1.0 + RHO_SLOPE * (temperatures[i] - 300.0)));
@@ -143,7 +165,7 @@ fn check_field(
             close(
                 field.current_density_a_m2[i][axis],
                 sigma * expected_e[i][axis],
-                2e-9,
+                current_tolerance_a_m2,
             );
         }
         close(
