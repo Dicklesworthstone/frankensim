@@ -1,10 +1,14 @@
 //! Finite liquid temperature -> sourced viscosity -> joint Reynolds force/heat.
 //!
-//! The film has negligible thermal storage and equilibrates to an explicitly
-//! bound finite, well-mixed liquid reservoir. That reservoir's original caloric
-//! chart remains the energy owner. Flow through the pressure graph does not
-//! create another fluid mass inventory. This is a lubrication approximation,
-//! not a spatial thermal film, cavitation model or phase-changing flow solver.
+//! The film has negligible thermal storage. A whole pressure island, or each
+//! original hydraulic passage separately, equilibrates to an explicitly bound
+//! finite liquid reservoir. Each reservoir's original caloric chart remains
+//! the energy owner. The existing thermal network supplies its actual local
+//! temperature; no island-average temperature or viscosity is substituted.
+//! Flow through the pressure graph creates no second fluid mass inventory.
+//! This is a lumped lubrication approximation, not a gap-resolved thermal film,
+//! cavitation model or phase-changing flow solver. Heat destinations remain
+//! explicit routes; a temperature binding never deposits additional heat.
 
 use std::collections::BTreeSet;
 
@@ -16,6 +20,7 @@ use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep};
 use fs_qty::Temperature;
 use fs_thermal::enthalpy::{DepositionObserver, DepositionSimulation, StepConfig};
 
+use super::super::super::squeeze::ResistiveFilm;
 use super::super::super::{ImpactError, invalid};
 use super::super::MaterialContact;
 use super::feedback::MaterialFeedbackFrame;
@@ -40,6 +45,24 @@ pub struct LiquidFilmBinding<'m> {
     pub maximum_relative_viscosity_change: f64,
 }
 
+/// One original hydraulic passage at one finite liquid store's temperature.
+/// Channel bindings cover a complete pressure island and retain original
+/// channel indices. They cannot overlap a whole-island `LiquidFilmBinding`.
+#[derive(Clone, Debug)]
+pub struct LiquidFilmChannelBinding<'m> {
+    /// Original pressure-island insertion index.
+    pub film: usize,
+    /// Original hydraulic channel index, including a currently closed passage.
+    pub channel: usize,
+    /// Stable key of the finite liquid reservoir setting this passage temperature.
+    pub reservoir: String,
+    /// Original liquid source, pinned claims and fixed nonthermal context.
+    pub law: LiquidTemperatureLaw<'m>,
+    /// Maximum `abs(mu_next - mu_old) / mu_old` in one accepted mechanical sample.
+    /// Must lie in (0, 1]. This is a temporal-refinement gate, not an error bound.
+    pub maximum_relative_viscosity_change: f64,
+}
+
 /// Original prepared mechanics and caloric stores with a live material binding.
 ///
 /// At each accepted time, the retained sources and film operators match those
@@ -56,8 +79,39 @@ pub struct LiquidFilmBinding<'m> {
 pub struct LiquidFilmImpactSystem<'m> {
     inner: HeatedImpactSystem<'m>,
     bindings: Vec<LiquidFilmBinding<'m>>,
+    channel_bindings: Vec<LiquidFilmChannelBinding<'m>>,
     reservoir_indices: Vec<usize>,
     sources: Vec<ResolvedLiquidState>,
+    groups: Vec<FilmBindingGroup>,
+}
+
+// Uniform rows precede channel rows in the shared source arrays. Each group
+// covers one complete island, so geometry and coefficients are compiled once
+// per island rather than once per source row.
+struct FilmBindingGroup {
+    film: usize,
+    rows: std::ops::Range<usize>,
+    per_channel: bool,
+}
+
+impl FilmBindingGroup {
+    fn compile(
+        &self,
+        geometry: &ResistiveFilm,
+        sources: &[ResolvedLiquidState],
+    ) -> Result<ResistiveFilm, ImpactError> {
+        let sources = &sources[self.rows.clone()];
+        if self.per_channel {
+            let viscosities: Vec<_> = sources
+                .iter()
+                .map(ResolvedLiquidState::dynamic_viscosity_pa_s)
+                .collect();
+            geometry.with_channel_viscosities(&viscosities)
+        } else {
+            geometry.with_viscosity(sources[0].dynamic_viscosity_pa_s())
+        }
+        .map_err(|error| invalid(error.0))
+    }
 }
 
 impl<'m> LiquidFilmImpactSystem<'m> {
@@ -68,54 +122,126 @@ impl<'m> LiquidFilmImpactSystem<'m> {
     /// approximation in its source integration; transport Cp is not reapplied as
     /// a second temperature update. The caller owns spatial lumping validity.
     pub fn new(
+        inner: HeatedImpactSystem<'m>,
+        bindings: Vec<LiquidFilmBinding<'m>>,
+    ) -> Result<Self, ImpactError> {
+        Self::new_with_channels(inner, bindings, Vec::new())
+    }
+
+    /// Bind uniform islands and/or complete channel-resolved islands on the
+    /// SAME mechanical and enthalpy clock. Uniform rows retain their legacy
+    /// meaning; channel rows resolve each passage at its own reservoir's actual
+    /// accepted temperature. One store may control several passages.
+    ///
+    /// Channel rows are canonicalized by `(film, channel)` and must cover each
+    /// selected island exactly once, including closed passages. Missing,
+    /// duplicate, unknown and whole-island/channel-overlapping assignments
+    /// refuse. Work is bounded by the existing admitted islands/channel counts.
+    /// Each passage is uniform across its gap and length at that temperature;
+    /// this does not infer a gapwise thermal profile or a mixing law.
+    ///
+    /// Existing whole-film or explicitly selected per-channel heat routes own
+    /// work deposition. A viscosity binding neither chooses those destinations
+    /// nor deposits another copy. All source and density/phase gates of `new`
+    /// apply independently to every row before any coefficients are published.
+    pub fn new_with_channels(
         mut inner: HeatedImpactSystem<'m>,
         mut bindings: Vec<LiquidFilmBinding<'m>>,
+        mut channel_bindings: Vec<LiquidFilmChannelBinding<'m>>,
     ) -> Result<Self, ImpactError> {
-        if bindings.is_empty() || bindings.len() > 4 {
+        let maximum_bindings: usize = (0..inner.mechanics().squeeze_film_count())
+            .map(|index| {
+                inner
+                    .mechanics()
+                    .squeeze_film(index)
+                    .expect("existing film")
+                    .channel_count()
+            })
+            .sum();
+        let count = bindings.len().saturating_add(channel_bindings.len());
+        if count == 0 || count > maximum_bindings {
             return Err(invalid(
-                "liquid film feedback needs one to four existing pressure islands",
+                "liquid film feedback needs bounded bindings to existing pressure channels",
             ));
         }
         bindings.sort_by_key(|binding| binding.film);
-        let mut reservoir_indices = Vec::with_capacity(bindings.len());
-        let mut sources = Vec::with_capacity(bindings.len());
-        let mut updates = Vec::with_capacity(bindings.len());
+        channel_bindings.sort_by_key(|binding| (binding.film, binding.channel));
+        let mut groups = Vec::new();
         for (i, binding) in bindings.iter().enumerate() {
-            if (i > 0 && bindings[i - 1].film == binding.film)
-                || !binding.maximum_relative_viscosity_change.is_finite()
-                || binding.maximum_relative_viscosity_change <= 0.0
-                || binding.maximum_relative_viscosity_change > 1.0
-            {
-                return Err(invalid(
-                    "duplicate film or invalid constitutive step-change allowance",
-                ));
+            if i > 0 && bindings[i - 1].film == binding.film {
+                return Err(invalid("duplicate uniform film temperature binding"));
             }
-            let film = inner
+            inner
                 .mechanics()
                 .squeeze_film(binding.film)
                 .ok_or_else(|| invalid("liquid feedback names an absent pressure island"))?;
+            groups.push(FilmBindingGroup {
+                film: binding.film,
+                rows: i..i + 1,
+                per_channel: false,
+            });
+        }
+        let mut start = 0;
+        while start < channel_bindings.len() {
+            let film_index = channel_bindings[start].film;
+            let end = start
+                + channel_bindings[start..].partition_point(|binding| binding.film == film_index);
+            let film = inner
+                .mechanics()
+                .squeeze_film(film_index)
+                .ok_or_else(|| invalid("liquid feedback names an absent pressure island"))?;
+            if groups.iter().any(|group| group.film == film_index)
+                || end - start != film.channel_count()
+                || channel_bindings[start..end]
+                    .iter()
+                    .enumerate()
+                    .any(|(channel, binding)| binding.channel != channel)
+            {
+                return Err(invalid(
+                    "film temperature needs complete unique channel coverage without a uniform binding",
+                ));
+            }
+            groups.push(FilmBindingGroup {
+                film: film_index,
+                rows: bindings.len() + start..bindings.len() + end,
+                per_channel: true,
+            });
+            start = end;
+        }
+        groups.sort_by_key(|group| group.film);
+        let mut reservoir_indices = Vec::with_capacity(count);
+        let mut sources = Vec::with_capacity(count);
+        for (reservoir, law, maximum_change) in source_bindings(&bindings, &channel_bindings) {
+            if !maximum_change.is_finite() || maximum_change <= 0.0 || maximum_change > 1.0 {
+                return Err(invalid("invalid constitutive step-change allowance"));
+            }
             let index = inner
                 .reservoirs()
                 .iter()
-                .position(|store| store.key() == binding.reservoir)
+                .position(|store| store.key() == reservoir)
                 .ok_or_else(|| invalid("liquid feedback names an absent caloric reservoir"))?;
             let store = &inner.reservoirs()[index];
-            let source = resolve(binding, store, store.state())?;
-            updates.push((
-                binding.film,
-                film.with_viscosity(source.dynamic_viscosity_pa_s())
-                    .map_err(|error| invalid(error.0))?,
-            ));
+            let source = resolve(law, store, store.state())?;
             reservoir_indices.push(index);
             sources.push(source);
+        }
+        let mut updates = Vec::with_capacity(groups.len());
+        for group in &groups {
+            let geometry = inner
+                .mechanics()
+                .squeeze_film(group.film)
+                .expect("bound film");
+            updates.push((group.film, group.compile(geometry, &sources)?));
         }
         // No fallible operation follows this coefficient publication.
         inner.mechanics.swap_squeeze_films(&mut updates);
         Ok(Self {
             inner,
             bindings,
+            channel_bindings,
             reservoir_indices,
             sources,
+            groups,
         })
     }
 
@@ -123,14 +249,26 @@ impl<'m> LiquidFilmImpactSystem<'m> {
     pub const fn system(&self) -> &HeatedImpactSystem<'m> {
         &self.inner
     }
-    /// Retained data prescriptions in pressure-island order.
+    /// Whole-island prescriptions in pressure-island order. Channel-resolved
+    /// islands are inspected separately through `channel_bindings`.
     pub fn bindings(&self) -> &[LiquidFilmBinding<'m>] {
         &self.bindings
     }
-    /// Actual material states driving the operators at the accepted temperature.
-    /// Each entry corresponds to the same entry of `bindings`.
+    /// Channel prescriptions in `(film, channel)` order, retaining each original
+    /// passage index and its own reservoir/source assignment.
+    pub fn channel_bindings(&self) -> &[LiquidFilmChannelBinding<'m>] {
+        &self.channel_bindings
+    }
+    /// Actual uniform-island material states at the accepted temperature.
+    /// Each entry corresponds to the same entry of `bindings`; channel source
+    /// states are available through `channel_sources`.
     pub fn sources(&self) -> &[ResolvedLiquidState] {
-        &self.sources
+        &self.sources[..self.bindings.len()]
+    }
+    /// Actual per-passage material states at their respective accepted local
+    /// temperatures, in the same order as `channel_bindings`.
+    pub fn channel_sources(&self) -> &[ResolvedLiquidState] {
+        &self.sources[self.bindings.len()..]
     }
     /// Select the existing analytic/finite-difference Newton image.
     pub fn set_analytic_newton(&mut self, enabled: bool) {
@@ -140,9 +278,23 @@ impl<'m> LiquidFilmImpactSystem<'m> {
     pub fn set_iteration_limit(&mut self, limit: usize) -> Result<(), ImpactError> {
         self.inner.set_iteration_limit(limit)
     }
-    /// Release the accepted state and its constitutive data together.
+    /// Release accepted mechanics/heat and the uniform-island prescriptions.
+    /// This legacy extraction omits channel prescriptions. Channel/mixed callers
+    /// should use `into_all_parts` to retain all source assignments.
     pub fn into_parts(self) -> (HeatedImpactSystem<'m>, Vec<LiquidFilmBinding<'m>>) {
         (self.inner, self.bindings)
+    }
+    /// Release accepted mechanics/heat and both original source-binding sets.
+    /// Rebinding these prescriptions uses the same accepted local temperatures
+    /// and does not reset motion, caloric histories or the shared sample clock.
+    pub fn into_all_parts(
+        self,
+    ) -> (
+        HeatedImpactSystem<'m>,
+        Vec<LiquidFilmBinding<'m>>,
+        Vec<LiquidFilmChannelBinding<'m>>,
+    ) {
+        (self.inner, self.bindings, self.channel_bindings)
     }
 
     /// Advance with adiabatic finite stores and frozen contact sources.
@@ -211,11 +363,13 @@ impl<'m> LiquidFilmImpactSystem<'m> {
         let Self {
             inner,
             bindings,
+            channel_bindings,
             reservoir_indices,
             sources,
+            groups,
         } = self;
         let stores = inner.reservoirs().to_vec();
-        let geometry: Vec<_> = bindings
+        let geometry: Vec<_> = groups
             .iter()
             .map(|binding| {
                 inner
@@ -225,8 +379,8 @@ impl<'m> LiquidFilmImpactSystem<'m> {
                     .clone()
             })
             .collect();
-        let mut next_sources = Vec::with_capacity(bindings.len());
-        let mut updates = Vec::with_capacity(bindings.len());
+        let mut next_sources = Vec::with_capacity(sources.len());
+        let mut updates = Vec::with_capacity(groups.len());
         let frame = inner.step_with_material_feedback(forces, gate, contact, |trial| {
             let proposed = transport(trial)?;
             if proposed.transfers.len() != stores.len() {
@@ -234,27 +388,29 @@ impl<'m> LiquidFilmImpactSystem<'m> {
                     "liquid feedback requires the complete original thermal proposal",
                 ));
             }
-            for (i, binding) in bindings.iter().enumerate() {
+            for (i, (_, law, maximum_change)) in
+                source_bindings(bindings, channel_bindings).enumerate()
+            {
                 if gate.is_requested() {
                     return Err(ImpactError::Cancelled);
                 }
                 let index = reservoir_indices[i];
-                let source = resolve(binding, &stores[index], proposed.transfers[index].state)?;
+                let source = resolve(law, &stores[index], proposed.transfers[index].state)?;
                 let old_mu = sources[i].dynamic_viscosity_pa_s();
                 let new_mu = source.dynamic_viscosity_pa_s();
                 let relative = (new_mu - old_mu).abs() / old_mu;
-                if !relative.is_finite() || relative > binding.maximum_relative_viscosity_change {
+                if !relative.is_finite() || relative > maximum_change {
                     return Err(invalid(
                         "liquid viscosity changed too far in one mechanical sample; refine dt",
                     ));
                 }
-                updates.push((
-                    binding.film,
-                    geometry[i]
-                        .with_viscosity(new_mu)
-                        .map_err(|error| invalid(error.0))?,
-                ));
                 next_sources.push(source);
+            }
+            for (group, geometry) in groups.iter().zip(&geometry) {
+                if gate.is_requested() {
+                    return Err(ImpactError::Cancelled);
+                }
+                updates.push((group.film, group.compile(geometry, &next_sources)?));
             }
             Ok(proposed)
         })?;
@@ -315,12 +471,34 @@ impl<'m> LiquidFilmImpactSystem<'m> {
     }
 }
 
+fn source_bindings<'s, 'm>(
+    uniform: &'s [LiquidFilmBinding<'m>],
+    channels: &'s [LiquidFilmChannelBinding<'m>],
+) -> impl Iterator<Item = (&'s str, &'s LiquidTemperatureLaw<'m>, f64)> {
+    uniform
+        .iter()
+        .map(|binding| {
+            (
+                binding.reservoir.as_str(),
+                &binding.law,
+                binding.maximum_relative_viscosity_change,
+            )
+        })
+        .chain(channels.iter().map(|binding| {
+            (
+                binding.reservoir.as_str(),
+                &binding.law,
+                binding.maximum_relative_viscosity_change,
+            )
+        }))
+}
+
 fn resolve(
-    binding: &LiquidFilmBinding<'_>,
+    law: &LiquidTemperatureLaw<'_>,
     store: &CaloricReservoir<'_>,
     state: EquilibriumPhaseState,
 ) -> Result<ResolvedLiquidState, ImpactError> {
-    let card = binding.law.card().content_hash();
+    let card = law.card().content_hash();
     if store.curve().material_card_identity() != card
         || state.material_card_identity() != card
         || state.phase_curve_identity() != store.curve().identity()
@@ -330,13 +508,12 @@ fn resolve(
             "film temperature requires its original fully liquid caloric material",
         ));
     }
-    let source = binding
-        .law
+    let source = law
         .at_temperature(Temperature::new(state.temperature_k()))
         .map_err(|error| ImpactError::Owner(error.to_string()))?;
     let density = source.density_kg_m3();
     let mass = density * store.volume_m3();
-    if density != binding.law.reference_state().density_kg_m3()
+    if density != law.reference_state().density_kg_m3()
         || density != state.bulk_density_kg_m3()
         || !mass.is_finite()
         || (mass - store.mass_kg()).abs() > 64.0 * f64::EPSILON * store.mass_kg()

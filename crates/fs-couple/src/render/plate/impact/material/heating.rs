@@ -108,7 +108,25 @@ pub struct SqueezeFilmHeatRoute {
     pub fraction_to_a: f64,
 }
 #[derive(Clone, Copy)]
-struct FilmRoute { film: usize, a: usize, b: usize, fraction: f64 }
+struct FilmRoute { film: usize, channel: Option<usize>, a: usize, b: usize, fraction: f64 }
+
+/// Explicit destinations for ONE hydraulic passage's actual viscous work.
+/// Its power is `Q * delta_p` from the original pressure solution. Separate
+/// passages can heat separate finite liquid stores and then drive different
+/// source viscosities. No automatic wall/fluid heat partition is inferred.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SqueezeFilmChannelHeatRoute {
+    /// Original pressure-island insertion index.
+    pub film: usize,
+    /// Original channel insertion index within that pressure island.
+    pub channel: usize,
+    /// First finite destination's stable key.
+    pub to_a: String,
+    /// Second finite destination's stable key; may equal the first.
+    pub to_b: String,
+    /// Fraction delivered to A, in [0,1]; B receives the remainder.
+    pub fraction_to_a: f64,
+}
 
 /// Destination of one original Maxwell arm's irreversible material work.
 /// Branch indices follow `ImpactSystem::with_relaxation_branches` insertion
@@ -204,11 +222,35 @@ impl<'a> HeatedImpactSystem<'a> {
         film_routes: Vec<SqueezeFilmHeatRoute>, memory_routes: Vec<RelaxationHeatRoute>,
         heat_tolerance_j: f64,
     ) -> Result<Self, ImpactError> {
+        Self::new_with_channel_losses(mechanics, stores, routes, film_routes,
+            Vec::new(), memory_routes, heat_tolerance_j)
+    }
+
+    /// Route contact, whole-film, individual-passage and material-memory work
+    /// through the same accepted mechanical/enthalpy step.
+    ///
+    /// Each selected pressure island is solved only once during heat staging,
+    /// at the original discrete-gradient velocity and midpoint geometry.
+    /// Channel heat is its signed flow times physical pressure drop, which is
+    /// nonnegative even under suction and retains pressure-viscosity effects.
+    /// A whole-film route and a channel route on that film cannot coexist;
+    /// duplicate channels also refuse. Unselected passages remain in the
+    /// original mechanical loss account and outside this thermal boundary.
+    ///
+    /// This supplies spatial work destinations without a new fluid inventory,
+    /// thermal clock, or inferred advection. The existing network and material
+    /// feedback wrappers consume these same deposits and retain atomic refusal.
+    pub fn new_with_channel_losses(mechanics: PreparedImpactSystem,
+        stores: Vec<CaloricReservoir<'a>>, routes: Vec<ContactHeatRoute>,
+        film_routes: Vec<SqueezeFilmHeatRoute>, channel_routes: Vec<SqueezeFilmChannelHeatRoute>,
+        memory_routes: Vec<RelaxationHeatRoute>, heat_tolerance_j: f64,
+    ) -> Result<Self, ImpactError> {
         if stores.is_empty() || stores.len()>64
-            || (routes.is_empty() && film_routes.is_empty() && memory_routes.is_empty())
+            || (routes.is_empty() && film_routes.is_empty() && channel_routes.is_empty() && memory_routes.is_empty())
             || routes.len()>32 || film_routes.len()>4 || memory_routes.len()>256
+            || channel_routes.len()>4*fs_tribo::resistive_film::MAX_CHANNELS
             || !positive(heat_tolerance_j) {
-            return Err(invalid("mechanical heating needs 1..64 stores, up to 32 contacts, four films and 256 material arms, at least one route and a positive joule allowance"));
+            return Err(invalid("mechanical heating needs 1..64 stores, up to 32 contacts, four films with bounded channels and 256 material arms, at least one route and a positive joule allowance"));
         }
         for (i,s) in stores.iter().enumerate() {
             if stores[..i].iter().any(|old|old.key==s.key) {
@@ -229,7 +271,7 @@ impl<'a> HeatedImpactSystem<'a> {
         }
         // Canonical contact order makes input route ordering immaterial.
         compiled.sort_by_key(|r|r.contact);
-        let mut compiled_films: Vec<FilmRoute> = Vec::with_capacity(film_routes.len());
+        let mut compiled_films: Vec<FilmRoute> = Vec::with_capacity(film_routes.len()+channel_routes.len());
         for route in film_routes {
             if route.film >= mechanics.squeeze_film_count()
                 || compiled_films.iter().any(|r| r.film == route.film) {
@@ -240,9 +282,23 @@ impl<'a> HeatedImpactSystem<'a> {
             }
             let a=stores.iter().position(|s|s.key==route.to_a).ok_or_else(||invalid("unknown first film heat store"))?;
             let b=stores.iter().position(|s|s.key==route.to_b).ok_or_else(||invalid("unknown second film heat store"))?;
-            compiled_films.push(FilmRoute {film:route.film,a,b,fraction:route.fraction_to_a});
+            compiled_films.push(FilmRoute {film:route.film,channel:None,a,b,fraction:route.fraction_to_a});
         }
-        compiled_films.sort_by_key(|r|r.film);
+        for route in channel_routes {
+            let film=mechanics.squeeze_film(route.film)
+                .ok_or_else(||invalid("channel heat names an absent pressure island"))?;
+            if route.channel>=film.channel_count() || compiled_films.iter().any(|r|
+                r.film==route.film && (r.channel.is_none() || r.channel==Some(route.channel))) {
+                return Err(invalid("channel heat must name an existing passage once without a whole-film overlap"));
+            }
+            if !route.fraction_to_a.is_finite() || !(0.0..=1.0).contains(&route.fraction_to_a) {
+                return Err(invalid("channel heat partition must be finite and in [0,1]"));
+            }
+            let a=stores.iter().position(|s|s.key==route.to_a).ok_or_else(||invalid("unknown first channel heat store"))?;
+            let b=stores.iter().position(|s|s.key==route.to_b).ok_or_else(||invalid("unknown second channel heat store"))?;
+            compiled_films.push(FilmRoute {film:route.film,channel:Some(route.channel),a,b,fraction:route.fraction_to_a});
+        }
+        compiled_films.sort_by_key(|r|(r.film,r.channel));
         let mut compiled_memory: Vec<MemoryRoute> = Vec::with_capacity(memory_routes.len());
         for route in memory_routes {
             if route.branch >= mechanics.relaxation_branch_count()
@@ -351,13 +407,27 @@ fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], effort:&[f64],
         let mut configuration=[0.0;MAX_IMPACT_MODES];
         let mut force=[0.0;MAX_IMPACT_MODES];
         let mut pressure=[0.0;fs_tribo::resistive_film::MAX_CELLS];
+        let mut channels=[fs_tribo::resistive_film::FilmChannelReport::default();
+            fs_tribo::resistive_film::MAX_CHANNELS];
+        let mut current_film=None;
+        let mut total_power=0.0;
         for i in 0..n {configuration[i]=midpoint[2*i];}
         for r in film_routes {
             let film=&system.squeeze_films[r.film];
-            let report=film.evaluate_into(&configuration[..n],velocity,&mut force[..n],
-                &mut pressure[..film.cell_count()]).map_err(|e|invalid(e.0))?;
-            let q=system.config.dt_s*report.dissipated_power_w;
-            if !q.is_finite() || q<0.0 || (report.dissipated_power_w>0.0 && q==0.0) {
+            if current_film!=Some(r.film) {
+                let report=if r.channel.is_some() {
+                    film.evaluate_with_channels_into(&configuration[..n],velocity,&mut force[..n],
+                        &mut pressure[..film.cell_count()],&mut channels[..film.channel_count()])
+                } else {
+                    film.evaluate_into(&configuration[..n],velocity,&mut force[..n],
+                        &mut pressure[..film.cell_count()])
+                }.map_err(|e|invalid(e.0))?;
+                total_power=report.dissipated_power_w;
+                current_film=Some(r.film);
+            }
+            let selected_power=r.channel.map_or(total_power,|k|channels[k].dissipated_power_w);
+            let q=system.config.dt_s*selected_power;
+            if !q.is_finite() || q<0.0 || (selected_power>0.0 && q==0.0) {
                 return Err(invalid("viscous film heat is unrepresentable"));
             }
             let a=q*r.fraction;
@@ -376,7 +446,11 @@ fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], effort:&[f64],
             heat[r.to]+=q;deposited+=q;
         }
     }
-    let roundoff=256.0*f64::EPSILON*(record.dissipated.abs()+deposited.abs());
+    // Positive accumulation now permits up to 1024 independently routed film
+    // passages. Its roundoff allowance scales with the actual addition count.
+    let additions=routes.len()+film_routes.len()+memory_routes.len();
+    let roundoff=(256.0_f64.max(additions as f64))*f64::EPSILON
+        *(record.dissipated.abs()+deposited.abs());
     if heat.iter().any(|q|!q.is_finite() || *q<0.0) || !deposited.is_finite()
         || deposited>record.dissipated+roundoff {
         return Err(invalid("routed physical heat exceeds the time owner's dissipation"));

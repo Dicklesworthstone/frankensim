@@ -7312,6 +7312,36 @@ mechanical energy balance, and refuse incomplete or incoherent source sets.
 
 The film is frozen, incompressible, Newtonian, no-slip and quasistatic. Caller-declared thin-gap, pressure and applicable inertia/cavitation/rarefaction restrictions remain; no continuous viscosity-temperature feedback, added fluid inertia, phase-changing geometry or implicit wall/fluid heat partition is inferred. Compressible-film free-energy loss and unrelated mechanical/acoustic losses are not relabelled finite heat. The source binding remains inspectable while mechanics owns its immutable compiled pressure operator. Regression sources cover data-only liquid viscosity/caloric swaps, analytic pressure/work, unchanged mechanical stepping, finite temperature and network conduction, and atomic refusals. Native execution was unavailable in this session; the independent numerical reduction is not a Rust test pass.
 
+### Spatial liquid-film work and thermoviscous feedback
+
+`SqueezeFilmChannelHeatRoute` and `HeatedImpactSystem::new_with_channel_losses`
+route selected original passages' `dt * Q * delta_p` to explicit finite
+stores. One pressure/work evaluation per selected island uses the original
+midpoint configuration and discrete-gradient velocity; all passage routes
+reuse its ordered reports. Physical pressure retains Barus viscosity effects.
+Whole-film/channel overlap, duplicate passages, unknown destinations and invalid
+partitions refuse. Unselected work remains in the original mechanical loss
+account. The existing enthalpy/network transaction deposits selected heat once,
+with no second mechanical debit, fluid inventory or inferred wall heat split.
+
+`LiquidFilmImpactSystem::new_with_channels` combines unchanged whole-island
+bindings with complete, unique `(film, channel)` `LiquidFilmChannelBinding`
+coverage. Every passage retains its pinned liquid law and resolves viscosity
+from its bound finite reservoir's actual accepted temperature. Uniform and
+channel assignments cannot overlap. The same transaction holds old coefficients
+during the sample, admits every next source, constant-density/fully-liquid state
+and relative-change limit, compiles once per island, then publishes sources,
+coefficients, motion, heat, network and observer together. Channel inspection
+and `into_all_parts` retain both prescription sets; a temperature binding adds
+no second heat deposit. This is first-order, lumped per-passage feedback, without
+advection/mixing, gapwise profiles or evolving fluid mass. The focused film-heat
+regressions specify independent unequal-passage Poiseuille work and actual force
+response, source identity, uniform recovery, conducting-node temperature,
+selective/unrouted energy, duplicate-route refusal and late source/cancellation
+rollback. Production film-module flow/work tests executed successfully; these
+whole mechanical/thermal integration regressions remain unexecuted under the
+shared host's native dependency-build memory limit.
+
 ### Material relaxation through finite heat and transport
 
 `HeatedImpactSystem::new_with_losses` also binds explicit `RelaxationHeatRoute`
