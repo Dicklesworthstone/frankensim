@@ -365,6 +365,33 @@ The optional final argument is a solids mass fraction, not a percentage.
 The executable checks pack identities and prints every source hash. It does
 not infer packing, settling, entrained gas, viscosity or a separation recovery.
 
+### Yield stress and pipeline pressure requirements
+
+`fs_material::slurry::rheology` adds a source-qualified Herschel–Bulkley law
+and its laminar circular-pipe integral. The fit declares yield stress, reference
+excess stress at a reference shear rate and a dimensionless flow index. Its
+temperature, solids mass fraction and shear-rate limits remain mandatory.
+`SlurryConditions::from_stream` carries the existing slurry's mass fraction
+into the law while requiring an explicit temperature.
+
+`LaminarCircularPipe::pressure_for_flow` solves for frictional pressure at a
+requested signed volume flow. It reports the unsheared core, wall stress/rate,
+hydraulic power and actual numerical residual. The source domain and an
+explicit caller-declared laminar ceiling bound the solve.
+
+```bash
+cargo run -p fs-material --example mineral_pipe -- 0.005 0.6
+```
+
+The authored example uses a 0.1 m inner radius, 100 m length, 298.15 K,
+25 Pa yield stress, 8 Pa excess stress at 10/s, and flow index 0.6.
+At 0.005 m³/s it requires approximately 71680.085 Pa, with a 0.069754 m
+unsheared-core radius and 358.400 W hydraulic dissipation. Reversing flow
+reverses pressure while retaining positive dissipation. Solids mass fraction
+0.9 and volume flow 100 m³/s refuse the declared support. These are arithmetic
+scenario results, not measured mineral rheology. Turbulence, settling, entrance
+losses, fittings, elevation and pump efficiency require separate closures.
+
 ## Recovery curves and material held in process tanks
 
 `fs_material::recovery::RecoveryKinetics` evaluates two explicitly selected

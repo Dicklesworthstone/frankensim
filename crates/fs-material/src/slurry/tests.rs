@@ -134,6 +134,24 @@ fn constituent_volumes_give_distinct_mass_and_volume_fractions() {
 }
 
 #[test]
+fn rheology_conditions_retain_mass_basis_and_require_actual_temperature() {
+    let feed = stream(4.0, 6.0);
+    let temperature = fs_qty::Temperature::new(298.15);
+    let conditions = rheology::SlurryConditions::from_stream(&feed, temperature).unwrap();
+    assert_eq!(conditions.temperature, temperature);
+    assert_eq!(conditions.solids_mass_fraction.value(), 0.4);
+    assert_ne!(
+        conditions.solids_mass_fraction.value(),
+        feed.state().solids_volume_fraction.unwrap().value()
+    );
+    assert!(rheology::SlurryConditions::from_stream(&stream(0.0, 0.0), temperature).is_err());
+    assert!(rheology::SlurryConditions::from_stream(&stream(4.0, 0.0), temperature).is_err());
+    assert!(
+        rheology::SlurryConditions::from_stream(&feed, fs_qty::Temperature::new(f64::NAN)).is_err()
+    );
+}
+
+#[test]
 fn source_query_receipt_and_range_endpoint_remain_explicit() {
     let reference = pack(
         "reported-range",

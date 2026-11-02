@@ -13,6 +13,9 @@
 //! constituent; splitting is nonselective. Density and composition are undefined
 //! for a zero-flow stream. Arithmetic that overflows or erases a positive phase
 //! through underflow is refused. All operations have explicit small size bounds.
+//!
+//! The separate [`rheology`] module evaluates source-qualified steady shear and
+//! laminar pipe flow; its parameters and temperature require explicit declarations.
 
 use fs_blake3::ContentHash;
 use fs_matdb::{
@@ -20,6 +23,10 @@ use fs_matdb::{
 };
 use fs_qty::{Density, Dimensionless, Dims, MassFlowRate, QuantitySpec, VolumetricFlowRate};
 use std::collections::BTreeMap;
+
+/// Source-qualified Herschel–Bulkley/Bingham rheology and laminar pipe hydraulics.
+#[path = "slurry/rheology.rs"]
+pub mod rheology;
 
 /// Maximum distinct dry constituents admitted by a stream.
 pub const MAX_SOLID_COMPONENTS: usize = 128;

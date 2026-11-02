@@ -61,6 +61,35 @@ calculation. No dissolution, reaction, thermal equilibration, volume contraction
 settling, rheology, liberation, separation efficiency or field calibration is
 inferred; source uncertainty is retained without inventing a mixture interval.
 
+## Yield-stress slurry rheology and pipe pressure
+
+`slurry::rheology::HerschelBulkleyCard` retains an explicit yield stress,
+reference excess stress at a reference shear rate, flow index and original
+specimen/test provenance. This reference-rate form keeps stress in Pa even
+for noninteger exponents. Signed stress and inverse shear rate use the same
+finite temperature, solids MASS fraction and absolute-rate domain. Zero rate
+returns the complete static yield interval; positive shearing reports
+nonnegative dissipation. `SlurryConditions::from_stream` transfers the existing
+stream's mass fraction and requires an explicit temperature; density metadata
+cannot silently establish thermal equilibrium or a rheological fit.
+
+`LaminarCircularPipe` integrates fully developed no-slip Herschel–Bulkley flow
+analytically, retaining the unsheared plug and stationary yield threshold.
+It returns signed flow, pressure drop, wall stress/rate, plug radius and
+hydraulic dissipation. Pressure inversion uses bounded bisection and an explicit
+volume-flow tolerance inside both the source domain and caller-declared
+laminar wall-rate ceiling. The ceiling is an applicability declaration, not
+a predicted transition. Overflow, positive underflow and unsupported conditions
+refuse; no turbulent, settling, entrance, elevation or pump-efficiency correction
+is inferred.
+
+The six rheology tests check Poiseuille and Buckingham–Reiner limits,
+independent radial quadrature for a noninteger exponent, signed reversal,
+inverse residuals, yield behavior, source limits and numerical refusal. The
+stream adapter has a separate real-pack mass/volume-basis regression.
+`cargo run -p fs-material --example mineral_pipe -- 0.005 0.6` exposes an
+authored pressure-sizing example; its parameters are not a plant calibration.
+
 ## Source-specific comminution references
 
 `comminution` supplies a typed, uncorrected Bond grinding-energy closure,
