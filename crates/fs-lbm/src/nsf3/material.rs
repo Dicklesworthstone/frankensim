@@ -438,7 +438,7 @@ impl NsfLaw {
         (self.dx_m / self.dt_s).powi(2)
     }
 
-    fn transport_scale(&self) -> f64 {
+    pub(super) fn transport_scale(&self) -> f64 {
         self.dt_s / (self.rho_ref_kg_m3 * self.dx_m * self.dx_m)
     }
 }

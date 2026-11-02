@@ -2312,6 +2312,30 @@ pressure-dilatation, shocklet closure or thermal wall function is supplied.
 The modeled shear and Prandtl heat-flux form follows NASA report 20200002378,
 equations (8)-(10), without its additional compressible terms.
 
+`NsfGrid3::with_dynamic_thermal_sgs(NsfDynamicThermalSgsConfig, maximum_bytes)`
+instead fits momentum and temperature diffusivity independently through the
+shared Favre--Germano producer. This path requires a fully periodic, all-fluid
+domain with at least three cells per axis. Each original predictor and accepted
+endpoint uses its current density, Guo-corrected physical velocity, temperature
+and material response. Fitted viscosity modifies only deviatoric relaxation;
+`rho (cp/R) alpha_t` enters the same conservative heat flux, including cases
+with zero modeled stress and nonzero modeled heat. No second heating source or
+energy integrator is introduced.
+
+Momentum-ratio and total-viscosity limits retain the original molecular source.
+Heat-ratio admission checks both the cached cell source and the original shared
+face conductivity, without a second face material query. Positive modeled heat
+with zero molecular conductivity refuses a finite ratio bound. Local and
+dynamic controls are mutually exclusive; wall, solid and open-face topologies
+are outside this dynamic path. Refusal preserves accepted transport, fields
+and energy accounts. The two reused filter buffers require 200 nominal bytes
+per cell, with actual-capacity admission; the existing NSF state, predictor
+and transport vectors are outside that filter budget. A single serial fit lock
+preserves the original parallel cell/face loops. This does not make the NSF
+step allocation-free or add whole-step cancellation. The existing low-Mach,
+temperature and stability qualifications remain in force; no DNS, wall-model,
+shock or complete compressible SGS-energy claim is added.
+
 ### Source-owned NASA9 energy and local transport in the NSF grid
 
 `NsfSpec<G = GasSpec>` admits `ThermochemicalNsfGas` through the same

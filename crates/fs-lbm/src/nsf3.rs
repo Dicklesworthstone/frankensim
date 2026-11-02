@@ -58,7 +58,9 @@
 //! theta)` only while it stays below the lattice speed (declared Mach and temperature-ratio bounds, refused
 //! beyond). Explicit exploratory Smagorinsky/WALE transport is available through
 //! [`NsfGrid3::with_sgs`], including conservative turbulent heat transport; it is
-//! never enabled by default. The optional open-axis boundary is a separately
+//! never enabled by default. Fully periodic fluid domains additionally admit
+//! independently fitted momentum and heat through [`NsfGrid3::with_dynamic_thermal_sgs`].
+//! The optional open-axis boundary is a separately
 //! bounded local linear characteristic rung, not a qualified nonreflecting jet interface. Sound-speed dispersion is second order; see the
 //! battery.
 //! Prescribed complete reservoir faces are a separate, mutually exclusive mode.
@@ -73,7 +75,7 @@ use material::NsfCellMaterial;
 mod material;
 pub use material::{NamedMixtureNsfGas, NsfGasMedium, ThermochemicalNsfGas};
 mod sgs;
-pub use sgs::{NsfSgsConfig, NsfSgsTransport};
+pub use sgs::{NsfDynamicThermalSgsConfig, NsfSgsConfig, NsfSgsTransport};
 mod open;
 pub use open::{MAX_NSF_RESERVOIR_APERTURES, NsfOpenState, NsfReservoirAperture,
     NsfReservoirExchange, NsfReservoirFlow, NsfReservoirTileState};
@@ -175,6 +177,14 @@ pub enum NsfError {
     },
     /// Explicit SGS controls or the local modeled/molecular viscosity ratio refused.
     Sgs(crate::sgs3::SgsError),
+    /// The same-stage periodic dynamic momentum/scalar fit refused.
+    DynamicSgs(crate::sgs3::dynamic::DynamicSgsError),
+    /// Modeled heat exceeded its original cell or shared-face molecular source.
+    SgsHeatRatio {
+        cell: usize,
+        ratio: f64,
+        maximum: f64,
+    },
     /// A non-finite state or non-positive density/absolute temperature.
     NonFinite {
         /// Offending cell index.
@@ -584,6 +594,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     /// Local source response only; empty for the bit-preserving GasSpec route.
     material: Vec<Option<NsfCellMaterial>>,
     sgs: Option<NsfSgsConfig>,
+    dynamic_sgs: Option<sgs::DynamicTransport>,
     /// Accepted-state closure; empty in the unchanged molecular route.
     sgs_transport: Vec<NsfSgsTransport>,
     n: usize,
@@ -791,6 +802,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             n,
             solid: solid_v,
             sgs: None,
+            dynamic_sgs: None,
             sgs_transport: Vec::new(),
             f: vec![[0.0; Q]; n],
             e,
@@ -1208,7 +1220,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             // telescoping ledger. Never add modeled heat flux through an
             // impermeable wall; its molecular half-cell law below is retained.
             if let (Some(left), Some(right)) = (transport.get(i), transport.get(j)) {
-                kf += 0.5 * (left.turbulent_conductivity_lu + right.turbulent_conductivity_lu);
+                let modeled =
+                    0.5 * (left.turbulent_conductivity_lu + right.turbulent_conductivity_lu);
+                self.admit_dynamic_heat_ratio(i, modeled, kf)?;
+                kf += modeled;
             }
             let wide = match (self.fluid_at(x, a, -1), self.fluid_at(self.at(j), a, 1)) {
                 (Some(m), Some(p)) => Some((m, p)),

@@ -13,6 +13,10 @@
 use super::*;
 use crate::sgs3::{SgsConfig, SgsError, SgsModel, eddy_viscosity};
 
+mod dynamic;
+pub(super) use dynamic::DynamicTransport;
+pub use dynamic::NsfDynamicThermalSgsConfig;
+
 /// Every modeling choice is explicit; there is no turbulence default.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NsfSgsConfig {
@@ -65,6 +69,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// supplied turbulent inflow spectrum or a transparency qualification.
     pub fn with_sgs(mut self, config: NsfSgsConfig) -> Result<Self, NsfError> {
         config.validate()?;
+        if self.dynamic_sgs.is_some() {
+            return Err(NsfError::Input("local and dynamic SGS controls are mutually exclusive"));
+        }
         let coefficient = match config.closure.model {
             SgsModel::Smagorinsky { cs } => cs,
             SgsModel::Wale { cw } => cw,
@@ -169,6 +176,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         material: &[Option<NsfCellMaterial>],
         faces: Option<&OpenFaces>,
     ) -> Result<Vec<NsfSgsTransport>, NsfError> {
+        if self.dynamic_sgs.is_some() {
+            return self.dynamic_sgs_field(rho, velocity, theta, material);
+        }
         let Some(config) = self.sgs else {
             return Ok(Vec::new());
         };

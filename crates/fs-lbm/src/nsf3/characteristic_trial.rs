@@ -206,7 +206,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         if cancelled() {
             return Err(NsfError::Input("characteristic interval cancelled"));
         }
-        if self.open.is_none() || self.sources.is_some() || steps == 0
+        if self.open.is_none() || self.sources.is_some() || self.dynamic_sgs.is_some() || steps == 0
             || self.n.checked_mul(steps).is_none_or(|work| work > maximum_cell_steps)
             || self.steps.checked_add(steps).is_none()
         {
@@ -369,6 +369,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         Self {
             spec: self.spec.clone(), law: self.law.clone(), material: self.material.clone(),
             sgs: self.sgs, sgs_transport: self.sgs_transport.clone(),
+            // The admitted characteristic topology excludes periodic dynamic SGS.
+            dynamic_sgs: None,
             n: self.n, solid: self.solid.clone(), f: self.f.clone(), e: self.e.clone(),
             theta: self.theta.clone(), force: self.force.clone(), div: self.div.clone(),
             wall_out: self.wall_out, open: self.open,
