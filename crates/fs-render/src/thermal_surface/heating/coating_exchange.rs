@@ -9,6 +9,9 @@
 /// Conservative mutual exchange between opaque native coating specimens.
 pub mod gap;
 
+/// Layer-resolved exchange with explicitly authored exterior radiation baths.
+pub mod external;
+
 use super::{
     CoatingOpticsModel, NativeCoatingEmission, NativeCoatingEmissionError, StatefulCoatingLayer,
     SubstrateOpticsModel, SurfaceHeatingError, SurfaceHeatingReceiver,
@@ -722,7 +725,26 @@ fn admit_law_rows(
     rows: &mut usize,
     maximum: usize,
 ) -> Result<(), NativeCoatingExchangeError> {
-    for film in stack.films() {
+    admit_optical_law_rows(
+        stack.films().iter(),
+        match stack {
+            IsothermalCoatingStack::Opaque { substrate, .. } => Some(substrate),
+            IsothermalCoatingStack::Transmitting { .. } => None,
+        },
+        laws,
+        rows,
+        maximum,
+    )
+}
+
+fn admit_optical_law_rows<'a>(
+    films: impl IntoIterator<Item = &'a CoatingOpticsModel>,
+    substrate: Option<&SubstrateOpticsModel>,
+    laws: &mut BTreeSet<(u8, [u8; 32])>,
+    rows: &mut usize,
+    maximum: usize,
+) -> Result<(), NativeCoatingExchangeError> {
+    for film in films {
         if let CoatingOpticsModel::Law(law) = film {
             if laws.insert((0, *law.identity().as_bytes())) {
                 *rows = rows
@@ -731,11 +753,7 @@ fn admit_law_rows(
             }
         }
     }
-    if let IsothermalCoatingStack::Opaque {
-        substrate: SubstrateOpticsModel::Law(law),
-        ..
-    } = stack
-    {
+    if let Some(SubstrateOpticsModel::Law(law)) = substrate {
         if laws.insert((1, *law.identity().as_bytes())) {
             *rows = rows
                 .checked_add(law.row_count())

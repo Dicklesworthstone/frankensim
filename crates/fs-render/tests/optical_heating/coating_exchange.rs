@@ -14,8 +14,9 @@ use fs_render::thermal_surface::heating::{
 use fs_thermal::enthalpy::{Reservoir, ThermalLink};
 use std::sync::Arc;
 
-mod infrared;
+mod external;
 mod gap;
+mod infrared;
 
 struct Hot;
 impl ThermalLaw for Hot {

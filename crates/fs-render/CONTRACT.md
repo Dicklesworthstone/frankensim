@@ -5578,3 +5578,57 @@ reverse routing, a complete two-bath single-film reference using independent
 Fresnel amplitude sums, positive weak-loss/subnormal conductances, and empty/dark
 channels, exact slot/work budgets, temperature shape and late cancellation.
 <!-- coating-external-bath:end -->
+
+<!-- native-coating-external-bath:start -->
+### Native per-layer exterior radiative boundary
+
+`NativeCoatingExternalBathExchange` composes the original layer-resolved
+exterior response with `DepositionSimulation::advance_observed`. Each
+`CoatingExternalBathSource` supplies one selected vacuum-facing port, its bath,
+area and quadrature, plus an `ExternalCoatingStack` of the original
+`StatefulCoatingLayer` receivers and optional opaque-substrate receiver.
+Every channel retains its original material, caloric identity, storage basis,
+mass and geometry. Films read their own accepted temperature and exact native
+specific enthalpy, including optical changes on a latent-temperature plateau.
+Reverse transmitting traversal preserves authored film/receiver association.
+
+The source's `surface_cell` owns the physical patch area and its optional native
+ambient bath. Area is charged once per port to that cell's CURRENT exposed
+surface. Buried film/substrate receivers need no exposed area. Repeated receiver
+cells sum their channel watts and positive frozen-optics secants. Several ports
+share the original-law row budget; retained channel-by-wavelength slots and
+cumulative optical/rate work have separate explicit bounds. IDs are canonical,
+and duplicated source IDs refuse. Scalar area checks do not prove geometric
+non-overlap or detect another radiation owner on the same patch/band.
+
+One coherent solve supplies all channels of a port. Immutable quadrature
+responses are shared by clones and reused while resolved optical identity is
+unchanged. Temperature/enthalpy state keys invalidate native optical snapshots;
+unchanged states and baths reuse rates. Native ambient events refresh the bath
+even when optics are unchanged. Secants combine with native conduction/source
+step bounds. Accepted-start watts and accepted duration own the interval before
+endpoint refresh. Domain, area, budget or cancellation refusal leaves the
+accepted native simulation and observer unchanged through transactional advance.
+
+Signed channel heat enters native `external_heat_j` once. Port energy and
+`energy_by_cell_j` report that already-applied heat; they are diagnostic accounts,
+not additional thermal stores. Compose independent supported transfers through
+the existing native observer machinery.
+
+This is an EXTERIOR boundary contribution. Internal radiative redistribution
+between separately heated absorbing layers remains a separate operator; total
+external closure alone does not certify complete individual-layer trajectories.
+Both ports of a vacuum/vacuum specimen must be authored when exposed. A complete
+isothermal specimen, or a single absorbing thermal subsystem surrounded by
+lossless films, then has its complete far-field boundary within the admitted
+source band. Material-side mode density, near-field transport, bolometric tails
+and internal layer-to-layer exchange are not inferred.
+
+The four native `coating_exchange/external.rs` integration groups check distinct
+hot/cold receivers behind occupied buried faces, repeated-cell isothermal
+reduction, two-sided single-absorber temperature feedback against independent
+SI-Planck/native-field integration and RK4, latent enthalpy optics, ambient
+events and split continuation, global slot/law/work limits, and atomic late
+cancellation/coverage refusal. The low-level exterior tests supply independent
+thin-film amplitude and layer-depth absorption references.
+<!-- native-coating-external-bath:end -->
