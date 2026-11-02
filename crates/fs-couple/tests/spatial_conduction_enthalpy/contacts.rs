@@ -21,7 +21,16 @@ use fs_material::{
     },
     thermal::interface::ThermalInterfacePoint,
 };
-use fs_qty::Pressure;
+use fs_qty::{
+    Pressure,
+    semantic::{QuantityKind, SemanticType, ValueForm},
+};
+
+fn static_quantity(kind: QuantityKind) -> QuantitySpec {
+    // A source's named environmental role needs its physical quantity kind;
+    // SI dimensions alone cannot distinguish pressure from evolving stress.
+    QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+}
 
 fn claim(key: PropertyKey, value: PropertyValue, validity: ValidityDomain) -> PropertyClaim {
     PropertyClaim {
@@ -63,7 +72,7 @@ fn interface_card(cards: &[MaterialCard; 2], claims: ClaimSet) -> InterfaceSyste
 
 fn interface(cards: &[MaterialCard; 2], r0: f64, upper: f64) -> InterfaceSystemCard {
     let mut claims = ClaimSet::new();
-    let temperature = QuantitySpec::dimensional(Temperature::DIMS);
+    let temperature = static_quantity(QuantityKind::AbsoluteTemperature);
     claims
         .insert_claim(claim(
             PropertyKey::new(ELECTRICAL_RP, ELECTRICAL_RD),
@@ -102,7 +111,7 @@ fn interface(cards: &[MaterialCard; 2], r0: f64, upper: f64) -> InterfaceSystemC
             },
             ValidityDomain::unconstrained().with_quantity(
                 "pressure",
-                QuantitySpec::dimensional(Pressure::DIMS),
+                static_quantity(QuantityKind::Pressure),
                 1e5,
                 2e5,
             ),
@@ -115,19 +124,19 @@ fn interface_point(temperature: f64, pressure: f64) -> QueryPoint {
     QueryPoint::new()
         .with_quantity(
             "Ta",
-            QuantitySpec::dimensional(Temperature::DIMS),
+            static_quantity(QuantityKind::AbsoluteTemperature),
             temperature,
         )
         .unwrap()
         .with_quantity(
             "Tb",
-            QuantitySpec::dimensional(Temperature::DIMS),
+            static_quantity(QuantityKind::AbsoluteTemperature),
             temperature,
         )
         .unwrap()
         .with_quantity(
             "pressure",
-            QuantitySpec::dimensional(Pressure::DIMS),
+            static_quantity(QuantityKind::Pressure),
             pressure,
         )
         .unwrap()

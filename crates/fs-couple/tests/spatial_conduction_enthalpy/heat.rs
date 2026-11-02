@@ -14,7 +14,15 @@ use fs_couple::circuit_enthalpy::{
 use fs_exec::{CancelGate, Cx};
 use fs_matdb::{ClaimSelection, InterfaceSystemCard, SurfaceSpec, SystemContext};
 use fs_material::thermal::interface::ThermalInterfacePoint;
-use fs_qty::Pressure;
+use fs_qty::{
+    Pressure,
+    semantic::{QuantityKind, SemanticType, ValueForm},
+};
+
+fn pressure_quantity() -> QuantitySpec {
+    // The external source coordinate is held pressure, not a stress response.
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
 
 fn emissive_material(
     rho: f64,
@@ -89,7 +97,7 @@ fn interface(cards: &[MaterialCard; 2]) -> InterfaceSystemCard {
             },
             validity: ValidityDomain::unconstrained().with_quantity(
                 "pressure",
-                QuantitySpec::dimensional(Pressure::DIMS),
+                pressure_quantity(),
                 100000.0,
                 200000.0,
             ),
@@ -160,11 +168,7 @@ fn with_heat<R>(
         .unwrap()
         .with_quantity("bT", QuantitySpec::dimensional(Temperature::DIMS), 300.0)
         .unwrap()
-        .with_quantity(
-            "pressure",
-            QuantitySpec::dimensional(Pressure::DIMS),
-            pressure,
-        )
+        .with_quantity("pressure", pressure_quantity(), pressure)
         .unwrap();
     let contacts = [MaterialContactLink {
         link: 7,
