@@ -1218,6 +1218,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-feec",
+ "fs-fft",
  "fs-io",
  "fs-matdb",
  "fs-material",

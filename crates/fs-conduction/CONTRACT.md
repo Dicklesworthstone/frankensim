@@ -3127,3 +3127,57 @@ This source adapter currently binds one isotropic material over a stationary
 mesh. Evolving geometry, density-driven mass changes, pressure work, convection,
 phase kinetics, anisotropic phase mixtures and uncertainty propagation are
 not supplied by this path.
+
+## Interference-driven linear lumped thermal response
+
+The native lumped rung now accepts an explicitly bound prepared quadratic
+power spectrum through `lumped::interference::PreparedLumpedInterference`.
+It borrows the actual `LumpedNetwork`, original nodes and shared
+`fs-fft` spectra. Preparation applies the original declared `BiotGate`,
+then requires exactly one named binding per node, nonblank source units and
+a common declared source clock, and a finite positive watts-per-spectrum-unit
+scale. For a spatially uniform W/m³ source, that scale can be an explicitly
+declared volume; no spatial integral or absorption fraction is inferred.
+
+Each independent node retains its original constant C, G and common ambient.
+For an absolute source-clock interval, the shared causal spectral integral
+solves C dT/dt = P(t) - G(T - T_ambient) analytically, preserving all authored
+difference and sum frequencies without a time grid, carrier averaging or
+network re-solve. A general quadratic observable is not proof of dissipation:
+the caller explicitly binds signed applied thermal power. Reversible field
+storage, acoustic intensity and mechanical work do not become heat merely
+because they have a spectrum. An ensemble-mean power spectrum produces the
+linear model's mean temperature, with no invented fluctuation statistics.
+
+The atomic result retains original node/network/gate/clock provenance,
+absolute endpoint and DD temperature change, unweighted signed source input
+joules, stored energy change and outward signed ambient exchange. The source
+integral, causal convolution and initial ambient relaxation are used once
+each; observation does not consume energy or advance external thermal state.
+DD initial-temperature queries retain weak accumulated heating across successive
+intervals, while the shared one-minus-decay kernel avoids subtracting a rounded
+exponential from unity. The balance residual is an algebraic diagnostic, not
+an independent error certificate.
+
+Preparation bounds nodes, combined prepared/result vector payload and total
+per-query spectral work (counting reused spectra again for distinct thermal
+rates), with a hard ceiling of 1,048,576 terms. Queries allocate one result
+vector; their per-node causal mathematics allocates nothing. Cancellation and
+any invalid unit/clock/name/scale/domain/finite-range/budget admission discard
+partial results. Ambient, initial and endpoint Kelvin temperatures must be
+finite and positive. Endpoint admission does not prove positivity or a material
+validity envelope throughout the intervening trajectory. Nonlinear capacities,
+temperature-dependent conductances, radiation and exchange between nodes are
+outside this constant-property rung.
+
+The focused tests in `src/lumped/interference/tests.rs` compare constant
+forcing with the original native response; full real carrier/beat forcing and
+proper optical-carrier beats with an independent RK4 ODE; interval composition
+and energy signs; weak DD temperature accumulation and tiny relaxation; and
+original Biot, bindings, physical domains, work/storage budgets and cancellation.
+
+The exact shared implementation, the original native LumpedNode/LumpedNetwork/
+BiotGate source and the thirteen new thermal tests compiled, linked and ran
+with real fs_math: all 48 combined tests passed, with no compiler warnings.
+Only the outer ConductionError variants were nominal. Full Cargo workspace,
+Clippy and the repository quality gate were not run in this scoped executable.

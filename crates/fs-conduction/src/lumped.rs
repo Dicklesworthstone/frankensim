@@ -34,6 +34,8 @@
 //! is the failure mode a fidelity graph exists to prevent, so the reduced
 //! rung deliberately has no power vocabulary of its own.
 
+pub mod interference;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_matdb::{
@@ -965,13 +967,14 @@ pub fn solve_lumped_contact_step(
         for (side, body) in [a, b].into_iter().enumerate() {
             let final_h = states[side].specific_enthalpy_j_kg();
             let temperature = states[side].temperature_k();
-            let delta_s = body.phase_curve
+            let delta_s = body
+                .phase_curve
                 .specific_entropy_change_j_kg_k(initial[side], final_h)
                 .map_err(|error| fail(&error.to_string()))?;
             storage_change_j_k[side] = body.mass_kg * delta_s;
             supplied_heat_at_body_temperature_j_k[side] = sources[side] / temperature;
-            temporal_defect_j_k[side] = body.mass_kg
-                * (delta_s - (final_h - initial[side]) / temperature);
+            temporal_defect_j_k[side] =
+                body.mass_kg * (delta_s - (final_h - initial[side]) / temperature);
             energy_residual_entropy_j_k[side] = residuals[side] / temperature;
         }
         let ta = step.state_a.temperature_k();
@@ -983,8 +986,10 @@ pub fn solve_lumped_contact_step(
         } else {
             (-step.heat_a_to_b_j / ta) * ((tb - ta) / tb)
         };
-        if !contact_generation_j_k.is_finite() || contact_generation_j_k < 0.0
-            || storage_change_j_k.into_iter()
+        if !contact_generation_j_k.is_finite()
+            || contact_generation_j_k < 0.0
+            || storage_change_j_k
+                .into_iter()
                 .chain(supplied_heat_at_body_temperature_j_k)
                 .chain(temporal_defect_j_k)
                 .chain(energy_residual_entropy_j_k)
