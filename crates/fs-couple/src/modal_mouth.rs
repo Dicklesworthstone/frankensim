@@ -12,6 +12,11 @@
 //! radial basis and panel-centroid traces. Omitted azimuthal/radial modes,
 //! mesh/basis convergence, the chosen BEM route's validity and interior wall
 //! losses remain the respective physical owners' responsibilities.
+//! [`realization`] converts explicitly supported source samples to the existing
+//! complete causal MIMO load through the shared physical-source fitting owner.
+
+/// Source-bound rational memory for all signed modal mouth coordinates.
+pub mod realization;
 
 use fs_bem::helmholtz::aperture::{
     Aperture, ApertureError, ApertureImpedance, ApertureRoute, aperture_impedance,

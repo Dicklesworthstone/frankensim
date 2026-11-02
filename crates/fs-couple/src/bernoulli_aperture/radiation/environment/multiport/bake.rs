@@ -207,7 +207,7 @@ pub fn bake_baffled_mimo(
 // One unchanged fitting/certification owner for every physical source sampler.
 // Geometry/material/quadrature admission belongs to each caller before this sweep.
 #[allow(clippy::too_many_arguments)]
-fn fit_source<E: From<BaffledMimoBakeError>>(
+pub(crate) fn fit_source<E: From<BaffledMimoBakeError>>(
     n: usize, mechanics_rate_hz: u32, band_hz: [f64; 2],
     options: BaffledMimoBakeOptions, limits: MimoRadiationLimits, gate: &CancelGate,
     sample: impl Fn(&[f64], &CancelGate) -> Result<Vec<Vec<C64>>, E>,
@@ -336,7 +336,7 @@ fn admit_apertures(apertures: &[CircularOpening]) -> Result<(), BaffledMimoBakeE
     Ok(())
 }
 
-fn admit_common(gas: &GasState, n: usize, rate: u32, band: [f64; 2],
+pub(crate) fn admit_common(gas: &GasState, n: usize, rate: u32, band: [f64; 2],
     opts: BaffledMimoBakeOptions, limits: MimoRadiationLimits) -> Result<(), BaffledMimoBakeError>
 {
     gas.validate_coherence().map_err(|_| invalid("source gas must be coherent"))?;
