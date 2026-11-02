@@ -1632,3 +1632,50 @@ compliant recoil and transactional refusal. An independent pressure-times-plasti
 slip return map refines in space and time across simultaneous load and shear
 reversals, including contact entry/exit; it does not reuse native dissipated work.
 
+## Regularized power-law Reynolds passages
+
+`resistive_film::power_law::PowerLawFilm` adds a stationary-wall,
+incompressible, full-film generalized-Newtonian owner on the original
+`ResistiveFilm` graph and its immutable geometry. Each original channel has
+explicit SI consistency `K`, positive stress index `n`, and a positive
+physical core shear rate `gamma0`, with
+`mu(gamma) = K * max(gamma, gamma0)^(n - 1)`. This is a continuous,
+strictly increasing stress law: it supports thinning and thickening without
+inferring yield stress, shear history, material authority, or an arbitrary
+numerical viscosity clamp. The `n = 1` image retains the native Newtonian
+force, pressure, channel work, and tangent arithmetic.
+
+The no-slip velocity profile is integrated analytically through the
+Newtonian core and power-law region. Positive differential conductance and
+the exact aperture derivative drive a bounded, damped Newton solve on the
+existing cell-volume balance and equilibrated pressure factorization.
+Geometry/laws are compiled once; call scratch is bounded and hot evaluation
+does not allocate. The accepted Jacobian factorization is reused by the
+analytic directional tangent; the Newtonian tangent shares the original
+native implementation without a second pressure solve.
+
+`PowerLawControls` declares iteration and line-search budgets and absolute
+and relative cell-flow and work-defect tolerances. Domain handling shortens
+the whole numerical pressure correction; it never clips individual physical
+pressures. Sealed pockets, unrepresentable constitutive terms, exhausted work,
+excessive pressure, failed volume/work closure, and caller cancellation
+refuse before publishing caller outputs. Both force and tangent require the
+same accepted flow, source-work, and actual projected-force-work checks.
+The numerical work defect is diagnostic, never extra heat; irreversible
+power remains `sum(Q * delta_p)`. Channel diagnostics retain original order,
+including closed passages.
+
+This owner does not combine its nonlinear law with sliding entrainment,
+stratification, temperature evolution, Barus pressure dependence, cavitation,
+fluid inertia, or yield memory. The exposed `pressure_operator()` is the
+core-viscosity geometry view, not a substitute for the nonlinear evaluator.
+
+Seven focused regressions cover the exact Newtonian image, independent
+no-slip profile integration through the core transition, mixed-law network
+continuity, full directional derivatives and reciprocity, SI consistency
+scaling, refusal/cancellation atomicity, and shared force/tangent admission
+at a one-ULP projected-work difference. The exact film sources and all 61
+native film test definitions, together with the real deterministic math
+modules and their seven tests, pass bounded Rust type and borrow checking.
+Runtime tests and a full crate build have not run in the full-storage
+environment; no runtime pass is claimed.

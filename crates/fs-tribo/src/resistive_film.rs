@@ -28,6 +28,9 @@ pub mod stratified;
 /// Work-conjugate sliding walls, Couette entrainment and shear on this same graph.
 pub mod shear;
 
+/// Regularized power-law pressure flow on the original Reynolds graph.
+pub mod power_law;
+
 use core::fmt;
 use std::sync::Arc;
 
@@ -570,6 +573,20 @@ impl ResistiveFilm {
             return fail("invalid film tangent shape or direction");
         }
         let s = self.solve(q, velocity)?;
+        self.tangent_from_solution(q, &s, dq, dv, out)
+    }
+
+    // Reuse a solution admitted by this exact operator. The caller has
+    // already checked direction/output shapes. Constitutive continuations
+    // retain the original tangent arithmetic without a second pressure solve.
+    fn tangent_from_solution(
+        &self,
+        q: &[f64],
+        s: &Solution,
+        dq: &[f64],
+        dv: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), FilmError> {
         let mut rhs = [0.0; MAX_CELLS];
         for (i, c) in self.cells.iter().enumerate() {
             rhs[i] = c.area_m2 * dot(&c.gap.closure, dv);
