@@ -34,6 +34,9 @@ mod scattering;
 pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
 mod harmonic;
 pub use harmonic::{
+    HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
+    HarmonicPressureTap, MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS,
+    PreparedHarmonicPressureArray, WindowedHarmonicPressureArray,
     HarmonicAveragedField, HarmonicExposureLimits, HarmonicExposureLine, HarmonicExposureMoments,
     HarmonicField, HarmonicFieldStatistics, HarmonicReadoutCovariance, HarmonicReadoutLimits,
     HarmonicReceiverPair, HarmonicWorkBudget, MAX_READOUT_RECEIVER_PAIRS,

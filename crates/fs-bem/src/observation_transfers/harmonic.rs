@@ -471,6 +471,9 @@ impl PreparedMicrophoneArray<'_> {
 
 mod exposure;
 pub use exposure::{
+    HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
+    HarmonicPressureTap, MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS,
+    PreparedHarmonicPressureArray, WindowedHarmonicPressureArray,
     HarmonicAveragedField, HarmonicExposureLimits, HarmonicExposureLine, HarmonicExposureMoments,
     HarmonicReadoutCovariance, HarmonicReadoutLimits, HarmonicReceiverPair,
     MAX_READOUT_RECEIVER_PAIRS, PreparedHarmonicExposure, WindowedHarmonicExposure,

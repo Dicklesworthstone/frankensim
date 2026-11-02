@@ -13,6 +13,13 @@ use fs_fft::harmonic_window::{
 };
 use fs_math::{c64::C64, dd::Dd};
 
+mod array;
+pub use array::{
+    HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
+    HarmonicPressureTap, MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS,
+    PreparedHarmonicPressureArray, WindowedHarmonicPressureArray,
+};
+
 mod readout;
 pub use readout::{
     HarmonicAveragedField, HarmonicReadoutCovariance, HarmonicReadoutLimits,

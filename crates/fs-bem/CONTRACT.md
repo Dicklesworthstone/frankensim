@@ -2434,3 +2434,61 @@ new tests with the shared 22-test temporal module. This is not a full BEM
 crate build or executed Rust tests. An independent triangular four-phase
 reference agreed with weighted real-time integration to 5.30e-14 maximum
 absolute discrepancy.
+
+## Delayed pressure-array channels from original BEM fields
+
+`PreparedHarmonicPressureArray` prepares explicitly authored causal
+delay-and-sum channels from `PreparedHarmonicExposure`. A channel is
+`y_c(t)=sum_j weight_j*p_receiver_j(t-delay_j)`. Each tap names an ORIGINAL
+physical receiver, a finite signed real dimensionless gain and a finite
+nonnegative delay. Multiple taps on one receiver are allowed, tap order is
+retained, and no gain normalization or steering direction is inferred.
+Channel identities are unique and bounded. Empty taps explicitly mean a dark
+channel; zero channels yield an empty observation.
+
+Under the original exp(-i omega t) convention, delay uses
+exp(+i omega delay). The original propagated pressure fields are summed with
+these complex gains BEFORE any product. Coherence across receivers, sources,
+frequencies and the deterministic mean/proper-factor decomposition survives.
+Delay phases are prepared once per distinct frequency across all banks, with
+DD products, near-unit cosine decrements and DD tap accumulation. Repeated
+window queries require no BEM solve, spatial reconstruction or delay-phase
+evaluation. Transcendental leaves remain deterministic f64; DD is not an
+arbitrary-null relative error certificate.
+
+Outputs retain original receiver geometry, physical source coordinates,
+producer hash/uncertainty and source clock separately from the processed
+channel definitions. Channel pressure is a signal-processing readout, not a
+new spatial receiver or physical acoustic intensity. These authored harmonic
+continuations do not infer a pulse onset, sampled fractional-delay filter,
+microphone calibration, electronic noise or source bandwidth.
+
+Every query returns per-channel E[average(y)] and E[average(y²)], plus the
+full real symmetric centered Cov(average(y_a),average(y_b)) matrix. Mean-square
+pressure and variance of an averaged pressure are distinct quantities.
+Covariance integrates each complete proper factor before its outer product;
+deterministic means never contaminate a small covariance through subtraction
+of a large squared mean. The original jointly proper second moments apply;
+no independent-microphone, stationary-source or Gaussian assumption is added.
+Uniform and Triangular normalized detector sensitivities are supported.
+
+With C channels, T total taps, K unique frequencies, B banks and L retained
+lines, preparation uses O(K*T + K*B*log(L+1) + L*T) work. Pressure-moment
+queries cost O(C*sum_b(F_b²) + C*L + B*C²). Logical storage is
+O(C*L + T + C²), plus bounded metadata and frequency lists. Fixed ceilings
+are 64 channels, 4096 taps and 128 bytes per channel identity. Explicit
+preparation, query and logical-workspace budgets are checked before allocation;
+the original exposure's source/frequency/factor bounds remain in force.
+Cancellation/refusal publishes no partial channel bank or observation.
+
+Six authored G0/G1/G3/G4 regressions cover delayed real-time integration over
+an exact 16-state proper ensemble under both shutters; broadband steering and
+directional cancellation; identity with original point/readout observers;
+sub-ulp cosine decrements and weak tap survivors; common latency/channel
+permutation; and metadata, budgets, cancellation, darkness and replay.
+Native formatting and focused no-codegen Rust analysis passed for the exact
+new production/test files, existing exposure/readout code and shared temporal
+module (28 test definitions). This is not a full BEM crate build or executed
+Rust tests. Independent Python delayed-signal quadrature agrees with the
+analytical moments to 2.00e-14 maximum absolute discrepancy for Uniform and
+2.10e-14 for Triangular across means, mean squares and readout covariance.
