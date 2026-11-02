@@ -3,7 +3,11 @@ use crate::helmholtz::bc::{IncidentSource, Monopole, PlaneWave};
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
 
-fn state(temperature: f64, pressure: f64, relaxation_ms: Option<f64>) -> RelaxationState {
+pub(super) fn state(
+    temperature: f64,
+    pressure: f64,
+    relaxation_ms: Option<f64>,
+) -> RelaxationState {
     // Manufactured slow caloric reservoir; not measured atmospheric data.
     let text = relaxation_ms.map_or_else(
         || "declared 1 synthetic 0".into(),
@@ -19,7 +23,7 @@ fn state(temperature: f64, pressure: f64, relaxation_ms: Option<f64>) -> Relaxat
     let medium = RelaxingMedium::new(gas, vec![(law.species()[0].species.clone(), 1.0)]).unwrap();
     law.evaluate(&medium).unwrap()
 }
-fn plane() -> IncidentField<'static> {
+pub(super) fn plane() -> IncidentField<'static> {
     IncidentField::PlaneWave(PlaneWave {
         direction: [0.0, 0.0, 1.0],
         amplitude_pa: C64::ONE,
@@ -187,7 +191,7 @@ fn empty_reservoirs_recover_native_transmission_and_molecular_identity_is_transp
 // Entire regular-Bessel series and outgoing seeds/recurrence, independent of
 // the panel kernels. The continuum coefficients enforce p and (1/rho)dp/dr
 // continuity mode by mode, with physical SI rho and omega.
-fn regular(z: C64, count: usize) -> Vec<C64> {
+pub(super) fn regular(z: C64, count: usize) -> Vec<C64> {
     let mut out = Vec::with_capacity(count);
     let mut leading = C64::ONE;
     for n in 0..count {
@@ -203,10 +207,10 @@ fn regular(z: C64, count: usize) -> Vec<C64> {
     }
     out
 }
-fn exp_i(z: C64) -> C64 {
+pub(super) fn exp_i(z: C64) -> C64 {
     C64::new(z.re.cos(), z.re.sin()).scale((-z.im).exp())
 }
-fn outgoing(z: C64, count: usize) -> Vec<C64> {
+pub(super) fn outgoing(z: C64, count: usize) -> Vec<C64> {
     let ez = exp_i(z) / z;
     let mut out = vec![
         C64::new(0.0, -1.0) * ez,
@@ -217,7 +221,7 @@ fn outgoing(z: C64, count: usize) -> Vec<C64> {
     }
     out
 }
-fn derivative(f: &[C64], z: C64, n: usize) -> C64 {
+pub(super) fn derivative(f: &[C64], z: C64, n: usize) -> C64 {
     f[n].scale(n as f64) / z - f[n + 1]
 }
 struct Sphere {

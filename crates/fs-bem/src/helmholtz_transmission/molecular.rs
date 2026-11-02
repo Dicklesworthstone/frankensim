@@ -9,7 +9,8 @@
 //! This is a stationary, source-free, homogeneous gas interior, inviscid
 //! momentum and relaxing bulk compression. Both mean pressures must agree.
 //! No molecular mixing, mean heat transport, shear viscosity, solid interface
-//! or multiple-body solve is implied. Finite receivers use the original
+//! is implied. `multiple` extends this owner to mutually scattering bodies.
+//! Finite receivers use the original
 //! centroid Green derivative, not the lossless owner's adaptive quadrature.
 use super::*;
 use crate::ComplexSum;
@@ -18,6 +19,8 @@ use crate::helmholtz::laplace::{DampedWaveNumber, fields_from_traces};
 use fs_material::relaxation::RelaxationState;
 
 mod kernels;
+/// All mutual reflections among source-owned molecular gas bodies.
+pub mod multiple;
 
 /// One original molecular gas on each side, with one reusable factorization.
 pub struct MolecularFluidInterface<'a> {

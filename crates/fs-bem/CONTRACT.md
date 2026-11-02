@@ -2130,6 +2130,47 @@ certificate. Stationary inviscid nondispersive fluids, constant-panel centroid
 interaction, equivalent-disc self terms, and source-free interiors retain the
 original owner's limitations. Close-interaction accuracy requires refinement.
 
+### Multiple bodies with original molecular absorption and dispersion
+
+`helmholtz::transmission::molecular::multiple::{Body, MolecularFluidBodies,
+MolecularMultipleField}` extends these coupled equations to distinct relaxing
+gas bodies in one original relaxing exterior. Each `RelaxationState` is
+retained and evaluated at the shared frequency; stationary interfaces require
+identical mean pressure. Both complex |k| wavelengths constrain every mesh.
+Pressure and physical normal velocity remain continuous. The real reference
+`k_ref=omega/c_eq,out` scales the pressure coordinates; physical momentum
+remains `q=i*rho*omega*v` with the original real density on each side.
+
+The original real-k `FluidBodies` and this molecular owner share geometry and
+payload admission, transfer, coupled assembly/LU and physical-trace recovery
+through a private engine. The native real-k operation order and cached real
+impedance remain unchanged. Molecular blocks use the existing stable complex
+contrast differences and `E_ij=[D,-k_ref*S;N/k_ref,-D']`. One retained coupled
+factorization includes every mutual reflection for repeated coherent plane,
+volume-flow and force incidents. Exact transparent bodies emit zero outgoing
+coefficients while receiving all neighbors. Their interior receivers evaluate
+the original incident plus global outgoing field, so an artificial interface
+does not change the field.
+
+Complete scattered and total p/v remain distinct from local outgoing
+coefficients. Per-body interface work and complete scattered work retain
+coherent cross terms, reactive work and signed numerical defects. Roundoff
+intervals bound panel-dot arithmetic only; absorbing-exterior surface work is
+not power at infinity. Interior/exterior p/u receivers use original centroid
+Green derivatives, actual rho*omega, winding and clearance admission. No
+adaptive near-field or close-body continuum accuracy is inferred. Disjoint
+vertex boxes, total panels, peak numerical payload, source/receiver products
+and cancellation remain bounded. Receiver geometry scratch, allocator/runtime
+metadata and thread stacks are outside the logical numerical-payload cap.
+
+Five new G0/G1/G3 regressions cover empty-reservoir native and single-body
+molecular parity, transparent-neighbor removal, coherent cross-work and body
+ordering, resource/cancellation refusal, and an independent complex two-sphere
+mode-order and 20/80/320-panel-per-body ladder for paired fields and interface
+work. The continuum oracle also compares inward work with the original
+caloric bulk heat. These definitions passed syntax/formatting checks; native
+compilation and BEM test execution remain blocked in the authoring environment.
+
 ## Cancellation in coherent field evaluation
 
 Analytic incident pressure and particle velocity, constant-panel finite and far

@@ -23,6 +23,8 @@
 
 use super::*;
 
+pub(in crate::helmholtz::transmission) mod engine;
+
 /// Original surface and inviscid fluid source for one bounded body.
 #[derive(Clone, Copy)]
 pub struct Body<'a> {
@@ -38,6 +40,21 @@ struct PreparedBody<'a> {
     k: f64,
     ppw: f64,
     contrast: Vec<C64>,
+}
+
+impl engine::BoundaryBlock for PreparedBody<'_> {
+    fn surface(&self) -> &SpherePanels {
+        self.original.surface
+    }
+    fn first_panel(&self) -> usize {
+        self.first_panel
+    }
+    fn first_unknown(&self) -> usize {
+        self.first_unknown
+    }
+    fn contrast(&self) -> &[C64] {
+        &self.contrast
+    }
 }
 
 /// One complete dense multiple-scattering solve and retained source identities.
@@ -86,92 +103,15 @@ impl<'a> FluidBodies<'a> {
                 bad("invalid multiple-fluid body, frequency, clearance or panel budget").into(),
             );
         }
-        let mut count = 0usize;
-        let mut local_entries = 0usize;
-        let mut boxes: Vec<([f64; 3], [f64; 3])> = Vec::with_capacity(bodies.len());
-        for body in bodies {
-            poll(gate)?;
-            let n = body.surface.areas().len();
-            count = count
-                .checked_add(n)
-                .ok_or_else(|| bad("multiple-fluid panel overflow"))?;
-            if count > options.maximum_panels {
-                return Err(HelmholtzError::WorkCap { panels: count }.into());
-            }
-            body.surface
-                .validate()
-                .map_err(|_| bad("invalid multiple-fluid surface"))?;
-            let triangles = body
-                .surface
-                .triangles()
-                .ok_or_else(|| bad("multiple-fluid bodies require retained triangles"))?;
-            if near_field::components(triangles)?.len() != 1 {
-                return Err(bad("each fluid body requires one closed outward component").into());
-            }
-            let mut lower = [f64::INFINITY; 3];
-            let mut upper = [f64::NEG_INFINITY; 3];
-            for vertex in triangles.iter().flatten() {
-                for axis in 0..3 {
-                    lower[axis] = lower[axis].min(vertex[axis]);
-                    upper[axis] = upper[axis].max(vertex[axis]);
-                }
-            }
-            for &(lo, hi) in &boxes {
-                let mut gap2 = 0.0;
-                for axis in 0..3 {
-                    let gap = (lower[axis] - hi[axis])
-                        .max(lo[axis] - upper[axis])
-                        .max(0.0);
-                    gap2 += gap * gap;
-                }
-                let scale = lower
-                    .iter()
-                    .chain(&upper)
-                    .chain(&lo)
-                    .chain(&hi)
-                    .fold(0.0_f64, |a, &b| a.max(b.abs()));
-                if gap2.sqrt() < minimum_body_clearance_m.max(128.0 * f64::EPSILON * scale) {
-                    return Err(
-                        bad("fluid body bounding boxes overlap or violate separation").into(),
-                    );
-                }
-            }
-            boxes.push((lower, upper));
-            local_entries += 4 * n * n;
-        }
-        drop(boxes);
+        let (count, workers) = engine::admit(
+            bodies.iter().map(|body| body.surface),
+            bodies.len(),
+            core::mem::size_of::<PreparedBody<'_>>(),
+            minimum_body_clearance_m,
+            options,
+            gate,
+        )?;
         let m = 2 * count;
-        let workers = DENSE_WORKERS.with(core::cell::Cell::get);
-        let scratch = lu_complex_blocked_workspace_bytes(m, workers)
-            .ok_or_else(|| bad("multiple-fluid LU workspace byte count overflow"))?;
-        let complex_bytes = core::mem::size_of::<C64>();
-        let transfer_entries = if bodies.len() == 1 { 0 } else { m * m };
-        // Factorization clones A; retained C_i and E are live throughout.
-        // The solve peak includes incident, solution, exciting, output traces.
-        let fixed = (local_entries + transfer_entries) * complex_bytes
-            + m * core::mem::size_of::<usize>()
-            + count * 16 * core::mem::size_of::<f64>()
-            + bodies.len() * core::mem::size_of::<PreparedBody<'_>>();
-        let factor_peak = fixed
-            .checked_add((2 * m * m + m) * complex_bytes)
-            .and_then(|x| x.checked_add(scratch))
-            .ok_or_else(|| bad("multiple-fluid factor byte count overflow"))?;
-        let solve_peak = fixed
-            .checked_add((m * m + 8 * m) * complex_bytes)
-            .and_then(|x| {
-                x.checked_add(
-                    bodies.len() * core::mem::size_of::<(RadiationPowerDiagnostics, (f64, f64))>(),
-                )
-            })
-            .ok_or_else(|| bad("multiple-fluid solve byte count overflow"))?;
-        let required_bytes = factor_peak.max(solve_peak);
-        if required_bytes > options.maximum_bytes {
-            return Err(HelmholtzError::CacheBudget {
-                required_bytes,
-                maximum_bytes: options.maximum_bytes,
-            }
-            .into());
-        }
         let exterior = exterior_source.acoustic_state()?;
         let k_o = omega_rad_s / exterior.sound_speed_m_s();
         if !k_o.is_finite()
@@ -223,67 +163,8 @@ impl<'a> FluidBodies<'a> {
         }
         let surface = SpherePanels::from_triangles(triangles)
             .map_err(|_| bad("invalid assembled multiple-fluid surface"))?;
-        let transparent = prepared.iter().all(|body| body.contrast.is_empty());
-        let (transfer, factor, condition_lower_bound) = if transparent {
-            (Vec::new(), None, 1.0)
-        } else {
-            let transfer = if prepared.len() == 1 {
-                Vec::new()
-            } else {
-                assemble_transfer(&prepared, k_o, m, gate)?
-            };
-            let mut matrix = zero_matrix(m * m, "multiple-fluid matrix")?;
-            for body in &prepared {
-                let mi = 2 * body.original.surface.areas().len();
-                for row in 0..mi {
-                    poll(gate)?;
-                    let global_row = body.first_unknown + row;
-                    matrix[global_row * m + global_row] = C64::ONE;
-                    if body.contrast.is_empty() {
-                        continue;
-                    }
-                    for col in 0..mi {
-                        matrix[global_row * m + body.first_unknown + col] = matrix
-                            [global_row * m + body.first_unknown + col]
-                            + body.contrast[row * mi + col];
-                    }
-                    for other in &prepared {
-                        // An identical-fluid body's exact equation is s_j=0.
-                        // Eliminate those zero columns algebraically; its
-                        // interior still receives every active body's field.
-                        if other.first_unknown == body.first_unknown || other.contrast.is_empty() {
-                            continue;
-                        }
-                        let mj = 2 * other.original.surface.areas().len();
-                        for col in 0..mj {
-                            if col % 64 == 0 {
-                                poll(gate)?;
-                            }
-                            let global_col = other.first_unknown + col;
-                            let mut value = C64::ZERO;
-                            for inner in 0..mi {
-                                value = value
-                                    + body.contrast[row * mi + inner]
-                                        * transfer[(body.first_unknown + inner) * m + global_col];
-                            }
-                            matrix[global_row * m + global_col] = value;
-                        }
-                    }
-                }
-            }
-            if matrix.iter().any(|&z| !finite(z)) {
-                return Err(bad("nonfinite multiple-fluid coupled operator").into());
-            }
-            let factor =
-                lu_complex_blocked_with_cancel(&matrix, m, workers, || gate.is_requested())
-                    .map_err(lu_error)?;
-            poll(gate)?;
-            let condition = condition_lower_bound(&matrix, m, &factor);
-            if !condition.is_finite() {
-                return Err(bad("nonfinite multiple-fluid condition diagnostic").into());
-            }
-            (transfer, Some(factor), condition)
-        };
+        let (transfer, factor, condition_lower_bound) =
+            engine::prepare(&prepared, k_o, k_o, m, workers, gate)?;
         poll(gate)?;
         Ok(Self {
             bodies: prepared,
@@ -334,112 +215,27 @@ impl<'a> FluidBodies<'a> {
     ) -> Result<Solution<'p, 'a>, HelmholtzError> {
         poll(gate)?;
         incident.validate_binding(&self.surface, self.k_o, medium(self.exterior))?;
-        let n = self.surface.areas().len();
-        let m = 2 * n;
-        let z = self.exterior.characteristic_impedance_pa_s_m();
-        let mut incoming = vec![C64::ZERO; m];
-        for body in &self.bodies {
-            let ni = body.original.surface.areas().len();
-            for j in 0..ni {
-                incoming[body.first_unknown + j] = incident.pressure_pa()[body.first_panel + j];
-                incoming[body.first_unknown + ni + j] =
-                    incident.normal_velocity_m_s()[body.first_panel + j] * C64::new(0.0, z);
-            }
-        }
-        if incoming.iter().any(|&value| !finite(value)) {
-            return Err(bad(
-                "nonfinite pressure-scaled multiple-fluid incident field",
-            ));
-        }
-        let mut outgoing = vec![C64::ZERO; m];
-        if let Some(factor) = &self.factor {
-            for body in &self.bodies {
-                if body.contrast.is_empty() {
-                    continue;
-                }
-                let mi = 2 * body.original.surface.areas().len();
-                for row in 0..mi {
-                    poll(gate)?;
-                    for col in 0..mi {
-                        outgoing[body.first_unknown + row] = outgoing[body.first_unknown + row]
-                            - body.contrast[row * mi + col] * incoming[body.first_unknown + col];
-                    }
-                }
-            }
-            if outgoing.iter().any(|&v| !finite(v)) {
-                return Err(bad("nonfinite multiple-fluid contrast drive"));
-            }
-            factor
-                .solve_with_cancel(&mut outgoing, || gate.is_requested())
-                .map_err(lu_error)?;
-        }
-        let mut total_scattered = outgoing.clone();
-        if !self.transfer.is_empty() {
-            for row in 0..m {
-                poll(gate)?;
-                for (col, &value) in outgoing.iter().enumerate() {
-                    total_scattered[row] =
-                        total_scattered[row] + self.transfer[row * m + col] * value;
-                }
-            }
-        }
-        let mut pressure = vec![C64::ZERO; n];
-        let mut velocity = vec![C64::ZERO; n];
-        let mut scattered_pressure = vec![C64::ZERO; n];
-        let mut scattered_velocity = vec![C64::ZERO; n];
-        let mut total_pressure = vec![C64::ZERO; n];
-        let mut total_velocity = vec![C64::ZERO; n];
-        let mut work = Vec::with_capacity(self.bodies.len());
-        for body in &self.bodies {
-            poll(gate)?;
-            let ni = body.original.surface.areas().len();
-            for j in 0..ni {
-                let (p, q) = (body.first_unknown + j, body.first_unknown + ni + j);
-                let target = body.first_panel + j;
-                pressure[target] = outgoing[p];
-                velocity[target] = if body.contrast.is_empty() {
-                    C64::ZERO
-                } else {
-                    C64::new(outgoing[q].im / z, -outgoing[q].re / z)
-                };
-                scattered_pressure[target] = total_scattered[p];
-                scattered_velocity[target] = if self.factor.is_none() {
-                    C64::ZERO
-                } else {
-                    C64::new(total_scattered[q].im / z, -total_scattered[q].re / z)
-                };
-                if self.factor.is_none() {
-                    total_pressure[target] = incident.pressure_pa()[target];
-                    total_velocity[target] = incident.normal_velocity_m_s()[target];
-                } else {
-                    total_pressure[target] = total_scattered[p] + incoming[p];
-                    let total_q = total_scattered[q] + incoming[q];
-                    total_velocity[target] = C64::new(total_q.im / z, -total_q.re / z);
-                }
-            }
-            let range = body.first_panel..body.first_panel + ni;
-            let (_, interval, diagnostics) = evaluate_radiated_power(
-                &total_pressure[range.clone()],
-                &total_velocity[range],
-                body.original.surface.areas(),
-                medium(self.exterior),
-            );
-            if !finite(diagnostics.surface_power) || !diagnostics.apparent_power.is_finite() {
-                return Err(bad("nonfinite multiple-fluid interface work"));
-            }
-            work.push((diagnostics, interval));
-        }
-        if pressure
-            .iter()
-            .chain(&velocity)
-            .chain(&total_pressure)
-            .chain(&total_velocity)
-            .chain(&scattered_pressure)
-            .chain(&scattered_velocity)
-            .any(|&v| !finite(v))
-        {
-            return Err(bad("nonfinite multiple-fluid solution traces"));
-        }
+        let engine::Traces {
+            pressure,
+            velocity,
+            scattered_pressure,
+            scattered_velocity,
+            scattered_work,
+            scattered_work_interval,
+            total_pressure,
+            total_velocity,
+            work,
+        } = engine::solve(
+            &self.bodies,
+            &self.surface,
+            medium(self.exterior),
+            self.exterior.characteristic_impedance_pa_s_m(),
+            &self.transfer,
+            self.factor.as_ref(),
+            incident.pressure_pa(),
+            incident.normal_velocity_m_s(),
+            gate,
+        )?;
         // Local outgoing densities reconstruct the field without adding each
         // neighbor's regular representation repeatedly. Physical flux uses
         // COMPLETE scattered boundary traces, including interference terms.
@@ -452,15 +248,6 @@ impl<'a> FluidBodies<'a> {
             pressure,
             velocity,
         )?;
-        let (_, scattered_work_interval, scattered_work) = evaluate_radiated_power(
-            &scattered_pressure,
-            &scattered_velocity,
-            self.surface.areas(),
-            medium(self.exterior),
-        );
-        if !finite(scattered_work.surface_power) || !scattered_work.apparent_power.is_finite() {
-            return Err(bad("nonfinite complete multiple-fluid scattered work"));
-        }
         poll(gate)?;
         Ok(Solution {
             interface: self,
@@ -646,57 +433,6 @@ impl ScatteredField<'_, '_> {
         }
         Ok(observed)
     }
-}
-
-fn zero_matrix(entries: usize, what: &'static str) -> Result<Vec<C64>, HelmholtzError> {
-    let mut values = Vec::new();
-    values
-        .try_reserve_exact(entries)
-        .map_err(|_| HelmholtzError::AllocationFailed { what })?;
-    values.resize(entries, C64::ZERO);
-    Ok(values)
-}
-
-fn assemble_transfer(
-    bodies: &[PreparedBody<'_>],
-    k: f64,
-    m: usize,
-    gate: &CancelGate,
-) -> Result<Vec<C64>, HelmholtzError> {
-    let mut transfer = zero_matrix(m * m, "multiple-fluid exterior transfer")?;
-    for target in bodies {
-        let a = target.original.surface;
-        let ni = a.areas().len();
-        for source in bodies {
-            if source.first_unknown == target.first_unknown || source.contrast.is_empty() {
-                continue;
-            }
-            let b = source.original.surface;
-            let nj = b.areas().len();
-            for i in 0..ni {
-                poll(gate)?;
-                for j in 0..nj {
-                    let (s, d, dp, n) = kernels(
-                        k,
-                        a.centroids()[i],
-                        a.normals()[i],
-                        b.centroids()[j],
-                        b.normals()[j],
-                    );
-                    let (r, c) = (target.first_unknown + i, source.first_unknown + j);
-                    let area = b.areas()[j];
-                    transfer[r * m + c] = d.scale(area);
-                    transfer[r * m + c + nj] = s.scale(-k * area);
-                    transfer[(r + ni) * m + c] = n.scale(area / k);
-                    transfer[(r + ni) * m + c + nj] = dp.scale(-area);
-                }
-            }
-        }
-    }
-    if transfer.iter().any(|&v| !finite(v)) {
-        return Err(bad("nonfinite multiple-fluid exterior transfer"));
-    }
-    Ok(transfer)
 }
 
 fn representation(
