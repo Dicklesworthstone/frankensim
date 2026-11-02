@@ -10,6 +10,7 @@
 //! volume of a bubble that also contains noncondensable gas.
 
 use fs_aeroac::AeroacError;
+use fs_aeroac::curle3d::moving::{CompactSourceStrength, TimedCompactSource};
 use fs_aeroac::monopole::{CompactMonopoleObserver, MonopoleLimits, MonopoleSample};
 use fs_flux::cavitation::{
     BubbleGas, BubbleLimits, BubbleNumerics, BubbleObservation, BubblePressureSample, BubbleState,
@@ -64,6 +65,13 @@ impl From<AeroacError> for MaterialBubbleError {
 pub struct ObservedBubbleStep {
     pub bubble: BubbleStep,
     pub acoustic: MonopoleSample,
+}
+
+/// Accepted dynamics and the same physical volume source, before propagation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompactBubbleStep {
+    pub bubble: BubbleStep,
+    pub source: TimedCompactSource,
 }
 
 /// Source-retaining spherical bubble with a single authoritative state clock.
@@ -168,6 +176,22 @@ impl<'a, F: CavitationProperties + ?Sized, M: SphericalBubbleModel> MaterialBubb
         Ok(self.model.observe(&self.state, pressure)?)
     }
 
+    /// Export the accepted volume source and its analytic time derivative.
+    ///
+    /// The native radial equation supplies `Q = 4 pi R² R'` and `Q' = V''`.
+    /// No force source or numerical differentiation is inferred. This sample
+    /// stays on the mechanics clock; propagation and receiver-clock sampling
+    /// use the original liquid density and sound speed from [`Self::material`].
+    /// Finite-source compactness, observation bandwidth, and any prescribed
+    /// translation must be admitted separately. Translation does not change
+    /// this radial model into a solver for bubble translational dynamics.
+    pub fn compact_source_sample(
+        &self,
+        pressure: M::Pressure,
+    ) -> Result<TimedCompactSource, MaterialBubbleError> {
+        compact_source_from_observation(&self.observe(pressure)?)
+    }
+
     /// Advance the native physical history atomically, without an observer.
     pub fn advance<Pressure, Cancel>(
         &mut self,
@@ -187,6 +211,40 @@ impl<'a, F: CavitationProperties + ?Sized, M: SphericalBubbleModel> MaterialBubb
             pressure,
             cancelled,
         )?)
+    }
+
+    /// Commit the complete physical interval and its source endpoint together.
+    ///
+    /// The endpoint retains both `Q` and `Q'` from the accepted native equation
+    /// for coherent interpolation on a later receiver clock. A failed export
+    /// or final cancellation leaves the original accepted state unchanged.
+    /// The equation retains ownership of liquid response and losses; exporting
+    /// a source adds no extra radiation damping or synthetic tail.
+    pub fn advance_compact_source<Pressure, Cancel>(
+        &mut self,
+        end_time_s: f64,
+        numerics: &BubbleNumerics,
+        pressure: &Pressure,
+        cancelled: &mut Cancel,
+    ) -> Result<CompactBubbleStep, MaterialBubbleError>
+    where
+        Pressure: Fn(f64) -> M::Pressure,
+        Cancel: FnMut() -> bool,
+    {
+        let mut candidate = self.state;
+        let bubble = self.model.advance_controlled(
+            &mut candidate,
+            end_time_s,
+            numerics,
+            pressure,
+            cancelled,
+        )?;
+        let source = compact_source_from_observation(&bubble.observation)?;
+        if cancelled() {
+            return Err(MaterialBubbleError::Dynamics(CavitationError::Cancelled));
+        }
+        self.state = candidate;
+        Ok(CompactBubbleStep { bubble, source })
     }
 
     /// Commit dynamics and observation together after both owners accept.
@@ -229,4 +287,30 @@ impl<'a, F: CavitationProperties + ?Sized, M: SphericalBubbleModel> MaterialBubb
         self.state = candidate;
         Ok(ObservedBubbleStep { bubble, acoustic })
     }
+}
+
+fn compact_source_from_observation(
+    observation: &BubbleObservation,
+) -> Result<TimedCompactSource, MaterialBubbleError> {
+    let source_time_s = observation.state.time_s();
+    let volume_flow_m3_s = observation.volume_rate_m3_s;
+    let volume_flow_rate_m3_s2 = observation.volume_acceleration_m3_s2;
+    if !source_time_s.is_finite()
+        || !volume_flow_m3_s.is_finite()
+        || !volume_flow_rate_m3_s2.is_finite()
+    {
+        return Err(AeroacError::NonFinite {
+            what: "accepted bubble compact source",
+        }
+        .into());
+    }
+    Ok(TimedCompactSource {
+        source_time_s,
+        strength: CompactSourceStrength {
+            volume_flow_m3_s,
+            volume_flow_rate_m3_s2,
+            force_on_fluid_n: [0.0; 3],
+            force_rate_on_fluid_n_s: [0.0; 3],
+        },
+    })
 }

@@ -12,6 +12,9 @@ use crate::render::{RenderError, schedule::ScheduledRenderer};
 /// Latency-aligned acoustic superposition of independently clocked mechanics.
 pub mod ensemble;
 
+/// Retarded moving compact sources sampled from accepted physical histories.
+pub mod moving;
+
 mod policy;
 pub use policy::{ObservationError, ObservationPolicy, validate_reaction_medium};
 

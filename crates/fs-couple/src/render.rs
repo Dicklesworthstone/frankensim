@@ -1167,6 +1167,8 @@ pub struct ControlRecord {
 /// Typed refusal from the render context.
 #[derive(Debug)]
 pub enum RenderError {
+    /// The original physical acoustic observer refused a pressure sample.
+    Acoustic(fs_aeroac::AeroacError),
     /// The implicit friction/network owner refused its physical sample.
     Friction(ModalFrictionError),
     /// A previous voice refusal left partial state; construct a new context.
@@ -1204,6 +1206,7 @@ pub enum RenderError {
 impl core::fmt::Display for RenderError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Acoustic(e) => write!(f, "acoustic observation refusal: {e}"),
             Self::Friction(e) => write!(f, "friction voice refusal: {e}"),
             Self::Poisoned => write!(
                 f,
