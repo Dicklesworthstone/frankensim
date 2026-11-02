@@ -2962,16 +2962,36 @@ interface sides. Source temperature, strain and rate domains remain enforced by
 the native material law; member memory, cohesive damage, force/extension
 compatibility and work/storage checks remain owned by the existing joint.
 
-Every advance explicitly admits the unchanged interface query, including quantity
+The ordinary advance explicitly admits the unchanged interface query, including quantity
 conventions, so evolving bulk temperature cannot silently freeze an unsupported
 cohesive-state change. Three source integration tests cover independent series and
 thermal-work references, data-only substitutions with relaxation and fracture
 continuation, and source/domain/cancellation refusal. This remains a quasistatic
 fixed-geometry series model with prescribed bulk temperatures and fixed external
 interface state; no thermal transport, fracture-heat partition or
-temperature-dependent cohesive-history transfer is inferred. New modules pass
-formatting and whitespace checks. Native tests remain unexecuted: a single-threaded
-metadata-only check was SIGKILLed in unchanged asupersync in the authoring worker.
+temperature-dependent cohesive-history transfer is inferred from that path.
+
+`SourceJoint::advance_with_interface_temperature[_controlled]` explicitly
+accepts a common-mode temperature successor from the same card and pinned claims.
+It stages the material owner's fixed-jump history transfer before the original
+native equilibrium solve, retaining every bulk Maxwell strain, reference
+geometry and source assignment. `TemperatureJointReport` separates signed
+interface parameter work, fixed-jump damage release and the native mechanical
+accounts. An independent old-to-new energy balance includes both stages before
+joint state, source receipts, damage and physical time publish together.
+
+Three focused source/native regressions add an analytical series-force and
+parameter-work reference, hot strength/toughness loss followed by cooling
+without healing, and source-domain/late-cancellation refusal with identical
+retry. This is first-order prescribed-temperature composition; subdivide
+combined thermal/load paths for accuracy. It does not solve thermal transport,
+assign fracture heat, validate an unobserved continuous temperature path, or
+refresh frozen-onset mixed-mode history.
+
+The 34 cohesive constitutive tests, including the four temperature-transfer
+tests, passed in an exact-physics slice. Source/native integration targets remain
+unexecuted in this worker: compiling the unchanged pinned `asupersync` dependency
+was SIGKILLed even with single-threaded metadata-only compilation.
 
 ## Original thermal eigenstrain in tensor-Prony projection
 

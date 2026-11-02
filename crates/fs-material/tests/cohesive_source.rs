@@ -425,3 +425,35 @@ fn physical_viscosity_refuses_missing_bulk_units_and_unowned_rate_axes() {
         &QueryPoint::new().with("T",300.0).unwrap(),MaterialPropertySelection::SingleClaimOnly,
         CohesiveEnvelope::CommonMode,0.02,0.2).is_err());
 }
+
+#[test]
+fn temperature_refresh_keeps_original_viscosity_claim_and_timed_physics() {
+    let mut inputs = properties();
+    let mut viscosity = claim(COHESIVE_NORMAL_VISCOSITY_PROPERTY, COHESIVE_VISCOSITY_DIMS, 1e7);
+    viscosity.value = PropertyValue::Curve {
+        abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+        knots: vec![(280.0, 1e7), (340.0, 3e7)], dims: COHESIVE_VISCOSITY_DIMS,
+    };
+    viscosity.interpolation = InterpolationPolicy::LinearInside;
+    inputs.push(viscosity);
+    inputs.push(claim(COHESIVE_TANGENTIAL_VISCOSITY_PROPERTY, COHESIVE_VISCOSITY_DIMS, 3e7));
+    let card = card(inputs, "manufactured temperature-dependent physical viscosity");
+    let cold = resolve_viscous_bilinear_cohesive(&card,
+        &QueryPoint::new().with("T", 280.0).unwrap(),
+        MaterialPropertySelection::SingleClaimOnly, CohesiveEnvelope::CommonMode, 0.02, 0.2).unwrap();
+    let hot = cold.at_temperature(&card, "T", 340.0).unwrap();
+    cold.require_temperature_successor(&hot, "T").unwrap();
+    assert_eq!(hot.law().viscosity().unwrap().normal_pa_s_m(), 3e7);
+    assert_eq!(hot.law().viscosity().unwrap().maximum_rate_m_s(), 0.2);
+    let loaded = cold.law().bonded_point()
+        .trial_over_time([0.0003, 0.0, 0.0], 0.5, 1e-8).unwrap().equilibrium.point;
+    let refreshed = loaded.transfer_temperature(hot.law(), 1e-8).unwrap();
+    assert_eq!(refreshed.parameter_work_j_m2, 0.0);
+    assert_eq!(refreshed.damage_dissipated_j_m2, 0.0);
+    let continued = refreshed.point.trial_over_time([0.0006, 0.0, 0.0], 0.5, 1e-8).unwrap();
+    assert!((continued.traction_pa[0] - 618000.0).abs() < 1e-8);
+    assert!((continued.viscous_dissipated_j_m2 - 5.4).abs() < 1e-12);
+    for (old, new) in cold.resolved().properties().iter().zip(hot.resolved().properties()) {
+        assert_eq!(old.answer().receipt.selected, new.answer().receipt.selected);
+    }
+}

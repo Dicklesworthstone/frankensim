@@ -1,7 +1,8 @@
 //! Original material sources drive the native restrained-member/bond solve.
 //! Bulk temperatures may evolve along each source's admitted temperature line.
-//! Interface conditions remain explicit and fixed: changing them requires a
-//! thermodynamic cohesive-history transfer, not replacement of coefficients.
+//! The ordinary update retains fixed interface conditions. The explicit
+//! temperature update transfers common-mode damage before the original native
+//! solve, keeping coefficient work and additional fracture release separate.
 
 use std::collections::BTreeMap;
 
@@ -55,6 +56,22 @@ pub struct SourceJoint<'a> {
     interface: &'a ResolvedBilinearCohesive,
     surface_members: [u64; 2],
     interface_query: QueryPoint,
+}
+
+/// A source-temperature change and native equilibrium accepted as one operation.
+/// All extensive energy accounts are joules. No loss is automatically heat.
+#[derive(Clone, Debug)]
+pub struct TemperatureJointReport {
+    /// Existing native solve after the fixed-jump temperature transfer.
+    pub mechanical: Report,
+    /// Signed work supplied by changing interface coefficients at fixed damage.
+    pub interface_parameter_work_j: f64,
+    /// New irreversible bond loss released at fixed jump by the weaker envelope.
+    pub interface_damage_dissipated_j: f64,
+    /// Storage change due to temperature transfer before mechanical motion.
+    pub interface_stored_change_j: f64,
+    /// Complete old-to-new joint balance, including parameter work and damage.
+    pub energy_residual_j: f64,
 }
 
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), SourceJointError> {
@@ -210,6 +227,125 @@ impl<'a> SourceJoint<'a> {
             extension_m,
             temperatures_k,
             interface_query,
+            config,
+            || cx.checkpoint().is_err(),
+        )
+    }
+
+    /// Evolve the original joint with one explicitly resolved interface
+    /// temperature endpoint. `interface` must retain the original card and
+    /// selected claims; use its `at_temperature` to resolve such a successor.
+    /// Bulk sources, Maxwell strains, geometry and clock stay bound.
+    ///
+    /// First change coefficients at fixed old jump/damage, then release any
+    /// additional damage demanded by the new common-mode envelope at that jump.
+    /// Finally use the original native solver at the new coefficients. The
+    /// entire candidate is published only after an independent energy balance
+    /// and the final cancellation gate. A failed nonlinear solve cannot publish
+    /// a temperature change, damage, or rewritten accumulated fracture loss.
+    ///
+    /// This is a first-order staggered, prescribed-temperature update. Subdivide
+    /// combined thermal/load paths for accuracy. Parameter work is an explicit
+    /// external energy account, not an inferred heat source, thermal transport
+    /// calculation or entropy claim. Frozen-onset mixed-mode refresh refuses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_interface_temperature_controlled(
+        &self,
+        target_s: f64,
+        extension_m: f64,
+        temperatures_k: &BTreeMap<u64, f64>,
+        interface: &'a ResolvedBilinearCohesive,
+        temperature_axis: &str,
+        config: Config,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, TemperatureJointReport), SourceJointError> {
+        poll(&mut cancelled)?;
+        self.interface
+            .require_temperature_successor(interface, temperature_axis)
+            .map_err(SourceJointError::Interface)?;
+        let transfer = self
+            .joint
+            .bond
+            .transfer_temperature(
+                interface.law(),
+                config.equilibrium.local_energy_tolerance_j_m2,
+            )
+            .map_err(|error| {
+                JointError::Equilibrium(super::super::Error::Material {
+                    patch: self.joint.interface,
+                    error,
+                })
+            })?;
+        let mut staged = self.joint.clone();
+        staged.bond = transfer.point;
+        poll(&mut cancelled)?;
+        let (joint, mechanical) = staged.advance_controlled(
+            target_s,
+            extension_m,
+            temperatures_k,
+            config,
+            &mut cancelled,
+        )?;
+        let area = self.joint.area_m2;
+        let parameter_work = super::finite(area * transfer.parameter_work_j_m2)?;
+        let released = super::finite(area * transfer.damage_dissipated_j_m2)?;
+        let stored_change = super::finite(area * transfer.stored_change_j_m2)?;
+        let storage = super::finite(joint.stored_energy_j() - self.joint.stored_energy_j())?;
+        let bulk = &mechanical.bulk_energy_j;
+        let defect = super::finite(
+            storage
+                + bulk.dissipated
+                + bulk.numerical_dissipation
+                + mechanical.cohesive_energy_j.dissipated
+                + released
+                + mechanical.bond_viscous_dissipated_j
+                + mechanical.cohesive_work_correction_j
+                - mechanical.endpoint_work_j
+                - bulk.thermal_strain_work
+                - bulk.modulus_work
+                - parameter_work,
+        )?;
+        if defect.abs() > config.energy_tolerance_j {
+            return Err(JointError::Energy(defect).into());
+        }
+        let candidate = Self {
+            joint,
+            bulk_sources: self.bulk_sources.clone(),
+            interface,
+            surface_members: self.surface_members,
+            interface_query: interface.resolved().query(),
+        };
+        poll(&mut cancelled)?;
+        Ok((
+            candidate,
+            TemperatureJointReport {
+                mechanical,
+                interface_parameter_work_j: parameter_work,
+                interface_damage_dissipated_j: released,
+                interface_stored_change_j: stored_change,
+                energy_residual_j: defect,
+            },
+        ))
+    }
+
+    /// Same explicit temperature transfer in the original executor scope.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_interface_temperature(
+        &self,
+        cx: &Cx<'_>,
+        target_s: f64,
+        extension_m: f64,
+        temperatures_k: &BTreeMap<u64, f64>,
+        interface: &'a ResolvedBilinearCohesive,
+        temperature_axis: &str,
+        config: Config,
+    ) -> Result<(Self, TemperatureJointReport), SourceJointError> {
+        self.advance_with_interface_temperature_controlled(
+            target_s,
+            extension_m,
+            temperatures_k,
+            interface,
+            temperature_axis,
             config,
             || cx.checkpoint().is_err(),
         )

@@ -434,3 +434,257 @@ fn source_assignment_interface_state_domains_and_cancellation_refuse_atomically(
         .unwrap();
     assert_eq!(a.joint(), b.joint());
 }
+
+fn thermal_interface_card(
+    a: &ResolvedThermoMaxwell,
+    b: &ResolvedThermoMaxwell,
+    values: [[f64; 2]; 4],
+) -> InterfaceSystemCard {
+    let mut claims = ClaimSet::new();
+    for ((name, dims), values) in [
+        (
+            COHESIVE_STIFFNESS_PROPERTY,
+            interface_stiffness_per_area_dims(),
+        ),
+        (COHESIVE_STRENGTH_PROPERTY, Pressure::DIMS),
+        (
+            COHESIVE_FRACTURE_ENERGY_PROPERTY,
+            FRACTURE_ENERGY_PER_AREA_DIMS,
+        ),
+        (
+            COHESIVE_COMPRESSION_STIFFNESS_PROPERTY,
+            interface_stiffness_per_area_dims(),
+        ),
+    ]
+    .into_iter()
+    .zip(values)
+    {
+        claims.insert_claim(claim(name, dims, values)).unwrap();
+    }
+    let surface = |source: &ResolvedThermoMaxwell| SurfaceSpec {
+        material: source.samples()[0].material().clone(),
+        texture_frame: "fixed axial reference frame".into(),
+    };
+    InterfaceSystemCard::assemble(
+        surface(a),
+        surface(b),
+        SystemContext {
+            medium: "manufactured temperature-dependent cohesive fixture".into(),
+            third_body: None,
+            environment: "prescribed interface temperature, no measured-data claim".into(),
+            history: "initially bonded; irreversible thereafter".into(),
+        },
+        claims,
+        vec![],
+    )
+    .unwrap()
+}
+
+#[test]
+fn temperature_dependent_interface_drives_native_force_and_parameter_work() {
+    let a = material("A", 1e9, false);
+    let b = material("B", 1e9, false);
+    let card = thermal_interface_card(&a, &b, [[1e10, 5e9], [1e6; 2], [2000.0; 2], [2e10; 2]]);
+    let cold = resolve_bilinear_cohesive(
+        &card,
+        &point(280.0),
+        MaterialPropertySelection::SingleClaimOnly,
+        0.01,
+    )
+    .unwrap();
+    let hot = cold.at_temperature(&card, "T", 520.0).unwrap();
+    let temperatures = BTreeMap::from([(1, 500.0), (2, 500.0)]);
+    let (loaded, _) = joint(&a, &b, &cold)
+        .advance_controlled(1.0, 1e-5, &temperatures, &point(280.0), config(), || false)
+        .unwrap();
+    let old_gap = loaded.joint().bond().jump_m()[0];
+    let (heated, report) = loaded
+        .advance_with_interface_temperature_controlled(
+            2.0,
+            1e-5,
+            &temperatures,
+            &hot,
+            "T",
+            config(),
+            || false,
+        )
+        .unwrap();
+    // Independent two-member plus adhesive compliance, from the supplied SI data.
+    let compliance = 2.0 * 0.005 / (1e-4 * 1e9);
+    let expected_force = 1e-5 / (compliance + 1.0 / (1e-4 * 5e9));
+    near(report.mechanical.force_n, expected_force, 1e-7);
+    near(
+        report.mechanical.opening_m,
+        expected_force / (1e-4 * 5e9),
+        1e-13,
+    );
+    near(
+        report.interface_parameter_work_j,
+        0.5 * 1e-4 * (5e9 - 1e10) * old_gap * old_gap,
+        1e-14,
+    );
+    near(report.interface_damage_dissipated_j, 0.0, 1e-15);
+    near(
+        heated.joint().stored_energy_j(),
+        0.5 * expected_force * 1e-5,
+        1e-11,
+    );
+    near(report.energy_residual_j, 0.0, config().energy_tolerance_j);
+    assert!(core::ptr::eq(heated.interface_source(), &hot));
+    assert!(core::ptr::eq(heated.member_sources()[&1], &a));
+    assert_eq!(heated.interface_query(), &point(520.0));
+    assert_eq!(heated.joint().bond().damage(), 0.0);
+    for (old, new) in cold
+        .resolved()
+        .properties()
+        .iter()
+        .zip(hot.resolved().properties())
+    {
+        assert_eq!(old.answer().receipt.selected, new.answer().receipt.selected);
+    }
+}
+
+#[test]
+fn heated_joint_loses_strength_and_cooling_does_not_restore_adhesion() {
+    let a = material("A", 1e9, false);
+    let b = material("B", 1e9, false);
+    let card = thermal_interface_card(&a, &b, [[1e10; 2], [1e6, 2e5], [2000.0, 10.0], [2e10; 2]]);
+    let cold = resolve_bilinear_cohesive(
+        &card,
+        &point(280.0),
+        MaterialPropertySelection::SingleClaimOnly,
+        0.01,
+    )
+    .unwrap();
+    let hot = cold.at_temperature(&card, "T", 520.0).unwrap();
+    let temperatures = BTreeMap::from([(1, 500.0), (2, 500.0)]);
+    let (loaded, before) = joint(&a, &b, &cold)
+        .advance_controlled(1.0, 5e-5, &temperatures, &point(280.0), config(), || false)
+        .unwrap();
+    assert_eq!(loaded.joint().bond().damage(), 0.0);
+    let (heated, heat) = loaded
+        .advance_with_interface_temperature_controlled(
+            2.0,
+            5e-5,
+            &temperatures,
+            &hot,
+            "T",
+            config(),
+            || false,
+        )
+        .unwrap();
+    // On the hot softening branch F=(D-g)/S=A*T*(gf-g)/(gf-g0).
+    let expected_gap = (500.0 - 25.0) / (1e7 - 2.5e5);
+    near(heat.mechanical.opening_m, expected_gap, 1e-12);
+    near(heat.mechanical.force_n, (5e-5 - expected_gap) / 1e-7, 1e-6);
+    assert!(heat.mechanical.force_n < before.force_n);
+    assert!(heat.interface_damage_dissipated_j > 0.0);
+    near(heat.interface_parameter_work_j, 0.0, 1e-15);
+    let damage = heated.joint().bond().damage();
+    let dissipated = heated.joint().bond().dissipated_j_m2();
+    assert!(damage > 0.7);
+    near(
+        dissipated,
+        (heat.interface_damage_dissipated_j + heat.mechanical.cohesive_energy_j.dissipated) / 1e-4,
+        1e-10,
+    );
+    let (cooled, cool) = heated
+        .advance_with_interface_temperature_controlled(
+            3.0,
+            5e-5,
+            &temperatures,
+            &cold,
+            "T",
+            config(),
+            || false,
+        )
+        .unwrap();
+    assert!(cooled.joint().bond().damage() >= damage);
+    near(cooled.joint().bond().damage(), damage, 1e-12);
+    near(cooled.joint().bond().dissipated_j_m2(), dissipated, 1e-10);
+    near(cool.mechanical.force_n, heat.mechanical.force_n, 1e-6);
+    near(cool.interface_parameter_work_j, 0.0, 1e-15);
+    near(cool.energy_residual_j, 0.0, config().energy_tolerance_j);
+}
+
+#[test]
+fn temperature_source_and_late_cancellation_refuse_without_publishing_damage() {
+    let a = material("A", 1e9, true);
+    let b = material("B", 1e9, true);
+    let card = thermal_interface_card(&a, &b, [[1e10; 2], [1e6, 2e5], [2000.0, 10.0], [2e10; 2]]);
+    let cold = resolve_bilinear_cohesive(
+        &card,
+        &point(280.0),
+        MaterialPropertySelection::SingleClaimOnly,
+        0.01,
+    )
+    .unwrap();
+    let hot = cold.at_temperature(&card, "T", 520.0).unwrap();
+    assert!(cold.at_temperature(&card, "T", 521.0).is_err());
+    assert!(cold.at_temperature(&card, "unowned", 300.0).is_err());
+    let temperatures = BTreeMap::from([(1, 500.0), (2, 500.0)]);
+    let (loaded, _) = joint(&a, &b, &cold)
+        .advance_controlled(1.0, 5e-5, &temperatures, &point(280.0), config(), || false)
+        .unwrap();
+    let saved = loaded.joint().clone();
+    let unrelated = interface(&a, &b, 2e5, 10.0);
+    assert!(matches!(
+        loaded.advance_with_interface_temperature_controlled(
+            2.0,
+            5e-5,
+            &temperatures,
+            &unrelated,
+            "T",
+            config(),
+            || false
+        ),
+        Err(SourceJointError::Interface(_))
+    ));
+    let mut count = 0;
+    let (reference, _) = loaded
+        .advance_with_interface_temperature_controlled(
+            2.0,
+            5e-5,
+            &temperatures,
+            &hot,
+            "T",
+            config(),
+            || {
+                count += 1;
+                false
+            },
+        )
+        .unwrap();
+    for allowed in [0, 3, count - 1] {
+        let mut calls = 0;
+        assert!(matches!(
+            loaded.advance_with_interface_temperature_controlled(
+                2.0,
+                5e-5,
+                &temperatures,
+                &hot,
+                "T",
+                config(),
+                || {
+                    calls += 1;
+                    calls > allowed
+                }
+            ),
+            Err(SourceJointError::Cancelled)
+        ));
+        assert_eq!(loaded.joint(), &saved);
+        assert!(core::ptr::eq(loaded.interface_source(), &cold));
+    }
+    let (retry, _) = loaded
+        .advance_with_interface_temperature_controlled(
+            2.0,
+            5e-5,
+            &temperatures,
+            &hot,
+            "T",
+            config(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(retry.joint(), reference.joint());
+}

@@ -3784,9 +3784,10 @@ material name, absent property, or geometric proximity creates an adhesive bond.
 The full bundle, exact source selections, ordered surfaces and texture frames
 remain accessible. The canonical fixed-external-condition policy applies to
 both value dependence and applicability: evolving gap, damage, stress, rate or
-frequency coordinates cannot be frozen into this rate-independent law. All
-external conditions remain fixed during the accepted damage history; there is
-no implicit coefficient/history refresh or inference of fracture heat.
+frequency coordinates cannot be frozen into this rate-independent law. The
+ordinary binding keeps external conditions fixed. An explicit common-mode
+temperature successor uses `at_temperature` and the history transfer below;
+there is no implicit coefficient refresh or inference of fracture heat.
 
 The existing common-mode cohesive law still owns traction, tangents,
 irreversibility, compression after failure and fracture-energy accounting.
@@ -3794,6 +3795,31 @@ This is not a calibrated mixed-mode adhesion model. The focused
 `cohesive_source` regressions cover shared electrical/mechanical source bundles,
 fixed-temperature substitution, independent fracture work and source/unit/domain
 refusals; structural source-to-force tests live in `fs-solid`.
+
+### Irreversible cohesive history through temperature changes
+
+`CohesivePoint::transfer_temperature` preserves the original jump, retained
+damage and accumulated fracture loss while adopting an explicitly supplied
+common-mode law. It first changes coefficients at fixed damage, reporting the
+signed change in stored surface energy as parameter work. It then relaxes onto
+the new envelope at fixed jump, recording any additional released storage as
+nonnegative damage dissipation. Cooling and increased toughness cannot heal.
+The inverse damage map changes internal onset/failure coordinates without
+rescaling past fracture work. Subsequent loading, viscosity, mean traction and
+frictional compression still use the original constitutive owners.
+
+`ResolvedBilinearCohesive::at_temperature` retains the same ordered interface
+card and exact selected claims, including explicit viscosity when selected.
+`require_temperature_successor` checks the original source, property selections,
+temperature meaning, all held coordinates and separation/rate bounds before a
+native owner may transfer history. Frozen-onset mixed-mode transfer refuses.
+
+This is a declared staggered endpoint model with prescribed temperature,
+not a cure/fatigue law, continuous thermal-path validation, heat partition or
+entropy proof. Parameter work belongs to the external thermal/material source;
+additional damage is a separate physical loss. Four focused G1/G3 tests cover
+analytical fixed-jump work/release, unloading and changed-Gc continuation,
+failed-bond compression, no healing and unsupported transfer refusal.
 
 ## Explicit independent isotropic elastic parameters
 

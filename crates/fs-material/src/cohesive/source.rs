@@ -1,9 +1,9 @@
 //! Source-defined cohesive failure at fixed external conditions.
 //!
 //! Interface definitions and their source receipts remain immutable. The
-//! existing cohesive point owns separation and irreversible damage. Changing
-//! a coefficient after damage requires a separate thermodynamic history
-//! transfer; this adapter deliberately exposes no history-refresh operation.
+//! existing cohesive point owns separation and irreversible damage. The explicit
+//! common-mode `at_temperature` path retains the same claims; its successor can
+//! be consumed only with the point owner's temperature-history transfer.
 
 /// Explicit normal/shear source data for the frozen-onset BK extension.
 pub mod mixed_mode;
@@ -54,7 +54,8 @@ impl ResolvedBilinearCohesive {
     /// moisture or external pressure. The canonical static-source admission
     /// rejects separation, damage, rate, frequency and other unowned axes,
     /// including applicability-only bounds on otherwise constant coefficients.
-    /// These external conditions must stay fixed throughout the bond history.
+    /// The ordinary history update keeps these conditions fixed; an explicit
+    /// common-mode temperature successor requires its history-transfer owner.
     /// The numerical separation limit is explicit and must include failure.
     pub fn try_from_resolved(
         card: &InterfaceSystemCard,
@@ -132,6 +133,121 @@ impl ResolvedBilinearCohesive {
         if &self.surfaces[0].material != first || &self.surfaces[1].material != second {
             return Err(invalid(
                 "cohesive interface surface material assignment mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolve a new temperature from the SAME card and every original selected
+    /// claim. Other coordinates, quantity conventions, model/rate bounds and
+    /// extra interface properties stay bound. No source is silently replaced.
+    /// This returns immutable coefficients, not an evolved cohesive history.
+    /// The receiving point must use `CohesivePoint::transfer_temperature`.
+    pub fn at_temperature(
+        &self,
+        card: &InterfaceSystemCard,
+        temperature_axis: &str,
+        temperature_k: f64,
+    ) -> Result<Self, MaterialStatePointError> {
+        self.require_temperature_axis(temperature_axis)?;
+        if !temperature_k.is_finite() || temperature_k <= 0.0 {
+            return Err(invalid(
+                "cohesive temperature must be finite positive kelvin",
+            ));
+        }
+        let point = self
+            .resolved
+            .query()
+            .with(temperature_axis, temperature_k)
+            .map_err(|source| MaterialStatePointError::Query {
+                property: format!("cohesive temperature:{temperature_axis}"),
+                source,
+            })?;
+        let resolved = self.resolved.at_query_point(card, &point)?;
+        match self.law.viscosity() {
+            Some(viscosity) => Self::try_from_viscous_resolved(
+                card,
+                resolved,
+                CohesiveEnvelope::CommonMode,
+                self.law.maximum_separation_m(),
+                viscosity.maximum_rate_m_s(),
+            ),
+            None => Self::try_from_resolved(card, resolved, self.law.maximum_separation_m()),
+        }
+    }
+
+    /// Admit an already resolved temperature successor for native history
+    /// transfer. Required even if its numerical coefficients happen to agree.
+    /// The physical source, receiving order, selected claims and all nonthermal
+    /// coordinates remain identical; mixed-mode history is not reinterpreted.
+    pub fn require_temperature_successor(
+        &self,
+        next: &Self,
+        temperature_axis: &str,
+    ) -> Result<(), MaterialStatePointError> {
+        self.require_temperature_axis(temperature_axis)?;
+        next.require_temperature_axis(temperature_axis)?;
+        if self.resolved.card_identity() != next.resolved.card_identity()
+            || self.surfaces != next.surfaces
+            || self.resolved.axis_quantities() != next.resolved.axis_quantities()
+            || self.law.maximum_separation_m() != next.law.maximum_separation_m()
+            || self.law.viscosity().map(|v| v.maximum_rate_m_s())
+                != next.law.viscosity().map(|v| v.maximum_rate_m_s())
+        {
+            return Err(invalid(
+                "cohesive temperature successor changed source or model bounds",
+            ));
+        }
+        let a = self.resolved.query_point();
+        let b = next.resolved.query_point();
+        if a.len() != b.len()
+            || a.iter().zip(b).any(|((name, value), (other, new))| {
+                name != other || (name != temperature_axis && value != new)
+            })
+        {
+            return Err(invalid(
+                "cohesive temperature successor changed a held coordinate",
+            ));
+        }
+        let a = self.resolved.properties();
+        let b = next.resolved.properties();
+        if a.len() != b.len()
+            || a.iter().zip(b).any(|(old, new)| {
+                old.requirement() != new.requirement()
+                    || old.answer().receipt.selected != new.answer().receipt.selected
+            })
+        {
+            return Err(invalid(
+                "cohesive temperature successor changed original selected claims",
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_temperature_axis(&self, axis: &str) -> Result<(), MaterialStatePointError> {
+        use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+        let quantity = self.resolved.axis_quantities().get(axis).copied();
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let legacy = axis == "T"
+            && (quantity.is_none()
+                || quantity == Some(QuantitySpec::dimensional(fs_qty::Temperature::DIMS)));
+        if self.law.mixed_mode_parameters().is_some()
+            || !(legacy || quantity == Some(absolute))
+            || !self
+                .resolved
+                .state_coordinate(axis)
+                .is_some_and(|v| v.is_finite() && v > 0.0)
+            || self
+                .resolved
+                .properties()
+                .iter()
+                .any(|property| !property.has_only_fixed_external_conditions(Some(axis), false))
+        {
+            return Err(invalid(
+                "common-mode cohesive refresh requires one original absolute-temperature axis",
             ));
         }
         Ok(())
