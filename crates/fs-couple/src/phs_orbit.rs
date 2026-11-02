@@ -27,6 +27,13 @@ pub use stability::{
     PhsFloquetControls, PhsFloquetLevel, PhsForcedStability, PhsNumericalStability,
     analyze_forced_orbit_stability,
 };
+mod autonomous;
+pub use autonomous::{
+    AutonomousPortFeedback, PhsAutonomousControls, PhsAutonomousLevel,
+    PhsAutonomousStability, analyze_autonomous_feedback_stability,
+    audit_autonomous_feedback_orbit, solve_autonomous_feedback_harmonic_balance,
+    solve_autonomous_feedback_harmonic_balance_adaptive,
+};
 
 const MAX_INPUT_HARMONICS: usize = 256;
 
@@ -154,6 +161,7 @@ struct PhsOrbitProblem<'a> {
 enum InputKind<'a> {
     Forced { periodic: &'a PeriodicPortInput, omega_rad_s: f64 },
     Constant(&'a [f64]),
+    Feedback { law: &'a dyn AutonomousPortFeedback, flows: RefCell<Vec<f64>> },
 }
 impl PhsOrbitProblem<'_> {
     fn source_refused(&self) -> bool { self.source_refused.get() }
@@ -164,7 +172,7 @@ impl PhsOrbitProblem<'_> {
 }
 impl OrbitProblem for PhsOrbitProblem<'_> {
     fn dim(&self) -> usize { self.system.state_dim() }
-    fn autonomous(&self) -> bool { matches!(self.input, InputKind::Constant(_)) }
+    fn autonomous(&self) -> bool { !matches!(self.input, InputKind::Forced { .. }) }
     fn time_domain_rhs(&self) -> Option<fs_orbit::TimeDomainRhs<Self>> {
         // This adapter's frequency port is exactly sI: island already evaluates
         // the complete original ODE, including all explicit memory coordinates.
@@ -183,12 +191,19 @@ impl OrbitProblem for PhsOrbitProblem<'_> {
         if effort.iter().any(|v| !v.is_finite()) { self.fail(out); return; }
 
         let mut input = self.ports.borrow_mut();
-        let ok = match self.input {
+        let ok = match &self.input {
             InputKind::Forced { periodic, omega_rad_s } =>
-                periodic.sample_at_frequency_into(t, omega_rad_s, &mut input),
+                periodic.sample_at_frequency_into(t, *omega_rad_s, &mut input),
             InputKind::Constant(bias) => {
                 if bias.len() != m || bias.iter().any(|v| !v.is_finite()) { false }
                 else { input.copy_from_slice(bias); true }
+            }
+            InputKind::Feedback { law, flows } => {
+                let mut flows = flows.borrow_mut();
+                input.fill(f64::NAN);
+                port_flows_into(self.system, &effort, &mut flows)
+                    && law.input(x, &flows, &mut input)
+                    && input.iter().all(|value| value.is_finite())
             }
         };
         if !ok { self.fail(out); return; }
@@ -419,9 +434,35 @@ pub fn audit_forced_orbit(
         || samples<32 || samples>65_536
         || orbit.coeffs.iter().any(|row|row.is_empty())
     { return Err(bad("cycle audit needs matching forced orbit and 32..=65536 samples")); }
+    audit_orbit_with_input(system, orbit, samples,
+        |time, _, _, out| input.sample_into(time, out))
+}
+
+fn port_flows_into(system: &PortHamiltonian, effort: &[f64], out: &mut [f64]) -> bool {
     let n=system.state_dim(); let m=system.port_dim();
-    let (_,r,g)=system.structure();
+    let (_,_,g)=system.structure();
+    for (p,value) in out.iter_mut().enumerate() {
+        *value=(0..n).map(|i|g[i*m+p]*effort[i]).sum::<f64>();
+    }
+    out.iter().all(|value|value.is_finite())
+}
+
+fn audit_orbit_with_input(
+    system: &PortHamiltonian, orbit: &HbOrbit, samples: usize,
+    mut input: impl FnMut(f64, &[f64], &[f64], &mut [f64]) -> bool,
+) -> Result<PhsOrbitAudit, PhsOrbitError> {
+    let width=orbit.coeffs.first().map_or(0,Vec::len);
+    if system.state_dim()==0 || orbit.coeffs.len()!=system.state_dim() || width==0
+        || !orbit.omega.is_finite() || orbit.omega<=0.0
+        || !(core::f64::consts::TAU/orbit.omega).is_finite()
+        || !(32..=65_536).contains(&samples)
+        || orbit.coeffs.iter().any(|row|row.len()!=width || row[0].im!=0.0
+            || row.iter().any(|z|!z.re.is_finite() || !z.im.is_finite()))
+    { return Err(bad("cycle audit needs finite original-state Fourier rows and 32..=65536 samples")); }
+    let n=system.state_dim(); let m=system.port_dim();
+    let (_,r,_)=system.structure();
     let mut x=vec![0.0;n]; let mut e=vec![0.0;n]; let mut u=vec![0.0;m];
+    let mut flows=vec![0.0;m];
     let (mut energy_sum,mut supply_sum,mut loss_sum,mut scale_sum)=(0.0,0.0,0.0,0.0);
     let (mut ce,mut cs,mut cl,mut cx)=(0.0,0.0,0.0,0.0);
     let (mut emin,mut emax)=(f64::INFINITY,f64::NEG_INFINITY);
@@ -431,13 +472,15 @@ pub fn audit_forced_orbit(
         for (k,value) in x.iter_mut().enumerate() {*value=orbit.sample(k,theta);}
         e.fill(f64::NAN); system.storage().gradient(&x,&mut e);
         if e.iter().any(|v|!v.is_finite()) {return Err(PhsOrbitError::SourceRefused);}
-        let time=theta/input.omega_rad_s();
-        if !input.sample_into(time,&mut u) {return Err(PhsOrbitError::SourceRefused);}
+        let time=theta/orbit.omega;
+        u.fill(f64::NAN);
+        if !port_flows_into(system,&e,&mut flows) || !input(time,&x,&flows,&mut u)
+            || u.iter().any(|value|!value.is_finite())
+        {return Err(PhsOrbitError::SourceRefused);}
         let h=system.hamiltonian(&x);
         let mut supply=0.0; let mut loss=0.0;
         for p in 0..m {
-            let y=(0..n).map(|i|g[i*m+p]*e[i]).sum::<f64>();
-            supply+=u[p]*y;
+            supply+=u[p]*flows[p];
         }
         for i in 0..n {
             let re=(0..n).map(|k|r[i*n+k]*e[k]).sum::<f64>();
