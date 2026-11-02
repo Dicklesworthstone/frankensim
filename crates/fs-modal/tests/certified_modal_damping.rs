@@ -444,6 +444,175 @@ fn g1_clustered_pair_triggers_full_block_fallback() {
 }
 
 #[test]
+fn g0_isolated_damping_poles_enforce_the_requested_accuracy() {
+    // The single-mode and uncoupled-row paths need no Schur complement,
+    // but their pole-rounding radius must still fit the declared accuracy.
+    let strict = ModalDampingBudget {
+        max_rel_decay_error: 1e-16,
+        ..budget()
+    };
+    for (omega, c) in [
+        (vec![100.0], vec![0.2]),
+        (vec![100.0, 250.0], vec![0.2, 0.0, 0.0, 0.5]),
+    ] {
+        let accepted = certify_modal_damping(&omega, &c, &budget()).unwrap();
+        assert!(accepted.worst_rel_decay <= budget().max_rel_decay_error);
+        assert!(accepted.worst_freq_cents <= budget().max_freq_error_cents);
+        let error = certify_modal_damping(&omega, &c, &strict).unwrap_err();
+        assert!(error.to_string().contains("FS-MODAL-DAMPING-ACCURACY"));
+        assert!(matches!(
+            error,
+            ModalError::DampingAccuracyUnresolved {
+                modes, radius, allowed_radius, ..
+            } if modes == vec![0] && radius > allowed_radius
+        ));
+        // The matrix-free/windowed front door has the same terminal promise.
+        let n = omega.len();
+        assert!(matches!(
+            certify_modal_damping_windowed_far_rows(
+                &omega,
+                &|i, j| c[n * i + j],
+                &vec![0.0; n],
+                1000.0,
+                &strict,
+            ),
+            Err(ModalError::DampingAccuracyUnresolved { .. })
+        ));
+    }
+}
+
+#[test]
+fn g0_full_damping_block_cannot_bypass_decay_or_frequency_accuracy() {
+    // This nonproportional positive-definite two-mode system cannot meet
+    // the normal budget by discarding its off-diagonal damping. Retaining
+    // the whole system still leaves finite-precision pole uncertainty.
+    let omega = [1000.0, 1003.0];
+    let c = [4.0, 0.6, 0.6, 0.1];
+    let accepted = certify_modal_damping(&omega, &c, &budget()).unwrap();
+    assert!(matches!(
+        &accepted.blocks[..],
+        [ModalDampingBlock::Full { modes, .. }] if modes == &[0, 1]
+    ));
+    assert!(accepted.worst_rel_decay <= budget().max_rel_decay_error);
+    assert!(accepted.worst_freq_cents <= budget().max_freq_error_cents);
+    for strict in [
+        ModalDampingBudget {
+            max_rel_decay_error: 1e-16,
+            ..budget()
+        },
+        ModalDampingBudget {
+            max_freq_error_cents: 1e-16,
+            ..budget()
+        },
+    ] {
+        let error = certify_modal_damping(&omega, &c, &strict).unwrap_err();
+        assert!(matches!(
+            &error,
+            ModalError::DampingAccuracyUnresolved {
+                modes, radius, allowed_radius, ..
+            } if modes.as_slice() == [0, 1] && radius > allowed_radius
+        ));
+        assert_eq!(
+            certify_modal_damping(&omega, &c, &strict),
+            Err(error),
+            "accuracy refusal is deterministic"
+        );
+    }
+}
+
+#[test]
+fn g1_owned_diagonal_keeps_lossless_modal_channels_exact() {
+    // Zero material loss is a physical limit, not a reason to invent a
+    // small damping floor or reject an otherwise independent coordinate.
+    let omega = [100.0, 250.0];
+    for c in [[0.0; 4], [0.0, 0.0, 0.0, 0.5]] {
+        let owner = [0.0, c[3] / (2.0 * omega[1])];
+        let result = certify_modal_damping_owned_diagonal(&omega, &c, &owner, &budget()).unwrap();
+        assert!(result.worst_rel_decay <= budget().max_rel_decay_error);
+        assert!(result.worst_freq_cents <= budget().max_freq_error_cents);
+        for block in &result.blocks {
+            let ModalDampingBlock::Diagonal {
+                mode,
+                zeta,
+                eigenvalue,
+                radius,
+            } = block
+            else {
+                panic!("independent modes need no full block");
+            };
+            assert_eq!(zeta.to_bits(), owner[*mode].to_bits());
+            if owner[*mode] == 0.0 {
+                assert_eq!(*eigenvalue, C64::new(0.0, omega[*mode]));
+                assert_eq!(*radius, 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_degenerate_lossless_modes_keep_exact_poles_and_multiplicity() {
+    // A circular plate's two polarization coordinates can be independent
+    // while sharing a natural frequency. Their identical zero-loss poles
+    // need no numerical eigensolve, damping floor, or connection to other modes.
+    let omega = [100.0, 100.0, 250.0];
+    let mut c = [0.0; 9];
+    c[8] = 0.5;
+    for result in [
+        certify_modal_damping(&omega, &c, &budget()).unwrap(),
+        certify_modal_damping_owned_diagonal(&omega, &c, &[0.0, 0.0, 0.001], &budget()).unwrap(),
+    ] {
+        assert_eq!(result.blocks.len(), 2);
+        let ModalDampingBlock::Full {
+            modes,
+            eigenvalues,
+            radii,
+            ..
+        } = &result.blocks[0]
+        else {
+            panic!("coincident poles retain a counted block");
+        };
+        assert_eq!(modes, &[0, 1]);
+        assert_eq!(eigenvalues, &[C64::new(0.0, 100.0); 2]);
+        assert_eq!(radii, &[0.0; 2]);
+        assert!(result.worst_rel_decay <= budget().max_rel_decay_error);
+        assert!(result.worst_freq_cents <= budget().max_freq_error_cents);
+    }
+}
+
+#[test]
+fn g0_owned_diagonal_checks_reported_accuracy_at_a_rounded_boundary() {
+    let omega = [1.0];
+    let c = [0.3];
+    let owner = [0.15];
+    let resolved = certify_modal_damping_owned_diagonal(&omega, &c, &owner, &budget()).unwrap();
+    let strict = ModalDampingBudget {
+        max_rel_decay_error: resolved.worst_rel_decay.next_down(),
+        ..budget()
+    };
+    let ModalDampingBlock::Diagonal {
+        radius, eigenvalue, ..
+    } = resolved.blocks[0]
+    else {
+        panic!("one independent mode");
+    };
+    // Multiplying the stricter relative tolerance back to a radius rounds
+    // up to exactly the old radius. Testing only that inverse transform
+    // previously returned a report that contradicted its own tolerance.
+    assert!(radius <= strict.max_rel_decay_error * eigenvalue.re.abs());
+    assert!(matches!(
+        certify_modal_damping_owned_diagonal(&omega, &c, &owner, &strict),
+        Err(ModalError::DampingAccuracyUnresolved { .. })
+    ));
+    let admitted = ModalDampingBudget {
+        max_rel_decay_error: resolved.worst_rel_decay.next_up(),
+        ..budget()
+    };
+    let result = certify_modal_damping_owned_diagonal(&omega, &c, &owner, &admitted).unwrap();
+    assert!(result.worst_rel_decay <= admitted.max_rel_decay_error);
+    assert!(result.worst_freq_cents <= admitted.max_freq_error_cents);
+}
+
+#[test]
 fn g0_cluster_cap_and_cap_plus_one() {
     // Every mode coupled to every other inside a 1e-6 relative band: the
     // minimal certified cluster is everything.

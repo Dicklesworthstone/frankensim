@@ -233,7 +233,8 @@ last published diagnostics. The opt-in `broadband` observer is not part of this 
 
 ## Error model
 The certified-damping paths refuse with `DampingInput`,
-`DampingNotUnderdamped`, `DampingClusterTooLarge` (naming the cluster) and
+`DampingNotUnderdamped`, `DampingClusterTooLarge` (naming the cluster),
+`DampingAccuracyUnresolved` (naming the block, pole and numerical radius), and
 `DampingBlockSpansWindow`; they never fall back to a default budget.
 Structural misuse (wrong slice lengths in the dense/quadratic paths) panics
 with structured messages — programmer errors. Everything else refuses
@@ -310,6 +311,11 @@ The certificate is Rouché's theorem on the Schur complement of
 - `ModalDampingBudget` has no default. Its decay and cents tolerances must be
   finite and positive, and the cluster cap must lie in
   `1..=MAX_DAMPING_CLUSTER` (64, the connection ceiling).
+- Every returned pole uncertainty meets both requested accuracy limits,
+  including isolated rows and full-system blocks with no complement.
+  Retaining all coupling does not waive finite-precision accuracy: an
+  unresolved pole refuses with `DampingAccuracyUnresolved` instead of
+  returning a certificate whose own reported error exceeds its budget.
 
 `certify_modal_damping_windowed` never forms C.
 - It reads `C_jk` only for `|ω_j − ω_k| < window`. `damping_window_neighbours`
@@ -333,6 +339,12 @@ energy-quotient image. It certifies on C as above. Each `Diagonal` block then
 reports `zeta_owner[i]` bit for bit, with its closed-form pole, and its radius
 grows by the centre shift so the exact pole stays enclosed. An owner ζ that
 breaks the budget or moves a disc into another refuses by name.
+An exactly undamped independent channel preserves its exact pole `i*omega`
+and zero radius, including through this owner-diagonal path; it needs no
+artificial damping floor. Repeated independent frequencies retain their
+analytic poles and multiplicities in one block without a dense eigensolve.
+A block with exactly zero coupling to its complement needs no perturbation
+allowance from unrelated modes.
 
 Comparisons carry `ROUCHE_SAFETY = 1e-9` relative; this is not interval
 arithmetic.
@@ -375,6 +387,10 @@ up to ~1e-12 relative.
   diagonal breaks the decay budget (reported).
 - **G0 cap and inputs:** the 64/65 cluster cap, and refusal of every budget,
   frequency and matrix input.
+- **G0 accuracy:** isolated rows and full-system fallback blocks enforce
+  both error limits; a stricter-than-resolved request refuses deterministically.
+- **G1 lossless limit:** owner-diagonal material channels with zero loss
+  retain exact imaginary poles and zero radii alongside damped channels.
 - **G0 Bessel:** the far bound dominates the true far norm and falls to its
   √ε floor on a complete space.
 - **G0 windowed:** windowed certificates enclose dense truth.

@@ -161,6 +161,19 @@ pub enum ModalError {
         /// The cap.
         cap: usize,
     },
+    /// The pole uncertainty still exceeds the requested physical accuracy
+    /// after retaining the required damping block. No partial certificate
+    /// is returned, even when that block is the entire system.
+    DampingAccuracyUnresolved {
+        /// Modes of the unresolved block.
+        modes: Vec<usize>,
+        /// Pole whose uncertainty exceeds the budget [1/s].
+        eigenvalue: C64,
+        /// Computed uncertainty radius [1/s].
+        radius: f64,
+        /// Rounded radius implied by both accuracy limits [1/s].
+        allowed_radius: f64,
+    },
     /// A required block needs coupling entries outside the supplied window.
     DampingBlockSpansWindow {
         /// The block.
@@ -233,6 +246,15 @@ impl core::fmt::Display for ModalError {
                 f,
                 "FS-MODAL-DAMPING-CLUSTER: certified cluster of {} modes {modes:?} exceeds cap {cap}",
                 modes.len()
+            ),
+            ModalError::DampingAccuracyUnresolved {
+                modes,
+                eigenvalue,
+                radius,
+                allowed_radius,
+            } => write!(
+                f,
+                "FS-MODAL-DAMPING-ACCURACY: block {modes:?} pole {eigenvalue:?} has unresolved accuracy (radius {radius} 1/s, requested limit {allowed_radius} 1/s)"
             ),
             ModalError::DampingBlockSpansWindow { modes, window } => write!(
                 f,

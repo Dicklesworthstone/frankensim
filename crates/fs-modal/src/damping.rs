@@ -182,6 +182,8 @@ pub struct CertifiedModalDamping {
 ///   block has real poles.
 /// - [`ModalError::DampingClusterTooLarge`] when the minimal certified
 ///   cluster exceeds the cap.
+/// - [`ModalError::DampingAccuracyUnresolved`] when retained pole uncertainty
+///   exceeds the decay or frequency budget, including a full-system block.
 /// - [`ModalError::QuadraticEig`] when a block solve fails.
 pub fn certify_modal_damping(
     omega: &[f64],
@@ -320,6 +322,29 @@ fn budget_radius(budget: &ModalDampingBudget, mu: C64) -> f64 {
     (budget.max_rel_decay_error * mu.re.abs()).min(mu.im * k / (1.0 + k))
 }
 
+// Check the reported quantities themselves, rather than only the inverse
+// radius transform, which can round an over-budget radius onto its boundary.
+fn pole_errors_within_budget(
+    budget: &ModalDampingBudget,
+    pole: C64,
+    radius: f64,
+) -> Option<(f64, f64)> {
+    let decay = if radius == 0.0 {
+        0.0
+    } else {
+        radius / pole.re.abs()
+    };
+    let cents = cents_bound(radius, pole.im);
+    (pole.re.is_finite()
+        && pole.im.is_finite()
+        && pole.im > 0.0
+        && radius.is_finite()
+        && radius >= 0.0
+        && decay <= budget.max_rel_decay_error
+        && cents <= budget.max_freq_error_cents)
+        .then_some((decay, cents))
+}
+
 /// [`certify_modal_damping`] with the diagonal decay rates owned by the
 /// caller. `zeta_owner[i]` is the caller's own evaluator for mode i (for a
 /// plate, its energy-quotient image), which can differ from `C_ii/(2ω_i)` in
@@ -366,11 +391,22 @@ pub fn certify_modal_damping_owned_diagonal(
             if half >= w {
                 return Err(ModalError::DampingNotUnderdamped { modes: vec![*mode] });
             }
-            let nu = det::sqrt((w - half) * (w + half));
+            // A lossless coordinate has the exact pole i*w, just as in the
+            // base certifier. Squaring/square-rooting w and adding a fictitious
+            // rounding radius would make its zero decay-error budget fail.
+            let nu = if z == 0.0 {
+                w
+            } else {
+                det::sqrt((w - half) * (w + half))
+            };
             let centre = C64::new(-half, nu);
             // The owner's closed form: one product for the real part, and
             // as in `Certifier::new`, 2εν for the imaginary part.
-            let rounding = f64::EPSILON * half + 2.0 * f64::EPSILON * nu;
+            let rounding = if z == 0.0 {
+                0.0
+            } else {
+                f64::EPSILON * half + 2.0 * f64::EPSILON * nu
+            };
             let grown = (*radius + (centre - *eigenvalue).abs() + rounding) * (1.0 + ROUCHE_SAFETY);
             if !(grown <= budget_radius(budget, centre)) {
                 return Err(input(
@@ -411,10 +447,23 @@ pub fn certify_modal_damping_owned_diagonal(
         }
     }
     let (mut worst_rel_decay, mut worst_freq_cents) = (0.0_f64, 0.0_f64);
-    for &(centre, radius, _) in &discs {
+    for &(centre, radius, block) in &discs {
+        let (decay, cents) =
+            pole_errors_within_budget(budget, centre, radius).ok_or_else(|| {
+                let modes = match &result.blocks[block] {
+                    ModalDampingBlock::Diagonal { mode, .. } => vec![*mode],
+                    ModalDampingBlock::Full { modes, .. } => modes.clone(),
+                };
+                ModalError::DampingAccuracyUnresolved {
+                    modes,
+                    eigenvalue: centre,
+                    radius,
+                    allowed_radius: budget_radius(budget, centre),
+                }
+            })?;
         if radius > 0.0 {
-            worst_rel_decay = worst_rel_decay.max(radius / centre.re.abs());
-            worst_freq_cents = worst_freq_cents.max(cents_bound(radius, centre.im));
+            worst_rel_decay = worst_rel_decay.max(decay);
+            worst_freq_cents = worst_freq_cents.max(cents);
         }
     }
     result.worst_rel_decay = worst_rel_decay;
@@ -848,7 +897,7 @@ impl<'a> Certifier<'a> {
                 }
             }
             if merges.is_empty() {
-                return Ok(self.assemble(&blocks, outcomes));
+                return self.assemble(&blocks, outcomes);
             }
             for (a, b) in merges {
                 let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
@@ -921,9 +970,17 @@ impl<'a> Certifier<'a> {
                 }
             }
         }
-        if block.len() == self.n() {
-            // No complement: the block poles are the poles, to the accuracy
-            // of their refinement.
+        if block.len() == self.n()
+            || block.iter().all(|&j| {
+                self.coupling.far[j] == 0.0
+                    && self.coupling.near[j]
+                        .iter()
+                        .all(|&(k, _)| block.binary_search(&k).is_ok())
+            })
+        {
+            // No coupling to the complement: the block poles are exact to
+            // the accuracy of their refinement. This also keeps isolated
+            // degenerate lossless channels at their exact zero radius.
             return self.block_poles(block).map(|poles| {
                 BlockOutcome::Certified(
                     poles
@@ -994,9 +1051,20 @@ impl<'a> Certifier<'a> {
     /// keeps its seed with a 1e-6 relative allowance.
     fn block_poles(&self, block: &[usize]) -> Result<Vec<(C64, f64)>, ModalError> {
         let b = block.len();
-        if b == 1 {
-            let i = block[0];
-            return Ok(vec![(self.lam[i], self.delta[i])]);
+        if block.iter().all(|&j| {
+            self.coupling.near[j]
+                .iter()
+                .all(|&(k, _)| block.binary_search(&k).is_err())
+        }) {
+            // Exact diagonal pencils, including repeated poles, retain the
+            // analytic roots and their multiplicities. QR would add fictitious
+            // uncertainty to an exactly known undamped pole i*omega.
+            let mut poles: Vec<_> = block
+                .iter()
+                .map(|&i| (self.lam[i], self.delta[i]))
+                .collect();
+            poles.sort_by(|x, y| x.0.im.total_cmp(&y.0.im).then(x.0.re.total_cmp(&y.0.re)));
+            return Ok(poles);
         }
         let d = 2 * b;
         let mut a = vec![C64::ZERO; d * d];
@@ -1414,7 +1482,7 @@ impl<'a> Certifier<'a> {
         &self,
         blocks: &[Vec<usize>],
         outcomes: Vec<BlockOutcome>,
-    ) -> CertifiedModalDamping {
+    ) -> Result<CertifiedModalDamping, ModalError> {
         let mut result = Vec::with_capacity(blocks.len());
         let (mut worst_rel_decay, mut worst_freq_cents) = (0.0_f64, 0.0_f64);
         for (block, outcome) in blocks.iter().zip(outcomes) {
@@ -1424,9 +1492,19 @@ impl<'a> Certifier<'a> {
             let mut members: Vec<(C64, f64)> = discs.into_iter().flat_map(|d| d.members).collect();
             members.sort_by(|x, y| x.0.im.total_cmp(&y.0.im).then(x.0.re.total_cmp(&y.0.re)));
             for &(mu, r) in &members {
+                // The isolated-row and full-system paths need no complement
+                // bound, but their floating-point pole uncertainty still has
+                // to resolve the requested physical decay and frequency.
+                let (decay_error, frequency_error) = pole_errors_within_budget(&self.budget, mu, r)
+                    .ok_or_else(|| ModalError::DampingAccuracyUnresolved {
+                        modes: block.clone(),
+                        eigenvalue: mu,
+                        radius: r,
+                        allowed_radius: self.budget_radius(mu),
+                    })?;
                 if r > 0.0 {
-                    worst_rel_decay = worst_rel_decay.max(r / mu.re.abs());
-                    worst_freq_cents = worst_freq_cents.max(cents_bound(r, mu.im));
+                    worst_rel_decay = worst_rel_decay.max(decay_error);
+                    worst_freq_cents = worst_freq_cents.max(frequency_error);
                 }
             }
             if let [i] = **block {
@@ -1447,7 +1525,7 @@ impl<'a> Certifier<'a> {
                 });
             }
         }
-        CertifiedModalDamping {
+        Ok(CertifiedModalDamping {
             blocks: result,
             worst_rel_decay,
             worst_freq_cents,
@@ -1455,7 +1533,7 @@ impl<'a> Certifier<'a> {
                 window_rad_s: self.coupling.window,
                 far_row_norm: self.coupling.far.clone(),
             },
-        }
+        })
     }
 }
 
