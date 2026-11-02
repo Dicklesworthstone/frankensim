@@ -230,3 +230,24 @@ fn rigid_cap_blocks_all_modal_mouth_flow_after_junctions() {
         }
     }
 }
+
+#[test]
+fn modal_junction_crosses_simultaneous_pressure_and_flow_nodes() {
+    // G1: mixed pressure/flow nodes cannot make a physical junction singular.
+    let gas = air();
+    let n = 2;
+    let r_down = [C64::ONE, C64::ZERO, C64::ZERO, -C64::ONE];
+    for radii in [&[0.035, 0.05][..], &[0.05, 0.035][..]] {
+        let source = cylinders(radii);
+        let prepared = PreparedModalDuct::new(&source, n, 1).unwrap();
+        let data = prepared.junctions[0].as_ref().unwrap();
+        let omega = core::f64::consts::TAU * 8000.0;
+        let z_up = modal_wave(&gas, radii[0], omega, LossModel::Lossless,
+            &prepared.gammas).unwrap().zc;
+        let z_down = modal_wave(&gas, radii[1], omega, LossModel::Lossless,
+            &prepared.gammas).unwrap().zc;
+        let mut transmission = Some(vec![C64::ONE, C64::ZERO, C64::ZERO, C64::ONE]);
+        let r_up = junction(&mut transmission, &r_down, &z_down, &z_up, data, n).unwrap();
+        assert!(transmission.unwrap().iter().chain(&r_up).all(|&v| finite(v)));
+    }
+}

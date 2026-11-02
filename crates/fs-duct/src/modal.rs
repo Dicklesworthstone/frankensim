@@ -18,8 +18,9 @@
 //! reflection recursion is bounded under evanescence — propagation
 //! multiplies by `diag(e^{i k_n L})` whose entries all have magnitude
 //! <= 1 in this crate's `e^{-i omega t}` convention (`Im k >= 0` decays),
-//! while an ABCD product would grow like `e^{+kappa L}`. Impedance
-//! matrices appear only at junction planes. Segment two-ports follow the
+//! while an ABCD product would grow like `e^{+kappa L}`. Junctions enforce
+//! pressure/flow continuity directly in wave coordinates: neither a pressure
+//! node nor a flow node requires an internal impedance inversion. Segment two-ports follow the
 //! crate technique: built from exact analytic basis solutions, never
 //! transcribed matrices. Cones and flares are STAIRCASED into short
 //! cylinders (the crate already slices lossy cones); mode conversion
@@ -784,20 +785,14 @@ fn mm_evaluate_prepared(
         let wave_up = modal_wave(state, st.radius, omega, loss, gammas)?;
         min_shear = min_shear.min(wave_up.shear_number);
         if let Some(junction) = &geometry.junctions[idx] {
-            let z_down = impedance_from_reflection(&r, &wave_here.zc, n)?;
-            let f = &junction.projection;
-            let ft = &junction.transpose;
-            let z_up = if junction.expansion {
-                // Expansion along propagation: upstream is the SMALL side.
-                outlet::junction(&mut mouth_flow, &r, &wave_here.zc, &wave_up.zc, f, true, n)?;
-                mat_mul(&mat_mul(f, &z_down, n), ft, n)
-            } else {
-                // Contraction along propagation: downstream is SMALL.
-                let z_inv = mat_inv(&z_down, n)?;
-                outlet::junction(&mut mouth_flow, &r, &wave_here.zc, &wave_up.zc, f, false, n)?;
-                mat_inv(&mat_mul(&mat_mul(ft, &z_inv, n), f, n), n)?
-            };
-            r = reflection_from_impedance(&z_up, &wave_up.zc, n)?;
+            r = outlet::junction(
+                &mut mouth_flow,
+                &r,
+                &wave_here.zc,
+                &wave_up.zc,
+                junction,
+                n,
+            )?;
         }
         propagate(&mut r, &mut mouth_flow, &wave_up, st.length)?;
         wave_here = wave_up;

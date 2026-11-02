@@ -964,8 +964,8 @@ fn mm_riccati_reciprocity_and_power() {
         if loss != LossModel::Lossless {
             continue;
         }
-        let g = p.flow.unwrap();
-        let g_inv = mat_inv(&g, n).unwrap();
+        let record = p.stations.as_ref().unwrap();
+        let inlet_wave = mat_inv(record.flow.last().unwrap(), n).unwrap();
         let mouth = modal_wave(
             &state,
             cone.outlet_radius(),
@@ -985,14 +985,11 @@ fn mm_riccati_reciprocity_and_power() {
                     (u_in[r].conj() * pr).re
                 })
                 .sum();
-            let u_out: Vec<C64> = (0..n)
-                .map(|r| {
-                    (0..n).fold(C64::ZERO, |acc, c| {
-                        acc + g_inv[r * n + c] * u_in[c].scale(1.0 / p.zref)
-                    })
-                })
-                .map(|v| v.scale(p.zref))
-                .collect();
+            let mut wave = mat_vec(&inlet_wave, &u_in, n);
+            for back in record.wave_back.iter().rev() {
+                wave = mat_vec(back, &wave, n);
+            }
+            let u_out = mat_vec(&record.flow[0], &wave, n);
             let power_out: f64 = (0..n)
                 .map(|r| (u_out[r].conj() * mouth.zc[r] * u_out[r]).re)
                 .sum();
@@ -1232,8 +1229,8 @@ fn mm_field_power_flux_conserved() {
 
 #[test]
 fn mm_field_refusals() {
-    // G0: one finite inlet flow per retained mode, a finite plane-mode mouth
-    // load, and the impedance image's own mode and step refusals.
+    // G0: one finite inlet flow per retained mode, and the impedance image's
+    // own mode and step refusals. A rigid cap is an admitted physical boundary.
     fn call(
         load: MouthLoad<'_>,
         modes: usize,
@@ -1268,12 +1265,12 @@ fn mm_field_refusals() {
         256,
         &[C64::new(f64::NAN, 0.0), C64::ZERO]
     )));
-    assert!(bad_param(call(
+    assert!(call(
         MouthLoad::Analytic(Termination::Closed),
         2,
         256,
         &ok
-    )));
+    ).is_ok());
     let cap = certified_mode_cap();
     assert!(bad_param(call(
         MouthLoad::Matched,
@@ -1374,6 +1371,59 @@ fn pressure_release_field_annihilates_every_mouth_pressure_mode() {
                 (flow[mode] - expected).abs() < 5e-11 * expected.abs(),
                 "{frequency} Hz, mode {mode}: {:?} != {expected:?}", flow[mode]
             );
+        }
+    }
+}
+
+#[test]
+fn standing_wave_fields_cross_pressure_and_flow_nodes() {
+    // G1/G3: exact cylindrical standing waves, with plane-mode nodes on the
+    // grid and evanescent higher modes. No damping or gain cap is introduced.
+    let gas = air20();
+    let (radius,length,n) = (0.05,0.2,3);
+    let profile = RadiusProfile::power(radius,1.0,0.0,length).unwrap();
+    let drive = [C64::new(0.7,-0.2),C64::new(0.3,0.1),C64::new(-0.2,0.4)];
+    let gammas: Vec<_> = std::iter::once(0.0).chain(j1_roots_unchecked(n-1)).collect();
+    for end in [Termination::Closed,Termination::IdealOpen] {
+        let closed = end == Termination::Closed;
+        let k = (if closed { 2.5 } else { 3.0 })*core::f64::consts::PI/length;
+        let omega = k*gas.sound_speed;
+        for steps in [60,120,240] {
+            let field = mm_profile_field(&profile,&gas,omega,LossModel::Lossless,
+                MouthLoad::Analytic(end),ModeCount(n),RiccatiSteps(steps),&drive).unwrap();
+            for (m,&g) in gammas.iter().enumerate() {
+                let q = k*k-(g/radius).powi(2);
+                let kn = C64::from_re(q).sqrt();
+                let zc = C64::from_re(gas.density*omega/(core::f64::consts::PI*radius*radius))/kn;
+                let sc = |distance: f64| {
+                    let t = kn.abs()*distance;
+                    if q >= 0.0 { (C64::from_re(t.sin()),C64::from_re(t.cos())) }
+                    else { (C64::new(0.0,t.sinh()),C64::from_re(t.cosh())) }
+                };
+                let (sl,cl) = sc(length);
+                for (j,&x) in field.x.iter().enumerate() {
+                    let (s,c) = sc(length-x);
+                    let (p,u) = if closed {
+                        (C64::new(0.0,1.0)*zc*c*drive[m]/sl,s*drive[m]/sl)
+                    } else { (C64::new(0.0,-1.0)*zc*s*drive[m]/cl,c*drive[m]/cl) };
+                    assert!((field.pressure[j][m]-p).abs() < 3e-10*zc.abs()*drive[m].abs());
+                    assert!((field.flow[j][m]-u).abs() < 3e-10*drive[m].abs());
+                }
+            }
+            let last = if closed { &field.flow[steps] } else { &field.pressure[steps] };
+            assert!(last.iter().all(|&v| v == C64::ZERO));
+        }
+        // True input poles still amplify the response on both sides.
+        let pole = (if closed { 1.0 } else { 0.5 })*core::f64::consts::PI;
+        let zc = gas.density*gas.sound_speed/(core::f64::consts::PI*radius*radius);
+        for offset in [-1e-5,1e-5] {
+            let phase = pole+offset;
+            let expected = C64::new(0.0,if closed { zc/phase.tan() } else { -zc*phase.tan() });
+            let actual = mm_profile_impedance(&profile,&gas,phase*gas.sound_speed/length,
+                LossModel::Lossless,MouthLoad::Analytic(end),ModeCount(1),RiccatiSteps(32))
+                .unwrap().plane_impedance;
+            assert!(actual.abs() > 9e4*zc);
+            assert!((actual-expected).abs() < 1e-7*expected.abs());
         }
     }
 }

@@ -473,6 +473,9 @@ pipe `Z_in = +i Zc cot(kL)`.
   reflection matrices are respectively `+I` and `-I`, including evanescent
   modes; propagation retains the original decaying round-trip factors.
   These conditions feed both input impedance and the complete mouth-flow map.
+  Junctions solve the original pressure/flow constraints in forward-wave
+  coordinates with one LU shared by reflection and mouth transmission.
+  Internal pressure or flow nodes need no impedance/admittance inversion.
   `mm_input_impedance_load` supplies an explicit finite plane-mode impedance
   with nonnegative resistance to that same recurrence. It retains every
   interior modal coupling and the matched higher-mode mouth closure. Runtime
@@ -490,9 +493,10 @@ pipe `Z_in = +i Zc cot(kL)`.
   It is derived in the module doc from the Bessel ODE and orthogonality,
   with no quadrature.
   - Each fixed step is a fourth-order two-node Gauss-Magnus exponential
-    of the `2N x 2N` generator, applied to the scaled impedance as a
-    Moebius map, so evanescent modes relax onto their decaying branch
-    without explicit Riccati marching.
+    of the `2N x 2N` generator, applied to a homogeneous pair
+    `P/Zref=X a`, `U=Y a`. Normalizing by `X+Y` uses a positive real
+    reference wave and crosses internal standing-wave nodes. Only the
+    final inlet impedance forms `Zref X Y^-1`; true input poles remain.
   - `MAX_EVANESCENT_STEP = 8` refuses a step whose `max_n |Im k_n| |h|`
     would put the O(1) propagating entries below accuracy. The error is
     "refine Riccati steps"; it never silently degrades.
@@ -513,21 +517,21 @@ pipe `Z_in = +i Zc cot(kL)`.
   - `bessel_j0` keeps its double-double series below 26, so every
     staircase argument keeps its bits. Above 26 it switches to the
     generated Hankel expansion.
-  - The staircase image, its goldens and `MAX_MODES = 8` are unchanged;
-    it is now the O(dx) comparison rung.
+  - The staircase retains its physical projections and `MAX_MODES = 8`
+    as the O(dx) comparison rung; wave-coordinate junction arithmetic changes.
 - `modal::mm_profile_field(profile, state, omega, loss, load, modes, steps,
   inlet_flow) -> ModalField` (IRP M2.1-W3b): the continuous field behind
   that impedance, driven by a prescribed inlet modal flow (a plane piston
   of volume flow `q` is `[q, 0, ..]`).
-  - It keeps the scaled impedance at every step station and each step's
-    inverse flow map. It then carries the inlet flow back toward the mouth
-    (`u_j = Y_j^-1 u_{j+1}`, which contracts evanescent components) and
-    sets `P = Z U` station by station.
+  - It keeps both normalized pressure/flow maps and each step's backward
+    reference-wave map. After solving the inlet flow constraint once,
+    it reconstructs pressure and flow separately at every station. A closed
+    end and internal zero-flow nodes retain their finite pressure.
   - `ModalField` holds the stations (ascending from the inlet), `P_n`, `U_n`
     and the axis pressure `sum_n P_n psi_n(0)`, `psi_n(0) = 1/|J0(gamma_n)|`.
-  - It refuses an inlet flow that is not one finite value per retained
-    mode, and a mouth with no finite plane-mode impedance. Memory is
-    `O(steps N^2)`. The impedance path is bit-identical.
+  - It refuses invalid inlet flows and singular inlet impedance, while
+    admitting closed mouths. Memory is `O(steps N^2)`, with no growing
+    cumulative inverse-flow matrix. Observation leaves impedance bits intact.
 
 - `profiled_tone_hole_shunt` / `profiled_tone_hole_junction` (IRP M5.5-W2
   seam qualification): a tone hole whose chimney is a chain of duct sections

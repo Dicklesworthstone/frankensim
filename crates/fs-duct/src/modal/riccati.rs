@@ -43,12 +43,15 @@
 //!
 //! **Integration.** From the mouth to the inlet in fixed steps. Each step is
 //! the fourth-order two-node Gauss-Magnus exponential of the `2N x 2N`
-//! generator (scaled by `Z_ref = rho c / S_inlet`), applied as a Moebius map
-//! to the scaled impedance `zeta = Z/Z_ref`:
-//! `zeta <- (Phi11 zeta + Phi12)(Phi21 zeta + Phi22)^-1`. The exact local
-//! exponential carries evanescent modes without explicit Riccati marching:
-//! integrated toward the source the impedance relaxes onto the decaying
-//! branch (local rate `-2 kappa_n`), and only ratios enter the map.
+//! generator (scaled by `Z_ref = rho c / S_inlet`), applied to the homogeneous
+//! pressure/flow pair `[X; Y]`. Normalize by `X+Y`, the incoming wave in this
+//! positive real reference, rather than by pressure or flow alone. A passive
+//! terminated guide cannot have a nonzero state with `P=-Z_ref U`, so this
+//! chart crosses internal standing-wave nodes without a fictitious pole.
+//! The exact local exponential carries evanescent modes without explicit
+//! Riccati marching or a growing whole-guide transfer product. Only the
+//! final requested input impedance forms `Z = Z_ref X Y^-1`; a genuine
+//! input resonance remains singular.
 //!
 //! **Mouth.** Closed and ideal pressure-release boundaries act on every
 //! retained mode. Scalar radiation and tabulated loads act on the plane mode,
@@ -57,11 +60,11 @@
 //! APIs impose the complete original Zorumski radiation matrix, retaining
 //! signed mutual loads and the exterior gas.
 //!
-//! **Field.** [`mm_profile_field`] keeps the scaled impedance at every step
-//! station and each step's inverse flow map, then carries a prescribed
-//! inlet modal flow back toward the mouth (`u_j = Y_j^-1 u_{j+1}`, which
-//! contracts evanescent components: they decay away from the source) and
-//! sets `P = Z U` station by station. The pressure on the axis is
+//! **Field.** [`mm_profile_field`] keeps the normalized pressure/flow pair
+//! and each step's backward wave map. It then carries the prescribed inlet
+//! state toward the mouth using those same maps. Pressure and flow are
+//! evaluated independently, including at closed ends and internal nodes;
+//! no `infinity * zero` impedance reconstruction is needed. Pressure on the axis is
 //! `sum_n P_n psi_n(0)`, `psi_n(0) = 1/|J0(gamma_n)|`.
 //!
 //! **Bounds.** Mode counts are admitted up to [`certified_mode_cap`]: every
@@ -323,25 +326,41 @@ fn generator(
     })
 }
 
-/// Per-station record of a tracked propagation, mouth (index 0) to inlet:
-/// the scaled impedance at every station and each step's inverse flow map,
-/// `u_j = Y_j^-1 u_{j+1}`.
+/// Normalized pressure/flow maps, mouth (index 0) to inlet. With
+/// `a=P/Zref+U`, each station has `P/Zref=X a`, `U=Y a`, `X+Y=I`.
+/// `wave_back[j]` takes a at station j+1 back to station j.
 struct Stations {
-    zeta: Vec<Vec<C64>>,
-    flow_back: Vec<Vec<C64>>,
+    pressure: Vec<Vec<C64>>,
+    flow: Vec<Vec<C64>>,
+    wave_back: Vec<Vec<C64>>,
 }
 
-/// Inlet impedance (scaled), diagnostics, and optionally the flow transfer
-/// `u_in = G u_out` with the station record (only for loads with a finite
-/// plane-mode impedance).
+/// Inlet impedance (scaled), diagnostics, and optional bounded station maps.
 struct Propagated {
     zeta: Vec<C64>,
     zref: f64,
     min_shear: f64,
     throat: f64,
     mouth_ka: f64,
-    flow: Option<Vec<C64>>,
     stations: Option<Stations>,
+}
+
+/// Reparameterize the same admissible subspace by its incoming reference wave.
+/// The returned inverse maps the new wave to the previous column amplitudes.
+/// Keep X and Y separately: forming Y=I-X would lose a small resonant flow.
+fn normalize_wave_chart(x: &mut Vec<C64>, y: &mut Vec<C64>, n: usize)
+    -> Result<Vec<C64>, DuctError>
+{
+    let incoming: Vec<_> = x.iter().zip(y.iter()).map(|(&p, &u)| p + u).collect();
+    let back = mat_inv(&incoming, n)?;
+    let pressure = mul(x, &back, n);
+    let flow = mul(y, &back, n);
+    if pressure.iter().chain(&flow).any(|&v| !finite(v)) {
+        return Err(DuctError::Singular);
+    }
+    *x = pressure;
+    *y = flow;
+    Ok(back)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,18 +398,26 @@ fn propagate<'a>(
     let mut y_blk = vec![C64::ZERO; n * n];
     let mouth_ka = match load {
         ProfileLoad::Scalar(load) => {
-            let mouth = modal_wave(state, r_mouth, omega, loss, &basis.gammas[1..])?;
+            // Ideal boundary conditions need no characteristic modal impedance:
+            // the pressure/flow generator is finite even at a bare cutoff.
+            let mouth = if matches!(load,
+                MouthLoad::Analytic(Termination::Closed | Termination::IdealOpen))
+            {
+                None
+            } else {
+                Some(modal_wave(state, r_mouth, omega, loss, &basis.gammas[1..])?)
+            };
             let (plane, ka) = match load {
                 MouthLoad::Analytic(t) => termination_impedance(t, state, r_mouth, omega)?,
                 MouthLoad::Tabulated(table) => (
                     Some(table.z_at(omega)?),
                     omega * r_mouth / state.sound_speed,
                 ),
-                MouthLoad::Matched => (Some(mouth.zc[0]), omega * r_mouth / state.sound_speed),
+                MouthLoad::Matched => (
+                    Some(mouth.as_ref().ok_or(DuctError::Singular)?.zc[0]),
+                    omega * r_mouth / state.sound_speed,
+                ),
             };
-            if track_flow && plane.is_none() {
-                return Err(bad("flow tracking needs a finite plane-mode mouth impedance"));
-            }
             for k in 0..n {
                 let (xk, yk) = match (k, plane) {
                     // A rigid cap annihilates every modal normal velocity.
@@ -402,7 +429,10 @@ fn propagate<'a>(
                     {
                         (z.scale(1.0 / zref), C64::ONE)
                     }
-                    _ => (mouth.zc[k].scale(1.0 / zref), C64::ONE),
+                    _ => (
+                        mouth.as_ref().ok_or(DuctError::Singular)?.zc[k].scale(1.0 / zref),
+                        C64::ONE,
+                    ),
                 };
                 if !finite(xk) {
                     return Err(DuctError::Singular);
@@ -429,16 +459,11 @@ fn propagate<'a>(
             omega * r_mouth / exterior.sound_speed
         }
     };
-    let mut flow = track_flow.then(|| {
-        let mut g = vec![C64::ZERO; n * n];
-        for k in 0..n {
-            g[k * n + k] = C64::ONE;
-        }
-        g
-    });
+    normalize_wave_chart(&mut x_blk, &mut y_blk, n)?;
     let mut stations = track_flow.then(|| Stations {
-        zeta: vec![x_blk.clone()],
-        flow_back: Vec::with_capacity(steps.0),
+        pressure: vec![x_blk.clone()],
+        flow: vec![y_blk.clone()],
+        wave_back: Vec::with_capacity(steps.0),
     });
     let h = -length / steps.0 as f64;
     let root3 = det::sqrt(3.0);
@@ -482,31 +507,27 @@ fn propagate<'a>(
                 y_new[r * n + c] = ys;
             }
         }
-        if let Some(g) = &mut flow {
-            *g = mul(&y_new, g, n);
-        }
-        // Moebius normalization: zeta = X' Y'^-1, then [X; Y] = [zeta; I].
-        let y_inv = mat_inv(&y_new, n)?;
-        x_blk = mul(&x_new, &y_inv, n);
-        if x_blk.iter().any(|&v| !finite(v)) {
-            return Err(DuctError::Singular);
-        }
+        // Never divide by a physical pressure/flow node. Normalization only
+        // changes the coordinates of the same propagated boundary subspace.
+        let wave_back = normalize_wave_chart(&mut x_new, &mut y_new, n)?;
+        x_blk = x_new;
+        y_blk = y_new;
         if let Some(record) = &mut stations {
-            record.zeta.push(x_blk.clone());
-            record.flow_back.push(y_inv);
-        }
-        y_blk.fill(C64::ZERO);
-        for k in 0..n {
-            y_blk[k * n + k] = C64::ONE;
+            record.pressure.push(x_blk.clone());
+            record.flow.push(y_blk.clone());
+            record.wave_back.push(wave_back);
         }
     }
+    let zeta = mul(&x_blk, &mat_inv(&y_blk, n)?, n);
+    if zeta.iter().any(|&v| !finite(v)) {
+        return Err(DuctError::Singular);
+    }
     Ok(Propagated {
-        zeta: x_blk,
+        zeta,
         zref,
         min_shear,
         throat,
         mouth_ka,
-        flow,
         stations,
     })
 }
@@ -624,8 +645,8 @@ fn mat_vec(a: &[C64], v: &[C64], n: usize) -> Vec<C64> {
 ///
 /// # Errors
 /// As [`mm_profile_impedance`], plus an inlet flow that is not one finite
-/// value per retained mode, and a mouth load with no finite plane-mode
-/// impedance (a closed end).
+/// value per retained mode. Closed ends and internal pressure/flow nodes
+/// are supported; a genuine singular input impedance still refuses.
 #[allow(clippy::too_many_arguments)]
 pub fn mm_profile_field(
     profile: &RadiusProfile,
@@ -681,11 +702,7 @@ fn profile_field_with_load(
         ));
     }
     let run = propagate(profile, state, omega, loss, load, n, steps, true)?;
-    let Some(record) = run.stations else {
-        return Err(bad(
-            "flow tracking needs a finite plane-mode mouth impedance",
-        ));
-    };
+    let record = run.stations.ok_or(DuctError::Singular)?;
     let axis_weight: Vec<f64> = Basis::new(n)
         .gammas
         .iter()
@@ -697,7 +714,7 @@ fn profile_field_with_load(
             }
         })
         .collect();
-    let s = record.flow_back.len();
+    let s = record.wave_back.len();
     let (length, h) = (profile.length(), -profile.length() / s as f64);
     let mut field = ModalField {
         n_modes: n,
@@ -706,13 +723,19 @@ fn profile_field_with_load(
         flow: Vec::with_capacity(s + 1),
         axis_pressure: Vec::with_capacity(s + 1),
     };
+    // Solve the prescribed physical inlet flow once. Every interior station
+    // then uses wave coordinates, so even U=0 retains its finite pressure.
+    let mut wave = inlet_flow.to_vec();
+    let inlet = fs_la::eigen_complex::lu_complex(&record.flow[s], n)
+        .map_err(|_| DuctError::Singular)?;
+    inlet.solve(&mut wave);
     // Station j counts steps from the mouth; walk back from the inlet (j = s).
-    let mut u = inlet_flow.to_vec();
     for j in (0..=s).rev() {
         if j < s {
-            u = mat_vec(&record.flow_back[j], &u, n);
+            wave = mat_vec(&record.wave_back[j], &wave, n);
         }
-        let p: Vec<C64> = mat_vec(&record.zeta[j], &u, n)
+        let u = mat_vec(&record.flow[j], &wave, n);
+        let p: Vec<C64> = mat_vec(&record.pressure[j], &wave, n)
             .iter()
             .map(|v| v.scale(run.zref))
             .collect();
@@ -720,14 +743,14 @@ fn profile_field_with_load(
             .iter()
             .zip(&axis_weight)
             .fold(C64::ZERO, |acc, (pn, w)| acc + pn.scale(*w));
-        if !(finite(axis) && u.iter().all(|&v| finite(v))) {
+        if !(finite(axis) && p.iter().chain(&u).all(|&v| finite(v))) {
             return Err(DuctError::Singular);
         }
         field
             .x
             .push(if j == s { 0.0 } else { length + j as f64 * h });
         field.pressure.push(p);
-        field.flow.push(u.clone());
+        field.flow.push(u);
         field.axis_pressure.push(axis);
     }
     Ok(field)

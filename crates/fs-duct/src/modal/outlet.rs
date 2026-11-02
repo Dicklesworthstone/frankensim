@@ -106,32 +106,35 @@ pub(super) fn propagate(map: &mut Option<Vec<C64>>, e: &[C64], n: usize) {
     }
 }
 
-/// Transfer forward amplitudes across a load-dependent original junction.
+/// Reflect and transfer forward amplitudes across an original junction.
 /// Expansion: p_u=F p_d, U_d=F^T U_u. Contraction: p_d=F p_u,
 /// U_u=F^T U_d. Eliminate incoming waves using b_d=R_d a_d, but do
-/// not invert F or I-R_d. Isolated flow nodes therefore add no new pole.
+/// not invert F, I-R_d or I+R_d. Interior pressure/flow nodes therefore
+/// add no pole, even when the impedance-only route is requested. The same
+/// one LU yields both a_d=J a_u and the upstream reflected wave.
 pub(super) fn junction(map: &mut Option<Vec<C64>>, r: &[C64], z_down: &[C64],
-    z_up: &[C64], f: &[C64], expansion: bool, n: usize) -> Result<(), DuctError>
+    z_up: &[C64], junction: &prepared::PreparedJunction, n: usize)
+    -> Result<Vec<C64>, DuctError>
 {
-    let Some(map) = map else { return Ok(()); };
+    let f = &junction.projection;
+    let ft = &junction.transpose;
     let mut p = r.to_vec();
     for i in 0..n { p[i*n+i] = p[i*n+i] + C64::ONE; }
     let y = terminal_flow(r, z_down, n);
-    let ft = transpose(f, n);
-    let (a, b) = if expansion {
+    let (a, b) = if junction.expansion {
         let mut weighted_f = f.to_vec();
         for row in 0..n {
             for col in 0..n { weighted_f[row*n+col] = weighted_f[row*n+col] / z_up[row]; }
         }
-        let mut a = mat_mul(&mat_mul(&ft, &weighted_f, n), &p, n);
+        let mut a = mat_mul(&mat_mul(ft, &weighted_f, n), &p, n);
         for (a, y) in a.iter_mut().zip(&y) { *a = *a + *y; }
-        let mut b = ft;
+        let mut b = ft.to_vec();
         for row in 0..n {
             for col in 0..n { b[row*n+col] = b[row*n+col].scale(2.0) / z_up[col]; }
         }
         (a, b)
     } else {
-        let mut weighted_ft = ft;
+        let mut weighted_ft = ft.to_vec();
         for row in 0..n {
             for col in 0..n { weighted_ft[row*n+col] = weighted_ft[row*n+col] * z_up[row]; }
         }
@@ -147,9 +150,28 @@ pub(super) fn junction(map: &mut Option<Vec<C64>>, r: &[C64], z_down: &[C64],
         lu.solve(&mut rhs);
         for row in 0..n { j[row*n+col] = rhs[row]; }
     }
-    *map = mat_mul(map, &j, n);
-    if map.iter().any(|&v| !finite(v)) { return Err(DuctError::Singular); }
-    Ok(())
+    let reflected = if junction.expansion {
+        // p_u = F (I+R_d) J a_u = (I+R_u) a_u.
+        let mut value = mat_mul(&mat_mul(f, &p, n), &j, n);
+        for k in 0..n { value[k*n+k] = value[k*n+k] - C64::ONE; }
+        value
+    } else {
+        // U_u = F^T Z_d^-1 (I-R_d) J a_u = Z_u^-1 (I-R_u) a_u.
+        let mut value = mat_mul(&mat_mul(ft, &y, n), &j, n);
+        for row in 0..n {
+            for col in 0..n { value[row*n+col] = -z_up[row] * value[row*n+col]; }
+            value[row*n+row] = value[row*n+row] + C64::ONE;
+        }
+        value
+    };
+    if reflected.iter().any(|&v| !finite(v)) {
+        return Err(DuctError::Singular);
+    }
+    if let Some(map) = map {
+        *map = mat_mul(map, &j, n);
+        if map.iter().any(|&v| !finite(v)) { return Err(DuctError::Singular); }
+    }
+    Ok(reflected)
 }
 
 pub(super) fn finish(map: Option<Vec<C64>>, impedance: &[C64], zc: &[C64], n: usize)
