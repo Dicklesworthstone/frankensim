@@ -1,6 +1,8 @@
 //! Original caloric laws on the existing material/flow fixed point and clock.
 
 mod transient;
+#[cfg(feature = "enthalpy-coupling")]
+pub use transient::MaterialViscousHeatMarch;
 pub use transient::{
     MaterialEnthalpyMarch, MaterialEnthalpySolidMarch, MaterialEnthalpyStepReport,
     MaterialEnthalpyTransientConfig,

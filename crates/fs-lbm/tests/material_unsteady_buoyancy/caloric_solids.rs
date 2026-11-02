@@ -3,6 +3,9 @@
 
 #[path = "compact_caloric.rs"]
 mod compact;
+#[cfg(feature = "enthalpy-coupling")]
+#[path = "caloric_viscous_heat.rs"]
+mod viscous_heat;
 
 use super::solid::{card, law, specific_energy};
 use super::*;

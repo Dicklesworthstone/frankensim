@@ -9,6 +9,8 @@ use crate::conjugate::{
 use crate::material::conjugate::MaterialChtFluid;
 use crate::material::transport::boussinesq::BoussinesqConfig;
 use fs_exec::CancelGate;
+#[cfg(feature = "enthalpy-coupling")]
+use crate::conjugate::unsteady::MaterialViscousHeat;
 use fs_material::{
     MaterialError,
     fluid_transport::{FluidTransport, FluidTransportState},
@@ -84,7 +86,10 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     ) -> Result<MaterialBuoyancyMarch<S>, MaterialBuoyancyError> {
         self.march_natural_convection_inner(
             domain, solids, flow_config, thermal, energy_config, initial_temperature_k,
-            config, unsteady, None, inlet_schedule, power_schedule, radiation, None, gate, resolve,
+            config, unsteady, None,
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule, power_schedule, radiation, None, gate, resolve,
         )
     }
 
@@ -131,7 +136,10 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     ) -> Result<MaterialBuoyancyMarch<S>, MaterialBuoyancyError> {
         self.march_natural_convection_inner(
             domain, solids, flow_config, thermal, energy_config, initial_temperature_k,
-            config, unsteady, Some(sgs), inlet_schedule, power_schedule, radiation, None, gate, resolve,
+            config, unsteady, Some(sgs),
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule, power_schedule, radiation, None, gate, resolve,
         )
     }
 
@@ -147,6 +155,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         config: BoussinesqConfig<3>,
         unsteady: &UnsteadyConfig,
         sgs: Option<FvSgsConfig>,
+        #[cfg(feature = "enthalpy-coupling")] viscous_heat: Option<&mut MaterialViscousHeat>,
         inlet_schedule: impl Fn(f64) -> f64,
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
@@ -231,6 +240,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             flow_config,
             unsteady,
             sgs,
+            #[cfg(feature = "enthalpy-coupling")]
+            viscous_heat,
             initial_temperature_k,
             inlet_schedule,
             power_schedule,

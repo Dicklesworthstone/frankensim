@@ -264,6 +264,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             config,
             unsteady,
             sgs,
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
             inlet_schedule,
             power_schedule,
             radiation,

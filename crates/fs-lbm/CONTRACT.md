@@ -1,5 +1,36 @@
 # CONTRACT: fs-lbm
 
+## Source-caloric molecular viscous self-heating
+
+With `enthalpy-coupling`, `MaterialChtFluid` exposes
+`march_natural_convection_with_enthalpy_and_viscous_heat` and
+`march_natural_convection_with_enthalpy_and_material_solids_and_viscous_heat`.
+Both use the existing backward-Euler unsteady-Stokes work owner on the
+original projected MAC faces and source-start local molecular viscosity.
+Its cell heat enters the existing thermal power field once, after authored
+power scheduling, and stays fixed during every caloric/radiative trial.
+The source law h(T), joint solid storage/conductivity, contacts and compact
+storage keep their existing owners. An empty authored source field is reset
+between intervals, so previous molecular deposits do not accumulate as power.
+
+Generated heat at fixed-temperature cells is reported as equal physical
+source and thermostat outflow. Duplicate fixed declarations do not double
+count it. The original nonlinear energy-closure residual is retained across
+these cancelling additions. Accepted mechanical receipts separately retain
+wall/body supply, native face kinetic storage, backward-Euler numerical loss
+and pressure-constraint work; only molecular work enters thermal storage.
+
+`MaterialViscousHeatMarch<M>` returns the original thermal result, the native
+`UnsteadyHeatingAudit` and one mechanical receipt per accepted interval.
+Audit acceptance follows thermal and source endpoint acceptance. The native
+closed-wall/symmetry Stokes admission, Reynolds ceiling at most 0.1, physical
+work tolerance, and no fan/resistance/SGS restrictions remain. Heated intervals
+restart BE history from exact accepted faces; unheated entries retain their
+existing history path. Source feedback remains explicitly first order.
+No second momentum solve, gravitational store, numerical-loss heat or inferred
+turbulent heating is introduced. Four physical regressions cover evolving
+source Cp/mu, thermostat rejection, kinetic/time-loss history and joint solids.
+
 Lattice Boltzmann core with a D2Q9 BGK path, a tile-major D3Q19 BGK/Guo path,
 link-wise D3Q19 wall/open-boundary topology, the lattice-scaling assistant,
 and dense-grid extension scaffolding for vector forcing, local rheology,

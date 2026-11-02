@@ -21,6 +21,10 @@ use crate::conjugate::{
 };
 use crate::material::transport::boussinesq::BoussinesqConfig;
 use fs_exec::CancelGate;
+#[cfg(feature = "enthalpy-coupling")]
+use crate::conjugate::unsteady::MaterialViscousHeat;
+#[cfg(feature = "enthalpy-coupling")]
+use crate::conjugate::{UnsteadyHeatingAudit, UnsteadyMechanicalStep, ViscousHeatControls};
 use fs_material::{
     MaterialError,
     fluid_transport::{FluidTransport, FluidTransportState},
@@ -80,6 +84,19 @@ pub struct MaterialEnthalpyMarch<'a, F, C: ConvectionCaloricLaw> {
     pub enthalpy: MaterialEnthalpyState,
     /// One nonlinear acceptance/work record per native time step.
     pub records: Vec<MaterialEnthalpyStepReport>,
+}
+
+/// A source-caloric march with its accepted native mechanical work account.
+/// Generated molecular heat is already included in the thermal source ledger;
+/// wall/body supply and backward-Euler numerical loss are never extra heat.
+#[cfg(feature = "enthalpy-coupling")]
+pub struct MaterialViscousHeatMarch<M> {
+    /// Original source-caloric result and native temperature/flow histories.
+    pub thermal: M,
+    /// Integrated physical heat, signed supply, kinetic storage and time loss.
+    pub heating: UnsteadyHeatingAudit,
+    /// One projected native mechanical receipt per accepted thermal interval.
+    pub mechanical_steps: Vec<UnsteadyMechanicalStep>,
 }
 
 impl MaterialEnthalpyTransientConfig {
@@ -514,8 +531,10 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     ) -> Result<MaterialEnthalpyMarch<'a, S, C>, MaterialBuoyancyError> {
         self.march_natural_convection_with_enthalpy_inner(
             domain, solids, flow, thermal, energy, initial_temperature_k,
-            bounds, caloric, controls, unsteady, None, inlet_schedule,
-            power_schedule, radiation, gate, resolve,
+            bounds, caloric, controls, unsteady, None,
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule, power_schedule, radiation, gate, resolve,
         )
     }
 
@@ -569,9 +588,69 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     ) -> Result<MaterialEnthalpyMarch<'a, S, C>, MaterialBuoyancyError> {
         self.march_natural_convection_with_enthalpy_inner(
             domain, solids, flow, thermal, energy, initial_temperature_k,
-            bounds, caloric, controls, unsteady, Some(sgs), inlet_schedule,
-            power_schedule, radiation, gate, resolve,
+            bounds, caloric, controls, unsteady, Some(sgs),
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule, power_schedule, radiation, gate, resolve,
         )
+    }
+
+    /// Deposit native molecular viscous work into actual source h(T) on the
+    /// same backward-Euler momentum and thermal clock.
+    ///
+    /// The existing unsteady-Stokes owner uses local source mu(T_n), full
+    /// symmetric stress and half-cell wall traction. Its projected endpoint
+    /// cell_heat_w enters the original thermal source exactly once, after
+    /// authored power scheduling, and stays fixed during caloric iteration.
+    /// Source h(T), native contacts, compact storage, radiation and thermostats
+    /// retain their existing nonlinear owners. Generated heat in a fixed cell
+    /// is accounted as equal physical source and thermostat rejection.
+    ///
+    /// The returned receipt separates molecular heat, wall/buoyancy supply,
+    /// native face kinetic energy, pressure-constraint defect and BE numerical
+    /// loss. Only molecular heat is deposited. Material transport/buoyancy
+    /// retain the explicit first-order lag; no gravitational-potential store,
+    /// SGS dissipation or second thermal/momentum advance is introduced.
+    ///
+    /// # Errors
+    /// Requires the existing closed-wall/symmetry unsteady-Stokes admission,
+    /// backward Euler, Reynolds at most the declared ceiling (<=0.1), no fans
+    /// or configured resistance, and the native physical-work tolerance.
+    /// Source, thermal, mechanical or cancellation refusal returns no result
+    /// or partial audit. Existing non-heated entries remain unchanged.
+    #[cfg(feature = "enthalpy-coupling")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_enthalpy_and_viscous_heat<
+        'a, S: FluidTransport, C: ConvectionCaloricLaw,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        flow: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        bounds: BoussinesqConfig<3>,
+        caloric: &'a C,
+        controls: MaterialEnthalpyTransientConfig,
+        unsteady: &UnsteadyConfig,
+        heating: ViscousHeatControls,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialViscousHeatMarch<MaterialEnthalpyMarch<'a, S, C>>, MaterialBuoyancyError> {
+        let mut heating = MaterialViscousHeat::new(heating);
+        let thermal = self.march_natural_convection_with_enthalpy_inner(
+            domain, solids, flow, thermal, energy, initial_temperature_k,
+            bounds, caloric, controls, unsteady, None, Some(&mut heating),
+            inlet_schedule, power_schedule, radiation, gate, resolve,
+        )?;
+        poll(gate)?;
+        Ok(MaterialViscousHeatMarch {
+            thermal, heating: heating.audit, mechanical_steps: heating.records,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -592,6 +671,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         controls: MaterialEnthalpyTransientConfig,
         unsteady: &UnsteadyConfig,
         sgs: Option<FvSgsConfig>,
+        #[cfg(feature = "enthalpy-coupling")] viscous_heat: Option<&mut MaterialViscousHeat>,
         inlet_schedule: impl Fn(f64) -> f64,
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
@@ -661,6 +741,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             bounds,
             unsteady,
             sgs,
+            #[cfg(feature = "enthalpy-coupling")]
+            viscous_heat,
             inlet_schedule,
             power_schedule,
             radiation,
