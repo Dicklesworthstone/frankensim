@@ -12,6 +12,13 @@ use fs_bem::reciprocal_radiation::open_screen::{
     PreparedMolecularScreenReceivers,
 };
 
+mod incident;
+pub use incident::{
+    MolecularOpenScreenIncidentBatch, MolecularOpenScreenIncidentOptions,
+    MolecularOpenScreenIncidentPower, MolecularOpenScreenIncidentResponse,
+    PreparedMolecularOpenScreenIncidentReceivers,
+};
+
 /// One original boundary batch and complete mechanical response admission.
 /// Receiver quadrature has its own explicit row/work/depth limits.
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +63,30 @@ pub struct MolecularOpenScreenHarmonicResponse {
     /// This screen has no separate sheet loss or mechanical Maxwell arms, so
     /// wall_w and relaxation_w are zero; gas memory is in exterior_w once.
     pub power: MolecularModesPower,
+}
+
+impl MolecularOpenScreenHarmonicResponse {
+    fn from_mechanical(r: OpenScreenHarmonicResponse) -> Self {
+        Self {
+            angular_frequency_rad_s: r.angular_frequency_rad_s,
+            modal_displacement: r.modal_displacement,
+            modal_velocity: r.modal_velocity,
+            fluid_reaction: r.fluid_reaction,
+            mean_structural_energy_j: r.mean_structural_energy_j,
+            mechanical_residual: r.mechanical_residual,
+            maximum_boundary_residual: r.maximum_boundary_residual,
+            power: MolecularModesPower {
+                input_w: r.power.input_w,
+                kelvin_w: r.power.kelvin_w,
+                relaxation_w: 0.0,
+                exterior_w: r.power.radiated_w,
+                wall_w: 0.0,
+                balance_w: r.power.balance_w,
+                apparent_power_scale_w: r.power.apparent_power_scale_w,
+                relative_balance: r.power.relative_balance,
+            },
+        }
+    }
 }
 
 /// One complete molecular boundary bank and one mechanical factorization for
@@ -149,25 +180,7 @@ impl<'s> PreparedOpenScreenModes<'s> {
         )?;
         let responses = responses
             .into_iter()
-            .map(|r| MolecularOpenScreenHarmonicResponse {
-                angular_frequency_rad_s: r.angular_frequency_rad_s,
-                modal_displacement: r.modal_displacement,
-                modal_velocity: r.modal_velocity,
-                fluid_reaction: r.fluid_reaction,
-                mean_structural_energy_j: r.mean_structural_energy_j,
-                mechanical_residual: r.mechanical_residual,
-                maximum_boundary_residual: r.maximum_boundary_residual,
-                power: MolecularModesPower {
-                    input_w: r.power.input_w,
-                    kelvin_w: r.power.kelvin_w,
-                    relaxation_w: 0.0,
-                    exterior_w: r.power.radiated_w,
-                    wall_w: 0.0,
-                    balance_w: r.power.balance_w,
-                    apparent_power_scale_w: r.power.apparent_power_scale_w,
-                    relative_balance: r.power.relative_balance,
-                },
-            })
+            .map(MolecularOpenScreenHarmonicResponse::from_mechanical)
             .collect();
         poll(&mut cancelled)?;
         Ok(MolecularOpenScreenHarmonicBatch {

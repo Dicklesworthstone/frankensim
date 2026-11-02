@@ -2260,6 +2260,36 @@ This frozen harmonic model does not add cavity backing, finite acoustic
 thickness, shear/thermal boundary layers, a time-domain realization or molecular
 loaded-pole discovery.
 
+`PreparedOpenScreenModes::harmonic_molecular_incident_response_batch` drives
+the original shell with incoming sound and an optional authored mechanical
+force (an explicit zero vector for purely sound-driven cases). It uses the
+original blocked pressure jump's work-conjugate force, then solves the unchanged
+complete K/C and molecular self/mutual reaction. One boundary H/LU serves all
+motion columns and blocked illuminations, and one mechanical LU serves all
+resulting force cases. Original source phases, geometry and material remain
+bound to the returned batch; no external impedance matrix is substituted.
+
+`MolecularOpenScreenIncidentPower` independently contracts external mechanical
+input, blocked acoustic input, original structural viscosity, motion-only
+exterior work and TOTAL signed pressure-jump work. The original total fluid
+reaction is blocked force minus Z times actual velocity. Thus external input
+equals structural heat plus total exterior work; a sound-only damped shell has
+negative total exterior work. The blocked pressure/motion exchange is directly
+contracted, never recovered as a difference of large radiation powers. This
+zero-thickness impermeable screen has no separate wall-absorption channel.
+Normalization, compensated work sums and explicit physical balance refusal
+preserve small channels without clipping signs or claiming continuum passivity.
+
+Prepared incident receivers use the actual sound-driven modal velocity with
+the original incident + blocked-scattered + motion field. One shared P1 row
+bank serves every case; the analytic incident field is cached and added once.
+The full mechanical response, force-column/conversion payload and additional
+work are admitted before boundary assembly. Two focused regressions exercise
+sound-only and joint force/sound motion, signed work, independent existing-owner
+mechanical recovery, coherent mixed-source receiver fields and transactional
+resource/cancellation refusals. They are authored and syntax checked; native
+execution remains pending the existing dependency/build-runner blocker.
+
 `OpenScreenHarmonicBatch` retains the original unit-source jump solutions.
 `pressure_jump`, `pressure_at`, `far_field` and `radiated_power_w` combine them
 with the actual loaded modal velocities before the original field integration,

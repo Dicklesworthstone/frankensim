@@ -8,7 +8,7 @@ use fs_material::{
     relaxation::{RelaxingMedium, input::read_relaxation},
 };
 
-fn gas_exterior(relaxing: bool, pressure: f64) -> MolecularExterior {
+pub(super) fn gas_exterior(relaxing: bool, pressure: f64) -> MolecularExterior {
     // Declared caloric fixture, not measured atmospheric validation.
     let data = if relaxing {
         "declared 1 synthetic 1 vibration 1 900 1 power 101.325 293.15 0 200 500"
@@ -21,7 +21,7 @@ fn gas_exterior(relaxing: bool, pressure: f64) -> MolecularExterior {
     MolecularExterior::new(law.evaluate(&medium).unwrap(), [100.0, 800.0]).unwrap()
 }
 
-fn source(exterior: &MolecularExterior) -> OpenScreenLoadedModes {
+pub(super) fn source(exterior: &MolecularExterior) -> OpenScreenLoadedModes {
     let viscosity = ModalPlateViscosity::from_psd_modal_matrix(
         vec![0.8, 0.3, 0.3, 0.7],
         2,
@@ -49,7 +49,7 @@ fn source(exterior: &MolecularExterior) -> OpenScreenLoadedModes {
     .unwrap()
 }
 
-fn options() -> MolecularOpenScreenHarmonicOptions {
+pub(super) fn options() -> MolecularOpenScreenHarmonicOptions {
     let native = fixture::options();
     MolecularOpenScreenHarmonicOptions {
         boundary: MolecularScreenPortLimits {
