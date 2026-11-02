@@ -16,6 +16,7 @@ nonlinear-euler = ["dep:fs-gas", "fs-gas/experimental-euler", "dep:fs-qty"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-fft = { path = "../fs-fft" }
 fs-gas = { path = "../fs-gas", optional = true }
 fs-qty = { path = "../fs-qty", optional = true }
 fs-la = { path = "../fs-la" }

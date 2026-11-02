@@ -1454,6 +1454,7 @@ dependencies = [
  "fs-bem",
  "fs-blake3",
  "fs-evidence",
+ "fs-fft",
  "fs-gas",
  "fs-la",
  "fs-matdb",

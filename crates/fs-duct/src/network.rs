@@ -20,6 +20,7 @@ pub use loaded::{
     network_drive_source_bank_regional, network_drive_sources, network_drive_sources_regional,
     network_prepare_sources, network_prepare_sources_regional,
 };
+pub mod observation;
 mod prepared;
 pub use prepared::{
     NetworkCoherenceBudget, NetworkSourceCoordinate, NetworkSourceQuantity,

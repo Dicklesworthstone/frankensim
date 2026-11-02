@@ -1461,6 +1461,57 @@ example uses preparation and accepts a fifth coherence-magnitude argument,
 e.g. `-- 180 0.5 -0.25 0.1 0.6`, to compare the declared partial-coherence
 statistics with its coherent reference using the same physical boundary.
 
+### Finite-window observations of solved network port fields
+
+`network::observation::PreparedNetworkObservation` observes the actual solved
+pressure p [Pa] and boundary volume velocity U [m^3/s] from multiple
+`NetworkCoherentResponse` lines. It preserves each frequency-specific duct,
+source and exterior-load solution; it does not substitute or re-solve a network.
+`NetworkObservationScope` explicitly declares one ordered set of physical
+ports, their existing flow orientation, and a common source clock. Labels and
+order are checked, but those checks cannot certify equal original topology or
+material ownership: `NetworkCoherentResponse` does not retain that owner.
+The caller must provide responses for the declared common physical scope.
+
+An optional deterministic mean field may be combined with explicit joint
+proper-complex factor banks satisfying E[xi_r] = 0,
+E[xi_r conj(xi_s)] = delta_rs and E[xi_r xi_s] = 0. Frequencies interfere
+within each bank; deterministic and factor second moments then add.
+No Gaussian, stationary, PSD-bin-width or cross-frequency independence
+assumption is inferred from an ordinary list of phasors. Authored frequencies
+remain in rad/s, matching the original solver and shared
+`fs_fft::harmonic_window` kernel.
+
+Equal-frequency pressure and volume-velocity fields are coalesced in
+double-double arithmetic before forming products. All retained high/low
+cross-products pass through the shared finite-window kernel, preserving small
+beat residuals and contributions that would disappear if grouped fields were
+rounded back to f64. The observer reports deterministic means, ensemble
+uncentered pressure and volume-velocity mean squares, signed mean pU [W] per
+port, and the signed sum of boundary work. U is volume velocity, not particle
+velocity. Finite-window boundary work includes reversible acoustic storage;
+it is not a material-heating, dissipation or radiated-power attribution.
+There is no certified relative guarantee at every cancellation null.
+
+The immutable prepared owner copies only admitted line data and scope labels;
+observations borrow its labels and source clock. Explicit port, line, pair-work
+and workspace budgets are checked before allocation, with hard caps of 256
+factors and 4096 total lines. Kernel work is shared across ports, and
+equal-frequency grouping reduces the retained quadratic work. Preparation and
+evaluation poll cancellation, refuse nonfinite/invalid states, and publish no
+partial result; the same owner remains reusable after a cancelled observation.
+
+Eight authored regression tests cover real solved network responses against
+analytic propagation and direct time integration, proper-factor phase ensembles,
+sub-ulp beat residuals, retained low components in later cancellation, coherent
+versus independent sources, signed reactive boundary work, clock-shift
+covariance, scope and budget checks, nonfinite inputs, cancellation and replay.
+These Rust tests are unexecuted because the native process runner is unavailable.
+Independent JavaScript time-integration references agreed within 1.56e-14
+absolute error for the tested port moments, and retained both a 1.38e-25 weak
+beat moment and negative reactive boundary work. They validate reference
+equations, not Rust compilation.
+
 ### Regional material and exterior binding
 
 `NetworkMedia` binds a complete original `GasRecord` to every exact edge id,

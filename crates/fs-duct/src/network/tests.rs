@@ -6,6 +6,7 @@ use std::time::Instant;
 mod coherent;
 mod loaded;
 mod porous;
+mod observation;
 mod prepared;
 mod source_bank;
 
