@@ -20,6 +20,8 @@
 pub mod fixture;
 /// Conservative full-stick Griffith coupling of normal adhesion and shear.
 pub mod mixed_mode;
+/// Same-source thermal changes at an explicitly retained normal control.
+pub mod temperature;
 
 use core::f64::consts::PI;
 

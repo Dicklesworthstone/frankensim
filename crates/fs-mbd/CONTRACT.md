@@ -3480,3 +3480,29 @@ including dependent two-pad support, nonprincipal full-inertia mixed motion and
 common acceleration, original body indexing/patch permutation/singleton limits,
 and atomic invalid-drive/normal/slip-event/cancellation refusal. All eleven
 native multi-contact Hertz/rolling tests pass.
+
+## Native adhesion after prescribed normal thermal evolution
+
+`tangential_friction::adhesive::thermal_normal` consumes the original JKR
+held-indentation thermal refresh, accepted branch token and actual source-owned
+disk. It refreshes the same selected junction-strength claims and reconstructs
+the complete native response at the new solid-contact radius. The new radius
+therefore changes both torque capacity and the scaled mobility; an old prepared
+matrix is never reused across changing normal geometry. Zero/tensile resultant
+loads retain their actual attached area.
+
+The native solver independently checks body impulses, momenta, kinetic work and
+physical shear/spin loss. The combined storage check includes the actual change
+in normal elastic-plus-surface potential and the signed parameter-work supply:
+delta(K + U_normal) + friction loss - parameter work = 0 within declared bounds.
+Parameter work is never exported as friction heat. The atomic application moves
+both native momenta, new normal/shear source owners and branch token together
+after final cancellation admission, without cloning the new normal owner.
+
+Normal approach, body poses and mass properties are held during this prescribed
+thermal then impulse split. Normal-motion integration, expansion, caloric/entropy
+closure, changing attachment and held-load actuator motion are not supplied.
+Three G1/G3/G4 groups in `tests/adhesive_thermal_normal.rs` check independent
+zero-approach JKR radius and torque, separate bulk/interface temperatures, full
+scaled mobility, complete storage work, zero-slip thermal work, accepted source
+continuation and atomic history/control/cancellation refusal.

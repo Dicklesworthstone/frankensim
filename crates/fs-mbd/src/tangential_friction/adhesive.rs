@@ -20,6 +20,9 @@ pub mod multiple;
 /// Continuous fixed-ray impulse phases that resolve finite arrest and rest.
 pub mod trajectory;
 
+/// Prescribed thermal changes of normal adhesion, real area and native recoil.
+pub mod thermal_normal;
+
 use fs_contact::interface_binding::adhesive_shear::spinning::SourceAdhesiveSlidingPatch;
 use fs_exec::CancelGate;
 use fs_tribo::adhesive::spinning::contact::{

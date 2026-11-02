@@ -3,6 +3,9 @@
 /// Pinned thermal junction strengths on explicitly frozen normal geometry.
 pub mod temperature;
 
+/// Original junction claims rebound to a thermally updated normal-contact disk.
+pub mod normal_temperature;
+
 use core::f64::consts::PI;
 
 use fs_tribo::adhesive::spinning::{

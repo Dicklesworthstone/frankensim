@@ -154,7 +154,7 @@ impl Sources {
                 1.0,
                 1e-7,
                 JkrEnvelope {
-                    maximum_indentation_m: 0.01,
+                    maximum_indentation_m: 0.001,
                     half_space_depth_m: 1.0,
                     layer_thickness_m: 1.0,
                     maximum_patch_to_radius: 0.1,

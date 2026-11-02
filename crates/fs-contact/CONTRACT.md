@@ -1758,6 +1758,31 @@ Three source integration groups check original Hertz/material/Coulomb
 propagation, loading/open/recontact fields and identity, and foreign-source or
 invalid-radius refusal without mutation. All 22 source Mindlin tests pass.
 
+## Temperature-driven normal adhesion and junction continuation
+
+`normal_patch::adhesive::temperature` refreshes the original ordered bulk
+elastic states and interface claims at three explicit positive temperatures.
+Every selected claim, held coordinate and quantity convention is retained;
+each bulk uses its own temperature. Original card hashes are required even for
+an unchanged query. `SourceJkrSphereContact` rebuilds the same radius, attraction
+range and applicability envelope and reevaluates its actual stable equilibrium.
+Held-indentation transfer preserves the original attached/detached branch token;
+loss of equilibrium refuses rather than silently detaching or inventing heat.
+Held-load equilibrium separately reports the actuator's F times delta(delta).
+Actual normal-potential change minus that mechanical work is signed parameter
+work. This endpoint split is not an entropy calculation, thermal expansion,
+path-stability proof or autonomous caloric feedback.
+
+`SourceAdhesiveShear::rebind_jkr_temperature` continues the same selected
+junction-strength claims on this immutable normal successor. Its subsequent
+sliding/spinning patch uses the successor's actual solid radius and area;
+the earlier frozen-normal strength-only API remains a separate split. Five
+source groups in `tests/adhesive_temperature.rs` cover independent dimensional
+JKR force/area/potential, unequal temperatures, actuator work, claim pinning,
+source expiry, exact no-op receipts, branches, card roles and applicability.
+Native continuation and its complete storage accounting are exercised in
+`fs-mbd/tests/adhesive_thermal_normal.rs`.
+
 ## Original-source local sliding and Archard fretting wear
 
 `SourceMindlinContact::advance_with_surface_sliding` applies the same original
