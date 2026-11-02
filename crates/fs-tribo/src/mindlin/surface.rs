@@ -21,6 +21,9 @@ use crate::{TriboError, finite, nonnegative_finite};
 use core::f64::consts::PI;
 use fs_math::det;
 
+/// Irreversible local sliding and friction work during one fixed-load segment.
+pub mod sliding;
+
 /// Local accepted-state fields in the original fixed first tangent direction.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MindlinSurfaceResponse {
@@ -133,9 +136,12 @@ fn displacement(memory: &[MemoryInterval], radius_m: f64, a: f64) -> f64 {
                 det::sqrt((low_r - cutoff) / radius_squared),
             )
         } else {
+            // Preserve a thin edge interval's original radial coordinate;
+            // squaring its rounded sine would lose tiny microslip fields.
+            let gap = (1.0 - scale) * (1.0 + scale);
             (
-                det::sqrt((1.0 - low_sine) * (1.0 + low_sine)),
-                det::sqrt((1.0 - high_sine) * (1.0 + high_sine)),
+                det::sqrt(gap + scale * scale * high_r),
+                det::sqrt(gap + scale * scale * low_r),
             )
         };
         let width = high_r - low_r;

@@ -1483,3 +1483,38 @@ superposition and area-force convergence, changing normal/shear histories,
 local Coulomb bounds and original ownership/domain/frictionless behavior.
 All 30 surface, fixed-load and changing-load Mindlin tests pass.
 
+### Irreversible local Mindlin sliding and pressure-weighted wear input
+
+`MindlinDeresiewiczPoint::advance_with_surface_sliding` performs the original
+fixed-load scalar solve once and returns a private-path observer borrowing the
+old history and owning the accepted candidate. It observes one monotone segment;
+arbitrary endpoint pairs cannot hide intervening reversals. The original source,
+body-compliance, force and history budgets remain. Local sliding is macroscopic
+motion minus the change of relative elastic surface displacement. Its analytic
+evaluation integrates the nonnegative spring plastic increments through the
+positive Abel kernel, avoiding false wear from cancellation in a sticking zone.
+Queries use O(old history intervals), stack-only temporary pieces and no new
+history clone, solve or radial mesh.
+
+Within the fixed patch, irreversible work per area is `mu*p*abs(delta_s)`.
+The exact pressure-weighted sliding integral `I = integral p*abs(delta_s) dA`
+is original dissipation divided by positive mu. Explicit zero friction instead
+has `I = N*abs(actual_delta_u)` with zero friction work. The original fixed
+pressure and coefficient, scalar direction and monotone accepted displacement
+are essential; changing load, contact entry/exit or multiple reversals require
+their path owners. Reference: Popov, Hess and Willert (2019), equations 4.41
+and 4.42, <https://doi.org/10.1007/978-3-662-58709-6_4>.
+
+`ArchardLaw::advance_pressure_weighted_sliding` accepts this spatial load-distance
+measure directly and computes `delta_V = k*I/H` through the existing checked,
+provenance-preserving cumulative volume update. The original uniform-sliding
+entry forms `I=N*distance` and uses the same implementation. This does not infer
+surface recession, debris transport, hardness conversion or an energy share.
+
+Four new physical groups verify virgin sticking and microslip, signed reversal
+and gross sliding, accepted compliant motion, the frictionless limit, monotone
+subdivision and original ownership/domain refusal. Independent area integration
+on 512/2048/8192 radii converges to original native dissipation over six shear
+history segments, with finest relative error below 3e-5. All 34 fixed-load,
+changing-load, surface-field and local-sliding Mindlin tests pass.
+

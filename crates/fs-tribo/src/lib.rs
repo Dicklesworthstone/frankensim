@@ -1853,11 +1853,35 @@ impl ArchardLaw {
         nonnegative_finite(self.wear_coefficient, "wear_coefficient")?;
         nonnegative_finite(normal_force_n, "normal_force_n")?;
         nonnegative_finite(sliding_distance_m, "sliding_distance_m")?;
+        self.advance_pressure_weighted_sliding(
+            interface,
+            state,
+            checked_mul(normal_force_n, sliding_distance_m, "wear_increment")?,
+            hardness_pa,
+        )
+    }
+
+    /// Advance with the actual pressure-weighted unsigned sliding integral
+    /// `I = integral p(x,t) |ds(x,t)| dA` [N m], giving `delta V = k I / H`.
+    /// This admits nonuniform partial slip without treating elastic motion or
+    /// the contact's macroscopic displacement as uniform local sliding.
+    /// The caller owns the physical path and spatial integration; k and H are
+    /// held over it. This measure is not itself heat or an energy-partition law.
+    pub fn advance_pressure_weighted_sliding(
+        self,
+        interface: &InterfaceSystemRef,
+        state: &mut WearState,
+        pressure_weighted_sliding_j: f64,
+        hardness_pa: f64,
+    ) -> Result<WearAdvance, TriboError> {
+        interface.validate()?;
+        nonnegative_finite(self.wear_coefficient, "wear_coefficient")?;
+        nonnegative_finite(pressure_weighted_sliding_j, "pressure_weighted_sliding_j")?;
         positive_finite(hardness_pa, "hardness_pa")?;
         nonnegative_finite(state.volume_m3, "wear_volume_m3")?;
         let increment_m3 = checked_mul(
             self.wear_coefficient,
-            checked_mul(normal_force_n, sliding_distance_m, "wear_increment")?,
+            pressure_weighted_sliding_j,
             "wear_increment",
         )? / hardness_pa;
         nonnegative_finite(increment_m3, "wear_increment")?;
