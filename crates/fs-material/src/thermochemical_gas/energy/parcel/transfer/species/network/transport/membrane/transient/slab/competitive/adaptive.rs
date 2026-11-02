@@ -61,6 +61,17 @@ pub(crate) trait CompetitiveNative: Clone {
         None
     }
     fn is_cancelled(error: &Self::Error) -> bool;
+    /// Source wrappers can compare additional ORIGINAL inventories (for
+    /// example actual EOS gas composition), retaining the joint raw estimator.
+    fn additional_distance(
+        &self,
+        _coarse: &Self,
+        _fine: &Self,
+        _controls: MembraneDiffusionAdvanceControls,
+        _cancelled: &mut impl FnMut() -> bool,
+    ) -> AdvanceResult<f64, Self::Error> {
+        Ok(0.0)
+    }
     fn competitive_step(
         &self,
         pressures: &[[f64; 2]],
@@ -436,7 +447,12 @@ impl<S: CompetitiveNative> Native for Controlled<S> {
             .map_err(arithmetic::<Self::Error>)?;
             error = error.max(difference.value.abs() / allowance);
         }
-        Ok(error)
+        Ok(error.max(self.state.additional_distance(
+            &coarse.state,
+            &fine.state,
+            controls,
+            cancelled,
+        )?))
     }
 }
 

@@ -13,6 +13,9 @@
 //! supplied claims must already apply to the intended mixture, and unowned
 //! composition, humidity or concentration-dependent applicability refuses.
 
+/// Complete competitive breakthrough windows with original finite-gas accounts.
+pub mod adaptive;
+
 use super::super::{
     ResolvedMembraneDiffusionError,
     reservoir::IsothermalGasMembraneError,

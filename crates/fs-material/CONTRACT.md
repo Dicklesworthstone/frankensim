@@ -10286,3 +10286,33 @@ The model is isothermal in a rigid, stationary membrane frame. Gas enthalpy
 and thermostat reports exclude an unrepresented mobile/trapped caloric store.
 No heat of sorption, swelling feedback, Maxwell–Stefan gas-frame diffusion,
 cross diffusion or unrestricted mixed-gas validity is inferred.
+
+### Adaptive competitive breakthrough with actual gas reconstruction
+
+`transient::mixture::competitive::adaptive` gives
+`IsothermalCompetitiveGasMembrane` a complete-duration adaptive candidate and
+two retained native workspaces. It reuses `MembraneMixtureAdvanceControls`
+and the original competitive time controller. Every coarse and half-step
+probe runs the full source-qualified gas/membrane candidate, including the
+original gas reconstruction, pressure-capacity closure, common-site solve
+and actual source envelopes. Actual gas species inventories receive their
+own temporal comparisons, in addition to all native pressure, mobile,
+trapped, vacancy and face-transfer comparisons.
+
+Only accepted half-step histories contribute signed and gross species
+transfers, original stream enthalpies and explicit gas thermostats. Fixed
+whole-window species, total-mass and gas-energy budgets constrain native
+probes through duration-weighted algebraic shares. Stored native controls
+remain hard ceilings and are restored after each proposal. Final audits
+independently compare actual original-to-final gas species amounts,
+mobile/trapped storage, accepted gas-boundary transfers, whole mass and the
+original source-relative gas thermal increment. A large formation-enthalpy
+datum therefore does not contaminate the thermal residual.
+
+The maximum total cell count and both native workspaces have explicit bounds.
+Rejected proposals, source/native refusals, exhausted work and late
+cancellation leave all original gas and membrane inventories, time and
+source receipts unchanged. Local temporal estimates remain distinct from
+global or spatial error certificates. Temperature and geometry stay fixed;
+gas-side caloric accounts do not supply sorption heat or whole-membrane
+energy closure.
