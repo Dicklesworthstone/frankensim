@@ -1,6 +1,6 @@
 # Mineral processing: public sources and callable physics
 
-These **24 source profiles and 74 property claims** provide reusable mineral
+These **27 source profiles and 85 property claims** provide reusable mineral
 and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and
 `matdb-catalog` discovery. No separate material registry or schema is required.
@@ -103,6 +103,11 @@ All queries require `source-standard-state=1`,
 Pure liquid sulfuric acid does not represent an aqueous acid concentration;
 solid NaOH/NaCN do not supply aqueous ion formation properties. Commercial
 purity, slurry composition, solvation and heat of dilution remain separate.
+
+The [reactive mineral thermochemistry guide](MINERAL_THERMOCHEMISTRY.md)
+documents 11 additional claims for calcite, pyrite and alpha-quartz, including
+bounded calcite/pyrite Cp curves. It preserves their separate USGS and JANAF
+reference conventions and reuses the existing quartz caloric profile.
 
 ### Carbonate calcination and iron-oxide oxidation
 

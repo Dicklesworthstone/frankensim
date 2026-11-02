@@ -1,0 +1,37 @@
+frankensim.matdb-source.v1
+observation	identity	Alpha-quartz SiO2 standard reference	https://webbook.nist.gov/cgi/cbook.cgi?ID=C14808607&Mask=2	The WebBook quartz entry identifies CAS 14808-60-7, alpha-quartz and molecular weight 60.0843 g/mol. This preserves the same stated mass basis as the existing quartz-alpha-nist-shomate-caloric Cp profile, without asserting specimen identity or adding a duplicate Cp curve. Fused silica, other silica polymorphs and impure gangue are excluded.
+observation	reference-values	JANAF O-037 reference row at 298.15 K	https://janaf.nist.gov/tables/O-037.html	The selected quartz table gives standard molar formation enthalpy -910.857 kJ/mol and absolute standard molar entropy 41.463 J/(mol K). The WebBook summary's separately rounded -910.86 kJ/mol is not substituted; the Shomate H coefficient is not treated as a further measurement. No uncertainty distribution is inferred from printed precision.
+observation	scope	Pure alpha-quartz at 298.15 K and one bar	https://janaf.nist.gov/tables/O-037.html	All three claims are restricted to 298.15 K and 100000 Pa with the JANAF elemental-reference convention. The existing quartz-alpha-nist-shomate-caloric pack separately supplies bounded heat capacity with its own query conditions. This reference pack supplies no Cp curve, beta-quartz transition heat, dissolution or reaction rate, aqueous silica species, temperature-dependent formation enthalpy, bulk-ore properties or Bond work index.
+scalar	molar-mass	identity,scope	mass	60.0843	g/mol	constant
+scalar	formation-enthalpy	identity,reference-values,scope	hf	-910.857	kJ/mol	tabulated
+scalar	standard-entropy	identity,reference-values,scope	s0	41.463	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	molar-mass	polymorph	1	1	1
+validity	formation-enthalpy	polymorph	1	1	1
+validity	standard-entropy	polymorph	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1

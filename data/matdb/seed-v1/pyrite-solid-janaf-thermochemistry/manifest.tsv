@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	pyrite-solid-janaf-thermochemistry
+redistribution	permitted	Attributed numerical facts, independently converted heat capacities and original notes only; no source document or table layout is redistributed
+citation	Chase (1998), NIST-JANAF Thermochemical Tables Fourth Edition, pyrite FeS2(cr), printed page 1199, reviewed September 1977; https://janaf.nist.gov/tables/Fe-028.html; scanned table https://janaf.nist.gov/pdf/JANAF-FourthEd-1998-Iron.pdf page 27; alternate WebBook entry https://webbook.nist.gov/cgi/cbook.cgi?ID=C1309360&Mask=2 is explicitly not the selected formation-enthalpy evaluation; accessed 2026-11-02
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	janaf-pyrite	properties.tsv	material-tsv-v1
+property	mass	molar-mass	dimensional
+property	hf	standard-molar-formation-enthalpy	dimensional
+property	s0	standard-molar-entropy	dimensional
+property	cp	specific-heat-capacity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	standard	source-standard-state	dimensional
+axis	convention	source-elemental-reference-janaf	dimensional
+axis	phase	source-phase-solid	dimensional
+axis	polymorph	source-phase-pyrite	dimensional
+axis	pure	source-pure-species	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional

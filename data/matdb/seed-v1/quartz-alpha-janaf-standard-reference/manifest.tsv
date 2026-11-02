@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	quartz-alpha-janaf-standard-reference
+redistribution	permitted	Attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Chase (1998), NIST-JANAF Thermochemical Tables Fourth Edition, quartz SiO2(cr), O-037 reference row, reviewed June 1967; https://janaf.nist.gov/tables/O-037.html; NIST Chemistry WebBook SRD 69 molecular weight https://webbook.nist.gov/cgi/cbook.cgi?ID=C14808607&Mask=2; accessed 2026-11-02
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	janaf-quartz-reference	properties.tsv	material-tsv-v1
+property	mass	molar-mass	dimensional
+property	hf	standard-molar-formation-enthalpy	dimensional
+property	s0	standard-molar-entropy	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	standard	source-standard-state	dimensional
+axis	convention	source-elemental-reference-janaf	dimensional
+axis	phase	source-phase-solid	dimensional
+axis	polymorph	source-phase-quartz-alpha	dimensional
+axis	pure	source-pure-species	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional

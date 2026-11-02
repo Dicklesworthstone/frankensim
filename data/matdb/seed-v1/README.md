@@ -6,8 +6,8 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
-The [mineral-processing guide](MINERAL_PROCESSING.md) covers 24 source profiles
-and 74 claims for ore/gangue constituents and processing reagents, with an
+The [mineral-processing guide](MINERAL_PROCESSING.md) covers 27 source profiles
+and 85 claims for ore/gangue constituents and processing reagents, with an
 executable source-backed lime-hydration, carbonate-calcination and iron-oxide
 oxidation example. Shared physics now provide
 typed Bond milling energy/throughput, ideal ball-mill critical speed, exact
@@ -18,6 +18,10 @@ Source-declared contact-time recovery curves and conservative stirred-tank
 transport add explicit kinetics and retained inventory through changing flow.
 Mineral/reference data retain their own conditions; site work indices,
 conversion, recovery and process calibration remain explicit inputs.
+
+The [reactive mineral thermochemistry guide](MINERAL_THERMOCHEMISTRY.md)
+details calcite, pyrite and alpha-quartz reference quantities, bounded
+calcite/pyrite Cp curves, and their distinct USGS and JANAF source conventions.
 
 ## Violin varnish and historical finish layers
 
