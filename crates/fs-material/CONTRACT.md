@@ -779,6 +779,14 @@ homogenization, the P2 milestone.
 
 ## Public types and semantics
 
+- `state_point::VisibleConductorStatePoint::try_from_material` adopts all
+  eighteen canonical dimensionless n/k knots from a complete resolved bundle,
+  retaining additional selected properties and the full source identity. This
+  lets spectral wave consumers retain optical constants and permeability from
+  one snapshot. Adoption and pinned refresh recheck positive real index,
+  nonnegative extinction and fixed external source conditions; missing knots,
+  substituted quantities and unowned dynamic coordinates refuse atomically.
+
 - `state_point::VisibleOpticalStatePoint::at_query_point` and the conductor /
   dielectric variants continue the original visible optical law at a new
   complete physical condition. They reuse the shared pinned-claim refresh,

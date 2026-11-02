@@ -209,7 +209,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             .iter()
             .any(|v| !v.is_finite() || *v <= 0.0)
             || !finite(exit_omega_epsilon)
-            || exit_omega_epsilon.re <= 0.0
+            || exit_omega_epsilon == C64::ZERO
+            || exit_omega_epsilon.im > 0.0
         {
             return Err(bad("wave number or magnetic admittance is unrepresentable"));
         }

@@ -3,7 +3,8 @@
 //! Layers are ordered from the incident face to the exit half-space. Sources,
 //! SI epsilon/mu and exp(+i omega t) phasors are the same as the parent owner.
 //! The incident medium is lossless; each film and the exit may use its original
-//! Debye or explicitly selected Ohmic law. Transmitted power enters the exit face; finite-film absorption excludes
+//! Debye, explicitly selected Ohmic or original spectral complex-index law.
+//! Transmitted power enters the exit face; finite-film absorption excludes
 //! subsequent dissipation in that semi-infinite medium.
 //!
 //! Composition retains bounded homogeneous E/H states in common real reference
@@ -180,6 +181,9 @@ impl<'a> PlanarDielectricLayers<'a> {
                 },
             ) => {
                 core::ptr::eq(a_dielectric, b_dielectric) && core::ptr::eq(a_conductor, b_conductor)
+            }
+            (DielectricResponse::OpticalConductor(a), DielectricResponse::OpticalConductor(b)) => {
+                core::ptr::eq(a.source(), b.source())
             }
             _ => false,
         };

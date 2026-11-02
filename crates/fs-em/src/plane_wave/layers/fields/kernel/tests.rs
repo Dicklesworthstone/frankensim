@@ -143,6 +143,59 @@ fn integrated_vector_dielectric_heat_matches_signed_poynting_loss_for_both_polar
 }
 
 #[test]
+fn negative_real_permittivity_retains_metal_fields_and_positive_volume_heat() {
+    let omega_epsilon = C64::new(-2.3, -0.45);
+    let omega_mu = 1.3;
+    let kt = 0.7;
+    let kz = (omega_epsilon.scale(omega_mu) - C64::from_re(kt * kt)).sqrt();
+    assert!(kz.re > 0.0 && kz.im < 0.0);
+    // Exercise both the entire small-depth propagator and face-decaying waves.
+    for thickness in [0.05, 1.6] {
+        for tm in [false, true] {
+            let (a, b, y) = if tm {
+                ((kz * kz) / omega_epsilon, omega_epsilon, omega_epsilon / kz)
+            } else {
+                (
+                    C64::from_re(omega_mu),
+                    (kz * kz).scale(1.0 / omega_mu),
+                    kz.scale(1.0 / omega_mu),
+                )
+            };
+            let independent =
+                |z| reference(kz, y, C64::new(0.9, 0.2), C64::new(-0.3, 0.4), thickness, z);
+            let left = independent(0.0);
+            let right = independent(thickness);
+            let kernel = LayerFieldKernel::new(thickness, kz, a, b, left, right).unwrap();
+            let heat = |z| {
+                let field = kernel.field(z).unwrap();
+                let expected = independent(z);
+                close(field[0], expected[0], 3e-13);
+                close(field[1], expected[1], 3e-13);
+                let ez = if tm {
+                    -field[1].scale(kt) / omega_epsilon
+                } else {
+                    C64::ZERO
+                };
+                -0.5 * omega_epsilon.im * (field[0].norm_sq() + ez.norm_sq())
+            };
+            let intervals = 512;
+            let dz = thickness / intervals as f64;
+            let mut integrated = heat(0.0) + heat(thickness);
+            for i in 1..intervals {
+                integrated += if i % 2 == 0 { 2.0 } else { 4.0 } * heat(i as f64 * dz);
+            }
+            integrated *= dz / 3.0;
+            let expected = 0.5 * ((left[0] * left[1].conj()).re - (right[0] * right[1].conj()).re);
+            assert!(expected > 0.0 && integrated > 0.0);
+            assert!(
+                (integrated - expected).abs() < 2e-10 * expected,
+                "metal volume heat {integrated} != boundary work {expected}"
+            );
+        }
+    }
+}
+
+#[test]
 fn opaque_film_never_needs_a_growing_wave_or_an_unobservable_underflowed_phase() {
     let kz = C64::new(2.0, -800.0);
     let a = C64::ONE;

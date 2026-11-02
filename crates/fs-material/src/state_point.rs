@@ -2885,6 +2885,58 @@ impl VisibleDielectricStatePoint {
 }
 
 impl VisibleConductorStatePoint {
+    /// Adopt all eighteen canonical optical knots from one complete material
+    /// snapshot, retaining every other selected property and receipt unchanged.
+    /// The knots describe fixed vacuum wavelengths; their values may depend on
+    /// held external conditions, but not an additional unowned frequency, field
+    /// or deformation coordinate. No interpolation or material preset is added.
+    ///
+    /// # Errors
+    /// Missing/ambiguous knots, noncanonical quantities or source coordinates,
+    /// nonpositive real index, or negative extinction. The original requirement
+    /// may be more permissive; every adopted and refreshed value is rechecked.
+    pub fn try_from_material(
+        resolved: ResolvedMaterialStatePoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        for (names, admissibility) in [
+            (
+                VISIBLE_COMPLEX_IOR_ETA_PROPERTIES,
+                ScalarAdmissibility::StrictlyPositive,
+            ),
+            (
+                VISIBLE_COMPLEX_IOR_K_PROPERTIES,
+                ScalarAdmissibility::NonNegative,
+            ),
+        ] {
+            for name in names {
+                let property = resolved.property(name).ok_or_else(|| {
+                    MaterialStatePointError::InvalidRequirement {
+                        property: name.to_owned(),
+                        reason: "visible complex-index knot is missing or ambiguous",
+                    }
+                })?;
+                if !property
+                    .requirement()
+                    .matches_key(&PropertyKey::new(name, Dims::NONE))
+                    || !property.is_static_at_fixed_external_conditions()
+                {
+                    return Err(MaterialStatePointError::InvalidRequirement {
+                        property: name.to_owned(),
+                        reason: "visible complex-index knots require canonical dimensionless scalars at fixed external conditions",
+                    });
+                }
+                if !admissibility.admits(property.value_si()) {
+                    return Err(MaterialStatePointError::OutsideConsumerDomain {
+                        property: name.to_owned(),
+                        value: property.value_si(),
+                        admissibility,
+                    });
+                }
+            }
+        }
+        Ok(visible_conductor_from_resolved(resolved))
+    }
+
     /// Complete card/state/property-use bundle.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
@@ -2905,9 +2957,7 @@ impl VisibleConductorStatePoint {
         card: &MaterialCard,
         point: &QueryPoint,
     ) -> Result<Self, MaterialStatePointError> {
-        Ok(visible_conductor_from_resolved(
-            self.resolved.at_query_point(card, point)?,
-        ))
+        Self::try_from_material(self.resolved.at_query_point(card, point)?)
     }
 }
 
@@ -2938,7 +2988,7 @@ pub fn resolve_visible_conductor_state_point(
         )?);
     }
     let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
-    Ok(visible_conductor_from_resolved(resolved))
+    VisibleConductorStatePoint::try_from_material(resolved)
 }
 
 fn visible_conductor_from_resolved(
@@ -5211,6 +5261,144 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn g0_visible_complex_index_adopts_complete_state_and_rechecks_refresh() {
+        use crate::field_storage::{MAGNETIC_PERMEABILITY_DIMS, MAGNETIC_PERMEABILITY_PROPERTY};
+        let base = optical_card(600.0);
+        let mut claims = ClaimSet::new();
+        for (_, source) in base.claims().claims_ordered() {
+            let source = if source.key.name() == VISIBLE_COMPLEX_IOR_K_PROPERTIES[0] {
+                claim(
+                    source.key.name(),
+                    Dims::NONE,
+                    vec![(250.0, 2.5), (600.0, -0.5)],
+                    600.0,
+                )
+            } else {
+                source.clone()
+            };
+            claims.insert_claim(source).unwrap();
+        }
+        claims
+            .insert_claim(claim(
+                MAGNETIC_PERMEABILITY_PROPERTY,
+                MAGNETIC_PERMEABILITY_DIMS,
+                vec![(250.0, 1.0e-6), (600.0, 1.0e-6)],
+                600.0,
+            ))
+            .unwrap();
+        let card = MaterialCard::assemble(base.id().clone(), claims, Vec::new()).unwrap();
+        // Deliberately permissive original numerical domains: adoption and
+        // refresh must enforce the optical law without rewriting requirements.
+        let mut requirements: Vec<_> = VISIBLE_COMPLEX_IOR_ETA_PROPERTIES
+            .into_iter()
+            .chain(VISIBLE_COMPLEX_IOR_K_PROPERTIES)
+            .map(|name| {
+                ScalarPropertyRequirement::try_new(name, Dims::NONE, ScalarAdmissibility::Finite)
+                    .unwrap()
+            })
+            .collect();
+        requirements.push(
+            ScalarPropertyRequirement::try_new(
+                MAGNETIC_PERMEABILITY_PROPERTY,
+                MAGNETIC_PERMEABILITY_DIMS,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap(),
+        );
+        let material = resolve_material_state_point(
+            &card,
+            &point(425.0),
+            &requirements,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let optical = VisibleConductorStatePoint::try_from_material(material.clone()).unwrap();
+        assert_eq!(optical.resolved(), &material);
+        assert_eq!(optical.resolved().properties().len(), 19);
+        assert_eq!(
+            optical
+                .resolved()
+                .property(MAGNETIC_PERMEABILITY_PROPERTY)
+                .unwrap()
+                .value_si(),
+            1.0e-6
+        );
+        let refreshed = optical.at_query_point(&card, &point(450.0)).unwrap();
+        assert_eq!(
+            refreshed.resolved(),
+            &material.at_query_point(&card, &point(450.0)).unwrap()
+        );
+        assert!(matches!(optical.at_query_point(&card, &point(600.0)),
+            Err(MaterialStatePointError::OutsideConsumerDomain { property, .. })
+                if property == VISIBLE_COMPLEX_IOR_K_PROPERTIES[0]));
+        assert_eq!(optical.resolved(), &material);
+        let incomplete = resolve_material_state_point(
+            &card,
+            &point(425.0),
+            &requirements[1..],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(VisibleConductorStatePoint::try_from_material(incomplete).is_err());
+    }
+
+    #[test]
+    fn g0_visible_complex_index_adoption_refuses_noncanonical_or_dynamic_knots() {
+        for wrong_dimensions in [true, false] {
+            let base = optical_card(600.0);
+            let mut claims = ClaimSet::new();
+            let mut requirements = Vec::new();
+            for (_, source) in base.claims().claims_ordered() {
+                let mut source = source.clone();
+                if source.key.name() == VISIBLE_COMPLEX_IOR_ETA_PROPERTIES[0] {
+                    if wrong_dimensions {
+                        source = claim(
+                            source.key.name(),
+                            Pressure::DIMS,
+                            vec![(250.0, 1.0), (600.0, 2.0)],
+                            600.0,
+                        );
+                    } else {
+                        // An extra frequency applicability bound cannot be
+                        // frozen into a knot that already names its wavelength.
+                        source.validity = source.validity.with("omega", 1.0, 2.0);
+                    }
+                }
+                requirements.push(
+                    ScalarPropertyRequirement::try_with_key(
+                        &source.key,
+                        ScalarAdmissibility::Finite,
+                    )
+                    .unwrap(),
+                );
+                claims.insert_claim(source).unwrap();
+            }
+            let card = MaterialCard::assemble(base.id().clone(), claims, Vec::new()).unwrap();
+            let query = point(425.0)
+                .with_quantity(
+                    "omega",
+                    QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::Frequency(fs_qty::semantic::FrequencyConvention::Angular),
+                        ValueForm::Static,
+                    )),
+                    1.5,
+                )
+                .unwrap();
+            let material = resolve_material_state_point(
+                &card,
+                &query,
+                &requirements,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            assert!(matches!(
+                VisibleConductorStatePoint::try_from_material(material),
+                Err(MaterialStatePointError::InvalidRequirement { .. })
+            ));
+        }
     }
 
     #[test]

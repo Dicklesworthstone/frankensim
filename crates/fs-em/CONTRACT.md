@@ -1994,6 +1994,20 @@ when both retain the identical complete resolved material/source snapshot.
 Their imaginary permittivities add in parallel. Independent adoption of the
 same snapshot is allowed; a foreign source bundle refuses before scattering.
 
+`OpticalConductorResponse` adapts the original visible spectral complex-index
+state to this same wave solver. Its complete retained bundle includes all n/k
+knots and an explicitly sourced positive absolute permeability; no electric
+constant, nonmagnetic assumption or DC-conductivity fit is inserted. Under this
+owner's convention `N=n-i*k` and `epsilon=N*N/(mu*c0*c0)`, with exact SI vacuum
+light speed. Original n/k are interpolated linearly within their source band;
+out-of-band frequencies refuse, including zero-thickness films. Negative real
+epsilon is admitted while finite nonpositive imaginary epsilon and the decaying
+outgoing branch remain mandatory. The original loss is used once by half-space,
+film, beam and interior-heat owners. There is no added Ohmic term or inferred
+causal time-domain model. G1/G3 cases compare independent Fresnel phase and
+integrated heat, thin/opaque metal films, subdivision, magnetic contrast and
+vector-beam power. These synthetic fixtures do not qualify a measured specimen.
+
 The convention is exp(+i omega t), with a forward transmitted wave
 exp(-i k_z z) and Im(k_z) <= 0. TE and TM amplitudes refer to the same
 tangential electric-field axis on both sides. The TM coefficient therefore

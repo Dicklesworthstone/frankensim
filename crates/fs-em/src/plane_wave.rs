@@ -2,8 +2,9 @@
 //!
 //! This explicit plane-wave rung is separate from the mesh MQS solvers.
 //! Sources declare a nondispersive lossless law, the existing passive Debye
-//! law, or an explicitly selected isotropic Ohmic conductor with displacement
-//! current. Selecting a law is not experimental qualification at a frequency.
+//! law, an explicitly selected isotropic Ohmic conductor with displacement
+//! current, or an original spectral complex-index metal response. Selecting a
+//! law is not experimental qualification at a frequency.
 //! Both sides retain their complete source states, including absolute SI mu.
 //!
 //! Convention: exp(+i omega t), forward exp(-i k_z z), interface at z=0,
@@ -37,6 +38,10 @@ pub mod layers;
 /// Coherent vector diffraction of sampled beams through the original films.
 pub mod angular_spectrum;
 
+/// Original spectral metal n/k with explicit same-state magnetic permeability.
+pub mod optical;
+pub use optical::OpticalConductorResponse;
+
 /// Electric field transverse to the incidence plane, or magnetic field transverse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarization {
@@ -66,6 +71,10 @@ pub enum DielectricResponse<'a> {
         dielectric: &'a ResolvedDebyeCapacitor,
         conductor: &'a ResolvedConductorState,
     },
+    /// Visible complex-index source with its original same-state permeability.
+    /// Includes the source's electric absorption once; real epsilon may be
+    /// negative. Frequencies outside the source's spectral band refuse.
+    OpticalConductor(OpticalConductorResponse<'a>),
 }
 impl<'a> DielectricResponse<'a> {
     pub fn material(self) -> &'a ResolvedMaterialStatePoint {
@@ -74,6 +83,7 @@ impl<'a> DielectricResponse<'a> {
             Self::Debye(model) => model.material(),
             Self::Ohmic(conductor) => conductor.material(),
             Self::DebyeWithOhmic { dielectric, .. } => dielectric.material(),
+            Self::OpticalConductor(response) => response.material(),
         }
     }
 
@@ -106,8 +116,9 @@ impl<'a> DielectricResponse<'a> {
                 let epsilon = Self::Debye(dielectric).permittivity(omega)?;
                 C64::new(epsilon.re, epsilon.im - positive(sigma / omega)?)
             }
+            Self::OpticalConductor(response) => response.permittivity_f_m(omega)?,
         };
-        if !finite(epsilon) || epsilon.re <= 0.0 || epsilon.im > 0.0 {
+        if !finite(epsilon) || epsilon == C64::ZERO || epsilon.im > 0.0 {
             return Err(ReflectionError::Invalid(
                 "dielectric response must be finite and passive",
             ));
@@ -219,8 +230,9 @@ impl WaveMedium {
         let index_squared_ratio = epsilon_ratio.scale(mu_ratio);
         if !finite(index_squared_ratio)
             || !finite(epsilon_ratio)
-            || epsilon_ratio.re <= 0.0
-            || index_squared_ratio.re <= 0.0
+            || epsilon_ratio == C64::ZERO
+            || index_squared_ratio == C64::ZERO
+            || epsilon_ratio.im > 0.0
         {
             return Err(ReflectionError::Invalid(
                 "material contrast is unrepresentable",
@@ -290,7 +302,7 @@ impl<'a> PlanarDielectricInterface<'a> {
             } => {
                 shared_ohmic_conductivity(dielectric, conductor)?;
             }
-            DielectricResponse::Debye(_) => {}
+            DielectricResponse::Debye(_) | DielectricResponse::OpticalConductor(_) => {}
         }
         Ok(Self {
             incident,
