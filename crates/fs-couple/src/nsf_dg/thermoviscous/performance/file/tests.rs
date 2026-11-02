@@ -23,7 +23,7 @@ fn read(text: &str, block: usize) -> ResolvedThermoviscousDgInput {
 }
 
 fn render(source: ResolvedThermoviscousDgInput, block: usize)
-    -> (Vec<f64>, ContentHash, NsfFiniteReservoirInventory)
+    -> (Vec<f64>, u64, NsfFiniteReservoirInventory)
 {
     source.with_physical_renderer(|renderer, info| {
         let mut pressure = vec![0.0; info.samples as usize];

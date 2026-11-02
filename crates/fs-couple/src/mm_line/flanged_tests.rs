@@ -43,9 +43,12 @@ fn flanged_line_selector_retains_full_physical_port_work() {
     let outgoing = [C64::new(1.0, 0.2), C64::new(-0.3, 0.4), C64::new(0.1, -0.2)];
     let mut roots = vec![0.0];
     roots.extend(fs_duct::modal::j1_roots(n - 1).unwrap());
+    let geometry = PreparedModalDuct::new(&duct, config.n_modes, config.extra_slices)
+        .expect("same line geometry");
     for ka in [1.2, 4.6, 7.8] {
         let omega = ka * gas.sound_speed / radius;
-        let reflection = matrix_reflection_at(&duct, &gas, omega, &config, &load, z0).unwrap();
+        let reflection =
+            matrix_reflection_at(&geometry, &gas, omega, config.loss, &load, z0).unwrap();
         let gain = matrix_admission::reflection_gain(&reflection, n, &mut || false).unwrap();
         assert!(gain <= 1.0 + crate::driving_point::PASSIVITY_TOL);
         let incoming = multiply(&reflection, &outgoing);
@@ -87,7 +90,7 @@ fn flanged_line_selector_retains_full_physical_port_work() {
         assert!(input_power > 0.0);
         assert!((input_power - power(&mouth_pressure, &mouth_flow)).abs() < 5.0e-10 * input_power);
     }
-    let dc = dc_response(&duct, &gas, &config, &load).unwrap();
+    let dc = dc_response(&geometry, &gas, config.loss, &load).unwrap();
     assert!(
         dc.impedance_matrix
             .iter()
