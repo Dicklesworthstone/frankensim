@@ -373,8 +373,9 @@ impl<'a> DepositionSimulation<'a> {
     /// substep allowance. Event-splitting owners pass their remaining shared
     /// allowance here instead of renewing the whole thermal budget at each cut.
     /// This can only tighten the stored ceiling, never alter it. Zero still
-    /// admits same-time events or movement through an empty interval, but not
-    /// a thermal step. Work refusal occurs BEFORE the next thermal evaluation.
+    /// admits same-time events or movement through an empty interval without
+    /// an interval-dependent observer, but not a thermal/observer step. Work
+    /// refusal occurs BEFORE the next thermal evaluation.
     pub fn advance_observed_limited<O: DepositionObserver>(
         &self, observer: &O, target_s: f64, config: StepConfig, max_substeps: usize,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -406,7 +407,12 @@ impl<'a> DepositionSimulation<'a> {
             }
             if next.time_s == target_s { break; }
             let mut stop = next.schedule.get(next.cursor).map_or(target_s, |e| e.time_s.min(target_s));
-            if next.cells.is_empty() { next.time_s = stop; continue; }
+            // An interval owner can account for transmitted/reflected energy
+            // even without a thermal receiver. Preserve its schedule and work
+            // limits; only observers without interval work may skip this span.
+            if next.cells.is_empty() && !observer.requires_step_interval() {
+                next.time_s = stop; continue;
+            }
             if audit.substeps >= next.budget.max_substeps.min(max_substeps) {
                 return Err(DepositionError::Budget("thermal substeps").into());
             }

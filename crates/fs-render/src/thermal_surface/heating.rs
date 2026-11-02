@@ -18,6 +18,7 @@ pub use response::SurfacePowerResponse;
 pub mod coating;
 pub use coating::{
     CoatedSurfaceIlluminationSource, CoatedSurfacePowerResponse, SurfaceHeatingReceiver,
+    TransmittingSurfaceIlluminationSource, TransmittingSurfacePowerResponse,
 };
 /// Finite-film optical constants on the original temperature or enthalpy state.
 pub mod coating_feedback;
@@ -154,10 +155,21 @@ struct Receiver {
     maximum_k: f64,
 }
 
+#[derive(Clone, Debug)]
+struct PreparedSurfaceSource<const N: usize> {
+    source_id: u64,
+    /// Only a single-receiver source has an implicit destination. Coherent
+    /// film partitions supply all actual receivers separately, including none
+    /// for a bare transmitting interface.
+    receiver: Option<SurfaceHeatingReceiver>,
+    response: SurfacePowerResponse<N>,
+    power: SpectralPowerSchedule<N>,
+}
+
 #[derive(Debug)]
 struct Model<const N: usize> {
     identity: ContentHash,
-    sources: Vec<SurfaceIlluminationSource<N>>,
+    sources: Vec<PreparedSurfaceSource<N>>,
     receivers: BTreeMap<CellId, Receiver>,
     transitions_s: Vec<f64>,
     budget: SurfaceHeatingBudget,
@@ -248,14 +260,44 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, SurfaceHeatingError> {
         checkpoint()?;
+        if sources.len() > budget.max_sources {
+            return Err(SurfaceHeatingError::Budget);
+        }
+        let mut prepared = Vec::new();
+        prepared
+            .try_reserve_exact(sources.len())
+            .map_err(|_| SurfaceHeatingError::Budget)?;
+        for source in sources {
+            checkpoint()?;
+            prepared.push(PreparedSurfaceSource {
+                source_id: source.source_id,
+                receiver: Some(SurfaceHeatingReceiver {
+                    thermal_cell: source.thermal_cell,
+                    material_id: source.material_id,
+                    temperature_bounds_k: source.temperature_bounds_k,
+                }),
+                response: source.response,
+                power: source.power.clone(),
+            });
+        }
+        Self::try_new_prepared(prepared, thermal, budget, tolerance, checkpoint)
+    }
+
+    fn try_new_prepared(
+        sources: Vec<PreparedSurfaceSource<N>>,
+        thermal: &DepositionSimulation<'_>,
+        budget: SurfaceHeatingBudget,
+        tolerance: SurfaceHeatingTolerance,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, SurfaceHeatingError> {
+        checkpoint()?;
         if N == 0
             || sources.is_empty()
-            || thermal.cells().is_empty()
             || !tolerance.power_roundoff_w.is_finite()
             || tolerance.power_roundoff_w < 0.0
         {
             return Err(invalid(
-                "nonempty surface sources, active cells and finite nonnegative roundoff allowance required",
+                "nonempty surface sources and finite nonnegative roundoff allowance required",
             ));
         }
         if sources.len() > budget.max_sources || budget.max_source_evaluations == 0 {
@@ -264,35 +306,35 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
         let wavelengths = sources[0].response.wavelengths_nm().map(f64::to_bits);
         let mut segments = 0_usize;
         let mut receivers = BTreeMap::<CellId, Receiver>::new();
-        for source in sources {
+        for source in &sources {
             checkpoint()?;
-            let (lo, hi) = source.temperature_bounds_k;
-            if !lo.is_finite()
-                || !hi.is_finite()
-                || lo <= 0.0
-                || hi < lo
-                || source.response.wavelengths_nm().map(f64::to_bits) != wavelengths
-            {
-                return Err(invalid(
-                    "finite positive temperature support and one shared wavelength packet required",
-                ));
+            if source.response.wavelengths_nm().map(f64::to_bits) != wavelengths {
+                return Err(invalid("one shared surface wavelength packet required"));
             }
-            let cell = thermal
-                .cells()
-                .get(&source.thermal_cell)
-                .ok_or_else(|| invalid("surface receiver must be an active native cell"))?;
-            if cell.material_id != source.material_id {
-                return Err(invalid(
-                    "surface receiver must retain its declared native material",
-                ));
+            if let Some(binding) = source.receiver {
+                let (lo, hi) = binding.temperature_bounds_k;
+                if !lo.is_finite() || !hi.is_finite() || lo <= 0.0 || hi < lo {
+                    return Err(invalid(
+                        "finite positive surface temperature support required",
+                    ));
+                }
+                let cell = thermal
+                    .cells()
+                    .get(&binding.thermal_cell)
+                    .ok_or_else(|| invalid("surface receiver must be an active native cell"))?;
+                if cell.material_id != binding.material_id {
+                    return Err(invalid(
+                        "surface receiver must retain its declared native material",
+                    ));
+                }
+                let receiver = receivers.entry(binding.thermal_cell).or_insert(Receiver {
+                    material: binding.material_id,
+                    minimum_k: lo,
+                    maximum_k: hi,
+                });
+                receiver.minimum_k = receiver.minimum_k.max(lo);
+                receiver.maximum_k = receiver.maximum_k.min(hi);
             }
-            let receiver = receivers.entry(source.thermal_cell).or_insert(Receiver {
-                material: source.material_id,
-                minimum_k: lo,
-                maximum_k: hi,
-            });
-            receiver.minimum_k = receiver.minimum_k.max(lo);
-            receiver.maximum_k = receiver.maximum_k.min(hi);
             segments = segments
                 .checked_add(source.power.segment_count())
                 .ok_or(SurfaceHeatingError::Budget)?;
@@ -300,11 +342,7 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
                 return Err(SurfaceHeatingError::Budget);
             }
         }
-        let mut retained = Vec::new();
-        retained
-            .try_reserve_exact(sources.len())
-            .map_err(|_| SurfaceHeatingError::Budget)?;
-        retained.extend_from_slice(sources);
+        let mut retained = sources;
         retained.sort_unstable_by_key(|source| source.source_id);
         if retained
             .windows(2)
@@ -316,20 +354,30 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
         transitions_s
             .try_reserve_exact(segments.checked_mul(2).ok_or(SurfaceHeatingError::Budget)?)
             .map_err(|_| SurfaceHeatingError::Budget)?;
-        let mut hash = DomainHasher::new("org.frankensim.render.surface-optical-heating.v1");
+        let explicit_receivers = retained.iter().any(|source| source.receiver.is_none());
+        let mut hash = DomainHasher::new(if explicit_receivers {
+            "org.frankensim.render.partitioned-surface-optical-heating.v1"
+        } else {
+            "org.frankensim.render.surface-optical-heating.v1"
+        });
         hash.update(&(N as u64).to_le_bytes());
         hash.update(&(retained.len() as u64).to_le_bytes());
         for source in &retained {
             checkpoint()?;
-            for id in [
-                source.source_id,
-                source.thermal_cell.0,
-                source.material_id.0,
-            ] {
-                hash.update(&id.to_le_bytes());
+            hash.update(&source.source_id.to_le_bytes());
+            if explicit_receivers {
+                hash.update(&[u8::from(source.receiver.is_some())]);
             }
-            for value in [source.temperature_bounds_k.0, source.temperature_bounds_k.1] {
-                hash.update(&value.to_bits().to_le_bytes());
+            if let Some(receiver) = source.receiver {
+                for id in [receiver.thermal_cell.0, receiver.material_id.0] {
+                    hash.update(&id.to_le_bytes());
+                }
+                for value in [
+                    receiver.temperature_bounds_k.0,
+                    receiver.temperature_bounds_k.1,
+                ] {
+                    hash.update(&value.to_bits().to_le_bytes());
+                }
             }
             hash.update(source.response.identity().as_bytes());
             hash.update(source.power.identity().as_bytes());
@@ -608,8 +656,11 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
                         }
                     }
                 } else if heat > 0.0 {
+                    let receiver = source.receiver.ok_or_else(|| {
+                        invalid("absorbing surface requires an explicit thermal receiver")
+                    })?;
                     receiving
-                        .entry(source.thermal_cell)
+                        .entry(receiver.thermal_cell)
                         .or_default()
                         .add(heat)?;
                 }

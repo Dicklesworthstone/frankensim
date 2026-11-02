@@ -333,7 +333,7 @@ pub(super) fn hash_geometry<const N: usize>(
     hash_values(hash, *s_fraction);
 }
 
-fn hash_values<const N: usize>(hash: &mut DomainHasher, values: [f64; N]) {
+pub(super) fn hash_values<const N: usize>(hash: &mut DomainHasher, values: [f64; N]) {
     for value in values {
         hash.update(&value.to_bits().to_le_bytes());
     }
@@ -343,7 +343,10 @@ pub(super) fn mix(values: [f64; 2], s_fraction: f64) -> f64 {
     s_fraction * values[0] + (1.0 - s_fraction) * values[1]
 }
 
-fn polarized_power(matrix: Mueller, s_fraction: f64) -> Result<f64, SurfaceHeatingError> {
+pub(super) fn polarized_power(
+    matrix: Mueller,
+    s_fraction: f64,
+) -> Result<f64, SurfaceHeatingError> {
     let value = matrix.0[0][0] + (2.0 * s_fraction - 1.0) * matrix.0[0][1];
     if !value.is_finite() || !(-RESPONSE_ROUNDOFF..=1.0 + RESPONSE_ROUNDOFF).contains(&value) {
         return Err(invalid("nonpassive polarized surface power"));

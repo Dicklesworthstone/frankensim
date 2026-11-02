@@ -4929,3 +4929,31 @@ independent film/substrate temperatures and coherent first-step work, three
 temporal refinements against an independently integrated RK4 thermal ODE,
 equal-temperature latent states, shared packet counts, permutation/continuation,
 dark-domain refusal and late cancellation followed by identical retry.
+
+### Transmitting coating heat retains authored film receivers
+
+`TransmittingSurfacePowerResponse::from_dielectric_stack` compiles the original
+dielectric coherent owner's reflected/transmitted power and positive finite-film
+work once per wavelength. `SurfaceOpticalHeating::try_new_transmitting` binds
+exactly those films to native thermal cells. Transmitted radiation remains an
+outgoing optical channel; no substrate absorption, radiance eta-squared factor,
+extra area/cosine factor or implicit exit-medium heat destination is introduced.
+
+Film fractions and receivers retain authored outside-to-inside order under both
+forward and reverse incidence. The caller supplies the appropriate incident/exit
+indices and incidence angle. Original dispersive lossless films remain lossless;
+weak positive film work survives below the rounding scale of R+T, and evanescent
+fields under total internal reflection can heat genuinely absorbing finite films.
+Native optical spectral, coherence, passivity and grazing restrictions remain
+binding. Fixed responses retain the existing whole-film thermal lumping,
+temperature support and prompt-thermalization assumptions.
+
+The common source admission and thermal observer own budgets, schedules,
+compensated energy reductions, material/domain checks and rollback. Empty film
+stacks have no thermal receivers and can account for a bare interface on an empty
+native thermal state. Native interval observers still honor waveform transitions,
+work budgets and cancellation in that case; the ordinary no-observer empty-state
+fast-forward remains unchanged. Existing opaque source identities and numerical
+operation order are retained. G1/G3 regressions cover asymmetric reverse routing,
+TIR, weak stored enthalpy, lossless dispersion, empty-state pulse/ramp schedules,
+receiver/budget refusal and late cancellation without partial publication.

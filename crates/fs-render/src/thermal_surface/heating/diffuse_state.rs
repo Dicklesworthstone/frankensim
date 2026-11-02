@@ -179,14 +179,20 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
         hash.update(&(count as u64).to_le_bytes());
         for (index, source) in result.model.sources.iter().enumerate() {
             checkpoint()?;
+            let receiver = source
+                .receiver
+                .expect("diffuse surface source retains its receiver");
             for id in [
                 source.source_id,
-                source.thermal_cell.0,
-                source.material_id.0,
+                receiver.thermal_cell.0,
+                receiver.material_id.0,
             ] {
                 hash.update(&id.to_le_bytes());
             }
-            for t in [source.temperature_bounds_k.0, source.temperature_bounds_k.1] {
+            for t in [
+                receiver.temperature_bounds_k.0,
+                receiver.temperature_bounds_k.1,
+            ] {
                 hash.update(&t.to_bits().to_le_bytes());
             }
             hash.update(source.power.identity().as_bytes());
