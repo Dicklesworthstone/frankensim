@@ -27,6 +27,12 @@ fn caloric_rate_source() -> (
     ResolvedHeatCapacityCurve,
     ResolvedMaterialStatePoint,
 ) {
+    caloric_rate_source_with_knots(vec![(300.0, 0.01), (320.0, 0.03)])
+}
+
+fn caloric_rate_source_with_knots(knots: Vec<(f64, f64)>) -> (
+    MaterialCard, ResolvedHeatCapacityCurve, ResolvedMaterialStatePoint,
+) {
     let (original, _) = coating(false, false);
     let mut claims = original.claims().clone();
     // Explicitly use a nonstandard selector: native memory must follow the
@@ -37,7 +43,7 @@ fn caloric_rate_source() -> (
             value: PropertyValue::Curve {
                 abscissa: "T".into(),
                 abscissa_dims: Temperature::DIMS,
-                knots: vec![(300.0, 0.01), (320.0, 0.03)],
+                knots,
                 dims: Time::DIMS,
             },
             validity: ValidityDomain::unconstrained()
@@ -297,6 +303,79 @@ fn branch_snapshot(system: &MultiFrictionModalSystem) -> Vec<(f64, f64, Vec<f64>
         .iter()
         .map(|b| (b.stiffness, b.relaxation_time_s, b.projection.clone()))
         .collect()
+}
+
+#[test]
+fn moving_material_rate_source_refusal_restores_warm_geometry_heat_and_history() {
+    use fs_couple::render::schedule::force::coupled::contact::friction::multiple::surfaces::geometry::{
+        FrictionGeometry, FrictionEndpointGeometry, FrictionGeometryConfig,
+    };
+    let gate = CancelGate::new_clock_free();
+    let volume = 1e-9;
+    let dt = 0.001;
+    let fraction = -(-2.0_f64 * dt / 0.01).exp_m1();
+    let first_rise = 0.5 * 0.1_f64.powi(2) * fraction / (DENSITY * volume * CP);
+    // The first interval has a valid constant rate. The second's physical heat
+    // reaches a positive source time whose reciprocal is unrepresentable. The
+    // caloric solve itself remains valid; refusal belongs to endpoint mobility.
+    let (card, caloric, source) = caloric_rate_source_with_knots(vec![
+        (300.0, 0.01), (300.0 + 1.5 * first_rise, 0.01),
+        (300.0 + 1.6 * first_rise, 1e-310), (320.0, 1e-310),
+    ]);
+    let mut system = isolated_memory(1000, &gate);
+    let mut heat = isolated_body(caloric.curve(), volume);
+    let mut routes = [MaterialRelaxationHeatDestination {
+        cell: BODY, material: &card, caloric: caloric.curve(), temperature_axis: "T",
+        density_property: "density", volume_m3: volume, source,
+        channel: Some(system.prepare_material_heat(&[0..1], budget(), &gate).unwrap()),
+        nonlinear_channels: vec![],
+    }];
+    let rates = [MaterialRelaxationTemperature { cell: BODY, times: vec![(0, "retardation_clock".into())] }];
+    let geometry = |shape| FrictionGeometry {
+        left: ModalAttachment { component: 0, shapes: vec![shape] }, right: None,
+    };
+    let endpoint = |a, b| FrictionEndpointGeometry { start: geometry(a), end: geometry(b),
+        start_speed_m_s: 0.02, end_speed_m_s: 0.02 };
+    let config = FrictionGeometryConfig { max_update_terms: 100_000 };
+    system.step_with_material_rate_thermal_geometry(&mut heat, &[], &[], &[], &mut routes,
+        &rates, controls(1), &[0.0], &[0.0], &[drive(0.02, 0.001)], &[geometry(1.5)],
+        Some(&[endpoint(1.0, 2.0)]), config, &gate, |s, _| other(s)).unwrap();
+    assert!((heat.temperature_k(BODY).unwrap() - 300.0 - first_rise).abs() < 1e-8);
+    let states = system.components()[0].states().to_vec();
+    let memory = system.material_memory().to_vec();
+    let branches = branch_snapshot(&system);
+    let source = routes[0].source.clone();
+    let temperature = heat.temperature_k(BODY).unwrap();
+    let energy = total_heat(&heat);
+    let clock = heat.time_s();
+    let failure = system.step_with_material_rate_thermal_geometry(&mut heat, &[], &[], &[],
+        &mut routes, &rates, controls(1), &[energy], &[0.0], &[drive(0.02, 0.001)],
+        &[geometry(2.5)], Some(&[endpoint(2.0, 3.0)]), config, &gate, |s, _| other(s))
+        .unwrap_err();
+    assert!(matches!(failure, LayerThermalError::Invalid(
+        "source relaxation time and rate must be positive representable values")));
+    assert_eq!(system.port(0).unwrap().left, geometry(1.5).left);
+    assert_eq!(system.components()[0].states(), states);
+    assert_eq!(system.material_memory(), memory);
+    assert_eq!(branch_snapshot(&system), branches);
+    assert_eq!(routes[0].source, source);
+    assert_eq!(system.samples_rendered(), 1);
+    assert_eq!(heat.time_s(), clock);
+    assert_eq!(heat.temperature_k(BODY).unwrap(), temperature);
+    assert_eq!(total_heat(&heat), energy);
+    system.admit_material_rate_thermal_feedback(&heat, &routes, &rates, &gate).unwrap();
+    // An explicit external cooling source can retain the admitted temperature
+    // on retry. It removes exactly this independent uncoupled arm's heat; no
+    // geometry work or artificial energy reset is used to clear the refusal.
+    let cooling = 0.5 * memory[0].powi(2) * fraction / dt;
+    system.step_with_material_rate_thermal_geometry(&mut heat, &[], &[], &[], &mut routes,
+        &rates, controls(1), &[energy], &[0.0], &[drive(0.02, 0.001)], &[geometry(2.5)],
+        Some(&[endpoint(2.0, 3.0)]), config, &gate, |_, _| Ok::<_, Infallible>(StepCoefficients {
+            sources_w: BTreeMap::from([(BODY, -cooling)]), conductances_w_k: BTreeMap::new(), payload: (),
+        })).unwrap();
+    assert_eq!(system.samples_rendered(), 2);
+    assert_eq!(system.port(0).unwrap().left, geometry(2.5).left);
+    assert!((system.material_memory()[0] - memory[0] * (-dt/0.01).exp()).abs() < 1e-13);
 }
 
 fn warm_body(

@@ -67,7 +67,7 @@ impl RateContinuation<'_> {
             || system.core.has_nonlinear_potentials()
         {
             return Err(bad(
-                "material rate feedback requires explicit finite-body routes and fixed linear contact mechanics",
+                "material rate feedback requires explicit finite-body routes, original linear storage and prescribed normal loads",
             ));
         }
         let mut cells = BTreeSet::new();
@@ -300,6 +300,18 @@ impl RateContinuation<'_> {
             channels: endpoint.channels,
         });
     }
+
+    fn complete<S>(self, material_heat: &mut [MaterialRelaxationHeatDestination<'_>],
+        frame: LayerThermalFrame<S>) -> (LayerThermalFrame<S>, MaterialRelaxationTimeReport) {
+        // Native acceptance and the final cancellation check already occurred.
+        // These source/cache moves cannot fail or split the accepted timeline.
+        let accepted = self.publication.into_inner().expect("accepted material rate transaction");
+        for (index, source) in accepted.sources { material_heat[index].source = source; }
+        for (route, channel) in material_heat.iter_mut().zip(accepted.channels) {
+            if let Some(channel) = channel { route.channel = Some(channel); }
+        }
+        (frame, accepted.report)
+    }
 }
 
 impl MultiFrictionModalSystem {
@@ -324,7 +336,8 @@ impl MultiFrictionModalSystem {
     /// prepare before mechanics, heat, source snapshots or rates publish.
     /// Stored moduli, density, geometry and material internal strains remain
     /// unchanged. No endpoint-power approximation supplies material heat.
-    /// Refine this first-order partition in time. Moving/normal contacts and
+    /// Refine this first-order partition in time. Moving tangential maps use
+    /// `step_with_material_rate_thermal_geometry`; solved normal contacts and
     /// nonlinear material storage require their separate update compositions.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_material_rate_thermal_feedback<'t, S, E>(
@@ -363,20 +376,39 @@ impl MultiFrictionModalSystem {
             gate,
             resolve,
         )?;
-        // Native acceptance and the final cancellation check already occurred.
-        // These source/cache moves cannot fail or split the accepted timeline.
-        let accepted = continuation
-            .publication
-            .into_inner()
-            .expect("accepted material rate transaction");
-        for (index, source) in accepted.sources {
-            material_heat[index].source = source;
-        }
-        for (route, channel) in material_heat.iter_mut().zip(accepted.channels) {
-            if let Some(channel) = channel {
-                route.channel = Some(channel);
-            }
-        }
-        Ok((frame, accepted.report))
+        Ok(continuation.complete(material_heat, frame))
+    }
+
+    /// Source-temperature body mobilities with the original held tangential
+    /// map transaction. Its actual converged contact effort drives the SAME
+    /// source-heat trajectory. Endpoint eta/tau refresh rebuilds responses from
+    /// these current complete maps before any state or clock is published.
+    ///
+    /// The geometry owner retains source-domain checks at the actual start/end
+    /// maps and restores the accepted geometry on every later thermal/source/
+    /// cache refusal. Motion is a power-conjugate velocity transformer, not an
+    /// extra displacement or Bdot*q excitation. Prescribed normal loads only;
+    /// retained film patches and all source/body admission remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_rate_thermal_geometry<'t, S, E>(
+        &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination], dry: &[DryContactHeat<'_>],
+        material_heat: &mut [MaterialRelaxationHeatDestination<'_>],
+        rates: &[MaterialRelaxationTemperature], controls: LayerThermalSolve,
+        energy_guess_j: &[f64], external: &[f64], drives: &[FrictionDrive],
+        geometry: &[surfaces::geometry::FrictionGeometry],
+        endpoints: Option<&[surfaces::geometry::FrictionEndpointGeometry]>,
+        config: surfaces::geometry::FrictionGeometryConfig, gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<(LayerThermalFrame<S>, MaterialRelaxationTimeReport), LayerThermalError<E>> {
+        // Admit the accepted source/operator before staging endpoint controls.
+        // Tangential maps do not change the native linear storage generator;
+        // their work-conjugate contact forces enter its actual held input.
+        let continuation = RateContinuation::new(self, material_heat, rates, thermal, gate)?;
+        let frame = self.with_friction_geometry_and_endpoints(geometry, endpoints, None,
+            config, gate, |system| system.step_with_contact_thermal_inner(thermal, bindings,
+                series_heat, dry, material_heat, Some(&continuation), controls, energy_guess_j,
+                external, drives, None, None, false, gate, resolve))?;
+        Ok(continuation.complete(material_heat, frame))
     }
 }

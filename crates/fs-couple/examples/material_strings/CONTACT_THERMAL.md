@@ -466,13 +466,32 @@ parameter work. This is a **first-order partition in temperature** and requires
 time refinement, not a fully implicit same-step `tau(T)` or `eta(T)` solve.
 
 This opt-in supports fixed reference density, geometry and storage moduli,
-fully solid caloric states, original linear material losses, fixed contact/support
-maps and prescribed normal loads. `bow_fiber_strain`, nonlinear storage,
-solved normal contacts/stops, and moving bow/fiber/stop programs require their
-corresponding compositions and refuse on this route. Existing fixed-map dry
-footprints, retained film heat, sliding thermal counterfaces, conductive links
-and explicit series-drive heat remain connected. String omitted-mode compliance
-retains its original mechanical storage and numerical-loss account.
+fully solid caloric states, original linear material losses and prescribed
+normal loads. Existing `bow_station_motion` and `bow_fiber_program` records may
+move the contact while this same finite-body feedback continues. The original
+geometry owner projects the midpoint tangential maps, actual endpoint source
+checks, moving dry footprints and fiber support inertial forces. Material cells
+remain attached to their full physical body volumes. A translating fiber may
+pass a retained film attached to the fixed string patch; the film itself does
+not migrate along the string.
+
+The current contact maps drive every thermal trial and the original converged
+held contact force drives the source-heat integral. Endpoint mobility changes
+rebuild the response against those same maps before publication. Geometry,
+mechanics, material sources, finite heat and the motion cursor accept together;
+a later source/cache refusal retains their preceding accepted state. Contact
+map motion is a work-conjugate velocity/force transformation and introduces no
+additional `Bdot*q` slip or artificial stored energy. Midpoint map and held
+temperature discretizations both require time refinement. Fiber support work
+and the laboratory kinetic correction retain their original separate accounts.
+
+`bow_fiber_strain`, nonlinear storage, solved normal contacts/stops and stop
+motion still require their corresponding compositions and refuse on this route.
+Moving a film on its material body still requires transported film history.
+Dry heat, retained film heat, sliding thermal counterfaces, conductive links
+and explicit series-drive heat remain connected. Omitted-mode friction
+compliance retains its original fixed-map restriction; supported string-tail
+storage keeps its original mechanical and numerical-loss accounts.
 
 The source material's heat capacity, relaxation-time and supported viscosity claims affect the
 same physical pressure history through temperature, material memory and contact

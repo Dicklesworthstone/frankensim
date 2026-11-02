@@ -160,7 +160,29 @@ fn viscous_ready(
     only_kelvin: bool,
     varying_viscosity: bool,
 ) -> Ready {
+    viscous_ready_with_motion(cx, gate, profile, cp, explicit, viscosity,
+        only_kelvin, varying_viscosity, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn viscous_ready_with_motion(
+    cx: &Cx<'_>, gate: &CancelGate, profile: &Profile, cp: f64, explicit: bool,
+    viscosity: [f64; 2], only_kelvin: bool, varying_viscosity: bool, moving: bool,
+) -> Ready {
     let mut specification = spec(profile, explicit);
+    if moving {
+        let motion = "bow_station_motion 2 0.00003 1048576 2\n\
+            bow_station_knot 6 0.20012\nbow_station_knot 12 0.2\n";
+        specification.bow_station_motion = input::Spec::parse(
+            include_str!("../relaxing-layered-strings.material-strings")
+                .replace("forces preload", &format!("{motion}forces preload")).as_bytes())
+            .unwrap().bow_station_motion;
+        specification.schedule = GestureSchedule::try_new(48_000, vec![GestureTrack {
+            id: "bow".into(), target: GestureTarget::BowStroke { string: 1 },
+            initial: GestureValue::Bow { velocity_m_per_s: 0.01, normal_force_n: 0.001, station: 0.2 },
+            events: vec![],
+        }]).unwrap();
+    }
     for wire in &mut specification.strings {
         wire.twist_modes = 1;
         wire.torsion_memory = Some(vec![
@@ -692,13 +714,16 @@ fn v4_string_heat_uses_source_viscosities_with_one_layer_inventory_and_native_hi
 }
 
 #[test]
-fn v4_source_viscosities_and_times_continue_one_warm_annulus_without_reinitializing() {
+fn v4_source_viscosities_and_times_continue_a_moving_bow_and_warm_annulus() {
     scoped(|cx, gate| {
         let profile = Profile::parse(text(true).as_bytes()).unwrap();
         for only_kelvin in [false, true] {
             let mut outcomes = Vec::new();
             for cp in [0.001, 0.004] {
-                let mut ready = viscous_ready(cx, gate, &profile, cp, true, [2e9, 2e5], only_kelvin, true);
+                let mut ready = viscous_ready_with_motion(cx, gate, &profile, cp, true,
+                    [2e9, 2e5], only_kelvin, true, true);
+                assert!(ready.spec.material_body_thermal && !ready.spec.dry_contact_thermal);
+                let initial_map = ready.performance.bank().system().port(0).unwrap().left.clone();
                 let original_modes: Vec<_> = ready.performance.bank().system().components()
                     .iter().flat_map(|m| m.modes()).copied().collect();
                 let original_times: Vec<_> = ready.performance.bank().system().material_relaxation_branches()
@@ -731,6 +756,10 @@ fn v4_source_viscosities_and_times_continue_one_warm_annulus_without_reinitializ
                 let original_b = 2e9 * (1.0 + (INITIAL - 280.0) / 40.0);
                 let original_s = 2e5 * (2.0 - (INITIAL - 280.0) / 40.0);
                 let system = ready.performance.bank().system();
+                let map = system.port(0).unwrap().left.clone();
+                assert_ne!(map, initial_map);
+                let stations = ready.performance.bank().bow_station_fractions().unwrap().to_vec();
+                assert!((stations[0] - 0.20006).abs() < 1e-15);
                 for (index, (mode, original)) in system.components().iter().flat_map(|m| m.modes())
                     .zip(&original_modes).enumerate() {
                     assert_eq!(mode.angular_frequency_rad_s, original.angular_frequency_rad_s);
@@ -757,8 +786,16 @@ fn v4_source_viscosities_and_times_continue_one_warm_annulus_without_reinitializ
                 if only_kelvin { foreign[0].times.push((0, "invented-time".into())); }
                 else { foreign[0].times[0].1 = ETA.into(); }
                 assert!(system.admit_material_rate_thermal_feedback(&network, &routes, &foreign, gate).is_err());
+                let refuse = std::cell::Cell::new(false);
+                let refusal_observed = std::cell::Cell::new(false);
                 let mut renderer = ready.performance.with_material_contact_thermal_network(
-                    network, vec![], vec![], routes, profile.controls, gate, |endpoint| prepared.resolve(endpoint))
+                    network, vec![], vec![], routes, profile.controls, gate, |endpoint| {
+                        if refuse.get() {
+                            refusal_observed.set(true);
+                            return Err("late moving-body thermal source refusal".into());
+                        }
+                        prepared.resolve(endpoint)
+                    })
                     .unwrap().with_material_relaxation_temperature(rates).unwrap();
                 assert_eq!(renderer.performance().samples_rendered(), clock);
                 assert_eq!(renderer.performance().bank().system().material_memory(), memory);
@@ -773,6 +810,34 @@ fn v4_source_viscosities_and_times_continue_one_warm_annulus_without_reinitializ
                 assert_eq!(cell.mass_kg, mass);
                 assert!((cell.mass_kg * cell.specific_h_j_kg - heat).abs() < 4e-12);
                 assert_eq!(renderer.performance().bank().system().material_memory().len(), if only_kelvin { 0 } else { 20 });
+                assert_eq!(renderer.performance().samples_rendered(), 6);
+                assert_eq!(renderer.performance().bank().bow_station_fractions().unwrap(), &[0.20012]);
+                // Finish the successful warm continuation before the injected
+                // refusal: a failed block deliberately poisons this renderer.
+                let system = renderer.performance().bank().system();
+                let state: Vec<_> = system.components().iter().flat_map(|m| m.states()).copied().collect();
+                let memory = system.material_memory().to_vec();
+                let map = system.port(0).unwrap().left.clone();
+                let stations = renderer.performance().bank().bow_station_fractions().unwrap().to_vec();
+                let clock = renderer.performance().samples_rendered();
+                let modes: Vec<_> = renderer.performance().bank().system().components().iter().flat_map(|m| m.modes()).copied().collect();
+                let times: Vec<_> = renderer.performance().bank().system().material_relaxation_branches().iter().map(|b| b.relaxation_time_s).collect();
+                let thermal_time = renderer.thermal().time_s();
+                let enthalpy = renderer.thermal().cells()[&CellId(30)].specific_h_j_kg;
+                refuse.set(true);
+                let mut untouched = [123.0];
+                assert!(renderer.block(&mut untouched).is_err());
+                assert!(refusal_observed.get(), "the failure must reach the staged thermal source");
+                assert_eq!(untouched, [123.0]);
+                assert_eq!(renderer.performance().samples_rendered(), clock);
+                assert_eq!(renderer.thermal().time_s(), thermal_time);
+                assert_eq!(renderer.thermal().cells()[&CellId(30)].specific_h_j_kg, enthalpy);
+                assert_eq!(renderer.performance().bank().bow_station_fractions().unwrap(), stations);
+                assert_eq!(renderer.performance().bank().system().port(0).unwrap().left, map);
+                assert_eq!(renderer.performance().bank().system().material_memory(), memory);
+                assert_eq!(renderer.performance().bank().system().components().iter().flat_map(|m| m.states()).copied().collect::<Vec<_>>(), state);
+                assert_eq!(renderer.performance().bank().system().components().iter().flat_map(|m| m.modes()).copied().collect::<Vec<_>>(), modes);
+                assert_eq!(renderer.performance().bank().system().material_relaxation_branches().iter().map(|b| b.relaxation_time_s).collect::<Vec<_>>(), times);
                 outcomes.push((pressure, renderer.thermal().temperature_k(CellId(30)).unwrap()));
             }
             assert!(outcomes[0].1 > outcomes[1].1);

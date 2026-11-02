@@ -270,6 +270,8 @@ pub struct Spec {
     pub contact_thermal: bool,
     /// An explicit profile routes dry heat through original material-coordinate strips.
     pub dry_contact_thermal: bool,
+    /// Explicit finite-body losses retain their material cells while contact maps move.
+    pub material_body_thermal: bool,
     /// Every film has a v3 route to physical fibers; its mass/history stays on the string.
     pub retained_string_films: bool,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<MaterialForceProgram>,
@@ -1239,7 +1241,7 @@ impl Spec {
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, material_states, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, bow_residual_flexibility, geometric_stretching, stretching_memory,
             longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
-            plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, observer_molecular, cavity, friction, contact_thermal: false, dry_contact_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
+            plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, observer_molecular, cavity, friction, contact_thermal: false, dry_contact_thermal: false, material_body_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.validate_material_states()?;
         spec.bow_station_program(&CancelGate::new_clock_free())?;

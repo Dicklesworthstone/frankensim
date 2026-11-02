@@ -374,6 +374,7 @@ impl Profile {
     pub fn configure(&self, spec: &mut input::Spec) {
         spec.contact_thermal = true;
         spec.dry_contact_thermal = !self.dry.is_empty();
+        spec.material_body_thermal = self.material_heat.as_ref().is_some_and(|routes| routes.len() > 0);
         spec.retained_string_films = spec.bow_fibers.is_some()
             && !self.films.is_empty()
             && self.film_surfaces.len() == self.films.len();
@@ -778,7 +779,7 @@ impl Prepared<'_> {
             .is_some_and(material_heat::Routes::has_temperature_rates)
         {
             eprintln!(
-                "body_material_rates=original source tau(T) and string eta(T); fixed storage/geometry; accepted interval mobilities, endpoint mobilities for next interval; first-order temperature partition"
+                "body_material_rates=original source tau(T) and string eta(T); fixed body storage/geometry, original held contact maps; accepted interval mobilities, endpoint mobilities for next interval; first-order temperature partition"
             );
         }
         eprintln!(

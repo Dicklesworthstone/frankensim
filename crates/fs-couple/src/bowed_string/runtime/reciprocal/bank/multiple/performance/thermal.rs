@@ -54,7 +54,7 @@ pub struct ContactThermalPerformance<'p, 't, 'm, 'g, F, S, E> {
 
 impl MultiBowPerformance {
     /// Admit source-selected finite-body relaxation rates without advancing the
-    /// original schedule, mechanics or heat. The fixed-map, linear-memory scope
+    /// original schedule, mechanics or heat. The linear-memory, prescribed-load scope
     /// is checked here and by the same native rate/source admission used at each
     /// step. Other film, dry-footprint and conductive heat routes are retained.
     pub fn admit_material_relaxation_temperature(
@@ -62,10 +62,11 @@ impl MultiBowPerformance {
         material_heat: &[MaterialRelaxationHeatDestination<'_>],
         rates: &[MaterialRelaxationTemperature], gate: &CancelGate,
     ) -> Result<(), RenderError> {
-        if self.bank.bow_station_motion_limits().is_some() || self.bow_station_motion.is_some()
-            || self.stop_motion.is_some() || self.stop_station_motion.is_some()
-            || self.fiber_support.is_some() {
-            return Err(render_invalid("source material-rate feedback requires fixed contact maps and supports"));
+        if self.stop_motion.is_some() || self.stop_station_motion.is_some() {
+            return Err(render_invalid("source material-rate feedback requires prescribed normal loads without stop motion"));
+        }
+        if self.bank.bow_station_motion_limits().is_some() {
+            self.bank.admit_bow_station_sources().map_err(RenderError::Friction)?;
         }
         self.bank.system.admit_material_rate_thermal_feedback(thermal, material_heat, rates, gate)
             .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))
@@ -204,8 +205,8 @@ impl<'p, 't, F, S, E> ContactThermalPerformance<'p, 't, '_, '_, F, S, E> {
 }
 
 impl<'m, F, S, E> ContactThermalPerformance<'_, '_, 'm, '_, F, S, E> {
-    /// Feed each selected finite body's temperature into its original memory
-    /// rate. Accepted rates govern this interval and endpoint rates the next;
+    /// Feed each selected finite body's temperature into its original material
+    /// mobility. Accepted rates govern this interval and endpoint rates the next;
     /// the original native owner refreshes propagation, contact and heat caches.
     /// This first-order partition retains storage/internal strains and requires
     /// time refinement. No source property or receiving mass is inferred here.
@@ -323,16 +324,12 @@ where
                     dry, material_heat, *controls, energy_guess_j, forces, drives,
                     motion.bow_stations, motion.stop_stations, motion.stop_offsets_m, gate, source)?
             } else {
-                if motion.bow_stations.is_some() || motion.stop_stations.is_some()
-                    || motion.stop_offsets_m.is_some() {
-                    return Err(render_invalid("material rate feedback cannot discard scheduled contact motion"));
+                if motion.stop_stations.is_some() || motion.stop_offsets_m.is_some() {
+                    return Err(render_invalid("material rate feedback cannot discard scheduled normal/stop motion"));
                 }
-                let failure = |error: crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::LayerThermalError<E>|
-                    RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string()));
-                let routes = bank.fixed_dry_heat_routes(dry).map_err(failure)?;
-                bank.step_with_material_rate_thermal_feedback(thermal, bindings, series_heat,
-                    &routes, material_heat, material_rates, *controls, energy_guess_j,
-                    forces, drives, gate, source).map_err(failure)?.0
+                bank.step_with_material_rate_thermal_motion(thermal, bindings, series_heat,
+                    dry, material_heat, material_rates, *controls, energy_guess_j,
+                    forces, drives, motion.bow_stations, gate, source)?
             };
             let pressure = accepted.mechanics.observer_pressure_pa;
             *last_frame = Some(accepted);

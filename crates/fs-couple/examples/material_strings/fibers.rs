@@ -368,11 +368,11 @@ impl Input {
         // and before resolving any fiber material. Dimension counting alone
         // cannot reject a film whose separate thermal profile is not loaded yet.
         if (self.motion.is_some() || self.support_program.is_some())
-            && ((spec.contact_thermal && !spec.dry_contact_thermal)
+            && ((spec.contact_thermal && !spec.dry_contact_thermal && !spec.material_body_thermal)
                 || spec.friction.shear_layers().is_some())
             && !spec.retained_string_films
         {
-            return Err("moving fibers require dry heat routes or a complete v3 film binding attached to the original string patches".into());
+            return Err("moving fibers require explicit dry/body heat routes or a complete v3 film binding attached to the original string patches".into());
         }
         let mut requirements = vec![
             Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,

@@ -221,7 +221,7 @@ impl FreeSurfaceRheology3 {
         check_cancel(gate)?;
         let applied = self.stats;
         let mut candidate = self.lattice.clone();
-        candidate.step_with_material_relaxation(gate, &self.tau)?;
+        candidate.step_with_material_relaxation_and_pressure(gate, &self.tau, None)?;
         let (tau, stats) = resolve(&candidate, &self.assignment, &self.tau, gate)?;
         check_cancel(gate)?;
         self.lattice = candidate;

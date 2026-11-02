@@ -47,14 +47,27 @@ fn source(cx: &Cx<'_>, gate: &CancelGate, profile: &Profile,
 
 fn source_with_pack(cx: &Cx<'_>, gate: &CancelGate, profile: &Profile,
     full_strain: bool, other_cp: f64, block: usize, pack: NormalizedPack) -> Ready {
+    source_with_pack_and_motion(cx, gate, profile, full_strain, other_cp, block, pack, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_with_pack_and_motion(cx: &Cx<'_>, gate: &CancelGate, profile: &Profile,
+    full_strain: bool, other_cp: f64, block: usize, pack: NormalizedPack, moving: bool) -> Ready {
     let strain = if full_strain {
         "bow_fiber_strain 0.2 0.01 128 1e8 1e-10 1e-9\n"
+    } else { "" };
+    let motion = if moving {
+        "bow_fiber_program 0 0.1 1000 0.01 1048576 3\n\
+         fiber_speed 4 0.01\nfiber_speed 8 -0.01\nfiber_speed 12 0\n"
     } else { "" };
     let text = include_str!("../fiber-ribbon.material-strings")
         .replace("audio 48000 4096 0.01 128", &format!("audio 48000 16 0.01 {block}"))
         .replace("bow_ribbon 0.01 3", "bow_ribbon 0.01 1")
         .replace("forces retain", &format!(
-            "bow_fiber_memory 16 young_modulus 1 fiber_delta fiber_tau\n{strain}forces retain"));
+            "bow_fiber_memory 16 young_modulus 1 fiber_delta fiber_tau\n{strain}{motion}forces retain"));
+    let text = if moving {
+        text.replace("initial\tbow\t1e-2\t1e-2", "initial\tbow\t0e0\t1e-2")
+    } else { text };
     let mut spec = input::Spec::parse(text.as_bytes()).unwrap();
     profile.configure(&mut spec);
     spec.compile(cx, gate, |name| Ok(if name == "fiber.fsmatpk" { pack.clone() }
@@ -175,7 +188,7 @@ fn v4_source_temperature_rates_require_explicit_opt_in_and_linear_material_histo
 }
 
 #[test]
-fn v4_source_temperature_fiber_rates_reach_original_pressure_and_pcm() {
+fn v4_source_temperature_fiber_rates_follow_support_acceleration_reversal_and_pcm() {
     scoped(|cx, gate| {
         let profile = Profile::parse(profile().replace("fiber-body 0 0 30",
             "fiber-body 0 0 30 source-temperature").as_bytes()).unwrap();
@@ -184,7 +197,9 @@ fn v4_source_temperature_fiber_rates_reach_original_pressure_and_pcm() {
         // coefficients at the initial temperature, other cards and drive agree.
         for cp in [20.0, 40.0] {
             let pack = fiber_pack_with_temperature(cp, true);
-            let mut direct = source_with_pack(cx, gate, &profile, false, 20.0, 7, pack.clone());
+            let mut direct = source_with_pack_and_motion(cx, gate, &profile, false, 20.0, 7, pack.clone(), true);
+            assert!(direct.spec.material_body_thermal && !direct.spec.dry_contact_thermal);
+            let receiver = direct.performance.bank().system().port(0).unwrap().right.clone();
             let initial_time = direct.performance.bank().system()
                 .material_relaxation_branches()[0].relaxation_time_s;
             let prepared = profile.prepare(&direct, gate).unwrap();
@@ -210,15 +225,31 @@ fn v4_source_temperature_fiber_rates_reach_original_pressure_and_pcm() {
             // here would either refuse or silently reset physical memory rates.
             let (network, routes, rates) = renderer.into_thermal_with_material_rates();
             assert_eq!(routes[0].source.state_coordinate("T"), Some(network.temperature_k(CellId(30)).unwrap()));
+            let kinematics = direct.performance.bank().fiber_support_kinematics().unwrap();
+            // Independent integral of the first two linear velocity segments:
+            // 0 -> .01 over four samples, then .01 -> -.01 over four samples.
+            assert!((kinematics.displacement_m - 0.02/48_000.0).abs() < 1e-18);
+            assert_eq!(kinematics.velocity_m_s, -0.01);
+            assert_ne!(direct.performance.bank().system().port(0).unwrap().right, receiver);
+            let states: Vec<_> = direct.performance.bank().system().components().iter().flat_map(|m| m.states()).copied().collect();
+            let memory = direct.performance.bank().system().material_memory().to_vec();
             let mut renderer = direct.performance.with_material_contact_thermal_network(
                 network, vec![], vec![], routes, profile.controls, gate,
                 |endpoint| prepared.resolve(endpoint)).unwrap()
                 .with_material_relaxation_temperature(rates).unwrap();
+            assert_eq!(renderer.performance().bank().fiber_support_kinematics().unwrap(), kinematics);
+            assert_eq!(renderer.performance().samples_rendered(), 8);
+            assert_eq!(renderer.performance().bank().system().material_memory(), memory);
+            assert_eq!(renderer.performance().bank().system().components().iter().flat_map(|m| m.states()).copied().collect::<Vec<_>>(), states);
             for sample in &mut pressure[8..] {
                 renderer.block(std::slice::from_mut(sample)).unwrap();
                 let frame = renderer.last_frame().unwrap();
                 loss += frame.routed_material_heat_j;
                 assert!(frame.total_energy_residual_j.abs() <= profile.controls.total_energy_tolerance_j);
+                let support = renderer.performance().fiber_support_frame().unwrap();
+                assert_eq!(support.sample, renderer.performance().samples_rendered());
+                assert_eq!(renderer.thermal().time_s(), support.sample as f64 * (1.0/48_000.0));
+                assert!(support.support_work_j.is_finite() && support.inertial_coordinate_work_j.is_finite());
             }
             let temperature = renderer.thermal().temperature_k(CellId(30)).unwrap();
             let time = renderer.performance().bank().system()
@@ -228,11 +259,14 @@ fn v4_source_temperature_fiber_rates_reach_original_pressure_and_pcm() {
             assert!(loss > 0.0);
             assert!((cell.mass_kg * cell.specific_h_j_kg - loss).abs() < 2e-12);
             let accepted = renderer.last_frame().unwrap().mechanics.clone();
+            let support = *renderer.performance().fiber_support_frame().unwrap();
+            assert_eq!(support.velocity_m_s, 0.0);
+            assert!(support.translation_m.abs() < 1e-18);
             drop(renderer);
 
             // The declarative path, tracing and PCM writer consume that same
             // rate-enabled owner; no second simulation or thermal audio effect.
-            let mut streamed = source_with_pack(cx, gate, &profile, false, 20.0, 16, pack);
+            let mut streamed = source_with_pack_and_motion(cx, gate, &profile, false, 20.0, 16, pack, true);
             let prepared = profile.prepare(&streamed, gate).unwrap();
             let mut trace = Vec::new();
             let (wav, summary) = prepared.write(&mut streamed, Cursor::new(Vec::new()),
@@ -242,6 +276,7 @@ fn v4_source_temperature_fiber_rates_reach_original_pressure_and_pcm() {
             assert_eq!(summary.samples, 16);
             assert_eq!(String::from_utf8(trace).unwrap().lines().count(), 17);
             assert_eq!(streamed.performance.bank().system().last_frame(), Some(&accepted));
+            assert_eq!(streamed.performance.fiber_support_frame(), Some(&support));
             observed.push((pressure, temperature, time));
         }
         assert_eq!(observed[0].0[0], observed[1].0[0]); // same initial physical operator
