@@ -8137,21 +8137,39 @@ membrane. Explicit dry-skeleton density converts the original mol/kg capacity
 to trap mol/m3 of the complete layer. Distinct material cards explicitly declare
 composite constituents; no porosity or mobile transport coefficient is inferred.
 
+`ResolvedFiniteTrappingMembraneDiffusion` binds the same original film to two
+explicit whole-reservoir molar pressure capacities. Both reservoir inventories,
+mobile Henry loading and immobile Langmuir loading share the original native
+implicit solve. The wrapper owns one native finite state; immutable source
+metadata and receipts do not duplicate its physical inventories. Construction
+requalifies the actual finite initial pressures, including baths different from
+the previous prescribed boundaries.
+
 Each candidate requalifies original mobile D/S, ordered interfaces and trap
 capacity, affinity and kinetics across actual old/new cell and layer-face
 pressure envelopes. Complete typed physical contexts must match. Unowned
 composition/concentration coordinates refuse in this pure-permeant bridge.
 Original source identities and both families of receipts remain retained.
 Source failure or cancellation publishes neither inventory, clock nor receipts.
-This fixed-temperature binding adds no sorption heat or finite-gas EOS closure.
+These fixed-temperature owners do not infer sorption heat, gas-mixture
+composition, an EOS, caloric storage or thermostat work.
+
+Both source owners expose adaptive windows through the SAME kinetic time
+controller. Every coarse and fine native probe passes original source admission;
+an unsupported fine release transient cannot hide behind a supported coarse
+endpoint. Source refusals are hard errors, not time-step retry signals.
+Only accepted half steps advance physical inventories and integrated transfers.
+The returned state retains the final accepted step's support and all original
+bindings. Local temporal estimates are not whole-window or spatial certificates.
 
 Langmuir source-property evaluation admits pressure zero only when its original
 selected material domain covers it; actual gas-parcel pressure admission is
-unchanged. Three authored source-stack regressions cover source-qualified vacuum,
-native/source-bound trajectory equivalence with source rejection, and mismatched
-humidity or unowned mixture context. These integration regressions were not
-executed in the focused local dependency build; the raw coupled solver's executed
-physical tests remain a separate verification claim.
+unchanged. Focused G0/G1/G3 source-stack regressions exercise source-qualified
+vacuum, native/source trajectory equality, held humidity/mixture context refusal,
+finite-bath rebinding and conservation, preloaded release beyond source support,
+adaptive raw/source equality, fine-probe source rejection and transactional late
+cancellation. These source-owner tests do not establish measured material
+qualification or full workspace/application validation.
 
 ### Accuracy-controlled transient membrane windows
 
