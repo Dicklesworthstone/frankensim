@@ -7,6 +7,12 @@
 //! backward-Euler truncation's NUMERICAL loss, never a constitutive loss.
 //! Refining the retained basis drives G and this loss to zero. This is a
 //! quasi-static tail, not a dynamic replacement for omitted resonances.
+//!
+//! A material film uses that same corrected slip, including every cross-port
+//! reaction, for its elastic/plastic/Maxwell return map. Its storage and heat
+//! remain separate from the tail: G is in series with the physical contact,
+//! not an added film modulus or plastic viscosity. Finite-cell thermal trials
+//! repeat this joint solve from the accepted film AND residual-force history.
 
 use super::*;
 use surfaces::geometry::FrictionGeometry;
@@ -86,11 +92,15 @@ impl MultiFrictionModalSystem {
     /// spectrum. This owner stores F G F / 2 and reports dF G dF / 2 separately
     /// as numerical loss. It does not infer compliance from friction or tune
     /// retained eigenfrequencies. Modal and time refinement remain necessary.
+    /// Fixed material shear films and series compliant drives share the actual
+    /// slip increment on this load line. Film plastic/relaxation loss may enter
+    /// finite heat cells; the residual's numerical loss never does.
     ///
     /// # Errors
     /// Playback/rebinding, moving maps, normal contacts, nonlinear storage or
-    /// source-bound interface histories (whose omitted endpoint velocities are
-    /// not reconstructed), invalid maps/matrix, budget or cancellation.
+    /// Mindlin or dry-interface source histories (whose omitted endpoint
+    /// velocities are not reconstructed), invalid maps/matrix, budget or
+    /// cancellation. Fixed material films use interval slip and are admitted.
     pub fn with_friction_residual_ports(mut self, geometry: Vec<FrictionGeometry>,
         compliance: Vec<f64>, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
@@ -125,10 +135,9 @@ impl MultiFrictionModalSystem {
     pub(super) fn admit_friction_residual(&self) -> Result<(), ModalFrictionError> {
         if self.obstacles.is_some() || self.core.has_nonlinear_potentials()
             || self.endpoint_controls.is_some()
-            || self.shear_layers.iter().any(Option::is_some)
             || self.mindlin_contacts.iter().any(Option::is_some)
             || (0..self.port_count()).any(|i| self.interface(i).is_some()) {
-            return Err(invalid("friction residual compliance requires fixed dry ports without normal contacts, nonlinear storage or interface histories").into());
+            return Err(invalid("friction residual compliance requires fixed ports without normal contacts, nonlinear storage, Mindlin or dry-interface histories").into());
         }
         Ok(())
     }

@@ -3,6 +3,9 @@
 //! The constitutive owner is fs-tribo's midpoint elastic/viscoplastic simple-shear
 //! return map. This adapter supplies the actual held-force body compliance,
 //! retains the material claims and publishes history with the original network.
+//! An admitted static residual at these ports acts in series with the film:
+//! only the slip left after G delta_F enters its constitutive history. The
+//! original residual owner retains its own energy and numerical dissipation.
 //! Area, thickness, temperature and tangent frame are fixed. An explicitly
 //! left-attached film can retain its material patch while the counterface moves.
 //! Normal opening, layer transport, wear and pressure-dependent yield are
@@ -256,9 +259,6 @@ impl MultiFrictionModalSystem {
         poll(Some(gate))?;
         if bindings.is_empty() {
             return Ok(self);
-        }
-        if self.friction_residual.is_some() {
-            return Err(invalid("friction residual compliance does not include source-bound interface histories").into());
         }
         if self.samples_rendered() != 0
             || self.shear_layers.iter().any(Option::is_some)

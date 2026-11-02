@@ -139,9 +139,12 @@ impl MultiBowStringBank {
     /// no claim is made near omitted resonances. A material-derived series
     /// hair spring/dashpot composes on the same load line: its reversible
     /// storage and physical dashpot loss remain separate from the omitted
-    /// string tail's storage and numerical loss. Normal contacts, migrating
-    /// bows, nonlinear stretching, receiving fibers
-    /// and source-bound interface histories refuse in this lane.
+    /// string tail's storage and numerical loss. Fixed material shear films
+    /// use the same corrected slip for elastic, plastic and Maxwell histories,
+    /// including their finite-cell thermal continuation. Only physical film
+    /// loss heats the film. Normal contacts, migrating bows, nonlinear
+    /// stretching, receiving fibers, Mindlin contacts and dry-interface source
+    /// histories remain outside this lane.
     pub fn with_bow_residual_flexibility(mut self, gate: &CancelGate)
         -> Result<Self, ReciprocalStringError>
     {

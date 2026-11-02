@@ -125,6 +125,25 @@ Graph electrical work cannot be silently omitted, and field-dependent thermal
 boundaries refuse without an interface-field owner. Radiation's signed numerical
 net is checked as internal exchange rather than external energy supply.
 
+Matching tetrahedral electrical contacts use the original ordered material
+interfaces on coincident exterior triangles with distinct vertices and opposite
+adjacent volumes. The native P1 operator integrates the voltage jump with
+`A/(12 R'') * [[2,1,1],[1,2,1],[1,1,2]]`; it does not replace the interface by a
+mean jump or lumped resistor. Finite contacts join electrical gauge components,
+and their faces cannot also carry external electrical traces. Bulk `E.J` and
+surface work remain separate and close against terminal and assembled work.
+
+`SpatialConductionThermalNetwork::step_contact_candidate` and
+`PreparedHeatNetwork::step_spatial_conduction_contact_candidate` refresh the
+original bulk and interface bundles at the same trial enthalpy endpoint. Each
+interface keeps its two actual temperatures, explicitly owned liquid mass
+fractions, fixed external pressure/history and selected source claims. Surface
+work is deposited once into the original adjacent volume receivers using an
+explicit physical heat fraction. Empty-binding entry points refuse unowned
+contact heat. The planar and tetrahedral paths share source admission, caloric
+coordinates and heat partitioning. Rejected/cancelled candidates preserve both
+accepted histories; successful field and thermal endpoints publish jointly.
+
 Synthetic G1/G3/G4 cases compare independent two-cell electrothermal elimination,
 material swaps, voltage/current reversal, tetrahedral subdivision, continuation,
 and source T/f surface feedback through an isothermal latent interval in both
@@ -135,10 +154,14 @@ and receiving-volume refusals retain retryable original inputs.
 balance, source-only contact-pressure and emissivity substitutions, continuing
 field/heat history, source-domain refusal and cancellation. These are authored
 synthetic numerical cases, not measured-device qualification.
+`tests/spatial_conduction_enthalpy/contacts.rs` adds independent two-body
+current/heat balances, pressure/material substitutions, latent-fraction feedback,
+continuation and transactional refusal. Native field tests independently
+integrate nonuniform triangle voltage jumps and their work.
 
 This fixed-geometry, memoryless DC closure adds no thermal spatial-resolution
-claim beyond its authored finite cells, phase-density motion, electrical contact
-layer, induction, dielectric storage, total-current equipotential terminal,
+claim beyond its authored finite cells, phase-density motion, contact-layer
+storage, opening/arcing, induction, dielectric storage, total-current equipotential terminal,
 unconditional nonlinear convergence or empirical material validation.
 
 ## Original latent fractions in constitutive graph feedback
@@ -3043,7 +3066,7 @@ geometry and measured violin/cello/bass fidelity remain separate requirements.
 
 ### Omitted bending flexibility at fixed material bow contacts
 
-Fixed dry bows may select `bow-residual-flexibility exact-static-green` after
+Fixed bows may select `bow-residual-flexibility exact-static-green` after
 the matching bridge `residual-flexibility` record. The material string bank
 derives omitted bending compliance from each admitted string's tension,
 bending stiffness, span and retained spectrum, reusing the bridge/point-force
@@ -3054,10 +3077,25 @@ not material or friction dissipation. Traction history publishes only with
 the complete accepted step. This quasi-static approximation requires modal/time
 refinement and does not restore omitted resonances or torsional modes. Fixed
 point or uniform-ribbon bows on linear banks with one simple bridge per string
-are supported; normal contacts, moving maps, material compliant ribbons,
-receiving fibers, extra bridge maps, nonlinear storage and source-bound friction
-histories refuse. The optional Cannone experiment preserves physical data and
-existing acoustic acceptance gates.
+are supported. Source-defined shear films compose with this same residual,
+including elastic/plastic/Maxwell history and series compliant drives. Each
+film receives the actual interval slip `u dt - b^T delta_q - G delta_F`, further
+reduced by any series-drive displacement. Omitted-mode storage and its
+backward-Euler numerical loss remain separate from film storage and physical
+heat. Finite-cell thermal trials retain the same accepted film and traction
+histories, then publish the mechanical and thermal endpoints together. Either
+attachment order reaches the same solver.
+
+Normal contacts, moving maps, receiving resolved fibers, extra bridge maps,
+nonlinear string storage, Mindlin and dry-interface source histories still
+refuse. This composition adds no film opening/transport or measured rosin law.
+Focused tests compare independent two-port elastic/plastic/Maxwell and compliant
+drive solutions, retained pressure/history under reversal and rejected opening,
+and heat-capacity substitutions without heating numerical tail loss. A native
+material-string input reaches the same coupled thermal PCM path with identical
+output across callback sizes. These are manufactured integration cases, not
+measured instrument qualification. The optional Cannone experiment preserves
+physical data and existing acoustic acceptance gates.
 
 ### `string_specimen`
 

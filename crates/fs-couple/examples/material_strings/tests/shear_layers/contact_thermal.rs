@@ -322,6 +322,61 @@ fn source_shear_memory_heat_and_temperature_dependent_relaxation_survive_cli_the
     });
 }
 
+#[test]
+fn residual_film_source_description_reaches_the_cli_thermal_pcm_writer() {
+    scoped(|cx, gate| {
+        let profile = Profile::parse(PROFILE.as_bytes()).unwrap();
+        // Select the original shared owners entirely through description data.
+        // The optional moving finger fixture is absent: this residual lane
+        // retains fixed bow maps and does not reconstruct normal stop motion.
+        let text = String::from_utf8(thermal_spec().bytes).unwrap()
+            .replace("cavity neck", "residual-flexibility exact-static-green\n\
+                bow-residual-flexibility exact-static-green\ncavity neck")
+            .replace("forces retain", "shear-memory 1 shear_memory_modulus shear_memory_thermal_time\nforces retain");
+        let build = |cp, block| {
+            let source = text.replace("48000 512 0.01 128", &format!("48000 512 0.01 {block}"));
+            let mut spec = input::Spec::parse(source.as_bytes()).unwrap();
+            profile.configure(&mut spec);
+            spec.compile(cx, gate, |name| Ok(if name == "manufactured-shear-layer.fsmatpk" {
+                thermal_pack(cp, None, 200_000.0)
+            } else { pack(name, 7800.0, 200_000.0, None) })).unwrap()
+        };
+        let mut plain = build(10.0, 128);
+        let mut traced = build(10.0, 37);
+        let mut cooler = build(1000.0, 128);
+        let g = plain.performance.bank().system().friction_residual_compliance().unwrap()[0];
+        assert!(g > 0.0);
+        assert!(plain.performance.bank().bow_shear_layer(0).unwrap().relaxation().len() == 1);
+        let mut trace = Vec::new();
+        let (wav, report) = profile.prepare(&plain, gate).unwrap()
+            .write(&mut plain, Cursor::new(Vec::new()), None, gate).unwrap();
+        let (replay, replay_report) = profile.prepare(&traced, gate).unwrap()
+            .write(&mut traced, Cursor::new(Vec::new()), Some(&mut trace), gate).unwrap();
+        profile.prepare(&cooler, gate).unwrap()
+            .write(&mut cooler, Cursor::new(Vec::new()), None, gate).unwrap();
+        let bytes = wav.into_inner();
+        assert_eq!(bytes, replay.into_inner());
+        assert_eq!(bytes.len(), 44 + 512 * 2);
+        assert_eq!(report.samples, 512);
+        assert_eq!(replay_report.samples, 512);
+        assert_eq!(String::from_utf8(trace).unwrap().lines().count(), 513);
+        let system = plain.performance.bank().system();
+        let frame = system.last_frame().unwrap();
+        assert_eq!(system.last_frame(), traced.performance.bank().system().last_frame());
+        assert_eq!(system.material_shear_state(0),
+            traced.performance.bank().system().material_shear_state(0));
+        assert!((frame.friction_residual_energy_j - 0.5 * g * frame.ports[0].traction_n.powi(2)).abs() < 1e-14);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert!(frame.ports[0].shear_layer.unwrap().relaxation_dissipated_j > 0.0);
+        let warm = plain.performance.bank().bow_shear_layer(0).unwrap();
+        let cool = cooler.performance.bank().bow_shear_layer(0).unwrap();
+        assert!(warm.temperature_kelvin() > cool.temperature_kelvin());
+        assert!(cool.temperature_kelvin() > 293.15);
+        assert_ne!(frame.observer_pressure_pa,
+            cooler.performance.bank().system().last_frame().unwrap().observer_pressure_pa);
+    });
+}
+
 fn thermal_memory_pack(modulus_slope_pa_k: f64) -> NormalizedPack {
     let source = thermal_pack(10.0, None, 200_000.0);
     let mut claims = source.claims().clone();

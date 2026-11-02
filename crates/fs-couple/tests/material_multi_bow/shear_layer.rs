@@ -4,14 +4,34 @@ use super::*;
 use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionRegime;
 use fs_material::state_point::ResolvedShearLayer;
 
+#[path = "shear_layer/residual.rs"]
+mod residual;
+
 fn layer(g: f64, yield_stress: f64, viscosity: f64, maximum_omega: f64) -> ResolvedShearLayer {
+    layer_with_memory(g, yield_stress, viscosity, maximum_omega, false)
+}
+
+fn layer_with_memory(
+    g: f64,
+    yield_stress: f64,
+    viscosity: f64,
+    maximum_omega: f64,
+    memory: bool,
+) -> ResolvedShearLayer {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
-    for (name, dims, value) in [
+    let mut properties = vec![
         ("shear_modulus", Pressure::DIMS, g),
         ("shear_yield_stress", Pressure::DIMS, yield_stress),
         ("plastic_shear_viscosity", DynViscosity::DIMS, viscosity),
-    ] {
+    ];
+    if memory {
+        properties.extend([
+            ("shear_delta_g", Pressure::DIMS, 0.5 * g),
+            ("shear_tau", fs_qty::Time::DIMS, 0.0002),
+        ]);
+    }
+    for (name, dims, value) in properties {
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
@@ -56,7 +76,14 @@ fn layer(g: f64, yield_stress: f64, viscosity: f64, maximum_omega: f64) -> Resol
     )
     .unwrap();
     // 20 um film over a 2 mm^2 patch; explicit 5% elastic-strain ceiling.
-    ResolvedShearLayer::new(material, 2e-6, 20e-6, 0.05).unwrap()
+    let source = ResolvedShearLayer::new(material, 2e-6, 20e-6, 0.05).unwrap();
+    if memory {
+        source
+            .with_relaxation(vec![("shear_delta_g".into(), "shear_tau".into())])
+            .unwrap()
+    } else {
+        source
+    }
 }
 
 fn coated(cx: &Cx<'_>, gate: &CancelGate, g: f64, viscosity: f64) -> MultiBowStringBank {

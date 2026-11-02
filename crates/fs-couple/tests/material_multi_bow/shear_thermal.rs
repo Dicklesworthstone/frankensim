@@ -5,6 +5,8 @@ mod film_surface;
 mod retained_fiber;
 #[path = "shear_thermal/material_heat.rs"]
 mod material_heat;
+#[path = "shear_thermal/residual.rs"]
+mod residual;
 
 use super::*;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::*;
