@@ -1,0 +1,310 @@
+//! Original string-layer bending loss in its actual finite material volume.
+//! The source producer owns arm/plane/mode order; no damping fraction, modal
+//! mass or invented heat partition replaces the physical annular inventory.
+use super::*;
+use crate::render::schedule::force::coupled::coefficients::heat::MaterialHeatBudget;
+use crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::{
+    material::MaterialRelaxationHeatDestination, rates::MaterialRelaxationTemperature,
+};
+use core::ops::Range;
+use fs_matdb::MaterialCard;
+use fs_material::{
+    phase::EquilibriumEnthalpyPhaseCurve,
+    section::{ConcentricElasticSection, relaxation::LayerRelaxationProperties},
+    state_point::ResolvedMaterialStatePoint,
+    visco::GeneralizedMaxwell,
+};
+use fs_thermal::enthalpy::CellId;
+
+struct Source {
+    material: ResolvedMaterialStatePoint,
+    volume_m3: f64,
+    branches: Range<usize>,
+    times: Vec<(usize, String)>,
+}
+
+// The admitted section has no other material dissipation to leave behind at a
+// different temperature. An elastic torsion/axial extension needs a separate
+// complete source continuation, so this bounded producer refuses those too.
+fn bending_source(
+    source: &MaterialStringSource,
+) -> Result<&MaterialStringSource, ReciprocalStringError> {
+    match source {
+        MaterialStringSource::WithPolarizations(p) => bending_source(p.source()),
+        MaterialStringSource::Homogeneous(_)
+        | MaterialStringSource::Concentric { .. }
+        | MaterialStringSource::ConcentricProny { .. } => Ok(source),
+        _ => Err(invalid(
+            "string material heat requires original bending-only homogeneous or bonded layers",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layer_source(
+    section: &ConcentricElasticSection,
+    spectra: &[GeneralizedMaxwell],
+    properties: &[LayerRelaxationProperties],
+    layer: usize,
+    length_m: f64,
+    per_arm: usize,
+    mut start: usize,
+    gate: &CancelGate,
+) -> Result<Source, ReciprocalStringError> {
+    if layer >= section.layers().len()
+        || spectra.len() != section.layers().len()
+        || properties.len() != spectra.len()
+        || per_arm == 0
+    {
+        return Err(invalid(
+            "string material heat requires one original physical layer and complete spectra",
+        ));
+    }
+    for spectrum in &spectra[..layer] {
+        poll(gate)?;
+        start += per_arm
+            * spectrum
+                .terms
+                .iter()
+                .filter(|(increment, _)| *increment > 0.0)
+                .count();
+    }
+    let spectrum = &spectra[layer];
+    let roles = &properties[layer];
+    if spectrum.terms.len() != roles.branches.len() {
+        return Err(invalid(
+            "string heat lost the original source arm selectors",
+        ));
+    }
+    let mut times = Vec::new();
+    for (arm, &(increment, _)) in spectrum.terms.iter().enumerate() {
+        poll(gate)?;
+        if increment == 0.0 {
+            continue;
+        }
+        for _ in 0..per_arm {
+            times.push((start + times.len(), roles.branches[arm].1.clone()));
+        }
+    }
+    let volume_m3 = section.layer_integrals()[layer].area_m2() * length_m;
+    if times.is_empty() || !volume_m3.is_finite() || volume_m3 <= 0.0 {
+        return Err(invalid(
+            "string heat requires positive source loss channels and an actual finite layer volume",
+        ));
+    }
+    Ok(Source {
+        material: section.layers()[layer].material.clone(),
+        volume_m3,
+        branches: start..start + times.len(),
+        times,
+    })
+}
+
+impl MultiBowStringBank {
+    fn string_heat_source(
+        &self,
+        string: usize,
+        layer: usize,
+        gate: &CancelGate,
+    ) -> Result<Source, ReciprocalStringError> {
+        poll(gate)?;
+        let bank = &self.source.bank;
+        let member = bank
+            .strings
+            .get(string)
+            .ok_or_else(|| invalid("string heat names no original material string"))?;
+        let source = bending_source(&member.source)?;
+        if bank.geometric_stretching.is_some() || bank.longitudinal_waves.is_some() {
+            return Err(invalid(
+                "string body heat needs a complete axial/nonlinear heat continuation before including stretching",
+            ));
+        }
+        let string_model = source.resolved_transverse_string()?;
+        if string_model.damping_ratio != 0.0
+            || string_model.rayleigh.is_some()
+            || string_model
+                .kelvin_voigt_bending
+                .is_some_and(|law| law.viscous_stiffness_n_m2_s != 0.0)
+            || string_model
+                .tension_loss_factor
+                .is_some_and(|loss| loss != 0.0)
+            || string_model
+                .bending_loss_factor
+                .is_some_and(|loss| loss != 0.0)
+        {
+            return Err(invalid(
+                "string body heat cannot omit parallel intrinsic material loss",
+            ));
+        }
+        let card = &self.cards[string];
+        let planes = if matches!(&member.source, MaterialStringSource::WithPolarizations(_)) {
+            2
+        } else {
+            1
+        };
+        let per_arm = planes * card.mode_count;
+        if let MaterialStringSource::ConcentricProny { section, .. } = source {
+            // All original bending histories precede torsion/body/additional
+            // histories, exactly as source_memory_branches constructs them.
+            let mut start = 0;
+            for (previous, card) in bank.strings[..string].iter().zip(&self.cards[..string]) {
+                poll(gate)?;
+                if let Some(law) = previous.source.bending_relaxation() {
+                    let planes =
+                        if matches!(&previous.source, MaterialStringSource::WithPolarizations(_)) {
+                            2
+                        } else {
+                            1
+                        };
+                    start += planes
+                        * card.mode_count
+                        * law
+                            .branches
+                            .iter()
+                            .filter(|arm| arm.relaxing_stiffness_n_m2 > 0.0)
+                            .count();
+                }
+            }
+            return layer_source(
+                section.elastic(),
+                section.spectra(),
+                section.properties(),
+                layer,
+                card.length_m,
+                per_arm,
+                start,
+                gate,
+            );
+        }
+        if source.bending_relaxation().is_some() {
+            return Err(invalid(
+                "homogeneous intrinsic spectra need their complete original layer-role binding",
+            ));
+        }
+        let image = bank.string_bending_relaxation.as_ref().ok_or_else(|| {
+            invalid("string heat requires an original source-selected bending spectrum")
+        })?;
+        let selected = image
+            .layered_selections()
+            .iter()
+            .position(|selection| selection.string == string)
+            .ok_or_else(|| invalid("string heat names a string without selected bending memory"))?;
+        let prefix = image
+            .channels()
+            .iter()
+            .position(|channel| channel.string == string)
+            .ok_or_else(|| invalid("selected string layer has no physical bending dissipation"))?;
+        let body_count = bank
+            .material_chart_relaxation
+            .as_ref()
+            .map_or(0, |image| image.coupling_rows_per_s().len())
+            + bank
+                .material_chart_tensor_relaxation
+                .as_ref()
+                .map_or(0, |image| image.coupling_rows_per_s().len())
+            + bank
+                .material_shell_coating_relaxation
+                .as_ref()
+                .map_or(0, |image| image.coupling_rows_per_s().len());
+        let start = bank.source_memory_count(&self.cards, gate)? + body_count + prefix;
+        layer_source(
+            &image.sections()[selected],
+            &image.spectra()[selected],
+            &image.layered_selections()[selected].layers,
+            layer,
+            card.length_m,
+            per_arm,
+            start,
+            gate,
+        )
+    }
+
+    /// Bind every original bending-memory arm/plane/mode of one material layer
+    /// to that layer's finite uniform-temperature caloric body. The annular
+    /// area and full supported span supply its volume; the existing heat owner
+    /// integrates actual resistance loss along the original mechanical path.
+    ///
+    /// Original bonded Prony sections and explicit homogeneous/bonded layered
+    /// bending spectra are supported. Torsional/axial histories, geometric
+    /// stretching, measured/wound sections and parallel intrinsic loss refuse
+    /// rather than silently losing part of one material body's heat. Gas drag,
+    /// body/contact loss and radiation retain their independent owners. Stored
+    /// coefficients and reference geometry remain fixed; all source and caloric
+    /// domain checks belong to the original thermal transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn string_material_heat_destination<'a>(
+        &self,
+        string: usize,
+        layer: usize,
+        cell: CellId,
+        material: &'a MaterialCard,
+        caloric: &'a EquilibriumEnthalpyPhaseCurve,
+        temperature_axis: &'a str,
+        budget: MaterialHeatBudget,
+        gate: &CancelGate,
+    ) -> Result<MaterialRelaxationHeatDestination<'a>, ReciprocalStringError> {
+        let source = self.string_heat_source(string, layer, gate)?;
+        let channel = self
+            .system
+            .prepare_material_heat(&[source.branches], budget, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        Ok(MaterialRelaxationHeatDestination {
+            cell,
+            material,
+            caloric,
+            temperature_axis,
+            density_property: "density",
+            volume_m3: source.volume_m3,
+            source: source.material,
+            channel: Some(channel),
+            nonlinear_channels: Vec::new(),
+        })
+    }
+
+    /// The same complete material layer with its original source time roles.
+    /// The existing accepted-rate/endpoint-temperature transaction changes only
+    /// relaxation times, retaining material strain/storage and the full coupled
+    /// state. This is the same first-order temperature partition as fiber heat;
+    /// it does not re-resolve geometry, modulus, density or prestress.
+    #[allow(clippy::too_many_arguments)]
+    pub fn string_material_rate_heat_destination<'a>(
+        &self,
+        string: usize,
+        layer: usize,
+        cell: CellId,
+        material: &'a MaterialCard,
+        caloric: &'a EquilibriumEnthalpyPhaseCurve,
+        temperature_axis: &'a str,
+        budget: MaterialHeatBudget,
+        gate: &CancelGate,
+    ) -> Result<
+        (
+            MaterialRelaxationHeatDestination<'a>,
+            MaterialRelaxationTemperature,
+        ),
+        ReciprocalStringError,
+    > {
+        let source = self.string_heat_source(string, layer, gate)?;
+        let channel = self
+            .system
+            .prepare_material_heat(&[source.branches], budget, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        Ok((
+            MaterialRelaxationHeatDestination {
+                cell,
+                material,
+                caloric,
+                temperature_axis,
+                density_property: "density",
+                volume_m3: source.volume_m3,
+                source: source.material,
+                channel: Some(channel),
+                nonlinear_channels: Vec::new(),
+            },
+            MaterialRelaxationTemperature {
+                cell,
+                times: source.times,
+            },
+        ))
+    }
+}

@@ -1,4 +1,4 @@
-//! Source fiber-body heat declarations for the existing finite thermal renderer.
+//! Source fiber/string-body heat in the existing finite thermal renderer.
 //! Geometry and loss channels come from the original mechanical source. Profile
 //! cells supply a caloric discretization, never substitute damping or a heat split.
 use super::*;
@@ -16,9 +16,26 @@ pub(super) struct FiberRoute {
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct StringRoute {
+    string: usize,
+    layer: usize,
+    cell: CellId,
+    source_temperature: bool,
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct Routes {
     budget: MaterialHeatBudget,
     pub(super) fibers: Vec<FiberRoute>,
+    strings: Vec<StringRoute>,
+}
+
+impl Routes {
+    pub(super) fn len(&self) -> usize { self.fibers.len() + self.strings.len() }
+    pub(super) fn has_temperature_rates(&self) -> bool {
+        self.fibers.iter().any(|route| route.source_temperature)
+            || self.strings.iter().any(|route| route.source_temperature)
+    }
 }
 
 pub(super) fn parse(
@@ -54,6 +71,31 @@ pub(super) fn parse(
         }
         fibers.push(route);
     }
+    let mut strings = Vec::<StringRoute>::new();
+    if rows.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next())
+        == Some("string-heat") {
+        for _ in 0..rows.count("string-heat", MAX_CELLS)? {
+            let mut row = rows.row("string-body")?;
+            let route = StringRoute {
+                string: row.parse()?, layer: row.parse()?, cell: CellId(row.parse()?),
+                source_temperature: match row.words.next() {
+                    None => false,
+                    Some("source-temperature") => true,
+                    _ => return Err("string-body accepts only the explicit source-temperature rate option".into()),
+                },
+            };
+            row.end()?;
+            if !cells.iter().any(|cell| cell.id == route.cell)
+                || films.iter().any(|&(_, cell)| cell == route.cell)
+                || fibers.iter().any(|fiber| fiber.cell == route.cell)
+                || strings.iter().any(|other| other.cell == route.cell
+                    || (other.string, other.layer) == (route.string, route.layer)) {
+                return Err("each string material layer needs one distinct existing body cell and cannot alias a film or fiber".into());
+            }
+            strings.push(route);
+        }
+    }
+    let count = fibers.len() + strings.len();
     // The original integral checks each complete operator. Reserve a share of
     // the declared aggregate resources for EVERY retained receiving body.
     if count > 0 && (max_dense_bytes / count == 0 || max_multiply_terms / count as u64 == 0) {
@@ -62,7 +104,7 @@ pub(super) fn parse(
     Ok(Routes {
         budget: MaterialHeatBudget { max_groups: 1, max_dimension,
             max_dense_bytes, max_multiply_terms },
-        fibers,
+        fibers, strings,
     })
 }
 
@@ -71,8 +113,8 @@ impl Prepared {
         &'a self, ready: &Ready, network: &DepositionSimulation<'_>, gate: &CancelGate,
     ) -> Result<(Vec<MaterialRelaxationHeatDestination<'a>>, Vec<MaterialRelaxationTemperature>)> {
         let Some(declaration) = &self.profile.material_heat else { return Ok((Vec::new(), Vec::new())); };
-        if declaration.fibers.is_empty() { return Ok((Vec::new(), Vec::new())); }
-        let count = declaration.fibers.len();
+        let count = declaration.len();
+        if count == 0 { return Ok((Vec::new(), Vec::new())); }
         let budget = MaterialHeatBudget {
             max_dense_bytes: declaration.budget.max_dense_bytes / count,
             max_multiply_terms: declaration.budget.max_multiply_terms / count as u64,
@@ -80,28 +122,40 @@ impl Prepared {
         };
         let mut routes = Vec::with_capacity(count);
         let mut rates = Vec::new();
-        for route in &declaration.fibers {
+        let bodies = declaration.fibers.iter().map(|route|
+            (false, route.strip, route.layer, route.cell, route.source_temperature))
+            .chain(declaration.strings.iter().map(|route|
+                (true, route.string, route.layer, route.cell, route.source_temperature)));
+        for (string, body, layer, id, temperature_rates) in bodies {
             poll(gate)?;
-            let index = self.profile.cells.iter().position(|cell| cell.id == route.cell)
-                .ok_or("fiber heat lost its original receiving cell")?;
+            let index = self.profile.cells.iter().position(|cell| cell.id == id)
+                .ok_or("material heat lost its original receiving cell")?;
             let cell = &self.profile.cells[index];
             let source = &self.sources[index];
-            let (destination, rate) = if route.source_temperature {
-                let (heat, rate) = ready.performance.bank().fiber_material_rate_heat_destination(
-                    route.strip, route.layer, route.cell, &source.card, &source.curve,
-                    "T", budget, gate,
-                )?;
+            let bank = ready.performance.bank();
+            let (destination, rate) = if temperature_rates {
+                let (heat, rate) = if string {
+                    bank.string_material_rate_heat_destination(body, layer, id,
+                        &source.card, &source.curve, "T", budget, gate)?
+                } else {
+                    bank.fiber_material_rate_heat_destination(body, layer, id,
+                        &source.card, &source.curve, "T", budget, gate)?
+                };
                 (heat, Some(rate))
             } else {
-                (ready.performance.bank().fiber_material_heat_destination(
-                    route.strip, route.layer, route.cell, &source.card, &source.curve,
-                    "T", budget, gate,
-                )?, None)
+                let heat = if string {
+                    bank.string_material_heat_destination(body, layer, id,
+                        &source.card, &source.curve, "T", budget, gate)?
+                } else {
+                    bank.fiber_material_heat_destination(body, layer, id,
+                        &source.card, &source.curve, "T", budget, gate)?
+                };
+                (heat, None)
             };
             if destination.source.state_coordinate("T")
                 .is_none_or(|temperature| temperature.to_bits() != cell.temperatures[1].to_bits())
             {
-                return Err("fiber body and its finite thermal cell require one initial source temperature".into());
+                return Err("material body and its finite thermal cell require one initial source temperature".into());
             }
             // Fixed routes keep their existing admission. Explicit rate routes
             // use the original source/volume/operator admission together below,

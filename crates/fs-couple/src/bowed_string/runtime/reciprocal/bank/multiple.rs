@@ -315,5 +315,8 @@ pub mod surfaces;
 /// Source-bound isothermal material shear in the original pressure renderer.
 mod shear_layer;
 
+// Original string-layer material histories into the shared finite heat owner.
+mod material_heat;
+
 /// Explicit finite thermal strips following the source string/fiber contact.
 pub use shear_layer::dry::{BowDryContactHeat, DryReceiverHeatPosition};

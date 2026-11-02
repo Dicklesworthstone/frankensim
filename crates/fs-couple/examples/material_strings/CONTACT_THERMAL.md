@@ -265,7 +265,7 @@ boundaries. It does not transport rosin mass, renew or reset shear history, chan
 the string-side film attachment, model wear, or supply missing interface measurements.
 Thermal cells and time steps still require physical resolution/refinement.
 
-## Version 4: hereditary heat in the physical fiber bodies
+## Version 4: hereditary heat in physical fiber and string bodies
 
 `frankensim-contact-thermal-v4` retains all version 3 records and adds this
 block after `series`, before `links`:
@@ -322,9 +322,51 @@ retains its fixed-coefficient behavior: density, geometry and source mechanical
 coefficients must stay fixed throughout the admitted temperature interval.
 A temperature-dependent source law is refused instead of silently frozen.
 
+### String core and coating heat
+
+The same version 4 block accepts an optional `string-heat` list after all
+`fiber-body` rows and before `links`:
+
+```text
+material-heat-budget MAX_DIMENSION MAX_DENSE_BYTES MAX_MULTIPLY_TERMS
+fiber-heat 0
+string-heat N
+string-body STRING LAYER CELL_ID [source-temperature]
+```
+
+Indices name the original string and radial layer, with the core at layer zero.
+Each receiving cell owns the full layer volume
+`pi * (r_outer^2 - r_inner^2) * supported_length`, including any afterlength.
+It receives every positive bending arm, every retained sine mode, and both
+transverse planes when present. Zero source arms contribute no history or heat.
+The original constitutive selectors determine the rates; the heat declaration
+contains no new damping, modal heat fraction or fitted coefficient. String and
+fiber routes share the declared aggregate work/byte budgets and cannot reuse
+each other's receiving cells or a film cell. Original files without the optional
+list retain their prior behavior.
+
+This route admits original bonded `bending-loss prony` sections and explicit
+`bending-memory` selections on homogeneous or bonded sections. The producer
+keeps the native source/body/additional-memory ordering, so the chosen layer
+cannot accidentally heat or update another string's histories. Homogeneous
+intrinsic spectra without the retained section-role binding, torsion, retained
+axial waves, geometric stretching, measured/wound reductions and parallel
+intrinsic viscosity, modal or tension loss refuse. Those cases require their
+complete physical heat routing, rather than dropping unowned dissipation.
+Gas drag and body/contact/radiation losses keep their separate owners.
+
+`source-temperature` uses exactly the same finite-body transaction and warm
+continuation as the fiber option below. The accepted layer temperature updates
+all of that layer's original bending time properties for the next interval.
+Geometry, reference mass, moduli, prestress and material strain storage remain
+fixed; this is not thermal expansion or a temperature-dependent elastic pencil.
+Finite-cell conductivity can carry the actual bending heat into other declared
+body/contact cells through the existing links. No temperature-dependent source
+law is invented when the material card lacks it.
+
 ### Source-temperature relaxation feedback
 
-Add `source-temperature` to each selected `fiber-body` record to feed that
+Add `source-temperature` to a selected `fiber-body` or `string-body` record to feed that
 finite cell's temperature back into its original linear Maxwell relaxation
 times. For example, the following selects an existing strip, radial layer and
 cell; it supplies no additional constitutive number:
@@ -361,7 +403,7 @@ retains its original mechanical storage and numerical-loss account.
 
 The source material's heat capacity and relaxation-time claims now affect the
 same physical pressure history through temperature, material memory and contact
-reaction. They do not modify output gain or supply missing horsehair/rosin data.
+reaction. They do not modify output gain or supply missing fiber/string/rosin data.
 Other body coefficient changes still require their thermomechanical owners.
 Film temperature-dependent laws continue to use the original simultaneous
 thermal/contact solve. Unselected physical losses keep their original
@@ -387,11 +429,11 @@ Geometric stretching and retained longitudinal waves use their original
 nonlinear mechanical/contact solve at every proposed thermal endpoint. Each
 trial starts from accepted string, film and drive histories, and film plastic
 heat, reversible affine-modulus exchange and explicitly routed drive loss enter
-the same finite enthalpy network. String/body constitutive coefficients stay at
-their declared source state. Version 4 explicitly routes source fiber hereditary
-heat into its finite bodies; its `source-temperature` option additionally updates
-the original linear fiber relaxation rates under the bounded scope above.
-Bulk string heating, thermal expansion and body storage-modulus evolution still
+the same finite enthalpy network. Unselected string/body constitutive coefficients
+stay at their declared source state. Version 4 explicitly routes admitted fiber
+and string-layer hereditary heat into their finite bodies; `source-temperature`
+additionally updates their original linear relaxation rates under the bounded
+scopes above. Thermal expansion and body storage-modulus evolution still
 require their corresponding physical owners. Solid caloric state and the
 existing affine film `G(T)` admission remain required. Omitted string modes keep
 their original storage and numerical loss, which is never deposited as heat.
@@ -425,10 +467,11 @@ history for continuation; no mechanical or thermal state is reset.
 Moving dry surfaces select `with_dry_contact_thermal_network(...)` through the
 same performance loop, finite thermal owner, observer, trace and PCM writer.
 
-For source-temperature fiber rates, the same performance gains
+For source-temperature body rates, the same performance gains
 `.with_material_relaxation_temperature(rates)`. The rates come from
-`fiber_material_rate_heat_destination`, which derives their property selectors
-from the original fiber material spectrum. The frontend's optional record wires
+`fiber_material_rate_heat_destination` or `string_material_rate_heat_destination`,
+which derive their property selectors from the original material spectrum.
+The corresponding fixed-rate methods omit `_rate` from those names. The frontend's optional record wires
 these existing owners together; it adds no separate time step or sound engine.
 
 When continuing a rate-enabled library performance, use

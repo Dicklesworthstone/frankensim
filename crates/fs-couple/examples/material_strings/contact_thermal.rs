@@ -249,7 +249,7 @@ impl Profile {
             return Err("a physical contact cannot own both dry-interface and material-film heat".into());
         }
         if dry.is_empty() && films.is_empty() && series.is_empty()
-            && material_heat.as_ref().is_none_or(|routes| routes.fibers.is_empty()) {
+            && material_heat.as_ref().is_none_or(|routes| routes.len() == 0) {
             return Err("contact-thermal profile has no physical heat route".into());
         }
         let mut links = Vec::<Link>::new();
@@ -595,9 +595,8 @@ impl Prepared {
         })
     }
     pub fn describe(&self) {
-        if self.profile.material_heat.as_ref().is_some_and(|routes|
-            routes.fibers.iter().any(|route| route.source_temperature)) {
-            eprintln!("fiber_material_rates=original source tau(T); fixed storage/maps; accepted interval rates, endpoint rates for next interval; first-order temperature partition");
+        if self.profile.material_heat.as_ref().is_some_and(material_heat::Routes::has_temperature_rates) {
+            eprintln!("body_material_rates=original source tau(T); fixed storage/maps; accepted interval rates, endpoint rates for next interval; first-order temperature partition");
         }
         eprintln!(
             "contact_thermal=source-bound finite solid cells; adiabatic exterior; retained films with optional sliding thermal counterfaces or moving dry footprints; original sample clock"
