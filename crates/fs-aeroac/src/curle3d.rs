@@ -1,4 +1,4 @@
-//! Compact, stationary 3D force dipoles in a homogeneous lossless fluid.
+//! Compact 3D source operators in a homogeneous lossless fluid.
 //!
 //! For actual force **on the fluid** `F` [N], the retarded free-space solution is
 //! `p(x,t) = n·F(t-r/c)/(4πr²) + n·Fdot(t-r/c)/(4πcr)`.
@@ -8,12 +8,16 @@
 //! density again is dimensionally incorrect. The material's sound speed still
 //! sets propagation time and the radiative coefficient.
 //!
-//! Inputs are prescribed 3D forces, never 2D force-per-span data. This operator
+//! Inputs are prescribed 3D forces, never 2D force-per-span data. The stationary
+//! [`CompactForceObserver`] below
 //! does not validate a force model, resolve finite source size, moving sources,
 //! boundaries, absorption or feedback, or confer measured-SPL authority.
+//! The separate [`moving`] owner observes prescribed subsonic source motion.
 
 /// Prepared harmonic arrays of physical volume sources and force dipoles.
 pub mod array;
+/// Retarded pressure from prescribed moving compact volume and force sources.
+pub mod moving;
 /// Analytic whole-sphere power of coherent compact-source arrays.
 pub mod power;
 mod statistics;

@@ -100,6 +100,18 @@ material scaling and domain/representability refusals.
   signed directivity, rigid motion, density independence and refusals. This is
   an ideal free-space transfer for prescribed forces, not validation of a
   source model, finite-size compactness, enclosure scattering or measured SPL.
+- `curle3d::moving::MovingCompactObserver` prepares eight real pressure
+  coefficients for physical Q/Qdot and force/force-rate at one emission event,
+  retaining Doppler amplitude, source acceleration and near-field induction.
+  Its constant-velocity trajectory owner analytically inverts retarded time
+  under an explicit global subsonic margin, clearance and measured light-cone
+  residual limit; supplied instantaneous kinematics establish no global motion
+  guarantee. The original fluid snapshot and source clock are preserved, with
+  no extra density on force. Evaluation is constant-work, allocation-free and
+  coherently sums using double-double arithmetic. Source-history coverage and
+  antialiasing belong to the consumer. This is prescribed compact 3D pressure
+  in a quiescent lossless medium, without finite-size validation, scattering,
+  absorption, feedback, transient force particle velocity or SPL qualification.
 - `curle3d::PreparedCompactSourceObserver` prepares actual 3D source positions
   at one frequency and checked material state. `CompactSourcePhasor` explicitly
   separates volume injection Q [m³/s] from force ON the fluid F [N]. In
