@@ -23,6 +23,8 @@
 pub mod cavitation;
 /// Compressible mass storage and transport on the same geometric pressure graph.
 pub mod isothermal;
+/// Exact pressure-flow reduction for prescribed through-gap viscosity layers.
+pub mod stratified;
 
 use core::fmt;
 use std::sync::Arc;
@@ -281,6 +283,8 @@ impl ResistiveFilm {
     /// supply the length-weighted arithmetic mean, not a harmonic mean. Gapwise
     /// thermal profiles require their own momentum integration and are not
     /// represented by substituting a cell or wall viscosity.
+    /// [`stratified::StratifiedFilm`] supplies that integration for prescribed
+    /// piecewise-constant layers while retaining their original viscosities.
     ///
     /// Original geometry, limits and force ports remain exact and share their
     /// admitted storage without another topology/closure validation or copy.

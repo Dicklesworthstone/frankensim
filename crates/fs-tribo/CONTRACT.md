@@ -842,6 +842,29 @@ independent unequal-channel network pressures, Poiseuille mass fluxes, pressure
 work and directional tangents, conserve cavitation refill/squeeze mass, and
 recover uniform coefficients bitwise. Invalid updates leave prior owners intact.
 
+`resistive_film::stratified::{ViscosityLayer, GapViscosityProfile, StratifiedFilm}`
+admits one to 64 contiguous positive-viscosity layers per original channel,
+with strictly increasing normalized interfaces ending exactly at one. It retains
+the authored layers and compiles their exact piecewise-constant, no-slip
+pressure-flow mobility through scaled, centered weighted variance, including
+each layer's thickness²/12 contribution. This avoids cancellation of raw second
+moments. Equal-viscosity partitions recover the original coefficient exactly.
+Cached neutral-plane coordinates and positive layer pressure-work fractions
+come from the same momentum integration; multiplying those fractions by native
+channel work locates dissipation without inventing a thermal destination.
+
+The compiled native film remains the pressure, analytic-tangent and channel-work
+owner. A common Barus multiplier is separable across all layers and preserves
+the fractions. Unrepresentable layer weights, mobility contributions,
+equivalents or fractions refuse without floors. Profiles remain prescribed and
+fixed within each solve; this adds no Couette/slip law, thermal evolution, layer
+advection/inventory or moving-interface conservation. Eight focused regressions
+specify independent two/three-layer oracles, velocity/dissipation quadrature,
+uniform/reflection/scaling limits, a narrow core at 1e40 viscosity contrast,
+native Barus/flow/work integration and bounded refusal. The complete real film
+module and all 42 unit tests pass Rust type/borrow checking to MIR; native
+linking/execution of the new tests remains pending host storage availability.
+
 The admitted cells and channels share immutable geometry storage across clones,
 Barus continuations and viscosity recompilations. Updating a uniform or spatial
 viscosity field rebuilds only its two channel coefficient arrays, without copying
