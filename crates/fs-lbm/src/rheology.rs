@@ -108,13 +108,35 @@ impl Rheology {
     }
 
     fn validate(&self) {
+        if let Err(reason) = self.check_parameters() {
+            panic!("{reason}");
+        }
+    }
+
+    // Shared by the legacy scalar API and fallible spatial-field admission.
+    // Validation never evaluates a constitutive law or changes accepted state.
+    fn check_parameters(&self) -> Result<(), &'static str> {
+        let positive = |value: f64, reason| {
+            if value.is_finite() && value > 0.0 {
+                Ok(())
+            } else {
+                Err(reason)
+            }
+        };
+        let nonnegative = |value: f64, reason| {
+            if value.is_finite() && value >= 0.0 {
+                Ok(())
+            } else {
+                Err(reason)
+            }
+        };
         match *self {
             Rheology::Newtonian { nu } => {
-                require_positive_finite("Newtonian viscosity", nu);
+                positive(nu, "Newtonian viscosity must be positive and finite")?;
             }
             Rheology::PowerLaw { k, n } => {
-                require_positive_finite("power-law consistency k", k);
-                require_positive_finite("power-law index n", n);
+                positive(k, "power-law consistency k must be positive and finite")?;
+                positive(n, "power-law index n must be positive and finite")?;
             }
             Rheology::Carreau {
                 nu0,
@@ -122,14 +144,22 @@ impl Rheology {
                 lambda,
                 n,
             } => {
-                require_positive_finite("Carreau zero-shear viscosity", nu0);
-                require_positive_finite("Carreau infinite-shear viscosity", nu_inf);
-                require_nonnegative_finite("Carreau relaxation time", lambda);
-                require_positive_finite("Carreau flow index", n);
-                assert!(
-                    n <= 1.0 || nu0 >= nu_inf || lambda == 0.0,
-                    "thickening Carreau law requires nu0 >= nu_inf to stay positive"
-                );
+                positive(
+                    nu0,
+                    "Carreau zero-shear viscosity must be positive and finite",
+                )?;
+                positive(
+                    nu_inf,
+                    "Carreau infinite-shear viscosity must be positive and finite",
+                )?;
+                nonnegative(
+                    lambda,
+                    "Carreau relaxation time must be nonnegative and finite",
+                )?;
+                positive(n, "Carreau flow index must be positive and finite")?;
+                if n > 1.0 && nu0 < nu_inf && lambda != 0.0 {
+                    return Err("thickening Carreau law requires nu0 >= nu_inf to stay positive");
+                }
             }
             Rheology::HerschelBulkley {
                 k,
@@ -138,13 +168,26 @@ impl Rheology {
                 regularization_time,
                 minimum_shear_rate,
             } => {
-                require_positive_finite("Herschel-Bulkley consistency k", k);
-                require_positive_finite("Herschel-Bulkley index n", n);
-                require_nonnegative_finite("kinematic yield stress", yield_stress_over_density);
-                require_nonnegative_finite("yield regularization time", regularization_time);
-                require_positive_finite("power-law minimum shear rate", minimum_shear_rate);
+                positive(
+                    k,
+                    "Herschel-Bulkley consistency k must be positive and finite",
+                )?;
+                positive(n, "Herschel-Bulkley index n must be positive and finite")?;
+                nonnegative(
+                    yield_stress_over_density,
+                    "kinematic yield stress must be nonnegative and finite",
+                )?;
+                nonnegative(
+                    regularization_time,
+                    "yield regularization time must be nonnegative and finite",
+                )?;
+                positive(
+                    minimum_shear_rate,
+                    "power-law minimum shear rate must be positive and finite",
+                )?;
             }
         }
+        Ok(())
     }
 
     // Return (nu, gamma*dnu/dgamma); the scaled derivative avoids division
@@ -207,6 +250,10 @@ impl Rheology {
 
     pub(crate) fn prepare(self) -> PreparedRheology {
         self.validate();
+        self.prepare_validated()
+    }
+
+    fn prepare_validated(self) -> PreparedRheology {
         let constant = match self {
             Self::Newtonian { nu } => Some(nu),
             Self::PowerLaw { k, n } if n == 1.0 => Some(k),
@@ -294,6 +341,7 @@ fn regularized_yield(rate: f64, yield_stress: f64, time: f64) -> (f64, f64) {
 
 /// One validated law shared by the two lattice dimensions. Constant laws
 /// evaluate their constitutive relation once, without per-cell iteration.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct PreparedRheology {
     law: Rheology,
     constant_tau: Option<f64>,
@@ -441,6 +489,173 @@ impl PreparedRheology {
     }
 }
 
+/// Refusal while preparing or applying a spatial constitutive field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RheologyFieldError {
+    /// Only positive 2-D/3-D extents with a representable cell count are admitted.
+    InvalidShape,
+    /// Field extents differ from the target grid, even if cell counts agree.
+    ShapeMismatch,
+    /// A law slice or a required grid array has the wrong cell count.
+    LengthMismatch {
+        /// Required cell count.
+        expected: usize,
+        /// Supplied cell count.
+        actual: usize,
+    },
+    /// A proposed local law is invalid; the accepted field is unchanged.
+    InvalidLaw {
+        /// X-fastest linear cell index, including wall/inactive cells.
+        cell: usize,
+        /// Constitutive parameter requirement that was violated.
+        reason: &'static str,
+    },
+    /// A single-cell replacement addresses a cell outside the field.
+    CellOutOfBounds {
+        /// Requested linear index.
+        cell: usize,
+    },
+    /// The prepared field cannot be allocated.
+    AllocationFailed,
+}
+
+impl core::fmt::Display for RheologyFieldError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidShape => write!(
+                f,
+                "rheology requires positive, representable 2-D/3-D extents"
+            ),
+            Self::ShapeMismatch => write!(f, "rheology field shape differs from the grid"),
+            Self::LengthMismatch { expected, actual } => {
+                write!(f, "rheology requires {expected} cells, received {actual}")
+            }
+            Self::InvalidLaw { cell, reason } => write!(f, "rheology cell {cell}: {reason}"),
+            Self::CellOutOfBounds { cell } => {
+                write!(f, "rheology cell {cell} is outside the field")
+            }
+            Self::AllocationFailed => write!(f, "cannot allocate the prepared rheology field"),
+        }
+    }
+}
+
+impl std::error::Error for RheologyFieldError {}
+
+/// Reusable, spatially varying constitutive laws for the native lattices.
+///
+/// Shapes are `[nx, ny]` for D2Q9 and `[nx, ny, nz]` for D3Q19, with x
+/// fastest. Every stored grid cell has an admitted law, including walls/gas;
+/// updates only apply it to fluid/interface cells (D2Q9) or interior layers
+/// (D3Q19). This lets a cell change activity without finding an unvalidated law.
+/// Laws remain attached to their grid cells; this owner does not advect material
+/// labels, mix constitutive parameters, or evolve temperature.
+///
+/// Construct once and reuse with [`update_tau_field`] or
+/// [`crate::d3q19::update_tau3_field`]. Each law is validated and prepared before
+/// stepping. Constant laws keep their direct relaxation path, nonlinear laws
+/// use the same local solve as uniform rheology, and updates allocate nothing.
+/// Use [`Self::refresh`] to supply temperature/composition-dependent parameters
+/// between steps; all proposed laws are admitted before any accepted law changes.
+#[derive(Debug)]
+pub struct RheologyField<const D: usize> {
+    shape: [usize; D],
+    laws: Vec<PreparedRheology>,
+}
+
+impl<const D: usize> RheologyField<D> {
+    /// Admit a complete law field. Shape/count/parameter checks precede allocation.
+    pub fn new(shape: [usize; D], laws: &[Rheology]) -> Result<Self, RheologyFieldError> {
+        if !matches!(D, 2 | 3) || shape.contains(&0) {
+            return Err(RheologyFieldError::InvalidShape);
+        }
+        let cells = shape
+            .iter()
+            .try_fold(1usize, |n, &extent| n.checked_mul(extent))
+            .ok_or(RheologyFieldError::InvalidShape)?;
+        Self::admit_laws(cells, laws)?;
+        let mut prepared = Vec::new();
+        prepared
+            .try_reserve_exact(cells)
+            .map_err(|_| RheologyFieldError::AllocationFailed)?;
+        prepared.extend(laws.iter().map(|law| law.prepare_validated()));
+        Ok(Self {
+            shape,
+            laws: prepared,
+        })
+    }
+
+    /// Grid extents, including any stored wall layers.
+    #[must_use]
+    pub fn shape(&self) -> [usize; D] {
+        self.shape
+    }
+
+    /// The admitted law at an x-fastest linear index, or `None` out of bounds.
+    #[must_use]
+    pub fn law(&self, cell: usize) -> Option<Rheology> {
+        self.laws.get(cell).map(|prepared| prepared.law)
+    }
+
+    /// Replace all laws without allocating. A length/parameter refusal leaves
+    /// every accepted law unchanged, including when the last proposal is invalid.
+    pub fn refresh(&mut self, laws: &[Rheology]) -> Result<(), RheologyFieldError> {
+        Self::admit_laws(self.laws.len(), laws)?;
+        for (accepted, proposal) in self.laws.iter_mut().zip(laws) {
+            *accepted = proposal.prepare_validated();
+        }
+        Ok(())
+    }
+
+    /// Admit and replace one cell's law without allocating or changing other cells.
+    pub fn set_law(&mut self, cell: usize, law: Rheology) -> Result<(), RheologyFieldError> {
+        let accepted = self
+            .laws
+            .get_mut(cell)
+            .ok_or(RheologyFieldError::CellOutOfBounds { cell })?;
+        law.check_parameters()
+            .map_err(|reason| RheologyFieldError::InvalidLaw { cell, reason })?;
+        *accepted = law.prepare_validated();
+        Ok(())
+    }
+
+    fn admit_laws(cells: usize, laws: &[Rheology]) -> Result<(), RheologyFieldError> {
+        if laws.len() != cells {
+            return Err(RheologyFieldError::LengthMismatch {
+                expected: cells,
+                actual: laws.len(),
+            });
+        }
+        for (cell, law) in laws.iter().enumerate() {
+            law.check_parameters()
+                .map_err(|reason| RheologyFieldError::InvalidLaw { cell, reason })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn admit_grid(
+        &self,
+        shape: [usize; D],
+        storage_lengths: &[usize],
+    ) -> Result<(), RheologyFieldError> {
+        if shape != self.shape {
+            return Err(RheologyFieldError::ShapeMismatch);
+        }
+        for &actual in storage_lengths {
+            if actual != self.laws.len() {
+                return Err(RheologyFieldError::LengthMismatch {
+                    expected: self.laws.len(),
+                    actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepared(&self, cell: usize) -> &PreparedRheology {
+        &self.laws[cell]
+    }
+}
+
 /// Per-step rheology ledger.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RheologyStats {
@@ -465,6 +680,36 @@ pub struct RheologyStats {
 #[must_use]
 pub fn update_tau(grid: &mut Grid, law: Rheology) -> RheologyStats {
     let law = law.prepare();
+    update_tau_prepared(grid, |_| &law)
+}
+
+/// Apply the prepared local law at each fluid/interface cell, using the same
+/// force-corrected, collision-specific strain and constitutive solve as
+/// [`update_tau`]. Wall/gas relaxation times are left untouched. Shape and
+/// storage refusals precede all writes; physical populations must satisfy the
+/// same finite-density/strain requirements as the uniform update.
+pub fn update_tau_field(
+    grid: &mut Grid,
+    laws: &RheologyField<2>,
+) -> Result<RheologyStats, RheologyFieldError> {
+    laws.admit_grid(
+        [grid.nx, grid.ny],
+        &[
+            grid.flags.len(),
+            grid.f.len(),
+            grid.tau.len(),
+            grid.fext.len(),
+        ],
+    )?;
+    Ok(update_tau_prepared(grid, |i| laws.prepared(i)))
+}
+
+// Static dispatch keeps the scalar-law path free of field indexing and
+// per-cell law validation; both APIs share the complete strain/solve loop.
+fn update_tau_prepared<'a>(
+    grid: &mut Grid,
+    law_at: impl Fn(usize) -> &'a PreparedRheology,
+) -> RheologyStats {
     let mut stats = RheologyStats {
         floored: 0,
         capped: 0,
@@ -475,6 +720,7 @@ pub fn update_tau(grid: &mut Grid, law: Rheology) -> RheologyStats {
         if !matches!(grid.flags[i], Cell::Fluid | Cell::Interface) {
             continue;
         }
+        let law = law_at(i);
         let mm = grid.moments(i);
         let force = std::array::from_fn(|d| grid.g[d].mul_add(mm.rho, grid.fext[i][d]));
         let local = if matches!(grid.collision, CollisionModel2::CentralMoment) {
@@ -577,9 +823,341 @@ pub fn channel_flow(
 #[cfg(test)]
 mod tests {
     use super::{
-        Rheology, TAU_CAP, TAU_FLOOR, channel_flow, powerlaw_poiseuille_analytic, update_tau,
+        Rheology, RheologyField, RheologyFieldError, TAU_CAP, TAU_FLOOR, channel_flow,
+        powerlaw_poiseuille_analytic, update_tau, update_tau_field,
     };
-    use crate::{CS2, E, Grid, W, core2::CollisionModel2, equilibrium};
+    use crate::{
+        CS2, E, Grid, W,
+        core2::{Cell, CollisionModel2},
+        equilibrium,
+    };
+
+    fn mixed_laws() -> [Rheology; 4] {
+        [
+            Rheology::Newtonian { nu: 0.06 },
+            Rheology::PowerLaw { k: 0.02, n: 0.7 },
+            Rheology::Carreau {
+                nu0: 0.2,
+                nu_inf: 0.01,
+                lambda: 100.0,
+                n: 0.5,
+            },
+            Rheology::HerschelBulkley {
+                k: 0.02,
+                n: 1.0,
+                yield_stress_over_density: 0.0002,
+                regularization_time: 100.0,
+                minimum_shear_rate: 1e-8,
+            },
+        ]
+    }
+
+    #[test]
+    fn spatial_laws_preserve_manufactured_roots_and_reuse_prepared_storage() {
+        let mixed = mixed_laws();
+        let laws = [
+            mixed[0],
+            mixed[1],
+            mixed[2],
+            mixed[3],
+            Rheology::Newtonian { nu: 1e-5 },
+            Rheology::Newtonian { nu: 10.0 },
+        ];
+        let mut field = RheologyField::new([3, 2], &laws).unwrap();
+        assert_eq!(field.shape(), [3, 2]);
+        let address = field.laws.as_ptr();
+        for (i, law) in laws.iter().enumerate() {
+            let rate = 0.02 + 0.01 * i as f64;
+            let target = 0.5 + law.viscosity(rate) / CS2;
+            let expected = target.clamp(TAU_FLOOR, TAU_CAP);
+            for (variable, fixed) in [(rate, 0.0), (0.6 * rate, 0.8 * rate)] {
+                for old in [0.51, 1.0, 2.9] {
+                    let actual =
+                        field
+                            .prepared(i)
+                            .solve_with_fixed_strain(variable * expected, fixed, old);
+                    let scalar =
+                        law.prepare()
+                            .solve_with_fixed_strain(variable * expected, fixed, old);
+                    assert_eq!(actual.tau.to_bits(), scalar.tau.to_bits());
+                    assert!((actual.tau - expected).abs() < 4e-12);
+                    assert!((actual.shear_rate - rate).abs() < 1e-12);
+                    assert_eq!(actual.floored, target < TAU_FLOOR);
+                    assert_eq!(actual.capped, target > TAU_CAP);
+                }
+            }
+        }
+        // Parameters selected by a new local temperature/composition state
+        // replace the accepted laws, not just an initial relaxation guess.
+        let refreshed = std::array::from_fn::<_, 6, _>(|i| Rheology::Newtonian {
+            nu: 0.03 + 0.01 * i as f64,
+        });
+        field.refresh(&refreshed).unwrap();
+        assert_eq!(field.laws.as_ptr(), address);
+        for (i, law) in refreshed.iter().enumerate() {
+            assert_eq!(
+                field.prepared(i).solve(0.04, 2.9).tau,
+                0.5 + law.viscosity(0.0) / CS2
+            );
+        }
+        field.set_law(2, mixed[3]).unwrap();
+        assert_eq!(
+            field.law(2).unwrap().viscosity(0.02),
+            mixed[3].viscosity(0.02)
+        );
+        assert!(field.law(6).is_none());
+        assert_eq!(field.laws.as_ptr(), address);
+    }
+
+    #[test]
+    fn spatial_law_admission_and_refresh_refuse_before_changing_accepted_state() {
+        let valid = Rheology::Newtonian { nu: 0.1 };
+        assert!(matches!(
+            RheologyField::new([0, 2], &[]),
+            Err(RheologyFieldError::InvalidShape)
+        ));
+        assert!(matches!(
+            RheologyField::new([usize::MAX, 2], &[]),
+            Err(RheologyFieldError::InvalidShape)
+        ));
+        assert!(matches!(
+            RheologyField::new([1], &[valid]),
+            Err(RheologyFieldError::InvalidShape)
+        ));
+        assert!(matches!(
+            RheologyField::new([2, 2], &[valid; 3]),
+            Err(RheologyFieldError::LengthMismatch {
+                expected: 4,
+                actual: 3
+            })
+        ));
+        let invalid = [
+            Rheology::Newtonian { nu: f64::NAN },
+            Rheology::PowerLaw { k: 0.1, n: 0.0 },
+            Rheology::Carreau {
+                nu0: 0.01,
+                nu_inf: 0.2,
+                lambda: 1.0,
+                n: 2.0,
+            },
+            Rheology::HerschelBulkley {
+                k: 0.1,
+                n: 1.0,
+                yield_stress_over_density: 0.1,
+                regularization_time: 10.0,
+                minimum_shear_rate: 0.0,
+            },
+        ];
+        let mut field = RheologyField::new([2, 2], &[valid; 4]).unwrap();
+        for bad in invalid {
+            let proposal = [Rheology::Newtonian { nu: 0.5 }, valid, valid, bad];
+            assert!(matches!(
+                RheologyField::new([2, 2], &proposal),
+                Err(RheologyFieldError::InvalidLaw { cell: 3, .. })
+            ));
+            assert!(matches!(
+                field.refresh(&proposal),
+                Err(RheologyFieldError::InvalidLaw { cell: 3, .. })
+            ));
+            assert!(matches!(
+                field.set_law(0, bad),
+                Err(RheologyFieldError::InvalidLaw { cell: 0, .. })
+            ));
+            assert!(field.laws.iter().all(|law| law.law.viscosity(0.1) == 0.1));
+        }
+        assert!(matches!(
+            field.refresh(&[valid; 3]),
+            Err(RheologyFieldError::LengthMismatch { .. })
+        ));
+        assert_eq!(
+            field.set_law(4, valid),
+            Err(RheologyFieldError::CellOutOfBounds { cell: 4 })
+        );
+        assert_eq!(
+            field.admit_grid([1, 4], &[4; 4]),
+            Err(RheologyFieldError::ShapeMismatch)
+        );
+        assert_eq!(
+            field.admit_grid([2, 2], &[4, 4, 3, 4]),
+            Err(RheologyFieldError::LengthMismatch {
+                expected: 4,
+                actual: 3
+            })
+        );
+        assert!(field.laws.iter().all(|law| law.law.viscosity(0.1) == 0.1));
+    }
+
+    #[test]
+    fn spatial_d2q9_laws_recover_forced_mixed_strain_and_preserve_uniform_bits() {
+        let mixed = mixed_laws();
+        let laws = [mixed[0], mixed[1], mixed[2], mixed[3], mixed[0], mixed[0]];
+        let field = RheologyField::new([3, 2], &laws).unwrap();
+        for collision in [CollisionModel2::Bgk, CollisionModel2::CentralMoment] {
+            let mut grid = Grid::uniform(3, 2, 1.7);
+            grid.collision = collision;
+            grid.g = [0.001, -0.002];
+            grid.flags[2] = Cell::Interface;
+            grid.flags[4] = Cell::Wall;
+            grid.flags[5] = Cell::Gas;
+            let mut expected = [1.7; 6];
+            let mut max_rate = 0.0_f64;
+            for i in 0..4 {
+                let rho = 0.6 + 0.4 * i as f64;
+                let u = [0.04, -0.03];
+                grid.fext[i] = [-0.0002 * i as f64, 0.0003];
+                let force: [f64; 2] =
+                    std::array::from_fn(|d| grid.g[d].mul_add(rho, grid.fext[i][d]));
+                let strain = [[0.003 + 0.001 * i as f64, -0.002], [-0.002, -0.001]];
+                let rate = (2.0 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+                max_rate = max_rate.max(rate);
+                expected[i] = 0.5 + laws[i].viscosity(rate) / CS2;
+                let isotropic = 0.5 * (strain[0][0] + strain[1][1]);
+                let bulk_tau = if collision == CollisionModel2::CentralMoment {
+                    1.0
+                } else {
+                    expected[i]
+                };
+                let stress: [[f64; 2]; 2] = std::array::from_fn(|a| {
+                    std::array::from_fn(|b| {
+                        let trace = if a == b { isotropic } else { 0.0 };
+                        -2.0 * rho * CS2 * (expected[i] * (strain[a][b] - trace) + bulk_tau * trace)
+                    })
+                });
+                let mut populations = equilibrium(rho, u[0], u[1]);
+                for (q, direction) in E.iter().enumerate() {
+                    let e = [f64::from(direction.0), f64::from(direction.1)];
+                    let mut contraction = 0.0;
+                    for a in 0..2 {
+                        for b in 0..2 {
+                            contraction +=
+                                (e[a] * e[b] - if a == b { CS2 } else { 0.0 }) * stress[a][b];
+                        }
+                    }
+                    let eu = e[0] * u[0] + e[1] * u[1];
+                    let source: f64 = (0..2)
+                        .map(|a| (3.0 * (e[a] - u[a]) + 9.0 * eu * e[a]) * force[a])
+                        .sum();
+                    populations[q] += W[q] * (contraction / (2.0 * CS2 * CS2) - 0.5 * source);
+                }
+                grid.f[i] = populations;
+            }
+            grid.f[4] = [f64::NAN; 9];
+            grid.f[5] = [f64::NAN; 9];
+            let stats = update_tau_field(&mut grid, &field).unwrap();
+            for (actual, expected) in grid.tau.iter().zip(expected) {
+                assert!((actual - expected).abs() < 4e-12);
+            }
+            assert_eq!((stats.floored, stats.capped), (0, 0));
+            assert!((stats.max_shear - max_rate).abs() < 1e-13);
+            for law in mixed {
+                let mut scalar = grid.clone();
+                let mut spatial = grid.clone();
+                let uniform = RheologyField::new([3, 2], &[law; 6]).unwrap();
+                let a = update_tau(&mut scalar, law);
+                let b = update_tau_field(&mut spatial, &uniform).unwrap();
+                assert_eq!(scalar.tau, spatial.tau);
+                assert_eq!(
+                    (a.floored, a.capped, a.max_shear, a.tau_range),
+                    (b.floored, b.capped, b.max_shear, b.tau_range)
+                );
+            }
+            let snapshot = grid.tau.clone();
+            let wrong = RheologyField::new([2, 3], &laws).unwrap();
+            assert!(matches!(
+                update_tau_field(&mut grid, &wrong),
+                Err(RheologyFieldError::ShapeMismatch)
+            ));
+            grid.fext.pop();
+            assert!(matches!(
+                update_tau_field(&mut grid, &field),
+                Err(RheologyFieldError::LengthMismatch { .. })
+            ));
+            assert_eq!(grid.tau, snapshot);
+        }
+    }
+
+    #[test]
+    fn spatial_d3q19_laws_recover_forced_mixed_strain_and_preserve_uniform_bits() {
+        use crate::d3q19::{E3, PlatesGrid3, W3, equilibrium3, update_tau3, update_tau3_field};
+        let mixed = mixed_laws();
+        let mut grid = PlatesGrid3::plates(2, 2, 2, 1.7);
+        let mut laws = vec![mixed[0]; grid.f.len()];
+        let mut expected = grid.tau.clone();
+        let mut max_rate = 0.0_f64;
+        for i in 4..12 {
+            laws[i] = mixed[i % 4];
+            let rho = 0.6 + 0.05 * i as f64;
+            let u = [0.03, -0.02, 0.01];
+            let force = [0.001, -0.0007, 0.0003];
+            grid.fext[i] = force;
+            let strain = [
+                [0.003 + 0.0002 * i as f64, 0.001, -0.002],
+                [0.001, -0.002, 0.001],
+                [-0.002, 0.001, 0.002],
+            ];
+            let rate = (2.0 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+            max_rate = max_rate.max(rate);
+            expected[i] = 0.5 + laws[i].viscosity(rate) / CS2;
+            let mut populations = equilibrium3(rho, u);
+            for (q, direction) in E3.iter().enumerate() {
+                let e = [
+                    f64::from(direction.0),
+                    f64::from(direction.1),
+                    f64::from(direction.2),
+                ];
+                let mut contraction = 0.0;
+                for a in 0..3 {
+                    for b in 0..3 {
+                        contraction += (e[a] * e[b] - if a == b { CS2 } else { 0.0 })
+                            * (-2.0 * rho * CS2 * expected[i] * strain[a][b]);
+                    }
+                }
+                let eu: f64 = (0..3).map(|a| e[a] * u[a]).sum();
+                let source: f64 = (0..3)
+                    .map(|a| (3.0 * (e[a] - u[a]) + 9.0 * eu * e[a]) * force[a])
+                    .sum();
+                populations[q] += W3[q] * (contraction / (2.0 * CS2 * CS2) - 0.5 * source);
+            }
+            grid.f[i] = populations;
+        }
+        let field = RheologyField::new([2, 2, 4], &laws).unwrap();
+        let stats = update_tau3_field(&mut grid, &field).unwrap();
+        for (actual, expected) in grid.tau.iter().zip(expected) {
+            assert!((actual - expected).abs() < 4e-12);
+        }
+        assert_eq!((stats.floored, stats.capped), (0, 0));
+        assert!((stats.max_shear - max_rate).abs() < 1e-13);
+        for law in mixed {
+            let mut scalar = PlatesGrid3::plates(2, 2, 2, 1.7);
+            scalar.f.clone_from(&grid.f);
+            scalar.fext.clone_from(&grid.fext);
+            scalar.tau.clone_from(&grid.tau);
+            let mut spatial = PlatesGrid3::plates(2, 2, 2, 1.7);
+            spatial.f.clone_from(&grid.f);
+            spatial.fext.clone_from(&grid.fext);
+            spatial.tau.clone_from(&grid.tau);
+            let uniform = RheologyField::new([2, 2, 4], &vec![law; grid.f.len()]).unwrap();
+            let a = update_tau3(&mut scalar, law);
+            let b = update_tau3_field(&mut spatial, &uniform).unwrap();
+            assert_eq!(scalar.tau, spatial.tau);
+            assert_eq!(
+                (a.floored, a.capped, a.max_shear, a.tau_range),
+                (b.floored, b.capped, b.max_shear, b.tau_range)
+            );
+        }
+        let snapshot = grid.tau.clone();
+        let wrong = RheologyField::new([4, 1, 4], &laws).unwrap();
+        assert!(matches!(
+            update_tau3_field(&mut grid, &wrong),
+            Err(RheologyFieldError::ShapeMismatch)
+        ));
+        grid.fext.pop();
+        assert!(matches!(
+            update_tau3_field(&mut grid, &field),
+            Err(RheologyFieldError::LengthMismatch { .. })
+        ));
+        assert_eq!(grid.tau, snapshot);
+    }
 
     /// G0/G3: a mixed volumetric/deviatoric deformation has the same physical
     /// invariant for BGK and central moments, although their trace relaxation

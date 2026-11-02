@@ -29,7 +29,9 @@
 //! GOLDEN_POLICY four-quadrant ceremony, as in the 40p2 precedent).
 
 use super::{CollisionModel3, E3, OPP3, Q3, collision_kernel3, equilibrium3};
-use crate::rheology::{Rheology, RheologyStats};
+use crate::rheology::{
+    PreparedRheology, Rheology, RheologyField, RheologyFieldError, RheologyStats,
+};
 use crate::thermal::{ThermalForcingError, forcing::validate_external_forces};
 
 /// Flow-lattice sound speed squared (D3Q19).
@@ -295,6 +297,32 @@ pub(crate) fn force_corrected_shear_rate3(
 #[must_use]
 pub fn update_tau3(grid: &mut PlatesGrid3, law: Rheology) -> RheologyStats {
     let law = law.prepare();
+    update_tau3_prepared(grid, |_| &law)
+}
+
+/// Apply prepared spatial rheology to every interior plate-channel cell.
+/// The field shape includes both wall layers, whose relaxation times remain
+/// untouched. Shape/storage refusal happens before any tau is changed. As in
+/// [`update_tau3`], populations must have finite positive density and finite
+/// force-corrected strain. The field adds no allocation to an update.
+pub fn update_tau3_field(
+    grid: &mut PlatesGrid3,
+    laws: &RheologyField<3>,
+) -> Result<RheologyStats, RheologyFieldError> {
+    if grid.nz < 4 {
+        return Err(RheologyFieldError::InvalidShape);
+    }
+    laws.admit_grid(
+        [grid.nx, grid.ny, grid.nz],
+        &[grid.f.len(), grid.tau.len(), grid.fext.len()],
+    )?;
+    Ok(update_tau3_prepared(grid, |i| laws.prepared(i)))
+}
+
+fn update_tau3_prepared<'a>(
+    grid: &mut PlatesGrid3,
+    law_at: impl Fn(usize) -> &'a PreparedRheology,
+) -> RheologyStats {
     let mut stats = RheologyStats {
         floored: 0,
         capped: 0,
@@ -307,7 +335,7 @@ pub fn update_tau3(grid: &mut PlatesGrid3, law: Rheology) -> RheologyStats {
                 let i = grid.idx(x, y, z);
                 let (rho, u) = grid.moments3(i);
                 let numerator = force_corrected_shear_rate3(&grid.f[i], rho, u, grid.fext[i], 1.0);
-                let local = law.solve(numerator, grid.tau[i]);
+                let local = law_at(i).solve(numerator, grid.tau[i]);
                 grid.tau[i] = local.tau;
                 stats.floored += u32::from(local.floored);
                 stats.capped += u32::from(local.capped);

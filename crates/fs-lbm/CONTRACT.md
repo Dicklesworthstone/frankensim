@@ -1404,6 +1404,27 @@ momentum balance, a nearly flat creeping core, mass balance and absence of
 numerical viscosity clipping. Full-crate execution of that added channel test
 is not established by a standalone constitutive-kernel check.
 
+`rheology::RheologyField<2>` and `<3>` retain one prepared constitutive law
+per native D2Q9 or D3Q19 plate-grid cell, with x-fastest full-grid extents
+including walls. Newtonian, power-law, Carreau and regularized Herschel–Bulkley
+laws can coexist. Construction checks dimensions, checked cell multiplication,
+exact law count and all parameters before allocation. Complete `refresh`
+admits every proposal before changing any accepted law and reuses storage;
+`set_law` admits one local replacement. Callers may refresh parameters from
+temperature/composition between steps; the field does not transport material
+labels, infer mixture/interface laws, evolve temperature or add stress memory.
+
+`update_tau_field` and `d3q19::update_tau3_field` share the uniform updater's
+implicit local constitutive solve, Guo correction and clipping statistics.
+D2Q9 central moments retain separate bulk/shear strain reconstruction. Static
+dispatch preserves the scalar path, and prepared-field updates allocate nothing.
+Shape/storage mismatch refuses before relaxation writes; physical populations
+retain the original updater's validity preconditions. Exact production-source
+native tests cover mixed roots, clipping, storage reuse and atomic admission;
+full-grid regressions specify force/trace invariance, inactive cells and
+scalar/field bit parity in both dimensions, with execution still pending a
+resource-capable native build.
+
 `tests/extensions.rs` (tfz.19): lbm-101 power-law/Carreau profiles vs
 analytic (0.14% for the n = 0.8 profile with τ floor+cap ledger);
 lbm-102 Rayleigh–Bénard onset
