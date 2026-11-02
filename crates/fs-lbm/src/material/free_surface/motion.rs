@@ -83,6 +83,78 @@ impl MaterialFreeSurface3<'_> {
         maximum_relative_mass_defect: f64,
         gate: &CancelGate,
     ) -> Result<MaterialPlanarWallMotionReport3, MaterialLbmError> {
+        self.step_with_planar_wall_motion_inner(
+            wall,
+            velocity_m_s,
+            maximum_relative_mass_defect,
+            gate,
+            None,
+        )
+    }
+
+    /// Advance gas pressure [Pa] and tangential wall motion [m/s] together.
+    ///
+    /// Requires an explicit fixed [`MaterialFreeSurfaceScaling::with_pressure_reference`].
+    /// The callback supplies positive absolute gas pressure at exposed liquid
+    /// cell centers [m], frozen for this physical timestep. Original capillary
+    /// traction adds to this load under the supplied density-excursion bound.
+    /// Wall reflection and gas reconstruction use ONE native candidate; the
+    /// reported reaction and mechanical work come from its actual populations.
+    /// Pressure disturbances propagate through that original liquid evolution.
+    ///
+    /// The source coefficients remain frozen and wall motion remains tangential
+    /// on a fully flooded, fixed domain plane. This neither evolves a gas
+    /// reservoir nor deposits boundary work as thermal energy. The caller owns
+    /// the prescribed gas field and wall actuator. A common shift of the gas
+    /// pressure and reference leaves the trajectory and wall work unchanged;
+    /// the reported absolute normal wall force includes the shifted datum.
+    ///
+    /// # Errors
+    /// The original wall, source-scale, speed, mass and SI-output gates apply.
+    /// Missing reference, invalid pressure, excess combined gas/capillary
+    /// density excursion, native failure or cancellation preserves the entire
+    /// accepted liquid state.
+    pub fn step_with_planar_wall_motion_and_gas_pressure_si(
+        &mut self,
+        wall: PlanarWall3,
+        velocity_m_s: [f64; 3],
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn([f64; 3]) -> f64,
+    ) -> Result<MaterialPlanarWallMotionReport3, MaterialLbmError> {
+        if gate.is_requested() {
+            return Err(FreeSurfaceError3::Cancelled.into());
+        }
+        let reference = self
+            .scaling
+            .reference_pressure_pa
+            .ok_or(MaterialLbmError::Invalid(
+                "gas-loaded moving wall requires an explicit fixed pressure reference",
+            ))?;
+        let pressure = super::pressure::lattice_pressure_field(
+            reference,
+            self.scaling.cell_size_m,
+            self.scaling.pressure_unit_pa,
+            pressure_pa,
+        );
+        self.step_with_planar_wall_motion_inner(
+            wall,
+            velocity_m_s,
+            maximum_relative_mass_defect,
+            gate,
+            Some((maximum_density_excursion, &pressure)),
+        )
+    }
+
+    fn step_with_planar_wall_motion_inner(
+        &mut self,
+        wall: PlanarWall3,
+        velocity_m_s: [f64; 3],
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
+    ) -> Result<MaterialPlanarWallMotionReport3, MaterialLbmError> {
         if gate.is_requested() {
             return Err(FreeSurfaceError3::Cancelled.into());
         }
@@ -106,9 +178,14 @@ impl MaterialFreeSurface3<'_> {
             impulse_unit * scale.velocity_scale,
             "moving-wall SI work unit is unrepresentable",
         )?;
-        let (candidate, raw): (_, PlanarWallMotionReport3) = self
-            .lattice
-            .planar_wall_motion_candidate(wall, velocity, maximum_relative_mass_defect, gate)?;
+        let (candidate, raw): (_, PlanarWallMotionReport3) =
+            self.lattice.planar_wall_motion_candidate(
+                wall,
+                velocity,
+                maximum_relative_mass_defect,
+                gate,
+                gas_pressure,
+            )?;
         if raw.maximum_speed > scale.flow.u_lattice {
             return Err(MaterialLbmError::Invalid(
                 "wall-driven liquid exceeds the original material scenario speed",

@@ -133,6 +133,89 @@ fn g3_zero_wall_motion_preserves_native_bits_and_rebound_motion_replays() {
 }
 
 #[test]
+fn g3_combined_wall_pressure_preserves_each_original_boundary_operator() {
+    let wall = PlanarWall3::ZMin;
+    let gate = CancelGate::new_clock_free();
+    let mut ordinary = tank(wall);
+    let mut combined = ordinary.clone();
+    let expected = ordinary
+        .step_with_planar_wall_motion(wall, [0.01, 0.0, 0.0], 1e-12, &gate)
+        .unwrap();
+    let actual = combined
+        .step_with_planar_wall_motion_and_gas_pressure(
+            wall,
+            [0.01, 0.0, 0.0],
+            1e-12,
+            &gate,
+            0.05,
+            |_| Ok(0.0),
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(combined.grid.state_bits(), ordinary.grid.state_bits());
+    assert_eq!(combined.mass_snapshot(), ordinary.mass_snapshot());
+    assert_eq!(combined.conversions(), ordinary.conversions());
+
+    let mut pressure_only = tank(wall);
+    let mut stationary_wall = pressure_only.clone();
+    pressure_only
+        .step_with_gas_pressure(&gate, 0.05, |_| Ok(0.0005))
+        .unwrap();
+    let report = stationary_wall
+        .step_with_planar_wall_motion_and_gas_pressure(wall, [0.0; 3], 1e-12, &gate, 0.05, |_| {
+            Ok(0.0005)
+        })
+        .unwrap();
+    assert_eq!(
+        stationary_wall.grid.state_bits(),
+        pressure_only.grid.state_bits()
+    );
+    assert_eq!(
+        stationary_wall.mass_snapshot(),
+        pressure_only.mass_snapshot()
+    );
+    assert_eq!(stationary_wall.conversions(), pressure_only.conversions());
+    assert_eq!(report.fluid_work, 0.0);
+}
+
+#[test]
+fn g1_g3_gas_loading_propagates_to_actual_submerged_wall_reaction_and_work() {
+    let wall = PlanarWall3::ZMin;
+    let gate = CancelGate::new_clock_free();
+    let mut ordinary = tank(wall);
+    let mut loaded = ordinary.clone();
+    let mass = loaded.ledger_mass();
+    let mut last = None;
+    for _ in 0..6 {
+        let baseline = ordinary
+            .step_with_planar_wall_motion(wall, [0.01, 0.0, 0.0], 1e-12, &gate)
+            .unwrap();
+        let report = loaded
+            .step_with_planar_wall_motion_and_gas_pressure(
+                wall,
+                [0.01, 0.0, 0.0],
+                1e-12,
+                &gate,
+                0.05,
+                |_| Ok(0.0005),
+            )
+            .unwrap();
+        close(report.mass_after, mass);
+        close(report.fluid_work, 0.01 * report.fluid_impulse[0]);
+        assert_eq!(report.wall_impulse, report.fluid_impulse.map(|v| -v));
+        assert_eq!(report.wall_work, -report.fluid_work);
+        last = Some((baseline, report));
+    }
+    let (baseline, report) = last.unwrap();
+    // The imposed surface load must travel through the liquid before reaching
+    // the submerged wall. Its eventual extra compressive reaction comes from
+    // actual reflected populations, not an added p*A report correction.
+    assert!(report.wall_impulse[2] < baseline.wall_impulse[2] - 1e-5);
+    assert_ne!(report.fluid_work, baseline.fluid_work);
+    assert_ne!(loaded.grid.state_bits(), ordinary.grid.state_bits());
+}
+
+#[test]
 fn g1_slow_wall_receives_mechanical_work_from_faster_liquid() {
     let wall = PlanarWall3::ZMin;
     let mut surface = tank(wall);

@@ -3,6 +3,7 @@
 use super::*;
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::FreeSurfaceError3;
+use fs_lbm::d3q19::freesurface3::PlanarWall3;
 use fs_lbm::material::MaterialLbmError;
 use fs_lbm::material::free_surface::MaterialFreeSurface3;
 use fs_lbm::material::free_surface::MaterialFreeSurfaceInitialCell3;
@@ -152,6 +153,217 @@ fn g1_initial_pressure_matches_a_loaded_flat_surface_without_startup_flow() {
             zero.ledger_mass_kg().unwrap().to_bits()
         );
     });
+}
+
+#[test]
+fn g1_g3_loaded_moving_wall_has_physical_traction_reciprocal_work_and_gauge_invariance() {
+    let source = liquid(1_000.0, 0.1, None);
+    let initial = initial_slab(2, false);
+    let domain = MaterialFreeSurfaceDomain3 {
+        cells: [12; 3],
+        gravity_m_s2: [0.0; 3],
+        max_cells: 12usize.pow(3),
+        ..domain()
+    };
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let make = |reference, pressure| {
+            plan(&source)
+                .with_pressure_reference(reference)
+                .unwrap()
+                .free_surface3_from_cells_with_pressure(domain, &initial, 0.05, |_| pressure, cx)
+                .unwrap()
+        };
+        let mut flow = make(100_000.0, 100_002.0);
+        let mut shifted = make(100_500.0, 100_502.0);
+        let mut native = flow.lattice().clone();
+        let velocity = [0.01, 0.0, 0.0];
+        let calls = std::cell::Cell::new(0);
+        let report = flow
+            .step_with_planar_wall_motion_and_gas_pressure_si(
+                PlanarWall3::ZMin,
+                velocity,
+                1e-12,
+                &gate,
+                0.05,
+                |position| {
+                    assert!((position[2] - 0.0075).abs() < 1e-15);
+                    calls.set(calls.get() + 1);
+                    100_002.0
+                },
+            )
+            .unwrap();
+        assert_eq!(calls.get(), 144);
+        native
+            .step_with_planar_wall_motion_and_gas_pressure(
+                PlanarWall3::ZMin,
+                velocity,
+                1e-12,
+                &gate,
+                0.05,
+                |_| Ok(2.0 / 1_000.0),
+            )
+            .unwrap();
+        assert_eq!(
+            flow.lattice().grid().state_bits(),
+            native.grid().state_bits()
+        );
+        // Uniform initial pressure independently fixes normal traction p*A.
+        // Two moving D3Q19 diagonals give rho_lattice*cell_mass*A_cells*u/3.
+        let area = 144.0 * 0.001_f64.powi(2);
+        let impulse = 1.006 * 1e-6 * 144.0 * velocity[0] / 3.0;
+        near(report.fluid_impulse_kg_m_s[0], impulse, 1e-11);
+        near(report.fluid_work_j, velocity[0] * impulse, 1e-11);
+        near(
+            report.pressure_perturbation_wall_force_n[2],
+            -2.0 * area,
+            2e-9,
+        );
+        near(
+            report.absolute_wall_force_n.unwrap()[2],
+            -100_002.0 * area,
+            2e-13,
+        );
+        assert_eq!(
+            report.wall_impulse_kg_m_s,
+            report.fluid_impulse_kg_m_s.map(|v| -v)
+        );
+        assert_eq!(report.wall_work_j, -report.fluid_work_j);
+        near(report.mass_after_kg, report.mass_before_kg, 1e-12);
+        assert_eq!(flow.scaling().material(), &source);
+
+        let other = shifted
+            .step_with_planar_wall_motion_and_gas_pressure_si(
+                PlanarWall3::ZMin,
+                velocity,
+                1e-12,
+                &gate,
+                0.05,
+                |_| 100_502.0,
+            )
+            .unwrap();
+        assert_eq!(
+            flow.lattice().grid().state_bits(),
+            shifted.lattice().grid().state_bits()
+        );
+        assert_eq!(report.fluid_work_j, other.fluid_work_j);
+        assert_eq!(report.fluid_impulse_kg_m_s, other.fluid_impulse_kg_m_s);
+        near(
+            other.absolute_wall_force_n.unwrap()[2] - report.absolute_wall_force_n.unwrap()[2],
+            -500.0 * area,
+            2e-12,
+        );
+    });
+}
+
+#[test]
+fn g4_combined_moving_wall_pressure_admission_and_late_failure_are_atomic() {
+    let source = liquid(1_000.0, 0.1, None);
+    let domain = MaterialFreeSurfaceDomain3 {
+        cells: [12; 3],
+        gravity_m_s2: [0.0; 3],
+        max_cells: 12usize.pow(3),
+        ..domain()
+    };
+    let gate = CancelGate::new_clock_free();
+    let mut unreferenced = plan(&source)
+        .free_surface3(domain, |_, _, z| z < 8)
+        .unwrap();
+    assert!(
+        unreferenced
+            .step_with_planar_wall_motion_and_gas_pressure_si(
+                PlanarWall3::ZMin,
+                [0.01, 0.0, 0.0],
+                1e-12,
+                &gate,
+                0.05,
+                |_| panic!("pressure must not be sampled without an explicit reference"),
+            )
+            .is_err()
+    );
+    let mut flow = plan(&source)
+        .with_pressure_reference(100_000.0)
+        .unwrap()
+        .free_surface3(domain, |_, _, z| z < 8)
+        .unwrap();
+    let bits = flow.lattice().grid().state_bits();
+    let mass = flow.ledger_mass_kg().unwrap().to_bits();
+    let conversions = flow.lattice().conversions();
+    assert!(
+        flow.step_with_planar_wall_motion_and_gas_pressure_si(
+            PlanarWall3::ZMin,
+            [0.01, 0.0, 0.0],
+            1e-12,
+            &gate,
+            0.0,
+            |_| panic!("invalid pressure bounds must refuse before sampling"),
+        )
+        .is_err()
+    );
+    let calls = std::cell::Cell::new(0);
+    let result = flow.step_with_planar_wall_motion_and_gas_pressure_si(
+        PlanarWall3::ZMin,
+        [0.01, 0.0, 0.0],
+        1e-12,
+        &gate,
+        0.05,
+        |_| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 10 { 0.0 } else { 100_002.0 }
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(MaterialLbmError::FreeSurface(
+            FreeSurfaceError3::InvalidGasPressure {
+                coordinates: Some(_),
+                ..
+            }
+        ))
+    ));
+    assert_eq!(calls.get(), 10);
+    assert_eq!(flow.lattice().grid().state_bits(), bits);
+    assert_eq!(flow.ledger_mass_kg().unwrap().to_bits(), mass);
+    assert_eq!(flow.lattice().conversions(), conversions);
+
+    let cancelled = CancelGate::new_clock_free();
+    let result = flow.step_with_planar_wall_motion_and_gas_pressure_si(
+        PlanarWall3::ZMin,
+        [0.01, 0.0, 0.0],
+        1e-12,
+        &cancelled,
+        0.05,
+        |_| {
+            cancelled.request();
+            100_002.0
+        },
+    );
+    assert_eq!(
+        result,
+        Err(MaterialLbmError::FreeSurface(FreeSurfaceError3::Cancelled))
+    );
+    assert_eq!(flow.lattice().grid().state_bits(), bits);
+    assert_eq!(flow.ledger_mass_kg().unwrap().to_bits(), mass);
+    assert_eq!(flow.lattice().conversions(), conversions);
+    let mut ordinary = flow.clone();
+    let expected = ordinary
+        .step_with_planar_wall_motion_si(PlanarWall3::ZMin, [0.01, 0.0, 0.0], 1e-12, &gate)
+        .unwrap();
+    let actual = flow
+        .step_with_planar_wall_motion_and_gas_pressure_si(
+            PlanarWall3::ZMin,
+            [0.01, 0.0, 0.0],
+            1e-12,
+            &gate,
+            0.05,
+            |_| 100_000.0,
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        flow.lattice().grid().state_bits(),
+        ordinary.lattice().grid().state_bits()
+    );
 }
 
 #[test]

@@ -524,8 +524,52 @@ impl FreeSurface3 {
         maximum_relative_mass_defect: f64,
         gate: &CancelGate,
     ) -> Result<PlanarWallMotionReport3, FreeSurfaceError3> {
-        let (candidate, report) =
-            self.planar_wall_motion_candidate(wall, velocity, maximum_relative_mass_defect, gate)?;
+        let (candidate, report) = self.planar_wall_motion_candidate(
+            wall,
+            velocity,
+            maximum_relative_mass_defect,
+            gate,
+            None,
+        )?;
+        check_cancel(gate)?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    /// Advance prescribed gas loading and tangential wall motion together.
+    ///
+    /// `pressure` supplies the gas-pressure perturbation in lattice units at
+    /// exposed liquid cell coordinates, with the same frozen-field and combined
+    /// gas/capillary density bound as [`Self::step_with_gas_pressure`]. Both
+    /// boundaries act during ONE original collision/transport step. The actual
+    /// reflected populations supply wall impulse and velocity-dot-impulse work;
+    /// gas pressure is not an additional force or caloric heat source.
+    ///
+    /// The flooded-plane and tangent-only geometry limits of
+    /// [`Self::step_with_planar_wall_motion`] still apply. Pressure propagates
+    /// through the liquid dynamics; this is not an instantaneous pressure solve.
+    /// Zero gas perturbation preserves the ordinary moving-wall trajectory.
+    /// Gas evolution and its pressure-volume work are not computed here.
+    ///
+    /// # Errors
+    /// Refuses the ordinary moving-wall or gas-pressure gates, including late
+    /// native/cancellation failures, without publishing the candidate.
+    pub fn step_with_planar_wall_motion_and_gas_pressure(
+        &mut self,
+        wall: PlanarWall3,
+        velocity: [f64; 3],
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure: impl Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>,
+    ) -> Result<PlanarWallMotionReport3, FreeSurfaceError3> {
+        let (candidate, report) = self.planar_wall_motion_candidate(
+            wall,
+            velocity,
+            maximum_relative_mass_defect,
+            gate,
+            Some((maximum_density_excursion, &pressure)),
+        )?;
         check_cancel(gate)?;
         *self = candidate;
         Ok(report)
@@ -539,8 +583,12 @@ impl FreeSurface3 {
         velocity: [f64; 3],
         maximum_relative_mass_defect: f64,
         gate: &CancelGate,
+        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
     ) -> Result<(Self, PlanarWallMotionReport3), FreeSurfaceError3> {
         check_cancel(gate)?;
+        let gas_pressure = gas_pressure
+            .map(|(bound, field)| pressure::GasPressure3::new(bound, field))
+            .transpose()?;
         if velocity[wall.axis()] != 0.0 {
             return Err(refused(
                 None,
@@ -577,7 +625,13 @@ impl FreeSurface3 {
             impulse: [0.0; 3],
         };
         let mut candidate = self.clone();
-        candidate.step_inner_with_wall(gate, None, None, None, Some(&mut exchange))?;
+        candidate.step_inner_with_wall(
+            gate,
+            None,
+            None,
+            gas_pressure.as_ref(),
+            Some(&mut exchange),
+        )?;
         let (_, after_speed) = candidate.admit_planar_wall_state(wall, velocity, gate)?;
         let mass_after = candidate.ledger_mass();
         let relative_mass_defect = ((mass_after - mass_before) / mass_before).abs();

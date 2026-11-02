@@ -4556,6 +4556,24 @@ an absolute physical pressure. Tangential work is independent of that datum.
 The actuator is prescribed, with no finite-wall inertia, thermal deposition,
 kinetic-energy closure, moving-contact calibration or curved moving-body claim.
 
+`step_with_planar_wall_motion_and_gas_pressure` and its material
+`step_with_planar_wall_motion_and_gas_pressure_si` adapter combine that wall
+exchange with the original prescribed gas reconstruction in ONE private native
+candidate. The SI field uses the shared physical cell-center/Pascal conversion,
+requires an explicit fixed pressure reference, and admits the combined gas plus
+capillary density excursion. Applied gas load propagates through the actual
+liquid populations into the submerged wall reaction and velocity-dot-impulse
+work; no instantaneous pressure-force correction or second fluid step is added.
+Zero/reference-pressure loading preserves the ordinary moving-wall bits; zero
+wall velocity preserves the pressure-only step. Pressure refusal, late speed or
+mass failure, unrepresentable SI output and cancellation leave the whole
+accepted liquid state unchanged. The same tangent-only fixed geometry limits
+apply: this does not supply piston swept volume, an evolved gas chamber, gas
+pressure-volume energy, or an enthalpy moving-wall solve. Uniform loaded-state
+traction, raw SI/native parity, pressure propagation to actual wall reaction,
+gauge-invariant tangential work and late pressure rollback have four additional
+authored regressions; their native execution remains unverified.
+
 Five native regressions specify analytical six-plane shear impulse/work, true
 VOF motion, zero-motion bit parity, mechanical power reversal, inertial/relative
 speed admission and transactional early/late refusal. Three sourced-material
