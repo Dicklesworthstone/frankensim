@@ -945,6 +945,53 @@ molecular, finite-wall heat or network owners. Original chemistry method,
 splitting-error, source precision and unequal-caloric-contact limits remain;
 there is no general second-order, entropy-stability or combustion-validity claim.
 
+### Molecular stress and heat transport through a reacting inertial piston
+
+`ReactingEuler1d::step_with_piston_and_dissipation` evaluates the original
+`D(dt/2), C(dt/2), A(dt), C(dt/2), D(dt/2)` composition inside the shared
+midpoint-speed piston root. Every proposal restarts all five stages from the
+same accepted field at one duration and wall speed. The molecular stages use
+the old and moved physical widths/volumes, respectively; only the original
+extensive Euler A stage changes geometry and time. Chemical conversion,
+Maxwell--Stefan species enthalpies, Fourier/Soret/Dufour transport and the
+longitudinal Newtonian stress remain with their existing source owners.
+
+Both pressure and molecular wall stresses drive piston inertia. Molecular
+wall gradients use the candidate wall velocity, and the very same signed
+momentum flux supplies laboratory wall work `w*(-tau)` in total energy.
+`DissipationReport` now retains separate signed left/right conservative
+transfers, including network branch reports. The returned
+`PistonStep<ReactiveStepReport>` combines those impulses/work with the moving
+Euler pressure exchanges. Actual endpoint chemical gas energy, piston kinetic
+energy, fixed-left support impulse and exterior-pressure/additional-force work
+must satisfy the caller's original physical budgets before publication. No
+separate heat-release or viscous-heating source and no energy correction is added.
+
+The constant-area interval has an impermeable adiabatic fixed left wall and
+one impermeable adiabatic inertial right wall. Conduction and species diffusion
+act inside the gas; there is no conductive wall-reservoir heat to count as
+mechanical work. Finite wall storage, prescribed thermal end reservoirs,
+variable-area or multidimensional motion remain outside this entry.
+
+The molecular operator retains its accepted geometry separately from one
+fallibly allocated candidate mesh. Trial widths are refreshed for every
+stage, so a refused moved candidate cannot contaminate a later stationary
+step. A shortened acoustic duration restarts the complete composition and
+root. Gas, mesh, clock, piston and the molecular geometry binding publish
+together after final acceptance and cancellation polling. Source and molecular
+scratch are reused; no complete field is cloned per velocity proposal. The
+original stationary molecular entry still requires its exact accepted mesh.
+
+Four authored G1/G3/G4 regressions cover an independent one-cell RK2 viscous
+wall force/work oracle; reacting expansion with nonzero viscous load, physical
+energy/support balance and source-gauge changes; complete replay at the solved
+speed after acoustic shortening; and final cancellation after prior motion,
+scratch reuse and ordinary stationary continuation on the accepted geometry.
+They are unexecuted in this resource-limited session. Original parabolic,
+source, chemistry/splitting and unequal-caloric-contact limits remain; no
+experimental combustion, general second-order, entropy or FSI-stability claim
+is made.
+
 ## Characteristic compact-reservoir boundaries
 
 Frozen Euler `Boundary::Reservoir` retains a stationary conservative state in

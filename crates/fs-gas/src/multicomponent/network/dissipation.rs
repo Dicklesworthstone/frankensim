@@ -401,6 +401,8 @@ fn empty_report(n: usize) -> DissipationReport {
         before: zero,
         after: zero,
         boundary_change: zero,
+        left_boundary_change: zero,
+        right_boundary_change: zero,
         conservation_residual: zero,
         absolute_energy_residual_j: 0.0,
     }

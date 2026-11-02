@@ -28,6 +28,46 @@ pub(super) fn advance<L: TransportLaw>(
     controls: DissipationControl,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DissipationReport, DissipationError> {
+    advance_inner(owner, flow, duration, controls, None, cancelled)
+}
+
+pub(super) fn advance_moving<L: TransportLaw>(
+    owner: &mut DissipationOperator<L>,
+    flow: &mut MixtureEuler1d,
+    duration: Time,
+    controls: DissipationControl,
+    wall_velocity: [f64; 2],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<DissipationReport, DissipationError> {
+    if wall_velocity.iter().any(|v| !v.is_finite())
+        || flow.boundaries
+            != (Boundaries::Ends {
+                left: Boundary::Reflecting,
+                right: Boundary::Reflecting,
+            })
+    {
+        return Err(DissipationError::Invalid(
+            "molecular moving trial requires two finite impermeable wall speeds",
+        ));
+    }
+    advance_inner(
+        owner,
+        flow,
+        duration,
+        controls,
+        Some(wall_velocity),
+        cancelled,
+    )
+}
+
+fn advance_inner<L: TransportLaw>(
+    owner: &mut DissipationOperator<L>,
+    flow: &mut MixtureEuler1d,
+    duration: Time,
+    controls: DissipationControl,
+    wall_velocity: Option<[f64; 2]>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<DissipationReport, DissipationError> {
     poll(cancelled)?;
     controls.validate()?;
     if !duration.value().is_finite() || duration.value() < 0.0 {
@@ -35,8 +75,15 @@ pub(super) fn advance<L: TransportLaw>(
             "nonnegative finite molecular duration required",
         ));
     }
+    let geometry = if wall_velocity.is_some() {
+        owner.motion_mesh.as_ref().ok_or(DissipationError::Invalid(
+            "molecular motion was not admitted",
+        ))?
+    } else {
+        &owner.mesh
+    };
     if flow.gas != owner.gas
-        || flow.mesh != owner.mesh
+        || flow.mesh != *geometry
         || flow.boundaries != owner.boundaries
         || owner.law.source() != owner.gas.source()
     {
@@ -49,6 +96,8 @@ pub(super) fn advance<L: TransportLaw>(
     let before = totals(&flow.states, flow.mesh.volumes(), n, cancelled)?;
     let mut boundary = [0.0; MAX_COMPONENTS];
     let mut boundary_correction = [0.0; MAX_COMPONENTS];
+    let mut ends = [[0.0; MAX_COMPONENTS]; 2];
+    let mut end_corrections = [[0.0; MAX_COMPONENTS]; 2];
     let mut accepted_steps = 0;
     let mut rejected_steps = 0;
     let mut elapsed = 0.0;
@@ -59,6 +108,7 @@ pub(super) fn advance<L: TransportLaw>(
     let DissipationOperator {
         gas,
         mesh,
+        motion_mesh,
         boundaries,
         law,
         maxwell_stefan,
@@ -66,7 +116,30 @@ pub(super) fn advance<L: TransportLaw>(
         mass_ratio,
         work,
     } = owner;
+    let mesh: &Mesh1d = if wall_velocity.is_some() {
+        motion_mesh.as_ref().expect("admitted moving geometry")
+    } else {
+        mesh
+    };
     let area = mesh.face_areas()[0];
+    // Widths are scratch, not accepted geometry: even an aborted moving trial
+    // must not poison the next stationary update's gradients or parabolic bound.
+    for (i, width) in widths.iter_mut().enumerate() {
+        poll(cancelled)?;
+        *width = mesh.uniform_cell_width().map_or_else(
+            || mesh.positions()[i + 1] - mesh.positions()[i],
+            |w| w.value(),
+        );
+        let expected = area * *width;
+        if !positive(expected)
+            || (mesh.volumes()[i] - expected).abs()
+                > 64.0 * f64::EPSILON * expected.max(mesh.volumes()[i])
+        {
+            return Err(DissipationError::Invalid(
+                "molecular trial volume differs from area times physical width",
+            ));
+        }
+    }
     while elapsed < duration.value() {
         poll(cancelled)?;
         let remaining = duration.value() - elapsed;
@@ -82,7 +155,7 @@ pub(super) fn advance<L: TransportLaw>(
                     rejected_steps,
                 });
             }
-            let a = spatial(
+            let a = spatial_with_wall_motion(
                 gas,
                 mesh,
                 *boundaries,
@@ -98,6 +171,7 @@ pub(super) fn advance<L: TransportLaw>(
                 &mut work.binary_diffusivities,
                 &mut work.diffusion,
                 controls.diffusion,
+                wall_velocity.unwrap_or([0.0; 2]),
                 cancelled,
             )?;
             if a.rate > 0.0 {
@@ -123,7 +197,7 @@ pub(super) fn advance<L: TransportLaw>(
                     &mut work.stage,
                     cancelled,
                 )?;
-                let b = spatial(
+                let b = spatial_with_wall_motion(
                     gas,
                     mesh,
                     *boundaries,
@@ -139,6 +213,7 @@ pub(super) fn advance<L: TransportLaw>(
                     &mut work.binary_diffusivities,
                     &mut work.diffusion,
                     controls.diffusion,
+                    wall_velocity.unwrap_or([0.0; 2]),
                     cancelled,
                 )?;
                 let number = step * a.rate.max(b.rate);
@@ -179,6 +254,18 @@ pub(super) fn advance<L: TransportLaw>(
                         let next = boundary[k] + y;
                         boundary_correction[k] = (next - boundary[k]) - y;
                         boundary[k] = next;
+                        for (end, transfer) in [
+                            0.5 * step * area * (a.left[k] + b.left[k]),
+                            -0.5 * step * area * (a.right[k] + b.right[k]),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            let y = transfer - end_corrections[end][k];
+                            let next = ends[end][k] + y;
+                            end_corrections[end][k] = (next - ends[end][k]) - y;
+                            ends[end][k] = next;
+                        }
                     }
                     maximum_parabolic = maximum_parabolic.max(step * a.rate.max(b.rate));
                     maximum_gradient_residual = maximum_gradient_residual
@@ -223,6 +310,8 @@ pub(super) fn advance<L: TransportLaw>(
     if !boundary[..m]
         .iter()
         .chain(&residual[..m])
+        .chain(&ends[0][..m])
+        .chain(&ends[1][..m])
         .all(|x| x.is_finite())
         || !absolute_energy_residual.is_finite()
     {
@@ -243,6 +332,8 @@ pub(super) fn advance<L: TransportLaw>(
         before,
         after,
         boundary_change: Totals::from_values(&boundary[..m], n),
+        left_boundary_change: Totals::from_values(&ends[0][..m], n),
+        right_boundary_change: Totals::from_values(&ends[1][..m], n),
         conservation_residual: Totals::from_values(&residual[..m], n),
         absolute_energy_residual_j: absolute_energy_residual,
     })
@@ -293,6 +384,47 @@ pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
     binary: &mut [f64],
     diffusion_workspace: &mut MaxwellStefanWorkspaceV1,
     controls: MaxwellStefanSolveV1,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, DissipationError> {
+    spatial_with_wall_motion(
+        gas,
+        mesh,
+        boundaries,
+        widths,
+        mass_ratio,
+        law,
+        diffusion,
+        states,
+        primitive,
+        cv,
+        faces,
+        face_rates,
+        binary,
+        diffusion_workspace,
+        controls,
+        [0.0; 2],
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spatial_with_wall_motion<L: TransportLaw>(
+    gas: &MixtureGas,
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    widths: &[f64],
+    mass_ratio: f64,
+    law: &mut L,
+    diffusion: &MaxwellStefanV1,
+    states: &[f64],
+    primitive: &mut [Primitive],
+    cv: &mut [f64],
+    faces: &mut [f64],
+    face_rates: &mut [f64],
+    binary: &mut [f64],
+    diffusion_workspace: &mut MaxwellStefanWorkspaceV1,
+    controls: MaxwellStefanSolveV1,
+    wall_velocity: [f64; 2],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, DissipationError> {
     let n = gas.species_count();
@@ -379,6 +511,7 @@ pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
                     primitive[0],
                     0.5 * widths[0],
                     true,
+                    wall_velocity[0],
                     binary,
                     &mut faces[..m],
                     cancelled,
@@ -392,6 +525,7 @@ pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
                     primitive[count - 1],
                     0.5 * widths[count - 1],
                     false,
+                    wall_velocity[1],
                     binary,
                     &mut faces[count * m..(count + 1) * m],
                     cancelled,
@@ -509,15 +643,16 @@ fn wall_face<L: TransportLaw>(
     p: Primitive,
     distance: f64,
     left: bool,
+    wall_velocity: f64,
     binary: &mut [f64],
     out: &mut [f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, DissipationError> {
     let n = gas.species_count();
     let gradient = if left {
-        p.velocity / distance
+        (p.velocity - wall_velocity) / distance
     } else {
-        -p.velocity / distance
+        (wall_velocity - p.velocity) / distance
     };
     let evaluated = super::face::wall::<false, L>(
         gas,
@@ -534,8 +669,15 @@ fn wall_face<L: TransportLaw>(
         out,
         cancelled,
     )?;
+    // The laboratory total-energy flux carries the SAME stress evaluated
+    // above times the moving wall's speed. No additional viscous heat source.
+    out[n + 1] = if wall_velocity == 0.0 {
+        0.0
+    } else {
+        wall_velocity * out[n]
+    };
     let rate = evaluated.diffusivity_m2_s / distance;
-    if !rate.is_finite() {
+    if !rate.is_finite() || !out[n + 1].is_finite() {
         return Err(DissipationError::Invalid("wall traction overflow"));
     }
     Ok(rate)

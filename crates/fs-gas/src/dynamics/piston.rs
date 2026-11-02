@@ -192,7 +192,8 @@ pub struct PistonStep<R = StepReport> {
     pub midpoint_velocity_m_s: f64,
     /// Actual represented displacement of the mesh's right endpoint [m].
     pub displacement_m: f64,
-    /// Accepted two-stage pressure impulse ON the piston [N s].
+    /// Accepted gas impulse ON the piston [N s]: pressure plus any molecular
+    /// wall stress explicitly included by the composing owner.
     pub gas_impulse_n_s: f64,
     /// Opposite of the left-face impulse on the gas, delivered to its fixed
     /// support [N s]. This reaction does no work but carries momentum.
@@ -216,7 +217,7 @@ pub struct PistonStep<R = StepReport> {
     pub total_energy_residual_j: f64,
     /// Interior scalar proposals in the accepted coupled attempt.
     pub iterations: usize,
-    /// All original spatial gas proposals, including rejected attempts.
+    /// All coupled gas proposals, including rejected attempts.
     pub gas_trials: usize,
 }
 
@@ -392,12 +393,12 @@ impl Euler1d {
 // Only the source-neutral mechanical exchange crosses the two field owners.
 // Their native reports and complete species/reference axes remain untouched.
 pub(crate) struct MechanicalExchange {
-    duration_s: f64,
-    momentum_change: f64,
-    energy_change: f64,
-    left_impulse: f64,
-    right_impulse: f64,
-    right_work: f64,
+    pub(crate) duration_s: f64,
+    pub(crate) momentum_change: f64,
+    pub(crate) energy_change: f64,
+    pub(crate) left_impulse: f64,
+    pub(crate) right_impulse: f64,
+    pub(crate) right_work: f64,
 }
 
 impl From<&StepReport> for MechanicalExchange {
@@ -492,12 +493,12 @@ pub(crate) fn mechanical_report<R>(
     })
 }
 
-pub(crate) fn solve<R>(
+pub(crate) fn solve<R, E: From<PistonError>>(
     initial: f64,
     controls: PistonControl,
-    mut trial: impl FnMut(f64) -> Result<PistonStep<R>, PistonError>,
-) -> Result<PistonStep<R>, PistonError> {
-    let mut evaluate = |speed| {
+    mut trial: impl FnMut(f64) -> Result<PistonStep<R>, E>,
+) -> Result<PistonStep<R>, E> {
+    let mut evaluate = |speed| -> Result<PistonStep<R>, E> {
         let value = trial(speed)?;
         if value.momentum_residual_n_s == 0.0 && !value.admitted(controls) {
             return Err(PistonError::Balance {
@@ -506,7 +507,8 @@ pub(crate) fn solve<R>(
                     .mechanical_energy_residual_j
                     .abs()
                     .max(value.total_energy_residual_j.abs()),
-            });
+            }
+            .into());
         }
         Ok(value)
     };
@@ -529,7 +531,8 @@ pub(crate) fn solve<R>(
         return Err(PistonError::OutsideBracket {
             lower_impulse_n_s: flo,
             upper_impulse_n_s: fhi,
-        });
+        }
+        .into());
     }
     if initial > lo && initial < hi {
         if current.momentum_residual_n_s.is_sign_positive() == flo.is_sign_positive() {
@@ -559,7 +562,8 @@ pub(crate) fn solve<R>(
             return Err(PistonError::NotConverged {
                 iterations: iterations - 1,
                 impulse_residual_n_s: residual,
-            });
+            }
+            .into());
         }
         let mut value = evaluate(speed)?;
         residual = value.momentum_residual_n_s;
@@ -578,7 +582,8 @@ pub(crate) fn solve<R>(
     Err(PistonError::NotConverged {
         iterations: controls.maximum_iterations,
         impulse_residual_n_s: residual,
-    })
+    }
+    .into())
 }
 
 #[cfg(test)]

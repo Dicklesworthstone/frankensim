@@ -110,7 +110,7 @@ impl Mesh1d {
         self.positions[i + 1] - self.positions[i]
     }
 
-    pub(super) fn try_copy(&self) -> Result<Self, Error> {
+    pub(crate) fn try_copy(&self) -> Result<Self, Error> {
         let mut positions = allocated(self.positions.len(), 0.0)?;
         let mut areas = allocated(self.areas.len(), 0.0)?;
         let mut volumes = allocated(self.volumes.len(), 0.0)?;

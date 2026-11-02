@@ -247,6 +247,14 @@ pub(super) fn advance<L: TransportLaw>(
             before: branch_before,
             after: branch_after,
             boundary_change: Totals::from_values(&boundary[..m], n),
+            left_boundary_change: Totals::from_values(
+                &owner.work.endpoint_changes[2 * index * m..(2 * index + 1) * m],
+                n,
+            ),
+            right_boundary_change: Totals::from_values(
+                &owner.work.endpoint_changes[(2 * index + 1) * m..(2 * index + 2) * m],
+                n,
+            ),
             conservation_residual: Totals::from_values(&residual[..m], n),
             absolute_energy_residual_j: absolute_energy,
         };

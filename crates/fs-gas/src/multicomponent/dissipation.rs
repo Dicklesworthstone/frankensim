@@ -1,4 +1,4 @@
-//! Conservative molecular transport on a stationary constant-area gas mesh.
+//! Conservative molecular transport on a constant-area gas mesh.
 //!
 //! Maxwell--Stefan species fluxes use the mass-averaged frame. Their original
 //! partial enthalpies accompany diffusion; Fourier heat conduction and Newtonian
@@ -101,6 +101,10 @@ pub struct DissipationReport {
     pub after: Totals,
     /// Time/area-integrated left inflow minus right outflow.
     pub boundary_change: Totals,
+    /// Signed conservative transfer into the gas through its left end.
+    pub left_boundary_change: Totals,
+    /// Signed conservative transfer into the gas through its right end.
+    pub right_boundary_change: Totals,
     /// `after - before - boundary_change` for every conservative component.
     pub conservation_residual: Totals,
     /// Physical total-energy balance including original species references [J].
@@ -198,6 +202,9 @@ struct Workspace {
 pub struct DissipationOperator<L: TransportLaw> {
     gas: MixtureGas,
     mesh: Mesh1d,
+    // A composing piston owner prepares this private mesh, then swaps it only
+    // after the entire molecular/chemical/mechanical transaction is accepted.
+    motion_mesh: Option<Mesh1d>,
     boundaries: Boundaries,
     law: L,
     maxwell_stefan: MaxwellStefanV1,
@@ -274,6 +281,7 @@ impl<L: TransportLaw> DissipationOperator<L> {
         Ok(Self {
             gas: flow.gas().clone(),
             mesh: flow.mesh().clone(),
+            motion_mesh: None,
             boundaries: flow.boundaries,
             law,
             maxwell_stefan,
@@ -291,7 +299,64 @@ impl<L: TransportLaw> DissipationOperator<L> {
         &self.law
     }
 
-    /// Advance the entire requested duration without advancing the flow clock.
+    /// Accepted physical geometry. Trial motion never changes this binding.
+    pub const fn mesh(&self) -> &Mesh1d {
+        &self.mesh
+    }
+
+    pub(in crate::multicomponent) fn admit_motion(
+        &mut self,
+        flow: &MixtureEuler1d,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
+        poll(cancelled)?;
+        if flow.gas != self.gas
+            || flow.mesh != self.mesh
+            || flow.boundaries != self.boundaries
+            || self.law.source() != self.gas.source()
+        {
+            return Err(DissipationError::Invalid(
+                "molecular operator and accepted moving flow ownership differ",
+            ));
+        }
+        if self.motion_mesh.is_none() {
+            self.motion_mesh = Some(
+                self.mesh
+                    .try_copy()
+                    .map_err(super::moving::geometry_error)?,
+            );
+        }
+        Ok(())
+    }
+
+    pub(in crate::multicomponent) fn advance_moving_trial(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: DissipationControl,
+        wall_velocity_m_s: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DissipationReport, DissipationError> {
+        self.motion_mesh
+            .as_mut()
+            .ok_or(DissipationError::Invalid(
+                "molecular motion was not admitted",
+            ))?
+            .reset_motion_from(flow.mesh(), cancelled)
+            .map_err(super::moving::geometry_error)?;
+        evolve::advance_moving(self, flow, duration, controls, wall_velocity_m_s, cancelled)
+    }
+
+    pub(in crate::multicomponent) fn publish_motion(&mut self) {
+        core::mem::swap(
+            &mut self.mesh,
+            self.motion_mesh
+                .as_mut()
+                .expect("completed molecular motion"),
+        );
+    }
+
+/// Advance the entire requested duration without advancing the flow clock.
     ///
     /// SSP RK2 uses actual-state molecular coefficients and a parabolic scale
     /// estimate at both stages. Failed stages halve the step instead of clipping

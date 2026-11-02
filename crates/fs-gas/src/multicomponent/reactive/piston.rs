@@ -8,6 +8,8 @@ use crate::dynamics::piston::{Piston, PistonControl, PistonError, PistonLoad, Pi
 use crate::multicomponent::{Boundaries, Boundary};
 use fs_qty::Time;
 
+mod molecular;
+
 /// One atomic chemistry/pressure-wave/piston step on moving physical volumes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReactivePistonStep {
