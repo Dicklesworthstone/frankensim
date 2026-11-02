@@ -4,7 +4,9 @@
 //! Finite-body full-inertia response is retained, but poses, contact points,
 //! normal load, material parameters and frequency are frozen for the window.
 //! This is a contact-momentum trajectory, not a moving-geometry trajectory.
-//! There is no external force or normal impulse in this owner.
+//! Held external forces and body torques may drive the same continuous path;
+//! their work stays separate from physical surface and bulk heat. There is no
+//! normal impulse or geometric acceleration in this owner.
 //!
 //! During slip the original Hertz pure-translation force is `-mu_k*N*sign(u)`.
 //! Rolling obeys the original material torque at every instant. An actual zero
@@ -25,7 +27,7 @@ use crate::tangential_friction::rolling::RigidRollingHistory;
 use crate::tangential_friction::{
     RigidContactBinding, RigidFrictionError, magnitude, poll, totals,
 };
-use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
+use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3, Wrench};
 use fs_exec::CancelGate;
 use fs_math::det;
 use fs_tribo::partial_slip::TangentFrame;
@@ -34,6 +36,9 @@ use fs_tribo::rolling_loss::viscoelastic::path::{
 };
 use fs_tribo::sliding_patch::contact::HertzWrenchContact;
 
+mod driven;
+use driven::HeldDrive;
+
 #[derive(Clone, Debug, PartialEq)]
 struct StoppedCheckpoint {
     bodies: [RigidBodyState; 2],
@@ -41,6 +46,7 @@ struct StoppedCheckpoint {
     body_indices: [usize; 2],
     arms_body: [Vec3; 2],
     frame: TangentFrame,
+    departure: Option<driven::Departure>,
 }
 
 /// Original material history plus an opaque, physically located shear-stop
@@ -124,6 +130,8 @@ pub struct RigidHertzRollingCollinearPhase {
     pub duration_s: f64,
     pub mode: RigidHertzRollingCollinearMode,
     pub reached_stop: bool,
+    /// The required static reaction reached its capacity while shear was zero.
+    pub reached_static_limit: bool,
     pub root_iterations: usize,
     pub root_bracket_s: f64,
     pub shear_velocity_before_m_s: f64,
@@ -137,6 +145,8 @@ pub struct RigidHertzRollingCollinearPhase {
     pub maximum_shear_force_n: f64,
     pub surface_heat_j: f64,
     pub bulk_heat_j: f64,
+    /// Actual continuous held-wrench work, including complementary body motion.
+    pub external_work_j: f64,
     pub native_shear_velocity_after_m_s: f64,
     pub native_rolling_rate_after_rad_s: f64,
     pub maximum_velocity_residual_m_s: f64,
@@ -153,8 +163,10 @@ pub struct RigidHertzRollingCollinearReport {
     pub rolling_excitation_frequency_hz: f64,
     pub duration_s: f64,
     pub scaled_mobility_per_kg: [[f64; 2]; 2],
+    pub driving_acceleration_m_s2: [f64; 2],
     pub surface_heat_j: f64,
     pub bulk_heat_j: f64,
+    pub external_work_j: f64,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
     pub total_energy_residual_j: f64,
@@ -163,6 +175,10 @@ pub struct RigidHertzRollingCollinearReport {
     pub rolling_angular_impulse_world_nms: Vec3,
     pub linear_momentum_change_ns: Vec3,
     pub angular_momentum_change_nms: Vec3,
+    pub external_linear_impulse_ns: Vec3,
+    pub external_angular_impulse_nms: Vec3,
+    pub linear_momentum_residual_ns: Vec3,
+    pub angular_momentum_residual_nms: Vec3,
     pub maximum_velocity_residual_m_s: f64,
 }
 
@@ -181,6 +197,7 @@ pub struct PreparedRigidHertzRollingCollinear<'a> {
     controls: RigidHertzRollingCollinearControls,
     response: [[f64; 2]; 2],
     gamma: f64,
+    drive: HeldDrive,
 }
 
 #[derive(Debug)]
@@ -240,6 +257,34 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
         properties: &[MassProperties],
         history: &RigidHertzRollingCollinearHistory,
         contact: RigidHertzRollingContact<'a>,
+        dt_s: f64,
+        controls: RigidHertzRollingCollinearControls,
+        gate: &CancelGate,
+    ) -> Result<Self, RigidHertzRollingCollinearError> {
+        Self::new_driven(
+            bodies,
+            properties,
+            history,
+            contact,
+            [Wrench::ZERO; 2],
+            dt_s,
+            controls,
+            gate,
+        )
+    }
+
+    /// Prepare a continuously driven phase on the original frozen body pair.
+    /// Wrenches follow contact A/B order: forces are world-frame, torques are
+    /// body-frame. Their relative acceleration must preserve the same admitted
+    /// longitudinal/rolling subspace; common-body motion remains unrestricted.
+    /// A pre-kick is not used to select friction or account for external work.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_driven(
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        history: &RigidHertzRollingCollinearHistory,
+        contact: RigidHertzRollingContact<'a>,
+        external: [Wrench; 2],
         dt_s: f64,
         controls: RigidHertzRollingCollinearControls,
         gate: &CancelGate,
@@ -327,6 +372,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
         {
             return Err(invalid("original material rolling damping underflow"));
         }
+        let drive = HeldDrive::new(&pair, response, external)?;
         poll(gate)?;
         Ok(Self {
             pair,
@@ -334,6 +380,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             controls,
             response,
             gamma,
+            drive,
         })
     }
     #[must_use]
@@ -390,11 +437,13 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
         let static_capacity = finite(parameters.static_mu * parameters.normal_force_n)?;
         let kinetic_capacity = finite(parameters.kinetic_mu * parameters.normal_force_n)?;
         let [[a, b], [_b, c]] = self.response;
+        let [drive_u, drive_r] = self.drive.acceleration;
         let dt = self.duration_s();
         let radius = self.pair.radius_m;
         let mut current = self.pair.core.before;
         let mut rolling_history = self.history.rolling.clone();
         let mut stopped = self.history.is_stopped() || self.pair.rate_before[0] == 0.0;
+        let mut departure = self.retained_departure(static_capacity);
         let mut elapsed = 0.0;
         let mut phases = Vec::new();
         let mut total_shear_impulse = 0.0;
@@ -410,19 +459,36 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             let native_rates = rates(p, self.pair.core.axes, self.contact_radius_m(), radius);
             let u = if stopped { 0.0 } else { native_rates[0] };
             let r = native_rates[4];
-            let required_static = finite((b / a) * self.gamma * r)?;
-            let sticking = stopped && required_static.abs() <= static_capacity;
+            let required_static = finite((b * self.gamma * r - drive_u) / a)?;
+            let mut sticking =
+                stopped && required_static.abs() <= static_capacity && departure.is_none();
+            let mut static_exit = if sticking && self.drive.acceleration != [0.0; 2] {
+                self.first_static_exit(r, static_capacity, remaining, gate)?
+            } else {
+                None
+            };
+            if let Some(exit) = &static_exit {
+                if exit.root.time == 0.0 {
+                    sticking = false;
+                    departure = Some(exit.sign);
+                    static_exit = None;
+                }
+            }
             let sign = if u != 0.0 {
                 u.signum()
             } else {
-                (-b * self.gamma * r).signum()
+                departure.unwrap_or((drive_u - b * self.gamma * r).signum())
             };
             let force = if sticking {
                 0.0
             } else {
                 -kinetic_capacity * sign
             };
-            let drive = if sticking { 0.0 } else { b * force };
+            let drive = if sticking {
+                drive_r - (b / a) * drive_u
+            } else {
+                b * force + drive_r
+            };
             let decay = if sticking {
                 self.gamma * (c - b * (b / a))
             } else {
@@ -437,10 +503,15 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             };
             let stop = if sticking {
                 None
+            } else if self.drive.acceleration != [0.0; 2] {
+                self.first_driven_stop(u, r, force, sign, remaining, gate)?
             } else {
                 self.first_stop(u, r, force, sign, remaining, gate)?
             };
-            let duration = stop.as_ref().map_or(remaining, |root| root.time);
+            let event = stop
+                .as_ref()
+                .or_else(|| static_exit.as_ref().map(|exit| &exit.root));
+            let duration = event.map_or(remaining, |root| root.time);
             if !duration.is_finite() || duration <= 0.0 || elapsed + duration <= elapsed {
                 return Err(RigidHertzRollingCollinearError::NoProgress);
             }
@@ -462,20 +533,23 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             )?;
             let (shear_impulse, travel, shear_after, maximum_force) = if sticking {
                 (
-                    finite((b / a) * self.gamma * path.rate_integral())?,
+                    finite(((b * self.gamma) * path.rate_integral() - drive_u * duration) / a)?,
                     0.0,
                     0.0,
-                    required_static.abs(),
+                    required_static
+                        .abs()
+                        .max(((b * self.gamma * path.endpoint_rate() - drive_u) / a).abs()),
                 )
             } else {
                 (
                     finite(force * duration)?,
                     finite((-b * self.gamma).mul_add(
                         path.integrated_displacement(),
-                        u * duration + 0.5 * a * force * duration * duration,
+                        u * duration + 0.5 * (a * force + drive_u) * duration * duration,
                     ))?,
                     finite(
-                        (-b * self.gamma).mul_add(path.rate_integral(), u + a * force * duration),
+                        (-b * self.gamma)
+                            .mul_add(path.rate_integral(), u + (a * force + drive_u) * duration),
                     )?,
                     force.abs(),
                 )
@@ -502,7 +576,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             }
             let impulse = self.pair.core.axes[0].scale(shear_impulse);
             let couple = self.pair.core.axes[1].scale(rolling.rolling_moment_impulse_nms);
-            let after = apply_pair_wrench(
+            let friction_after = apply_pair_wrench(
                 current,
                 self.pair.core.pair_properties,
                 self.pair.core.arms,
@@ -510,6 +584,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
                 couple,
                 gate,
             )?;
+            let after = self.drive.apply(friction_after, duration)?;
             let after_points = points(after, self.pair.core.pair_properties, self.pair.core.arms)?;
             let after_rates = rates(
                 after_points,
@@ -539,13 +614,21 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             let energy_before = totals(&current, &self.pair.core.pair_properties, gate)?.0;
             let energy_after = totals(&after, &self.pair.core.pair_properties, gate)?.0;
             let bulk_heat = rolling.rolling.dissipation.total_heat_j;
+            let external_work = self.drive.work(
+                current,
+                self.pair.core.pair_properties,
+                duration,
+                [u, r],
+                [travel, path.rate_integral()],
+            )?;
             let phase = RigidHertzRollingCollinearPhase {
                 start_time_s: elapsed,
                 duration_s: duration,
                 mode,
                 reached_stop: stop.is_some(),
-                root_iterations: stop.as_ref().map_or(0, |s| s.iterations),
-                root_bracket_s: stop.as_ref().map_or(0.0, |s| s.bracket),
+                reached_static_limit: static_exit.is_some(),
+                root_iterations: event.map_or(0, |s| s.iterations),
+                root_bracket_s: event.map_or(0.0, |s| s.bracket),
                 shear_velocity_before_m_s: u,
                 shear_velocity_after_m_s: shear_after,
                 rolling_rate_before_rad_s: r / radius,
@@ -557,11 +640,13 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
                 maximum_shear_force_n: maximum_force,
                 surface_heat_j: surface_heat,
                 bulk_heat_j: bulk_heat,
+                external_work_j: external_work,
                 native_shear_velocity_after_m_s: after_rates[0],
                 native_rolling_rate_after_rad_s: after_rates[4] / radius,
                 maximum_velocity_residual_m_s: velocity_residual,
                 kinetic_energy_change_j: energy_after - energy_before,
-                energy_residual_j: energy_after - energy_before + surface_heat + bulk_heat,
+                energy_residual_j: energy_after - energy_before + surface_heat + bulk_heat
+                    - external_work,
                 rolling,
             };
             if !phase.energy_residual_j.is_finite()
@@ -577,6 +662,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             }
             rolling_history = RigidRollingHistory::from_native_step(&phase.rolling.rolling);
             stopped = sticking || phase.reached_stop;
+            departure = static_exit.map(|exit| exit.sign);
             total_shear_impulse = finite(total_shear_impulse + shear_impulse)?;
             total_rolling_impulse =
                 finite(total_rolling_impulse + phase.rolling_moment_impulse_nms)?;
@@ -592,7 +678,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
         // intermediate states exist only for path/domain/event verification.
         let impulse = self.pair.core.axes[0].scale(total_shear_impulse);
         let couple = self.pair.core.axes[1].scale(total_rolling_impulse);
-        let after = apply_pair_wrench(
+        let friction_after = apply_pair_wrench(
             self.pair.core.before,
             self.pair.core.pair_properties,
             self.pair.core.arms,
@@ -600,6 +686,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             couple,
             gate,
         )?;
+        let after = self.drive.apply(friction_after, dt)?;
         let before_totals = self.pair.core.totals_before;
         let after_totals = totals(&after, &self.pair.core.pair_properties, gate)?;
         let final_points = points(after, self.pair.core.pair_properties, self.pair.core.arms)?;
@@ -644,6 +731,10 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
         }
         let surface_heat = phases.iter().map(|p| p.surface_heat_j).sum::<f64>();
         let bulk_heat = phases.iter().map(|p| p.bulk_heat_j).sum::<f64>();
+        let external_work = phases.iter().map(|p| p.external_work_j).sum::<f64>();
+        let (external_linear, external_angular) = self.drive.impulses(self.pair.core.before, dt);
+        let linear_change = after_totals.1.sub(before_totals.1);
+        let angular_change = after_totals.2.sub(before_totals.2);
         let maximum_residual = phases
             .iter()
             .map(|p| p.maximum_velocity_residual_m_s)
@@ -655,18 +746,25 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             rolling_excitation_frequency_hz: self.pair.contact.excitation_frequency_hz,
             duration_s: dt,
             scaled_mobility_per_kg: self.response,
+            driving_acceleration_m_s2: self.drive.acceleration,
             surface_heat_j: surface_heat,
             bulk_heat_j: bulk_heat,
+            external_work_j: external_work,
             kinetic_before_j: before_totals.0,
             kinetic_after_j: after_totals.0,
-            total_energy_residual_j: after_totals.0 - before_totals.0 + surface_heat + bulk_heat,
+            total_energy_residual_j: after_totals.0 - before_totals.0 + surface_heat + bulk_heat
+                - external_work,
             history_heat_residual_j: rolling_history.state().cumulative_heat_j()
                 - self.history.rolling.state().cumulative_heat_j()
                 - bulk_heat,
             force_impulse_world_ns: impulse,
             rolling_angular_impulse_world_nms: couple,
-            linear_momentum_change_ns: after_totals.1.sub(before_totals.1),
-            angular_momentum_change_nms: after_totals.2.sub(before_totals.2),
+            linear_momentum_change_ns: linear_change,
+            angular_momentum_change_nms: angular_change,
+            external_linear_impulse_ns: external_linear,
+            external_angular_impulse_nms: external_angular,
+            linear_momentum_residual_ns: linear_change.sub(external_linear),
+            angular_momentum_residual_nms: angular_change.sub(external_angular),
             maximum_velocity_residual_m_s: maximum_residual,
         };
         if [
@@ -675,8 +773,10 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
         ]
         .into_iter()
         .any(|v| !v.is_finite() || v.abs() > m.energy_tolerance_j)
-            || magnitude(report.linear_momentum_change_ns) > m.linear_momentum_tolerance_ns
-            || magnitude(report.angular_momentum_change_nms) > m.angular_momentum_tolerance_nms
+            || !report.linear_momentum_residual_ns.is_finite()
+            || !report.angular_momentum_residual_nms.is_finite()
+            || magnitude(report.linear_momentum_residual_ns) > m.linear_momentum_tolerance_ns
+            || magnitude(report.angular_momentum_residual_nms) > m.angular_momentum_tolerance_nms
         {
             return Err(RigidHertzRollingCollinearError::Audit(Box::new(report)));
         }
@@ -688,6 +788,7 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
                 body_indices: [self.binding().body_a, self.binding().body_b],
                 arms_body: [self.binding().arm_a_body, self.binding().arm_b_body],
                 frame: self.pair.contact.frame,
+                departure: departure.map(|sign| self.departure(static_capacity, sign)),
             }),
         };
         poll(gate)?;
@@ -707,10 +808,13 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
         gate: &CancelGate,
     ) -> Result<(f64, f64, f64), RigidHertzRollingCollinearError> {
         let [[a, b], [_b, c]] = self.response;
-        let path =
-            ExponentialRatePath::new(r, b * force, self.gamma * c, t, || gate.is_requested())?;
-        let arithmetic_scale =
-            u.abs() + (a * force * t).abs() + (b * self.gamma * path.rate_integral()).abs();
+        let [drive_u, drive_r] = self.drive.acceleration;
+        let path = ExponentialRatePath::new(r, b * force + drive_r, self.gamma * c, t, || {
+            gate.is_requested()
+        })?;
+        let arithmetic_scale = u.abs()
+            + ((a * force + drive_u) * t).abs()
+            + (b * self.gamma * path.rate_integral()).abs();
         let root_tolerance = self
             .controls
             .mechanical
@@ -718,8 +822,8 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             .velocity_tolerance_m_s
             .min(128.0 * f64::EPSILON * arithmetic_scale);
         Ok((
-            finite((-b * self.gamma).mul_add(path.rate_integral(), u + a * force * t))?,
-            finite(a * force - b * self.gamma * path.endpoint_rate())?,
+            finite((-b * self.gamma).mul_add(path.rate_integral(), u + (a * force + drive_u) * t))?,
+            finite(a * force + drive_u - b * self.gamma * path.endpoint_rate())?,
             root_tolerance,
         ))
     }

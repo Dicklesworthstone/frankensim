@@ -2984,7 +2984,7 @@ failure returns no partial body, stop marker or material history. Work is
 bounded by at most 4096 phases and 256 root iterations per event.
 
 This owner holds poses, contact points, normal load, radius, material card and
-frequency over the window. It supplies no external forcing, normal impulse or
+frequency over the window. It supplies no normal impulse or
 normal elastic storage, moving geometry, general shear/spin event trajectory
 or simultaneous-island stopping path. Thermal trial owners may refresh admitted
 coefficients while reusing the same immutable geometry. Seven G1/G3 groups in
@@ -2999,6 +2999,37 @@ compensated positive `log(1+x)` evaluation, retaining weak departures without
 platform libm. The reversal regression continues through the second physical
 arrest and subsequent sticking, checking both stopping times against an
 independent scalar exponential/bisection reference and continued bulk loss.
+
+`PreparedRigidHertzRollingCollinear::new_driven` retains that same constitutive
+path under explicit held world forces and body torques on the original pair.
+Native inverse mass and full inertia determine the two driving accelerations;
+relative acceleration outside the admitted shear/rolling subspace refuses.
+Common translation and rotation retain their own body response and work.
+With drive `[d_u,d_r]`, sliding uses `u'=a*F-b*gamma*r+d_u` and
+`r'=b*F-c*gamma*r+d_r`. During sticking the actual required reaction is
+`F_static=(b*gamma*r-d_u)/a`; the original exponential path locates its first
+static-capacity exit and starts kinetic motion in the outgoing direction.
+A zero-slip departure marker remains tied to the accepted native state and
+the same held drive, capacity and material damping. Changing those inputs
+re-evaluates static admission. No momentum is projected to manufacture rest.
+
+Driven stop searches split at the single possible velocity extremum, exposing
+an interior stop even when the unresolved interval endpoints have the same
+sign. They retain arithmetic-scaled local velocity residuals and the existing
+total root-iteration budget. The zero-viscosity limit uses its exact linear
+stop, and the original undriven constructor keeps its existing event path.
+Full-body external work is integrated through the contact/complementary
+mass-metric decomposition. Independent native energy and world momentum
+checks subtract that work and the commanded external impulses; neither common
+acceleration nor actuator work becomes friction heat. Surface friction and
+the original material-owned rolling bulk heat stay separate.
+
+Five driven integration groups add independent constant-acceleration force,
+torque and heat references; hidden interior arrest; motor-driven static exit
+with split continuation; common-acceleration heat invariance; and tiny-slip
+and equal-static/kinetic departure boundaries. They also exercise incompatible
+drive and cancellation refusal. These remain held-geometry contact-momentum
+trajectories, without gyroscopic or changing-contact geometric acceleration.
 
 ### Frictional impacts with closed rigid distance linkages
 

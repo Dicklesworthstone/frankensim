@@ -16,6 +16,9 @@ use fs_tribo::{
     ApplicabilityRange, HertzSpherePlane, InputAuthority, InterfaceMedium, InterfaceSystemRef,
 };
 
+#[path = "hertz_rolling_collinear/driven.rs"]
+mod driven;
+
 const R: f64 = 0.1;
 const L: f64 = 0.06;
 fn close(a: f64, b: f64, tol: f64) {
