@@ -115,6 +115,7 @@ pub struct SqueezeFilmHeatRoute {
 struct FilmRoute {
     film: usize, channel: Option<usize>, a: usize, b: usize, fraction: f64,
     layers: Option<LayerHeatRoute>,
+    sliding_layers: Option<Vec<usize>>,
 }
 
 /// Explicit destinations for ONE hydraulic passage's actual viscous work.
@@ -316,7 +317,7 @@ impl<'a> HeatedImpactSystem<'a> {
             }
             let a=stores.iter().position(|s|s.key==route.to_a).ok_or_else(||invalid("unknown first film heat store"))?;
             let b=stores.iter().position(|s|s.key==route.to_b).ok_or_else(||invalid("unknown second film heat store"))?;
-            compiled_films.push(FilmRoute {film:route.film,channel:None,a,b,fraction:route.fraction_to_a,layers:None});
+            compiled_films.push(FilmRoute {film:route.film,channel:None,a,b,fraction:route.fraction_to_a,layers:None,sliding_layers:None});
         }
         for route in channel_routes {
             let film=mechanics.squeeze_film(route.film)
@@ -330,7 +331,7 @@ impl<'a> HeatedImpactSystem<'a> {
             }
             let a=stores.iter().position(|s|s.key==route.to_a).ok_or_else(||invalid("unknown first channel heat store"))?;
             let b=stores.iter().position(|s|s.key==route.to_b).ok_or_else(||invalid("unknown second channel heat store"))?;
-            compiled_films.push(FilmRoute {film:route.film,channel:Some(route.channel),a,b,fraction:route.fraction_to_a,layers:None});
+            compiled_films.push(FilmRoute {film:route.film,channel:Some(route.channel),a,b,fraction:route.fraction_to_a,layers:None,sliding_layers:None});
         }
         for route in layer_routes {
             let film=mechanics.squeeze_film(route.film)
@@ -343,7 +344,7 @@ impl<'a> HeatedImpactSystem<'a> {
             let layers=LayerHeatRoute::compile(film,route,&stores)?;
             let first=layers.destinations[0];
             compiled_films.push(FilmRoute {film:index,channel:Some(channel),a:first,b:first,
-                fraction:1.0,layers:Some(layers)});
+                fraction:1.0,layers:Some(layers),sliding_layers:None});
         }
         compiled_films.sort_by_key(|r|(r.film,r.channel));
         let mut compiled_memory: Vec<MemoryRoute> = Vec::with_capacity(memory_routes.len());

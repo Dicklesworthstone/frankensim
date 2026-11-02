@@ -1,5 +1,30 @@
 # CONTRACT: fs-couple
 
+## Source-backed evolving viscosity across film layers
+
+`LiquidFilmImpactSystem::new_with_layers` accepts explicit source-backed
+`(film, channel, layer)` bindings on the original normal-pressure
+mechanical/enthalpy clock. Every channel/layer of a selected island is covered
+exactly once at its existing finite heat destination; uniform/channel
+assignments cannot overlap. Original normalized interfaces, finite inventories
+and nonthermal source context remain fixed.
+
+Every endpoint resolves each original liquid law at its actual accepted local
+temperature and checks that layer's own relative viscosity change. A small
+effect on the hydraulic equivalent cannot hide excessive change in a thin
+layer. One group compilation stages the native hydraulic coefficients and
+the exact profile work fractions, retaining common Barus separation. Profiles,
+sources, mechanical coefficients, reservoirs and any thermal-network state
+publish together only after the existing accepted-step gates. The completed
+interval uses its old profile's work; endpoint viscosity never reprices heat.
+
+The same implementation serves adiabatic, coupled-transport and network
+entries. No second clock, extra heat source, layer advection/mixing or inferred
+inventory is introduced. Separate sliding-film routes cannot alias these
+normal-pressure bindings. Six focused regressions cover independent old/new
+profile work and actual motion, one-layer recovery, network conservation,
+source/change-limit/cancellation rollback and mixed source segments.
+
 ## Sliding Reynolds films in native mechanical time integration
 
 `ImpactSystem::with_sliding_film` attaches the existing `ShearedFilm`
@@ -37,8 +62,8 @@ hydraulic-equivalent viscosity, both at attachment and before each deposit.
 A common native Barus factor preserves these pressure-work fractions.
 Whole-film, whole-channel and layered routes cannot overlap or duplicate
 physical work. Existing uniform/channel liquid feedback refuses replacement
-of a retained layered film; these profiles are frozen until an explicit
-layer-law binding is provided. Couette work is outside this pressure-only
+of a retained layered film. Dedicated source-backed layer bindings update
+viscosity and physical work fractions together at accepted endpoints. Couette work is outside this pressure-only
 route: combined pressure/shear layer cross terms require their own partition.
 
 The original pressure solve is evaluated once per selected island at the

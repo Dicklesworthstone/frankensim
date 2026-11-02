@@ -1,3 +1,6 @@
+#[path = "layer_feedback.rs"]
+mod layer_feedback;
+
 use super::*;
 use fs_couple::render::plate::impact::material::heating::SqueezeFilmChannelHeatRoute;
 use fs_couple::render::plate::impact::material::heating::liquid_film::{

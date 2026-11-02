@@ -6,10 +6,11 @@
 //! Each complete layer explicitly names a finite caloric destination, which
 //! may be shared with another layer or with the existing thermal network.
 //!
-//! Profiles are prescribed and frozen. Their hydraulic equivalent must match
-//! the actual channel coefficient at construction and before every deposit.
-//! A common native Barus factor preserves the layer work fractions. Uniform
-//! or channel-only liquid feedback cannot replace this retained layer model.
+//! Profiles are frozen within each physical interval. Their hydraulic equivalent
+//! must match the actual channel coefficient at construction and deposition.
+//! A common native Barus factor preserves the layer work fractions. The dedicated
+//! source-backed layer binding updates viscosities and work fractions together
+//! at accepted endpoints; uniform/channel-only feedback cannot replace layers.
 
 use fs_tribo::resistive_film::ResistiveFilm;
 pub use fs_tribo::resistive_film::stratified::{GapViscosityProfile, ViscosityLayer};
@@ -62,6 +63,34 @@ impl LayerHeatRoute {
         }
         let result=Self {profile:route.profile,destinations,largest};
         result.admit_operator(film,route.channel)?;
+        Ok(result)
+    }
+
+    /// Recompile viscosity while retaining every original interface/destination.
+    /// The caller stages this replacement until the common time owner accepts.
+    pub(super) fn with_profile(
+        &self,
+        film: &ResistiveFilm,
+        channel: usize,
+        profile: GapViscosityProfile,
+    ) -> Result<Self, ImpactError> {
+        if self.profile.layers().len() != profile.layers().len()
+            || self.profile.layers().iter().zip(profile.layers())
+                .any(|(old, next)| old.upper_fraction != next.upper_fraction)
+        {
+            return Err(invalid("layer feedback must retain original normalized interfaces"));
+        }
+        let fractions = profile.layer_pressure_work_fractions();
+        let mut largest = 0;
+        for i in 1..fractions.len() {
+            if fractions[i] > fractions[largest] { largest = i; }
+        }
+        let result = Self {
+            profile,
+            destinations: self.destinations.clone(),
+            largest,
+        };
+        result.admit_operator(film, channel)?;
         Ok(result)
     }
 
