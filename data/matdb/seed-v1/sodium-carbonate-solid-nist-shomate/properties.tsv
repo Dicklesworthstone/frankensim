@@ -1,0 +1,45 @@
+frankensim.matdb-source.v1
+observation	identity	Pure anhydrous solid Na2CO3 reference, not hydrated soda ash	https://webbook.nist.gov/cgi/cbook.cgi?ID=C497198&Mask=2	CAS 497-19-8; source molecular weight 105.9884 g/mol. No hydrate, dissolved carbonate/bicarbonate composition, commercial purity, particle size or producer specimen is identified.
+observation	caloric	First solid sodium carbonate Shomate branch, retained 298.15-700 K	https://webbook.nist.gov/cgi/cbook.cgi?ID=C497198&Mask=2	Source branch 298-723 K: t=T/1000, Cp0=A+B*t+C*t^2+D*t^3+E/t^2 J/(mol K), A-E=175.2010,-348.0580,743.0720,-305.5510,-1.634221. Independent 70-digit decimal evaluations divided by 0.1059884 kg/mol produce mass heat-capacity knots. Linear interpolation is an authored approximation with unstated uncertainty. F,G,H=-1178.980,415.0610,-1130.770 remain provenance constants. The branch above 723 K and the molten state are excluded.
+observation	reference-values	Chase 1998 solid reference values at 298.15 K	https://webbook.nist.gov/cgi/cbook.cgi?ID=C497198&Mask=2	Standard molar formation enthalpy -1130.77 kJ/mol and absolute standard molar entropy 138.79 J/(mol K), reviewed March 1966, using the JANAF elemental reference convention. Rounded summary values remain separate from values computed from the rounded Shomate fit.
+observation	scope	Pure-compound thermochemical reference at one bar	https://janaf.nist.gov/pdf/JANAF-FourthEd-1998-1Vol1-Intro.pdf section 4.4	Standard pressure is 100000 Pa, not an attributed specimen measurement. Queries require source-pure-species=1, source-phase-solid=1, source-standard-state=1, source-elemental-reference-janaf=1, engineering-reference-model=1 and source-specimen-qualified=0. Formation enthalpy and entropy are point claims at 298.15 K. No aqueous activity, acid-neutralization capacity for an unknown mixture, pH, solubility, dissolution heat, reaction rate, density, conductivity or ore recovery is supplied.
+curve	specific-heat	identity,caloric,scope	cp	temperature	K	J/kg/K	298.15:1047.279498733028,300:1049.663848957894,310:1062.419547073037,320:1075.037722796787,330:1087.620850583796,340:1100.254054541896,350:1113.008039400192,360:1125.941459685479,370:1139.102846884123,380:1152.532186384563,390:1166.262215092908,400:1180.319494869250,410:1194.725304979100,420:1209.496387612041,430:1224.645573477888,440:1240.182309030481,450:1256.113102608457,460:1272.441903437462,470:1289.170424797254,480:1306.298420560384,490:1323.823922635870,500:1341.743445509131,510:1360.052162987892,520:1378.744061388073,530:1397.812072681670,540:1417.248190547177,550:1437.043571786399,560:1457.188625179159,570:1477.673089523221,580:1498.486102338052,590:1519.616260487398,600:1541.051673789039,610:1562.780012523763,620:1584.788549624289,630:1607.064198214270,640:1629.593545073977,650:1652.362880530088,660:1675.358225199681,670:1698.565353961215,680:1721.969817476272,690:1745.556961543972,700:1769.311944533938	linear
+scalar	molar-mass	identity,scope	mass	105.9884	g/mol	constant
+scalar	formation-enthalpy	identity,reference-values,scope	hf	-1130.77	kJ/mol	tabulated
+scalar	standard-entropy	identity,reference-values,scope	s0	138.79	J/mol/K	tabulated
+uncertainty	specific-heat	unstated	-	-	-	-
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+validity	specific-heat	temperature	298.15	700	K
+validity	molar-mass	temperature	298.15	700	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	specific-heat	pressure	100000	100000	Pa
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	specific-heat	standard	1	1	1
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	specific-heat	reference_convention	1	1	1
+validity	molar-mass	reference_convention	1	1	1
+validity	formation-enthalpy	reference_convention	1	1	1
+validity	standard-entropy	reference_convention	1	1	1
+validity	specific-heat	phase	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	specific-heat	pure	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	specific-heat	reference	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	specific-heat	specimen	0	0	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1

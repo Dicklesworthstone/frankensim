@@ -1,6 +1,6 @@
 # Mineral processing: public sources and callable physics
 
-These **12 source profiles and 33 property claims** provide reusable mineral
+These **18 source profiles and 56 property claims** provide reusable mineral
 and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and
 `matdb-catalog` discovery. No separate material registry or schema is required.
@@ -28,6 +28,17 @@ they are not a composite assay or a machine-authenticated elemental matrix.
 | `cassiterite` | SnO2 | Reported endpoints 6980 and 7010 |
 | `dolomite` | CaMg(CO3)2 | 2860 |
 | `magnetite` | Fe3O4 | 5175 |
+| `bornite` | Cu5FeS4 | Reported endpoints 5060 and 5080 |
+| `sphalerite` | (Zn,Fe)S | Reported endpoints 3900 and 4100 |
+| `galena` | PbS | 7580 |
+| `arsenopyrite` | FeAsS | 6070; source parenthetical magnitude 150 |
+| `malachite` | Cu2CO3(OH)2 | 4050; source parenthetical magnitude 20 |
+
+The last five profiles use the `-handbook-mineralogy` suffix. Their
+[mineral reference guide](MINING_MINERALS.md) details the additional 19 claims,
+including ordinal Mohs endpoints and the source's parenthetical density
+magnitudes. Those magnitudes carry no inferred probability or confidence level.
+These profiles also require their named mineral and unqualified specimen flags.
 
 Single values use `density`. Ranges use the separate properties
 `density-reported-range-minimum` and `density-reported-range-maximum`.
@@ -66,10 +77,11 @@ Every reagent profile contains four claims: `molar-mass`,
 | `calcium-hydroxide-solid-nist-mining` | Ca(OH)2(s), hydrated lime constituent | −986090 | 298.15–500 |
 | `sodium-hydroxide-solid-nist-mining` | NaOH(s) | −425930 | 298.15–500 |
 | `sodium-cyanide-solid-nist-mining` | NaCN(s) | −90710 | 298.15–500 |
+| `sodium-carbonate-solid-nist-shomate` | Anhydrous Na2CO3(s), soda-ash constituent | −1130770 | 298.15–700 |
 | `sulfuric-acid-liquid-janaf-mining` | Pure H2SO4(l) | −813989 | 298.15–400 |
 | `water-liquid-janaf-mining` | Pure H2O(l) | −285830 | 298.15–360 |
 
-The four solid profiles use [NIST Chemistry WebBook](https://webbook.nist.gov/)
+The five solid profiles use [NIST Chemistry WebBook](https://webbook.nist.gov/)
 data with explicitly sampled Shomate Cp curves. The liquid profiles retain
 selected literal [JANAF H-075](https://janaf.nist.gov/tables/H-075.html) and
 [H-063](https://janaf.nist.gov/tables/H-063.html) Cp points. Linear interpolation
@@ -77,6 +89,11 @@ is an authored reference approximation; source/interpolation uncertainties
 remain unstated. Formation enthalpies are not extrapolated with temperature.
 The chosen WebBook values are retained at their published rounding, separately
 from more precise fit coefficients or alternate evaluations.
+
+The [sodium carbonate source](https://webbook.nist.gov/cgi/cbook.cgi?ID=C497198&Mask=2)
+provides the pure anhydrous solid's first Shomate branch, 298–723 K. The pack
+retains 298.15–700 K with 42 Cp knots; it excludes the higher-temperature
+branch, the melt, hydrates and dissolved carbonate/bicarbonate species.
 
 All queries require `source-standard-state=1`,
 `source-elemental-reference-janaf=1`, `source-pure-species=1`,
@@ -126,20 +143,30 @@ be bit-exactly additive; exact elemental conservation is a separate proof.
 and `ChargeVector` artifacts. Admission checks exact element and charge
 balance. `amounts` scales the equation by a supplied extent;
 `extent_from_reacted_mass` makes the mass/mole basis explicit;
-`limiting_extent` bounds possible extent from all reactant inventories.
+`limiting_extent` bounds possible extent from all reactant inventories, with a
+conservative rounding check against reagent overdraw. `advance_inventory`
+applies an explicitly supplied extent to every active species, including
+initially absent products entered as zero. It returns canonical inventories
+without mutating the inputs and refuses extents exceeding available reagents.
 
-`MineralReaction::build` provides five explicit endpoint choices:
+`MineralReaction::build` provides ten explicit endpoint choices:
 
 | Reference | What the equation accounts for |
 | --- | --- |
 | `LimeHydration` | One mole water per mole CaO, forming solid Ca(OH)2 |
 | `CalciteAcidNeutralization` | Two mol H+ per mol calcite, dissolved CO2 endpoint |
 | `DolomiteAcidNeutralization` | Four mol H+ per mol dolomite, dissolved CO2 endpoint |
+| `CalciteBicarbonateNeutralization` | One mol H+ per mol calcite, retained bicarbonate endpoint |
+| `DolomiteBicarbonateNeutralization` | Two mol H+ per mol dolomite, retained bicarbonate endpoint |
+| `HydratedLimeNeutralization` | Two mol H+ consumed and two mol water formed per mol Ca(OH)2 |
+| `MalachiteAcidLeach` | Four mol H+ per mol malachite, forming two mol dissolved Cu(II) |
+| `GoldCyanidation` | Two mol cyanide and 0.25 mol oxygen per mol gold, net ionic Elsner balance |
 | `PyriteOxidationFerrous` | 3.5 mol O2 consumed and 2 mol H+ generated per mol pyrite |
 | `PyriteOxidationFerricHydroxide` | 3.75 mol O2 consumed and 4 mol H+ generated per mol pyrite |
 
 Pyrite equations use integer multiples of two/four FeS2; an extent is per
-equation as written. These endpoints follow the cited USGS reference chemistry
+equation as written. These endpoints follow the primary references cited in
+`stoichiometry/minerals.rs`
 and do not choose pH/Eh, speciation or precipitates. Only lime hydration has
 complete formation-enthalpy inputs in this new seed slice. Missing aqueous-ion
 data for other reaction heats remain missing.
@@ -178,7 +205,7 @@ It is not an operating-speed recommendation, power-draw model or DEM solver.
 Normal workspace commands for these slices:
 
 ```bash
-cargo test -p xtask --test mining_mineral_sources --test mining_reagent_sources --test mining_reaction_balances
+cargo test -p xtask --test mining_mineral_sources --test mining_mineral_coverage --test mining_reagent_sources --test mining_reagent_references --test mining_reaction_balances
 cargo test -p fs-material comminution::tests
 cargo test -p fs-thermochem stoichiometry::tests
 ```

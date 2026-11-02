@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	sodium-carbonate-solid-nist-shomate
+redistribution	permitted	Attributed numerical facts, independent equation evaluations and original notes only; no source document, prose or table layout is redistributed
+citation	NIST Chemistry WebBook SRD 69, sodium carbonate, CAS 497-19-8, first solid Shomate branch and Chase (1998) reference values; https://webbook.nist.gov/cgi/cbook.cgi?ID=C497198&Mask=2; JANAF standard state https://janaf.nist.gov/pdf/JANAF-FourthEd-1998-1Vol1-Intro.pdf section 4.4; accessed 2026-11-02
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	nist-reagent	properties.tsv	material-tsv-v1
+property	cp	specific-heat-capacity	dimensional
+property	mass	molar-mass	dimensional
+property	hf	standard-molar-formation-enthalpy	dimensional
+property	s0	standard-molar-entropy	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	standard	source-standard-state	dimensional
+axis	reference_convention	source-elemental-reference-janaf	dimensional
+axis	phase	source-phase-solid	dimensional
+axis	pure	source-pure-species	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional
