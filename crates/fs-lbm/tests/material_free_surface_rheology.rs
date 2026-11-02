@@ -3,8 +3,9 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_lbm::d3q19::freesurface3::ContactModel3;
+use fs_lbm::d3q19::freesurface3::{ContactModel3, FreeSurfaceError3};
 use fs_lbm::d3q19::{E3, Q3, equilibrium3};
+use fs_lbm::material::MaterialLbmError;
 use fs_lbm::material::free_surface::rheology::{
     FreeSurfaceRheologyError, IsothermalRheologyLaw, MaterialFreeSurfaceRheology3, RheologySolve,
 };
@@ -188,9 +189,13 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
 
 // Independent non-equilibrium second-moment reduction. The full fixture has
 // all eight Morton-ordered tiles active; no production stress helper is called.
-fn numerator(flow: &MaterialFreeSurfaceRheology3<'_, '_>, gravity: [f64; 3]) -> f64 {
+fn numerator(
+    flow: &MaterialFreeSurfaceRheology3<'_, '_>,
+    gravity: [f64; 3],
+    coordinates: [usize; 3],
+) -> f64 {
     let bits = flow.lattice().grid().state_bits();
-    let [x, y, z] = CELL;
+    let [x, y, z] = coordinates;
     let slot = (x / 4) | ((y / 4) << 1) | ((z / 4) << 2);
     let lane = x % 4 + 4 * (y % 4 + 4 * (z % 4));
     let sample = flow.lattice().sample_at(x, y, z).unwrap();
@@ -237,7 +242,7 @@ fn native_stress_closes_source_viscosity_and_newtonian_limit_has_exact_native_pa
             flow.step_with_gate(&gate).unwrap();
             // mu = 0.1 + b*rate; tau = 0.8 + 3*b*rate. Solve this quadratic
             // analytically instead of reproducing the production iteration.
-            let rhs = numerator(&flow, gravity) / DT;
+            let rhs = numerator(&flow, gravity, CELL) / DT;
             let expected = 2.0 * rhs / (0.8 + (0.64 + 12.0 * 0.003 * rhs).sqrt());
             let sample = flow.rheology_at(CELL).unwrap();
             near(sample.shear_rate_per_s, expected, 2e-10);
@@ -468,5 +473,279 @@ fn endpoint_source_and_convergence_refusals_and_cancellation_preserve_the_accept
                 .is_err()
             );
         }
+    });
+}
+
+fn pressure_slab() -> Vec<MaterialFreeSurfaceInitialCell3> {
+    initial(true)
+        .into_iter()
+        .filter(|cell| (2..6).contains(&cell.coordinates[0]))
+        .map(|mut cell| {
+            cell.velocity_m_s = [0.0; 3];
+            cell
+        })
+        .collect()
+}
+
+fn pressure_flow<'s, 'm>(
+    binding: &'s IsothermalRheologyLaw<'m>,
+    cells: &[MaterialFreeSurfaceInitialCell3],
+    reference: f64,
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+) -> MaterialFreeSurfaceRheology3<'s, 'm> {
+    MaterialFreeSurfaceRheology3::from_cells_with_pressure_reference(
+        binding,
+        DX,
+        DT,
+        0.1,
+        domain([0.0; 3]),
+        cells,
+        solve(),
+        reference,
+        cx,
+        gate,
+    )
+    .unwrap()
+}
+
+fn mean_pressure_driven_velocity(flow: &MaterialFreeSurfaceRheology3<'_, '_>) -> f64 {
+    let mut momentum = 0.0;
+    let mut mass = 0.0;
+    for z in 0..8 {
+        for y in 0..8 {
+            for x in 0..8 {
+                if let Some(sample) = flow.sample_at_si(x, y, z).unwrap() {
+                    let weight = sample.fill_fraction * sample.density_kg_m3;
+                    momentum += weight * sample.velocity_m_s[0];
+                    mass += weight;
+                }
+            }
+        }
+    }
+    momentum / mass
+}
+
+#[test]
+fn g1_g3_prescribed_pressure_matches_newtonian_vof_and_keeps_one_fixed_datum() {
+    let gate = CancelGate::new_clock_free();
+    let cells = pressure_slab();
+    let source = card(0.0, 1000.0, 0.001);
+    let binding = law(&source);
+    let frozen = ResolvedLiquidSurfaceState::try_from_material(
+        bundle(&source),
+        LiquidViscosityBasis::Dynamic,
+        LiquidCapillarity::Sourced,
+    )
+    .unwrap();
+    with_cx(&gate, |cx| {
+        let mut native = plan_free_surface_from_material(&frozen, DX, DT, 0.1)
+            .unwrap()
+            .with_pressure_reference(100_000.0)
+            .unwrap()
+            .free_surface3_from_cells(domain([0.0; 3]), &cells, cx)
+            .unwrap();
+        let mut flow = pressure_flow(&binding, &cells, 100_000.0, cx, &gate);
+        let mut shifted = pressure_flow(&binding, &cells, 100_500.0, cx, &gate);
+        assert_eq!(flow.reference_pressure_pa(), Some(100_000.0));
+        let pressure = |p: [f64; 3]| if p[0] < 4.0 * DX { 0.75 } else { -0.75 };
+        for _ in 0..5 {
+            native
+                .step_with_gas_pressure(&gate, 0.05, |p| 100_000.0 + pressure(p))
+                .unwrap();
+            flow.step_with_gas_pressure(&gate, 0.05, |p| 100_000.0 + pressure(p))
+                .unwrap();
+            shifted
+                .step_with_gas_pressure(&gate, 0.05, |p| 100_500.0 + pressure(p))
+                .unwrap();
+            assert_eq!(
+                flow.lattice().grid().state_bits(),
+                native.lattice().grid().state_bits()
+            );
+            assert_eq!(
+                flow.lattice().grid().state_bits(),
+                shifted.lattice().grid().state_bits()
+            );
+            assert_eq!(
+                flow.ledger_mass_kg().unwrap(),
+                native.ledger_mass_kg().unwrap()
+            );
+            assert_eq!(flow.lattice().conversions(), native.lattice().conversions());
+            assert_eq!(flow.rheology_at(CELL), shifted.rheology_at(CELL));
+        }
+        assert!(mean_pressure_driven_velocity(&flow) > 1e-5);
+        assert_eq!(
+            flow.material_at(CELL).unwrap().card_identity(),
+            source.content_hash()
+        );
+    });
+}
+
+#[test]
+fn g1_pressure_driven_shear_closes_original_thinning_and_thickening_sources() {
+    let gate = CancelGate::new_clock_free();
+    let cells = pressure_slab();
+    with_cx(&gate, |cx| {
+        let mut results = Vec::new();
+        for slope in [-0.00005, 0.0, 0.003] {
+            let source = card(slope, 1000.0, 0.001);
+            let binding = law(&source);
+            let mut flow = pressure_flow(&binding, &cells, 100_000.0, cx, &gate);
+            let mass = flow.ledger_mass_kg().unwrap();
+            for _ in 0..6 {
+                flow.step_with_gas_pressure(&gate, 0.05, |p| {
+                    100_000.0 + if p[0] < 4.0 * DX { 0.75 } else { -0.75 }
+                })
+                .unwrap();
+            }
+            near(flow.ledger_mass_kg().unwrap(), mass, 1e-10 * mass);
+            // Independent moment reduction and the quadratic constitutive
+            // root: rate*(0.8 + 3*slope*rate) = stress_numerator / dt.
+            let probe = [3, 0, 3]; // Actual shear next to a stationary sidewall.
+            let rhs = numerator(&flow, [0.0; 3], probe) / DT;
+            let expected = 2.0 * rhs / (0.8 + (0.64 + 12.0 * slope * rhs).sqrt());
+            let sample = flow.rheology_at(probe).unwrap();
+            assert!(sample.shear_rate_per_s > 1e-6);
+            near(sample.shear_rate_per_s, expected, 2e-10);
+            near(sample.collision_tau, 0.8 + 3.0 * slope * expected, 2e-11);
+            let material = flow.material_at(probe).unwrap();
+            near(
+                material.property("dynamic_viscosity").unwrap().value_si(),
+                0.1 + slope * expected,
+                2e-11,
+            );
+            assert_eq!(material.card_identity(), source.content_hash());
+            assert!(
+                material
+                    .query_point()
+                    .contains(&("pressure".into(), 100_000.0))
+            );
+            let speed = mean_pressure_driven_velocity(&flow);
+            assert!(speed > 1e-5, "pressure must drive actual liquid motion");
+            results.push((flow.lattice().grid().state_bits(), speed));
+        }
+        for pair in results.windows(2) {
+            assert_ne!(pair[0].0, pair[1].0);
+            assert!((pair[0].1 - pair[1].1).abs() > 1e-12);
+        }
+    });
+}
+
+#[test]
+fn g4_pressure_and_endpoint_source_failures_preserve_flow_and_rheology_together() {
+    let gate = CancelGate::new_clock_free();
+    let cells = pressure_slab();
+    with_cx(&gate, |cx| {
+        let source = card(0.003, 1000.0, 0.001);
+        let binding = law(&source);
+        let mut ordinary = MaterialFreeSurfaceRheology3::from_cells(
+            &binding,
+            DX,
+            DT,
+            0.1,
+            domain([0.0; 3]),
+            &cells,
+            solve(),
+            cx,
+            &gate,
+        )
+        .unwrap();
+        assert_eq!(ordinary.reference_pressure_pa(), None);
+        assert!(
+            ordinary
+                .step_with_gas_pressure(&gate, 0.05, |_| {
+                    panic!("missing pressure reference must refuse before sampling")
+                })
+                .is_err()
+        );
+        let mut flow = pressure_flow(&binding, &cells, 100_000.0, cx, &gate);
+        let bits = flow.lattice().grid().state_bits();
+        let mass = flow.ledger_mass_kg().unwrap();
+        let carry = flow.lattice().carry();
+        let conversions = flow.lattice().conversions();
+        let sample = *flow.rheology_at(CELL).unwrap();
+        let material = flow.material_at(CELL).unwrap().clone();
+        let unchanged = |flow: &MaterialFreeSurfaceRheology3<'_, '_>| {
+            assert_eq!(flow.lattice().grid().state_bits(), bits);
+            assert_eq!(flow.ledger_mass_kg().unwrap(), mass);
+            assert_eq!(flow.lattice().carry(), carry);
+            assert_eq!(flow.lattice().conversions(), conversions);
+            assert_eq!(*flow.rheology_at(CELL).unwrap(), sample);
+            assert_eq!(*flow.material_at(CELL).unwrap(), material);
+        };
+        assert!(
+            flow.step_with_gas_pressure(&gate, 0.0, |_| {
+                panic!("invalid density bound must refuse before sampling")
+            })
+            .is_err()
+        );
+        unchanged(&flow);
+        for invalid in [f64::NAN, 0.0, 100_100.0] {
+            let calls = std::cell::Cell::new(0);
+            let refusal = flow.step_with_gas_pressure(&gate, 0.05, |_| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 10 {
+                    invalid
+                } else {
+                    100_000.75
+                }
+            });
+            assert!(matches!(
+                refusal,
+                Err(FreeSurfaceRheologyError::Flow(
+                    MaterialLbmError::FreeSurface(FreeSurfaceError3::InvalidGasPressure { .. })
+                ))
+            ));
+            assert_eq!(calls.get(), 10);
+            unchanged(&flow);
+        }
+        let cancelled = CancelGate::new_clock_free();
+        assert_eq!(
+            flow.step_with_gas_pressure(&cancelled, 0.05, |_| {
+                cancelled.request();
+                100_000.75
+            }),
+            Err(FreeSurfaceRheologyError::Flow(
+                MaterialLbmError::FreeSurface(FreeSurfaceError3::Cancelled,)
+            ))
+        );
+        unchanged(&flow);
+        for _ in 0..3 {
+            ordinary.step_with_gate(&gate).unwrap();
+            flow.step_with_gas_pressure(&gate, 0.05, |_| 100_000.0)
+                .unwrap();
+            assert_eq!(
+                flow.lattice().grid().state_bits(),
+                ordinary.lattice().grid().state_bits()
+            );
+            assert_eq!(flow.rheology_at(CELL), ordinary.rheology_at(CELL));
+        }
+
+        let narrow_source = card(0.003, 1e-6, 0.001);
+        let narrow_binding = law(&narrow_source);
+        let mut narrow = pressure_flow(&narrow_binding, &cells, 100_000.0, cx, &gate);
+        let bits = narrow.lattice().grid().state_bits();
+        let mass = narrow.ledger_mass_kg().unwrap();
+        let conversions = narrow.lattice().conversions();
+        let sample = *narrow.rheology_at(CELL).unwrap();
+        let material = narrow.material_at(CELL).unwrap().clone();
+        let calls = std::cell::Cell::new(0);
+        let refusal = narrow.step_with_gas_pressure(&gate, 0.05, |p| {
+            calls.set(calls.get() + 1);
+            100_000.0 + if p[0] < 4.0 * DX { 0.75 } else { -0.75 }
+        });
+        assert!(
+            calls.get() > 0,
+            "source refusal must follow actual gas loading"
+        );
+        assert!(matches!(
+            refusal,
+            Err(FreeSurfaceRheologyError::Material(_))
+        ));
+        assert_eq!(narrow.lattice().grid().state_bits(), bits);
+        assert_eq!(narrow.ledger_mass_kg().unwrap(), mass);
+        assert_eq!(narrow.lattice().conversions(), conversions);
+        assert_eq!(*narrow.rheology_at(CELL).unwrap(), sample);
+        assert_eq!(*narrow.material_at(CELL).unwrap(), material);
     });
 }

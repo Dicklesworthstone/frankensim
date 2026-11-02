@@ -4943,6 +4943,24 @@ receipts are published together. Cancellation is polled between constitutive
 queries and before publication. The unregioned mass carry has no invented shear
 rate or material collision cell. Original native mass accounting is unchanged.
 
+`from_cells_with_pressure_reference` fixes the positive absolute-pressure datum
+through the existing material scaling owner before the trajectory is returned.
+`step_with_gas_pressure` then accepts absolute Pascals at exposed physical cell
+centers, using the shared conversion and original gas-plus-capillary
+reconstruction. Pressure and current source-resolved local relaxation act in
+one native step without allocating unused thermal transport routes. The actual
+new stress closes the next constitutive samples before joint publication;
+pressure, endpoint source, convergence, speed or cancellation refusal rolls
+back flow and all material/rate receipts together. Zero/reference loading keeps
+the ordinary path's population bits; a common pressure/reference shift keeps
+the same dynamics. Numerical density retains its original incompressible
+meaning: this does not rebind the material's fixed source-pressure context,
+evolve a gas reservoir, or add pressure-volume heat/work. Three focused
+regressions specify Newtonian pressure-loaded parity, gauge invariance, actual
+pressure-driven thinning/thickening with independent stress/constitutive roots,
+mass retention, reference-load identity and late pressure/source rollback.
+Their native execution remains a separate, unverified gate.
+
 This is isothermal generalized-Newtonian response on stationary walls, with the
 explicit numerical contact ghost inherited from the domain. It does not add
 thermal storage, viscous heat, viscoelastic or yield history, moving walls,

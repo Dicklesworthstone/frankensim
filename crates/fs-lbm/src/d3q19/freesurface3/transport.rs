@@ -326,12 +326,17 @@ impl FreeSurface3 {
     /// The enclosing constitutive owner admits and publishes a private candidate.
     /// Reuse native collision, mass exchange and conversion without recording
     /// unused enthalpy routes for an isothermal trajectory.
-    pub(crate) fn step_with_material_relaxation(
+    pub(crate) fn step_with_material_relaxation_and_pressure(
         &mut self,
         gate: &CancelGate,
         tau: &BTreeMap<(u64, usize), f64>,
+        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
     ) -> Result<(), FreeSurfaceError3> {
-        self.step_inner(gate, None, Some(tau), None)
+        check_cancel(gate)?;
+        let boundary = gas_pressure
+            .map(|(maximum, field)| super::pressure::GasPressure3::new(maximum, field))
+            .transpose()?;
+        self.step_inner(gate, None, Some(tau), boundary.as_ref())
     }
 }
 

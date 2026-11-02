@@ -232,6 +232,74 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
         cx: &Cx<'_>,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
+        Self::from_cells_inner(
+            law,
+            cell_size_m,
+            timestep_s,
+            max_speed_m_s,
+            domain,
+            initial,
+            solve,
+            None,
+            cx,
+            gate,
+        )
+    }
+
+    /// Initialize rheology with a fixed absolute-pressure datum [Pa].
+    ///
+    /// Uses the original material scaling's pressure-reference owner. Numerical
+    /// density one represents `reference_pressure_pa`; initial populations,
+    /// velocities and mass are otherwise identical to [`Self::from_cells`].
+    /// This does not initialize a hydrostatic or capillary pressure field.
+    /// The caller owns initial pressure/load compatibility and applicability
+    /// of the unchanged source pressure context. Only shear rate evolves in
+    /// the material law; the numerical pressure is not a liquid equation of
+    /// state. This datum cannot be rebound on an accepted trajectory.
+    ///
+    /// # Errors
+    /// The ordinary ingress/source gates apply. Nonpositive or nonfinite
+    /// reference pressure refuses before returning a candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_cells_with_pressure_reference(
+        law: &'s IsothermalRheologyLaw<'m>,
+        cell_size_m: f64,
+        timestep_s: f64,
+        max_speed_m_s: f64,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        initial: &[MaterialFreeSurfaceInitialCell3],
+        solve: RheologySolve,
+        reference_pressure_pa: f64,
+        cx: &Cx<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        Self::from_cells_inner(
+            law,
+            cell_size_m,
+            timestep_s,
+            max_speed_m_s,
+            domain,
+            initial,
+            solve,
+            Some(reference_pressure_pa),
+            cx,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_cells_inner(
+        law: &'s IsothermalRheologyLaw<'m>,
+        cell_size_m: f64,
+        timestep_s: f64,
+        max_speed_m_s: f64,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        initial: &[MaterialFreeSurfaceInitialCell3],
+        solve: RheologySolve,
+        reference_pressure_pa: Option<f64>,
+        cx: &Cx<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
         poll(gate)?;
         solve
             .validate()
@@ -247,6 +315,9 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
             scaling.pressure_unit_pa,
             cell_size_m,
         )?;
+        if let Some(reference) = reference_pressure_pa {
+            scaling = scaling.with_pressure_reference(reference)?;
+        }
         let flow = scaling.free_surface3_from_cells_inner(domain, initial, cx)?;
         let mut candidate = Self {
             flow,
@@ -270,6 +341,13 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
     #[must_use]
     pub const fn law(&self) -> &'s IsothermalRheologyLaw<'m> {
         self.law
+    }
+
+    /// Fixed absolute pressure represented by numerical density one [Pa].
+    /// None retains the original pressure-perturbation-only convention.
+    #[must_use]
+    pub const fn reference_pressure_pa(&self) -> Option<f64> {
+        self.flow.scaling.reference_pressure_pa()
     }
 
     /// Current complete source bundle at a wet cell; gas/carry has no rheology.
@@ -313,6 +391,60 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
     /// the new native stress field before publishing either flow or sources.
     /// Endpoint queries validate the explicit step, not an implicit time solve.
     pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), Error> {
+        self.step_inner(gate, None)
+    }
+
+    /// Advance source-resolved viscosity under prescribed gas pressure [Pa].
+    ///
+    /// Requires the construction-time fixed pressure reference. The callback
+    /// supplies positive absolute gas pressure at exposed liquid cell centers
+    /// [m], frozen over this physical timestep. It shares the original physical
+    /// coordinate conversion and combined gas/capillary density-excursion bound
+    /// in `(0,1)` with [`MaterialFreeSurface3::step_with_gas_pressure`].
+    ///
+    /// Current source-resolved local relaxation and the pressure reconstruction
+    /// act in ONE original native collision/transport step. Its actual endpoint
+    /// stress supplies the next bounded constitutive solve before either flow
+    /// or material samples publish. No unused thermal mass routes are allocated.
+    /// Zero/reference loading retains the ordinary rheology trajectory, and a
+    /// common shift of reference and gas pressure leaves that trajectory intact.
+    ///
+    /// Pressure is a mechanical boundary load, not a source-pressure rebind or
+    /// physical compressibility model. Gas evolution, pressure-volume work and
+    /// heat are outside this isothermal, fixed-source-context owner.
+    ///
+    /// # Errors
+    /// Invalid pressure or density bounds, source-domain/convergence failure,
+    /// endpoint speed refusal or cancellation leaves populations, mass, carry,
+    /// conversion counters and all accepted material/rate samples unchanged.
+    pub fn step_with_gas_pressure(
+        &mut self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn([f64; 3]) -> f64,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        let reference = self
+            .flow
+            .scaling
+            .reference_pressure_pa
+            .ok_or(Error::Invalid(
+                "rheology gas loading requires an explicit fixed pressure reference",
+            ))?;
+        let field = super::pressure::lattice_pressure_field(
+            reference,
+            self.flow.scaling.cell_size_m,
+            self.flow.scaling.pressure_unit_pa,
+            pressure_pa,
+        );
+        self.step_inner(gate, Some((maximum_density_excursion, &field)))
+    }
+
+    fn step_inner(
+        &mut self,
+        gate: &CancelGate,
+        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
+    ) -> Result<(), Error> {
         poll(gate)?;
         let mut tau = BTreeMap::new();
         for (&location, cell) in &self.samples {
@@ -322,7 +454,7 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
             }
         }
         let mut lattice = self.flow.lattice.clone();
-        lattice.step_with_material_relaxation(gate, &tau)?;
+        lattice.step_with_material_relaxation_and_pressure(gate, &tau, gas_pressure)?;
         let samples = self.sample_lattice(&lattice, gate)?;
         poll(gate)?;
         self.flow.lattice = lattice;
