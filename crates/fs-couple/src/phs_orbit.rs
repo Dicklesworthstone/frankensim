@@ -22,6 +22,11 @@ use fs_phs::PortHamiltonian;
 
 mod continuation;
 pub use continuation::{PhsFrequencyResponsePoint, continue_forced_frequency_response};
+mod stability;
+pub use stability::{
+    PhsFloquetControls, PhsFloquetLevel, PhsForcedStability, PhsNumericalStability,
+    analyze_forced_orbit_stability,
+};
 
 const MAX_INPUT_HARMONICS: usize = 256;
 
@@ -33,9 +38,18 @@ pub enum PhsOrbitError {
         /// The violated requirement.
         what: &'static str,
     },
-    /// The original storage callback produced a non-finite effort at an AFT sample.
+    /// The original storage/input evaluation refused at an AFT or time-domain sample.
     SourceRefused,
-    /// fs-orbit's harmonic-balance solve refused.
+    /// Shooting moved farther from the supplied phase-zero state than permitted.
+    SeedDisagreement {
+        /// Original pHS state coordinate.
+        coordinate: usize,
+        /// Absolute difference, in this coordinate's physical units.
+        absolute_change: f64,
+        /// Caller-authored limit in the same units.
+        tolerance: f64,
+    },
+    /// fs-orbit's underlying periodic solve refused.
     Orbit(OrbitError),
 }
 impl core::fmt::Display for PhsOrbitError {
@@ -79,6 +93,14 @@ impl PeriodicPortInput {
     }
     /// Fundamental angular frequency [rad/s].
     pub fn omega_rad_s(&self) -> f64 { self.omega_rad_s }
+    /// Reuse the same DC values, complex harmonic amplitudes and phase origin
+    /// at another positive finite fundamental, for example a continuation point.
+    pub fn at_frequency(&self, omega_rad_s: f64) -> Result<Self, PhsOrbitError> {
+        if !omega_rad_s.is_finite() || omega_rad_s <= 0.0 {
+            return Err(bad("positive finite forcing frequency required"));
+        }
+        Ok(Self { omega_rad_s, coefficients: self.coefficients.clone() })
+    }
     /// Number of driven ports (Fourier rows).
     pub fn port_count(&self) -> usize { self.coefficients.len() }
     /// Declared harmonics per port, excluding the DC term, including zero padding.
@@ -143,6 +165,11 @@ impl PhsOrbitProblem<'_> {
 impl OrbitProblem for PhsOrbitProblem<'_> {
     fn dim(&self) -> usize { self.system.state_dim() }
     fn autonomous(&self) -> bool { matches!(self.input, InputKind::Constant(_)) }
+    fn time_domain_rhs(&self) -> Option<fs_orbit::TimeDomainRhs<Self>> {
+        // This adapter's frequency port is exactly sI: island already evaluates
+        // the complete original ODE, including all explicit memory coordinates.
+        Some(Self::island)
+    }
 
     fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
         let n = self.system.state_dim();
