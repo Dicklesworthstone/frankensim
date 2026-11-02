@@ -1,5 +1,6 @@
 //! Material endpoints plugged into the existing thermal time-error controller.
 
+use super::super::{LayeredSurfacePatch, boundary::SurfaceBoundaries};
 use super::{
     BoundLayeredThermalBody, LayerConductionConfig, LayeredThermalAdaptiveControls,
     LayeredThermalAdaptiveError, LayeredThermalAdaptiveReport, LayeredThermalSolveControls,
@@ -42,10 +43,48 @@ impl BoundLayeredThermalBody<'_> {
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(DepositionSimulation<'m>, LayeredThermalAdaptiveReport), LayeredThermalAdaptiveError>
     {
+        self.advance_adaptive_to_with_surface_boundaries(
+            initial,
+            target_s,
+            &[],
+            config,
+            controls,
+            workspace,
+            checkpoint,
+        )
+    }
+
+    /// The same adaptive owner with fixed physical terminal-face patches.
+    ///
+    /// Every original coarse/fine interval binds the current authored baths and
+    /// film conductances. Native Boundary events may change those values, but
+    /// each selected channel must still have the complete declared patch area.
+    /// Coverage and actual material-face source support are rechecked after
+    /// events, including events exactly at the requested target. A removed
+    /// reservoir, incompatible coverage or unsupported face refuses the entire
+    /// advance; no accepted prefix escapes on error or cancellation.
+    ///
+    /// Only the accepted fine trajectory contributes heat and entropy. Patches
+    /// retain the single-interval normal-streamtube approximation and fixed
+    /// geometry; this does not add lateral spreading or a new time integrator.
+    /// An empty map preserves the original cell-temperature boundary semantics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_adaptive_to_with_surface_boundaries<'m>(
+        &self,
+        initial: &DepositionSimulation<'m>,
+        target_s: f64,
+        patches: &[LayeredSurfacePatch],
+        config: LayerConductionConfig,
+        controls: LayeredThermalAdaptiveControls,
+        workspace: &mut LayeredThermalWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(DepositionSimulation<'m>, LayeredThermalAdaptiveReport), LayeredThermalAdaptiveError>
+    {
         LayeredStepper {
             binding: self,
             ids: self.cell_ids(),
             config,
+            patches,
         }
         .advance_adaptive_to(initial, target_s, controls, workspace, checkpoint)
     }
@@ -55,6 +94,7 @@ struct LayeredStepper<'s, 'a> {
     binding: &'s BoundLayeredThermalBody<'a>,
     ids: Vec<CellId>,
     config: LayerConductionConfig,
+    patches: &'s [LayeredSurfacePatch],
 }
 
 /// A fixed-mass layered body permits boundary schedules, not topology changes.
@@ -110,7 +150,14 @@ impl AdaptiveConductionStepper for LayeredStepper<'_, '_> {
             ));
         }
         self.binding
-            .step_coefficients(thermal, self.config, checkpoint)?;
+            .step_coefficients(thermal, self.config, &mut *checkpoint)?;
+        if !self.patches.is_empty() {
+            // The shared time owner invokes this again AFTER native events and
+            // before its target-time exit. Query the actual material face even
+            // when no subsequent interval remains to expose a source refusal.
+            SurfaceBoundaries::new(self.binding, thermal, self.patches, &mut *checkpoint)?
+                .resolve(self.binding, thermal, self.config, checkpoint)?;
+        }
         Ok(())
     }
 
@@ -130,13 +177,16 @@ impl AdaptiveConductionStepper for LayeredStepper<'_, '_> {
         if remaining == 0 {
             return Err(DepositionError::Budget("adaptive layered residual evaluations").into());
         }
-        let step = LayeredThermalStep::new(
+        let mut step = LayeredThermalStep::new(
             self.binding,
             thermal,
             target_s,
             self.config,
             &mut *checkpoint,
         )?;
+        if !self.patches.is_empty() {
+            step = step.with_surface_boundaries(self.patches, &mut *checkpoint)?;
+        }
         let mut spent = SolveWork::default();
         let result = step.solve_inner(
             LayeredThermalSolveControls {

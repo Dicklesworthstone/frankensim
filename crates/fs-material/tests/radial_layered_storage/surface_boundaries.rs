@@ -529,3 +529,6 @@ fn g0_surface_mapping_refusals_and_late_cancellation_leave_original_state_untouc
     assert_eq!(old.cells(), &before);
     assert_eq!(old.time_s(), 0.0);
 }
+
+#[path = "surface_boundaries/adaptive.rs"]
+mod adaptive;

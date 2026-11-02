@@ -6266,6 +6266,33 @@ integrals, physical inventory, native surfaces, finite-difference tangents,
 implicit conservation, source/boundary energy, adaptive evolution, manufactured
 spatial refinement, planar compatibility and source/geometry refusal.
 
+## Adaptive physical-face boundary conduction
+
+`BoundLayeredThermalBody::advance_adaptive_to_with_surface_boundaries` carries an
+explicit fixed set of `LayeredSurfacePatch` values through the existing adaptive
+backward-Euler owner. Every coarse and fine interval prepares the original
+material/film face laws from that interval's actual authored bath temperatures,
+conductances and coverage. Native boundary schedules remain the event owner.
+
+The existing admission seam rechecks complete selected-channel coverage and the
+actual material-face source support after events, including events exactly at
+the target. Reservoir removal, changed coverage incompatible with the fixed
+patch map, unsupported material faces and cancellation return no partial
+trajectory. Accepted half steps alone supply heat and entropy; rejected/coarse
+work does not enter those accounts. Existing unselected channels and empty-map
+behavior retain their original semantics.
+
+The face map preserves fixed geometry and the explicit independent normal
+streamtube approximation. It adds no lateral spreading or second time
+integrator. Local temporal estimates remain distinct from spatial error and
+experimental validation. Focused tests compare physical-face cooling with an
+independent exponential, scheduled bath/film changes with closed-form accepted
+half steps, and target-event refusal with original-state preservation.
+
+Native Rust execution of these new regressions remains unverified under the
+existing dependency-build memory and disk limits; pinned formatting, source/API
+review and independent scalar fixture calculations passed.
+
 ## Physical terminal-face conduction on the layered thermal timeline
 
 `LayeredThermalStep::with_surface_boundaries` maps selected original ambient
