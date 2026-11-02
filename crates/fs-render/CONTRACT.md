@@ -4593,3 +4593,18 @@ exact rectangular/triangular pulse fluence into a latent plateau, clear-glass an
 lossless-stack zero heat, polarization, shared receivers, conduction and dark
 cooling, Kirchhoff gray/spectral absorption, weak loss, canonical continuation,
 bounded admission and transactional cancellation/domain/underflow refusals.
+
+`examples/surface_optical_heating.rs` compares three synthetic 1 g receivers
+under the same intercepted 192 J blue box and 160 J red triangular pulse: a
+smooth opaque metal, the same substrate with a coherent 100 nm transparent
+coating, and a clear dielectric interface. The original equilibrium caloric
+chart supplies a 350 K latent plateau. Bare and coated receivers both melt;
+after source switch-off at 8.5 s, native convection refreezes both on the same
+clock. The clear interface reflects/transmits its illumination and remains at
+300 K. CSV output includes each temperature, metal liquid fractions, separate
+R/T/A energies, native convection and stored-energy residual. Assertions check
+independent pulse fluence, phase traversal, dark heat history and conservation.
+Fixed synthetic optical constants, prescribed incidence/intercepted power and
+aggregate coating/substrate heat are explicit assumptions; radiation and bulk
+absorption behind the clear interface are outside this example. Run with
+`cargo run -p fs-render --example surface_optical_heating --no-default-features --features optical-heating,material-state`.
