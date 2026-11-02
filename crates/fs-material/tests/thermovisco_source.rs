@@ -141,6 +141,26 @@ fn caloric(
 }
 
 #[test]
+fn caloric_temperature_initialization_inverts_the_original_source_chart() {
+    let card = card(claims(5.0));
+    let curve = caloric(&card, 5.0, &point(280.0), &point(320.0));
+    let source = resolve(&card, &point(280.0), &point(320.0)).unwrap();
+    for temperature in [280.0, 287.25, 300.0, 319.875, 320.0] {
+        let state = curve.state_at_temperature(temperature).unwrap();
+        assert!((state.temperature_k() - temperature).abs() < 1e-12);
+        assert!((state.specific_enthalpy_j_kg() - 5.0 * (temperature - 300.0)).abs() < 1e-11);
+        assert_eq!(state.phase_curve_identity(), curve.curve().identity());
+        assert_eq!(state, curve.curve().state_at_specific_enthalpy(state.specific_enthalpy_j_kg()).unwrap());
+        let thermal = source.caloric_point(&curve, temperature, 0.0, 1e-6, 1e-3).unwrap();
+        assert_eq!(thermal.caloric_state(), &state);
+    }
+    for temperature in [279.0, 321.0, f64::NAN, f64::INFINITY] {
+        assert!(curve.state_at_temperature(temperature).is_err());
+        assert!(source.caloric_point(&curve, temperature, 0.0, 1e-6, 1e-3).is_err());
+    }
+}
+
+#[test]
 fn all_source_breakpoints_drive_the_original_history_update() {
     let card = card(claims(5.0));
     let source = resolve(&card, &point(280.0), &point(320.0)).unwrap();

@@ -805,3 +805,6 @@ fn g4_failed_thermal_trials_and_cancellation_preserve_the_whole_vibrating_histor
 
 #[path = "thermovisco_dynamics/finite_gas.rs"]
 mod finite_gas;
+
+#[path = "thermovisco_dynamics/midpoint.rs"]
+mod midpoint;

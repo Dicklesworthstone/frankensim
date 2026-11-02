@@ -12,6 +12,10 @@
 //! Physical Maxwell dashpot work and signed reversible thermoelastic exchange
 //! reach that same thermal owner. Endpoint numerical losses in material and
 //! kinetic energy remain separate, nonthermal accounts.
+//! An explicit `step_midpoint` path instead pairs midpoint inertia with exact
+//! strain-ramp mean stress and heat; it introduces neither inertial nor
+//! constitutive algorithmic damping. Temperature-frozen coefficients still
+//! require refinement when the thermal state changes.
 //!
 //! Source admission requires constant reference density, a single solid phase,
 //! globally affine spring-modulus and free-strain laws, and positive coupled
@@ -128,11 +132,12 @@ pub struct Step<'a, R> {
     pub inertial_numerical_loss_j: f64,
     /// Sum of material and inertial backward-Euler losses. Never material heat.
     pub numerical_loss_j: f64,
-    /// Prescribed endpoint force times actual end displacement increment [J].
+    /// Prescribed force times actual displacement increment [J]. The force is
+    /// endpoint-sampled for `step`, interval-mean/midpoint for `step_midpoint`.
     pub external_work_j: f64,
     pub force_residual_n: f64,
     /// Delta kinetic + delta mechanical internal energy + delta enthalpy + numerical loss
-    /// minus external endpoint work and actual boundary heat [J].
+    /// minus external force work and actual boundary heat [J].
     pub combined_residual_j: f64,
 }
 
@@ -253,6 +258,51 @@ impl<'a> Oscillator<'a> {
         transport: impl FnMut(UniformEnthalpyStepInput<'_>) -> Result<UniformEnthalpyStep<R>, E>,
         gate: &CancelGate,
     ) -> Result<Step<'a, R>, Error<E>> {
+        self.step_with_scheme(external_force_n, duration_s, controls, transport, gate, false)
+    }
+
+    /// Advance with midpoint inertia and the original exact strain-ramp law.
+    ///
+    /// The supplied mean force does work F*delta_q; for a smooth force history,
+    /// a midpoint sample gives a second-order load approximation. Condensing
+    /// m*(v1-v0)/h+A*mean_sigma=F and delta_q=h*(v0+v1)/2 gives the mean-stress
+    /// load line F/A+2*m*v0/(A*h)-2*m*L*delta_epsilon/(A*h*h).
+    /// The original caloric owner resolves this line at EVERY thermal trial,
+    /// preserving exact branch history, physical heat and reversible exchange.
+    ///
+    /// The source must explicitly select `HistoryIntegration::ExactStrainRamp`.
+    /// This path adds no numerical damping. It is second order at fixed material
+    /// temperature; endpoint-frozen temperature-dependent coefficients retain
+    /// their original first-order scope. Energy closure is not a phase-error or
+    /// source-validity certificate. Failure returns no updated history.
+    pub fn step_midpoint<R, E>(
+        &self,
+        mean_external_force_n: f64,
+        duration_s: f64,
+        controls: Controls,
+        transport: impl FnMut(UniformEnthalpyStepInput<'_>) -> Result<UniformEnthalpyStep<R>, E>,
+        gate: &CancelGate,
+    ) -> Result<Step<'a, R>, Error<E>> {
+        poll(gate)?;
+        if self.point.mechanical().law().history_integration()
+            != fs_material::thermovisco::HistoryIntegration::ExactStrainRamp
+        {
+            return Err(Error::Invalid(
+                "midpoint inertia requires the source's exact strain-ramp history law",
+            ));
+        }
+        self.step_with_scheme(mean_external_force_n, duration_s, controls, transport, gate, true)
+    }
+
+    fn step_with_scheme<R, E>(
+        &self,
+        external_force_n: f64,
+        duration_s: f64,
+        controls: Controls,
+        transport: impl FnMut(UniformEnthalpyStepInput<'_>) -> Result<UniformEnthalpyStep<R>, E>,
+        gate: &CancelGate,
+        midpoint: bool,
+    ) -> Result<Step<'a, R>, Error<E>> {
         poll(gate)?;
         if !external_force_n.is_finite()
             || !positive(duration_s)
@@ -265,6 +315,11 @@ impl<'a> Oscillator<'a> {
         }
         let area = self.geometry.cross_section_m2;
         let inertia_per_area_dt = finite(self.effective_mass_kg / area / duration_s)?;
+        let inertia_per_area_dt = if midpoint {
+            finite(2.0 * inertia_per_area_dt)?
+        } else {
+            inertia_per_area_dt
+        };
         let stiffness_pa = finite(inertia_per_area_dt * self.geometry.length_m / duration_s)?;
         let stress_at_reference_pa =
             finite(external_force_n / area + finite(inertia_per_area_dt * self.velocity_m_s)?)?;
@@ -275,15 +330,25 @@ impl<'a> Oscillator<'a> {
             ));
         }
         let old_strain = self.point.mechanical().total_strain();
+        let control = if midpoint {
+            MechanicalControl::AffineMeanStress {
+                reference_strain: old_strain,
+                stress_at_reference_pa,
+                stiffness_pa,
+                tolerance_pa: stress_tolerance,
+            }
+        } else {
+            MechanicalControl::AffineStress {
+                reference_strain: old_strain,
+                stress_at_reference_pa,
+                stiffness_pa,
+                tolerance_pa: stress_tolerance,
+            }
+        };
         let feedback = self
             .point
             .advance_controlled(
-                MechanicalControl::AffineStress {
-                    reference_strain: old_strain,
-                    stress_at_reference_pa,
-                    stiffness_pa,
-                    tolerance_pa: stress_tolerance,
-                },
+                control,
                 duration_s,
                 controls.feedback,
                 transport,
@@ -295,11 +360,23 @@ impl<'a> Oscillator<'a> {
                 * finite(feedback.next.mechanical().total_strain() - old_strain)?,
         )?;
         let velocity = finite(displacement / duration_s)?;
+        let velocity = if midpoint {
+            finite(2.0 * velocity - self.velocity_m_s)?
+        } else {
+            velocity
+        };
+        if midpoint
+            && (velocity / self.geometry.length_m).abs() > self.point.max_strain_rate_s()
+        {
+            return Err(Error::Invalid(
+                "endpoint velocity exceeds the material strain-rate envelope",
+            ));
+        }
         finite(0.5 * self.effective_mass_kg * velocity * velocity)?;
         let delta_velocity = finite(velocity - self.velocity_m_s)?;
         let force_residual_n = finite(
             finite(self.effective_mass_kg * delta_velocity / duration_s)?
-                + finite(area * feedback.next.mechanical().stress_pa())?
+                + finite(area * feedback.work_conjugate_stress_pa)?
                 - external_force_n,
         )?;
         if force_residual_n.abs() > controls.force_tolerance_n {
@@ -312,8 +389,11 @@ impl<'a> Oscillator<'a> {
         let kinetic_change_j = finite(
             0.5 * self.effective_mass_kg * delta_velocity * finite(velocity + self.velocity_m_s)?,
         )?;
-        let inertial_numerical_loss_j =
-            finite(0.5 * self.effective_mass_kg * delta_velocity * delta_velocity)?;
+        let inertial_numerical_loss_j = if midpoint {
+            0.0
+        } else {
+            finite(0.5 * self.effective_mass_kg * delta_velocity * delta_velocity)?
+        };
         let numerical_loss_j = finite(
             inertial_numerical_loss_j
                 + finite(volume * feedback.mechanical_energy.numerical_dissipation)?,

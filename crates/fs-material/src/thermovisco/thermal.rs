@@ -40,7 +40,7 @@ pub struct FeedbackConfig {
     pub relaxation: f64,
 }
 
-/// Work-conjugate uniaxial endpoint control, independent of the material law.
+/// Work-conjugate uniaxial strain/stress control, independent of the material law.
 /// Stress is work per reference volume per total engineering strain, matching
 /// the existing small-strain Maxwell owner; it is not a finite-strain load.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,6 +66,18 @@ pub enum MechanicalControl {
         stiffness_pa: f64,
         tolerance_pa: f64,
     },
+    /// Exact-ramp interval-mean load line with the same units and signs as
+    /// `AffineStress`. It constrains the original law's work-conjugate mean
+    /// stress, not its endpoint reaction. Requires `ExactStrainRamp`; it can
+    /// close midpoint inertia without turning algorithmic loss into heat.
+    /// Zero stiffness prescribes constant mean stress. Endpoint-force accuracy
+    /// and continuous loading still require temporal convergence.
+    AffineMeanStress {
+        reference_strain: f64,
+        stress_at_reference_pa: f64,
+        stiffness_pa: f64,
+        tolerance_pa: f64,
+    },
 }
 
 impl MechanicalControl {
@@ -75,6 +87,7 @@ impl MechanicalControl {
             Self::Stress { stress_pa, tolerance_pa }
                 if stress_pa.is_finite() && positive(tolerance_pa) => Ok(()),
             Self::AffineStress { reference_strain, stress_at_reference_pa, stiffness_pa, tolerance_pa }
+            | Self::AffineMeanStress { reference_strain, stress_at_reference_pa, stiffness_pa, tolerance_pa }
                 if reference_strain.is_finite() && stress_at_reference_pa.is_finite()
                     && stiffness_pa.is_finite() && stiffness_pa >= 0.0 && positive(tolerance_pa) => Ok(()),
             _ => Err(FeedbackError::Invalid("control needs finite strain/stress, nonnegative affine stiffness and positive stress tolerance")),
@@ -85,7 +98,8 @@ impl MechanicalControl {
         match self {
             Self::TotalStrain(_) => Ok(None),
             Self::Stress { stress_pa, tolerance_pa } => Ok(Some((stress_pa, tolerance_pa))),
-            Self::AffineStress { reference_strain, stress_at_reference_pa, stiffness_pa, tolerance_pa } =>
+            Self::AffineStress { reference_strain, stress_at_reference_pa, stiffness_pa, tolerance_pa }
+            | Self::AffineMeanStress { reference_strain, stress_at_reference_pa, stiffness_pa, tolerance_pa } =>
                 Ok(Some((finite(stress_at_reference_pa - finite(stiffness_pa * finite(strain-reference_strain)?)?)?, tolerance_pa))),
         }
     }
@@ -101,9 +115,13 @@ impl MechanicalControl {
                     .map_err(FeedbackError::Mechanical)?;
                 finite(finite(stress_pa - affine.offset_pa)? / affine.tangent_pa)?
             }
-            Self::AffineStress { reference_strain, stress_at_reference_pa, stiffness_pa, .. } => {
-                let affine = old.linearize(temperature, duration_s)
-                    .map_err(FeedbackError::Mechanical)?;
+            Self::AffineStress { reference_strain, stress_at_reference_pa, stiffness_pa, .. }
+            | Self::AffineMeanStress { reference_strain, stress_at_reference_pa, stiffness_pa, .. } => {
+                let affine = if matches!(self, Self::AffineMeanStress { .. }) {
+                    old.linearize_work(temperature, duration_s)
+                } else {
+                    old.linearize(temperature, duration_s)
+                }.map_err(FeedbackError::Mechanical)?;
                 // Center the load at its reference strain. Condensed inertia
                 // can be very stiff, so do not subtract two large k*strain
                 // offsets to obtain the small displacement increment.
@@ -115,13 +133,22 @@ impl MechanicalControl {
         let step = old.advance(temperature, strain, duration_s, energy_tolerance)
             .map_err(FeedbackError::Mechanical)?;
         if let Some((stress_pa, tolerance_pa)) = self.target_stress(step.point.total_strain())? {
-            let residual = finite(step.stress_pa - stress_pa)?;
+            let actual = self.controlled_stress(&step);
+            let residual = finite(actual - stress_pa)?;
             if residual.abs() > tolerance_pa {
                 return Err(FeedbackError::StressResidual { target_pa: stress_pa,
-                    actual_pa: step.stress_pa, tolerance_pa });
+                    actual_pa: actual, tolerance_pa });
             }
         }
         Ok(step)
+    }
+
+    fn controlled_stress(self, step: &super::Step<'_>) -> f64 {
+        if matches!(self, Self::AffineMeanStress { .. }) {
+            step.work_conjugate_stress_pa
+        } else {
+            step.stress_pa
+        }
     }
 }
 
@@ -194,8 +221,11 @@ pub struct FeedbackStep<'a, R> {
     pub next: CaloricPoint<'a>,
     /// The imposed boundary condition, not a fitted material parameter.
     pub control: MechanicalControl,
-    /// Actual minus prescribed endpoint/load-line stress [Pa]; None for strain control.
+    /// Actual minus prescribed endpoint/mean load-line stress [Pa]; None for strain control.
     pub stress_residual_pa: Option<f64>,
+    /// Original constitutive stress conjugate to the strain increment [Pa].
+    /// Interval mean for exact ramps; endpoint for backward Euler.
+    pub work_conjugate_stress_pa: f64,
     /// Boundary work [J]. For stress control this uses the prescribed
     /// load, not a possibly imperfect constitutive reaction. Under strain
     /// control it is the original law's mechanical work times reference volume,
@@ -337,10 +367,9 @@ impl<'a> CaloricPoint<'a> {
     /// The original transport transaction, source-domain, work and cancellation
     /// limits apply to all control modes. A rejected proposal changes neither
     /// strain, branch memory, enthalpy nor the accepted clock.
-    /// Exact strain-ramp integration admits prescribed strain here. Stress and
-    /// affine-stress controls retain endpoint-load work and therefore refuse
-    /// that integration mode; their complete loading path is not supplied by
-    /// an endpoint stress alone.
+    /// Exact strain-ramp integration admits prescribed strain or the explicit
+    /// `AffineMeanStress` load line. Endpoint stress controls retain their
+    /// backward-Euler work convention and refuse exact-ramp integration.
     pub fn advance_controlled<R, E>(&self, control: MechanicalControl, duration_s: f64,
         config: FeedbackConfig,
         mut transport: impl FnMut(UniformEnthalpyStepInput<'_>) -> Result<UniformEnthalpyStep<R>, E>,
@@ -348,9 +377,15 @@ impl<'a> CaloricPoint<'a> {
         poll(&mut cancelled)?;
         control.validate()?;
         if self.point.law.history_integration == HistoryIntegration::ExactStrainRamp
-            && !matches!(control, MechanicalControl::TotalStrain(_)) {
+            && !matches!(control, MechanicalControl::TotalStrain(_)
+                | MechanicalControl::AffineMeanStress { .. }) {
             return Err(FeedbackError::Invalid(
-                "exact strain-ramp history requires prescribed strain; endpoint load work is a different boundary history"));
+                "exact strain-ramp history requires strain or mean-stress control; endpoint load work is a different boundary history"));
+        }
+        if self.point.law.history_integration != HistoryIntegration::ExactStrainRamp
+            && matches!(control, MechanicalControl::AffineMeanStress { .. }) {
+            return Err(FeedbackError::Invalid(
+                "mean-stress control requires exact strain-ramp material integration"));
         }
         let final_time = self.time_s + duration_s;
         let material_tolerance = config.energy_tolerance_j / self.volume_m3;
@@ -391,7 +426,8 @@ impl<'a> CaloricPoint<'a> {
             let actual_heat = exchange.heat_j;
             let thermal_residual = finite(thermal_change - actual_heat - proposal.external_heat_j)?;
             let target = control.target_stress(mechanical.point.total_strain())?;
-            let stress_residual_pa = target.map(|(stress, _)| finite(mechanical.stress_pa-stress)).transpose()?;
+            let stress_residual_pa = target.map(|(stress, _)|
+                finite(control.controlled_stress(&mechanical)-stress)).transpose()?;
             let work_density = match target {
                 None => mechanical.energy.mechanical_work,
                 Some((stress_pa, _)) => product(stress_pa,
@@ -414,6 +450,7 @@ impl<'a> CaloricPoint<'a> {
                     mechanical_entropy_j_k: exchange.entropy_j_k,
                     mechanical_internal_energy_j: exchange.internal_energy_j };
                 return Ok(FeedbackStep { next, control, stress_residual_pa, external_mechanical_work_j,
+                    work_conjugate_stress_pa: mechanical.work_conjugate_stress_pa,
                     mechanical_energy: mechanical.energy, transport: proposal,
                     mechanical_internal_energy_change_j: exchange.internal_change_j,
                     mechanical_entropy_energy_change_j: exchange.entropy_energy_change_j,

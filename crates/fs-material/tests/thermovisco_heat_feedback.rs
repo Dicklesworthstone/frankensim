@@ -116,6 +116,64 @@ fn exact_ramp_refuses_endpoint_load_work_before_transport_or_publication() {
 }
 
 #[test]
+fn exact_mean_stress_load_closes_physical_heat_and_preserves_history() {
+    let material = law(1.0).with_history_integration(HistoryIntegration::ExactStrainRamp);
+    let curve = chart(100.0, 73);
+    let initial = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(),
+        &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+    let dt = 0.2_f64;
+    let stress = 5e5;
+    let decay = (-dt).exp();
+    let b = (1.0-decay)/dt;
+    let mean_gain = (1.0-b)/dt;
+    let expected_strain = stress/(0.5e8+3e8*mean_gain);
+    let control = MechanicalControl::AffineMeanStress {
+        reference_strain: 0.0, stress_at_reference_pa: stress,
+        stiffness_pa: 0.0, tolerance_pa: 1e-6,
+    };
+    let step = initial.advance_controlled(control, dt, config(), adiabatic, || false).unwrap();
+    close(step.next.mechanical().total_strain(), expected_strain, 1e-15);
+    close(step.next.mechanical().branch_strains()[0], b*expected_strain, 1e-15);
+    close(step.work_conjugate_stress_pa, stress, 1e-8);
+    close(step.external_mechanical_work_j, VOLUME*stress*expected_strain, 1e-12);
+    let heat = VOLUME*3e8*(expected_strain/dt).powi(2)
+        *(dt-2.0*(1.0-decay)+0.5*(1.0-(-2.0*dt).exp()));
+    close(step.applied_heat_j, heat, 1e-12);
+    assert_eq!(step.mechanical_energy.numerical_dissipation, 0.0);
+    assert!(step.combined_residual_j.abs()<1e-10);
+    assert!(step.next.mechanical().stress_pa()>stress);
+    let warmed = step.next;
+    let saved = warmed.clone();
+    let held_line = MechanicalControl::AffineMeanStress {
+        reference_strain: warmed.mechanical().total_strain(),
+        stress_at_reference_pa: stress, stiffness_pa: 2e8, tolerance_pa: 1e-6,
+    };
+    let replay = warmed.advance_controlled(held_line, dt, config(), adiabatic, || false).unwrap();
+    close(replay.work_conjugate_stress_pa,
+        stress-2e8*(replay.next.mechanical().total_strain()-warmed.mechanical().total_strain()),1e-7);
+    assert!(replay.combined_residual_j.abs()<1e-10);
+    assert_eq!(warmed, saved);
+    assert!(matches!(warmed.advance_controlled(held_line,dt,config(),adiabatic,||true),
+        Err(FeedbackError::Cancelled)));
+    assert_eq!(warmed, saved);
+}
+
+#[test]
+fn mean_stress_requires_exact_history_before_transport() {
+    let material = law(1.0);
+    let curve = chart(100.0, 74);
+    let initial = CaloricPoint::try_new(material.birth(300.0,0.0).unwrap(),
+        &curve,0.0,MASS,VOLUME,0.001).unwrap();
+    let calls = Cell::new(0);
+    let result = initial.advance_controlled(MechanicalControl::AffineMeanStress {
+        reference_strain:0.0,stress_at_reference_pa:1e5,stiffness_pa:0.0,tolerance_pa:1e-6,
+    },0.2,config(),|input| {calls.set(calls.get()+1);adiabatic(input)},||false);
+    assert!(matches!(result,Err(FeedbackError::Invalid(_))));
+    assert_eq!(calls.get(),0);
+    assert_eq!(initial.mechanical().branch_strains(),&[0.0]);
+}
+
+#[test]
 fn caloric_data_alone_changes_temperature_relaxation_and_stress() {
     let material = law(0.05);
     let a = chart(5.0, 2);

@@ -3280,6 +3280,32 @@ the mixed expansion/modulus derivative term. The native branch-strain envelope
 is enforced on expansion-bearing endpoints. Changing reference density, phase,
 or either affine derivative still requires additional terms and refuses.
 
+### Work-mean stress control for exact hereditary heat feedback
+
+`Point::linearize_work` returns the affine derivative of the stress used by the
+original work ledger. For exact strain ramps this is the interval-mean stress,
+using the original stable Prony coefficients and retained thermal/history
+references; backward Euler keeps its endpoint semantics. `Step` and
+`FeedbackStep` expose that work-conjugate stress even on a zero-increment hold.
+`MechanicalControl::AffineMeanStress` solves an explicit affine mean-load line
+at every thermal trial, then independently checks the actual mean-stress
+residual and prescribed work. It requires `ExactStrainRamp`; existing endpoint
+stress controls retain their refusal of an incompatible exact-ramp work law.
+
+The original finite caloric owner continues to receive only physical dashpot
+loss plus signed reversible exchange, while mechanical entropy and internal
+energy close the combined balance. This enables consistent midpoint inertia
+without introducing a separate constitutive or thermal solver. Coefficients
+remain frozen at the proposed endpoint temperature, so changing-temperature
+paths still require refinement. Source identity, strain/rate limits,
+cancellation, and candidate-only publication remain binding.
+
+`ResolvedHeatCapacityCurve::state_at_temperature` initializes the same original
+single-phase enthalpy chart by its monotone piecewise-linear inverse. It retains
+source identity and chart interpolation and refuses nonfinite temperatures or
+extrapolation. Source-bound `caloric_point` uses this operation rather than an
+independent Cp integration or arbitrary enthalpy datum.
+
 ### Shared phase-dependent conductivity
 
 `phase::conductivity::LiquidMassFractionConductivity` owns the declared positive

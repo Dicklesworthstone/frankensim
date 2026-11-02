@@ -222,6 +222,11 @@ pub struct Energy {
 pub struct Step<'a> {
     pub point: Point<'a>,
     pub stress_pa: f64,
+    /// Stress conjugate to this step's total-strain increment [Pa]. This is
+    /// interval-mean stress for exact ramps and endpoint stress for backward Euler.
+    /// It remains defined when the strain increment is zero; never infer it by
+    /// dividing work by a displacement that may vanish.
+    pub work_conjugate_stress_pa: f64,
     pub tangent_pa: f64,
     pub energy: Energy,
 }
@@ -284,6 +289,33 @@ impl<'a> Point<'a> {
         tangent = finite(tangent*thermal.modulus_scale)?;
         let offset = finite(thermal.modulus_scale*history
             - tangent*(self.birth_strain+thermal.free_strain-self.birth_free_strain))?;
+        positive(tangent)?;
+        Ok(AffineStress { tangent_pa: tangent, offset_pa: offset })
+    }
+
+    /// Affine stress conjugate to the prescribed total-strain increment.
+    /// For exact strain ramps this is the interval mean, with the ORIGINAL
+    /// branch histories and coefficients frozen at the proposed temperature.
+    /// Its tangent is suitable for energy-consistent midpoint inertia or an
+    /// explicitly supplied mean-stress load line. Endpoint-stress conditions
+    /// continue to use [`Self::linearize`]. This query does not age history.
+    pub fn linearize_work(&self, temperature_k: f64, duration_s: f64) -> Result<AffineStress, Error> {
+        if self.law.history_integration == HistoryIntegration::BackwardEuler {
+            return self.linearize(temperature_k, duration_s);
+        }
+        positive(duration_s)?;
+        let thermal = self.law.at(temperature_k)?;
+        let old_e = self.mechanical_strain();
+        let mut tangent = 0.5 * self.law.equilibrium_pa;
+        let mut history = tangent * old_e;
+        for (&(e, tau), &q) in self.law.branches.iter().zip(&self.q) {
+            let ramp = crate::visco::PronyRamp::new(duration_s/(tau*thermal.relaxation_scale));
+            tangent += e * ramp.apply(0.0, 1.0).1;
+            history += e * ramp.apply(q, -old_e).1;
+        }
+        tangent = finite(tangent * thermal.modulus_scale)?;
+        let offset = finite(thermal.modulus_scale * history
+            - tangent * (self.birth_strain+thermal.free_strain-self.birth_free_strain))?;
         positive(tangent)?;
         Ok(AffineStress { tangent_pa: tangent, offset_pa: offset })
     }
@@ -366,7 +398,8 @@ impl<'a> Point<'a> {
         if energy.residual.abs() > energy_tolerance_j_m3 {
             return Err(Error::Energy(energy.residual));
         }
-        Ok(Step { point: next, stress_pa: stress, tangent_pa, energy })
+        Ok(Step { point: next, stress_pa: stress,
+            work_conjugate_stress_pa: work_stress, tangent_pa, energy })
     }
 }
 
@@ -535,6 +568,46 @@ mod tests {
         close((b.stress_pa-a.stress_pa)/1e-7/affine.tangent_pa, 1.0, 1e-8);
         assert!(a.energy.modulus_work > 0.0 && a.energy.dissipated > 0.0);
         assert_eq!(a.energy.numerical_dissipation, 0.0);
+    }
+
+    #[test]
+    fn exact_work_stress_and_its_affine_tangent_keep_warm_thermal_history() {
+        let law = law(vec![(3e8, 2.0), (2e8, 0.03)])
+            .with_history_integration(HistoryIntegration::ExactStrainRamp);
+        let old = law.birth(450.0, 0.001).unwrap()
+            .advance(400.0, 0.002, 0.3, 1e-7).unwrap().point;
+        let saved = old.clone();
+        for dt in [0.001, 0.4, 20.0] {
+            let affine = old.linearize_work(350.0, dt).unwrap();
+            let a = old.advance(350.0, 0.003, dt, 1e-7).unwrap();
+            let b = old.advance(350.0, 0.003+1e-7, dt, 1e-7).unwrap();
+            close(a.work_conjugate_stress_pa,
+                affine.tangent_pa*0.003+affine.offset_pa, 1e-6);
+            close((b.work_conjugate_stress_pa-a.work_conjugate_stress_pa)
+                /1e-7/affine.tangent_pa, 1.0, 1e-8);
+            close(a.energy.mechanical_work,
+                a.work_conjugate_stress_pa*(0.003-old.total_strain()), 1e-10);
+            assert!(a.work_conjugate_stress_pa != a.stress_pa);
+            let held = old.advance(350.0, old.total_strain(), dt, 1e-7).unwrap();
+            assert_eq!(held.energy.mechanical_work, 0.0);
+            assert!(held.work_conjugate_stress_pa.is_finite());
+        }
+        assert_eq!(old, saved);
+        for dt in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(old.linearize_work(350.0, dt).is_err());
+        }
+    }
+
+    #[test]
+    fn backward_euler_work_linearization_preserves_endpoint_semantics() {
+        let law = law(vec![(3e8, 2.0)]);
+        let point = law.birth(400.0, 0.001).unwrap();
+        let endpoint = point.linearize(350.0, 0.2).unwrap();
+        let work = point.linearize_work(350.0, 0.2).unwrap();
+        assert_eq!(endpoint.tangent_pa.to_bits(), work.tangent_pa.to_bits());
+        assert_eq!(endpoint.offset_pa.to_bits(), work.offset_pa.to_bits());
+        let step = point.advance(350.0, 0.002, 0.2, 1e-7).unwrap();
+        assert_eq!(step.stress_pa.to_bits(), step.work_conjugate_stress_pa.to_bits());
     }
 
     #[test]

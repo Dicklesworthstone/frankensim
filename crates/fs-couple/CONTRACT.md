@@ -8508,6 +8508,33 @@ Non-temperature coordinates stay fixed external conditions; this adds no
 evolving pressure/composition work, phase transition, variable reference mass
 or alternate caloric model. Numerical dissipation is not converted to heat.
 
+### Energy-consistent midpoint hereditary vibration
+
+`thermovisco_dynamics::Oscillator::step_midpoint` couples the existing axial
+Galerkin inertia to the material owner's exact strain-ramp mean stress and
+independently integrated Maxwell heat. The source must explicitly select
+`HistoryIntegration::ExactStrainRamp`. The prescribed interval-mean force does
+work against the actual displacement increment; midpoint kinematics make that
+work equal kinetic-energy change plus the original mean-stress material work.
+Both inertial and constitutive algorithmic loss are exactly zero in this path.
+The original backward-Euler `step` keeps its separate numerical-loss accounts.
+
+The same original thermal feedback solve re-evaluates the condensed load line
+at every candidate temperature, preserving branch memory, thermal eigenstrain,
+mechanical entropy, reversible heat and finite caloric storage. The complete
+kinetic/material-internal/caloric balance and force residual must pass before
+publication. The reconstructed endpoint velocity must also stay inside the
+original source strain-rate envelope; an admitted average strain rate alone
+cannot admit an excessive midpoint endpoint velocity.
+
+This is second-order mechanical integration at fixed material temperature.
+Endpoint-frozen temperature-dependent coefficients retain their first-order
+thermal scope. It remains the existing one-coordinate axial reduction with
+fixed reference density and geometry; timestep refinement and source validity
+are independent of energy closure. Physical regressions check elastic phase
+convergence and long-run energy, full Maxwell motion/history/heat against an
+independent ODE, finite self-heating feedback, and transactional refusals.
+
 ### Environmental material surfaces in thermoplastic conduction
 
 The existing native tetrahedral plasticity solve and prepared material heat
