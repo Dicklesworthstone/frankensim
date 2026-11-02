@@ -1406,6 +1406,25 @@ homogenization, the P2 milestone.
   claimed. The formulation follows the quadrature-local elimination of
   [Ahmadi et al. (2025)](https://doi.org/10.1007/s00707-025-04310-z), extended
   here to the complete transverse column by differentiating `P[:,2]=0`.
+- `hyper::incompressible_plane_stress` is the explicit exactly incompressible
+  alternative: `F22=1/det(F_in_plane)` enforces `J=1`, and the two transverse
+  shears relax against the original `isochoric_energy` remainder. No bulk
+  penalty or large bulk-modulus arithmetic is evaluated. The full physical
+  Piola stress is `dW_remainder/dF - p cof(F)`, with the compression-positive
+  multiplier `p=(dW_remainder/dF22)/det(F_in_plane)`. This multiplier follows
+  the native remainder's convention; for NH it is `mu*(F22²-1)`, and it is
+  not generally the negative mean Cauchy stress. The returned tangent
+  differentiates the six-variable constrained energy, including the second
+  derivatives of the exact thickness, then condenses the two shear variables.
+  The state-only path uses two-direction local AD. Original stretch admission,
+  positive shear stiffness, unit-covariant traction tolerances and bounded
+  Newton/backtracking apply without clipping. `hyper_incompressible_plane_stress.rs`
+  tests independent NH finite-deformation formulas, all four laws and both HGO
+  invariant choices, physical transverse traction closure, energy/tangent finite
+  differences, rotation, modulus scaling and bitwise independence of bulk
+  parameters through 1e300. This locally stable planar branch does not claim
+  3-D mixed displacement/pressure elements, shell bending, wrinkling or a
+  globally unique equilibrium.
 - `hyper::cards` instantiates strict, dimensioned `ConstitutiveModelCard`s
   for `neo-hookean-log`, `mooney-rivlin-decoupled`, `ogden-decoupled` and
   `hgo-dispersed` v1 and registers the real

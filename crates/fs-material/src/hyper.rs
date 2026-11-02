@@ -12,6 +12,8 @@ use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 
 /// Dimensioned constitutive-model cards and graph registration.
 pub mod cards;
+/// Exact incompressibility with traction-free thickness and transverse shears.
+pub mod incompressible_plane_stress;
 /// Traction-free finite-strain thickness and transverse-shear relaxation.
 pub mod plane_stress;
 mod spectral;
