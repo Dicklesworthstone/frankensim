@@ -3,6 +3,8 @@
 
 #[path = "compact_caloric.rs"]
 mod compact;
+#[path = "caloric_solids/implicit.rs"]
+mod implicit;
 #[cfg(feature = "enthalpy-coupling")]
 #[path = "caloric_viscous_heat.rs"]
 mod viscous_heat;

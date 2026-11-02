@@ -8,23 +8,27 @@
 //! viscosity fixed and converts it through the current source Cp at each
 //! trial, with the same endpoint heat-flux acceptance and energy accounting.
 
-use super::{
-    MaterialEnthalpyMarch, MaterialEnthalpyStepReport, MaterialEnthalpyTransientConfig, SourceSgsHeat,
+use super::super::super::{
+    MaterialBuoyancyError, MaterialBuoyancyMarch, MaterialEndpointConfig, MaterialEndpointMarch,
+    admit_open_boundary_materials, poll,
 };
 use super::super::{
     CaloricCoupling, ConvectionCaloricLaw, MaterialEnthalpyConfig, MaterialEnthalpyReport,
     MaterialEnthalpyState, defect_field,
 };
-use super::super::super::{
-    MaterialBuoyancyError, MaterialBuoyancyMarch, admit_open_boundary_materials, poll,
-};
-use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep};
 #[cfg(feature = "enthalpy-coupling")]
-use crate::conjugate::unsteady::MaterialViscousHeat;
+use super::MaterialViscousHeatMarch;
+use super::{
+    MaterialEnthalpyMarch, MaterialEnthalpyStepReport, MaterialEnthalpyTransientConfig,
+    SourceSgsHeat,
+};
 #[cfg(feature = "enthalpy-coupling")]
 use crate::conjugate::ViscousHeatControls;
 #[cfg(feature = "enthalpy-coupling")]
-use super::MaterialViscousHeatMarch;
+use crate::conjugate::unsteady::MaterialViscousHeat;
+use crate::conjugate::unsteady::{
+    MaterialCoefficients, MaterialEndpointCoupling, MaterialHeatStep,
+};
 use crate::conjugate::{
     AdvectiveEnthalpyField, ChtError, EnergyConfig, FvSgsConfig, RadiationConfig, SimpleConfig,
     ThermalSetup, TransientRecord, UnsteadyConfig, Voxel, VoxelDomain,
@@ -145,20 +149,19 @@ fn stored_change(
         let Voxel::Solid(index) = domain.voxel_at(cell) else {
             continue;
         };
-        let source = solid_sources
-            .get(usize::from(index))
-            .ok_or(MaterialBuoyancyError::Invalid(
-                "every solid assignment needs its original thermal material law",
-            ))?;
+        let source =
+            solid_sources
+                .get(usize::from(index))
+                .ok_or(MaterialBuoyancyError::Invalid(
+                    "every solid assignment needs its original thermal material law",
+                ))?;
         let old = step.previous_temperature_k[cell];
         let new = temperature[cell];
         let actual = domain.volume(cell)
             * source
                 .storage()
                 .energy_change_j(old, new)
-                .map_err(|error| {
-                    solid_failure(cell, new, SolidThermalError::Storage(error))
-                })?;
+                .map_err(|error| solid_failure(cell, new, SolidThermalError::Storage(error)))?;
         if !actual.is_finite() {
             return Err(MaterialBuoyancyError::Invalid(
                 "joint source-caloric stored energy is unrepresentable",
@@ -279,12 +282,9 @@ fn joint_energy_step(
                 let source = &solid_sources[usize::from(index)];
                 if delta == 0.0 {
                     domain.volume(cell)
-                        * source
-                            .storage()
-                            .heat_capacity_j_k(old)
-                            .map_err(|error| {
-                                solid_failure(cell, old, SolidThermalError::Storage(error))
-                            })?
+                        * source.storage().heat_capacity_j_k(old).map_err(|error| {
+                            solid_failure(cell, old, SolidThermalError::Storage(error))
+                        })?
                 } else {
                     trial_stored[cell] / delta
                 }
@@ -358,7 +358,9 @@ fn joint_energy_step(
         let mut solid_storage_ok = true;
         let mut outflow_correction_w = if sgs_outflow_correction_w == 0.0 {
             radiation_correction_w
-        } else { radiation_correction_w + sgs_outflow_correction_w };
+        } else {
+            radiation_correction_w + sgs_outflow_correction_w
+        };
         for cell in 0..domain.cell_count() {
             poll(gate)?;
             let old = step.previous_temperature_k[cell];
@@ -368,8 +370,7 @@ fn joint_energy_step(
             if step.is_compact_cell(cell) {
                 continue;
             }
-            let linear_j =
-                storage_w_k[cell] * step.time_step_s * (new - old);
+            let linear_j = storage_w_k[cell] * step.time_step_s * (new - old);
             let defect_j = stored[cell] - linear_j;
             if !defect_j.is_finite() {
                 return Err(MaterialBuoyancyError::Invalid(
@@ -383,8 +384,7 @@ fn joint_energy_step(
                     outflow_correction_w += cell_defects[cell];
                 }
             } else {
-                maximum_solid_storage_defect_j =
-                    maximum_solid_storage_defect_j.max(defect_j.abs());
+                maximum_solid_storage_defect_j = maximum_solid_storage_defect_j.max(defect_j.abs());
                 solid_stored_energy_change_j += stored[cell];
                 let cell_roundoff_j = 64.0
                     * f64::EPSILON
@@ -394,8 +394,8 @@ fn joint_energy_step(
                 // A different voxel's reference mass must not loosen this
                 // cell's constitutive closure; only the global ledger sums
                 // independently bounded floating-point roundoff.
-                solid_storage_ok &= defect_j.abs()
-                    <= solid_controls.storage_tolerance_j + cell_roundoff_j;
+                solid_storage_ok &=
+                    defect_j.abs() <= solid_controls.storage_tolerance_j + cell_roundoff_j;
                 solid_roundoff_j += cell_roundoff_j;
                 if !cell_roundoff_j.is_finite() || !solid_roundoff_j.is_finite() {
                     return Err(MaterialBuoyancyError::Invalid(
@@ -418,18 +418,13 @@ fn joint_energy_step(
                 .copied()
                 .zip(after.conductivity_w_m_k)
             {
-                conductivity_relative_defect = conductivity_relative_defect
-                    .max((b - a).abs() / a.max(b));
+                conductivity_relative_defect =
+                    conductivity_relative_defect.max((b - a).abs() / a.max(b));
             }
         }
 
         next.report.iterations = total_iterations;
-        let record = step.record_with_enthalpy(
-            &next,
-            &stored,
-            radiated_w,
-            outflow_correction_w,
-        )?;
+        let record = step.record_with_enthalpy(&next, &stored, radiated_w, outflow_correction_w)?;
         closure_j = record.closure_j;
         fluid_report = MaterialEnthalpyStepReport {
             time_s: step.time_s,
@@ -449,22 +444,17 @@ fn joint_energy_step(
             solid_stored_energy_change_j,
         };
 
-        let temperature_roundoff =
-            64.0 * f64::EPSILON * largest_temperature;
+        let temperature_roundoff = 64.0 * f64::EPSILON * largest_temperature;
         let fluid_ok = temperature_defect_k
             <= fluid_controls.temperature_tolerance_k + temperature_roundoff
-            && maximum_fluid_storage_defect_w
-                <= fluid_controls.maximum_storage_defect_w
-            && advection.maximum_face_flux_defect_w
-                <= caloric.config.maximum_flux_defect_w
-            && advection.maximum_cell_flux_defect_w
-                <= caloric.config.maximum_flux_defect_w
+            && maximum_fluid_storage_defect_w <= fluid_controls.maximum_storage_defect_w
+            && advection.maximum_face_flux_defect_w <= caloric.config.maximum_flux_defect_w
+            && advection.maximum_cell_flux_defect_w <= caloric.config.maximum_flux_defect_w
             && maximum_sgs_heat_flux_defect_w <= caloric.config.maximum_flux_defect_w
             && closure_j.abs() <= fluid_controls.maximum_energy_closure_j;
         let solid_ok = temperature_defect_k
             <= solid_controls.temperature_tolerance_k + temperature_roundoff
-            && conductivity_relative_defect
-                <= solid_controls.conductivity_relative_tolerance
+            && conductivity_relative_defect <= solid_controls.conductivity_relative_tolerance
             && solid_storage_ok
             && closure_j.abs() <= solid_controls.storage_tolerance_j + solid_roundoff_j;
         if fluid_ok && solid_ok {
@@ -494,14 +484,7 @@ fn joint_energy_step(
                 for (trial, target) in iterate.iter_mut().zip(next.temperature) {
                     *trial = relaxation.mul_add(target - *trial, *trial);
                 }
-                caloric.write_field(
-                    domain,
-                    &iterate,
-                    reference,
-                    bounds,
-                    &mut applied,
-                    gate,
-                )?;
+                caloric.write_field(domain, &iterate, reference, bounds, &mut applied, gate)?;
                 solid_applied = solid_samples(step, solid_sources, &iterate, gate)?;
                 stored_change(
                     caloric,
@@ -581,19 +564,104 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
         gate: &CancelGate,
-        resolve: impl FnMut(
-            usize,
-            f64,
-            &FluidTransportState,
-        ) -> Result<S, MaterialError>,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialEnthalpySolidMarch<'a, S, C>, MaterialBuoyancyError> {
         self.march_natural_convection_with_enthalpy_and_material_solids_inner(
-            domain, solid_sources, flow, thermal, energy, initial_temperature_k,
-            bounds, caloric, fluid_controls, solid_controls, unsteady, None,
+            domain,
+            solid_sources,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            fluid_controls,
+            solid_controls,
+            unsteady,
+            None,
             #[cfg(feature = "enthalpy-coupling")]
             None,
-            inlet_schedule, power_schedule, radiation, gate, resolve,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            gate,
+            resolve,
         )
+    }
+
+    /// Close fluid h(T), solid integral Cp(T)/k(T), source transport and
+    /// density-derived buoyancy on the same native transient endpoint.
+    ///
+    /// The original joint caloric owner still solves one thermal residual;
+    /// the bounded outer material owner reuses original BE/BDF2 momentum with
+    /// fixed accepted time levels. Every thermal trial starts from the SAME
+    /// old temperature, so discarded coupling trials cannot add storage or
+    /// advance the physical clock. Native, caloric, solid and unrelaxed fluid
+    /// material defects must all pass before publishing the complete march.
+    ///
+    /// Original fluid and solid sources retain their identities, support,
+    /// reference masses and energy datums. Contacts, compact storage,
+    /// thermostats and radiation keep their original owners. Every actual
+    /// caloric/radiative/compact solve consumes both the original heat budget
+    /// and the outer endpoint budget; records sum work from discarded trials
+    /// while retaining one physical storage/heat account per accepted step.
+    ///
+    /// Coupled time accuracy remains first order even with BDF2 momentum.
+    /// This entry selects neither SGS nor physical viscous heating. Original
+    /// source/native refusal, failed nonlinear closure, exhausted work or
+    /// cancellation returns no partial march or accepted source history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_enthalpy_and_material_solids_implicit<
+        'a,
+        S: FluidTransport,
+        C: ConvectionCaloricLaw,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        solid_sources: &[SolidThermalLaw<'_>],
+        flow: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        bounds: BoussinesqConfig<3>,
+        caloric: &'a C,
+        fluid_controls: MaterialEnthalpyTransientConfig,
+        solid_controls: SolidThermalConfig,
+        unsteady: &UnsteadyConfig,
+        endpoint_controls: MaterialEndpointConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEndpointMarch<MaterialEnthalpySolidMarch<'a, S, C>>, MaterialBuoyancyError>
+    {
+        let mut endpoint = MaterialEndpointCoupling::new(endpoint_controls)?;
+        let solution = self.march_natural_convection_with_enthalpy_and_material_solids_inner(
+            domain,
+            solid_sources,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            fluid_controls,
+            solid_controls,
+            unsteady,
+            None,
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            Some(&mut endpoint),
+            gate,
+            resolve,
+        )?;
+        poll(gate)?;
+        Ok(endpoint.finish(solution))
     }
 
     /// Compose explicit unsteady SGS with joint source-caloric fluid and solid
@@ -645,12 +713,92 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialEnthalpySolidMarch<'a, S, C>, MaterialBuoyancyError> {
         self.march_natural_convection_with_enthalpy_and_material_solids_inner(
-            domain, solid_sources, flow, thermal, energy, initial_temperature_k,
-            bounds, caloric, fluid_controls, solid_controls, unsteady, Some(sgs),
+            domain,
+            solid_sources,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            fluid_controls,
+            solid_controls,
+            unsteady,
+            Some(sgs),
             #[cfg(feature = "enthalpy-coupling")]
             None,
-            inlet_schedule, power_schedule, radiation, gate, resolve,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            gate,
+            resolve,
         )
+    }
+
+    /// Close exploratory SGS, original fluid h(T), source-solid Cp(T)/k(T)
+    /// and fluid material/buoyancy feedback on the same native endpoint.
+    /// Each outer projected momentum trial supplies its own eddy viscosity;
+    /// inner caloric trials convert it with the actual source fluid Cp and
+    /// must pass the existing face/cell SGS heat-defect gates. Solid storage,
+    /// reciprocal interfaces and molecular source snapshots remain separate.
+    ///
+    /// This retains the same whole-march budgets, first-order coupled time
+    /// accuracy and atomic refusal as the laminar implicit source-solid entry.
+    /// SGS stays exploratory; no resolved-turbulence, wall-model or turbulent
+    /// dissipation-heating claim is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_enthalpy_and_material_solids_and_sgs_implicit<
+        'a,
+        S: FluidTransport,
+        C: ConvectionCaloricLaw,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        solid_sources: &[SolidThermalLaw<'_>],
+        flow: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        bounds: BoussinesqConfig<3>,
+        caloric: &'a C,
+        fluid_controls: MaterialEnthalpyTransientConfig,
+        solid_controls: SolidThermalConfig,
+        unsteady: &UnsteadyConfig,
+        sgs: FvSgsConfig,
+        endpoint_controls: MaterialEndpointConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEndpointMarch<MaterialEnthalpySolidMarch<'a, S, C>>, MaterialBuoyancyError>
+    {
+        let mut endpoint = MaterialEndpointCoupling::new(endpoint_controls)?;
+        let solution = self.march_natural_convection_with_enthalpy_and_material_solids_inner(
+            domain,
+            solid_sources,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            fluid_controls,
+            solid_controls,
+            unsteady,
+            Some(sgs),
+            #[cfg(feature = "enthalpy-coupling")]
+            None,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            Some(&mut endpoint),
+            gate,
+            resolve,
+        )?;
+        poll(gate)?;
+        Ok(endpoint.finish(solution))
     }
 
     /// Compose native molecular viscous self-heating with the SAME joint
@@ -675,7 +823,9 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     #[cfg(feature = "enthalpy-coupling")]
     #[allow(clippy::too_many_arguments)]
     pub fn march_natural_convection_with_enthalpy_and_material_solids_and_viscous_heat<
-        'a, S: FluidTransport, C: ConvectionCaloricLaw,
+        'a,
+        S: FluidTransport,
+        C: ConvectionCaloricLaw,
     >(
         &self,
         domain: &VoxelDomain,
@@ -695,16 +845,35 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         radiation: Option<&RadiationConfig>,
         gate: &CancelGate,
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
-    ) -> Result<MaterialViscousHeatMarch<MaterialEnthalpySolidMarch<'a, S, C>>, MaterialBuoyancyError> {
+    ) -> Result<MaterialViscousHeatMarch<MaterialEnthalpySolidMarch<'a, S, C>>, MaterialBuoyancyError>
+    {
         let mut heating = MaterialViscousHeat::new(heating);
         let thermal = self.march_natural_convection_with_enthalpy_and_material_solids_inner(
-            domain, solid_sources, flow, thermal, energy, initial_temperature_k,
-            bounds, caloric, fluid_controls, solid_controls, unsteady, None,
-            Some(&mut heating), inlet_schedule, power_schedule, radiation, gate, resolve,
+            domain,
+            solid_sources,
+            flow,
+            thermal,
+            energy,
+            initial_temperature_k,
+            bounds,
+            caloric,
+            fluid_controls,
+            solid_controls,
+            unsteady,
+            None,
+            Some(&mut heating),
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            gate,
+            resolve,
         )?;
         poll(gate)?;
         Ok(MaterialViscousHeatMarch {
-            thermal, heating: heating.audit, mechanical_steps: heating.records,
+            thermal,
+            heating: heating.audit,
+            mechanical_steps: heating.records,
         })
     }
 
@@ -731,6 +900,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         inlet_schedule: impl Fn(f64) -> f64,
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
+        endpoint_coupling: Option<&mut MaterialEndpointCoupling>,
         gate: &CancelGate,
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialEnthalpySolidMarch<'a, S, C>, MaterialBuoyancyError> {
@@ -774,39 +944,65 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         let mut solids = Vec::with_capacity(solid_sources.len());
         for source in solid_sources {
             solids.push(source.reference_material().map_err(|_| {
-                MaterialBuoyancyError::Invalid(
-                    "solid reference storage is not representable",
-                )
+                MaterialBuoyancyError::Invalid("solid reference storage is not representable")
             })?);
         }
 
         let mut remaining_solves = fluid_controls.maximum_energy_solves;
-        let mut fluid_records = Vec::with_capacity(unsteady.steps);
-        let mut solid_records = Vec::with_capacity(unsteady.steps);
+        let mut fluid_records: Vec<MaterialEnthalpyStepReport> = Vec::with_capacity(unsteady.steps);
+        let mut solid_records: Vec<SolidThermalRecord> = Vec::with_capacity(unsteady.steps);
         let mut last_state = None;
         let mut last_solid_endpoint = Vec::new();
-        let mut thermal_step =
-            |step: &MaterialHeatStep<'_>, fields: &mut MaterialCoefficients| {
-                let (next, record, state, fluid_record, solid_endpoint, solid_record) =
-                    joint_energy_step(
-                        coupling,
-                        fluid_controls,
-                        solid_sources,
-                        solid_controls,
-                        domain,
-                        &self.transport,
-                        bounds,
-                        step,
-                        fields,
-                        &mut remaining_solves,
-                        gate,
-                    )?;
-                last_state = Some(state);
-                last_solid_endpoint = solid_endpoint;
+        let mut thermal_step = |step: &MaterialHeatStep<'_>, fields: &mut MaterialCoefficients| {
+            let (next, record, state, mut fluid_record, solid_endpoint, mut solid_record) =
+                joint_energy_step(
+                    coupling,
+                    fluid_controls,
+                    solid_sources,
+                    solid_controls,
+                    domain,
+                    &self.transport,
+                    bounds,
+                    step,
+                    fields,
+                    &mut remaining_solves,
+                    gate,
+                )?;
+            last_state = Some(state);
+            last_solid_endpoint = solid_endpoint;
+            if let Some(previous) = fluid_records
+                .last_mut()
+                .filter(|old| old.time_s == step.time_s)
+            {
+                fluid_record.passes = fluid_record.passes.checked_add(previous.passes).ok_or(
+                    MaterialBuoyancyError::Invalid("joint caloric pass count overflow"),
+                )?;
+                fluid_record.energy_solves = fluid_record
+                    .energy_solves
+                    .checked_add(previous.energy_solves)
+                    .ok_or(MaterialBuoyancyError::Invalid(
+                        "joint caloric solve count overflow",
+                    ))?;
+                *previous = fluid_record;
+            } else {
                 fluid_records.push(fluid_record);
+            }
+            if let Some(previous) = solid_records
+                .last_mut()
+                .filter(|old| old.time_s == step.time_s)
+            {
+                solid_record.iterations = solid_record
+                    .iterations
+                    .checked_add(previous.iterations)
+                    .ok_or(MaterialBuoyancyError::Invalid(
+                        "joint solid work count overflow",
+                    ))?;
+                *previous = solid_record;
+            } else {
                 solid_records.push(solid_record);
-                Ok((next, record))
-            };
+            }
+            Ok((next, record))
+        };
 
         let convection: MaterialBuoyancyMarch<S> = self.march_natural_convection_inner(
             domain,
@@ -824,7 +1020,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             power_schedule,
             radiation,
             Some(&mut thermal_step),
-            None,
+            endpoint_coupling,
             gate,
             resolve,
         )?;
@@ -859,8 +1055,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                 convection,
                 caloric,
                 config: fluid_controls,
-                enthalpy: last_state
-                    .expect("native march admits at least one accepted step"),
+                enthalpy: last_state.expect("native march admits at least one accepted step"),
                 records: fluid_records,
             },
             solid_endpoint: last_solid_endpoint,

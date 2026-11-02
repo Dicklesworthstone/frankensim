@@ -7686,3 +7686,58 @@ remains unverified in the resource-constrained delivery environment. This is
 prescribed gas traction, not evolved gas topology, gas-volume reconstruction,
 gas inertia, compressive heating or a pressure-volume work closure.
 
+## Implicit material convection with native SGS transport
+
+The opt-in `march_natural_convection_with_sgs_implicit` and
+`march_natural_convection_with_enthalpy_and_sgs_implicit` entries compose
+`MaterialEndpointConfig` with the original projected momentum, SGS and thermal
+owners. Every outer trial starts from the same accepted thermal and momentum
+histories. Its current projected eddy viscosity replaces the reusable eddy heat
+field; it is never accumulated across trials or written into molecular material
+coefficients. Reference-caloric heat uses rho0*Cp0*nu_t/Pr_t. Original source
+calorics use the existing actual-Cp(T) SGS heat owner and its independent face,
+cell, storage and enthalpy-flux closure tests.
+
+The physical local eddy-viscosity limit is checked against the actual refreshed
+endpoint molecular viscosity before acceptance, even when a loose nonlinear
+material tolerance would otherwise accept a large source change. This check
+does not advance SGS or alter its accepted field. Every actual momentum and
+heat solve consumes its existing whole-march allowance, including discarded
+outer and caloric trials. Coupled time accuracy remains first order with
+BE or BDF2 momentum. The original exploration-only SGS admission remains;
+these entries add neither a turbulent wall model nor dissipation heat.
+
+Regression sources exercise nonzero SGS, exact zero-SGS specialization,
+independent native heat replay with one eddy field, source-Cp(T) heat transfer,
+and physical-cap/heat-flux/work refusal. They were syntax-checked; native
+execution was unavailable in the delivery environment.
+
+## Implicit source-solid conjugate convection
+
+The `march_natural_convection_with_material_solids_implicit` and
+`march_natural_convection_with_enthalpy_and_material_solids_implicit` entries,
+and their `and_sgs_implicit` counterparts, close original solid k(T), integrated
+solid Cp(T), fluid transport and buoyancy on the same accepted native endpoint.
+The enthalpy entry also retains the original fluid h(T) and its source-owned
+storage/advection defects. These wrappers reuse the existing solid and joint
+caloric heat solvers; no independent time integrator or synthetic solid source
+is introduced. Solid conductivity is retained for endpoint-defect evaluation
+while the fluid source refresh replaces only fluid coefficients.
+
+Every nonlinear trial measures storage from the same previous accepted
+temperature. Repeated trials at one physical time aggregate constitutive and
+linear work while replacing the provisional storage record with the accepted
+record. Source energy datums, reference masses, contacts, radiation, compact
+storage, fixed-temperature reservoirs and reciprocal interfaces retain their
+original owners. The plain and joint caloric paths consume the shared outer
+energy allowance on every actual solve. A source/native refusal, cancellation,
+failed endpoint closure or exhausted allowance returns no partial march.
+
+SGS variants use the current outer trial's projected eddy field only in fluid
+heat transport; joint source calorics convert it with actual fluid Cp(T).
+Original SGS limits and flux-defect gates remain active. Coupled time accuracy
+remains first order; these APIs do not select viscous or SGS dissipation heating.
+Four regression sources cover an independent nonlinear two-cell heat balance,
+same-step buoyancy from solid heating, exact work-budget/source refusal, and
+joint SGS/solid energy accounting with constant-Cp specialization. They were
+syntax-checked; native execution was unavailable in the delivery environment.

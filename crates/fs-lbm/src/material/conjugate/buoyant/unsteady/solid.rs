@@ -2,11 +2,15 @@
 //! Explicit unsteady SGS shares this owner; its accepted eddy heat flux stays
 //! fixed throughout each solid constitutive iteration.
 
-use super::{MaterialBuoyancyMarch, MaterialChtFluid};
-use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep, compact_owners};
+use super::{
+    MaterialBuoyancyMarch, MaterialChtFluid, MaterialEndpointConfig, MaterialEndpointMarch,
+};
+use crate::conjugate::unsteady::{
+    MaterialCoefficients, MaterialEndpointCoupling, MaterialHeatStep, compact_owners,
+};
 use crate::conjugate::{
-    EnergyConfig, FvSgsConfig, RadiationConfig, SimpleConfig, ThermalSetup, TransientRecord, UnsteadyConfig,
-    Voxel, VoxelDomain,
+    EnergyConfig, FvSgsConfig, RadiationConfig, SimpleConfig, ThermalSetup, TransientRecord,
+    UnsteadyConfig, Voxel, VoxelDomain,
 };
 use crate::material::conjugate::buoyant::{MaterialBuoyancyError, poll};
 use crate::material::conjugate::solid::{
@@ -22,7 +26,8 @@ use fs_material::{
 /// Bounded implicit solid constitutive iteration inside each native heat step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SolidThermalConfig {
-    /// Maximum source/conduction/storage iterations within one native step.
+    /// Maximum source/conduction/storage iterations within one native heat trial.
+    /// Implicit fluid feedback separately bounds trials per physical step.
     pub maximum_iterations: usize,
     /// Absolute unrelaxed output-minus-trial temperature defect, K.
     pub temperature_tolerance_k: f64,
@@ -76,7 +81,8 @@ impl SolidThermalConfig {
 pub struct SolidThermalRecord {
     /// End of the original native time interval, s.
     pub time_s: f64,
-    /// Constitutive iterations, including any unsupported linear predictors.
+    /// Constitutive iterations, including unsupported linear predictors and
+    /// discarded outer fluid-feedback trials at this physical time level.
     pub iterations: usize,
     /// Maximum unrelaxed output-minus-trial temperature defect, K.
     pub temperature_defect_k: f64,
@@ -141,10 +147,82 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialSolidBuoyancyMarch<S>, MaterialBuoyancyError> {
         self.march_natural_convection_with_material_solids_inner(
-            domain, solid_sources, flow_config, thermal, energy_config,
-            initial_temperature_k, config, unsteady, solid_controls, None,
-            inlet_schedule, power_schedule, radiation, gate, resolve,
+            domain,
+            solid_sources,
+            flow_config,
+            thermal,
+            energy_config,
+            initial_temperature_k,
+            config,
+            unsteady,
+            solid_controls,
+            None,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            gate,
+            resolve,
         )
+    }
+
+    /// Close source-material fluid feedback and nonlinear solid heat at one
+    /// native endpoint. Original solid k(T) and source-integral Cp(T), fluid
+    /// viscosity/conductivity and density-derived buoyancy all belong to that
+    /// same physical interval. Each outer trial retains the accepted old
+    /// thermal state and BE/BDF2 momentum histories; records and averages
+    /// advance once after all native, fluid and solid closure tests pass.
+    ///
+    /// Solid constitutive trials retain their original convergence and domain
+    /// policy. Every actual heat solve also consumes the shared endpoint work
+    /// budget, including discarded outer trials, radiation and compact storage.
+    /// Returned solid records sum trial work but retain only the final physical
+    /// storage change. Fluid storage remains reference rho*Cp; the source-h(T)
+    /// implicit entry supplies original fluid calorics when required.
+    ///
+    /// Coupled time accuracy remains first order. Any source/native refusal,
+    /// exhausted work, failed endpoint closure or cancellation returns no
+    /// partial march. This entry selects neither SGS nor viscous heating.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_material_solids_implicit<S: FluidTransport>(
+        &self,
+        domain: &VoxelDomain,
+        solid_sources: &[SolidThermalLaw<'_>],
+        flow_config: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        config: BoussinesqConfig<3>,
+        unsteady: &UnsteadyConfig,
+        solid_controls: SolidThermalConfig,
+        endpoint_controls: MaterialEndpointConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEndpointMarch<MaterialSolidBuoyancyMarch<S>>, MaterialBuoyancyError> {
+        let mut endpoint = MaterialEndpointCoupling::new(endpoint_controls)?;
+        let solution = self.march_natural_convection_with_material_solids_inner(
+            domain,
+            solid_sources,
+            flow_config,
+            thermal,
+            energy_config,
+            initial_temperature_k,
+            config,
+            unsteady,
+            solid_controls,
+            None,
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            Some(&mut endpoint),
+            gate,
+            resolve,
+        )?;
+        poll(gate)?;
+        Ok(endpoint.finish(solution))
     }
 
     /// Compose explicit unsteady SGS with source-integral solid calorimetry.
@@ -185,10 +263,75 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialSolidBuoyancyMarch<S>, MaterialBuoyancyError> {
         self.march_natural_convection_with_material_solids_inner(
-            domain, solid_sources, flow_config, thermal, energy_config,
-            initial_temperature_k, config, unsteady, solid_controls, Some(sgs),
-            inlet_schedule, power_schedule, radiation, gate, resolve,
+            domain,
+            solid_sources,
+            flow_config,
+            thermal,
+            energy_config,
+            initial_temperature_k,
+            config,
+            unsteady,
+            solid_controls,
+            Some(sgs),
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            None,
+            gate,
+            resolve,
         )
+    }
+
+    /// Compose original exploratory SGS with implicit fluid-source feedback
+    /// and nonlinear source-solid storage/conduction. Each outer momentum
+    /// trial supplies its current projected eddy heat field to the original
+    /// solid heat owner; no eddy coefficient enters a solid material snapshot.
+    /// Old thermal/momentum histories remain fixed until one accepted step.
+    ///
+    /// Local SGS caps, source support, independent material/solid closure and
+    /// all native work limits remain authoritative. Coupled time accuracy is
+    /// first order. This does not add SGS dissipation heat or a wall closure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn march_natural_convection_with_material_solids_and_sgs_implicit<S: FluidTransport>(
+        &self,
+        domain: &VoxelDomain,
+        solid_sources: &[SolidThermalLaw<'_>],
+        flow_config: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        config: BoussinesqConfig<3>,
+        unsteady: &UnsteadyConfig,
+        solid_controls: SolidThermalConfig,
+        sgs: FvSgsConfig,
+        endpoint_controls: MaterialEndpointConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialEndpointMarch<MaterialSolidBuoyancyMarch<S>>, MaterialBuoyancyError> {
+        let mut endpoint = MaterialEndpointCoupling::new(endpoint_controls)?;
+        let solution = self.march_natural_convection_with_material_solids_inner(
+            domain,
+            solid_sources,
+            flow_config,
+            thermal,
+            energy_config,
+            initial_temperature_k,
+            config,
+            unsteady,
+            solid_controls,
+            Some(sgs),
+            inlet_schedule,
+            power_schedule,
+            radiation,
+            Some(&mut endpoint),
+            gate,
+            resolve,
+        )?;
+        poll(gate)?;
+        Ok(endpoint.finish(solution))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -207,6 +350,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         inlet_schedule: impl Fn(f64) -> f64,
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
+        endpoint_coupling: Option<&mut MaterialEndpointCoupling>,
         gate: &CancelGate,
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialSolidBuoyancyMarch<S>, MaterialBuoyancyError> {
@@ -270,7 +414,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             power_schedule,
             radiation,
             Some(&mut advance),
-            None,
+            endpoint_coupling,
             gate,
             resolve,
         )?;
@@ -392,8 +536,7 @@ impl SolidHeat<'_, '_> {
                 self.capacity[cell] = step.domain.volume(cell) * capacity;
                 fields.conductivity_w_m_k[cell] = sample.conductivity_w_m_k;
             }
-            for (slot, (rate, &capacity)) in
-                self.storage.iter_mut().zip(&self.capacity).enumerate()
+            for (slot, (rate, &capacity)) in self.storage.iter_mut().zip(&self.capacity).enumerate()
             {
                 *rate = capacity / step.time_step_s;
                 let alias = slot < step.domain.cell_count() && step.is_compact_cell(slot);
@@ -511,7 +654,18 @@ impl SolidHeat<'_, '_> {
                 && heat.closure_j.abs() <= self.controls.storage_tolerance_j + roundoff
             {
                 self.endpoint = endpoint;
-                self.records.push(report);
+                if let Some(previous) = self
+                    .records
+                    .last_mut()
+                    .filter(|old| old.time_s == step.time_s)
+                {
+                    report.iterations = report.iterations.checked_add(previous.iterations).ok_or(
+                        MaterialBuoyancyError::Invalid("solid constitutive work count overflow"),
+                    )?;
+                    *previous = report;
+                } else {
+                    self.records.push(report);
+                }
                 return Ok((next, heat));
             }
             if iteration == self.controls.maximum_iterations {
