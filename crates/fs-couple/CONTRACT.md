@@ -5506,10 +5506,27 @@ None.
   flow. One immutable prepared geometry serves each path's entire output
   sweep; analytic, strict table, declared-DC and full flanged loading remain
   live. Output mode/tail/prefix gates, valve-history handling and original
-  source mechanics retain their existing meaning. The lip microphone now
-  receives mode-zero mouth flow from the same retained modal bore as its
-  feedback, using that staircase's actual aperture radius. Its existing
-  uniform-disk receiver still does not resolve higher mouth-mode directivity.
+  source mechanics retain their existing meaning. The legacy lip microphone
+  receives mode-zero flow with its original uniform-disk receiver. An explicit
+  `modal_baffle <relative_kernel_tol> <maximum_kernel_terms>` lip record selects
+  the full flanged matrix for both feedback and every mouth-flow FIR, together
+  with finite-distance Rayleigh observation of all original signed `psi_n/S`
+  traces. It requires a linear bore and `termination flanged`; the same gas
+  and actual staircase aperture own the load and receiver. No foreign exterior
+  or scalar load is silently replaced. Higher zero-net-flow modes still radiate
+  with their spatial phase and direction. The existing bandlimited derivative
+  and causal path kernels retain their reported latency and clock limits.
+  `baffled::modal` uses Gauss-Legendre radial nodes and periodic angular points;
+  declared counts are multiples of four in 4..=128 and 32..=512. Independent
+  quarter/half/full axis checks compare every actual modal kernel in L1 against
+  the unit-flow scale `rho/(2 pi d_min)`, never against a possibly vanishing
+  pressure. Fine basis Gram and band-resolution checks refuse underresolution
+  without changing the signed shapes. The explicit total work cap covers all
+  five preparations. These are measured quadrature changes, not a continuum
+  error enclosure; temporal reconstruction, omitted modes and finite-body
+  scattering remain separate limits. Source FIR tolerances are never relaxed
+  automatically. The example `modal-baffled-lip.performance` is authored
+  development geometry and mechanics, not an instrument-realism claim.
   `MouthLoad::Matched` refuses explicitly on these staircase time-domain lines.
   The existing FIR Nyquist rolloff and precursor folding remain in effect;
   full-band source coverage is not a new high-band realization-error claim.

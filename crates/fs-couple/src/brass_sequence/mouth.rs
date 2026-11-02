@@ -47,6 +47,17 @@ pub(crate) fn plane_flow_line(duct: &Duct, gas: &GasState, load: MmLoad<'_>,
     Ok((filter, receipt))
 }
 
+/// Every retained signed mouth mode from the same plane-driven bore. The
+/// physical receiver must use the original radial basis and exterior load.
+pub(crate) fn modal_flow_lines(duct: &Duct, gas: &GasState, load: MmLoad<'_>,
+    line: &MmLineConfig, reference: f64, output: MouthFlowConfig)
+    -> Result<(Vec<DelayedFilter>, MouthFlowReceipt), RenderError>
+{
+    realize::admit(core::slice::from_ref(duct), &["held"], gas,
+        MmBankLoad::Shared(load), line, output)?;
+    realize::path(duct, "held", gas, load, line, reference, output, line.n_modes)
+}
+
 /// Observed time-image convergence; not a continuum or source-validity bound.
 #[derive(Clone, Debug)]
 pub struct MouthFlowRung {

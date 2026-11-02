@@ -1,0 +1,28 @@
+frankensim-lip-performance-v1
+# Authored development fixture, not a measured instrument or player.
+# cargo run -p fs-couple --bin music_render -- lip crates/fs-couple/examples/modal-baffled-lip.performance /tmp/modal-baffled-lip.wav
+# The source explicitly chooses the same full infinite-baffle modal load and receiver.
+audio 24000 2400
+full_scale_pa 30000
+ambient moist_air 293.15 101325 0
+lip_response 200 7 0.1 0.012 0.0005 0.0001
+lip_source authored development fixture, not tissue measurements
+bore_source authored cylindrical and conical development fixture, not an instrument specimen
+cup_volume_m3 1.5e-6
+termination flanged
+modes 3 1
+mouth_flow_tail_tol 1e-6
+modal_baffle 1e-5 8000000
+cylinder 0.006 0.30
+cone 0.006 0.012 0.25
+cone 0.012 0.035 0.12
+microphone 0.15 0.02 0.20 64 128 3000
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	blow	blowing-pressure
+initial	pressure-pa	0e0
+events	2
+event	0e0	1e-2	pressure-pa	3.5e3
+event	6e-2	1e-2	pressure-pa	0e0

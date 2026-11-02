@@ -184,11 +184,23 @@ fn bore_json(bore: &LipBoreInfo) -> String {
                 .collect::<Vec<_>>()
                 .join(",");
             let line = &lines.line;
+            let (radiation, scope) = if let Some(r) = &lines.modal_radiation {
+                let changes = |values: &[Vec<f64>; 2]| values.iter().map(|row|
+                    format!("[{}]", row.iter().map(|v| number(*v)).collect::<Vec<_>>().join(",")))
+                    .collect::<Vec<_>>().join(",");
+                (format!("{{\"modes\":{},\"radial_nodes\":{:?},\"angular_points\":{:?},\"radial_kernel_changes\":[{}],\"angular_kernel_changes\":[{}],\"basis_gram_defect\":{},\"kernel_terms\":{},\"tolerance\":{}}}",
+                    r.modes, r.radial_nodes, r.angular_points, changes(&r.radial_changes),
+                    changes(&r.angular_changes), number(r.basis_gram_defect), r.kernel_terms, number(r.tolerance)),
+                 "full flanged modal reflection load and finite-distance Rayleigh observation of every original signed axisymmetric mouth mode, with the same gas and aperture; infinite rigid baffle; omitted modes and finite-body scattering unresolved")
+            } else {
+                ("null".into(), "uniform baffled-disk Rayleigh radiation of total mouth flow; higher mouth-mode directivity unresolved; source termination retains its declared scalar load")
+            };
             format!(
                 "\"reflectance_line\":{{\"taps\":{},\"round_trip_samples\":{},\"peak_reflectance\":{},\"rungs_tried\":{},\"tail_energy\":{},\"peak_shift_cents\":{},\
                  \"image_peaks\":{},\"image_worst_cents\":{},\"image_worst_db\":{}}},\
-                 \"mouth_flow_line\":{{\"taps\":{},\"rungs\":{},\"tail_tol\":{},\"ladder\":[{}]}},\
-                 \"model_scope\":\"one held bore; 1-DOF outward-striking lip island; plane-source multimodal reflectance and total mouth flow from the same retained modal bore; uniform baffled-disk Rayleigh radiation at the declared point with higher mouth-mode directivity unresolved; no valve or slide motion, no bore wall vibration, no breath heating, no nonlinear propagation; the declared band is the resolved band of the radiation quadrature and the clock's flanged-radiation ceiling\"",
+                 \"mouth_flow_line\":{{\"taps\":{},\"rungs\":{},\"tail_tol\":{},\"ladder\":[{}],\"modes\":{}}},\
+                 \"modal_radiation\":{},\
+                 \"model_scope\":\"one held bore; 1-DOF outward-striking lip island; plane-source multimodal reflectance and mouth flow from the same retained modal bore; {}; no valve or slide motion, no bore wall vibration, no breath heating, no nonlinear propagation; spatial and temporal convergence do not establish instrument realism\"",
                 line.n_fft,
                 number(line.round_trip_samples),
                 number(line.peak_reflectance),
@@ -202,6 +214,9 @@ fn bore_json(bore: &LipBoreInfo) -> String {
                 lines.mouth_flow_rungs,
                 number(lines.mouth_flow_tail_tol),
                 ladder,
+                lines.mouth_flow_modes,
+                radiation,
+                scope,
             )
         }
         LipBoreInfo::Nonlinear(n) => format!(

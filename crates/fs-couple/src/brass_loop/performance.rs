@@ -26,6 +26,7 @@
 //! termination <flanged|unflanged|ideal_open>
 //! modes <n_modes> <extra_slices>
 //! mouth_flow_tail_tol <relative_energy>      optional; default 1e-10 (the line ladder's own)
+//! modal_baffle <relative_kernel_tol> <maximum_kernel_terms>  optional; full modal load and observation
 //! cylinder <radius_m> <length_m>             bore records, mouthpiece to bell
 //! cone <inlet_radius_m> <outlet_radius_m> <length_m>
 //! bessel <inlet_radius_m> <outlet_radius_m> <length_m> <flare> <pieces>
@@ -35,6 +36,14 @@
 //! schedule
 //! <canonical GestureSchedule bytes: blowing-pressure, optional pre-stress>
 //! ```
+//!
+//! `modal_baffle` explicitly selects the complete flanged modal radiation load
+//! and observes every signed mouth mode at the declared finite-distance point.
+//! It requires `termination flanged` and a linear bore. The same original gas
+//! and actual staircase aperture enter both load and receiver. Its microphone
+//! radial count is Gauss-Legendre nodes; radial and angular counts must be
+//! multiples of four for the quarter/half/full kernel convergence checks.
+//! Files without that record retain the original total-flow disk observation.
 //!
 //! Exactly one of `lip_response` and `lip` is given. `lip_response` carries
 //! the quantities lip-reed measurements publish: the outward-striking
@@ -58,11 +67,11 @@
 //! sample taking `gas_steps_per_mechanics` fixed gas steps; the microphone
 //! receives every mechanics sample's bell volume flow.
 //!
-//! Limits, not hidden: one held bore (no valve or slide motion), total mouth
-//! flow from its full retained modal response, a uniform baffled-disk receiver
-//! (higher mouth-mode directivity is not resolved), and the fs-duct
-//! flanged-radiation ceiling (`ka <= 20` at the Nyquist frequency of the
-//! declared clock at the mouth radius), which sets the highest usable clock.
+//! Limits: one held bore, a stationary infinite rigid baffle, and the original
+//! fs-duct radiation-band ceiling at the declared clock's Nyquist frequency.
+//! The legacy receiver sees total flow only; `modal_baffle` resolves the retained
+//! axisymmetric mouth-mode directivity. Neither resolves omitted transverse
+//! modes, finite bell/body scattering, wall vibration or a realistic instrument.
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, LossModel, Segment, Termination};
@@ -77,10 +86,11 @@ use fs_vfit::discretize::DelayedFilter;
 
 use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland};
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::brass_sequence::mouth::{MouthFlowConfig, plane_flow_line};
+use crate::brass_sequence::mouth::{MouthFlowConfig, modal_flow_lines, plane_flow_line};
 use crate::driving_point::LineLadder;
 use crate::mm_line::{MmComboReceipt, MmLineConfig, MmLoad};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
+use crate::pcm_wav::baffled::modal::{MAX_MODAL_KERNEL_TERMS, ModalOutletOptions, ModalOutletReport};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 
@@ -147,6 +157,7 @@ pub struct LipDescription {
     duct: Duct,
     microphone: CircularOutletReceiver,
     mouth_flow_tail_tol: f64,
+    modal_baffle: Option<ModalOutletOptions>,
     schedule: GestureSchedule,
     blow_track: String,
     tension_track: Option<String>,
@@ -357,6 +368,7 @@ impl LipDescription {
         let mut modes: Option<(usize, usize)> = None;
         let mut microphone: Option<CircularOutletReceiver> = None;
         let mut mouth_flow_tail_tol: Option<f64> = None;
+        let mut modal_baffle: Option<ModalOutletOptions> = None;
         let mut nonlinear: Option<NonlinearBoreRecord> = None;
         let mut ambient_words = None;
         let mut segments: Vec<Segment> = Vec::new();
@@ -528,6 +540,17 @@ impl LipDescription {
                     once(&mut mouth_flow_tail_tol, value, &f)?;
                     f.finish()?;
                 }
+                "modal_baffle" => {
+                    let relative_kernel_tolerance = f.positive()?;
+                    if relative_kernel_tolerance >= 1.0 {
+                        return f.err("modal quadrature tolerance must be below 1");
+                    }
+                    let maximum_kernel_terms = f.count(MAX_MODAL_KERNEL_TERMS as u64)? as usize;
+                    once(&mut modal_baffle, ModalOutletOptions {
+                        relative_kernel_tolerance, maximum_kernel_terms,
+                    }, &f)?;
+                    f.finish()?;
+                }
                 "microphone" => {
                     let position = [f.number()?, f.number()?, f.number()?];
                     let rings = f.count(128)? as usize;
@@ -589,6 +612,11 @@ impl LipDescription {
         }
         let blow_track =
             blow_track.ok_or_else(|| "a blowing-pressure track is required".to_string())?;
+        if modal_baffle.is_some()
+            && (termination != Some(Termination::FlangedOpen) || nonlinear.is_some())
+        {
+            return Err("modal_baffle requires a linear bore and termination flanged; no foreign exterior load is substituted".into());
+        }
         let nonlinear = match nonlinear {
             None => None,
             Some(_) if !cfg!(feature = "nonlinear-brass") => return Err(NONLINEAR_FEATURE.into()),
@@ -655,6 +683,7 @@ impl LipDescription {
             duct: Duct { segments },
             microphone: microphone.ok_or_else(|| missing("microphone"))?,
             mouth_flow_tail_tol: mouth_flow_tail_tol.unwrap_or(LineLadder::default().tail_tol),
+            modal_baffle,
             schedule,
             blow_track,
             tension_track,
@@ -694,8 +723,9 @@ impl LipDescription {
         self.schedule.tracks().iter().map(|track| 1 + track.events.len()).sum()
     }
 
-    /// The passive bore (no lip, no cup shunt, no radiation observer) scanned at `frequencies_hz`: the multimodal and the
-    /// plane-wave input impedance and the mouth-to-input flow ratio, from the same duct, gas and termination the render uses.
+    /// The passive bore (no lip, cup shunt or observer) at `frequencies_hz`.
+    /// The modal impedance uses the render's actual load, including a declared
+    /// full modal baffle. Scalar impedance/flow remain comparison diagnostics.
     ///
     /// # Errors
     /// The duct owner's refusal at any frequency (loss-model or radiation validity).
@@ -711,7 +741,10 @@ impl LipDescription {
         let mut rows = Vec::with_capacity(frequencies_hz.len());
         for &frequency_hz in frequencies_hz {
             let omega = core::f64::consts::TAU * frequency_hz;
-            let multimodal = fs_duct::modal::mm_input_impedance(
+            let multimodal = if self.modal_baffle.is_some() {
+                fs_duct::modal::mm_input_impedance_flanged(&self.duct, gas, gas, omega,
+                    LossModel::Bessel, self.modes, self.extra_slices)
+            } else { fs_duct::modal::mm_input_impedance(
                 &self.duct,
                 gas,
                 omega,
@@ -719,7 +752,7 @@ impl LipDescription {
                 self.termination,
                 self.modes,
                 self.extra_slices,
-            )
+            ) }
             .map_err(|e| format!("multimodal bore at {frequency_hz} Hz refused: {e}"))?;
             let scalar = fs_duct::input_impedance(
                 &self.duct,
@@ -774,7 +807,19 @@ impl LipDescription {
             extra_slices: self.extra_slices,
             loss: LossModel::Bessel,
         };
-        let load = MmLoad::Analytic(self.termination);
+        let load = if self.modal_baffle.is_some() { MmLoad::FlangedModal(gas) }
+            else { MmLoad::Analytic(self.termination) };
+        // Reject an unresolved or over-budget receiver before the frequency
+        // sweeps. Its aperture comes from the same immutable geometry owner.
+        let modal_receiver = if let Some(options) = self.modal_baffle {
+            let geometry = fs_duct::modal::PreparedModalDuct::new(&self.duct,
+                self.modes, self.extra_slices).map_err(|e| e.to_string())?;
+            let radius = geometry.mouth_radius_m();
+            let (receiver, report) = BaffledPressure::circular_modal_outlet_multirate_differentiating(
+                radius, fs_duct::modal::ModeCount(self.modes), self.rate_hz,
+                self.rate_hz, self.microphone, gas, options, || false)?;
+            Some((radius, receiver, report))
+        } else { None };
         let voice = BrassVoice::new(
             core::slice::from_ref(&self.duct),
             &["held"],
@@ -790,36 +835,40 @@ impl LipDescription {
             .first()
             .cloned()
             .ok_or_else(|| "the bank realized no line".to_string())?;
-        let (mouth, mouth_receipt) = plane_flow_line(
-            &self.duct,
-            gas,
-            load,
-            &config,
-            voice.port_impedance(),
-            MouthFlowConfig {
-                tail_tolerance: self.mouth_flow_tail_tol,
-                tap_change_tolerance: self.mouth_flow_tail_tol.sqrt(),
-                ..MouthFlowConfig::default()
-            },
-        )
+        let output = MouthFlowConfig {
+            tail_tolerance: self.mouth_flow_tail_tol,
+            tap_change_tolerance: self.mouth_flow_tail_tol.sqrt(),
+            ..MouthFlowConfig::default()
+        };
+        let (mouth, mouth_receipt) = if self.modal_baffle.is_some() {
+            modal_flow_lines(&self.duct, gas, load, &config, voice.port_impedance(), output)
+        } else {
+            plane_flow_line(&self.duct, gas, load, &config, voice.port_impedance(), output)
+                .map(|(filter, receipt)| (vec![filter], receipt))
+        }
         .map_err(|e| format!("mouth-flow line refused: {e}"))?;
         let mouth_radius_m = mouth_receipt.mouth_radius_m;
-        let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
-            mouth_radius_m,
-            self.rate_hz,
-            self.rate_hz,
-            self.microphone,
-            medium,
-        )?;
+        let (receiver, modal_radiation) = if let Some((radius, receiver, report)) = modal_receiver {
+            if radius != mouth_radius_m {
+                return Err("modal load and receiver must retain the same actual mouth radius".into());
+            }
+            (receiver, Some(report))
+        } else {
+            (BaffledPressure::circular_outlet_multirate_differentiating(mouth_radius_m,
+                self.rate_hz, self.rate_hz, self.microphone, medium)?, None)
+        };
         let bore = LipBoreInfo::Linear(LinearBoreInfo {
             line,
+            mouth_flow_modes: mouth.len(),
+            modal_radiation,
             mouth_flow_taps: mouth_receipt.n_fft,
             mouth_flow_rungs: mouth_receipt.rungs.len(),
             mouth_flow_tail_tol: self.mouth_flow_tail_tol,
             mouth_flow_ladder: mouth_receipt
                 .rungs
                 .iter()
-                .map(|r| (r.n_fft, r.tail_energy[0], r.tap_change[0]))
+                .map(|r| (r.n_fft, r.tail_energy.iter().copied().fold(0.0, f64::max),
+                    r.tap_change.iter().copied().fold(0.0, f64::max)))
                 .collect(),
         });
         Ok(self.performance(
@@ -936,6 +985,11 @@ impl LipDescription {
             control_rate_hz: self.schedule.control_rate_hz,
             has_lip_tension_track: self.tension_track.is_some(),
         };
+        let inputs = match &engine {
+            Engine::Linear { mouth, .. } => mouth.len(),
+            #[cfg(feature = "nonlinear-brass")]
+            Engine::Nonlinear(_) => 1,
+        };
         LipPerformance {
             info,
             engine,
@@ -949,7 +1003,7 @@ impl LipDescription {
             poisoned: false,
             mouthpiece: vec![0.0; MAX_BLOCK],
             outgoing: vec![0.0; MAX_BLOCK],
-            trace: vec![0.0; MAX_BLOCK * ratio],
+            trace: vec![0.0; MAX_BLOCK * ratio * inputs],
             ratio,
             window_len: u64::from(self.rate_hz / 10).max(1),
             acc: Vec::new(),
@@ -1056,6 +1110,10 @@ pub enum LipBoreInfo {
 pub struct LinearBoreInfo {
     /// Realization receipt of the multimodal reflectance line.
     pub line: MmComboReceipt,
+    /// Observed signed mouth coordinates; one for the legacy total-flow route.
+    pub mouth_flow_modes: usize,
+    /// Present only for the explicitly selected full modal baffled exterior.
+    pub modal_radiation: Option<ModalOutletReport>,
     /// Taps of the mouth-flow line.
     pub mouth_flow_taps: usize,
     /// Ladder rungs the mouth-flow line traversed.
@@ -1063,7 +1121,7 @@ pub struct LinearBoreInfo {
     /// Relative tail energy the mouth-flow ladder was asked to reach (the
     /// owner's default unless the file declares `mouth_flow_tail_tol`).
     pub mouth_flow_tail_tol: f64,
-    /// Every mouth-flow rung: `(taps, tail energy, tap change vs the previous rung)`.
+    /// Every mouth-flow rung: `(taps, worst modal tail energy, worst modal tap change)`.
     pub mouth_flow_ladder: Vec<(usize, f64, f64)>,
 }
 
@@ -1172,7 +1230,7 @@ impl WindowAcc {
 enum Engine {
     Linear {
         voice: BrassVoice,
-        mouth: DelayedFilter,
+        mouth: Vec<DelayedFilter>,
     },
     #[cfg(feature = "nonlinear-brass")]
     Nonlinear(Box<super::nonlinear::NonlinearLip>),
@@ -1355,10 +1413,11 @@ impl LipPerformance {
             for i in 0..chunk {
                 let frame = match &mut self.engine {
                     Engine::Linear { mouth, .. } => {
-                        self.trace[0] = mouth
-                            .push(self.outgoing[i])
-                            .map_err(|e| format!("mouth-flow line refused: {e:?}"))?;
-                        &self.trace[..self.ratio]
+                        for (flow, filter) in self.trace.iter_mut().zip(mouth.iter_mut()) {
+                            *flow = filter.push(self.outgoing[i])
+                                .map_err(|e| format!("mouth-flow line refused: {e:?}"))?;
+                        }
+                        &self.trace[..mouth.len()]
                     }
                     #[cfg(feature = "nonlinear-brass")]
                     Engine::Nonlinear(_) => &self.trace[i * self.ratio..(i + 1) * self.ratio],
@@ -1642,6 +1701,64 @@ mod tests {
     }
 
     #[test]
+    fn modal_baffle_is_explicit_and_cannot_replace_a_foreign_exterior_or_nonlinear_bore() {
+        assert!(LipDescription::from_bytes(fixture("").as_bytes()).unwrap().modal_baffle.is_none());
+        let selected = "modal_baffle 1e-5 8000000\n";
+        let source = fixture(selected);
+        assert!(LipDescription::from_bytes(source.as_bytes()).unwrap().modal_baffle.is_some());
+        for foreign in ["unflanged", "ideal_open"] {
+            let source = source.replace("termination flanged", &format!("termination {foreign}"));
+            assert!(LipDescription::from_bytes(source.as_bytes()).unwrap_err().contains("modal_baffle requires"));
+        }
+        let nonlinear = fixture(&format!("{selected}bore nonlinear 0.0024 4 1 24 20 8000 1e-2\n"));
+        assert!(LipDescription::from_bytes(nonlinear.as_bytes()).unwrap_err().contains("modal_baffle requires"));
+        for declaration in ["modal_baffle 0 8000000\n", "modal_baffle 1 8000000\n",
+            "modal_baffle 1e-5 0\n", "modal_baffle 1e-5 134217729\n",
+            "modal_baffle 1e-5 8000000\nmodal_baffle 1e-5 8000000\n"] {
+            assert!(LipDescription::from_bytes(fixture(declaration).as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn modal_baffle_example_renders_all_mouth_modes_from_the_declared_flanged_bore() {
+        let description = LipDescription::from_bytes(
+            include_bytes!("../../examples/modal-baffled-lip.performance")).unwrap();
+        let gas = description.ambient_gas();
+        let frequency = 2107.0;
+        let scan = description.bore_scan(&[frequency]).unwrap();
+        let expected = fs_duct::modal::mm_input_impedance_flanged(&description.duct, gas, gas,
+            core::f64::consts::TAU*frequency, LossModel::Bessel, description.modes,
+            description.extra_slices).unwrap();
+        assert_eq!(scan.rows[0].impedance_multimodal,
+            [expected.plane_impedance.re, expected.plane_impedance.im]);
+        let mut performance = description.build().unwrap();
+        let LipBoreInfo::Linear(lines) = &performance.info().bore else { panic!("linear fixture"); };
+        assert_eq!(lines.mouth_flow_modes, 3);
+        assert_eq!(lines.modal_radiation.as_ref().unwrap().modes, 3);
+        assert_eq!(lines.modal_radiation.as_ref().unwrap().radial_nodes, [16,32,64]);
+        let mouth = match &performance.engine {
+            Engine::Linear { mouth, .. } => mouth,
+            #[cfg(feature = "nonlinear-brass")]
+            Engine::Nonlinear(_) => panic!("linear fixture"),
+        };
+        assert_eq!(mouth.len(), 3);
+        assert!(mouth[1..].iter().all(|filter|
+            filter.quiescent_fir().unwrap().1.iter().any(|tap| *tap != 0.0)));
+        let mut output = vec![0.0; description.samples as usize];
+        let mut contributions = [0.0; 3];
+        let mut higher_peak = 0.0_f64;
+        for block in output.chunks_mut(61) {
+            performance.block(block).unwrap();
+            performance.receiver.mode_pressures(&mut contributions).unwrap();
+            higher_peak = higher_peak.max(contributions[1].abs()).max(contributions[2].abs());
+        }
+        assert!(output.iter().all(|p| p.is_finite()));
+        assert!(output.iter().any(|p| p.abs() > 1e-9));
+        assert!(higher_peak > 1e-12, "retained higher mouth modes must reach emitted pressure");
+        assert_eq!(performance.samples_rendered(), description.samples);
+    }
+
+    #[test]
     fn control_ticks_apply_at_the_ceiling_of_their_start() {
         let (control, rate) = (700, 19_200);
         assert_eq!(tick_at(0, control, rate), 0);
@@ -1787,7 +1904,7 @@ mod tests {
             let geometry = fs_duct::modal::PreparedModalDuct::new(
                 &description.duct, description.modes, description.extra_slices,
             ).unwrap();
-            let (_, taps) = mouth.quiescent_fir().unwrap();
+            let (_, taps) = mouth[0].quiescent_fir().unwrap();
             let (mut scale, mut error, mut scalar_difference) = (0.0_f64, 0.0_f64, 0.0_f64);
             for frequency in [310.0, 1013.0, 2207.0, 5119.0] {
                 let omega = core::f64::consts::TAU*frequency;

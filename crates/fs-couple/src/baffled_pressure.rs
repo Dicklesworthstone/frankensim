@@ -49,6 +49,10 @@ pub mod openings;
 #[path = "baffled_pressure_tiles.rs"]
 pub mod tiles;
 
+/// Original circular-duct modal traces observed at finite distance.
+#[path = "baffled_pressure_modal.rs"]
+pub mod modal;
+
 /// Largest retained input basis (the established observer/decimator limit).
 pub const MAX_RAYLEIGH_INPUTS: usize = 128;
 
