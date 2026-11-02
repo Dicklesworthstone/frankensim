@@ -224,6 +224,7 @@ impl<'a> CohesivePoint<'a> {
             jump,
             maximum,
             mixed_history: history,
+            ..*self
         };
         let old_intact = self.mixed_integrity();
         let work = match history {

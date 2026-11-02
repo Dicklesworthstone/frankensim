@@ -11,8 +11,10 @@
 //! Unloading/reloading is elastic at the retained damaged stiffness. Compression
 //! has a separate, undamaged penalty; after complete failure only that normal
 //! penalty remains (frictionless reclosure, not exact nonpenetration). No healing,
-//! fatigue, automatic bond creation, temperature dependence, calibrated
+//! fatigue, automatic bond creation, implicit temperature dependence, calibrated
 //! adhesion, evolving contact geometry or finite-rotation objectivity is claimed.
+//! `temperature` explicitly transfers common-mode history to a newly supplied
+//! temperature state, with separate parameter-work and damage-release accounts.
 //!
 //! Reference formulation: Camanho and Davila (2002), as described by the Abaqus
 //! cohesive-contact damage-evolution documentation. Fracture energy is the area
@@ -29,6 +31,9 @@ pub mod mixed_mode;
 /// Explicit physical bond viscosity and timed constitutive steps.
 pub mod rate;
 pub use rate::{CohesiveRateStep, CohesiveViscosity};
+
+/// Irreversible common-mode history across explicitly supplied temperature states.
+pub mod temperature;
 
 // Work-conjugate vector averages for native dynamic interface owners.
 mod path;
@@ -110,7 +115,8 @@ impl BilinearCohesive {
     /// an actual interface is bonded and which physical area it represents.
     #[must_use]
     pub fn bonded_point(&self) -> CohesivePoint<'_> {
-        CohesivePoint { law: self, jump: [0.0; 3], maximum: 0.0, mixed_history: None }
+        CohesivePoint { law: self, jump: [0.0; 3], maximum: 0.0, mixed_history: None,
+            fracture_reference: 0.0, dissipated_reference: 0.0 }
     }
 
     fn intact(&self, maximum: f64) -> f64 {
@@ -143,6 +149,11 @@ pub struct CohesivePoint<'a> {
     jump: [f64; 3],
     maximum: f64,
     mixed_history: Option<mixed_mode::MixedModeHistory>,
+    // A temperature refresh changes the local envelope without rewriting past
+    // irreversible work. Differences from the new envelope's reference retain
+    // the accumulated loss, including fixed-jump thermal damage release.
+    fracture_reference: f64,
+    dissipated_reference: f64,
 }
 
 /// Incremental energy per original bonded area, J/m2.
@@ -194,10 +205,10 @@ impl<'a> CohesivePoint<'a> {
     }
     #[must_use]
     pub fn dissipated_j_m2(&self) -> f64 {
-        if self.law.mixed_mode.is_some() {
-            return self.mixed_history.map_or(0.0, |h| h.fracture(self.maximum));
-        }
-        self.law.fracture(self.maximum)
+        let current = if self.law.mixed_mode.is_some() {
+            self.mixed_history.map_or(0.0, |h| h.fracture(self.maximum))
+        } else { self.law.fracture(self.maximum) };
+        self.dissipated_reference + (current-self.fracture_reference)
     }
     #[must_use]
     pub fn stored_energy_j_m2(&self) -> f64 {
@@ -239,7 +250,7 @@ impl<'a> CohesivePoint<'a> {
         let radius = norm(active(jump_m))?;
         let old_radius = norm(active(self.jump))?;
         let maximum = self.maximum.max(radius).min(self.law.failure);
-        let point = Self { law: self.law, jump: jump_m, maximum, mixed_history: None };
+        let point = Self { jump: jump_m, maximum, mixed_history: None, ..*self };
         let stiffness_old = self.law.stiffness*self.law.intact(self.maximum);
         // The effective radius is convex on a straight jump segment, so it
         // cannot exceed both endpoints. Below the old maximum, constant-damage
