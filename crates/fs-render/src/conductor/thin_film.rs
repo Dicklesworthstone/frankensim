@@ -42,7 +42,8 @@ pub struct CoherentDielectricCoating {
 
 impl CoherentDielectricCoating {
     /// Declare a source-bound film. Wavelength evaluation uses the existing
-    /// shared visible-band Cauchy, Sellmeier or tabulated law; thickness is in metres,
+    /// shared Cauchy, Sellmeier or tabulated law over its original support;
+    /// thickness is in metres,
     /// including exact zero. The phase index controls both Snell's law and
     /// coherent optical thickness at each wavelength; group index is not used.
     pub fn try_new(
@@ -66,6 +67,12 @@ impl CoherentDielectricCoating {
     #[must_use]
     pub const fn ior(self) -> DielectricIor {
         self.ior
+    }
+
+    /// Closed support of the original phase-index law, in vacuum nanometres.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(self) -> (f64, f64) {
+        self.ior.wavelength_bounds_nm()
     }
 
     /// Uniform physical thickness normal to the microfacet, in metres.
@@ -98,6 +105,10 @@ impl CoherentDielectricCoating {
             }
             DielectricIor::Tabulated(law) => {
                 hasher.update(b"coherent-dielectric-coating.tabulated.v1");
+                if law.max_knot_span_nm() != crate::dielectric::MAX_DIELECTRIC_KNOT_SPAN_NM {
+                    hasher.update(b"declared-knot-span.v1");
+                    hasher.update(&law.max_knot_span_nm().to_bits().to_le_bytes());
+                }
                 for sample in law.samples() {
                     hasher.update(&sample.wavelength_nm().to_bits().to_le_bytes());
                     hasher.update(&sample.index().to_bits().to_le_bytes());

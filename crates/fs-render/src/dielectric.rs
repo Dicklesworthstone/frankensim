@@ -23,9 +23,9 @@ const MAX_ROUGHNESS_ALPHA: f64 = 1.0;
 const MAX_GLASS_IOR: f64 = 3.0;
 const UNIT_TOLERANCE: f64 = 2.0e-10;
 
-/// Fixed number of knots in a visible dielectric phase-index table.
+/// Fixed number of knots in a dielectric phase-index table.
 pub const DIELECTRIC_SPECTRAL_SAMPLE_COUNT: usize = 9;
-/// Largest admitted interval between successive phase-index knots (nm).
+/// Legacy visible constructor's maximum interval between phase-index knots (nm).
 pub const MAX_DIELECTRIC_KNOT_SPAN_NM: f64 = 100.0;
 
 /// Refusal from validated dielectric construction or analytic evaluation.
@@ -39,7 +39,7 @@ pub enum DielectricError {
     InvalidAbsorption,
     /// A roughness value was outside the admitted GGX interval.
     InvalidRoughness,
-    /// A wavelength was outside the tracer's declared visible interval.
+    /// A wavelength was outside the consumed optical law's declared support.
     InvalidWavelength,
     /// Spectral knots did not strictly span 380--780 nm, or an interval
     /// exceeded the declared interpolation envelope.
@@ -282,6 +282,15 @@ impl DielectricIorSample {
     /// Construct a visible-band sample with an absolute index in `[1, 3]`.
     pub fn try_new(wavelength_nm: f64, index: f64) -> Result<Self, DielectricError> {
         validate_wavelength(wavelength_nm)?;
+        Self::try_new_in_band(wavelength_nm, index)
+    }
+
+    /// Positive finite vacuum-wavelength knot for an explicitly supported real
+    /// index table. The original absolute-index `[1,3]` domain is unchanged.
+    pub fn try_new_in_band(wavelength_nm: f64, index: f64) -> Result<Self, DielectricError> {
+        if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
+            return Err(DielectricError::InvalidWavelength);
+        }
         if !index.is_finite() || !(1.0..=MAX_GLASS_IOR).contains(&index) {
             return Err(DielectricError::InvalidIor);
         }
@@ -304,7 +313,7 @@ impl DielectricIorSample {
     }
 }
 
-/// Bounded piecewise-linear phase dispersion over the complete visible band.
+/// Bounded piecewise-linear phase dispersion over declared wavelength support.
 ///
 /// No Cauchy fit, monotonicity assumption or extrapolation is applied. Samples
 /// define an isotropic real-index geometric-optics model; they do not establish
@@ -312,6 +321,7 @@ impl DielectricIorSample {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabulatedIor {
     samples: [DielectricIorSample; DIELECTRIC_SPECTRAL_SAMPLE_COUNT],
+    max_knot_span_nm: f64,
 }
 
 impl TabulatedIor {
@@ -321,7 +331,26 @@ impl TabulatedIor {
         samples: [DielectricIorSample; DIELECTRIC_SPECTRAL_SAMPLE_COUNT],
     ) -> Result<Self, DielectricError> {
         validate_table_wavelengths(samples.map(DielectricIorSample::wavelength_nm))?;
-        Ok(Self { samples })
+        Ok(Self { samples, max_knot_span_nm: MAX_DIELECTRIC_KNOT_SPAN_NM })
+    }
+
+    /// Admit nine original real-index samples over their actual first/last
+    /// wavelengths, with a positive finite caller-declared maximum gap in nm.
+    /// Linear interpolation stays inside this closed band. This is an explicit
+    /// table declaration, not an extension of a visible Cauchy/Sellmeier law.
+    pub fn try_new_in_band(
+        samples: [DielectricIorSample; DIELECTRIC_SPECTRAL_SAMPLE_COUNT],
+        max_knot_span_nm: f64,
+    ) -> Result<Self, DielectricError> {
+        if !max_knot_span_nm.is_finite() || max_knot_span_nm <= 0.0
+            || samples.iter().any(|sample| !sample.wavelength_nm.is_finite() || sample.wavelength_nm <= 0.0)
+            || samples.windows(2).any(|pair| {
+                let span = pair[1].wavelength_nm - pair[0].wavelength_nm;
+                !span.is_finite() || span <= 0.0 || span > max_knot_span_nm
+            }) {
+            return Err(DielectricError::InvalidTable);
+        }
+        Ok(Self { samples, max_knot_span_nm })
     }
 
     /// Retained phase-index samples, in increasing vacuum-wavelength order.
@@ -330,9 +359,27 @@ impl TabulatedIor {
         &self.samples
     }
 
+    /// Closed support of the original phase-index data, in vacuum nanometres.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        (self.samples[0].wavelength_nm,
+            self.samples[DIELECTRIC_SPECTRAL_SAMPLE_COUNT - 1].wavelength_nm)
+    }
+
+    /// Retained caller-declared interpolation gap ceiling, in nanometres.
+    #[must_use]
+    pub const fn max_knot_span_nm(&self) -> f64 { self.max_knot_span_nm }
+
+    fn validate_wavelength(&self, wavelength_nm: f64) -> Result<(), DielectricError> {
+        let (minimum, maximum) = self.wavelength_bounds_nm();
+        if wavelength_nm.is_finite() && (minimum..=maximum).contains(&wavelength_nm) {
+            Ok(())
+        } else { Err(DielectricError::InvalidWavelength) }
+    }
+
     /// Evaluate the absolute phase index without extending the support band.
     pub fn eval(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
-        validate_wavelength(wavelength_nm)?;
+        self.validate_wavelength(wavelength_nm)?;
         Ok(self.eval_unchecked(wavelength_nm))
     }
 
@@ -341,10 +388,10 @@ impl TabulatedIor {
     /// Each open interval has its exact linear derivative. An interior knot
     /// admits a derivative only when the slopes on both sides are equal;
     /// otherwise this returns [`DielectricError::UndefinedGroupIndex`]. At
-    /// 380/780 nm the one-sided derivative inside the support band is used.
+    /// either support endpoint the one-sided derivative inside the band is used.
     /// This describes the interpolant, not an inferred smooth material law.
     pub fn group_index(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
-        validate_wavelength(wavelength_nm)?;
+        self.validate_wavelength(wavelength_nm)?;
         let upper = self
             .samples
             .partition_point(|sample| sample.wavelength_nm < wavelength_nm)
@@ -384,11 +431,22 @@ pub enum DielectricIor {
     Cauchy(CauchyIor),
     /// Transparent-band Sellmeier oscillator model.
     Sellmeier(SellmeierIor),
-    /// Explicit visible-band absolute phase-index samples.
+    /// Explicit finite-band absolute phase-index samples.
     Tabulated(TabulatedIor),
 }
 
 impl DielectricIor {
+    /// Actual declared vacuum-wavelength support. Original analytic dispersion
+    /// laws retain their visible band; only an explicitly bounded table admits
+    /// another band. An algebraic formula is not permission to extrapolate it.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        match self {
+            Self::Cauchy(_) | Self::Sellmeier(_) => (LAMBDA_MIN, LAMBDA_MAX),
+            Self::Tabulated(ior) => ior.wavelength_bounds_nm(),
+        }
+    }
+
     /// Absolute phase index used by Fresnel and Snell transport.
     pub fn eval(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
         match self {

@@ -69,6 +69,7 @@ impl DielectricCoating {
 #[derive(Clone, Copy, Debug)]
 pub struct DielectricCoatingStack<'a> {
     layers: StackLayers<'a>,
+    wavelength_bounds_nm: (f64, f64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,10 +107,27 @@ impl<'a> DielectricCoatingStack<'a> {
     /// Layers are authored outside first; at most 64 physical films are admitted.
     /// An empty or entirely zero-thickness stack preserves the bare interface.
     pub fn try_new(layers: &'a [CoherentDielectricCoating]) -> Result<Self, DielectricError> {
+        Self::try_new_in_band(layers, (crate::spectral::LAMBDA_MIN, crate::spectral::LAMBDA_MAX))
+    }
+
+    /// Admit original real-index layers over an explicitly declared vacuum-
+    /// wavelength band. Every layer must cover the complete requested interval,
+    /// including zero-thickness layers. Original Cauchy/Sellmeier laws therefore
+    /// retain their visible validity; nonvisible real laws use bounded tables.
+    pub fn try_new_in_band(
+        layers: &'a [CoherentDielectricCoating],
+        wavelength_bounds_nm: (f64, f64),
+    ) -> Result<Self, DielectricError> {
         if layers.len() > MAX_COHERENT_STACK_LAYERS {
             return Err(DielectricError::InvalidCoating);
         }
-        Ok(Self { layers: StackLayers::Transparent(layers) })
+        validate_stack_band(wavelength_bounds_nm)?;
+        for layer in layers {
+            if !covers(layer.wavelength_bounds_nm(), wavelength_bounds_nm) {
+                return Err(DielectricError::InvalidWavelength);
+            }
+        }
+        Ok(Self { layers: StackLayers::Transparent(layers), wavelength_bounds_nm })
     }
 
     /// Borrow arbitrarily ordered transparent and absorbing spectral films.
@@ -117,9 +135,42 @@ impl<'a> DielectricCoatingStack<'a> {
     /// refused by the original film constructors. The same 64-layer bound
     /// applies, including empty and zero-thickness stacks.
     pub fn try_mixed(layers: &'a [CoatingLayer<'a>]) -> Result<Self, DielectricError> {
+        Self::try_mixed_in_band(layers, (crate::spectral::LAMBDA_MIN, crate::spectral::LAMBDA_MAX))
+    }
+
+    /// Admit mixed original film laws over explicit support without extending
+    /// any layer. An empty stack still retains this band, so bare-interface and
+    /// all-zero-thickness shortcuts cannot bypass wavelength admission.
+    /// The query's scalar exterior indices must come from physical exterior laws
+    /// valid at that wavelength; this borrowed stack owns only its finite films.
+    /// Equal bounds admit one explicitly requested wavelength, useful for a
+    /// single-lane packet; integrating a band requires strictly positive width.
+    pub fn try_mixed_in_band(
+        layers: &'a [CoatingLayer<'a>],
+        wavelength_bounds_nm: (f64, f64),
+    ) -> Result<Self, DielectricError> {
         let stack = CoherentCoatingStack::try_new(layers)
             .map_err(|_| DielectricError::InvalidCoating)?;
-        Ok(Self { layers: StackLayers::Mixed(stack) })
+        validate_stack_band(wavelength_bounds_nm)?;
+        for layer in layers {
+            if !covers(layer.wavelength_bounds_nm(), wavelength_bounds_nm) {
+                return Err(DielectricError::InvalidWavelength);
+            }
+        }
+        Ok(Self { layers: StackLayers::Mixed(stack), wavelength_bounds_nm })
+    }
+
+    /// Declared common finite-film support, including an empty interface.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(self) -> (f64, f64) {
+        self.wavelength_bounds_nm
+    }
+
+    fn validate_wavelength(self, wavelength_nm: f64) -> Result<(), DielectricError> {
+        let (minimum, maximum) = self.wavelength_bounds_nm;
+        if wavelength_nm.is_finite() && (minimum..=maximum).contains(&wavelength_nm) {
+            Ok(())
+        } else { Err(DielectricError::InvalidWavelength) }
     }
 
     /// Number of authored physical layers, including zero-thickness films.
@@ -154,7 +205,7 @@ impl<'a> DielectricCoatingStack<'a> {
         eta_i: f64,
         eta_t: f64,
     ) -> Result<PolarizedFresnel, DielectricError> {
-        super::validate_wavelength(wavelength_nm)?;
+        self.validate_wavelength(wavelength_nm)?;
         let bare = fresnel_dielectric_polarized(cosine, eta_i, eta_t)?;
         if !self.is_active() {
             return Ok(bare);
@@ -205,7 +256,7 @@ impl<'a> DielectricCoatingStack<'a> {
         eta_i: f64,
         eta_t: f64,
     ) -> Result<DielectricLayerPowerBalance, DielectricError> {
-        super::validate_wavelength(wavelength_nm)?;
+        self.validate_wavelength(wavelength_nm)?;
         let bare = fresnel_dielectric_polarized(cosine, eta_i, eta_t)?;
         let mut result = DielectricLayerPowerBalance {
             fresnel: bare,
@@ -236,6 +287,16 @@ impl<'a> DielectricCoatingStack<'a> {
         result.fresnel = polarized_response(response, bare, self.layer_count())?;
         Ok(result)
     }
+}
+
+fn validate_stack_band(bounds: (f64, f64)) -> Result<(), DielectricError> {
+    if bounds.0.is_finite() && bounds.1.is_finite() && bounds.0 > 0.0 && bounds.1 >= bounds.0 {
+        Ok(())
+    } else { Err(DielectricError::InvalidWavelength) }
+}
+
+fn covers(outer: (f64, f64), inner: (f64, f64)) -> bool {
+    outer.0 <= inner.0 && inner.1 <= outer.1
 }
 
 /// Borrowed native interface owner at one wavelength and physical layer order.

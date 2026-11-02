@@ -1026,6 +1026,10 @@ impl Material {
                     }
                     DielectricIor::Tabulated(ior) => {
                         hasher.update(&[4]);
+                        if ior.max_knot_span_nm() != crate::dielectric::MAX_DIELECTRIC_KNOT_SPAN_NM {
+                            hasher.update(b"declared-knot-span.v1");
+                            update_material_scalar(&mut hasher, ior.max_knot_span_nm());
+                        }
                         for sample in ior.samples() {
                             update_material_scalar(&mut hasher, sample.wavelength_nm());
                             update_material_scalar(&mut hasher, sample.index());
@@ -9913,6 +9917,10 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
                 }
                 DielectricIor::Tabulated(law) => {
                     hasher.update(&[2]);
+                    if law.max_knot_span_nm() != crate::dielectric::MAX_DIELECTRIC_KNOT_SPAN_NM {
+                        hasher.update(b"declared-knot-span.v1");
+                        update_continuity_f64(hasher, law.max_knot_span_nm());
+                    }
                     for sample in law.samples() {
                         update_continuity_f64(hasher, sample.wavelength_nm());
                         update_continuity_f64(hasher, sample.index());

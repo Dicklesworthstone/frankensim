@@ -5323,3 +5323,49 @@ coverage/domain/budget/cancellation refusal, independent direct coherent/SI
 Planck RK4 refinement with native convection/reservoir heat, and illumination
 balanced by cooling through the original `CoupledObservers` on one timeline.
 <!-- native-coating-exchange:end -->
+
+<!-- optical-band:start -->
+### Explicit optical support extends the original kernels beyond the visible band
+
+`ConductorOptics`, `CoherentAbsorbingCoating` and `TabulatedIor` admit original
+nine-knot data through opt-in `try_new_in_band` constructors. The first and last
+positive finite vacuum-wavelength knots define the exact closed support; each
+table retains a positive finite caller-declared maximum interpolation gap. Knots
+must increase strictly and every interval must satisfy that ceiling. This keeps
+the original bounded linear interpolation and source/passivity/index limits;
+the gap declaration is not an interpolation-error certificate or causal spectral
+fit. Coating extinction may be exactly zero; an opaque substrate retains its
+strictly positive extinction. No constructor extends or extrapolates an existing
+visible data table.
+
+Actual support and retained gap limits are exposed through
+`wavelength_bounds_nm()` and `max_knot_span_nm()`. Existing visible constructors
+keep their exact 380/780 nm endpoints and 100 nm gap policy. Original visible
+identity bytes and arithmetic are preserved; source identities/statuses remain
+unchanged. Opt-in band boundaries are carried by the original samples, and
+nondefault gap policies enter optical, coating and tabulated scene/lens identity.
+The structs remain bounded inline Copy values. Original Cauchy and Sellmeier
+laws retain visible validity; nonvisible clear films and real exterior media use
+explicitly supported real-index tables rather than unchecked analytic extension.
+
+The original complex-interface, coherent phase, polarized reflection/transmission
+and positive film-work kernels consume the actual vacuum wavelength in nm.
+No wavelength remapping or replacement Fresnel solver is introduced. Every
+consumed film and substrate must admit the query, including attached coatings,
+zero-thickness films, matched-index and grazing shortcuts. An explicit conductor
+stack continues to replace any coating attached to its supplied substrate.
+`DielectricCoatingStack::try_new_in_band` and `try_mixed_in_band` retain a requested
+band covered by all finite films; empty/all-zero stacks still enforce that band
+before their bare-interface shortcuts. A singleton requested band admits one
+spectral packet lane. Scalar exterior indices remain caller inputs at that
+wavelength; their original exterior laws must also admit it. Integrated consumers
+must intersect all consumed material supports and require positive band width.
+
+Four G1/G3 groups cover retained IR knots and declared gaps, visible compatibility,
+independent 8--14 micrometre Fresnel and Beer--Lambert losses, an IR quarter-wave
+impedance oracle, weak transmitting absorption below the R+T rounding scale,
+TIR and reverse film partitions, and support refusal through attached, empty,
+zero-depth, matched and grazing paths. These tests verify implementation and
+model boundaries; their synthetic optical values establish no measured-specimen
+accuracy or authority outside the supplied source data.
+<!-- optical-band:end -->

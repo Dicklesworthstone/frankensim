@@ -15,7 +15,6 @@ use super::{
 };
 use crate::dielectric::CauchyIor;
 use crate::polarization::Mueller;
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::det;
 
@@ -266,7 +265,7 @@ impl CoherentPeriodicCoating {
         for (slot, layer) in prepared.iter_mut().zip(self.unit_cell()) {
             *slot = absorption::Layer::new::<false>(
                 ComplexIor {
-                    eta: layer.ior.eval_unchecked(wavelength_nm),
+                    eta: layer.ior.eval(wavelength_nm).map_err(|_| ConductorError::InvalidWavelength)?,
                     k: layer.extinction_k,
                 },
                 layer.thickness_m,
@@ -286,7 +285,7 @@ impl CoherentPeriodicCoating {
         let mut prepared = [LayerTransfer::IDENTITY; MAX_COHERENT_UNIT_CELL_LAYERS];
         for (slot, layer) in prepared.iter_mut().zip(self.unit_cell()) {
             let ior = ComplexIor {
-                eta: layer.ior.eval_unchecked(geometry.wavelength_nm),
+                eta: layer.ior.eval(geometry.wavelength_nm).map_err(|_| ConductorError::InvalidWavelength)?,
                 k: layer.extinction_k,
             };
             *slot = LayerTransfer::new::<TRANSMISSION>(ior, layer.thickness_m, geometry);
@@ -332,6 +331,9 @@ pub(crate) fn lossless_stack_transmission(
     if layers.len() > MAX_COHERENT_STACK_LAYERS {
         return Err(ConductorError::InvalidCoatingStack);
     }
+    for layer in layers {
+        super::validate_supported_wavelength(wavelength_nm, layer.wavelength_bounds_nm())?;
+    }
     let mut geometry = Geometry::new(
         wavelength_nm,
         incident_eta,
@@ -372,6 +374,18 @@ pub enum CoatingLayer<'a> {
     Absorbing(&'a CoherentAbsorbingCoating),
 }
 
+impl CoatingLayer<'_> {
+    /// Closed support of this original physical layer's optical law, in nm.
+    /// Even a zero-thickness layer retains its source's declared domain.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(self) -> (f64, f64) {
+        match self {
+            Self::Dielectric(film) => film.wavelength_bounds_nm(),
+            Self::Absorbing(film) => film.wavelength_bounds_nm(),
+        }
+    }
+}
+
 /// Borrowed general stack with arbitrary layer ordering and full spectral
 /// laws, evaluated with the same kernel as compact scene coatings. This API
 /// does not attach heap-backed stacks to Copy scene materials. It is useful
@@ -398,6 +412,13 @@ impl<'a> CoherentCoatingStack<'a> {
         self.layers
     }
 
+    fn validate_wavelength(self, wavelength_nm: f64) -> Result<(), ConductorError> {
+        for layer in self.layers {
+            super::validate_supported_wavelength(wavelength_nm, layer.wavelength_bounds_nm())?;
+        }
+        Ok(())
+    }
+
     /// Original complex films between two real-index surrounding media. The
     /// same scaled field kernel owns reflection and transmitted Poynting flux.
     /// Film order reverses together with the caller's incident/exit media.
@@ -411,6 +432,7 @@ impl<'a> CoherentCoatingStack<'a> {
         reverse: bool,
         exit_normal: [f64; 2],
     ) -> Result<CoherentTransmission, ConductorError> {
+        self.validate_wavelength(wavelength_nm)?;
         if !exit_eta.is_finite() || !(1.0..=3.0).contains(&exit_eta) {
             return Err(ConductorError::InvalidSample);
         }
@@ -440,6 +462,7 @@ impl<'a> CoherentCoatingStack<'a> {
         reverse: bool,
         exit_normal: [f64; 2],
     ) -> Result<CoherentLayerTransmission, ConductorError> {
+        self.validate_wavelength(wavelength_nm)?;
         if !exit_eta.is_finite() || !(1.0..=3.0).contains(&exit_eta) {
             return Err(ConductorError::InvalidSample);
         }
@@ -477,6 +500,7 @@ impl<'a> CoherentCoatingStack<'a> {
         incident_eta: f64,
         cosine: f64,
     ) -> Result<f64, ConductorError> {
+        self.validate_wavelength(wavelength_nm)?;
         let geometry = Geometry::new(
             wavelength_nm,
             incident_eta,
@@ -496,6 +520,7 @@ impl<'a> CoherentCoatingStack<'a> {
         incident_eta: f64,
         cosine: f64,
     ) -> Result<ConductorPowerBalance, ConductorError> {
+        self.validate_wavelength(wavelength_nm)?;
         let geometry = Geometry::new(
             wavelength_nm, incident_eta, substrate.complex_ior(wavelength_nm)?, cosine,
         )?;
@@ -515,6 +540,7 @@ impl<'a> CoherentCoatingStack<'a> {
         incident_eta: f64,
         cosine: f64,
     ) -> Result<super::ConductorLayerPowerBalance, ConductorError> {
+        self.validate_wavelength(wavelength_nm)?;
         let geometry = Geometry::new(
             wavelength_nm,
             incident_eta,
@@ -537,6 +563,7 @@ impl<'a> CoherentCoatingStack<'a> {
         incident_eta: f64,
         cosine: f64,
     ) -> Result<Mueller, ConductorError> {
+        self.validate_wavelength(wavelength_nm)?;
         let geometry = Geometry::new(
             wavelength_nm,
             incident_eta,
@@ -576,7 +603,7 @@ impl<'a> CoherentCoatingStack<'a> {
             CoatingLayer::Dielectric(layer) => (
                 ComplexIor {
                     eta: layer.ior().eval(wavelength_nm)
-                        .map_err(|_| ConductorError::NumericalFailure)?,
+                        .map_err(|_| ConductorError::InvalidWavelength)?,
                     k: 0.0,
                 },
                 layer.thickness_m(),
@@ -607,7 +634,7 @@ impl Geometry {
         substrate: ComplexIor,
         cosine: f64,
     ) -> Result<Self, ConductorError> {
-        if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+        if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
             return Err(ConductorError::InvalidWavelength);
         }
         if !incident_eta.is_finite() || incident_eta <= 0.0 || incident_eta > MAX_IOR_COMPONENT {

@@ -33,7 +33,7 @@ pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 2;
 pub const CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 1;
 /// Fixed number of knots in a conductor optical table.
 pub const CONDUCTOR_IOR_SAMPLE_COUNT: usize = 9;
-/// Largest accepted interval between adjacent optical knots.
+/// Legacy visible constructor's maximum interval between adjacent optical knots.
 pub const MAX_CONDUCTOR_KNOT_SPAN_NM: f64 = 100.0;
 
 const MAX_IOR_COMPONENT: f64 = 100.0;
@@ -169,6 +169,17 @@ impl ConductorIorSample {
         Ok(sample)
     }
 
+    /// Construct one finite positive vacuum-wavelength knot for an explicitly
+    /// supported table. The owning table's first/last knots define its band;
+    /// this does not extend a visible table or authorize extrapolation.
+    pub fn try_new_in_band(wavelength_nm: f64, eta: f64, k: f64) -> Result<Self, ConductorError> {
+        let sample = Self { wavelength_nm, eta: canonical_zero(eta), k: canonical_zero(k) };
+        if !sample_is_valid_in_band(sample) {
+            return Err(ConductorError::InvalidSample);
+        }
+        Ok(sample)
+    }
+
     /// Vacuum wavelength in nanometres.
     #[must_use]
     pub const fn wavelength_nm(self) -> f64 {
@@ -209,10 +220,11 @@ impl ComplexIor {
     }
 }
 
-/// Validated fixed-band complex-IOR table.
+/// Validated complex-IOR table over its declared wavelength band.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConductorOptics {
     samples: [ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT],
+    max_knot_span_nm: f64,
     source: ConductorSource,
     provenance: ConductorProvenance,
     coating: Option<CoherentCoating>,
@@ -234,6 +246,23 @@ impl ConductorOptics {
         source: ConductorSource,
     ) -> Result<Self, ConductorError> {
         Self::from_samples(samples, source, ConductorProvenance::Custom)
+    }
+
+    /// Admit nine original absolute-index knots over their actual finite band.
+    /// The positive finite interpolation-gap ceiling is a caller declaration,
+    /// not an error certificate or a broadband causal dispersion fit. Each
+    /// interval must satisfy it; support is exactly the first through last knot.
+    pub fn try_new_in_band(
+        samples: [ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT],
+        max_knot_span_nm: f64,
+        source: ConductorSource,
+    ) -> Result<Self, ConductorError> {
+        if samples.iter().copied().any(|sample| !sample_is_valid_in_band(sample)) {
+            return Err(ConductorError::InvalidSample);
+        }
+        validate_band_grid(samples.map(|sample| sample.wavelength_nm), max_knot_span_nm)?;
+        Ok(Self { samples, max_knot_span_nm, source, provenance: ConductorProvenance::Custom,
+            coating: None })
     }
 
     /// Representative tungsten-like optical table.  These values are an
@@ -271,6 +300,7 @@ impl ConductorOptics {
         validate_table(&samples)?;
         Ok(Self {
             samples,
+            max_knot_span_nm: MAX_CONDUCTOR_KNOT_SPAN_NM,
             source,
             provenance,
             coating: None,
@@ -337,7 +367,8 @@ impl ConductorOptics {
     /// Evaluate the linearly interpolated substrate's absolute `eta + i k`.
     /// An optional coating retains its own independent phase-index law.
     pub fn complex_ior(self, wavelength_nm: f64) -> Result<ComplexIor, ConductorError> {
-        if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+        let (minimum, maximum) = self.wavelength_bounds_nm();
+        if !wavelength_nm.is_finite() || !(minimum..=maximum).contains(&wavelength_nm) {
             return Err(ConductorError::InvalidWavelength);
         }
         Ok(self.complex_ior_unchecked(wavelength_nm))
@@ -356,6 +387,7 @@ impl ConductorOptics {
         incident_eta: f64,
         incidence_cosine: f64,
     ) -> Result<f64, ConductorError> {
+        self.validate_surface_wavelength(wavelength_nm)?;
         let ior = self.complex_ior(wavelength_nm)?;
         match self.coating {
             Some(CoherentCoating::Dielectric(coating)) => {
@@ -375,6 +407,36 @@ impl ConductorOptics {
     #[must_use]
     pub const fn samples(self) -> [ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT] {
         self.samples
+    }
+
+    /// Actual substrate-data support in vacuum nanometres. Attached coatings
+    /// retain independent support and must also admit every surface query.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(self) -> (f64, f64) {
+        (self.samples[0].wavelength_nm,
+            self.samples[CONDUCTOR_IOR_SAMPLE_COUNT - 1].wavelength_nm)
+    }
+
+    /// Retained caller-declared interpolation gap ceiling in nanometres.
+    #[must_use]
+    pub const fn max_knot_span_nm(self) -> f64 { self.max_knot_span_nm }
+
+    pub(crate) fn validate_surface_wavelength(&self, wavelength_nm: f64) -> Result<(), ConductorError> {
+        validate_supported_wavelength(wavelength_nm, self.wavelength_bounds_nm())?;
+        match &self.coating {
+            Some(CoherentCoating::Dielectric(film)) => {
+                validate_supported_wavelength(wavelength_nm, film.wavelength_bounds_nm())?;
+            }
+            Some(CoherentCoating::Absorbing(film)) => {
+                validate_supported_wavelength(wavelength_nm, film.wavelength_bounds_nm())?;
+            }
+            Some(CoherentCoating::Periodic(_)) => {
+                // Compact unit cells use the original visible Cauchy laws.
+                validate_supported_wavelength(wavelength_nm, (LAMBDA_MIN, LAMBDA_MAX))?;
+            }
+            None => {}
+        }
+        Ok(())
     }
 
     /// Substrate source identity and declared status. A coating, if present,
@@ -408,9 +470,10 @@ impl ConductorOptics {
             ConductorDataStatus::MaterialStateClaims => 2,
         }]);
         hasher.update(self.source.identity.as_bytes());
-        hasher.update(&LAMBDA_MIN.to_bits().to_le_bytes());
-        hasher.update(&LAMBDA_MAX.to_bits().to_le_bytes());
-        hasher.update(&MAX_CONDUCTOR_KNOT_SPAN_NM.to_bits().to_le_bytes());
+        let (minimum, maximum) = self.wavelength_bounds_nm();
+        hasher.update(&minimum.to_bits().to_le_bytes());
+        hasher.update(&maximum.to_bits().to_le_bytes());
+        hasher.update(&self.max_knot_span_nm.to_bits().to_le_bytes());
         for sample in self.samples {
             hasher.update(&sample.wavelength_nm.to_bits().to_le_bytes());
             hasher.update(&sample.eta.to_bits().to_le_bytes());
@@ -603,9 +666,20 @@ fn canonical_zero(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
 }
 
+fn validate_supported_wavelength(wavelength_nm: f64, bounds: (f64, f64)) -> Result<(), ConductorError> {
+    if wavelength_nm.is_finite() && (bounds.0..=bounds.1).contains(&wavelength_nm) {
+        Ok(())
+    } else { Err(ConductorError::InvalidWavelength) }
+}
+
 fn sample_is_valid(sample: ConductorIorSample) -> bool {
+    (LAMBDA_MIN..=LAMBDA_MAX).contains(&sample.wavelength_nm)
+        && sample_is_valid_in_band(sample)
+}
+
+fn sample_is_valid_in_band(sample: ConductorIorSample) -> bool {
     sample.wavelength_nm.is_finite()
-        && (LAMBDA_MIN..=LAMBDA_MAX).contains(&sample.wavelength_nm)
+        && sample.wavelength_nm > 0.0
         && sample.eta.is_finite()
         && sample.eta > 0.0
         && sample.eta <= MAX_IOR_COMPONENT
@@ -620,7 +694,7 @@ fn interpolate_ior(
     samples: &[ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT],
     wavelength_nm: f64,
 ) -> ComplexIor {
-    if wavelength_nm.to_bits() == LAMBDA_MAX.to_bits() {
+    if wavelength_nm.to_bits() == samples[CONDUCTOR_IOR_SAMPLE_COUNT - 1].wavelength_nm.to_bits() {
         let sample = samples[CONDUCTOR_IOR_SAMPLE_COUNT - 1];
         return ComplexIor {
             eta: sample.eta,
@@ -673,6 +747,20 @@ fn validate_table(
     Ok(())
 }
 
+fn validate_band_grid(
+    wavelengths: [f64; CONDUCTOR_IOR_SAMPLE_COUNT],
+    max_knot_span_nm: f64,
+) -> Result<(), ConductorError> {
+    if !max_knot_span_nm.is_finite() || max_knot_span_nm <= 0.0
+        || wavelengths.iter().any(|wavelength| !wavelength.is_finite() || *wavelength <= 0.0)
+        || wavelengths.windows(2).any(|pair| {
+            let span = pair[1] - pair[0];
+            !span.is_finite() || span <= 0.0 || span > max_knot_span_nm
+        }) {
+        Err(ConductorError::InvalidTable)
+    } else { Ok(()) }
+}
+
 fn representative_source(
     label: &[u8],
     samples: &[ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT],
@@ -723,6 +811,9 @@ const STAINLESS_STEEL_SAMPLES: [ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT] 
     sample(730.0, 2.97, 4.38),
     sample(780.0, 3.04, 4.50),
 ];
+
+#[cfg(test)]
+mod band_tests;
 
 #[cfg(test)]
 mod tests {

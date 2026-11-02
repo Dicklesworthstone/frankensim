@@ -58,6 +58,7 @@ impl ConductorOptics {
         incident_eta: f64,
         incidence_cosine: f64,
     ) -> Result<ConductorLayerPowerBalance, ConductorError> {
+        self.validate_surface_wavelength(wavelength_nm)?;
         match &self.coating {
             Some(CoherentCoating::Dielectric(film)) => {
                 CoherentCoatingStack::try_new(&[CoatingLayer::Dielectric(film)])?
@@ -95,6 +96,7 @@ impl ConductorOptics {
         incident_eta: f64,
         incidence_cosine: f64,
     ) -> Result<ConductorPowerBalance, ConductorError> {
+        self.validate_surface_wavelength(wavelength_nm)?;
         match &self.coating {
             Some(CoherentCoating::Dielectric(film)) => {
                 CoherentCoatingStack::try_new(&[CoatingLayer::Dielectric(film)])?.power_balance(

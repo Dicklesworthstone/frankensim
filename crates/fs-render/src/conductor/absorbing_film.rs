@@ -15,7 +15,7 @@ use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use fs_blake3::DomainHasher;
 use fs_math::det;
 
-/// One visible-band absolute complex-index sample of a passive film.
+/// One absolute complex-index sample of a passive film.
 /// Unlike an opaque substrate, a film can have exactly zero extinction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoatingIorSample(ConductorIorSample);
@@ -25,8 +25,17 @@ impl CoatingIorSample {
     /// dimensionless extinction coefficient k. Both index components are
     /// bounded by 100; negative k (gain) is refused.
     pub fn try_new(wavelength_nm: f64, eta: f64, k: f64) -> Result<Self, ConductorError> {
-        if !wavelength_nm.is_finite()
-            || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm)
+        if !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+            return Err(ConductorError::InvalidSample);
+        }
+        Self::try_new_in_band(wavelength_nm, eta, k)
+    }
+
+    /// Construct a finite positive vacuum-wavelength knot for a source-bounded
+    /// film table. The owning table supplies the closed support interval and
+    /// declared gap ceiling. Exact zero extinction remains a lossless layer.
+    pub fn try_new_in_band(wavelength_nm: f64, eta: f64, k: f64) -> Result<Self, ConductorError> {
+        if !wavelength_nm.is_finite() || wavelength_nm <= 0.0
             || !eta.is_finite()
             || eta <= 0.0
             || eta > MAX_IOR_COMPONENT
@@ -63,8 +72,10 @@ impl CoatingIorSample {
 
 /// One uniform isotropic passive coating on an opaque substrate.
 ///
-/// Nine explicit vacuum-wavelength knots span 380--780 nm. Both eta and k
-/// interpolate linearly, retaining dispersion and absorption inside the
+/// Nine explicit vacuum-wavelength knots span the declared source support.
+/// The legacy constructor retains 380--780 nm; another finite band requires
+/// the explicit band constructor. Both eta and k interpolate linearly,
+/// retaining dispersion and absorption inside the
 /// coherent phase calculation rather than applying an intensity tint after
 /// interference. The sample/source declaration does not assert measurement
 /// fidelity or enforce a broadband causal dispersion fit.
@@ -76,6 +87,7 @@ impl CoatingIorSample {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoherentAbsorbingCoating {
     samples: [ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT],
+    max_knot_span_nm: f64,
     thickness_m: f64,
     source: ConductorSource,
 }
@@ -90,25 +102,36 @@ impl CoherentAbsorbingCoating {
         source: ConductorSource,
     ) -> Result<Self, ConductorError> {
         if !thickness_m.is_finite()
+            || !(0.0..=MAX_COHERENT_COATING_THICKNESS_M).contains(&thickness_m) {
+            return Err(ConductorError::InvalidCoating);
+        }
+        if samples[0].wavelength_nm().to_bits() != LAMBDA_MIN.to_bits()
+            || samples[CONDUCTOR_IOR_SAMPLE_COUNT - 1].wavelength_nm().to_bits() != LAMBDA_MAX.to_bits() {
+            return Err(ConductorError::InvalidTable);
+        }
+        Self::try_new_in_band(samples, thickness_m, MAX_CONDUCTOR_KNOT_SPAN_NM, source)
+    }
+
+    /// Admit original film data over the exact first/last sample wavelengths.
+    /// Nine strictly ordered knots and a positive finite caller-declared gap
+    /// ceiling retain bounded work without extrapolation or an inferred fit.
+    /// The original index, passivity and 100-micrometre thickness bounds apply.
+    pub fn try_new_in_band(
+        samples: [CoatingIorSample; CONDUCTOR_IOR_SAMPLE_COUNT],
+        thickness_m: f64,
+        max_knot_span_nm: f64,
+        source: ConductorSource,
+    ) -> Result<Self, ConductorError> {
+        if !thickness_m.is_finite()
             || !(0.0..=MAX_COHERENT_COATING_THICKNESS_M).contains(&thickness_m)
         {
             return Err(ConductorError::InvalidCoating);
         }
         let samples = samples.map(|sample| sample.0);
-        if samples[0].wavelength_nm.to_bits() != LAMBDA_MIN.to_bits()
-            || samples[CONDUCTOR_IOR_SAMPLE_COUNT - 1]
-                .wavelength_nm
-                .to_bits()
-                != LAMBDA_MAX.to_bits()
-            || samples.windows(2).any(|pair| {
-                let span = pair[1].wavelength_nm - pair[0].wavelength_nm;
-                span <= 0.0 || span > MAX_CONDUCTOR_KNOT_SPAN_NM
-            })
-        {
-            return Err(ConductorError::InvalidTable);
-        }
+        super::validate_band_grid(samples.map(|sample| sample.wavelength_nm), max_knot_span_nm)?;
         Ok(Self {
             samples,
+            max_knot_span_nm,
             thickness_m: super::canonical_zero(thickness_m),
             source,
         })
@@ -116,7 +139,8 @@ impl CoherentAbsorbingCoating {
 
     /// The film's absolute eta+i*k at the supplied vacuum wavelength.
     pub fn complex_ior(&self, wavelength_nm: f64) -> Result<ComplexIor, ConductorError> {
-        if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+        let (minimum, maximum) = self.wavelength_bounds_nm();
+        if !wavelength_nm.is_finite() || !(minimum..=maximum).contains(&wavelength_nm) {
             return Err(ConductorError::InvalidWavelength);
         }
         Ok(super::interpolate_ior(&self.samples, wavelength_nm))
@@ -127,6 +151,17 @@ impl CoherentAbsorbingCoating {
     pub fn samples(&self) -> [CoatingIorSample; CONDUCTOR_IOR_SAMPLE_COUNT] {
         self.samples.map(CoatingIorSample)
     }
+
+    /// Closed support of the original film data, in vacuum nanometres.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        (self.samples[0].wavelength_nm,
+            self.samples[CONDUCTOR_IOR_SAMPLE_COUNT - 1].wavelength_nm)
+    }
+
+    /// Retained caller-declared interpolation gap ceiling in nanometres.
+    #[must_use]
+    pub const fn max_knot_span_nm(&self) -> f64 { self.max_knot_span_nm }
 
     /// Uniform physical thickness normal to the microfacet, in metres.
     #[must_use]
@@ -141,7 +176,13 @@ impl CoherentAbsorbingCoating {
     }
 
     pub(super) fn update_identity(&self, hasher: &mut DomainHasher) {
-        hasher.update(b"coherent-absorbing-coating.v1");
+        if self.wavelength_bounds_nm() == (LAMBDA_MIN, LAMBDA_MAX)
+            && self.max_knot_span_nm == MAX_CONDUCTOR_KNOT_SPAN_NM {
+            hasher.update(b"coherent-absorbing-coating.v1");
+        } else {
+            hasher.update(b"coherent-absorbing-coating.band.v1");
+            hasher.update(&self.max_knot_span_nm.to_bits().to_le_bytes());
+        }
         for sample in self.samples {
             hasher.update(&sample.wavelength_nm.to_bits().to_le_bytes());
             hasher.update(&sample.eta.to_bits().to_le_bytes());
@@ -170,7 +211,7 @@ impl CoherentAbsorbingCoating {
         if !cosine.is_finite() || !(0.0..=1.0).contains(&cosine) {
             return Err(ConductorError::InvalidIncidence);
         }
-        let film = super::interpolate_ior(&self.samples, wavelength_nm);
+        let film = self.complex_ior(wavelength_nm)?;
         if self.thickness_m == 0.0
             || (film.k == 0.0 && film.eta == incident_eta)
             || (film.eta == substrate.eta && film.k == substrate.k)

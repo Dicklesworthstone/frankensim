@@ -32,6 +32,7 @@ impl ConductorOptics {
         incident_eta: f64,
         incidence_cosine: f64,
     ) -> Result<Mueller, ConductorError> {
+        self.validate_surface_wavelength(wavelength_nm)?;
         let substrate = self.complex_ior(wavelength_nm)?;
         if !incident_eta.is_finite()
             || incident_eta <= 0.0
