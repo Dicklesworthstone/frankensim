@@ -3038,8 +3038,8 @@ pub enum TracerError {
     ProgressiveTimeModeMismatch,
     /// The v1 NEE light is static metadata and cannot name animated geometry.
     AnimatedLightUnsupported,
-    /// Bidirectional transport does not yet carry the body-locked brushed
-    /// tangent frame; brushed conductors refuse rather than render isotropic.
+    /// Legacy refusal retained for error compatibility. Native bidirectional
+    /// transport now retains brushed frames and supports their importance adjoint.
     BrushedConductorUnsupported,
     /// The bidirectional light-source construction does not yet sample thermal
     /// surfaces. Ordinary camera-path transport supports this material.
@@ -21886,8 +21886,8 @@ fn opaque_bsdf_eval(
         // denominator leaves ns.wo here, not ng.wo. The latter spuriously
         // amplifies every sample by (ns.wo)/(ng.wo) near the geometric horizon.
         // PBRT 3e, section 16.1.3, "Non-symmetry Due to Shading Normals".
-        // This effective radiance BSDF is not its importance adjoint; the
-        // bidirectional owner continues to refuse brushed conductors.
+        // This effective radiance BSDF is not symmetric. The bidirectional
+        // owner exchanges wo/wi to evaluate its importance adjoint.
         return Ok(d * g * fresnel / (4.0 * wo_local[2] * cos_i));
     }
     let Material::Conductor { optics, surface } = mat else {

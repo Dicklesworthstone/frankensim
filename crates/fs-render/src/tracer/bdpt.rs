@@ -10,6 +10,8 @@
 use super::transport::{TransportMode, refractive_transport_factor};
 use super::*;
 
+mod brushed;
+
 /// Bit-affecting semantics of the opt-in bidirectional path integrator.
 /// Version 2 corrected the global sample multiplicity and estimator
 /// normalization of light-subpath strategies that splat into the raster.
@@ -167,6 +169,10 @@ struct Vertex<'scene> {
     kind: VertexKind,
     point: Point3,
     geometric_normal: Option<Vec3>,
+    /// Body-locked frame at this path's shutter time, facing the sampled
+    /// predecessor. Reversing a reflection exchanges directions on that same
+    /// side; it must not reconstruct the grooves from world coordinates.
+    brushed_frame: Option<crate::surface_detail::ShadingFrame>,
     /// Direction from this vertex to its predecessor.
     wo: Option<Vec3>,
     beta: f64,
@@ -183,6 +189,7 @@ impl<'scene> Vertex<'scene> {
             kind: VertexKind::Camera,
             point,
             geometric_normal: None,
+            brushed_frame: None,
             wo: None,
             beta: 1.0,
             pdf_fwd: 1.0,
@@ -203,6 +210,7 @@ impl<'scene> Vertex<'scene> {
             },
             point: sample.point,
             geometric_normal: Some(sample.normal),
+            brushed_frame: None,
             wo: None,
             beta: spectrum.eval(wavelength_nm) * scale,
             pdf_fwd: sample.pdf_position_area,
@@ -213,6 +221,7 @@ impl<'scene> Vertex<'scene> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn surface(
         scene: &'scene Scene,
         intersection: SceneIntersection,
@@ -221,9 +230,18 @@ impl<'scene> Vertex<'scene> {
         stack: &MediumStack<'scene>,
         beta: f64,
         pdf_fwd: f64,
-    ) -> Self {
+        ray_time: Option<&PathTime>,
+    ) -> Result<Self, TracerError> {
         let primitive_index = intersection.primitive_index;
         let primitive = &scene.primitives[primitive_index];
+        let brushed_frame = brushed_shading_frame(
+            scene,
+            primitive_index,
+            intersection.instance_hit.as_ref(),
+            &intersection.hit,
+            frame.oriented,
+            ray_time,
+        )?;
         let (positive_medium, negative_medium) = match &primitive.material {
             Material::Dielectric { glass, .. } => {
                 let positive = if frame.entering {
@@ -254,10 +272,11 @@ impl<'scene> Vertex<'scene> {
                 (medium, medium)
             }
         };
-        Self {
+        Ok(Self {
             kind: VertexKind::Surface { primitive_index },
             point: intersection.hit.point,
             geometric_normal: Some(frame.geometric),
+            brushed_frame,
             wo: Some(ray.dir.scale(-1.0)),
             beta,
             pdf_fwd,
@@ -265,7 +284,7 @@ impl<'scene> Vertex<'scene> {
             delta: false,
             positive_medium,
             negative_medium,
-        }
+        })
     }
 
     fn is_surface(self) -> bool {
@@ -509,7 +528,15 @@ fn surface_scattering(
                 None,
             )
         }
-        Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
+        Material::BrushedConductor { .. } => brushed::scattering(
+            material,
+            vertex,
+            normal,
+            predecessor_direction,
+            next_direction,
+            wavelength_nm,
+            mode,
+        ),
         Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
             Err(TracerError::ThermalSurfaceUnsupported)
         }
@@ -571,7 +598,13 @@ fn surface_pdf_solid_angle(
             next_direction,
             None,
         )),
-        Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
+        Material::BrushedConductor { .. } => Ok(bsdf_pdf(
+            material,
+            normal,
+            predecessor_direction,
+            next_direction,
+            vertex.brushed_frame.as_ref(),
+        )),
         Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
             Err(TracerError::ThermalSurfaceUnsupported)
         }
@@ -614,7 +647,9 @@ fn sample_surface(
     let material = &scene.primitives[primitive_index].material;
     let normal = oriented_normal(vertex, wo).ok_or(TracerError::MissingNormal)?;
     match material {
-        Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
+        Material::BrushedConductor { .. } => {
+            brushed::sample(material, vertex, normal, wo, wavelength_nm, mode, random)
+        }
         Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
             Err(TracerError::ThermalSurfaceUnsupported)
         }
@@ -869,6 +904,7 @@ fn random_walk<'scene>(
             },
             point: intersection.hit.point,
             geometric_normal: Some(frame.geometric),
+            brushed_frame: None,
             wo: Some(ray.dir.scale(-1.0)),
             beta,
             pdf_fwd: 0.0,
@@ -882,7 +918,9 @@ fn random_walk<'scene>(
             pdf_fwd_solid_angle,
             &placeholder,
         );
-        let vertex = Vertex::surface(scene, intersection, ray, frame, &stack, beta, pdf_area);
+        let vertex = Vertex::surface(
+            scene, intersection, ray, frame, &stack, beta, pdf_area, ray_time,
+        )?;
         vertices.push(vertex);
 
         if scene.primitives[intersection.primitive_index]
@@ -1798,6 +1836,7 @@ fn connect_s1(
                 },
                 point: sample.point,
                 geometric_normal: Some(sample.normal),
+                brushed_frame: None,
                 wo: None,
                 beta: emitted / sample.pdf_solid_angle,
                 pdf_fwd: position_pdf,
@@ -2385,9 +2424,10 @@ fn merge_block(
 /// The serial oracle and parallel executor share the same fixed eight-sample
 /// reduction blocks. This keeps floating-point image bits invariant to worker
 /// count while supporting `t=1` light-tracing strategies that splat into
-/// arbitrary pixels. The estimator supports ordinary opaque and
-/// smooth/rough dielectric materials, finite rectangle emitters, animated
-/// geometry at sampled shutter time, and a pinhole cinematic camera. A finite
+/// arbitrary pixels. The estimator supports opaque materials (including
+/// body-locked brushed conductors), smooth/rough dielectrics, rectangle
+/// emitters, animated geometry at sampled shutter time, and a pinhole
+/// cinematic camera. A finite
 /// aperture refuses rather than pretending an optical-centre connection
 /// represents the lens integral. Gray/diffuse thermal surfaces refuse until
 /// their physical spectra have a matching light-subpath proposal.
@@ -3056,6 +3096,7 @@ mod tests {
             let medium = Some(MediumEntry { boundary_primitive: 0, glass: &glass });
             let vertex = Vertex {
                 kind: VertexKind::Surface { primitive_index: 0 }, point: Point3::new(0.0, 0.0, 0.0),
+                brushed_frame: None,
                 geometric_normal: Some(normal), wo: Some(normal), beta: 1.0, pdf_fwd: 1.0,
                 pdf_rev: 0.0, delta: false, positive_medium: medium, negative_medium: medium,
             };
@@ -3095,6 +3136,7 @@ mod tests {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let mut vertex = Vertex {
             kind: VertexKind::Surface { primitive_index: 0 },
+            brushed_frame: None,
             point: Point3::new(0.0, 0.0, 0.0), geometric_normal: Some(normal), wo: Some(normal),
             beta: 1.0, pdf_fwd: 1.0, pdf_rev: 0.0, delta: true, positive_medium: None,
             negative_medium: Some(MediumEntry { boundary_primitive: 0, glass: &glass }),
@@ -3289,6 +3331,7 @@ mod tests {
         .unwrap();
         let surface = |primitive_index, point, normal| Vertex {
             kind: VertexKind::Surface { primitive_index },
+            brushed_frame: None,
             point,
             geometric_normal: Some(normal),
             wo: Some(normal),
@@ -3726,6 +3769,7 @@ mod tests {
             .unwrap();
             let surface_vertex = |primitive_index, point, normal, delta| Vertex {
                 kind: VertexKind::Surface { primitive_index },
+                brushed_frame: None,
                 point,
                 geometric_normal: Some(normal),
                 wo: None,
@@ -4019,6 +4063,7 @@ mod tests {
                         Vertex::camera(point.offset(normal)),
                         Vertex {
                             kind: VertexKind::Surface { primitive_index: 0 },
+                            brushed_frame: None,
                             point,
                             geometric_normal: Some(Vec3::new(0.0, 0.0, 1.0)),
                             wo: Some(normal),

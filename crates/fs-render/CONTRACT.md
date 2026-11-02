@@ -3911,9 +3911,17 @@ Brushed BSDF semantics version 2 applies the radiance projection
 §16.1.3, “Non-symmetry Due to Shading Normals.” Native and calibrated
 consumers retain their geometric incoming cosine. This removes artificial
 grazing-view gain while preserving the reciprocal local GGX law; the effective
-radiance BSDF itself is generally non-symmetric. The existing bidirectional
-owner still refuses brushed conductors rather than treating this radiance law
-as its importance adjoint. Furnace regressions cover the bounded reflected
+radiance BSDF itself is generally non-symmetric. Bidirectional vertices now
+retain the same body-local frame at the sampled shutter time. Camera walks and
+connections evaluate the existing radiance law; light walks and camera splats
+use its adjoint `f_importance(wo, wi) = f_radiance(wi, wo)`. Both directions
+retain the native GGX visible-normal proposal, including geometric/shading
+horizon rejection, mark roughness, and isotropic pole fallback. No rejected
+sample is resampled, and the importance correction is not clamped to one.
+Focused regressions compare sample/PDF/evaluation consistency, coated-metal
+forward power in a dielectric host, rigidly placed frames on both sides, and
+finite-emitter camera connections/light splats. Other material paths retain
+their existing arithmetic. Furnace regressions cover the bounded reflected
 radiance and an independent angular-quadrature reference. Decorative normal
 mapping remains a shading approximation, not resolved microgeometry.
 The new Rust regressions remain natively unexecuted in the implementation environment.
