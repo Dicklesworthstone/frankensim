@@ -36,6 +36,7 @@ pub mod evolving;
 pub mod fetch_mass_consistent;
 pub mod fit;
 pub mod mann;
+pub mod mann_field;
 pub mod ou;
 
 /// Registered fs-rand kernel id for atmosphere draws ("ATMO").

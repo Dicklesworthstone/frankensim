@@ -56,19 +56,36 @@ FetchAdjustedMassConsistent mode.
   reuses the retained stress instead of repeating the target quadrature.
   Γ = 0 fits the variances with zero cross-correlation, without dividing by a
   zero shear-stress target. Nonfinite heights/covariances/advection refuse.
+- `mann_field::{MannSpectralModel, HomogeneousMannField}` provides a separate
+  homogeneous prescribed velocity field from the full Mann spectral tensor.
+  Each finite-band wavevector has two transverse polarizations whose complete
+  covariance equals its weighted tensor, including cross-components. Four
+  independent unit-variance OU paths supply both polarizations' sine/cosine
+  quadratures. Geometry and amplitude seeds are separate; vector advection,
+  decorrelation times, mode count and both kL cutoffs are explicit. Initialization
+  performs the tensor algebra; velocity/gradient samples allocate no storage.
+  `covariance` exposes the exact represented spatial or space-time tensor,
+  including finite-band and quadrature effects. Checkpoints retain model inputs
+  and all four paths and rebuild the deterministic model on resume. This field
+  is homogeneous in all three coordinates and has **no wall condition**; z = 0
+  is an ordinary plane. No terrain/flight boundary treatment is implied.
 
 ## Invariants
 
-- Solenoidality: u is a curl — ∇·u ≡ 0 analytically; the analytic-gradient
-  trace cancels to machine precision (V-04a gate, relative bound).
-- Wall parity: sin(k_h·0) = 0 makes the vertical component vanish at h = 0
-  IDENTICALLY (bitwise zero, battery-asserted).
+- Wall-compatible solenoidality: u is a curl — ∇·u ≡ 0 analytically; the
+  analytic-gradient trace cancels to machine precision (V-04a relative bound).
+- Wall-compatible parity: sin(k_h·0) = 0 makes the vertical component vanish
+  at h = 0 IDENTICALLY (bitwise zero, battery-asserted).
 - Pointwise z₀ insertion is FORBIDDEN while solenoidal claims stand
   (Round-2): the law carries exactly one scenario-level effective z₀.
 - The analytic gradient is term-wise exact (central differences converge to
   it at measured order 2).
 - Mode draws are a pure function of (seed, kernel, tile): independent of
-  mode count and of other fields built in between.
+  mode count and of other fields built in between for the original wall basis.
+- Homogeneous Mann modes instead use an explicit finite-band quadrature whose
+  geometry depends on its mode count. Every velocity polarization is transverse
+  to its wavevector, so its instantaneous analytic divergence vanishes without
+  a wall projection. Unresolved energy is omitted, never rescaled away.
 
 - `ou::OuMode::from_correlation_time(sigma_st, tau)` — exact-discrete
   ρ = e^(−Δt/τ), σ_innov = σ_st·√(1−ρ²) (the stationary law is a FIXED
@@ -141,6 +158,14 @@ velocity/gradient/air-property consistency.
 binding, input refusal, and the unchanged nonzero-shear fit golden. The
 existing per-truncation and bootstrap checks concern the fitted one-point
 stresses, not full spectral/coherence agreement.
+
+`mann_field::tests` checks all nine modal tensor components for Γ = 0, 3.9
+and 10, independent isotropic radial-energy integration, sheared two-point
+covariance at oblique separations over 4096 independent amplitude seeds,
+advected OU covariance over 2048 independent seeds, analytic gradients and
+divergence, absence of an invented wall condition, exact checkpoint/resume,
+and model/state refusals. These validate the represented finite-band model;
+they do not certify continuum quadrature convergence or measured wind spectra.
 
 ## No-claim boundaries
 
