@@ -7,6 +7,8 @@
 //! Constitutive evaluation and assembly remain owned by the parent hyper3
 //! kernel, with the same deterministic element order and cancellation points.
 
+mod energy_momentum;
+
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::cards::FiniteStrainPotential;

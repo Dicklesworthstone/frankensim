@@ -2,6 +2,8 @@
 //! These are authored numerical fixtures, not measured material validation.
 #[path = "finite_solid/contact.rs"]
 mod contact;
+#[path = "finite_solid/energy_momentum.rs"]
+mod energy_momentum;
 #[path = "finite_solid/expansion.rs"]
 mod expansion;
 #[path = "finite_solid/impulse.rs"]

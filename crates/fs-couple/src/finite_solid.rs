@@ -14,7 +14,10 @@
 //! This bounded path has fixed supports, held referential nodal/body loads,
 //! optional held pressure on the current exterior faces,
 //! compressible isothermal hyperelasticity and conforming P1 tetrahedra.
-//! Nonlinear midpoint has a signed energy defect: it is reported and gated,
+//! The opt-in energy-momentum step uses the same native time solver with an
+//! objective strain-space discrete gradient and analytic endpoint tangent.
+//! Its work identity is bounded by the nonlinear and floating-point gates.
+//! Ordinary nonlinear midpoint has a signed energy defect: it is reported and gated,
 //! never converted into physical heat. The optional source-expansion paths
 //! prepare isotropic or oriented principal thermal references at a held
 //! temperature per element.
@@ -601,6 +604,42 @@ impl<'a> FiniteSolidBody<'a> {
             nodal_forces_n,
             body_force_n_m3,
             None,
+            false,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance with objective energy/momentum-compatible internal forces.
+    ///
+    /// The original midpoint time solver, consistent reference mass and fixed
+    /// supports are retained. Symmetric algorithmic stress closes internal
+    /// force/torque balance and potential work to the nonlinear/roundoff budget.
+    /// Below the documented small-strain threshold the stress takes its
+    /// continuous limit; the same measured energy gate remains authoritative.
+    /// This is second-order time integration, not frequency-unwarped modal flow.
+    /// Held dead loads are supported. A pressure-bound body refuses because
+    /// this entry point does not supply a discrete pressure-work algorithm.
+    pub fn step_energy_momentum_candidate(
+        &self,
+        duration_s: f64,
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        controls: FiniteSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
+        checkpoint(cx)?;
+        if self.pressure_surface.is_some() {
+            return Err(FiniteSolidError::Invalid(
+                "energy-momentum stepping requires a body without pressure",
+            ));
+        }
+        self.step_with_loads(
+            duration_s,
+            nodal_forces_n,
+            body_force_n_m3,
+            None,
+            true,
             controls,
             cx,
         )
@@ -639,6 +678,7 @@ impl<'a> FiniteSolidBody<'a> {
             nodal_forces_n,
             body_force_n_m3,
             pressure,
+            false,
             controls,
             cx,
         )
@@ -651,6 +691,7 @@ impl<'a> FiniteSolidBody<'a> {
         nodal_forces_n: &[(usize, f64)],
         body_force_n_m3: [f64; 3],
         pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
+        energy_momentum: bool,
         controls: FiniteSolidControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
@@ -673,7 +714,7 @@ impl<'a> FiniteSolidBody<'a> {
         let before_u = inflate(&self.state.q, &self.free, &self.fixed);
         let strain_before_j = self.prepared.stored_energy_j(&before_u, cx)?;
         let kinetic_before_j = self.kinetic_energy_j()?;
-        let operator = DynamicOperator::new(
+        let mut operator = DynamicOperator::new(
             &self.prepared,
             &self.free_mass,
             &self.free,
@@ -681,6 +722,7 @@ impl<'a> FiniteSolidBody<'a> {
             pressure,
             cx,
         );
+        operator.energy_momentum_start = energy_momentum.then_some(before_u.as_slice());
         let integrator =
             OperatorGeneralizedAlpha::new(self.free.len(), duration_s, 1.0, controls.solve);
         // Immutable matrices are shared; only the physical trajectory is copied.
@@ -712,9 +754,28 @@ impl<'a> FiniteSolidBody<'a> {
             }
             None => 0.0,
         };
-        let integration_defect_j = (kinetic_after_j - kinetic_before_j)
-            + (strain_after_j - strain_before_j)
-            - source_work_j;
+        let kinetic_change_j = if energy_momentum {
+            let dv: Vec<f64> = candidate
+                .state
+                .v
+                .iter()
+                .zip(&self.state.v)
+                .map(|(a, b)| a - b)
+                .collect();
+            let mut dp = vec![0.0; dv.len()];
+            self.free_mass.spmv(&dv, &mut dp);
+            candidate
+                .state
+                .v
+                .iter()
+                .zip(&self.state.v)
+                .zip(dp)
+                .fold(0.0, |sum, ((a, b), p)| (0.5 * a + 0.5 * b).mul_add(p, sum))
+        } else {
+            kinetic_after_j - kinetic_before_j
+        };
+        let integration_defect_j =
+            kinetic_change_j + (strain_after_j - strain_before_j) - source_work_j;
         if !source_work_j.is_finite() || !integration_defect_j.is_finite() {
             return Err(FiniteSolidError::Invalid(
                 "mechanical work is not representable",
@@ -731,7 +792,12 @@ impl<'a> FiniteSolidBody<'a> {
             .zip(&after_u)
             .map(|(before, after)| 0.5 * before + 0.5 * after)
             .collect();
-        let mut internal = self.prepared.internal_force(&midpoint, cx)?;
+        let mut internal = if energy_momentum {
+            self.prepared
+                .energy_momentum_internal_force(&before_u, &after_u, cx)?
+        } else {
+            self.prepared.internal_force(&midpoint, cx)?
+        };
         subtract_pressure_force(&mut internal, &midpoint, pressure, cx)?;
         let mut acceleration = vec![0.0; before_u.len()];
         for ((&dof, before), after) in self.free.iter().zip(&self.state.v).zip(&candidate.state.v) {
@@ -867,6 +933,7 @@ struct DynamicOperator<'a, 'b, 'cx> {
     fixed: &'b [f64],
     pressure: Option<(&'b ClosedTetPressureSurface, TetPressure<'b>)>,
     cx: &'b Cx<'cx>,
+    energy_momentum_start: Option<&'b [f64]>,
     tangent: RefCell<Option<(Vec<f64>, Csr)>>,
     // Void native operator callbacks communicate a persistent error here.
     // Speculative validate_state refusals remain recoverable by line search.
@@ -889,6 +956,7 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
             fixed,
             pressure,
             cx,
+            energy_momentum_start: None,
             tangent: RefCell::new(None),
             error: RefCell::new(None),
         }
@@ -921,7 +989,17 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
             .is_none_or(|(at, _)| at.as_slice() != q);
         if rebuild {
             let displacement = inflate(q, self.free, self.fixed);
-            let mut full = self.problem.tangent_matrix(&displacement, self.cx)?;
+            let mut full = if let Some(before) = self.energy_momentum_start {
+                let after: Vec<f64> = displacement
+                    .iter()
+                    .zip(before)
+                    .map(|(mid, old)| 2.0 * mid - old)
+                    .collect();
+                self.problem
+                    .energy_momentum_tangent(before, &after, self.cx)?
+            } else {
+                self.problem.tangent_matrix(&displacement, self.cx)?
+            };
             if let Some((surface, pressure_pa)) = self.pressure {
                 let external = surface.force_tangent(&displacement, pressure_pa, self.cx)?;
                 let mut combined = Coo::new(full.nrows(), full.nrows());
@@ -1008,13 +1086,21 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
             return;
         }
         let displacement = inflate(q, self.free, self.fixed);
-        let result = self
-            .problem
-            .internal_force(&displacement, self.cx)
-            .and_then(|mut full| {
-                subtract_pressure_force(&mut full, &displacement, self.pressure, self.cx)?;
-                Ok(full)
-            });
+        let result = if let Some(before) = self.energy_momentum_start {
+            let after: Vec<f64> = displacement
+                .iter()
+                .zip(before)
+                .map(|(mid, old)| 2.0 * mid - old)
+                .collect();
+            self.problem
+                .energy_momentum_internal_force(before, &after, self.cx)
+        } else {
+            self.problem.internal_force(&displacement, self.cx)
+        }
+        .and_then(|mut full| {
+            subtract_pressure_force(&mut full, &displacement, self.pressure, self.cx)?;
+            Ok(full)
+        });
         match result {
             Ok(full) => {
                 for (value, &dof) in output.iter_mut().zip(self.free) {
@@ -1036,6 +1122,13 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
         }
         if let Some((_, matrix)) = self.tangent.borrow().as_ref() {
             matrix.spmv(direction, output);
+            // Native rho_inf=1 evaluates forces at midpoint q. Endpoint
+            // reconstruction has d(q_after)/d(q_mid)=2, including this tangent.
+            if self.energy_momentum_start.is_some() {
+                for value in output.iter_mut() {
+                    *value *= 2.0;
+                }
+            }
         } else {
             output.fill(f64::NAN);
         }
@@ -1068,7 +1161,13 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
                 .mass
                 .mul_add(
                     self.mass.get(row, row),
-                    weights.tangent * matrix.get(row, row),
+                    weights.tangent
+                        * matrix.get(row, row)
+                        * if self.energy_momentum_start.is_some() {
+                            2.0
+                        } else {
+                            1.0
+                        },
                 )
                 .abs();
             *out = if diagonal > 0.0 {

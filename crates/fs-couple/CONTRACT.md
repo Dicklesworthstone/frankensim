@@ -1248,6 +1248,42 @@ duration, finite travel, collision discovery or thermal allocation. Impact loss
 remains unallocated mechanical loss. These synthetic source references do not
 establish experimental calibration.
 
+## Energy/momentum stepping of nonlinear finite bodies
+
+`FiniteSolidBody::step_energy_momentum_candidate` opts into the prepared
+solid's objective discrete-gradient force and analytic tangent while retaining
+the native midpoint/generalized-alpha Newton-FGMRES solve, source material,
+consistent reference mass and fixed supports. The operator reconstructs the
+endpoint only inside midpoint force/tangent callbacks; actual-state validation
+keeps its original meaning. Endpoint differentiation supplies the required
+factor of two in both tangent action and preconditioning.
+
+Held nodal and body dead loads retain displacement-conjugate work. Support
+reactions use the same algorithmic force and full consistent-mass acceleration.
+Pressure-bound bodies refuse this entry point because discrete pressure work
+is not supplied. The ordinary midpoint path remains available. Stable midpoint
+velocity times the mass-applied velocity increment evaluates kinetic change;
+the measured energy gate retains potential-work and nonlinear error instead
+of converting it to heat. Material failure, failed convergence, energy refusal
+or cancellation publishes no candidate state.
+
+Four production stress/tangent groups and two native 250-step, h=0.02 free P1
+tetrahedron trajectories were executed. For the Mooney--Rivlin fixture, maximum
+energy drift changed from 3.9257e-3 J with ordinary midpoint to 1.0419e-13 J;
+the original source-card-compatible Ogden alpha=2 fixture changed from
+3.7880e-3 J to 5.2625e-14 J. Linear and angular momentum drifts remained at most
+3.1e-14 in these fixtures. They are numerical checks, not measured material
+validation or general performance results.
+
+Public integration regressions cover free tumbling, supported dead-load work
+and atomic stalled/cancelled refusal. They have not been executed: exact public
+prepared/Cx/source-card compilation is blocked by unavailable sibling runtime
+dependencies. Integration received static API, lifetime and scaling review;
+no runtime stubs or substitute numerical solver were introduced. The bounded
+midpoint method still requires temporal/mesh refinement and does not supply
+frequency-unwarped modal flow, a follower-pressure work algorithm or completion
+of the broader instrument-realism program.
+
 ## Material-bound finite bodies under spatial follower pressure
 
 `finite_solid::FiniteSolidBody` accepts the original pressure owner's

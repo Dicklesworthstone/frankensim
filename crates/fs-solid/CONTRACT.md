@@ -442,6 +442,34 @@ candidate steps. G0/G1 checks cover changing finite stretches against closed-for
 Neo-Hookean energy/force/tangent, exact native assembly, new load admission,
 inversion, invalid dimensions, budgets and cancellation.
 
+### Objective energy/momentum force on the prepared mesh
+
+`PreparedHyperTetProblem::energy_momentum_internal_force` and
+`energy_momentum_tangent` evaluate an objective strain-space discrete gradient
+between two configurations on the original P1 mesh. The mean right
+Cauchy--Green metric is `Cbar=(C0+C1)/2`, represented by
+`F*=chol(Cbar)^T`; it is not the metric of the mean deformation gradient.
+The original material supplies energy, Piola stress, tangent and endpoint-domain
+admission. A symmetric second-Piola work correction, multiplied by midpoint F,
+retains partition-of-unity force balance, midpoint internal torque balance and
+the potential-work identity. No physical damping or constitutive replacement
+is introduced.
+
+The analytic generally nonsymmetric 9-by-9 endpoint tangent differentiates the
+same Cholesky representative, material pullback and work quotient. A consumer
+using midpoint displacement must multiply its action by two. Near
+`||Delta C||^2 <= 64 epsilon ||Cbar||^2`, the stress takes the continuous limit;
+measured nonlinear and energy tolerances remain authoritative. Original
+reference geometry, material/reference adapters and consistent mass are retained.
+
+Four exact native stress/tangent tests pass, covering work, internal force and
+torque, all nine tangent directions, objectivity, endpoint reversal, the
+continuous limit and source-domain refusal. Two 250-step native free-tumbling
+P1 tetrahedron trajectories with the original generalized-alpha/Newton-FGMRES
+owner retain energy and both momenta near roundoff for the admitted fixtures.
+Full prepared/Cx/material-card integration regressions are authored but remain
+unexecuted because the required sibling runtime dependencies are unavailable.
+
 ## Source-pack mechanical coupons and nonthermal dead loads
 
 `linear3::eigenstrain` admits explicit sorted unique dead nodal forces in
