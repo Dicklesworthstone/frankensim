@@ -23,6 +23,10 @@ use super::*;
 use fs_lbm::sgs3::{SgsConfig, eddy_viscosity, vreman_eddy_viscosity};
 pub use fs_lbm::sgs3::{SgsModel, SgsUse};
 
+mod dynamic;
+pub use dynamic::DynamicSubgridConfig;
+pub use fs_lbm::sgs3::dynamic::{DynamicAveraging, DynamicSgsConfig, DynamicSgsReport};
+
 /// Explicit subgrid controls; enabling the Cargo feature alone changes no flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SubgridConfig {
@@ -73,18 +77,42 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         Ok(result)
     }
 
-    /// The exact model controls, including an explicitly disabled coefficient.
+    /// Exact local controls; `None` for molecular-only or dynamic SGS flow.
     pub fn subgrid_config(&self) -> Option<SubgridConfig> {
-        self.sgs.as_ref().map(|s| s.config)
+        self.sgs.as_ref().and_then(|s| match &s.closure {
+            SubgridClosure::Local { config, .. } => Some(*config),
+            SubgridClosure::Dynamic(_) => None,
+        })
     }
 }
 
 pub(super) struct SubgridTransport {
-    config: SubgridConfig,
-    widths: [f64; 3],
-    filter_width: f64,
+    closure: SubgridClosure,
     // Reused at every stage. No allocation in the per-cell/face hot path.
     dynamic_viscosity: Vec<f64>,
+}
+
+enum SubgridClosure {
+    Local {
+        config: SubgridConfig,
+        widths: [f64; 3],
+        filter_width: f64,
+    },
+    Dynamic(dynamic::DynamicTransport),
+}
+
+impl SubgridClosure {
+    fn heat_and_ratio(&self) -> (f64, f64) {
+        match self {
+            Self::Local { config, .. } => {
+                (config.turbulent_prandtl, config.maximum_eddy_to_molecular)
+            }
+            Self::Dynamic(dynamic) => (
+                dynamic.config.turbulent_prandtl,
+                dynamic.config.model.maximum_eddy_to_molecular,
+            ),
+        }
+    }
 }
 
 impl SubgridTransport {
@@ -97,9 +125,11 @@ impl SubgridTransport {
             ));
         }
         Ok(Self {
-            config,
-            widths,
-            filter_width,
+            closure: SubgridClosure::Local {
+                config,
+                widths,
+                filter_width,
+            },
             dynamic_viscosity: allocated(flow.states.len(), 0.0)?,
         })
     }
@@ -110,7 +140,17 @@ impl SubgridTransport {
         gradient: &[[[f64; 3]; 3]],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MolecularError> {
-        if self.config.model.coefficient() == 0.0 {
+        let (config, widths, filter_width) = match &mut self.closure {
+            SubgridClosure::Local {
+                config,
+                widths,
+                filter_width,
+            } => (*config, *widths, *filter_width),
+            SubgridClosure::Dynamic(dynamic) => {
+                return dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled);
+            }
+        };
+        if config.model.coefficient() == 0.0 {
             return Ok(());
         }
         for (cell, ((p, g), mu)) in primitive
@@ -122,9 +162,9 @@ impl SubgridTransport {
             if cell % 64 == 0 {
                 poll(cancelled)?;
             }
-            let nu = match self.config.model {
-                SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, self.widths, *g),
-                model => eddy_viscosity(model, self.filter_width, *g),
+            let nu = match config.model {
+                SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, widths, *g),
+                model => eddy_viscosity(model, filter_width, *g),
             }
             .map_err(MolecularError::Subgrid)?;
             *mu = p.density * nu;
@@ -156,12 +196,13 @@ impl SubgridTransport {
             return Ok((molecular_mu, molecular_conductivity));
         }
         let ratio = mu_t / molecular_mu;
-        if !ratio.is_finite() || ratio > self.config.maximum_eddy_to_molecular {
+        let (prandtl, maximum_ratio) = self.closure.heat_and_ratio();
+        if !ratio.is_finite() || ratio > maximum_ratio {
             return Err(MolecularError::SubgridViscosityRatio {
                 axis,
                 face,
                 observed: ratio,
-                maximum: self.config.maximum_eddy_to_molecular,
+                maximum: maximum_ratio,
             });
         }
         let cp = gas
@@ -171,7 +212,7 @@ impl SubgridTransport {
             .mass_specific_cp()
             .value();
         let mu = molecular_mu + mu_t;
-        let conductivity = molecular_conductivity + mu_t * (cp / self.config.turbulent_prandtl);
+        let conductivity = molecular_conductivity + mu_t * (cp / prandtl);
         if !positive(cp) || !mu.is_finite() || !conductivity.is_finite() {
             return Err(MolecularError::Invalid(
                 "unrepresentable subgrid stress or heat coefficient",

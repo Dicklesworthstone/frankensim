@@ -32,6 +32,10 @@ const WALLS: Boundaries3d = Boundaries3d {
 #[path = "molecular/sgs_tests.rs"]
 mod sgs;
 
+#[cfg(feature = "experimental-sgs")]
+#[path = "molecular/dynamic_tests.rs"]
+mod dynamic_sgs;
+
 #[path = "molecular/wall_tests.rs"]
 mod walls;
 

@@ -1304,12 +1304,34 @@ trajectory, all three active closures, periodic momentum/total-energy balance,
 resolved kinetic-to-internal energy conversion, an independent helical-mode
 stress/heat formula, temperature-mode decay, refusal atomicity and bitwise
 replay. These are numerical consistency tests, not DNS/experimental turbulence
-validation. The stress/heat model follows Nicoud's 2007 course equations
-(24)-(26); no dynamic coefficient, backscatter, SGS kinetic-energy equation,
+validation. The local stress/heat model follows Nicoud's 2007 course equations
+(24)-(26); no backscatter, SGS kinetic-energy equation,
 pressure-dilatation or shock/turbulence closure, evolving-species mixing, or
 wall function is supplied. Reflecting sides use the molecular wall treatment
 above, with zero modeled SGS flux at the face. Acceptance renders refuse. This opt-in low-Mach exploration lane does
 not change the default solver, incompressible BDM, or reacting-mixture paths.
+
+Both frozen-gas molecular owners also expose `with_dynamic_sgs`, which consumes
+the original `fs-lbm::sgs3::dynamic::PeriodicDynamicSgs` Favre--Germano fit at
+every SSP stage and retry. Its 27-cell test box has width `3h`; domain or local
+box averaging operates on the numerator and denominator separately. Negative
+fits follow the core's explicit zero-backscatter policy; positive coefficient
+and eddy/molecular-ratio bounds refuse. Density and momentum-derived physical
+velocity feed the filter, and `rho*nu_t` feeds the same conservative stress,
+stress-work, source-owned Cp heat and total parabolic estimate described above.
+The turbulent Prandtl number remains authored rather than dynamically fitted.
+
+Dynamic admission requires fully periodic, isotropic Cartesian spacing and at
+least three cells per axis. The caller budgets all added array capacities,
+including density/velocity staging, the filter and face-viscosity cache; the
+nominal numerical payload is 176 bytes/cell, excluding the existing molecular
+and Euler workspaces and fixed-size/allocator metadata. Arrays are reused
+without per-stage allocation. Core cancellation uses the original transaction's
+cancellation branch. Four focused regressions cover zero-fit trajectory
+identity, variable-density stress/heat routing and energy balance, topology/
+byte/coefficient refusals, and cancelled coupled-step replay. They do not
+establish turbulent DNS agreement, shock interaction, wall behavior, dynamic
+heat closure, or physical coefficient calibration.
 
 ### Evolving composition on the shared Cartesian discretization
 

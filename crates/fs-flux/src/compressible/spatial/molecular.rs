@@ -17,7 +17,7 @@ use fs_qty::{Pressure, Temperature};
 mod coupled;
 pub use coupled::{MolecularEuler3d, MolecularStepReport3d};
 
-/// Explicit local subgrid transport for low-Mach, frozen-composition studies.
+/// Explicit local or periodic dynamic subgrid transport for low-Mach studies.
 #[cfg(feature = "experimental-sgs")]
 pub mod sgs;
 

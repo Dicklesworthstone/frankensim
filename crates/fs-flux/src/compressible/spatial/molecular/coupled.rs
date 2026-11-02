@@ -73,7 +73,37 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         Ok(result)
     }
 
-    /// Exact authored subgrid controls; `None` retains molecular-only flow.
+    /// Fit periodic dynamic stress through both molecular halves and the same
+    /// atomic Euler composition. The byte budget covers additional SGS arrays,
+    /// excluding original molecular and Euler storage.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn with_dynamic_sgs(
+        flow: Euler3d,
+        law: L,
+        config: sgs::DynamicSubgridConfig,
+        maximum_subgrid_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MolecularError> {
+        poll(&mut cancelled)?;
+        let sgs = sgs::SubgridTransport::new_dynamic(
+            &flow,
+            config,
+            maximum_subgrid_workspace_bytes,
+        )?;
+        poll(&mut cancelled)?;
+        let mut result = Self::new(flow, law, &mut cancelled)?;
+        result.molecular.sgs = Some(sgs);
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    /// Exact dynamic controls; `None` for molecular-only or local SGS flow.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn dynamic_subgrid_config(&self) -> Option<sgs::DynamicSubgridConfig> {
+        self.molecular.dynamic_subgrid_config()
+    }
+
+    /// Exact local controls; `None` for molecular-only or dynamic SGS flow.
     #[cfg(feature = "experimental-sgs")]
     pub fn subgrid_config(&self) -> Option<sgs::SubgridConfig> {
         self.molecular.subgrid_config()

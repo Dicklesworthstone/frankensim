@@ -240,7 +240,7 @@ impl PeriodicDynamicSgs {
                 maximum: maximum_bytes,
             });
         }
-        Ok(Self {
+        let result = Self {
             shape,
             spacing,
             velocity: allocated(n, [0.0; 3])?,
@@ -249,7 +249,27 @@ impl PeriodicDynamicSgs {
             strain_rate: allocated(n, 0.0)?,
             contraction: allocated(n, [0.0; 2])?,
             viscosity: allocated(n, 0.0)?,
-        })
+        };
+        let required = result.workspace_bytes();
+        if required > maximum_bytes {
+            return Err(DynamicSgsError::WorkspaceBytes {
+                required,
+                maximum: maximum_bytes,
+            });
+        }
+        Ok(result)
+    }
+
+    /// Actual numerical vector capacities, excluding the fixed-size owner and
+    /// allocator metadata. Consumers include this in their complete byte gate.
+    pub fn workspace_bytes(&self) -> usize {
+        (3 * self.velocity.capacity()
+            + 4 * self.filtered.capacity()
+            + 6 * self.basis.capacity()
+            + self.strain_rate.capacity()
+            + 2 * self.contraction.capacity()
+            + self.viscosity.capacity())
+            * core::mem::size_of::<f64>()
     }
 
     pub const fn shape(&self) -> [usize; 3] {

@@ -89,6 +89,9 @@ pub enum MolecularError {
     /// Original shared local-closure refusal; no clipping or replacement.
     #[cfg(feature = "experimental-sgs")]
     Subgrid(fs_lbm::sgs3::SgsError),
+    /// Original periodic Favre--Germano filter or dynamic-fit refusal.
+    #[cfg(feature = "experimental-sgs")]
+    DynamicSubgrid(fs_lbm::sgs3::dynamic::DynamicSgsError),
     /// A face exceeds the authored subgrid/molecular dynamic-viscosity ratio.
     #[cfg(feature = "experimental-sgs")]
     SubgridViscosityRatio {
@@ -140,6 +143,17 @@ impl From<DissipationError> for MolecularError {
             Self::Cancelled
         } else {
             Self::Law(error)
+        }
+    }
+}
+
+#[cfg(feature = "experimental-sgs")]
+impl From<fs_lbm::sgs3::dynamic::DynamicSgsError> for MolecularError {
+    fn from(error: fs_lbm::sgs3::dynamic::DynamicSgsError) -> Self {
+        if error == fs_lbm::sgs3::dynamic::DynamicSgsError::Cancelled {
+            Self::Cancelled
+        } else {
+            Self::DynamicSubgrid(error)
         }
     }
 }
