@@ -1,6 +1,8 @@
 //! Reference-mass enthalpy transport with explicit material assignments.
 //!
 //! Each tetrahedron names a declared phase chart and frozen reference density.
+//! An explicitly bound positive P1 nodal profile can replace the initial
+//! material-constant density without replacing any vertex's caloric chart.
 //! A shared vertex must have exactly one material identity. Different materials
 //! therefore meet through separate traces and an explicitly declared thermal
 //! contact, not through an inferred mixture of enthalpy charts. Conductivity
@@ -121,6 +123,7 @@ pub struct HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
     vertex_material_ids: Arc<[usize]>,
     material_count: usize,
     reference_materials: Vec<ReferenceEnthalpyMaterial<'c>>,
+    nodal_reference_density_kg_m3: Option<Vec<f64>>,
 }
 
 impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
@@ -257,7 +260,76 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             vertex_material_ids: vertex_material_ids.into(),
             material_count: materials.len(),
             reference_materials: materials.to_vec(),
+            nodal_reference_density_kg_m3: None,
         })
+    }
+
+    /// Replace prepared storage by a frozen positive P1 reference-density field.
+    ///
+    /// Exact row masses are `sum_e V_e*(sum_b rho_b + rho_a)/20`, retaining
+    /// density/enthalpy correlation. Original material IDs and borrowed charts
+    /// remain unchanged. This is a reference-inventory declaration before
+    /// evolution, not a current-density update of an accepted heated specimen.
+    /// Scalar material-source bindings deliberately become unavailable through
+    /// [`Self::reference_material`]; source owners must explicitly support the
+    /// declared profile instead of treating the old scalar as its inventory.
+    /// Existing preparation budgets bound this mesh-sized work and allocation.
+    ///
+    /// # Errors
+    /// Refuses an already bound scalar phase-source inventory, wrong length,
+    /// nonpositive/nonfinite density, unrepresentable
+    /// positive mass, arithmetic overflow or cancellation before publishing.
+    pub fn with_nodal_reference_density(
+        mut self,
+        cx: &Cx<'_>,
+        density_kg_m3: &[f64],
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        poll(cx, 0)?;
+        if self.inner.sourced_phase.is_some() {
+            return Err(EnthalpyError::InvalidInput(
+                "nodal reference density requires an explicitly profile-aware phase source",
+            ).into());
+        }
+        let n = self.inner.mesh.vertex_count();
+        if density_kg_m3.len() != n {
+            return Err(EnthalpyError::InvalidInput(
+                "one nodal reference density per mesh vertex required",
+            ).into());
+        }
+        for (vertex, &density) in density_kg_m3.iter().enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+            if !density.is_finite() || density <= 0.0 {
+                return Err(EnthalpyError::InvalidInput(
+                    "positive finite nodal reference densities required",
+                ).into());
+            }
+        }
+        let mut masses = vec![0.0; n];
+        for (element, vertices) in self.inner.mesh.complex().tets.iter().enumerate() {
+            if element % ASSEMBLY_TILE == 0 { poll(cx, element)?; }
+            let density = vertices.map(|vertex| density_kg_m3[vertex as usize]);
+            let local = super::reference_mass::p1_nodal_masses(
+                self.inner.mesh.element_volume(element), density,
+            ).ok_or(EnthalpyError::InvalidInput(
+                "positive nodal reference mass is not representable",
+            ))?;
+            for (&vertex, contribution) in vertices.iter().zip(local) {
+                let vertex = vertex as usize;
+                masses[vertex] = finite(masses[vertex] + contribution)?;
+            }
+        }
+        poll(cx, n)?;
+        self.inner.masses = masses;
+        self.nodal_reference_density_kg_m3 = Some(density_kg_m3.to_vec());
+        Ok(self)
+    }
+
+    /// Original explicitly declared P1 density in mesh vertex order, kg/m3.
+    /// Material-constant storage returns None. Equilibrium densities never
+    /// replace this immutable reference profile.
+    #[must_use]
+    pub fn nodal_reference_density_kg_m3(&self) -> Option<&[f64]> {
+        self.nodal_reference_density_kg_m3.as_deref()
     }
 
     /// Bind one original isotropic phase source and fixed reference density
@@ -355,9 +427,15 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
 
     /// Original borrowed caloric chart and frozen reference density. Coupled
     /// Lagrangian owners must use this inventory, not a fresh density at T.
+    /// Returns None for an explicit nodal profile: no scalar material density
+    /// represents that declared inventory, even when its values happen to match.
     #[must_use]
     pub fn reference_material(&self, material: usize) -> Option<ReferenceEnthalpyMaterial<'c>> {
-        self.reference_materials.get(material).copied()
+        if self.nodal_reference_density_kg_m3.is_some() {
+            None
+        } else {
+            self.reference_materials.get(material).copied()
+        }
     }
 
     /// Whether a separately declared phase multiplier modifies conductivity.
@@ -933,12 +1011,16 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
 pub struct HeterogeneousEnthalpyStepGradient {
     /// Existing history/source gradients and independently checked transpose solve.
     pub transport: EnthalpyStepGradient,
-    /// Derivative with respect to each tetrahedron's independent reference
-    /// density [kg/m3], holding specific enthalpy history and the chart fixed.
+    /// Derivative for an additive constant density [kg/m3] in each tetrahedron,
+    /// holding its reference profile, specific enthalpy history and chart fixed.
+    /// These element controls remain independent for an explicit nodal profile.
     pub element_reference_density: Vec<f64>,
     /// Sum of element derivatives for each declared material-table record.
     /// Unused material records receive exactly zero, not an inferred effect.
     pub material_reference_density: Vec<f64>,
+    /// Derivative per nodal P1 reference density, in mesh vertex order.
+    /// Present only when that independent profile was explicitly declared.
+    pub nodal_reference_density: Option<Vec<f64>>,
 }
 
 /// Rechecked heterogeneous endpoint with a bound reference-storage derivative.
@@ -988,6 +1070,7 @@ struct ReferenceDensityLinearization<'m> {
     specific_enthalpy_change: Vec<f64>,
     element_material_ids: Arc<[usize]>,
     material_count: usize,
+    nodal_profile: bool,
 }
 
 impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
@@ -1127,6 +1210,7 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
             specific_enthalpy_change,
             element_material_ids: self.element_material_ids.clone(),
             material_count: self.material_count,
+            nodal_profile: self.nodal_reference_density_kg_m3.is_some(),
         })
     }
 }
@@ -1178,13 +1262,24 @@ impl HeterogeneousEnthalpyStepLinearization<'_> {
 
     /// Apply `R_rho * direction` at fixed current and previous specific enthalpy.
     /// This is a RESIDUAL Jacobian action, not an implicit endpoint state JVP.
-    /// Directions are independent reference-density perturbations per element.
+    /// Directions are additive constant reference-density perturbations per
+    /// element about the frozen profile, including for a nodal profile.
     pub fn apply_reference_density_jacobian(
         &self,
         cx: &Cx<'_>,
         direction: &[f64],
     ) -> Result<Vec<f64>, EnthalpyAdjointError> {
         self.density.apply_jacobian(cx, direction)
+    }
+
+    /// Residual action for the explicitly declared nodal P1 density controls.
+    /// History, endpoint h, chart ownership and geometry remain fixed.
+    pub fn apply_nodal_reference_density_jacobian(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+    ) -> Result<Vec<f64>, EnthalpyAdjointError> {
+        self.density.apply_nodal_jacobian(cx, direction)
     }
 
     /// Solve the physical transpose once, then return source/history gradients
@@ -1269,6 +1364,16 @@ impl<'m> HeterogeneousEnthalpyRadiationStepLinearization<'m> {
         self.density.apply_jacobian(cx, direction)
     }
 
+    /// Residual action for the bound nodal density profile, retaining the same
+    /// radiative endpoint and prescribed-row mask as all other controls.
+    pub fn apply_nodal_reference_density_jacobian(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+    ) -> Result<Vec<f64>, EnthalpyAdjointError> {
+        self.density.apply_nodal_jacobian(cx, direction)
+    }
+
     /// Solve the complete radiative transpose once. Contract radiation controls
     /// and the bound reference-density controls with that same multiplier.
     pub fn pullback(
@@ -1296,6 +1401,36 @@ impl<'m> HeterogeneousEnthalpyRadiationStepLinearization<'m> {
 }
 
 impl ReferenceDensityLinearization<'_> {
+    fn apply_nodal_jacobian(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+    ) -> Result<Vec<f64>, EnthalpyAdjointError> {
+        poll(cx, 0)?;
+        if !self.nodal_profile || direction.len() != self.specific_enthalpy_change.len() {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "one direction per vertex of an explicit nodal density profile required",
+            ));
+        }
+        let mut output = vec![0.0; direction.len()];
+        for (element, vertices) in self.mesh.complex().tets.iter().enumerate() {
+            if element % ASSEMBLY_TILE == 0 { poll(cx, element)?; }
+            let local = super::reference_mass::p1_nodal_mass_direction(
+                self.mesh.element_volume(element),
+                vertices.map(|vertex| direction[vertex as usize]),
+            ).ok_or(EnthalpyAdjointError::InvalidInput(
+                "finite representable nodal density direction required",
+            ))?;
+            for (&vertex, mass_direction) in vertices.iter().zip(local) {
+                let vertex = vertex as usize;
+                let contribution = finite(mass_direction * self.specific_enthalpy_change[vertex])?;
+                output[vertex] = finite(output[vertex] + contribution)?;
+            }
+        }
+        poll(cx, direction.len())?;
+        Ok(output)
+    }
+
     fn apply_jacobian(
         &self,
         cx: &Cx<'_>,
@@ -1333,27 +1468,44 @@ impl ReferenceDensityLinearization<'_> {
     ) -> Result<HeterogeneousEnthalpyStepGradient, EnthalpyAdjointError> {
         let mut element_reference_density = Vec::with_capacity(self.mesh.element_count());
         let mut material_reference_density = vec![0.0; self.material_count];
+        let mut nodal_reference_density = self.nodal_profile
+            .then(|| vec![0.0; self.specific_enthalpy_change.len()]);
         for (element, &material) in self.element_material_ids.iter().enumerate() {
             if element % ASSEMBLY_TILE == 0 {
                 poll(cx, element)?;
             }
             let mut sum = 0.0;
-            for &vertex in &self.mesh.complex().tets[element] {
+            let vertices = &self.mesh.complex().tets[element];
+            let mut weighted_change = [0.0; 4];
+            for (local, &vertex) in vertices.iter().enumerate() {
                 let vertex = vertex as usize;
                 let term =
                     finite(transport.adjoint[vertex] * self.specific_enthalpy_change[vertex])?;
+                weighted_change[local] = term;
                 sum = finite(sum + term)?;
             }
             let derivative = finite(-self.mesh.element_volume(element) / 4.0 * sum)?;
             element_reference_density.push(derivative);
             material_reference_density[material] =
                 finite(material_reference_density[material] + derivative)?;
+            if let Some(nodal) = nodal_reference_density.as_mut() {
+                let local = super::reference_mass::p1_nodal_mass_direction(
+                    self.mesh.element_volume(element), weighted_change,
+                ).ok_or(EnthalpyAdjointError::InvalidInput(
+                    "nodal reference-density pullback is not representable",
+                ))?;
+                for (&vertex, contribution) in vertices.iter().zip(local) {
+                    let vertex = vertex as usize;
+                    nodal[vertex] = finite(nodal[vertex] - contribution)?;
+                }
+            }
         }
         poll(cx, self.mesh.element_count())?;
         Ok(HeterogeneousEnthalpyStepGradient {
             transport,
             element_reference_density,
             material_reference_density,
+            nodal_reference_density,
         })
     }
 }

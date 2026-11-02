@@ -1,6 +1,8 @@
 //! Heterogeneous reference storage and phase ownership through actual solves.
 
 mod support;
+#[path = "heterogeneous_enthalpy/nodal_density.rs"]
+mod nodal_density;
 
 use fs_blake3::ContentHash;
 use fs_conduction::transient::enthalpy::heterogeneous::{

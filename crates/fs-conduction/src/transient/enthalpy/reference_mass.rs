@@ -29,6 +29,37 @@ pub(super) fn p1_nodal_masses(volume: f64, density: [f64; 4]) -> Option<[f64; 4]
         .then_some(masses)
 }
 
+/// Exact signed action of `integral(N_a N_b dV)` on a nodal density
+/// direction. The same symmetric action contracts a storage multiplier back
+/// to nodal density. Zero directions are valid; density admission belongs to
+/// the positive reference profile, not its derivative.
+pub(super) fn p1_nodal_mass_direction(volume: f64, direction: [f64; 4]) -> Option<[f64; 4]> {
+    if !volume.is_finite() || volume <= 0.0 || direction.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let scale = direction.into_iter().map(f64::abs).fold(0.0_f64, f64::max);
+    if scale == 0.0 {
+        return Some([0.0; 4]);
+    }
+    let normalized = direction.map(|value| value / scale);
+    let sum: f64 = normalized.iter().sum();
+    let scaled_volume = volume * scale;
+    let action = normalized.map(|value| {
+        let coefficient = (sum + value) / 20.0;
+        if scaled_volume.is_finite() {
+            // Preserve a subnormal direction when geometric scaling makes
+            // its final contribution representable before applying the weight.
+            scaled_volume * coefficient
+        } else {
+            volume * (scale * coefficient)
+        }
+    });
+    action
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(action)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +165,56 @@ mod tests {
         }
         assert!(p1_nodal_masses(f64::MAX, [2.0; 4]).is_none());
         assert!(p1_nodal_masses(f64::MIN_POSITIVE, [f64::MIN_POSITIVE; 4]).is_none());
+    }
+
+    #[test]
+    fn signed_density_action_and_transpose_match_independent_quadrature() {
+        let volume = 0.23;
+        let direction = [0.7, -1.3, 0.2, -0.4];
+        let multiplier = [-0.6, 0.8, 1.1, -0.2];
+        let large = 0.585_410_196_624_968_5;
+        let small = 0.138_196_601_125_010_5;
+        let mut expected = [0.0; 4];
+        for point in 0..4 {
+            let shape: [f64; 4] = std::array::from_fn(|a| if a == point { large } else { small });
+            let value: f64 = shape.iter().zip(direction).map(|(n, d)| n * d).sum();
+            for a in 0..4 {
+                expected[a] += (volume / 4.0) * shape[a] * value;
+            }
+        }
+        let forward = p1_nodal_mass_direction(volume, direction).unwrap();
+        let transpose = p1_nodal_mass_direction(volume, multiplier).unwrap();
+        for a in 0..4 {
+            close(forward[a], expected[a]);
+        }
+        close(
+            forward.iter().zip(multiplier).map(|(a, b)| a * b).sum(),
+            transpose.iter().zip(direction).map(|(a, b)| a * b).sum(),
+        );
+        let density = [2.0, 4.0, 1.0, 3.0];
+        let perturbed =
+            p1_nodal_masses(volume, std::array::from_fn(|a| density[a] + direction[a])).unwrap();
+        let base = p1_nodal_masses(volume, density).unwrap();
+        for a in 0..4 {
+            close(perturbed[a] - base[a], forward[a]);
+        }
+        assert_eq!(p1_nodal_mass_direction(volume, [0.0; 4]), Some([0.0; 4]));
+        assert!(p1_nodal_mass_direction(volume, [f64::NAN, 0.0, 0.0, 0.0]).is_none());
+        assert!(p1_nodal_mass_direction(f64::MAX, [f64::MAX; 4]).is_none());
+        let extreme =
+            p1_nodal_mass_direction(1.0 / f64::MAX, [f64::MAX, -f64::MAX, f64::MAX, -f64::MAX])
+                .unwrap();
+        for (actual, expected) in extreme.into_iter().zip([0.05, -0.05, 0.05, -0.05]) {
+            close(actual, expected);
+        }
+        for sign in [-1.0, 1.0] {
+            let subnormal = sign * f64::from_bits(1);
+            let expected = (1e300 * subnormal) / 4.0;
+            assert_ne!(expected, 0.0);
+            assert_eq!(
+                p1_nodal_mass_direction(1e300, [subnormal; 4]),
+                Some([expected; 4])
+            );
+        }
     }
 }

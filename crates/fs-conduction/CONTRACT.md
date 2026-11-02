@@ -2352,6 +2352,28 @@ authority.
   prescribed-bath storage, replay and admission. Their full spatial execution
   remains unverified in the current dependency-constrained environment.
 
+  `HeterogeneousEnthalpyBackwardEuler::with_nodal_reference_density` binds the
+  same exact P1 reference-mass integration to the existing heterogeneous owner.
+  Original material assignments and borrowed caloric charts remain fixed;
+  separate material traces retain their explicit contact convention. The
+  positive nodal profile defines immutable storage for all existing primal,
+  endpoint, radiation and history paths. It is a pre-evolution reference
+  inventory declaration, not a density-at-temperature update that changes a
+  closed specimen's mass. `reference_material` returns `None` for such a profile
+  so scalar-only coupled source owners refuse an unsupported inventory binding.
+  An already bound scalar phase-source inventory refuses profile replacement;
+  its original source identity cannot describe an independently declared field.
+  The original element/material density controls remain additive constant
+  perturbations about the frozen profile. Explicit nodal controls additionally
+  provide a residual JVP and an optional nodal pullback using the same symmetric
+  degree-two P1 mass action. Prescribed residual rows retain their original
+  zero density derivative; all controls use the accepted endpoint's existing
+  adjoint multiplier. Native kernel tests check independent quadrature, signed
+  actions and transpose identities. Public integration regressions in
+  `tests/heterogeneous_enthalpy/nodal_density.rs` cover graded sensible/latent
+  storage, source-binding refusal, uniform parity and density derivatives;
+  full thermal integration execution remains unverified in this environment.
+
   `EnthalpyHistoryRun` admits unique prescribed temperatures without changing
   initial physical enthalpy. Event-aligned, adaptive and ambient-radiation
   histories charge prescribed storage jumps to the bath once. Held boundary
