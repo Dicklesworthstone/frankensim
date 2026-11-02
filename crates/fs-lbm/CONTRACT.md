@@ -1357,9 +1357,35 @@ refusal paths.
 The rheology unit battery independently checks strongly thinning and
 thickening constitutive roots, previous-tau independence in both dimensions,
 repeated-update identity, and clipping at the applied strain rate.
+For D2Q9 central-moment collision, the trace uses its independent unit bulk
+relaxation time; only deviatoric strain varies with the solved shear tau.
+The manufactured tensor battery covers mixed dilation/shear and Guo forcing,
+and the local-root battery includes fixed trace contributions.
 `strongly_thickening_channel_matches_analytic_profile` adds an n = 5 channel
 with 33 fluid rows: it must reach steady state before 80,000 steps and keep
 worst pointwise velocity error below 3% of the analytic peak.
+
+`Rheology::HerschelBulkley` extends the same D2Q9/D3Q19 local solver with
+`nu = k max(gamma, gamma_min)^(n-1) + Y (1-exp(-m gamma))/gamma`, where
+`Y` is yield stress divided by density. `n=1` recovers the
+Bingham–Papanastasiou law. The regularization time `m` and power-law minimum
+rate `gamma_min` are explicit inputs; the yield contribution at zero strain
+is exactly `Y*m`. Deterministic `expm1` and a small-rate series preserve that
+limit and the derivative without a second constitutive iteration. This is a
+finite-viscosity regularization with sub-yield creep, not an exact rigid plug,
+cessation criterion, thixotropic memory or experimentally qualified material.
+The existing tau floor/cap remains a separately counted resolution limit;
+capped cells cannot establish physical yield behavior. The formula follows
+Papanastasiou (1987), DOI:10.1122/1.549926, as written for Herschel–Bulkley by
+Jeon & Hodges (2018), equation (6), DOI:10.5194/nhess-18-303-2018; the explicit
+power-law plateau additionally regularizes its otherwise singular `n<1`
+zero-strain term. The focused unit battery checks plateaus, monotone stress,
+zero-yield reduction, invalid inputs and constitutive closure.
+`regularized_bingham_channel_matches_stress_integral_in_both_dimensions`
+specifies native 2-D/3-D channel profiles against an independent integrated
+momentum balance, a nearly flat creeping core, mass balance and absence of
+numerical viscosity clipping. Full-crate execution of that added channel test
+is not established by a standalone constitutive-kernel check.
 
 `tests/extensions.rs` (tfz.19): lbm-101 power-law/Carreau profiles vs
 analytic (0.14% for the n = 0.8 profile with τ floor+cap ledger);

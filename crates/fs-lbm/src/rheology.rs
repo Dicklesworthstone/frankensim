@@ -68,6 +68,34 @@ pub enum Rheology {
         /// Flow index.
         n: f64,
     },
+    /// Regularized Herschel–Bulkley yield-stress fluid:
+    /// `nu = k max(gamma, gamma_min)^(n-1)
+    ///       + Y (1 - exp(-m gamma)) / gamma`.
+    ///
+    /// `n=1` is the Bingham–Papanastasiou law. The yield term has the exact
+    /// zero-rate limit `Y*m`; the explicit power-law plateau also prevents
+    /// divergence for `n<1`. Finite regularization admits creep below yield,
+    /// so this is not an exact rigid-plug or cessation model.
+    ///
+    /// Papanastasiou, J. Rheol. 31 (1987), DOI:10.1122/1.549926;
+    /// Jeon & Hodges (2018), equation (6),
+    /// <https://doi.org/10.5194/nhess-18-303-2018>.
+    HerschelBulkley {
+        /// Kinematic consistency index in lattice units; positive.
+        k: f64,
+        /// Positive flow index; below one thins, above one thickens.
+        n: f64,
+        /// Yield stress divided by density, in lattice velocity squared.
+        /// For SI input use `(stress_pa / rho_kg_m3) * dt_s^2 / dx_m^2`.
+        yield_stress_over_density: f64,
+        /// Papanastasiou regularization time `m` in lattice time units.
+        /// SI time converts as `m_si / dt_s`; zero disables the yield term.
+        regularization_time: f64,
+        /// Positive low-shear cutoff `gamma_min` for the power-law part,
+        /// in inverse lattice time. This is a declared constitutive
+        /// regularization, separate from the lattice tau floor/cap.
+        minimum_shear_rate: f64,
+    },
 }
 
 impl Rheology {
@@ -102,6 +130,19 @@ impl Rheology {
                     n <= 1.0 || nu0 >= nu_inf || lambda == 0.0,
                     "thickening Carreau law requires nu0 >= nu_inf to stay positive"
                 );
+            }
+            Rheology::HerschelBulkley {
+                k,
+                n,
+                yield_stress_over_density,
+                regularization_time,
+                minimum_shear_rate,
+            } => {
+                require_positive_finite("Herschel-Bulkley consistency k", k);
+                require_positive_finite("Herschel-Bulkley index n", n);
+                require_nonnegative_finite("kinematic yield stress", yield_stress_over_density);
+                require_nonnegative_finite("yield regularization time", regularization_time);
+                require_positive_finite("power-law minimum shear rate", minimum_shear_rate);
             }
         }
     }
@@ -140,6 +181,27 @@ impl Rheology {
                 };
                 (nu, (nu0 - nu_inf) * shape * (n - 1.0) * fraction)
             }
+            Rheology::HerschelBulkley {
+                k,
+                n,
+                yield_stress_over_density,
+                regularization_time,
+                minimum_shear_rate,
+            } => {
+                let base = if n == 1.0 {
+                    k
+                } else {
+                    k * fs_math::det::pow(gdot.max(minimum_shear_rate), n - 1.0)
+                };
+                let base_slope = if gdot > minimum_shear_rate {
+                    (n - 1.0) * base
+                } else {
+                    0.0
+                };
+                let (yield_viscosity, yield_slope) =
+                    regularized_yield(gdot, yield_stress_over_density, regularization_time);
+                (base + yield_viscosity, base_slope + yield_slope)
+            }
         }
     }
 
@@ -154,6 +216,15 @@ impl Rheology {
                 lambda,
                 n,
             } if lambda == 0.0 || n == 1.0 || nu0 == nu_inf => Some(nu0),
+            Self::HerschelBulkley {
+                k,
+                n,
+                yield_stress_over_density,
+                regularization_time,
+                ..
+            } if n == 1.0 && (yield_stress_over_density == 0.0 || regularization_time == 0.0) => {
+                Some(k)
+            }
             _ => None,
         };
         PreparedRheology {
@@ -161,6 +232,64 @@ impl Rheology {
             constant_tau: constant.map(|nu| 0.5 + nu / CS2),
         }
     }
+}
+
+// Yield contribution and gamma*dnu/dgamma. expm1 preserves the zero-rate
+// plateau; the small-x series also keeps the derivative from subtracting
+// nearly equal numbers. No platform libm, fit or rate-dependent iteration.
+fn regularized_yield(rate: f64, yield_stress: f64, time: f64) -> (f64, f64) {
+    if yield_stress == 0.0 || time == 0.0 {
+        return (0.0, 0.0);
+    }
+    let x = time * rate;
+    if x == 0.0 {
+        return (yield_stress * time, 0.0);
+    }
+    if x < 1e-4 {
+        // phi=(1-exp(-x))/x; x*phi'=-x/2+x²/3-x³/8+x⁴/30+O(x⁵).
+        let zero_rate = yield_stress * time;
+        let phi = 1.0 + x * (-0.5 + x * (1.0 / 6.0 + x * (-1.0 / 24.0 + x / 120.0)));
+        let slope = x * (-0.5 + x * (1.0 / 3.0 + x * (-1.0 / 8.0 + x / 30.0)));
+        return if zero_rate.is_finite() {
+            (zero_rate * phi, zero_rate * slope)
+        } else {
+            // The declared zero-rate plateau may overflow even when its
+            // scaled value at this nonzero rate remains representable.
+            ((yield_stress * phi) * time, (yield_stress * slope) * time)
+        };
+    }
+    // One strict exponential evaluation per query. Near zero expm1 retains
+    // the onset accurately; outside its own small-argument branch it would
+    // call exp again, so share that exp with the analytic derivative instead.
+    let (onset, decay) = if x < 0.5 * core::f64::consts::LN_2 {
+        let onset = -fs_math::det::expm1(-x);
+        (onset, 1.0 - onset)
+    } else {
+        let decay = fs_math::det::exp(-x);
+        (1.0 - decay, decay)
+    };
+    let viscosity = if x <= 1.0 {
+        let plateau = yield_stress * time;
+        let factor = onset / x;
+        if plateau.is_finite() {
+            plateau * factor
+        } else {
+            (yield_stress * factor) * time
+        }
+    } else {
+        let unscaled = yield_stress / rate;
+        if unscaled.is_finite() {
+            unscaled * onset
+        } else {
+            (yield_stress * onset) / rate
+        }
+    };
+    let ratio = if x.is_finite() {
+        x * decay / onset
+    } else {
+        0.0
+    };
+    (viscosity, viscosity * (ratio - 1.0))
 }
 
 /// One validated law shared by the two lattice dimensions. Constant laws
@@ -638,22 +767,48 @@ mod tests {
                 },
                 [0.01, 0.1, 1.0],
             ),
+            (
+                Rheology::HerschelBulkley {
+                    k: 0.03,
+                    n: 0.5,
+                    yield_stress_over_density: 0.003,
+                    regularization_time: 10.0,
+                    minimum_shear_rate: 0.001,
+                },
+                [0.01, 0.1, 1.0],
+            ),
+            (
+                Rheology::HerschelBulkley {
+                    k: 0.1,
+                    n: 2.0,
+                    yield_stress_over_density: 0.02,
+                    regularization_time: 20.0,
+                    minimum_shear_rate: 1e-6,
+                },
+                [0.01, 0.1, 1.0],
+            ),
         ];
         for (law, rates) in cases {
             let prepared = law.prepare();
             for rate in rates {
                 let expected = 0.5 + law.viscosity(rate) / CS2;
                 assert!(expected > TAU_FLOOR && expected < TAU_CAP);
-                let numerator = rate * expected;
-                for previous in [TAU_FLOOR, 0.8, 2.9, TAU_CAP, f64::NAN] {
-                    let solved = prepared.solve(numerator, previous);
-                    assert!(
-                        (solved.tau - expected).abs() < 4e-12,
-                        "{law:?}, rate={rate}, previous={previous}"
-                    );
-                    let target = 0.5 + law.viscosity(solved.shear_rate) / CS2;
-                    assert!((solved.tau - target).abs() <= 1.1e-12 * solved.tau);
-                    assert!(!solved.floored && !solved.capped);
+                for (numerator, fixed_rate) in [
+                    (rate * expected, 0.0),
+                    (0.6 * rate * expected, 0.8 * rate),
+                    (0.0, rate),
+                ] {
+                    for previous in [TAU_FLOOR, 0.8, 2.9, TAU_CAP, f64::NAN] {
+                        let solved =
+                            prepared.solve_with_fixed_strain(numerator, fixed_rate, previous);
+                        assert!(
+                            (solved.tau - expected).abs() < 4e-12,
+                            "{law:?}, rate={rate}, fixed={fixed_rate}, previous={previous}"
+                        );
+                        let target = 0.5 + law.viscosity(solved.shear_rate) / CS2;
+                        assert!((solved.tau - target).abs() <= 1.1e-12 * solved.tau);
+                        assert!(!solved.floored && !solved.capped);
+                    }
                 }
             }
         }
@@ -686,6 +841,183 @@ mod tests {
         assert_eq!(zero.tau, TAU_CAP);
         assert_eq!(zero.shear_rate, 0.0);
         assert!(zero.capped);
+    }
+
+    #[test]
+    fn yield_regularization_has_declared_plateaus_and_limits() {
+        let law = Rheology::HerschelBulkley {
+            k: 0.05,
+            n: 1.0,
+            yield_stress_over_density: 0.00005,
+            regularization_time: 15_000.0,
+            minimum_shear_rate: 1e-12,
+        };
+        assert_eq!(law.viscosity(0.0), 0.05 + 0.00005 * 15_000.0);
+        // Neither 0/0 nor 1-exp(-x) cancellation may erase the yield plateau.
+        assert_eq!(law.viscosity(1e-25), law.viscosity(0.0));
+        assert!((law.viscosity(1.0) - 0.05005).abs() < 1e-16);
+        // A finite constitutive result must survive an overflowing
+        // intermediate plateau or unregularized Y/gamma. The independent
+        // reference multiplies the bounded onset before division.
+        for (time, rate) in [(2.0, 0.25), (3.0, 0.5), (1.7977, 1e-5 / 1.7977)] {
+            let extreme = Rheology::HerschelBulkley {
+                k: 0.1,
+                n: 1.0,
+                yield_stress_over_density: 1e308,
+                regularization_time: time,
+                minimum_shear_rate: 1e-12,
+            };
+            let expected = (1e308 * (-(-time * rate).exp_m1())) / rate;
+            let (actual, slope) = extreme.viscosity_and_slope(rate);
+            assert!(actual.is_finite() && expected.is_finite());
+            assert!((actual / expected - 1.0).abs() < 4e-15);
+            assert!(slope.is_finite() && slope < 0.0);
+        }
+        let mut previous = 0.0;
+        for rate in [0.0, 1e-25, 1e-10, 1e-6, 1e-4, 0.01, 1.0] {
+            let stress = rate * law.viscosity(rate);
+            assert!(stress >= previous, "yield stress response must be monotone");
+            previous = stress;
+        }
+        for n in [0.5, 1.0, 1.5] {
+            let yielded = Rheology::HerschelBulkley {
+                k: 0.1,
+                n,
+                yield_stress_over_density: 0.0,
+                regularization_time: 1000.0,
+                minimum_shear_rate: 1e-12,
+            };
+            let power = Rheology::PowerLaw { k: 0.1, n };
+            for rate in [0.0, 1e-25, 0.01, 1.0] {
+                assert_eq!(yielded.viscosity(rate), power.viscosity(rate));
+            }
+        }
+        // Declared regularization and numerical resolution limits are distinct:
+        // a large zero-rate viscosity is reported as capped, not as exact yield.
+        let capped = Rheology::HerschelBulkley {
+            k: 0.1,
+            n: 1.0,
+            yield_stress_over_density: 0.01,
+            regularization_time: 1000.0,
+            minimum_shear_rate: 1e-8,
+        }
+        .prepare()
+        .solve(0.0, 0.8);
+        assert_eq!(capped.tau, TAU_CAP);
+        assert!(capped.capped);
+        assert!(!capped.floored);
+        assert_eq!(capped.shear_rate, 0.0);
+    }
+
+    #[test]
+    fn yield_law_rejects_undeclared_or_nonphysical_regularization() {
+        for (yield_stress, time, minimum_rate) in [
+            (-1.0, 1.0, 1e-8),
+            (1.0, f64::INFINITY, 1e-8),
+            (1.0, -1.0, 1e-8),
+            (1.0, 1.0, 0.0),
+            (1.0, 1.0, f64::NAN),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    Rheology::HerschelBulkley {
+                        k: 0.1,
+                        n: 1.0,
+                        yield_stress_over_density: yield_stress,
+                        regularization_time: time,
+                        minimum_shear_rate: minimum_rate,
+                    }
+                    .viscosity(0.1)
+                })
+                .is_err()
+            );
+        }
+    }
+
+    // Independent steady momentum balance: stress/rho = |g*y|. Invert the
+    // scalar Bingham-Papanastasiou stress, then integrate gamma*d(stress)/g
+    // analytically. This reference never invokes the production viscosity or
+    // local kinetic constitutive solver, and uses platform exp as its oracle.
+    fn bingham_velocity(
+        y: f64,
+        half_height: f64,
+        g: f64,
+        k: f64,
+        yield_stress: f64,
+        m: f64,
+    ) -> f64 {
+        let shear = |stress: f64| {
+            let (mut lo, mut hi) = (0.0, stress / k);
+            for _ in 0..80 {
+                let gamma = 0.5 * (lo + hi);
+                let value = k * gamma + yield_stress * (1.0 - (-m * gamma).exp());
+                if value > stress {
+                    hi = gamma;
+                } else {
+                    lo = gamma;
+                }
+            }
+            0.5 * (lo + hi)
+        };
+        let a = shear(g * y.abs());
+        let b = shear(g * half_height);
+        (0.5 * k * (b * b - a * a)
+            + yield_stress * ((a + 1.0 / m) * (-m * a).exp() - (b + 1.0 / m) * (-m * b).exp()))
+            / g
+    }
+
+    /// G1: a real yielded-channel flow develops a nearly flat creeping core.
+    /// Both native lattice dimensions share the same law and must agree with
+    /// the continuum stress integral without any numerical viscosity cap.
+    #[test]
+    fn regularized_bingham_channel_matches_stress_integral_in_both_dimensions() {
+        let (ny, g, k, yield_stress, m) = (33, 1e-5, 0.05, 0.00005, 15_000.0);
+        let law = Rheology::HerschelBulkley {
+            k,
+            n: 1.0,
+            yield_stress_over_density: yield_stress,
+            regularization_time: m,
+            minimum_shear_rate: 1e-12,
+        };
+        let max_steps = 60_000;
+        let (grid2, steps2, stats2) = channel_flow(2, ny, g, law, max_steps);
+        let (grid3, steps3, stats3) =
+            crate::d3q19::plate_channel_flow3(2, 1, ny, g, law, max_steps);
+        assert!(steps2 < max_steps && steps3 < max_steps);
+        assert_eq!(
+            (stats2.floored, stats2.capped, stats3.floored, stats3.capped),
+            (0, 0, 0, 0)
+        );
+        let center = (ny - 1) as f64 / 2.0;
+        let half_height = ny as f64 / 2.0;
+        let peak = bingham_velocity(0.0, half_height, g, k, yield_stress, m);
+        let mut errors = [0.0_f64; 2];
+        for y in 0..ny {
+            let exact = bingham_velocity(y as f64 - center, half_height, g, k, yield_stress, m);
+            let u2 = grid2.moments(grid2.idx(0, y + 1)).u[0];
+            let u3 = grid3.moments3(grid3.idx(0, 0, y + 1)).1[0];
+            errors[0] = errors[0].max((u2 - exact).abs());
+            errors[1] = errors[1].max((u3 - exact).abs());
+            assert!((u2 - u3).abs() < 1e-9, "2D/3D constitutive drift at y={y}");
+        }
+        for error in errors {
+            assert!(
+                error / peak < 0.03,
+                "Bingham profile error={}",
+                error / peak
+            );
+        }
+        let mid = ny / 2 + 1;
+        let center_u = grid2.moments(grid2.idx(0, mid)).u[0];
+        let core_edge_u = grid2.moments(grid2.idx(0, mid + 2)).u[0];
+        assert!((center_u - core_edge_u) / center_u < 0.005);
+        assert!(center_u < 0.6 * g * half_height * half_height / (2.0 * k));
+        assert!((grid2.total_mass() - (2 * (ny + 2)) as f64).abs() < 1e-9);
+        assert!((grid3.total_mass() - (2 * (ny + 2)) as f64).abs() < 1e-9);
+        println!(
+            "regularized Bingham: 2D={steps2} steps, 3D={steps3} steps, relative profile errors={:?}",
+            errors.map(|e| e / peak),
+        );
     }
 
     /// G1: n=5 is well outside the range where undamped local fixed-point
