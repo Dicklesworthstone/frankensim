@@ -25,6 +25,8 @@ pub mod cavitation;
 pub mod isothermal;
 /// Exact pressure-flow reduction for prescribed through-gap viscosity layers.
 pub mod stratified;
+/// Work-conjugate sliding walls, Couette entrainment and shear on this same graph.
+pub mod shear;
 
 use core::fmt;
 use std::sync::Arc;
@@ -360,6 +362,24 @@ impl ResistiveFilm {
     }
 
     fn solve(&self, q: &[f64], v: &[f64]) -> Result<Solution, FilmError> {
+        self.solve_with_entrainment::<false>(q, v, &[])
+    }
+
+    // The sliding-wall owner supplies oriented volume entrainment and its
+    // conjugate wall tractions. Matrix assembly and elimination remain here.
+    // The ordinary pressure image specializes away the additional RHS path.
+    fn solve_with_entrainment<const ENTRAINMENT: bool>(
+        &self,
+        q: &[f64],
+        v: &[f64],
+        entrainment: &[f64],
+    ) -> Result<Solution, FilmError> {
+        if ENTRAINMENT
+            && (entrainment.len() != self.channels.len()
+                || entrainment.iter().any(|flow| !flow.is_finite()))
+        {
+            return fail("invalid oriented film entrainment");
+        }
         let minimum = self.validate_configuration(q)?;
         if v.len() != self.ports || v.iter().any(|x| !x.is_finite()) {
             return fail("invalid film velocity/effort");
@@ -383,6 +403,16 @@ impl ResistiveFilm {
         }
         for (i, cell) in self.cells.iter().enumerate() {
             s.pressure[i] = cell.area_m2 * dot(&cell.gap.closure, v);
+        }
+        if ENTRAINMENT {
+            for (edge, &flow) in self.channels.iter().zip(entrainment) {
+                if flow != 0.0 {
+                    s.pressure[edge.from] -= flow;
+                    if let Some(j) = edge.to {
+                        s.pressure[j] += flow;
+                    }
+                }
+            }
         }
         s.factor()?;
         solve_factored(&s.lower, &s.scale, n, &mut s.pressure)?;

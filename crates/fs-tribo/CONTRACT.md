@@ -1,5 +1,31 @@
 # CONTRACT: fs-tribo
 
+## Sliding-wall and layered Reynolds work
+
+`resistive_film::shear::ShearedFilm` binds explicit lower/upper tangential
+velocity rows to the same work-conjugate mechanical ports as native normal
+film motion. Uniform-channel and retained-stratified constructors compile
+the harmonic shear viscosity and two independently integrated wall-distance
+entrainment weights. The existing graph and factorization solve
+`L p = A B v - div(Qc)`. Combined normal pressure and transposed wall
+tractions satisfy `F dot v = sum(G*(delta_p)^2 + S*(delta_U)^2)`;
+total flow times pressure drop alone is not the sliding passage's heat.
+
+The directional tangent differentiates aperture conductance, entrainment,
+pressure wall tractions and inverse-gap shear drag, reusing the native
+pressure factorization. Bounded stack scratch, atomic outputs and original
+pressure/gap limits remain. Zero wall rows recover the native pressure
+operator and exact passage closure; channels with nonzero wall rows require
+positive aperture. Nonzero Barus coefficients explicitly refuse. Per-channel
+reports retain total flow, entrainment, pressure work and shear work.
+
+Profiles and wall rows are prescribed. Pressure-only layer work fractions
+do not partition combined Couette heat: layerwise pressure/shear cross
+terms generally do not cancel. This module introduces no thermal clock,
+advection, layer mass, slip, dry friction or evolving interfaces. Six focused
+regressions cover native reduction, free and blocked Couette flow, layered
+quadrature, reciprocal work, analytic tangents and atomic refusal.
+
 ## Accept independently resolved directional slip history
 
 `EllipticCoulomb::accept_resolved_slip` records an independently admitted two-component displacement in the existing native state's tangent frame. Original law identity, coefficients and material axis remain intact. It validates explicit temperature and componentwise representability, returning actual represented increments and residuals. Lost nonzero increments refuse independently of the caller's absolute length tolerance. The state has zero elastic storage and no clock; physical time, contact admissibility and objective frame transport remain with their original owners.
