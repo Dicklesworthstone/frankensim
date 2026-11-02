@@ -167,7 +167,9 @@ pub fn step_free_floating_spatial_implicit(
     config: ImplicitSpatialConfig,
     cancelled: impl FnMut() -> bool,
 ) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
-    step_with_bushings(model, state, loads, &[], duration, config, cancelled)
+    step_with_bushings::<bushing::SpatialBushing>(
+        model, state, loads, &[], duration, config, cancelled,
+    )
 }
 
 /// Advance spatial loads and state-dependent internal joint efforts in one
@@ -213,7 +215,7 @@ pub fn step_free_floating_spatial_implicit_with_effort(
     ) -> Result<(), FreeFloatingMotionError>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
-    step_with_bushings_and_effort(
+    step_with_bushings_and_effort::<bushing::SpatialBushing>(
         model,
         state,
         loads,
@@ -225,11 +227,11 @@ pub fn step_free_floating_spatial_implicit_with_effort(
     )
 }
 
-pub(super) fn step_with_bushings(
+pub(super) fn step_with_bushings<B: bushing::BushingLaw>(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
     loads: SpatialMotionLoads<'_>,
-    bushings: &[bushing::SpatialBushing],
+    bushings: &[B],
     duration: f64,
     config: ImplicitSpatialConfig,
     cancelled: impl FnMut() -> bool,
@@ -239,11 +241,11 @@ pub(super) fn step_with_bushings(
     )
 }
 
-pub(super) fn step_with_bushings_and_effort(
+pub(super) fn step_with_bushings_and_effort<B: bushing::BushingLaw>(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
     loads: SpatialMotionLoads<'_>,
-    bushings: &[bushing::SpatialBushing],
+    bushings: &[B],
     duration: f64,
     config: ImplicitSpatialConfig,
     effort: Option<&mut EffortLaw<'_>>,
@@ -432,14 +434,14 @@ struct MidpointInitial {
     momentum: crate::articulated::ArticulatedMomentum,
 }
 
-fn finish_midpoint(
+fn finish_midpoint<B: bushing::BushingLaw>(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
     loads: SpatialMotionLoads<'_>,
     duration: f64,
     initial: MidpointInitial,
     midpoint: MidpointEvaluation,
-    bushings: &[bushing::SpatialBushing],
+    bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<SpatialMotionStep, ImplicitSpatialError> {
     let MidpointInitial {
@@ -540,11 +542,11 @@ fn finish_midpoint(
     Ok(spatial)
 }
 
-struct MidpointEquations<'a> {
+struct MidpointEquations<'a, B: bushing::BushingLaw> {
     model: &'a ArticulatedModel,
     state: &'a FreeFloatingMotionState,
     loads: SpatialMotionLoads<'a>,
-    bushings: &'a [bushing::SpatialBushing],
+    bushings: &'a [B],
     duration: f64,
     initial: MomentumCoordinates,
     mass: f64,
@@ -561,7 +563,7 @@ struct MidpointEvaluation {
     residual: Vec<f64>,
 }
 
-impl MidpointEquations<'_> {
+impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
     fn evaluate(
         &self,
         x: &[f64],

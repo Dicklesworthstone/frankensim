@@ -1,4 +1,7 @@
 //! Physical bushing forces, finite-rotation work, native recoil and stiff modes.
+#[path = "articulated_bushings/coupled.rs"]
+mod coupled;
+
 use fs_ga::{Mat3, Se3, So3, So3Tangent, Twist, Vec3, Wrench};
 use fs_mbd::articulated::motion::spatial_loads::bushing::{
     MAX_BUSHING_ROTATION_RADIANS, MaterialFrame, SpatialBushing, evaluate_bushing_forces,

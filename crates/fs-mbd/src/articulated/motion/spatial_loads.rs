@@ -173,14 +173,14 @@ fn finish_spatial(
     loads: SpatialMotionLoads<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
-    finish_with_bushings(model, evaluated, loads, &[], cancelled)
+    finish_with_bushings::<bushing::SpatialBushing>(model, evaluated, loads, &[], cancelled)
 }
 
-fn finish_with_bushings(
+fn finish_with_bushings<B: bushing::BushingLaw>(
     model: &ArticulatedModel,
     evaluated: super::EvaluatedStep,
     loads: SpatialMotionLoads<'_>,
-    bushings: &[bushing::SpatialBushing],
+    bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
     let mut stored_energy_after = 0.0;

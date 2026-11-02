@@ -2898,6 +2898,35 @@ gradients, spatial moment/virtual-work identities, large common rigid motion,
 analytic stiff translational/torsional recoil, combined-tree refinement and
 late-cancellation/retry fixtures exercise the actual public consumers.
 
+`bushing::coupled` adds explicitly supplied full 6x6 passive stiffness and
+damping in native `[translation, principal rotation vector]` coordinates.
+`PassiveBushingMatrix` retains every original SI coefficient and admits exact
+symmetry and semidefinite structure after congruence by caller-declared metre
+and radian coordinate scales. Negative/unresolved pivots, coupled zero diagonals
+and unrepresentable arithmetic refuse; no symmetrization, eigenvalue clipping
+or positive loss floor repairs the data. The factor reconstruction residual is
+reported in equilibrated coordinates. Exact zero/free directions are admitted;
+near-dependent passive forms may refuse without an exact-rank certificate.
+
+`CoupledSpatialBushing` fixes those prepared K/C forms to the original material
+frames. Full cross-axis and translation/rotation forces use the SAME strain,
+log differential, reciprocal wrench lift and finite-state admission as diagonal
+elements. Non-diagonal Gram actions supply nonnegative elastic storage and
+viscous power; diagonal actions retain the original products exactly. Both
+explicit and implicit stepping entry points reuse the original native integrator,
+including simultaneous coupling, base recoil, external spatial loads, physical
+loss and separate numerical work defects. The diagonal public API is unchanged.
+This native law does not infer missing material claims, thermal feedback,
+active/circulatory forces, moving rest commands or a different rotational chart.
+
+Four focused preparation tests and three new native integration groups pass
+with the original numerical owners. They cover full cross work and physical
+rescaling, dependent/free modes, near-active and asymmetric refusal, independent
+finite-rotation energy/rate checks, reciprocal force/moment balance, large common
+rigid motion, actual coupled trajectories and loss, exact diagonal parity for
+both native integrators, and final cancellation. All six original bushing groups
+also pass. This focused execution does not constitute a full-workspace gate.
+
 ### State-dependent internal effort in implicit motion
 
 `step_free_floating_spatial_implicit_with_effort` and

@@ -14,6 +14,9 @@
 //! A prescribed rest orientation is represented by the two attachment frames.
 //! This is finite compliance, not a rigid six-axis joint or unilateral contact.
 
+/// Explicitly supplied passive full-matrix stiffness and damping.
+pub mod coupled;
+
 use super::super::{
     ArticulatedModel, EvaluatedStage, FreeFloatingMotionError, FreeFloatingMotionState,
     MAX_FREE_FLOATING_STEP_LINKS, MomentumMap, Se3, StageLoad, Vec3, Wrench, poll, step_evaluated,
@@ -94,6 +97,15 @@ pub fn evaluate_bushing_forces(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
     bushings: &[SpatialBushing],
+    cancelled: impl FnMut() -> bool,
+) -> Result<BushingForces, FreeFloatingMotionError> {
+    evaluate_forces(model, state, bushings, cancelled)
+}
+
+fn evaluate_forces<B: BushingLaw>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    bushings: &[B],
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<BushingForces, FreeFloatingMotionError> {
     poll(&mut cancelled)?;
@@ -266,10 +278,10 @@ pub fn step_free_floating_bushings_implicit_with_effort(
     )
 }
 
-pub(super) fn admit(
+pub(super) fn admit<B: BushingLaw>(
     model: &ArticulatedModel,
     loads: SpatialMotionLoads<'_>,
-    bushings: &[SpatialBushing],
+    bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), FreeFloatingMotionError> {
     super::admit(model, loads, cancelled)?;
@@ -287,9 +299,9 @@ pub(super) fn admit(
     admit_bushings(model, bushings, cancelled)
 }
 
-fn admit_bushings(
+fn admit_bushings<B: BushingLaw>(
     model: &ArticulatedModel,
-    bushings: &[SpatialBushing],
+    bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), FreeFloatingMotionError> {
     if bushings.len() > super::MAX_SPATIAL_MOTION_LOADS {
@@ -299,34 +311,26 @@ fn admit_bushings(
         if i % 64 == 0 {
             poll(cancelled)?;
         }
-        if b.a.link >= model.link_count() || b.b.link >= model.link_count() || b.a.link == b.b.link
+        let geometry = b.geometry();
+        if geometry.a.link >= model.link_count()
+            || geometry.b.link >= model.link_count()
+            || geometry.a.link == geometry.b.link
         {
             return Err(FreeFloatingMotionError::InvalidLoad(
                 "bushing attachment links",
             ));
         }
-        validate_vec3(b.rest_translation_a, "bushing.rest_translation")?;
-        for v in [
-            b.translation_stiffness,
-            b.translation_damping,
-            b.rotation_stiffness,
-            b.rotation_damping,
-        ] {
-            if [v.x, v.y, v.z].iter().any(|x| !x.is_finite() || *x < 0.0) {
-                return Err(FreeFloatingMotionError::InvalidLoad(
-                    "nonnegative finite bushing coefficients",
-                ));
-            }
-        }
+        validate_vec3(geometry.rest_translation_a, "bushing.rest_translation")?;
+        b.admit_coefficients()?;
     }
     Ok(())
 }
 
-pub(super) fn evaluate<'a>(
+pub(super) fn evaluate<'a, B: BushingLaw>(
     map: &MomentumMap,
     base: super::super::FreeFloatingBaseState,
     loads: SpatialMotionLoads<'a>,
-    bushings: &[SpatialBushing],
+    bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError> {
     let mut stage = super::evaluate(map, base, loads, cancelled)?;
@@ -342,21 +346,21 @@ pub(super) fn evaluate<'a>(
     Ok(stage)
 }
 
-struct Strain {
+pub(super) struct Strain {
     translation: Vec3,
     rotation: Vec3,
     frame_a_rotation: fs_ga::So3,
     delta_base: Vec3,
 }
 
-fn strain(map: &MomentumMap, b: SpatialBushing) -> Result<Strain, FreeFloatingMotionError> {
+fn strain(map: &MomentumMap, b: BushingGeometry) -> Result<Strain, FreeFloatingMotionError> {
     let a = map.shape.world_from_link[b.a.link]
         .rotation()
         .compose(b.a.link_from_attachment.rotation())?;
     let delta_base = position_base(map, point(b.b))? - position_base(map, point(b.a))?;
     let translation = a.inverse().rotate(delta_base)? - b.rest_translation_a;
     let mut rotation = Vec3::default();
-    if b.rotation_stiffness != Vec3::default() || b.rotation_damping != Vec3::default() {
+    if b.rotation_active {
         let r_b = map.shape.world_from_link[b.b.link]
             .rotation()
             .compose(b.b.link_from_attachment.rotation())?;
@@ -375,17 +379,18 @@ fn strain(map: &MomentumMap, b: SpatialBushing) -> Result<Strain, FreeFloatingMo
     })
 }
 
-fn accumulate(
+fn accumulate<B: BushingLaw>(
     map: &MomentumMap,
-    bushings: &[SpatialBushing],
+    bushings: &[B],
     wrenches: &mut [Wrench],
     load: &mut StageLoad,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), FreeFloatingMotionError> {
-    for (i, b) in bushings.iter().copied().enumerate() {
+    for (i, law) in bushings.iter().enumerate() {
         if i % 64 == 0 {
             poll(cancelled)?;
         }
+        let b = law.geometry();
         let s = strain(map, b)?;
         let a_inverse = s.frame_a_rotation.inverse();
         let angular_a = map.shape.world_from_link[b.a.link]
@@ -402,10 +407,9 @@ fn accumulate(
         )?;
         let inverse_jacobian = so3_left_jacobian_inverse(So3Tangent::new(s.rotation))?;
         let rotation_rate = inverse_jacobian.apply(a_inverse.rotate(angular_b - angular_a)?);
-        let force_a = diagonal(b.translation_stiffness, s.translation)
-            + diagonal(b.translation_damping, translation_rate);
-        let log_force = diagonal(b.rotation_stiffness, s.rotation)
-            + diagonal(b.rotation_damping, rotation_rate);
+        let response = law.response(&s, translation_rate, rotation_rate)?;
+        let force_a = response.force;
+        let log_force = response.log_force;
         let force = s.frame_a_rotation.rotate(force_a)?;
         let couple = s
             .frame_a_rotation
@@ -425,10 +429,8 @@ fn accumulate(
             couple.scale(-1.0),
         )?;
         load.internal_body_power -= force_a.dot(translation_rate) + log_force.dot(rotation_rate);
-        load.dissipation_power += translation_rate
-            .dot(diagonal(b.translation_damping, translation_rate))
-            + rotation_rate.dot(diagonal(b.rotation_damping, rotation_rate));
-        load.stored_energy += storage(b, &s);
+        load.dissipation_power += response.dissipation_power;
+        load.stored_energy += response.stored_energy;
     }
     validate_external_wrenches(wrenches)?;
     validate_slice(
@@ -442,17 +444,17 @@ fn accumulate(
     Ok(())
 }
 
-pub(super) fn stored_energy(
+pub(super) fn stored_energy<B: BushingLaw>(
     map: &MomentumMap,
-    bushings: &[SpatialBushing],
+    bushings: &[B],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, FreeFloatingMotionError> {
     let mut energy = 0.0;
-    for (i, b) in bushings.iter().copied().enumerate() {
+    for (i, b) in bushings.iter().enumerate() {
         if i % 64 == 0 {
             poll(cancelled)?;
         }
-        energy += storage(b, &strain(map, b)?);
+        energy += b.energy(&strain(map, b.geometry())?)?;
     }
     validate_slice(&[energy], "bushing.final_storage")?;
     Ok(energy)
@@ -473,5 +475,81 @@ fn point(f: MaterialFrame) -> MaterialPoint {
     MaterialPoint {
         link: f.link,
         point_body: f.link_from_attachment.translation(),
+    }
+}
+
+/// The geometry and reciprocal force lift have one owner for every native law.
+/// Private static dispatch keeps the original diagonal path allocation-free.
+#[derive(Clone, Copy)]
+pub(super) struct BushingGeometry {
+    a: MaterialFrame,
+    b: MaterialFrame,
+    rest_translation_a: Vec3,
+    rotation_active: bool,
+}
+
+pub(super) struct ConstitutiveResponse {
+    force: Vec3,
+    log_force: Vec3,
+    stored_energy: f64,
+    dissipation_power: f64,
+}
+
+pub(super) trait BushingLaw {
+    fn geometry(&self) -> BushingGeometry;
+    fn admit_coefficients(&self) -> Result<(), FreeFloatingMotionError>;
+    fn response(
+        &self,
+        strain: &Strain,
+        translation_rate: Vec3,
+        rotation_rate: Vec3,
+    ) -> Result<ConstitutiveResponse, FreeFloatingMotionError>;
+    fn energy(&self, strain: &Strain) -> Result<f64, FreeFloatingMotionError>;
+}
+
+impl BushingLaw for SpatialBushing {
+    fn geometry(&self) -> BushingGeometry {
+        BushingGeometry {
+            a: self.a,
+            b: self.b,
+            rest_translation_a: self.rest_translation_a,
+            rotation_active: self.rotation_stiffness != Vec3::default()
+                || self.rotation_damping != Vec3::default(),
+        }
+    }
+    fn admit_coefficients(&self) -> Result<(), FreeFloatingMotionError> {
+        for v in [
+            self.translation_stiffness,
+            self.translation_damping,
+            self.rotation_stiffness,
+            self.rotation_damping,
+        ] {
+            if [v.x, v.y, v.z].iter().any(|x| !x.is_finite() || *x < 0.0) {
+                return Err(FreeFloatingMotionError::InvalidLoad(
+                    "nonnegative finite bushing coefficients",
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn response(
+        &self,
+        s: &Strain,
+        translation_rate: Vec3,
+        rotation_rate: Vec3,
+    ) -> Result<ConstitutiveResponse, FreeFloatingMotionError> {
+        Ok(ConstitutiveResponse {
+            force: diagonal(self.translation_stiffness, s.translation)
+                + diagonal(self.translation_damping, translation_rate),
+            log_force: diagonal(self.rotation_stiffness, s.rotation)
+                + diagonal(self.rotation_damping, rotation_rate),
+            stored_energy: storage(*self, s),
+            dissipation_power: translation_rate
+                .dot(diagonal(self.translation_damping, translation_rate))
+                + rotation_rate.dot(diagonal(self.rotation_damping, rotation_rate)),
+        })
+    }
+    fn energy(&self, s: &Strain) -> Result<f64, FreeFloatingMotionError> {
+        Ok(storage(*self, s))
     }
 }
