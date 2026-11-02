@@ -8,6 +8,8 @@ use std::cell::Cell;
 
 #[path = "stokes_boundary/navier_stokes.rs"]
 mod navier_stokes;
+#[path = "stokes_boundary/reaction.rs"]
+mod reaction;
 #[path = "stokes_boundary/transient.rs"]
 mod transient;
 

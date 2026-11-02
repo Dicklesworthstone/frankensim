@@ -140,6 +140,31 @@ fn mixed_material_rheology_retains_endpoint_sources_and_coherent_pressure_inerti
             );
             near(sample.material().temperature_k, 310.0, 0.0);
         }
+        // The accepted source viscosity also owns dimensional pressure/shear
+        // reactions. This affine field has nonzero normal viscous stress.
+        let origin = [0.2, 0.3];
+        for (edge_id, edge) in mesh.edges.iter().enumerate().filter(|(edge_id, edge)|
+            mesh.is_boundary(*edge_id) && edge.normal[1].abs() > 0.5)
+        {
+            let load = step.solution.boundary_loads(&[edge_id], origin, &[None]).unwrap();
+            let mu = viscosity(0.5);
+            let pressure = 7.0 + 2.0*edge.mid[0] - 3.0*edge.mid[1];
+            let expected = [
+                edge.len*((pressure-0.4*mu)*edge.normal[0]-0.3*mu*edge.normal[1]),
+                edge.len*(-0.3*mu*edge.normal[0]+(pressure+0.4*mu)*edge.normal[1]),
+            ];
+            let a = mesh.verts[edge.verts.0];
+            let b = mesh.verts[edge.verts.1];
+            let delta = [b[0]-a[0], b[1]-a[1]];
+            let moment = (edge.mid[0]-origin[0])*expected[1]-(edge.mid[1]-origin[1])*expected[0]
+                + edge.len*(2.0*delta[0]-3.0*delta[1])*(delta[0]*edge.normal[1]-delta[1]*edge.normal[0])/12.0;
+            near(load.stress.force_n_per_m[0], expected[0], 1e-7);
+            near(load.stress.force_n_per_m[1], expected[1], 1e-7);
+            near(load.stress.moment_n, moment, 1e-7);
+            near(load.stress.rigid_power_w_per_m([0.3,-0.2], 0.4).unwrap(),
+                0.3*expected[0]-0.2*expected[1]+0.4*moment, 1e-7);
+            assert_eq!(load.pressure_offsets_pa, vec![(0,None)]);
+        }
         // Analytic integral of |u|²/2 over the unit square, independent of the
         // FEEC mass matrix. Every dimensional term uses this same density.
         let x_square = 0.2_f64.powi(2) / 3.0

@@ -11,6 +11,13 @@ use crate::bdm::edge_gauss_pub;
 use fs_sparse::Csr;
 use std::cell::Cell;
 
+#[path = "boundary/reaction.rs"]
+pub(super) mod reaction;
+pub use reaction::{
+    BoundaryLoad, BoundaryReactionOwner, BoundaryReactions, BoundaryWrench,
+    DiscreteBoundaryReaction,
+};
+
 #[path = "boundary/rheology.rs"]
 mod rheology;
 pub use rheology::{StokesRheologyControls, StokesRheologySolution};
@@ -171,6 +178,7 @@ pub struct StokesAssembly<'a, 'm> {
     params: FluxParams,
     reference: StokesPressureReference,
     has_traction: Vec<bool>,
+    reactions: reaction::ReactionOperator,
 }
 
 /// The admitted discrete field together with pressure in its declared datum.
@@ -184,6 +192,10 @@ pub struct StokesSolution {
     /// Actual reference for each cell, always MeanZero or TractionDatum.
     /// Independent mean-zero components have no known pressure difference.
     pub pressure_reference_per_cell: Vec<StokesPressureReference>,
+    /// Original discrete boundary reaction functionals at this accepted field.
+    /// Stress exchange is separate from outward advective momentum; mechanics
+    /// evaluation requires explicit offsets for selected mean-zero components.
+    pub reactions: BoundaryReactions,
 }
 
 impl StokesAssembly<'_, '_> {
@@ -250,6 +262,9 @@ impl StokesAssembly<'_, '_> {
                 "non-finite reported pressure",
             ));
         }
+        let reactions =
+            self.reactions
+                .evaluate(self.system, &field, &pressure, &self.has_traction)?;
         Ok(StokesSolution {
             field,
             pressure,
@@ -260,6 +275,7 @@ impl StokesAssembly<'_, '_> {
                         .expect("cell belongs to mesh")
                 })
                 .collect(),
+            reactions,
         })
     }
 }
@@ -388,6 +404,7 @@ impl<'m> FluxSystem<'m> {
                 [0.0; 2]
             }
         };
+        let mut reactions = reaction::ReactionAssembly::new(self, admitted, advecting_velocity);
         let (matrix, rhs) = self.assemble_operator(
             params,
             Some(&checked_viscosity),
@@ -398,6 +415,7 @@ impl<'m> FluxSystem<'m> {
             previous_velocity,
             Some(admitted),
             darcy,
+            Some(&mut reactions),
         );
         if let Some((cell, point, value)) = bad_viscosity.get() {
             return Err(StokesBoundaryError::InvalidViscosity { cell, point, value });
@@ -426,6 +444,7 @@ impl<'m> FluxSystem<'m> {
                 StokesPressureReference::Componentwise
             },
             has_traction: admitted.has_traction.clone(),
+            reactions: reactions.finish(),
         })
     }
 

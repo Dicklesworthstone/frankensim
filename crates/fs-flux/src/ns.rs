@@ -15,6 +15,7 @@
 
 use crate::bdm::{CellBasis, cell_basis, eval_basis, tri_quad};
 use crate::trimesh::TriMesh;
+use boundary::reaction::ReactionAssembly;
 use fs_la::factor::lu;
 use fs_sparse::{Coo, Csr};
 
@@ -116,6 +117,23 @@ fn convection_boundary_trace(samples: [[f64; 2]; 2], fraction: f64) -> [f64; 2] 
         return samples[1];
     }
     core::array::from_fn(|axis| (1.0 - fraction) * samples[0][axis] + fraction * samples[1][axis])
+}
+
+// Preserve primal insertion order. Only otherwise discarded normal momentum
+// rows enter the optional, boundary-sized reaction matrix.
+fn momentum_entry(
+    matrix: &mut Coo,
+    reaction: &mut Option<&mut ReactionAssembly>,
+    constraints: &[Option<f64>],
+    row: usize,
+    column: usize,
+    value: f64,
+) {
+    if constraints[row].is_none() {
+        matrix.push(row, column, value);
+    } else if let Some(reaction) = reaction {
+        reaction.push(row, column, value);
+    }
 }
 
 /// Solver parameters.
@@ -357,7 +375,7 @@ impl<'m> FluxSystem<'m> {
         inv_dt: f64,
         uprev: Option<&[f64]>,
     ) -> (Csr, Vec<f64>) {
-        self.assemble_operator(params, None, f, g, advect, inv_dt, uprev, None, None)
+        self.assemble_operator(params, None, f, g, advect, inv_dt, uprev, None, None, None)
     }
 
     /// Assemble `-div(2 nu D(u)) + grad(p) = f`, with
@@ -421,6 +439,7 @@ impl<'m> FluxSystem<'m> {
             uprev,
             None,
             None,
+            None,
         )
     }
 
@@ -436,6 +455,7 @@ impl<'m> FluxSystem<'m> {
         uprev: Option<&[f64]>,
         boundary: Option<&boundary::AdmittedBoundary>,
         darcy: Option<&[porous::DarcyDrag]>,
+        mut reactions: Option<&mut ReactionAssembly>,
     ) -> (Csr, Vec<f64>) {
         let mesh = self.mesh;
         let nu = params.nu;
@@ -487,7 +507,7 @@ impl<'m> FluxSystem<'m> {
                     .map(|(q, w)| w * positive_viscosity(field(t, q)))
                     .sum::<f64>()
             });
-            let reaction = darcy.map(|cells| cells[t].local_matrix(basis, p, area));
+            let drag_matrix = darcy.map(|cells| cells[t].local_matrix(basis, p, area));
             for i in 0..6 {
                 let gi = self.dof(t, i);
                 // Load.
@@ -498,7 +518,7 @@ impl<'m> FluxSystem<'m> {
                     fi += w * (fv[0] * v[0] + fv[1] * v[1]);
                 }
                 rhs[gi] += fi;
-                if con[gi].is_none() {
+                if con[gi].is_none() || reactions.is_some() {
                     for j in 0..6 {
                         let gj = self.dof(t, j);
                         let mut visc = 0.0;
@@ -511,10 +531,13 @@ impl<'m> FluxSystem<'m> {
                             }
                         }
                         let value = integrated_nu * visc;
-                        coo.push(
+                        momentum_entry(
+                            &mut coo,
+                            &mut reactions,
+                            &con,
                             gi,
                             gj,
-                            reaction.as_ref().map_or(value, |drag| value + drag[i][j]),
+                            drag_matrix.as_ref().map_or(value, |drag| value + drag[i][j]),
                         );
                     }
                 }
@@ -523,11 +546,9 @@ impl<'m> FluxSystem<'m> {
                 if con[pdof].is_none() {
                     coo.push(pdof, gi, -basis.div[i] * area);
                 }
-                if con[gi].is_none() {
-                    coo.push(gi, pdof, -basis.div[i] * area);
-                }
+                momentum_entry(&mut coo, &mut reactions, &con, gi, pdof, -basis.div[i] * area);
                 // BDF1 mass: (1/dt)(u, v) and (1/dt)(u_prev, v).
-                if inv_dt > 0.0 && con[gi].is_none() {
+                if inv_dt > 0.0 && (con[gi].is_none() || reactions.is_some()) {
                     for j in 0..6 {
                         let gj = self.dof(t, j);
                         let mut mij = 0.0;
@@ -536,7 +557,7 @@ impl<'m> FluxSystem<'m> {
                             let bj = eval_basis(basis, j, q);
                             mij += w * (bi[0] * bj[0] + bi[1] * bj[1]);
                         }
-                        coo.push(gi, gj, inv_dt * mij);
+                        momentum_entry(&mut coo, &mut reactions, &con, gi, gj, inv_dt * mij);
                         if let Some(up) = uprev {
                             rhs[gi] += inv_dt * mij * up[gj];
                         }
@@ -559,7 +580,7 @@ impl<'m> FluxSystem<'m> {
                         let traction = data.traction(e, q);
                         for i in 0..6 {
                             let gi = self.dof(t0, i);
-                            if con[gi].is_none() {
+                            if con[gi].is_none() || reactions.is_some() {
                                 let vi = eval_basis(&self.bases[t0], i, gx);
                                 rhs[gi] += w * (traction[0] * vi[0] + traction[1] * vi[1]);
                             }
@@ -577,6 +598,9 @@ impl<'m> FluxSystem<'m> {
                         h
                     };
                     let penalty = params.sigma * local_nu / normal_height;
+                    if let Some(reactions) = &mut reactions {
+                        reactions.viscosity(e, q, local_nu, penalty);
+                    }
                     for i in 0..6 {
                         let gi = self.dof(t0, i);
                         let vi = eval_basis(&self.bases[t0], i, gx);
@@ -588,9 +612,7 @@ impl<'m> FluxSystem<'m> {
                             let val = -local_nu * (gnj[0] * vi[0] + gnj[1] * vi[1])
                                 - local_nu * (gni[0] * vj[0] + gni[1] * vj[1])
                                 + penalty * (vi[0] * vj[0] + vi[1] * vj[1]);
-                            if con[gi].is_none() {
-                                coo.push(gi, gj, w * val);
-                            }
+                            momentum_entry(&mut coo, &mut reactions, &con, gi, gj, w * val);
                         }
                         // rhs consistency + penalty with g.
                         let val = -local_nu * (gni[0] * gval[0] + gni[1] * gval[1])
@@ -647,9 +669,7 @@ impl<'m> FluxSystem<'m> {
                                             * (va_[0] * vb_[0] + va_[1] * vb_[1])
                                             * jump_v
                                             * jump_u;
-                                    if con[gi].is_none() {
-                                        coo.push(gi, gj, w * val);
-                                    }
+                                    momentum_entry(&mut coo, &mut reactions, &con, gi, gj, w * val);
                                 }
                             }
                         }
@@ -659,7 +679,18 @@ impl<'m> FluxSystem<'m> {
         }
         // --- Convection (Picard): −∫(u⊗w):∇v + face upwinding.
         if let Some(wfield) = advect {
-            self.add_convection(&mut coo, &mut rhs, wfield, g, &con, boundary);
+            self.add_convection(
+                &mut coo,
+                &mut rhs,
+                wfield,
+                g,
+                &con,
+                boundary,
+                reactions.as_deref_mut(),
+            );
+        }
+        if let Some(reactions) = reactions {
+            reactions.capture_rhs(&rhs);
         }
         // Constrained rows last: identity diagonal, prescribed value.
         for (d, c) in con.iter().enumerate() {
@@ -672,6 +703,7 @@ impl<'m> FluxSystem<'m> {
     }
 
     /// Upwinded DG convection linearized about `wfield`.
+    #[allow(clippy::too_many_arguments)]
     fn add_convection(
         &self,
         coo: &mut Coo,
@@ -680,6 +712,7 @@ impl<'m> FluxSystem<'m> {
         g: &dyn Fn([f64; 2]) -> [f64; 2],
         con: &[Option<f64>],
         boundary: Option<&boundary::AdmittedBoundary>,
+        mut reactions: Option<&mut ReactionAssembly>,
     ) {
         let mesh = self.mesh;
         let w_at = |t: usize, x: [f64; 2]| -> [f64; 2] {
@@ -706,9 +739,7 @@ impl<'m> FluxSystem<'m> {
                         // (u ⊗ w) : ∇v = Σ_rc u_r w_c ∂v_r/∂x_c
                         let val = uj[0] * (wv[0] * gv[0][0] + wv[1] * gv[0][1])
                             + uj[1] * (wv[0] * gv[1][0] + wv[1] * gv[1][1]);
-                        if con[gi].is_none() {
-                            coo.push(gi, gj, -wq * val);
-                        }
+                        momentum_entry(coo, &mut reactions, con, gi, gj, -wq * val);
                     }
                 }
             }
@@ -736,7 +767,7 @@ impl<'m> FluxSystem<'m> {
                     for i in 0..6 {
                         let gi = self.dof(t0, i);
                         let vi = eval_basis(&self.bases[t0], i, gx);
-                        if con[gi].is_some() {
+                        if con[gi].is_some() && reactions.is_none() {
                             continue;
                         }
                         if wn >= 0.0 || open_policy.is_some() {
@@ -751,7 +782,14 @@ impl<'m> FluxSystem<'m> {
                             for j in 0..6 {
                                 let gj = self.dof(t0, j);
                                 let uj = eval_basis(&self.bases[t0], j, gx);
-                                coo.push(gi, gj, wq * normal_flux * (uj[0] * vi[0] + uj[1] * vi[1]));
+                                momentum_entry(
+                                    coo,
+                                    &mut reactions,
+                                    con,
+                                    gi,
+                                    gj,
+                                    wq * normal_flux * (uj[0] * vi[0] + uj[1] * vi[1]),
+                                );
                             }
                         } else {
                             let gval = convection_boundary_trace(
@@ -775,13 +813,14 @@ impl<'m> FluxSystem<'m> {
                         for j in 0..6 {
                             let gj = self.dof(up, j);
                             let uj = eval_basis(&self.bases[up], j, gx);
-                            if con[gi].is_none() {
-                                coo.push(
-                                    gi,
-                                    gj,
-                                    wq * wn * (uj[0] * vi[0] + uj[1] * vi[1]) * side_sign[sa],
-                                );
-                            }
+                            momentum_entry(
+                                coo,
+                                &mut reactions,
+                                con,
+                                gi,
+                                gj,
+                                wq * wn * (uj[0] * vi[0] + uj[1] * vi[1]) * side_sign[sa],
+                            );
                         }
                     }
                 }
@@ -1408,6 +1447,7 @@ mod convection_tests {
             &advecting,
             &|_| [0.0; 2],
             &vec![None; system.n],
+            None,
             None,
         );
         let mut residual = vec![0.0; system.n];

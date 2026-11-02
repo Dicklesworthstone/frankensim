@@ -72,8 +72,9 @@ pub use gas_film::{
 };
 #[cfg(feature = "continuum")]
 pub use material::{
-    MaterialBrinkmanSolution, MaterialFluxError, MaterialFluxNumerics, MaterialFluxRheologyPoint,
-    MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
+    MaterialBoundaryLoad, MaterialBoundaryWrench, MaterialBrinkmanSolution, MaterialFluxError,
+    MaterialFluxNumerics, MaterialFluxRheologyPoint, MaterialFluxRheologySample,
+    MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
     MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution,
 };
@@ -81,9 +82,10 @@ pub use material::{
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};
 #[cfg(feature = "continuum")]
 pub use ns::boundary::{
-    NavierStokesBoundary, NavierStokesControls, NavierStokesStep, OpenBoundaryPolicy,
-    StokesAssembly, StokesBoundary, StokesBoundaryError, StokesPressureReference,
-    StokesRheologyControls, StokesRheologySolution, StokesSolution,
+    BoundaryLoad, BoundaryReactionOwner, BoundaryReactions, BoundaryWrench,
+    DiscreteBoundaryReaction, NavierStokesBoundary, NavierStokesControls, NavierStokesStep,
+    OpenBoundaryPolicy, StokesAssembly, StokesBoundary, StokesBoundaryError,
+    StokesPressureReference, StokesRheologyControls, StokesRheologySolution, StokesSolution,
 };
 #[cfg(feature = "continuum")]
 pub use ns::linearization::{

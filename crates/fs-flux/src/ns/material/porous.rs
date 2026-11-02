@@ -1,6 +1,6 @@
 //! Molecular source viscosity and physical units for native Brinkman momentum.
 
-use super::{MaterialFluxError, MaterialFluxSystem, MaterialStokesBoundary};
+use super::{MaterialBoundaryLoad, MaterialFluxError, MaterialFluxSystem, MaterialStokesBoundary};
 use crate::ns::FluxSolution;
 use crate::ns::boundary::{StokesBoundary, StokesPressureReference, StokesSolution};
 use crate::ns::porous::BrinkmanCell;
@@ -17,6 +17,26 @@ pub struct MaterialBrinkmanSolution {
 }
 
 impl MaterialBrinkmanSolution {
+    /// Physical discrete boundary reactions, retaining pore drag in the same
+    /// momentum equation. Mean-zero components need explicit pressure offsets
+    /// [Pa]; natural components retain their traction datum with None.
+    ///
+    /// # Errors
+    /// Refuses invalid selections/references or unrepresentable physical loads.
+    pub fn boundary_loads(
+        &self,
+        edges: &[usize],
+        origin_m: [f64; 2],
+        pressure_offsets_pa: &[Option<f64>],
+    ) -> Result<MaterialBoundaryLoad, MaterialFluxError> {
+        super::mixed::physical_boundary_load(
+            &self.flow,
+            self.transport.density_kg_m3(),
+            edges,
+            origin_m,
+            pressure_offsets_pa,
+        )
+    }
     /// Native BDM1/P0 result, including independent equation residuals.
     #[must_use]
     pub const fn discrete(&self) -> &FluxSolution {

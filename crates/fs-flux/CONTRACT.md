@@ -732,6 +732,80 @@ added but not executed in the resource-limited implementation session. They
 claim no general nonlinear convergence, empirical material validity or error
 envelope beyond their explicit manufactured physics.
 
+## Discrete pressure and viscous boundary reactions
+
+Every checked mixed `StokesSolution` now retains `BoundaryReactions` at the
+returned field. This includes steady/transient Stokes, Brinkman, frozen Oseen
+and accepted nonlinear Navier–Stokes/rheological endpoints. The primitive
+assembly keeps only the two discarded normal momentum equations per prescribed
+velocity edge, in a rectangular sparse matrix. Its RHS is retained before
+identity replacement. Pressure, symmetric stress, BOTH SIP consistency terms,
+mass/history, actual convection and any porous drag remain in those equations.
+Primal insertion order and strong-constraint arithmetic are unchanged; legacy
+assembly without mixed-boundary results does not retain reaction rows.
+
+This is a discrete reaction functional, not a pointwise P0 Cauchy-stress trace.
+Let R0 and R1 be the original normal-equation residuals evaluated with the
+RETURNED pressure datum. Their virtual work is `R0*m0(v)+R1*m1(v)`, where
+`m0=integral(v.n)/edge_length` and `m1=integral(s*v.n)/edge_length`, with
+`s` from -1/2 to 1/2 along the edge. Translation and rotation are exactly
+represented by the BDM1 trace, including the first normal moment.
+
+The original velocity-boundary kernel assembles full-vector Nitsche terms
+before eliminating normal rows. Consequently the recovery restores the FULL
+numerical viscous flux `2 nu D(u)n - eta*(u-g)`, not just its tangent, where
+`eta=sigma*nu/(2*cell_area/edge_length)` is the actual one-sided penalty.
+The adjoint-consistency contribution remains in R; it is not discarded or
+replaced by a pressure-only trace. For a global rigid extraction velocity,
+`D(v)=0` and its interior jump is zero. The constraint functional plus restored
+numerical flux therefore reconstructs the original rigid weak momentum work.
+The reported stress is its negative: force and moment exerted by fluid on the
+exterior. General Nitsche weak-form reaction extraction is discussed by
+D'Angella et al. (2022), Journal of Mechanics 38, 60–76,
+<https://doi.org/10.1093/jom/ufac006>; their mesh formulation and convergence
+results are not claimed for this BDM1/SIP implementation.
+
+`BoundaryReactionOwner` distinguishes velocity constraints from open traction.
+A velocity condition may be an inlet/outlet and is never inferred to be an
+impermeable mechanical wall. Open edges retain the supplied total stress and
+any declared backflow resistance separately. `outward_momentum` uses the
+original upwind trace and reversing-face split quadrature; it is advective
+transport, not a wall force. For dissipative open boundaries the physical
+outward momentum remains `(w.n)u`, while the separately reported stress adds
+`min(w.n,0)u`. Their difference is the actual `max(w.n,0)u` operator. No pressure,
+stress or momentum transfer is counted twice.
+
+`BoundaryReactions::resultant` selects original boundary edges, an authored
+moment origin, and component-indexed pressure offsets. Selected mean-zero
+components REQUIRE an explicit offset, including an explicit zero if desired;
+traction-datum components retain their imposed stress with None. The pressure
+offset adds the corresponding normal-pressure force and moment. Actual applied
+references are retained in the result; one chamber cannot supply another's
+unknown reference. Empty, duplicate, nonboundary or incompatible selections
+and nonfinite resultants refuse. No thermodynamic absolute pressure is inferred.
+
+The native force/moment are divided by the constant reference density. Material
+`boundary_loads` accessors return force per depth [N/m] and moment per depth
+[(N m)/m = N], using the SAME retained density as inertia and reported pressure.
+`rigid_power_w_per_m` evaluates `F.V + M*omega` [W/m] at an explicitly authored
+rigid virtual motion. This is conjugate mechanical work, not advective kinetic
+energy or a body/mesh time update. Endpoint viscosity, prescribed data and
+advection are retained from the accepted assembly; reaction reporting makes no
+new source query, nonlinear solve or full-operator assembly. The existing
+material-rheology cache and pressure/solver refusal semantics remain intact.
+
+`tests/stokes_boundary/reaction.rs` adds a static pressure box with a traction
+datum; affine shear AND normal strain with exact forces, moments and work;
+disconnected hydrostatic fields with explicit offsets and a naive cell-pressure
+trace falsifier; and non-affine BDF rheological flow whose whole-domain linear
+and angular momentum balances include actual SIP slip, nonzero history and
+separate natural/dissipative open fluxes. The material rheology regression also
+checks SI endpoint reactions and source-query reuse under density swaps. These
+regressions were added but not executed in the resource-limited implementation
+session. No pointwise traction error bound, moving-domain/FSI integration,
+whole-scheme passivity, performance benchmark or new cancellation guarantee is
+claimed.
+
 ## Horizontal capillary meniscus transport
 
 The existing fully filled Hagen–Poiseuille API remains a distinct model.

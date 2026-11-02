@@ -6,11 +6,110 @@ use super::{
 };
 use crate::ns::FluxSolution;
 use crate::ns::boundary::{
-    StokesBoundary, StokesPressureReference, StokesRheologyControls, StokesRheologySolution,
-    StokesSolution,
+    BoundaryWrench, StokesBoundary, StokesPressureReference, StokesRheologyControls,
+    StokesRheologySolution, StokesSolution,
 };
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
+
+/// Physical effort per metre of out-of-plane depth, about an explicit origin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialBoundaryWrench {
+    /// Force per unit depth [N/m].
+    pub force_n_per_m: [f64; 2],
+    /// Moment per unit depth [(N m)/m = N], positive counterclockwise.
+    pub moment_n: f64,
+}
+
+impl MaterialBoundaryWrench {
+    /// Mechanical power per unit depth [W/m] for an authored rigid virtual
+    /// motion: translation [m/s] at the moment origin and angular rate [1/s].
+    /// This evaluates conjugate work; it does not advance body/mesh motion or
+    /// include transported kinetic energy.
+    ///
+    /// # Errors
+    /// Refuses nonfinite motion or unrepresentable power.
+    pub fn rigid_power_w_per_m(
+        self,
+        translation: [f64; 2],
+        angular_rate: f64,
+    ) -> Result<f64, MaterialFluxError> {
+        let power = self.force_n_per_m[0] * translation[0]
+            + self.force_n_per_m[1] * translation[1]
+            + self.moment_n * angular_rate;
+        if !translation.iter().all(|v| v.is_finite())
+            || !angular_rate.is_finite()
+            || !power.is_finite()
+        {
+            return Err(MaterialFluxError::Invalid(
+                "nonfinite physical boundary power",
+            ));
+        }
+        Ok(power)
+    }
+}
+
+/// Actual discrete pressure/viscous reactions in SI, with momentum transport
+/// kept separate. Two-dimensional forces are N/m, moments N, and powers W/m.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialBoundaryLoad {
+    /// Origin [m] for every moment.
+    pub origin_m: [f64; 2],
+    /// Total discrete stress effort exerted by fluid on exterior.
+    pub stress: MaterialBoundaryWrench,
+    /// Supplied open stress, with sign reversed to act on exterior.
+    pub imposed: MaterialBoundaryWrench,
+    /// Separately declared open-boundary backflow resistance on exterior.
+    pub backflow: MaterialBoundaryWrench,
+    /// Outward advective momentum and its moment; not a mechanical wall load.
+    pub outward_momentum: MaterialBoundaryWrench,
+    /// Selected component references: None retains its traction datum;
+    /// Some(offset) adds that authored [Pa] offset to its mean-zero pressure.
+    pub pressure_offsets_pa: Vec<(usize, Option<f64>)>,
+}
+
+pub(super) fn physical_boundary_load(
+    flow: &StokesSolution,
+    density: f64,
+    edges: &[usize],
+    origin_m: [f64; 2],
+    pressure_offsets_pa: &[Option<f64>],
+) -> Result<MaterialBoundaryLoad, MaterialFluxError> {
+    let offsets: Vec<_> = pressure_offsets_pa
+        .iter()
+        .map(|value| value.map(|p| p / density))
+        .collect();
+    let load = flow
+        .reactions
+        .resultant(edges, origin_m, &offsets)
+        .map_err(MaterialFluxError::Boundary)?;
+    let physical = |value: BoundaryWrench| {
+        let force_n_per_m = value.force.map(|f| density * f);
+        let moment_n = density * value.moment;
+        if !force_n_per_m.iter().all(|f| f.is_finite()) || !moment_n.is_finite() {
+            Err(MaterialFluxError::Invalid(
+                "unrepresentable physical boundary effort",
+            ))
+        } else {
+            Ok(MaterialBoundaryWrench {
+                force_n_per_m,
+                moment_n,
+            })
+        }
+    };
+    Ok(MaterialBoundaryLoad {
+        origin_m,
+        stress: physical(load.stress)?,
+        imposed: physical(load.imposed)?,
+        backflow: physical(load.backflow)?,
+        outward_momentum: physical(load.outward_momentum)?,
+        pressure_offsets_pa: load
+            .pressure_offsets
+            .iter()
+            .map(|(component, _)| (*component, pressure_offsets_pa[*component]))
+            .collect(),
+    })
+}
 
 /// Exactly one physical velocity or total-traction owner per boundary edge.
 /// Geometry is in metres. Callbacks must be pure and fixed during the solve.
@@ -41,6 +140,27 @@ pub struct MaterialStokesSolution {
 }
 
 impl MaterialStokesSolution {
+    /// Evaluate selected boundary reactions using retained endpoint coefficients
+    /// and source density. Mean-zero components require explicit offsets [Pa];
+    /// traction-datum components require None. Velocity edges are not inferred
+    /// to be impermeable walls. No material or boundary callback is queried.
+    ///
+    /// # Errors
+    /// Refuses invalid selections/references or unrepresentable physical loads.
+    pub fn boundary_loads(
+        &self,
+        edges: &[usize],
+        origin_m: [f64; 2],
+        pressure_offsets_pa: &[Option<f64>],
+    ) -> Result<MaterialBoundaryLoad, MaterialFluxError> {
+        physical_boundary_load(
+            &self.flow,
+            self.transport.density_kg_m3(),
+            edges,
+            origin_m,
+            pressure_offsets_pa,
+        )
+    }
     /// Original BDM1/P0 field and independently checked equation residuals.
     #[must_use]
     pub const fn discrete(&self) -> &FluxSolution {
@@ -89,6 +209,32 @@ pub struct MaterialStokesRheologySolution<G> {
 }
 
 impl<G> MaterialStokesRheologySolution<G> {
+    /// Physical selected-edge reactions at the accepted constitutive field.
+    /// Explicit mean-zero offsets [Pa] and retained traction datums follow
+    /// [`MaterialStokesSolution::boundary_loads`]. No source requery occurs.
+    ///
+    /// # Errors
+    /// Refuses invalid selections/references or unrepresentable physical loads.
+    pub fn boundary_loads(
+        &self,
+        edges: &[usize],
+        origin_m: [f64; 2],
+        pressure_offsets_pa: &[Option<f64>],
+    ) -> Result<MaterialBoundaryLoad, MaterialFluxError> {
+        let density = self
+            .samples
+            .first()
+            .ok_or(MaterialFluxError::Invalid("missing endpoint material"))?
+            .transport()
+            .density_kg_m3();
+        physical_boundary_load(
+            &self.flow.solution,
+            density,
+            edges,
+            origin_m,
+            pressure_offsets_pa,
+        )
+    }
     /// Primitive velocity/kinematic-pressure coefficients and independently
     /// reassembled original and row-scaled nonlinear endpoint residuals.
     #[must_use]
