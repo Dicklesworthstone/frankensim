@@ -10,11 +10,13 @@
 //!
 //! Geometry is in metres, velocity in m/s, force density in N/m³, and time
 //! in seconds. The base binding is a homogeneous Newtonian incompressible
-//! snapshot. Its rheological BDF1 and mixed Stokes entries resolve cellwise
-//! material responses at the evolving strain, retaining their exact owners.
-//! Neither entry infers gas compressibility, phase validity or thermal evolution.
+//! snapshot. Its rheological BDF1, mixed Stokes and mixed Navier–Stokes entries
+//! resolve cellwise material responses at the evolving strain, retaining their
+//! exact owners. They infer no gas compressibility, phase validity or thermal
+//! evolution.
 //! Force and boundary callbacks must be pure and fixed during admission and
-//! solution. Prescribed boundary velocities must have zero net outward flux.
+//! solution. Prescribed velocities on each sealed component must have zero
+//! net outward flux.
 
 use std::cell::Cell;
 
@@ -34,7 +36,9 @@ mod porous;
 #[path = "material/rheology.rs"]
 mod rheology;
 pub use mixed::{MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution};
-pub use navier_stokes::{MaterialNavierStokesBoundary, MaterialNavierStokesStep};
+pub use navier_stokes::{
+    MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
+};
 pub use porous::MaterialBrinkmanSolution;
 
 /// Numerical choices, separate from the material's physical viscosity.

@@ -3,6 +3,9 @@
 use super::*;
 use fs_flux::{MaterialNavierStokesBoundary, NavierStokesControls, OpenBoundaryPolicy};
 
+#[path = "navier_stokes_rheology.rs"]
+mod rheology;
+
 #[test]
 fn nonlinear_mixed_flow_keeps_shared_gas_density_and_viscous_traction_in_si() {
     let mesh = mesh();

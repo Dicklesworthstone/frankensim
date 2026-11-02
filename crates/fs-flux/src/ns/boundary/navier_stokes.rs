@@ -52,12 +52,12 @@ pub enum NavierStokesBoundary<'a> {
 /// Bounded Picard controls shared with the existing mixed constitutive solver.
 pub type NavierStokesControls = StokesRheologyControls;
 
-/// A nonlinear endpoint accepted against its own convection operator.
+/// A nonlinear endpoint accepted against its own convection and viscosity.
 pub struct NavierStokesStep {
     /// Velocity and pressure with component-local datums and actual endpoint
     /// residuals, rather than only the last frozen Oseen solve's residuals.
     pub solution: StokesSolution,
-    /// Number of completed frozen-advection solves.
+    /// Number of completed frozen-advection/constitutive solves.
     pub iterations: usize,
     /// Relative velocity correction before relaxation.
     pub relative_update: f64,
@@ -206,6 +206,124 @@ impl<'m> FluxSystem<'m> {
         timestep_s: f64,
         controls: NavierStokesControls,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_bdf1(
+            params,
+            boundaries,
+            previous_velocity,
+            timestep_s,
+            controls,
+            &|admitted, velocity| {
+                self.assemble_stokes_admitted_operator(
+                    params,
+                    viscosity,
+                    force,
+                    admitted,
+                    None,
+                    timestep_s.recip(),
+                    Some(previous_velocity),
+                    Some(&velocity[..self.n_u]),
+                )
+            },
+            &|| true,
+        )
+    }
+
+    /// Advance pressure-driven generalized-Newtonian Navier–Stokes with both
+    /// convection and `nu(cell, point, gamma)` implicit at the new time level.
+    /// Here `gamma = sqrt(2 D(u):D(u))` [1/s] is computed from each cell's
+    /// affine BDM1 velocity, and the law returns positive kinematic viscosity
+    /// [m²/s]. The strain and advecting velocity always come from the SAME
+    /// candidate, including the independently reassembled endpoint residual.
+    ///
+    /// The actual previous velocity initializes the law; there is no assumed
+    /// zero-shear probe or viscosity floor. Captured temperature/composition
+    /// and the density stay fixed, while viscosity may vary with position and
+    /// strain. `params.nu` is unused. One-sided harmonic SIP stress, admitted
+    /// boundary samples, mass history and the explicit backflow policy retain
+    /// their original owners. This adds no thermal or viscoelastic evolution.
+    ///
+    /// # Errors
+    /// Inherits mixed nonlinear admission and convergence refusals, and rejects
+    /// nonfinite strain or a nonpositive/nonfinite constitutive response.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf1_navier_stokes_mixed_rheology_step(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.bdf1_navier_stokes_mixed_rheology_step_checked(
+            params,
+            law,
+            force,
+            boundaries,
+            previous_velocity,
+            timestep_s,
+            controls,
+            &|| true,
+        )
+    }
+
+    // A material source retains its typed refusal outside the scalar law.
+    // The common Picard owner checks it before any solve or final publication.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf1_navier_stokes_mixed_rheology_step_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_bdf1(
+            params,
+            boundaries,
+            previous_velocity,
+            timestep_s,
+            controls,
+            &|admitted, velocity| {
+                let rates = self.shear_rates(velocity);
+                if rates.iter().any(|rate| !rate.is_finite()) {
+                    return Err(StokesBoundaryError::InvalidInput("nonfinite shear rate"));
+                }
+                self.assemble_stokes_admitted_operator(
+                    params,
+                    &|cell, point| law(cell, point, rates[cell]),
+                    force,
+                    admitted,
+                    None,
+                    timestep_s.recip(),
+                    Some(previous_velocity),
+                    Some(&velocity[..self.n_u]),
+                )
+            },
+            source_is_valid,
+        )
+    }
+
+    // Preserve one admission/reporting path without adding strain work to the
+    // frozen-viscosity entry. Only the candidate-dependent operator differs.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_navier_stokes_mixed_bdf1<'a>(
+        &'a self,
+        params: FluxParams,
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        assemble: &dyn Fn(
+            &AdmittedBoundary,
+            &[f64],
+        ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError>,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
         self.check_mixed_bdf1_history(previous_velocity, timestep_s)?;
         if controls.maximum_iterations == 0
             || !controls.relative_tolerance.is_finite()
@@ -222,19 +340,8 @@ impl<'m> FluxSystem<'m> {
         let solved = self.solve_mixed_picard(
             previous_velocity,
             controls,
-            &|velocity| {
-                self.assemble_stokes_admitted_operator(
-                    params,
-                    viscosity,
-                    force,
-                    &admitted,
-                    None,
-                    timestep_s.recip(),
-                    Some(previous_velocity),
-                    Some(&velocity[..self.n_u]),
-                )
-            },
-            &|| true,
+            &|velocity| assemble(&admitted, velocity),
+            source_is_valid,
         )?;
         Ok(NavierStokesStep {
             solution: solved.solution,

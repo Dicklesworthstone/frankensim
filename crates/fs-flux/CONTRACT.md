@@ -676,10 +676,61 @@ convection-omitted falsifier, independently integrated natural/backflow matrix
 work including a reversing boundary face, exact original all-velocity operator
 identity, invalid/exhausted nonlinear steps, and two actual gas-source states
 with coherent SI stress and energy. They were added but not executed in the
-resource-limited implementation session. This remains fixed-mesh 2-D flow with
-frozen viscosity; no new implicit rheology, variable-density storage, thermal
-or turbulent closure, nonlinear adjoint, whole-scheme stability, scalable
-throughput or synchronous cancellation claim is made.
+resource-limited implementation session. These original entries use frozen
+viscosity. The constitutive extension below closes viscosity at the endpoint;
+all of these entries remain fixed-mesh 2-D incompressible flow, without
+variable-density storage, thermal or turbulent closure, nonlinear adjoints,
+whole-scheme stability, scalable throughput or synchronous cancellation claims.
+
+### Coupled rheology and pressure-driven transient inertia
+
+`FluxSystem::bdf1_navier_stokes_mixed_rheology_step` advances
+`(u-u_old)/dt + div(u tensor u) - div(2 nu(x,gamma) D(u)) + grad(p) = f`,
+where `gamma = sqrt(2 D:D)` [1/s] is evaluated from each cell's actual affine
+BDM1 velocity. The caller's law supplies positive finite kinematic viscosity
+[m²/s] at the given cell, position and strain. Spatial viscosity gradients
+and one-sided interface stresses remain in the original symmetric-stress
+operator. There is no separate pressure approximation or Laplacian shortcut.
+The actual old velocity initializes both constitutive strain and convection;
+the new path does not probe an invented zero-shear state or add a floor.
+
+Convection and viscosity use the SAME candidate at every Picard assembly and
+at independent endpoint acceptance. The shared bounded iteration still
+requires the unrelaxed correction and original/row-scaled nonlinear residuals.
+Accepting a frozen constitutive response or frozen history advection is
+insufficient. Boundary samples, component-local pressure datums, continuity,
+history and the natural/dissipative backflow laws above retain their existing
+owners. The frozen-viscosity path does not allocate a new strain field.
+
+`MaterialFluxSystem::bdf1_navier_stokes_mixed_rheology_step` resolves the
+original `FluidTransport` source at each cell centroid and actual candidate
+strain. The existing `RheologyField` caches unchanged cell/rate queries and
+reuses one source response throughout cell and face quadrature. Every source
+must preserve the reference density: that SAME rho scales inertia, convection,
+dynamic viscosity, body force, physical traction, added backflow resistance,
+pressure [Pa] and kinetic energy [J/m]. Source failure, including at the final
+reassembly, retains its original typed error and refuses before publication.
+No changed-density response or fallback viscosity is an accepted endpoint.
+
+`MaterialNavierStokesRheologyStep` returns the physical flow and explicit
+boundary policies through `step`, and the exact accepted per-cell source
+owners through `samples()`. The original homogeneous transport snapshot remains
+the constant-density reference; `samples()` supplies the endpoint viscosities.
+Reporting does not query the source again. Captured temperature/composition
+stay fixed, and this generalized-Newtonian law adds no material fitting,
+thermal evolution, viscoelastic memory or density evolution.
+
+The focused `navier_stokes_rheology.rs` regressions under `tests/stokes_boundary`
+and `tests/material_flow` add an independently derived affine unsteady flow
+with nonzero history, live convection and shear-dependent spatial viscosity;
+both explicit backflow laws and traction pressure datums; independent endpoint
+assembly with lagged-strain and lagged-advection falsifiers; physical material
+swaps and analytic kinetic energy; retained final source identities and bounded
+query counts; and final-reassembly source/density refusals, invalid coefficients
+and exhausted nonlinear work without changed history. These regressions were
+added but not executed in the resource-limited implementation session. They
+claim no general nonlinear convergence, empirical material validity or error
+envelope beyond their explicit manufactured physics.
 
 ## Horizontal capillary meniscus transport
 

@@ -38,7 +38,7 @@ where
     pub(super) fn viscosity(&self, cell: usize, rate: f64) -> f64 {
         let fallback = self.reference.kinematic_viscosity_m2_s();
         if !self.is_valid() {
-            // Only the already-started assembly may finish. Both callers
+            // Only the already-started assembly may finish. All callers
             // inspect is_valid before solving or publishing its candidate.
             return fallback;
         }

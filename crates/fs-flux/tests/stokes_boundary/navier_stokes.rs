@@ -4,6 +4,9 @@ use super::*;
 use fs_flux::bdm::edge_gauss_pub;
 use fs_flux::{NavierStokesBoundary, NavierStokesControls, OpenBoundaryPolicy};
 
+#[path = "navier_stokes_rheology.rs"]
+mod rheology;
+
 fn moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
     let mut values = Vec::new();
     for edge in &mesh.edges {

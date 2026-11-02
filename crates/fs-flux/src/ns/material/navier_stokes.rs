@@ -1,8 +1,15 @@
 //! Shared-source SI pressure and inertia for nonlinear mixed-boundary flow.
 
-use super::{MaterialFluxError, MaterialFluxSystem, MaterialStokesSolution};
-use crate::ns::boundary::{NavierStokesBoundary, NavierStokesControls, OpenBoundaryPolicy};
-use fs_material::fluid_transport::FluidTransport;
+use super::rheology::RheologyField;
+use super::{
+    MaterialFluxError, MaterialFluxRheologyPoint, MaterialFluxRheologySample, MaterialFluxSystem,
+    MaterialStokesSolution,
+};
+use crate::ns::boundary::{
+    NavierStokesBoundary, NavierStokesControls, NavierStokesStep, OpenBoundaryPolicy,
+};
+use fs_material::MaterialError;
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
 /// Physical endpoint conditions on the original FEEC boundary edges.
 #[derive(Clone, Copy)]
@@ -31,7 +38,7 @@ pub enum MaterialNavierStokesBoundary<'a> {
 pub struct MaterialNavierStokesStep {
     /// Physical pressure, velocity history, kinetic energy and source state.
     pub solution: MaterialStokesSolution,
-    /// Completed frozen-advection solves.
+    /// Completed frozen-advection/constitutive solves.
     pub iterations: usize,
     /// Final velocity correction before relaxation.
     pub relative_update: f64,
@@ -39,6 +46,25 @@ pub struct MaterialNavierStokesStep {
     pub nonlinear_residual: f64,
     /// Actual open-boundary policies, retaining the meaning of supplied loads.
     pub open_boundary_policies: Vec<(usize, OpenBoundaryPolicy)>,
+}
+
+/// Accepted pressure-driven transient and its exact endpoint material owners.
+pub struct MaterialNavierStokesRheologyStep<G> {
+    /// Physical flow, convergence evidence and the declared open-boundary laws.
+    /// The retained transport snapshot supplies the constant reference density;
+    /// endpoint viscosities are in [`Self::samples`], not that initial snapshot.
+    pub step: MaterialNavierStokesStep,
+    samples: Vec<MaterialFluxRheologySample<G>>,
+}
+
+impl<G> MaterialNavierStokesRheologyStep<G> {
+    /// One original constitutive owner per triangle in mesh order, evaluated
+    /// at the returned velocity and used in its accepted nonlinear residual.
+    /// Reading these retained responses does not query the source again.
+    #[must_use]
+    pub fn samples(&self) -> &[MaterialFluxRheologySample<G>] {
+        &self.samples
+    }
 }
 
 impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
@@ -65,51 +91,85 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         controls: NavierStokesControls,
     ) -> Result<MaterialNavierStokesStep, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
-        // One homogeneous closure allocation; no boxed callback per edge.
-        let scaled: Vec<_> = boundaries
-            .iter()
-            .map(|boundary| {
-                move |point, normal| match boundary {
-                    MaterialNavierStokesBoundary::Open { traction, .. } => {
-                        let t = traction(point, normal);
-                        [t[0] / density, t[1] / density]
-                    }
-                    MaterialNavierStokesBoundary::Velocity { .. } => {
-                        unreachable!("only open edges request traction samples")
-                    }
-                }
-            })
-            .collect();
-        let native: Vec<_> = boundaries
-            .iter()
-            .zip(&scaled)
-            .map(|(boundary, traction)| match *boundary {
-                MaterialNavierStokesBoundary::Velocity { edge, value } => {
-                    NavierStokesBoundary::Velocity { edge, value }
-                }
-                MaterialNavierStokesBoundary::Open { edge, backflow, .. } => {
-                    NavierStokesBoundary::Open {
-                        edge,
-                        traction,
-                        backflow,
-                    }
-                }
-            })
-            .collect();
-        let endpoint = self
-            .system
-            .bdf1_navier_stokes_mixed_step(
+        let endpoint = with_kinematic_boundaries(density, boundaries, |native| {
+            self.system.bdf1_navier_stokes_mixed_step(
                 self.params,
                 &|point| {
                     let f = force_density(point);
                     [f[0] / density, f[1] / density]
                 },
-                &native,
+                native,
                 previous_velocity,
                 timestep_s,
                 controls,
             )
-            .map_err(MaterialFluxError::Boundary)?;
+        })
+        .map_err(MaterialFluxError::Boundary)?;
+        self.material_navier_stokes_step(endpoint)
+    }
+
+    /// Advance pressure-driven generalized-Newtonian BDF1 with the original
+    /// material law resolved at each candidate's actual cell strain [1/s].
+    /// The returned velocity must satisfy BOTH implicit convection and the
+    /// shear-dependent viscous stress in its independently rebuilt residual.
+    ///
+    /// Each source response must retain the reference density. That same rho
+    /// scales dynamic viscosity, inertia, force density [N/m³], total traction
+    /// [Pa], explicit backflow resistance, recovered pressure and energy.
+    /// Mechanical traction pressure is never used as thermodynamic pressure.
+    /// resolve receives the cell centroid [m] and strain invariant; captured
+    /// temperature/composition remain fixed during this step. Unchanged
+    /// cell/rate queries are cached, and the exact final owners are returned
+    /// by [`MaterialNavierStokesRheologyStep::samples`].
+    ///
+    /// The initial material snapshot remains the reference, while returned
+    /// samples supply the endpoint viscosities. No constitutive fit, floor,
+    /// thermal update, viscoelastic memory or density evolution is inferred.
+    /// Boundary callbacks must be pure and describe the new time level.
+    ///
+    /// # Errors
+    /// Preserves the original source refusal, rejects changed density and all
+    /// native boundary/coefficient/nonlinear failures, and never publishes a
+    /// fallback source or partial endpoint. History is unchanged on refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf1_navier_stokes_mixed_rheology_step<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+    ) -> Result<MaterialNavierStokesRheologyStep<G>, MaterialFluxError> {
+        let density = self.transport.density_kg_m3();
+        let field = RheologyField::new(&self.system.mesh.centroids, &self.transport, resolve);
+        let result = with_kinematic_boundaries(density, boundaries, |native| {
+            self.system.bdf1_navier_stokes_mixed_rheology_step_checked(
+                self.params,
+                &|cell, _, rate| field.viscosity(cell, rate),
+                &|point| {
+                    let f = force_density(point);
+                    [f[0] / density, f[1] / density]
+                },
+                native,
+                previous_velocity,
+                timestep_s,
+                controls,
+                &|| field.is_valid(),
+            )
+        })
+        .map_err(MaterialFluxError::Boundary);
+        let (endpoint, samples) = field.finish(result)?;
+        Ok(MaterialNavierStokesRheologyStep {
+            step: self.material_navier_stokes_step(endpoint)?,
+            samples,
+        })
+    }
+
+    fn material_navier_stokes_step(
+        &self,
+        endpoint: NavierStokesStep,
+    ) -> Result<MaterialNavierStokesStep, MaterialFluxError> {
         Ok(MaterialNavierStokesStep {
             solution: self.material_stokes_solution(endpoint.solution)?,
             iterations: endpoint.iterations,
@@ -118,4 +178,43 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             open_boundary_policies: endpoint.open_boundary_policies,
         })
     }
+}
+
+fn with_kinematic_boundaries<T>(
+    density: f64,
+    boundaries: &[MaterialNavierStokesBoundary<'_>],
+    solve: impl FnOnce(&[NavierStokesBoundary<'_>]) -> T,
+) -> T {
+    // One homogeneous closure allocation; no boxed callback per edge.
+    let scaled: Vec<_> = boundaries
+        .iter()
+        .map(|boundary| {
+            move |point, normal| match boundary {
+                MaterialNavierStokesBoundary::Open { traction, .. } => {
+                    let t = traction(point, normal);
+                    [t[0] / density, t[1] / density]
+                }
+                MaterialNavierStokesBoundary::Velocity { .. } => {
+                    unreachable!("only open edges request traction samples")
+                }
+            }
+        })
+        .collect();
+    let native: Vec<_> = boundaries
+        .iter()
+        .zip(&scaled)
+        .map(|(boundary, traction)| match *boundary {
+            MaterialNavierStokesBoundary::Velocity { edge, value } => {
+                NavierStokesBoundary::Velocity { edge, value }
+            }
+            MaterialNavierStokesBoundary::Open { edge, backflow, .. } => {
+                NavierStokesBoundary::Open {
+                    edge,
+                    traction,
+                    backflow,
+                }
+            }
+        })
+        .collect();
+    solve(&native)
 }

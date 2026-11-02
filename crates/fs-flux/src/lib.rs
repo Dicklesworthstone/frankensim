@@ -74,8 +74,8 @@ pub use gas_film::{
 pub use material::{
     MaterialBrinkmanSolution, MaterialFluxError, MaterialFluxNumerics, MaterialFluxRheologyPoint,
     MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
-    MaterialNavierStokesBoundary, MaterialNavierStokesStep, MaterialStokesBoundary,
-    MaterialStokesRheologySolution, MaterialStokesSolution,
+    MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
+    MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution,
 };
 #[cfg(feature = "continuum")]
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};
