@@ -5147,6 +5147,26 @@ None.
   damping, rest gap, collision, mucosal speed authored Estimate — the
   honesty ladder's permitted rung, card-driven either way.
 
+- Glottal flow observation (`glottis::glottal_qois` and the checked
+  `glottal_qois_with_options`) uses fixed-window FFT correlation and the
+  YIN cumulative-mean normalized difference, with raw-difference parabolic
+  lag interpolation. Fractional mean crossings refine coherent periods and
+  avoid integer-sample jitter. Pitch-band edges bracket the continuous
+  trough; an out-of-band estimate is not clamped into the band or promoted
+  to its double period. Constant or unvoiced records identify no pitch
+  (`f0_hz = 0`); invalid input is a typed refusal, or NaNs through the
+  original convenience API. The pitch band, periodicity threshold, and
+  conservative numeric workspace limit are explicit options. DC and up to
+  six strictly sub-Nyquist harmonics are jointly fitted by `fs-fft`'s shared
+  QR owner. Peak amplitudes and unexplained RMS retain input flow units;
+  absent or residual-buried harmonics do not acquire invented finite dB
+  levels. Undefined slope or ambiguous mean-crossing jitter remains NaN.
+  This is a descriptive, approximately stationary record observer, not a
+  clinical voice standard, calibrated voicing probability, or physical
+  uncertainty certificate. G0/G1/G3 regressions cover the FFT/direct-sum
+  identity, constant/noise/ramp rejection, fractional-period spectral tilt,
+  missing fundamental, band edges, Nyquist, physical scaling, and refusals.
+
 - `tract` module (bead 3ez8g.8.1): the tract as A(x,t) with LICENSED
   charts (Assaneo 2011 PLOS CC-BY Table 2 — the authors' own 10-tube
   /a/ and /u/; Spanish, acoustically-inverted, formant-valid register
