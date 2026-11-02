@@ -30,6 +30,9 @@ mod pulsed;
 #[path = "optical_heating/surface.rs"]
 mod surface;
 
+#[path = "optical_heating/coating.rs"]
+mod coating;
+
 #[path = "optical_heating/surface_feedback.rs"]
 mod surface_feedback;
 

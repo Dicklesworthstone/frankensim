@@ -16,7 +16,8 @@ use fs_blake3::{ContentHash, DomainHasher};
 
 // The original dielectric coating owner admits this per-layer power roundoff.
 // This is a floating-point admission allowance, not a certified error bound.
-const RESPONSE_ROUNDOFF: f64 = 512.0 * f64::EPSILON * (MAX_COHERENT_STACK_LAYERS + 1) as f64;
+pub(super) const RESPONSE_ROUNDOFF: f64 =
+    512.0 * f64::EPSILON * (MAX_COHERENT_STACK_LAYERS + 1) as f64;
 
 /// Immutable spectral response for one already resolved incidence geometry.
 ///
@@ -270,7 +271,7 @@ impl<const N: usize> SurfacePowerResponse<N> {
         &self.absorbed
     }
 
-    fn finish(
+    pub(super) fn finish(
         mut hash: DomainHasher,
         wavelengths_nm: [f64; N],
         reflected: [f64; N],
@@ -305,7 +306,7 @@ impl<const N: usize> SurfacePowerResponse<N> {
     }
 }
 
-fn validate_packet<const N: usize>(
+pub(super) fn validate_packet<const N: usize>(
     wavelengths: &[f64; N],
     s_fraction: &[f64; N],
 ) -> Result<(), SurfaceHeatingError> {
@@ -323,7 +324,10 @@ fn validate_packet<const N: usize>(
     Ok(())
 }
 
-fn response_hash(kind: &[u8], source: ContentHash) -> Result<DomainHasher, SurfaceHeatingError> {
+pub(super) fn response_hash(
+    kind: &[u8],
+    source: ContentHash,
+) -> Result<DomainHasher, SurfaceHeatingError> {
     if source == ContentHash([0; 32]) {
         return Err(invalid("explicit surface optical source identity required"));
     }
@@ -333,7 +337,7 @@ fn response_hash(kind: &[u8], source: ContentHash) -> Result<DomainHasher, Surfa
     Ok(hash)
 }
 
-fn hash_geometry<const N: usize>(
+pub(super) fn hash_geometry<const N: usize>(
     hash: &mut DomainHasher,
     cosine: f64,
     incident_eta: &[f64; N],
@@ -350,7 +354,7 @@ fn hash_values<const N: usize>(hash: &mut DomainHasher, values: [f64; N]) {
     }
 }
 
-fn mix(values: [f64; 2], s_fraction: f64) -> f64 {
+pub(super) fn mix(values: [f64; 2], s_fraction: f64) -> f64 {
     s_fraction * values[0] + (1.0 - s_fraction) * values[1]
 }
 

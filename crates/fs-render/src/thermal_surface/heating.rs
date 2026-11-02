@@ -7,12 +7,18 @@
 //! Outgoing light remains the responsibility of its original transport owner.
 //!
 //! Responses are fixed or supplied by an explicit native-temperature/enthalpy
-//! conductor law. No phase mixing, spatial deposition depth, multilayer heat
-//! partition, emission or cooling law is inferred. Native caloric storage,
+//! conductor law. Coated sources can assign the original coherent film and
+//! substrate absorption to separate native cells. No phase mixing, within-film
+//! deposition depth, emission or cooling law is inferred. Native caloric storage,
 //! conduction and independently composed boundary owners remain authoritative.
 
 mod response;
 pub use response::SurfacePowerResponse;
+/// Coherent coating absorption assigned to separate native thermal receivers.
+pub mod coating;
+pub use coating::{
+    CoatedSurfaceIlluminationSource, CoatedSurfacePowerResponse, SurfaceHeatingReceiver,
+};
 
 /// Explicit conductor optical constants versus native temperature or enthalpy.
 pub mod feedback;
@@ -22,8 +28,8 @@ pub use state::{StatefulSurfaceIlluminationSource, SurfaceIncidence};
 
 pub mod diffuse_feedback;
 mod diffuse_state;
-use diffuse_state::SurfaceDiffuseFeedbackState;
 pub use diffuse_state::StatefulDiffuseSurfaceIlluminationSource;
+use diffuse_state::SurfaceDiffuseFeedbackState;
 
 use super::ThermalSurfaceError;
 use crate::conductor::ConductorError;
@@ -146,6 +152,8 @@ struct Model<const N: usize> {
     transitions_s: Vec<f64>,
     budget: SurfaceHeatingBudget,
     tolerance: SurfaceHeatingTolerance,
+    /// Present only for sources with an explicit film/substrate partition.
+    coating_receivers: BTreeMap<u64, Box<[coating::AbsorptionReceiver<N>]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -330,6 +338,7 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
                 transitions_s,
                 budget,
                 tolerance,
+                coating_receivers: BTreeMap::new(),
             }),
             feedback: None,
             diffuse_feedback: None,
@@ -547,7 +556,18 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
                 }
                 residuals[lane].add(residual)?;
                 absorbed.add(heat)?;
-                if heat > 0.0 {
+                if let Some(receivers) = self.model.coating_receivers.get(&source.source_id) {
+                    for receiver in receivers {
+                        checkpoint()?;
+                        let local_heat = physical_product(incident, receiver.absorbed[lane])?;
+                        if local_heat > 0.0 {
+                            receiving
+                                .entry(receiver.cell)
+                                .or_default()
+                                .add(local_heat)?;
+                        }
+                    }
+                } else if heat > 0.0 {
                     receiving
                         .entry(source.thermal_cell)
                         .or_default()

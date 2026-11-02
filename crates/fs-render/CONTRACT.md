@@ -4733,3 +4733,31 @@ thermal-emission model, rough-film/scattering law, broadband continuation, or
 experimental validation of representative optical data. G1/G3 regressions
 exercise independent matched-index Beer-Lambert layers, weak/zero loss,
 oblique-polarization power closure, opaque shielding and periodic order.
+
+### Coherent coating heat on the native thermal timeline
+
+`CoatedSurfacePowerResponse` prepares polarization-weighted spectral film and
+substrate fractions through the original coherent absorption owner. The optical
+solve occurs once during preparation. `SurfaceOpticalHeating::try_new_coated`
+binds every authored film, including zero-loss films, and the opaque substrate
+to explicit active native thermal cells and their material identities. Multiple
+receivers may share a cell; their powers add while incident, reflected and total
+absorbed energy are accounted once per physical source.
+
+The existing source schedule, compensated reductions, native enthalpy storage,
+external heat sources, thermal stepping and rollback remain authoritative.
+Source permutation retains deterministic identity and reductions. Every
+receiver declares a positive Kelvin interval supporting its frozen optical
+coefficients; repeated cells use the intersection of all declared intervals.
+Initial and accepted-step validation includes film cells even when their
+instantaneous absorption is zero. Failed domains, cancellation or invalid
+bindings publish neither partial thermal state nor partial optical energy.
+
+Each receiver represents whole-film power. Callers justify this thermal lumping
+and the optical/material association; source identity alone does not certify
+them. Absorbed energy is assumed to thermalize within the resolved interval.
+Within-film penetration, temperature-varying coating optics, fluorescence,
+carrier extraction and delayed nonthermal stores require their own owners.
+G1/G3 tests compare distinct-cell heat against an independent matched-index
+Fresnel/Beer-Lambert solution, retain existing external heat, and cover shared
+cells, source permutation, receiver refusal and late transactional failure.
