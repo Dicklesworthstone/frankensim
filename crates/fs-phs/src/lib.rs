@@ -5382,7 +5382,9 @@ pub fn modal_bank_ports(
     let mut r = vec![0.0; n * n];
     let mut g = vec![0.0; n * m];
     for i in 0..nm {
-        if omegas[i] <= 0.0 || zetas[i] < 0.0 {
+        // frankensim-c2ftg follow-up: written so that a NaN frequency or damping ratio
+        // refuses too.
+        if !(omegas[i] > 0.0 && zetas[i] >= 0.0) {
             return Err(PhsError::Unadmitted {
                 what: "modal parameters",
             });
@@ -5748,6 +5750,38 @@ mod refusal_labels {
                 })
             );
         }
+    }
+
+    /// frankensim-c2ftg follow-up: a non-positive or NaN modal frequency, or a negative or
+    /// NaN damping ratio, is refused as `Unadmitted { "modal parameters" }` by both modal
+    /// bank constructors, at the first mode and at a later one. Planted positive: an
+    /// undamped mode at a positive frequency is still admitted.
+    #[test]
+    fn modal_bank_refuses_non_positive_negative_and_nan_parameters() {
+        for (omega, zeta) in [
+            (0.0, 0.0),
+            (-1.0, 0.0),
+            (1.0, -0.1),
+            (f64::NAN, 0.0),
+            (1.0, f64::NAN),
+        ] {
+            let refused = super::modal_bank(&[omega], &[zeta], &[1.0]).err();
+            assert_eq!(
+                refused,
+                Some(PhsError::Unadmitted {
+                    what: "modal parameters"
+                })
+            );
+            assert_eq!(refused.unwrap().to_string(), "refused: modal parameters");
+            let later = super::modal_bank_ports(&[2.0, omega], &[0.0, zeta], &[&[1.0, 1.0]]).err();
+            assert_eq!(
+                later,
+                Some(PhsError::Unadmitted {
+                    what: "modal parameters"
+                })
+            );
+        }
+        assert!(super::modal_bank(&[1.0], &[0.0], &[1.0]).is_ok());
     }
 }
 
