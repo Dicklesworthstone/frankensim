@@ -11,6 +11,11 @@
 //! The optional `radiation-load none|baffled-piston` record after `observer`
 //! selects the existing compact reaction model from the SAME gas and clock.
 //! Omission keeps the original unloaded image; no loss model is inferred.
+//! An optional `observer_law` after that record (or directly after `observer`)
+//! selects the shared causal atmosphere law: `none`, `stokes-kirchhoff`,
+//! `iso9613`, or `relaxation iso9613-terrestrial-air`. Source admission is the
+//! same as for native wind performers. Without the record, the existing
+//! unfiltered compact observation is retained and explicitly reported.
 //!
 //! A section is either bare numbers ending in an explicit `fixture LABEL`
 //! (`section THICK RHO E1 E2 NU12 G12 ANGLE fixture LABEL`), or pack-backed:
@@ -32,6 +37,7 @@ use crate::thin_plate::PlateMaterialModel;
 use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection};
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::air_path::{ObserverFilterReceipt, input::{ObserverLawInput, observer_filter}};
 use crate::render::{ControlDelta, RenderContext, RenderError, RenderVoice};
 use crate::render::schedule::{ScheduledControl, ScheduledRenderer};
 use crate::thin_plate::{PlateChartRadiation, certified_chart_radiators};
@@ -109,6 +115,9 @@ pub struct PlatePerformanceInfo {
     pub listener_m: f64,
     /// Time of flight to the listener, r/c [s].
     pub propagation_delay_s: f64,
+    /// Applied causal atmosphere law, with receiver/filter delay split.
+    /// `None` retains the original unfiltered compact pressure approximation.
+    pub observer_filter: Option<ObserverFilterReceipt>,
     /// Whether the input explicitly requested the compact piston reaction.
     pub baffled_piston_loading: bool,
     /// Geometry counts of the actual assembled chart.
@@ -186,12 +195,22 @@ impl PlatePerformance {
             CompactPlateVoice::from_radiators(bodies, input.initial_force_n, input.config)
         }
             .map_err(PlatePerformanceError::Render)?;
+        let voice = match input.observer_law {
+            Some(law) => {
+                let filter = observer_filter(Some(law), &input.config.gas,
+                    core::slice::from_ref(&input.gas_record), input.config.listener_m,
+                    input.config.sample_rate_hz).map_err(PlatePerformanceError::Reduction)?;
+                voice.with_observer_filter(filter).map_err(PlatePerformanceError::Render)?
+            }
+            None => voice,
+        };
         let info = PlatePerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.plate-performance.v1", bytes),
             sample_rate_hz: input.config.sample_rate_hz, samples: input.samples,
             full_scale_pa: input.full_scale_pa, gas: input.config.gas,
             listener_m: input.config.listener_m,
             propagation_delay_s: input.config.listener_m / input.config.gas.sound_speed,
+            observer_filter: voice.observer_receipt().copied(),
             baffled_piston_loading: input.baffled_piston_loading,
             nodes: input.chart.mesh.nodes.len(),
             triangles: input.chart.mesh.tris.len(), sections: input.sections,
@@ -229,6 +248,7 @@ struct Parsed {
     options: PlateChartRadiation,
     config: PlateVoiceConfig,
     baffled_piston_loading: bool,
+    observer_law: Option<ObserverLawInput>,
     samples: u64,
     full_scale_pa: f64,
     initial_force_n: f64,
@@ -287,6 +307,13 @@ impl Parsed {
             row.finish()?;
             enabled
         } else { false };
+        let observer_law = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("observer_law")
+        {
+            let mut row = r.row("observer_law")?;
+            let line = row.line;
+            Some(ObserverLawInput::parse(&row.rest()).map_err(|what| bad(line, what))?)
+        } else { None };
         let mut limits = r.row("limits")?;
         let max_modes = limits.count(MAX_MODES)?;
         let nyquist_guard_fraction = limits.scalar()?;
@@ -431,7 +458,7 @@ impl Parsed {
         if r.lines.next().is_some() { return Err(bad(r.line + 1, "unexpected trailing record")); }
         let options = PlateChartRadiation { assembly: AssemblyOptions { pretension, support },
             eigenvalue_window, n_modes, damping_ratio, unit_force_weights };
-        Ok(Self { gas_record, chart, options, config, baffled_piston_loading,
+        Ok(Self { gas_record, chart, options, config, baffled_piston_loading, observer_law,
             samples, full_scale_pa, initial_force_n,
             sections: sections_count, section_provenance, events, max_events })
     }

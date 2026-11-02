@@ -13,11 +13,13 @@
 //! scale) and its sound speed: the listener hears each body's exact-ZOH
 //! acceleration at the retarded time t - r/c, evaluated inside the recorded
 //! step rather than interpolated between samples. Compact radiation remains an
-//! approximation: no atmospheric absorption, directivity or whole-fluid energy
-//! claim is added.
+//! approximation. An explicitly attached shared atmosphere filter adds its
+//! original absorption/dispersion and compensates the receiver delay once;
+//! no directivity or whole-fluid energy claim is added.
 
 use super::RenderError;
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::air_path::{GasAbsorptionModel, ObserverFilter, ObserverFilterReceipt};
 use crate::modal_acoustic_time::MAX_TIME_DOMAIN_ACOUSTIC_MODES;
 use crate::thin_plate::{CompactBody, HeldStep, certified_radiators};
 use fs_material::gas::GasState;
@@ -86,6 +88,8 @@ pub struct CompactPlateVoice {
     retarded_elapsed_s: f64,
     /// Ring of delay_whole + 1 step rows, each with one entry per body.
     history: Vec<HeldStep>,
+    /// Original atmosphere law, with its own retained pressure history.
+    observer: Option<ObserverFilter>,
 }
 
 impl CompactPlateVoice {
@@ -154,9 +158,69 @@ impl CompactPlateVoice {
         let retarded_elapsed_s = (1.0 - (delay - delay.floor())) * f64::from(config.sample_rate_hz).recip();
         let history = vec![HeldStep::REST; (delay_whole as usize + 1) * bodies.len()];
         let voice = Self { bodies, config, force_n: initial_force_n, sample_index: 0, poisoned: false,
-            delay_whole, retarded_elapsed_s, history };
+            delay_whole, retarded_elapsed_s, history, observer: None };
         voice.validate_force(initial_force_n)?;
         Ok(voice)
+    }
+
+    /// Apply the shared causal atmosphere law to the original compact pressure.
+    /// The law uses this voice's actual gas, range and clock. Molecular
+    /// relaxation must have been evaluated for that exact same gas state.
+    ///
+    /// The receiver applies `r/c - filter.low_frequency_delay_s`; the filter
+    /// then supplies its original attenuation, dispersion and latency. Together
+    /// they count low-frequency propagation once. A range too short to absorb
+    /// the filter's latency refuses. This is an observer approximation, not an
+    /// extra mechanical loss or a finite ambient heat account.
+    /// Attachment must precede the first sample and cannot reset an existing
+    /// atmosphere history. Original body, force and radiation-load state stay.
+    pub fn with_observer_law(
+        self,
+        law: GasAbsorptionModel,
+        relaxation: Option<&fs_material::relaxation::RelaxationState>,
+    ) -> Result<Self, RenderError> {
+        let filter = ObserverFilter::for_law(law, &self.config.gas, relaxation,
+            self.config.listener_m, self.config.sample_rate_hz).map_err(RenderError::Voice)?;
+        self.with_observer_filter(filter)
+    }
+
+    // Only this module and its source-file child supply filters, always built
+    // for the original gas. A public foreign filter could conceal another gas.
+    fn with_observer_filter(mut self, filter: ObserverFilter) -> Result<Self, RenderError> {
+        if self.poisoned || self.sample_index != 0 || self.observer.is_some() {
+            return Err(invalid("plate atmosphere must attach once before its first sample"));
+        }
+        let receipt = filter.receipt();
+        if receipt.sample_rate_hz != self.config.sample_rate_hz
+            || receipt.range_m.to_bits() != self.config.listener_m.to_bits()
+        {
+            return Err(invalid("plate atmosphere must retain its original range and sample clock"));
+        }
+        let rate = f64::from(self.config.sample_rate_hz);
+        let delay = self.config.propagation_delay_samples() - receipt.low_frequency_delay_s * rate;
+        if !delay.is_finite() || delay <= 0.0 {
+            return Err(RenderError::Voice(AcousticRealizeError::ObserverLatency {
+                range_m: self.config.listener_m,
+                available_samples: self.config.propagation_delay_samples(),
+                needed_samples: receipt.low_frequency_delay_s * rate,
+                budget_energy: receipt.budget_energy,
+            }));
+        }
+        let rows = delay.floor() + 1.0;
+        if rows * self.bodies.len() as f64 > MAX_PLATE_RETARDED_STEPS as f64 {
+            return Err(invalid("filtered plate receiver exceeds its original history budget"));
+        }
+        self.delay_whole = delay.floor() as u64;
+        self.retarded_elapsed_s = (1.0 - (delay - delay.floor())) * rate.recip();
+        self.history = vec![HeldStep::REST; rows as usize * self.bodies.len()];
+        self.observer = Some(filter);
+        Ok(self)
+    }
+
+    /// Applied observer law and its original delay/error accounting, if any.
+    #[must_use]
+    pub fn observer_receipt(&self) -> Option<&ObserverFilterReceipt> {
+        self.observer.as_ref().map(ObserverFilter::receipt)
     }
 
     /// Attach the existing compact baffled-piston reaction using the SAME gas
@@ -206,8 +270,9 @@ impl CompactPlateVoice {
     pub(super) fn set_force_admitted(&mut self, force_n: f64) { self.force_n = force_n; }
 
     /// Advance existing body mechanics, sum the retarded compact pressures in
-    /// body order, and retain every state. Before the first wavefront arrives
-    /// (r/c after the render starts) the listener hears the resting past: zero.
+    /// body order, and retain every state. The unfiltered observation hears
+    /// resting past until r/c. An attached atmosphere uses its compensated
+    /// receiver delay and original impulse response, with total DC delay r/c.
     /// Refusals leave a partial callback and poison this voice. Clock/empty-input
     /// admission occurs before any state changes. The successful no-filter loop
     /// allocates no buffers; measured callback timing/allocation and loaded-filter
@@ -254,6 +319,13 @@ impl CompactPlateVoice {
                 return Err(RenderError::Voice(AcousticRealizeError::InvalidDescription {
                     what: "compact plate pressure exceeds the declared finite output budget",
                 }));
+            }
+            if let Some(observer) = &mut self.observer {
+                pressure = observer.process(pressure);
+                if !pressure.is_finite() || pressure.abs() > self.config.maximum_abs_pressure_pa {
+                    self.poisoned = true;
+                    return Err(invalid("filtered plate pressure exceeds its declared finite output budget"));
+                }
             }
             *slot = pressure;
             self.sample_index += 1;

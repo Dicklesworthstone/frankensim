@@ -7,6 +7,8 @@
 
 /// Refinable causal gas inertia and viscous memory for circular transverse motion.
 pub mod cylinder;
+/// Source-record admission shared by native pressure performers.
+pub mod input;
 
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;

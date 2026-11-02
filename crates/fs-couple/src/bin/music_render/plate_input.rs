@@ -5,7 +5,7 @@ use std::path::Path;
 use fs_material::gas_species::input::ThermochemicalSources;
 use fs_matdb::NormalizedMaterialCardPack;
 use fs_couple::render::plate::file::{
-    MAX_PLATE_PERFORMANCE_BYTES, PLATE_PERFORMANCE_SCHEMA, PlatePerformance,
+    MAX_PLATE_PERFORMANCE_BYTES, PLATE_PERFORMANCE_SCHEMA, PlatePerformance, PlatePerformanceInfo,
 };
 use super::{RATE, create_outputs, json_string, stream_output};
 
@@ -20,6 +20,33 @@ pub(super) fn section_pack_loader(parent: &Path)
 /// `,"section_sources":[...]`: each section's pack, hash, state and point, or its fixture label.
 pub(super) fn section_sources_json(sources: &[String]) -> String {
     format!(",\"section_sources\":[{}]", sources.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(","))
+}
+
+fn observer_json(info: PlatePerformanceInfo) -> String {
+    use fs_couple::air_path::{GasAbsorptionModel, OmissionBound};
+    let Some(filter) = info.observer_filter else {
+        return ",\"observer\":{\"law\":\"unfiltered\",\"declared\":false,\"classical_absorption_omitted\":true,\"molecular_relaxation_omitted\":true}".into();
+    };
+    let law = match filter.absorption.law {
+        GasAbsorptionModel::Lossless => "none",
+        GasAbsorptionModel::StokesKirchhoff => "stokes-kirchhoff",
+        GasAbsorptionModel::Iso9613Air { .. } => "iso9613",
+        GasAbsorptionModel::MolecularRelaxation => "relaxation",
+    };
+    let omission = filter.absorption.relaxation_omitted;
+    let convention_db = omission.map_or_else(|| "null".into(), |value| {
+        let OmissionBound::StandardAirConvention { db } = value.bound;
+        format!("{db:e}")
+    });
+    format!(",\"observer\":{{\"law\":\"{law}\",\"declared\":true,\"taps\":{},\
+        \"latency_s\":{:e},\"low_frequency_delay_s\":{:e},\"receiver_delay_s\":{:e},\
+        \"truncated_energy\":{:e},\"budget_energy\":{:e},\
+        \"classical_absorption_omitted\":{},\"molecular_relaxation_omitted\":{},\
+        \"molecular_omission_standard_air_convention_db\":{convention_db},\
+        \"omission_scope\":\"standard-air convention is not a bound for arbitrary gas mixtures\"}}",
+        filter.taps, filter.latency_s, filter.low_frequency_delay_s, filter.receiver_delay_s,
+        filter.truncated_energy, filter.budget_energy,
+        filter.absorption.law == GasAbsorptionModel::Lossless, omission.is_some())
 }
 
 fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
@@ -66,6 +93,7 @@ pub(super) fn run_with_gas_sources(
     let section_sources = section_sources_json(performance.section_provenance());
     let gas_sources = super::thermochemical::provenance(core::slice::from_ref(performance.gas_record()));
     let info = performance.info();
+    let observer = observer_json(info);
     if info.sample_rate_hz != RATE {
         return Err("music_render requires an explicitly declared 48000 Hz input; no implicit resampling".into());
     }
@@ -89,8 +117,8 @@ pub(super) fn run_with_gas_sources(
          \"retained_modes\":{},\"force_events\":{},\
          \"ambient_gas\":{{\"temperature_k\":{:e},\"pressure_pa\":{:e},\"density_kg_m3\":{:e},\
          \"sound_speed_m_s\":{:e},\"water_mole_fraction\":{:e}}},\
-         \"listener_m\":{:e},\"propagation_delay_s\":{:e},\"radiation_load\":\"{radiation_load}\"{section_sources},\
-         \"model_scope\":\"linear flat DKT plate; sections from their named packs or fixture labels; compact baffled observer retarded by r/c; optional per-mode piston reaction uses the same gas and clock; no mutual-radiation, continuum-convergence or physical-validation claim\"}}{gas_sources}}}",
+         \"listener_m\":{:e},\"propagation_delay_s\":{:e},\"radiation_load\":\"{radiation_load}\"{section_sources}{observer},\
+         \"model_scope\":\"linear flat DKT plate; sections from their named packs or fixture labels; compact baffled observer; declared causal atmosphere and compensated receiver together count low-frequency r/c once; optional per-mode piston reaction uses the same gas and clock; no mutual-radiation, continuum-convergence or physical-validation claim\"}}{gas_sources}}}",
         info.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.nodes, info.triangles, info.sections, info.requested_modes, info.retained_modes,
         info.force_events, info.gas.temperature, info.gas.pressure, info.gas.density,

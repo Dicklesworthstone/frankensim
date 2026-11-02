@@ -34,9 +34,10 @@
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::air_path::{
-    GasAbsorptionModel, ObserverFilter, ObserverFilterReceipt, ObserverOmission, legacy_relative_humidity,
+    GasAbsorptionModel, ObserverFilter, ObserverFilterReceipt, ObserverOmission,
     observer_band_top_hz, omitted_observer_absorption,
 };
+use crate::air_path::input::ObserverLawInput as DeclaredObserverLaw;
 use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, HoleState, Segment, Termination};
@@ -134,15 +135,6 @@ impl std::error::Error for ReedPerformanceError {
 }
 fn bad(line: usize, what: &'static str) -> ReedPerformanceError {
     ReedPerformanceError::Input { line, what }
-}
-
-/// The observer law a performance file declares with `observer_law`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeclaredObserverLaw {
-    Lossless,
-    Iso9613,
-    StokesKirchhoff,
-    IsoAirRelaxation,
 }
 
 /// The observer law applied to a performance's emitted pressure.
@@ -243,33 +235,6 @@ fn check_receiver_delay(
     Ok(())
 }
 
-/// ISO 9613-1's admission of the observer medium and its relative humidity,
-/// from the medium's own record: a legacy record's U.S. Standard Atmosphere
-/// air, or a thermochemical record's composition. `None` for a named mixture
-/// record, whose default law here is Stokes-Kirchhoff, or a resolved field.
-fn iso_admission(
-    record: Option<&GasRecord>,
-    gas: &GasState,
-) -> Result<Option<(fs_material::iso9613::TerrestrialAir, f64)>, AcousticRealizeError> {
-    use fs_material::iso9613::{TerrestrialAir, iso9613_relative_humidity};
-    match record {
-        Some(GasRecord::Legacy(state)) => Ok(legacy_relative_humidity(state).and_then(|rh| {
-            let (rebuilt, air) =
-                TerrestrialAir::moist_air(state.temperature, state.pressure, rh).ok()?;
-            (rebuilt == *gas).then_some((air, rh))
-        })),
-        Some(GasRecord::Thermochemical(resolved)) => {
-            let medium = fs_material::relaxation::RelaxingMedium::from_thermochemical(resolved)
-                .map_err(|error| AcousticRealizeError::Ambient(error.to_string()))?;
-            let air = TerrestrialAir::admit(&medium).map_err(AcousticRealizeError::NonTerrestrialAir)?;
-            let rh = iso9613_relative_humidity(gas.temperature, gas.pressure, gas.water_mole_fraction)
-                .map_err(|error| AcousticRealizeError::Ambient(error.to_string()))?;
-            Ok(Some((air, rh)))
-        }
-        Some(GasRecord::Mixture(..)) | None => Ok(None),
-    }
-}
-
 /// The observer filter for the medium `gas`, as `acoustic_realize` chooses:
 /// declared, or by default ISO 9613-1 for a legacy air record inside ISO's
 /// window, otherwise Stokes-Kirchhoff.
@@ -280,44 +245,8 @@ fn observer_filter(
     range_m: f64,
     rate: u32,
 ) -> Result<ObserverFilter, ReedPerformanceError> {
-    let record = records.iter().find(|record| record.state() == gas);
-    let filter = match declared {
-        Some(DeclaredObserverLaw::Lossless) => ObserverFilter::lossless(gas, range_m, rate),
-        Some(DeclaredObserverLaw::StokesKirchhoff) => {
-            ObserverFilter::stokes_kirchhoff(gas, range_m, rate)
-        }
-        Some(DeclaredObserverLaw::Iso9613) => match iso_admission(record, gas) {
-            Ok(Some((air, rh))) => ObserverFilter::iso9613(&air, gas, rh, range_m, rate),
-            Ok(None) => Err(AcousticRealizeError::InvalidDescription {
-                what: "observer_law iso9613 needs a legacy or thermochemical observer gas record",
-            }),
-            Err(error) => Err(error),
-        },
-        Some(DeclaredObserverLaw::IsoAirRelaxation) => match record {
-            Some(GasRecord::Thermochemical(resolved)) => {
-                fs_material::relaxation::RelaxingMedium::from_thermochemical(resolved)
-                    .and_then(|medium| {
-                        fs_material::relaxation::RelaxationAbsorption::iso9613_terrestrial_air()?
-                            .evaluate(&medium)
-                    })
-                    .map_err(|error| AcousticRealizeError::Ambient(error.to_string()))
-                    .and_then(|state| ObserverFilter::molecular_relaxation(&state, range_m, rate))
-            }
-            _ => Err(AcousticRealizeError::InvalidDescription {
-                what: "observer_law relaxation needs a thermochemical observer gas record",
-            }),
-        },
-        None => match iso_admission(record, gas) {
-            Ok(Some((air, rh)))
-                if matches!(record, Some(GasRecord::Legacy(_)))
-                    && fs_material::iso9613::iso9613_absorption(&air, gas, rh, 1.0).is_ok() =>
-            {
-                ObserverFilter::iso9613(&air, gas, rh, range_m, rate)
-            }
-            _ => ObserverFilter::stokes_kirchhoff(gas, range_m, rate),
-        },
-    };
-    filter.map_err(ReedPerformanceError::Model)
+    crate::air_path::input::observer_filter(declared, gas, records, range_m, rate)
+        .map_err(ReedPerformanceError::Model)
 }
 
 /// The absorption the listener gas applies over the observer's range up to

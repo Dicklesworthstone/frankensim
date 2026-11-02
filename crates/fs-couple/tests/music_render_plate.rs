@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fs_couple::pcm_wav::encode_pcm16_wav;
 use fs_couple::render::plate::file::PlatePerformance;
 
+#[path = "music_render_plate/atmosphere.rs"]
+mod atmosphere;
+
 const SOURCE: &[u8] = include_bytes!("../examples/plate-mesh.performance");
 static NEXT: AtomicU64 = AtomicU64::new(0);
 fn scratch() -> PathBuf {
