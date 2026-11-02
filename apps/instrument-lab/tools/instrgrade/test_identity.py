@@ -199,5 +199,118 @@ class SyntheticInstrumentTests(unittest.TestCase):
         self.assertGreater(rise, 10.0)
 
 
+def plucked(midi, seed=0, dur=2.5, beat=True, glide_cents=8.0, noise_db=-70.0, B=2e-4, K=10):
+    """One note of a synthetic plucked string whose decay lives: every partial is two modes (two polarisations) a random 1.5-4 Hz
+    apart, the second weaker and decaying 2.5 times slower (beating and a double decay), the pitch falling `glide_cents` over the
+    first half second (tension modulation), stiff-string partials, noise `noise_db` under it. beat=False, glide_cents=0: one clean
+    exponential per partial (a still decay)."""
+    rng = np.random.default_rng(seed)
+    n = int(dur * SR)
+    t = np.arange(n) / SR
+    f0 = 440.0 * 2 ** ((midi - 69) / 12)
+    y = np.zeros(n)
+    for k in range(1, K + 1):
+        fk = k * f0 * np.sqrt(1.0 + B * k * k) * 2 ** (glide_cents * np.exp(-t / 0.4) / 1200)
+        ph = 2 * np.pi * np.cumsum(fk) / SR + rng.uniform(0, 2 * np.pi)
+        r1 = 25.0 * (1 + 0.15 * k) * rng.uniform(0.9, 1.1)
+        part = 10 ** (-r1 * t / 20) * np.sin(ph)
+        if beat:
+            part += 0.5 * 10 ** (-0.4 * r1 * t / 20) * np.sin(ph + 2 * np.pi * rng.uniform(1.5, 4.0) * t + rng.uniform(0, 2 * np.pi))
+        y += part / k ** 1.2
+    y = np.concatenate([np.zeros(int(0.01 * SR)), y * np.minimum(1.0, t / 0.002)])
+    return y + 10 ** (noise_db / 20) * rng.standard_normal(len(y)) * np.max(np.abs(y))
+
+
+class DecayCandidateTests(unittest.TestCase):
+    """The UNREGISTERED decay-domain candidates for struck and plucked notes (bead pexfp.360) on a synthetic plucked string whose
+    decay lives by construction: D-amp (each partial's level about its own local straight decay), D-freq (each partial's frequency
+    about its median) and D-dec (the spread of the partials' decay rates)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.members = [(f"{m}/{s}", idn.decay_features(plucked(m, seed=s), 440.0 * 2 ** ((m - 69) / 12)))
+                       for s, m in zip(range(11, 17), (67, 67, 69, 69, 71, 71))]
+        cls.cand = plucked(69, seed=999)
+        print(f"\n  set: {len(cls.members)} living plucked notes (G4, A4, B4 x 2 takes, six seeds; two modes per partial 1.5-4 Hz apart, an 8 c fall)")
+        for la, f in cls.members:
+            print(f"    {la}: {f['partials']} partials, amp {f['decay_amp_db']:.3f} dB, freq {f['decay_freq_db']:.3f} c, "
+                  f"spread {f['decay_spread_db']:.2f} dB/s")
+
+    def judge(self, name, y, measures):
+        j = idn.judge(idn.decay_features(y, 440.0), self.members, measures)
+        show(name, j)
+        return j
+
+    def test_a_still_decay_reads_no_movement(self):
+        """The measurement's own floor: one clean exponential per partial. A brick-wall band (freeze.lowpass_complex) rings after
+        the attack with tails falling as 1/t and read about 0.5 dB and 0.4 c here; the Hann band reads none."""
+        f = idn.decay_features(plucked(69, seed=5, beat=False, glide_cents=0.0, noise_db=-140.0), 440.0)
+        print(f"\n  still decay: {f}")
+        self.assertGreaterEqual(f["partials"], 8)
+        self.assertLess(f["decay_amp_db"], 0.01)
+        self.assertLess(f["decay_freq_db"], 0.01)
+
+    def test_beating_moves_level_and_frequency_and_a_glide_moves_frequency_only(self):
+        """Against the still decay's own reading. Two modes Df apart with amplitude ratio r move partial k's frequency by about
+        r Df Hz, so by 1731 r Df / (k f0) cents: the median over ten partials of an A4 is a fraction of a cent."""
+        still = idn.decay_features(plucked(69, seed=6, beat=False, glide_cents=0.0, noise_db=-140.0), 440.0)
+        beat = idn.decay_features(plucked(69, seed=6, glide_cents=0.0, noise_db=-140.0), 440.0)
+        glide = idn.decay_features(plucked(69, seed=6, beat=False, glide_cents=20.0, noise_db=-140.0), 440.0)
+        print(f"\n  still: amp {still['decay_amp_db']:.5f} dB freq {still['decay_freq_db']:.5f} c; beating: amp {beat['decay_amp_db']:.3f} dB "
+              f"freq {beat['decay_freq_db']:.3f} c; glide: amp {glide['decay_amp_db']:.4f} dB freq {glide['decay_freq_db']:.3f} c")
+        self.assertGreater(beat["decay_amp_db"], 1.0)
+        self.assertGreater(beat["decay_amp_db"], 100 * still["decay_amp_db"])
+        self.assertGreater(beat["decay_freq_db"], 0.2)
+        self.assertGreater(beat["decay_freq_db"], 100 * still["decay_freq_db"])
+        self.assertLess(glide["decay_amp_db"], 0.05)
+        self.assertGreater(glide["decay_freq_db"], 1.0)
+
+    def test_a_living_note_passes_level_and_frequency_movement(self):
+        self.assertTrue(self.judge("E3: another living A4", self.cand, ("decay_amp_db", "decay_freq_db"))["recognisable"])
+
+    def test_the_five_nulls_fail_level_and_frequency_movement_by_a_wide_margin(self):
+        for name, z in freeze.null_signals(self.cand, 440.0, 2e-4).items():
+            for ms in (("decay_amp_db",), ("decay_freq_db",)):
+                j = self.judge(f"{ms[0]}: null {name}", z, ms)
+                self.assertIsNot(j["recognisable"], True, (name, ms))
+                if j["margin_db"] is not None:  # None: no partial of the null had a counted decay, so no claim either way
+                    self.assertLess(j["margin_db"], -6.0, (name, ms))  # not a near miss: their stillness
+
+    def test_the_decay_rate_spread_passes_the_frozen_null(self):
+        """Why D-dec cannot be offered alone: freeze keeps each partial's smoothed decay, so the frozen note has the recording's
+        decay rates and passes; only the four tones (one envelope for every partial) fail it."""
+        nulls = freeze.null_signals(self.cand, 440.0, 2e-4)
+        self.assertTrue(self.judge("E4: null frozen", nulls["frozen"], ("decay_spread_db",))["recognisable"])
+        self.assertFalse(self.judge("E4: null 1/n", nulls["1/n"], ("decay_spread_db",))["recognisable"])
+
+    def test_a_twenty_cent_shift_moves_no_margin_by_a_db(self):
+        fa, fb = idn.decay_features(self.cand, 440.0), idn.decay_features(shift(self.cand, 20.0), 440.0)
+        d = {}
+        for m in idn.DECAY_MEASURES:
+            a, b = idn.judge(fa, self.members, (m,)), idn.judge(fb, self.members, (m,))
+            d[m] = abs(a["measures"][m]["margin_db"] - b["measures"][m]["margin_db"])
+        print("\n  |margin change| dB under +20 c: " + "  ".join(f"{m} {v:.3f}" for m, v in d.items()))
+        self.assertLess(max(d.values()), 1.0)
+
+    def test_local_line_reproduces_a_straight_decay_at_the_ends_and_across_gaps(self):
+        L = -30.0 - 45.0 * np.arange(400) / idn.DECAY_RATE
+        use = np.ones(400, dtype=bool)
+        use[150:170] = False
+        fit = idn.local_line(L, use, int(freeze.SMOOTH_S * idn.DECAY_RATE))
+        self.assertLess(float(np.max(np.abs((fit - L)[use]))), 1e-9)
+
+    def test_a_bars_inharmonic_partials_are_found_where_they_are(self):
+        f0 = 523.25
+        t = np.arange(int(1.5 * SR)) / SR
+        ratios = (1.0, 3.93, 9.17)
+        y = sum(np.exp(-(3 + 2 * i) * t) * np.sin(2 * np.pi * r * f0 * t) / (1 + i) for i, r in enumerate(ratios))
+        y = np.concatenate([np.zeros(int(0.01 * SR)), y])
+        found = sorted(idn.decay_peaks(y, f0, int(0.17 * SR)))
+        print(f"\n  bar partials at {[round(r * f0, 1) for r in ratios]} Hz: found {[round(v, 1) for v in found]}")
+        self.assertEqual(len(found), 3)
+        for r, v in zip(ratios, found):
+            self.assertLess(abs(v - r * f0), 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

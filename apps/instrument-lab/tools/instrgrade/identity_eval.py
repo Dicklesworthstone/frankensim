@@ -14,7 +14,15 @@ For each candidate: candidates A, B and C of identity.py, the five nulls of free
   phase 2   the sampled notes, their nulls and +20 c copies -> DIR/cands.json
   phase 3   the tables                             -> DIR/identity-eval.json, printed
 
-usage (trj; numpy, pillow, matplotlib): identity_eval.py DIR PHASE [--jobs 12]
+The decay-domain candidates for struck and plucked notes (bead pexfp.360; NOT registered, the owner chooses), on the decaying
+library entries of DECAY_SET with the same hold-outs (leave-era-out where an instrument and articulation has two eras, else
+leave-file-out): E1 D-amp, E2 D-freq, E3 both, E4 D-dec (identity.decay_features); nulls as above, the frozen null for non-bars
+only, plus frozen + its residual noise; every candidate aligned as a render is.
+  phase d1  decay features of every decaying library note                      -> DIR/decay-lib.json
+  phase d2  the sampled notes, their nulls, frozen + noise and +20 c copies    -> DIR/decay-cands.json
+  phase d3  the table                                                          -> DIR/decay-eval.json, printed
+
+usage (trj or ts1; numpy, pillow, matplotlib): identity_eval.py DIR PHASE [--jobs 12]
 """
 from __future__ import annotations
 
@@ -300,15 +308,190 @@ def report(o):
     return "\n".join(L)
 
 
+# --- Struck and plucked notes (bead pexfp.360): the decay-domain candidates of identity.py, on the same footing -------------------
+# Phases d1, d2, d3 read the light library of DECAY_SET (ts1), its decaying notes only, and write DIR/decay-{lib,cands,eval}.json.
+# Held out across specimens where UIowa recorded an instrument and articulation twice (the pizzicato strings), across files elsewhere.
+# Besides the five nulls, "frozen+noise" (freeze's frozen partials plus the recording's own residual) is judged and reported: a measure
+# that a recording's noise floor passes would pass it. Not a requirement; the owner reads it beside the table.
+DECAY_SET = dict(lib=dc.DEFAULTS["lib"], wav=dc.DEFAULTS["wav_dir"], refs=dc.DEFAULTS["refs_json"])
+DECAY_CANDIDATES = {"E1": ("decay_amp_db",), "E2": ("decay_freq_db",), "E3": ("decay_amp_db", "decay_freq_db"),
+                    "E4": ("decay_spread_db",)}
+_D = {}
+
+
+def _dinit():
+    _D["refs"] = dc.Refs(DECAY_SET["lib"], DECAY_SET["wav"], DECAY_SET["refs"])
+
+
+def decay_lib():
+    return [e for e in json.loads(Path(DECAY_SET["lib"]).read_text()) if e["kind"] == "decaying"]
+
+
+def as_render_y(raw, f0):
+    """A signal aligned as a render is (the render floor, the alignment), without the grader's Note."""
+    return dc.align(raw, f0, dc.render_floor(dc.highpass(raw, f0), f0))[0]
+
+
+def dlib_job(e):
+    try:
+        y, _ = _D["refs"].aligned(e)
+        return key(e), idn.decay_features(y, hz_of(e["note"])), None
+    except REFUSALS as err:
+        return key(e), None, f"{type(err).__name__}: {err}"
+
+
+def dcand_job(e):
+    out = dict(key=key(e))
+    try:
+        refs = _D["refs"]
+        y, _ = refs.aligned(e)
+        f0 = hz_of(e["note"])
+        inh = e["inst"] in ("xylophone", "marimba")
+        out["real"] = idn.decay_features(y, f0)
+        B = 0.0 if inh else refs.note(e).B
+        zs = freeze.null_signals(y, f0, B)
+        if inh:
+            zs.pop("frozen")  # a bar's partials are not k f0: there is no frozen null of a bar
+        else:
+            s = freeze.split(y, f0, B)
+            zs["frozen+noise"] = s.frozen + s.residual
+        zs["+20c"] = shift(y, SHIFT_CENTS)
+        for name, z in zs.items():
+            try:
+                out[name] = idn.decay_features(as_render_y(z, f0), f0)
+            except REFUSALS as err:
+                out[name] = dict(refused=f"{type(err).__name__}: {err}")
+    except REFUSALS as err:
+        out["error"] = f"{type(err).__name__}: {err}"
+    return out
+
+
+def dphase1(d, jobs):
+    lib = sorted(decay_lib(), key=lambda e: (e["file"], e["start"]))
+    with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("fork"), initializer=_dinit) as pool:
+        res = list(pool.map(dlib_job, lib, chunksize=8))
+    feats = {k: f for k, f, _ in res if f is not None}
+    (d / "decay-lib.json").write_text(json.dumps(dict(features=feats, refused={k: r for k, _, r in res if r is not None})))
+    print("decaying features", len(feats), "refused", len(res) - len(feats), flush=True)
+
+
+def dsample(feats):
+    rng = random.Random(SEED)
+    groups = defaultdict(list)
+    for e in decay_lib():
+        if key(e) in feats:
+            groups[(e["inst"], e["art"])].append(e)
+    out = []
+    for _, es in sorted(groups.items()):
+        es = sorted(es, key=lambda e: (e["note"], e["dyn"], e["file"]))
+        if len(es) > PER_GROUP:
+            step = len(es) / PER_GROUP
+            es = [es[int(i * step + rng.random() * step)] for i in range(PER_GROUP)]
+        out += es
+    return out
+
+
+def dphase2(d, jobs):
+    cands = dsample(json.loads((d / "decay-lib.json").read_text())["features"])
+    print("sampled decaying notes", len(cands), flush=True)
+    with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("fork"), initializer=_dinit) as pool:
+        res = list(pool.map(dcand_job, cands, chunksize=1))
+    (d / "decay-cands.json").write_text(json.dumps(res))
+    print("done", len(res), "errors", sum(1 for r in res if "error" in r), flush=True)
+
+
+def dphase3(d):
+    feats = json.loads((d / "decay-lib.json").read_text())["features"]
+    entries = {key(e): e for e in decay_lib() if key(e) in feats}
+    pages = {Path(f["path"]).stem.replace(" ", ""): f["page"] for f in json.loads(Path(DECAY_SET["refs"]).read_text())["files"]}
+    page = lambda e: pages.get(Path(e["file"]).stem, "?")  # noqa: E731
+    eras = defaultdict(set)
+    for e in entries.values():
+        eras[(e["inst"], e["art"])].add(page(e))
+
+    def protocol(e):
+        return "leave-era-out" if len(eras[(e["inst"], e["art"])]) > 1 else "leave-file-out"
+
+    def members(e, p):
+        return [(k, feats[k]) for k, x in entries.items() if k != key(e) and idn.in_set(x, e["inst"], e["art"], e["kind"], e["note"])
+                and not (p == "leave-file-out" and x["file"] == e["file"]) and not (p == "leave-era-out" and page(x) == page(e))]
+
+    C = list(DECAY_CANDIDATES)
+    real, nulls, moved = defaultdict(lambda: defaultdict(list)), defaultdict(lambda: defaultdict(list)), defaultdict(list)
+    moved_by = defaultdict(lambda: defaultdict(list))
+    flips, n_cands, errors = defaultdict(int), 0, 0
+    for r in json.loads((d / "decay-cands.json").read_text()):
+        if "error" in r:
+            errors += 1
+            continue
+        n_cands += 1
+        e = entries[r["key"]]
+        g, p = f'{e["inst"]}.{e["art"] or "-"}', protocol(e)
+        S = members(e, p)
+        jr = {c: judge(r["real"], S, ms) for c, ms in DECAY_CANDIDATES.items()}
+        for c in C:
+            real[(g, p)][c].append(jr[c]["recognisable"])
+        for name in list(freeze.NULLS) + ["frozen+noise"]:
+            if name in r:
+                for c, ms in DECAY_CANDIDATES.items():
+                    nulls[name][c].append(None if "refused" in r[name] else judge(r[name], S, ms)["recognisable"])
+        if "+20c" in r and "refused" not in r["+20c"]:
+            for c, ms in DECAY_CANDIDATES.items():
+                js = judge(r["+20c"], S, ms)
+                if jr[c]["margin_db"] is not None and js["margin_db"] is not None:
+                    dm = max(abs(jr[c]["measures"][m]["margin_db"] - js["measures"][m]["margin_db"]) for m in ms)
+                    moved[c].append(dm)
+                    moved_by[g][c].append(dm)
+                    flips[c] += int(jr[c]["recognisable"] != js["recognisable"])
+
+    def rate(vs):
+        n = [x for x in vs if x is not None]
+        return [sum(n), len(n)]
+
+    out = dict(schema="frankensim.identity-eval-decay.v1", decay_version=idn.DECAY_VERSION, utc=datetime.now(timezone.utc).isoformat(),
+               per_group=PER_GROUP, seed=SEED, set=DECAY_SET, candidates={c: list(ms) for c, ms in DECAY_CANDIDATES.items()},
+               notes=n_cands, errors=errors,
+               real={f"{g}|{p}": {c: rate(vv[c]) for c in C} for (g, p), vv in sorted(real.items())},
+               real_pooled={c: rate([x for vv in real.values() for x in vv[c]]) for c in C},
+               real_cross_specimen={c: rate([x for (g, p), vv in real.items() if p == "leave-era-out" for x in vv[c]]) for c in C},
+               nulls={name: {c: rate(vv[c]) for c in C} for name, vv in nulls.items()},
+               shift={c: dict(median_db=float(np.median(v)), max_db=float(np.max(v)), n=len(v), over_1db=int(np.sum(np.array(v) >= 1.0)),
+                              verdict_flips=flips[c]) for c, v in moved.items() if v},
+               shift_by_group={g: {c: dict(max_db=float(np.max(v)), over_1db=int(np.sum(np.array(v) >= 1.0)), n=len(v)) for c, v in vv.items() if v}
+                               for g, vv in sorted(moved_by.items())})
+    (d / "decay-eval.json").write_text(json.dumps(out, indent=1))
+    print(decay_report(out))
+
+
+def decay_report(o):
+    C = list(o["candidates"])
+    L = [f"Q2 decay candidates on library recordings only ({o['decay_version']}; " + ", ".join(f"{c} = {' + '.join(ms)}" for c, ms in o["candidates"].items())
+         + f"); {o['notes']} notes, {o['errors']} errors", "", f'{"real notes, held out":42s}' + "".join(f"{c:>18s}" for c in C)]
+    for gp, cc in o["real"].items():
+        L.append(f"  {gp.replace('|', '  '):40s}" + "".join(f"{pct(cc[c]):>18s}" for c in C))
+    L.append(f'{"  ALL":42s}' + "".join(f"{pct(o['real_pooled'][c]):>18s}" for c in C))
+    L.append(f'{"  across specimens only":42s}' + "".join(f"{pct(o['real_cross_specimen'][c]):>18s}" for c in C))
+    L += ["", f'{"nulls passing (must be 0; frozen+noise reported)":42s}' + "".join(f"{c:>18s}" for c in C)]
+    for name, cc in o["nulls"].items():
+        L.append(f"  {name:40s}" + "".join(f"{pct(cc[c]):>18s}" for c in C))
+    L += ["", "+20 c: largest margin change per note (dB): " + "   ".join(
+        f"{c} median {s['median_db']:.3f} max {s['max_db']:.3f} ({s['over_1db']}/{s['n']} >= 1 dB, {s['verdict_flips']} flips)"
+        for c, s in o["shift"].items())]
+    for g, cc in o["shift_by_group"].items():
+        L.append(f"  {g:24s} " + "   ".join(f"{c} max {s['max_db']:.2f} ({s['over_1db']}/{s['n']} >= 1 dB)" for c, s in cc.items()))
+    return "\n".join(L)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dir")
-    ap.add_argument("phase", choices=("1", "2", "3"))
+    ap.add_argument("phase", choices=("1", "2", "3", "d1", "d2", "d3"))
     ap.add_argument("--jobs", type=int, default=12)
     a = ap.parse_args()
     d = Path(a.dir)
     d.mkdir(parents=True, exist_ok=True)
-    {"1": lambda: phase1(d, min(a.jobs, 16)), "2": lambda: phase2(d, min(a.jobs, 16)), "3": lambda: phase3(d)}[a.phase]()
+    {"1": lambda: phase1(d, min(a.jobs, 16)), "2": lambda: phase2(d, min(a.jobs, 16)), "3": lambda: phase3(d),
+     "d1": lambda: dphase1(d, min(a.jobs, 16)), "d2": lambda: dphase2(d, min(a.jobs, 16)), "d3": lambda: dphase3(d)}[a.phase]()
 
 
 if __name__ == "__main__":
