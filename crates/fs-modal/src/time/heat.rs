@@ -4,6 +4,7 @@ use fs_math::det;
 
 /// The existing entire-series transition, shared with the heat preparation.
 /// All fields are dimensionless on the current preparation interval.
+#[derive(Clone, Copy, Debug)]
 pub(super) struct DampedTransition {
     pub angle: f64,
     pub drag: f64,

@@ -97,6 +97,25 @@ ratios to critical damping, or subtract nearly equal overdamped poles. Separate
 increments and retentions preserve both small attacks and long decay tails.
 Focused G1 tests cover those regimes and a one-second, 440-cycle high-Q decay;
 cached full/half steps and direct steps share the same coefficient evaluator.
+
+`time::LinearForceTransition` adds a prepared exact first-order-hold path for
+forces specified at both interval endpoints. It shares the entire-series and
+transition-doubling owner, adding the analytically integrated force moment.
+Preparation depends only on frequency, damping and duration; advancing a state
+allocates nothing and uses scalar arithmetic only. Undamped, critical,
+overdamped and explicit free coordinates use one continuous formula without
+division by stiffness or pole separation. Scaled forcing and increments retain
+soft-mode attacks and small motions; separate retentions preserve decay tails.
+Inputs and unrepresentable scaled responses refuse without state mutation.
+This API supplies motion, not ZOH heat/work accounts or an acoustic observer.
+The input is the piecewise-linear force itself; interpolation error in measured
+forcing, finite-arithmetic phase error over very long intervals and a certified
+roundoff enclosure are not claimed away. G1 compares independent 100-digit
+augmented matrix exponentials, affine force balance, the free cubic limit and
+resonant growth under a sampled linear forcing interpolant. G3 checks temporal
+subdivision and replay, including both sides of critical damping and a strongly
+overdamped slow pole. Existing ZOH stepping and energy arithmetic are unchanged.
+
 `held_force_for_port_velocity` solves the exact-ZOH scalar endpoint constraint
 using free modal motion plus unit-port-force mobility, with conjugate force
 and velocity projections.
