@@ -1,5 +1,6 @@
 //! SI heat and momentum use the SAME retained material evaluation and units.
 
+pub mod sgs3;
 pub mod transport;
 
 use super::{MaterialSlab, ThermalLbm, ThermalLbm3};

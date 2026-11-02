@@ -7,6 +7,7 @@
 //! step, not an implicit reaction law. Symmetric source splitting alone does
 //! not establish second-order accuracy of the partitioned flow/heat solver.
 
+pub mod sgs3;
 pub mod transport;
 
 use super::{ThermalForcingError, ThermalLbm};
