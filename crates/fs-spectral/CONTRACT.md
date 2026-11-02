@@ -2,7 +2,7 @@
 
 ## Purpose and layer
 
-Layer L1 spectral semantics and health monitoring. This crate owns three related,
+Layer L1 numerical spectra, spectral semantics and health monitoring. This crate owns four related,
 but deliberately separate, capabilities:
 
 1. deterministic sheaf-Laplacian gap health, confidence demotion, conditioning
@@ -10,9 +10,11 @@ but deliberately separate, capabilities:
 2. RB.1a versioned spectral problem admission plus proposition-bound,
    set-valued result truth; and
 3. RB.M1 versioned Maslov--Krein--Evans theorem statements, executable
-   convention transforms, and explicit hypothesis/implication lattices.
+   convention transforms, and explicit hypothesis/implication lattices; and
+4. complete bounded nonsymmetric dense numerical spectra through the existing
+   fs-la QR/SVD owners, with eigenpair residual and whole-basis admission.
 
-The latter two capabilities are semantic and epistemic boundaries. They
+The second and third capabilities are semantic and epistemic boundaries. They
 classify problems or theorem statements, verify that retained evidence names
 the exact proposition being used, check explicit prerequisites, and validate
 result or lattice claims. They do not compute eigenpairs, prove theorems, or
@@ -27,8 +29,9 @@ Production dependencies are limited to:
 - `fs-evidence` for the existing gap-health confidence color lattice;
 - `fs-exec` for the cancellation contexts polled by eigensolver-service ticks
   and bridge-lattice validation;
-- `fs-la` for the deterministic Lanczos/LOBPCG backends the service
-  wraps; and
+- `fs-la` for the deterministic Lanczos/LOBPCG backends and native complex
+  QR/Jacobi-SVD owners the services wrap;
+- `fs-math` for the original complex scalar representation; and
 - `fs-qty` for compile-time Floquet quantities and runtime-dimensioned
   normalization boundaries.
 
@@ -39,6 +42,31 @@ There is no FFI and no external numerical runtime.
 The API sections below (spectral health, admission, physical-domain
 adapter, Maslov--Krein--Evans bridge, eigensolver service, result truth)
 are the complete public-type surface; each states its own semantics.
+
+## Complete nonsymmetric dense numerical spectra
+
+`dense::nonsymmetric_spectrum` composes the existing fs-la complex QR and Jacobi
+SVD owners. It returns exactly dimension-many numerical roots and unit right
+vectors, preserving native canonical ordering and algebraic multiplicity.
+Exactly coincident roots use distinct vectors from one nullspace SVD; no root
+is merged, pruned or stabilized. This is a numerical service, not an authority
+constructor for the separate spectral truth or theorem APIs.
+
+Each vector must satisfy an independently evaluated original-row backward
+residual. The complete right-vector basis must also pass the declared
+sigma_min(V)/sigma_max(V) threshold. Unresolved or deficient numerical bases
+refuse the whole query; small individual residuals do not establish independent
+modes. Dimension, aggregate dense payload, conservative iteration work, native
+iteration counts, tolerances and cancellation are explicit. The reusable
+`eigenpair_row_residuals` also checks domain back-transforms without replacing
+the original equations by the norm of a nearly singular shifted pencil.
+
+These are numerical spectra and row-norm residuals, not interval enclosures,
+componentwise perturbation certificates, separation proofs, continuum counts
+or forward-error bounds for nonnormal eigenvalues. Callers supply appropriate
+dimensionless coordinates. Focused G1/G0/G4 regressions check complex pairs,
+semisimple repeated/zero/unstable roots, defective-basis refusal, deterministic
+replay, residual falsification, resource limits and cancellation.
 
 ## Existing spectral-health API
 

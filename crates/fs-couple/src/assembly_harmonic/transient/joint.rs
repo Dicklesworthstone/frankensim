@@ -62,6 +62,11 @@ pub(super) fn preflight(
 
 pub(super) struct PreparedJointFlow {
     pub(super) flow: PreparedQuadraticFlow,
+    /// The exact original generator already supplied to the transient owner.
+    /// Kept for loaded-mode analysis; no second equation assembly is needed.
+    pub(super) generator_per_s: Vec<f64>,
+    /// Existing numerical load conditioning, without a storage interpretation.
+    pub(super) extra_scales: Vec<f64>,
     flow_rows: Vec<f64>,
     effort_rows: Vec<f64>,
     force_map: Vec<f64>,
@@ -226,6 +231,8 @@ impl PreparedJointFlow {
         })?;
         Ok(Self {
             flow,
+            generator_per_s: generator,
+            extra_scales,
             flow_rows,
             effort_rows,
             force_map: force_map.to_vec(),

@@ -17,6 +17,9 @@ use fs_vfit::mimo::load::{MimoLoadError, PreparedMimoLoad};
 mod joint;
 use joint::{PreparedJointFlow, check, dot, invalid, multiply};
 
+/// Full loaded poles of the same continuous assembly and original load memory.
+pub mod spectrum;
+
 /// Independent source, connection and original exact-owner resource ceilings.
 #[derive(Clone, Copy, Debug)]
 pub struct AssemblyMimoTransientBudget {

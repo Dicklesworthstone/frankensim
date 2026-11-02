@@ -41,6 +41,8 @@ use fs_evidence::{Color, ColorRank};
 pub mod adapter;
 pub mod admission;
 pub mod bridge;
+/// Complete bounded nonsymmetric dense spectra through the existing L1 kernels.
+pub mod dense;
 pub mod generalized;
 pub mod service;
 pub mod truth;

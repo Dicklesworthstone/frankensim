@@ -5,7 +5,7 @@ use fs_phs::{PortHamiltonian, QuadraticStorage};
 use fs_vfit::mimo::{MimoModel, load::MimoLoadLimits};
 use fs_vfit::model::PoleTerm;
 
-fn budget() -> AssemblyMimoTransientBudget {
+pub(super) fn budget() -> AssemblyMimoTransientBudget {
     AssemblyMimoTransientBudget {
         structure: AssemblyResponseBudget {
             maximum_projection_terms: 1_000_000,
@@ -28,7 +28,7 @@ fn budget() -> AssemblyMimoTransientBudget {
     }
 }
 
-fn system(k: &[f64], inverse_mass: &[f64], c: &[f64], n: usize) -> PortHamiltonian {
+pub(super) fn system(k: &[f64], inverse_mass: &[f64], c: &[f64], n: usize) -> PortHamiltonian {
     let s = 2 * n;
     let (mut q, mut j, mut r, mut g) = (
         vec![0.; s * s],
@@ -57,7 +57,7 @@ fn system(k: &[f64], inverse_mass: &[f64], c: &[f64], n: usize) -> PortHamiltoni
     .unwrap()
 }
 
-fn source(model: &MimoModel, dt: f64) -> PreparedMimoLoad {
+pub(super) fn source(model: &MimoModel, dt: f64) -> PreparedMimoLoad {
     PreparedMimoLoad::new(
         model,
         dt,
@@ -70,7 +70,7 @@ fn source(model: &MimoModel, dt: f64) -> PreparedMimoLoad {
     )
     .unwrap()
 }
-fn maxwell(dt: f64) -> PreparedMimoLoad {
+pub(super) fn maxwell(dt: f64) -> PreparedMimoLoad {
     source(
         &MimoModel {
             ports: 1,

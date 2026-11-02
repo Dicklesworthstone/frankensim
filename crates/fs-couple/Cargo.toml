@@ -65,6 +65,7 @@ fs-scenario = { path = "../fs-scenario" }
 fs-solid = { path = "../fs-solid" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
+fs-spectral = { path = "../fs-spectral" }
 fs-thermal = { path = "../fs-thermal" }
 fs-thermochem = { path = "../fs-thermochem" }
 fs-time = { path = "../fs-time" }
