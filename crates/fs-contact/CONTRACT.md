@@ -1723,3 +1723,21 @@ groups in `tests/adhesive_shear/spinning.rs` exercise these distinctions,
 detachment, both strengths and original owner identity. These adapters do
 not replace normal branch history, solve spin-induced peeling or claim new
 source authority.
+
+## Thermal junction strengths on frozen adhesive normal geometry
+
+`SourceAdhesiveSlidingPatch::at_temperature` produces an immutable
+`spinning::temperature::SourceThermalAdhesivePatch` from the original ordered
+card and pinned static/kinetic shear claims. Only one admitted absolute face
+temperature changes; all other coordinates and quantity conventions remain
+fixed. The original uniform-disk law uses those actual strengths and the
+original solid radius, including zero or tensile net normal load. Detached
+zero-area states refuse this solid thermal-face entry.
+
+The original normal source, its temperature, elasticity, adhesion energy and
+geometry stay unchanged. This explicitly held-normal split does not supply
+normal thermal feedback or peeling. The surrounding owner must accept face
+temperature, native recoil, source receipts and combined sliding/spin heat
+together. Five source regression groups in `tests/adhesive_shear/temperature.rs`
+cover analytic spin power, pinned claims, fixed pressure, typed temperatures,
+source-domain and strength-order refusal, detachment and unchanged originals.

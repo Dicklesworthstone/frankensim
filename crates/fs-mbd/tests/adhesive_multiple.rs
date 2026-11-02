@@ -123,6 +123,92 @@ fn reference(radius: f64, area: f64) -> (f64, f64, f64, f64) {
 }
 
 #[test]
+fn thermal_strength_trials_reuse_original_response_and_refuse_foreign_disks() {
+    let (normal, shear) = common::sources(0.05, 3e6, STRENGTH);
+    let response = normal.evaluate_contact_load(0.0).unwrap();
+    let source = shear
+        .sliding_patch_dmt(normal.normal_state(), &response)
+        .unwrap();
+    let f = Fixture::new(response.contact_radius_m);
+    let contacts = f.contacts(source);
+    let dt = RESOLVED_FRACTION * reference(f.radius, response.contact_area_m2).3;
+    let gate = CancelGate::new();
+    let prepared = PreparedRigidAdhesiveIsland::new(
+        &f.bodies,
+        &f.properties,
+        &contacts,
+        dt,
+        controls(),
+        &gate,
+    )
+    .unwrap();
+    let original = prepared.advance(&gate).unwrap();
+    // These original claims are constant within a bounded T interval. Distinct
+    // thermal queries must preserve exactly the same native mechanics here.
+    let warm = source.at_temperature("T", 310.0).unwrap();
+    let cool = source.at_temperature("T", 285.0).unwrap();
+    let inputs = [
+        RigidAdhesiveIslandThermalLaw {
+            patch_id: "right",
+            source: &warm,
+        },
+        RigidAdhesiveIslandThermalLaw {
+            patch_id: "left",
+            source: &cool,
+        },
+    ];
+    assert_eq!(prepared.advance_thermal(&inputs, &gate).unwrap(), original);
+    let mut reversed = inputs;
+    reversed.reverse();
+    assert_eq!(
+        prepared.advance_thermal(&reversed, &gate).unwrap(),
+        original
+    );
+    assert!(prepared.advance_thermal(&inputs[..1], &gate).is_err());
+    let duplicate = [inputs[0], inputs[0]];
+    assert!(prepared.advance_thermal(&duplicate, &gate).is_err());
+
+    // Equal W, radius and kinetic strength do not authorize a different card.
+    let (foreign_normal, foreign_shear) = common::sources(0.05, 4e6, STRENGTH);
+    let foreign_response = foreign_normal.evaluate_contact_load(0.0).unwrap();
+    let foreign = foreign_shear
+        .sliding_patch_dmt(foreign_normal.normal_state(), &foreign_response)
+        .unwrap()
+        .at_temperature("T", 310.0)
+        .unwrap();
+    let changed_source = [
+        RigidAdhesiveIslandThermalLaw {
+            patch_id: "right",
+            source: &foreign,
+        },
+        inputs[1],
+    ];
+    assert!(prepared.advance_thermal(&changed_source, &gate).is_err());
+
+    // Even the exact same normal/shear source cannot silently change its disk.
+    let larger_response = normal.evaluate_contact_load(1e-7).unwrap();
+    let larger = shear
+        .sliding_patch_dmt(normal.normal_state(), &larger_response)
+        .unwrap()
+        .at_temperature("T", 310.0)
+        .unwrap();
+    let changed_area = [
+        RigidAdhesiveIslandThermalLaw {
+            patch_id: "right",
+            source: &larger,
+        },
+        inputs[1],
+    ];
+    assert!(prepared.advance_thermal(&changed_area, &gate).is_err());
+    assert_eq!(prepared.advance_thermal(&inputs, &gate).unwrap(), original);
+    assert_eq!(f.bodies, Fixture::new(f.radius).bodies);
+    assert_eq!(
+        source.shear_source().resolved().state_coordinate("T"),
+        Some(293.15)
+    );
+}
+
+#[test]
 fn two_symmetric_junctions_transfer_exact_rim_torque_and_relative_energy_to_finite_bodies() {
     let (normal, shear) = common::sources(0.05, 3e6, STRENGTH);
     let pull_off =

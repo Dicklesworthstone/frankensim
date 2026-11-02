@@ -21,6 +21,7 @@ use crate::tangential_friction::hertz::{
 use crate::tangential_friction::island::{self, PatchMechanics};
 use crate::tangential_friction::{magnitude, poll, totals, vector};
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
+use fs_contact::interface_binding::adhesive_shear::spinning::temperature::SourceThermalAdhesivePatch;
 use fs_exec::CancelGate;
 use fs_tribo::adhesive::spinning::contact::multiple::{
     AdhesiveContactInput, MultipleAdhesiveError, MultipleAdhesiveStep, PreparedAdhesiveContacts,
@@ -43,6 +44,16 @@ pub struct RigidAdhesiveIslandContact<'a> {
     pub patch_id: &'a str,
     /// Actual ordered body points, tangent frame and source-owned junction.
     pub contact: RigidAdhesiveContact<'a>,
+}
+
+/// Temperature-refreshed junction strengths for one unchanged original disk.
+/// The stable patch ID and original source identities are checked before solving.
+#[derive(Clone, Copy, Debug)]
+pub struct RigidAdhesiveIslandThermalLaw<'s, 'a> {
+    /// Original attached mechanical patch identity.
+    pub patch_id: &'s str,
+    /// Only the original junction-strength claims have been refreshed.
+    pub source: &'s SourceThermalAdhesivePatch<'a>,
 }
 
 /// Original source and geometry retained in canonical physical ID order.
@@ -387,10 +398,57 @@ impl<'a> PreparedRigidAdhesiveIsland<'a> {
         &self,
         gate: &CancelGate,
     ) -> Result<RigidAdhesiveIslandCandidate, RigidAdhesiveIslandError> {
+        self.advance_laws(&self.laws, gate)
+    }
+
+    /// Reuse the captured full body response with the original junction claims
+    /// evaluated at explicitly supplied interface temperatures. Normal source,
+    /// disk geometry, body binding and accepted velocities remain unchanged.
+    /// Source order is immaterial; exactly one successor per attached patch is
+    /// required. This does not evolve normal adhesion or allocate friction heat.
+    pub fn advance_thermal(
+        &self,
+        sources: &[RigidAdhesiveIslandThermalLaw<'_, '_>],
+        gate: &CancelGate,
+    ) -> Result<RigidAdhesiveIslandCandidate, RigidAdhesiveIslandError> {
+        poll(gate)?;
+        if sources.len() != self.patches.len() {
+            return Err(RigidAdhesiveIslandError::Invalid(
+                "one thermal junction source per original attached patch required",
+            ));
+        }
+        let mut ordered: Vec<_> = sources.iter().collect();
+        ordered.sort_by_key(|source| source.patch_id);
+        let mut laws = Vec::with_capacity(ordered.len());
+        for (source, patch) in ordered.iter().zip(&self.patches) {
+            poll(gate)?;
+            let original = source.source.original();
+            let expected = patch.contact.source;
+            if source.patch_id != patch.patch_id
+                || original.normal_state().identity() != expected.normal_state().identity()
+                || original.shear_source().resolved().identity()
+                    != expected.shear_source().resolved().identity()
+                || original.contact_area_m2() != expected.contact_area_m2()
+                || original.patch().parameters().contact_radius_m
+                    != expected.patch().parameters().contact_radius_m
+            {
+                return Err(RigidAdhesiveIslandError::Invalid(
+                    "thermal junction changed its original patch, source or disk geometry",
+                ));
+            }
+            laws.push(*source.source.law());
+        }
+        self.advance_laws(&laws, gate)
+    }
+
+    fn advance_laws(
+        &self,
+        laws: &[AdhesiveWrenchContact],
+        gate: &CancelGate,
+    ) -> Result<RigidAdhesiveIslandCandidate, RigidAdhesiveIslandError> {
         poll(gate)?;
         let native = if let Some(prepared) = &self.native {
-            let inputs: Vec<_> = self
-                .laws
+            let inputs: Vec<_> = laws
                 .iter()
                 .zip(&self.mechanics)
                 .map(|(law, mechanics)| AdhesiveContactInput {
@@ -428,14 +486,15 @@ impl<'a> PreparedRigidAdhesiveIsland<'a> {
             gate,
         )?;
         let mut reports = Vec::with_capacity(self.patches.len());
-        for ((patch, mechanics), contact) in self
+        for (((patch, mechanics), contact), law) in self
             .patches
             .iter()
             .zip(&self.mechanics)
             .zip(&native.contacts)
+            .zip(laws)
         {
             poll(gate)?;
-            let original = patch.contact.source.patch();
+            let original = law.kinetic_patch();
             let report = island::contact_report(
                 &patch.patch_id,
                 mechanics,

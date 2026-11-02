@@ -8,6 +8,9 @@ mod loading;
 #[path = "adhesive_shear/spinning.rs"]
 mod spinning;
 
+#[path = "adhesive_shear/temperature.rs"]
+mod temperature;
+
 use fs_contact::interface_binding::adhesive_shear::*;
 use fs_contact::interface_binding::*;
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};

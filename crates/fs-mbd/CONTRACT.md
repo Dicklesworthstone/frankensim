@@ -3346,3 +3346,16 @@ at unchanged force/work gates. Its much larger interval explicitly exercises
 support-budget refusal; strong translation/spin conditioning is not hidden by
 relaxed tolerances. A separate axial disk isolates the physical stopping-event
 refusal without that numerical conditioning limit.
+
+`PreparedRigidAdhesiveIsland::advance_thermal` reuses the captured Gram factors,
+full compliance, body endpoints and source-owned disks with the junction claims
+refreshed by `SourceThermalAdhesivePatch`. Exactly one source per attached patch
+is required; canonical IDs, original normal/shear source identities and exact
+disk geometry are checked before a solve. Detached patches cannot acquire rows
+or heat through this API. The original fixed-source `advance` and thermal path
+share the same numerical solve and native audits, with actual endpoint traction
+reevaluated through the selected temperature-dependent uniform-junction law.
+Only shear strengths change here: normal thermodynamics, poses and heat transport
+remain with their own owners. The additional `adhesive_multiple` regression
+checks identical constant-claim mechanics at different temperatures, source
+ordering, foreign-card/changed-area refusal and retry from unchanged endpoints.

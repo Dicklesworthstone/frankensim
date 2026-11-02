@@ -1,5 +1,8 @@
 //! Original ordered shear claims applied over the normal owner's real disk.
 
+/// Pinned thermal junction strengths on explicitly frozen normal geometry.
+pub mod temperature;
+
 use core::f64::consts::PI;
 
 use fs_tribo::adhesive::spinning::{
