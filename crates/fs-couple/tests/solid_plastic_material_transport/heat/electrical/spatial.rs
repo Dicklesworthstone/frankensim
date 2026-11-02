@@ -8,6 +8,8 @@
 mod dynamics;
 #[path = "spatial/terminals.rs"]
 mod terminals;
+#[path = "spatial/contacts.rs"]
+mod contacts;
 use super::*;
 use fs_couple::solid_enthalpy::plastic::electrical::spatial::*;
 use fs_em::{conduction::ConductionControls, spatial::conduction::*};

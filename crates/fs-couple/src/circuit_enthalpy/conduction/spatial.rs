@@ -428,8 +428,11 @@ impl SpatialConductionThermalNetwork<'_> {
     }
 
     // A native mechanical owner may supply current positions while caloric
-    // inventory remains on its original reference volumes. Source resolution,
-    // actual field work, heat routes and the one enthalpy residual stay here.
+    // inventory remains on its original reference volumes. Matching electrical
+    // interfaces retain their original paired vertices and source/heat owners;
+    // the native field re-admits their coincidence and actual surface metric at
+    // every proposal. Source resolution, field work, heat routes and the one
+    // enthalpy residual stay here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn step_resolved_candidate_with_geometry<
         't,
@@ -468,13 +471,6 @@ impl SpatialConductionThermalNetwork<'_> {
                 initial_energy_increments_j,
             )
             .map_err(map_conduction_error)?;
-        if reference_volumes_m3.is_some()
-            && (!problem.contacts().is_empty() || !contact_bindings.is_empty())
-        {
-            return Err(map_conduction_error(invalid(
-                "deforming current geometry requires its own moving electrical-interface owner",
-            )));
-        }
         if contact_bindings.len() != problem.contacts().len() {
             return Err(map_conduction_error(invalid(
                 "every tetrahedral electrical contact needs explicit source and heat ownership",
@@ -629,10 +625,18 @@ impl SpatialConductionThermalNetwork<'_> {
                     )));
                 }
                 let next = if let Some(positions) = positions {
-                    SpatialConduction::new(
+                    // Preserve material trace identities, ordered sources and
+                    // phase roles. The existing native contact assembly checks
+                    // exact coincidence and opposite adjacent volumes on X+u,
+                    // then integrates the voltage jump on the CURRENT triangle
+                    // area. Opening/sliding therefore refuses atomically; it is
+                    // never projected back onto the accepted interface.
+                    SpatialConduction::new_with_phase_contacts(
                         positions,
                         problem.mesh().tets.clone(),
                         conductors,
+                        refreshed_contacts,
+                        problem.contact_liquid_mass_fraction_axes().to_vec(),
                         assembly,
                         &mut || (*cancel.borrow_mut())(),
                     )

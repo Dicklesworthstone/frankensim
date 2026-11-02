@@ -9,7 +9,7 @@ use fs_material::state_point::{
 };
 use std::collections::BTreeSet;
 
-const PRISM_NODES: [[f64; 3]; 6] = [
+pub(super) const PRISM_NODES: [[f64; 3]; 6] = [
     [0.0, 0.0, 0.0],
     [0.0, L, 0.0],
     [0.0, 0.0, L],
@@ -17,7 +17,7 @@ const PRISM_NODES: [[f64; 3]; 6] = [
     [L, L, 0.0],
     [L, 0.0, L],
 ];
-const PRISM_TETS: [[usize; 4]; 3] = [[0, 1, 2, 5], [0, 1, 5, 4], [0, 4, 5, 3]];
+pub(super) const PRISM_TETS: [[usize; 4]; 3] = [[0, 1, 2, 5], [0, 1, 5, 4], [0, 4, 5, 3]];
 const PRISM_CELLS: [CellId; 3] = [CellId(17), CellId(3), CellId(47)];
 const AREA: f64 = L * L / 2.0;
 const ALPHA: f64 = 2e-5;
@@ -31,11 +31,11 @@ fn prism_controls() -> SpatialElectricalSolidSolve {
     result
 }
 
-fn tet_surface(tet: [usize; 4]) -> f64 {
+fn tet_surface(nodes: &[[f64; 3]], tet: [usize; 4]) -> f64 {
     [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
         .into_iter()
         .map(|face| {
-            let [a, b, c] = face.map(|i| PRISM_NODES[tet[i]]);
+            let [a, b, c] = face.map(|i| nodes[tet[i]]);
             let u: [f64; 3] = core::array::from_fn(|i| b[i] - a[i]);
             let v: [f64; 3] = core::array::from_fn(|i| c[i] - a[i]);
             let cross = [
@@ -49,26 +49,45 @@ fn tet_surface(tet: [usize; 4]) -> f64 {
 }
 
 fn prism_thermal(f: &Fixture) -> DepositionSimulation<'_> {
-    let events = PRISM_TETS
+    prism_thermal_cells(
+        f.caloric[0].curve(),
+        MATS[0],
+        &PRISM_NODES,
+        &PRISM_TETS,
+        &PRISM_CELLS,
+    )
+}
+
+// Both terminal and matching-interface prisms retain one equal reference-mass
+// caloric cell per original tet. Only their assembly and source card differ.
+pub(super) fn prism_thermal_cells<'a>(
+    curve: &'a dyn ThermalLaw,
+    material_id: MaterialId,
+    nodes: &[[f64; 3]],
+    tets: &[[usize; 4]],
+    cells: &[CellId],
+) -> DepositionSimulation<'a> {
+    assert_eq!(tets.len(), cells.len());
+    let events = tets
         .iter()
         .enumerate()
         .map(|(i, &tet)| {
             let center: [f64; 3] =
-                core::array::from_fn(|axis| tet.iter().map(|&v| PRISM_NODES[v][axis] / 4.0).sum());
+                core::array::from_fn(|axis| tet.iter().map(|&v| nodes[v][axis] / 4.0).sum());
             TimedEvent {
                 time_s: 0.0,
                 event: Event::Birth(DepositedCell {
-                    id: PRISM_CELLS[i],
+                    id: cells[i],
                     segment_id: i as u64,
                     body_id: 1,
-                    material_id: MATS[0],
+                    material_id,
                     mass_kg: MASS,
                     specific_h_j_kg: 0.0,
                     geometry: CellGeometry {
                         start_m: [center[0] - L / 16.0, center[1], center[2]],
                         end_m: [center[0] + L / 16.0, center[1], center[2]],
                         volume_m3: VOLUME,
-                        surface_area_m2: tet_surface(tet),
+                        surface_area_m2: tet_surface(nodes, tet),
                     },
                     boundary: boundary(),
                 }),
@@ -77,11 +96,11 @@ fn prism_thermal(f: &Fixture) -> DepositionSimulation<'_> {
         .collect();
     DepositionSimulation::new(
         events,
-        &[(MATS[0], f.caloric[0].curve() as &dyn ThermalLaw)],
+        &[(material_id, curve)],
         DepositionBudget {
-            max_cells: 3,
+            max_cells: cells.len(),
             max_links: 0,
-            max_events: 3,
+            max_events: cells.len(),
             max_substeps: 1000,
         },
     )
@@ -199,7 +218,10 @@ fn with_prism<R>(
     })
 }
 
-fn current_drive(terminals: &[Vec<usize>; 2], current_a: f64) -> SpatialConductionDrive<'_> {
+pub(super) fn current_drive(
+    terminals: &[Vec<usize>; 2],
+    current_a: f64,
+) -> SpatialConductionDrive<'_> {
     SpatialConductionDrive::TotalCurrent {
         positive_faces: &terminals[0],
         negative_faces: &terminals[1],

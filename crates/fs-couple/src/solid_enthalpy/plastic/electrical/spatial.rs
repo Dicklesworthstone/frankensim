@@ -5,6 +5,7 @@
 //! assembly stay authoritative. This adds no resistor reduction or integrator.
 
 use super::*;
+use crate::circuit_enthalpy::conduction::contacts::ConductionContactThermal;
 use crate::circuit_enthalpy::conduction::spatial::{
     SpatialConductionDrive, SpatialConductionRegion, SpatialConductionThermalNetwork,
     SpatialConductionThermalStep,
@@ -127,8 +128,9 @@ impl<'m> ThermoplasticSolid<'m> {
     ///
     /// This bounded quasistatic composition retains fully solid isotropic DC
     /// transport and the native small-strain/rotation limits. Thermal geometry,
-    /// reference mass, heat-transfer areas and topology remain fixed. Electrical
-    /// contacts, source strain-dependence, material-frame tensor evolution, melt,
+    /// reference mass, heat-transfer areas and topology remain fixed. Matching
+    /// electrical interfaces use [`Self::advance_spatial_electrical_contact_candidate`].
+    /// Source strain-dependence, material-frame tensor evolution, melt,
     /// motional EMF and Lorentz force need their own owners and are not inferred.
     /// In particular, this is not finite-deformation constitutive mechanics.
     ///
@@ -153,11 +155,61 @@ impl<'m> ThermoplasticSolid<'m> {
         cx: &Cx<'_>,
     ) -> Result<SpatialElectricalSolidCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
     {
+        self.advance_spatial_electrical_contact_candidate(
+            thermal,
+            problem,
+            assembly,
+            drive,
+            &[],
+            target_s,
+            prescribed_m,
+            nodal_forces_n,
+            settings,
+            controls,
+            guess_j,
+            cx,
+        )
+    }
+
+    /// Close native bulk current and matching source-backed electrical
+    /// interfaces on the same proposed solid configuration and finite heat
+    /// endpoint. Every original contact requires its ordered material source,
+    /// two actual caloric temperatures and explicit two-sided heat partition.
+    /// The native surface owner re-admits the original paired triangles on X+u
+    /// and integrates the voltage jump over their actual changing area.
+    /// Surface work reaches the original adjacent reference-mass cells once.
+    ///
+    /// The paired coordinates must remain exactly coincident, with their
+    /// original distinct vertices and opposite adjacent volumes. This composes
+    /// admitted interface kinematics; it adds no mechanical tie/contact force,
+    /// opening, sliding or remeshing. Interface pressure, preparation and history
+    /// remain explicitly authored source conditions, not inferred from stress.
+    /// Thermal link geometry and receiving masses remain fixed. The DC,
+    /// small-strain and atomic-candidate scope of
+    /// [`Self::advance_spatial_electrical_candidate`] otherwise applies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_spatial_electrical_contact_candidate<'t, 'd, A: HeatAssembly + ?Sized>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        problem: &SpatialConduction<ResolvedConductorState>,
+        assembly: &A,
+        drive: impl Into<SpatialConductionDrive<'d>>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: SpatialElectricalSolidSolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SpatialElectricalSolidCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
+    {
         self.advance_spatial_electrical_with_motion_candidate(
             thermal,
             problem,
             assembly,
             drive,
+            contact_bindings,
             target_s,
             prescribed_m,
             nodal_forces_n,
@@ -184,6 +236,7 @@ impl<'m> ThermoplasticSolid<'m> {
         problem: &SpatialConduction<ResolvedConductorState>,
         assembly: &A,
         drive: impl Into<SpatialConductionDrive<'d>>,
+        contact_bindings: &[ConductionContactThermal<'_>],
         target_s: f64,
         prescribed_m: &[(usize, f64)],
         nodal_forces_n: &[(usize, f64)],
@@ -213,10 +266,9 @@ impl<'m> ThermoplasticSolid<'m> {
             || self.nodes_m.len() != problem.positions_m().len()
             || self.tetrahedra.len() != problem.mesh().tets.len()
             || self.conductor_geometry.is_some()
-            || !problem.contacts().is_empty()
         {
             return Err(ElectricalSolidError::Invalid(
-                "matching bounded solid/current histories without lumped paths or moving electrical contacts required",
+                "matching bounded solid/current histories without lumped conductor paths required",
             ));
         }
         for (solid, electrical) in self.tetrahedra.iter().zip(&problem.mesh().tets) {
@@ -313,7 +365,7 @@ impl<'m> ThermoplasticSolid<'m> {
             target_s,
             problem,
             drive,
-            &[],
+            contact_bindings,
             controls.assembly,
             controls.field,
             controls.coupled.coupled,
