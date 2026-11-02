@@ -36,6 +36,9 @@ mod interior;
 #[path = "plane_wave/coherence.rs"]
 mod coherence;
 
+#[path = "plane_wave/ohmic.rs"]
+mod ohmic;
+
 fn source(
     properties: &[(&str, Dims, f64)],
     validity: ValidityDomain,

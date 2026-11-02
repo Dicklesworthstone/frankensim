@@ -1981,6 +1981,18 @@ states. Incident epsilon and both permeabilities use the existing lossless
 field-storage admission. Transmitted epsilon is either the explicitly chosen
 nondispersive law or the original `ResolvedDebyeCapacitor` response, converted
 from terminal admittance to bulk permittivity without a second Debye law.
+`DielectricResponse::Ohmic` additionally consumes an original
+`ResolvedConductorState`, with absolute epsilon and mu in that same complete
+bundle. Its explicit stationary isotropic law retains the selected conductivity
+or resistivity basis and uses `epsilon_eff = epsilon - i sigma/omega`.
+The shared outgoing-wave calculation therefore retains conductor reflection
+phase, skin-depth attenuation and finite Joule absorption instead of imposing
+an ideal mirror. Missing displacement/magnetic data and unsupported dynamic
+source coordinates refuse; no vacuum constant or optical carrier law is inferred.
+`DebyeWithOhmic` combines the original polarization and conduction responses
+when both retain the identical complete resolved material/source snapshot.
+Their imaginary permittivities add in parallel. Independent adoption of the
+same snapshot is allowed; a foreign source bundle refuses before scattering.
 
 The convention is exp(+i omega t), with a forward transmitted wave
 exp(-i k_z z) and Im(k_z) <= 0. TE and TM amplitudes refer to the same
@@ -1994,15 +2006,18 @@ angle avoids division by vanishing normal wavenumber.
 Synthetic source-bound tests cover normal incidence, magnetic impedance,
 Brewster cancellation, independent Poynting balance, total internal reflection,
 critical incidence, grazing transparency, Debye phase and capacitor-geometry
-invariance, retained source identity and explicit refusals. This is not a mesh
-Maxwell solver, transient wave model, layered-medium solver, or experimental
+invariance, retained source identity and explicit refusals. The Ohmic tests
+independently integrate half-space Joule heat (including the TM longitudinal
+field), compare both electrical source bases and recover the good-conductor
+skin-depth limit. This is not a mesh
+Maxwell solver, transient wave model, or experimental
 qualification of an otherwise static material at an optical frequency.
 
 ### Coherent finite dielectric films
 
 `plane_wave::layers::PlanarDielectricLayers` prepares up to 64 ordered finite
-films between an explicit lossless incident source and an explicit lossless
-or Debye exit source. Every film retains its original `DielectricResponse`,
+films between an explicit lossless incident source and an explicit lossless,
+Debye or Ohmic exit source. Every film retains its original `DielectricResponse`,
 thickness and sourced permeability. Constitutive data are cached once at the
 selected frequency; angle/polarization queries are allocation-free. Zero
 thickness is an exact identity after source admission. The half-space owner
@@ -2026,6 +2041,17 @@ resonances, independent E/H transfer matrices with magnetic media, original
 Debye/geometry invariance, weak-film loss, critical films/exits and thick absorbing/evanescent limits. This remains a coherent
 homogeneous isotropic planar model: finite coherence length, roughness,
 anisotropy and mesh Maxwell evolution are outside its scope.
+
+Ohmic films use this same prepared scattering, internal-field and vector-beam
+path. The local cycle-mean heat is `sigma |E|^2/2`, already included in physical
+film absorption; it is never deposited a second time. Focused synthetic cases
+cover the resistive-sheet limit (including 50% absorption for sheet conductance
+`2/Z`), opaque-metal reflection and vector-beam volume heat versus boundary
+Poynting flux. These numerical fixtures do not qualify DC electrical sources
+at optical frequencies or include carrier dispersion, magnetic loss or roughness.
+The combined-law case also checks reflection phase and integrated Debye plus
+Joule heat across frequency, using independent source equations and rejecting
+a conductivity attached from another material snapshot.
 
 ### Coherent vector beam diffraction through the same films
 

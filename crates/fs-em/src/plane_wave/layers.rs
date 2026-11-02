@@ -2,8 +2,8 @@
 //!
 //! Layers are ordered from the incident face to the exit half-space. Sources,
 //! SI epsilon/mu and exp(+i omega t) phasors are the same as the parent owner.
-//! Incoming light is lossless; each film and the exit may use its original Debye
-//! law. Transmitted power enters the exit face; finite-film absorption excludes
+//! The incident medium is lossless; each film and the exit may use its original
+//! Debye or explicitly selected Ohmic law. Transmitted power enters the exit face; finite-film absorption excludes
 //! subsequent dissipation in that semi-infinite medium.
 //!
 //! Composition retains bounded homogeneous E/H states in common real reference

@@ -1,8 +1,9 @@
 //! Exact monochromatic scattering by one planar isotropic dielectric interface.
 //!
 //! This explicit plane-wave rung is separate from the mesh MQS solvers.
-//! Sources declare either a nondispersive lossless law or the existing passive
-//! Debye law; selecting either is not experimental qualification at a frequency.
+//! Sources declare a nondispersive lossless law, the existing passive Debye
+//! law, or an explicitly selected isotropic Ohmic conductor with displacement
+//! current. Selecting a law is not experimental qualification at a frequency.
 //! Both sides retain their complete source states, including absolute SI mu.
 //!
 //! Convention: exp(+i omega t), forward exp(-i k_z z), interface at z=0,
@@ -14,10 +15,14 @@
 //!
 //! Reference: MIT 6.974, "Electromagnetic Waves and Interfaces", §§2.2.1/2.2.3:
 //! <https://ocw.mit.edu/courses/6-974-fundamentals-of-photonics-quantum-electronics-spring-2006/fafcb9e36b7749f4eeb099d666bdf70a_electr_wav_inter.pdf>.
-//! See [`layers`] for finite coherent films. No roughness, anisotropy, conducting leakage, magnetic loss,
+//! Ohmic displacement current: MIT 6.013, Electromagnetics and Applications,
+//! §9.2.4, equations 9.2.37–9.2.39:
+//! <https://ocw.mit.edu/courses/6-013-electromagnetics-and-applications-spring-2009/d3be4ea78b036a6362230fb41780cf54_MIT6_013S09_notes.pdf>.
+//! See [`layers`] for finite coherent films. No roughness, anisotropy, magnetic loss,
 //! transient wave evolution or measured-material accuracy claim is supplied.
 
 use fs_material::{
+    conductor::{ResolvedConductorState, planar::PlanarConductorMaterial},
     field_storage::{
         FieldStorageError, dielectric::ResolvedDebyeCapacitor, linear_electric_permittivity,
         linear_magnetic_permeability,
@@ -39,7 +44,7 @@ pub enum Polarization {
     Tm,
 }
 
-/// Explicit existing material law for a homogeneous isotropic dielectric.
+/// Explicit material law for a homogeneous isotropic electromagnetic medium.
 #[derive(Clone, Copy, Debug)]
 pub enum DielectricResponse<'a> {
     /// Positive, isotropic, nondispersive lossless epsilon and mu.
@@ -47,12 +52,28 @@ pub enum DielectricResponse<'a> {
     /// Original polarization response, with a lossless sourced mu in the SAME
     /// retained bundle. The capacitor geometry cancels from bulk permittivity.
     Debye(&'a ResolvedDebyeCapacitor),
+    /// Original scalar Ohmic law J=sigma E plus lossless displacement current,
+    /// with epsilon and mu from the SAME complete conductor material bundle.
+    /// For exp(+i omega t), epsilon_eff = epsilon - i sigma/omega. This admits
+    /// skin-depth attenuation and Joule loss, without treating a DC source as
+    /// measured optical data or inventing carrier dispersion or magnetic loss.
+    Ohmic(&'a ResolvedConductorState),
+    /// Original Debye polarization and Ohmic conduction acting in parallel.
+    /// Both owners must retain the identical complete material snapshot; a
+    /// conductivity from another source state cannot be attached to this law.
+    /// Polarization loss and Joule loss add once in the effective permittivity.
+    DebyeWithOhmic {
+        dielectric: &'a ResolvedDebyeCapacitor,
+        conductor: &'a ResolvedConductorState,
+    },
 }
 impl<'a> DielectricResponse<'a> {
     pub fn material(self) -> &'a ResolvedMaterialStatePoint {
         match self {
             Self::Lossless(material) => material,
             Self::Debye(model) => model.material(),
+            Self::Ohmic(conductor) => conductor.material(),
+            Self::DebyeWithOhmic { dielectric, .. } => dielectric.material(),
         }
     }
 
@@ -69,6 +90,22 @@ impl<'a> DielectricResponse<'a> {
                     -(y.conductance_s / omega) * geometry,
                 )
             }
+            Self::Ohmic(conductor) => {
+                let epsilon = linear_electric_permittivity(conductor.material())?;
+                let sigma = ohmic_conductivity(conductor)?;
+                // Maxwell-Ampere: curl H = (sigma + i omega epsilon) E.
+                // Reuse the original scalar source and its independent basis;
+                // the film/field owners then account for sigma |E|^2 / 2 once.
+                C64::new(epsilon, -positive(sigma / omega)?)
+            }
+            Self::DebyeWithOhmic {
+                dielectric,
+                conductor,
+            } => {
+                let sigma = shared_ohmic_conductivity(dielectric, conductor)?;
+                let epsilon = Self::Debye(dielectric).permittivity(omega)?;
+                C64::new(epsilon.re, epsilon.im - positive(sigma / omega)?)
+            }
         };
         if !finite(epsilon) || epsilon.re <= 0.0 || epsilon.im > 0.0 {
             return Err(ReflectionError::Invalid(
@@ -77,6 +114,30 @@ impl<'a> DielectricResponse<'a> {
         }
         Ok(epsilon)
     }
+}
+
+// Same static source admission as the native spatial Ohmic field owner. A
+// field-, frequency- or strain-dependent transport snapshot is not a constant
+// instantaneous J=sigma E law. Retain explicitly owned stationary phase data.
+fn ohmic_conductivity(conductor: &ResolvedConductorState) -> Result<f64, ReflectionError> {
+    if !conductor.has_admitted_static_sources() {
+        return Err(ReflectionError::Invalid(
+            "Ohmic waves require the original stationary scalar conductivity law",
+        ));
+    }
+    positive(conductor.resistivity_ohm_m().recip())
+}
+
+fn shared_ohmic_conductivity(
+    dielectric: &ResolvedDebyeCapacitor,
+    conductor: &ResolvedConductorState,
+) -> Result<f64, ReflectionError> {
+    if dielectric.material().identity() != conductor.material().identity() {
+        return Err(ReflectionError::Invalid(
+            "Debye and Ohmic wave laws require the same complete material snapshot",
+        ));
+    }
+    ohmic_conductivity(conductor)
 }
 
 /// Source/model-domain or unrepresentable scattering refusal.
@@ -215,8 +276,21 @@ impl<'a> PlanarDielectricInterface<'a> {
         let incident_epsilon_f_m = linear_electric_permittivity(incident)?;
         let incident_mu_h_m = linear_magnetic_permeability(incident)?;
         let transmitted_mu_h_m = linear_magnetic_permeability(transmitted.material())?;
-        if let DielectricResponse::Lossless(material) = transmitted {
-            linear_electric_permittivity(material)?;
+        match transmitted {
+            DielectricResponse::Lossless(material) => {
+                linear_electric_permittivity(material)?;
+            }
+            DielectricResponse::Ohmic(conductor) => {
+                linear_electric_permittivity(conductor.material())?;
+                ohmic_conductivity(conductor)?;
+            }
+            DielectricResponse::DebyeWithOhmic {
+                dielectric,
+                conductor,
+            } => {
+                shared_ohmic_conductivity(dielectric, conductor)?;
+            }
+            DielectricResponse::Debye(_) => {}
         }
         Ok(Self {
             incident,
