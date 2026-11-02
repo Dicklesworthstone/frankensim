@@ -10591,6 +10591,39 @@ strong resistance contrasts, and actual finite-vapor conservation and surface
 source receipts. No interface storage, sorption heat, hysteresis or measured
 transfer coefficient is inferred.
 
+### Adaptive heterogeneous moisture and finite-vapor windows
+
+`MoistureLayeredSlab::advance_adaptive_to` and
+`FiniteMoistureAtmosphere::advance_layered_adaptive_to` reuse the original
+moisture full-step/two-half-step controller for an entire heterogeneous stack.
+Every native trial retains original sorption, Kirchhoff diffusivity and finite
+surface/interlayer transfer laws. Per-cell dry-basis moisture AND source
+activity receive independent accuracy scales; a shallow sorption curve cannot
+hide an unresolved chemical driving change behind small water storage.
+Finite-vapor windows additionally control actual reservoir water and RH.
+
+Each layer remains an original inventory view with its own dry mass per cell;
+there is no averaged-material or concatenated uniform-capacity substitute.
+Accepted half-step interface transfers enter adjacent layer accounts with
+opposite signs. `LayeredMoistureAdvanceReport` exposes each layer's integrated
+transfers and balance, while its summary contains only the two physical stack
+exteriors. Original-to-final water, finite vapor, noncondensing carrier and
+total mass checks retain one whole-window tolerance.
+
+The exact target time, bounded evaluations and original native solver limits
+remain active. Only the completed stack and gas are returned; failed work,
+source admission or cancellation exposes no successful internal prefix.
+Local temporal estimates are not global or spatial error certificates.
+Temperature, geometry, contact laws and prescribed environments stay fixed
+during each call; explicit boundaries split environmental histories.
+
+Focused independent continuous-time references verify two-material/contact
+relaxation and the three-inventory finite-vapor semigroup, temporal refinement,
+separate activity sensitivity, layer/exterior accounting and late work refusal.
+The unchanged homogeneous slab/Cartesian adaptive regression also runs through
+the shared controller. This addition does not infer hysteresis, evolving
+swelling geometry or sorption-energy coupling.
+
 ### Source-backed finite surface moisture exchange
 
 `moisture::surface::DryBasisSurfaceTransfer` admits the canonical

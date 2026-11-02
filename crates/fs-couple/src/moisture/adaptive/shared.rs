@@ -145,6 +145,7 @@ fn observe_fields<'a, B, F: ReservoirField<N>, E, const N: usize>(
 ) -> Result<Snapshot<'a>, E> {
     let [water, activity] = observe(&state.0)?;
     Ok(Snapshot {
+        field_activities: None,
         fields: Specimens::Many(
             state
                 .1

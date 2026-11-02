@@ -12,7 +12,10 @@
 //! convergence/increment failures and temporal error permit shorter retries.
 
 mod finite;
+mod layered;
 mod shared;
+
+pub use layered::LayeredMoistureAdvanceReport;
 
 pub use shared::{
     SharedAtmosphereMoistureAdvanceCandidate, SharedCartesianAtmosphereMoistureAdvanceCandidate,
@@ -229,6 +232,10 @@ impl<Step: WaterStep<N>, const N: usize> ReportTransfers<N> for OneReport<Step> 
 
 struct Snapshot<'a> {
     fields: Specimens<(u64, MoistureField<'a>)>,
+    /// Optional material activity coordinates, in the same native field order.
+    /// A shallow sorption curve must not hide a large chemical driving change
+    /// behind a small dry-basis moisture increment.
+    field_activities: Option<Specimens<(u64, &'a [f64])>>,
     reservoir_water_kg: Option<f64>,
     activity: Option<f64>,
 }
@@ -237,6 +244,7 @@ fn field_snapshot<F: ReservoirField<N>, const N: usize>(
 ) -> Result<Snapshot<'_>, MoistureError> {
     Ok(Snapshot {
         fields: Specimens::One((0, field.inventory())),
+        field_activities: None,
         reservoir_water_kg: None,
         activity: None,
     })
@@ -378,6 +386,19 @@ fn distance<E>(
     field_errors: &mut [f64],
     cx: &Cx<'_>,
 ) -> Result<f64, MoistureAdvanceError<E>> {
+    let activities = match (
+        &old.field_activities,
+        &a.field_activities,
+        &b.field_activities,
+    ) {
+        (None, None, None) => None,
+        (Some(old), Some(a), Some(b)) => Some((old.as_slice(), a.as_slice(), b.as_slice())),
+        _ => {
+            return Err(MoistureAdvanceError::Invalid(
+                "material activity coordinates changed during one moisture duration",
+            ));
+        }
+    };
     let (old, coarse, fine) = (
         old.fields.as_slice(),
         a.fields.as_slice(),
@@ -386,6 +407,13 @@ fn distance<E>(
     if old.len() != coarse.len() || old.len() != fine.len() || old.len() != field_errors.len() {
         return Err(MoistureAdvanceError::Invalid(
             "adaptive comparison changed the specimen collection",
+        ));
+    }
+    if activities.is_some_and(|(a, b, c)| {
+        a.len() != old.len() || b.len() != old.len() || c.len() != old.len()
+    }) {
+        return Err(MoistureAdvanceError::Invalid(
+            "material activity coordinates lost a native field",
         ));
     }
     let mut ratio: f64 = 0.0;
@@ -415,6 +443,39 @@ fn distance<E>(
                 c.moisture_absolute_tolerance,
                 c.relative_tolerance,
             )?);
+        }
+        if let Some((old_activity, coarse_activity, fine_activity)) = activities {
+            let coordinates = [
+                &old_activity[slot],
+                &coarse_activity[slot],
+                &fine_activity[slot],
+            ];
+            if coordinates
+                .iter()
+                .any(|(id, values)| *id != before.0 || values.len() != before.1.moisture.len())
+            {
+                return Err(MoistureAdvanceError::Invalid(
+                    "material activity coordinates changed their original cells",
+                ));
+            }
+            for (i, ((&old, &a), &b)) in coordinates[0]
+                .1
+                .iter()
+                .zip(coordinates[1].1)
+                .zip(coordinates[2].1)
+                .enumerate()
+            {
+                if i % 128 == 0 {
+                    checkpoint(cx)?;
+                }
+                local = local.max(scaled_error(
+                    old,
+                    a,
+                    b,
+                    c.activity_absolute_tolerance,
+                    c.relative_tolerance,
+                )?);
+            }
         }
         field_errors[slot] = local;
         ratio = ratio.max(local);

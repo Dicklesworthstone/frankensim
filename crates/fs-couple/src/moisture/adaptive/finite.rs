@@ -46,6 +46,7 @@ fn vapor_snapshot<F: ReservoirField<N>, const N: usize>(
 ) -> Result<Snapshot<'_>, AtmosphereMoistureError> {
     Ok(Snapshot {
         fields: Specimens::One((0, state.1.inventory())),
+        field_activities: None,
         reservoir_water_kg: Some(state.0.vapor_mass_kg()?),
         activity: Some(state.0.relative_humidity()?),
     })
@@ -55,6 +56,7 @@ fn solution_snapshot<F: ReservoirField<N>, const N: usize>(
 ) -> Result<Snapshot<'_>, SolutionMoistureError> {
     Ok(Snapshot {
         fields: Specimens::One((0, state.1.inventory())),
+        field_activities: None,
         reservoir_water_kg: Some(state.0.solvent_mass_kg()),
         activity: Some(state.0.solution().water_activity()?),
     })

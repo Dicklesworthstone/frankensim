@@ -9,6 +9,8 @@ use fs_material::state_point::{
 
 #[path = "layered/atmosphere.rs"]
 mod atmosphere;
+#[path = "layered/adaptive.rs"]
+mod adaptive;
 #[path = "layered/transfer.rs"]
 mod transfer;
 
