@@ -1,6 +1,6 @@
 //! G0/G1/G3: moving analytic geometry and native population/body momentum.
 
-use fs_lbm::core2::moving_disk::{MovingDisk2, disk_cell_fraction};
+use fs_lbm::core2::moving_disk::{MovingDisk2, disk_cell_fraction, disk_cell_moments};
 use fs_lbm::core2::{Cell, Grid, PartialSaturationBody2};
 
 const E: [[f64; 2]; 9] = [
@@ -307,4 +307,96 @@ fn late_endpoint_refusal_preserves_body_fluid_and_scratch_recovery() {
 
     assert!(std::panic::catch_unwind(|| disk_cell_fraction(f64::INFINITY, [0.0; 2])).is_err());
     assert!(std::panic::catch_unwind(|| disk_cell_fraction(0.0, [0.0; 2])).is_err());
+}
+
+#[test]
+fn analytic_cut_cell_first_moments_match_independent_circle_integrals() {
+    let r = 0.4f64;
+    let pi = std::f64::consts::PI;
+    let area = pi * r * r;
+    let enclosed = disk_cell_moments(r, [0.08, -0.06]);
+    close(enclosed.area, area, 2e-14);
+    close(enclosed.first_moment[0], -0.08 * area, 2e-14);
+    close(enclosed.first_moment[1], 0.06 * area, 2e-14);
+    for sx in [-1., 1.] {
+        for sy in [-1., 1.] {
+            let quarter = disk_cell_moments(r, [0.5 * sx, 0.5 * sy]);
+            let quarter_area = 0.25 * area;
+            close(quarter.area, quarter_area, 2e-14);
+            close(
+                quarter.first_moment[0],
+                sx * (r.powi(3) / 3. - 0.5 * quarter_area),
+                2e-14,
+            );
+            close(
+                quarter.first_moment[1],
+                sy * (r.powi(3) / 3. - 0.5 * quarter_area),
+                2e-14,
+            );
+        }
+    }
+    for sign in [-1., 1.] {
+        let half = disk_cell_moments(r, [0.5 * sign, 0.]);
+        close(half.area, 0.5 * area, 2e-14);
+        close(
+            half.first_moment[0],
+            sign * (2. * r.powi(3) / 3. - 0.25 * area),
+            2e-14,
+        );
+        close(half.first_moment[1], 0., 2e-14);
+        // Integrate a circular cap directly in Cartesian x, not by sectors.
+        let a = 0.2f64;
+        let cap_area = r * r * (a / r).acos() - a * (r * r - a * a).sqrt();
+        let cap_mx = 2. * (r * r - a * a).powf(1.5) / 3.;
+        let cap = disk_cell_moments(r, [sign * (a + 0.5), 0.]);
+        close(cap.area, cap_area, 2e-14);
+        close(
+            cap.first_moment[0],
+            sign * (cap_mx - (a + 0.5) * cap_area),
+            2e-14,
+        );
+        close(cap.first_moment[1], 0., 2e-14);
+    }
+    // A curved corner cut with both lower coordinates nonzero. Direct
+    // integrals of sqrt(R²-x²)-b, x*(sqrt(R²-x²)-b), and (R²-x²-b²)/2.
+    let (r, a, b) = (0.65f64, 0.1f64, 0.15f64);
+    let hi = (r * r - b * b).sqrt();
+    let integral = |x: f64| 0.5 * (x * (r * r - x * x).sqrt() + r * r * (x / r).asin()) - b * x;
+    let corner_area = integral(hi) - integral(a);
+    let mx = (-(r * r - hi * hi).powf(1.5) + (r * r - a * a).powf(1.5)) / 3.
+        - 0.5 * b * (hi * hi - a * a);
+    let my = 0.5 * ((r * r - b * b) * (hi - a) - (hi.powi(3) - a.powi(3)) / 3.);
+    let corner = disk_cell_moments(r, [a + 0.5, b + 0.5]);
+    close(corner.area, corner_area, 2e-14);
+    close(corner.first_moment[0], mx - (a + 0.5) * corner_area, 2e-14);
+    close(corner.first_moment[1], my - (b + 0.5) * corner_area, 2e-14);
+    assert_eq!(disk_cell_moments(2., [0.1, -0.2]).first_moment, [0.; 2]);
+    assert_eq!(disk_cell_moments(0.4, [3., 2.]).first_moment, [0.; 2]);
+}
+
+#[test]
+fn translated_disk_first_moments_close_and_preserve_area_only_bits() {
+    for radius in [0.2, 0.65, 1.7, 4.2] {
+        for center in [[8.2, 7.3], [8.37, 7.62], [8.5, 7.5]] {
+            let mut area = 0.;
+            let mut first = [0.; 2];
+            for y in 0..18 {
+                for x in 0..19 {
+                    let offset = [x as f64 - center[0], y as f64 - center[1]];
+                    let moments = disk_cell_moments(radius, offset);
+                    assert_eq!(
+                        moments.area.to_bits(),
+                        disk_cell_fraction(radius, offset).to_bits()
+                    );
+                    area += moments.area;
+                    first[0] += moments.area * x as f64 + moments.first_moment[0];
+                    first[1] += moments.area * y as f64 + moments.first_moment[1];
+                }
+            }
+            let expected = std::f64::consts::PI * radius * radius;
+            close(area, expected, 1e-12);
+            close(first[0], expected * center[0], 3e-12);
+            close(first[1], expected * center[1], 3e-12);
+        }
+    }
 }

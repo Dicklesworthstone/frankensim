@@ -1,7 +1,7 @@
 //! Physical dry-disk scenarios against independently integrated populations.
 use fs_exec::CancelGate;
 use fs_lbm::core2::moving_disk::{
-    DryDisk2, DryDiskCouplingConfig2, DryDiskError2, disk_cell_fraction,
+    DryDisk2, DryDiskCouplingConfig2, DryDiskError2, disk_cell_moments,
 };
 use fs_lbm::core2::{Cell, Grid, PartialSaturationBody2};
 
@@ -61,10 +61,18 @@ fn joint(grid: &Grid, disk: &DryDisk2, origin: [f64; 2]) -> [f64; 3] {
                 continue;
             }
             let (_, p) = physical(grid, i);
-            let weight = 1. - disk.solid_fraction(x, y);
+            let moments = disk_cell_moments(
+                disk.radius(),
+                [x as f64 - body.center[0], y as f64 - body.center[1]],
+            );
+            let weight = 1. - moments.area;
             result[0] += weight * p[0];
             result[1] += weight * p[1];
-            result[2] += weight * cross([x as f64 - origin[0], y as f64 - origin[1]], p);
+            let exterior_arm = [
+                weight * (x as f64 - origin[0]) - moments.first_moment[0],
+                weight * (y as f64 - origin[1]) - moments.first_moment[1],
+            ];
+            result[2] += cross(exterior_arm, p);
         }
     }
     result
@@ -323,14 +331,28 @@ fn changing_density_uses_endpoint_half_source_in_the_actual_dry_correction() {
             let average = core::array::from_fn::<_, 2, _>(|k| {
                 0.5 * (rho0 + rho1) * grid.g[k] + grid.fext[i][k]
             });
-            let fraction = disk_cell_fraction(radius, [x as f64 - center[0], y as f64 - center[1]]);
+            let moments = disk_cell_moments(radius, [x as f64 - center[0], y as f64 - center[1]]);
+            let fraction = moments.area;
             let arm = [x as f64 - origin[0], y as f64 - origin[1]];
+            let inside_arm = [
+                fraction * arm[0] + moments.first_moment[0],
+                fraction * arm[1] + moments.first_moment[1],
+            ];
             let full = [average[0], average[1], cross(arm, average)];
-            let held = [held[0], held[1], cross(arm, held)];
+            let inside = [
+                fraction * average[0],
+                fraction * average[1],
+                cross(inside_arm, average),
+            ];
+            let held = [
+                fraction * held[0],
+                fraction * held[1],
+                cross(inside_arm, held),
+            ];
             for k in 0..3 {
-                exterior_source[k] += (1. - fraction) * full[k];
-                interior_source[k] += fraction * full[k];
-                held_interior[k] += fraction * held[k];
+                exterior_source[k] += full[k] - inside[k];
+                interior_source[k] += inside[k];
+                held_interior[k] += held[k];
             }
         }
     }
@@ -574,4 +596,50 @@ fn stationary_walls_and_exterior_bounces_keep_their_separate_physical_reaction()
     );
     assert_eq!(receipt.periodic_angular_impulse, 0.);
     assert_eq!(receipt.physical_external_impulse, [0.; 3]);
+}
+
+#[test]
+fn oblique_common_translation_does_not_create_fictitious_spin_at_any_dry_density() {
+    let velocity = [0.018, -0.007];
+    let origin = [-7., 26.];
+    for density in [0.15, 1., 3.] {
+        let mut grid = periodic_grid(24, 22);
+        grid.f
+            .fill(fs_lbm::equilibrium(1., velocity[0], velocity[1]));
+        let mut initial = body(1.7, density, [10.2, 11.3]);
+        initial.velocity = velocity;
+        let mut disk = DryDisk2::new(&grid, 1.7, initial, 0.3).unwrap();
+        let conserved = joint(&grid, &disk, origin);
+        for step in 1..=16 {
+            let exchange = disk
+                .step(
+                    &mut grid,
+                    [0.; 2],
+                    0.,
+                    origin,
+                    DryDiskCouplingConfig2::default(),
+                    &gate(),
+                )
+                .unwrap();
+            // Previously the first light-body tick generated O(1e-5) angular
+            // correction and changed both velocity components despite zero slip.
+            close(disk.body().velocity[0], velocity[0], 3e-14);
+            close(disk.body().velocity[1], velocity[1], 3e-14);
+            close(disk.body().angular_velocity, 0., 3e-14);
+            close(disk.angle(), 0.3, 3e-14);
+            vector_close(exchange.interior_correction_impulse, [0.; 3], 1e-12);
+            vector_close(joint(&grid, &disk, origin), conserved, 3e-10);
+            assert_eq!(exchange.iterations, 0);
+            assert_eq!(exchange.candidate_evaluations, 1);
+            assert_eq!(disk.body().mass.to_bits(), initial.mass.to_bits());
+            assert_eq!(disk.body().inertia.to_bits(), initial.inertia.to_bits());
+            for k in 0..2 {
+                close(
+                    disk.body().center[k],
+                    initial.center[k] + step as f64 * velocity[k],
+                    2e-13,
+                );
+            }
+        }
+    }
 }

@@ -5788,9 +5788,25 @@ independently integrated density-dependent endpoint source, interior-only
 forcing, wall/exterior bounce and rollback/exact retry after actual probes.
 Full Cargo remains unexecuted where the constellation runtime closure is absent.
 
-Fractional angular inventory remains located at native lattice cell centers.
-Oblique subcell motion need not preserve its geometric first moment exactly;
-no exact arbitrary free-stream or geometric-conservation claim is made.
+`disk_cell_moments` extends the original analytic circle/unit-square integral
+with first moments relative to the cell center. The area-only specialization
+retains the same arithmetic and skips moment work. Dry interior angular
+momentum and midpoint interior-source torque integrate these exact cut-cell
+moments against the piecewise-constant cell momentum/force. Full-cell native
+collision and source torque remain unchanged; exterior quantities are their
+cut-interior complements. Only midpoint cut cells enter an additional reusable
+sorted cache, without another full-grid buffer.
+
+The previously demonstrated oblique uniform-translation spin artifact is
+removed. At dry density ratios 0.15/1/3, sixteen native ticks retain both velocity
+components, spin and material angle within 3e-14, with zero Newton corrections
+and one candidate per tick. Eight geometry/moving-disk and eight physical
+dry-disk groups pass against rebuilt actual sources. Independent Cartesian
+cap/corner integrals and full/half/quarter-disk moments, translated area/centroid
+sums and area-only bit agreement check the geometric change. The retained
+nonuniform-density/source, wall, angular-origin and rollback cases also pass.
+Exact cut-cell first moments do not establish a general moving-boundary GCL,
+higher-order fluid reconstruction or exact no-slip.
 One fixed-radius disk, lattice dx=dt=1 and a fluid-only swept interior domain
 are required. Multiple disks, body seam crossing, contact and free surfaces
 remain outside this owner. The existing `MovingDisk2` retains its explicit

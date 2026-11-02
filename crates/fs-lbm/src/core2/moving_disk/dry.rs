@@ -5,10 +5,11 @@
 //! a rigid-interior mass approximation. Since D2Q9 holds `rho*g + fext` during
 //! collision, its physical endpoint source is `(F_old + F_new)/2`; the density
 //! after streaming participates in every correction candidate.
-//! Fractional angular inventories use the original lattice cell centers.
-//! Their first geometric moment need not advect exactly in an oblique subcell
-//! translation; this owner closes that discrete angular balance, not a GCL or
-//! an exact free-stream-preservation claim for arbitrary moving fractions.
+//! Fractional angular inventories integrate the actual circle/cell first
+//! moment against each cell's physical momentum. Uniform oblique translation
+//! therefore transports the disk interior's geometric moment without creating
+//! a fictitious spin. Full-cell native collision/streaming torque is unchanged;
+//! exterior angular momentum is its exact cut-interior complement.
 //!
 //! This follows the fictitious-fluid momentum account of Breugem, JCP 231
 //! (2012), doi:10.1016/j.jcp.2012.02.026, and Lacis, Taira & Bagheri, JCP 305
@@ -19,7 +20,7 @@ use super::super::{
     Cell, CollisionModel2, Grid, PartialSaturationBody2, PartialSaturationBodyExchange2,
     raw_population_moments,
 };
-use super::{Bounds, MovingDisk2, cell_fraction};
+use super::{Bounds, MovingDisk2, cell_moments};
 use crate::{E, Q};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
@@ -113,6 +114,8 @@ pub struct ImmersedMomentum2 {
     /// Population mass; fractional cells carry their actual fluid density.
     pub mass: f64,
     /// Physical `(Px, Py, Lz)` about the requested fixed lattice origin.
+    /// Interior `Lz` integrates the analytic cut-cell first moment against the
+    /// piecewise-constant physical momentum density in that lattice cell.
     pub momentum: [f64; 3],
     /// Macroscopic `sum rho |u|^2/2`; excludes thermal and compressional energy.
     pub kinetic_energy: f64,
@@ -133,7 +136,8 @@ pub struct DryDiskExchange2 {
     pub interior: [ImmersedMomentum2; 2],
     /// Solved retained-fluid correction, expressed about the requested origin.
     pub interior_correction_impulse: [f64; 3],
-    /// Collision-midpoint occupancy times `(F_old + F_new)/2`, including torque.
+    /// Collision-midpoint occupancy times `(F_old + F_new)/2`, with torque
+    /// integrated using the same analytic cut-cell first moment.
     pub interior_forcing_impulse: [f64; 3],
     /// Full physical endpoint source minus the fictitious interior source.
     pub represented_fluid_forcing_impulse: [f64; 3],
@@ -176,6 +180,9 @@ pub struct DryDiskExchange2 {
 #[derive(Debug, Clone)]
 pub struct DryDisk2 {
     disk: MovingDisk2,
+    // Only midpoint cut cells need a correction to area * cell_center.
+    // Sorted lattice indices permit one linear merge during each inventory.
+    midpoint_cut_moments: Vec<(usize, [f64; 2])>,
 }
 
 impl DryDisk2 {
@@ -209,6 +216,7 @@ impl DryDisk2 {
         admit_drift(grid, radius, body.center, body.center)?;
         Ok(Self {
             disk: MovingDisk2::new(grid, radius, body, angle),
+            midpoint_cut_moments: Vec::new(),
         })
     }
 
@@ -278,6 +286,7 @@ impl DryDisk2 {
         let center = core::array::from_fn(|a| initial.center[a] + 0.5 * initial.velocity[a]);
         admit_drift(grid, self.disk.radius, initial.center, center)?;
         self.disk.rasterize(center);
+        self.cache_midpoint_moments(center, cancel)?;
         let before = self.measure(grid, None, initial.center, moment_origin, cancel)?;
         let context = Context {
             initial,
@@ -543,6 +552,33 @@ impl DryDisk2 {
         })
     }
 
+    fn cache_midpoint_moments(
+        &mut self,
+        center: [f64; 2],
+        cancel: &CancelGate,
+    ) -> Result<(), DryDiskError2> {
+        self.midpoint_cut_moments.clear();
+        let bounds = self
+            .disk
+            .raster_bounds
+            .expect("midpoint raster precedes its moments");
+        for y in bounds.lower[1]..bounds.upper[1] {
+            checkpoint(cancel)?;
+            for x in bounds.lower[0]..bounds.upper[0] {
+                let i = y * self.disk.dims[0] + x;
+                let fraction = self.disk.fractions[i];
+                if fraction > 0.0 && fraction < 1.0 {
+                    let moments = cell_moments(
+                        self.disk.radius,
+                        [x as f64 - center[0], y as f64 - center[1]],
+                    );
+                    self.midpoint_cut_moments.push((i, moments.first_moment));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn measure(
         &self,
         grid: &Grid,
@@ -557,6 +593,7 @@ impl DryDisk2 {
         let mut interior_force = [Dd::ZERO; 3];
         let mut boundary = [Dd::ZERO; 3];
         let mut periodic = Dd::ZERO;
+        let mut source_cut = 0;
         for y in 0..grid.ny {
             checkpoint(cancel)?;
             for x in 0..grid.nx {
@@ -611,12 +648,13 @@ impl DryDisk2 {
                         "dry-disk candidate has invalid physical fluid moments",
                     ));
                 }
-                let fraction = cell_fraction(
+                let moments = cell_moments(
                     self.disk.radius,
                     [x as f64 - center[0], y as f64 - center[1]],
                 );
                 fluid.add(rho, momentum, kinetic, arm, 1.0);
-                interior.add(rho, momentum, kinetic, arm, fraction);
+                interior.add(rho, momentum, kinetic, arm, moments.area);
+                interior.add_first_moment(moments.first_moment, momentum);
                 if post.is_some() {
                     let old_rho = raw_population_moments(&grid.f[i]).0;
                     let average = core::array::from_fn(|k| {
@@ -624,6 +662,13 @@ impl DryDisk2 {
                     });
                     add_impulse(&mut force, average, arm, 1.0);
                     add_impulse(&mut interior_force, average, arm, self.disk.fractions[i]);
+                    if let Some(&(index, first_moment)) = self.midpoint_cut_moments.get(source_cut)
+                        && index == i
+                    {
+                        interior_force[2] =
+                            interior_force[2] + Dd::from_f64(cross(first_moment, average));
+                        source_cut += 1;
+                    }
                 }
             }
         }
@@ -700,6 +745,11 @@ impl Inventory {
             mass: x[0],
             momentum: [x[1], x[2], x[3]],
             kinetic_energy: x[4],
+        }
+    }
+    fn add_first_moment(&mut self, first_moment: [f64; 2], momentum: [f64; 2]) {
+        if first_moment != [0.0; 2] {
+            self.0[3] = self.0[3] + Dd::from_f64(cross(first_moment, momentum));
         }
     }
 }

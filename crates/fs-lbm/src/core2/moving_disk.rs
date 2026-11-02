@@ -8,6 +8,7 @@
 
 use super::{Cell, Grid, PartialSaturationBody2, PartialSaturationBodyExchange2};
 use crate::Q;
+use fs_math::dd::Dd;
 use fs_math::det;
 
 mod dry;
@@ -307,6 +308,39 @@ pub fn disk_cell_fraction(radius: f64, cell_offset: [f64; 2]) -> f64 {
     cell_fraction(radius, cell_offset)
 }
 
+/// Analytic area and first spatial moment of a disk inside a unit lattice cell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DiskCellMoments2 {
+    /// Intersection area, also the solid fraction because the cell has unit area.
+    pub area: f64,
+    /// `integral_inside (position - cell_center) dA`, in lattice length cubed.
+    /// This is a first moment, not a centroid; it is zero for empty/full cells.
+    /// Adding `area * (cell_center - origin)` gives the integrated moment arm
+    /// for a piecewise-constant cell momentum or force density.
+    pub first_moment: [f64; 2],
+}
+
+/// Integrate disk area and both first moments using the same circle/square
+/// intersection as [`disk_cell_fraction`]. `cell_offset` is the unit cell's
+/// center relative to the disk center. The returned first moment is relative
+/// to the CELL center, so it corrects an area-times-cell-center approximation.
+///
+/// Oriented triangle and circular-sector integrals supply the cut-cell moment;
+/// no sampling, nominal rigid-fluid inertia or geometry renormalization is used.
+/// The area-only entry retains its original arithmetic and skips moment work.
+///
+/// # Panics
+/// Invalid radius/offsets or unrepresentable analytic moments.
+#[must_use]
+pub fn disk_cell_moments(radius: f64, cell_offset: [f64; 2]) -> DiskCellMoments2 {
+    admit_radius(radius);
+    assert!(
+        cell_offset.into_iter().all(f64::is_finite),
+        "disk cell offset must be finite"
+    );
+    cell_moments(radius, cell_offset)
+}
+
 fn admit_radius(radius: f64) {
     assert!(
         radius.is_finite()
@@ -318,14 +352,28 @@ fn admit_radius(radius: f64) {
 }
 
 fn cell_fraction(radius: f64, [x, y]: [f64; 2]) -> f64 {
+    cell_integrals::<false>(radius, [x, y]).area
+}
+
+fn cell_moments(radius: f64, offset: [f64; 2]) -> DiskCellMoments2 {
+    cell_integrals::<true>(radius, offset)
+}
+
+fn cell_integrals<const FIRST_MOMENTS: bool>(radius: f64, [x, y]: [f64; 2]) -> DiskCellMoments2 {
     let r2 = radius * radius;
     let nearest = [(x.abs() - 0.5).max(0.0), (y.abs() - 0.5).max(0.0)];
     if nearest[0].mul_add(nearest[0], nearest[1] * nearest[1]) >= r2 {
-        return 0.0;
+        return DiskCellMoments2 {
+            area: 0.0,
+            first_moment: [0.0; 2],
+        };
     }
     let farthest = [x.abs() + 0.5, y.abs() + 0.5];
     if farthest[0].mul_add(farthest[0], farthest[1] * farthest[1]) <= r2 {
-        return 1.0;
+        return DiskCellMoments2 {
+            area: 1.0,
+            first_moment: [0.0; 2],
+        };
     }
     let corners = [
         [x - 0.5, y - 0.5],
@@ -334,6 +382,7 @@ fn cell_fraction(radius: f64, [x, y]: [f64; 2]) -> f64 {
         [x - 0.5, y + 0.5],
     ];
     let mut area = 0.0;
+    let mut first = [Dd::ZERO; 2];
     for edge in 0..4 {
         let a = corners[edge];
         let b = corners[(edge + 1) % 4];
@@ -362,11 +411,31 @@ fn cell_fraction(radius: f64, [x, y]: [f64; 2]) -> f64 {
             let cross = edge_cross * (segment[1] - segment[0]);
             // A tangent edge has its midpoint on the circle but otherwise
             // lies outside it; only a strictly interior segment is triangular.
-            area += if middle[0].mul_add(middle[0], middle[1] * middle[1]) < r2 {
+            let inside = middle[0].mul_add(middle[0], middle[1] * middle[1]) < r2;
+            area += if inside {
                 0.5 * cross
             } else {
                 0.5 * r2 * det::atan2(cross, u[0].mul_add(v[0], u[1] * v[1]))
             };
+            if FIRST_MOMENTS {
+                if inside {
+                    // Triangle (0,u,v): integral r dA = cross(u,v)*(u+v)/6.
+                    for axis in 0..2 {
+                        first[axis] = first[axis]
+                            + Dd::from_f64(cross / 6.0) * Dd::from_f64(u[axis] + v[axis]);
+                    }
+                } else {
+                    // Sector: R^3/3 * (sin(b)-sin(a), cos(a)-cos(b)).
+                    // Project the endpoints first, avoiding an intermediate R^3.
+                    let su = radius / det::sqrt(u[0].mul_add(u[0], u[1] * u[1]));
+                    let sv = radius / det::sqrt(v[0].mul_add(v[0], v[1] * v[1]));
+                    let delta = [v[1] * sv - u[1] * su, u[0] * su - v[0] * sv];
+                    for axis in 0..2 {
+                        first[axis] =
+                            first[axis] + Dd::from_f64(r2 / 3.0) * Dd::from_f64(delta[axis]);
+                    }
+                }
+            }
         }
     }
     let tolerance = 128.0 * f64::EPSILON * r2.max(1.0);
@@ -374,5 +443,22 @@ fn cell_fraction(radius: f64, [x, y]: [f64; 2]) -> f64 {
         area.is_finite() && area >= -tolerance && area <= 1.0 + tolerance,
         "analytic disk/cell area is numerically unresolved"
     );
-    area.clamp(0.0, 1.0)
+    let area = area.clamp(0.0, 1.0);
+    let first_moment = if FIRST_MOMENTS && area > 0.0 && area < 1.0 {
+        core::array::from_fn(|axis| {
+            (first[axis] - Dd::from_f64(area) * Dd::from_f64([x, y][axis])).to_f64()
+        })
+    } else {
+        [0.0; 2]
+    };
+    if FIRST_MOMENTS {
+        let allowance = tolerance * radius.max(1.0);
+        assert!(
+            first_moment
+                .into_iter()
+                .all(|m| m.is_finite() && m.abs() <= 0.5 * area + allowance),
+            "analytic disk/cell first moment is numerically unresolved"
+        );
+    }
+    DiskCellMoments2 { area, first_moment }
 }
