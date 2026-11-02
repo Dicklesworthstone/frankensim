@@ -73,6 +73,28 @@ impl IsothermalFilm {
         }
         Ok(Self{geometry,gas,initial_gap,scales})
     }
+    /// Continue the SAME gas inventory with a new positive dynamic viscosity.
+    ///
+    /// Only the dissipative Poiseuille coefficient changes. The original gas
+    /// EOS, reservoir, reference gaps and mass-state scales remain exact, so
+    /// existing `z` coordinates keep their mass, pressure and free energy.
+    /// No state is reinitialized and there is no coefficient-change work:
+    /// viscosity does not enter this owner's storage.
+    ///
+    /// This is a caller-declared scalar transport update, not a material-source
+    /// refresh or thermal evolution. The caller holds the returned coefficient
+    /// fixed during each coupled solve and accounts for work using that same
+    /// owner. Changing temperature, density or the EOS needs its own transfer.
+    /// Invalid or unrepresentable viscosity leaves the original owner intact.
+    pub fn with_viscosity(&self, viscosity_pa_s: f64) -> Result<Self, FilmError> {
+        Ok(Self {
+            geometry: self.geometry.with_viscosity(viscosity_pa_s)?,
+            gas: self.gas,
+            initial_gap: self.initial_gap.clone(),
+            scales: self.scales.clone(),
+        })
+    }
+
     /// Number of work-conjugate mechanical coordinates.
     #[must_use]
     pub fn port_count(&self)->usize {self.geometry.port_count()}

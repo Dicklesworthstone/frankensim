@@ -101,3 +101,80 @@ fn invalid_mass_pressure_and_collapsed_gap_leave_outputs_untouched() {
     assert!(m.flow_into(&[0.0;2],z,&[f64::NAN;2],&mut zout).is_err());assert_eq!(zout,[22.0;2]);
     assert!(IsothermalFilm::at_ambient(m.geometry.clone(),&[0.0;2],AmbientGas{pressure_pa:0.0,..gas()}).is_err());
 }
+
+#[test]
+fn g1_g3_viscosity_continuation_keeps_gas_storage_and_scales_transport() {
+    let original = model(false);
+    let q = [0.0001, -0.00003];
+    let mut z = original.initial_state().to_vec();
+    z[0] *= 1.1;
+    z[1] *= 0.9;
+    let continued = original.with_viscosity(5.4e-5).unwrap();
+    assert_eq!(continued.initial_state(), original.initial_state());
+    let before = original.observe(&q, &z).unwrap();
+    let after = continued.observe(&q, &z).unwrap();
+    assert_eq!(after.mass_kg, before.mass_kg);
+    assert_eq!(after.free_energy_j, before.free_energy_j);
+    assert_eq!(after.minimum_pressure_pa, before.minimum_pressure_pa);
+    assert_eq!(after.maximum_pressure_pa, before.maximum_pressure_pa);
+    let (mut gq, mut gz, mut next_gq, mut next_gz) = ([0.0; 2], [0.0; 2], [0.0; 2], [0.0; 2]);
+    original.gradient_into(&q, &z, &mut gq, &mut gz).unwrap();
+    continued
+        .gradient_into(&q, &z, &mut next_gq, &mut next_gz)
+        .unwrap();
+    assert_eq!(next_gq, gq);
+    assert_eq!(next_gz, gz);
+    let (mut flow, mut next_flow) = ([0.0; 2], [0.0; 2]);
+    let power = original.flow_into(&q, &z, &gz, &mut flow).unwrap();
+    let next_power = continued.flow_into(&q, &z, &gz, &mut next_flow).unwrap();
+    for i in 0..2 {
+        close(next_flow[i], flow[i] / 3.0, 1e-13);
+    }
+    close(next_power, power / 3.0, 1e-13);
+    close(dot(&gz, &next_flow), next_power, 1e-13);
+    close(
+        continued.scales[0] * next_flow[0],
+        -continued.scales[1] * next_flow[1],
+        1e-13,
+    );
+    let dq = [0.0001, 0.00004];
+    let dz = [0.02, -0.04];
+    let de = [0.03, 0.02];
+    let (mut tangent, mut next_tangent) = ([0.0; 2], [0.0; 2]);
+    original
+        .flow_tangent_into(&q, &z, &gz, &dq, &dz, &de, &mut tangent)
+        .unwrap();
+    continued
+        .flow_tangent_into(&q, &z, &gz, &dq, &dz, &de, &mut next_tangent)
+        .unwrap();
+    for i in 0..2 {
+        close(next_tangent[i], tangent[i] / 3.0, 1e-13);
+    }
+    assert_eq!(original.geometry.viscosity_pa_s(), 1.8e-5);
+}
+
+#[test]
+fn g0_invalid_viscosity_continuation_leaves_gas_inventory_and_flow_intact() {
+    let original = model(true);
+    let q = [0.0002, 0.0];
+    let z = original.initial_state().to_vec();
+    let before = original.observe(&q, &z).unwrap();
+    let mut flow = [0.0; 2];
+    let power = original
+        .flow_into(&q, &z, &[0.01, -0.02], &mut flow)
+        .unwrap();
+    for viscosity in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(original.with_viscosity(viscosity).is_err());
+    }
+    let after = original.observe(&q, &z).unwrap();
+    assert_eq!(after.mass_kg, before.mass_kg);
+    assert_eq!(after.free_energy_j, before.free_energy_j);
+    let mut retried = [0.0; 2];
+    assert_eq!(
+        original
+            .flow_into(&q, &z, &[0.01, -0.02], &mut retried)
+            .unwrap(),
+        power
+    );
+    assert_eq!(retried, flow);
+}

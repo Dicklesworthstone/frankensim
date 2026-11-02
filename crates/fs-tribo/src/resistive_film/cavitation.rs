@@ -164,6 +164,27 @@ impl CavitatingFilm {
         })
     }
 
+    /// Continue the SAME retained liquid inventory with a new dynamic viscosity.
+    ///
+    /// The original geometry, density, cavitation pressure, reservoir and state
+    /// identity are retained. Existing states remain valid without resetting
+    /// liquid content or pressure; only the next step's Poiseuille conductances
+    /// change. A separately constructed film still cannot adopt these states.
+    ///
+    /// This is a caller-declared scalar transport update, not a material-source
+    /// refresh, thermal evolution or a transfer to a new density or vapor
+    /// pressure. Hold the selected coefficient fixed within each coupled step.
+    /// This mass-only owner makes no coefficient-work or thermal-energy claim.
+    /// Failure leaves the original owner and every accepted state untouched.
+    pub fn with_viscosity(&self, viscosity_pa_s: f64) -> Result<Self, FilmError> {
+        Ok(Self {
+            owner: Arc::clone(&self.owner),
+            geometry: self.geometry.with_viscosity(viscosity_pa_s)?,
+            liquid: self.liquid,
+            solve: self.solve,
+        })
+    }
+
     /// The original immutable pressure graph and viscosity coefficient.
     #[must_use]
     pub const fn geometry(&self) -> &ResistiveFilm {

@@ -364,3 +364,132 @@ fn g1_squeezed_full_cell_feeds_adjacent_cavity_with_one_conserved_flux() {
             .is_err()
     );
 }
+
+#[test]
+fn g1_g3_viscosity_continuation_preserves_cavity_and_changes_refill_flux() {
+    let original = CavitatingFilm::new(geometry(false), liquid(), config()).unwrap();
+    let full = original.initial_state(&[0.0]).unwrap();
+    let cavity = original
+        .advance(&full, &[-0.001], &[0.0], 0.01, || false)
+        .unwrap();
+    let saved = cavity.state.clone();
+    assert!(saved.liquid_fraction()[0] < 1.0);
+    let continued = original.with_viscosity(0.02).unwrap();
+    assert_eq!(continued.liquid(), original.liquid());
+    assert_eq!(original.geometry().viscosity_pa_s(), 0.01);
+    let baseline = original
+        .advance(&saved, &[-0.001], &[0.0], 0.01, || false)
+        .unwrap();
+    let slower = continued
+        .advance(&saved, &[-0.001], &[0.0], 0.01, || false)
+        .unwrap();
+    assert_eq!(
+        slower.state.pressure_pa(),
+        &[liquid().cavitation_pressure_pa]
+    );
+    close(
+        slower.channel_volume_flow_m3_s[0],
+        baseline.channel_volume_flow_m3_s[0] / 2.0,
+    );
+    close(
+        slower.report.liquid_mass_before_kg,
+        cavity.report.liquid_mass_after_kg,
+    );
+    close(
+        slower.report.liquid_mass_after_kg,
+        cavity.report.liquid_mass_after_kg - slower.report.boundary_mass_out_kg,
+    );
+    close(
+        slower.state.liquid_fraction()[0],
+        saved.liquid_fraction()[0] + 0.01 * 0.5e-10 * 98_000.0 / 2e-6,
+    );
+    assert!(slower.report.mass_residual_kg.abs() < 1e-16);
+    assert_eq!(cavity.state, saved);
+    let reformed = continued
+        .advance(&slower.state, &[0.0], &[0.0], 0.01, || false)
+        .unwrap();
+    assert_eq!(reformed.state.liquid_fraction(), &[1.0]);
+    close(
+        reformed.report.liquid_mass_before_kg,
+        slower.report.liquid_mass_after_kg,
+    );
+    close(
+        reformed.report.liquid_mass_after_kg,
+        reformed.report.liquid_mass_before_kg - reformed.report.boundary_mass_out_kg,
+    );
+}
+
+#[test]
+fn g1_g3_viscosity_continuation_scales_squeeze_pressure_without_changing_mass() {
+    let original = CavitatingFilm::new(geometry(false), liquid(), config()).unwrap();
+    let old = original.initial_state(&[0.0]).unwrap();
+    let continued = original.with_viscosity(0.03).unwrap();
+    let a = original
+        .advance(&old, &[0.0001], &[0.0], 0.01, || false)
+        .unwrap();
+    let b = continued
+        .advance(&old, &[0.0001], &[0.0], 0.01, || false)
+        .unwrap();
+    let ambient = liquid().ambient_pressure_pa;
+    close(
+        b.state.pressure_pa()[0] - ambient,
+        3.0 * (a.state.pressure_pa()[0] - ambient),
+    );
+    close(b.generalized_force[0], 3.0 * a.generalized_force[0]);
+    close(b.channel_volume_flow_m3_s[0], a.channel_volume_flow_m3_s[0]);
+    close(
+        b.report.liquid_mass_before_kg,
+        a.report.liquid_mass_before_kg,
+    );
+    close(b.report.liquid_mass_after_kg, a.report.liquid_mass_after_kg);
+    assert_eq!(old.configuration(), &[0.0]);
+    let sealed = CavitatingFilm::new(geometry(true), liquid(), config()).unwrap();
+    let full = sealed.initial_state(&[0.0]).unwrap();
+    let cavity = sealed
+        .advance(&full, &[-0.001], &[0.0], 0.1, || false)
+        .unwrap();
+    let next = sealed
+        .with_viscosity(0.03)
+        .unwrap()
+        .advance(&cavity.state, &[-0.0005], &[0.0], 0.1, || false)
+        .unwrap();
+    close(next.state.liquid_fraction()[0], 2.0 / 3.0);
+    close(
+        next.report.liquid_mass_after_kg,
+        cavity.report.liquid_mass_after_kg,
+    );
+    assert_eq!(next.report.boundary_mass_out_kg, 0.0);
+}
+
+#[test]
+fn g0_viscosity_continuation_keeps_state_ownership_and_refuses_invalid_values() {
+    let original = CavitatingFilm::new(geometry(false), liquid(), config()).unwrap();
+    let state = original.initialize(&[0.0], &[0.4]).unwrap();
+    let saved = state.clone();
+    for viscosity in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(original.with_viscosity(viscosity).is_err());
+    }
+    let continued = original.with_viscosity(0.02).unwrap();
+    assert!(
+        continued
+            .advance(&state, &[0.0], &[0.0], 0.001, || false)
+            .is_ok()
+    );
+    let foreign = CavitatingFilm::new(geometry(false), liquid(), config())
+        .unwrap()
+        .with_viscosity(0.02)
+        .unwrap();
+    assert!(
+        foreign
+            .advance(&state, &[0.0], &[0.0], 0.001, || false)
+            .is_err()
+    );
+    assert_eq!(state, saved);
+    let first = original
+        .advance(&state, &[0.0], &[0.0], 0.001, || false)
+        .unwrap();
+    let retry = original
+        .advance(&state, &[0.0], &[0.0], 0.001, || false)
+        .unwrap();
+    assert_eq!(first, retry);
+}
