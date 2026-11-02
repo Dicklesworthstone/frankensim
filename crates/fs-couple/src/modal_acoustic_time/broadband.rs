@@ -1,14 +1,19 @@
 //! One-way broadband receiver observation. The lower rows of the augmented
-//! [mode, continuous filter, held force] exponential integrate the filter under
-//! the actual within-sample modal trajectory. The original cached modal owner
-//! advances the mechanical states, retaining its exact energy/work bits.
-use super::{ModalAcousticFrame, ModalAcousticTimeModel, ModalAcousticWorkspace};
+//! [mode, continuous filter, forcing] exponential integrate the filter under
+//! the actual within-sample modal trajectory. Held and continuous harmonic or
+//! multi-tone loads retain the original mechanical owner's state/work/heat.
+use super::{
+    ModalAcousticFrame, ModalAcousticMode, ModalAcousticTimeModel, ModalAcousticWorkspace,
+};
 pub use crate::broadband_radiation::modal::{
     BroadbandModalControls, BroadbandModalError, BroadbandModalReport, ModalTransferSamples,
 };
 use crate::broadband_radiation::modal::{admit_modal_samples, fit_modal_velocity_transfers};
 use fs_math::{c64::C64, det};
+use std::sync::Arc;
 
+mod forcing;
+pub use forcing::{PreparedBroadbandHarmonic, PreparedBroadbandTones};
 mod linear;
 
 /// Maximum lag in a receiver's explicit sampled delay history.
@@ -25,6 +30,41 @@ struct ExactFilter {
     d: f64,
     q_scale: f64,
     model: fs_vfit::RationalModel,
+}
+impl ExactFilter {
+    fn try_new(
+        mode: ModalAcousticMode,
+        model: fs_vfit::RationalModel,
+        dt: f64,
+    ) -> Result<Self, BroadbandModalError> {
+        let ss = model.state_space();
+        let n = ss.n + 3;
+        let mut a = vec![0.0; n * n];
+        let w = mode.angular_frequency_rad_s;
+        let q_scale = if w == 0.0 { 1.0 } else { w };
+        a[1] = q_scale * dt;
+        a[n] = -w * w / q_scale * dt;
+        a[n + 1] = -2.0 * mode.damping_ratio * w * dt;
+        a[n + n - 1] = dt;
+        for i in 0..ss.n {
+            a[(i + 2) * n + 1] = ss.b[i] * dt;
+            for j in 0..ss.n {
+                a[(i + 2) * n + j + 2] = ss.a[i * ss.n + j] * dt;
+            }
+        }
+        let transition =
+            fs_phs::linear_exact::exponential(&a, n).map_err(BroadbandModalError::Exact)?;
+        Ok(Self {
+            n,
+            transition,
+            state: vec![0.0; ss.n],
+            candidate: vec![0.0; ss.n],
+            c: ss.c,
+            d: ss.d,
+            q_scale,
+            model,
+        })
+    }
 }
 struct Delay {
     taps: Vec<(usize, f64)>,
@@ -129,14 +169,16 @@ impl Delay {
     }
 }
 
-/// One-way exact held-force receiver; the original mechanical owner is retained.
+/// One-way exact-trajectory receiver; the original mechanical owner is retained.
 pub struct BroadbandModalObserver {
     model: ModalAcousticTimeModel,
     workspace: ModalAcousticWorkspace,
+    candidate_workspace: ModalAcousticWorkspace,
     filters: Vec<ExactFilter>,
     constant: Option<Vec<C64>>,
     delay: Delay,
     report: BroadbandModalReport,
+    forcing_owner: Arc<()>,
     // One extra force-moment column per continuous filter, prepared explicitly.
     // None means the warm linear-force path has not been admitted/prepared.
     linear_force_gains: Option<Vec<Vec<f64>>>,
@@ -218,33 +260,7 @@ impl BroadbandModalObserver {
         }
         let mut filters = Vec::with_capacity(bank.models.len());
         for (mode, fit) in model.modes().iter().zip(bank.models) {
-            let ss = fit.state_space();
-            let n = ss.n + 3;
-            let mut a = vec![0.0; n * n];
-            let w = mode.angular_frequency_rad_s;
-            let q_scale = if w == 0.0 { 1.0 } else { w };
-            a[1] = q_scale * dt;
-            a[n] = -w * w / q_scale * dt;
-            a[n + 1] = -2.0 * mode.damping_ratio * w * dt;
-            a[n + n - 1] = dt;
-            for i in 0..ss.n {
-                a[(i + 2) * n + 1] = ss.b[i] * dt;
-                for j in 0..ss.n {
-                    a[(i + 2) * n + j + 2] = ss.a[i * ss.n + j] * dt;
-                }
-            }
-            let transition =
-                fs_phs::linear_exact::exponential(&a, n).map_err(BroadbandModalError::Exact)?;
-            filters.push(ExactFilter {
-                n,
-                transition,
-                state: vec![0.0; ss.n],
-                candidate: vec![0.0; ss.n],
-                c: ss.c,
-                d: ss.d,
-                q_scale,
-                model: fit,
-            });
+            filters.push(ExactFilter::try_new(*mode, fit, dt)?);
         }
         // The new receiver owns the pressure ceiling. Retaining an unrelated
         // old narrow-band receiver here would admit/refuse on a second pressure.
@@ -253,10 +269,12 @@ impl BroadbandModalObserver {
         let observer = Self {
             model: mechanics,
             workspace: ModalAcousticWorkspace::new(model),
+            candidate_workspace: ModalAcousticWorkspace::new(model),
             filters,
             constant: bank.constant,
             delay,
             report: report.clone(),
+            forcing_owner: Arc::new(()),
             linear_force_gains: None,
         };
         Ok((observer, report))
@@ -267,6 +285,8 @@ impl BroadbandModalObserver {
     pub const fn report(&self) -> &BroadbandModalReport {
         &self.report
     }
+    /// Last accepted mechanical work/heat frame, unchanged by a refused step.
+    /// Receiver pressure is returned separately by the observation step.
     pub fn last_modal_frame(&self) -> &ModalAcousticFrame {
         self.workspace.frame()
     }
@@ -343,6 +363,15 @@ impl BroadbandModalObserver {
                 raw += y;
             }
         }
+        let pressure = self.preview_pressure(raw)?;
+        self.model
+            .step_into(force, &mut self.candidate_workspace)
+            .map_err(BroadbandModalError::Modal)?;
+        self.commit_observation(raw);
+        Ok(pressure)
+    }
+
+    fn preview_pressure(&self, raw: f64) -> Result<f64, BroadbandModalError> {
         if !raw.is_finite() {
             return Err(BroadbandModalError::NonFinite {
                 what: "modal pressure superposition",
@@ -354,14 +383,15 @@ impl BroadbandModalObserver {
                 "broadband observer exceeds the declared pressure ceiling",
             ));
         }
-        self.model
-            .step_into(force, &mut self.workspace)
-            .map_err(BroadbandModalError::Modal)?;
+        Ok(pressure)
+    }
+
+    fn commit_observation(&mut self, raw: f64) {
+        std::mem::swap(&mut self.workspace, &mut self.candidate_workspace);
         for filter in &mut self.filters {
             filter.state.copy_from_slice(&filter.candidate);
         }
         self.delay.commit(raw);
-        Ok(pressure)
     }
 }
 

@@ -61,9 +61,11 @@ fn observer(rate: u32, omega: f64, zeta: f64, ceiling: f64, delay: f64) -> Broad
         model: fit,
     };
     let workspace = ModalAcousticWorkspace::new(&model);
+    let candidate_workspace = ModalAcousticWorkspace::new(&model);
     BroadbandModalObserver {
         model,
         workspace,
+        candidate_workspace,
         filters: vec![filter],
         constant: None,
         delay: Delay::new(delay, 1).unwrap(),
@@ -84,6 +86,7 @@ fn observer(rate: u32, omega: f64, zeta: f64, ceiling: f64, delay: f64) -> Broad
             input_batches: 1,
         },
         linear_force_gains: None,
+        forcing_owner: std::sync::Arc::new(()),
     }
 }
 
@@ -282,3 +285,4 @@ fn real_feedthrough_supports_free_motion_and_complex_quadrature_refuses() {
     assert!(narrow.step_linear(&[0.0], &[1.0]).is_err());
     assert_eq!(narrow.model.states(), initial);
 }
+

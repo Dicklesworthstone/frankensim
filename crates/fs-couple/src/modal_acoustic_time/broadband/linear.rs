@@ -175,15 +175,13 @@ impl BroadbandModalObserver {
             ));
         }
         self.model
-            .step_linear_into(force_start, force_end, &mut self.workspace)
+            .step_linear_into(force_start, force_end, &mut self.candidate_workspace)
             .map_err(BroadbandModalError::Modal)?;
-        for filter in &mut self.filters {
-            filter.state.copy_from_slice(&filter.candidate);
-        }
-        self.delay.commit(raw);
+        self.commit_observation(raw);
         Ok(pressure)
     }
 }
 
 #[cfg(test)]
 mod tests;
+

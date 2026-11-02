@@ -3058,6 +3058,42 @@ and total augmented matrices<=4194304 entries. No mode/pole truncation or implic
 budget enlargement is allowed. Host cancellation is at bounded pressure-block
 boundaries; no hard-real-time, continuum passivity or load-model claim follows.
 
+`BroadbandModalObserver::{prepare_harmonic,step_harmonic}` and
+`{prepare_tones,step_tones}` follow continuous cosine/sine modal forces through
+the original fitted receiver, including the mechanical startup transient.
+Forces are interval-local peak coefficients in exp(-i Omega t) convention;
+multi-tone arrays are mode-major in the caller's original frequency order.
+Prepared plans bind the actual receiver/filter identity and original sample
+period. Phase advances only after a successful observation. The original
+fs-modal owners still produce the mechanical states, signed input work and
+independent positive viscous heat, retaining cross-frequency power terms.
+
+For each distinct frequency, the same deterministic exponential augments
+[scaled displacement, velocity, continuous filter, cosine force, sine force].
+Only its two filter-forcing columns are retained; all tones share the existing
+homogeneous filter transition. Thus warm steps allocate nothing, perform no
+matrix exponential or transfer refit, and retain each mode's homogeneous
+motion once. Exact duplicate frequencies use original-order compensated force
+sums before filter application; near frequencies remain distinct and retain
+beats. Cold observation preparation keeps the aggregate augmented-matrix cap;
+the mechanical owner separately admits the explicit `ModalToneBudget` and
+its 32-tone hard limit. The original Nyquist, fit, sampled-delay, producer-error
+and one-way-load boundaries remain unchanged.
+
+Mechanical states, the last accepted work/heat frame, filter history and delay
+commit together after all gates. A spare preallocated workspace keeps the last
+accepted frame intact even when mechanics refuses after acoustic staging.
+Held, linear-ramp and harmonic steps share this commit boundary. Real constant
+velocity gains remain valid, including free coordinates; complex constant
+legacy quadrature refuses the continuous-forcing paths because it does not
+define their causal broadband startup response. G0/G1/G3 checks cover the
+public sampled-fit construction, independent analytical transient convolution,
+true-frequency pressure and sampled delay, bit-identical original mechanics
+and work/heat, DC agreement, duplicate-tone cancellation, and warm refusal /
+retry across harmonic and ramp steps. These are finite-model numerical checks,
+not independent experimental source or continuum-radiation qualification.
+
+
 The v1 modal-file optional `broadband` block reuses its original parser and
 ProjectedForceProgram; v2-v5 coupled/nonlinear trajectories refuse this
 independent-mode receiver. CLI sidecars retain every producer/fit/error/delay
