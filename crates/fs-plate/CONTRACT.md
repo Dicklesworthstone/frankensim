@@ -50,6 +50,24 @@ units, impedance provenance, source band, and ownership of each physical loss
 remain explicit caller responsibilities. No acoustic surface, material law,
 external storage/heat decomposition, or broadband validity is inferred.
 
+## Shared original source for coupled resonance transients
+
+`vibration::response::AssemblyResponseSource` owns the original complete
+projected mass/stiffness, inverse mass, glue damping and canonical pHS source.
+The existing `AssemblyResponse::prepare` reuses this owner without changing its
+standalone held-force propagation. `AssemblyHarmonicPorts` exposes its borrowed
+accepted vibration and original physical attachment vectors so coupled solvers
+reuse the same body, mode ordering, support/tie transforms and force map.
+
+The fs-couple exact assembly/MIMO transient uses this source to evolve structural
+motion and original rational-load memory together. It reconstructs full physical
+displacements about the unchanged loaded mean, velocities, reactions and load
+impulses, and independently checks supplied work against structural energy,
+original glue dissipation and signed external work before publishing either
+history. The original projection budgets and retained-mode/fixed-branch
+limitations remain; this extraction introduces no new FE operator, preload,
+mode window, material law or external storage/heat certificate.
+
 ## Purpose and layer
 Orthotropic thin-plate bending for instrument bodies: DKT (discrete
 Kirchhoff triangle) elements with an orthotropic bending-rigidity matrix

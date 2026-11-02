@@ -50,6 +50,20 @@ pub struct AssemblyResponseStep {
     pub energy_balance_residual_j: f64,
 }
 
+/// Original canonical source shared by bare and externally loaded transients.
+///
+/// This owns the complete projected mass/tangent, the checked symmetric mass
+/// inverse and the original glue resistance witness. Preparing a different
+/// coupled flow must retain this source and its accepted equilibrium; it must
+/// not replace the projected pencil by ideal modal diagonals.
+pub struct AssemblyResponseSource<'v, 'body> {
+    vibration: &'v AssemblyVibration<'body>,
+    system: PortHamiltonian,
+    mass: Vec<f64>,
+    stiffness: Vec<f64>,
+    inverse_mass: Vec<f64>,
+}
+
 /// Fixed-clock response borrowing the unchanged equilibrium and its mode basis.
 ///
 /// This advances the complete supplied window basis, not an independently
@@ -70,13 +84,12 @@ pub struct AssemblyResponse<'v, 'body> {
     state: Vec<f64>,
 }
 
-impl<'v, 'body> AssemblyResponse<'v, 'body> {
-    /// Prepare once; the initial state is exactly the accepted static body.
+impl<'v, 'body> AssemblyResponseSource<'v, 'body> {
+    /// Prepare the source without choosing a clock or a propagation operator.
     /// Full projected M/K must be SPD. Singular/unstable pencils, non-PSD glue,
     /// inaccurate inversion, nonfinite data or exhausted budgets refuse.
     pub fn prepare(
         vibration: &'v AssemblyVibration<'body>,
-        duration_s: f64,
         budget: AssemblyResponseBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, String> {
@@ -91,15 +104,10 @@ impl<'v, 'body> AssemblyResponse<'v, 'body> {
         if n == 0
             || scalar > budget.linear.max_modes
             || augmented > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
-            || !duration_s.is_finite()
-            || duration_s <= 0.
             || !budget.linear.max_omega_dt.is_finite()
             || budget.linear.max_omega_dt <= 0.
         {
-            return Err(
-                "assembled response requires a positive clock and complete exact-owner capacity"
-                    .into(),
-            );
+            return Err("assembled response source requires complete exact-owner capacity".into());
         }
         let square = n * n; // the original operator cap bounds n before allocation
         let assembly = &vibration.equilibrium.assembly;
@@ -255,6 +263,66 @@ impl<'v, 'body> AssemblyResponse<'v, 'body> {
                 .map_err(|e| e.to_string())?;
         }
         checkpoint(cx)?;
+        Ok(Self {
+            vibration,
+            system,
+            mass,
+            stiffness,
+            inverse_mass,
+        })
+    }
+
+    /// Exact accepted equilibrium, constraint map and retained mode ordering.
+    pub fn vibration(&self) -> &'v AssemblyVibration<'body> {
+        self.vibration
+    }
+
+    /// Canonical [q,p] source with p=M_r*v and the original glue witness.
+    pub fn system(&self) -> &PortHamiltonian {
+        &self.system
+    }
+
+    /// Complete original Phi^T M Phi.
+    pub fn mass_matrix(&self) -> &[f64] {
+        &self.mass
+    }
+
+    /// Complete original Phi^T K_t Phi.
+    pub fn stiffness_matrix(&self) -> &[f64] {
+        &self.stiffness
+    }
+
+    /// Symmetric inverse actually checked against the original projected mass.
+    pub fn inverse_mass_matrix(&self) -> &[f64] {
+        &self.inverse_mass
+    }
+
+    /// Original projected glue resistance, without external load loss.
+    pub fn damping_matrix(&self) -> &[f64] {
+        self.vibration.glue_damping()
+    }
+}
+
+impl<'v, 'body> AssemblyResponse<'v, 'body> {
+    /// Prepare once; the initial state is exactly the accepted static body.
+    /// Source construction is shared unchanged with loaded transient owners.
+    pub fn prepare(
+        vibration: &'v AssemblyVibration<'body>,
+        duration_s: f64,
+        budget: AssemblyResponseBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self, String> {
+        checkpoint(cx)?;
+        if !duration_s.is_finite() || duration_s <= 0. {
+            return Err("assembled response requires a positive clock".into());
+        }
+        let AssemblyResponseSource {
+            vibration,
+            system,
+            mass,
+            stiffness,
+            inverse_mass,
+        } = AssemblyResponseSource::prepare(vibration, budget, cx)?;
         let exact = PreparedExactZoh::new_owned(system, duration_s, budget.linear)
             .map_err(|e| e.to_string())?;
         checkpoint(cx)?;
@@ -264,7 +332,7 @@ impl<'v, 'body> AssemblyResponse<'v, 'body> {
             mass,
             stiffness,
             inverse_mass,
-            state: vec![0.; scalar],
+            state: vec![0.; 2 * vibration.mode_count()],
         })
     }
 

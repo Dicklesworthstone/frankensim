@@ -33,6 +33,31 @@ resonance, DC and higher forcing harmonics, original work, Maxwell memory and
 frequency-dependent loss, both folds of a cubic-storage response with generated
 higher harmonics, admission before source evaluation, and source refusal.
 
+## Numerical Floquet stability of forced pHS resonance branches
+
+`phs_orbit::analyze_forced_orbit_stability` exposes the complete original ODE to
+fs-orbit's existing shooting and monodromy owner. The forcing frequency and phase
+must match the supplied HB or continuation point; `PeriodicPortInput::at_frequency`
+preserves authored Fourier amplitudes and phases at an accepted branch frequency.
+All damping and material-memory coordinates remain. Each native solve fixes the
+forcing period, and corrections exceeding caller-authored absolute tolerances in
+any original state coordinate return `SeedDisagreement`.
+
+The report retains native shooting states, complete multipliers and residuals on
+N, 2N and 4N time grids. Stable/Unstable numerical status requires both adjacent
+state/radius comparisons to pass and all radii to lie beyond the explicit
+unit-circle guard; otherwise it is Unresolved. No forced multiplier is removed
+as an autonomous phase. Dimensions, finite data, harmonic bandwidth and budgets
+are admitted before source callbacks. Source and native solver refusals remain
+errors, including the native suspected-torus refusal.
+
+This is local numerical evidence for smooth ODEs. Native forward-difference
+monodromy and three finite grids do not provide an eigenvalue enclosure,
+existence theorem, global stability claim, hybrid-event map or cooperative Cx
+cancellation. Regressions cover analytic complex-forced oscillators, all three
+Maxwell-memory multipliers, stable and unstable Duffing branches with an
+independent Liouville determinant, and unresolved/refusal boundaries.
+
 ## Continuous physical impedance on accepted loaded assemblies
 
 `assembly_harmonic::PreparedAssemblyMimoHarmonicResponse` borrows the original
@@ -51,6 +76,72 @@ is inferred. The focused MIMO test covers the analytic two-port Maxwell source,
 Fourier axis, original band, resource/cancellation refusals and unchanged
 history/reports. Loaded-shell port regressions separately cover resonance,
 nonmatching ties, physical reaction work and mutual-load falsifiers.
+
+## Exact joint assembly and rational-load resonance transients
+
+`assembly_harmonic::transient::PreparedAssemblyMimoTransient` evolves the original
+accepted body's complete retained M/K, glue C, physical attachment map and every
+original `PreparedMimoLoad` memory coordinate in one continuous linear generator.
+Applied incremental component force is held over the original source clock;
+attachment flow evolves with the body and load memory. The connection uses no
+inverse of the load's direct term, no held-flow split and no discarded pole or
+mutual entry. Zero-direct-term Maxwell and complete nonreciprocal MIMO loads are
+supported through their existing admitted source owner.
+
+The structural source comes from `AssemblyResponseSource`, shared with the
+original standalone response. The existing fs-phs prepared quadratic-flow owner
+caches the joint exponential and independent trajectory integrals once. States
+remain [q,p,original load coordinates], with p=M*v and the source's original
+complex-pair real chart. Initialization preserves load history; checkpoint
+restoration publishes complete structural and load histories atomically.
+
+Each accepted step independently reconstructs physical applied work, attachment
+flows, endpoint reactions and reaction impulses. Structural energy change, the
+integral of original glue dissipation and signed external load work must balance
+physical applied work. The load-work integral may be negative when existing
+memory releases energy; no load storage or heat certificate is invented. Static
+loaded mean shape and all original component/support/tie maps remain unchanged.
+Failures of source, physical maps, numerical accounts, budgets or cancellation
+publish neither structural state nor load history.
+
+Connection dimensions, allocation envelope, construction/contraction work and
+the original exact-owner cache budget are explicit. Source clock, declared band,
+port ordering and continuous/sampled passivity report classes remain unchanged.
+Exact evolution of the supplied rational equations does not certify broadband
+source validity, missing structural modes, nonlinear motion or a changed contact
+branch. Focused numerical checks cover analytical loaded decay/frequency through
+large time steps, history release, full coupled mass/damping/mutual loading,
+independent q/v integration, exact subdivision and original complex-pair charts.
+
+## Original exterior BEM geometry to complete modal mouth loading
+
+`modal_mouth::BemModalMouth` binds a caller-selected circular planar cap on the
+original closed outward-oriented exterior triangle mesh to fs-duct's signed
+axisymmetric mouth basis. A unit modal volume flow imposes the physical normal
+velocity trace psi/S. Native aperture work projection returns the complete modal
+pressure/volume-flow impedance directly, including mutual terms and higher modes
+whose net volume flow is zero. The adapter never applies the per-port net-flow
+conversion of `ApertureImpedance::acoustic` to these modal traces.
+
+Original geometry validation, cap normals/radius, panel uniqueness, area and the
+unmodified discrete basis Gram matrix are checked before solving. A caller-owned
+Gram-defect limit refuses an under-resolved cap; no trace renormalization or mesh
+repair is performed. Finite Gram moments do not certify complete disk coverage
+or absence of self-intersection; the selected cap remains the caller's physical
+surface. Geometry is not remeshed and no missing cap is generated.
+
+`bake` uses the explicitly selected native collocation or Galerkin aperture route,
+shares each frequency factor across modal loads, and preserves the original raw
+BEM artifact and diagnostics. Every complete complex matrix must pass fs-duct's
+pointwise Hermitian passivity admission, with its original frequency, radius,
+exterior gas and mode count. The batch admits trace, matrix and projection work
+ceilings and cancellation before publishing all requested loads together.
+
+This is finite-panel, axisymmetric harmonic loading of the supplied rigid exterior
+geometry, not an azimuthal-mode model or a causal broadband fit. Regressions cover
+signed modal traces and mesh refinement, independent surface/port work equality,
+native Galerkin radiation connected to a loaded duct at two frequencies, mutual
+loading liveness, and geometry/resolution/budget/cancellation refusals.
 
 ## Finite load-resistor feedback on three-dimensional winding histories
 

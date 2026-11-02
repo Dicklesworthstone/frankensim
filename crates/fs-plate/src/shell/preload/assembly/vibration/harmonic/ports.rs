@@ -164,6 +164,12 @@ impl<'m, 'v, 'body> AssemblyHarmonicPorts<'m, 'v, 'body> {
         &self.ports
     }
 
+    /// The exact accepted body and retained basis that own this physical map.
+    /// Time-domain consumers use this identity, not just matching dimensions.
+    pub fn vibration(&self) -> &'v super::AssemblyVibration<'body> {
+        self.model.vibration
+    }
+
     /// Load the complete source pencil with Z(omega) under exp(-i*omega*t).
     /// This matrix maps conjugate port flows to resisting efforts. It may have
     /// reactive, mutual and nonreciprocal terms. The common numerical Hermitian
