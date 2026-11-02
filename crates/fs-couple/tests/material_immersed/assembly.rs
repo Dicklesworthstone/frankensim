@@ -5,6 +5,9 @@ use fs_couple::material_immersed::settling::{SubmergedEllipsoid, SubmergedSphere
 use fs_ga::{Se3, So3Tangent, Vec3};
 use fs_lbm::d3q19::{DryBodiesExchange3, DryBodyCouplingConfig3};
 
+#[path = "assembly/planes.rs"]
+mod planes;
+
 type Model<'a, const N: usize> = ResolvedImmersedBodies<'a, ResolvedLiquidState, N>;
 
 fn vector(v: [f64; 3]) -> Vec3 {

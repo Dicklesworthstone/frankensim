@@ -21525,6 +21525,50 @@ and statically reviewed, with pinned formatting checks, but remain uncompiled
 and unexecuted: the narrow Cargo command fails loading the missing asupersync
 sibling before Rust compilation. No public-target pass is claimed.
 
+### Material-owned dry assemblies with prescribed film surfaces
+
+`ResolvedImmersedBodies::with_prescribed_planes` attaches SI
+`PlaneFilmSi` inputs to a spherical material assembly and returns
+`ResolvedImmersedPlanes`. Original material identity, density, complete dry
+inertia, populations, accepted pose/momentum and step count survive attachment.
+Plane normals are normalized by the original native owner. Wall-normal and
+optional tangent/parallel-spin cutoff/roughness scales remain explicit and
+independent of sphere-pair scales. Viscosity comes only from the same resolved
+fluid snapshot used for bulk flow and every film.
+
+One original implicit dry-body solve includes all sphere-pair and plane
+resistance. The complete `DryLubricatedPlanesExchange3` remains in lattice
+units; each plane separately receives its linear impulse, angular impulse
+including reaction couple, and work. Its prescribed reservoir supplies the
+opposite to the represented fluid/body system. Resolved-wall exchange,
+authored loads, reduced weight, fictitious-fluid correction and modeled film
+loss remain distinct. No reaction is applied to populations a second time.
+
+The wrapper owns accepted plane positions. Their native constant translation
+advances exactly once per accepted interval; all next-plane positions, body
+load conversions and the next count are checked before native publication.
+Rejected probes, cancellation and exhausted budgets retain all accepted
+plane/fluid/body history. The reusable next-plane buffer is prepared at
+attachment; density-preserving viscosity rebind retains geometry and updates
+bulk, pair and plane resistance together. Read-only assembly access prevents
+advancing body time independently of its attached surfaces. Empty planes
+retain the original sphere-only result exactly.
+
+These surfaces supply missing-film resistance only. They do not create or move
+a resolved no-slip boundary, and the scenario must supply a matching resolved
+boundary separately. Finite plane mass/recoil, rotational motion, contact,
+ellipsoid films and thermal allocation of film loss remain outside this owner.
+Original dry solve, low-Mach, positive-gap, sweep, film/mode and at-most-64-plane
+admission remain authoritative.
+
+Three public regression groups cover independent exterior-fluid/dry-body/plane
+momentum balance, normal-film SI resistance and reservoir work, exactly one
+geometry advance, empty-plane parity after existing history, and viscosity
+rebind/refusal/exact retry after native probes. They are authored and
+statically reviewed; pinned formatting passes. The public target remains
+uncompiled and unexecuted because the constellation preflight finds missing
+siblings and Cargo fails on asupersync before Rust compilation.
+
 ### Continuous modal reflection on the complete exact flow
 
 `mm_line::continuous::ContinuousModalLine` is a full-state lossless

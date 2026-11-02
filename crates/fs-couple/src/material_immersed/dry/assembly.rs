@@ -4,6 +4,15 @@ use super::super::settling::{SubmergedEllipsoid, SubmergedSphere};
 use super::super::*;
 use fs_lbm::d3q19::{DryBodiesExchange3, DryBodyCouplingConfig3};
 
+mod planes;
+pub use planes::{PlaneFilmSi, ResolvedImmersedPlanes};
+
+struct StepLoads<const N: usize> {
+    next: u64,
+    impulses: [[f64; 6]; N],
+    origin: [f64; 3],
+}
+
 /// One to eight ordinary material bodies sharing one resolved fluid state.
 ///
 /// Light, neutral and heavy bodies retain their original positive dry mass and
@@ -219,6 +228,44 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
         controls: DryBodyCouplingConfig3,
         gate: &CancelGate,
     ) -> Result<DryBodiesExchange3<N>, Error> {
+        let loads = self.prepare_step(authored, moment_origin_m, gate)?;
+        let report = match &self.native.surfaces {
+            CarrierSurfaces::Spheres { radii, film } => {
+                self.native.grid.step_with_dry_lubricated_spheres(
+                    &mut self.native.samplers,
+                    *radii,
+                    &mut self.native.bodies,
+                    loads.impulses,
+                    *film,
+                    loads.origin,
+                    controls,
+                    gate,
+                )?
+            }
+            CarrierSurfaces::Ellipsoids(shapes) => {
+                self.native.grid.step_with_dry_partial_saturation_bodies(
+                    &mut self.native.samplers,
+                    core::array::from_fn(|i| &shapes[i] as &dyn BodyFrameShape3),
+                    &mut self.native.bodies,
+                    loads.impulses,
+                    loads.origin,
+                    controls,
+                    gate,
+                )?
+            }
+        };
+        self.native.accepted_steps = loads.next;
+        Ok(report)
+    }
+
+    // One conversion/load authority for sphere-only, ellipsoid and plane-film
+    // consumers. No fallible physical-unit operation may follow publication.
+    fn prepare_step(
+        &self,
+        authored: [[f64; 6]; N],
+        moment_origin_m: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<StepLoads<N>, Error> {
         poll(gate)?;
         let next = self
             .native
@@ -243,33 +290,11 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
             }
         }
         let origin = convert(moment_origin_m, 1.0 / self.native.scaling.cell_size_m())?;
-        let report = match &self.native.surfaces {
-            CarrierSurfaces::Spheres { radii, film } => {
-                self.native.grid.step_with_dry_lubricated_spheres(
-                    &mut self.native.samplers,
-                    *radii,
-                    &mut self.native.bodies,
-                    impulses,
-                    *film,
-                    origin,
-                    controls,
-                    gate,
-                )?
-            }
-            CarrierSurfaces::Ellipsoids(shapes) => {
-                self.native.grid.step_with_dry_partial_saturation_bodies(
-                    &mut self.native.samplers,
-                    core::array::from_fn(|i| &shapes[i] as &dyn BodyFrameShape3),
-                    &mut self.native.bodies,
-                    impulses,
-                    origin,
-                    controls,
-                    gate,
-                )?
-            }
-        };
-        self.native.accepted_steps = next;
-        Ok(report)
+        Ok(StepLoads {
+            next,
+            impulses,
+            origin,
+        })
     }
 
     /// Convert native mass to kg without changing accepted state.
