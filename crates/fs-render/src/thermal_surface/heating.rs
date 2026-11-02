@@ -23,6 +23,9 @@ pub use coating::{
 /// Finite-film optical constants on the original temperature or enthalpy state.
 pub mod coating_feedback;
 pub use coating_feedback::SurfaceCoatingLaw;
+/// Read-only coherent emission from the same native film/substrate states.
+pub mod coating_emission;
+pub use coating_emission::{NativeCoatingEmission, NativeCoatingEmissionError};
 /// Independently evolving film/substrate optics on the native thermal timeline.
 pub mod coating_state;
 use coating_state::CoatingFeedbackState;

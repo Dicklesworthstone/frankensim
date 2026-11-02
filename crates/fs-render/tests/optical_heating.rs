@@ -35,6 +35,7 @@ mod coating;
 
 #[path = "optical_heating/transmitting_coating.rs"]
 mod transmitting_coating;
+mod coating_emission;
 
 #[path = "optical_heating/coating_state.rs"]
 mod coating_state;

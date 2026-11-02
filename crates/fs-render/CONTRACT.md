@@ -5063,3 +5063,36 @@ independent Beer--Lambert depth losses and SI Planck radiance, polarized
 isothermal Kirchhoff closure with the original dispersive optical owners,
 asymmetric reverse temperature routing, positive emission at k=1e-20 when R+T
 rounds to one, and empty/lossless/zero-thickness and support-refusal limits.
+
+### Native coating emission resolves the original accepted thermal state
+
+`NativeCoatingEmission` prepares an immutable spectral observation from an
+accepted `DepositionSimulation`. Every `StatefulCoatingLayer` retains its own
+active cell, material identity and declared temperature support. Opaque emission
+also binds the original substrate receiver and fixed or state-dependent complex
+index law. Transmitting emission retains only its physical finite-film receivers;
+a bare lossless interface requires no cells and emits zero.
+
+Preparation obtains temperature and exact specific enthalpy from the native
+thermal owner and resolves the same fixed, temperature or caloric-enthalpy optical
+laws used by absorption heating. A latent plateau may keep Planck temperature
+unchanged while its optical response evolves with enthalpy. Original caloric
+identity, storage basis and law domains remain binding. Repeated cell/law pairs
+share one resolution; distinct optical-law rows consume the declared preparation
+budget once. The existing 64-film ceiling applies before allocation. Cancellation
+or any binding/domain failure publishes no snapshot and changes no thermal state.
+
+The snapshot owns resolved optics and temperatures, records the accepted native
+time, and hashes ordered physical bindings, source identity, native state and
+resolved emitter identity. Later angle/wavelength queries reuse that immutable
+emitter without reading a changed simulation or resolving laws again. Observation
+needs no illumination schedule and neither advances nor debits thermal storage;
+internal exchange and radiative cooling require a separate thermal transport
+owner. The reciprocal emitter's vacuum, wavelength, polarization and local
+equilibrium assumptions remain unchanged.
+
+Three G1/G3 integration groups compare independently evolving film/substrate
+states with direct coherent absorption and independent SI Planck radiance, check
+snapshot immutability and identities, preserve distinct equal-temperature latent
+states under reverse observation and shared-law budgets, and exercise material,
+caloric, domain and cancellation refusals without altering native heat.
