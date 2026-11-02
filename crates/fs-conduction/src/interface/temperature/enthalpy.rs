@@ -36,7 +36,86 @@ pub struct ContactEnthalpyStep {
     pub radiation_iterations: usize,
 }
 
+/// Bounded coupled Newton work and independent physical enthalpy acceptance.
+#[derive(Debug, Clone, Copy)]
+pub struct ContactEnthalpyNewtonConfig {
+    /// Original storage, Newton/FGMRES and independent joule-balance controls.
+    /// Requires Armijo line search, zero relative stopping tolerance, and an
+    /// absolute numerical target no looser than `residual_tolerance_j`.
+    pub step: EnthalpyStepConfig,
+    /// Maximum residual callbacks, including initialization and rejected
+    /// source-domain/line-search trials. The final physical audit is separate.
+    pub max_residual_evaluations: usize,
+    /// Original matching-pair/overlap-triangle tangent allowance.
+    pub max_face_pairs: usize,
+    /// Absolute Euclidean norm of the complete nodal energy residual, J.
+    pub residual_tolerance_j: f64,
+}
+
 impl TemperatureContacts<'_, '_> {
+    /// Solve primary enthalpy and source-backed contact resistance together.
+    ///
+    /// Every residual queries R at its actual chart-resolved temperatures.
+    /// The original spatial owner supplies reference-mass storage, nonlinear
+    /// conductivity and latent phase response. The tangent adds only
+    /// `(dK_contact/dT * T) * dT/dh`; frozen contact conduction already belongs
+    /// to the original operator. On a latent plateau the temperature column
+    /// vanishes while reference-mass enthalpy storage remains active.
+    ///
+    /// Matching and nonmatching interfaces retain their original quadrature,
+    /// pinned source laws and fixed geometry/pressure. Source-domain misses
+    /// backtrack through the existing Armijo owner. Constitutive corners that
+    /// lack the contact owner's unique tangent refuse without extrapolation.
+    /// Prescribed temperatures must select unique enthalpies on their charts.
+    /// No radiation or airflow feedback is added by this entry point.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_enthalpy_newton(
+        &self,
+        cx: &Cx<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+        problem: ConductionProblem<'_>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: ContactEnthalpyNewtonConfig,
+    ) -> Result<ContactEnthalpyStep, EnthalpyError> {
+        let (solved, actual) = engine.advance_with_temperature_contacts(
+            cx, problem, self, old_h, dt_s, config,
+        )?;
+        let physical = engine.evaluate_endpoint(
+            cx, problem, Some(actual.frozen_interfaces()), old_h,
+            &solved.specific_enthalpy_j_kg, dt_s, config.step, None,
+        )?;
+        if !physical.residual_norm_j.is_finite()
+            || physical.residual_norm_j > config.residual_tolerance_j
+            || !physical.energy_residual_j.is_finite()
+            || physical.energy_residual_j.abs() > config.step.energy_tolerance_j
+        {
+            return Err(invalid("<contact-enthalpy-newton>", format!(
+                "coupled enthalpy endpoint fails physical gates: residual {:e} J (target {:e}), energy {:e} J (target {:e})",
+                physical.residual_norm_j, config.residual_tolerance_j,
+                physical.energy_residual_j, config.step.energy_tolerance_j,
+            )).into());
+        }
+        let nonlinear_iterations = solved.newton.iterations;
+        let krylov_iterations = solved.newton.history.iter().try_fold(0usize, |work, row| {
+            work.checked_add(row.linear_iterations)
+                .ok_or(EnthalpyError::InvalidInput("contact enthalpy Krylov counter overflows"))
+        })?;
+        poll(cx, nonlinear_iterations)?;
+        Ok(ContactEnthalpyStep {
+            conduction: solved,
+            applied_contacts: actual.clone(),
+            physical_contacts: actual,
+            physical,
+            iterations: 1,
+            nonlinear_iterations,
+            krylov_iterations,
+            radiation: None,
+            combined_boundary: None,
+            radiation_iterations: 0,
+        })
+    }
+
     /// Advance heterogeneous enthalpy with source-backed R(T_interface).
     ///
     /// Every contact trial calls the existing spatial enthalpy solver from the

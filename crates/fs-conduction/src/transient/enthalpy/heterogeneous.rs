@@ -402,6 +402,18 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             .advance(cx, problem, interfaces, old_specific_h, dt_s, config)
     }
 
+    pub(crate) fn advance_with_temperature_contacts(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        contacts: &crate::interface::temperature::TemperatureContacts<'_, '_>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: crate::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig,
+    ) -> Result<(EnthalpyStepSolution, crate::interface::temperature::TemperatureContactEvaluation), EnthalpyError> {
+        self.inner.advance_with_temperature_contacts(cx, problem, contacts, old_h, dt_s, config)
+    }
+
     /// Evaluate one supplied physical endpoint using its assigned phase charts
     /// and reference masses, without advancing history or taking a Newton step.
     /// The caller owns residual and energy acceptance for the returned values.

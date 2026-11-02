@@ -32,13 +32,18 @@ fn mesh() -> ConductionMesh {
     ConductionMesh::new(TetComplex::from_tets(8,vec![[0,1,2,3],[4,5,6,7]]),points).unwrap()
 }
 fn card() -> InterfaceSystemCard {
+    card_with_curve(vec![(280., 0.1), (380., 0.7)])
+}
+fn card_with_curve(knots: Vec<(f64, f64)>) -> InterfaceSystemCard {
     let dims=fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
+    let lower = knots.first().unwrap().0;
+    let upper = knots.last().unwrap().0;
     let mut claims=ClaimSet::new();
     claims.insert_claim(PropertyClaim {
         key:PropertyKey::new(fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,dims),
         value:PropertyValue::Curve { abscissa:"T".into(),abscissa_dims:fs_conduction::TEMPERATURE_DIMS,
-            knots:vec![(280.,0.1),(380.,0.7)],dims },
-        validity:ValidityDomain::unconstrained().with("T",280.,380.).with("normal_pressure",1e6,1e6),
+            knots,dims },
+        validity:ValidityDomain::unconstrained().with("T",lower,upper).with("normal_pressure",1e6,1e6),
         uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::LinearInside,
         observations:vec![],provenance:Provenance {
             source:"synthetic temperature-contact enthalpy reference, not measurements".into(),
@@ -72,6 +77,14 @@ fn config()->EnthalpyStepConfig {
 }
 fn coupling()->ContactIterationConfig {
     ContactIterationConfig {max_iterations:64,relaxation:0.5,residual_tolerance_j:1e-8}
+}
+fn coupled_newton() -> fs_conduction::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig {
+    let mut step = config();
+    step.newton.relative_tolerance = 0.0;
+    fs_conduction::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig {
+        step, max_residual_evaluations: 512, max_face_pairs: 1,
+        residual_tolerance_j: coupling().residual_tolerance_j,
+    }
 }
 fn close(a:f64,b:f64,tolerance:f64){assert!((a-b).abs()<=tolerance,"{a} vs {b}, tolerance {tolerance}");}
 
@@ -209,5 +222,143 @@ fn g4_contact_enthalpy_limits_domain_and_cancellation_preserve_history() {
         assert_eq!(a.conduction.specific_enthalpy_j_kg,b.conduction.specific_enthalpy_j_kg);
         assert_eq!(a.physical_contacts.states(),b.physical_contacts.states());
         assert_eq!(a.iterations,b.iterations);
+    });
+}
+
+#[test]
+fn g1_coupled_enthalpy_contact_newton_crosses_latent_plateaus_at_the_original_roots() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let bc = ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap();
+        let card = card();
+        let contacts = TemperatureContacts::new(
+            cx, &mesh, &bc, vec![], vec![law(&mesh, &card)], 1,
+        ).unwrap();
+        let cold = chart(false);
+        let hot = chart(true);
+        let engine = HeterogeneousEnthalpyBackwardEuler::new(cx, &mesh, &[
+            ReferenceEnthalpyMaterial { curve: &cold, reference_density_kg_m3: 1.0 },
+            ReferenceEnthalpyMaterial { curve: &hot, reference_density_kg_m3: 2.0 },
+        ], &[0, 1], EnthalpyBudget { max_vertices: 8, max_elements: 2 }).unwrap();
+        let material = ConductivityModel::isotropic(
+            ConductivityTable::declared_curve(vec![(280., 1.6), (380., 3.6)]).unwrap(),
+        );
+        let source = ScalarField::Nodal(vec![0., 0., 0., 0., 60., 60., 60., 60.]);
+        let problem = ConductionProblem { mesh: &mesh, boundary: &bc,
+            material: &material, element_materials: None, source: &source };
+        let initial = vec![80., 80., 80., 80., 450., 450., 450., 450.];
+        let mut old = initial.clone();
+        for (i, dt) in [0.15, 0.35, 0.5].into_iter().enumerate() {
+            let before = old.clone();
+            let next = contacts.advance_enthalpy_newton(
+                cx, &engine, problem, &old, dt, coupled_newton(),
+            ).unwrap();
+            assert_eq!(old, before);
+            assert_eq!(next.iterations, 1);
+            assert_eq!(next.nonlinear_iterations, next.conduction.newton.iterations);
+            assert_eq!(next.applied_contacts.states(), next.physical_contacts.states());
+            assert!(next.physical.residual_norm_j <= coupled_newton().residual_tolerance_j);
+            close(next.physical.stored_energy_change_j, 10.0 * dt, 1e-8);
+            close(next.physical.energy_residual_j, 0.0, 1e-8);
+            for (&h, &reference) in next.conduction.specific_enthalpy_j_kg.iter().zip(&EXPECTED_H[i]) {
+                close(h, reference, 3e-6);
+            }
+            if i == 0 {
+                for vertex in 0..3 {
+                    close(next.conduction.temperature[vertex], 310.0, 1e-10);
+                    assert!(next.conduction.liquid_mass_fraction[vertex] > 0.2);
+                    assert!(next.conduction.liquid_mass_fraction[vertex] < 0.4);
+                }
+            }
+            old = next.conduction.specific_enthalpy_j_kg;
+        }
+        let stored: f64 = old.iter().zip(&initial).zip(engine.reference_nodal_masses_kg())
+            .map(|((&h, &h0), &mass)| mass * (h - h0)).sum();
+        close(stored, 10.0, 3e-8);
+    });
+}
+
+#[test]
+fn g1_stiff_enthalpy_contact_feedback_solves_inside_pinned_source_support() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let bc = ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap();
+        // R = 0.001 + 10*(T_interface - 326.5). Its original narrow source
+        // support contains the physical root but not the frozen-R response.
+        let card = card_with_curve(vec![(326.49995, 0.0005), (326.8, 3.001)]);
+        let point = QueryPoint::new().with("T", 326.5).unwrap()
+            .with("normal_pressure", 1e6).unwrap();
+        let law = TemperatureContact::new("joint", ThermalInterfaces::coincident_face_pairs(&mesh).unwrap(),
+            &card, &point, "T", SelectionPolicy::SingleClaimOnly).unwrap();
+        let contacts = TemperatureContacts::new(cx, &mesh, &bc, vec![], vec![law], 1).unwrap();
+        let cold = chart(false);
+        let hot = chart(true);
+        let engine = HeterogeneousEnthalpyBackwardEuler::new(cx, &mesh, &[
+            ReferenceEnthalpyMaterial { curve: &cold, reference_density_kg_m3: 1.0 },
+            ReferenceEnthalpyMaterial { curve: &hot, reference_density_kg_m3: 2.0 },
+        ], &[0, 1], EnthalpyBudget { max_vertices: 8, max_elements: 2 }).unwrap();
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem { mesh: &mesh, boundary: &bc,
+            material: &material, element_materials: None, source: &source };
+        let old = [80., 80., 80., 80., 450., 450., 450., 450.];
+        let before = old;
+        assert!(contacts.advance_enthalpy(cx, &engine, problem, &old, 0.15, config(), coupling()).is_err());
+        let next = contacts.advance_enthalpy_newton(cx, &engine, problem, &old, 0.15, coupled_newton()).unwrap();
+        // Independent 60-digit scalar solve: for trial R, solve the exact
+        // 8x8 sensible P1 system, then close R(mean(T)). Constant k=2,
+        // m=(1/24,1/12), cp=10 and the original consistent triangle mass rule.
+        let reference = [88.70706475284678, 89.38864357251035, 89.38864357251035, 80.93289979494787,
+            445.4913626078047, 445.27760871795596, 445.27760871795596, 449.7447941098757];
+        for (&h, &expected) in next.conduction.specific_enthalpy_j_kg.iter().zip(&reference) {
+            close(h, expected, 3e-7);
+        }
+        let state = &next.physical_contacts.states()[0];
+        close(state.resistance.value_m2_k_per_w(), 2.2561553235973436, 1e-7);
+        assert_eq!(state.resistance.card_identity(), card.content_hash());
+        assert!(state.interface_temperature_k < 326.8);
+        close(next.physical.stored_energy_change_j, 0.0, 1e-8);
+        assert!(next.physical.residual_norm_j <= coupled_newton().residual_tolerance_j);
+        assert_eq!(old, before);
+    });
+}
+
+#[test]
+fn g4_coupled_enthalpy_contact_newton_bounds_work_and_preserves_history_on_refusal() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let bc = ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap();
+        let card = card();
+        let contacts = TemperatureContacts::new(cx, &mesh, &bc, vec![], vec![law(&mesh, &card)], 1).unwrap();
+        let cold = chart(false);
+        let hot = chart(true);
+        let engine = HeterogeneousEnthalpyBackwardEuler::new(cx, &mesh, &[
+            ReferenceEnthalpyMaterial { curve: &cold, reference_density_kg_m3: 1.0 },
+            ReferenceEnthalpyMaterial { curve: &hot, reference_density_kg_m3: 2.0 },
+        ], &[0, 1], EnthalpyBudget { max_vertices: 8, max_elements: 2 }).unwrap();
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem { mesh: &mesh, boundary: &bc,
+            material: &material, element_materials: None, source: &source };
+        let old = [80., 80., 80., 80., 450., 450., 450., 450.];
+        let before = old;
+        let limited = fs_conduction::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig {
+            max_residual_evaluations: 1, ..coupled_newton()
+        };
+        assert!(matches!(contacts.advance_enthalpy_newton(cx, &engine, problem, &old, 0.15, limited),
+            Err(EnthalpyError::InvalidInput("contact enthalpy residual allowance exhausted"))));
+        let mut invalid = coupled_newton();
+        invalid.step.newton.relative_tolerance = 1e-3;
+        assert!(contacts.advance_enthalpy_newton(cx, &engine, problem, &old, 0.15, invalid).is_err());
+        let mut outside = old;
+        outside[0] = -201.0;
+        assert!(matches!(contacts.advance_enthalpy_newton(cx, &engine, problem, &outside, 0.15, coupled_newton()),
+            Err(EnthalpyError::Phase { vertex: 0, .. })));
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        context(&gate, |cancelled| assert!(matches!(contacts.advance_enthalpy_newton(
+            cancelled, &engine, problem, &old, 0.15, coupled_newton()),
+            Err(EnthalpyError::Conduction(fs_conduction::ConductionError::Cancelled { .. })))));
+        assert_eq!(old, before);
     });
 }

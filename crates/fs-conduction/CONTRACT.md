@@ -103,6 +103,36 @@ Geometry, pressure, contact area and all nonthermal source coordinates remain
 fixed. This is backward Euler with constant prepared heat capacity; variable
 caloric storage and latent heat remain owned by the primary-enthalpy path.
 
+## Coupled primary-enthalpy contact Newton
+
+`TemperatureContacts::advance_enthalpy_newton` closes source-backed R(T)
+inside the original spatial enthalpy residual. Reference masses, distinct
+material charts, nonlinear bulk conductivity, phase-conductivity response and
+sharp latent plateaus remain owned by the original enthalpy step. Matching
+and nonmatching contacts retain their existing physical quadrature and pinned
+source claims. The exact additional tangent is
+`dt * (dK_contact/dT * T) * dT/dh`; the original tangent already contains
+frozen contact conduction. Latent storage remains `m * delta_h`, including
+where `dT/dh` is zero. There is no apparent-capacity approximation.
+
+The original fs-solver Armijo/FGMRES driver bounds Newton and linear work.
+One complete sparse tangent is reused at each Newton field, with the original
+positive Picard preconditioner. An explicit residual-callback budget includes
+initialization and rejected trials. Only original chart, bulk-temperature or
+typed contact-source domain misses are retryable; source corners without a
+unique tangent and other constitutive failures refuse. Absolute numerical
+stopping is no looser than the independent physical nodal joule gate, and the
+unchanged energy-balance gate checks the accepted state before publication.
+The result's applied and physical contacts describe that same endpoint.
+
+G1 tests compare spatial melting with independent eight-node enthalpy roots
+and a stiff R(T) case with an independent 60-digit scalar/matrix root inside
+source support that the frozen-contact response leaves. G4 tests exercise
+bounded residual work, chart-domain refusal and cancellation without changing
+history. This is fixed-geometry, fixed-pressure, non-radiative thermal contact;
+it asserts neither arbitrary-law convergence nor uniqueness or experimental
+validation of the synthetic constitutive fixtures.
+
 ## Complete steady contact tangents and adjoints
 
 `TemperatureContacts::linearize_steady_endpoint` binds the unchanged physical

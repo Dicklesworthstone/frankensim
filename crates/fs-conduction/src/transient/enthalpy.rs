@@ -51,6 +51,7 @@ pub mod radiation;
 pub use radiation::adjoint::{EnthalpyRadiationStepGradient, EnthalpyRadiationStepLinearization};
 mod endpoint;
 pub use endpoint::EnthalpyEndpointEvaluation;
+mod contact;
 mod pointwise;
 use pointwise::{PointwiseBoundary, PointwiseBoundaryAssembly};
 
