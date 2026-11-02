@@ -20,6 +20,9 @@ use fs_tribo::{
     InterfaceSystemRef,
 };
 
+#[path = "hertz_rolling/driven.rs"]
+mod driven;
+
 const R: f64 = 0.1;
 const L: f64 = 0.05;
 const TAU: f64 = 0.01;

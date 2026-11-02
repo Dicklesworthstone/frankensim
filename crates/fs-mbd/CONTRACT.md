@@ -3202,6 +3202,26 @@ differences all twelve endpoint pose directions and checks common-motion
 invariance and internal force/moment cancellation. All 44 focused cases passed,
 including the 36 existing distance/bushing/spatial/motion regressions.
 
+## Driven joint Hertz shear, spin and rolling
+
+`PreparedRigidHertzRollingPair::new_driven` and
+`apply_rigid_hertz_rolling_driven` admit held world forces and body torques in
+contact A/B order through the original five-coordinate shear/spin/rolling
+owner. Native full-inertia acceleration supplies released drive displacement
+before the existing rolling Schur elimination and joint Hertz solve. Original
+accepted shear/spin rates still select the kinetic/static phase. Each body
+receives one summed external/contact resultant.
+
+Full-body midpoint actuator work and commanded world momentum transfer stay
+separate from surface friction heat and material rolling bulk heat. The original
+zero-drive entry, source applicability and normal-motion checks remain. An
+assisting endpoint effort refuses for refinement. This retains the existing
+frozen-geometry held-effort approximation; general multidimensional arrest
+events and gyroscopic/pose integration are not added. Four new native test
+groups cover mixed powered motion against independent pressure integration,
+off-center nonprincipal inertia and frame covariance, exact zero-drive/common
+acceleration invariance, and atomic reversal/normal-motion/cancellation refusal.
+
 ## Source-owned adhesive sliding and twisting on finite bodies
 
 `tangential_friction::adhesive` applies the original ordered junction-shear

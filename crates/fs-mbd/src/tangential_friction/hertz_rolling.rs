@@ -14,6 +14,8 @@
 //! supplies `c=A*N*R`; exact two-coordinate Schur elimination of its viscous
 //! moment precedes the original joint Hertz solve. One combined native impulse
 //! supplies all recoil. Surface heat and sphere bulk heat remain distinct.
+//! Held world forces and body torques can drive the same coupled phase; their
+//! full-body work and momentum transfer remain separate from contact losses.
 //!
 //! Geometry, normal load, sphere material temperature and frequency are held.
 //! Poses and the normal contact remain caller-owned. A held effort that assists
@@ -22,8 +24,10 @@
 //! store is added. The association of the supplied Hertz law with the ordered
 //! interface remains caller-owned unless a source-bound wrapper establishes it.
 
-pub mod multiple;
 pub mod collinear;
+mod driven;
+pub mod multiple;
+use driven::HeldPairDrive;
 
 use super::hertz::{
     PreparedRigidHertzPair, RigidHertzContact, RigidHertzControls, RigidHertzError, accepted_phase,
@@ -31,7 +35,7 @@ use super::hertz::{
 };
 use super::rolling::RigidRollingHistory;
 use super::{RigidContactBinding, RigidFrictionError, magnitude, poll, totals};
-use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
+use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_exec::CancelGate;
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::rolling_loss::viscoelastic::{DeformingSphereSurface, ViscoelasticSphereRollingCard};
@@ -88,6 +92,7 @@ pub struct RigidHertzRollingReport {
     pub effective_hertz_compliance_m_per_n: [[f64; 3]; 3],
     pub scaled_rates_before_m_s: [f64; 5],
     pub scaled_rates_after_m_s: [f64; 5],
+    pub scaled_driving_acceleration_m_s2: [f64; 5],
     pub actual_midpoint_coordinates_m: [f64; 5],
     pub normal_velocity_before_m_s: f64,
     pub normal_velocity_after_m_s: f64,
@@ -100,7 +105,9 @@ pub struct RigidHertzRollingReport {
     pub kinetic_after_j: f64,
     pub surface_midpoint_work_j: f64,
     pub rolling_midpoint_work_j: f64,
+    /// Work of contact impulses only; held external wrenches have their own port.
     pub midpoint_impulse_work_j: f64,
+    pub external_wrench_work_j: f64,
     pub work_energy_residual_j: f64,
     pub total_energy_residual_j: f64,
     pub surface_work_residual_j: f64,
@@ -115,6 +122,10 @@ pub struct RigidHertzRollingReport {
     pub endpoint_angular_velocity_residual_rad_s: f64,
     pub linear_momentum_change_ns: Vec3,
     pub angular_momentum_change_nms: Vec3,
+    pub external_linear_impulse_ns: Vec3,
+    pub external_angular_impulse_nms: Vec3,
+    pub linear_momentum_residual_ns: Vec3,
+    pub angular_momentum_residual_nms: Vec3,
     pub maximum_assisting_work_j: f64,
 }
 
@@ -139,6 +150,8 @@ pub struct PreparedRigidHertzRollingPair<'a> {
     mobility: [[f64; 5]; 5],
     compliance: [[f64; 5]; 5],
     rate_before: [f64; 5],
+    released_midpoint_rate: [f64; 5],
+    drive: HeldPairDrive,
     rolling_factor: Spd2,
     effective: HertzWrenchInput,
 }
@@ -213,6 +226,30 @@ pub fn apply_rigid_hertz_rolling(
     Ok(candidate.report)
 }
 
+/// Apply coupled shear, spin and rolling with held external wrenches on A/B.
+/// Both bodies and the original rolling history publish only after admission.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_rigid_hertz_rolling_driven(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    history: &mut RigidRollingHistory,
+    contact: RigidHertzRollingContact<'_>,
+    external: [Wrench; 2],
+    dt_s: f64,
+    controls: RigidHertzRollingControls,
+    gate: &CancelGate,
+) -> Result<RigidHertzRollingReport, RigidHertzRollingError> {
+    let prepared = PreparedRigidHertzRollingPair::new_driven(
+        bodies, properties, history, contact, external, dt_s, controls, gate,
+    )?;
+    let candidate = prepared.advance(contact.hertz, gate)?;
+    poll(gate)?;
+    bodies[contact.binding.body_a] = candidate.bodies_after[0];
+    bodies[contact.binding.body_b] = candidate.bodies_after[1];
+    *history = candidate.rolling_history;
+    Ok(candidate.report)
+}
+
 impl<'a> PreparedRigidHertzRollingPair<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -220,6 +257,34 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
         properties: &[MassProperties],
         history: &RigidRollingHistory,
         contact: RigidHertzRollingContact<'a>,
+        dt_s: f64,
+        controls: RigidHertzRollingControls,
+        gate: &CancelGate,
+    ) -> Result<Self, RigidHertzRollingError> {
+        Self::new_driven(
+            bodies,
+            properties,
+            history,
+            contact,
+            [Wrench::ZERO; 2],
+            dt_s,
+            controls,
+            gate,
+        )
+    }
+
+    /// Prepare the original five-coordinate phase under held external drive.
+    /// Forces are world-frame and torques body-frame, in contact A/B order.
+    /// The original accepted rates select the kinetic/static branch; released
+    /// drive displacement is included in the simultaneous solve, never a pre-kick.
+    /// Geometry and inertia remain frozen, without gyroscopic acceleration.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_driven(
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        history: &RigidRollingHistory,
+        contact: RigidHertzRollingContact<'a>,
+        external: [Wrench; 2],
         dt_s: f64,
         controls: RigidHertzRollingControls,
         gate: &CancelGate,
@@ -238,7 +303,7 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
         }
         let card = sphere_card(contact.rolling)?;
         admit_history(history, contact)?;
-        let core = PreparedRigidHertzPair::new(
+        let mut core = PreparedRigidHertzPair::new(
             bodies,
             properties,
             RigidHertzContact {
@@ -350,7 +415,30 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
                 1.0 + half_damping * mobility[4][4],
             ],
         ])?;
-        let effective = eliminate(&core, mobility, half_damping, rolling_factor, rate_before)?;
+        let drive = HeldPairDrive::new(&core, radius_m, external)?;
+        let released_midpoint_rate =
+            std::array::from_fn(|i| rate_before[i] + 0.5 * dt_s * drive.acceleration[i]);
+        if released_midpoint_rate.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("unrepresentable released driven rates"));
+        }
+        if external != [Wrench::ZERO; 2] {
+            for i in 0..2 {
+                core.input.free_displacement_m[i] = finite(
+                    core.input.free_displacement_m[i] + half_dt_squared * drive.acceleration[i],
+                )?;
+            }
+            core.input.free_spin_angle_rad = finite(
+                core.input.free_spin_angle_rad
+                    + half_dt_squared * (drive.acceleration[2] / parameters.contact_radius_m),
+            )?;
+        }
+        let effective = eliminate(
+            &core,
+            mobility,
+            half_damping,
+            rolling_factor,
+            released_midpoint_rate,
+        )?;
         poll(gate)?;
         Ok(Self {
             core,
@@ -362,6 +450,8 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             mobility,
             compliance,
             rate_before,
+            released_midpoint_rate,
+            drive,
             rolling_factor,
             effective,
         })
@@ -476,7 +566,7 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             resolved.spin_moment_nm / hp.contact_radius_m,
         ];
         let roll_mid_scaled = self.rolling_factor.solve(std::array::from_fn(|i| {
-            self.rate_before[i + 3]
+            self.released_midpoint_rate[i + 3]
                 + 0.5
                     * dt
                     * (0..3)
@@ -509,14 +599,9 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
         let impulse = force.scale(dt);
         let spin_impulse = spin_couple.scale(dt);
         let rolling_impulse = rolling_couple.scale(dt);
-        let after = apply_pair_wrench(
-            self.core.before,
-            self.core.pair_properties,
-            self.core.arms,
-            impulse,
-            spin_impulse.add(rolling_impulse),
-            gate,
-        )?;
+        let after =
+            self.drive
+                .apply(&self.core, impulse, spin_impulse.add(rolling_impulse), gate)?;
         let after_points = points(after, self.core.pair_properties, self.core.arms)?;
         let point_before = relative_point(self.core.points_before);
         let point_after = relative_point(after_points);
@@ -616,6 +701,10 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
         let (energy_before, linear_before, angular_before) = self.core.totals_before;
         let (energy_after, linear_after, angular_after) =
             totals(&after, &self.core.pair_properties, gate)?;
+        let external_work = self.drive.work(&self.core, after_points)?;
+        let (external_linear, external_angular) = self.drive.impulses(&self.core)?;
+        let linear_change = linear_after.sub(linear_before);
+        let angular_change = angular_after.sub(angular_before);
         let assisting_work = [
             force.dot(point_before),
             force.dot(point_after),
@@ -641,6 +730,7 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             effective_hertz_compliance_m_per_n: self.effective.scaled_compliance_m_per_n,
             scaled_rates_before_m_s: self.rate_before,
             scaled_rates_after_m_s: rate_after,
+            scaled_driving_acceleration_m_s2: self.drive.acceleration,
             actual_midpoint_coordinates_m: actual,
             normal_velocity_before_m_s: point_before.dot(axes[2]),
             normal_velocity_after_m_s: point_after.dot(axes[2]),
@@ -654,8 +744,10 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             surface_midpoint_work_j: surface_work,
             rolling_midpoint_work_j: rolling_work,
             midpoint_impulse_work_j: work,
-            work_energy_residual_j: energy_after - energy_before - work,
-            total_energy_residual_j: energy_after - energy_before + surface_heat + bulk_heat,
+            external_wrench_work_j: external_work,
+            work_energy_residual_j: energy_after - energy_before - work - external_work,
+            total_energy_residual_j: energy_after - energy_before + surface_heat + bulk_heat
+                - external_work,
             rolling_work_residual_j: rolling_work + bulk_heat,
             history_heat_residual_j: history_heat - bulk_heat,
             native_force_residual_n: force_residual,
@@ -664,8 +756,12 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             maximum_compatibility_residual_m: compatibility,
             endpoint_velocity_residual_m_s: endpoint_velocity,
             endpoint_angular_velocity_residual_rad_s: endpoint_angular,
-            linear_momentum_change_ns: linear_after.sub(linear_before),
-            angular_momentum_change_nms: angular_after.sub(angular_before),
+            linear_momentum_change_ns: linear_change,
+            angular_momentum_change_nms: angular_change,
+            external_linear_impulse_ns: external_linear,
+            external_angular_impulse_nms: external_angular,
+            linear_momentum_residual_ns: linear_change.sub(external_linear),
+            angular_momentum_residual_nms: angular_change.sub(external_angular),
             maximum_assisting_work_j: assisting_work,
         };
         audit(&report, self.controls)?;
@@ -871,6 +967,7 @@ fn audit(
             r.surface_midpoint_work_j,
             r.rolling_midpoint_work_j,
             r.midpoint_impulse_work_j,
+            r.external_wrench_work_j,
             r.maximum_assisting_work_j,
             r.normal_velocity_before_m_s,
             r.normal_velocity_after_m_s,
@@ -882,6 +979,8 @@ fn audit(
             r.endpoint_angular_velocity_residual_rad_s,
             magnitude(r.linear_momentum_change_ns),
             magnitude(r.angular_momentum_change_nms),
+            magnitude(r.linear_momentum_residual_ns),
+            magnitude(r.angular_momentum_residual_nms),
         ]
         .into_iter()
         .any(|v| !v.is_finite())
@@ -893,8 +992,8 @@ fn audit(
         || r.maximum_compatibility_residual_m > m.contact.displacement_tolerance_m
         || r.endpoint_velocity_residual_m_s > m.velocity_tolerance_m_s
         || r.endpoint_angular_velocity_residual_rad_s > m.angular_velocity_tolerance_rad_s
-        || magnitude(r.linear_momentum_change_ns) > m.linear_momentum_tolerance_ns
-        || magnitude(r.angular_momentum_change_nms) > m.angular_momentum_tolerance_nms
+        || magnitude(r.linear_momentum_residual_ns) > m.linear_momentum_tolerance_ns
+        || magnitude(r.angular_momentum_residual_nms) > m.angular_momentum_tolerance_nms
     {
         return Err(RigidHertzRollingError::Audit(Box::new(r.clone())));
     }
