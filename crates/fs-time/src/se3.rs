@@ -18,9 +18,9 @@
 //! 3. **Discrete adjoint**: derived from the ACTUAL fixed-point
 //!    residual of the variational step via the implicit-function
 //!    theorem and verified against finite differences of the whole
-//!    map. The 3×3 residual Jacobians are formed by central
-//!    differences of that residual (a stated v1 boundary; analytic
-//!    tangents are follow-up work).
+//!    map. Analytic residual Jacobians reuse the canonical SO(3)
+//!    right Jacobian, avoiding perturbation-size dependence when
+//!    angular velocities and time units change.
 //!
 //! RATTLE-style constraint projection is exposed as a hook trait for
 //! fs-mbd; the constrained lanes live there, not here.
@@ -497,6 +497,7 @@ pub fn run_dep_free(
 
 /// The converged step's residual, as a function of (ω_mid, ω_k):
 /// `g(ω_m, ω_k) = ω_m − ½·(ω_k + I⁻¹·(exp(h ω̂_m)⁻¹ · I ω_k))`.
+#[cfg(test)]
 fn dep_residual(w_mid: Vec3, w_k: Vec3, inertia: Vec3, h: f64) -> Result<Vec3, Se3Error> {
     let increment = So3::exp(So3Tangent::new(w_mid.scale(h)))?;
     let momentum = Vec3::new(inertia.x * w_k.x, inertia.y * w_k.y, inertia.z * w_k.z);
@@ -508,51 +509,48 @@ fn dep_residual(w_mid: Vec3, w_k: Vec3, inertia: Vec3, h: f64) -> Result<Vec3, S
     ))
 }
 
-/// Central-difference 3×3 Jacobian of the residual in its first or
-/// second argument. This IS the actual discrete residual being
-/// differenced (the bead's requirement); replacing the stencils with
-/// analytic tangents is tracked follow-up work.
-fn residual_jacobian(
+/// Analytic derivatives of the same midpoint residual used by the primal.
+/// For D = diag(I), F = Exp(h ω_m), and p = F⁻¹ D ω_k:
+///   dg/dω_m = 1 − h/2 D⁻¹ [p]× J_r(h ω_m),
+///   dg/dω_k = −1/2 (1 + D⁻¹ F⁻¹ D).
+/// The sign follows from δ(F⁻¹ D ω_k) = [p]× J_r δ(h ω_m), since
+/// Exp(φ + δφ) = Exp(φ) Exp(J_r(φ) δφ) to first order (Solà et al.,
+/// *A micro Lie theory*, arXiv:1812.01537, equations 68 and 143).
+fn residual_jacobians(
     w_mid: Vec3,
     w_k: Vec3,
     inertia: Vec3,
     h: f64,
-    wrt_mid: bool,
-) -> Result<[[f64; 3]; 3], Se3Error> {
-    let mut columns = [[0.0f64; 3]; 3];
-    let base = if wrt_mid { w_mid } else { w_k };
-    let scale = 1.0 + norm3(base);
-    let eps = 1e-7 * scale;
-    let bases = [
-        Vec3::new(eps, 0.0, 0.0),
-        Vec3::new(0.0, eps, 0.0),
-        Vec3::new(0.0, 0.0, eps),
-    ];
-    for (column, basis) in columns.iter_mut().zip(bases) {
-        let plus = base + basis;
-        let minus = base - basis;
-        let (gp, gm) = if wrt_mid {
-            (
-                dep_residual(plus, w_k, inertia, h)?,
-                dep_residual(minus, w_k, inertia, h)?,
-            )
-        } else {
-            (
-                dep_residual(w_mid, plus, inertia, h)?,
-                dep_residual(w_mid, minus, inertia, h)?,
-            )
-        };
-        let gp = [gp.x, gp.y, gp.z];
-        let gm = [gm.x, gm.y, gm.z];
-        for row in 0..3 {
-            column[row] = (gp[row] - gm[row]) / (2.0 * eps);
+) -> Result<([[f64; 3]; 3], [[f64; 3]; 3]), Se3Error> {
+    let phi = So3Tangent::new(w_mid.scale(h));
+    let inverse = So3::exp(phi)?.inverse();
+    let momentum = Vec3::new(inertia.x * w_k.x, inertia.y * w_k.y, inertia.z * w_k.z);
+    let p = inverse.rotate(momentum)?;
+    let cross = fs_ga::Mat3 {
+        m: [0.0, -p.z, p.y, p.z, 0.0, -p.x, -p.y, p.x, 0.0],
+    };
+    let derivative = cross.compose(fs_ga::so3_right_jacobian(phi)?);
+    let transport = inverse.matrix();
+    let moments = [inertia.x, inertia.y, inertia.z];
+    let mut dg_dmid = [[0.0; 3]; 3];
+    let mut dg_dk = [[0.0; 3]; 3];
+    for row in 0..3 {
+        for column in 0..3 {
+            let identity = if row == column { 1.0 } else { 0.0 };
+            // Divide rows directly: forming 1/I first can overflow even
+            // when the physically relevant momentum/inertia ratio is finite.
+            let midpoint_action = h * (derivative.m[3 * row + column] / moments[row]);
+            let input_action = (transport.m[3 * row + column] * moments[column]) / moments[row];
+            dg_dmid[row][column] = (-0.5_f64).mul_add(midpoint_action, identity);
+            dg_dk[row][column] = -0.5 * (identity + input_action);
+            if !dg_dmid[row][column].is_finite() || !dg_dk[row][column].is_finite() {
+                return Err(Se3Error::InvalidParameter {
+                    context: "variational residual Jacobian",
+                });
+            }
         }
     }
-    Ok([
-        [columns[0][0], columns[1][0], columns[2][0]],
-        [columns[0][1], columns[1][1], columns[2][1]],
-        [columns[0][2], columns[1][2], columns[2][2]],
-    ])
+    Ok((dg_dmid, dg_dk))
 }
 
 /// Solve `Aᵀ·x = b` for a 3×3 matrix by Gaussian elimination with
@@ -649,8 +647,7 @@ pub fn dep_momentum_adjoint(
     //   bar_ω_k = −2·(∂g/∂ω_k)ᵀ·(∂g/∂ω_m)⁻ᵀ·v − v.
     let mut bar = [bar_omega_n.x, bar_omega_n.y, bar_omega_n.z];
     for (w_k, w_mid) in trajectory.iter().rev() {
-        let dg_dmid = residual_jacobian(*w_mid, *w_k, inertia, h, true)?;
-        let dg_dk = residual_jacobian(*w_mid, *w_k, inertia, h, false)?;
+        let (dg_dmid, dg_dk) = residual_jacobians(*w_mid, *w_k, inertia, h)?;
         let y = solve3_transpose(&dg_dmid, bar)?;
         let z = mat_t_vec(&dg_dk, y);
         bar = [
@@ -694,5 +691,46 @@ impl RattleProjection for Unconstrained {
 
     fn project_velocity(&self, _pose: &Se3, _twist: &mut Twist) -> Result<f64, Se3Error> {
         Ok(0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn g3_analytic_residual_jacobians_match_independent_centered_probes() {
+        let inertia = Vec3::new(1.1, 2.3, 3.2);
+        let w_k = Vec3::new(0.9, -0.6, 0.3);
+        for (w_mid, h) in [
+            (Vec3::new(0.0, 0.0, 0.0), 0.2),
+            (Vec3::new(0.8, -0.4, 0.2), 0.2),
+            (Vec3::new(0.8, -0.4, 0.2), -0.3),
+            (Vec3::new(1e-8, -2e-8, 3e-8), 1e-4),
+        ] {
+            let (mid, input) = residual_jacobians(w_mid, w_k, inertia, h).unwrap();
+            for direction in [
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.6, -0.8, 0.2),
+            ] {
+                let eps = 2e-6;
+                let delta = direction.scale(eps);
+                let mid_probe = (dep_residual(w_mid + delta, w_k, inertia, h).unwrap()
+                    - dep_residual(w_mid - delta, w_k, inertia, h).unwrap())
+                .scale(0.5 / eps);
+                let input_probe = (dep_residual(w_mid, w_k + delta, inertia, h).unwrap()
+                    - dep_residual(w_mid, w_k - delta, inertia, h).unwrap())
+                .scale(0.5 / eps);
+                for (matrix, probe) in [(mid, mid_probe), (input, input_probe)] {
+                    let d = [direction.x, direction.y, direction.z];
+                    let action: [f64; 3] =
+                        std::array::from_fn(|r| (0..3).map(|c| matrix[r][c] * d[c]).sum());
+                    let error = (Vec3::new(action[0], action[1], action[2]) - probe).norm();
+                    assert!(error < 5e-9, "h {h:e}, direction {direction:?}: {error:e}");
+                }
+            }
+        }
     }
 }

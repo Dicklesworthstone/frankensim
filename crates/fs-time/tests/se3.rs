@@ -195,6 +195,59 @@ fn se3_006_damped_run_is_demoted_to_measured_only() {
 }
 
 #[test]
+fn g3_dep_adjoint_is_invariant_under_time_and_angular_velocity_rescaling() {
+    let omega = Vec3::new(0.9, -0.6, 0.3);
+    let seed = Vec3::new(0.25, -1.0, 0.5);
+    let params = DepSolveParams::default();
+    let expected = dep_momentum_adjoint(omega, INERTIA, 0.005, 25, &params, seed).unwrap();
+    // Changing the time unit scales omega and the solver's velocity tolerance
+    // together, and inversely scales h. The dimensionless trajectory and its
+    // velocity-to-velocity Jacobian must be identical. An absolute finite-
+    // difference floor instead probes rotations hundreds of radians away.
+    for scale in [1e-12, 1e-9, 1e-6, 1.0, 1e6, 1e12] {
+        let scaled_params = DepSolveParams {
+            tol: params.tol * scale,
+            ..params
+        };
+        let actual = dep_momentum_adjoint(
+            omega.scale(scale),
+            INERTIA,
+            0.005 / scale,
+            25,
+            &scaled_params,
+            seed,
+        )
+        .unwrap();
+        let error = (actual - expected).norm();
+        assert!(error < 2e-13, "scale {scale:e}: adjoint error {error:e}");
+    }
+}
+
+#[test]
+fn g1_dep_spherical_body_adjoint_is_identity_across_inertia_scales() {
+    let omega = Vec3::new(0.9, -0.6, 0.3);
+    let seed = Vec3::new(0.25, -1.0, 0.5);
+    // Spherical free rotation has constant body angular velocity, so its
+    // exact velocity map and pullback are the identity, even at a finite h.
+    for moment in [1e-120, 1.0, 1e120] {
+        let actual = dep_momentum_adjoint(
+            omega,
+            Vec3::new(moment, moment, moment),
+            0.2,
+            40,
+            &DepSolveParams::default(),
+            seed,
+        )
+        .unwrap();
+        let error = (actual - seed).norm();
+        assert!(
+            error < 2e-13,
+            "inertia {moment:e}: identity error {error:e}"
+        );
+    }
+}
+
+#[test]
 fn se3_007_renormalization_receipts_bound_long_run_drift() {
     let twist = Twist::new(Vec3::new(1.3, -0.8, 0.6), Vec3::new(0.4, 0.9, -0.2));
     let policy = RenormPolicy::default();

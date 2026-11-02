@@ -309,7 +309,11 @@ where claimed below.
   solve converged — dissipation, adaptivity, or divergence demote to
   `MeasuredOnly` with measured drift receipts. `dep_momentum_adjoint`
   pulls a terminal cotangent through the transposed implicit-function
-  tangent of each step's ACTUAL residual. `RattleProjection` is the
+  tangent of each step's ACTUAL residual. Both 3-by-3 residual Jacobians are
+  analytic, using `fs-ga`'s right SO(3) Jacobian and the same inverse momentum
+  transport as the primal. One exponential replaces twelve perturbed residual
+  evaluations per reverse step; no finite-difference step size is selected.
+  `RattleProjection` is the
   constraint hook fs-mbd's constrained lanes plug into
   (`Unconstrained` is the trivial impl).
 
@@ -558,7 +562,9 @@ canonicalization determinism, `M`/`−M` bit-equality, and bitwise
 replay across a scalar-zero crossing (se3-003); free-body DEP spatial
 momentum to roundoff plus bounded energy over 10⁴ steps with the
 theorem claim class earned (se3-004); adjoint-vs-central-FD gate on
-the DEP momentum map, four directions, rel ≤ 1e−6 (se3-005); the
+the DEP momentum map, four directions, rel ≤ 1e−6 (se3-005); invariance under
+inverse time/angular-velocity rescaling from 1e-12 to 1e12; the analytic
+spherical-body identity pullback across inertia scales; the
 honesty fixture — a damped run demotes to `MeasuredOnly` with nonzero
 measured drift despite converged solves (se3-006); 10⁵-step
 renormalization receipts bounding the final unit defect (se3-007);
@@ -596,10 +602,11 @@ per-relation and aggregate reset-target caps.
   claimed only for the declared smooth conservative fixed-step class
   with converged solves — impacts, adaptivity, and dissipation get
   measured `BalanceReceipt`s, never the theorem. The
-  `dep_momentum_adjoint` residual Jacobians are central differences of
-  the actual residual (3×3), not analytic tangents; the analytic
-  derivation and revolve checkpointing (O(N) memory today) are
-  follow-up work. The variational lane's group update solves the
+  `dep_momentum_adjoint` differentiates the converged implicit residual using
+  analytic 3-by-3 tangents, not the finite fixed-point iteration history.
+  Its agreement with the accepted forward map remains limited by the primal
+  solve tolerance. Revolve checkpointing (O(N) memory today) remains follow-up
+  work. The variational lane's group update solves the
   midpoint transported-momentum fixed point; no claim of equivalence
   to any OTHER published DEP variant. No higher-order compositions
   (Yoshida/Suzuki), no splitting beyond kick–drift–kick.
