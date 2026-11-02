@@ -22,6 +22,10 @@
 use super::SgsUse;
 use fs_math::det;
 
+/// Independently fitted gradient-diffusion transport of a resolved scalar.
+#[path = "dynamic/scalar.rs"]
+pub mod scalar;
+
 /// Numerator and denominator are averaged separately, never their ratio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DynamicAveraging {
@@ -109,6 +113,12 @@ pub struct PeriodicDynamicSgs {
     strain_rate: Vec<f64>,
     contraction: Vec<[f64; 2]>,
     viscosity: Vec<f64>,
+}
+
+#[derive(Clone, Copy)]
+struct InputScales {
+    density: f64,
+    velocity: f64,
 }
 
 fn allocated<T: Clone>(n: usize, value: T) -> Result<Vec<T>, DynamicSgsError> {
@@ -288,8 +298,21 @@ impl PeriodicDynamicSgs {
         config: DynamicSgsConfig,
         density: &[f64],
         velocity: &[[f64; 3]],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<DynamicSgsReport, DynamicSgsError> {
+        self.prepare_scaled(config, density, velocity, cancelled)
+            .map(|(report, _)| report)
+    }
+
+    // The scalar model reuses this same preparation and its normalization;
+    // no public API accepts coefficients from stale or unrelated flow fields.
+    fn prepare_scaled(
+        &mut self,
+        config: DynamicSgsConfig,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(DynamicSgsReport, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
         config.validate()?;
         let n = self.viscosity.len();
@@ -328,10 +351,16 @@ impl PeriodicDynamicSgs {
                 values.fill(0.0);
             }
             poll(&mut cancelled, 0)?;
-            return Ok(DynamicSgsReport {
-                undetermined_cells: n,
-                ..DynamicSgsReport::default()
-            });
+            return Ok((
+                DynamicSgsReport {
+                    undetermined_cells: n,
+                    ..DynamicSgsReport::default()
+                },
+                InputScales {
+                    density: density_scale,
+                    velocity: velocity_scale,
+                },
+            ));
         }
         for (cell, v) in self.velocity.iter_mut().enumerate() {
             poll(&mut cancelled, cell)?;
@@ -450,7 +479,13 @@ impl PeriodicDynamicSgs {
             report.maximum_eddy_viscosity = report.maximum_eddy_viscosity.max(nu);
         }
         poll(&mut cancelled, 0)?;
-        Ok(report)
+        Ok((
+            report,
+            InputScales {
+                density: density_scale,
+                velocity: velocity_scale,
+            },
+        ))
     }
 }
 

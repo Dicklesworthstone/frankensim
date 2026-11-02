@@ -1741,6 +1741,28 @@ developed turbulent TGV dissipation histories, a channel DNS profile, jet
 physics or finest-rung acoustic equivalence. Those full M3.2-W5/G2 campaigns
 remain open. Neither SGS nor LVEL is a resolved-turbulence acceptance render.
 
+### Dynamic scalar transport on the periodic LES field
+
+`sgs3::dynamic::scalar` supplies an independently fitted scalar diffusivity.
+`PeriodicDynamicSgs::prepare_with_scalar` prepares momentum and scalar fits
+from the same density, velocity and scalar fields, reusing the Favre-filtered
+velocity and strain. The scalar Leonard vector and modeled gradient vector
+are contracted by least squares, following Squires (1991), equations
+(2.13)--(2.19), with the implementation's explicit `3h` test box. The scalar
+model has no stress-tensor factor of two. It returns diffusivity directly;
+it never divides by a possibly zero momentum coefficient to form Prandtl.
+
+Domain or local-box averaging operates on numerator and denominator
+separately. Scalar offsets and units are removed before the fit; negative
+fits follow the explicit no-backscatter policy, excessive positive fits
+refuse, and undetermined fits return zero. The consuming solver enforces the
+authored diffusivity/molecular bound against its original material source.
+The reusable scalar workspace adds 64 nominal numerical bytes per cell,
+with actual capacity admission and bounded cancellation. Constant scalars
+and uniform velocity use zero diffusivity without consuming stale scratch.
+This exploratory gradient-diffusion model supplies no wall or shock model,
+dynamic multicomponent diffusion, SGS energy equation, or DNS qualification.
+
 ### Moving/open D3Q19 boundaries and turbulent wall loads
 
 `BoundaryGrid3::{sgs_workspace, prepare_sgs, step_with_sgs,
