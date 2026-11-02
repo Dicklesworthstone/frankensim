@@ -1878,3 +1878,28 @@ does not certify caller-supplied motion, alter native work or add a heat sink.
 The native Hertz--Mindlin consumer exercises actual changing-normal recoil,
 external drive, frictionless Hertz averaging, selected-role refusal and late
 second-surface overflow without partial publication.
+
+## Exact temperature continuation of retained Mindlin history
+
+`SourceMindlinContact::continue_at_temperature` transfers an original accepted
+history to a contact re-resolved at independent bulk-A, bulk-B and interface
+temperatures. Original full cards, ordered roles, selected property requirements
+and claim identities, model, geometry, operating envelope, normal load/footprint,
+axis schemas and every non-T coordinate must remain unchanged. The complete
+native law, including both G/nu pairs, mu and history capacity, must be identical.
+
+For each changed temperature interval, the selected properties must be scalar
+`ConstantWithinValidity` claims with no response axes. Both admitted endpoints
+then lie in the same original convex validity box, proving constancy throughout
+the interval. Matching samples at the endpoints of a temperature-dependent
+curve or surface do not establish this invariant and refuse. Changing
+constitutive coefficients retains the need for a thermoelastic/plastic owner.
+
+The continuation retains the complete analytic spring history and replaces
+only its source identities. It performs no mechanical solve, normal update,
+storage correction or heat deposition; refusal/cancellation preserves both
+source bindings and the accepted checkpoint. Four G1/G3/G4 groups exercise
+independent temperatures, loaded/reversal histories, exact unchanged-T behavior,
+equal-endpoint nonconstant mu(T) and E(T), original-card/claim/domain/schema
+refusals and cancellation with identical retry. This exact invariant-parameter
+transfer enables same-transaction finite heat without silently resetting memory.

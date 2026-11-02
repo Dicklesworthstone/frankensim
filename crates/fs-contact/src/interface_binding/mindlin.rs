@@ -7,9 +7,11 @@
 //!
 //! This explicitly selects the classical decoupled, isotropic Hertz/Mindlin
 //! approximation. Normal/tangential elastic coupling, changing load, elliptic
-//! contacts, adhesion, thermal evolution and nonproportional slip are excluded.
-//! The whole source query is frozen, including its external conditions. A
-//! different temperature or load needs a physical history-transfer owner;
+//! contacts, adhesion and nonproportional slip are excluded from this step.
+//! The whole source query is frozen during each constitutive advance. Explicit
+//! temperature continuation preserves history only when the original sources
+//! prove unchanged constitutive physics over the entire temperature interval.
+//! Changing coefficients or load needs its physical history-transfer owner;
 //! constructing a new unloaded contact does not perform such a transfer.
 
 use core::fmt;
@@ -38,6 +40,10 @@ pub mod sliding;
 /// Local irreversible sliding and source-bound small-removal fretting wear.
 #[path = "mindlin/fretting.rs"]
 pub mod fretting;
+
+/// Exact retained-history continuation under source-constant thermal changes.
+#[path = "mindlin/temperature.rs"]
+pub mod temperature;
 
 /// Original bulk, interface and patch sources around one stateful friction law.
 ///

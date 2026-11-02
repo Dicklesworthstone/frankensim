@@ -14,6 +14,9 @@ mod surface;
 #[path = "source_mindlin/fretting.rs"]
 mod fretting;
 
+#[path = "source_mindlin/temperature.rs"]
+mod temperature;
+
 use fs_contact::interface_binding::mindlin::{SourceMindlinContact, SourceMindlinError};
 use fs_contact::interface_binding::*;
 use fs_contact::normal_patch::source::*;
