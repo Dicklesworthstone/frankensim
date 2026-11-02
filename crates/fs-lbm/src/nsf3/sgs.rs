@@ -78,12 +78,15 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             return Ok(self);
         }
-        if self.characteristic_thermal_policy.contains(&NsfCharacteristicThermalPolicy::EnthalpyFlux) {
-            return Err(NsfError::Input(
-                "enthalpy-flux characteristic thermal contacts do not yet support active SGS",
-            ));
-        }
         self.sgs = Some(config);
+        if self.coupled_sgs_contact() {
+            // Adding modeled conductivity changes the enthalpy-contact face
+            // temperature and its Guo force chart. Rebind both while holding
+            // the current physical velocity and total energy fixed.
+            let drives = self.boundary_drives().expect("attached thermal contact");
+            self.set_boundary_drives(drives)?;
+            return Ok(self);
+        }
         let (rho, mom) = self.macro_fields(&self.f);
         let velocity = self.velocity_field(&rho, &mom, &self.force);
         let transport = self.sgs_field(
@@ -174,47 +177,76 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if self.solid[i] {
                 return Ok(NsfSgsTransport::default());
             }
-            let local = material.get(i).and_then(Option::as_ref);
-            let mu = local.map_or_else(|| self.law.mu_lattice(theta[i]), |m| m.mu_lattice);
-            let molecular = mu / rho[i];
-            if !(molecular.is_finite() && molecular > 0.0 && rho[i] > 0.0) {
-                return Err(NsfError::Sgs(SgsError::InvalidMolecularViscosity {
-                    cell: i,
-                }));
-            }
-            let eddy = eddy_viscosity(
-                config.closure.model,
-                config.closure.filter_width_lu,
+            self.sgs_cell_transport(
+                config, i, rho[i], theta[i], material.get(i).and_then(Option::as_ref),
                 self.sgs_gradient(i, velocity, faces),
             )
-            .map_err(NsfError::Sgs)?;
-            let ratio = eddy / molecular;
-            if ratio > config.closure.maximum_eddy_to_molecular {
-                return Err(NsfError::Sgs(SgsError::ViscosityRatioExceeded {
-                    cell: i,
-                    ratio,
-                    maximum: config.closure.maximum_eddy_to_molecular,
-                }));
-            }
-            if molecular + eddy > MAX_VERIFIED_LATTICE_VISCOSITY {
-                return Err(NsfError::Viscosity {
-                    observed: molecular + eddy,
-                    maximum: MAX_VERIFIED_LATTICE_VISCOSITY,
-                });
-            }
-            let cp_over_r = local.map_or(self.law.gamma / (self.law.gamma - 1.0), |m| {
-                m.state.specific_heat_cp / self.law.gas_constant
-            });
-            let conductivity = rho[i] * cp_over_r * eddy / config.turbulent_prandtl;
-            if !(conductivity.is_finite() && conductivity >= 0.0) {
-                return Err(NsfError::Input("nonfinite SGS turbulent heat conductivity"));
-            }
-            Ok(NsfSgsTransport {
-                eddy_viscosity_lu: eddy,
-                turbulent_conductivity_lu: conductivity,
-            })
         });
         out.into_iter().collect()
+    }
+
+    // One local evaluator supplies the field and the thermal contact. The
+    // latter knows its acoustic face velocity before solving temperature,
+    // so its conductivity must use that velocity, not a stale cached face.
+    pub(super) fn sgs_characteristic_transport(
+        &self,
+        i: usize,
+        rho: &[f64],
+        velocity: &[[f64; 3]],
+        theta: &[f64],
+        material: &[Option<NsfCellMaterial>],
+        axis: usize,
+        direction: i64,
+        face_velocity: [f64; 3],
+    ) -> Result<NsfSgsTransport, NsfError> {
+        let Some(config) = self.sgs else {
+            return Ok(NsfSgsTransport::default());
+        };
+        let gradient = self.sgs_gradient_with_face(
+            i, velocity, None, Some((axis, direction, face_velocity)),
+        );
+        self.sgs_cell_transport(
+            config, i, rho[i], theta[i], material.get(i).and_then(Option::as_ref), gradient,
+        )
+    }
+
+    fn sgs_cell_transport(
+        &self,
+        config: NsfSgsConfig,
+        i: usize,
+        rho: f64,
+        theta: f64,
+        local: Option<&NsfCellMaterial>,
+        gradient: [[f64; 3]; 3],
+    ) -> Result<NsfSgsTransport, NsfError> {
+        let mu = local.map_or_else(|| self.law.mu_lattice(theta), |m| m.mu_lattice);
+        let molecular = mu / rho;
+        if !(molecular.is_finite() && molecular > 0.0 && rho > 0.0) {
+            return Err(NsfError::Sgs(SgsError::InvalidMolecularViscosity { cell: i }));
+        }
+        let eddy = eddy_viscosity(config.closure.model, config.closure.filter_width_lu, gradient)
+            .map_err(NsfError::Sgs)?;
+        let ratio = eddy / molecular;
+        if ratio > config.closure.maximum_eddy_to_molecular {
+            return Err(NsfError::Sgs(SgsError::ViscosityRatioExceeded {
+                cell: i, ratio, maximum: config.closure.maximum_eddy_to_molecular,
+            }));
+        }
+        if molecular + eddy > MAX_VERIFIED_LATTICE_VISCOSITY {
+            return Err(NsfError::Viscosity {
+                observed: molecular + eddy, maximum: MAX_VERIFIED_LATTICE_VISCOSITY,
+            });
+        }
+        let cp_over_r = local.map_or(self.law.gamma / (self.law.gamma - 1.0), |m| {
+            m.state.specific_heat_cp / self.law.gas_constant
+        });
+        let conductivity = rho * cp_over_r * eddy / config.turbulent_prandtl;
+        if !(conductivity.is_finite() && conductivity >= 0.0) {
+            return Err(NsfError::Input("nonfinite SGS turbulent heat conductivity"));
+        }
+        Ok(NsfSgsTransport {
+            eddy_viscosity_lu: eddy, turbulent_conductivity_lu: conductivity,
+        })
     }
 
     // Second-order centred differences in fluid or across a full-spacing
@@ -227,9 +259,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         velocity: &[[f64; 3]],
         faces: Option<&OpenFaces>,
     ) -> [[f64; 3]; 3] {
+        self.sgs_gradient_with_face(i, velocity, faces, None)
+    }
+
+    fn sgs_gradient_with_face(
+        &self,
+        i: usize,
+        velocity: &[[f64; 3]],
+        faces: Option<&OpenFaces>,
+        boundary: Option<(usize, i64, [f64; 3])>,
+    ) -> [[f64; 3]; 3] {
         let x = self.at(i);
         let wall = |axis, side| {
-            if let Some(face) = self.characteristic_face(faces, i, axis, side) {
+            if let Some((_, _, velocity)) = boundary.filter(|&(a, s, _)| a == axis && s == side) {
+                velocity
+            } else if let Some(face) = self.characteristic_face(faces, i, axis, side) {
                 face.u
             } else if self.shifted(x, axis, side).is_none() {
                 self.edge_velocity[axis][usize::from(side > 0)]

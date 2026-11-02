@@ -22,7 +22,9 @@
 //! The normal boundary stencil is first order. Oblique transparency, a
 //! <-40 dB reflection bound and resolved instrument accuracy are unqualified.
 
-use super::{NsfError, NsfGrid3, NsfSgsTransport, Q, THETA0, check_state, equilibrium};
+use super::{
+    NsfCellMaterial, NsfError, NsfGrid3, NsfSgsTransport, Q, THETA0, check_state, equilibrium,
+};
 use crate::lattice3::Lattice3;
 
 mod enthalpy;
@@ -202,6 +204,15 @@ pub(super) struct OpenFaces {
     axis: usize,
     values: [Vec<OpenFace>; 2],
     patch: [Option<CharacteristicPatchBinding>; 2],
+}
+
+/// One converged force/face predictor with a common modeled heat coefficient.
+/// It is staged locally; no accepted grid state is changed during its solve.
+pub(super) struct SgsContactPredictor {
+    pub faces: Option<OpenFaces>,
+    pub force: Vec<[f64; 3]>,
+    pub velocity: Vec<[f64; 3]>,
+    pub transport: Vec<NsfSgsTransport>,
 }
 
 pub(super) struct IncomingPopulations {
@@ -461,7 +472,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
         let faces = self.resolve_open_faces(Some(&open), pressure_offset_pa,
-            inflow_temperature_k, patch, &rho, &u, &self.theta)?;
+            inflow_temperature_k, patch, &rho, &u, &self.theta, &self.material)?;
         let force = self.force_field(&rho, &self.theta, faces.as_ref());
         let mut f = self.f.clone();
         for i in 0..self.n {
@@ -493,6 +504,52 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         Ok(())
     }
 
+    pub(super) fn coupled_sgs_contact(&self) -> bool {
+        self.sgs.is_some() && self.open.is_some()
+            && self.characteristic_thermal_policy.contains(&NsfCharacteristicThermalPolicy::EnthalpyFlux)
+    }
+
+    // For a fixed thermal predictor, face heat changes the thermal-pressure
+    // force and therefore the physical half-force velocity. Close this loop
+    // before using its SGS stress and conservative energy flux. Only the
+    // boundary closure is recomputed while iterating; the full SGS field and
+    // source-owned cell material are each evaluated once per predictor.
+    pub(super) fn sgs_contact_predictor(
+        &self,
+        rho: &[f64],
+        momentum: &[[f64; 3]],
+        theta: &[f64],
+        material: &[Option<NsfCellMaterial>],
+        initial_velocity: &[[f64; 3]],
+    ) -> Result<SgsContactPredictor, NsfError> {
+        let mut velocity = initial_velocity.to_vec();
+        for _ in 0..32 {
+            let faces = self.resolve_open_faces(
+                self.open.as_ref(), self.characteristic_pressure_offset_pa,
+                self.characteristic_inflow_temperature_k, self.characteristic_patch,
+                rho, &velocity, theta, material,
+            )?;
+            let force = self.force_field(rho, theta, faces.as_ref());
+            let corrected = self.velocity_field(rho, momentum, &force);
+            let converged = corrected.iter().zip(&velocity).all(|(a, b)| {
+                a.iter().zip(b).all(|(&a, &b)| a.is_finite() && b.is_finite()
+                    && (a - b).abs() <= 64.0 * f64::EPSILON * a.abs().max(b.abs()).max(1.0))
+            });
+            if converged {
+                // This field uses exactly the velocity predictor used by the
+                // face root, keeping its total conductivity identical in the
+                // heat balance and energy flux. The actual Guo-frame velocity
+                // differs only by the checked floating-point solve residual.
+                let transport = self.sgs_field(rho, &velocity, theta, material, faces.as_ref())?;
+                return Ok(SgsContactPredictor { faces, force, velocity: corrected, transport });
+            }
+            velocity = corrected;
+        }
+        Err(NsfError::Input(
+            "SGS characteristic enthalpy/force predictor did not converge",
+        ))
+    }
+
     pub(super) fn resolve_open_faces(
         &self,
         open: Option<&NsfCharacteristicAxis>,
@@ -502,6 +559,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         rho: &[f64],
         u: &[[f64; 3]],
         theta: &[f64],
+        material: &[Option<NsfCellMaterial>],
     ) -> Result<Option<OpenFaces>, NsfError> {
         let Some(open) = open else {
             return Ok(None);
@@ -615,15 +673,26 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 } else {
                     normal_reference >= 0.0
                 };
+                let mut velocity = if outward_convected {
+                    ui
+                } else {
+                    boundary.reference_velocity_m_s
+                };
+                velocity[open.axis] = sign * normal;
+                let face_u = velocity.map(|v| v / velocity_unit);
                 // Preserve the original acoustic donor selection and arithmetic
                 // unless this face explicitly selects an enthalpy-flux contact.
                 let thermal_theta = if self.characteristic_thermal_policy[side]
                     == NsfCharacteristicThermalPolicy::EnthalpyFlux
                 {
+                    let transport = self.sgs_characteristic_transport(
+                        i, rho, u, theta, material, open.axis, sign as i64, face_u,
+                    )?;
                     Some(self.enthalpy_flux_theta(
                         theta[i], pi, pressure, normal / velocity_unit,
                         inflow_temperature.unwrap_or(reference.temperature
                             + alpha * (pressure - reference.pressure)),
+                        transport.turbulent_conductivity_lu,
                     )?)
                 } else { None };
                 let temperature = if let Some(face_theta) = thermal_theta {
@@ -641,12 +710,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             + entropy_temperature,
                     }
                 };
-                let mut velocity = if outward_convected {
-                    ui
-                } else {
-                    boundary.reference_velocity_m_s
-                };
-                velocity[open.axis] = sign * normal;
                 let du_i = std::array::from_fn(|a| ui[a] - boundary.reference_velocity_m_s[a]);
                 let du_f =
                     std::array::from_fn(|a| velocity[a] - boundary.reference_velocity_m_s[a]);
@@ -667,7 +730,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 // Keep exact adjacent theta for stationary/outgoing thermal
                 // contacts; a kelvin round trip would create spurious heat.
                 let face_theta = thermal_theta.unwrap_or_else(|| self.law.theta_of_kelvin(temperature));
-                let face_u = velocity.map(|v| v / velocity_unit);
                 let material = self.spec.gas.resolve(&self.law, face_rho, face_theta)?;
                 let gamma = match &material {
                     Some(m) => m.state.gamma,

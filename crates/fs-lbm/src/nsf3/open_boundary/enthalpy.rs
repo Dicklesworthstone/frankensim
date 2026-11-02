@@ -1,8 +1,9 @@
 //! Advective-diffusive thermal contacts on the original characteristic faces.
 //!
 //! The acoustic characteristic still owns pressure and normal velocity. For
-//! inflow, the original upstream specific enthalpy and molecular half-cell
-//! Fourier flux determine one face temperature. This is a Danckwerts thermal
+//! inflow, the original upstream specific enthalpy and total half-cell
+//! Fourier flux determine one face temperature. Explicit SGS contributes the
+//! same adjacent conductivity as the conservative energy flux. This is a Danckwerts thermal
 //! inlet condition, not a fitted entropy blend or an extra volume heat source.
 //! Tangential donor selection is unchanged; arbitrary reversal is unqualified.
 
@@ -17,7 +18,7 @@ pub enum NsfCharacteristicThermalPolicy {
     /// Original convected entropy trace, including its original Fourier flux.
     UpwindEntropy,
     /// Upstream enthalpy enters with inward mass flow. The original material
-    /// Fourier flux and face enthalpy balance; outward/stationary conduction
+    /// Fourier flux (including selected SGS heat) and face enthalpy balance; outward/stationary conduction
     /// is zero. No finite external inventory or species source is introduced.
     EnthalpyFlux,
 }
@@ -25,9 +26,9 @@ pub enum NsfCharacteristicThermalPolicy {
 impl<L: Lattice3<27>> NsfGrid3<L> {
     /// Select physical thermal contacts after attaching the characteristic axis
     /// and before the first step. The original gas, face quadrature, pressure
-    /// and population/energy owners remain in force. Active SGS is refused
-    /// until its boundary gradient and conductivity can be solved together.
-    /// The exact-zero SGS control remains the molecular route.
+    /// and population/energy owners remain in force. Active SGS uses its same
+    /// face gradient, total conductivity and deviatoric stress throughout the
+    /// coupled predictor. The exact-zero control retains molecular arithmetic.
     pub fn with_characteristic_thermal_policy(
         mut self,
         policies: [NsfCharacteristicThermalPolicy; 2],
@@ -38,11 +39,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         if self.steps != 0 {
             return Err(NsfError::Input(
                 "characteristic thermal policy is cold-only",
-            ));
-        }
-        if self.sgs.is_some() && policies.contains(&NsfCharacteristicThermalPolicy::EnthalpyFlux) {
-            return Err(NsfError::Input(
-                "enthalpy-flux characteristic thermal contacts do not yet support active SGS",
             ));
         }
         if policies == self.characteristic_thermal_policy {
@@ -96,12 +92,15 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         pressure_pa: f64,
         outward_velocity_lu: f64,
         upstream_temperature_k: f64,
+        turbulent_conductivity_lu: f64,
     ) -> Result<f64, NsfError> {
         if !(pressure_pa.is_finite()
             && pressure_pa > 0.0
             && adjacent_pressure_pa.is_finite()
             && adjacent_pressure_pa > 0.0
-            && outward_velocity_lu.is_finite())
+            && outward_velocity_lu.is_finite()
+            && turbulent_conductivity_lu.is_finite()
+            && turbulent_conductivity_lu >= 0.0)
         {
             return Err(NsfError::Input(
                 "invalid characteristic thermal contact state",
@@ -125,11 +124,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let (_, upstream_enthalpy) = self.contact_enthalpy(upstream_theta, pressure_pa)?;
         let residual = |theta: f64| -> Result<f64, NsfError> {
             let (rho, enthalpy) = self.contact_enthalpy(theta, pressure_pa)?;
-            let k = self.spec.gas.face_conductivity(
+            let mut k = self.spec.gas.face_conductivity(
                 &self.law,
                 0.5 * (adjacent_theta + theta),
                 0.5 * (adjacent_pressure_pa + pressure_pa),
             )?;
+            // Use the identical sum as open_energy_flux. At fixed cell
+            // velocity the acoustic face velocity, local gradient and this
+            // adjacent SGS conductivity do not depend on the root temperature.
+            if turbulent_conductivity_lu != 0.0 {
+                k += turbulent_conductivity_lu;
+            }
             let value = (-rho * outward_velocity_lu) * (enthalpy - upstream_enthalpy)
                 + 2.0 * k * (theta - adjacent_theta);
             if !(k.is_finite() && k > 0.0 && value.is_finite()) {
@@ -186,3 +191,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod sgs_tests;

@@ -949,6 +949,18 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .any(|u| u.iter().any(|&v| v != 0.0));
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
+        if self.coupled_sgs_contact() {
+            // A transverse wall changes the boundary-cell SGS gradient and
+            // hence its enthalpy-contact temperature. Refresh the face and
+            // preserve the physical distribution through the common rebase.
+            let drives = self.boundary_drives().expect("attached thermal contact");
+            if let Err(error) = self.set_boundary_drives(drives) {
+                self.edge_velocity = old_edge_velocity;
+                self.moving_walls = old_moving_walls;
+                return Err(error);
+            }
+            return Ok(());
+        }
         let transport = match self.sgs_field(
             &rho, &u, &self.theta, &self.material, self.open_faces.as_ref(),
         ) {
@@ -1496,25 +1508,45 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         };
         let mut result = None;
         for _ in 0..COUPLING_PASSES {
-            let faces1 = self.resolve_open_faces(
-                self.open.as_ref(), self.characteristic_pressure_offset_pa,
-                self.characteristic_inflow_temperature_k,
-                self.characteristic_patch, &rho1, &u_guess, &th1,
-            )?;
-            let mut f1 = self.force_field(&rho1, &th1, faces1.as_ref());
-            if have_sources {
-                for i in 0..n {
-                    if !self.solid[i] {
-                        for a in 0..3 {
-                            f1[i][a] += src_next[i].1[a];
+            let (faces1, f1, u1, trial_material, trial_transport) = if self.coupled_sgs_contact() {
+                let material = self.material_field(&rho1, &th1)?;
+                let contact =
+                    self.sgs_contact_predictor(&rho1, &mom1, &th1, &material, &u_guess)?;
+                (
+                    contact.faces,
+                    contact.force,
+                    contact.velocity,
+                    material,
+                    contact.transport,
+                )
+            } else {
+                // Keep the original molecular and entropy-contact arithmetic.
+                let faces = self.resolve_open_faces(
+                    self.open.as_ref(),
+                    self.characteristic_pressure_offset_pa,
+                    self.characteristic_inflow_temperature_k,
+                    self.characteristic_patch,
+                    &rho1,
+                    &u_guess,
+                    &th1,
+                    &[],
+                )?;
+                let mut force = self.force_field(&rho1, &th1, faces.as_ref());
+                if have_sources {
+                    for i in 0..n {
+                        if !self.solid[i] {
+                            for a in 0..3 {
+                                force[i][a] += src_next[i].1[a];
+                            }
                         }
                     }
                 }
-            }
-            let u1 = self.velocity_field(&rho1, &mom1, &f1);
-            let trial_material = self.material_field(&rho1, &th1)?;
-            let trial_transport =
-                self.sgs_field(&rho1, &u1, &th1, &trial_material, faces1.as_ref())?;
+                let velocity = self.velocity_field(&rho1, &mom1, &force);
+                let material = self.material_field(&rho1, &th1)?;
+                let transport =
+                    self.sgs_field(&rho1, &velocity, &th1, &material, faces.as_ref())?;
+                (faces, force, velocity, material, transport)
+            };
             let et_trial: Vec<f64> = (0..n)
                 .map(|i| {
                     let internal = trial_material
@@ -1617,9 +1649,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // Admit the actual endpoint too, without replacing the common
         // predictor faces that supplied its force and conservative FV flux.
         let endpoint_faces = self.resolve_open_faces(
-            self.open.as_ref(), self.characteristic_pressure_offset_pa,
+            self.open.as_ref(),
+            self.characteristic_pressure_offset_pa,
             self.characteristic_inflow_temperature_k,
-            self.characteristic_patch, &rho1, &u1, &th1,
+            self.characteristic_patch,
+            &rho1,
+            &u1,
+            &th1,
+            &material_new,
         )?;
         // The next collision must use the actual accepted force-corrected
         // velocity and source state, after the final temperature corrector.

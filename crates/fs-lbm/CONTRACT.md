@@ -4361,13 +4361,30 @@ with zero boundary conduction. An explicit pressure-temperature drive provides
 the upstream temperature; other drives retain the existing isentropic reference
 temperature at the reconstructed pressure. Normal acoustic and tangential
 characteristics are unchanged. Policy, native face states, trial clones and
-rollback remain with the original owner. Active SGS is refused in either
-attachment order until its boundary-dependent gradient/conductivity can be
-resolved simultaneously; an explicit zero coefficient retains molecular
-transport. This is a thermal contact, not full nonlinear NSCBC, general
+rollback remain with the original owner. An explicit zero SGS coefficient
+retains molecular transport. This is a thermal contact, not full nonlinear NSCBC, general
 flow-reversal admission, finite player heat capacity or species transport.
 Focused independent-flux and native-input regressions accompany the selection;
 these checks do not establish measured instrument fidelity.
+
+Active Smagorinsky, WALE and Vreman closures also admit `EnthalpyFlux` contacts.
+Each acoustic face velocity supplies the same half-cell gradient and adjacent
+modeled conductivity as the conservative transport field. The inlet solves
+`abs(rho_f*u_n)*(h_f-h_up) + 2*(k_m+k_t)*(theta_f-theta_i) = 0` using the
+original source enthalpy and molecular conductivity. Matching deviatoric stress
+work remains in the original total-energy flux. A bounded 32-pass face/Guo-force
+iteration closes the velocity dependence before each thermal predictor;
+nonconvergence refuses instead of using inconsistent heat. Only boundary
+closure values are recomputed during the iteration, followed by one complete
+SGS field. Outward/stationary conduction remains exactly zero. Attaching SGS
+in either order, changing face/patch drives and changing transverse wall
+velocity rebind force and conservative history together. Molecular and
+exact-zero paths retain their original arithmetic. Six focused regressions
+cover the total-conductivity root, axes/orientations/models, attachment order,
+patches, worker identity, mass/energy balance, drop/cancel/retry and failed
+rebinds. This adds no turbulent inflow spectrum, SGS kinetic-energy equation
+or new boundary-transparency qualification; the original finite outer thermal
+coupling accuracy remains in force.
 
 The same reconstructed face supplies incoming populations (adjacent
 post-collision non-equilibrium extrapolation), the conservative thermal-pressure

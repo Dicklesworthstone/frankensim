@@ -7,7 +7,7 @@ use crate::nsf3::{
 use crate::sgs3::{SgsConfig, SgsModel, SgsUse};
 use fs_material::gas::{GasSpec, GasState};
 
-fn grid(axis: usize, inlet_high: bool) -> NsfGrid3<D3q27> {
+pub(super) fn grid(axis: usize, inlet_high: bool) -> NsfGrid3<D3q27> {
     let gas = GasSpec::dry_air_ussa1976();
     let reference = GasState::try_new(&gas, 300.0, 100_000.0).unwrap();
     let unit = (3.0 * reference.specific_gas_constant * 300.0).sqrt();
@@ -55,7 +55,7 @@ fn grid(axis: usize, inlet_high: bool) -> NsfGrid3<D3q27> {
     .unwrap()
 }
 
-fn thermal(p: f64, t: f64) -> NsfBoundaryDrive {
+pub(super) fn thermal(p: f64, t: f64) -> NsfBoundaryDrive {
     NsfBoundaryDrive::PressureTemperature {
         pressure_offset_pa: p,
         inflow_temperature_k: t,
@@ -137,20 +137,22 @@ fn g1_constant_material_quadratic_and_zero_flow_limit_are_independent_of_the_roo
     for upstream_k in [296.0, 300.4, 304.0] {
         let upstream = grid.law.theta_of_kelvin(upstream_k);
         for normal in [-1e-5, -1e-3, -1e-2] {
-            let a = p_lu * -normal * cp_over_r;
-            let g = 2.0 * k;
-            let b = a - g * adjacent;
-            // G theta_f^2 + (A-G theta_i) theta_f - A theta_up = 0.
-            let reference = (-b + (b * b + 4.0 * g * a * upstream).sqrt()) / (2.0 * g);
-            let actual = grid
-                .enthalpy_flux_theta(adjacent, pressure, pressure, normal, upstream_k)
-                .unwrap();
-            assert!((actual - reference).abs() < 3e-15);
+            for modeled_k in [0.0, 0.4 * k, 3.0 * k] {
+                let a = p_lu * -normal * cp_over_r;
+                let g = 2.0 * (k + modeled_k);
+                let b = a - g * adjacent;
+                // G theta_f^2 + (A-G theta_i) theta_f - A theta_up = 0.
+                let reference = (-b + (b * b + 4.0 * g * a * upstream).sqrt()) / (2.0 * g);
+                let actual = grid.enthalpy_flux_theta(
+                    adjacent, pressure, pressure, normal, upstream_k, modeled_k,
+                ).unwrap();
+                assert!((actual - reference).abs() < 3e-15);
+            }
         }
     }
     for normal in [0.0, -0.0, 1e-12, 0.01] {
         assert_eq!(
-            grid.enthalpy_flux_theta(adjacent, pressure, pressure, normal, 304.0)
+            grid.enthalpy_flux_theta(adjacent, pressure, pressure, normal, 304.0, 0.0)
                 .unwrap()
                 .to_bits(),
             adjacent.to_bits()
@@ -159,7 +161,7 @@ fn g1_constant_material_quadratic_and_zero_flow_limit_are_independent_of_the_roo
     let mut previous = f64::INFINITY;
     for normal in [-1e-3, -1e-6, -1e-9, -1e-12] {
         let distance = (grid
-            .enthalpy_flux_theta(adjacent, pressure, pressure, normal, 304.0)
+            .enthalpy_flux_theta(adjacent, pressure, pressure, normal, 304.0, 0.0)
             .unwrap()
             - adjacent)
             .abs();
@@ -170,7 +172,7 @@ fn g1_constant_material_quadratic_and_zero_flow_limit_are_independent_of_the_roo
 }
 
 #[test]
-fn g0_g4_g5_policy_keeps_legacy_bits_and_original_trial_rollback_and_sgs_refusals() {
+fn g0_g4_g5_policy_keeps_legacy_bits_and_original_trial_rollback() {
     let mut original = grid(0, false);
     let mut explicit = grid(0, false)
         .with_characteristic_thermal_policy([NsfCharacteristicThermalPolicy::UpwindEntropy; 2])
@@ -254,14 +256,14 @@ fn g0_g4_g5_policy_keeps_legacy_bits_and_original_trial_rollback_and_sgs_refusal
             .with_sgs(config(0.17))
             .unwrap()
             .with_characteristic_thermal_policy(policies)
-            .is_err()
+            .is_ok()
     );
     assert!(
         grid(0, false)
             .with_characteristic_thermal_policy(policies)
             .unwrap()
             .with_sgs(config(0.17))
-            .is_err()
+            .is_ok()
     );
     let molecular = grid(0, false)
         .with_characteristic_thermal_policy(policies)
