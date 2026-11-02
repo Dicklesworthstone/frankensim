@@ -4,7 +4,8 @@
 //! resampled or advanced here. A C1 cubic Hermite interpolant represents each
 //! source between accepted endpoints. Its analytic derivative supplies Qdot
 //! and Fdot to the original moving-source pressure operator, at the SAME
-//! retarded time. Straight-line subsonic motion has a unique analytic inverse.
+//! retarded time. Uniform motion retains its analytic inverse; prepared curved
+//! motion uses bounded inversion of the original C2 trajectory interpolant.
 //!
 //! Input bandwidth, interpolation convergence, finite-source compactness and
 //! pressure linearity remain producer responsibilities. Declared receiver
@@ -22,11 +23,14 @@ use fs_aeroac::curle3d::moving::{
 };
 use fs_math::{dd::Dd, det};
 
+mod motion;
+pub use motion::{CompactMotion, CompactSourceMotion};
+
 /// Immutable accepted history and a prescribed trajectory in the medium frame.
 #[derive(Clone, Copy, Debug)]
-pub struct CompactSourceHistory<'a> {
+pub struct CompactSourceHistory<'a, M = UniformSourceMotion> {
     /// Source translation, independent of the mechanics' time integration.
-    pub motion: UniformSourceMotion,
+    pub motion: M,
     /// Strictly increasing finite physical times with values AND derivatives.
     pub samples: &'a [TimedCompactSource],
     /// Declared source bandwidth [Hz], including physical source harmonics.
@@ -64,8 +68,9 @@ pub struct MovingPressureBudget {
     /// Logical owned payload: track records, cubic coefficients and scratch.
     /// Borrowed input, allocator metadata and allocator rounding are excluded.
     pub maximum_payload_bytes: usize,
-    /// Sources times output samples. Each pair has one analytic root, one
-    /// binary search (bounded by source history length), and fixed arithmetic.
+    /// Sources times output samples. Each uniform pair has one analytic root;
+    /// each curved pair additionally retains its prepared trajectory's explicit
+    /// root-iteration cap. All pairs have a bounded source-history search.
     pub maximum_source_receiver_pairs: u64,
 }
 
@@ -76,8 +81,8 @@ struct CubicInterval {
     terms: [[f64; 3]; 4],
 }
 
-struct PreparedTrack<'a> {
-    source: CompactSourceHistory<'a>,
+struct PreparedTrack<'a, M> {
+    source: CompactSourceHistory<'a, M>,
     first_interval: usize,
 }
 
@@ -88,21 +93,22 @@ struct PreparedTrack<'a> {
 /// not change timestamps or arithmetic. A failed/cancelled block leaves the
 /// output and sample counter untouched; only private scratch may have changed.
 /// Keep the borrowed source histories alive and immutable while observing.
-pub struct MovingCompactRenderer<'a> {
+pub struct MovingCompactRenderer<'a, M = UniformSourceMotion> {
     observer: MovingCompactObserver,
     config: MovingPressureConfig,
-    tracks: Vec<PreparedTrack<'a>>,
+    tracks: Vec<PreparedTrack<'a, M>>,
     intervals: Vec<CubicInterval>,
     scratch: Vec<f64>,
     completed: u64,
+    maximum_retarded_iterations: u64,
 }
 
-impl<'a> MovingCompactRenderer<'a> {
+impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
     /// Admit the complete receiver window and compile source interpolation.
     /// Cancellation is checked while traversing retained input, before output.
     pub fn new<Cancel: FnMut() -> bool>(
         observer: MovingCompactObserver,
-        sources: &[CompactSourceHistory<'a>],
+        sources: &[CompactSourceHistory<'a, M>],
         config: MovingPressureConfig,
         budget: MovingPressureBudget,
         cancelled: &mut Cancel,
@@ -138,6 +144,7 @@ impl<'a> MovingCompactRenderer<'a> {
             ));
         }
         let mut endpoint_count = 0_usize;
+        let mut root_iterations_per_sample = 0_u64;
         for (index, source) in sources.iter().enumerate() {
             if index % 64 == 0 {
                 check_cancel(cancelled)?;
@@ -147,6 +154,13 @@ impl<'a> MovingCompactRenderer<'a> {
                     "compact observation needs two accepted source endpoints",
                 ));
             }
+            source.motion.admit_observer(&observer)?;
+            root_iterations_per_sample = root_iterations_per_sample
+                .checked_add(
+                    u64::try_from(source.motion.maximum_root_iterations())
+                        .map_err(|_| sizing("trajectory root-iteration limit exceeds u64"))?,
+                )
+                .ok_or_else(|| sizing("combined trajectory root work overflows"))?;
             endpoint_count = endpoint_count
                 .checked_add(source.samples.len())
                 .ok_or_else(|| sizing("source endpoint count overflow"))?;
@@ -154,10 +168,14 @@ impl<'a> MovingCompactRenderer<'a> {
         if endpoint_count > budget.maximum_source_samples {
             return Err(sizing("compact source histories exceed the input budget"));
         }
+        let maximum_retarded_iterations = config
+            .samples
+            .checked_mul(root_iterations_per_sample)
+            .ok_or_else(|| sizing("finite receiver-window root work overflows"))?;
         let interval_count = endpoint_count - sources.len();
         let payload = sources
             .len()
-            .checked_mul(size_of::<PreparedTrack<'a>>())
+            .checked_mul(size_of::<PreparedTrack<'a, M>>())
             .and_then(|n| {
                 interval_count
                     .checked_mul(size_of::<CubicInterval>())
@@ -229,25 +247,20 @@ impl<'a> MovingCompactRenderer<'a> {
                 source,
                 config.first_receiver_time_s,
                 config.maximum_time_residual_s,
+                cancelled,
             )?;
             let last = prepare_history(
                 &observer,
                 source,
                 last_receiver_time,
                 config.maximum_time_residual_s,
+                cancelled,
             )?;
-            // Bound the entire uniform trajectory between the two emissions,
-            // including a close pass between output samples.
-            admit_clearance(
-                &observer,
-                &source.motion,
-                first.source_time_s(),
-                last.source_time_s(),
-            )?;
-            // Along a uniform path, d(Mr)/dτ = c*(Mr²-|M|²)/R <= 0.
-            // The first emission therefore has the window's largest Doppler
-            // rate; a receding source need not pay an approaching-source bound.
-            let maximum_doppler = first.source_time_rate();
+            // Each motion owner supplies the continuous geometry admission and
+            // a Doppler bound valid for the whole requested observation window.
+            let maximum_doppler = source
+                .motion
+                .admit_window(&observer, &first, &last, cancelled)?;
             if source.source_bandwidth_hz * maximum_doppler > config.receiver_bandwidth_hz {
                 return Err(sizing(
                     "declared receiver bandwidth does not include source Doppler expansion",
@@ -266,6 +279,7 @@ impl<'a> MovingCompactRenderer<'a> {
             intervals,
             scratch,
             completed: 0,
+            maximum_retarded_iterations,
         })
     }
 
@@ -292,6 +306,13 @@ impl<'a> MovingCompactRenderer<'a> {
     /// Largest complete callback that fits the retained scratch buffer.
     pub const fn max_block_len(&self) -> usize {
         self.config.max_block
+    }
+
+    /// Checked upper bound on iterative root steps over the complete window.
+    /// Uniform sources contribute zero; constant endpoint/search work is
+    /// separately bounded by source count and retained history sizes.
+    pub const fn maximum_retarded_iterations(&self) -> u64 {
+        self.maximum_retarded_iterations
     }
 
     /// Exact uniform clock expression used by callbacks; no accumulated dt.
@@ -342,6 +363,7 @@ impl<'a> MovingCompactRenderer<'a> {
                     &track.source,
                     time,
                     self.config.maximum_time_residual_s,
+                    cancelled,
                 )?;
                 let strength = interpolate(track, &self.intervals, prepared.source_time_s())?;
                 pressure = pressure
@@ -362,7 +384,7 @@ impl<'a> MovingCompactRenderer<'a> {
     }
 }
 
-impl PressureRenderer for MovingCompactRenderer<'_> {
+impl<M: CompactMotion> PressureRenderer for MovingCompactRenderer<'_, M> {
     fn samples_rendered(&self) -> u64 {
         Self::samples_rendered(self)
     }
@@ -415,8 +437,8 @@ fn compile_interval(
     Ok(CubicInterval { terms })
 }
 
-fn interpolate(
-    track: &PreparedTrack<'_>,
+fn interpolate<M>(
+    track: &PreparedTrack<'_, M>,
     intervals: &[CubicInterval],
     time: f64,
 ) -> Result<CompactSourceStrength, RenderError> {
@@ -458,29 +480,36 @@ fn interpolate(
     Ok(strength)
 }
 
-fn prepare_history(
+fn prepare_history<M: CompactMotion, Cancel: FnMut() -> bool>(
     observer: &MovingCompactObserver,
-    source: &CompactSourceHistory<'_>,
+    source: &CompactSourceHistory<'_, M>,
     time: f64,
     tolerance: f64,
+    cancelled: &mut Cancel,
 ) -> Result<PreparedMovingCompactSample, RenderError> {
     let first = source.samples[0].source_time_s;
     let last = source.samples[source.samples.len() - 1].source_time_s;
-    let original_error = match observer.prepare_uniform(time, &source.motion, tolerance) {
+    let original_error = match source
+        .motion
+        .prepare_at(observer, time, tolerance, cancelled)
+    {
         Ok(prepared) if (first..=last).contains(&prepared.source_time_s()) => return Ok(prepared),
         Ok(_) => sizing("receiver window is outside retained physical source history"),
-        Err(error) => acoustic(error),
+        Err(error @ RenderError::Acoustic(AeroacError::Cancelled { .. })) => return Err(error),
+        Err(error) => error,
     };
     // Analytic inversion can round just outside an exact retained endpoint.
     // Reuse that physical event ONLY when its rounded arrival is the requested
     // clock value and its measured light-cone residual meets the same budget.
     // This is no extrapolation, tolerance-sized time clamp, or invented history.
     for endpoint_time in [first, last] {
+        check_cancel(cancelled)?;
         if let Ok(kinematics) = source.motion.kinematics_at(endpoint_time)
             && let Ok(endpoint) = observer.prepare_emission(endpoint_time, kinematics)
             && endpoint.receiver_time_s() == time
             && endpoint.retarded_time_residual_s() <= tolerance
         {
+            check_cancel(cancelled)?;
             return Ok(endpoint);
         }
     }
