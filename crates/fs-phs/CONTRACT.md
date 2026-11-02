@@ -924,6 +924,35 @@ warm steps, and atomic/budget/cancellation refusals. Existing positive-heat,
 owned exact-flow, stiff-energy and common-flow regressions protect the shared
 numerical owners; full-workspace qualification is not asserted.
 
+### Continuous one-way observation of a prepared tone source
+
+`linear_exact::PreparedToneObserver` prepares `z'=A*z+B*x`,
+`y=C*z+D*x` on a `PreparedExactTones` owner's actual within-step physical
+trajectory. B and D address the complete original state order, including
+coupled coordinates and material histories. It reuses the source's exact
+balanced continuous generator and the existing bounded exponential, retaining
+only observer endpoint and output rows. All original source quadratures,
+DC and exact duplicate coalescing remain; no velocity sample is substituted
+for the continuous drive. Zero observer states admit pure direct feedthrough.
+
+An owner identity binds the cache to its original source and clock. Moving that
+owner preserves validity; substituting a rebuilt owner refuses. Explicit
+capacity includes physical, observer and source coordinates, dense workspace,
+retained rows and warm buffers. Warm preview and controlled cancellation allocate
+nothing, and caller filter/output buffers publish together only on success.
+Physical state, filter state and phase remain external and checkpointable.
+The consumer must publish observation candidates alongside the corresponding
+accepted physical step; preview adds no physical energy, heat, loading or
+reaction, and does not advance the physical owner. Finite matrix admission is
+not a stability, passivity, bandwidth or rigorous interval certificate.
+
+Five native tests check independent continuous convolution, retained Maxwell
+history against a separate physical ODE, signed/direct transfers, duplicate
+cancellation, owner binding, atomic late refusal/cancellation, and 1,000 warm
+allocation-free source/filter/phase steps with clock-subdivision agreement.
+All eight continuous-tone physical-owner tests also pass; complete workspace
+qualification is not asserted.
+
 ### Resonance spectrum of the original descriptor model
 
 `HarmonicModel::resonance_spectrum` discovers finite free modes inside an
@@ -1571,4 +1600,5 @@ nonlinear knot crossing alongside full mutual inductance; stable small work
 beside an unchanged energy bias; shared preparation and ownership/rank refusals.
 An independent modal test covers nF/pF/fF matrices and the same dynamics beside
 a held 1 F capacitor with 10^8 C charge, checking terminal KCL and physical work.
+
 

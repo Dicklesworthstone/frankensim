@@ -1,5 +1,7 @@
 //! Continuous sources through the original complete quadratic pHS owner.
+mod observer;
 mod power;
+pub use observer::PreparedToneObserver;
 
 use super::{
     DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, finite,
@@ -13,6 +15,7 @@ use crate::{
 };
 use fs_math::det;
 use power::{Sum, TonePower};
+use std::sync::Arc;
 
 struct Scratch {
     input: Vec<f64>,
@@ -46,6 +49,7 @@ struct Scratch {
 /// evaluate no exponentials or transcendentals, assuming allocation-free
 /// storage callbacks. Caller state and source phase are never mutated.
 pub struct PreparedExactTones<'a> {
+    identity: Arc<()>,
     system: System<'a>,
     duration: f64,
     frequencies: Vec<f64>,
@@ -244,6 +248,7 @@ impl<'a> PreparedExactTones<'a> {
             return Err(PreparedStepError::Cancelled);
         }
         Ok(Self {
+            identity: Arc::new(()),
             system: owner,
             duration,
             frequencies: frequencies.to_vec(),
@@ -375,17 +380,14 @@ impl<'a> PreparedExactTones<'a> {
             ));
         }
         let scratch = &mut self.scratch;
-        scratch.sums.fill(Sum::default());
-        for p in 0..m {
-            for (source, &target) in self.mapping.iter().enumerate() {
-                let index = 2 * (p * self.unique.len() + target);
-                scratch.sums[index].add(cosine[p * k + source]);
-                scratch.sums[index + 1].add(sine[p * k + source]);
-            }
-        }
-        for (out, &sum) in scratch.input.iter_mut().zip(&scratch.sums) {
-            *out = sum.value();
-        }
+        combine_tones(
+            &self.mapping,
+            self.unique.len(),
+            cosine,
+            sine,
+            &mut scratch.sums,
+            &mut scratch.input,
+        )?;
         self.flow.evaluate_into(
             initial,
             &scratch.input,
@@ -493,7 +495,7 @@ fn admit(
     // BEFORE any factor/candidate allocation. Existing bounded kernels retain
     // their own 32-term/48-doubling admission. Scores are not wall-clock claims.
     let (f, d, c) = (flow as u128, power as u128, channels.len() as u128);
-    let bytes = 8 * (f * f * (2 * m as u128 + 24) + d * d * (c + 80) + (n * n) as u128 * c)
+    let bytes = 8 * (f * f * (2 * m as u128 + 25) + d * d * (c + 80) + (n * n) as u128 * c)
         + 128 * (n + m + source + frequencies.len()) as u128;
     let work = 224 * f * f * f * (m as u128).max(1) + 2048 * d * d * d * (c + 2);
     if bytes > budget.max_dense_bytes as u128 || work > budget.max_multiply_terms as u128 {
@@ -507,6 +509,33 @@ fn admit(
         return Err(refuse(
             "continuous-tone channel witness must match original state layout",
         ));
+    }
+    Ok(())
+}
+
+// Shared original-order compensated source packing for motion and observers.
+fn combine_tones(
+    mapping: &[usize],
+    unique: usize,
+    cosine: &[f64],
+    sine: &[f64],
+    sums: &mut [Sum],
+    input: &mut [f64],
+) -> Result<(), PhsError> {
+    sums.fill(Sum::default());
+    let k = mapping.len();
+    for p in 0..cosine.len() / k {
+        for (source, &target) in mapping.iter().enumerate() {
+            let index = 2 * (p * unique + target);
+            sums[index].add(cosine[p * k + source]);
+            sums[index + 1].add(sine[p * k + source]);
+        }
+    }
+    for (out, &sum) in input.iter_mut().zip(sums.iter()) {
+        *out = sum.value();
+    }
+    if !finite(input) {
+        return Err(refuse("combined continuous-tone source overflows"));
     }
     Ok(())
 }

@@ -46,6 +46,7 @@ pub struct PreparedQuadraticFlow {
     balanced_input: Vec<f64>,
     source_scales: Vec<f64>,
     rotating_sources: bool,
+    tone_generator: Option<Vec<f64>>,
 }
 impl PreparedQuadraticFlow {
     /// Prepare the SAME energy-balanced exact-ZOH generator and stable Gramian
@@ -164,6 +165,12 @@ impl PreparedQuadraticFlow {
         &self.source_scales
     }
 
+    // Exact prepared continuous generator and original diagonal state map.
+    // One-way observers must reuse these, including every source quadrature.
+    pub(super) fn tone_operator(&self) -> Option<(&[f64], &[f64])> {
+        self.tone_generator.as_deref().map(|generator| (generator, self.forward.as_slice()))
+    }
+
     /// Retain the same extended generator and physical base storage while
     /// supplying the complete original-coordinate input map. This supports
     /// force-record states whose derivatives, rather than the mechanical
@@ -236,6 +243,8 @@ impl PreparedQuadraticFlow {
             .and_then(|v| {
                 v.checked_mul(count.checked_mul(2)?.checked_add(if extension.is_some() {
                     36
+                } else if tones.is_some() {
+                    25
                 } else {
                     24
                 })?)
@@ -513,6 +522,7 @@ impl PreparedQuadraticFlow {
             balanced_input,
             source_scales,
             rotating_sources: tones.is_some(),
+            tone_generator: tones.map(|_| generator),
         })
     }
 
