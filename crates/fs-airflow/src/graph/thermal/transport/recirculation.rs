@@ -104,6 +104,9 @@ impl<'a> TransportNetwork<'a> {
     ) -> Result<Self, TransportError> {
         poll(cx)?;
         positive(temperature_tolerance_k, "recirculation temperature tolerance")?;
+        if self.circulation.is_some() && !links.is_empty() {
+            return Err(TransportError::InvalidInput("a closed native circulation has no external return-air supplies"));
+        }
         if self.feedback.is_some() || links.len() > MAX_RECIRCULATION_LINKS {
             return Err(TransportError::InvalidInput("recirculation already bound or link cap exceeded"));
         }

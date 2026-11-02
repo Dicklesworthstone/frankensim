@@ -24,11 +24,15 @@ impl TransportLinearization<'_, '_> {
     /// This differentiates the smooth extension off the conservation manifold;
     /// the physical direction must come from a hydraulic solve. A single reverse
     /// DAG sweep suffices for all branches. Zero flows, zero reservoir exchange
-    /// and imposed return feedback refuse, not silently frozen derivatives.
+    /// and imposed return feedback refuse. Closed native circulation also
+    /// refuses; its flow controls need a mass-conserving hydraulic tangent.
     pub fn pullback_branch_flows(
         &self, cx: &Cx<'_>, objective: &TransportObjective,
     ) -> Result<Vec<f64>, TransportError> {
         self.check_objective(cx, objective)?;
+        if self.network.circulation.is_some() {
+            return Err(TransportError::InvalidInput("individual flow derivatives of closed native circulation require a separate mass-conserving hydraulic tangent"));
+        }
         if self.network.feedback.is_some() {
             return Err(TransportError::InvalidInput("individual flow derivatives do not freeze imposed return feedback"));
         }

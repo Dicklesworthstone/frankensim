@@ -1,4 +1,4 @@
-//! Matrix-free tangents and adjoints of the admitted thermal transport DAG.
+//! Tangents and adjoints of admitted thermal transport.
 //!
 //! The controls are wall temperatures, external supply temperatures, and
 //! `ln(U)` for each segment conductance `U = h A`. One forward sweep applies
@@ -6,6 +6,8 @@
 //! number of controls. Return links add a bounded reduced supply solve and
 //! its transpose, including implicit intake feedback. Neither derivative
 //! reruns a primal march or a solid solve. Inlet controls then denote FRESH air.
+//! Closed native circulation reuses its bounded node matrix and transpose to
+//! close feedback around the same local segment Jacobians.
 //!
 //! With `x = U/C`, `a = exp(-x)`, `e = 1-a`, `g = e/x`, and `D = Tw-Tin`,
 //! the segment derivatives with respect to `(Tin, Tw, ln(U))` are
@@ -26,6 +28,7 @@ use super::{BranchThermalModel, TransportError, TransportMarch, TransportNetwork
 
 pub mod design;
 mod feedback;
+mod circulation;
 // Opt-in signed-flow derivatives, separate from the fixed-flow controls above.
 mod flows;
 
@@ -107,7 +110,8 @@ struct MixingRow {
 
 /// A linearization bound to an immutable network and an actually admitted march.
 /// Once-through storage and sweeps are linear in nodes, edges and segments.
-/// Return links additionally solve at most 64 coupled supply unknowns. Publicly assembled or mismatched `TransportMarch` values cannot
+/// Return links additionally solve at most 64 coupled supply unknowns. Closed
+/// native circulation solves at most 64 coupled node unknowns. Publicly assembled or mismatched `TransportMarch` values cannot
 /// be substituted for the private primal used to construct these derivatives.
 #[derive(Debug)]
 pub struct TransportLinearization<'network, 'flow> {
@@ -200,6 +204,9 @@ impl TransportLinearization<'_, '_> {
 
     fn apply_open(&self, cx: &Cx<'_>, direction: &TransportDirection) -> Result<TransportDifferential, TransportError> {
         self.check_direction(cx, direction)?;
+        let circulating = if self.network.circulation.is_some() {
+            Some(circulation::temperatures(self, cx, direction)?)
+        } else { None };
         let mut result = TransportDifferential {
             node_temperatures_k: vec![None; self.mixers.len()], branch_outlets_k: vec![None; self.upstream.len()],
             reference_temperatures_k: vec![0.0; self.segments.len()], wall_heat_rate_w: 0.0,
@@ -210,13 +217,16 @@ impl TransportLinearization<'_, '_> {
             poll(cx)?;
             if self.primal.node_temperatures_k[node].is_none() { continue; }
             let mixer = &self.mixers[node];
-            let mut temperature = finite(mixer.supply * direction.inlets_k[node], "supply tangent")?;
-            for &(branch, weight) in &mixer.incoming {
-                poll(cx)?;
-                let upstream = result.branch_outlets_k[branch]
-                    .ok_or(TransportError::InvalidInput("missing upstream tangent"))?;
-                add(&mut temperature, weight * upstream)?;
-            }
+            let temperature = if let Some(values) = &circulating { values[node] } else {
+                let mut mixed = finite(mixer.supply * direction.inlets_k[node], "supply tangent")?;
+                for &(branch, weight) in &mixer.incoming {
+                    poll(cx)?;
+                    let upstream = result.branch_outlets_k[branch]
+                        .ok_or(TransportError::InvalidInput("missing upstream tangent"))?;
+                    add(&mut mixed, weight * upstream)?;
+                }
+                mixed
+            };
             result.node_temperatures_k[node] = Some(temperature);
             let external = self.network.external_capacity[node];
             let entering = if external > 0.0 { direction.inlets_k[node] } else { temperature };
@@ -268,6 +278,9 @@ impl TransportLinearization<'_, '_> {
             add(&mut reference_weight, external * external_weight - residual * objective.hydraulic_energy_defect)?;
         }
         if let Some(node) = self.reference_node { add(&mut gradient.inlets[node], reference_weight)?; }
+        if self.network.circulation.is_some() {
+            return circulation::pullback(self, cx, objective, nodes, gradient, heat_weight);
+        }
         for &node in self.network.order.iter().rev() {
             poll(cx)?;
             if self.primal.node_temperatures_k[node].is_none() { continue; }

@@ -1667,9 +1667,33 @@ mistaking conservative head for a resistance coefficient.
 
 The existing `TransportNetwork` consumes gravity-driven flows, including
 downward paths with increasing static pressure, using the same reference rho/Cp.
-It still owns a directed-acyclic sensible-heat model: Boussinesq circulation
-cycles explicitly refuse and require a recirculating thermal owner. Neither
-gravity work nor hydraulic dissipation is automatically deposited as heat.
+The original `TransportNetwork::new` retains directed-acyclic admission.
+`new_circulating` additionally transports heat around a closed native hydraulic
+loop with at most 64 nodes. All pressure boundaries are explicit pressure
+datums; incoming and outgoing flow must balance there as well as at interior
+nodes. Each active component needs a numerically resolved wall-heat anchor.
+An entirely adiabatic closed component has no unique steady temperature and
+refuses. Stagnant adiabatic nodes retain their unknown temperatures.
+
+The same exponential `AirPath` laws and incoming-capacity mixing weights form
+a simultaneous node-temperature system. The existing bounded elimination and
+backward-residual check solve that system; an independent physical branch
+remarch checks the sum of absolute node heat residuals and the original
+whole-network heat budget. The supplied positive temperature reference only
+sets numerical coordinates and the initial solid-iteration guess. It supplies
+no fresh air or thermal reservoir. Uniform-wall equilibrium is evaluated in
+wall-centered differences to retain the constant-temperature limit at weak hA.
+
+Fixed-flow wall-temperature/hA tangents and adjoints close through the same
+node matrix and its transpose; conductance scaling preserves this mode.
+Imposed external return-air links and individual unconstrained branch-flow
+derivatives refuse on a closed circulation. Density, heat capacity, branch
+flows and hA remain frozen. There is no temperature-driven hydraulic feedback,
+fluid storage, conditioning enclosure or experimental validation claim.
+Neither gravity work nor hydraulic dissipation is automatically deposited as heat.
+Focused G1/G3/G4 regression sources compare actual buoyant hydraulic loops with
+independent exponential heat balances, check reversal, numerical-reference
+invariance, weak-anchor uniform equilibrium, derivatives, refusal and cancellation.
 G0/G1/G3/G5 focused tests cover arbitrary-axis hydrostatics, zero/reversed g,
 material-density substitution, closed-loop density-driven circulation and power
 closure, fan operating points, fixed-head derivatives, heat-transport coherence,

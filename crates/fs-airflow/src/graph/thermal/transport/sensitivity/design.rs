@@ -118,7 +118,10 @@ impl<'flow> TransportNetwork<'flow> {
             poll(cx)?;
             if let Some(value) = temperature { inlets.push(TransportInlet { node, temperature: Temperature::new(*value) }); }
         }
-        let network = Self::new(cx, self.flow, self.air, models, &inlets, self.config)?;
+        let network = if self.circulation.is_some() {
+            Self::new_circulating(cx, self.flow, self.air, models,
+                Temperature::new(self.reference_k), self.config)?
+        } else { Self::new(cx, self.flow, self.air, models, &inlets, self.config)? };
         match &self.feedback {
             Some(feedback) => network.with_recirculation(cx, feedback.links.clone(), feedback.tolerance_k),
             None => Ok(network),

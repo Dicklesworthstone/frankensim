@@ -5,7 +5,8 @@
 //! exponential `AirPath` law. A uniform-density gravitational flow descends
 //! pressure plus specific-potential head, so its directed graph is acyclic
 //! even when static pressure rises along a downward stream. A frozen Boussinesq
-//! circulation can contain a directed cycle, which this DAG owner refuses.
+//! circulation can contain a directed cycle. `new_circulating` admits a bounded,
+//! closed, wall-anchored network and solves its node temperatures simultaneously.
 //! Without return links a deterministic topological pass needs no thermal
 //! matrix solve. Optional imposed return links close a bounded supply system.
 //!
@@ -30,6 +31,8 @@ use crate::graph::GraphSolution;
 pub mod sensitivity;
 pub mod recirculation;
 use recirculation::{Feedback, RecirculationReport};
+mod circulation;
+pub use circulation::MAX_CIRCULATION_NODES;
 
 /// One explicit thermal model for each hydraulic branch, in graph order.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,10 +121,12 @@ pub enum TransportError {
     Node { node: usize, reason: &'static str },
     /// Invalid branch or an unsupported zero-flow heat exchanger.
     Branch { branch: usize, reason: &'static str },
-    /// A free hydraulic node is not adequately balanced for transport.
+    /// A hydraulic node required to conserve flow is not adequately balanced.
     FlowImbalance { node: usize, residual_m3_s: f64, tolerance_m3_s: f64 },
     /// A global heat budget was not met; no march is returned.
     HeatImbalance { residual_w: f64, tolerance_w: f64, hydraulic_defect_w: f64 },
+    /// Sum of absolute recomputed node heat residuals in a native circulation.
+    CirculationResidual { residual_w: f64, tolerance_w: f64 },
     /// A bounded work checkpoint refused more work.
     Interrupted,
     /// Existing channel or conjugate solver refusal, preserved without promotion.
@@ -162,6 +167,7 @@ pub struct TransportNetwork<'a> {
     reference_k: f64,
     config: TransportConfig,
     feedback: Option<Feedback>,
+    circulation: Option<circulation::Circulation>,
 }
 
 impl<'a> TransportNetwork<'a> {
@@ -171,10 +177,45 @@ impl<'a> TransportNetwork<'a> {
     /// also refuse. Independent anchored components and adiabatic dead legs work.
     pub fn new(
         cx: &Cx<'_>, flow: &'a GraphSolution, air: TransportAir,
-        mut models: Vec<BranchThermalModel>, inlets: &[TransportInlet],
+        models: Vec<BranchThermalModel>, inlets: &[TransportInlet],
         config: TransportConfig,
     ) -> Result<Self, TransportError> {
+        Self::new_inner(cx, flow, air, models, inlets, config, None)
+    }
+
+    /// Admit a CLOSED native hydraulic circulation with finite wall exchange.
+    /// All pressure boundaries are explicitly pressure datums, not external
+    /// fluid supplies. Incoming/outgoing flow is checked at EVERY node, including
+    /// those datums. Each flowing component must reach a resolved wall-heat
+    /// anchor; an adiabatic closed loop has no unique steady temperature.
+    ///
+    /// The positive reference supplies only numerical coordinates and the
+    /// initial solid-iteration guess. It adds no reservoir or physical heat.
+    /// The original branch laws, reference density/Cp, heat budgets and
+    /// cancellation apply. At most MAX_CIRCULATION_NODES nodes are admitted.
+    /// Hydraulics and coefficients stay frozen; this does not close nonlinear
+    /// buoyancy feedback, fluid storage or hydraulic dissipation as heat.
+    pub fn new_circulating(
+        cx: &Cx<'_>, flow: &'a GraphSolution, air: TransportAir,
+        models: Vec<BranchThermalModel>, reference_temperature: Temperature,
+        config: TransportConfig,
+    ) -> Result<Self, TransportError> {
+        Self::new_inner(cx, flow, air, models, &[], config,
+            Some(reference_temperature.value()))
+    }
+
+    fn new_inner(
+        cx: &Cx<'_>, flow: &'a GraphSolution, air: TransportAir,
+        mut models: Vec<BranchThermalModel>, inlets: &[TransportInlet],
+        config: TransportConfig, circulation_reference: Option<f64>,
+    ) -> Result<Self, TransportError> {
         poll(cx)?;
+        if let Some(reference) = circulation_reference {
+            positive(reference, "circulation reference temperature")?;
+            if flow.pressures.len() > MAX_CIRCULATION_NODES {
+                return Err(TransportError::InvalidInput("native circulation node cap exceeded"));
+            }
+        }
         positive(air.density.value(), "air density")?;
         positive(air.specific_heat_j_kg_k, "air specific heat")?;
         if flow.gravity.as_ref().is_some_and(|gravity| {
@@ -290,7 +331,7 @@ impl<'a> TransportNetwork<'a> {
             poll(cx)?;
             let residual = finite(volume_out[node] - volume_in[node], "node volume residual")?;
             let capacity_difference = finite(capacity_out[node] - capacity_in[node], "node capacity residual")?;
-            if fixed[node] {
+            if fixed[node] && circulation_reference.is_none() {
                 external_capacity[node] = capacity_difference;
             } else {
                 let tolerance = finite(config.absolute_flow_tolerance.value()
@@ -329,18 +370,26 @@ impl<'a> TransportNetwork<'a> {
             }
         }
         if order.len() != n {
-            return Err(TransportError::InvalidInput("directed recirculation is not a passive transport DAG"));
+            if circulation_reference.is_none() {
+                return Err(TransportError::InvalidInput("directed recirculation is not a passive transport DAG; use new_circulating for a closed wall-anchored loop"));
+            }
+            // Simultaneous equations, not a purported topological ordering.
+            order = (0..n).collect();
         }
-        let reference_k = inlet_temperatures.iter().flatten().next().copied().unwrap_or(0.0);
-        let network = Self { flow, air, models, offsets, outgoing, downstream, order,
+        let reference_k = inlet_temperatures.iter().flatten().next().copied()
+            .unwrap_or(circulation_reference.unwrap_or(0.0));
+        let mut network = Self { flow, air, models, offsets, outgoing, downstream, order,
             mass_flows, capacities, external_capacity, capacity_residual, inlet_temperatures,
-            reference_k, config, feedback: None };
+            reference_k, config, feedback: None, circulation: None };
         // Admit the very same channel arithmetic before any caller solid work.
         for branch in 0..network.models.len() {
             poll(cx)?;
             if matches!(network.models[branch], BranchThermalModel::Exchange(_)) {
                 network.path(branch, reference_k)?;
             }
+        }
+        if circulation_reference.is_some() {
+            network.circulation = Some(circulation::Circulation::new(&network, cx)?);
         }
         Ok(network)
     }
@@ -362,7 +411,13 @@ impl<'a> TransportNetwork<'a> {
     /// Seed all solid references with zero-heat transport of the declared inlets.
     /// Downstream branches already see any upstream mixing, not an invented
     /// uniform ambient. This is an initial guess, not a solved temperature field.
+    /// A closed circulation instead uses its explicitly supplied reference as
+    /// this guess; there is no unique zero-heat closed-loop temperature.
     pub fn initial_references(&self, cx: &Cx<'_>) -> Result<Vec<f64>, TransportError> {
+        poll(cx)?;
+        if self.circulation.is_some() {
+            return Ok(vec![self.reference_k; self.offsets.last().copied().unwrap_or(0)]);
+        }
         Ok(self.march_inner(cx, None)?.reference_temperatures_k)
     }
 
@@ -388,6 +443,10 @@ impl<'a> TransportNetwork<'a> {
     }
 
     fn march_inner(&self, cx: &Cx<'_>, walls: Option<&[f64]>) -> Result<TransportMarch, TransportError> {
+        if let Some(circulation) = &self.circulation {
+            return circulation.march(self, cx, walls.ok_or(TransportError::InvalidInput(
+                "closed circulation needs its actual wall temperatures"))?);
+        }
         match &self.feedback {
             Some(feedback) => feedback.march(self, cx, walls),
             None => self.march_once(cx, walls, &self.inlet_temperatures),
@@ -396,8 +455,14 @@ impl<'a> TransportNetwork<'a> {
 
     fn march_once(&self, cx: &Cx<'_>, walls: Option<&[f64]>,
         inlets: &[Option<f64>]) -> Result<TransportMarch, TransportError> {
+        self.march_once_with_nodes(cx, walls, inlets, None)
+    }
+
+    fn march_once_with_nodes(&self, cx: &Cx<'_>, walls: Option<&[f64]>,
+        inlets: &[Option<f64>], solved_nodes: Option<&[f64]>)
+        -> Result<TransportMarch, TransportError> {
         poll(cx)?;
-        let reference_k = inlets.iter().flatten().next().copied().unwrap_or(0.0);
+        let reference_k = inlets.iter().flatten().next().copied().unwrap_or(self.reference_k);
         let n = self.order.len();
         let mut mixers = vec![Mixer::default(); n];
         for (node, &temperature) in inlets.iter().enumerate() {
@@ -417,7 +482,11 @@ impl<'a> TransportNetwork<'a> {
         let mut gross_external = 0.0;
         for &node in &self.order {
             poll(cx)?;
-            let Some(temperature) = mixers[node].temperature else {
+            let temperature = if let Some(values) = solved_nodes {
+                let circulation = self.circulation.as_ref().expect("native circulation solve");
+                (circulation.incoming_capacities[node] > 0.0).then_some(values[node])
+            } else { mixers[node].temperature };
+            let Some(temperature) = temperature else {
                 if !self.outgoing[node].is_empty() {
                     return Err(TransportError::Node { node, reason: "active node has no thermally supplied incoming flow" });
                 }
@@ -461,6 +530,21 @@ impl<'a> TransportNetwork<'a> {
         result.heat_imbalance_w = finite(result.external_heat_gain_w - result.wall_heat_rate_w, "global heat imbalance")?;
         let threshold = finite(self.config.absolute_heat_tolerance_w
             + self.config.relative_heat_tolerance * gross_wall.max(gross_external), "global heat threshold")?;
+        if let Some(values) = solved_nodes {
+            let circulation = self.circulation.as_ref().expect("native circulation solve");
+            let mut residual = 0.0;
+            for (node, mixer) in mixers.iter().enumerate() {
+                poll(cx)?;
+                if let Some(recomputed) = mixer.temperature {
+                    residual = finite(residual + circulation.incoming_capacities[node]
+                        * (values[node] - recomputed).abs(), "circulation mixing power residual")?;
+                }
+            }
+            if residual > threshold {
+                return Err(TransportError::CirculationResidual { residual_w: residual,
+                    tolerance_w: threshold });
+            }
+        }
         if result.heat_imbalance_w.abs() > threshold {
             return Err(TransportError::HeatImbalance { residual_w: result.heat_imbalance_w,
                 tolerance_w: threshold, hydraulic_defect_w: result.hydraulic_energy_defect_w });
