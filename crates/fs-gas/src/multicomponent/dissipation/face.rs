@@ -20,6 +20,9 @@ pub struct TransportFaceReport {
     /// composing modeled transport. Exposes the actual source evaluation
     /// without repeating a stateful material/kinetic law query.
     pub dynamic_viscosity_pa_s: f64,
+    /// Original zero-diffusive-flux thermal conductivity at this face [W/(m K)],
+    /// from the same source evaluation as the molecular flux.
+    pub thermal_conductivity_w_m_k: f64,
     /// Largest checked original Maxwell--Stefan row residual [1/m].
     pub maximum_gradient_residual_per_m: f64,
     /// Signed sum of all diffusive species mass fluxes [kg/(m² s)].
@@ -682,6 +685,7 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     let mut report = TransportFaceReport {
         diffusivity_m2_s: 0.0,
         dynamic_viscosity_pa_s: coefficients.dynamic_viscosity.value(),
+        thermal_conductivity_w_m_k: coefficients.thermal_conductivity.value(),
         maximum_gradient_residual_per_m: evaluated.maximum_gradient_residual_per_m(),
         mass_frame_residual_kg_m2_s: evaluated.mass_frame_residual_kg_m2_s(),
         enthalpy_temperature_k: enthalpy_temperature,
@@ -874,6 +878,7 @@ fn wall_components<const TRANSVERSE: usize, L: TransportLaw>(
         diffusivity_m2_s,
         dynamic_viscosity_pa_s: mu,
         enthalpy_temperature_k: p.temperature,
+        thermal_conductivity_w_m_k: c.thermal_conductivity.value(),
         ..TransportFaceReport::default()
     })
 }
@@ -971,6 +976,7 @@ fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
         diffusivity_m2_s,
         dynamic_viscosity_pa_s: mu,
         enthalpy_temperature_k: face_temperature,
+        thermal_conductivity_w_m_k: c.thermal_conductivity.value(),
         reduced_heat_flux_w_m2: -c.thermal_conductivity.value() * temperature_gradient,
         ..TransportFaceReport::default()
     })

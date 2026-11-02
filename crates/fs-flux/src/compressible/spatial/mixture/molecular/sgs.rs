@@ -23,7 +23,8 @@
 use super::super::sum;
 use super::*;
 pub use crate::compressible::spatial::molecular::sgs::{
-    DynamicAveraging, DynamicSgsConfig, DynamicSubgridConfig, SgsModel, SgsUse, SubgridConfig,
+    DynamicAveraging, DynamicScalarConfig, DynamicSgsConfig, DynamicSubgridConfig,
+    DynamicThermalSubgridConfig, SgsModel, SgsUse, SubgridConfig,
 };
 use fs_gas::multicomponent::dissipation::{MaxwellStefanSolveV1, TransportFaceReport};
 use fs_gas::multicomponent::{Error as FlowError, MAX_SPECIES};
@@ -32,7 +33,7 @@ use fs_qty::Temperature;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod dynamic;
-pub use dynamic::MixtureDynamicSubgridConfig;
+pub use dynamic::{MixtureDynamicSubgridConfig, MixtureDynamicThermalSubgridConfig};
 
 /// Explicit stress/heat controls shared with frozen gas, plus species mixing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -100,7 +101,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     pub fn subgrid_config(&self) -> Option<MixtureSubgridConfig> {
         match &self.sgs.as_ref()?.closure {
             ViscosityClosure::Local { config, .. } => Some(*config),
-            ViscosityClosure::Dynamic(_) => None,
+            ViscosityClosure::Dynamic(_) | ViscosityClosure::DynamicThermal(_) => None,
         }
     }
 }
@@ -112,6 +113,7 @@ enum ViscosityClosure {
         filter_width: f64,
     },
     Dynamic(dynamic::DynamicTransport),
+    DynamicThermal(dynamic::DynamicThermalTransport),
 }
 
 pub(super) struct SubgridTransport {
@@ -148,6 +150,7 @@ impl SubgridTransport {
             + match &self.closure {
                 ViscosityClosure::Local { .. } => 0,
                 ViscosityClosure::Dynamic(dynamic) => dynamic.workspace_bytes(),
+                ViscosityClosure::DynamicThermal(dynamic) => dynamic.workspace_bytes(),
             }
     }
 
@@ -169,6 +172,15 @@ impl SubgridTransport {
                 if dynamic.prepare(primitive, cancelled)? == 0.0 {
                     // A fit can become zero after a nonzero earlier SSP stage.
                     // Preserve molecular face arithmetic without stale stress.
+                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                        poll(cancelled)?;
+                        values.fill(0.0);
+                    }
+                    return Ok(());
+                }
+            }
+            ViscosityClosure::DynamicThermal(dynamic) => {
+                if !dynamic.prepare(primitive, cancelled)? {
                     for values in self.dynamic_viscosity.chunks_mut(64) {
                         poll(cancelled)?;
                         values.fill(0.0);
@@ -207,6 +219,7 @@ impl SubgridTransport {
                     })?
                 }
                 ViscosityClosure::Dynamic(dynamic) => dynamic.viscosities()[i],
+                ViscosityClosure::DynamicThermal(dynamic) => dynamic.viscosities()[i],
             };
             let mut cv = [0.0; MAX_SPECIES];
             for (k, model) in gas.source().models().iter().enumerate() {
@@ -254,28 +267,39 @@ impl SubgridTransport {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<TransportFaceReport, DissipationError> {
         let mu = 0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right];
+        let dynamic_heat = match &self.closure {
+            ViscosityClosure::DynamicThermal(dynamic) => Some(dynamic.face_heat(left, right)),
+            _ => None,
+        };
         // An exactly disabled model makes no extra caloric calls/arithmetic.
-        if mu == 0.0 {
+        if mu == 0.0 && dynamic_heat.is_none_or(|(weight, _)| weight == 0.0) {
             return Ok(receipt);
         }
         poll(cancelled)?;
         let (prandtl, schmidt, maximum_ratio) = match &self.closure {
             ViscosityClosure::Local { config, .. } => (
-                config.transport.turbulent_prandtl,
+                Some(config.transport.turbulent_prandtl),
                 config.turbulent_schmidt,
                 config.transport.maximum_eddy_to_molecular,
             ),
             ViscosityClosure::Dynamic(dynamic) => (
-                dynamic.config.transport.turbulent_prandtl,
+                Some(dynamic.config.transport.turbulent_prandtl),
                 dynamic.config.turbulent_schmidt,
                 dynamic.config.transport.model.maximum_eddy_to_molecular,
             ),
+            ViscosityClosure::DynamicThermal(dynamic) => (
+                None,
+                dynamic.config.turbulent_schmidt,
+                dynamic.config.transport.momentum.maximum_eddy_to_molecular,
+            ),
         };
-        let ratio = mu / receipt.dynamic_viscosity_pa_s;
-        if !ratio.is_finite() || ratio > maximum_ratio {
-            return Err(DissipationError::Invalid(
-                "mixture subgrid eddy/molecular viscosity ratio exceeded",
-            ));
+        if mu != 0.0 {
+            let ratio = mu / receipt.dynamic_viscosity_pa_s;
+            if !ratio.is_finite() || ratio > maximum_ratio {
+                return Err(DissipationError::Invalid(
+                    "mixture subgrid eddy/molecular viscosity ratio exceeded",
+                ));
+            }
         }
         let n = gas.species_count();
         let width = n + 4;
@@ -317,39 +341,58 @@ impl SubgridTransport {
                     .value();
             // Evaluate changes within each original caloric source. Subtracting
             // two large formation enthalpies would destroy gauge invariance.
-            enthalpy[k] = inverse_mass
-                * (model
-                    .molar_internal_energy_change(
-                        Temperature::new(gas.domain().minimum_temperature),
-                        Temperature::new(temperature),
-                    )
-                    .map_err(FlowError::from)?
-                    .value()
-                    + R * temperature);
+            if mu != 0.0 {
+                enthalpy[k] = inverse_mass
+                    * (model
+                        .molar_internal_energy_change(
+                            Temperature::new(gas.domain().minimum_temperature),
+                            Temperature::new(temperature),
+                        )
+                        .map_err(FlowError::from)?
+                        .value()
+                        + R * temperature);
+            }
         }
         let cp = sum(cp[..n].iter().copied());
-        let conductivity = mu * (cp / prandtl);
+        let conductivity = if let Some((weight, maximum_ratio)) = dynamic_heat {
+            let conductivity = weight * cp;
+            if conductivity != 0.0 {
+                // The original face reports the same source evaluation that
+                // supplied its Fourier law; stateful laws are not queried twice.
+                let ratio = conductivity / receipt.thermal_conductivity_w_m_k;
+                if !ratio.is_finite() || ratio > maximum_ratio {
+                    return Err(DissipationError::Invalid(
+                        "mixture subgrid heat/molecular conductivity ratio exceeded",
+                    ));
+                }
+            }
+            conductivity
+        } else {
+            mu * (cp / prandtl.expect("fixed-Prandtl heat closure"))
+        };
         let heat = -conductivity * ((pr.temperature - pl.temperature) / distance);
         let mut energy = heat + sum((0..n).map(|k| enthalpy[k] * species_flux[k]));
-        for k in 0..n {
-            out[k] += species_flux[k];
-        }
-        let [a, b] = tangents(axis);
-        let divergence = (pr.velocity[axis] - pl.velocity[axis]) / distance
-            + 0.5 * gradient[left][a][a]
-            + 0.5 * gradient[right][a][a]
-            + 0.5 * gradient[left][b][b]
-            + 0.5 * gradient[right][b][b];
-        for (frame, component) in [axis, a, b].into_iter().enumerate() {
-            let normal = (pr.velocity[component] - pl.velocity[component]) / distance;
-            let transpose = if component == axis {
-                normal - (2.0 / 3.0) * divergence
-            } else {
-                0.5 * gradient[left][component][axis] + 0.5 * gradient[right][component][axis]
-            };
-            let stress = mu * (normal + transpose);
-            out[n + frame] -= stress;
-            energy -= (0.5 * pl.velocity[component] + 0.5 * pr.velocity[component]) * stress;
+        if mu != 0.0 {
+            for k in 0..n {
+                out[k] += species_flux[k];
+            }
+            let [a, b] = tangents(axis);
+            let divergence = (pr.velocity[axis] - pl.velocity[axis]) / distance
+                + 0.5 * gradient[left][a][a]
+                + 0.5 * gradient[right][a][a]
+                + 0.5 * gradient[left][b][b]
+                + 0.5 * gradient[right][b][b];
+            for (frame, component) in [axis, a, b].into_iter().enumerate() {
+                let normal = (pr.velocity[component] - pl.velocity[component]) / distance;
+                let transpose = if component == axis {
+                    normal - (2.0 / 3.0) * divergence
+                } else {
+                    0.5 * gradient[left][component][axis] + 0.5 * gradient[right][component][axis]
+                };
+                let stress = mu * (normal + transpose);
+                out[n + frame] -= stress;
+                energy -= (0.5 * pl.velocity[component] + 0.5 * pr.velocity[component]) * stress;
+            }
         }
         out[n + 3] += energy;
         receipt.reduced_heat_flux_w_m2 += heat;

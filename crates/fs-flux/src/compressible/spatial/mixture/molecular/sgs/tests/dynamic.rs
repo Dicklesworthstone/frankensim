@@ -1,6 +1,8 @@
 use super::*;
 use fs_lbm::sgs3::dynamic::PeriodicDynamicSgs;
 
+mod thermal;
+
 fn dynamic_config() -> MixtureDynamicSubgridConfig {
     MixtureDynamicSubgridConfig {
         transport: DynamicSubgridConfig {

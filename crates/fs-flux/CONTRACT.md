@@ -1621,6 +1621,22 @@ establish an entropy/invariant-domain or experimental combustion claim.
 
 ### Exploratory turbulent mixing on evolving-species three-dimensional gas
 
+The mixture transport owner also exposes `with_dynamic_thermal_sgs` with
+`MixtureDynamicThermalSubgridConfig`. Momentum and temperature diffusivity
+are fitted separately from the same SSP-stage density, velocity and temperature;
+species mixing retains its explicitly supplied common Schmidt number. The
+source mixture Cp converts face-averaged `rho*alpha_t` to conductivity. Heat
+therefore remains active when modeled stress and species diffusivity vanish,
+and source Cv is still refreshed for its contribution to the stability bound.
+The original molecular face reports its evaluated conductivity alongside
+viscosity, so heat-ratio admission requires no second transport-law query.
+Total energy, referenced species enthalpies, Maxwell--Stefan diffusion and the
+reactive splitter retain their existing owners. The combined field/operator
+budget includes 264 nominal additional numerical bytes/cell. This independent
+heat closure has the same periodic, isotropic and low-Mach applicability as
+the frozen-gas dynamic thermal model; no dynamic species or chemistry closure
+or complete compressible SGS-energy qualification is implied.
+
 With `experimental-sgs`, the existing spatial mixture molecular owner admits
 `sgs::MixtureSubgridConfig { transport: SubgridConfig, turbulent_schmidt }`
 through `MolecularTransport3d::with_sgs`. Every SSP stage/retry evaluates shared
