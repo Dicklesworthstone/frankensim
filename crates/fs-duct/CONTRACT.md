@@ -2847,3 +2847,32 @@ with real fs_math/shared temporal code and nominal native graph-constructor
 boundaries; this is not full duct-crate compilation or Rust test execution.
 An independent eight-case analytic cylinder/ensemble reconstruction agreed
 with real-time Simpson integration to 3.95e-15 maximum scaled discrepancy.
+
+<!-- porous-pressure-covariance:start -->
+### Partially coherent stationary pressure on a porous stack
+
+`porous::PressureCovariance` admits a row-major Hermitian positive-semidefinite
+two-port pressure matrix with the RMS convention `C_ij = E[u_i conj(u_j)]`.
+Its left/right entry is left pressure times conjugate right pressure; a known
+coherent peak phasor has `C = p p*/2`. Arbitrary matrix inputs receive a strict
+PSD test on their original encoded values, using bounded exact dyadic products
+so tiny orthogonal components cannot disappear at the rank-one boundary.
+Negative eigenvalues are not clipped. A scaled positive Schur factor retains
+weak incoherent work and widely unequal port variances without overflow.
+
+`from_peak_pressure` preserves the original coherent phasors as a positive
+witness, avoiding spurious refusal from separately rounded outer products.
+`from_angular_density` first admits a one-sided angular cross-spectral density
+and then applies its positive quadrature weight to that witness. Mean-square
+pressure is `integral S(omega) d omega`; bandwidth and the harmonic factor are
+not added again. Matrix inspection returns rounded entries of the same source.
+
+`PorousLayerStack::prepare_covariance` reuses one prepared stack's incident maps
+for at most two original coherent excitations at the SAME frequency. Their
+positive analytic viscous/thermal integrals and mean field moments add;
+complex pressures must not be added across statistical components. Original
+source domains, stable decaying propagation, field queries and cancellation
+remain authoritative. Three focused groups cover strict PSD refusals, weak and
+extreme-scale factors, an independent four-phase ensemble of original fields
+and powers, angular weighting and exact coherent-witness parity.
+<!-- porous-pressure-covariance:end -->

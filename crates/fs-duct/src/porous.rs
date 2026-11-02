@@ -24,6 +24,8 @@ mod excitation;
 pub use excitation::{PorousLayerDissipation, PorousLayerExcitation, PorousLayerField};
 mod stack;
 pub use stack::{PorousLayerStack, PorousStackExcitation, PorousStackField};
+mod covariance;
+pub use covariance::PressureCovariance;
 
 fn bad(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }

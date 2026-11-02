@@ -22720,3 +22720,42 @@ math test definitions pass native type and borrow checking. An independent
 98-case numerical profile check bounds flux relative error below 6.3e-15 and
 pressure/aperture derivative error below 3.4e-10. Coupling runtime tests and a
 full crate build remain unexecuted in the full-storage environment.
+
+<!-- porous-covariance-feedback:start -->
+### Partially coherent pressure spectra on the native thermal trajectory
+
+`porous_heating::feedback::covariance::PorousCrossSpectrumHeating` binds one
+admitted `PressureCovariance` to each original physical frequency. Each
+`PorousCovarianceBin` has a fixed positive real exterior reference and the same
+full specimen area. Distinct frequencies remain canonical and statistically
+independent. Duplicate frequencies refuse; independent same-frequency emitters
+must first add covariance matrices, while coherent emitters require their
+phasor sum or the appropriate cross correlation. Components never masquerade
+as extra frequencies.
+
+The covariance is bin-integrated RMS pressure squared. Native coherent peak
+amplitudes have `C = p p*/2`; the angular-density constructor applies a positive
+`d omega` quadrature weight exactly once. One changed cell evaluates its native
+gas state once across the spectrum. Each affected frequency then rebuilds its
+changed porous coefficients and composes one stack before at most two original
+coherent excitations. Both statistical components share the same physical
+layers, interface map and admitted source state.
+
+Positive native viscous/thermal cell work adds before one accepted-start
+thermal step. Boundary deficits never manufacture heat. The same `PreparedHeat`
+and `HeatAccount` owners retain total and per-frequency exterior-energy
+accounts without duplicate credit. Native caloric identities, thermal masses,
+geometry, conduction, authored heat, events, latent storage and continuation
+remain bound; late domain/cancellation refusal publishes neither candidate.
+Existing frequency/cell-product limits apply, with at most two component fields
+per cached cell/frequency pair and no second stack composition.
+
+This retains stationary ensemble/long-time averaging, prescribed isobaric gas,
+rigid-frame normal incidence and justified common gas/skeleton temperature.
+Finite-time beats, stochastic thermal fluctuations, frequency conversion and
+transient acoustic storage remain outside the model. Four integration groups
+cover exact coherent-spectrum parity, uncorrelated illumination, zero drive,
+shared gas/composition work, latent heat, events/continuation and atomic
+refusals, plus independent direct `H C H*` spatial work and native temperature/
+energy refinement against a two-frequency RK4 reference.
+<!-- porous-covariance-feedback:end -->

@@ -12,8 +12,8 @@
 //! band, [`angular_pressure_density_bin`] applies a positive authored quadrature
 //! weight to a one-sided angular-frequency pressure amplitude density. Spectral
 //! discretization accuracy remains the caller's responsibility. Two-sided
-//! partial coherence within a bin requires a separate cross-spectral model;
-//! the two phasors here share one coherent statistical component.
+//! partial coherence within a bin is supplied by [`super::covariance`]; the
+//! two phasors here share one coherent statistical component.
 
 use super::*;
 
@@ -246,72 +246,11 @@ impl<'a> PorousSpectrumHeating<'a> {
         &mut self,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), PorousHeatingError> {
-        // Retain exact original single-bin arithmetic and diagnostics.
-        if self.bins.len() == 1 {
-            self.heat.clone_from(&self.bins[0].heat);
-            return Ok(());
-        }
-        let mut total = [Dd::ZERO; 3];
-        for (index, cell) in self.heat.cells.iter_mut().enumerate() {
-            let mut sum = [Dd::ZERO; 3];
-            for bin in &self.bins {
-                checkpoint()?;
-                let loss = bin.heat.cells[index].dissipation;
-                for (sum, value) in sum.iter_mut().zip([
-                    loss.viscous_power_w,
-                    loss.thermal_power_w,
-                    loss.absorbed_power_w,
-                ]) {
-                    *sum = *sum + Dd::from_f64(value);
-                }
-            }
-            cell.dissipation = PorousLayerDissipation {
-                viscous_power_w: finite(sum[0].to_f64())?,
-                thermal_power_w: finite(sum[1].to_f64())?,
-                absorbed_power_w: finite(sum[2].to_f64())?,
-            };
-            *self
-                .heat
-                .sources_w
-                .get_mut(&cell.cell)
-                .expect("original admitted spectral cell") = cell.dissipation.absorbed_power_w;
-            for (total, value) in total.iter_mut().zip(sum) {
-                *total = *total + value;
-            }
-        }
-        let mut boundary = [Dd::ZERO; 2];
-        for bin in &self.bins {
-            checkpoint()?;
-            for (sum, value) in boundary.iter_mut().zip(bin.heat.boundary_power_w) {
-                *sum = *sum + Dd::from_f64(value);
-            }
-        }
-        self.heat.dissipation = PorousLayerDissipation {
-            viscous_power_w: finite(total[0].to_f64())?,
-            thermal_power_w: finite(total[1].to_f64())?,
-            absorbed_power_w: finite(total[2].to_f64())?,
-        };
-        self.heat.boundary_power_w = [finite(boundary[0].to_f64())?, finite(boundary[1].to_f64())?];
-        // Check boundary closure independently of the positive local sources.
-        // Do not recover absorption by subtracting nearly equal boundary watts.
-        let count = self.heat.cells.len() * self.bins.len();
-        let residual = finite((boundary[0] - boundary[1] - total[2]).to_f64())?;
-        let tolerance = finite(
-            512.0
-                * f64::EPSILON
-                * (count + 1) as f64
-                * self.heat.boundary_power_w[0]
-                    .max(self.heat.boundary_power_w[1])
-                    .max(self.heat.dissipation.absorbed_power_w),
-        )?;
-        if residual.abs() > tolerance {
-            return Err(PorousHeatingError::PowerBalance {
-                residual_w: residual,
-                tolerance_w: tolerance,
-            });
-        }
-        self.heat.power_residual_w = residual;
-        Ok(())
+        sum_heat_sources(
+            &mut self.heat,
+            self.bins.iter().map(|bin| &bin.heat),
+            checkpoint,
+        )
     }
 
     fn refresh(
@@ -392,6 +331,79 @@ impl<'a> PorousSpectrumHeating<'a> {
             work: observer.work,
         })
     }
+}
+
+// One positive source sum serves coherent and covariance spectra.
+pub(super) fn sum_heat_sources<'h>(
+    heat: &mut PreparedHeat,
+    bins: impl ExactSizeIterator<Item = &'h PreparedHeat> + Clone,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(), PorousHeatingError> {
+    // Retain exact original single-bin arithmetic and diagnostics.
+    if bins.len() == 1 {
+        heat.clone_from(bins.clone().next().expect("nonempty spectrum"));
+        return Ok(());
+    }
+    let mut total = [Dd::ZERO; 3];
+    for (index, cell) in heat.cells.iter_mut().enumerate() {
+        let mut sum = [Dd::ZERO; 3];
+        for bin in bins.clone() {
+            checkpoint()?;
+            let loss = bin.cells[index].dissipation;
+            for (sum, value) in sum.iter_mut().zip([
+                loss.viscous_power_w,
+                loss.thermal_power_w,
+                loss.absorbed_power_w,
+            ]) {
+                *sum = *sum + Dd::from_f64(value);
+            }
+        }
+        cell.dissipation = PorousLayerDissipation {
+            viscous_power_w: finite(sum[0].to_f64())?,
+            thermal_power_w: finite(sum[1].to_f64())?,
+            absorbed_power_w: finite(sum[2].to_f64())?,
+        };
+        *heat
+            .sources_w
+            .get_mut(&cell.cell)
+            .expect("original admitted spectral cell") = cell.dissipation.absorbed_power_w;
+        for (total, value) in total.iter_mut().zip(sum) {
+            *total = *total + value;
+        }
+    }
+    let mut boundary = [Dd::ZERO; 2];
+    for bin in bins.clone() {
+        checkpoint()?;
+        for (sum, value) in boundary.iter_mut().zip(bin.boundary_power_w) {
+            *sum = *sum + Dd::from_f64(value);
+        }
+    }
+    heat.dissipation = PorousLayerDissipation {
+        viscous_power_w: finite(total[0].to_f64())?,
+        thermal_power_w: finite(total[1].to_f64())?,
+        absorbed_power_w: finite(total[2].to_f64())?,
+    };
+    heat.boundary_power_w = [finite(boundary[0].to_f64())?, finite(boundary[1].to_f64())?];
+    // Check boundary closure independently of the positive local sources.
+    // Do not recover absorption by subtracting nearly equal boundary watts.
+    let count = heat.cells.len() * bins.len();
+    let residual = finite((boundary[0] - boundary[1] - total[2]).to_f64())?;
+    let tolerance = finite(
+        512.0
+            * f64::EPSILON
+            * (count + 1) as f64
+            * heat.boundary_power_w[0]
+                .max(heat.boundary_power_w[1])
+                .max(heat.dissipation.absorbed_power_w),
+    )?;
+    if residual.abs() > tolerance {
+        return Err(PorousHeatingError::PowerBalance {
+            residual_w: residual,
+            tolerance_w: tolerance,
+        });
+    }
+    heat.power_residual_w = residual;
+    Ok(())
 }
 
 #[derive(Clone)]

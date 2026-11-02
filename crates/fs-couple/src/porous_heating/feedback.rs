@@ -27,6 +27,8 @@ use fs_material::gas::{GasSpec, GasState};
 use fs_material::porous::PorousFluidLaw;
 use fs_math::c64::C64;
 
+/// Partially coherent two-sided stationary pressure spectra.
+pub mod covariance;
 /// Statistically stationary independent frequencies on one thermal specimen.
 pub mod spectrum;
 
