@@ -209,11 +209,174 @@ pointwise Hermitian passivity admission, with its original frequency, radius,
 exterior gas and mode count. The batch admits trace, matrix and projection work
 ceilings and cancellation before publishing all requested loads together.
 
-This is finite-panel, axisymmetric harmonic loading of the supplied rigid exterior
-geometry, not an azimuthal-mode model or a causal broadband fit. Regressions cover
+The harmonic bake is finite-panel, axisymmetric loading of the supplied rigid
+exterior geometry; its separate causal realization is described below. Regressions cover
 signed modal traces and mesh refinement, independent surface/port work equality,
 native Galerkin radiation connected to a loaded duct at two frequencies, mutual
 loading liveness, and geometry/resolution/budget/cancellation refusals.
+
+## Continuous multimodal duct with complete rational radiation memory
+
+`mm_line::continuous::rational::RationalModalLine` joins the original lossless
+Galerkin duct's full radial-mode state to every original `PreparedMimoLoad`
+coordinate. `ModalRationalLoad::from_bem` retains the actual modal-mouth producer's
+geometry, signed basis, independent source samples and fit reports. The generic
+constructor requires an explicit producer-declared pressure/volume-flow basis.
+Mouth radius and coherent static pressure must match the duct attachment.
+
+The sole interval is the original load clock. All incident pressure-wave modes
+are held at the inlet, while duct pressure, outward mouth flow and the complete
+mutual radiation state evolve jointly throughout the interval. The existing
+fs-phs exact exponential/Gramian owner prepares one full finite generator and
+independent linear/quadratic observation maps. Warm steps use bounded matrix
+contractions and private candidate allocations; no allocation-free claim is made.
+Held incident coordinates condition the numerical preparation only and never
+enter the public physical history or receive assigned stored energy.
+
+Invertible direct D uses the existing terminal solve for D*U=P_duct-C*z. Exactly
+zero D uses the existing differentiated pressure-constraint owner, including
+every held input in the original generator. Neither path inserts a resistance,
+diagonalizes mutual terms, advances a separately held-flow load or discards pole
+history. Mixed-rank D, singular higher-index constraints and inconsistent
+accepted zero-D history refuse without projection. Complete original-state,
+workspace, work and cancellation admission precedes preparation/publication.
+
+Independent exact integrals report inlet pressure-flow work, incident and
+reflected wave energies, duct-mouth work, and original (C*z+D*U)*U load work.
+Original duct storage change closes against these exchanges. Endpoint pressure,
+constraint and work agreement must pass before any physical state, original load
+history or output changes. The mean reflection relation retains every mutual
+entry and changes no history. Interval-mean waves remain distinct from integrated
+wave energy. Rational work is signed exchange, not inferred heat or storage.
+
+The original load's band, clock and continuous/sampled classes remain unchanged;
+component admission does not qualify the whole closed loop. Exact propagation
+concerns this admitted finite spatial operator. Spatial/radial convergence, inlet
+wave sampling, physical source fit and omitted duct-loss physics remain separate.
+
+## Self-excited resonance through original physical ports
+
+`phs_orbit::AutonomousPortFeedback` is an explicitly authored instantaneous law
+producing physical port efforts from the complete original state and conjugate
+flows G^T*grad(H). Native autonomous HB and adaptive HB solve the resulting full
+ODE without changing its Hamiltonian, native resistance or material-memory
+states. Stateful excitation, transport and controller memory must remain in
+explicit physical states; deterministic callbacks may not hide evolving history.
+The source can supply energy. Component passivity does not establish closed-loop
+passivity, and the adapter does not validate the authored excitation physics.
+
+Autonomous stability selects a resolved transverse coordinate at the supplied
+HB waveform's phase zero and temporarily permutes it into native shooting's
+coordinate-zero section. N/2N/4N native shooting solves for the period, restores
+original state order and reports the actual section coordinate and value. Each
+shot must retain section orientation and transversality and satisfy explicit
+physical-state and period agreement with the seed. An accurate period alone
+cannot admit an under-resolved waveform.
+
+Every multiplier remains in the returned spectrum. Exactly one isolated
+multiplier near +1 may identify the phase direction for the transverse numerical
+classification; multiple neutral directions, including conservative 1:1 families,
+remain Unresolved or retain the native solver's refusal. State, period and
+transverse-radius agreement across all three grids and the unit-circle guard
+control classification. Existing forced-response continuation is unchanged.
+
+The independent cycle audit evaluates original H, physical source work and full
+R loss on the supplied HB waveform; it is not a shooting-trajectory quadrature.
+These smooth-ODE, finite-difference numerical results do not certify global
+stability, a fundamental period, hybrid events or material/source validity. The
+bounded native solves have no cooperative Cx cancellation. Focused checks cover
+stable/unstable cycles, phase changes, Maxwell storage and heat, a resolved
+Van der Pol cycle, conservative degeneracy and transactional source refusal.
+
+## Loaded resonance poles from the original joint transient
+
+`assembly_harmonic::transient::spectrum` analyzes the exact retained generator
+already used by `PreparedAssemblyMimoTransient`. The accepted body's complete
+M/C/K, physical port coupling and every original continuous MIMO memory state
+survive, including mutual/nonreciprocal entries and port-dark states. No second
+equation assembly, equivalent-viscous fit, pole pruning, source-history reset
+or sample-clock-derived pole estimate is introduced.
+
+Declared time scaling and the existing numerical coordinate scales prepare the
+complete nonsymmetric spectrum for fs-spectral. Every eigenstate returns to the
+original [q,p,load] chart, with p=M*v and the original pair-memory convention.
+Independent residuals check kinematic, momentum and load equations. Explicit
+payload/conversion and spectral budgets, complete-basis conditioning admission
+and cancellation govern publication.
+
+Poles use x(t)=v*exp(s*t) and omega=i*s under exp(-i*omega*t). Signed decay is
+-Re(s), oscillation frequency is |Im(s)|/(2*pi), and optional cycle-decay Q is
+|Im(s)|/(-2*Re(s)) for finite decaying oscillation. A pole need not be a peak in
+an observed transfer. No damping floor or forced-response linewidth is inferred;
+mixed-unit eigenstate normalization does not define stored energy.
+
+All roots remain regardless of source-band membership. The original band and
+continuous/sampled classes remain unchanged; a frequency-membership flag does
+not certify off-axis source continuation. Results describe the complete retained
+finite generator, not omitted modes or continuum completeness. Focused checks
+cover analytical Maxwell poles, clock/unit invariance, full mutual/nonreciprocal
+eigenstate evolution, dark memory, and an analytical memory-only high-Q case.
+
+## Complete geometric modal radiation memory
+
+`modal_mouth::BemModalMouth::realize` connects every original signed modal mouth
+impedance entry to the existing physical-source MIMO fitting owner. The shared
+owner supplies the three-order ladder, independent training/held-out/causality
+BEM sweeps, dispersion consistency, explicitly reported bounded residue repair,
+continuous passivity and actual interval-mean ZOH passivity. The original Pa s/m3
+matrices are conjugated once into s=+i*omega; higher-mode net-flow gains remain
+diagnostics and never rescaling factors. The raw reciprocity defect is bounded
+before reciprocal identification and remains in the reported fit error.
+
+The result retains the original `PreparedMimoLoad`, physical clock, exact BEM
+route, circular patch, coherent exterior gas, radial mode count, authored source
+and approximation bands, source budgets, all three unchanged physical bakes and
+complete fit reports. Every physical query, including the causality grid's lower
+probes, must fit the source support. The approximation band must reach mechanics
+Nyquist, and the complete three-sweep source budget is checked before sampling.
+Unsupported coverage, native refusal or cancellation publishes no realization.
+
+These coincident modal coordinates share one physical mouth reference plane;
+no inter-aperture propagation delay is inferred. Geometric diffraction memory
+and mutual terms remain in the shared rational state. The sampled report stays
+GridOnly. Mesh/basis accuracy, unsampled frequencies and closed-loop resonance
+or decay qualification remain distinct from realization error and passivity.
+This advances the modal-mouth path without closing the broader multi-aperture
+delay and instrument-audit requirements of M2.5-W3b. Focused G1/G0 checks retain
+native two-mode BEM samples, an independently loaded duct, higher-mode mutual
+pressure and persistent pole memory, plus early band/clock/budget refusals.
+
+## Matched modal radiation loading and receiver fields
+
+`modal_mouth::observation` prepares the original Galerkin exterior geometry once
+and reuses its complete signed modal source batch. At a frequency, one boundary
+factor supplies both the full `ModalMouthImpedance` and the original P1-pressure/
+P0-auxiliary-density solutions. The native adaptive receiver owner integrates
+those same densities to physical pressure and particle velocity. Panel pressure
+means remain the work projection only; they do not replace the P1 receiver field.
+
+Receiver positions and actual triangle clearances are admitted once. Each
+frequency prepares one common adaptive row bank, with separate componentwise
+gradient discrepancy checks. Coherent modal-flow cases reuse the resulting
+field bank without new source solves or quadrature. Signed higher modes with
+zero net volume flow remain present, and original complex phases determine both
+interference and the returned mean intensity. The output also reports P=Z*U
+and complex mouth work (1/2)*sum(P*conj(U)) at the same frequency and reference
+plane. It can feed the native ideal pressure/velocity microphone projection.
+
+Native source geometry, exclusion-band, wavelength, angular-resolution and
+quadrature limits remain active. Separate source/receiver payload and contraction
+caps cover the complete requested bank. Cancellation or any finite/admission
+failure returns no partial response; immutable source/field preparations remain
+reusable. Propagated quadrature discrepancies do not cover BEM mesh, solve or
+physical-model error. This is an axisymmetric harmonic receiver path, with no
+causal observation filter or microphone hardware model implied.
+
+Three G1/G4 regressions compare coherent pressure, particle velocity and mouth
+work against a separately solved combined physical source; close a lossless
+loaded duct's incident/reflected power against the same radiation work; retain
+directional microphone response and higher-mode interference; and check band,
+geometry, budget, finite-input, cancellation and deterministic reuse boundaries.
 
 ## Finite load-resistor feedback on three-dimensional winding histories
 

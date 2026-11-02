@@ -5,6 +5,7 @@ use fs_duct::dg::continuous::{DgContinuous, state::DgTrajectoryPort};
 mod network;
 mod zero_direct;
 pub(crate) use network::DgContinuousNetwork;
+pub(crate) use zero_direct::eliminate as eliminate_zero_direct;
 
 /// Original DG/rational ODE after eliminating terminal flow multipliers.
 /// Invertible D uses direct pressure closure; exactly zero D retains pressure

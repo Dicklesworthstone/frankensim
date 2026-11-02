@@ -11,7 +11,7 @@ use super::super::terminal::TerminalSolve;
 use super::{AcousticRealizeError, invalid};
 use fs_exec::CancelGate;
 
-pub(super) struct ConstrainedTerminal {
+pub(crate) struct ConstrainedTerminal {
     pub generator: Vec<f64>,
     pub inlet_column: Vec<f64>,
     pub flow_columns: Vec<Vec<f64>>,
@@ -31,7 +31,7 @@ fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
 
 /// Project the original vector field onto the original pressure manifold.
 /// The admitted initial state must already satisfy H x = 0; it is never reset.
-pub(super) fn eliminate(
+pub(crate) fn eliminate(
     source: &[f64],
     inputs: &[Vec<f64>],
     constraints: &[Vec<f64>],

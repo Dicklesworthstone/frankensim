@@ -30,6 +30,9 @@ use fs_phs::linear_exact::{
 mod load;
 pub use load::{ModalAdmittanceLoad, ModalLoadSource};
 
+/// Original continuous duct and full rational impedance in one exact flow.
+pub mod rational;
+
 /// Prepared full-state modal region and its accepted physical history.
 ///
 /// Output pressures and waves use the original mode normalization. The
