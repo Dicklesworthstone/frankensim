@@ -608,6 +608,27 @@ The relations a port needs are public and source-owned:
   `inflow_flux(face, T0, signal)` (energy flux = mass flux times the donor's
   stagnation enthalpy) close a face from one state.
 
+The shared nozzle closure resolves the imposed pressure difference even near
+equal reservoir pressures. It factors the temperature decrement by the original
+source's isothermal entropy increment `R ln(p0/pb)` and evaluates the source's
+Cp/T and enthalpy secants in that coordinate. The residual is relative to the
+driving increment; an absolute Cp-scale tolerance cannot introduce a flow floor.
+The derivative limit retains finite nozzle kinetic energy when the temperature
+decrement is smaller than one representable absolute-temperature step. Returned
+temperature and EOS state still have ordinary floating-point rounding.
+
+Positive source Cv gives a conservative subsonic shortcut: when
+`2 ln(p0/pb) < pb/p0` and the bounded cooling interval is source-supported, the
+closure avoids the preliminary sonic solve. Stronger pressure drops retain the
+existing source-owned sonic limit and choking decision. Neither route freezes
+gamma or extends the temperature domain. The same closure serves public frozen
+gas end ports and finite-volume network valves. Focused regressions compare
+constant/variable-Cp analytic isentropes down to adjacent pressures, the exact
+zero-drop limit, reversed donor flow, energy-reference invariance, cold-source
+refusal and cancellation. A counter over the actual FrozenGas source compares
+the complete weak solve with the previously mandatory preliminary sonic solve;
+this is a source-query work comparison, not a throughput or scaling benchmark.
+
 `Euler1d::apply_cell_sources(update, cancelled)` replaces every cell average
 through a caller-owned local update between accepted steps (wall friction, wall
 heat exchange). Every candidate is decoded through the original caloric law

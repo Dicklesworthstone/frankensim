@@ -6,6 +6,51 @@ fn law(cracking: f64, full_open: f64) -> PressureOpening {
 }
 
 #[test]
+fn nearly_balanced_valves_follow_the_pressure_drop_without_a_numerical_flow_floor() {
+    let initial = caloric_gas(false, 0.0);
+    let mut domain = initial.domain();
+    domain.absolute_energy_tolerance = 1e-10;
+    domain.relative_energy_tolerance = 1e-12;
+    let gas = MixtureGas::new(initial.source().clone(), domain, || false).unwrap();
+    let high = gas.conserved(&[1.0, 0.0], 0.0, 2.0).unwrap();
+    let donor = gas.primitive(high.as_cell(), || false).unwrap();
+    let valve = orifice(0.1);
+    let mut previous_rate = f64::INFINITY;
+    for requested_drop in [1e-4, 1e-8, 1e-12] {
+        let pressure = donor.pressure * (1.0 - requested_drop);
+        let low = gas.conserved(&[0.0, pressure], 0.0, pressure).unwrap();
+        let receiver = gas.primitive(low.as_cell(), || false).unwrap();
+        let fraction = (donor.pressure - receiver.pressure) / donor.pressure;
+        assert!(fraction > 0.0);
+        // Exact constant-Cp nozzle result, evaluated as differences rather
+        // than subtracting nearly equal powers in the independent oracle.
+        let log_temperature_ratio = (-fraction).ln_1p() / 3.5;
+        let temperature = donor.temperature * log_temperature_ratio.exp();
+        let speed = (-7.0 * donor.temperature * log_temperature_ratio.exp_m1()).sqrt();
+        let expected = 0.1 * (receiver.pressure / temperature) * speed;
+        let forward = valve
+            .flow(&gas, high.as_cell(), low.as_cell(), || false)
+            .unwrap();
+        let reverse = valve
+            .flow(&gas, low.as_cell(), high.as_cell(), || false)
+            .unwrap();
+        assert!(!forward.choked);
+        assert!(forward.mass_kg_s > 0.0 && forward.mass_kg_s < previous_rate);
+        close(forward.mass_kg_s / expected, 1.0, 4e-12);
+        assert_eq!(reverse.mass_kg_s, -forward.mass_kg_s);
+        assert_eq!(reverse.energy_w, -forward.energy_w);
+        assert_eq!(forward.species_kg_s[1], 0.0);
+        previous_rate = forward.mass_kg_s;
+    }
+    assert_eq!(
+        valve
+            .flow(&gas, high.as_cell(), high.as_cell(), || false)
+            .unwrap(),
+        ValveFlow::zero(2)
+    );
+}
+
+#[test]
 fn pressure_actuated_aperture_has_exact_thresholds_and_rejects_invalid_laws() {
     let opening = law(0.25, 1.25);
     assert_eq!(opening.cracking_pressure(), Pressure::new(0.25));

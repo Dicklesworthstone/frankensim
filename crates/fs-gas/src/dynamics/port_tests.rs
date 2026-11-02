@@ -232,6 +232,106 @@ fn nozzle_exit_has_the_incompressible_bernoulli_limit_and_face_flux_is_consisten
 }
 
 #[test]
+fn nozzle_pressure_drop_is_resolved_down_to_adjacent_pressures() {
+    // Independent integrated isentrope for Cp(T)=3.5+b*T and R=1:
+    // 3.5*ln(T0/T)+b*(T0-T)=ln(p0/pb). ln_1p keeps the oracle's
+    // pressure/temperature increments independent of absolute-state rounding.
+    // Constant-Cp specialization is the NASA Glenn isentropic nozzle relation:
+    // https://www.grc.nasa.gov/www/k-12/airplane/isentrop.html
+    let mut baseline = Vec::new();
+    for formation in [0.0, 1e18] {
+        let mut results = Vec::new();
+        for slope in [0.0, 0.4] {
+            let source = gas(slope, formation);
+            let donor = source.from_rho_u_p(1.0, 0.0, 10.0).unwrap();
+            let mut previous_speed = f64::INFINITY;
+            for back in [
+                8.0,
+                10.0 * (1.0 - 1e-4),
+                10.0 * (1.0 - 1e-8),
+                10.0 * (1.0 - 1e-12),
+                f64::from_bits(10.0_f64.to_bits() - 1),
+            ] {
+                let fraction = (donor.pressure - back) / donor.pressure;
+                let rhs = -(-fraction).ln_1p() / fraction;
+                let (mut low, mut high) = (0.0_f64, 1.0_f64);
+                for _ in 0..100 {
+                    let x = low.midpoint(high);
+                    let residual = -3.5 * (-fraction * x).ln_1p() / fraction
+                        + slope * donor.temperature * x
+                        - rhs;
+                    if residual < 0.0 {
+                        low = x;
+                    } else {
+                        high = x;
+                    }
+                }
+                let cooling = donor.temperature * fraction * low.midpoint(high);
+                let enthalpy = cooling * (3.5 + slope * donor.temperature - 0.5 * slope * cooling);
+                let expected = (2.0 * enthalpy).sqrt();
+                let (exit, choked) = source.nozzle_exit(donor, back, || false).unwrap();
+                assert!(!choked);
+                assert!(exit.velocity > 0.0 && exit.velocity < previous_speed);
+                assert!(
+                    (exit.velocity / expected - 1.0).abs() < 4e-12,
+                    "slope={slope}, pressure drop={}, actual={}, expected={expected}",
+                    donor.pressure - back,
+                    exit.velocity,
+                );
+                assert!((exit.pressure - back).abs() <= 4.0 * f64::EPSILON * back);
+                assert!(
+                    (exit.temperature - (donor.temperature - cooling)).abs()
+                        <= 4e-12 * cooling + 4.0 * f64::EPSILON * donor.temperature
+                );
+                previous_speed = exit.velocity;
+                results.push(exit);
+            }
+            assert_eq!(
+                source.nozzle_exit(donor, donor.pressure, || false).unwrap(),
+                (donor, false)
+            );
+        }
+        if formation == 0.0 {
+            baseline = results;
+        } else {
+            assert_eq!(results, baseline);
+        }
+    }
+}
+
+#[test]
+fn weak_nozzle_keeps_source_window_and_cancellation_refusals() {
+    let original = gas(0.4, 0.0);
+    let mut domain = original.domain();
+    domain.minimum_temperature = 9.999;
+    let source = FrozenGas::new(original.source().clone(), domain, || false).unwrap();
+    let donor = source.from_rho_u_p(1.0, 0.0, 10.0).unwrap();
+    let supported = source.nozzle_exit(donor, 9.9999, || false).unwrap().0;
+    assert!(supported.temperature >= domain.minimum_temperature);
+    assert!(matches!(
+        source.nozzle_exit(donor, 9.9, || false),
+        Err(Error::CaloricPath(_))
+    ));
+    let mut calls = 0;
+    source
+        .nozzle_exit(donor, 9.9999, || {
+            calls += 1;
+            false
+        })
+        .unwrap();
+    for stop in [1, calls / 2, calls] {
+        let mut count = 0;
+        assert_eq!(
+            source.nozzle_exit(donor, 9.9999, || {
+                count += 1;
+                count >= stop
+            }),
+            Err(Error::Cancelled)
+        );
+    }
+}
+
+#[test]
 fn cell_sources_are_transactional_and_exact() {
     let mut flow = tube(
         gas(0.02, 0.0),
