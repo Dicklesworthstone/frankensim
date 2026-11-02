@@ -11,12 +11,13 @@ use fs_bem::reciprocal_radiation::open_screen::{
 pub struct MolecularOpenScreenIncidentOptions {
     pub boundary: MolecularScreenIlluminationLimits,
     pub maximum_load_cases: usize,
-    /// cases*(112*modes+1024)+48*modes^2+320*modes+4096 logical bytes.
-    /// Includes force columns, motion and total-reaction results, conversion
-    /// headers and mechanical scratch. Source/boundary/receiver rows and
-    /// allocator metadata have their separate limits.
+    /// Full-state OpenScreenHarmonicOptions payload plus
+    /// cases*(64*modes+512)+160*modes logical bytes for effective force columns,
+    /// total reactions and conversion. All structural Maxwell states remain.
+    /// Source/boundary/receiver rows and allocator metadata have separate limits.
     pub maximum_response_bytes: usize,
-    /// 32*modes^3+(320*cases+256)*modes^2, excluding boundary/source sampling.
+    /// 32*d^3+256*(cases+1)*d^2+64*cases*modes^2, d=modes+memories,
+    /// excluding boundary/source sampling.
     pub maximum_work: u64,
     pub physical_residual_tolerance: f64,
     pub power_relative_tolerance: f64,
@@ -43,6 +44,9 @@ pub struct MolecularOpenScreenIncidentPower {
     /// Blocked-shell force applied to the actual loaded shell velocity.
     pub blocked_acoustic_input_w: f64,
     pub structural_viscosity_w: f64,
+    /// Heat in the original structural Maxwell arms, sum |e_j|^2/(2*tau_j).
+    /// Molecular gas relaxation remains in exterior work and is not added here.
+    pub structural_relaxation_w: f64,
     /// Work of the outgoing motion-only field; includes molecular gas heat.
     pub motion_exterior_w: f64,
     /// Direct blocked pressure-jump work against actual motion. This exchange
@@ -70,7 +74,7 @@ pub struct MolecularOpenScreenIncidentResponse {
 }
 
 /// All source columns and blocked fields share one boundary LU; all physical
-/// load cases share one mechanical LU. Original incident sources remain borrowed.
+/// load cases share one mechanical/memory LU. Incident sources remain borrowed.
 pub struct MolecularOpenScreenIncidentBatch<'p, 's, 'i> {
     radiation: MolecularScreenIllumination<'p, 's, 'i>,
     responses: Vec<MolecularOpenScreenIncidentResponse>,
@@ -88,9 +92,10 @@ impl<'s> PreparedOpenScreenModes<'s> {
     /// Incoming pressure is continuous across a zero-thickness screen, while
     /// blocked scattering supplies the pressure jump that drives the shell.
     ///
-    /// The original P1 boundary/source maps, molecular material, full K/C and
-    /// all mutual entries are retained. This stationary harmonic owner does
-    /// not infer an absorption cross-section or a causal time-domain response.
+    /// The original P1 boundary/source maps, molecular material, full K/C,
+    /// every structural Maxwell arm and all mutual entries are retained.
+    /// This stationary harmonic owner does not infer an absorption cross-section
+    /// or a causal time-domain response.
     pub fn harmonic_molecular_incident_response_batch<'p, 'i>(
         &'p self,
         exterior: &MolecularExterior,
@@ -106,8 +111,9 @@ impl<'s> PreparedOpenScreenModes<'s> {
             .admit_harmonic_batch(omega, mechanical_forces, mechanical)?;
         let m = self.source.mode_count() as u128;
         let c = incidents.len() as u128;
-        let bytes = c * (112 * m + 1024) + 48 * m * m + 320 * m + 4096;
-        let work = 32 * m * m * m + (320 * c + 256) * m * m;
+        let (mechanical_bytes, mechanical_work) = self.source.harmonic_resources(incidents.len());
+        let bytes = mechanical_bytes + c * (64 * m + 512) + 160 * m;
+        let work = mechanical_work + 64 * c * m * m;
         let gas = exterior.source().gas();
         if incidents.len() != mechanical_forces.len()
             || bytes > options.maximum_response_bytes as u128
@@ -162,6 +168,7 @@ impl<'s> PreparedOpenScreenModes<'s> {
                 mechanical_forces[case],
                 blocked,
                 &motion.modal_velocity,
+                &motion.elastic_memory_sqrt_j,
                 &motion.fluid_reaction,
                 &total,
                 options.power_relative_tolerance,
@@ -209,6 +216,7 @@ impl OpenScreenLoadedModes {
         external: &[C64],
         blocked: &[C64],
         velocity: &[C64],
+        memory: &[C64],
         motion_reaction: &[C64],
         total_reaction: &[C64],
         tolerance: f64,
@@ -218,6 +226,7 @@ impl OpenScreenLoadedModes {
             .iter()
             .chain(blocked)
             .chain(velocity)
+            .chain(memory)
             .chain(motion_reaction)
             .chain(total_reaction)
             .map(|z| z.abs())
@@ -236,7 +245,8 @@ impl OpenScreenLoadedModes {
                 Ok(result)
             }
         };
-        let mut sums = [Sum::default(); 6]; // external, blocked, heat, motion, total, envelope
+        // External, blocked, viscosity, motion, total, envelope, Maxwell heat.
+        let mut sums = [Sum::default(); 7];
         let m = self.mode_count();
         for i in 0..m {
             poll(cancelled)?;
@@ -258,8 +268,15 @@ impl OpenScreenLoadedModes {
                 sums[5].add(0.5 * self.viscosity[i * m + j].abs() * v.abs() * u.abs());
             }
         }
+        for (&value, &tau) in memory.iter().zip(&self.memory.times) {
+            poll(cancelled)?;
+            let e = scale(value)?;
+            let heat = 0.5 * e.norm_sq() / tau;
+            sums[6].add(heat);
+            sums[5].add(heat);
+        }
         let s = sums.map(Sum::finish);
-        let balance = s[0] - s[2] - s[4];
+        let balance = s[0] - s[2] - s[6] - s[4];
         let relative = if s[5] == 0.0 {
             balance.abs()
         } else {
@@ -286,6 +303,7 @@ impl OpenScreenLoadedModes {
             external_mechanical_input_w: restore(s[0])?,
             blocked_acoustic_input_w: restore(s[1])?,
             structural_viscosity_w: restore(s[2])?,
+            structural_relaxation_w: restore(s[6])?,
             motion_exterior_w: restore(s[3])?,
             blocked_pressure_work_w: restore(-s[1])?,
             total_exterior_w: restore(s[4])?,

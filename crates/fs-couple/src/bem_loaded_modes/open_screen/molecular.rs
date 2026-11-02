@@ -1,8 +1,9 @@
 //! Two-sided shell motion and sound in the original molecular exterior.
 //!
-//! The same complete K/C, exact facet-local P1 work map and mechanical LU are
-//! used by the nondispersive owner. The gas changes H(k(omega)); the acoustic
-//! drive remains i*rho*omega*G^T*v. Pressure work includes molecular heat in
+//! The same complete K/C, original structural Maxwell arms, exact facet-local
+//! P1 work map and mechanical/memory LU are used by the nondispersive owner.
+//! The gas changes H(k(omega)); the acoustic drive remains i*rho*omega*G^T*v.
+//! Pressure work includes molecular heat in
 //! the exterior and is not mislabeled as distant radiated flux.
 use super::*;
 use crate::bem_loaded_modes::MolecularModesPower;
@@ -25,10 +26,11 @@ pub use incident::{
 pub struct MolecularOpenScreenHarmonicOptions {
     pub boundary: MolecularScreenPortLimits,
     pub maximum_load_cases: usize,
-    /// Same live mechanical payload as OpenScreenHarmonicOptions, including
-    /// result conversion. Original source and boundary payloads are separate.
+    /// Same full-state live payload as OpenScreenHarmonicOptions, including
+    /// original Maxwell coordinates and result conversion. Source and boundary
+    /// payloads are separate.
     pub maximum_response_bytes: usize,
-    /// 32*modes^3 + 256*(cases+1)*modes^2, separate from boundary work.
+    /// 32*d^3 + 256*(cases+1)*d^2, d=modes+memories; boundary work is separate.
     pub maximum_work: u64,
     pub physical_residual_tolerance: f64,
     pub power_relative_tolerance: f64,
@@ -53,15 +55,20 @@ pub struct MolecularOpenScreenHarmonicResponse {
     pub angular_frequency_rad_s: f64,
     pub modal_displacement: Vec<C64>,
     pub modal_velocity: Vec<C64>,
+    /// Every original structural Maxwell coordinate, in source branch order.
+    /// Each arm stores cycle-mean energy |e|^2/4 [J].
+    pub elastic_memory_sqrt_j: Vec<C64>,
     /// Fluid force ON the shell, -Z*v, in original mode order.
     pub fluid_reaction: Vec<C64>,
-    /// Kinetic and elastic shell energy only, with no inferred fluid storage.
+    /// Kinetic, equilibrium elastic and Maxwell elastic shell energy only,
+    /// with no inferred fluid storage.
     pub mean_structural_energy_j: f64,
     pub mechanical_residual: f64,
+    pub memory_residual: f64,
     pub maximum_boundary_residual: f64,
-    /// Input = original viscosity + signed total exterior pressure-jump work.
-    /// This screen has no separate sheet loss or mechanical Maxwell arms, so
-    /// wall_w and relaxation_w are zero; gas memory is in exterior_w once.
+    /// Input = original viscosity + structural Maxwell heat + signed exterior
+    /// pressure-jump work. Gas relaxation belongs to exterior_w once; this bare
+    /// sheet has no separate wall law, so wall_w is zero.
     pub power: MolecularModesPower,
 }
 
@@ -71,14 +78,16 @@ impl MolecularOpenScreenHarmonicResponse {
             angular_frequency_rad_s: r.angular_frequency_rad_s,
             modal_displacement: r.modal_displacement,
             modal_velocity: r.modal_velocity,
+            elastic_memory_sqrt_j: r.elastic_memory_sqrt_j,
             fluid_reaction: r.fluid_reaction,
             mean_structural_energy_j: r.mean_structural_energy_j,
             mechanical_residual: r.mechanical_residual,
+            memory_residual: r.memory_residual,
             maximum_boundary_residual: r.maximum_boundary_residual,
             power: MolecularModesPower {
                 input_w: r.power.input_w,
                 kelvin_w: r.power.kelvin_w,
-                relaxation_w: 0.0,
+                relaxation_w: r.power.relaxation_w,
                 exterior_w: r.power.radiated_w,
                 wall_w: 0.0,
                 balance_w: r.power.balance_w,
@@ -89,8 +98,9 @@ impl MolecularOpenScreenHarmonicResponse {
     }
 }
 
-/// One complete molecular boundary bank and one mechanical factorization for
-/// all authored force cases. No source modes or mutual loads are discarded.
+/// One complete molecular boundary bank and one mechanical/memory factorization
+/// for all authored force cases. No source modes, material arms or mutual loads
+/// are discarded.
 pub struct MolecularOpenScreenHarmonicBatch<'p, 's> {
     radiation: MolecularScreenVelocityPortSolution<'p, 's>,
     responses: Vec<MolecularOpenScreenHarmonicResponse>,
@@ -131,8 +141,10 @@ impl OpenScreenLoadedModes {
 impl<'s> PreparedOpenScreenModes<'s> {
     /// Solve the original source against H(k(omega)) and real i*rho*omega
     /// forcing. Exact P1 G supplies BOTH the drive and the resisting effort.
-    /// All force cases share the complete self/mutual Z and mechanical LU.
-    /// The supplied gas must match this source's equilibrium density/speed.
+    /// All force cases share the complete self/mutual Z and mechanical/memory LU.
+    /// Every original structural Maxwell coordinate remains in the solve and
+    /// its heat is separate from gas relaxation. The supplied gas must match
+    /// this source's equilibrium density/speed.
     ///
     /// This is a frozen homogeneous, inviscid-momentum molecular exterior on
     /// both faces. It is not a cavity-backed or finite-thickness shell, a CQ
@@ -263,5 +275,7 @@ impl PreparedMolecularOpenScreenReceivers<'_, '_, '_> {
     }
 }
 
+#[cfg(test)]
+mod memory_tests;
 #[cfg(test)]
 mod tests;

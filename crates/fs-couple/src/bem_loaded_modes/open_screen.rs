@@ -1,11 +1,15 @@
 //! Complete real-frequency reaction of a two-sided open shell.
 //!
 //! Source mass-normalized coordinates are unchanged. For peak phasors in
-//! exp(-i omega t), D = K - omega^2 I - i omega (C + Z_screen). The same
-//! facet-local P1 work map produces the complete self/mutual Z and the
-//! coherent pressure-jump field. No baffled-piston law, fitted damping,
-//! independent face duplication or complex-pole continuation is introduced.
-use super::{BemHarmonicPower, BemModesError, bad, divide, finite, poll};
+//! exp(-i omega t), the mechanical block is K - omega^2 I - i omega (C +
+//! Z_screen), with every original Maxwell elastic-memory coordinate appended.
+//! The same facet-local P1 work map produces the complete self/mutual Z and
+//! coherent pressure-jump field. No baffled-piston law, fitted damping or
+//! independent face duplication is introduced.
+use super::{
+    BemHarmonicPower, BemModesError, PhysicalPencil, bad, divide, finite,
+    memory::RetainedMemory, poll,
+};
 use crate::plate_viscosity::ModalPlateViscosity;
 use fs_bem::helmholtz::Medium;
 use fs_bem::near_field;
@@ -13,7 +17,9 @@ use fs_bem::reciprocal_radiation::open_screen::{
     OpenOptions, OpenPanels, PreparedScreen, ScreenPortLimits, ScreenVelocityPortSolution,
 };
 use fs_la::eigen_complex::lu_complex_with_cancel;
+use fs_la::nonlinear_eig::PoleEvaluation;
 use fs_math::c64::C64;
+use fs_phs::RelaxationBranch;
 use fs_plate::shell::reduction::ShellReduction;
 use fs_plate::shell::reduction::radiation::open_screen::OpenScreenRadiationBudget;
 
@@ -45,13 +51,27 @@ pub struct OpenScreenModesOptions {
     pub maximum_setup_work: u64,
 }
 
+/// Separate admission for one cold attachment of original material branches.
+/// This payload is additional to the source geometry/K/C and acoustic caches.
+#[derive(Clone, Copy, Debug)]
+pub struct OpenScreenMemoryLimits {
+    /// At most 256 branches; equal-time or dependent rows still count separately.
+    pub maximum_branches: usize,
+    /// 8*branches*modes + 32*branches + 256 logical retained bytes.
+    /// Includes row headers/times, excludes allocator metadata and process RSS.
+    pub maximum_payload_bytes: usize,
+    /// 16*branches*(modes+1) units for original projection/scale validation.
+    pub maximum_work: u64,
+}
+
 /// One immutable source-derived unit-modal-mass shell and exterior medium.
-/// The full zero-state Hessian and supplied full viscosity retain their basis.
+/// The full zero-state Hessian, viscosity and material arms retain their basis.
 pub struct OpenScreenLoadedModes {
     surface: OpenPanels,
     weights: Vec<Vec<[f64; 3]>>,
     stiffness: Vec<f64>,
     viscosity: Vec<f64>,
+    memory: RetainedMemory,
     medium: Medium,
 }
 
@@ -69,17 +89,18 @@ pub struct OpenScreenHarmonicOptions {
     pub boundary: ScreenPortLimits,
     /// 1..=256 complete force cases. Coherent forces must be summed FIRST.
     pub maximum_load_cases: usize,
-    /// Logical live payload: cases*(48*modes+512) + 48*modes^2 +
-    /// 160*modes + 4096, including original/scaled matrix, LU and solve/work
-    /// scratch. Excludes separately bounded boundary columns/caches and the
-    /// source-owned K/C/geometry, allocator overhead and process RSS.
+    /// With d=modes+memories, logical live payload is
+    /// cases*(16*d+32*modes+640) + 96*d^2 + 320*d + 4096 bytes.
+    /// Includes full original/scaled matrices, LU, memory states and work/audit
+    /// scratch. Source K/C/material rows/geometry, boundary columns/caches,
+    /// allocator metadata and process RSS have separate admission.
     pub maximum_response_bytes: usize,
-    /// 32*modes^3 + 256*(cases+1)*modes^2; boundary work is separate.
+    /// 32*d^3 + 256*(cases+1)*d^2, d=modes+memories; boundary work is separate.
     pub maximum_work: u64,
-    /// Componentwise original mechanical-row backward error, in (0,1).
+    /// Original mechanical/material componentwise backward error, in (0,1).
     pub physical_residual_tolerance: f64,
-    /// Input = structural viscosity + exact P1 screen work, relative to the
-    /// sum of absolute complex-work magnitudes; this is a numerical balance.
+    /// Input = viscosity + material relaxation + exact P1 screen work, relative
+    /// to the sum of absolute work magnitudes; this is a numerical balance.
     pub power_relative_tolerance: f64,
 }
 
@@ -91,12 +112,16 @@ pub struct OpenScreenHarmonicResponse {
     pub modal_displacement: Vec<C64>,
     /// Original source order, [m sqrt(kg)/s].
     pub modal_velocity: Vec<C64>,
+    /// Original Maxwell elastic extensions e=c.q-z, in branch order [sqrt(J)].
+    pub elastic_memory_sqrt_j: Vec<C64>,
     /// Fluid force ON the structure, -Z*v, [N/sqrt(kg)].
     pub fluid_reaction: Vec<C64>,
-    /// Source structural kinetic + elastic cycle-mean energy only. No exterior
-    /// acoustic storage is inferred from an impedance at one frequency.
+    /// Source kinetic + equilibrium elastic + Maxwell elastic cycle-mean
+    /// energy. No exterior storage is inferred from a single-frequency load.
     pub mean_structural_energy_j: f64,
     pub mechanical_residual: f64,
+    /// Original retained material equations, independently audited.
+    pub memory_residual: f64,
     /// Largest original unit-source solve residual. This is not a bound for a
     /// coherent field near cancellation, nor an estimate of spatial error.
     pub maximum_boundary_residual: f64,
@@ -124,7 +149,8 @@ impl OpenScreenLoadedModes {
     /// acoustic offset, while physical thickness remains in source mass/K/C.
     /// A cavity-backed face or a finite-thickness acoustic skin needs its own
     /// owner. This small-signal image contains no nonlinear/prestressed motion,
-    /// hidden damping, inferred aperture or frequency-dependent material law.
+    /// hidden damping or inferred aperture. Original material relaxation is
+    /// attached explicitly with with_relaxation_branches.
     pub fn from_shell(
         shell: &ShellReduction,
         medium: Medium,
@@ -214,12 +240,66 @@ impl OpenScreenLoadedModes {
             weights,
             stiffness,
             viscosity,
+            memory: RetainedMemory::default(),
             medium,
         })
     }
 
+    /// Attach the SAME displacement-basis Maxwell arms used by fs-phs.
+    /// The source Hessian is the equilibrium stiffness: it must not already
+    /// include these excess-stiffness arms. Kelvin viscosity can coexist when
+    /// it represents a distinct material loss, not the same heat counted twice.
+    ///
+    /// Each signed c=sqrt(stiffness)*projection remains in the original basis.
+    /// Equal-time and mechanically cancelling branches retain separate states.
+    /// One complete cold attachment is allowed; empty input is a bitwise no-op.
+    /// The caller owns matching source basis and constitutive applicability.
+    pub fn with_relaxation_branches(
+        mut self,
+        branches: &[RelaxationBranch],
+        limits: OpenScreenMemoryLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, BemModesError> {
+        poll(&mut cancelled)?;
+        if limits.maximum_branches > 256 || branches.len() > limits.maximum_branches {
+            return Err(bad("open-screen material memory exceeds its branch ceiling"));
+        }
+        if branches.is_empty() {
+            return Ok(self);
+        }
+        if self.memory_count() != 0 {
+            return Err(bad("open-screen memory requires one complete cold attachment"));
+        }
+        let m = self.mode_count() as u128;
+        let r = branches.len() as u128;
+        let bytes = 8 * r * m + 32 * r + 256;
+        let work = 16 * r * (m + 1);
+        if bytes > limits.maximum_payload_bytes as u128 || work > limits.maximum_work as u128 {
+            return Err(bad("open-screen memory exceeds its source payload/work allowance"));
+        }
+        let memory = RetainedMemory::from_branches(
+            self.mode_count(),
+            branches,
+            limits.maximum_branches,
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        self.memory = memory;
+        Ok(self)
+    }
+
     pub fn mode_count(&self) -> usize {
         self.weights.len()
+    }
+    pub fn memory_count(&self) -> usize {
+        self.memory.times.len()
+    }
+    /// Original signed c rows [1/s], in mass-normalized displacement order.
+    pub fn relaxation_rows_per_s(&self) -> &[Vec<f64>] {
+        &self.memory.rows
+    }
+    pub fn relaxation_times_s(&self) -> &[f64] {
+        &self.memory.times
     }
     pub fn surface(&self) -> &OpenPanels {
         &self.surface
@@ -316,6 +396,17 @@ impl<'s> PreparedOpenScreenModes<'s> {
 }
 
 impl OpenScreenLoadedModes {
+    /// Complete retained mechanical/material payload, also used by sound drive.
+    fn harmonic_resources(&self, cases: usize) -> (u128, u128) {
+        let m = self.mode_count() as u128;
+        let d = m + self.memory_count() as u128;
+        let c = cases as u128;
+        (
+            c * (16 * d + 32 * m + 640) + 96 * d * d + 320 * d + 4096,
+            32 * d * d * d + 256 * (c + 1) * d * d,
+        )
+    }
+
     fn admit_harmonic_batch(
         &self,
         omega: f64,
@@ -347,11 +438,7 @@ impl OpenScreenLoadedModes {
                 "open-screen harmonic response requires a positive frequency, complete finite forces and valid limits",
             ));
         }
-        let bytes = cases as u128 * (48 * m as u128 + 512)
-            + 48 * (m as u128).pow(2)
-            + 160 * (m as u128)
-            + 4096;
-        let work = 32 * (m as u128).pow(3) + 256 * (cases as u128 + 1) * (m as u128).pow(2);
+        let (bytes, work) = self.harmonic_resources(cases);
         if bytes > options.maximum_response_bytes as u128 || work > options.maximum_work as u128 {
             return Err(bad(
                 "open-screen harmonic batch exceeds its response/work allowance",
@@ -374,84 +461,103 @@ impl OpenScreenLoadedModes {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<OpenScreenHarmonicResponse>, BemModesError> {
         let m = self.mode_count();
-        let cases = forces.len();
+        let d = m + self.memory_count();
         let omega_sq = omega * omega;
         let s = C64::new(0.0, -omega);
-        let mut matrix = vec![C64::ZERO; m * m];
+        let mut matrix = vec![C64::ZERO; d * d];
+        let mut envelope = vec![0.0; d * d];
         for i in 0..m {
             poll(&mut cancelled)?;
             for j in 0..m {
                 let at = i * m + j;
-                matrix[at] =
+                let dst = i * d + j;
+                matrix[dst] =
                     C64::new(self.stiffness[at], -omega * self.viscosity[at]) + s * impedance[at];
+                envelope[dst] = self.stiffness[at].abs()
+                    + omega * (self.viscosity[at].abs() + impedance[at].abs());
                 if i == j {
-                    matrix[at] = matrix[at] - C64::from_re(omega_sq);
+                    matrix[dst] = matrix[dst] - C64::from_re(omega_sq);
+                    envelope[dst] += omega_sq;
                 }
             }
         }
-        if matrix.iter().any(|&z| !finite(z)) {
+        if self.memory_count() != 0 {
+            // Keep the original elastic-memory equations, including dark and
+            // equal-time histories. No dense C_memory^T*C_memory is formed.
+            let mut derivative_scratch = vec![C64::ZERO; d * d];
+            self.memory.add_to_pencil(
+                C64::from_re(omega),
+                m,
+                0,
+                &mut matrix,
+                &mut derivative_scratch,
+                &mut envelope,
+                &mut cancelled,
+            )?;
+        }
+        if matrix.iter().any(|&z| !finite(z)) || envelope.iter().any(|x| !x.is_finite()) {
             return Err(bad(
-                "open-screen coupled dynamic stiffness is not representable",
+                "open-screen coupled mechanical/material operator is not representable",
             ));
         }
-        let scale = matrix.iter().map(|z| z.abs()).fold(0.0, f64::max);
-        if !scale.is_finite() || scale == 0.0 {
-            return Err(bad(
-                "open-screen coupled dynamic stiffness is singular or unrepresentable",
-            ));
+        // The same original-row balancing/audit used by closed-body loading
+        // handles the different displacement and sqrt(J) memory coordinates.
+        // No frequency derivative or loaded-pole authority is exposed here.
+        let raw = PhysicalPencil {
+            value: PoleEvaluation {
+                matrix,
+                derivative: Vec::new(),
+                residual_scale: 1.0,
+            },
+            envelope,
+        };
+        let (rows, columns) = raw.fixed_scales(d, &mut cancelled)?;
+        let mut balanced = raw.value.matrix.clone();
+        for i in 0..d {
+            poll(&mut cancelled)?;
+            for j in 0..d {
+                let at = i * d + j;
+                balanced[at] = balanced[at].scale(columns[j] / rows[i]);
+                if !finite(balanced[at]) {
+                    return Err(bad("open-screen balanced material operator is not representable"));
+                }
+            }
         }
-        let balanced: Vec<_> = matrix.iter().map(|&z| divide(z, scale)).collect();
-        let lu = lu_complex_with_cancel(&balanced, m, &mut cancelled)
+        let lu = lu_complex_with_cancel(&balanced, d, &mut cancelled)
             .map_err(BemModesError::ResponseSolve)?;
-        let mut responses = Vec::with_capacity(cases);
+        let mut responses = Vec::with_capacity(forces.len());
         for &force in forces {
             poll(&mut cancelled)?;
-            let mut displacement: Vec<_> = force.iter().map(|&z| divide(z, scale)).collect();
-            if displacement.iter().any(|&z| !finite(z)) {
+            let mut state = vec![C64::ZERO; d];
+            for i in 0..m {
+                state[i] = divide(force[i], rows[i]);
+            }
+            if state.iter().any(|&z| !finite(z)) {
                 return Err(bad("open-screen balanced force is not representable"));
             }
-            lu.solve_with_cancel(&mut displacement, &mut cancelled)
+            lu.solve_with_cancel(&mut state, &mut cancelled)
                 .map_err(BemModesError::ResponseSolve)?;
-            let velocity: Vec<_> = displacement.iter().map(|&q| s * q).collect();
-            if displacement.iter().chain(&velocity).any(|&z| !finite(z)) {
+            for (value, &column) in state.iter_mut().zip(&columns) {
+                *value = value.scale(column);
+            }
+            let velocity: Vec<_> = state[..m].iter().map(|&q| s * q).collect();
+            if state.iter().chain(&velocity).any(|&z| !finite(z)) {
                 return Err(bad("open-screen physical response is not finite"));
             }
-            let mut residual = 0.0_f64;
-            for i in 0..m {
-                poll(&mut cancelled)?;
-                let mut lhs = C64::ZERO;
-                let mut envelope = force[i].abs() + omega_sq * displacement[i].abs();
-                for j in 0..m {
-                    let at = i * m + j;
-                    lhs = lhs + matrix[at] * displacement[j];
-                    envelope += (self.stiffness[at].abs()
-                        + omega * self.viscosity[at].abs()
-                        + omega * impedance[at].abs())
-                        * displacement[j].abs();
-                }
-                let error = (lhs - force[i]).abs();
-                let relative = if envelope == 0.0 {
-                    error
-                } else {
-                    error / envelope
-                };
-                if !relative.is_finite() || !envelope.is_finite() {
-                    return Err(bad("open-screen physical row audit overflows"));
-                }
-                residual = residual.max(relative);
-            }
-            if residual > options.physical_residual_tolerance {
-                return Err(BemModesError::PhysicalResidual {
-                    mechanical: residual,
-                    boundary: boundary_residual,
-                    memory: 0.0,
-                });
-            }
+            let residuals = raw.physical_residuals(
+                m,
+                0,
+                &state,
+                Some(force),
+                options.physical_residual_tolerance,
+                &mut cancelled,
+            )?;
             let efforts = resisting_efforts(&velocity).map_err(BemModesError::ScreenBoundary)?;
             let (power, energy) = self.response_power(
                 force,
-                &displacement,
+                &state[..m],
                 &velocity,
+                &state[m..],
                 &efforts,
                 impedance,
                 options.power_relative_tolerance,
@@ -459,11 +565,13 @@ impl OpenScreenLoadedModes {
             )?;
             responses.push(OpenScreenHarmonicResponse {
                 angular_frequency_rad_s: omega,
-                modal_displacement: displacement,
+                modal_displacement: state[..m].to_vec(),
                 modal_velocity: velocity,
+                elastic_memory_sqrt_j: state[m..].to_vec(),
                 fluid_reaction: efforts.into_iter().map(|z| -z).collect(),
                 mean_structural_energy_j: energy,
-                mechanical_residual: residual,
+                mechanical_residual: residuals[0],
+                memory_residual: residuals[2],
                 maximum_boundary_residual: boundary_residual,
                 power,
             });
@@ -474,11 +582,13 @@ impl OpenScreenLoadedModes {
 }
 
 impl OpenScreenLoadedModes {
+    #[allow(clippy::too_many_arguments)]
     fn response_power(
         &self,
         force: &[C64],
         displacement: &[C64],
         velocity: &[C64],
+        memory: &[C64],
         efforts: &[C64],
         impedance: &[C64],
         tolerance: f64,
@@ -501,14 +611,16 @@ impl OpenScreenLoadedModes {
                 })
                 .collect()
         };
-        let (f, q, v, e) = (
+        let (f, q, v, e, h) = (
             normalize(force)?,
             normalize(displacement)?,
             normalize(velocity)?,
             normalize(efforts)?,
+            normalize(memory)?,
         );
-        let mut sums = [0.0; 5]; // input, viscosity, screen work, absolute work, structural energy
-        let mut corrections = [0.0; 5];
+        // Input, viscosity, screen work, absolute work, storage, relaxation.
+        let mut sums = [0.0; 6];
+        let mut corrections = [0.0; 6];
         let mut add = |channel: usize, value: f64| {
             let adjusted = value - corrections[channel];
             let next = sums[channel] + adjusted;
@@ -534,7 +646,15 @@ impl OpenScreenLoadedModes {
                 add(4, 0.25 * self.stiffness[at] * (q[i].conj() * q[j]).re);
             }
         }
-        let balance = sums[0] - sums[1] - sums[2];
+        for (&value, &tau) in h.iter().zip(&self.memory.times) {
+            poll(cancelled)?;
+            let norm_sq = value.norm_sq();
+            let heat = 0.5 * norm_sq / tau;
+            add(5, heat);
+            add(3, heat);
+            add(4, 0.25 * norm_sq);
+        }
+        let balance = sums[0] - sums[1] - sums[2] - sums[5];
         let relative = if sums[3] == 0.0 {
             balance.abs()
         } else {
@@ -565,7 +685,7 @@ impl OpenScreenLoadedModes {
             BemHarmonicPower {
                 input_w: restore(sums[0])?,
                 kelvin_w: restore(sums[1])?,
-                relaxation_w: 0.0,
+                relaxation_w: restore(sums[5])?,
                 radiated_w: restore(sums[2])?,
                 balance_w: restore(balance)?,
                 apparent_power_scale_w: restore(sums[3])?,

@@ -252,7 +252,7 @@ fn g0_full_live_payload_and_original_boundary_limits_refuse_before_publication()
     let baseline = prepared
         .harmonic_response_batch(450., &[&force], options(), || false)
         .unwrap();
-    let bytes = (48 * 2 + 512) + 48 * 4 + 160 * 2 + 4096;
+    let bytes = (16 * 2 + 32 * 2 + 640) + 96 * 4 + 320 * 2 + 4096;
     let mut limited = options();
     limited.maximum_response_bytes = bytes - 1;
     assert!(

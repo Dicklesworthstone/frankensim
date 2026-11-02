@@ -42,12 +42,38 @@ impl BemLoadedModes {
         }
         let m = self.mode_count();
         Self::admit_dimensions(m, self.panel_count(), branches.len(), &self.settings)?;
+        self.memory = RetainedMemory::from_branches(
+            m, branches, maximum_branches, &mut cancelled,
+        )?;
+        self.rebalance(&mut cancelled)?;
+        Ok(self)
+    }
+
+    /// c_j [1/s], in the SAME displacement basis; H_j=|c_j.x-z_j|^2/2.
+    pub fn relaxation_rows_per_s(&self) -> &[Vec<f64>] { &self.memory.rows }
+    pub fn relaxation_times_s(&self) -> &[f64] { &self.memory.times }
+}
+
+impl RetainedMemory {
+    /// Preserve each original signed source-coordinate arm without rank or
+    /// equal-time merging. The caller admits its complete model dimensions and
+    /// payload before construction; this owner validates the constitutive data.
+    pub(super) fn from_branches(
+        modes: usize,
+        branches: &[RelaxationBranch],
+        maximum_branches: usize,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Self, BemModesError> {
+        poll(cancelled)?;
+        if maximum_branches > 256 || branches.len() > maximum_branches {
+            return Err(bad("material memory exceeds its explicit 256-branch ceiling"));
+        }
         let mut rows = Vec::with_capacity(branches.len());
         let mut times = Vec::with_capacity(branches.len());
         for branch in branches {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let tau = branch.relaxation_time_s;
-            if branch.projection.len() != m
+            if branch.projection.len() != modes
                 || branch.projection.iter().any(|x| !x.is_finite())
                 || !branch.stiffness.is_finite() || branch.stiffness <= 0.0
                 || !tau.is_finite() || tau <= 0.0 || !(1.0/tau).is_finite()
@@ -64,17 +90,10 @@ impl BemLoadedModes {
             rows.push(row);
             times.push(tau);
         }
-        self.memory = RetainedMemory { rows, times };
-        self.rebalance(&mut cancelled)?;
-        Ok(self)
+        poll(cancelled)?;
+        Ok(Self { rows, times })
     }
 
-    /// c_j [1/s], in the SAME displacement basis; H_j=|c_j.x-z_j|^2/2.
-    pub fn relaxation_rows_per_s(&self) -> &[Vec<f64>] { &self.memory.rows }
-    pub fn relaxation_times_s(&self) -> &[f64] { &self.memory.times }
-}
-
-impl RetainedMemory {
     // O(branches*modes) per evaluation. In particular no dense C^T C and no
     // rational dynamic stiffness are formed. With no arms, not a bit is touched.
     pub(super) fn add_to_pencil(

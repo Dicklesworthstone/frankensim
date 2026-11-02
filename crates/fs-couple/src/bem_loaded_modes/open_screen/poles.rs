@@ -118,6 +118,11 @@ impl<'s> PreparedOpenScreenModes<'s> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<OpenScreenResonancePencil<'p, 's>, BemModesError> {
         poll(&mut cancelled)?;
+        if self.source.memory_count() != 0 {
+            return Err(bad(
+                "open-screen resonance requires retention of all attached material states",
+            ));
+        }
         let (m, p) = (self.source.mode_count(), self.screen.unknowns());
         let d = m
             .checked_add(p)
