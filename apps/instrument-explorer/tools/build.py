@@ -896,9 +896,13 @@ def main() -> int:
     # {"era": "...", "items": [{"stem": "...", "title": "..."}]}, played in the record's order and never graded.
     # A/B sets add "group" (the heading they are listed under, first on the family's Listen tab), "before_label" and
     # "after_label", and per item "before" (the stem of the render it is heard against, played in lock-step) and "detail".
+    # A set with "lead": true comes first in its family, so it is the one the start page opens (a retrim over the raw
+    # all-in, say); the rest keep their path order.
     xd = mirror / "renders" / "extras"
-    for rec in sorted(xd.glob("*/*/extras.json")) if xd.is_dir() else []:
-        fid, doc = rec.parent.parent.name, json.loads(rec.read_text())
+    recs = [(rec, json.loads(rec.read_text())) for rec in sorted(xd.glob("*/*/extras.json"))] if xd.is_dir() else []
+    recs.sort(key=lambda rd: (rd[0].parent.parent.name, not rd[1].get("lead")))
+    for rec, doc in recs:
+        fid = rec.parent.parent.name
         for it in doc["items"]:
             wav = rec.parent / f"{it['stem']}.wav"
             if not wav.is_file():
