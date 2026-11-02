@@ -20,6 +20,9 @@ use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::porous::{PorousFluidLaw, PorousFluidResponse};
 use fs_math::c64::C64;
 
+mod excitation;
+pub use excitation::{PorousLayerDissipation, PorousLayerExcitation, PorousLayerField};
+
 fn bad(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }
 }

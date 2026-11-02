@@ -2461,6 +2461,33 @@ It does not partition pore heat between fluid and skeleton or evolve temperature
 A physical normal-incidence plane-wave interpretation requires the surrounding
 fluid's real rho*c/area as the common port reference.
 
+`prepare_excitation` retains that same boundary solution and exposes interior
+pressure, superficial velocity, axial volume flow and separately nonnegative
+viscous/thermal dissipation per total specimen volume. For peak phasors in the
+duct convention, the local rate is
+`omega/2 * [Im(rho_eff)|v|^2 + Im(1/K_eff)|p|^2]` in W/m3. The density and
+bulk modulus are the original JCA(L) response, conjugated once. There is no
+second porosity factor, propagation-loss fit or repeated material query.
+
+`PorousLayerExcitation::dissipation_between` supplies exact constant-work
+integrals of both mechanisms for an arbitrary physical slab cell. It retains
+the coherent interference term using positive quadratic forms and a small-cell
+series near pressure/velocity nodes; it does not subtract nearly equal face
+powers or introduce a spatial quadrature axis. Forward/backward waves are
+anchored at opposite faces and only decay, including opaque layers. Prepared
+field and cell queries allocate nothing. Equal endpoints and zero drive give
+exact zero; outside/reversed/nonfinite depths or unrepresentable fields refuse.
+
+Cell watts may be supplied to a thermal discretization under the declared
+harmonic, frozen-background model. This mechanism split does not determine
+the fluid/skeleton heat partition, thermal transport, temperature feedback,
+transient acoustic storage or finite-amplitude response. The original source
+frequency support remains binding; no DC material extension is inferred.
+G1/G3 regressions compare fields and separate cell watts with independent
+volume quadrature and surface work, preserve arbitrary cell partitions and
+coherent node heating, and cover zero thermal coupling, exposed-area scaling,
+opaque layers, zero drive and depth refusal.
+
 The layer is homogeneous, rigid-frame and plane-wave, with open-pore pressure
 and volume-flow continuity. Moving frames, finite-face diffraction, oblique
 incidence, skins/interface resistances, anisotropy and mean flow need their own
