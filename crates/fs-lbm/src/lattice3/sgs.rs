@@ -6,6 +6,8 @@ use crate::sgs3::{
 };
 use fs_exec::{CancelGate, Cx, KernelRunner};
 
+mod dynamic;
+
 impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
     /// Allocate once for repeated SGS steps. Allocation failure is returned;
     /// no populations or molecular collision settings are changed.

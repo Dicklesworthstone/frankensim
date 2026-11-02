@@ -20,11 +20,15 @@ pub use model::{SgsConfig, SgsError, SgsModel, SgsUse, eddy_viscosity};
 mod vreman;
 pub use vreman::vreman_eddy_viscosity;
 
+/// Nonlocal Germano--Lilly viscosity with an explicit periodic test filter.
+pub mod dynamic;
+
 /// Grid failures and closure refusals remain distinguishable to callers.
 #[derive(Clone, Debug)]
 pub enum SgsStepError<E> {
     Grid(crate::lattice3::GridError3<E>),
     Closure(SgsError),
+    Dynamic(dynamic::DynamicSgsError),
 }
 
 impl<E: core::fmt::Debug> core::fmt::Display for SgsStepError<E> {
@@ -42,6 +46,28 @@ impl<E> From<SgsError> for SgsStepError<E> {
     fn from(error: SgsError) -> Self {
         Self::Closure(error)
     }
+}
+
+impl<E> From<dynamic::DynamicSgsError> for SgsStepError<E> {
+    fn from(error: dynamic::DynamicSgsError) -> Self { Self::Dynamic(error) }
+}
+
+/// Reusable macroscopic/collision and nonlocal-filter fields for dynamic SGS.
+pub struct DynamicSgsWorkspace3<C> {
+    pub(crate) local: SgsWorkspace3<C>,
+    pub(crate) filter: dynamic::PeriodicDynamicSgs,
+}
+
+impl<C> DynamicSgsWorkspace3<C> {
+    pub fn collisions(&self) -> &[C] { self.local.collisions() }
+    pub fn eddy_viscosities(&self) -> &[f64] { self.filter.viscosities() }
+}
+
+/// Dynamic fit diagnostics and the original pre-step shear dissipation account.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynamicSgsStepReport {
+    pub fit: dynamic::DynamicSgsReport,
+    pub dissipation: SgsReport,
 }
 
 /// A lattice whose molecular shear viscosity can be read without changing
