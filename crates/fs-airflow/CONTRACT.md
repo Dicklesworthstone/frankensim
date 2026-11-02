@@ -2658,3 +2658,21 @@ or inferred spatial mesh is added. Five regression sources exercise independent
 branched startup and thermal roots, directional heat transport through reversal,
 temperature-dependent drag feedback, rest/refusal behavior and explicit
 reservoir mass/enthalpy binding.
+
+### Actual-flow constitutive closure for inertial convection
+
+Final inertial thermal acceptance refreshes original graph and source
+coefficients at the actual native interval-average rates. A small
+candidate-versus-actual flow difference alone cannot establish closure of a
+sharp supported source law. `InertialGraphTrial::recheck` audits the exact
+retained impulse trajectory against the refreshed loss, body-head and pressure
+data without advancing momentum again. The original impulse, work, support and
+speed-envelope gates are shared with ordinary proposal evaluation.
+
+The refreshed source payload also drives a fresh native thermal evaluation at
+the same enthalpy field. This evaluation is charged to the existing work budget.
+The native descriptor receipt still describes its original held-coefficient
+solve; the independent original-law ledger describes the refreshed accepted
+physics. Regression sources distinguish these accounts and reject a sharp
+continuous drag law whose rate mismatch is tiny but whose impulse and energy
+defects are significant. A failed refresh publishes neither physical clock.

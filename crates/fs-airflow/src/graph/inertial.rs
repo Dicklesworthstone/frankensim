@@ -106,7 +106,7 @@ pub struct InertialGraph {
 /// Pressures are interval multipliers, not a new steady solution. Original
 /// A Q+B Q|Q| loss, inertia and explicit driving heads complete each branch
 /// equation. Endpoint flows must not replace average-flow advection.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct InertialGraphReport {
     pub duration_s: f64,
     pub average_volume_flows_m3_s: Vec<f64>,
@@ -137,20 +137,63 @@ pub struct InertialGraphReport {
     pub neglected_hydraulic_energy_bound_j: f64,
     pub neglected_buoyancy_energy_bound_j: f64,
     pub neglected_energy_bound_j: f64,
-    /// Native descriptor state includes algebraic multiplier endpoints. Only
-    /// its branch-impulse prefix is retained as physical history.
+    /// Original native proposal, including algebraic multiplier endpoints.
+    /// Rechecking a constitutive response leaves this trajectory and its native
+    /// solve receipt unchanged; the physical residuals above use the refreshed
+    /// law. Only the branch-impulse prefix is retained as physical history.
     pub momentum: StepRecord,
 }
 
 /// An uncommitted physical proposal. Access is read-only until the independent
 /// original-law impulse/energy gates accept; the input owner stays untouched.
+#[derive(Clone)]
 pub struct InertialGraphTrial {
+    initial: InertialGraph,
     next: InertialGraph,
     report: InertialGraphReport,
 }
 impl InertialGraphTrial {
     pub fn report(&self) -> &InertialGraphReport {
         &self.report
+    }
+
+    /// Audit this SAME proposed trajectory against a freshly resolved law.
+    ///
+    /// Neither impulse nor native average flow is stepped again. The exact
+    /// original impulses remain available for the physical momentum residual;
+    /// refreshed losses, drives, boundary pressures and gravity enter the same
+    /// original-law audit used by `propose`. Source support and approximation
+    /// caps are re-admitted before the independent acceptance gates are used.
+    /// The original candidate-to-average residual is retained unchanged.
+    pub fn recheck(
+        self,
+        cx: &Cx<'_>,
+        graph: &LossGraph,
+        boundaries: &[FixedPressure],
+        driving_pressure_pa: &[f64],
+        controls: InertialGraphControls,
+    ) -> Result<Self, InertialGraphError> {
+        let Self { initial, next, report } = self;
+        let (_, reduced_pressures) = initial.admit_step(
+            cx,
+            graph,
+            boundaries,
+            driving_pressure_pa,
+            &report.average_volume_flows_m3_s,
+            next.accepted_time_s,
+            controls,
+        )?;
+        initial.finish(
+            cx,
+            graph,
+            boundaries,
+            driving_pressure_pa,
+            next.accepted_time_s,
+            controls,
+            report.momentum,
+            report.average_flow_residual_m3_s,
+            reduced_pressures,
+        )
     }
 
     pub fn accept(
@@ -335,44 +378,17 @@ impl InertialGraph {
         target_s: f64,
         controls: InertialGraphControls,
     ) -> Result<InertialGraphTrial, InertialGraphError> {
-        checkpoint(cx)?;
         let c = &self.compiled;
         let edges = c.inertances.len();
-        let dt = target_s - self.accepted_time_s;
-        if !positive(dt)
-            || !target_s.is_finite()
-            || driving_pressure_pa.len() != edges
-            || candidate_average_flows_m3_s.len() != edges
-            || driving_pressure_pa
-                .iter()
-                .chain(candidate_average_flows_m3_s)
-                .any(|v| !v.is_finite())
-            || !positive(controls.maximum_drag_step)
-            || controls.maximum_drag_step > 2.0
-            || !nonnegative(controls.maximum_neglected_power_w)
-            || !nonnegative(controls.maximum_neglected_energy_j)
-        {
-            return Err(InertialGraphError::Invalid(
-                "finite complete trial, positive time and explicit physical caps required",
-            ));
-        }
-        admit_topology(c, graph)?;
-        let fixed = graph.fixed_pressures(boundaries, cx)?;
-        if fixed
-            .iter()
-            .zip(&c.free)
-            .any(|(p, index)| p.is_none() != index.is_some())
-        {
-            return Err(InertialGraphError::Invalid(
-                "pressure-boundary node identities changed",
-            ));
-        }
-        let reduced_boundaries = graph.reduce_boundaries(boundaries)?;
-        let reduced_boundaries = reduced_boundaries.as_deref().unwrap_or(boundaries);
-        let mut reduced_pressures = vec![0.0; graph.node_count()];
-        for boundary in reduced_boundaries {
-            reduced_pressures[boundary.node] = boundary.pressure.value();
-        }
+        let (dt, reduced_pressures) = self.admit_step(
+            cx,
+            graph,
+            boundaries,
+            driving_pressure_pa,
+            candidate_average_flows_m3_s,
+            target_s,
+            controls,
+        )?;
         let mut r = vec![0.0; c.states * c.states];
         let mut forcing = Vec::with_capacity(edges);
         for (edge, branch) in graph.branches().iter().enumerate() {
@@ -406,8 +422,100 @@ impl InertialGraph {
         checkpoint(cx)?;
         let momentum = fs_phs::step_descriptor(&system, &old, &forcing, dt)?;
         checkpoint(cx)?;
+        let flow_residuals = candidate_average_flows_m3_s
+            .iter()
+            .zip(&momentum.y)
+            .map(|(candidate, actual)| finite(candidate - actual, "average-flow closure"))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.finish(
+            cx,
+            graph,
+            boundaries,
+            driving_pressure_pa,
+            target_s,
+            controls,
+            momentum,
+            flow_residuals,
+            reduced_pressures,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_step(
+        &self,
+        cx: &Cx<'_>,
+        graph: &LossGraph,
+        boundaries: &[FixedPressure],
+        driving_pressure_pa: &[f64],
+        average_flows_m3_s: &[f64],
+        target_s: f64,
+        controls: InertialGraphControls,
+    ) -> Result<(f64, Vec<f64>), InertialGraphError> {
+        checkpoint(cx)?;
+        let c = &self.compiled;
+        let edges = c.inertances.len();
+        let dt = target_s - self.accepted_time_s;
+        if !positive(dt)
+            || !target_s.is_finite()
+            || driving_pressure_pa.len() != edges
+            || average_flows_m3_s.len() != edges
+            || driving_pressure_pa
+                .iter()
+                .chain(average_flows_m3_s)
+                .any(|v| !v.is_finite())
+            || !positive(controls.maximum_drag_step)
+            || controls.maximum_drag_step > 2.0
+            || !nonnegative(controls.maximum_neglected_power_w)
+            || !nonnegative(controls.maximum_neglected_energy_j)
+        {
+            return Err(InertialGraphError::Invalid(
+                "finite complete trial, positive time and explicit physical caps required",
+            ));
+        }
+        admit_topology(c, graph)?;
+        let fixed = graph.fixed_pressures(boundaries, cx)?;
+        if fixed
+            .iter()
+            .zip(&c.free)
+            .any(|(p, index)| p.is_none() != index.is_some())
+        {
+            return Err(InertialGraphError::Invalid(
+                "pressure-boundary node identities changed",
+            ));
+        }
+        let reduced_boundaries = graph.reduce_boundaries(boundaries)?;
+        let reduced_boundaries = reduced_boundaries.as_deref().unwrap_or(boundaries);
+        let mut reduced_pressures = vec![0.0; graph.node_count()];
+        for boundary in reduced_boundaries {
+            reduced_pressures[boundary.node] = boundary.pressure.value();
+        }
+        Ok((dt, reduced_pressures))
+    }
+
+    // The only original-law impulse, work and source-envelope audit. A fresh
+    // constitutive response reuses the exact native trajectory through here.
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &self,
+        cx: &Cx<'_>,
+        graph: &LossGraph,
+        boundaries: &[FixedPressure],
+        driving_pressure_pa: &[f64],
+        target_s: f64,
+        controls: InertialGraphControls,
+        momentum: StepRecord,
+        flow_residuals: Vec<f64>,
+        mut reduced_pressures: Vec<f64>,
+    ) -> Result<InertialGraphTrial, InertialGraphError> {
+        checkpoint(cx)?;
+        let c = &self.compiled;
+        let edges = c.inertances.len();
+        let dt = target_s - self.accepted_time_s;
         let average = &momentum.y;
-        if average.len() != edges || momentum.x.len() != c.states {
+        if average.len() != edges
+            || momentum.x.len() != c.states
+            || flow_residuals.len() != edges
+        {
             return Err(InertialGraphError::Invalid(
                 "native descriptor returned mismatched dimensions",
             ));
@@ -439,7 +547,6 @@ impl InertialGraph {
         }
         let mut pressure_losses = Vec::with_capacity(edges);
         let mut residuals = Vec::with_capacity(edges);
-        let mut flow_residuals = Vec::with_capacity(edges);
         let mut envelope = Vec::with_capacity(edges);
         let mut loss_power = Sum::default();
         let mut driving_power = Sum::default();
@@ -466,10 +573,6 @@ impl InertialGraph {
                 "original branch impulse residual",
             )?;
             residuals.push(impulse_residual);
-            flow_residuals.push(finite(
-                candidate_average_flows_m3_s[edge] - flow,
-                "average-flow closure",
-            )?);
             let speed = initial[edge]
                 .abs()
                 .max(final_flows[edge].abs())
@@ -493,9 +596,9 @@ impl InertialGraph {
             envelope_buoyancy_power.add(finite((head * speed).abs(), "gravity envelope")?)?;
             pressure_losses.push(loss);
         }
-        for boundary in reduced_boundaries {
+        for boundary in boundaries {
             boundary_power.add(finite(
-                boundary.pressure.value() * balances[boundary.node],
+                reduced_pressures[boundary.node] * balances[boundary.node],
                 "boundary power",
             )?)?;
         }
@@ -536,6 +639,7 @@ impl InertialGraph {
         };
         checkpoint(cx)?;
         Ok(InertialGraphTrial {
+            initial: self.clone(),
             next,
             report: InertialGraphReport {
                 duration_s: dt,
@@ -699,3 +803,4 @@ fn nonnegative(value: f64) -> bool {
 
 #[cfg(test)]
 mod tests;
+

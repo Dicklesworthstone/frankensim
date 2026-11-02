@@ -172,6 +172,130 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn g0_final_actual_flow_refresh_rejects_a_sharp_supported_drag_law() {
+    with_cx(|cx| {
+        let graph = network(2, &[(0, 1), (1, 0)], &[1.0; 2]);
+        let momentum = owner(cx, &graph, &[1.0; 2], &[0.0; 2]);
+        let law = Caloric;
+        let old = inventory(&law, &[300.0; 2], &[0.0; 2]);
+        let cells = [CellId(0), CellId(1)];
+        let problem = InertialThermalProblem {
+            momentum: &momentum,
+            node_cells: &cells,
+            maximum_connections: 2,
+        };
+        let guess = 1.0 - 5e-12;
+        let width = 1.0 - guess;
+        let calls = Cell::new(0);
+        let result = advance_inertial_graph(
+            cx,
+            &problem,
+            &old,
+            1.0,
+            controls(),
+            &[0.0; 2],
+            &[guess; 2],
+            |_, _, average| {
+                calls.set(calls.get() + 1);
+                // A continuous, supported source law; no regime/domain refusal
+                // exposes the stale coefficient. Both drag states are admissible.
+                let fraction = ((average[0] - guess) / width).clamp(0.0, 1.0);
+                let r = 1.0 + 0.5 * fraction;
+                Ok::<_, String>(ResolvedInertialGraph {
+                    graph: network(2, &[(0, 1), (1, 0)], &[r; 2]),
+                    pressure_boundaries: vec![boundary(0, 0.0)],
+                    driving_pressure_pa: vec![3.0; 2],
+                    payload: r,
+                })
+            },
+            |_, _, &r, _| {
+                assert!((1.0..=1.5).contains(&r));
+                Ok(heat(r))
+            },
+        );
+        // Held R=1 gives Qaverage=1, Qnew=2. The rate mismatch alone is
+        // already below the solver and physical tolerances. Refreshed R=1.5
+        // gives a 0.5 Pa s impulse defect per edge and a 1 J work defect on
+        // that SAME trajectory; stepping again would conceal this diagnosis.
+        match result {
+            Err(InertialThermalError::Momentum(InertialGraphError::MomentumResidual {
+                impulse_pa_s,
+                energy_j,
+            })) => {
+                assert!(impulse_pa_s > 0.49);
+                assert!(energy_j > 0.99);
+            }
+            Err(error) => panic!("unexpected refusal: {error:?}"),
+            Ok(_) => panic!("stale candidate-flow law was accepted"),
+        }
+        assert_eq!(calls.get(), 3);
+        assert_eq!(old.time_s(), 0.0);
+        assert_eq!(momentum.accepted_time_s(), 0.0);
+        assert!(old.cells().values().all(|cell| cell.specific_h_j_kg == 0.0));
+        assert_eq!(momentum.volume_flows_m3_s(), vec![0.0; 2]);
+    });
+}
+
+#[test]
+fn g0_final_refresh_retains_actual_flow_sources_and_charges_the_budget() {
+    with_cx(|cx| {
+        let graph = network(2, &[(0, 1), (1, 0)], &[1.0; 2]);
+        let momentum = owner(cx, &graph, &[1.0; 2], &[0.0; 2]);
+        let law = Caloric;
+        let old = inventory(&law, &[300.0; 2], &[0.0; 2]);
+        let cells = [CellId(0), CellId(1)];
+        let problem = InertialThermalProblem {
+            momentum: &momentum,
+            node_cells: &cells,
+            maximum_connections: 2,
+        };
+        let calls = Cell::new(0);
+        let run = |limits| {
+            advance_inertial_graph(
+                cx,
+                &problem,
+                &old,
+                1.0,
+                limits,
+                &[0.0; 2],
+                &[1.0 - 5e-12; 2],
+                |_, _, average| {
+                    calls.set(calls.get() + 1);
+                    Ok::<_, String>(ResolvedInertialGraph {
+                        graph: graph.clone(),
+                        pressure_boundaries: vec![boundary(0, 0.0)],
+                        driving_pressure_pa: vec![3.0; 2],
+                        payload: average[0],
+                    })
+                },
+                |_, _, &source_rate, hydraulic| {
+                    Ok(heat((source_rate, hydraulic.average_volume_flows_m3_s[0])))
+                },
+            )
+        };
+        let mut limited = controls();
+        limited.maximum_endpoint_evaluations = 2;
+        assert!(matches!(
+            run(limited),
+            Err(InertialThermalError::WorkBudget { performed: 2, maximum: 2 })
+        ));
+        assert_eq!(calls.get(), 2);
+        calls.set(0);
+        let (next_momentum, next_thermal, report) = run(controls()).unwrap();
+        let actual = report.hydraulics.average_volume_flows_m3_s[0];
+        assert_eq!(report.sources, actual);
+        assert_eq!(report.heat, (actual, actual));
+        assert_eq!(report.endpoint_evaluations, 3);
+        assert_eq!(calls.get(), 3);
+        assert_eq!(report.nonlinear.iterations, 0);
+        assert_eq!(next_momentum.accepted_time_s(), 1.0);
+        assert_eq!(next_thermal.time_s(), 1.0);
+        assert_eq!(momentum.accepted_time_s(), 0.0);
+        assert_eq!(old.time_s(), 0.0);
+    });
+}
+
+#[test]
 fn g1_branched_startup_matches_independent_momentum_and_enthalpy_roots() {
     with_cx(|cx| {
         let graph = network(2, &[(0, 1), (0, 1), (1, 0)], &[1.0, 2.0, 1.5]);
@@ -468,3 +592,4 @@ fn g0_direct_flow_binding_requires_real_mass_reservoirs_at_pressure_nodes() {
         near(audit.stored_energy_change_j, audit.external_heat_j, 1e-7);
     });
 }
+

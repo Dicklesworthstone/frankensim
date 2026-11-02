@@ -73,6 +73,84 @@ fn owner(
 }
 
 #[test]
+fn g0_constitutive_recheck_audits_the_same_trajectory_without_restepping() {
+    with_cx(|cx| {
+        let network = |resistance| {
+            LossGraph::new_mixed(
+                2,
+                [(0, 1), (1, 0)]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (from, to))| PassiveBranch::Linear {
+                        from,
+                        to,
+                        loss: LinearLossElement::new(
+                            format!("path-{i}"),
+                            LinearLossResistance::new(resistance),
+                            0.0,
+                            SourceProvenance::new(
+                                "authored linear network fixture",
+                                "inertial-graph-v1",
+                            ),
+                            ToleranceBasis::EngineeringAllowance,
+                        )
+                        .unwrap(),
+                    })
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let graph = network(1.0);
+        let boundaries = [boundary(0, 0.0)];
+        let initial = InertialGraph::try_new(
+            cx,
+            &graph,
+            Density::new(1.0),
+            &geometry(2),
+            &boundaries,
+            &[0.0; 2],
+            0.0,
+            16,
+        )
+        .unwrap();
+        let proposal = initial
+            .propose(cx, &graph, &boundaries, &[3.0; 2], &[1.0; 2], 1.0, controls())
+            .unwrap();
+        let old_x = proposal.report().momentum.x.clone();
+        let old_y = proposal.report().momentum.y.clone();
+        let refreshed = network(1.5);
+        let checked = proposal
+            .clone()
+            .recheck(cx, &refreshed, &boundaries, &[3.0; 2], controls())
+            .unwrap();
+        assert_eq!(checked.report().momentum.x, old_x);
+        assert_eq!(checked.report().momentum.y, old_y);
+        near(checked.report().maximum_impulse_residual_pa_s, 0.5, 1e-12);
+        near(checked.report().mechanical_balance_residual_j, 1.0, 1e-12);
+        assert!(matches!(
+            checked.accept(cx, 1e-8, 1e-8),
+            Err(InertialGraphError::MomentumResidual { .. })
+        ));
+
+        // A compensating source makes the same trajectory physically valid.
+        // The refreshed original-law ledger changes, not the native solve receipt.
+        let (next, report) = proposal
+            .recheck(cx, &refreshed, &boundaries, &[3.5; 2], controls())
+            .unwrap()
+            .accept(cx, 1e-12, 1e-12)
+            .unwrap();
+        assert_eq!(report.momentum.x, old_x);
+        assert_eq!(report.momentum.y, old_y);
+        near(report.hydraulic_loss_j, 3.0, 1e-12);
+        near(report.driving_work_j, 7.0, 1e-12);
+        near(report.momentum.dissipated, 2.0, 1e-12);
+        assert_eq!(next.volume_flows_m3_s(), vec![2.0; 2]);
+        assert_eq!(initial.volume_flows_m3_s(), vec![0.0; 2]);
+        assert_eq!(initial.accepted_time_s(), 0.0);
+    });
+}
+
+#[test]
 fn g1_branched_start_stop_and_reversal_retain_two_independent_momenta() {
     with_cx(|cx| {
         // Three paths share two junctions: two independent circulations, not a
@@ -433,3 +511,4 @@ fn g4_cancellation_refuses_a_prepared_momentum_publication() {
         assert_eq!(state.accepted_time_s(), 0.0);
     });
 }
+

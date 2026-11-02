@@ -62,7 +62,7 @@ pub struct InertialThermalControls {
     /// All active thermal cells, including solid walls.
     pub maximum_cells: usize,
     pub maximum_newton_iterations: usize,
-    /// Includes every derivative probe and the fresh final evaluation.
+    /// Includes every derivative probe, final proposal and actual-flow source refresh.
     pub maximum_endpoint_evaluations: usize,
     pub energy_scale_j: f64,
     pub flow_scale_m3_s: f64,
@@ -144,7 +144,10 @@ struct Prepared<P, T> {
 /// Cell-energy guesses follow native stable CellId order; flow guesses follow
 /// original graph branch order. The solver closes both energy increments and
 /// candidate-versus-native average rates. Final acceptance independently gates
-/// physical joule, impulse and rate residuals using a fresh complete evaluation.
+/// physical joule, impulse and rate residuals. It resolves sources again at the
+/// actual native average and rechecks the SAME momentum trajectory against that
+/// law; a small rate mismatch cannot hide a sharp constitutive change. Heat is
+/// reevaluated at the same endpoint enthalpies with those refreshed sources.
 ///
 /// This combines midpoint momentum with endpoint-held backward-Euler thermal
 /// coefficients, so the coupled method is first order in time. It does not
@@ -237,7 +240,7 @@ pub fn advance_inertial_graph<'m, P, T, E>(
         ));
     }
     let evaluations = Cell::new(0usize);
-    let evaluate = |x: &[f64]| {
+    let evaluate = |x: &[f64], retained: Option<InertialGraphTrial>| {
         thermal_checkpoint(cx)?;
         if evaluations.get() >= controls.maximum_endpoint_evaluations {
             return Err(InertialThermalError::WorkBudget {
@@ -269,18 +272,30 @@ pub fn advance_inertial_graph<'m, P, T, E>(
             &energies,
             |candidate| {
                 thermal_checkpoint(cx)?;
-                let response =
-                    resolve(cx, candidate, &average).map_err(InertialThermalError::Resolve)?;
+                let source_rates = retained.as_ref().map_or(average.as_slice(), |trial| {
+                    trial.report().average_volume_flows_m3_s.as_slice()
+                });
+                let response = resolve(cx, candidate, source_rates)
+                    .map_err(InertialThermalError::Resolve)?;
                 thermal_checkpoint(cx)?;
-                let momentum = problem.momentum.propose(
-                    cx,
-                    &response.graph,
-                    &response.pressure_boundaries,
-                    &response.driving_pressure_pa,
-                    &average,
-                    target_s,
-                    controls.momentum,
-                )?;
+                let momentum = match retained {
+                    Some(trial) => trial.recheck(
+                        cx,
+                        &response.graph,
+                        &response.pressure_boundaries,
+                        &response.driving_pressure_pa,
+                        controls.momentum,
+                    )?,
+                    None => problem.momentum.propose(
+                        cx,
+                        &response.graph,
+                        &response.pressure_boundaries,
+                        &response.driving_pressure_pa,
+                        &average,
+                        target_s,
+                        controls.momentum,
+                    )?,
+                };
                 let coefficients = exchange(cx, candidate, &response.payload, momentum.report())
                     .map_err(InertialThermalError::Exchange)?;
                 thermal_checkpoint(cx)?;
@@ -332,7 +347,7 @@ pub fn advance_inertial_graph<'m, P, T, E>(
     };
     let difference =
         FallibleFiniteDifference::new(dimension, controls.finite_difference_step, |x: &[f64]| {
-            let trial = evaluate(x)?;
+            let trial = evaluate(x, None)?;
             let mut residual: Vec<_> = trial
                 .residual_j()
                 .iter()
@@ -374,7 +389,12 @@ pub fn advance_inertial_graph<'m, P, T, E>(
     if !run.report.converged {
         return Err(InertialThermalError::NotConverged(run.report));
     }
-    let final_trial = evaluate(&solver.x)?;
+    let final_proposal = evaluate(&solver.x, None)?;
+    let retained = final_proposal.payload().momentum.clone();
+    drop(final_proposal);
+    // Retain the trajectory, not its candidate-flow constitutive payload. This
+    // additional endpoint call is budgeted and reruns heat with fresh sources.
+    let final_trial = evaluate(&solver.x, Some(retained))?;
     let flow_residual = final_trial
         .payload()
         .momentum
@@ -433,3 +453,4 @@ fn nonnegative(value: f64) -> bool {
 
 #[cfg(test)]
 mod tests;
+
