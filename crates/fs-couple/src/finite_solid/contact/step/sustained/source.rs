@@ -31,8 +31,8 @@ use crate::finite_solid::contact::texture::{
     FiniteSolidContactTexture, FiniteSolidContactTextureError,
 };
 use crate::finite_solid::{FiniteSolidBody, FiniteSolidMaterial};
-use fs_contact::frictional_multicontact::{FrictionalContactDeterminacy, NormalVelocityLaw};
 use fs_contact::frictional_multicontact::elliptic::EllipticFrictionalContactResult;
+use fs_contact::frictional_multicontact::{FrictionalContactDeterminacy, NormalVelocityLaw};
 use fs_contact::interface_binding::thermal_friction::elliptic::history::{
     SourcePostcontactMotionControls, SourcePostcontactMotionError, SourcePostcontactMotionReport,
 };
@@ -302,6 +302,126 @@ impl<'a> FiniteSolidBody<'a> {
         ),
         FiniteSolidSustainedSourceTrajectoryError<E>,
     > {
+        self.sustained_source_with_loads(
+            surface,
+            scene,
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            None,
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            history,
+            source_controls,
+            binding,
+            conditions,
+            cx,
+        )
+    }
+
+    /// Advance the same original first-order sustained-contact map with uniform
+    /// pressure held on the bound closed material surface for this whole call.
+    /// Pressure acts at the current kick geometry; original -p Delta V work and
+    /// pressure splitting error remain separate. Every rejected interval retries
+    /// the same pressure, contact dispatch and private auxiliary state together.
+    /// This does not change the map into an exact energy/momentum or pressure flow.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn sustained_source_elliptic_sphere_trajectory_candidate_with_pressure<'law, E>(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_pa: f64,
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        history: &FiniteSolidSourceTrajectoryHistory<'a>,
+        source_controls: FiniteSolidSourceTrajectoryControls,
+        binding: impl Fn(
+            &FiniteSolidSphereSceneKey,
+            &FiniteSolidMixedContact,
+        ) -> Result<FiniteSolidSourceContactBinding<'law>, E>,
+        conditions: impl Fn(
+            &FiniteSolidSourceConditionContext<'_>,
+        ) -> Result<SourceFrictionConditions, E>,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            Vec<RigidBodyState>,
+            FiniteSolidSourceTrajectoryHistory<'a>,
+            FiniteSolidSustainedSourceTrajectoryReport,
+        ),
+        FiniteSolidSustainedSourceTrajectoryError<E>,
+    > {
+        self.sustained_source_with_loads(
+            surface,
+            scene,
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            Some(pressure_pa),
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            history,
+            source_controls,
+            binding,
+            conditions,
+            cx,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    fn sustained_source_with_loads<'law, E>(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        history: &FiniteSolidSourceTrajectoryHistory<'a>,
+        source_controls: FiniteSolidSourceTrajectoryControls,
+        binding: impl Fn(
+            &FiniteSolidSphereSceneKey,
+            &FiniteSolidMixedContact,
+        ) -> Result<FiniteSolidSourceContactBinding<'law>, E>,
+        conditions: impl Fn(
+            &FiniteSolidSourceConditionContext<'_>,
+        ) -> Result<SourceFrictionConditions, E>,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            Vec<RigidBodyState>,
+            FiniteSolidSourceTrajectoryHistory<'a>,
+            FiniteSolidSustainedSourceTrajectoryReport,
+        ),
+        FiniteSolidSustainedSourceTrajectoryError<E>,
+    > {
         use FiniteSolidSustainedSourceFailure as F;
         if !Arc::ptr_eq(&self.prepared, &history.prepared)
             || history.scene.as_ref() != scene
@@ -322,7 +442,7 @@ impl<'a> FiniteSolidBody<'a> {
         }
         self.sustained_sphere_trajectory_with(
             surface, scene, bodies, properties, nodal_forces_n, body_force_n_m3,
-            wrenches, gravity, duration_s, origin_m, controls, history,
+            uniform_pressure_pa, wrenches, gravity, duration_s, origin_m, controls, history,
             |context, auxiliary| {
                 let mut contacts = Vec::with_capacity(context.contacts.len());
                 let mut histories = Vec::with_capacity(context.contacts.len());

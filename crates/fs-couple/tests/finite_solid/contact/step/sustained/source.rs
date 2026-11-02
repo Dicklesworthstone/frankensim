@@ -128,7 +128,10 @@ fn loaded_sliding_records_postcontact_point_slip_and_original_source_path_once()
             let after_tangent = speed + 1.75 * jt;
             let work = &event.work[0];
             assert_eq!(work.contact_id, event.sources[0].kinematics.contact_id);
-            assert_eq!(work.authority, FiniteSolidFrictionHeatAuthority::UniqueSustainedImpulse);
+            assert_eq!(
+                work.authority,
+                FiniteSolidFrictionHeatAuthority::UniqueSustainedImpulse
+            );
             near(
                 work.tangential_impulse_work_j,
                 jt * 0.5 * (speed + after_tangent),
@@ -684,5 +687,89 @@ fn material_spin_convects_source_axis_components_without_inventing_slip() {
         }
         // Contact normal is -z, opposite the physical +z material rotation.
         near(spin, -omega * 4.0 * SOURCE_STEP, 2e-10);
+    });
+}
+
+#[test]
+fn sourced_sustained_pressure_preserves_load_work_and_late_history_rollback() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        let solid = super::pressure::pressure_body(&material, cx);
+        let original = solid.native_state().clone();
+        let surface = FiniteSolidContactSurface::new(&solid, 64, cx).unwrap();
+        let scene = FiniteSolidSphereScene::new(&[sphere(9, 0, 0.0, 0.0)], &[], 0).unwrap();
+        let initial = body_at(
+            [0.25, 0.25, -0.125 - GAP],
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+        );
+        let (_, law) = interface_source([1.0, 0.0]);
+        let history = FiniteSolidSourceTrajectoryHistory::new(&solid, &scene);
+        let (next, _, accepted, report) = solid
+            .sustained_source_elliptic_sphere_trajectory_candidate_with_pressure(
+                &surface,
+                &scene,
+                &[initial],
+                &[homogeneous_sphere()],
+                &[],
+                [0.0; 3],
+                3.0,
+                &[Wrench::ZERO],
+                upward_gravity(),
+                SOURCE_STEP,
+                ORIGIN,
+                source_controls(SOURCE_STEP),
+                &history,
+                Default::default(),
+                |_, _| Ok::<_, &'static str>(binding(&law)),
+                |_| Ok(conditions(300.0)),
+                cx,
+            )
+            .unwrap();
+        let pressure_work: f64 = report
+            .steps
+            .iter()
+            .map(|step| step.solid_drift.pressure_work_j)
+            .sum();
+        assert!(pressure_work > 0.0);
+        near(report.source_work_j, pressure_work, 2e-12);
+        near(report.work_energy_residual_j, 0.0, 2e-10);
+        same(report.linear_momentum_residual_kg_m_s, Vec3::ZERO, 2e-10);
+        same(report.angular_momentum_residual_kg_m2_s, Vec3::ZERO, 2e-10);
+        assert!(report.steps.iter().all(|step| step.event_data.is_some()));
+        assert_eq!(accepted.entries().len(), 1);
+        near(accepted.time_s(), next.native_state().t, 0.0);
+        let attempted_motion = Cell::new(false);
+        let refused = solid.sustained_source_elliptic_sphere_trajectory_candidate_with_pressure(
+            &surface,
+            &scene,
+            &[initial],
+            &[homogeneous_sphere()],
+            &[],
+            [0.0; 3],
+            3.0,
+            &[Wrench::ZERO],
+            upward_gravity(),
+            SOURCE_STEP,
+            ORIGIN,
+            source_controls(SOURCE_STEP),
+            &history,
+            Default::default(),
+            |_, _| Ok::<_, &'static str>(binding(&law)),
+            |context| {
+                if context.phase == FiniteSolidSourceConditionPhase::AcceptedMotion {
+                    attempted_motion.set(true);
+                    Err("refuse after pressure/contact/drift")
+                } else {
+                    Ok(conditions(300.0))
+                }
+            },
+            cx,
+        );
+        assert!(attempted_motion.get());
+        assert!(refused.is_err());
+        assert_eq!(solid.native_state(), &original);
+        assert_eq!(history.entries().len(), 0);
+        near(history.time_s(), 0.0, 0.0);
     });
 }

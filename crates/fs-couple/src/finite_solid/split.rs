@@ -1,6 +1,6 @@
 //! First-order force/contact/drift composition on the ORIGINAL numerical owners.
 //!
-//! Hyper3 evaluates the original elastic and held referential external forces.
+//! Hyper3 evaluates original elastic, held referential and uniform closed-pressure forces.
 //! The existing impulse owner applies h(F_external - F_internal) using the full
 //! supported consistent mass. A caller then resolves simultaneous contact at
 //! this unchanged configuration. Finally the original generalized-alpha owner
@@ -10,7 +10,7 @@
 //! The retained native history entry is the ACTUAL implicit solve of that
 //! kinetic subflow; it is not a full-solid midpoint-equilibrium receipt. The
 //! endpoint acceleration is subsequently recomputed by the original mass solve
-//! and original elastic force. It describes the smooth force component only;
+//! and original elastic/current-pressure forces. It describes the smooth force component only;
 //! contact impulses remain measures and are not disguised as smooth forces.
 //!
 //! The caller must admit the whole coupled geometric path, including omitted
@@ -20,6 +20,8 @@
 //! work defects are reported and gated, never allocated to physical heat.
 
 use std::sync::Arc;
+
+use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 
 use super::impulse::{
     FiniteSolidImpulse, FiniteSolidImpulseControls, FiniteSolidMomentum, ImpulseMass, moments,
@@ -43,7 +45,10 @@ pub struct FiniteSolidForceKick<'a> {
     /// Minus original elastic force times h. Objectivity requires zero resultant
     /// and moment; their measured residuals pass the requested impulse gates.
     pub internal_impulse: FiniteSolidMomentum,
+    /// Total held-load kick work, including the separately retained pressure part.
     pub source_impulse_work_j: f64,
+    /// Actual pressure impulse paired with the mean velocity across this kick.
+    pub pressure_impulse_work_j: f64,
     pub internal_impulse_work_j: f64,
     /// Native combined-impulse work minus separately accumulated source and
     /// internal work. This measured floating-point decomposition defect is
@@ -61,6 +66,7 @@ pub struct FiniteSolidForceKick<'a> {
     initial_history_len: usize,
     initial_last_step: Option<ImplicitStepTelemetry>,
     external_force_n: Vec<f64>,
+    pressure: Option<(Arc<ClosedTetPressureSurface>, f64)>,
     controls: FiniteSolidImpulseControls,
     // Public diagnostic fields may be edited by callers; only this immutable
     // binding supplies the numerical continuation and its physical accounting.
@@ -72,6 +78,7 @@ struct ForceKickBinding {
     duration_s: f64,
     origin_m: [f64; 3],
     source_work_j: f64,
+    pressure_work_j: f64,
     internal_work_j: f64,
     strain_before_j: f64,
     kick_work_residual_j: f64,
@@ -85,7 +92,7 @@ pub struct FiniteSolidContactDrift {
     /// SecondOrderState.history. This is not a full elastic midpoint step.
     pub time: ImplicitStepTelemetry,
     /// Original mass solve for smooth endpoint acceleration under the same held
-    /// loads and endpoint elastic force; excludes the contact impulse measure.
+    /// loads and endpoint elastic/pressure forces; excludes the contact impulse measure.
     pub endpoint_acceleration: SolveReport,
     pub before: FiniteSolidMomentum,
     pub after: FiniteSolidMomentum,
@@ -98,16 +105,21 @@ pub struct FiniteSolidContactDrift {
     pub kinetic_change_j: f64,
     pub strain_before_j: f64,
     pub strain_after_j: f64,
-    /// Exact work of held referential external loads along admitted displacement.
+    /// Held referential load work plus original uniform-pressure -p Delta V work.
     pub source_displacement_work_j: f64,
-    /// External kick work minus external displacement work.
+    /// Original closed-pressure work, already included in total source work.
+    pub pressure_work_j: f64,
+    /// All external kick work minus all external displacement work.
     pub source_splitting_work_j: f64,
+    /// Pressure kick work minus -p Delta V, gated separately from dead-load work.
+    pub pressure_splitting_work_j: f64,
     /// Strain-energy change plus minus-elastic-force kick work.
     pub elastic_splitting_work_j: f64,
     /// Sum of the two signed split defects, actual kick work residual and drift
     /// kinetic change. Contact storage/loss belongs to the separate impact map.
     pub integration_defect_j: f64,
-    /// Sum of their absolute magnitudes. Opposing source/elastic errors cannot
+    /// Sum of their absolute magnitudes, separating dead-load and pressure work.
+    /// Opposing source/pressure/elastic errors cannot
     /// cancel this per-solid admission gate.
     pub absolute_integration_defect_j: f64,
 }
@@ -118,7 +130,7 @@ impl<'a> FiniteSolidBody<'a> {
     /// Held loads and original internal forces act at the initial current
     /// configuration. This primitive must be followed by the contact map and
     /// `contact_drift_candidate`; it is not a complete mechanical timestep.
-    /// Pressure-bound bodies require a pressure-aware extension and refuse.
+    /// Pressure-bound bodies retain their explicit-pressure refusal on this entry.
     #[allow(clippy::too_many_arguments)]
     pub fn force_kick_candidate(
         &self,
@@ -129,21 +141,80 @@ impl<'a> FiniteSolidBody<'a> {
         controls: FiniteSolidImpulseControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidForceKick<'a>), FiniteSolidError> {
+        self.force_kick_with_pressure(
+            duration_s,
+            nodal_forces_n,
+            body_force_n_m3,
+            None,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    /// Stage the original first-order force kick with uniform pressure held on
+    /// the bound closed material surface. Current pressure forces act at the
+    /// same old geometry as the contact impulses. The matching drift retains
+    /// original -p Delta V work and bounds pressure splitting error separately.
+    /// This is not the midpoint energy/momentum map or an exact pressure flow.
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_kick_candidate_with_pressure(
+        &self,
+        duration_s: f64,
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_pa: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, FiniteSolidForceKick<'a>), FiniteSolidError> {
+        self.force_kick_with_pressure(
+            duration_s,
+            nodal_forces_n,
+            body_force_n_m3,
+            Some(pressure_pa),
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn force_kick_with_pressure(
+        &self,
+        duration_s: f64,
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
+        origin_m: [f64; 3],
+        controls: FiniteSolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, FiniteSolidForceKick<'a>), FiniteSolidError> {
         checkpoint(cx)?;
         if !duration_s.is_finite() || duration_s <= 0.0 {
             return Err(invalid("force kick requires a finite positive interval"));
         }
-        if self.pressure_surface.is_some() {
-            return Err(invalid(
-                "contact splitting requires explicit pressure support",
-            ));
-        }
+        let pressure = self.admit_split_pressure(uniform_pressure_pa, cx)?;
         let displacement = inflate(&self.state.q, &self.free, &self.fixed);
         let strain_before_j = self.prepared.stored_energy_j(&displacement, cx)?;
         let external = self
             .prepared
             .external_force_n(nodal_forces_n, body_force_n_m3, cx)?;
         let internal = self.prepared.internal_force(&displacement, cx)?;
+        let pressure_impulse = pressure
+            .as_ref()
+            .map(|(surface, value)| {
+                let mut impulse = surface.force_n(&displacement, *value, cx)?;
+                for (dof, value) in impulse.iter_mut().enumerate() {
+                    if dof % 4096 == 0 {
+                        checkpoint(cx)?;
+                    }
+                    *value *= duration_s;
+                }
+                finite(&impulse)?;
+                Ok::<_, FiniteSolidError>(impulse)
+            })
+            .transpose()?;
         let mut source = vec![0.0; external.len()];
         let mut elastic = vec![0.0; external.len()];
         let mut nodal_impulses = Vec::with_capacity(self.problem.nodes_m.len());
@@ -156,7 +227,11 @@ impl<'a> FiniteSolidBody<'a> {
                 let dof = 3 * node + axis;
                 source[dof] = duration_s * external[dof];
                 elastic[dof] = -duration_s * internal[dof];
-                *value = source[dof] + elastic[dof];
+                let applied_source = match &pressure_impulse {
+                    Some(pressure) => source[dof] + pressure[dof],
+                    None => source[dof],
+                };
+                *value = applied_source + elastic[dof];
             }
             finite(&impulse)?;
             nodal_impulses.push((node, impulse));
@@ -166,7 +241,25 @@ impl<'a> FiniteSolidBody<'a> {
         let (candidate, impulse) =
             self.nodal_impulse_candidate(&nodal_impulses, origin_m, controls, cx)?;
         let positions = self.current_positions(cx)?;
-        let source_impulse = moments(&positions, &source, origin_m, cx)?;
+        let mut source_impulse = moments(&positions, &source, origin_m, cx)?;
+        if let Some(pressure) = &pressure_impulse {
+            let momentum = moments(&positions, pressure, origin_m, cx)?;
+            if magnitude(momentum.linear_kg_m_s) > controls.linear_tolerance_kg_m_s
+                || magnitude(momentum.angular_kg_m2_s) > controls.angular_tolerance_kg_m2_s
+            {
+                return Err(FiniteSolidError::ImpulseBalance {
+                    linear_residual_kg_m_s: momentum.linear_kg_m_s,
+                    angular_residual_kg_m2_s: momentum.angular_kg_m2_s,
+                    work_residual_j: 0.0,
+                });
+            }
+            for axis in 0..3 {
+                source_impulse.linear_kg_m_s[axis] += momentum.linear_kg_m_s[axis];
+                source_impulse.angular_kg_m2_s[axis] += momentum.angular_kg_m2_s[axis];
+            }
+            finite(&source_impulse.linear_kg_m_s)?;
+            finite(&source_impulse.angular_kg_m2_s)?;
+        }
         let internal_impulse = moments(&positions, &elastic, origin_m, cx)?;
         if magnitude(internal_impulse.linear_kg_m_s) > controls.linear_tolerance_kg_m_s
             || magnitude(internal_impulse.angular_kg_m2_s) > controls.angular_tolerance_kg_m2_s
@@ -182,7 +275,15 @@ impl<'a> FiniteSolidBody<'a> {
         {
             average_v[dof] = 0.5 * before + 0.5 * after;
         }
-        let source_impulse_work_j = dot(&source, &average_v);
+        let dead_load_impulse_work_j = dot(&source, &average_v);
+        let pressure_impulse_work_j = pressure_impulse
+            .as_ref()
+            .map_or(0.0, |pressure| dot(pressure, &average_v));
+        let source_impulse_work_j = if pressure_impulse.is_some() {
+            dead_load_impulse_work_j + pressure_impulse_work_j
+        } else {
+            dead_load_impulse_work_j
+        };
         let internal_impulse_work_j = dot(&elastic, &average_v);
         let work_decomposition_residual_j =
             impulse.impulse_work_j - (source_impulse_work_j + internal_impulse_work_j);
@@ -196,6 +297,8 @@ impl<'a> FiniteSolidBody<'a> {
         });
         finite(&[
             source_impulse_work_j,
+            pressure_impulse_work_j,
+            dead_load_impulse_work_j,
             internal_impulse_work_j,
             work_decomposition_residual_j,
         ])?;
@@ -215,7 +318,8 @@ impl<'a> FiniteSolidBody<'a> {
         let binding = ForceKickBinding {
             duration_s,
             origin_m,
-            source_work_j: source_impulse_work_j,
+            source_work_j: dead_load_impulse_work_j,
+            pressure_work_j: pressure_impulse_work_j,
             internal_work_j: internal_impulse_work_j,
             strain_before_j,
             kick_work_residual_j: impulse.work_residual_j,
@@ -227,6 +331,7 @@ impl<'a> FiniteSolidBody<'a> {
             source_impulse,
             internal_impulse,
             source_impulse_work_j,
+            pressure_impulse_work_j,
             internal_impulse_work_j,
             work_decomposition_residual_j,
             linear_decomposition_residual_kg_m_s,
@@ -239,11 +344,38 @@ impl<'a> FiniteSolidBody<'a> {
             initial_history_len: self.state.history.len(),
             initial_last_step: self.state.history.last().cloned(),
             external_force_n: external,
+            pressure,
             controls,
             binding,
         };
         checkpoint(cx)?;
         Ok((candidate, report))
+    }
+
+    /// Admit the original pressure binding before a trajectory starts contact
+    /// work. Zero pressure takes the unchanged no-pressure numerical path.
+    pub(in crate::finite_solid) fn admit_split_pressure(
+        &self,
+        pressure_pa: Option<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<Option<(Arc<ClosedTetPressureSurface>, f64)>, FiniteSolidError> {
+        match pressure_pa {
+            Some(value) => {
+                let surface = self
+                    .pressure_surface
+                    .as_ref()
+                    .ok_or_else(|| invalid("body was not initialized with a pressure surface"))?;
+                if surface.validate_pressure(TetPressure::Uniform(value), cx)? {
+                    Ok(None)
+                } else {
+                    Ok(Some((Arc::clone(surface), value)))
+                }
+            }
+            None if self.pressure_surface.is_some() => Err(invalid(
+                "contact splitting requires explicit pressure support",
+            )),
+            None => Ok(None),
+        }
     }
 
     /// Stage the original kinetic subflow after the matching kick/contact map.
@@ -312,7 +444,9 @@ impl<'a> FiniteSolidBody<'a> {
             &self.free_mass,
             &self.free,
             &self.fixed,
-            None,
+            kick.pressure
+                .as_ref()
+                .map(|(surface, value)| (surface.as_ref(), TetPressure::Uniform(*value))),
             cx,
         );
         let acceleration = second_order_acceleration(
@@ -389,7 +523,18 @@ impl<'a> FiniteSolidBody<'a> {
             }
             source_displacement_work_j = force.mul_add(new - old, source_displacement_work_j);
         }
-        let source_splitting_work_j = binding.source_work_j - source_displacement_work_j;
+        let dead_load_splitting_work_j = binding.source_work_j - source_displacement_work_j;
+        let pressure_work_j = match &kick.pressure {
+            Some((surface, value)) => surface.work_j(&before_u, &after_u, *value, cx)?,
+            None => 0.0,
+        };
+        let pressure_splitting_work_j = binding.pressure_work_j - pressure_work_j;
+        let source_splitting_work_j = if kick.pressure.is_some() {
+            source_displacement_work_j += pressure_work_j;
+            dead_load_splitting_work_j + pressure_splitting_work_j
+        } else {
+            dead_load_splitting_work_j
+        };
         let elastic_splitting_work_j =
             (strain_after_j - binding.strain_before_j) + binding.internal_work_j;
         let integration_defect_j = source_splitting_work_j
@@ -397,7 +542,8 @@ impl<'a> FiniteSolidBody<'a> {
             + binding.kick_work_residual_j
             + binding.decomposition_residual_j
             + kinetic_change_j;
-        let absolute_integration_defect_j = source_splitting_work_j.abs()
+        let absolute_integration_defect_j = dead_load_splitting_work_j.abs()
+            + pressure_splitting_work_j.abs()
             + elastic_splitting_work_j.abs()
             + binding.kick_work_residual_j.abs()
             + binding.decomposition_residual_j.abs()
@@ -405,7 +551,10 @@ impl<'a> FiniteSolidBody<'a> {
         finite(&[
             kinetic_change_j,
             source_displacement_work_j,
+            pressure_work_j,
             source_splitting_work_j,
+            pressure_splitting_work_j,
+            dead_load_splitting_work_j,
             elastic_splitting_work_j,
             integration_defect_j,
             absolute_integration_defect_j,
@@ -430,7 +579,9 @@ impl<'a> FiniteSolidBody<'a> {
             strain_before_j: binding.strain_before_j,
             strain_after_j,
             source_displacement_work_j,
+            pressure_work_j,
             source_splitting_work_j,
+            pressure_splitting_work_j,
             elastic_splitting_work_j,
             integration_defect_j,
             absolute_integration_defect_j,

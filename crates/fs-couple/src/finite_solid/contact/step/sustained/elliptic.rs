@@ -71,6 +71,110 @@ impl<'a> FiniteSolidBody<'a> {
         duration_s: f64,
         origin_m: [f64; 3],
         controls: FiniteSolidSphereTrajectoryControls,
+        friction: impl FnMut(
+            &FiniteSolidSustainedContactContext<'_, 'a, '_>,
+            &FiniteSolidSphereSceneKey,
+            &FiniteSolidMixedContact,
+        ) -> Result<EllipticFriction, E>,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            Vec<RigidBodyState>,
+            FiniteSolidSustainedEllipticTrajectoryReport,
+        ),
+        FiniteSolidSustainedEllipticTrajectoryError<E>,
+    > {
+        self.sustained_elliptic_with_loads(
+            surface,
+            scene,
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            None,
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            friction,
+            cx,
+        )
+    }
+
+    /// Advance the same original first-order sustained-contact map with uniform
+    /// pressure held on the bound closed material surface for this whole call.
+    /// Pressure acts at the current kick geometry; original -p Delta V work and
+    /// pressure splitting error remain separate. Every rejected interval retries
+    /// the same pressure, contact dispatch and private auxiliary state together.
+    /// This does not change the map into an exact energy/momentum or pressure flow.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn sustained_elliptic_sphere_trajectory_candidate_with_pressure<E>(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_pa: f64,
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        friction: impl FnMut(
+            &FiniteSolidSustainedContactContext<'_, 'a, '_>,
+            &FiniteSolidSphereSceneKey,
+            &FiniteSolidMixedContact,
+        ) -> Result<EllipticFriction, E>,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            Vec<RigidBodyState>,
+            FiniteSolidSustainedEllipticTrajectoryReport,
+        ),
+        FiniteSolidSustainedEllipticTrajectoryError<E>,
+    > {
+        self.sustained_elliptic_with_loads(
+            surface,
+            scene,
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            Some(pressure_pa),
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            friction,
+            cx,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    fn sustained_elliptic_with_loads<E>(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
         mut friction: impl FnMut(
             &FiniteSolidSustainedContactContext<'_, 'a, '_>,
             &FiniteSolidSphereSceneKey,
@@ -92,6 +196,7 @@ impl<'a> FiniteSolidBody<'a> {
             properties,
             nodal_forces_n,
             body_force_n_m3,
+            uniform_pressure_pa,
             wrenches,
             gravity,
             duration_s,

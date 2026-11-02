@@ -305,6 +305,98 @@ impl<'a> FiniteSolidBody<'a> {
         ),
         FiniteSolidSustainedTrajectoryError,
     > {
+        self.sustained_circular_with_loads(
+            surface,
+            scene,
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            None,
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance the same original first-order sustained-contact map with uniform
+    /// pressure held on the bound closed material surface for this whole call.
+    /// Pressure acts at the current kick geometry; original -p Delta V work and
+    /// pressure splitting error remain separate. Every rejected interval retries
+    /// the same pressure, contact dispatch and private auxiliary state together.
+    /// This does not change the map into an exact energy/momentum or pressure flow.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn sustained_sphere_trajectory_candidate_with_pressure(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_pa: f64,
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            Vec<RigidBodyState>,
+            FiniteSolidSustainedTrajectoryReport,
+        ),
+        FiniteSolidSustainedTrajectoryError,
+    > {
+        self.sustained_circular_with_loads(
+            surface,
+            scene,
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            Some(pressure_pa),
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    fn sustained_circular_with_loads(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            Vec<RigidBodyState>,
+            FiniteSolidSustainedTrajectoryReport,
+        ),
+        FiniteSolidSustainedTrajectoryError,
+    > {
         let (solid, bodies, (), report) = self.sustained_sphere_trajectory_with(
             surface,
             scene,
@@ -312,6 +404,7 @@ impl<'a> FiniteSolidBody<'a> {
             properties,
             nodal_forces_n,
             body_force_n_m3,
+            uniform_pressure_pa,
             wrenches,
             gravity,
             duration_s,
@@ -359,6 +452,7 @@ impl<'a> FiniteSolidBody<'a> {
         properties: &[MassProperties],
         nodal_forces_n: &[(usize, f64)],
         body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
         wrenches: &[Wrench],
         gravity: Gravity,
         duration_s: f64,
@@ -415,6 +509,7 @@ impl<'a> FiniteSolidBody<'a> {
                 "finite origin and positive phase gates required",
             ));
         }
+        self.admit_split_pressure(uniform_pressure_pa, cx)?;
         let start_time = self.native_state().t;
         let end_time = start_time + duration_s;
         if !end_time.is_finite() || end_time <= start_time {
@@ -484,6 +579,7 @@ impl<'a> FiniteSolidBody<'a> {
                     &keys,
                     nodal_forces_n,
                     body_force_n_m3,
+                    uniform_pressure_pa,
                     wrenches,
                     gravity,
                     dt,
@@ -654,6 +750,7 @@ fn interval<'a, R: ImpactResponse, E, S: Clone, A>(
     contact_keys: &[FiniteSolidSphereSceneKey],
     nodal_forces_n: &[(usize, f64)],
     body_force_n_m3: [f64; 3],
+    uniform_pressure_pa: Option<f64>,
     wrenches: &[Wrench],
     gravity: Gravity,
     dt: f64,
@@ -682,14 +779,25 @@ fn interval<'a, R: ImpactResponse, E, S: Clone, A>(
     ) -> Result<Option<FiniteSolidSustainedRefusal>, E>,
     cx: &Cx<'_>,
 ) -> Result<Attempt<'a, R, S, A>, FiniteSolidSustainedTrajectoryError<R, E, A>> {
-    let (kicked_solid, solid_kick) = solid.force_kick_candidate(
-        dt,
-        nodal_forces_n,
-        body_force_n_m3,
-        origin_m,
-        controls.impact.solid_impulse,
-        cx,
-    )?;
+    let (kicked_solid, solid_kick) = match uniform_pressure_pa {
+        Some(pressure_pa) => solid.force_kick_candidate_with_pressure(
+            dt,
+            nodal_forces_n,
+            body_force_n_m3,
+            pressure_pa,
+            origin_m,
+            controls.impact.solid_impulse,
+            cx,
+        ),
+        None => solid.force_kick_candidate(
+            dt,
+            nodal_forces_n,
+            body_force_n_m3,
+            origin_m,
+            controls.impact.solid_impulse,
+            cx,
+        ),
+    }?;
     let mut kicks = Vec::with_capacity(bodies.len());
     let mut kicked_rigid = Vec::with_capacity(bodies.len());
     for ((&body, &property), &wrench) in bodies.iter().zip(properties).zip(wrenches) {

@@ -1,4 +1,7 @@
 //! Independent mass/force and finite-stretch oracles for the declared split.
+#[path = "split/pressure.rs"]
+mod pressure;
+
 use super::*;
 use fs_couple::finite_solid::impulse::{FiniteSolidImpulseControls, FiniteSolidPoint};
 

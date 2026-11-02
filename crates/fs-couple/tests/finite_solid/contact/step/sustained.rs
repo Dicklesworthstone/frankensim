@@ -4,6 +4,9 @@ mod elliptic;
 #[path = "sustained/source.rs"]
 mod source;
 
+#[path = "sustained/pressure.rs"]
+mod pressure;
+
 use super::*;
 use fs_couple::finite_solid::contact::scene::{
     FiniteSolidSphereScene, FiniteSolidSphereSceneKey, SpherePairLaw,

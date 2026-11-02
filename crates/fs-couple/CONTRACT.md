@@ -857,8 +857,8 @@ Focused fixtures cover physical quarter-turn anisotropic recoil, full world-rota
 
 ## Sustained mixed contact through original force and kinetic subflows
 
-`finite_solid::split` supplies the original prepared hyperelastic and held
-external forces to the existing consistent-mass impulse owner. After a separately
+`finite_solid::split` supplies the original prepared hyperelastic, held dead-load
+and explicit uniform-pressure forces to the existing consistent-mass impulse owner. After a separately
 admitted mixed contact event, the original generalized-alpha owner advances the
 mass-only kinetic subflow and records its genuine solve/time/history receipt.
 The original mass and force owners recompute smooth endpoint acceleration;
@@ -889,11 +889,11 @@ work-margin growth, avoiding repeated rediscovery of a stable contact step.
 
 Whole affine sphere-pair, deforming-triangle and element-orientation admission
 is shared with the transient driver; every negative actual witness gap refuses.
-The automatic scene has held circular coefficients. Directional source-history
-updates remain available through the separate mixed event API. This is a bounded
-FIRST-order split requiring refinement, not general Moreau--Jean, continuous
-forced Euler-top quadrature, true-flow CCD, pressure-aware contact, contact heat
-partition, or guaranteed resolution of grazing/Zeno behavior.
+Circular, explicit directional and source-dependent directional dispatches share
+this owner. Uniform pressure enters through the explicit entries below. This is
+a bounded FIRST-order split requiring refinement, not general Moreau--Jean,
+continuous forced Euler-top quadrature, true-flow CCD, contact heat partition, or
+guaranteed resolution of grazing/Zeno behavior.
 
 Eight independent fixtures cover finite stretch, original mass/current-arm force
 transfer, immutable continuation and atomic refusal, loaded rest with restitution
@@ -903,6 +903,61 @@ the deforming fixture independently uses the consistent face-mode mass 0.6 kg
 and fixed-apex reaction. Pinned formatting and source/math review passed. Native
 compilation and execution remain unverified because the pinned sparse dependency
 preflight and shared storage/memory constraints block the native test path.
+
+## Held uniform pressure in sustained finite-solid contact
+
+The explicit `force_kick_candidate_with_pressure`,
+`sustained_sphere_trajectory_candidate_with_pressure`,
+`sustained_elliptic_sphere_trajectory_candidate_with_pressure` and
+`sustained_source_elliptic_sphere_trajectory_candidate_with_pressure` entries
+extend the same original first-order force/contact/kinetic-drift owner. One
+finite signed uniform pressure is held on the body's original closed material
+boundary for the whole call. Legacy entries retain their explicit-pressure
+refusal; explicit zero pressure takes the unchanged no-pressure numerical path.
+
+The kick evaluates the original instantaneous pressure force at the SAME current
+configuration used by the consistent-mass impulse and simultaneous contact maps.
+Closed-pressure force and torque resultants pass independent impulse gates.
+Pressure, elastic and dead-load impulses enter one native mass solve, retaining
+actual stationary support impulses and their current-arm moments. A midpoint
+discrete-gradient pressure force is deliberately not substituted into this
+old-geometry split. The immutable continuation receipt retains the pressure
+surface and value independently of editable diagnostic fields.
+
+The original pressure owner supplies `-p Delta V` exactly once in displacement
+source work; fixed-position impacts contribute no pressure work. Original endpoint
+acceleration includes current pressure force. Pressure kick work, pressure
+displacement work and their signed splitting defect are separately visible.
+The existing refinement gate sums absolute dead-load, pressure and elastic
+splitting defects separately, so those errors cannot cancel or become heat.
+Circular, directional and original-source dispatches retain the same pressure
+through every shortened attempt; body candidates, accepted clocks and private
+source histories publish together after the existing final gates.
+
+This is still a first-order split requiring refinement. It does not admit
+nonuniform follower pressure, supply an exact pressure flow, partition contact
+loss into heat, or certify the full contact trajectory. Original topology,
+geometry, source-history and cancellation admission remain in their native owners.
+
+Five new public regression cases cover pressure force/work/endpoint acceleration,
+zero-pressure parity and refusal, circular/directional support balance, refinement
+with late step-budget rollback, and late source-history refusal. All nine changed
+Rust files passed pinned formatting and static native-owner review. The complete
+public fs-couple/Cx target could not compile because the local constellation lacks
+required siblings, including asupersync; these five public cases were not executed.
+
+A separate selected native numerical lane executed the original pressure
+force/volume/work arithmetic, native consistent-mass FGMRES, contact solve,
+generalized-alpha kinetic drift and rigid momentum maps on a canonical unit
+tetrahedron. Its pressure extraction omits Cx parameters/checkpoints and topology
+construction, supplying that known topology explicitly; public callback, retry,
+cancellation and topology admission are outside this execution claim. A free
+recoiling pressure-loaded contact balances work within 5.6e-16 J and momentum
+within 3.4e-25 in the fixture; halving the interval reduces the splitting defect
+approximately fourfold. A supported contact over one fixed interval with 4/16/64
+native steps has absolute defects 2.99017e-4/7.47559e-5/1.86891e-5 J, with work
+closure below 1.2e-15 J and support-inclusive momentum residuals below 4.2e-17.
+These analytic fixtures are refinement evidence, not experimental validation.
 
 ## Automatic complete mixed sphere-contact trajectories
 
