@@ -22,6 +22,8 @@ use fs_math::c64::C64;
 
 mod excitation;
 pub use excitation::{PorousLayerDissipation, PorousLayerExcitation, PorousLayerField};
+mod stack;
+pub use stack::{PorousLayerStack, PorousStackExcitation, PorousStackField};
 
 fn bad(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }
@@ -162,48 +164,57 @@ impl<'a> PorousLayer<'a> {
         &self,
         incident_pressure_pa: [C64; 2],
     ) -> Result<PorousLayerPower, DuctError> {
-        if !incident_pressure_pa.into_iter().all(finite) {
-            return Err(bad("porous layer incident pressure must be finite"));
-        }
-        let s = self.two_port.scattering;
-        let incident = incident_pressure_pa;
-        let outgoing = [
-            s[0] * incident[0] + s[1] * incident[1],
-            s[2] * incident[0] + s[3] * incident[1],
-        ];
-        let reference = self.two_port.reference_impedance;
-        let pressure = std::array::from_fn(|i| incident[i] + outgoing[i]);
-        let flow = std::array::from_fn(|i| (incident[i] - outgoing[i]).scale(1.0 / reference));
-        let amplitude_scale = 1.0 / reference.sqrt();
-        let incident_power = 0.5
-            * incident
-                .into_iter()
-                .map(|p| p.scale(amplitude_scale).norm_sq())
-                .sum::<f64>();
-        let outgoing_power = 0.5
-            * outgoing
-                .into_iter()
-                .map(|p| p.scale(amplitude_scale).norm_sq())
-                .sum::<f64>();
-        let absorbed = incident_power - outgoing_power;
-        if !outgoing.into_iter().all(finite)
-            || !pressure.into_iter().all(finite)
-            || !flow.into_iter().all(finite)
-            || !incident_power.is_finite()
-            || !outgoing_power.is_finite()
-            || !absorbed.is_finite()
-        {
-            return Err(bad("porous layer field or power is unrepresentable"));
-        }
-        Ok(PorousLayerPower {
-            outgoing_pressure_pa: outgoing,
-            pressure_pa: pressure,
-            inward_volume_flow_m3_s: flow,
-            incident_power_w: incident_power,
-            outgoing_power_w: outgoing_power,
-            absorbed_power_w: absorbed,
-        })
+        power_for_port(self.two_port, incident_pressure_pa)
     }
+}
+
+// The same external pressure/flow and peak-phasor account for a single layer
+// and its native composed stack. Keep the original evaluation order.
+fn power_for_port(
+    two_port: TwoPort,
+    incident_pressure_pa: [C64; 2],
+) -> Result<PorousLayerPower, DuctError> {
+    if !incident_pressure_pa.into_iter().all(finite) {
+        return Err(bad("porous layer incident pressure must be finite"));
+    }
+    let s = two_port.scattering;
+    let incident = incident_pressure_pa;
+    let outgoing = [
+        s[0] * incident[0] + s[1] * incident[1],
+        s[2] * incident[0] + s[3] * incident[1],
+    ];
+    let reference = two_port.reference_impedance;
+    let pressure = std::array::from_fn(|i| incident[i] + outgoing[i]);
+    let flow = std::array::from_fn(|i| (incident[i] - outgoing[i]).scale(1.0 / reference));
+    let amplitude_scale = 1.0 / reference.sqrt();
+    let incident_power = 0.5
+        * incident
+            .into_iter()
+            .map(|p| p.scale(amplitude_scale).norm_sq())
+            .sum::<f64>();
+    let outgoing_power = 0.5
+        * outgoing
+            .into_iter()
+            .map(|p| p.scale(amplitude_scale).norm_sq())
+            .sum::<f64>();
+    let absorbed = incident_power - outgoing_power;
+    if !outgoing.into_iter().all(finite)
+        || !pressure.into_iter().all(finite)
+        || !flow.into_iter().all(finite)
+        || !incident_power.is_finite()
+        || !outgoing_power.is_finite()
+        || !absorbed.is_finite()
+    {
+        return Err(bad("porous layer field or power is unrepresentable"));
+    }
+    Ok(PorousLayerPower {
+        outgoing_pressure_pa: outgoing,
+        pressure_pa: pressure,
+        inward_volume_flow_m3_s: flow,
+        incident_power_w: incident_power,
+        outgoing_power_w: outgoing_power,
+        absorbed_power_w: absorbed,
+    })
 }
 
 #[cfg(test)]

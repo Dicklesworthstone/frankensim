@@ -2520,6 +2520,43 @@ checks coherent absorbed power against the original viscous/thermal volume-loss
 integral, composes split layers and an actual fluid air gap, recovers the existing
 rigid-backed material impedance, and exercises thin/opaque limits and refusal.
 
+### Heterogeneous finite-stack interior fields and heating
+
+`porous::PorousLayerStack` retains an ordered nonempty slice of original
+`PorousLayer` objects, including each material and saturating-fluid response.
+All layers must have exactly the same admitted angular frequency, full face
+area and positive real pressure/flow wave reference. Native `ComposeOptions`
+bound layer count and feedback conditioning before publication. Preparation is
+O(layers) in time/storage and is cancellable during admission, composition and
+local-drive reconstruction. Unrepresentable total depth refuses.
+
+Native `TwoPort::star` prefix/suffix compositions solve both incoming waves at
+every physical cut under arbitrary coherent exterior illumination. Each cut
+uses the original `1-P22*Q11` feedback admission; no attenuated transmission,
+inlet-flow node, global ABCD matrix or growing wave is inverted. The resulting
+two-by-two exterior-to-local incident maps are reusable. One prepared
+`PorousStackExcitation` applies both exterior amplitudes before squaring and
+retains one original `PorousLayerExcitation` for every physical layer.
+
+Exterior pressure/flow/power uses the same arithmetic as a single layer;
+internal face exchanges are not counted as external acoustic input. The
+compensated positive sum of original viscous/thermal layer work is checked
+against the exterior power balance without rescaling heat. Local field/cell
+queries retain the native allocation-free constant work. Global field queries
+take O(log layers), and a global cell integral splits only at intersected
+interfaces. At an exact internal face, a global field query reports the
+right-hand material's local loss density; pressure and superficial volume flow
+remain continuous. No extra interface heat, effective-medium replacement or
+fluid/skeleton heat split is inferred.
+
+Four focused groups in `porous/stack/tests.rs` compare against a simultaneous
+independent interface-equation solve and volume quadrature, preserve one-layer
+and homogeneous-split fields/power/cell integrals, test coherent two-sided
+opaque stacks and physical reversal, and refuse inconsistent common domains,
+exhausted work, cancellation and inadmissible depth queries. These are normal
+incidence, rigid-frame, homogeneous-per-layer model checks; the original
+constitutive/source support and thermal-feedback exclusions remain unchanged.
+
 ## Multilayer local wall reflection
 
 `wall::PorousLayersLining` borrows the original `RigidBackedLayers` preparation
