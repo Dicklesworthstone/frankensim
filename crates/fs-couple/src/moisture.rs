@@ -9,8 +9,9 @@
 //! proposed endpoint. No clipped water, inferred wood diffusivity,
 //! instantaneous bulk equilibration or second material evaluator is used.
 //! An explicitly moisture-independent zero diffusivity denotes impermeability.
-//! Degenerate moisture-dependent laws that reach zero need a different wetting-
-//! front discretization and are refused, rather than pinning a dry front.
+//! Opt-in Kirchhoff transport integrates the same pinned source D(M) along each
+//! face's actual moisture interval, including wetting of a dry D(0)=0 state.
+//! The ordinary harmonic schemes continue to refuse such degenerate states.
 //!
 //! Transport uses fixed reference dry-skeleton volumes and dilute bound moisture.
 //! The solid consumer resolves quasistatic swelling in that reference chart.
@@ -30,6 +31,8 @@ mod binding;
 /// Three-dimensional principal-axis transport on actual Cartesian finite volumes.
 pub mod cartesian;
 mod implicit;
+/// Source-integrated nonlinear Fick fluxes, including degenerate dry fronts.
+mod kirchhoff;
 mod reservoir;
 pub mod plate;
 /// Directional swelling, compatible shape, stress and native vibration tangent.
@@ -48,8 +51,9 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::{
     MaterialError,
     state_point::{
-        MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
-        ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
+        KirchhoffMoistureDiffusivity, MaterialPropertySelection, MaterialStatePointError,
+        ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
+        resolve_material_state_point,
     },
 };
 use fs_qty::{
@@ -93,6 +97,11 @@ pub enum MoistureError {
         linear_iterations: usize,
         relative_residual: f64,
         water_balance_residual_kg: f64,
+    },
+    /// The bounded nonlinear half-cell/surface resistance solve did not settle.
+    KirchhoffSurfaceNotConverged {
+        iterations: usize,
+        fraction_bracket: [f64; 2],
     },
     /// A valid cell endpoint exceeded the caller's numerical change limit.
     ContentIncrement {
@@ -288,6 +297,7 @@ pub struct MoistureSlab {
     time_s: f64,
     identity: ContentHash,
     implicit_diffusivity: Option<MoistureNonlinearConfig>,
+    kirchhoff_diffusivity: Option<MoistureNonlinearConfig>,
 }
 
 /// Actual source evaluations and the water transferred over one interval.
@@ -317,6 +327,9 @@ pub struct MoistureStepReport {
     pub transport_start: Vec<ResolvedMaterialStatePoint>,
     /// All endpoint sources re-admitted before publication.
     pub transport_end: Vec<ResolvedMaterialStatePoint>,
+    /// Identity of the exact prepared source-line chart in Kirchhoff mode.
+    /// None retains the harmonic endpoint/lagged coefficient scheme.
+    pub kirchhoff_source: Option<ContentHash>,
     /// Original true-residual solver report.
     pub linear: SolveReport,
     /// Endpoint nonlinear residual/work, or None for accepted-start lagging.
@@ -343,6 +356,58 @@ impl MoistureSlab {
         initial_moisture: Vec<f64>,
         cx: &Cx<'_>,
     ) -> Result<Self, MoistureError> {
+        Self::new_configured(
+            card,
+            reference_point,
+            diffusivity_property,
+            selection,
+            geometry,
+            initial_moisture,
+            None,
+            cx,
+        )
+    }
+
+    /// Bind an endpoint-implicit, source-integrated homogeneous diffusion law.
+    /// The Kirchhoff potential has derivative D(M). Its face differences, not
+    /// harmonic endpoint samples, carry water through degenerate dry D(0)=0
+    /// states. The source must support its complete intervening moisture path.
+    /// No finite-speed/front-location or continuum-error certificate is implied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_kirchhoff(
+        card: MaterialCard,
+        reference_point: QueryPoint,
+        diffusivity_property: &str,
+        selection: MaterialPropertySelection,
+        geometry: MoistureSlabGeometry,
+        initial_moisture: Vec<f64>,
+        nonlinear: MoistureNonlinearConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        nonlinear.validate()?;
+        Self::new_configured(
+            card,
+            reference_point,
+            diffusivity_property,
+            selection,
+            geometry,
+            initial_moisture,
+            Some(nonlinear),
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_configured(
+        card: MaterialCard,
+        reference_point: QueryPoint,
+        diffusivity_property: &str,
+        selection: MaterialPropertySelection,
+        geometry: MoistureSlabGeometry,
+        initial_moisture: Vec<f64>,
+        kirchhoff_diffusivity: Option<MoistureNonlinearConfig>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
         poll(cx)?;
         let n = initial_moisture.len();
         if n == 0
@@ -367,6 +432,7 @@ impl MoistureSlab {
         let (reference, transport, dry_density_kg_m3) = binding::bind_source(
             &card, &reference_point, &[diffusivity_property], selection,
             geometry.maximum_moisture,
+            kirchhoff_diffusivity.is_some(),
         )?;
         let dry_mass_per_cell_kg =
             dry_density_kg_m3 * geometry.cross_section_m2 * (geometry.length_m / n as f64);
@@ -401,6 +467,7 @@ impl MoistureSlab {
             time_s: 0.0,
             identity: hash.finalize(),
             implicit_diffusivity: None,
+            kirchhoff_diffusivity,
         };
         if !positive(slab.wet_mass_kg()) || !slab.water_mass_kg().is_finite() {
             return Err(MoistureError::Invalid(
@@ -468,6 +535,21 @@ impl MoistureSlab {
     ) -> Result<Self, MoistureError> {
         config.validate()?;
         self.implicit_diffusivity = Some(config);
+        self.kirchhoff_diffusivity = None;
+        Ok(self)
+    }
+
+    /// Use the original source's exact Kirchhoff path integral for internal and
+    /// surface diffusion. Existing reservoir and mechanical consumers retain
+    /// this choice through their ordinary slab calls. Source preparation occurs
+    /// once per proposed interval; no interpolant is reused outside its support.
+    pub fn with_kirchhoff_diffusivity(
+        mut self,
+        config: MoistureNonlinearConfig,
+    ) -> Result<Self, MoistureError> {
+        config.validate()?;
+        self.implicit_diffusivity = None;
+        self.kirchhoff_diffusivity = Some(config);
         Ok(self)
     }
 
@@ -486,16 +568,26 @@ impl MoistureSlab {
             .iter()
             .map(|&m| {
                 poll(cx)?;
-                binding::resolve_transport_state(&self.card, &self.transport, &self.point_at(m)?)
+                self.transport_state_at(m)
             })
             .collect()
+    }
+
+    fn transport_state_at(&self, moisture: f64) -> Result<ResolvedMaterialStatePoint, MoistureError> {
+        let point = self.point_at(moisture)?;
+        if self.kirchhoff_diffusivity.is_some() {
+            Ok(self.transport.at_query_point(&self.card, &point)?)
+        } else {
+            binding::resolve_transport_state(&self.card, &self.transport, &point)
+        }
     }
 
     /// Propose one conservative interval without mutating the accepted slab.
     /// Face values are constant over this interval; cut intervals at RH events.
     /// Interior face diffusivity is the harmonic mean of adjacent cell values,
-    /// at the accepted start by default or endpoint in implicit mode. The
-    /// boundary lies half a cell from its cell center; optional
+    /// at the accepted start by default or endpoint in implicit mode. Kirchhoff
+    /// mode instead integrates the original D(M) over each face's endpoint path.
+    /// The boundary lies half a cell from its cell center; optional
     /// finite surface exchange adds its resistance in series. Numerical
     /// coefficients are refreshed on EVERY call; no stale material operator is reused.
     pub fn advance(
@@ -547,14 +639,17 @@ impl MoistureSlab {
                 ));
             }
             // Admission at the actual interface state, not just the interior.
-            binding::resolve_transport_state(&self.card, &self.transport, &self.point_at(m)?)?;
+            self.transport_state_at(m)?;
         }
         let start = self.transport_states(&self.moisture, cx)?;
+        let profile = self.kirchhoff_diffusivity
+            .map(|_| self.kirchhoff_profile(surface, cx))
+            .transpose()?;
         let (solution, endpoint, coupling, nonlinear) =
-            if let Some(controls) = self.implicit_diffusivity {
-                self.solve_implicit(dt_s, &faces, &start, config, controls, cx)?
+            if let Some(controls) = self.kirchhoff_diffusivity.or(self.implicit_diffusivity) {
+                self.solve_implicit(dt_s, &faces, &start, config, controls, profile.as_ref(), cx)?
             } else {
-                let (operator, rhs, coupling) = self.transport_system(dt_s, &faces, &start, cx)?;
+                let (operator, rhs, coupling) = self.transport_system(dt_s, &faces, &start, None, cx)?;
                 let solution = operator.solve_direct(&rhs, config.linear, cx)?;
                 if !solution.report.converged_euclidean() {
                     return Err(MoistureError::NotConverged(solution.report));
@@ -608,11 +703,7 @@ impl MoistureSlab {
                 };
                 // The real surface, not just the reservoir and cell center,
                 // must be inside the original transport source domain.
-                binding::resolve_transport_state(
-                    &self.card,
-                    &self.transport,
-                    &self.point_at(value)?,
-                )?;
+                self.transport_state_at(value)?;
                 actual_surface[side] = Some(value);
             }
         }
@@ -647,6 +738,7 @@ impl MoistureSlab {
             water_balance_residual_kg: residual,
             transport_start: start,
             transport_end: endpoint,
+            kirchhoff_source: profile.as_ref().map(KirchhoffMoistureDiffusivity::identity),
             linear: solution.report,
             nonlinear,
         };
@@ -663,6 +755,7 @@ impl MoistureSlab {
         dt_s: f64,
         faces: &[ResolvedMoistureFace; 2],
         states: &[ResolvedMaterialStatePoint],
+        profile: Option<&KirchhoffMoistureDiffusivity>,
         cx: &Cx<'_>,
     ) -> Result<(DiffusionStep, Vec<f64>, [(f64, f64); 2]), MoistureError> {
         poll(cx)?;
@@ -687,17 +780,41 @@ impl MoistureSlab {
             diagonal: vec![1.0; n],
             off: Vec::with_capacity(n - 1),
         };
-        for pair in d.windows(2) {
-            operator.off.push(interior_coupling(scale, pair[0], pair[1])?);
+        for (i, pair) in d.windows(2).enumerate() {
+            if i % 128 == 0 {
+                poll(cx)?;
+            }
+            let coefficient = if let Some(profile) = profile {
+                kirchhoff::scaled_diffusivity(
+                    scale,
+                    profile.mean_diffusivity(
+                        states[i].state_coordinate("moisture_content")
+                            .expect("admitted moisture coordinate"),
+                        states[i + 1].state_coordinate("moisture_content")
+                            .expect("admitted moisture coordinate"),
+                    )?,
+                )?
+            } else {
+                interior_coupling(scale, pair[0], pair[1])?
+            };
+            operator.off.push(coefficient);
         }
         for (i, &a) in operator.off.iter().enumerate() {
             operator.diagonal[i] += a;
             operator.diagonal[i + 1] += a;
         }
-        let coupling = [
-            faces[0].coupling(dt_s, dx, d[0], scale)?,
-            faces[1].coupling(dt_s, dx, d[n - 1], scale)?,
-        ];
+        let mut coupling = [(0.0, 0.0); 2];
+        for (side, i) in [0, n - 1].into_iter().enumerate() {
+            coupling[side] = if let Some(profile) = profile {
+                kirchhoff::surface_coupling(
+                    profile, &faces[side], dt_s, dx,
+                    states[i].state_coordinate("moisture_content")
+                        .expect("admitted moisture coordinate"), scale, cx,
+                )?
+            } else {
+                faces[side].coupling(dt_s, dx, d[i], scale)?
+            };
+        }
         let boundary = [coupling[0].0, coupling[1].0];
         let mut rhs = self.moisture.clone();
         for (side, i) in [0, n - 1].into_iter().enumerate() {

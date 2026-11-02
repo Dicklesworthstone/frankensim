@@ -9104,8 +9104,8 @@ Slab and Cartesian source bindings accept an explicitly moisture-independent
 zero diffusivity as an impermeable direction. Its internal and external bulk
 fluxes are exactly zero; finite positive surface emission still equilibrates
 the massless interface. Missing or negative coefficients refuse. A
-moisture-dependent law reaching zero also refuses: the harmonic discretization
-does not establish a degenerate wetting-front model. This admission does not
+moisture-dependent law reaching zero refuses in the ordinary harmonic modes:
+those discretizations do not establish a degenerate wetting-front model. This admission does not
 infer permeability or experimental authority from a material name.
 
 `moisture::plate::MoisturePlate` maps that same inventory to the existing
@@ -9145,7 +9145,7 @@ identity. Every Picard iteration re-resolves the original pinned diffusivity
 at the proposed local moisture. Harmonic interior face values and half-cell /
 finite-surface series resistance use those coefficients. The native `fs-la`
 tridiagonal owner supplies O(n) factorization/substitution; bounded linear
-defect corrections reuse its factors. The original lagged checked-CG mode
+defect corrections reuse its factors. The original lagged-coefficient mode
 remains the default.
 
 Acceptance independently recomputes the complete endpoint-dependent operator
@@ -9165,6 +9165,32 @@ The original isothermal, homogeneous, dilute-bound-water physical limits
 remain. Authored G1/G3 regressions independently check a nonlinear one-cell
 quadratic, sealed cosine decay on a stiff 256-cell grid with one direct solve,
 the coupled finite-vapor quadratic, replay and transactional work refusal.
+
+### Source-integrated nonlinear moisture transport
+
+`MoistureSlab::new_kirchhoff` and `with_kirchhoff_diffusivity` select fully
+implicit homogeneous Fick transport through the original pinned source's
+Kirchhoff potential. Each interval prepares one exact, continuously supported
+D(M) source line over its maximum-principle moisture span. Internal and
+Dirichlet half-cell fluxes use potential secants. Finite surface emission
+solves the monotone nonlinear half-cell/surface balance with a 128-iteration
+ceiling and rechecks the reported surface against the same source integral.
+A dry state with D(0)=0 may therefore absorb moisture; an identically zero
+source still blocks transport.
+
+The existing SPD Picard/tridiagonal solve, endpoint source queries, true
+residual, water/increment/work and transactional publication gates remain.
+`MoistureStepReport::kirchhoff_source` identifies the actual prepared chart.
+Original finite-reservoir and mechanical consumers retain this configured
+slab through their existing transport calls. The ordinary harmonic modes
+retain their previous degenerate-source refusal.
+
+This is homogeneous isothermal reference-volume transport. Unlike-material
+partition laws, hysteresis, sorption heat, explicit front-location tracking
+and continuum-error certificates require additional models or evidence.
+Authored regressions cover analytical dry uptake, nonlinear square-root
+steady flow, finite-emission uptake/desorption, a finite vapor reservoir,
+negative intervening source data and nonlinear work refusal.
 
 ### Source-backed finite surface moisture exchange
 

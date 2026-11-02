@@ -28,6 +28,8 @@ mod surface;
 mod solution;
 #[path = "moisture/implicit.rs"]
 mod implicit;
+#[path = "moisture/kirchhoff.rs"]
+mod kirchhoff;
 #[path = "moisture/cartesian.rs"]
 mod cartesian;
 #[path = "moisture/adaptive.rs"]

@@ -114,6 +114,7 @@ impl MoistureCartesian {
             &diffusivity_properties,
             selection,
             geometry.maximum_moisture,
+            false,
         )?;
         let spacing =
             std::array::from_fn::<_, 3, _>(|k| geometry.lengths_m[k] / geometry.cells[k] as f64);

@@ -9,6 +9,7 @@ pub(super) fn bind_source(
     diffusivities: &[&str],
     selection: MaterialPropertySelection,
     maximum_moisture: f64,
+    allow_degenerate: bool,
 ) -> Result<(ResolvedMaterialStatePoint, ResolvedMaterialStatePoint, f64), MoistureError> {
     if point.axis_quantities().get("temperature")
         != Some(&quantity(QuantityKind::AbsoluteTemperature))
@@ -94,7 +95,9 @@ pub(super) fn bind_source(
         &requirements,
         MaterialPropertySelection::PinnedByProperty(pins),
     )?;
-    admit_transport_state(&transport)?;
+    if !allow_degenerate {
+        admit_transport_state(&transport)?;
+    }
     let dry_density = reference
         .property("density")
         .expect("required density")

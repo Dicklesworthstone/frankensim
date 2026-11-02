@@ -53,6 +53,7 @@ fn linear_error(error: TridiagonalError) -> MoistureError {
 }
 
 impl MoistureSlab {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn solve_implicit(
         &self,
         dt: f64,
@@ -60,6 +61,7 @@ impl MoistureSlab {
         start: &[ResolvedMaterialStatePoint],
         step: MoistureStepConfig,
         controls: MoistureNonlinearConfig,
+        profile: Option<&KirchhoffMoistureDiffusivity>,
         cx: &Cx<'_>,
     ) -> Result<
         (
@@ -73,7 +75,7 @@ impl MoistureSlab {
         let n = self.moisture.len();
         let mut workspace = TridiagonalWorkspace::new(n).map_err(linear_error)?;
         let mut iterate = self.moisture.clone();
-        let mut system = self.transport_system(dt, faces, start, cx)?;
+        let mut system = self.transport_system(dt, faces, start, profile, cx)?;
         let mut total_solves = 0;
         for iteration in 1..=controls.maximum_iterations {
             poll(cx)?;
@@ -88,7 +90,7 @@ impl MoistureSlab {
             // Re-query the ORIGINAL pinned source at every proposed endpoint.
             // Unsupported intermediate or final states refuse transactionally.
             let endpoint = self.transport_states(&solution.x, cx)?;
-            let endpoint_system = self.transport_system(dt, faces, &endpoint, cx)?;
+            let endpoint_system = self.transport_system(dt, faces, &endpoint, profile, cx)?;
             let (_, relative_residual) =
                 endpoint_system
                     .0
@@ -123,7 +125,7 @@ impl MoistureSlab {
                     *old = controls.relaxation.mul_add(candidate - *old, *old);
                 }
                 let states = self.transport_states(&iterate, cx)?;
-                system = self.transport_system(dt, faces, &states, cx)?;
+                system = self.transport_system(dt, faces, &states, profile, cx)?;
             }
         }
         unreachable!("validated positive nonlinear iteration budget")
