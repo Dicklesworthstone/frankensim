@@ -1376,6 +1376,12 @@ homogenization, the P2 milestone.
   the consistent tangent eliminates the transverse block by its Schur
   complement. Bounded Newton/backtracking uses the original principal-stretch
   domain and refuses nonpositive transverse stiffness or exhausted budgets.
+  If unit thickness has nonpositive transverse stiffness, initialization tries
+  a volume-preserving thickness. An out-of-domain target is approached by
+  bounded admissibility bisection until a stable seed is found; the same
+  `max_backtracks` cap bounds this search. No accepted deformation or material
+  stiffness is clipped. Large biaxial extension is covered for both admissible
+  and inadmissible isochoric seeds, plus compression and decoupled bulk laws.
   Traction normalization uses inverse transverse-compliance trace, so a large
   bulk penalty cannot hide a shear-scale residual. The energy/stress-only path
   forms only a three-direction local AD Hessian; the full path forms the native

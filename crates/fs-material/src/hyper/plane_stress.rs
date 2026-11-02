@@ -30,7 +30,8 @@ pub struct PlaneStressSettings {
     pub relative_tolerance: f64,
     /// Maximum accepted Newton updates, excluding the initial evaluation.
     pub max_iterations: usize,
-    /// Maximum trial step lengths per Newton update (1, 1/2, 1/4, ...).
+    /// Maximum candidate seeds if unit thickness is unstable, and maximum
+    /// trial step lengths per Newton update (1, 1/2, 1/4, ...).
     pub max_backtracks: usize,
 }
 
@@ -182,9 +183,13 @@ impl Hyperelastic {
     /// Relax all three transverse tractions using bounded, residual-decreasing
     /// Newton steps, without forming the full 9×9 constitutive Hessian.
     ///
-    /// The initial transverse column is `[0,0,1]`. Every trial must retain
-    /// positive orientation and the original material's principal-stretch
-    /// domain. An unstable transverse block or exhausted solve budget refuses.
+    /// The initial transverse column is `[0,0,1]`. If its tangent is unstable,
+    /// try a volume-preserving thickness; if that target leaves the material
+    /// domain, bisect toward it from the admitted thickness to find a stable
+    /// seed. At most `max_backtracks` candidate seeds are tried. Every trial
+    /// retains positive orientation and the original principal-stretch domain;
+    /// no stiffness or deformation is clipped. An unresolved stable seed or
+    /// exhausted equilibrium budget refuses.
     /// Iteration and backtracking are bounded; spatial callers poll cancellation
     /// between quadrature points. No history or warm-start state is mutated.
     pub fn plane_stress_state(
@@ -222,7 +227,51 @@ impl Hyperelastic {
             1.0,
         ];
         let mut p = self.piola(&f)?;
-        let mut block = PositiveBlock::new(self.transverse_tangent(&f))?;
+        let mut block = match PositiveBlock::new(self.transverse_tangent(&f)) {
+            Ok(block) => block,
+            Err(initial_error) => {
+                // A poor seed need not be a physical instability. In particular,
+                // log-squared bulk energy can have negative thickness curvature
+                // at large J even though its traction-free root is stable.
+                let target = 1.0 / determinant;
+                if !(target.is_finite() && target > 0.0) || target == 1.0 {
+                    return Err(initial_error);
+                }
+                let (mut toward, mut admitted) = (target, 1.0);
+                let mut candidate = target;
+                let mut seed = None;
+                for _ in 0..settings.max_backtracks {
+                    let mut trial = f;
+                    trial[8] = candidate;
+                    match self.piola(&trial) {
+                        Ok(stress) => {
+                            if let Ok(stable) = PositiveBlock::new(self.transverse_tangent(&trial))
+                            {
+                                seed = Some((trial, stress, stable));
+                                break;
+                            }
+                            // Admissible but unstable: continue toward J=1.
+                            admitted = candidate;
+                        }
+                        Err(MaterialError::State { .. }) => toward = candidate,
+                        Err(error) => return Err(error),
+                    }
+                    let next = 0.5 * toward + 0.5 * admitted;
+                    if next == candidate {
+                        break;
+                    }
+                    candidate = next;
+                }
+                let Some((gradient, stress, stable)) = seed else {
+                    return Err(state_error(
+                        "no admissible stable transverse seed within the initialization budget",
+                    ));
+                };
+                f = gradient;
+                p = stress;
+                stable
+            }
+        };
         let gradient_norm = in_plane[0]
             .hypot(in_plane[1])
             .hypot(in_plane[2])

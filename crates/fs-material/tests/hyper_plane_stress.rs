@@ -377,3 +377,147 @@ fn g0_inverted_states_material_domain_and_exhausted_budgets_refuse() {
             .is_err()
     );
 }
+
+// Independent one-dimensional bracket: the scalar equations used below are
+// strictly increasing for positive thickness. No native stress or tangent is
+// used to locate their root.
+fn thickness_root(limit: f64, equation: impl Fn(f64) -> f64) -> f64 {
+    let (mut lo, mut hi) = (1.0 / limit, limit);
+    assert!(equation(lo) < 0.0 && equation(hi) > 0.0);
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        if equation(mid) < 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+#[test]
+fn g0_large_biaxial_loading_reaches_stable_thickness_despite_an_unstable_unit_seed() {
+    for (stretch, limit, mu, lambda) in [
+        (2.0, 4.0, 2.0, 40.0),
+        // 1/area = 1/64 lies below the lower material stretch 1/32,
+        // but the traction-free thickness is about 0.036 and is admissible.
+        (8.0, 32.0, 2.0, 2.4),
+        // Large compression exercises the unchanged stable-seed route.
+        (0.25, 8.0, 2.0, 40.0),
+    ] {
+        let law = Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, limit).unwrap();
+        let area = stretch * stretch;
+        let initial = [stretch, 0.0, 0.0, 0.0, stretch, 0.0, 0.0, 0.0, 1.0];
+        if stretch > 1.0 {
+            assert!(law.tangent(&initial).unwrap()[8][8] < 0.0);
+        }
+        if area > limit {
+            let mut isochoric = initial;
+            isochoric[8] = 1.0 / area;
+            assert!(law.piola(&isochoric).is_err());
+            assert!(
+                law.plane_stress(
+                    &[stretch, 0.0, 0.0, stretch],
+                    PlaneStressSettings {
+                        max_backtracks: 1,
+                        ..PlaneStressSettings::default()
+                    }
+                )
+                .is_err()
+            );
+        }
+        let expected = thickness_root(limit, |t| mu * (t * t - 1.0) + lambda * (area * t).ln());
+        let response = law
+            .plane_stress(
+                &[stretch, 0.0, 0.0, stretch],
+                PlaneStressSettings::default(),
+            )
+            .unwrap();
+        close(response.deformation_gradient[8], expected, 1.0, 2e-11);
+        let stress = law.piola(&response.deformation_gradient).unwrap();
+        for i in TRANSVERSE {
+            close(stress[i], 0.0, mu, 1e-10);
+        }
+        close(
+            response.piola[0],
+            mu * (stretch - expected * expected / stretch),
+            mu,
+            1e-10,
+        );
+        close(response.piola[3], response.piola[0], mu, 1e-13);
+    }
+}
+
+#[test]
+fn g0_large_biaxial_decoupled_laws_retain_their_original_volumetric_response() {
+    let (mu, kappa, stretch, limit) = (2.0, 40.0, 2.0, 4.0);
+    let area = stretch * stretch;
+    for quadratic in [false, true] {
+        let volumetric = if quadratic {
+            Volumetric::Quadratic { kappa }
+        } else {
+            Volumetric::LogSquared { kappa }
+        };
+        let ogden = Hyperelastic::new(
+            HyperelasticModel::Ogden {
+                terms: vec![OgdenTerm {
+                    mu_pa: mu,
+                    alpha: 2.0,
+                }],
+                volumetric,
+            },
+            limit,
+        )
+        .unwrap();
+        let hgo = Hyperelastic::new(
+            HyperelasticModel::HolzapfelGasserOgden {
+                c10: mu / 2.0,
+                k1: 0.0,
+                k2: 1.0,
+                dispersion: 0.0,
+                fibres: vec![],
+                invariants: FibreInvariants::Isochoric,
+                volumetric,
+            },
+            limit,
+        )
+        .unwrap();
+        let expected = thickness_root(limit, |t| {
+            let j = area * t;
+            let distortional = (2.0 * mu / 3.0) * j.powf(-2.0 / 3.0) * (t * t - stretch * stretch);
+            distortional
+                + if quadratic {
+                    kappa * j * (j - 1.0)
+                } else {
+                    kappa * j.ln()
+                }
+        });
+        let mut models = vec![ogden, hgo];
+        if quadratic {
+            models.push(
+                Hyperelastic::new(
+                    HyperelasticModel::MooneyRivlin {
+                        c10: mu / 2.0,
+                        c01: 0.0,
+                        kappa,
+                    },
+                    limit,
+                )
+                .unwrap(),
+            );
+        }
+        for law in models {
+            let response = law
+                .plane_stress(
+                    &[stretch, 0.0, 0.0, stretch],
+                    PlaneStressSettings::default(),
+                )
+                .unwrap();
+            close(response.deformation_gradient[8], expected, 1.0, 2e-11);
+            let stress = law.piola(&response.deformation_gradient).unwrap();
+            for i in TRANSVERSE {
+                close(stress[i], 0.0, mu, 1e-10);
+            }
+        }
+    }
+}
