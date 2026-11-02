@@ -26,10 +26,10 @@
 //! gate (ml-006) is the executable witness.
 
 use fs_duct::modal::{
-    ModalResponse, mm_input_impedance, mm_input_impedance_flanged, mm_input_impedance_load,
-    mm_input_impedance_tabulated,
-    modal_reflection_from_impedance,
+    ModalResponse, PreparedModalDuct, modal_reflection_from_impedance,
 };
+#[cfg(test)]
+use fs_duct::modal::{mm_input_impedance, mm_input_impedance_load, mm_input_impedance_tabulated};
 use fs_duct::{Duct, DuctError, LossModel, MouthLoad, Segment, TabulatedLoad, Termination};
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
@@ -289,99 +289,45 @@ pub struct MmLineBank {
 /// Evaluate `mm_input_impedance`, falling back to `LossModel::Bessel` only when
 /// `LossModel::WideTube` refuses a low-frequency DFT bin below `s = 10`.
 fn mm_impedance_at(
-    duct: &Duct,
+    geometry: &PreparedModalDuct<'_>,
     gas: &GasState,
     omega: f64,
-    config: &MmLineConfig,
+    loss: LossModel,
     termination: Termination,
 ) -> Result<ModalResponse, MmLineError> {
-    match mm_input_impedance(
-        duct,
-        gas,
-        omega,
-        config.loss,
-        termination,
-        config.n_modes,
-        config.extra_slices,
-    ) {
-        Ok(r) => Ok(r),
-        Err(DuctError::TooNarrow { .. }) if matches!(config.loss, LossModel::WideTube) => Ok(
-            mm_input_impedance(
-                duct,
-                gas,
-                omega,
-                LossModel::Bessel,
-                termination,
-                config.n_modes,
-                config.extra_slices,
-            )?,
-        ),
-        Err(e) => Err(e.into()),
-    }
+    with_bessel_fallback(loss, |loss| {
+        geometry.input_impedance(gas, omega, loss, termination)
+    })
 }
 
 /// Sample the plane-mode load for one DFT bin under the splice policy.
 fn resolve_load(
-    duct: &Duct,
+    geometry: &PreparedModalDuct<'_>,
     gas: &GasState,
     omega: f64,
-    config: &MmLineConfig,
+    loss: LossModel,
     load: &MmLoad<'_>,
 ) -> Result<(ModalResponse, bool), MmLineError> {
     match load {
-        MmLoad::Analytic(t) => Ok((mm_impedance_at(duct, gas, omega, config, *t)?, false)),
+        MmLoad::Analytic(t) => Ok((mm_impedance_at(geometry, gas, omega, loss, *t)?, false)),
         MmLoad::FlangedModal(exterior) => {
-            let response = |loss| mm_input_impedance_flanged(
-                duct, gas, exterior, omega, loss, config.n_modes, config.extra_slices,
-            );
-            Ok((with_bessel_fallback(config.loss, response)?, false))
+            let response = |loss| geometry.input_impedance_flanged(gas, exterior, omega, loss);
+            Ok((with_bessel_fallback(loss, response)?, false))
         }
         MmLoad::Tabulated(table) => {
-            let response = |loss| {
-                mm_input_impedance_tabulated(
-                    duct,
-                    gas,
-                    omega,
-                    loss,
-                    table,
-                    config.n_modes,
-                    config.extra_slices,
-                )
-            };
-            Ok((with_bessel_fallback(config.loss, response)?, true))
+            let response = |loss| geometry.input_impedance_tabulated(gas, omega, loss, table);
+            Ok((with_bessel_fallback(loss, response)?, true))
         }
         MmLoad::Matched => Err(matched_refusal()),
         MmLoad::TabulatedWithFallback { table, fallback } => {
             let (lo, hi) = table.support();
             if omega >= lo && omega <= hi {
-                let resp = match mm_input_impedance_tabulated(
-                    duct,
-                    gas,
-                    omega,
-                    config.loss,
-                    table,
-                    config.n_modes,
-                    config.extra_slices,
-                ) {
-                    Ok(r) => r,
-                    Err(DuctError::TooNarrow { .. })
-                        if matches!(config.loss, LossModel::WideTube) =>
-                    {
-                        mm_input_impedance_tabulated(
-                            duct,
-                            gas,
-                            omega,
-                            LossModel::Bessel,
-                            table,
-                            config.n_modes,
-                            config.extra_slices,
-                        )?
-                    }
-                    Err(e) => return Err(e.into()),
-                };
+                let resp = with_bessel_fallback(loss, |loss| {
+                    geometry.input_impedance_tabulated(gas, omega, loss, table)
+                })?;
                 Ok((resp, true))
             } else {
-                Ok((mm_impedance_at(duct, gas, omega, config, *fallback)?, false))
+                Ok((mm_impedance_at(geometry, gas, omega, loss, *fallback)?, false))
             }
         }
     }
@@ -446,28 +392,25 @@ fn validate_mouth_load(
 }
 
 fn dc_response(
-    duct: &Duct,
+    geometry: &PreparedModalDuct<'_>,
     gas: &GasState,
-    config: &MmLineConfig,
+    loss: LossModel,
     load: &MmLoad<'_>,
 ) -> Result<ModalResponse, MmLineError> {
     if let MmLoad::Tabulated(table) = load {
         let mouth = table.mouth().ok_or(MmLineError::Invalid {
             what: "tabulated line requires a mouth reference and DC limit",
         })?;
-        with_bessel_fallback(config.loss, |loss| {
-            mm_input_impedance_load(
-                duct,
+        with_bessel_fallback(loss, |loss| {
+            geometry.input_impedance_load(
                 gas,
                 1.0e-3,
                 loss,
                 C64::new(mouth.dc_impedance, 0.0),
-                config.n_modes,
-                config.extra_slices,
             )
         })
     } else {
-        resolve_load(duct, gas, 1.0e-3, config, load).map(|(response, _)| response)
+        resolve_load(geometry, gas, 1.0e-3, loss, load).map(|(response, _)| response)
     }
 }
 
@@ -582,21 +525,26 @@ impl MmLineBank {
                 ladder.max_taps,
             )?;
         }
+        // Every frequency and ladder rung sees the same source geometry and
+        // radial basis. Gas-dependent propagation and mouth loads stay live.
+        let geometries: Vec<_> = ducts.iter()
+            .map(|duct| PreparedModalDuct::new(duct, config.n_modes, config.extra_slices))
+            .collect::<Result<_, _>>()?;
 
         // DC: each combo's own plane-reflectance limit (DC flow resistance
         // keeps a lossy bore off -1). A fixed -1 that disagrees with bin 1 is
         // a spectral jump, which leaves an N-independent tail in the IR.
-        let r_dc: Vec<C64> = ducts
+        let r_dc: Vec<C64> = geometries
             .iter()
             .enumerate()
-            .map(|(combo, duct)| {
+            .map(|(combo, geometry)| {
                 let load = loads.at(combo);
                 if load.is_strict() {
-                    let response = dc_response(duct, gas, config, &load)?;
+                    let response = dc_response(geometry, gas, config.loss, &load)?;
                     let r = admit_plane_reflection(reflectance(response.plane_impedance, zc0))?;
                     return Ok(C64::new(r.re, 0.0));
                 }
-                Ok(resolve_load(duct, gas, 1.0e-3, config, &load)
+                Ok(resolve_load(geometry, gas, 1.0e-3, config.loss, &load)
                     .ok()
                     .map(|(resp, _)| {
                         reflectance(
@@ -646,7 +594,7 @@ impl MmLineBank {
             rungs_tried += 1;
             let half = n_fft / 2;
             let mut all_converged = true;
-            for (combo, duct) in ducts.iter().enumerate() {
+            for (combo, geometry) in geometries.iter().enumerate() {
                 let load = loads.at(combo);
                 let rung = &mut rungs[combo];
                 let mut r_pos = vec![C64::ZERO; half + 1];
@@ -664,7 +612,7 @@ impl MmLineBank {
                 };
                 for k in fresh {
                     let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-                    let (response, table) = resolve_load(duct, gas, omega, config, &load)?;
+                    let (response, table) = resolve_load(geometry, gas, omega, config.loss, &load)?;
                     from_table[k] = table;
                     r_pos[k] = reflectance(
                         C64::new(response.plane_impedance.re, response.plane_impedance.im),
@@ -1053,15 +1001,15 @@ fn image_peak_error(r_pos: &[C64], taps: &[f64], dt: f64) -> (usize, f64, f64) {
 /// tends to `zc0` above cutoff, so `zc0` is each mode's propagating limit
 /// (the same reference as [`MmLineBank`]).
 fn matrix_reflection_at(
-    duct: &Duct,
+    geometry: &PreparedModalDuct<'_>,
     gas: &GasState,
     omega: f64,
-    config: &MmLineConfig,
+    loss: LossModel,
     load: &MmLoad<'_>,
     zc0: f64,
 ) -> Result<Vec<C64>, MmLineError> {
-    let n = config.n_modes;
-    let (response, _) = resolve_load(duct, gas, omega, config, load)?;
+    let n = geometry.n_modes();
+    let (response, _) = resolve_load(geometry, gas, omega, loss, load)?;
     let zc = vec![C64::new(zc0, 0.0); n];
     Ok(modal_reflection_from_impedance(
         &response.impedance_matrix,
@@ -1179,11 +1127,14 @@ impl MatrixFirLine {
             });
         }
         validate_mouth_load(duct, gas, &load, config.sample_rate_hz, ladder.max_taps)?;
+        let geometry = PreparedModalDuct::new_controlled(
+            duct, n, config.extra_slices, &mut cancelled,
+        )?;
         // DC: the matrix's own low-frequency limit, kept real for a real IR.
         // The old fixed -1 (plane) / 0 (higher modes) disagreed with bin 1:
         // a spectral jump, which leaves an N-independent tail in the IR.
         matrix_admission::poll(&mut cancelled)?;
-        let response = dc_response(duct, gas, config, &load)?;
+        let response = dc_response(&geometry, gas, config.loss, &load)?;
         let dc = modal_reflection_from_impedance(
             &response.impedance_matrix,
             &vec![C64::new(zc0, 0.0); n],
@@ -1231,7 +1182,7 @@ impl MatrixFirLine {
             for k in fresh {
                 matrix_admission::poll(&mut cancelled)?;
                 let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-                let r = matrix_reflection_at(duct, gas, omega, config, &load, zc0)?;
+                let r = matrix_reflection_at(&geometry, gas, omega, config.loss, &load, zc0)?;
                 matrix_admission::reflection_gain(&r, n, &mut cancelled)?;
                 for (r_pos, &v) in next.iter_mut().zip(&r) {
                     r_pos[k] = v;
@@ -1647,11 +1598,13 @@ mod mm_line_tests {
             // The shared FIR owner intentionally applies a Nyquist rolloff and
             // folds a precursor skirt. Check the original physical response
             // before that treatment, including the floor and Nyquist bins.
+            let geometry = PreparedModalDuct::new(&duct, config.n_modes, config.extra_slices)
+                .expect("same bank geometry");
             for bin in [1, receipt.n_fft / 8, receipt.n_fft / 4, receipt.n_fft / 2] {
                 let omega =
                     core::f64::consts::TAU * bin as f64 * f64::from(rate) / receipt.n_fft as f64;
                 let (response, from_table) =
-                    resolve_load(&duct, &gas, omega, &config, &MmLoad::Tabulated(&table)).unwrap();
+                    resolve_load(&geometry, &gas, omega, config.loss, &MmLoad::Tabulated(&table)).unwrap();
                 assert!(from_table);
                 let phase = omega * 16.0 / f64::from(rate);
                 let expected = C64::new(phase.cos(), phase.sin()).scale((0.7 - 1.0) / (0.7 + 1.0));

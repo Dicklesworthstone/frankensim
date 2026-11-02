@@ -64,6 +64,9 @@ pub mod outlet;
 /// Full-state lossless continuous-profile spatial image for exact time evolution.
 pub mod time_domain;
 
+mod prepared;
+pub use prepared::PreparedModalDuct;
+
 /// Continuous multimodal propagation on smooth profiles (M2.1-W3b).
 mod riccati;
 pub use riccati::{
@@ -690,12 +693,28 @@ fn mm_evaluate(
             what: "omega must be finite and positive",
         });
     }
-    for segment in &duct.segments {
-        segment.validate()?;
+    let geometry = PreparedModalDuct::new(duct, n_modes, extra_slices)?;
+    mm_evaluate_prepared(&geometry, state, omega, loss, load, observe_mouth)
+}
+
+// The original frequency-dependent reflection recurrence. Only the geometry,
+// radial eigenvalues and radius-junction projections are prepared once.
+fn mm_evaluate_prepared(
+    geometry: &PreparedModalDuct<'_>,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: MmLoad<'_>,
+    observe_mouth: bool,
+) -> Result<outlet::MouthResponse, DuctError> {
+    if !(omega.is_finite() && omega > 0.0) {
+        return Err(DuctError::BadParameter {
+            what: "omega must be finite and positive",
+        });
     }
-    let n = n_modes;
-    let stations = stations_of(duct, extra_slices)?;
-    let gammas = j1_roots(n_modes - 1)?;
+    let n = geometry.n_modes;
+    let stations = &geometry.stations;
+    let gammas = &geometry.gammas;
 
     // Mouth: plane-mode load from the scalar termination machinery or a
     // tabulated bake.
@@ -709,7 +728,7 @@ fn mm_evaluate(
             (None, omega * mouth / exterior.sound_speed)
         }
     };
-    let mouth_wave = modal_wave(state, mouth, omega, loss, &gammas)?;
+    let mouth_wave = modal_wave(state, mouth, omega, loss, gammas)?;
     let mut min_shear = mouth_wave.shear_number;
     // Ideal boundary conditions apply pointwise over the entire mouth:
     // U = Zc^-1 (a-b) = 0 gives R = +I, and P = a+b = 0 gives R = -I.
@@ -762,23 +781,21 @@ fn mm_evaluate(
     propagate(&mut r, &mut mouth_flow, &wave_here, stations[last].length)?;
     for idx in (0..last).rev() {
         let st = &stations[idx];
-        let wave_up = modal_wave(state, st.radius, omega, loss, &gammas)?;
+        let wave_up = modal_wave(state, st.radius, omega, loss, gammas)?;
         min_shear = min_shear.min(wave_up.shear_number);
-        if (st.radius - wave_here.radius).abs() > 1e-12 * st.radius.max(1e-300) {
+        if let Some(junction) = &geometry.junctions[idx] {
             let z_down = impedance_from_reflection(&r, &wave_here.zc, n)?;
-            let z_up = if st.radius < wave_here.radius {
+            let f = &junction.projection;
+            let ft = &junction.transpose;
+            let z_up = if junction.expansion {
                 // Expansion along propagation: upstream is the SMALL side.
-                let f = junction_projection(st.radius, wave_here.radius, &gammas, n);
-                let ft = transpose(&f, n);
-                outlet::junction(&mut mouth_flow, &r, &wave_here.zc, &wave_up.zc, &f, true, n)?;
-                mat_mul(&mat_mul(&f, &z_down, n), &ft, n)
+                outlet::junction(&mut mouth_flow, &r, &wave_here.zc, &wave_up.zc, f, true, n)?;
+                mat_mul(&mat_mul(f, &z_down, n), ft, n)
             } else {
                 // Contraction along propagation: downstream is SMALL.
-                let f = junction_projection(wave_here.radius, st.radius, &gammas, n);
-                let ft = transpose(&f, n);
                 let z_inv = mat_inv(&z_down, n)?;
-                outlet::junction(&mut mouth_flow, &r, &wave_here.zc, &wave_up.zc, &f, false, n)?;
-                mat_inv(&mat_mul(&mat_mul(&ft, &z_inv, n), &f, n), n)?
+                outlet::junction(&mut mouth_flow, &r, &wave_here.zc, &wave_up.zc, f, false, n)?;
+                mat_inv(&mat_mul(&mat_mul(ft, &z_inv, n), f, n), n)?
             };
             r = reflection_from_impedance(&z_up, &wave_up.zc, n)?;
         }

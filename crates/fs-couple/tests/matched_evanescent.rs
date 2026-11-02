@@ -5,8 +5,8 @@ use fs_couple::driving_point::LineLadder;
 use fs_couple::mm_line::evanescent::{
     EvanescentConfig, EvanescentError, MatchedEvanescentPorts, UniformModalLine,
 };
-use fs_couple::mm_line::{MmLineBank, MmLineConfig, MmLoad};
-use fs_duct::modal::{j1_roots, modal_characteristic_impedances};
+use fs_couple::mm_line::{MatrixFirLine, MmLineBank, MmLineConfig, MmLoad};
+use fs_duct::modal::{PreparedModalDuct, j1_roots, modal_characteristic_impedances};
 use fs_duct::{Duct, LossModel, Segment, TabulatedLoad, TabulatedMouth, Termination};
 use fs_material::gas::{GasSpec, GasState};
 use fs_math::c64::C64;
@@ -277,6 +277,35 @@ fn prior_uniform_fir_refusal_now_has_a_qualified_causal_runtime_and_unchanged_pl
             &MmLineConfig { n_modes: 1, ..cfg },
         )
         .unwrap();
+        let plane_cfg = MmLineConfig { n_modes: 1, ..cfg };
+        let prepared = PreparedModalDuct::new(&duct, 1, plane_cfg.extra_slices).unwrap();
+        let matrix = MatrixFirLine::new(&duct, &gas, MmLoad::Tabulated(&table), &plane_cfg)
+            .unwrap();
+        assert_eq!(matrix.zc0().to_bits(), plane.zc0().to_bits());
+        assert!(matrix.receipt().peak_operator_norm <= 1.0 + fs_couple::driving_point::PASSIVITY_TOL);
+        // Independent lossless-cylinder oracle: the load reflection returns
+        // after the original sixteen-sample round trip, R_in = R_load exp(2ikL).
+        // Probe off the realization bins so this also checks frequency ownership.
+        for frequency in [413.0, 1703.0, 3961.0] {
+            let omega = TAU * frequency;
+            let phase = omega * 16.0 / f64::from(rate);
+            let propagation = C64::new(phase.cos(), phase.sin());
+            for (termination, load_reflection) in [
+                (Termination::Closed, 1.0),
+                (Termination::IdealOpen, -1.0),
+            ] {
+                let response = prepared.input_impedance(
+                    &gas, omega, LossModel::Lossless, termination,
+                ).unwrap();
+                assert!((reflection(response.plane_impedance, plane.zc0())
+                    - propagation.scale(load_reflection)).abs() < 2e-11);
+            }
+            let response = prepared.input_impedance_tabulated(
+                &gas, omega, LossModel::Lossless, &table,
+            ).unwrap();
+            let expected = propagation.scale((0.7 - 1.0) / (0.7 + 1.0));
+            assert!((reflection(response.plane_impedance, plane.zc0()) - expected).abs() < 2e-11);
+        }
         assert!((line.plane_receipt().round_trip_samples - 16.0).abs() < 1e-12);
         assert!(line.higher_ports().receipts()[0].reflection_error_bound < 0.01);
         for n in 0..512 {
