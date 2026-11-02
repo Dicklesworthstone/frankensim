@@ -7,7 +7,9 @@
 //! sampled tones. [`ToneFitPlan`] retains arbitrary physical frequencies,
 //! including inharmonic partials and beating sources. [`HarmonicFitPlan`]
 //! supplies integer multiples of one fundamental to the same numerical owner.
-//! Neither plan estimates frequency or removes unmodeled tones.
+//! Neither plan estimates frequency or removes unmodeled tones. For a supplied
+//! local pitch seed, [`refine_harmonic_frequency`] jointly refines the common
+//! fundamental and amplitudes within explicit bounds and evaluation budgets.
 //!
 //! The returned peak phasor is `a_h + i b_h` for `exp(-i w_h t)`, referenced
 //! to the first sample. It is twice the conjugate of the positive-frequency
@@ -16,6 +18,13 @@
 use crate::C64;
 use fs_la::factor::{Qr, qr};
 use fs_math::det;
+
+#[path = "harmonic/frequency.rs"]
+mod frequency;
+pub use frequency::{
+    HarmonicFrequencyBudget, HarmonicFrequencyError, HarmonicFrequencyFit,
+    refine_harmonic_frequency,
+};
 
 /// Explicit storage and conditioning limits for a prepared harmonic fit.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -370,13 +379,7 @@ impl FitDesign {
         let entries = sample_count
             .checked_mul(columns)
             .ok_or_else(|| invalid("harmonic design size overflows"))?;
-        let workspace_bytes = entries
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(sample_count))
-            .and_then(|n| columns.checked_mul(3).and_then(|p| n.checked_add(p)))
-            .and_then(|n| tones.checked_mul(3).and_then(|h| n.checked_add(h)))
-            .and_then(|n| n.checked_mul(core::mem::size_of::<f64>()))
-            .ok_or_else(|| invalid("harmonic workspace size overflows"))?;
+        let workspace_bytes = fit_workspace_bytes(sample_count, tones)?;
         if workspace_bytes > budget.max_workspace_bytes {
             return Err(HarmonicFitError::BudgetExceeded {
                 required_bytes: workspace_bytes,
@@ -497,6 +500,19 @@ impl FitDesign {
         }
         Ok(HarmonicFitSummary { dc, residual_rms })
     }
+}
+
+// Shared admission calculation for fixed-frequency plans and local refinement.
+// Refinement adds its retained sample/derivative buffers before any allocation.
+fn fit_workspace_bytes(samples: usize, tones: usize) -> Result<usize, HarmonicFitError> {
+    let columns = tones.checked_mul(2).and_then(|n| n.checked_add(1));
+    columns
+        .and_then(|p| samples.checked_mul(p).and_then(|n| n.checked_mul(2)))
+        .and_then(|n| n.checked_add(samples))
+        .and_then(|n| columns?.checked_mul(3).and_then(|p| n.checked_add(p)))
+        .and_then(|n| tones.checked_mul(3).and_then(|h| n.checked_add(h)))
+        .and_then(|n| n.checked_mul(core::mem::size_of::<f64>()))
+        .ok_or_else(|| invalid("harmonic workspace size overflows"))
 }
 
 // The complete triangular inverse norm costs O(p^3), with O(p) scratch.

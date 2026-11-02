@@ -170,6 +170,35 @@ closer than one FFT bin, phase origin, shared numerical results, and unresolved
 tone refusal. This is known-frequency estimation, not blind source separation
 or a claim that arbitrary close tones can be resolved in noisy records.
 
+### Local fundamental-frequency refinement
+
+`harmonic::refine_harmonic_frequency` refines an independently supplied pitch
+seed inside a positive frequency interval. Every candidate jointly refits DC
+and harmonic amplitudes through the same Householder QR owner. Its analytic
+sinusoid derivative is projected outside the fitted columns; a scalar projected
+Gauss--Newton correction uses monotone backtracking and a quarter-cycle step
+cap across the record. This follows the variable-projection separation of
+linear and nonlinear parameters described by
+[O'Leary and Rust](https://www.cs.umd.edu/users/oleary/software/varpro.pdf).
+
+The explicit budget bounds all candidate QR evaluations and conservative peak
+numeric storage, including refinement scratch. Nyquist admission covers the
+entire search interval. Normalized fitting and search arithmetic preserve
+physical unit scaling. Missing fundamentals can be inferred from the declared
+upper harmonic pattern; no synthetic fundamental amplitude is introduced.
+An active bound, unidentifiable frequency, exhausted work, or floating-point
+stagnation produces a typed refusal rather than a nominally converged spectrum.
+
+This offline local estimator costs O(E (N K^2 + K^3)) for at most E fits and
+O(N K) storage. It does not discover pitch octaves, certify uncertainty, track
+time-varying frequency, or remove inharmonic energy. Frequency tolerance is a
+numerical correction criterion. Tests recover a missing-fundamental record
+whose coarse pitch hid weak harmonics, preserve phase/DC across unit scales,
+retain an omitted inharmonic residual, and enforce storage, search and work
+limits. Same-build deterministic arithmetic is retained; no new cross-ISA or
+mid-factorization cancellation claim is made.
+
+
 ## Determinism class
 The complex stage path is **bit-deterministic cross-ISA**: twiddles come from
 fs-math's strict functions and the transform body uses fixed-order `+`, `−`,
@@ -312,3 +341,4 @@ authority-policy receipt move.
   oracle uses platform trigonometry, so its observed output digests are
   same-run diagnostics rather than cross-ISA goldens.
 - `C64` is not a public complex-arithmetic library; only what the FFT needs.
+
