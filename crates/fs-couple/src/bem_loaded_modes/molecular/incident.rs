@@ -17,6 +17,9 @@ pub struct MolecularIncidentLimits {
     /// 16*[cases*(12*p+8*m+8*r+2*d+64)+16*p+4*r+4*m+2*t]. Here p/m/r are panel,
     /// mode and receiver counts; d=modes+memories, t=all incident source terms.
     /// The last term covers finite-source position/clearance scratch.
+    /// Adaptive receivers replace cases*8*r+4*r with cases*12*r+6*r, retaining
+    /// motion and total estimates plus shared paired-field scratch. Their
+    /// separately admitted adaptive operator rows are outside this reservation.
     /// Allocator overhead and the
     /// separately admitted original operator/source bank are excluded.
     pub maximum_live_bytes: usize,
@@ -70,6 +73,10 @@ pub struct MolecularIncidentResponse {
     pub total_fluid_reaction: Vec<C64>,
     /// Same declared order/locations as the prepared harmonic receiver bank.
     pub total_receivers: Vec<HarmonicField>,
+    /// Absolute blocked-field plus coherent-motion quadrature estimates.
+    /// They exclude source, solve and boundary discretization error and do not
+    /// bound relative error near interference nulls. None denotes centroid use.
+    pub total_receiver_quadrature_error_estimates: Option<Vec<MolecularReceiverError>>,
     pub total_surface_pressure_pa: Vec<C64>,
     pub total_surface_normal_velocity_m_s: Vec<C64>,
     pub power: MolecularIncidentPower,
@@ -102,6 +109,23 @@ struct BoundaryField {
     velocity: Vec<C64>,
 }
 
+fn sum_receiver(
+    pressure_pa: C64,
+    particle_velocity_m_s: [C64; 3],
+    radiated: &HarmonicField,
+) -> Result<HarmonicField, MolecularModesError> {
+    let total = HarmonicField {
+        pressure_pa: pressure_pa + radiated.pressure_pa,
+        particle_velocity_m_s: std::array::from_fn(|axis| {
+            particle_velocity_m_s[axis] + radiated.particle_velocity_m_s[axis]
+        }),
+    };
+    if !finite(total.pressure_pa) || total.particle_velocity_m_s.iter().any(|&u| !finite(u)) {
+        return Err(bad("molecular illuminated total receiver overflow").into());
+    }
+    Ok(total)
+}
+
 impl PreparedMolecularLoadedModes<'_> {
     /// Illuminate the ORIGINAL source, solve its resulting loaded motion, and
     /// observe the coherent incident + blocked scattering + motion field.
@@ -112,6 +136,9 @@ impl PreparedMolecularLoadedModes<'_> {
     /// previously cached mechanical/memory LU and motion boundary/receiver bank
     /// are reused. The source bank's earlier BEM LU is not retained or claimed
     /// to be reused. All original material arms and mutual loads survive.
+    /// If adaptive receivers were selected, one additional receiver row bank
+    /// serves the complete blocked incident batch. Motion and total estimates
+    /// retain the same original receiver choice without new motion quadrature.
     ///
     /// The same immutable molecular exterior, wall laws, formulation, original
     /// source modes and receiver declarations used at preparation are enforced.
@@ -149,10 +176,21 @@ impl PreparedMolecularLoadedModes<'_> {
                 IncidentField::Sources(sources) => sources.len() as u128,
             })
             .sum();
+        let (case_receiver_entries, shared_receiver_entries) = if self.near_field_options.is_some()
+        {
+            (12, 6)
+        } else {
+            (8, 4)
+        };
         let live_bytes = 16
-            * (c as u128 * (12 * p as u128 + 8 * m as u128 + 8 * r as u128 + 2 * d as u128 + 64)
+            * (c as u128
+                * (12 * p as u128
+                    + 8 * m as u128
+                    + case_receiver_entries * r as u128
+                    + 2 * d as u128
+                    + 64)
                 + 16 * p as u128
-                + 4 * r as u128
+                + shared_receiver_entries * r as u128
                 + 4 * m as u128
                 + 2 * source_terms);
         let panel_products = c as u128 * p as u128 * (4 * m as u128 + 4 * r as u128 + 24);
@@ -190,6 +228,21 @@ impl PreparedMolecularLoadedModes<'_> {
             },
             &mut cancelled,
         )?;
+        let points: Vec<_> = receivers.iter().map(|r| r.position_m).collect();
+        // The entire incident batch belongs to this same immutable exterior.
+        // Prepare once before consuming it; each case only contracts its traces.
+        let blocked_observer = self
+            .near_field_options
+            .map(|options| {
+                blocked[0].solution().scattered.prepare_near_field(
+                    &self.source.surface,
+                    &points,
+                    self.minimum_clearance_m,
+                    options,
+                    &mut cancelled,
+                )
+            })
+            .transpose()?;
         let mut acoustic_forces = Vec::with_capacity(c);
         let mut effective_forces = Vec::with_capacity(c);
         for (field, &force) in blocked.iter().zip(mechanical_forces) {
@@ -210,7 +263,6 @@ impl PreparedMolecularLoadedModes<'_> {
         }
         let force_columns: Vec<_> = effective_forces.iter().map(Vec::as_slice).collect();
         let motion = self.harmonic_response_batch(&force_columns, &mut cancelled)?;
-        let points: Vec<_> = receivers.iter().map(|r| r.position_m).collect();
         let mut output = Vec::with_capacity(c);
         for (((field, acoustic_force), motion), &external_force) in blocked
             .into_iter()
@@ -219,26 +271,64 @@ impl PreparedMolecularLoadedModes<'_> {
             .zip(mechanical_forces)
         {
             poll(&mut cancelled)?;
-            let samples = field.total_pressure_velocity_at(
-                &points,
-                self.minimum_clearance_m,
-                &mut cancelled,
-            )?;
-            let mut total_receivers = Vec::with_capacity(r);
-            for (blocked, radiated) in samples.into_iter().zip(&motion.receivers) {
-                let total = HarmonicField {
-                    pressure_pa: blocked.pressure_pa + radiated.pressure_pa,
-                    particle_velocity_m_s: std::array::from_fn(|axis| {
-                        blocked.velocity_m_s[axis] + radiated.particle_velocity_m_s[axis]
-                    }),
+            let (total_receivers, total_receiver_quadrature_error_estimates) =
+                if let Some(observer) = &blocked_observer {
+                    let samples =
+                        field.total_pressure_velocity_with_near_field(observer, &mut cancelled)?;
+                    // Allocate retained totals only after the observer releases
+                    // its temporary analytic-incident sample vector.
+                    let mut totals = Vec::with_capacity(r);
+                    let mut estimates = Vec::with_capacity(r);
+                    let motion_estimates = motion
+                        .receiver_quadrature_error_estimates
+                        .as_ref()
+                        .ok_or_else(|| {
+                            bad("adaptive molecular motion has no receiver estimates")
+                        })?;
+                    for i in 0..r {
+                        totals.push(sum_receiver(
+                            samples.scalar.pressure[i],
+                            samples.particle_velocity_m_s[i],
+                            &motion.receivers[i],
+                        )?);
+                        let estimate = MolecularReceiverError {
+                            pressure_pa: samples.scalar.quadrature_error_estimate_pa[i]
+                                + motion_estimates[i].pressure_pa,
+                            particle_velocity_m_s: std::array::from_fn(|axis| {
+                                samples.quadrature_error_estimate_m_s[i][axis]
+                                    + motion_estimates[i].particle_velocity_m_s[axis]
+                            }),
+                        };
+                        if !estimate.pressure_pa.is_finite()
+                            || estimate
+                                .particle_velocity_m_s
+                                .iter()
+                                .any(|v| !v.is_finite())
+                        {
+                            return Err(bad(
+                                "molecular total receiver quadrature estimate overflow",
+                            )
+                            .into());
+                        }
+                        estimates.push(estimate);
+                    }
+                    (totals, Some(estimates))
+                } else {
+                    let samples = field.total_pressure_velocity_at(
+                        &points,
+                        self.minimum_clearance_m,
+                        &mut cancelled,
+                    )?;
+                    let mut totals = Vec::with_capacity(r);
+                    for (blocked, radiated) in samples.into_iter().zip(&motion.receivers) {
+                        totals.push(sum_receiver(
+                            blocked.pressure_pa,
+                            blocked.velocity_m_s,
+                            radiated,
+                        )?);
+                    }
+                    (totals, None)
                 };
-                if !finite(total.pressure_pa)
-                    || total.particle_velocity_m_s.iter().any(|&u| !finite(u))
-                {
-                    return Err(bad("molecular illuminated total receiver overflow").into());
-                }
-                total_receivers.push(total);
-            }
             let blocked = BoundaryField {
                 pressure: field.solution().total_pressure_pa(),
                 velocity: field.solution().total_normal_velocity_m_s(),
@@ -286,6 +376,7 @@ impl PreparedMolecularLoadedModes<'_> {
                 blocked_acoustic_force: acoustic_force,
                 total_fluid_reaction: reaction,
                 total_receivers,
+                total_receiver_quadrature_error_estimates,
                 total_surface_pressure_pa: total.pressure,
                 total_surface_normal_velocity_m_s: total.velocity,
                 power,

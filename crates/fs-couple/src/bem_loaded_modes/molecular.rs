@@ -6,11 +6,11 @@
 //! fields and wall/exterior work use the same molecular source-solution bank.
 use super::*;
 use fs_bem::{
-    helmholtz::molecular::{MolecularError, MolecularExterior},
+    helmholtz::molecular::{MolecularError, MolecularExterior, MolecularNearFieldOptions},
     observation_transfers::{
         HarmonicField, LocalBoundary, MolecularBemObservation, MolecularObservationError,
         MolecularObservationFormulation, MolecularResponseLimits, PreparedMolecularResponse,
-        ReceiverSpec, SourceId, TransferError,
+        ReceiverSpec, SourceId, TransferError, molecular::MolecularReceiverError,
     },
 };
 use fs_la::eigen_complex::LuComplex;
@@ -82,6 +82,10 @@ pub struct MolecularLoadedResponse {
     pub fluid_reaction: Vec<C64>,
     /// Same order and physical locations as `radiation().harmonic().receivers()`.
     pub receivers: Vec<HarmonicField>,
+    /// Absolute adaptive-quadrature estimates for these actual coherent fields.
+    /// They do not bound boundary discretization, source error, or relative
+    /// error near cancellation. None denotes the original centroid receiver.
+    pub receiver_quadrature_error_estimates: Option<Vec<MolecularReceiverError>>,
     pub mechanical_residual: f64,
     pub memory_residual: f64,
     pub power: MolecularModesPower,
@@ -96,6 +100,7 @@ pub struct PreparedMolecularLoadedModes<'s> {
     exterior: MolecularExterior,
     boundary: Option<LocalBoundary>,
     minimum_clearance_m: f64,
+    near_field_options: Option<MolecularNearFieldOptions>,
     radiation: PreparedMolecularResponse,
     raw: PhysicalPencil,
     lu: LuComplex,
@@ -134,6 +139,68 @@ impl BemLoadedModes {
         boundary: Option<LocalBoundary>,
         response_limits: MolecularResponseLimits,
         solve_options: BemHarmonicOptions,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedMolecularLoadedModes<'_>, MolecularModesError> {
+        self.prepare_molecular_harmonic_with_receivers(
+            exterior,
+            omega,
+            receivers,
+            minimum_clearance_m,
+            boundary,
+            response_limits,
+            solve_options,
+            None,
+            cancelled,
+        )
+    }
+
+    /// The same original loaded mechanics with adaptive retained-triangle
+    /// pressure/particle-velocity receivers. One frequency/receiver row bank
+    /// serves every source column; later force cases perform no new quadrature.
+    /// Selecting these receivers does not change the boundary load, mechanical
+    /// operator, material memory, or work balance. Quadrature estimates remain
+    /// separate from the unchanged boundary-discretization limitations.
+    ///
+    /// Receiver rows use the supplied independent storage/work/depth limits.
+    /// Each force response additionally reserves 32 bytes per receiver for its
+    /// four absolute quadrature estimates in max_response_bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_molecular_harmonic_adaptive(
+        &self,
+        exterior: &MolecularExterior,
+        omega: f64,
+        receivers: &[ReceiverSpec],
+        minimum_clearance_m: f64,
+        boundary: Option<LocalBoundary>,
+        response_limits: MolecularResponseLimits,
+        solve_options: BemHarmonicOptions,
+        near_field_options: MolecularNearFieldOptions,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedMolecularLoadedModes<'_>, MolecularModesError> {
+        self.prepare_molecular_harmonic_with_receivers(
+            exterior,
+            omega,
+            receivers,
+            minimum_clearance_m,
+            boundary,
+            response_limits,
+            solve_options,
+            Some(near_field_options),
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_molecular_harmonic_with_receivers(
+        &self,
+        exterior: &MolecularExterior,
+        omega: f64,
+        receivers: &[ReceiverSpec],
+        minimum_clearance_m: f64,
+        boundary: Option<LocalBoundary>,
+        response_limits: MolecularResponseLimits,
+        solve_options: BemHarmonicOptions,
+        near_field_options: Option<MolecularNearFieldOptions>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedMolecularLoadedModes<'_>, MolecularModesError> {
         poll(&mut cancelled)?;
@@ -182,6 +249,9 @@ impl BemLoadedModes {
         )?;
         if let Some(boundary) = &boundary {
             observer = observer.with_local_boundary(boundary.clone())?;
+        }
+        if let Some(options) = near_field_options {
+            observer = observer.with_near_field(options)?;
         }
         let radiation = observer.prepare_response(omega, response_limits, &mut cancelled)?;
         let z = radiation.impedance();
@@ -246,6 +316,7 @@ impl BemLoadedModes {
             exterior: exterior.clone(),
             boundary,
             minimum_clearance_m,
+            near_field_options,
             radiation,
             raw,
             lu,
@@ -263,12 +334,23 @@ impl PreparedMolecularLoadedModes<'_> {
     pub fn radiation(&self) -> &PreparedMolecularResponse {
         &self.radiation
     }
+    /// Explicit adaptive receiver choice retained for incident and motion
+    /// fields alike. None keeps the original centroid receiver path.
+    pub fn near_field_options(&self) -> Option<MolecularNearFieldOptions> {
+        self.near_field_options
+    }
 
     fn admit_force_batch(&self, forces: &[&[C64]]) -> Result<(), MolecularModesError> {
         let (m, n) = (self.source.mode_count(), self.rows.len());
         let r = self.radiation.harmonic().receivers().len();
         let cases = forces.len();
-        let bytes = cases as u128 * (32 * n as u128 + 64 * m as u128 + 64 * r as u128 + 512);
+        let receiver_bytes = if self.near_field_options.is_some() {
+            96
+        } else {
+            64
+        };
+        let bytes =
+            cases as u128 * (32 * n as u128 + 64 * m as u128 + receiver_bytes * r as u128 + 512);
         let work = 32 * (n as u128).pow(3)
             + 128 * cases as u128 * (n as u128).pow(2)
             + 64 * cases as u128 * m as u128 * (r as u128 + 1);
@@ -295,6 +377,8 @@ impl PreparedMolecularLoadedModes<'_> {
     /// factorization allowance already paid during preparation. Response bytes
     /// additionally include source reactions and all receivers; original model
     /// payload admission bounds the temporary solve/audit buffers separately.
+    /// Adaptive receiver estimates add 32*cases*receivers bytes while remaining
+    /// within the existing conservative matched-observation work reservation.
     pub fn harmonic_response_batch(
         &self,
         forces: &[&[C64]],
@@ -346,6 +430,12 @@ impl PreparedMolecularLoadedModes<'_> {
                 &mut receivers,
                 &mut cancelled,
             )?;
+            let receiver_quadrature_error_estimates = if self.near_field_options.is_some() {
+                self.radiation
+                    .receiver_quadrature_for_rates(&velocity, &mut cancelled)?
+            } else {
+                None
+            };
             let power = self.power(force, &velocity, &state[m..], &mut cancelled)?;
             let memory = state.split_off(m);
             output.push(MolecularLoadedResponse {
@@ -355,6 +445,7 @@ impl PreparedMolecularLoadedModes<'_> {
                 elastic_memory_sqrt_j: memory,
                 fluid_reaction: reaction,
                 receivers,
+                receiver_quadrature_error_estimates,
                 mechanical_residual: residuals[0],
                 memory_residual: residuals[2],
                 power,
@@ -464,6 +555,8 @@ impl PreparedMolecularLoadedModes<'_> {
     }
 }
 
+#[cfg(test)]
+mod adaptive_tests;
 #[cfg(test)]
 mod sphere_tests;
 #[cfg(test)]

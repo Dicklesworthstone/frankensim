@@ -1858,6 +1858,32 @@ oracle for blocked force, material-memory motion, paired fields and signed
 total work. They are authored but remain unexecuted natively under the same
 dependency/resource blocker; no new continuum or performance claim is made.
 
+`BemLoadedModes::prepare_molecular_harmonic_adaptive` selects the original
+adaptive retained-triangle pressure/velocity receiver for the same loaded
+mechanics. A single receiver row bank serves every structural source column;
+subsequent force cases reuse the matched transfer bank. Each response retains
+absolute quadrature estimates for its actual coherent modal velocity. This
+selection changes neither the boundary load nor the original mass, stiffness,
+Kelvin/Maxwell state or surface-work calculation.
+
+Sound-driven responses retain that same receiver choice. One additional
+source-bound receiver bank serves the entire blocked incident batch, while
+the existing motion receiver bank remains cached. Total pressure/velocity add
+blocked and motion fields coherently; total quadrature estimates add the
+blocked estimates to absolute-rate-weighted motion estimates. These estimates
+do not cover BEM discretization, material/source error or relative accuracy
+near a field null. The new row-storage and quadrature-work limits remain
+separate. Adaptive force outputs reserve another 32 bytes per case/receiver;
+adaptive incident payload replaces `cases*8*r+4*r` with `cases*12*r+6*r` in the
+existing complex-entry reservation. Original centroid reservations are unchanged.
+
+A focused G1/G3 regression uses original two-mode mechanics, Maxwell memory
+and local wall physics with multiple force/illumination cases. It checks
+unchanged loading, motion and work, direct original-owner adaptive field
+agreement, shared-row reuse and total discrepancy addition. The test is
+authored and syntax checked; native execution remains pending the existing
+dependency/resource blocker.
+
 ### Open-shell forced response with two-sided diffraction reaction
 
 `bem_loaded_modes::open_screen::OpenScreenLoadedModes::from_shell` binds the
