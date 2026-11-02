@@ -2024,6 +2024,48 @@ solutions on 20, 80 and 320 panels for density-only, speed-only and combined
 contrasts, check actual interior/exterior receivers and finite-source phase,
 and resolve the first-Born forward limit down to a `1e-12` speed contrast.
 
+### Molecular gas transmission
+
+`helmholtz::transmission::molecular::MolecularFluidInterface` extends the same
+single-body direct transmission combination to two original `RelaxationState`
+owners. Each material is evaluated once at the actual angular frequency;
+its complex `relaxing_wavenumber` supplies propagation without an additional
+Stokes–Kirchhoff term. Both original gas states remain borrowed and their mean
+pressures must agree for the stationary interface. Density remains real.
+Pressure and physical normal velocity are continuous; the real equilibrium
+`k_ref=omega/c_eq,out` only scales `q_out/k_ref=i*rho_out*c_eq,out*v`.
+Complex propagation never substitutes `k*c_eq` for physical `rho*omega`.
+
+The real-k owner retains its original kernel callbacks and operation graph.
+Both routes share dense assembly, payload admission and factorization.
+Complex weak-contrast kernels use factored midpoint moment series; larger
+contrasts use the two decaying endpoint exponentials and their polynomials,
+avoiding hyperbolic overflow and cancellation between large midpoint squares.
+Equivalent-disc self differences retain factored powers. Identical density and
+complex wavenumber return exactly zero outgoing traces, including in an
+absorbing medium. Repeated coherent plane, volume and force illuminations
+reuse the same factorization and preserve source strengths and phase.
+
+`MolecularTransmissionField` retains outgoing and total physical traces,
+paired finite exterior/interior pressure and particle velocity, and signed
+outward interface work. Its negative real part equals continuum molecular
+loss in the source-free interior; numerical defects are never clipped into
+absorption. Receivers use the original complex centroid Green derivative and
+actual local `rho*omega`, with winding and triangle-clearance admission.
+This does not inherit the real owner's adaptive receiver quadrature or confer
+spatial accuracy. Both complex wavelengths, doubled dense storage (including
+worker scratch), source/receiver product caps and cancellation are admitted.
+The scope excludes multiple bodies, mean-flow/material transport, shear loss,
+solid/frame dynamics and experimental qualification.
+
+Four authored regressions cover weak/static/extreme-loss kernel limits,
+empty-reservoir recovery of the original nondispersive solver, exact molecular
+transparency, mixed sources and resource refusals, and three-mesh complex-sphere
+pressure/velocity convergence. The independent sphere also compares surface
+work to the radial integral of `omega*Im(1/K)*|p|²/2`. Native execution remains
+blocked; formatting and an independent scalar oracle check do not establish
+production numerical passes.
+
 ## Mutually reflecting penetrable fluid bodies
 
 `helmholtz::transmission::multiple::FluidBodies` extends the original fluid

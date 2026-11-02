@@ -31,6 +31,9 @@ use fs_la::eigen_complex::{
 use fs_material::MaterialError;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 
+/// Original molecular compression on both sides of a transmitting interface.
+#[path = "helmholtz_transmission/molecular.rs"]
+pub mod molecular;
 #[path = "helmholtz_transmission_multiple.rs"]
 pub mod multiple;
 
@@ -189,44 +192,13 @@ impl<'a> FluidInterface<'a> {
             return Err(bad("unrepresentable fluid-interface contrast or frequency scale").into());
         }
         let m = 2 * n;
-        let workers = DENSE_WORKERS.with(core::cell::Cell::get);
-        let complex_bytes = core::mem::size_of::<C64>();
-        let permutation_bytes = m * core::mem::size_of::<usize>();
-        let dense_bytes = 2 * m * m * complex_bytes + permutation_bytes;
-        let lu_workspace = lu_complex_blocked_workspace_bytes(m, workers)
-            .ok_or_else(|| bad("fluid-interface LU workspace byte count overflow"))?;
-        let factor_peak = dense_bytes + m * complex_bytes + lu_workspace;
-        let solve_peak = dense_bytes + 6 * m * complex_bytes;
-        let required_bytes = factor_peak.max(solve_peak);
-        if required_bytes > options.maximum_bytes {
-            return Err(HelmholtzError::CacheBudget {
-                required_bytes,
-                maximum_bytes: options.maximum_bytes,
-            }
-            .into());
-        }
+        let workers = admit_storage(n, options)?;
         let (contrast, factor, condition_lower_bound) = if medium(exterior) == medium(interior) {
             // Transparent material identity is exact, including finite sources.
             (Vec::new(), None, 1.0)
         } else {
-            let mut matrix = assemble(surface, k_o, k_i, eta, delta_rho, gate)?;
-            let diagonal: Vec<_> = (0..m).map(|i| matrix[i * m + i]).collect();
-            for i in 0..m {
-                matrix[i * m + i] = matrix[i * m + i] + C64::ONE;
-            }
-            let factor =
-                lu_complex_blocked_with_cancel(&matrix, m, workers, || gate.is_requested())
-                    .map_err(lu_error)?;
-            poll(gate)?;
-            let condition = condition_lower_bound(&matrix, m, &factor);
-            poll(gate)?;
-            if !condition.is_finite() {
-                return Err(bad("nonfinite fluid-interface condition diagnostic").into());
-            }
-            // Restore SAVED contrasts, not rounded (1+contrast)-1.
-            for i in 0..m {
-                matrix[i * m + i] = diagonal[i];
-            }
+            let matrix = assemble(surface, k_o, k_i, eta, delta_rho, gate)?;
+            let (matrix, factor, condition) = factor_contrast(matrix, m, workers, gate)?;
             (matrix, Some(factor), condition)
         };
         poll(gate)?;
@@ -580,6 +552,33 @@ fn assemble(
     delta_rho: f64,
     gate: &CancelGate,
 ) -> Result<Vec<C64>, HelmholtzError> {
+    assemble_wave(
+        surface,
+        k_o,
+        k_i,
+        k_o,
+        eta,
+        delta_rho,
+        gate,
+        kernel_difference,
+        self_contrast,
+    )
+}
+
+// The same two-trace operator with an explicit REAL pressure-coordinate
+// scaling. Molecular propagation may change k without changing rho*omega.
+#[allow(clippy::too_many_arguments)]
+fn assemble_wave<K: WaveNumber>(
+    surface: &SpherePanels,
+    k_o: K,
+    k_i: K,
+    k_reference: f64,
+    eta: f64,
+    delta_rho: f64,
+    gate: &CancelGate,
+    kernel_difference: impl Fn(K, K, [f64; 3], [f64; 3], [f64; 3], [f64; 3]) -> [C64; 4],
+    self_contrast: impl Fn(K, K, f64) -> (C64, C64, C64),
+) -> Result<Vec<C64>, HelmholtzError> {
     let n = surface.areas().len();
     let m = 2 * n;
     let mut matrix = Vec::new();
@@ -615,8 +614,8 @@ fn assemble(
                 (s.scale(area), dp.scale(area), ds, dd, ddp, dn)
             };
             matrix[i * m + j] = dd;
-            matrix[i * m + n + j] = (-s.scale(delta_rho) - ds.scale(eta)).scale(k_o);
-            matrix[(n + i) * m + j] = dn.scale(1.0 / k_o);
+            matrix[i * m + n + j] = (-s.scale(delta_rho) - ds.scale(eta)).scale(k_reference);
+            matrix[(n + i) * m + j] = dn.scale(1.0 / k_reference);
             matrix[(n + i) * m + n + j] = -dp.scale(delta_rho) - ddp.scale(eta)
                 + C64::from_re(if i == j { 0.5 * delta_rho } else { 0.0 });
         }
@@ -625,4 +624,49 @@ fn assemble(
         return Err(bad("nonfinite fluid-interface operator"));
     }
     Ok(matrix)
+}
+
+fn admit_storage(n: usize, options: Options) -> Result<usize, HelmholtzError> {
+    let m = 2 * n;
+    let workers = DENSE_WORKERS.with(core::cell::Cell::get);
+    let complex_bytes = core::mem::size_of::<C64>();
+    let permutation_bytes = m * core::mem::size_of::<usize>();
+    let dense_bytes = 2 * m * m * complex_bytes + permutation_bytes;
+    let lu_workspace = lu_complex_blocked_workspace_bytes(m, workers)
+        .ok_or_else(|| bad("fluid-interface LU workspace byte count overflow"))?;
+    let factor_peak = dense_bytes + m * complex_bytes + lu_workspace;
+    let solve_peak = dense_bytes + 6 * m * complex_bytes;
+    let required_bytes = factor_peak.max(solve_peak);
+    if required_bytes > options.maximum_bytes {
+        return Err(HelmholtzError::CacheBudget {
+            required_bytes,
+            maximum_bytes: options.maximum_bytes,
+        });
+    }
+    Ok(workers)
+}
+
+fn factor_contrast(
+    mut matrix: Vec<C64>,
+    m: usize,
+    workers: usize,
+    gate: &CancelGate,
+) -> Result<(Vec<C64>, LuComplex, f64), HelmholtzError> {
+    let diagonal: Vec<_> = (0..m).map(|i| matrix[i * m + i]).collect();
+    for i in 0..m {
+        matrix[i * m + i] = matrix[i * m + i] + C64::ONE;
+    }
+    let factor = lu_complex_blocked_with_cancel(&matrix, m, workers, || gate.is_requested())
+        .map_err(lu_error)?;
+    poll(gate)?;
+    let condition = condition_lower_bound(&matrix, m, &factor);
+    poll(gate)?;
+    if !condition.is_finite() {
+        return Err(bad("nonfinite fluid-interface condition diagnostic"));
+    }
+    // Restore SAVED contrasts, not rounded (1+contrast)-1.
+    for i in 0..m {
+        matrix[i * m + i] = diagonal[i];
+    }
+    Ok((matrix, factor, condition))
 }
