@@ -2,7 +2,8 @@
 
 use fs_flux::{
     FluxRheologyError, FluxSystem, MaterialFluxError, MaterialFluxNumerics,
-    MaterialFluxRheologyPoint, MaterialFluxSystem, StokesBoundaryError, TriMesh,
+    MaterialFluxRheologyPoint, MaterialFluxSystem, MaterialStokesBoundary, StokesBoundaryError,
+    StokesPressureReference, TriMesh,
 };
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
@@ -29,6 +30,131 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
         (actual - expected).abs() <= tolerance,
         "{actual} versus {expected} (tol {tolerance})"
     );
+}
+
+#[test]
+fn transient_pressure_impulse_uses_original_gas_density_and_reports_pascals() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let spec = GasSpec::dry_air_ussa1976();
+    let gradient = 2.5; // physical pressure drop per metre [Pa/m]
+    let dt = 0.04;
+    let mut speeds = Vec::new();
+    for thermodynamic_pressure in [101_325.0, 202_650.0] {
+        let gas = GasState::try_new(&spec, 293.15, thermodynamic_pressure).unwrap();
+        let flow = MaterialFluxSystem::new(&system, &gas, MaterialFluxNumerics::default()).unwrap();
+        let density = flow.transport().density_kg_m3();
+        let traction = |point: [f64; 2], normal: [f64; 2]| {
+            let pressure = 10.0 - gradient * point[0];
+            [-pressure * normal[0], -pressure * normal[1]]
+        };
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, _)| MaterialStokesBoundary::TotalTraction {
+                edge,
+                value: &traction,
+            })
+            .collect();
+        let previous = vec![0.0; system.n_u];
+        let solved = flow
+            .bdf1_stokes_mixed_step(&zero_force, &boundaries, &previous, dt)
+            .unwrap();
+        let expected_speed = gradient * dt / density;
+        let (error, divergence) =
+            system.velocity_error(&solved.discrete().x, &|_| [expected_speed, 0.0]);
+        assert!(error < 2e-11 && divergence < 2e-11);
+        assert_eq!(
+            solved.pressure_reference(),
+            StokesPressureReference::TractionDatum
+        );
+        for (cell, point) in mesh.centroids.iter().enumerate() {
+            near(solved.pressure_pa()[cell], 10.0 - gradient * point[0], 2e-9);
+            assert_eq!(
+                solved.pressure_reference_at(cell),
+                Some(StokesPressureReference::TractionDatum)
+            );
+        }
+        near(
+            solved.kinetic_energy_j_per_m(),
+            0.5 * density * expected_speed.powi(2),
+            2e-12,
+        );
+        assert_eq!(solved.transport(), flow.transport());
+        assert_eq!(previous, vec![0.0; system.n_u]);
+        speeds.push(system.velocity_at(&solved.discrete().x, [0.4, 0.4])[0]);
+    }
+    near(speeds[1] / speeds[0], 0.5, 2e-9);
+}
+
+#[test]
+fn transient_mixed_material_shear_uses_dynamic_viscosity_and_inertia_together() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let dt = 0.2;
+    // u(t,y) = t*(1.1 + 0.6*y), p = 8 - 2*x. This affine field is in BDM1.
+    let velocity = |point: [f64; 2]| [dt * (1.1 + 0.6 * point[1]), 0.0];
+    for material in [transport(2.0, 0.3), transport(7.0, 1.7)] {
+        let flow =
+            MaterialFluxSystem::new(&system, &material, MaterialFluxNumerics::default()).unwrap();
+        let density = flow.transport().density_kg_m3();
+        let viscosity = flow.transport().dynamic_viscosity_pa_s();
+        let force = |point: [f64; 2]| [density * (1.1 + 0.6 * point[1]) - 2.0, 0.0];
+        let traction = |point: [f64; 2], normal: [f64; 2]| {
+            let pressure = 8.0 - 2.0 * point[0];
+            let shear = viscosity * dt * 0.6;
+            [
+                shear * normal[1] - pressure * normal[0],
+                shear * normal[0] - pressure * normal[1],
+            ]
+        };
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, geometry)| {
+                if geometry.normal[1].abs() > 0.5 {
+                    MaterialStokesBoundary::Velocity {
+                        edge,
+                        value: &velocity,
+                    }
+                } else {
+                    MaterialStokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
+                }
+            })
+            .collect();
+        let previous = vec![0.0; system.n_u];
+        let solved = flow
+            .bdf1_stokes_mixed_step(&force, &boundaries, &previous, dt)
+            .unwrap();
+        let (error, divergence) = system.velocity_error(&solved.discrete().x, &velocity);
+        assert!(error < 3e-11 && divergence < 3e-11);
+        for (pressure, point) in solved.pressure_pa().iter().zip(&mesh.centroids) {
+            near(*pressure, 8.0 - 2.0 * point[0], 3e-9);
+        }
+        let expected_energy =
+            0.5 * density * dt * dt * (1.1_f64.powi(2) + 1.1 * 0.6 + 0.6_f64.powi(2) / 3.0);
+        near(solved.kinetic_energy_j_per_m(), expected_energy, 2e-11);
+        let queries = Cell::new(0);
+        let refused_force = |_: [f64; 2]| {
+            queries.set(queries.get() + 1);
+            [0.0; 2]
+        };
+        assert!(matches!(
+            flow.bdf1_stokes_mixed_step(&refused_force, &boundaries, &previous, 0.0),
+            Err(MaterialFluxError::Boundary(
+                StokesBoundaryError::InvalidInput(_)
+            ))
+        ));
+        assert_eq!(queries.get(), 0);
+        assert_eq!(previous, vec![0.0; system.n_u]);
+    }
 }
 
 #[test]

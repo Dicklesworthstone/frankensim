@@ -6,6 +6,9 @@ use fs_flux::{
 use fs_solid::Mesh2;
 use std::cell::Cell;
 
+#[path = "stokes_boundary/transient.rs"]
+mod transient;
+
 fn velocity_boundaries<'a>(
     mesh: &TriMesh,
     value: &'a dyn Fn([f64; 2]) -> [f64; 2],

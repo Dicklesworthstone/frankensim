@@ -31,7 +31,7 @@ pub mod mixed;
 mod porous;
 #[path = "material/rheology.rs"]
 mod rheology;
-pub use mixed::{MaterialStokesBoundary, MaterialStokesRheologySolution};
+pub use mixed::{MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution};
 pub use porous::MaterialBrinkmanSolution;
 
 /// Numerical choices, separate from the material's physical viscosity.

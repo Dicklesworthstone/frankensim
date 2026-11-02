@@ -304,7 +304,8 @@ impl<'m> FluxSystem<'m> {
         for (cell, law) in cells.iter().enumerate() {
             anchors[self.pressure_component[cell]] |= law.permeability.is_some();
         }
-        let admitted = self.admit_stokes_problem_with_drag(params, boundaries, &anchors)?;
+        let admitted =
+            self.admit_stokes_problem_with_velocity_anchors(params, boundaries, &anchors)?;
         let stokes = self.assemble_stokes_admitted_viscosity_and_drag(
             params,
             &|cell, _| effective_nu[cell],

@@ -389,9 +389,9 @@ geometry and must never be labelled as volts or discharge reach.
   fixtures. `linearize_rheology` supplies constitutive/convection state
   Jacobians for prescribed-velocity boundaries. Mixed-boundary nonlinear
   Jacobians and time-dependent adjoint checkpointing remain outside that API.
-- Nonlinear convection/backflow and transient open-boundary conditions.
-  Steady generalized-Newtonian Stokes velocity/total-traction boundaries
-  are provided by the APIs below.
+- Nonlinear convection/backflow at open boundaries. Steady generalized-Newtonian
+  Stokes and linear BDF1 Stokes velocity/total-traction boundaries are provided
+  by the APIs below; transient nonlinear open-boundary Navier–Stokes is not.
 - The affine-triangle GCL receipt does not remap fields, assemble or
   advance ALE Navier–Stokes, generate mesh motion, support curved faces
   or 3-D cells, couple FSI, or certify the continuum solver. It carries
@@ -569,13 +569,62 @@ original discrete adjoint against independently re-solved pressure-difference
 sensitivities. The existing Brinkman test also checks independently anchored
 porous domains and refusal when only the other domain has drag.
 
-The frozen-field assembly above covers steady linear, constant-density Stokes with frozen
-positive spatially varying Newtonian viscosity on the existing straight-sided
-2D triangulation. It does not add
-nonlinear convection/backflow, open-boundary time integration, pure-traction
-rigid-mode quotients, material-bound SI pressure
-conversion or continuum error bounds. Existing synchronous cancellation and
-dense/iterative solver limitations remain in force.
+The frozen-field assembly above covers steady linear, constant-density Stokes
+with frozen positive spatially varying Newtonian viscosity on the existing
+straight-sided 2D triangulation. It does not add nonlinear convection/backflow,
+steady pure-traction rigid-mode quotients or continuum error bounds. Existing
+synchronous cancellation and dense/iterative solver limitations remain in force.
+
+## Transient mixed-Stokes pressure and total-traction boundaries
+
+`FluxSystem::assemble_stokes_mixed_bdf1` and its
+`assemble_stokes_mixed_bdf1_variable_viscosity` field entry assemble
+`(u_new-u_previous)/dt - div(2 nu D(u_new)) + grad(p_new) = force_new`, with
+`div(u_new)=0`. They add the original BDF1 mass operator and immutable previous
+velocity load to the same checked symmetric-stress/mixed-boundary assembly.
+All force, velocity and total-traction callbacks describe the new time level;
+capturing its time supplies pressure pulses, ramps and changing wall motion.
+The field entry admits frozen positive endpoint `nu(cell, point)`, retaining
+the existing one-sided harmonic SIP stresses. The constant entry uses
+`params.nu`. There is no convection or implicit constitutive update.
+
+`bdf1_stokes_mixed_step` assembles and applies the existing dense LU/sparse
+FGMRES selection, requiring independently recomputed original and row-scaled
+residuals. A finite positive timestep and finite positive reciprocal, together
+with exactly `n_u` finite history moments, are required before callbacks run.
+Failed admission, assembly or convergence never modifies caller history or
+publishes a partial field. The matrix is also available for an individual
+step's existing transpose solve; no time-history adjoint is supplied.
+
+The physical positive mass term removes rigid-velocity nullspaces at finite
+dt. Therefore entirely traction-driven components are admitted by these
+transient APIs without adding an artificial velocity pin or resistance;
+their steady counterparts retain the existing unanchored-domain refusal.
+Pressure datums still follow boundary ownership separately on every connected
+component: total-traction components retain every continuity equation and the
+imposed datum, while sealed components enforce their endpoint flux compatibility
+and report their own mean-zero pressure. A datum in another chamber cannot
+absorb an incompatible sealed-component flux.
+
+`MaterialFluxSystem::bdf1_stokes_mixed_step` supplies the same linear law with
+physical force density [N/m³] and `MaterialStokesBoundary` total traction [Pa].
+The immutable material snapshot determines `mu/rho`; that same density scales
+inertia, force, traction, reported pressure [Pa] and kinetic energy [J/m].
+`MaterialStokesSolution` retains that snapshot, actual per-cell pressure datums
+and the velocity moments for the next step. Both time levels require the same
+reference density. Mechanical traction pressure is not an EOS absolute state.
+
+`tests/stokes_boundary/transient.rs` exercises variable-step pressure pulses
+and free coasting, the exact backward-Euler work/kinetic balance, dense/sparse
+agreement, an independently integrated pressure ramp with first-order temporal
+error, disconnected sealed/open pressure datums, original mass/stress operator
+identity, an exact variable-viscosity affine unsteady solution, and invalid
+history/timestep and incompatible-flux refusals. `tests/material_flow.rs`
+checks actual shared-gas density in pressure-driven acceleration and physical
+pressure, dynamic-viscosity traction, inertia and energy in an affine shear.
+This is fixed-mesh, constant-density linear unsteady Stokes, without nonlinear
+open-boundary/backflow conditions, variable-density storage, thermal evolution,
+BDF2+, continuum error bounds or new cancellation/throughput claims.
 
 ## Horizontal capillary meniscus transport
 
