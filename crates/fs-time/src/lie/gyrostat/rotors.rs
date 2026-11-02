@@ -21,6 +21,10 @@ use fs_math::dd::Dd;
 mod viscous;
 pub use viscous::{ViscousRotorStep, ViscousRotorStepper};
 
+#[path = "rotors/torsional.rs"]
+mod torsional;
+pub use torsional::{TorsionalRotorStep, TorsionalRotorStepper};
+
 /// Maximum fixed-axis rotors in this allocation-free stepping lane.
 pub const MAX_AXIAL_ROTORS: usize = 32;
 
@@ -409,7 +413,7 @@ impl<const N: usize> RotorBank<N> {
             duration_s,
         )?;
         let second = self.apply_impulse(&drifted, shaft_impulse, impulse_at(drifted.rotation)?)?;
-        self.finish_step(state, &first, &drifted, &second, duration_s)
+        self.finish_step(state, &first, &drifted, &second, duration_s, None)
     }
 
     fn finish_step(
@@ -419,17 +423,21 @@ impl<const N: usize> RotorBank<N> {
         drifted: &RotorState<N>,
         second: &RotorImpulse<N>,
         duration_s: f64,
+        accepted_phase: Option<[f64; N]>,
     ) -> Result<RotorStep<N>, LieStepError> {
         let drift_defect = self.energy_change(&first.state_after, drifted)?;
         let mut after = second.state_after;
         let mut shaft_work = [0.0; N];
         let mut axial_change = [0.0; N];
         for i in 0..N {
-            let rate =
-                0.5 * first.mean_relative_rate_rad_s[i] + 0.5 * second.mean_relative_rate_rad_s[i];
-            let angle = product(duration_s, rate, "relative phase increment")?;
-            after.relative_angle_rad[i] =
-                increment(state.relative_angle_rad[i], angle, "relative rotor phase")?;
+            after.relative_angle_rad[i] = if let Some(phase) = accepted_phase.as_ref() {
+                scalar(phase[i], "accepted relative rotor phase")?
+            } else {
+                let rate = 0.5 * first.mean_relative_rate_rad_s[i]
+                    + 0.5 * second.mean_relative_rate_rad_s[i];
+                let angle = product(duration_s, rate, "relative phase increment")?;
+                increment(state.relative_angle_rad[i], angle, "relative rotor phase")?
+            };
             shaft_work[i] = scalar(
                 (dd(first.shaft_work_j[i]) + dd(second.shaft_work_j[i])).to_f64(),
                 "shaft step work",

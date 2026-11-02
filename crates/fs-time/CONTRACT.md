@@ -152,6 +152,37 @@ where claimed below.
   refusals and a reproduced large-carrier work-loss counterexample. They and
   the seven existing rotor-bank groups pass; the full Cargo target remains
   unexecuted where the constellation runtime dependency closure is absent.
+- `RotorBank::torsional_stepper(stiffness, rest_phase, damping, duration)`
+  adds finite rotor/carrier shaft compliance on actual unwrapped relative
+  phases: `V_i=K_i*(q_i-q_rest_i)^2/2` and
+  `tau_i=drive_i-K_i*(q_i-q_rest_i)-d_i*s_i`. Original positive inertia,
+  nonorthogonal fixed rotor axes, simultaneous external impulses and full
+  carrier recoil are retained. Native gyrostat drift evolves attitude/total
+  body momentum at fixed shaft phases and momenta. Two shaft midpoint stages
+  evolve canonical phase/momentum; the second uses the first accepted phase.
+  With half duration delta, midpoint phase elimination gives
+  `drive_eff=drive-K*(q_before-q_rest)` and `d_eff=d+delta*K/2`.
+  This reuses the existing affine rank-three solve and one cached native 3x3
+  factor; stepping is O(N), allocation-free, without a new numerical solver.
+  Trajectory completion consumes already-integrated phases rather than
+  advancing them twice. Polarized actual phase increments determine spring
+  storage changes. Drive work, viscous heat, elastic storage, external work
+  and native drift defect remain separate. Actual stored phase, original
+  spring/drag effort and complete stage work must resolve at local scales;
+  large initial phase or potential energy cannot excuse lost increments.
+  Zero stiffness delegates bit-for-bit to the original viscous owner.
+  Preparation admits the combined elastic/viscous half-stage resolution
+  number at most two and exposes a numerical PSD-trace undamped-frequency
+  estimate. These are not arbitrary-step accuracy or interval proofs.
+  Four new groups plus five viscous/seven rotor-bank groups pass on actual
+  native sources. Harmonic-period, analytic driven/damped and independent
+  oblique full-tensor Euler ladders all demonstrate second-order refinement;
+  conservative harmonic total kinetic-plus-spring drift stays below
+  3.34e-16 J in the tested period. Unresolved phase/stiffness and malformed
+  parameters refuse without publishing a partial step. No global
+  symplecticity, moving gimbals, variable stiffness/rest phase or parametric
+  preload work is claimed. Full Cargo remains unavailable with missing
+  constellation siblings.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored

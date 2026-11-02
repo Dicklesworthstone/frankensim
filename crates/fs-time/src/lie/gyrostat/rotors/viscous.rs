@@ -21,7 +21,7 @@ use fs_la::factor::{Cholesky, cholesky};
 /// affine law supplies neither electrical dynamics nor arbitrary feedback.
 #[derive(Debug, Clone)]
 pub struct ViscousRotorStepper<const N: usize> {
-    bank: RotorBank<N>,
+    pub(super) bank: RotorBank<N>,
     duration_s: f64,
     half_s: f64,
     damping_nms: [f64; N],
@@ -233,6 +233,7 @@ impl<const N: usize> ViscousRotorStepper<N> {
             &drifted,
             &second.impulse,
             self.duration_s,
+            None,
         )?;
         let mut drive_work = [0.0; N];
         let mut heat = [0.0; N];
@@ -258,7 +259,11 @@ impl<const N: usize> ViscousRotorStepper<N> {
         })
     }
 
-    fn external_impulse(&self, rotation: So3, torque: HeldTorque) -> Result<Vec3, LieStepError> {
+    pub(super) fn external_impulse(
+        &self,
+        rotation: So3,
+        torque: HeldTorque,
+    ) -> Result<Vec3, LieStepError> {
         let body = match torque {
             HeldTorque::Body(value) => vector(value, "external body torque")?,
             HeldTorque::Space(value) => rotation.inverse().rotate(value)?,
@@ -270,7 +275,7 @@ impl<const N: usize> ViscousRotorStepper<N> {
         ))
     }
 
-    fn stage(
+    pub(super) fn stage(
         &self,
         state: &RotorState<N>,
         drive: [f64; N],
@@ -368,8 +373,8 @@ impl<const N: usize> ViscousRotorStepper<N> {
     }
 }
 
-struct ShaftStage<const N: usize> {
-    impulse: RotorImpulse<N>,
+pub(super) struct ShaftStage<const N: usize> {
+    pub(super) impulse: RotorImpulse<N>,
     drive_work: [f64; N],
     heat: [f64; N],
 }
