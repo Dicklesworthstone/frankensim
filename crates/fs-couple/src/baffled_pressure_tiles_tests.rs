@@ -184,3 +184,124 @@ fn one_piece_material_paths_and_pressure_match_the_original_owner() {
             original.step_trace(&flows).unwrap().to_bits());
     }
 }
+
+#[test]
+fn first_order_tiles_beyond_the_modal_cap_match_the_complete_compressed_surface() {
+    let medium = RayleighMedium { density: 1.2, sound_speed: 320.0 };
+    let position = [0.035, -0.017, 0.11];
+    let microphone = FirstOrder::new(0.32, [0.3, -0.4, -(0.75_f64).sqrt()]).unwrap();
+    let samples: Vec<_> = (0..2 * MAX_RAYLEIGH_INPUTS + 1).map(|i| FlowSurfaceSample {
+        position_m: [(i % 19) as f64 * 0.01 - 0.09, (i / 19) as f64 * 0.01 - 0.065, 0.0],
+        area_m2: 1e-5 * (1.0 + (i % 5) as f64 * 0.2),
+    }).collect();
+    let weights: Vec<[f64; 3]> = (0..samples.len()).map(|i| [
+        1.0 + (i % 7) as f64 * 0.125,
+        if i % 2 == 0 { 0.7 } else { -1.2 },
+        ((i * 17) % 31) as f64 / 15.0 - 1.0,
+    ]).collect();
+    // The direct receiver represents exactly the same physical surface on a
+    // three-dimensional flow subspace. No positions, areas or signs change.
+    let compressed: Vec<_> = samples.iter().zip(&weights).map(|(tile, weights)| SurfaceSample {
+        position_m: tile.position_m, area_m2: tile.area_m2,
+        mode_shape: weights.iter().map(|weight| weight / tile.area_m2).collect(),
+    }).collect();
+    let mut direct = BaffledPressure::new_first_order(&compressed, 3, RATE,
+        position, medium, microphone).unwrap();
+    direct.differentiate_pressure().unwrap();
+    let mut bank = BaffledTilePressure::new_first_order(&samples, RATE,
+        position, medium, microphone, TilePressureLimits::surface_reference(),
+        &mut || false).unwrap();
+    assert_eq!(bank.input_count(), samples.len());
+    assert_eq!(bank.receiver_count(), 3);
+    assert_eq!(bank.delay_samples, direct.delay_samples);
+    assert_eq!(bank.filter_delay_samples(), direct.filter_delay_samples());
+    let mut flows = vec![0.0; samples.len()];
+    let (mut error, mut signal) = (0.0, 0.0);
+    for step in 0..768 {
+        let time = step as f64 / f64::from(RATE);
+        let source = [
+            1e-8 * (std::f64::consts::TAU * 15.0 * time).sin(),
+            2e-8 * (std::f64::consts::TAU * 1300.0 * time + 0.7).cos(),
+            1e-8 * (std::f64::consts::TAU * 370.0 * time - 0.3).sin(),
+        ];
+        for (flow, weights) in flows.iter_mut().zip(&weights) {
+            *flow = weights.iter().zip(source).map(|(weight, q)| weight * q).sum();
+        }
+        let actual = bank.step_trace(&flows).unwrap();
+        let expected = direct.step_trace(&source).unwrap();
+        error += (actual - expected).powi(2);
+        signal += expected.powi(2);
+    }
+    assert!(signal > 1e-12, "the complete directional field must be live");
+    assert!(error / signal < 1e-20, "only linear summation grouping may change: {}", error / signal);
+}
+
+#[test]
+fn first_order_storage_counts_and_admits_every_reactive_buffer_and_kernel() {
+    fn retained(receiver: &BaffledPressure, reactive: bool) -> (usize, usize) {
+        let mut history = receiver.history.len() + receiver.taps.len()
+            + receiver.previous_velocity.len() + receiver.acceleration.len()
+            + receiver.decimator.retained_values()
+            + receiver.pressure_derivative.as_ref().map_or(0, |filter| filter.retained_values());
+        let mut kernels = receiver.kernels.iter().map(|(_, row)| row.len()).sum::<usize>()
+            + receiver.packed_weights.len();
+        if reactive && let Some(child) = receiver.directional_velocity.as_deref() {
+            let values = retained(child, true);
+            history += values.0;
+            kernels += values.1;
+        }
+        (history, kernels)
+    }
+    let samples = samples(MAX_RAYLEIGH_INPUTS + 1);
+    let medium = RayleighMedium { density: 1.2, sound_speed: 320.0 };
+    let microphone = FirstOrder::new(0.5, [0.0, 0.0, -1.0]).unwrap();
+    let limits = TilePressureLimits::surface_reference();
+    let bank = BaffledTilePressure::new_first_order(&samples, RATE, MICROPHONE,
+        medium, microphone, limits, &mut || false).unwrap();
+    let total = |reactive| bank.receivers.iter().map(|r| retained(r, reactive))
+        .fold((0, 0), |sum, values| (sum.0 + values.0, sum.1 + values.1));
+    let (histories, kernels) = total(true);
+    let parent_only = total(false);
+    assert_eq!(bank.retained_values(), (histories, kernels));
+    assert!(histories > parent_only.0 && kernels > parent_only.1);
+    for bounded in [
+        TilePressureLimits { maximum_history_values: parent_only.0, ..limits },
+        TilePressureLimits { maximum_kernel_values: parent_only.1, ..limits },
+        TilePressureLimits { maximum_history_values: histories - 1, ..limits },
+        TilePressureLimits { maximum_kernel_values: kernels - 1, ..limits },
+    ] {
+        assert!(BaffledTilePressure::new_first_order(&samples, RATE, MICROPHONE,
+            medium, microphone, bounded, &mut || false).is_err());
+    }
+    let exact = TilePressureLimits {
+        maximum_tiles: samples.len(), maximum_history_values: histories,
+        maximum_kernel_values: kernels,
+    };
+    assert_eq!(BaffledTilePressure::new_first_order(&samples, RATE, MICROPHONE,
+        medium, microphone, exact, &mut || false).unwrap().retained_values(), (histories, kernels));
+}
+
+#[test]
+fn omnidirectional_tiles_keep_scalar_output_bits_storage_and_latency() {
+    let medium = RayleighMedium { density: 1.2, sound_speed: 320.0 };
+    for count in [37, MAX_RAYLEIGH_INPUTS + 1] {
+        let samples = samples(count);
+        let limits = TilePressureLimits::surface_reference();
+        let mut scalar = BaffledTilePressure::new_differentiating(&samples, RATE,
+            MICROPHONE, medium, limits, &mut || false).unwrap();
+        let mut omni = BaffledTilePressure::new_first_order(&samples, RATE,
+            MICROPHONE, medium, FirstOrder::default(), limits, &mut || false).unwrap();
+        assert_eq!(scalar.retained_values(), omni.retained_values());
+        assert_eq!(scalar.delay_samples, omni.delay_samples);
+        assert_eq!(scalar.filter_delay_samples(), omni.filter_delay_samples());
+        assert!(omni.receivers.iter().all(|receiver| receiver.directional_velocity.is_none()));
+        let mut flows = vec![0.0; count];
+        for step in 0..320 {
+            for (i, flow) in flows.iter_mut().enumerate() {
+                *flow = 1e-8 * (step as f64 * 0.17 + i as f64 * 0.37).sin();
+            }
+            assert_eq!(scalar.step_trace(&flows).unwrap().to_bits(),
+                omni.step_trace(&flows).unwrap().to_bits());
+        }
+    }
+}

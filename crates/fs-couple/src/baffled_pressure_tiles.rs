@@ -5,6 +5,7 @@
 
 use super::{BaffledPressure, MAX_HISTORY, MAX_RAYLEIGH_INPUTS, MAX_TAP_RING, RayleighMedium, SurfaceSample};
 use super::gas::{GasPropagation, GasPropagationReport};
+use fs_bem::near_field::FirstOrder;
 use fs_material::gas::GasState;
 
 /// The existing shared surface quadrature ceiling, independent of basis size.
@@ -107,6 +108,14 @@ fn values_after(receiver: &BaffledPressure, extra: usize) -> Result<(usize, usiz
         coefficients = add(coefficients, receiver.kernels.len().checked_mul(receiver.modes)
             .ok_or("Rayleigh tile packed kernel overflow")?)?;
     }
+    if let Some(reactive) = receiver.directional_velocity.as_deref() {
+        // Material padding shifts this receiver's original pressure bank only.
+        // First-order receivers retain their own aligned velocity bank; they
+        // are inviscid and are not admitted to material latency alignment.
+        let (history, kernels) = values_after(reactive, 0)?;
+        histories = add(histories, history)?;
+        coefficients = add(coefficients, kernels)?;
+    }
     Ok((histories, coefficients))
 }
 
@@ -161,6 +170,32 @@ impl BaffledTilePressure {
             let basis = surface(chunk, cancelled)?;
             let mut receiver = BaffledPressure::new_differentiating(
                 &basis, chunk.len(), rate, position_m, medium)?;
+            if samples.len() > MAX_RAYLEIGH_INPUTS { receiver.differentiate_pressure()?; }
+            bank.push(receiver)?;
+        }
+        poll(cancelled)?;
+        Ok(bank)
+    }
+
+    /// Ideal first-order Pa-equivalent observation of every original tile flow.
+    /// Reuses the shared retarded pressure/particle-velocity receiver, including
+    /// its physical reactive near field and common numerical latency. The front
+    /// axis points toward the front source, as for BEM and harmonic receivers.
+    /// Both retained banks count against the complete surface storage allowance.
+    /// Alpha=1 retains the scalar constructor's output bits and storage layout.
+    /// This stationary inviscid receiver does not apply molecular absorption or
+    /// measured capsule response. The caller owns source-band/spatial resolution.
+    pub fn new_first_order(
+        samples: &[FlowSurfaceSample], rate: u32, position_m: [f64; 3],
+        medium: RayleighMedium, microphone: FirstOrder, limits: TilePressureLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, String> {
+        poll(cancelled)?;
+        let mut bank = Self::empty(samples.len(), position_m, limits)?;
+        for chunk in samples.chunks(MAX_RAYLEIGH_INPUTS) {
+            let basis = surface(chunk, cancelled)?;
+            let mut receiver = BaffledPressure::new_first_order(
+                &basis, chunk.len(), rate, position_m, medium, microphone)?;
             if samples.len() > MAX_RAYLEIGH_INPUTS { receiver.differentiate_pressure()?; }
             bank.push(receiver)?;
         }
