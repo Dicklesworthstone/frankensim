@@ -161,6 +161,164 @@ fn controls() -> BushingHeatControls {
     }
 }
 
+#[cfg(feature = "dissipative-coupling")]
+mod coupled {
+    use super::*;
+    use fs_mbd_material::attachments::thermal::coupled::{
+        CoupledBushingHeatControls, CoupledBushingHeatError,
+    };
+    use fs_solver::NewtonKrylovConfig;
+
+    fn coupled_controls() -> CoupledBushingHeatControls {
+        let mut mechanics = controls();
+        mechanics.mechanics.residual_tolerance = 1e-12;
+        CoupledBushingHeatControls {
+            mechanics,
+            maximum_step_s: DT,
+            maximum_cells: 2,
+            maximum_trials: 256,
+            maximum_newton_iterations: 16,
+            difference_step_j: 1e-7,
+            cell_energy_tolerance_j: 1e-10,
+            thermal_energy_tolerance_j: 1e-10,
+            newton: NewtonKrylovConfig {
+                absolute_tolerance: 1e-12,
+                relative_tolerance: 1e-10,
+                linear_restart: 2,
+                ..NewtonKrylovConfig::default()
+            },
+        }
+    }
+
+    fn unforced_links<'a>(materials: [&'a MaterialCard; 2], curves: [&'a ResolvedHeatCapacityCurve; 2])
+        -> Vec<LinkHeating<'a>> {
+        let mut links = links(materials, curves);
+        for link in &mut links {
+            for region in &mut link.regions { region.boundary.source_w = 0.; }
+        }
+        links
+    }
+
+    // Independent reduction of the physical two-capacity equations and the
+    // exact algebraic implicit-midpoint oscillator at its endpoint coefficients.
+    fn oracle(cp: f64, initial_q: f64, initial_v: f64, initial_t: [f64; 2]) -> [f64; 6] {
+        let response = |loss: f64| {
+            let ta = initial_t[0] + 0.25 * loss / (2. * cp);
+            let tb = initial_t[1] + 0.75 * loss / (2. * cp);
+            let rise = (ta + tb) / 2. - 300.;
+            let k = 6. * (1. + rise / 100.);
+            let c = 0.3 * (1. + 2. * rise / 100.);
+            let v = ((1. - DT * c / 2. - DT * DT * k / 4.) * initial_v
+                - DT * k * initial_q) / (1. + DT * c / 2. + DT * DT * k / 4.);
+            let q = initial_q + DT * (initial_v + v) / 2.;
+            [DT * c * ((initial_v + v) / 2.).powi(2), q, v, ta, tb, k]
+        };
+        let (mut lo, mut hi) = (0., 0.02);
+        for _ in 0..80 {
+            let mid = (lo + hi) / 2.;
+            if response(mid)[0] > mid { lo = mid; } else { hi = mid; }
+        }
+        response((lo + hi) / 2.)
+    }
+
+    #[test]
+    fn g1_self_heating_closes_source_viscosity_and_motion_in_the_same_interval() {
+        let mut final_velocities = Vec::new();
+        for cp in [0.0002, 0.002] {
+            let a = card(cp, 0., 500.);
+            let b = card(cp, 0., 500.);
+            let curves = [&a, &b].map(|m| caloric(m, 1e5, SolidLiquidPhase::Solid));
+            let model = mechanism(&a, &b);
+            let interface = interface(&a, &b);
+            let context = context();
+            let start = FreeFloatingMotionState { joint_velocity: vec![1.], ..state() };
+            let initial = HeatedBushings::new(
+                &model, unforced_links([&a, &b], [&curves[0], &curves[1]]),
+                vec![binding(&model, &interface, [&a, &b], &context)], start.clone(),
+                vec![], budget(), config(), || Ok(()),
+            ).unwrap();
+            let wrenches = [Wrench::new(ZERO, ZERO); 2];
+            let expected = oracle(cp, 0.01, 1., [300.; 2]);
+            let (next, report) = initial.step_to_coupled(
+                DT, loads(&wrenches), coupled_controls(), &[0.0015, 0.0045], || false,
+            ).unwrap();
+            assert!(report.nonlinear.converged && report.trials > 1);
+            assert!(report.maximum_cell_residual_j < 1e-10);
+            close(report.physical.dissipated_heat_j, expected[0]);
+            assert!((next.state().joint_position[0] - expected[1]).abs() < 2e-10);
+            assert!((next.state().joint_velocity[0] - expected[2]).abs() < 2e-9);
+            for (i, id) in [CellId(0), CellId(1)].into_iter().enumerate() {
+                close(next.thermal().temperature_k(id).unwrap(), expected[3 + i]);
+            }
+            close(next.bindings()[0].bushing.axes()[0].stiffness_n_m(), expected[5]);
+            let mean = (expected[3] + expected[4]) / 2.;
+            close(next.bindings()[0].bushing.axes()[0].damping_n_s_m(), 0.3 * (1. + 2. * (mean - 300.) / 100.));
+            // The stiffness change is external work at the initial strain,
+            // separate from both mechanical damping and the finite heat stores.
+            close(report.physical.elastic_parameter_work_j, 0.5 * (expected[5] - 6.) * 0.01_f64.powi(2));
+            close(report.physical.thermal.stored_energy_change_j, expected[0]);
+            close(report.physical.external_heat_j, 0.);
+            assert!(report.physical.total_energy_residual_j.abs() < 1e-8);
+            let (lagged, _) = initial.advance_to(DT, loads(&wrenches), config(), controls(), || Ok(())).unwrap();
+            assert!((lagged.state().joint_velocity[0] - next.state().joint_velocity[0]).abs() > 1e-5);
+
+            let expected_continuation = oracle(cp, expected[1], expected[2], [expected[3], expected[4]]);
+            let (continued, _) = next.step_to_coupled(2. * DT, loads(&wrenches), coupled_controls(),
+                &[0.0015, 0.0045], || false).unwrap();
+            assert!((continued.state().joint_velocity[0] - expected_continuation[2]).abs() < 4e-9);
+            assert_eq!(initial.state(), &start);
+            assert_eq!(initial.thermal().time_s(), 0.);
+            let (replayed, _) = initial.step_to_coupled(DT, loads(&wrenches), coupled_controls(),
+                &[0.0015, 0.0045], || false).unwrap();
+            assert_eq!(next.state(), replayed.state());
+            assert_eq!(next.thermal().cells(), replayed.thermal().cells());
+            final_velocities.push(expected[2]);
+        }
+        assert!(final_velocities[0] < final_velocities[1]);
+    }
+
+    #[test]
+    fn g4_source_work_budget_and_late_cancellation_leave_both_histories_unchanged() {
+        let a = card(0.0002, 0., 500.);
+        let b = card(0.0002, 0., 500.);
+        let curves = [&a, &b].map(|m| caloric(m, 1e5, SolidLiquidPhase::Solid));
+        let model = mechanism(&a, &b);
+        let interface = interface(&a, &b);
+        let context = context();
+        let start = FreeFloatingMotionState { joint_velocity: vec![1.], ..state() };
+        let initial = HeatedBushings::new(
+            &model, unforced_links([&a, &b], [&curves[0], &curves[1]]),
+            vec![binding(&model, &interface, [&a, &b], &context)], start.clone(),
+            vec![], budget(), config(), || Ok(()),
+        ).unwrap();
+        let wrenches = [Wrench::new(ZERO, ZERO); 2];
+        let mut limited = coupled_controls();
+        limited.maximum_trials = 1;
+        assert!(matches!(initial.step_to_coupled(DT, loads(&wrenches), limited,
+            &[0.0015, 0.0045], || false), Err(CoupledBushingHeatError::Budget(_))));
+        limited = coupled_controls();
+        limited.mechanics.maximum_parameter_work_j = 0.;
+        assert!(initial.step_to_coupled(DT, loads(&wrenches), limited, &[0.0015, 0.0045], || false).is_err());
+        // The original bulk caloric domain reaches 500 K, but this interface
+        // is valid only through 400 K: proposed 450 K must remain a refusal.
+        assert!(matches!(initial.step_to_coupled(DT, loads(&wrenches), coupled_controls(), &[0.06; 2], || false),
+            Err(CoupledBushingHeatError::Physical(_))));
+        let mut calls = 0;
+        initial.step_to_coupled(DT, loads(&wrenches), coupled_controls(), &[0.0015, 0.0045], || {
+            calls += 1; false
+        }).unwrap();
+        let mut visited = 0;
+        assert!(matches!(initial.step_to_coupled(DT, loads(&wrenches), coupled_controls(),
+            &[0.0015, 0.0045], || { visited += 1; visited == calls }),
+            Err(CoupledBushingHeatError::Physical(BushingHeatError::Thermal(DepositionError::Cancelled)))));
+        assert_eq!(visited, calls);
+        assert_eq!(initial.state(), &start);
+        assert_eq!(initial.thermal().time_s(), 0.);
+        for cell in initial.thermal().cells().values() { assert_eq!(cell.specific_h_j_kg, 0.); }
+        close(initial.bindings()[0].bushing.axes()[0].damping_n_s_m(), 0.3);
+    }
+}
+
 #[test]
 fn actual_midpoint_loss_heats_original_cells_then_refreshes_every_interface_axis() {
     let a = card(5., 0., 500.);

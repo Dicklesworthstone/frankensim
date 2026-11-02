@@ -1254,3 +1254,32 @@ The `attachments_thermal` generated-heat regression uses the existing source-bou
 uniform-conductor law at the actual cell temperature. It checks independent I²R
 heat, all-axis interface feedback, changed subsequent native motion, a shared
 observer step limit, restart and failure/cancellation rollback of every history.
+
+### Jointly converged bushing temperature and damping
+
+With `dissipative-coupling`, `attachments::thermal::coupled` adds
+`HeatedBushings::step_to_coupled`. The original `BackwardEulerStep` cell-energy
+residual and `NewtonKrylovState` close temperature-dependent stiffness, viscosity,
+native motion and finite damping heat within one event-free interval. Every
+immutable trial resolves the original endpoint source claims and runs all
+bushings in one existing implicit mechanical solve from the accepted state.
+Actual midpoint loss enters each declared original A/B cell exactly once.
+
+Source stiffness updates contribute U_new(q_initial)-U_old(q_initial) as signed
+external parameter work, with a separate sum-of-absolute-work budget. This work
+does not enter the heat source. Independent authored/reservoir heat, native
+mechanical work, physical damping loss, caloric storage and numerical defects
+retain their separate accounts. Local and global joule gates, original source
+applicability, trial/iteration limits and final cancellation all precede return
+of either proposed history. Start/interior events refuse; target events remain
+pending under the original thermal residual's semantics.
+
+Endpoint-frozen coefficients remain first-order in time. Fixed geometry and
+mass, fully solid support, frequency applicability and attachment bounds remain
+required. Nonlinear convergence supplies neither a time-accuracy certificate nor
+reciprocal thermoelastic free energy or entropy; arbitrary observers are outside
+this closed residual. Two focused integration tests define independent oscillator
+and caloric comparisons, heat-capacity substitution, continuation, deterministic
+replay and source/work/budget/cancellation rollback. Syntax and whitespace checks
+pass; native compilation and execution remain unverified because the existing
+dependency build is resource-blocked.

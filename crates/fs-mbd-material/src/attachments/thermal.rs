@@ -7,6 +7,11 @@
 //! or a complete reversible thermoelastic law. The thermal/mechanical split is
 //! first order; callers retain timestep and source-band qualification duties.
 
+/// Jointly converged source-temperature feedback through the original thermal
+/// residual and native implicit six-axis bushing mechanics.
+#[cfg(feature = "dissipative-coupling")]
+pub mod coupled;
+
 use super::{AttachmentError, MaterialBushing, step_bushings_implicit};
 use crate::articulated::ResolvedArticulated;
 use crate::thermal::heating::{
@@ -85,7 +90,9 @@ pub struct BushingHeatReport {
     /// Boundary/source and composed-observer heat, excluding bushing damping.
     /// A composed domain's own storage/work balance remains with that observer.
     pub external_heat_j: f64,
-    /// Signed U_new(q_after)-U_old(q_after), supplied by the parameter controller.
+    /// Signed U_new(q)-U_old(q), supplied by the parameter controller at the
+    /// unchanged strain chosen by the step: endpoint for `advance_to`, initial
+    /// state for the jointly converged `step_to_coupled` interval.
     pub elastic_parameter_work_j: f64,
     pub absolute_parameter_work_j: f64,
     /// Native actuator and external-wrench/gravity work.
