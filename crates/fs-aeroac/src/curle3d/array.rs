@@ -396,6 +396,24 @@ impl PreparedCompactSourceObserver {
         })
     }
 
+    /// Observe this frequency for finite-duration, potentially beating fields.
+    ///
+    /// Feed lines at the same receiver and on one physical source clock to
+    /// [`crate::observation::PreparedHarmonicField`]. All propagation phases are
+    /// already present; no second delay or amplitude normalization is required.
+    /// The prescribed compact-source model's applicability remains unchanged.
+    pub fn evaluate_harmonic_line(
+        &self,
+        sources: &[CompactSourcePhasor],
+    ) -> Result<crate::observation::HarmonicFieldLine<3>, AeroacError> {
+        let [pressure, ux, uy, uz] = self.amplitudes(sources)?;
+        Ok(crate::observation::HarmonicFieldLine {
+            frequency_hz: self.frequency_hz,
+            pressure_pa: pressure,
+            particle_velocity_m_s: [ux, uy, uz],
+        })
+    }
+
     /// Observe explicit source coherence factors `S = B xi`, `E[xi xi*] = I`.
     ///
     /// Each mode contains one source vector per position, with physically known

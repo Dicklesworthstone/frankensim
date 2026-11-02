@@ -68,6 +68,7 @@ pub mod material;
 /// Causal three-dimensional radiation from physical compact volume sources.
 pub mod monopole;
 pub mod noisetable;
+pub mod observation;
 pub mod regime;
 pub mod slot_jet_3d;
 

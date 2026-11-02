@@ -127,6 +127,22 @@ material scaling and domain/representability refusals.
   pressure-null velocity, separated-source and mixed-mechanism interference,
   standing waves, complex partial coherence against dense algebra, material
   density scaling, dynamic-range residuals and bounded admission.
+- `observation::PreparedHarmonicField` observes deterministic lines on a common
+  receiver clock over an explicit rectangular interval. The existing 2D/3D
+  prepared observers export `evaluate_harmonic_line` with the propagation delay
+  already applied. Exactly equal frequencies coalesce using double-double sums;
+  close frequencies remain distinct. Pressure mean, mean square and physical
+  `<p(t) u(t)>` retain both difference-frequency beats and sum-frequency terms,
+  including subperiod windows. The shared `fs-fft::harmonic_window` integral is
+  reused per line pair across all velocity components. Preparation and each
+  allocation-free observation are bounded by explicit line/pair budgets. This
+  is floating-point deterministic-signal integration, not inferred stochastic
+  coherence, a certified enclosure or a new source/SPL authority. Severe
+  cancellation between distinct frequencies remains roundoff-limited; negative
+  computed pressure squares refuse rather than being clamped. G0/G1/G3 cases
+  in `tests/harmonic_observation.rs` check a subperiod analytic solution,
+  coherent nulls and small residuals, beats against independent real-signal
+  quadrature, clock shifts, actual 2D/3D source-consumer paths and admission.
 - `PreparedCompactSourceObserver::new_molecular` retains an original
   `fs_material::relaxation::RelaxationState` and propagates its relaxing
   compression law through the same coherent 3D source operator. The original

@@ -177,11 +177,20 @@ pub struct HarmonicProduct {
 impl HarmonicProduct {
     /// Average `Re[a exp(-i omega_a t)] * Re[b exp(-i omega_b t)]`.
     pub fn mean_real_product(self, a: C64, b: C64) -> Result<f64, WindowError> {
+        self.mean_real_product_dd(a, b).map(Dd::to_f64)
+    }
+
+    /// Retain the double-double product until a whole field's interference
+    /// sum is complete. Rounding each large pair to f64 before cancellation
+    /// can discard a small beat signal even with an accurate outer sum.
+    /// Cached trigonometry remains f64; no relative error bound near an
+    /// arbitrary null is implied by this extended-precision accumulator.
+    pub fn mean_real_product_dd(self, a: C64, b: C64) -> Result<Dd, WindowError> {
         let (ar, ai) = rotate(a, self.rotation_a)?;
         let (br, bi) = rotate(b, self.rotation_b)?;
         let cosine = checked(checked(self.cos_cos * ar)? * br)?;
         let sine = checked(checked(self.sin_sin * ai)? * bi)?;
-        Ok(checked(cosine + sine)?.to_f64())
+        checked(cosine + sine)
     }
 }
 

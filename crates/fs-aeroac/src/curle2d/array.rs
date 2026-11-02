@@ -224,6 +224,24 @@ impl PreparedDipoleObserver {
         })
     }
 
+    /// Observe this frequency for finite-duration, potentially beating fields.
+    ///
+    /// Feed lines at the same receiver and on one physical source clock to
+    /// [`crate::observation::PreparedHarmonicField`]. The line retains the full
+    /// propagated pressure/velocity; its path delay is already applied. This
+    /// does not change the 2D source model's absolute-level authority boundary.
+    pub fn evaluate_harmonic_line(
+        &self,
+        forces_n_m: &[[C64; 2]],
+    ) -> Result<crate::observation::HarmonicFieldLine<2>, AeroacError> {
+        let [pressure, velocity_x, velocity_y] = self.amplitudes(forces_n_m)?;
+        Ok(crate::observation::HarmonicFieldLine {
+            frequency_hz: self.frequency_hz,
+            pressure_pa: pressure,
+            particle_velocity_m_s: [velocity_x, velocity_y],
+        })
+    }
+
     /// Propagate an explicit factorization of source coherence at this frequency.
     ///
     /// For factor `b_r[j][axis]` [N/m], the source force is
