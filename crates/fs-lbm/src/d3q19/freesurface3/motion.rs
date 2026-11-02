@@ -568,7 +568,39 @@ impl FreeSurface3 {
             velocity,
             maximum_relative_mass_defect,
             gate,
-            Some((maximum_density_excursion, &pressure)),
+            Some((maximum_density_excursion, pressure::GasPressureField3::Cell(&pressure))),
+        )?;
+        check_cancel(gate)?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    /// Advance tangential wall motion with independently loaded gas links.
+    ///
+    /// The actual neighboring gas source supplies each pressure perturbation
+    /// as in [`Self::step_with_gas_link_pressure`]. Wall impulse/work and gas
+    /// reconstruction share one native step and one atomic candidate, with
+    /// the flooded-plane and tangent-only limits of
+    /// [`Self::step_with_planar_wall_motion`]. A uniform link load reproduces
+    /// [`Self::step_with_planar_wall_motion_and_gas_pressure`] exactly.
+    pub fn step_with_planar_wall_motion_and_gas_link_pressure(
+        &mut self,
+        wall: PlanarWall3,
+        velocity: [f64; 3],
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure: impl Fn(GasPressureLink3) -> Result<f64, FreeSurfaceError3>,
+    ) -> Result<PlanarWallMotionReport3, FreeSurfaceError3> {
+        let (candidate, report) = self.planar_wall_motion_candidate(
+            wall,
+            velocity,
+            maximum_relative_mass_defect,
+            gate,
+            Some((
+                maximum_density_excursion,
+                pressure::GasPressureField3::Link(&pressure),
+            )),
         )?;
         check_cancel(gate)?;
         *self = candidate;
@@ -583,7 +615,7 @@ impl FreeSurface3 {
         velocity: [f64; 3],
         maximum_relative_mass_defect: f64,
         gate: &CancelGate,
-        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
+        gas_pressure: Option<(f64, pressure::GasPressureField3<'_>)>,
     ) -> Result<(Self, PlanarWallMotionReport3), FreeSurfaceError3> {
         check_cancel(gate)?;
         let gas_pressure = gas_pressure

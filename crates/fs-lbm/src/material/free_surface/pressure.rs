@@ -1,7 +1,24 @@
 //! Absolute external gas pressure enters the existing single-liquid VOF step.
 
 use super::*;
-use crate::d3q19::freesurface3::FreeSurfaceError3;
+use crate::d3q19::freesurface3::{FreeSurfaceError3, GasPressureLink3};
+
+/// Physical coordinates of one actual native liquid/gas pressure link.
+///
+/// The midpoint is halfway between lattice cell centers, not an inferred VOF
+/// interface intersection. The native direction is a streaming characteristic,
+/// not a geometric surface normal. The domain origin is zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialGasPressureLink3 {
+    /// Exact native liquid/gas cells and incoming population direction.
+    pub link: GasPressureLink3,
+    /// Liquid cell center [m].
+    pub liquid_center_m: [f64; 3],
+    /// Neighboring active gas cell center [m].
+    pub gas_center_m: [f64; 3],
+    /// Geometric midpoint of the two cell centers [m].
+    pub midpoint_m: [f64; 3],
+}
 
 // One physical-coordinate and pressure conversion for frozen and evolving
 // liquids; captures scalars so a thermal candidate need not borrow its owner.
@@ -23,6 +40,45 @@ pub(super) fn lattice_pressure_field(
             return Err(FreeSurfaceError3::InvalidGasPressure {
                 coordinates: Some(coordinates),
                 reason: "absolute gas pressure must be positive with finite physical coordinates and lattice conversion",
+            });
+        }
+        Ok(perturbation)
+    }
+}
+
+pub(super) fn lattice_link_pressure_field(
+    reference_pressure_pa: f64,
+    dx: f64,
+    pressure_unit: f64,
+    pressure_pa: impl Fn(MaterialGasPressureLink3) -> f64,
+) -> impl Fn(GasPressureLink3) -> Result<f64, FreeSurfaceError3> {
+    move |link| {
+        let liquid_center_m = link.liquid_cell.map(|c| (c as f64 + 0.5) * dx);
+        let gas_center_m = link.gas_cell.map(|c| (c as f64 + 0.5) * dx);
+        let midpoint_m = core::array::from_fn(|axis| {
+            let liquid = link.liquid_cell[axis] as f64;
+            (liquid + 0.5 + 0.5 * (link.gas_cell[axis] as f64 - liquid)) * dx
+        });
+        let physical = MaterialGasPressureLink3 {
+            link,
+            liquid_center_m,
+            gas_center_m,
+            midpoint_m,
+        };
+        let absolute = pressure_pa(physical);
+        let perturbation = (absolute - reference_pressure_pa) / pressure_unit;
+        if liquid_center_m
+            .iter()
+            .chain(&gas_center_m)
+            .chain(&midpoint_m)
+            .any(|x| !x.is_finite())
+            || !absolute.is_finite()
+            || absolute <= 0.0
+            || !perturbation.is_finite()
+        {
+            return Err(FreeSurfaceError3::InvalidGasPressure {
+                coordinates: Some(link.liquid_cell),
+                reason: "absolute gas link pressure must be positive with finite physical coordinates and lattice conversion",
             });
         }
         Ok(perturbation)
@@ -70,6 +126,45 @@ impl MaterialFreeSurfaceScaling<'_> {
 }
 
 impl MaterialFreeSurface3<'_> {
+    /// Advance with positive absolute gas pressure [Pa] on each actual gas link.
+    ///
+    /// Distinct neighbors of one interface cell may supply distinct loads.
+    /// [`MaterialGasPressureLink3`] supplies both cell centers and their midpoint
+    /// in metres; callers can identify a gas neighbor without inventing a
+    /// surface normal or gas-volume reconstruction. Pressure is frozen over
+    /// this step and converted about the construction-time pressure reference.
+    ///
+    /// The native per-link capillary bound, source correction, deterministic
+    /// callback order and atomicity are those of
+    /// [`FreeSurface3::step_with_gas_link_pressure`]. A uniform link load has the
+    /// same population bits as [`Self::step_with_gas_pressure`]. This is the
+    /// same isothermal incompressible owner; gas state and pressure work are
+    /// not inferred from numerical density or fill changes.
+    pub fn step_with_gas_link_pressure(
+        &mut self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(MaterialGasPressureLink3) -> f64,
+    ) -> Result<(), MaterialLbmError> {
+        let reference = self
+            .scaling
+            .reference_pressure_pa
+            .ok_or(MaterialLbmError::Invalid(
+                "absolute gas loading requires an explicit fixed pressure reference",
+            ))?;
+        self.lattice.step_with_gas_link_pressure(
+            gate,
+            maximum_density_excursion,
+            lattice_link_pressure_field(
+                reference,
+                self.scaling.cell_size_m,
+                self.scaling.pressure_unit_pa,
+                pressure_pa,
+            ),
+        )?;
+        Ok(())
+    }
+
     /// Advance under a spatial external gas pressure in absolute Pascals.
     ///
     /// The scaling's declared pressure reference is the fixed physical pressure

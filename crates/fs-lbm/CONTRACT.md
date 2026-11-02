@@ -7544,3 +7544,47 @@ Implicit SGS, source-solid calorics, wall closures and viscous-heating
 composition are not selected by these entries. No unconditional nonlinear
 convergence, measured performance or experimental accuracy is claimed.
 
+## Prescribed gas pressure resolved on actual free-surface links
+
+`FreeSurface3::step_with_gas_link_pressure` supplies a distinct pressure to each
+actual missing incoming gas population. `GasPressureLink3` identifies the liquid
+cell, signed gas source coordinates and incoming native D3Q19 direction. The
+source is exactly `liquid - E3[q]`; callbacks visit native cells deterministically
+and gas directions in increasing q. Inactive, covered-piston and out-of-domain
+wall sources never become gas pressure links. Separate neighbors of one liquid
+cell can therefore carry separate prescribed loads without assigning one
+pressure to that entire cell.
+
+The original reconstruction remains the only momentum boundary owner. Every
+link adds its gas-pressure perturbation to the SAME cell capillary density and
+retains the existing physical Guo source correction. The combined gas/capillary
+density must remain positive and inside the explicit excursion bound. Curvature
+is evaluated once per exposed cell; repeated identical boundary densities reuse
+the same equilibrium without a map or per-link allocation. Existing cell fields
+are still sampled exactly once per exposed cell, and uniform link loading keeps
+their population arithmetic and bits. Interior cells do not evaluate curvature
+or initialize a gas equilibrium.
+
+The frozen SI, source pressure/shear rheology, heat/enthalpy, complete conducting
+thermal and native/SI tangential moving-wall entries share this carrier and
+original collision/transport step. `MaterialGasPressureLink3` adds both cell
+centers and their midpoint in metres. That midpoint is not an asserted VOF
+surface intersection; the streaming direction is not a geometric surface
+normal. Absolute positive Pascals use the original fixed datum and pressure
+unit. The composed thermal link entry refuses a simultaneous cell-pressure
+owner. All existing source, surface/electrical, body heat, wall work and atomic
+publication gates remain in force. The original native Local/LegacyGlobal
+conversion-error semantics are unchanged; ConservativeLocal and the existing
+material transactions publish only complete candidates.
+
+Four native regression sources independently check every reconstructed
+population and pressure-traction sign on all axes, exact uniform-load parity
+including force/capillarity and callback cadence, wall exclusion, and last-link
+pressure/cancellation rollback. Four physical regression sources check SI
+coordinates and gauge, pressure/shear source updates, heated mass-route parity,
+and complete finite-body thermal rollback; the existing wall-pressure regression
+also compares both link entrypoints and reciprocal reports. Native execution
+remains unverified in the resource-constrained delivery environment. This is
+prescribed gas traction, not evolved gas topology, gas-volume reconstruction,
+gas inertia, compressive heating or a pressure-volume work closure.
+

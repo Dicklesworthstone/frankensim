@@ -20,6 +20,7 @@ use super::{
     MaterialFreeSurface3, MaterialFreeSurfaceDomain3, MaterialFreeSurfaceInitialCell3,
     MaterialFreeSurfaceSample3, capillary_scaling, plan_free_surface_from_material,
 };
+use crate::d3q19::freesurface3::pressure::GasPressureField3;
 use crate::d3q19::freesurface3::transport::MassLocation3;
 use crate::d3q19::freesurface3::{FreeSurface3, FreeSurfaceError3};
 use crate::material::transport::rheology::{LocalRheologyError, solve_local};
@@ -555,13 +556,50 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
             self.flow.scaling.pressure_unit_pa,
             pressure_pa,
         );
-        self.step_inner(gate, Some((maximum_density_excursion, &field)))
+        self.step_inner(
+            gate,
+            Some((maximum_density_excursion, GasPressureField3::Cell(&field))),
+        )
+    }
+
+    /// Advance source-resolved viscosity with distinct gas pressure per link.
+    ///
+    /// The positive absolute pressure [Pa] is sampled on the actual native gas
+    /// neighbors with the coordinate meaning of [`super::MaterialGasPressureLink3`].
+    /// This shares [`Self::step_with_gas_pressure`]'s one collision, endpoint
+    /// constitutive solve and atomic publication. A pressure-dependent source
+    /// still uses the actual liquid pressure, never a neighboring gas load.
+    /// Gas dynamics and pressure-volume heat/work are outside this owner.
+    pub fn step_with_gas_link_pressure(
+        &mut self,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(super::MaterialGasPressureLink3) -> f64,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        let reference = self
+            .flow
+            .scaling
+            .reference_pressure_pa
+            .ok_or(Error::Invalid(
+                "rheology gas loading requires an explicit fixed pressure reference",
+            ))?;
+        let field = super::pressure::lattice_link_pressure_field(
+            reference,
+            self.flow.scaling.cell_size_m,
+            self.flow.scaling.pressure_unit_pa,
+            pressure_pa,
+        );
+        self.step_inner(
+            gate,
+            Some((maximum_density_excursion, GasPressureField3::Link(&field))),
+        )
     }
 
     fn step_inner(
         &mut self,
         gate: &CancelGate,
-        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
+        gas_pressure: Option<(f64, GasPressureField3<'_>)>,
     ) -> Result<(), Error> {
         poll(gate)?;
         let mut tau = BTreeMap::new();

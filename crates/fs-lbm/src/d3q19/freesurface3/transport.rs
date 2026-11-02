@@ -308,7 +308,7 @@ impl FreeSurface3 {
         tau: &BTreeMap<(u64, usize), f64>,
         forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
         max_routes: usize,
-        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
+        gas_pressure: Option<(f64, super::pressure::GasPressureField3<'_>)>,
     ) -> Result<MassTransport3, FreeSurfaceError3> {
         check_cancel(gate)?;
         let boundary = gas_pressure
@@ -330,7 +330,7 @@ impl FreeSurface3 {
         &mut self,
         gate: &CancelGate,
         tau: &BTreeMap<(u64, usize), f64>,
-        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
+        gas_pressure: Option<(f64, super::pressure::GasPressureField3<'_>)>,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
         let boundary = gas_pressure

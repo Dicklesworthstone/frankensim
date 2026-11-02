@@ -63,6 +63,59 @@ fn binding(source: &MaterialCard, pressure: f64) -> IsothermalRheologyLaw<'_> {
 }
 
 #[test]
+fn link_loading_shares_source_pressure_and_shear_updates_and_refuses_atomically() {
+    let gate = CancelGate::new_clock_free();
+    let cells = pressure_slab();
+    let source = pressure_card(0.01, 0.001, 5.0);
+    let binding = binding(&source, 100_000.0);
+    with_cx(&gate, |cx| {
+        let mut cell = pressure_flow(&binding, &cells, 100_000.0, cx, &gate);
+        let mut link = cell.clone();
+        for _ in 0..3 {
+            cell.step_with_gas_pressure(&gate, 0.05, |_| 100_000.5)
+                .unwrap();
+            link.step_with_gas_link_pressure(&gate, 0.05, |_| 100_000.5)
+                .unwrap();
+            assert_eq!(
+                cell.lattice().grid().state_bits(),
+                link.lattice().grid().state_bits()
+            );
+            for x in 2..6 {
+                assert_eq!(cell.rheology_at([x, 0, 3]), link.rheology_at([x, 0, 3]));
+                assert_eq!(cell.material_at([x, 0, 3]), link.material_at([x, 0, 3]));
+            }
+        }
+        let bits = link.lattice().grid().state_bits();
+        let mass = link.ledger_mass_kg().unwrap();
+        let material = link.material_at([3, 0, 3]).unwrap().clone();
+        let sample = link.rheology_at([3, 0, 3]).cloned().unwrap();
+        for cancel in [false, true] {
+            let gate = CancelGate::new_clock_free();
+            let calls = std::cell::Cell::new(0);
+            assert!(
+                link.step_with_gas_link_pressure(&gate, 0.05, |_| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 5 {
+                        if cancel {
+                            gate.request();
+                        } else {
+                            return 0.0;
+                        }
+                    }
+                    100_000.5
+                })
+                .is_err()
+            );
+            assert!(calls.get() >= 5);
+            assert_eq!(link.lattice().grid().state_bits(), bits);
+            assert_eq!(link.ledger_mass_kg().unwrap(), mass);
+            assert_eq!(link.material_at([3, 0, 3]), Some(&material));
+            assert_eq!(link.rheology_at([3, 0, 3]), Some(&sample));
+        }
+    });
+}
+
+#[test]
 fn g1_pressure_and_shear_use_actual_interior_state_and_one_constitutive_root() {
     let gate = CancelGate::new_clock_free();
     let cells = pressure_slab();

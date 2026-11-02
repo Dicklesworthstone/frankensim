@@ -49,7 +49,8 @@ pub mod rheology;
 
 mod initial;
 pub use initial::FreeSurfaceInitialCell3;
-mod pressure;
+pub(crate) mod pressure;
+pub use pressure::GasPressureLink3;
 mod curvature;
 mod forcing;
 mod conversion_momentum;
@@ -1284,7 +1285,7 @@ impl FreeSurface3 {
                 let mut new_f = [0.0f64; Q3];
                 // One geometry and boundary velocity serve every missing gas
                 // population. Interior cells never compute capillary curvature.
-                let mut gas_equilibrium = None;
+                let mut gas_equilibrium = pressure::GasEquilibrium3::default();
                 let (cx, cy, cz) = Self::global_of(key, lane);
                 for (q, out) in new_f.iter_mut().enumerate() {
                     // Pull source lies opposite the direction of travel.
@@ -1308,13 +1309,16 @@ impl FreeSurface3 {
                             let src_key = self.grid.active_keys()[src_slot];
                             match self.tiles[&src_key].cells[src_lane] {
                                 Cell3::Gas => {
-                                    if gas_equilibrium.is_none() {
-                                        let density = self.loaded_reference_density(
-                                            key, lane, gas_pressure,
-                                        )?;
-                                        gas_equilibrium = Some(equilibrium3(density, u_pre));
-                                    }
-                                    let eq = gas_equilibrium.as_ref().expect("reconstructed gas boundary");
+                                    let eq = gas_equilibrium.at_link(
+                                        || self.reference_density(key, lane),
+                                        u_pre,
+                                        gas_pressure,
+                                        GasPressureLink3 {
+                                            liquid_cell: [cx as usize, cy as usize, cz as usize],
+                                            gas_cell: [sx, sy, sz],
+                                            incoming_direction: q,
+                                        },
+                                    )?;
                                     let value = eq[q] + eq[OPP3[q]] - post[&key][lane][OPP3[q]];
                                     if correct_pressure_source {
                                         value

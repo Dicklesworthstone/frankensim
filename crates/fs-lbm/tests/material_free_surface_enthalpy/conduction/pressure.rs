@@ -6,6 +6,127 @@ use fs_lbm::material::free_surface::enthalpy::conduction::{
 };
 use std::cell::Cell;
 
+#[test]
+fn link_pressure_shares_conduction_and_finite_body_publication() {
+    let card = conducting_card(1.0);
+    let solid = body::wall_card(0.5, 500.0);
+    let chart = body::wall_chart(&solid);
+    let context = point(450.0);
+    with_pressure_liquid(&card, Some(100000.0), |mut cell, gate| {
+        let mut link = cell.clone();
+        let mut cell_walls = [body::wall(&solid, &chart, &context, 450.0)];
+        let mut link_walls = cell_walls.clone();
+        let expected = cell
+            .step_with_thermal_boundaries(
+                &[conducting_face()],
+                &[],
+                controls(),
+                &mut cell_walls,
+                &[body::contact()],
+                boundary(&|_| 100000.5),
+                false,
+                gate,
+            )
+            .unwrap();
+        let actual = link
+            .step_with_thermal_boundaries_and_gas_link_pressure(
+                &[conducting_face()],
+                &[],
+                controls(),
+                &mut link_walls,
+                &[body::contact()],
+                FreeSurfaceThermalBoundaries::default(),
+                false,
+                gate,
+                0.05,
+                |_| 100000.5,
+            )
+            .unwrap();
+        assert_eq!(actual.conduction.flow, expected.conduction.flow);
+        assert_eq!(
+            actual.conduction.last_applied,
+            expected.conduction.last_applied
+        );
+        assert_eq!(
+            actual.conduction.thermal_endpoint,
+            expected.conduction.thermal_endpoint
+        );
+        assert_eq!(
+            link.flow().lattice().grid().state_bits(),
+            cell.flow().lattice().grid().state_bits()
+        );
+        assert_eq!(
+            link.total_enthalpy_j().unwrap(),
+            cell.total_enthalpy_j().unwrap()
+        );
+        assert_eq!(
+            link_walls[0].specific_enthalpy_j_kg(),
+            cell_walls[0].specific_enthalpy_j_kg()
+        );
+        assert_eq!(link_walls[0].material(), cell_walls[0].material());
+        assert_eq!(actual.conduction.flow.external_heat_j, 0.0);
+        assert_eq!(actual.conduction.flow.viscous_heat_j, 0.0);
+
+        let bits = link.flow().lattice().grid().state_bits();
+        let enthalpy = link.total_enthalpy_j().unwrap();
+        let wall_h = link_walls[0].specific_enthalpy_j_kg();
+        let wall_source = link_walls[0].material().clone();
+        let time = link.physical_time_s();
+        for cancel in [false, true] {
+            let gate = CancelGate::new_clock_free();
+            let calls = Cell::new(0);
+            assert!(
+                link.step_with_thermal_boundaries_and_gas_link_pressure(
+                    &[conducting_face()],
+                    &[],
+                    controls(),
+                    &mut link_walls,
+                    &[body::contact()],
+                    FreeSurfaceThermalBoundaries::default(),
+                    false,
+                    &gate,
+                    0.05,
+                    |_| {
+                        calls.set(calls.get() + 1);
+                        if calls.get() == 5 {
+                            if cancel {
+                                gate.request();
+                            } else {
+                                return 0.0;
+                            }
+                        }
+                        100000.5
+                    },
+                )
+                .is_err()
+            );
+            assert!(calls.get() >= 5);
+            assert_eq!(link.flow().lattice().grid().state_bits(), bits);
+            assert_eq!(link.total_enthalpy_j().unwrap(), enthalpy);
+            assert_eq!(link_walls[0].specific_enthalpy_j_kg(), wall_h);
+            assert_eq!(link_walls[0].material(), &wall_source);
+            assert_eq!(link.physical_time_s(), time);
+        }
+        assert!(
+            link.step_with_thermal_boundaries_and_gas_link_pressure(
+                &[],
+                &[],
+                controls(),
+                &mut link_walls,
+                &[],
+                boundary(&|_| 100000.5),
+                false,
+                gate,
+                0.05,
+                |_| panic!("competing pressure owners must refuse before sampling"),
+            )
+            .is_err()
+        );
+        assert_eq!(link.flow().lattice().grid().state_bits(), bits);
+        assert_eq!(link.physical_time_s(), time);
+    });
+}
+
 fn with_pressure_liquid<R>(
     card: &MaterialCard,
     reference: Option<f64>,

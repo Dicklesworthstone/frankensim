@@ -106,6 +106,101 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                     ))
                 })
                 .transpose()?;
+        self.step_with_thermal_pressure(
+            faces,
+            heat,
+            controls,
+            bodies,
+            contacts,
+            boundaries,
+            with_viscous_heating,
+            pressure
+                .as_ref()
+                .map(|(maximum, field)| (*maximum, GasPressureField::Cell(field))),
+            gate,
+        )
+    }
+
+    /// Advance all original thermal boundaries with distinct pressure per gas link.
+    ///
+    /// Positive absolute pressure [Pa] is frozen over the native flow interval
+    /// and uses [`super::super::super::MaterialGasPressureLink3`]'s cell centers
+    /// and link midpoint. The supplied `boundaries.gas_pressure` must be `None`:
+    /// one mechanical pressure field owns each reconstructed gas population.
+    ///
+    /// Conduction, finite bodies, source viscosity, surface/electrical bindings,
+    /// optional molecular viscous heat and mass/enthalpy transport use exactly
+    /// the transaction of [`Self::step_with_thermal_boundaries`]. A uniform
+    /// link field reproduces its cell-pressure result. All state, source and
+    /// clock publication remains atomic; gas topology, gas compression and
+    /// pressure-volume heat are not inferred from the numerical free surface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_thermal_boundaries_and_gas_link_pressure(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        boundaries: FreeSurfaceThermalBoundaries<'_>,
+        with_viscous_heating: bool,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(super::super::super::MaterialGasPressureLink3) -> f64,
+    ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
+        poll(gate)?;
+        if boundaries.gas_pressure.is_some() {
+            return Err(Error::Invalid(
+                "cell and link pressure cannot both own the gas boundary",
+            ));
+        }
+        if !maximum_density_excursion.is_finite()
+            || maximum_density_excursion <= 0.0
+            || maximum_density_excursion >= 1.0
+        {
+            return Err(Error::Invalid(
+                "gas-pressure density-excursion bound must be finite and in (0,1)",
+            ));
+        }
+        let reference = self
+            .flow
+            .scaling
+            .reference_pressure_pa
+            .ok_or(Error::Invalid(
+                "absolute gas loading requires an explicit fixed pressure reference",
+            ))?;
+        let field = super::super::super::pressure::lattice_link_pressure_field(
+            reference,
+            self.flow.scaling.cell_size_m,
+            self.flow.scaling.pressure_unit_pa,
+            pressure_pa,
+        );
+        self.step_with_thermal_pressure(
+            faces,
+            heat,
+            controls,
+            bodies,
+            contacts,
+            boundaries,
+            with_viscous_heating,
+            Some((maximum_density_excursion, GasPressureField::Link(&field))),
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_thermal_pressure(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        boundaries: FreeSurfaceThermalBoundaries<'_>,
+        with_viscous_heating: bool,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
+        gate: &CancelGate,
+    ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         let applied = if with_viscous_heating {
             self.viscous_sources(gate)?
         } else {
@@ -124,9 +219,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             boundaries.surfaces,
             boundaries.surface_solve,
             None,
-            pressure
-                .as_ref()
-                .map(|(maximum, field)| (*maximum, field as &GasPressureField<'_>)),
+            gas_pressure,
             gate,
         )?;
         Ok(viscous::FreeSurfaceViscousConductionReport {

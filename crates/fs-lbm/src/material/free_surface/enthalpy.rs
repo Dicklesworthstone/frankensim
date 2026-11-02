@@ -276,7 +276,7 @@ impl From<fs_material::thermochemical_gas::energy::GasEnergyError> for FreeSurfa
 }
 
 type Error = FreeSurfaceEnthalpyError;
-type GasPressureField<'a> = dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3> + 'a;
+type GasPressureField<'a> = crate::d3q19::freesurface3::pressure::GasPressureField3<'a>;
 
 /// Native moving liquid, original caloric chart and pinned source law.
 ///
@@ -606,7 +606,52 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             None,
             None,
             None,
-            Some((maximum_density_excursion, &field)),
+            Some((maximum_density_excursion, GasPressureField::Cell(&field))),
+            gate,
+        )
+    }
+
+    /// Apply cell heat and distinct positive absolute gas pressure [Pa] per link.
+    ///
+    /// This uses the same physical link coordinates and native reconstruction
+    /// as [`MaterialFreeSurface3::step_with_gas_link_pressure`]. Current source
+    /// viscosity, capillarity and the resulting mass/enthalpy routes advance
+    /// once, on the same private candidate as [`Self::step_with_heat_and_gas_pressure`].
+    /// Every source, pressure, transport and cancellation gate precedes joint
+    /// publication and clock advancement. Pressure is mechanical loading and
+    /// supplies no caloric heat or inferred gas-volume work.
+    pub fn step_with_heat_and_gas_link_pressure(
+        &mut self,
+        heat: &[FreeSurfaceCellHeat],
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(super::MaterialGasPressureLink3) -> f64,
+    ) -> Result<FreeSurfaceEnthalpyReport, Error> {
+        poll(gate)?;
+        let reference = self
+            .flow
+            .scaling
+            .reference_pressure_pa
+            .ok_or(Error::Invalid(
+                "absolute gas loading requires an explicit fixed pressure reference",
+            ))?;
+        let field = super::pressure::lattice_link_pressure_field(
+            reference,
+            self.flow.scaling.cell_size_m,
+            self.flow.scaling.pressure_unit_pa,
+            pressure_pa,
+        );
+        let (heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
+        self.advance_prepared_enthalpy_with_boundary(
+            heated,
+            external,
+            0.0,
+            0.0,
+            absolute_heat,
+            None,
+            None,
+            None,
+            Some((maximum_density_excursion, GasPressureField::Link(&field))),
             gate,
         )
     }
@@ -717,7 +762,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
         mut surface: Option<&mut SurfaceTensionResolver<'_>>,
         wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
-        gas_pressure: Option<(f64, &GasPressureField<'_>)>,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
         poll(gate)?;

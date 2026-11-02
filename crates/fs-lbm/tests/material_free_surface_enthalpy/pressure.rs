@@ -4,6 +4,76 @@ use super::*;
 use fs_lbm::material::free_surface::enthalpy::MaterialFreeSurfaceEnthalpy3;
 use std::cell::Cell;
 
+#[test]
+fn link_loading_shares_heated_mass_routes_and_rolls_back_late_refusals() {
+    with_liquid(0.02, Some(100000.0), |mut cell, gate| {
+        let mut link = cell.clone();
+        let supplied = heat();
+        for step in 0..3 {
+            let heat = if step == 0 { supplied.as_slice() } else { &[] };
+            let expected = cell
+                .step_with_heat_and_gas_pressure(heat, gate, 0.05, |_| 100000.5)
+                .unwrap();
+            let actual = link
+                .step_with_heat_and_gas_link_pressure(heat, gate, 0.05, |_| 100000.5)
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                link.flow().lattice().grid().state_bits(),
+                cell.flow().lattice().grid().state_bits()
+            );
+            assert_eq!(
+                link.total_enthalpy_j().unwrap(),
+                cell.total_enthalpy_j().unwrap()
+            );
+            assert_eq!(link.physical_time_s(), cell.physical_time_s());
+            for x in 2..6 {
+                assert_eq!(link.material_at([x, 3, 3]), cell.material_at([x, 3, 3]));
+                assert_eq!(
+                    link.specific_enthalpy_at([x, 3, 3]),
+                    cell.specific_enthalpy_at([x, 3, 3])
+                );
+            }
+            assert_eq!(actual.viscous_heat_j, 0.0);
+        }
+        let bits = link.flow().lattice().grid().state_bits();
+        let mass = link.flow().ledger_mass_kg().unwrap();
+        let enthalpy = link.total_enthalpy_j().unwrap();
+        let time = link.physical_time_s();
+        let material = link.material_at([3, 3, 3]).unwrap().clone();
+        for cancel in [false, true] {
+            let gate = CancelGate::new_clock_free();
+            let calls = Cell::new(0);
+            let result = link.step_with_heat_and_gas_link_pressure(
+                &[FreeSurfaceCellHeat {
+                    coordinates: [3, 3, 3],
+                    energy_j: 0.001,
+                }],
+                &gate,
+                0.05,
+                |_| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 5 {
+                        if cancel {
+                            gate.request();
+                        } else {
+                            return 0.0;
+                        }
+                    }
+                    100000.5
+                },
+            );
+            assert!(result.is_err());
+            assert!(calls.get() >= 5);
+            assert_eq!(link.flow().lattice().grid().state_bits(), bits);
+            assert_eq!(link.flow().ledger_mass_kg().unwrap(), mass);
+            assert_eq!(link.total_enthalpy_j().unwrap(), enthalpy);
+            assert_eq!(link.physical_time_s(), time);
+            assert_eq!(link.material_at([3, 3, 3]), Some(&material));
+        }
+    });
+}
+
 fn with_liquid<R>(
     hot_viscosity: f64,
     reference: Option<f64>,

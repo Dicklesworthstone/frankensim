@@ -1,6 +1,7 @@
 //! SI wall motion and reaction through the original frozen liquid trajectory.
 
 use super::*;
+use crate::d3q19::freesurface3::pressure::GasPressureField3;
 use crate::d3q19::freesurface3::{FreeSurfaceError3, PlanarWallMotionReport3};
 
 /// One accepted isothermal wall-driven free-surface timestep in SI units.
@@ -143,7 +144,48 @@ impl MaterialFreeSurface3<'_> {
             velocity_m_s,
             maximum_relative_mass_defect,
             gate,
-            Some((maximum_density_excursion, &pressure)),
+            Some((maximum_density_excursion, GasPressureField3::Cell(&pressure))),
+        )
+    }
+
+    /// Advance one wall-driven physical step with distinct pressure per gas link.
+    ///
+    /// Positive absolute pressure [Pa] uses [`MaterialGasPressureLink3`]'s cell
+    /// coordinates and midpoint, with the fixed construction-time reference.
+    /// The original physical scaling, flooded tangent-only wall, reciprocal
+    /// wall impulse/work, endpoint speed admission and atomic publication of
+    /// [`Self::step_with_planar_wall_motion_and_gas_pressure_si`] all apply.
+    /// No moving gas geometry or gas pressure-work owner is introduced.
+    pub fn step_with_planar_wall_motion_and_gas_link_pressure_si(
+        &mut self,
+        wall: PlanarWall3,
+        velocity_m_s: [f64; 3],
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(MaterialGasPressureLink3) -> f64,
+    ) -> Result<MaterialPlanarWallMotionReport3, MaterialLbmError> {
+        if gate.is_requested() {
+            return Err(FreeSurfaceError3::Cancelled.into());
+        }
+        let reference = self
+            .scaling
+            .reference_pressure_pa
+            .ok_or(MaterialLbmError::Invalid(
+                "gas-loaded moving wall requires an explicit fixed pressure reference",
+            ))?;
+        let field = super::pressure::lattice_link_pressure_field(
+            reference,
+            self.scaling.cell_size_m,
+            self.scaling.pressure_unit_pa,
+            pressure_pa,
+        );
+        self.step_with_planar_wall_motion_inner(
+            wall,
+            velocity_m_s,
+            maximum_relative_mass_defect,
+            gate,
+            Some((maximum_density_excursion, GasPressureField3::Link(&field))),
         )
     }
 
@@ -153,7 +195,7 @@ impl MaterialFreeSurface3<'_> {
         velocity_m_s: [f64; 3],
         maximum_relative_mass_defect: f64,
         gate: &CancelGate,
-        gas_pressure: Option<(f64, &dyn Fn([usize; 3]) -> Result<f64, FreeSurfaceError3>)>,
+        gas_pressure: Option<(f64, GasPressureField3<'_>)>,
     ) -> Result<MaterialPlanarWallMotionReport3, MaterialLbmError> {
         if gate.is_requested() {
             return Err(FreeSurfaceError3::Cancelled.into());

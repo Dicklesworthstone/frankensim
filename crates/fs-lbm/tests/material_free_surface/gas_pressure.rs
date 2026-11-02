@@ -177,6 +177,8 @@ fn g1_g3_loaded_moving_wall_has_physical_traction_reciprocal_work_and_gauge_inva
         let mut flow = make(100_000.0, 100_002.0);
         let mut shifted = make(100_500.0, 100_502.0);
         let mut native = flow.lattice().clone();
+        let mut link_loaded = flow.clone();
+        let mut native_link_loaded = native.clone();
         let velocity = [0.01, 0.0, 0.0];
         let calls = std::cell::Cell::new(0);
         let report = flow
@@ -208,6 +210,24 @@ fn g1_g3_loaded_moving_wall_has_physical_traction_reciprocal_work_and_gauge_inva
             flow.lattice().grid().state_bits(),
             native.grid().state_bits()
         );
+        let link_report = link_loaded
+            .step_with_planar_wall_motion_and_gas_link_pressure_si(
+                PlanarWall3::ZMin, velocity, 1e-12, &gate, 0.05, |link| {
+                    assert!((link.midpoint_m[2] - 0.008).abs() < 1e-15);
+                    assert_eq!(link.link.gas_cell[2], 8);
+                    100_002.0
+                },
+            )
+            .unwrap();
+        let native_link_report = native_link_loaded
+            .step_with_planar_wall_motion_and_gas_link_pressure(
+                PlanarWall3::ZMin, velocity, 1e-12, &gate, 0.05, |_| Ok(2.0 / 1_000.0),
+            )
+            .unwrap();
+        assert_eq!(link_report, report);
+        near(native_link_report.fluid_work, report.fluid_work_j / 1e-6, 1e-12);
+        assert_eq!(link_loaded.lattice().grid().state_bits(), native.grid().state_bits());
+        assert_eq!(native_link_loaded.grid().state_bits(), native.grid().state_bits());
         // Uniform initial pressure independently fixes normal traction p*A.
         // Two moving D3Q19 diagonals give rho_lattice*cell_mass*A_cells*u/3.
         let area = 144.0 * 0.001_f64.powi(2);
@@ -254,6 +274,66 @@ fn g1_g3_loaded_moving_wall_has_physical_traction_reciprocal_work_and_gauge_inva
             2e-12,
         );
     });
+}
+
+#[test]
+fn gas_neighbor_coordinates_drive_physical_link_traction_and_preserve_the_pressure_gauge() {
+    let source = liquid(1_000.0, 0.1, None);
+    let make = |reference| {
+        plan(&source)
+            .with_pressure_reference(reference)
+            .unwrap()
+            .free_surface3(
+                MaterialFreeSurfaceDomain3 {
+                    gravity_m_s2: [0.0; 3],
+                    ..domain()
+                },
+                |x, y, z| [x, y, z] == [6; 3],
+            )
+            .unwrap()
+    };
+    let gate = CancelGate::new_clock_free();
+    let mut first = make(100_000.0);
+    let mut shifted = make(100_500.0);
+    let mut native = first.lattice().clone();
+    for (flow, reference) in [(&mut first, 100_000.0), (&mut shifted, 100_500.0)] {
+        flow.step_with_gas_link_pressure(&gate, 0.05, |physical| {
+            assert_eq!(physical.link.liquid_cell, [6; 3]);
+            for axis in 0..3 {
+                near(physical.liquid_center_m[axis], 0.0065, 1e-14);
+                near(
+                    physical.gas_center_m[axis],
+                    (physical.link.gas_cell[axis] as f64 + 0.5) * 0.001,
+                    1e-14,
+                );
+                near(
+                    physical.midpoint_m[axis],
+                    0.5 * (physical.liquid_center_m[axis] + physical.gas_center_m[axis]),
+                    1e-14,
+                );
+            }
+            reference + (6 - physical.link.gas_cell[0]) as f64
+        })
+        .unwrap();
+    }
+    native
+        .step_with_gas_link_pressure(&gate, 0.05, |link| {
+            Ok((6 - link.gas_cell[0]) as f64 / 1_000.0)
+        })
+        .unwrap();
+    assert_eq!(
+        first.lattice().grid().state_bits(),
+        native.grid().state_bits()
+    );
+    assert_eq!(
+        first.lattice().grid().state_bits(),
+        shifted.lattice().grid().state_bits()
+    );
+    let sample = first.sample_at_si(6, 6, 6).unwrap().unwrap();
+    // D3Q19 at rest: sum_i 2*w_i*(p_i/cs²)*c_ix = 2 Pa / 1000 kg/m³.
+    near(sample.velocity_m_s[0], 0.002, 1e-10);
+    assert!(sample.velocity_m_s[1].abs() < 1e-14);
+    assert!(sample.velocity_m_s[2].abs() < 1e-14);
 }
 
 #[test]

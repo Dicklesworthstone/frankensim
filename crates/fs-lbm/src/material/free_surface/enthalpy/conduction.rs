@@ -751,7 +751,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         surfaces: &[FreeSurfaceInterfaceContact<'_>],
         surface_solve: FreeSurfaceInterfaceSolve,
         finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
-        gas_pressure: Option<(f64, &GasPressureField<'_>)>,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
