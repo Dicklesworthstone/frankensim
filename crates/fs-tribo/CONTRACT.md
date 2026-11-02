@@ -1518,3 +1518,28 @@ on 512/2048/8192 radii converges to original native dissipation over six shear
 history segments, with finest relative error below 3e-5. All 34 fixed-load,
 changing-load, surface-field and local-sliding Mindlin tests pass.
 
+### Pressure-weighted sliding through simultaneous Hertz loading and shear
+
+`HertzMindlinContact::advance_coupled_path_with_sliding` executes the original
+analytic normal/shear path once and retains its global load-distance integral
+in an opaque candidate. Positive constant mu gives `I=D/mu`, including
+microslip caused by a shrinking normal load with zero macroscopic shear and
+sliding before lift-off. Normal elastic work remains a separate signed port.
+The explicit frictionless branch integrates the nonlinear Hertz load along
+affine indentation and multiplies it by actual accepted shear travel. A scaled
+positive polynomial gives the mean load without endpoint subtraction or
+unscaled powers; first contact and lift-off give `mean(N)=2*N_peak/5`.
+
+The observer adds constant work and no history clone, new solve or spatial mesh.
+Original state ownership, scalar direction, force/history/iteration budgets,
+compliance and cancellation remain in force. It supplies integrated sliding,
+not local varying-load sliding fields, evolving wear geometry or a wear law.
+The MDR work equivalence used here is Popov, Hess and Willert (2019), equations
+4.41--4.42, <https://doi.org/10.1007/978-3-662-58709-6_4>.
+
+Four focused G1/G3/G4 groups exercise exact frictionless Hertz means, temporal
+subdivision, unload-induced fretting, separation/recontact, fixed-load reduction,
+compliant recoil and transactional refusal. An independent pressure-times-plastic
+slip return map refines in space and time across simultaneous load and shear
+reversals, including contact entry/exit; it does not reuse native dissipated work.
+

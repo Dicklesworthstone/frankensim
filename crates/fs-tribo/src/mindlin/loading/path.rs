@@ -25,6 +25,9 @@ use fs_math::det;
 
 mod compliance;
 
+/// Integrated pressure-weighted sliding over the original accepted path.
+pub mod sliding;
+
 /// Complete path response; shear work uses the time-average force
 /// in `tangential`, and normal work is audited separately.
 #[derive(Clone, Debug, PartialEq)]
