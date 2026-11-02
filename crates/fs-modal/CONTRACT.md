@@ -177,6 +177,32 @@ radiation account, and exact endpoints do not resolve unsampled observations.
 Long oscillatory intervals and repeated cached phase rotations accumulate
 floating-point error; no amplitude normalization is applied.
 
+`time::PreparedModalHarmonic` connects that motion owner to the actual shared
+`ModalAcousticTimeModel::step_harmonic_into` runtime. Every retained mode has
+its own cosine/sine force at one prescribed frequency, including DC. The
+ordinary frame reports independently integrated input work `integral F*v dt`
+and nonnegative viscous heat `integral 2*zeta*omega*v^2 dt`; harmonic work is
+not approximated by endpoint force times displacement. Preparation integrates
+on a resolved short interval with eight-point Gaussian quadrature, then
+composes signed work forms and positive square-root heat factors. Residual-force
+coordinates retain near-static motion and cosine/sine interference; heat is
+never computed by subtracting endpoint mechanical energies. Arithmetic
+allowances are numerical estimates, not rigorous interval certificates.
+Stepping allocates nothing, calls no transcendentals, and shares existing
+modal/aggregate state, energy and balance gates. Rejected steps commit no
+modal state. Preparation is bound to the model's immutable modal kernel and
+may be reused by its clones; checkpoint replay also retains caller-owned force
+phase. The model's nominal Nyquist guard admits the prescribed frequency.
+Nonzero legacy natural-frequency pressure transfers refuse: driven motion and
+startup transients need a separate physical broadband observer, so this
+mechanical frame reports zero pressure. Simultaneous distinct-frequency power
+accounts are outside this API; summing separate single-tone heats would omit
+cross terms. G1/G3 tests cover independent continuous-power quadrature,
+resonance, critical/free/DC limits, high Q, finite-interval interference,
+multimode subdivision/replay, tiny positive heat beneath a large lossless
+energy background and transactional refusals. Existing ZOH gates and exact
+motion regressions remain shared.
+
 `LinearForceTransition::pullback` returns `LinearForcePullback` cotangents for
 initial displacement/velocity and both endpoint forces, with frequency, damping
 and duration fixed. It transposes the same cached flow and force moments;

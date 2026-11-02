@@ -7,6 +7,10 @@
 use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
 use fs_math::det;
 
+mod integrals;
+mod runtime;
+pub use runtime::PreparedModalHarmonic;
+
 /// Cached motion for `q'' + 2*zeta*omega*q' + omega^2*q = F(t)`, where
 /// `F(t) = cosine_force*cos(Omega*t) + sine_force*sin(Omega*t)` and time is
 /// measured from the supplied initial state. Forces and state use the same
@@ -92,36 +96,7 @@ impl HarmonicForceTransition {
         let mut transition = DampedTransition::small(angle, drag);
         let mut force = small_force(angle, drag, phase, cosine_remainder);
         for _ in 0..doublings {
-            let (sine, cosine) = det::sin_cos(phase);
-            let [qc, qs, vc, vs] = force;
-            let restoring_gain = -(transition.angle * transition.b) * transition.angle;
-            let (constant_cos, constant_sin) = if cosine_remainder {
-                let half_sine = det::sin(0.5 * phase);
-                (-2.0 * half_sine * half_sine, sine)
-            } else {
-                (0.0, 0.0)
-            };
-            // U(2h) = E(h) U(h) + U(h) R(Omega*h). The position
-            // gains are scaled by h^2 and velocity gains by h. For a cos-1
-            // column, add U_ZOH (R-I) before rescaling to the doubled h.
-            force = [
-                0.25 * (transition.position_retention * qc + transition.b * vc + qc * cosine
-                    - qs * sine
-                    + transition.g * constant_cos),
-                0.25 * (transition.position_retention * qs
-                    + transition.b * vs
-                    + qc * sine
-                    + qs * cosine
-                    + transition.g * constant_sin),
-                0.5 * (restoring_gain * qc + transition.velocity_retention * vc + vc * cosine
-                    - vs * sine
-                    + transition.b * constant_cos),
-                0.5 * (restoring_gain * qs
-                    + transition.velocity_retention * vs
-                    + vc * sine
-                    + vs * cosine
-                    + transition.b * constant_sin),
-            ];
+            force = double_force(force, transition, phase, cosine_remainder);
             transition.double();
             phase *= 2.0;
         }
@@ -257,6 +232,42 @@ impl HarmonicForceTransition {
 
 fn invalid(what: &'static str) -> ModalAcousticTimeError {
     ModalAcousticTimeError::InvalidInput { what }
+}
+
+fn double_force(
+    force: [f64; 4],
+    transition: DampedTransition,
+    phase: f64,
+    cosine_remainder: bool,
+) -> [f64; 4] {
+    let (sine, cosine) = det::sin_cos(phase);
+    let [qc, qs, vc, vs] = force;
+    let restoring_gain = -(transition.angle * transition.b) * transition.angle;
+    let (constant_cos, constant_sin) = if cosine_remainder {
+        let half_sine = det::sin(0.5 * phase);
+        (-2.0 * half_sine * half_sine, sine)
+    } else {
+        (0.0, 0.0)
+    };
+    // U(2h) = E(h) U(h) + U(h) R(Omega*h). The position gains are
+    // scaled by h^2 and velocity gains by h. A cos-1 column additionally
+    // needs U_ZOH (R-I). The physical integral owner uses these same gains.
+    [
+        0.25 * (transition.position_retention * qc + transition.b * vc + qc * cosine - qs * sine
+            + transition.g * constant_cos),
+        0.25 * (transition.position_retention * qs
+            + transition.b * vs
+            + qc * sine
+            + qs * cosine
+            + transition.g * constant_sin),
+        0.5 * (restoring_gain * qc + transition.velocity_retention * vc + vc * cosine - vs * sine
+            + transition.b * constant_cos),
+        0.5 * (restoring_gain * qs
+            + transition.velocity_retention * vs
+            + vc * sine
+            + vs * cosine
+            + transition.b * constant_sin),
+    ]
 }
 
 fn small_force(angle: f64, drag: f64, phase: f64, cosine_remainder: bool) -> [f64; 4] {

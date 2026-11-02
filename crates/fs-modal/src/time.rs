@@ -40,7 +40,7 @@ pub use forcing::{LinearForcePullback, LinearForceTransition};
 
 /// Prepared exact motion under a continuous sinusoidal generalized force.
 pub mod harmonic;
-pub use harmonic::HarmonicForceTransition;
+pub use harmonic::{HarmonicForceTransition, PreparedModalHarmonic};
 
 /// Maximum number of modes admitted by one runtime model.
 pub const MAX_TIME_DOMAIN_ACOUSTIC_MODES: usize = 4_096;
@@ -922,7 +922,6 @@ impl ModalAcousticTimeModel {
     /// # Errors
     /// Invalid duration, force, workspace size, or any state/passivity refusal
     /// from [`Self::step`]. No accepted model state changes on failure.
-    #[allow(clippy::too_many_lines)] // one shared, transactional physics loop
     pub fn step_duration_into<'w>(
         &mut self,
         generalized_force_n_per_sqrt_kg: &[f64],
@@ -954,127 +953,38 @@ impl ModalAcousticTimeModel {
                 what: "modal workspace must match the admitted mode count",
             });
         }
-        let mut pressure_pa = 0.0;
-        let mut input_work_j = 0.0;
-        let mut energy_before_j = 0.0;
-        let mut energy_after_j = 0.0;
-        let mut viscous_dissipation_j = 0.0;
-        let mut dissipation_roundoff_tolerance_j = 0.0;
         let transition_coefficients = self.transition_kernel.for_duration(&self.modes, duration_s);
-        for (mode_index, ((mode, state), force)) in self
-            .modes
-            .iter()
-            .zip(&self.states)
-            .zip(generalized_force_n_per_sqrt_kg)
-            .enumerate()
-        {
-            let prepared = match transition_coefficients {
-                Some(coefficients) => coefficients[mode_index],
-                None => PreparedZohCoefficients::new(*mode, duration_s),
-            };
-            let (next, displacement_increment) =
-                advance_exact_zoh_increment(*mode, *state, *force, prepared.transition);
-            check_limit(
-                "absolute modal displacement",
-                next.displacement_m_sqrt_kg.abs(),
-                self.budget.maximum_abs_displacement_m_sqrt_kg,
-            )?;
-            check_limit(
-                "absolute modal velocity",
-                next.velocity_m_sqrt_kg_per_s.abs(),
-                self.budget.maximum_abs_velocity_m_sqrt_kg_per_s,
-            )?;
-            let before = modal_energy(*mode, *state);
-            let after = modal_energy(*mode, next);
-            energy_before_j += before;
-            energy_after_j += after;
-            // The held force acts over the displacement increment the transition
-            // itself added to q0, never over `next - state`. Rounding q0 + increment
-            // onto the grid of q costs up to eps*|q|/2, and a force times that is
-            // the whole balance error whenever one step moves q by a small fraction
-            // of itself: the stored positions are then the wrong operands. This is
-            // also the free coordinate's reason (it stores no positional energy, and
-            // subtracting absolute positions can fail near velocity reversal).
-            let work = force * displacement_increment;
-            input_work_j += work;
-            let (loss, allowance) = prepared
-                .viscous_integral
-                .evaluate(*mode, *state, *force, duration_s);
-            let balance_loss = work - (after - before);
-            let balance_allowance =
-                256.0 * f64::EPSILON * work.abs().max(before).max(after).max(f64::MIN_POSITIVE)
-                    + allowance;
-            if !loss.is_finite() || !allowance.is_finite() {
-                return Err(ModalAcousticTimeError::InvalidInput {
-                    what: "mode-local viscous integral must be finite",
-                });
-            }
-            if balance_loss < -balance_allowance {
-                return Err(ModalAcousticTimeError::NegativeDissipation {
-                    dissipation_j: balance_loss,
-                    tolerance_j: balance_allowance,
-                });
-            }
-            if (balance_loss - loss).abs() > balance_allowance {
-                return Err(ModalAcousticTimeError::InvalidInput {
-                    what: "independent viscous heat and held-force energy balance disagree",
-                });
-            }
-            viscous_dissipation_j += loss;
-            dissipation_roundoff_tolerance_j += allowance;
-            workspace.frame.modal_viscous_losses[mode_index] = ModalViscousLoss {
-                energy_j: loss,
-                roundoff_tolerance_j: allowance,
-            };
-            pressure_pa += mode.pressure_per_modal_velocity.re * next.velocity_m_sqrt_kg_per_s
-                + mode.pressure_per_modal_velocity.im
-                    * mode.angular_frequency_rad_s
-                    * next.displacement_m_sqrt_kg;
-            workspace.frame.modal_energy_j[mode_index] = after;
-            workspace.candidate[mode_index] = next;
-        }
-        check_limit(
-            "total modal energy",
-            energy_after_j,
-            self.budget.maximum_total_energy_j,
+        stage_modal_frame(
+            &self.modes,
+            &self.states,
+            self.budget,
+            workspace,
+            "independent viscous heat and held-force energy balance disagree",
+            "aggregate viscous integral and held-force energy balance disagree",
+            |index, mode, state| {
+                let force = generalized_force_n_per_sqrt_kg[index];
+                let prepared = match transition_coefficients {
+                    Some(coefficients) => coefficients[index],
+                    None => PreparedZohCoefficients::new(mode, duration_s),
+                };
+                let (next, increment) =
+                    advance_exact_zoh_increment(mode, state, force, prepared.transition);
+                // Use the displacement increment actually added by the owner;
+                // subtracting stored endpoints can erase a small physical work.
+                let work = force * increment;
+                let (loss, allowance) = prepared
+                    .viscous_integral
+                    .evaluate(mode, state, force, duration_s);
+                Ok(ModalStepData {
+                    next,
+                    work,
+                    work_allowance: 0.0,
+                    loss,
+                    loss_allowance: allowance,
+                })
+            },
         )?;
-        check_limit(
-            "absolute observer pressure",
-            pressure_pa.abs(),
-            self.budget.maximum_abs_pressure_pa,
-        )?;
-        if !pressure_pa.is_finite()
-            || !energy_before_j.is_finite()
-            || !energy_after_j.is_finite()
-            || !input_work_j.is_finite()
-        {
-            return Err(ModalAcousticTimeError::InvalidInput {
-                what: "sample transition produced a non-finite result",
-            });
-        }
-        let balance_loss = input_work_j - (energy_after_j - energy_before_j);
-        let scale = input_work_j
-            .abs()
-            .max(energy_before_j)
-            .max(energy_after_j)
-            .max(f64::MIN_POSITIVE);
-        dissipation_roundoff_tolerance_j +=
-            (16.0 + self.modes.len() as f64) * f64::EPSILON * viscous_dissipation_j;
-        let balance_allowance = 256.0 * f64::EPSILON * scale + dissipation_roundoff_tolerance_j;
-        if !viscous_dissipation_j.is_finite()
-            || !dissipation_roundoff_tolerance_j.is_finite()
-            || (balance_loss - viscous_dissipation_j).abs() > balance_allowance
-        {
-            return Err(ModalAcousticTimeError::InvalidInput {
-                what: "aggregate viscous integral and held-force energy balance disagree",
-            });
-        }
         self.states.copy_from_slice(&workspace.candidate);
-        workspace.frame.observer_pressure_pa = pressure_pa;
-        workspace.frame.total_modal_energy_j = energy_after_j;
-        workspace.frame.input_work_j = input_work_j;
-        workspace.frame.viscous_dissipation_j = viscous_dissipation_j;
-        workspace.frame.dissipation_roundoff_tolerance_j = dissipation_roundoff_tolerance_j;
         Ok(&workspace.frame)
     }
 
@@ -1172,6 +1082,154 @@ impl ModalAcousticTimeModel {
         }
         Ok(held_force_n)
     }
+}
+
+struct ModalStepData {
+    next: ModalAcousticState,
+    work: f64,
+    work_allowance: f64,
+    loss: f64,
+    loss_allowance: f64,
+}
+
+// Shared state admission and independent work/heat balance for ZOH and
+// continuous harmonic loads. A forcing owner proposes motion and integrals;
+// it cannot bypass the physical budgets or commit only part of a mode bank.
+#[allow(clippy::too_many_lines)] // one shared, transactional physics loop
+fn stage_modal_frame(
+    modes: &[ModalAcousticMode],
+    states: &[ModalAcousticState],
+    budget: ModalAcousticTimeBudget,
+    workspace: &mut ModalAcousticWorkspace,
+    mode_balance_error: &'static str,
+    aggregate_balance_error: &'static str,
+    mut advance: impl FnMut(
+        usize,
+        ModalAcousticMode,
+        ModalAcousticState,
+    ) -> Result<ModalStepData, ModalAcousticTimeError>,
+) -> Result<(), ModalAcousticTimeError> {
+    if workspace.mode_count() != modes.len() {
+        return Err(ModalAcousticTimeError::InvalidInput {
+            what: "modal workspace must match the admitted mode count",
+        });
+    }
+    let mut pressure_pa = 0.0;
+    let mut input_work_j = 0.0;
+    let mut work_roundoff_tolerance_j = 0.0;
+    let mut energy_before_j = 0.0;
+    let mut energy_after_j = 0.0;
+    let mut viscous_dissipation_j = 0.0;
+    let mut dissipation_roundoff_tolerance_j = 0.0;
+    for (index, (&mode, &state)) in modes.iter().zip(states).enumerate() {
+        let ModalStepData {
+            next,
+            work,
+            work_allowance,
+            loss,
+            loss_allowance,
+        } = advance(index, mode, state)?;
+        check_limit(
+            "absolute modal displacement",
+            next.displacement_m_sqrt_kg.abs(),
+            budget.maximum_abs_displacement_m_sqrt_kg,
+        )?;
+        check_limit(
+            "absolute modal velocity",
+            next.velocity_m_sqrt_kg_per_s.abs(),
+            budget.maximum_abs_velocity_m_sqrt_kg_per_s,
+        )?;
+        let before = modal_energy(mode, state);
+        let after = modal_energy(mode, next);
+        energy_before_j += before;
+        energy_after_j += after;
+        input_work_j += work;
+        work_roundoff_tolerance_j += work_allowance;
+        let balance_loss = work - (after - before);
+        let balance_allowance =
+            256.0 * f64::EPSILON * work.abs().max(before).max(after).max(f64::MIN_POSITIVE)
+                + loss_allowance
+                + work_allowance;
+        if ![loss, loss_allowance, work_allowance]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "mode-local work and viscous integrals must be finite",
+            });
+        }
+        if balance_loss < -balance_allowance {
+            return Err(ModalAcousticTimeError::NegativeDissipation {
+                dissipation_j: balance_loss,
+                tolerance_j: balance_allowance,
+            });
+        }
+        if (balance_loss - loss).abs() > balance_allowance {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: mode_balance_error,
+            });
+        }
+        viscous_dissipation_j += loss;
+        dissipation_roundoff_tolerance_j += loss_allowance;
+        workspace.frame.modal_viscous_losses[index] = ModalViscousLoss {
+            energy_j: loss,
+            roundoff_tolerance_j: loss_allowance,
+        };
+        pressure_pa += mode.pressure_per_modal_velocity.re * next.velocity_m_sqrt_kg_per_s
+            + mode.pressure_per_modal_velocity.im
+                * mode.angular_frequency_rad_s
+                * next.displacement_m_sqrt_kg;
+        workspace.frame.modal_energy_j[index] = after;
+        workspace.candidate[index] = next;
+    }
+    check_limit(
+        "total modal energy",
+        energy_after_j,
+        budget.maximum_total_energy_j,
+    )?;
+    check_limit(
+        "absolute observer pressure",
+        pressure_pa.abs(),
+        budget.maximum_abs_pressure_pa,
+    )?;
+    if ![
+        pressure_pa,
+        energy_before_j,
+        energy_after_j,
+        input_work_j,
+        work_roundoff_tolerance_j,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        return Err(ModalAcousticTimeError::InvalidInput {
+            what: "sample transition produced a non-finite result",
+        });
+    }
+    let balance_loss = input_work_j - (energy_after_j - energy_before_j);
+    let scale = input_work_j
+        .abs()
+        .max(energy_before_j)
+        .max(energy_after_j)
+        .max(f64::MIN_POSITIVE);
+    dissipation_roundoff_tolerance_j +=
+        (16.0 + modes.len() as f64) * f64::EPSILON * viscous_dissipation_j;
+    let balance_allowance =
+        256.0 * f64::EPSILON * scale + dissipation_roundoff_tolerance_j + work_roundoff_tolerance_j;
+    if !viscous_dissipation_j.is_finite()
+        || !dissipation_roundoff_tolerance_j.is_finite()
+        || (balance_loss - viscous_dissipation_j).abs() > balance_allowance
+    {
+        return Err(ModalAcousticTimeError::InvalidInput {
+            what: aggregate_balance_error,
+        });
+    }
+    workspace.frame.observer_pressure_pa = pressure_pa;
+    workspace.frame.total_modal_energy_j = energy_after_j;
+    workspace.frame.input_work_j = input_work_j;
+    workspace.frame.viscous_dissipation_j = viscous_dissipation_j;
+    workspace.frame.dissipation_roundoff_tolerance_j = dissipation_roundoff_tolerance_j;
+    Ok(())
 }
 
 fn validate_budget(budget: ModalAcousticTimeBudget) -> Result<(), ModalAcousticTimeError> {
