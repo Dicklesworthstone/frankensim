@@ -5,6 +5,8 @@ use fs_math::{c64::C64, det};
 use fs_orbit::{HbOrbit, ShootBudget, ShootOrbit, solve_shooting};
 use fs_phs::PortHamiltonian;
 
+mod subharmonic;
+
 /// Explicit physical agreement and numerical resolution controls.
 #[derive(Debug, Clone)]
 pub struct PhsFloquetControls {
