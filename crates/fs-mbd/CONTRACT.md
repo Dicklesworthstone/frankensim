@@ -3126,3 +3126,30 @@ budget/cancellation refusal. The private row-law unit case independently
 differences all twelve endpoint pose directions and checks common-motion
 invariance and internal force/moment cancellation. All 44 focused cases passed,
 including the 36 existing distance/bushing/spatial/motion regressions.
+
+## Source-owned adhesive sliding and twisting on finite bodies
+
+`tangential_friction::adhesive` applies the original ordered junction-shear
+claims over the actual circular JKR, DMT or Maugis solid-contact disk. Both
+finite bodies retain their own mass, orientation, inertia and material arms.
+Their complete three-coordinate mobility couples both tangent directions and
+normal-axis spin. The uniform junction law shares one force/moment capacity
+set, including adhesion at zero or tensile net normal load; its pure torque
+is `2*tau*pi*a^3/3`. Neither a compressive-load cutoff nor the Hertz pressure
+distribution replaces that adhesive law.
+
+`prepare_rigid_adhesive` stages equal/opposite point impulses and free spin
+couples. `apply_rigid_adhesive` publishes both momenta only after independent
+native velocity, work, dissipation, energy and total-momentum checks plus the
+final cancellation poll. The held wrench must not assist endpoint slip or
+spin; an unresolved stopping/reversal event requires a shorter physical
+interval. Detached zero-area responses produce exactly zero impulse and heat,
+even inside a DMT attractive gap. No cohesive annulus is counted as a solid
+shear junction.
+
+The five groups in `tests/adhesive_spinning.rs` use independent pure-spin and
+combined disk-rim solutions, all mobility cross terms, finite support recoil,
+tangent-frame covariance, stopping-event refusal, detached attraction and
+atomic cancellation/audit retry. This held-geometry impulse owner leaves
+normal evolution, poses, elastic microslip, peeling and heat partition to
+their separate physical owners; the returned junction loss is unpartitioned.

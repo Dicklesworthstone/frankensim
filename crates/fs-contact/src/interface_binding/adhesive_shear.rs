@@ -25,6 +25,9 @@ pub const STATIC_JUNCTION_SHEAR_PROPERTY: &str = "adhesive_static_shear_strength
 /// Interface property for the positive-speed junction shear strength, Pa.
 pub const KINETIC_JUNCTION_SHEAR_PROPERTY: &str = "adhesive_kinetic_shear_strength";
 
+/// Source-preserving circular junction shear with coupled slip and spin.
+pub mod spinning;
+
 /// A constant-shear-strength law with retained source receipts and normal identity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceAdhesiveShear {

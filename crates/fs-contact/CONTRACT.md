@@ -1650,3 +1650,22 @@ pinch-off and full three-dimensional stability are outside this owner. G1/G3
 checks compare both halves against independent radial-graph integration and
 recover second-order time refinement against independent two-line motion;
 G0/G4 checks retain source/history, budgets, cancellation and identical retry.
+
+## Source-bound circular junction spin resistance
+
+`SourceAdhesiveShear::{sliding_patch_jkr,sliding_patch_dmt,sliding_patch_maugis}`
+bind the original static/kinetic junction strengths to the actual circular
+solid-contact disk. `SourceAdhesiveSlidingPatch` borrows both original normal
+and shear owners, preserving their complete source claims, selected state and
+receipts without per-query allocation. Its kinetic leaf returns coupled
+translation/spin effort and unallocated mechanical loss; its static leaf
+supplies the support of the full force/moment capacity set.
+
+JKR attached area retains torsional resistance under tensile resultant load.
+DMT attraction across a finite gap contributes no solid spin friction, and a
+Maugis cohesive annulus is excluded from the radius and area. Source mismatch
+and inconsistent circular geometry refuse. Four source-backed regression
+groups in `tests/adhesive_shear/spinning.rs` exercise these distinctions,
+detachment, both strengths and original owner identity. These adapters do
+not replace normal branch history, solve spin-induced peeling or claim new
+source authority.

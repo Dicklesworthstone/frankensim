@@ -2081,11 +2081,15 @@ name = "fs-mbd"
 version = "0.0.1"
 dependencies = [
  "fs-contact",
+ "fs-evidence",
  "fs-exec",
  "fs-ga",
  "fs-la",
+ "fs-matdb",
+ "fs-material",
  "fs-math",
  "fs-modal",
+ "fs-qty",
  "fs-solver",
  "fs-time",
  "fs-tribo",

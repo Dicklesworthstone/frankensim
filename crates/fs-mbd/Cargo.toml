@@ -22,6 +22,12 @@ fs-solver = { path = "../fs-solver" }
 fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }
 
+[dev-dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-material = { path = "../fs-material" }
+fs-matdb = { path = "../fs-matdb" }
+fs-qty = { path = "../fs-qty" }
+
 
 [lints]
 workspace = true

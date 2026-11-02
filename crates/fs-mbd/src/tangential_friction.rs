@@ -11,6 +11,9 @@ pub mod rolling;
 /// Joint Hertz sliding/spin friction with full two-body recoil.
 pub mod hertz;
 
+/// Sourced real-area adhesive sliding and twisting with finite-body recoil.
+pub mod adhesive;
+
 /// Simultaneous Hertz shear/spin and material-derived rolling on one native pair.
 pub mod hertz_rolling;
 
