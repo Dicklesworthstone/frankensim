@@ -57,6 +57,9 @@ pub mod hertz;
 pub mod hertz_rolling;
 pub mod rolling;
 
+/// Retained source Mindlin histories, shared native bodies and finite heat.
+pub mod mindlin;
+
 fn invalid(message: &'static str) -> DepositionError {
     DepositionError::InvalidInput(message)
 }

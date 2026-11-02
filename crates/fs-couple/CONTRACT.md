@@ -22305,3 +22305,39 @@ phase, bitwise callback partitions, retained state and positive-heat ringdown
 after source release, explicit admission, rejected-step retry, and exact
 empty-sweep parity. Both existing CLI children have been exercised on their
 swept examples through the unchanged decimation and PCM owners.
+
+## Retained Mindlin microslip on shared bodies with finite contact heat
+
+`friction_heat::mindlin::propose_rigid_mindlin_island_heat` and its driven
+counterpart couple original source-bound scalar Mindlin histories to the existing
+finite multi-interface thermal network. Actual native masses, full inertia and
+attachment arms determine shared-body recoil and independent actuator work.
+Each physical microslip/gross-sliding loss enters its massless common-temperature
+face once; conduction and partition follow original finite-cell geometry and
+endpoint conductivities, without a caller heat fraction or added heat store.
+
+The mechanical island is solved once. Each thermal trial resolves the original
+bulk and interface sources at the actual separate cell/face temperatures, then
+uses exact source-owned temperature continuation to prove unchanged mechanical
+coefficients throughout the interval. The same retained spring history and
+physical dissipation therefore remain valid through thermal Newton iterations.
+Nonconstant mechanical claims refuse; temperature-dependent caloric/transport
+laws retain their original owners and the existing numerical solve.
+
+Admission checks original circular footprint/face geometry, native attachments,
+initial and endpoint bulk temperatures, solved interface temperatures, unique
+heat-link ownership and consistent native-body/full-card ownership of shared
+thermal cells. The source callback owns original caloric/conductivity bindings.
+Native kinetic energy, retained shear storage, caloric energy, external heat
+and once-per-body actuator work close before bodies, histories, refreshed source
+laws and the thermal candidate return together. Optional entropy uses the
+original network audit. Cancellation or late source/refinement/budget failure
+publishes none of the candidate states.
+
+Four G1/G3/G4 groups compare cell and face temperatures with an independent
+three-capacity temperature matrix, retain loaded reversal memory over repeated
+thermal updates, check signed hot-to-cold flux and external work, canonical
+contacts/common acceleration, original source temperatures and atomic refusal.
+The fixed-normal/frozen-geometry phase does not supply changing-footprint heat,
+thermal expansion or history transfer for varying elasticity/friction; finite
+thermal space/time discretization retains its refinement requirements.
