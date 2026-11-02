@@ -641,48 +641,6 @@ impl ResolvedHeatCapacityCurve {
         &self.curve
     }
 
-    /// Initialize a single-phase state at a supported absolute temperature.
-    /// This inverts the admitted piecewise-linear enthalpy chart, preserving
-    /// its source identity and interpolation law. It neither reintegrates Cp
-    /// nor extrapolates beyond the original temperature span.
-    pub fn state_at_temperature(
-        &self,
-        temperature_k: f64,
-    ) -> Result<EquilibriumPhaseState, PhaseStateError> {
-        if !temperature_k.is_finite() {
-            return Err(PhaseStateError::NonFiniteTemperature);
-        }
-        let knots = self.curve.knots();
-        let lower_k = knots[0].temperature_k;
-        let upper_k = knots[knots.len() - 1].temperature_k;
-        if temperature_k < lower_k || temperature_k > upper_k {
-            return Err(PhaseStateError::OutsideTemperatureDomain {
-                temperature_k,
-                lower_k,
-                upper_k,
-            });
-        }
-        let enthalpy = match knots.binary_search_by(|knot| {
-            knot.temperature_k
-                .partial_cmp(&temperature_k)
-                .expect("admitted single-phase temperatures and query are finite")
-        }) {
-            Ok(index) => knots[index].specific_enthalpy_j_kg,
-            Err(upper) => {
-                let (a, b) = (knots[upper - 1], knots[upper]);
-                let alpha = (temperature_k - a.temperature_k)
-                    / (b.temperature_k - a.temperature_k);
-                // A convex sum also handles charts straddling a large signed
-                // enthalpy datum without overflowing the endpoint difference.
-                a.specific_enthalpy_j_kg.mul_add(
-                    1.0 - alpha,
-                    alpha * b.specific_enthalpy_j_kg,
-                )
-            }
-        };
-        self.curve.state_at_specific_enthalpy(enthalpy)
-    }
-
     /// Receipts in increasing temperature order, Cp then density at each knot.
     #[must_use]
     pub fn receipts(&self) -> &[PropertyUsageReceipt] {
