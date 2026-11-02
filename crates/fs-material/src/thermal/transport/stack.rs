@@ -8,6 +8,10 @@
 #[path = "stack/transient.rs"]
 pub mod transient;
 
+/// Source-bound phase layers on the original enthalpy timeline.
+#[path = "stack/phase_transient.rs"]
+pub mod phase_transient;
+
 #[path = "stack/geometry.rs"]
 mod geometry;
 pub use geometry::LayerStackGeometry;

@@ -6266,6 +6266,31 @@ integrals, physical inventory, native surfaces, finite-difference tangents,
 implicit conservation, source/boundary energy, adaptive evolution, manufactured
 spatial refinement, planar compatibility and source/geometry refusal.
 
+## Distributed phase-changing layers on the original enthalpy timeline
+
+`thermal::transport::stack::phase_transient` binds explicitly declared reference
+masses and equal-volume planar, cylindrical or spherical control volumes to the
+original `PreparedPhaseConductivity` and equilibrium enthalpy/phase chart. Births
+specify h directly, including distinct latent states at the same temperature.
+Physical interface and end-face resistance coordinates preserve actual mass,
+volume and area. Optional face reservoirs retain the bulk half-cell and declared
+surface resistance.
+
+The original conduction observer and implicit/adaptive enthalpy chain own
+evolution and energy/entropy accounting, including zero latent dT/dh and source
+dk/dh. Geometry and reference mass remain fixed; cellwise conductivity requires
+spatial refinement. A cell supports at most one native reservoir. Source-domain,
+original-law, inventory, topology and cancellation failures refuse without
+publishing a changed timeline. This bounded MR19 transport increment does not
+establish empirical source qualification or phase kinetics.
+
+Five integration regressions cover latent inventory, nonlinear multi-material
+contact balances in all three geometries, physical face heating, a computed
+Stefan front with spatial/time refinement, and transactional refusal. Formatting,
+parsing and independent scalar oracle checks passed. Native integration execution,
+including the Stefan convergence thresholds, remains unverified because the
+shared workspace's dependency build exceeded its memory/storage capacity.
+
 ## Spatial heat storage inside sourced layers (2026-10-29)
 
 `thermal::transport::stack::transient::PreparedLayeredThermalBody` prepares
