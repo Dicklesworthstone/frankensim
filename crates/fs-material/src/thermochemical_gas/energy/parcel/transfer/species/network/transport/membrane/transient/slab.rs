@@ -552,3 +552,5 @@ pub mod finite;
 pub mod adaptive;
 /// Finite immobile site uptake coupled implicitly to mobile Henry diffusion.
 pub mod trapping;
+/// Coupled species transport through one finite population of competitive sites.
+pub mod competitive;

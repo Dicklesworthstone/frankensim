@@ -8312,6 +8312,61 @@ delayed breakthrough, preload/desorption history, seals, sub-ULP kinetic uptake
 refusal and atomic nonlinear/cancellation failure; these are not measured
 polymer validation.
 
+### Prepared shared-site kinetic response
+
+`adsorption::competitive::sites::backward_euler_sites_into` evaluates the
+original common-vacancy backward-Euler equations into a reusable bounded
+`CompetitiveSiteBuffer`. All species consume one finite capacity. The existing
+allocating entry point delegates to this same owner; its scalar limit retains
+the original scalar arithmetic and derivative.
+
+Occupied amounts, gross streams, vacancy and independent per-species kinetic
+residuals remain distinct. Analytic adsorption-rate derivatives use diagonal-
+minus-rank-one factors with O(species) storage. A dominant species retains its
+small diagonal response through a complementary sum. Evaluation stages on the
+stack and publishes only after admission and cancellation checks. Capacity-
+scaled closure remains separate from transport's increment/flux-scaled kinetic
+accuracy, so capacity rounding cannot obscure a physical uptake discrepancy
+or force refinement of an otherwise representable tiny uptake.
+
+### Competitive multicomponent membrane diffusion
+
+`membrane::transient::slab::competitive::CompetitiveMembraneDiffusionState`
+couples 1..32 explicit species on the same ordered membrane geometry and clock.
+Each keeps its original Henry storage and D*S face law. Adsorbing species share
+ONE exactly agreed site-capacity density in each layer; capacities are not
+summed. Original species IDs determine canonical channel and boundary order.
+Finite shared vacancy, saturation and displacement evolve with mobile storage
+in the same implicit solve. Only mobile material crosses the original faces.
+
+The prepared competitive-site response eliminates local occupied endpoints and
+supplies their cross-species derivatives. Bounded Newton/backtracking uses
+native per-species tridiagonal factors and block Gauss-Seidel corrections.
+Independent reconstruction of the complete Jacobian residual admits each
+correction. Each sweep costs O(cells*species); no dense mesh Jacobian or per-cell
+kinetic allocation is introduced. An explicit byte ceiling covers retained
+workspace, with bounded nonlinear iterations, linear sweeps and backtracks.
+
+Prescribed partial pressures or `FiniteCompetitiveMembraneDiffusionState`
+with explicit whole-bath molar pressure capacities are supported. Every species
+independently audits local mobile/trapped storage, original face transfers,
+kinetic residual and finite-bath closure. Aggregate mass cannot hide conversion
+between species. Shared occupancy cannot exceed capacity, and any work,
+representability or cancellation refusal publishes no partial species state.
+
+Fluxes are relative to a stationary rigid membrane matrix; this is not a
+zero-sum Maxwell-Stefan gas-mixture frame. Temperature, geometry, capacities,
+Henry coefficients and kinetics remain fixed. Original-source mixed-gas
+qualification, gas EOS/calorics, swelling, sorption heat, cross diffusion and
+adaptive competitive windows are not inferred. First-order time and spatial
+refinement remain caller responsibilities.
+
+Focused independent checks cover a common-vacancy finite-bath root, nonlinear
+competitive equilibrium, invading-species displacement, Riccati time refinement,
+canonical species permutation, original scalar/nonadsorbing limits, sub-ULP
+uptake refusal, bounded work and late cancellation. These are numerical model
+checks, not measured multicomponent membrane qualification.
+
 ### Adaptive finite-trap membrane windows
 
 `membrane::transient::slab::trapping::adaptive` reuses the original membrane
