@@ -26,6 +26,10 @@ use fs_rand::philox::philox4x32_10;
 #[cfg(feature = "volumes")]
 pub mod participating;
 
+/// Spectral pixels with selected refractive point-fixture connections.
+#[cfg(feature = "photometry")]
+pub mod point_lights;
+
 /// Each pixel sample independently traces this many wavelengths.
 pub const CAMERA_WAVELENGTHS: usize = 4;
 

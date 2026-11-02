@@ -1,0 +1,538 @@
+//! Calibrated point fixtures on the original curved camera walk.
+//!
+//! At every selected depolarizing diffuse encounter, a bounded native bundle
+//! connection supplies physical incident irradiance E. The camera adds
+//! `prefix_I * (n_camera/n_contact)^2 * reflectance * E/pi` before the same
+//! surface samples its continuation. The fixture's source solid-angle/receiver
+//! area Jacobian, polarization transfer and absorption belong to E already;
+//! no additional inverse-square, Fresnel or source-index factor is applied.
+//! The diffuse depolarizer makes this scalar factorization valid even when
+//! either reciprocal optical subpath changes polarization.
+//!
+//! Each source/receiver pair declares exactly one optical branch and local
+//! shooting seed. Success describes that branch, not all images of a fixture.
+//! Missing, blocked, nonplanar, grazing, caustic or unresolved connections are
+//! errors, never zero illumination. Point fixtures have zero probability of
+//! being hit by the continuous camera walk, so these selected contributions
+//! add without a competing endpoint proposal or MIS factor. Surface emission
+//! and the original camera's environment/continuation rules remain in force.
+//! This owner has no participating-medium binding: molecular scattering or
+//! volume extinction on either connecting leg must not be inferred.
+//!
+//! Connections use the original contact's resolved surface witness. Its
+//! numerical localization and each explicit connection tolerance remain
+//! allowances, not bounds on irradiance or an optical accuracy certificate.
+
+use super::emission::SurfaceEmission;
+use super::{
+    CameraRadianceError, CameraRadianceSample, CurvedCameraScene, CurvedPathResult,
+    CurvedSceneError, CurvedTraceSettings, phase_index,
+};
+use crate::charts::Ray;
+use crate::dielectric::DielectricError;
+use crate::photometry::source::PhotometricSource;
+use crate::photometry::source::bundle::{BundlePhotometryError, PlanarIrradianceReceiver};
+use crate::polarization::Stokes;
+use crate::polarization::dielectric::scene::curved::SceneMedium;
+use crate::polarization::dielectric::scene::curved::bundle::connection::{
+    BundleBranchPolicy, BundleConnectionError, BundleConnectionLaunch, BundleConnectionOptions,
+    BundleConnectionTarget,
+};
+use crate::polarization::dielectric::scene::{Interaction, PathTermination, SceneError};
+use crate::polarization::dielectric::transport::PolarizationFrame;
+use fs_exec::Cx;
+use fs_geom::Vec3;
+
+/// Fixed admission bound; camera rays allocate no fixture-owned workspace.
+pub const MAX_POINT_LIGHT_BRANCHES: usize = 64;
+
+/// One original fixture and one prescribed branch to a native diffuse object.
+/// The initial direction must lie in the native solver's local convergence
+/// basin for the actual sampled contact. A single seed does not cover every
+/// contact on a large receiver or discover other optical images. The original
+/// source is borrowed, and duplicate source-pointer/receiver pairs are refused
+/// even when their seeds or optical policies differ.
+#[derive(Clone, Copy, Debug)]
+pub struct PointLightBranch<'a> {
+    pub source: &'a PhotometricSource,
+    pub receiver_object_id: u64,
+    pub initial_medium: usize,
+    pub initial_direction: Vec3,
+    pub source_transverse_axis: Vec3,
+    pub policy: BundleBranchPolicy<'a>,
+    pub position_tolerance_m: f64,
+}
+
+/// Original camera and per-connection limits, plus cumulative shooting limits
+/// across every diffuse encounter of one camera ray. A source trial retains
+/// its own native integration, distance, surface and geometry-work limits.
+#[derive(Clone, Copy, Debug)]
+pub struct PointLightCameraSettings {
+    pub surfaces: CurvedTraceSettings,
+    pub connection: BundleConnectionOptions,
+    pub max_connections: u32,
+    pub max_trace_evaluations: u32,
+}
+
+impl Default for PointLightCameraSettings {
+    fn default() -> Self {
+        Self {
+            surfaces: CurvedTraceSettings::default(),
+            connection: BundleConnectionOptions::default(),
+            max_connections: MAX_POINT_LIGHT_BRANCHES as u32,
+            max_trace_evaluations: 4096,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PointLightCameraError {
+    Camera(CameraRadianceError),
+    TooManyBindings,
+    InvalidBinding {
+        index: usize,
+    },
+    DuplicateBinding {
+        first: usize,
+        second: usize,
+    },
+    InvalidSettings,
+    ConnectionLimit,
+    TraceEvaluationLimit,
+    Connection {
+        binding: usize,
+        error: BundleConnectionError,
+    },
+    Photometry {
+        binding: usize,
+        error: BundlePhotometryError,
+    },
+    NumericalRange,
+}
+
+impl From<CameraRadianceError> for PointLightCameraError {
+    fn from(error: CameraRadianceError) -> Self {
+        Self::Camera(error)
+    }
+}
+impl From<fs_exec::Cancelled> for PointLightCameraError {
+    fn from(error: fs_exec::Cancelled) -> Self {
+        Self::Camera(error.into())
+    }
+}
+impl core::fmt::Display for PointLightCameraError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "curved point-fixture camera: {self:?}")
+    }
+}
+impl core::error::Error for PointLightCameraError {}
+
+/// Combined radiance and actual selected-fixture work. The native camera path
+/// and its endpoint remain in `radiance_sample`; these extra counters describe
+/// only the source connection trials, including Newton and backtracking.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointLightCameraSample {
+    radiance: CameraRadianceSample,
+    fixture_radiance_w_m2_sr_nm: f64,
+    work: ConnectionWork,
+}
+
+impl PointLightCameraSample {
+    pub const fn radiance_sample(&self) -> &CameraRadianceSample {
+        &self.radiance
+    }
+    pub const fn fixture_radiance_w_m2_sr_nm(&self) -> f64 {
+        self.fixture_radiance_w_m2_sr_nm
+    }
+    pub const fn connections(&self) -> u32 {
+        self.work.connections
+    }
+    pub const fn trace_evaluations(&self) -> u32 {
+        self.work.traces
+    }
+    pub const fn field_evaluations(&self) -> u64 {
+        self.work.fields
+    }
+    pub const fn query_work(&self) -> u64 {
+        self.work.geometry
+    }
+}
+
+/// Point fixtures attached to this exact original camera and its scene. The
+/// source and receiver media must support native second-order bundles;
+/// unrelated first-order fields remain available to ordinary camera paths.
+pub struct CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
+    camera: &'a CurvedCameraScene<'s, 'm>,
+    branches: &'a [PointLightBranch<'l>],
+}
+
+impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
+    pub fn try_new(
+        cx: &Cx<'_>,
+        camera: &'a CurvedCameraScene<'s, 'm>,
+        branches: &'a [PointLightBranch<'l>],
+    ) -> Result<Self, PointLightCameraError> {
+        cx.checkpoint()?;
+        if branches.len() > MAX_POINT_LIGHT_BRANCHES {
+            return Err(PointLightCameraError::TooManyBindings);
+        }
+        for (index, branch) in branches.iter().enumerate() {
+            cx.checkpoint()?;
+            let invalid = || PointLightCameraError::InvalidBinding { index };
+            let receiver = camera
+                .scene
+                .bindings
+                .binary_search_by_key(&branch.receiver_object_id, |binding| binding.object_id)
+                .map_err(|_| invalid())?;
+            let Interaction::DepolarizingDiffuse { medium, .. } =
+                camera.scene.bindings[receiver].interaction
+            else {
+                return Err(invalid());
+            };
+            for slot in [branch.initial_medium, medium] {
+                if !matches!(
+                    camera.scene.media.get(slot),
+                    Some(SceneMedium::Homogeneous(_) | SceneMedium::Differentiable { .. })
+                ) {
+                    return Err(invalid());
+                }
+            }
+            if !branch.position_tolerance_m.is_finite() || branch.position_tolerance_m <= 0.0 {
+                return Err(invalid());
+            }
+            PolarizationFrame::try_new(branch.initial_direction, branch.source_transverse_axis)
+                .map_err(|_| invalid())?;
+            for (first, earlier) in branches[..index].iter().enumerate() {
+                if earlier.receiver_object_id == branch.receiver_object_id
+                    && core::ptr::eq(earlier.source, branch.source)
+                {
+                    return Err(PointLightCameraError::DuplicateBinding {
+                        first,
+                        second: index,
+                    });
+                }
+            }
+        }
+        cx.checkpoint()?;
+        Ok(Self { camera, branches })
+    }
+
+    pub const fn source_camera(&self) -> &'a CurvedCameraScene<'s, 'm> {
+        self.camera
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_ray(
+        &self,
+        cx: &Cx<'_>,
+        ray: Ray,
+        wavelength_nm: f64,
+        initial_medium: usize,
+        settings: PointLightCameraSettings,
+        seed: u64,
+        path_id: u64,
+    ) -> Result<PointLightCameraSample, PointLightCameraError> {
+        cx.checkpoint()?;
+        validate_settings(settings)?;
+        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
+        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut fixtures = FixtureContributions::new(self, settings, initial_index);
+        let result = self.camera.scene.trace_with_seed_mode(
+            cx,
+            beam,
+            initial_medium,
+            settings.surfaces,
+            seed,
+            path_id,
+            true,
+            |path| {
+                emission.observe(path)?;
+                fixtures.observe(cx, path)
+            },
+        );
+        self.finish(cx, initial_index, emission, fixtures, result)
+    }
+
+    /// The original camera's surface variates and event numbering are retained.
+    /// Solving a fixture consumes no camera random draws and never restarts the
+    /// camera path or resets its distance, integration or surface-event budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_ray_with_samples(
+        &self,
+        cx: &Cx<'_>,
+        ray: Ray,
+        wavelength_nm: f64,
+        initial_medium: usize,
+        settings: PointLightCameraSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<PointLightCameraSample, PointLightCameraError> {
+        cx.checkpoint()?;
+        validate_settings(settings)?;
+        let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
+        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        let mut emission = SurfaceEmission::new(self.camera, initial_index);
+        let mut fixtures = FixtureContributions::new(self, settings, initial_index);
+        let result = self.camera.scene.trace_with_samples_mode(
+            cx,
+            beam,
+            initial_medium,
+            settings.surfaces,
+            surface_samples,
+            true,
+            |path| {
+                emission.observe(path)?;
+                fixtures.observe(cx, path)
+            },
+        );
+        self.finish(cx, initial_index, emission, fixtures, result)
+    }
+
+    fn finish(
+        &self,
+        cx: &Cx<'_>,
+        initial_index: f64,
+        emission: SurfaceEmission<'_, 's, 'm>,
+        fixtures: FixtureContributions<'_, 'a, 's, 'm, 'l>,
+        result: Result<CurvedPathResult, CurvedSceneError>,
+    ) -> Result<PointLightCameraSample, PointLightCameraError> {
+        if let Some(error) = fixtures.error {
+            return Err(error);
+        }
+        let (path, emitted) = emission.finish(result)?;
+        let radiance = self.camera.finish(
+            cx,
+            path,
+            initial_index,
+            nonnegative(emitted + fixtures.radiance)?,
+        )?;
+        Ok(PointLightCameraSample {
+            radiance,
+            fixture_radiance_w_m2_sr_nm: fixtures.radiance,
+            work: fixtures.work,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ConnectionWork {
+    connections: u32,
+    traces: u32,
+    fields: u64,
+    geometry: u64,
+}
+
+struct FixtureContributions<'q, 'a, 's, 'm, 'l> {
+    owner: &'q CurvedPointLightCameraScene<'a, 's, 'm, 'l>,
+    settings: PointLightCameraSettings,
+    initial_index: f64,
+    radiance: f64,
+    work: ConnectionWork,
+    error: Option<PointLightCameraError>,
+}
+
+impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
+    fn new(
+        owner: &'q CurvedPointLightCameraScene<'a, 's, 'm, 'l>,
+        settings: PointLightCameraSettings,
+        initial_index: f64,
+    ) -> Self {
+        Self {
+            owner,
+            settings,
+            initial_index,
+            radiance: 0.0,
+            work: ConnectionWork::default(),
+            error: None,
+        }
+    }
+
+    fn observe(&mut self, cx: &Cx<'_>, path: &CurvedPathResult) -> Result<(), CurvedSceneError> {
+        self.add_contact(cx, path).map_err(|error| {
+            self.error = Some(error);
+            CurvedSceneError::NumericalRange
+        })
+    }
+
+    fn add_contact(
+        &mut self,
+        cx: &Cx<'_>,
+        path: &CurvedPathResult,
+    ) -> Result<(), PointLightCameraError> {
+        let contact = path
+            .last_contact()
+            .ok_or(PointLightCameraError::NumericalRange)?;
+        let scene = self.owner.camera.scene;
+        let binding = scene
+            .bindings
+            .get(contact.witness.boundary_id)
+            .ok_or(PointLightCameraError::NumericalRange)?;
+        if binding.object_id != contact.object_id {
+            return Err(PointLightCameraError::NumericalRange);
+        }
+        let Interaction::DepolarizingDiffuse {
+            medium,
+            reflectance,
+        } = binding.interaction
+        else {
+            return Ok(());
+        };
+        if medium != path.medium_index() {
+            return Err(CameraRadianceError::from(CurvedSceneError::from(
+                SceneError::MediumMismatch {
+                    object_id: contact.object_id,
+                    expected: medium,
+                    actual: path.medium_index(),
+                },
+            ))
+            .into());
+        }
+        let beam = path.beam();
+        let wavelength_nm = beam.wavelength_nm();
+        let rho = scene.reflectances[reflectance]
+            .at(wavelength_nm)
+            .map_err(|_| CameraRadianceError::Optics(DielectricError::InvalidWavelength))?;
+        if rho == 0.0 {
+            return Ok(());
+        }
+        let normal = if contact.witness.normal.dot(beam.ray().dir) > 0.0 {
+            contact.witness.normal.scale(-1.0)
+        } else {
+            contact.witness.normal
+        };
+        for (index, branch) in self.owner.branches.iter().enumerate() {
+            if branch.receiver_object_id != contact.object_id || branch.source.flux_lm() == 0.0 {
+                continue;
+            }
+            cx.checkpoint()?;
+            if self.work.connections >= self.settings.max_connections {
+                return Err(PointLightCameraError::ConnectionLimit);
+            }
+            let remaining = self
+                .settings
+                .max_trace_evaluations
+                .checked_sub(self.work.traces)
+                .ok_or(PointLightCameraError::TraceEvaluationLimit)?;
+            if remaining == 0 {
+                return Err(PointLightCameraError::TraceEvaluationLimit);
+            }
+            let mut options = self.settings.connection;
+            options.max_trace_evaluations = options.max_trace_evaluations.min(remaining);
+            let target = BundleConnectionTarget::try_diffuse_receiver(
+                contact.object_id,
+                contact.witness.surface_point,
+                normal,
+                branch.position_tolerance_m,
+            )
+            .map_err(|error| PointLightCameraError::Connection {
+                binding: index,
+                error,
+            })?;
+            let launch = BundleConnectionLaunch {
+                ray: Ray {
+                    origin: branch.source.position_m(),
+                    dir: branch.initial_direction,
+                },
+                transverse_axis: branch.source_transverse_axis,
+                wavelength_nm,
+                normalized_source_stokes: Stokes::unpolarized(1.0),
+                initial_medium: branch.initial_medium,
+            };
+            self.work.connections += 1;
+            let connection = scene
+                .connect_bundle_with_policy(cx, launch, target, options, branch.policy)
+                .map_err(|error| PointLightCameraError::Connection {
+                    binding: index,
+                    error,
+                })?;
+            self.work.traces = self
+                .work
+                .traces
+                .checked_add(connection.trace_evaluations())
+                .ok_or(PointLightCameraError::NumericalRange)?;
+            self.work.fields = self
+                .work
+                .fields
+                .checked_add(connection.field_evaluations())
+                .ok_or(PointLightCameraError::NumericalRange)?;
+            self.work.geometry = self
+                .work
+                .geometry
+                .checked_add(connection.query_work())
+                .ok_or(PointLightCameraError::NumericalRange)?;
+            let receiver = PlanarIrradianceReceiver::try_new(
+                target.position_m(),
+                target.normal(),
+                target.position_tolerance_m(),
+            )
+            .map_err(|error| PointLightCameraError::Photometry {
+                binding: index,
+                error,
+            })?;
+            let irradiance = branch
+                .source
+                .spectral_irradiance_from_refractive_bundle(
+                    connection.path().bundle(),
+                    receiver,
+                    options.projection,
+                )
+                .map_err(|error| PointLightCameraError::Photometry {
+                    binding: index,
+                    error,
+                })?;
+            if irradiance == 0.0 {
+                let bundle = connection.path().bundle();
+                // Native bundle photometry retains logarithmic attenuation,
+                // but its final positive irradiance can still round to zero.
+                // Such a value may be amplified by the camera prefix; do not
+                // confuse it with an exactly dark source or optical branch.
+                if bundle.interface_log_power() != f64::NEG_INFINITY {
+                    let intensity = branch
+                        .source
+                        .spectral_intensity_w_sr_nm(
+                            bundle.propagation().initial_ray().dir,
+                            wavelength_nm,
+                        )
+                        .map_err(|error| PointLightCameraError::Photometry {
+                            binding: index,
+                            error: error.into(),
+                        })?;
+                    if intensity > 0.0 {
+                        return Err(PointLightCameraError::NumericalRange);
+                    }
+                }
+                continue;
+            }
+            if beam.power().i == 0.0 {
+                return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
+            }
+            let local_index = phase_index(beam.medium(), wavelength_nm)?;
+            let ratio = self.initial_index / local_index;
+            let weight = nonnegative(beam.power().i * (ratio * ratio))?;
+            let contribution = nonnegative(weight * (rho * irradiance / core::f64::consts::PI))?;
+            if contribution == 0.0 {
+                return Err(PointLightCameraError::NumericalRange);
+            }
+            self.radiance = nonnegative(self.radiance + contribution)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_settings(settings: PointLightCameraSettings) -> Result<(), PointLightCameraError> {
+    if settings.max_connections == 0 || settings.max_trace_evaluations == 0 {
+        return Err(PointLightCameraError::InvalidSettings);
+    }
+    Ok(())
+}
+
+fn nonnegative(value: f64) -> Result<f64, PointLightCameraError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(PointLightCameraError::NumericalRange)
+    }
+}
+
+#[cfg(test)]
+mod tests;

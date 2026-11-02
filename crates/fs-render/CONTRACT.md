@@ -438,6 +438,32 @@ differentiable lift). Pure Rust throughout.
   curved finite-emitter visibility with Beer and group delay, table/medium
   admission, underflow, cumulative limits and bundle refusal.
 
+- With `photometry`, `camera::point_lights::CurvedPointLightCameraScene`
+  borrows the exact native camera and at most 64 explicitly bound original
+  point-fixture/diffuse-receiver branches. At every matching surface arrival it
+  preserves original emission and continuation, adding incoming camera Stokes-I
+  times `(n_camera/n_contact)^2 * reflectance * E/pi`. The native differentiated
+  source connection and calibrated source spectrum supply incident irradiance E;
+  source solid-angle/receiver-area Jacobian, Fresnel transfer and Beer absorption
+  occur once. Source and receiver media must support second-order bundles.
+  One prescribed branch and seed per original source/receiver pair selects a
+  local contribution, without claiming all-image discovery or area-light MIS.
+  Duplicate bindings, unsupported media, visibility/numerical failures and
+  exhausted cumulative connection/trace limits refuse. Exact black reflectance
+  and globally dark sources skip solves; positive underflow is not black.
+  The stack-only accumulator consumes no camera random draws, restarts no paths
+  and preserves original camera limits. Source-leg traces retain their native
+  limits and expose cumulative field/query counts. Participating-media source
+  legs remain outside this consumer. `CurvedCameraRaster::sample_pixel_point_lights`
+  independently connects every native wavelength lane, preserves physical-camera
+  and Philox streams, and feeds combined spectral radiance to original XYZ
+  integration. It retains each lane's fixture contribution and work counts;
+  any lane's failed source solve refuses the complete pixel with its original
+  error. Native regressions cover calibrated cosine/Beer radiometry, quadratic
+  GRIN focusing, affine-index endpoint factors, multiple diffuse bounces and
+  emission, source/receiver admission, numerical darkness, cumulative budgets,
+  cancellation, empty-fixture pixel parity and spectral pixel radiometry.
+
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original
   `CurvedRayleighScene` surface owner, checked by pointer identity. Native

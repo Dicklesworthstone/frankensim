@@ -42,8 +42,9 @@
 //! floating-point underflow and is unresolved before a positive finite source.
 //! Explicit depolarizing diffuse surfaces use their native cosine proposal and
 //! spectral reflectance while preserving the same curved path and medium.
-//! Point-light connections, moving fields,
-//! gain and nonreciprocal media remain outside this consumer.
+//! With `photometry`, `point_lights` adds selected calibrated fixture branches
+//! at native diffuse contacts. Moving fields, gain and nonreciprocal media
+//! remain outside this consumer.
 //! With `volumes`, `participating` adds the original reciprocal molecular
 //! scattering walk and retains this same endpoint radiometry.
 
@@ -67,6 +68,10 @@ pub mod raster;
 /// Molecular multiple-scattering camera paths on the original curved owner.
 #[cfg(feature = "volumes")]
 pub mod participating;
+
+/// Selected calibrated point-fixture branches at native diffuse contacts.
+#[cfg(feature = "photometry")]
+pub mod point_lights;
 
 /// Maximum knots in one immutable source spectrum, admitted before storage.
 pub const MAX_RADIANCE_KNOTS: usize = 1024;
@@ -380,10 +385,16 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self, initial_index);
-        let result = self
-            .scene
-            .trace_with_seed_mode(cx, beam, initial_medium, settings, seed, path_id, true,
-                |path| emission.observe(path));
+        let result = self.scene.trace_with_seed_mode(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            seed,
+            path_id,
+            true,
+            |path| emission.observe(path),
+        );
         let (path, emitted) = emission.finish(result)?;
         self.finish(cx, path, initial_index, emitted)
     }
@@ -407,10 +418,15 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self, initial_index);
-        let result = self
-            .scene
-            .trace_with_samples_mode(cx, beam, initial_medium, settings, samples, true,
-                |path| emission.observe(path));
+        let result = self.scene.trace_with_samples_mode(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            samples,
+            true,
+            |path| emission.observe(path),
+        );
         let (path, emitted) = emission.finish(result)?;
         self.finish(cx, path, initial_index, emitted)
     }
