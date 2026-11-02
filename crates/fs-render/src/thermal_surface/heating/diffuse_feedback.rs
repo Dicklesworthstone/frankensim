@@ -7,7 +7,7 @@
 //! no RGB lift, phase mixing rule or infrared continuation is invented.
 
 use super::{SurfaceHeatingError, SurfacePowerResponse};
-use crate::thermal_surface::SpectralEmissivity;
+use crate::thermal_surface::{SpectralDiffuseThermalSurface, SpectralEmissivity};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_thermal::enthalpy::{CellId, DepositionSimulation, MaterialId, ThermalStorageBasis};
 use std::sync::Arc;
@@ -192,6 +192,25 @@ impl SurfaceDiffuseLaw {
             &emissivity,
             self.identity,
         )
+    }
+
+    /// Resolve the reciprocal equilibrium-emission view from the SAME native
+    /// state law used by incident absorption. The native caloric owner supplies
+    /// temperature; no separate emissivity fit or phase-coordinate mapping is
+    /// introduced. This remains a visible-band source and makes no bolometric
+    /// cooling claim.
+    pub fn resolve_surface(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        cell: CellId,
+        material: MaterialId,
+    ) -> Result<SpectralDiffuseThermalSurface, SurfaceHeatingError> {
+        let emissivity = self.resolve(thermal, cell, material)?;
+        Ok(SpectralDiffuseThermalSurface::try_new(
+            thermal.temperature_k(cell)?,
+            emissivity,
+            self.identity,
+        )?)
     }
 
     pub fn at_temperature(

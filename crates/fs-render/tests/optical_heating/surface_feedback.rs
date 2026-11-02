@@ -751,3 +751,45 @@ fn constant_diffuse_state_rows_match_the_fixed_spectral_response_and_cache_it() 
     assert_eq!(fixed_history.energy(), dynamic_history.energy());
     assert_eq!(dynamic_history.response_evaluations(), 0);
 }
+
+
+#[test]
+fn diffuse_state_law_uses_the_same_latent_emissivity_for_absorption_and_emission() {
+    let law = SurfaceDiffuseLaw::try_enthalpy(
+        ContentHash([217; 32]),
+        ContentHash([202; 32]),
+        (300.0, 500.0),
+        &[
+            (0.0, SpectralEmissivity::constant(0.2).unwrap()),
+            (10.0, SpectralEmissivity::constant(0.2).unwrap()),
+            (110.0, SpectralEmissivity::constant(0.8).unwrap()),
+            (200.0, SpectralEmissivity::constant(0.8).unwrap()),
+        ],
+        4,
+    )
+    .unwrap();
+    let mut cells = vec![cell(11, 1.0, 1.0, 0.0), cell(12, 1.0, 1.0, 0.0)];
+    cells[0].specific_h_j_kg = 30.0;
+    cells[1].specific_h_j_kg = 90.0;
+    let native = thermal(cells, &IDENTIFIED_LATENT, vec![]);
+    assert_eq!(native.temperature_k(CellId(11)).unwrap(), 310.0);
+    assert_eq!(native.temperature_k(CellId(12)).unwrap(), 310.0);
+
+    let low = law.resolve_surface(&native, CellId(11), MaterialId(7)).unwrap();
+    let high = law.resolve_surface(&native, CellId(12), MaterialId(7)).unwrap();
+    let low_e = 0.2 + 0.6 * 20.0 / 100.0;
+    let high_e = 0.2 + 0.6 * 80.0 / 100.0;
+    close(low.emissivity().at(580.0).unwrap(), low_e);
+    close(high.emissivity().at(580.0).unwrap(), high_e);
+    let blackbody_factor = low.radiance_w_m2_sr_nm(580.0).unwrap() / low_e;
+    close(
+        high.radiance_w_m2_sr_nm(580.0).unwrap(),
+        blackbody_factor * high_e,
+    );
+    let low_response =
+        law.resolve_response(&native, CellId(11), MaterialId(7), [580.0]).unwrap();
+    let high_response =
+        law.resolve_response(&native, CellId(12), MaterialId(7), [580.0]).unwrap();
+    close(low_response.absorbed_fraction()[0], low_e);
+    close(high_response.absorbed_fraction()[0], high_e);
+}
