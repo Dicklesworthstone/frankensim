@@ -23,6 +23,8 @@ use fs_qty::semantic::QuantityKind;
 
 /// Accuracy-controlled windows with original-source admission on every probe.
 pub mod adaptive;
+/// Original finite gas parcels coupled to both membrane inventories.
+pub mod reservoir;
 
 #[derive(Clone, Debug)]
 pub struct LangmuirMembraneTrapSource {

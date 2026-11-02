@@ -367,7 +367,7 @@ impl LangmuirAdsorbent {
     fn molar_mass(&self) -> f64 {
         self.gas_source().molar_mass().value()
     }
-    fn admit_catalog(&self, catalog: &ThermochemicalGasModel) -> Result<()> {
+    pub(crate) fn admit_catalog(&self, catalog: &ThermochemicalGasModel) -> Result<()> {
         let i = catalog
             .thermodynamics()
             .components()

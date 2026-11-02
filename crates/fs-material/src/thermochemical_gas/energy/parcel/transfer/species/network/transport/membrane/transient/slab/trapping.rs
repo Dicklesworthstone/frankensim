@@ -118,6 +118,7 @@ pub struct TrappingMembraneStep {
     pub boundary_transfers_mol: [f64; 2],
     /// Mobile plus trapped change minus the net boundary transfer.
     pub membrane_amount_residual_mol: f64,
+    /// Maximum stored-amount or independently evaluated site-kinetic residual.
     pub maximum_cell_amount_residual_mol: f64,
     pub finite_reservoirs: Option<TrappingReservoirBalance>,
     pub nonlinear_iterations: usize,
@@ -366,8 +367,15 @@ impl TrappingMembraneDiffusionState {
             let incoming = finite((transport.face_molar_fluxes_mol_m2_s[i]*area)*duration)?;
             let outgoing = finite((transport.face_molar_fluxes_mol_m2_s[i+1]*area)*duration)?;
             let residual = finite((mobile+trapped)-(incoming-outgoing))?;
-            check_balance(residual,controls.balance.tolerance(mobile.abs()+trapped.abs()+incoming.abs()+outgoing.abs())?)?;
-            maximum_cell = maximum_cell.max(residual.abs());
+            let tolerance=controls.balance.tolerance(mobile.abs()+trapped.abs()+incoming.abs()+outgoing.abs())?;
+            check_balance(residual,tolerance)?;
+            // Stored-amount conservation alone cannot detect a kinetic change
+            // rounded away beside a large preloaded site inventory. Audit the
+            // original site's independent backward-Euler balance at this final
+            // candidate, using the caller's increment-based amount allowance.
+            let site_residual=work.sites[offset+i].maximum_balance_residual_mol;
+            check_balance(site_residual,tolerance)?;
+            maximum_cell = maximum_cell.max(residual.abs()).max(site_residual);
         }
         let membrane_residual = finite((mobile_change.value+trapped_change.value)
             -(boundary_transfers[0]-boundary_transfers[1]))?;
@@ -428,6 +436,8 @@ impl FiniteTrappingMembraneDiffusionState {
         Ok(state)
     }
     pub const fn membrane(&self) -> &TrappingMembraneDiffusionState { &self.membrane }
+    /// Retain the mobile and trapped inventories while reseeding actual bath pressures.
+    pub fn into_membrane(self) -> TrappingMembraneDiffusionState { self.membrane }
     pub const fn reservoir_pressures_pa(&self) -> [f64; 2] { self.pressures }
     pub const fn capacities(&self) -> [MolarPressureCapacity; 2] { self.capacities }
     pub fn total_amount_mol(&self) -> Result<f64> {

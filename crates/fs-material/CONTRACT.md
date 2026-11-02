@@ -8112,15 +8112,19 @@ There is no diffusion/uptake splitting or transport of the trapped pool.
 
 Reusable O(cells) scratch, bounded cancellation and immutable candidates retain
 transactional failure. Original local, membrane, reservoir and closed-system
-amount checks include mobile and trapped changes. Reports distinguish both
-inventories, gross adsorption/desorption and boundary/interface transport.
+amount checks include mobile and trapped changes. An independent scalar-site
+kinetic residual must also fit the same increment/flux-based budget; stored
+conservation alone cannot conceal uptake rounded away beside a large preloaded
+site. Reports distinguish both inventories, gross adsorption/desorption and
+boundary/interface transport.
 The coefficients and temperature are fixed; competitive trap populations,
 swelling, sorption heat and a total energy closure are not inferred. A single
-implicit step is first-order and requires time/space refinement. Six authored
-membrane regressions plus two scalar-site checks cover independent rational/
-quadratic solutions, the native Henry limit, finite nonlinear equilibrium,
-saturation-delayed breakthrough, preload/desorption history, seals and atomic
-nonlinear/cancellation refusal; these are not measured polymer validation.
+implicit step is first-order and requires time/space refinement. Authored
+membrane and scalar-site regressions cover independent rational/quadratic
+solutions, the native Henry limit, finite nonlinear equilibrium, saturation-
+delayed breakthrough, preload/desorption history, seals, sub-ULP kinetic uptake
+refusal and atomic nonlinear/cancellation failure; these are not measured
+polymer validation.
 
 ### Adaptive finite-trap membrane windows
 
@@ -8189,6 +8193,37 @@ finite-bath rebinding and conservation, preloaded release beyond source support,
 adaptive raw/source equality, fine-probe source rejection and transactional late
 cancellation. These source-owner tests do not establish measured material
 qualification or full workspace/application validation.
+
+### Original gas parcels around finite trapping membranes
+
+`membrane::transient::trapping::reservoir::IsothermalTrappingGasMembrane`
+couples the original source-qualified mobile/trapped film to two original pure
+`ClosedGasParcel` reservoirs at one exact held temperature. Shared gas admission
+supplies finite capacities, species/caloric/transport/pack identity and gas
+enthalpy. Each original adsorbent must independently admit that same catalog;
+a shared species identifier alone cannot authorize a substituted caloric law.
+
+Each step uses the original source-relative gas boundary owner and its exact
+isothermal flow-work offset. Actual gas mass and pressure closure must pass
+before the native reservoirs are reseeded from actual EOS pressures; membrane
+inventories are moved without copying or changing them. Original material
+support covers old, numerical and actual-EOS cell/face pressure envelopes, and
+the selected trap coefficients must remain unchanged.
+
+Its adaptive adapter performs this complete gas/source reconstruction on every
+coarse and fine probe. Unsupported gas/material sources remain hard errors.
+Accepted face totals determine net fixed-temperature gas enthalpy and thermostat
+streams, with an independent audit of actual gas, mobile and trapped mass.
+Fixed steps retain the original gas caloric reports; a window does not fabricate
+a summed gas-energy residual or whole-film energy closure. Preparation and
+failure retain original gas sources, volumes, temperature and accepted state.
+
+Focused original-source regressions compare nontrivial no-trap flow against the
+existing Henry gas owner, exercise trapped uptake and adaptive conservation,
+preserve trajectories under a 1e12 J/kg caloric-reference shift, and refuse
+unsupported gas domains, foreign trap caloric laws and late cancellation.
+No mixed-gas competition, mobile/trap caloric storage, sorption heat or
+nonisothermal membrane is inferred.
 
 ### Accuracy-controlled transient membrane windows
 

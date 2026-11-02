@@ -99,6 +99,37 @@ pub(super) fn isothermal_stream(species:&SpeciesId,amount_mol:f64,molar_mass:f64
         relative_energy_into_gas_j:heat},enthalpy))
 }
 
+/// Common original-gas admission for mobile-only and kinetic-trapping films.
+pub(super) struct GasBinding {
+    pub catalog:Arc<ThermochemicalGasModel>,
+    pub capacities:[MolarPressureCapacity;2],
+    pub pressures:[f64;2],
+    pub molar_mass_kg_mol:f64,
+    pub molar_enthalpy_j_mol:f64,
+}
+pub(super) fn bind_gases(species:&SpeciesId,temperature_k:f64,gases:&[ClosedGasParcel;2])
+    ->Result<GasBinding,Error>
+{
+    for gas in gases {
+        let components=gas.model().thermodynamics().components();
+        if components.len()!=1||components[0].species()!=species
+            ||gas.model().thermodynamics().mole_composition().fractions()!=[1.0]
+            ||gas.state().state().temperature!=temperature_k {
+            return Err(Error::Invalid("finite membrane reservoirs require the same pure species and exact common held temperature"));
+        }
+    }
+    let catalog=Arc::new(catalog(&gases[0],&gases[1])?);
+    let source=&catalog.thermodynamics().components()[0];
+    let molar_mass_kg_mol=source.molar_mass().value();
+    let molar_enthalpy_j_mol=source.evaluate_properties(Temperature::new(temperature_k))
+        .map_err(source_error)?.h().value();
+    let rt=finite(R*temperature_k)?;
+    let capacities=[MolarPressureCapacity::try_new(gases[0].volume_m3()/rt)?,
+        MolarPressureCapacity::try_new(gases[1].volume_m3()/rt)?];
+    let pressures=gases.each_ref().map(|gas|gas.state().state().pressure);
+    Ok(GasBinding {catalog,capacities,pressures,molar_mass_kg_mol,molar_enthalpy_j_mol})
+}
+
 #[derive(Clone,Debug)]
 pub struct IsothermalGasMembrane<'a> {
     bindings:Arc<Bindings<'a>>,
@@ -157,24 +188,9 @@ impl<'a> IsothermalGasMembrane<'a> {
         controls:IsothermalGasMembraneSolve,mut cancelled:impl FnMut()->bool)->Result<Self,Error>
     {
         poll(&mut cancelled)?;controls.validate(membrane.temperature_k())?;
-        for gas in &gases {
-            let components=gas.model().thermodynamics().components();
-            if components.len()!=1||components[0].species()!=membrane.species()
-                ||gas.model().thermodynamics().mole_composition().fractions()!=[1.0]
-                ||gas.state().state().temperature!=membrane.temperature_k() {
-                return Err(Error::Invalid("finite membrane reservoirs require the same pure species and exact common held temperature"));
-            }
-        }
-        let catalog=Arc::new(catalog(&gases[0],&gases[1])?);
+        let GasBinding {catalog,capacities,pressures,molar_mass_kg_mol,molar_enthalpy_j_mol}=
+            bind_gases(membrane.species(),membrane.temperature_k(),&gases)?;
         membrane.bindings.admit_gas_surfaces(&catalog)?;
-        let source=&catalog.thermodynamics().components()[0];
-        let molar_mass_kg_mol=source.molar_mass().value();
-        let molar_enthalpy_j_mol=source.evaluate_properties(Temperature::new(membrane.temperature_k()))
-            .map_err(source_error)?.h().value();
-        let rt=finite(R*membrane.temperature_k())?;
-        let capacities=[MolarPressureCapacity::try_new(gases[0].volume_m3()/rt)?,
-            MolarPressureCapacity::try_new(gases[1].volume_m3()/rt)?];
-        let pressures=gases.each_ref().map(|gas|gas.state().state().pressure);
         let ResolvedMembraneDiffusion {bindings,state,..}=membrane;
         let flux=state.sample_fluxes(pressures,&mut cancelled)?;
         let support=bindings.admit([(&state,flux.face_partial_pressures_pa.as_slice())],&mut cancelled)?;

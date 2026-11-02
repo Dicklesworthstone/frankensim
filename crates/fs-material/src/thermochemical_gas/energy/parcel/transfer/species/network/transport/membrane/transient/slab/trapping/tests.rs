@@ -70,6 +70,22 @@ fn no_traps_and_inert_traps_recover_original_henry_transport() {
 }
 
 #[test]
+fn a_sub_ulp_trap_change_cannot_silently_erase_physical_uptake() {
+    // Only 1e-8 mol is mobile beside a 1e12 mol preloaded population.
+    // Its initial kinetic imbalance is 1e-6 mol/s, but the bound-state ULP
+    // exceeds all available mobile material. Unchanged stored amounts would
+    // appear conservative while violating the original finite-rate site law.
+    let state=trapped(1,500.0,1e18,0.004,1e-18,1e12,true);
+    let saved=state.clone();
+    let mut work=state.workspace().unwrap();
+    assert!(matches!(state.step_candidate([0.0;2],1.0,controls(),&mut work,||false),
+        Err(TrappingMembraneError::Diffusion(MembraneDiffusionError::AmountBalance {
+            residual_mol,tolerance_mol,
+        })) if residual_mol > 1e-7 && tolerance_mol < 1e-18));
+    assert_eq!(state,saved);
+}
+
+#[test]
 fn finite_reservoirs_relax_to_the_nonlinear_equilibrium_with_traps_in_the_inventory() {
     let state = trapped(1,0.0,2.0,2e-5,0.5,0.0,false);
     let capacity = MolarPressureCapacity::try_new(AREA*L*S).unwrap();
