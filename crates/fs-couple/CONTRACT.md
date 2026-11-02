@@ -2297,6 +2297,30 @@ cancellation refusals. Package execution remains blocked by the missing
 canonical dependency checkout; spherical-shell and open-cylinder validation
 remain outstanding.
 
+### Causal modal observation of affine tone envelopes
+
+`BroadbandModalObserver::prepare_affine_tones` and `step_affine_tones`
+extend the original continuous-tone observation owner with linear force
+envelopes. Both coefficient endpoints share the interval-start carrier basis.
+The shared scalar mechanical owner supplies actual motion, input work and
+positive heat; the original continuous rational filter receives that entire
+trajectory through two additional exact source columns for each unique
+frequency. It does not hold an endpoint velocity or fade an already-rendered
+pressure. Startup, release ringdown, nearby-tone interference and existing
+sampled-delay history remain physical state.
+
+The same immutable source identity, clock, Nyquist guard, fit/held-out gates,
+matrix-entry cap, original mechanical limits and receiver-pressure ceiling
+remain binding. Constant-tone preparation retains its original smaller path;
+a mismatched preparation/step family refuses. Endpoint duplicates are summed
+before differencing, matching the mechanical source. A real constant
+feedthrough is admitted; imaginary constant quadrature still refuses.
+Mechanical state and frame, filter state and delay history commit together
+only after all previews and physical gates pass. Refusal changes no accepted
+history and never advances caller-owned phase. Observation adds no storage,
+heat or reaction load, and its numerical transfer evidence retains the
+original estimate-only scope.
+
 ### Continuous tone forcing of coupled modal mechanics
 
 `coupled::tones::CoupledModalTones` advances an existing complete coupled

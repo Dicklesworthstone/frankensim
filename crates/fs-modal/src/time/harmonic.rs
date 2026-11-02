@@ -7,6 +7,7 @@
 use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
 use fs_math::det;
 
+mod affine;
 mod integrals;
 mod runtime;
 mod tones;

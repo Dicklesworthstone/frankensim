@@ -7,6 +7,9 @@ use fs_modal::time::{
 };
 use fs_vfit::{PoleTerm, RationalModel};
 
+#[path = "forcing_affine_tests.rs"]
+mod affine;
+
 const RATE: u32 = 8000;
 const FILTER_POLE: f64 = -700.0;
 const FILTER_RESIDUE: f64 = 350.0;

@@ -10,10 +10,12 @@ use std::sync::Arc;
 struct ForcingColumns {
     owner: Arc<()>,
     tone_count: usize,
+    affine: bool,
     // Exact equal frequencies only, preserving original coefficient order.
     groups: Vec<Vec<usize>>,
     // Mode-major, then filter-state-major, then unique-frequency cosine/sine.
     columns: Vec<Vec<[f64; 2]>>,
+    delta_columns: Vec<Vec<[f64; 2]>>,
 }
 
 /// One continuous force frequency on the original receiver's sample clock.
@@ -59,6 +61,11 @@ pub struct PreparedBroadbandTones {
 }
 
 impl PreparedBroadbandTones {
+    /// Whether this source uses affine rotating-quadrature envelopes.
+    #[must_use]
+    pub fn is_affine(&self) -> bool {
+        self.mechanics.is_affine()
+    }
     /// Exact physical observation interval [s].
     #[must_use]
     pub fn duration_s(&self) -> f64 {
@@ -101,7 +108,7 @@ impl BroadbandModalObserver {
         &self,
         omega: f64,
     ) -> Result<PreparedBroadbandHarmonic, BroadbandModalError> {
-        let filters = self.admit_forcing_columns(&[omega])?;
+        let filters = self.admit_forcing_columns(&[omega], false)?;
         let mechanics =
             PreparedModalHarmonic::try_new(&self.model, omega, self.model.sample_period_s())
                 .map_err(BroadbandModalError::Modal)?;
@@ -119,10 +126,31 @@ impl BroadbandModalObserver {
         omega: &[f64],
         budget: ModalToneBudget,
     ) -> Result<PreparedBroadbandTones, BroadbandModalError> {
-        let filters = self.admit_forcing_columns(omega)?;
+        let filters = self.admit_forcing_columns(omega, false)?;
         let mechanics =
             PreparedModalTones::try_new(&self.model, omega, self.model.sample_period_s(), budget)
                 .map_err(BroadbandModalError::Modal)?;
+        let filters = self.prepare_forcing_columns(omega, filters)?;
+        Ok(PreparedBroadbandTones { mechanics, filters })
+    }
+
+    /// Prepare continuous linear force envelopes on each carrier. Both force
+    /// endpoints use the same interval-start phase basis. Source and retained
+    /// acoustic filter follow the actual affine-times-sinusoid trajectory;
+    /// this does not interpolate endpoint velocities or fade output pressure.
+    pub fn prepare_affine_tones(
+        &self,
+        omega: &[f64],
+        budget: ModalToneBudget,
+    ) -> Result<PreparedBroadbandTones, BroadbandModalError> {
+        let filters = self.admit_forcing_columns(omega, true)?;
+        let mechanics = PreparedModalTones::try_new_affine(
+            &self.model,
+            omega,
+            self.model.sample_period_s(),
+            budget,
+        )
+        .map_err(BroadbandModalError::Modal)?;
         let filters = self.prepare_forcing_columns(omega, filters)?;
         Ok(PreparedBroadbandTones { mechanics, filters })
     }
@@ -137,10 +165,13 @@ impl BroadbandModalObserver {
         cosine: &[f64],
         sine: &[f64],
     ) -> Result<f64, BroadbandModalError> {
-        let (raw, pressure) =
-            self.preview_forcing(&prepared.filters, cosine, sine, |i, state, c, s| {
-                prepared.mechanics.advance_mode(i, state, c[0], s[0])
-            })?;
+        let (raw, pressure) = self.preview_forcing(
+            &prepared.filters,
+            cosine,
+            sine,
+            None,
+            |i, state, c, s, _, _| prepared.mechanics.advance_mode(i, state, c[0], s[0]),
+        )?;
         self.model
             .step_harmonic_into(
                 &prepared.mechanics,
@@ -163,10 +194,13 @@ impl BroadbandModalObserver {
         cosine: &[f64],
         sine: &[f64],
     ) -> Result<f64, BroadbandModalError> {
-        let (raw, pressure) =
-            self.preview_forcing(&prepared.filters, cosine, sine, |i, state, c, s| {
-                prepared.mechanics.advance_mode(i, state, c, s)
-            })?;
+        let (raw, pressure) = self.preview_forcing(
+            &prepared.filters,
+            cosine,
+            sine,
+            None,
+            |i, state, c, s, _, _| prepared.mechanics.advance_mode(i, state, c, s),
+        )?;
         self.model
             .step_tones_into(
                 &prepared.mechanics,
@@ -179,7 +213,48 @@ impl BroadbandModalObserver {
         Ok(pressure)
     }
 
-    fn admit_forcing_columns(&self, omega: &[f64]) -> Result<ForcingColumns, BroadbandModalError> {
+    /// Commit one affine force interval, including causal acoustic startup,
+    /// sampled delay and original mechanical work/heat. Endpoint quadratures
+    /// are mode-major and share the interval-start carrier basis. All accepted
+    /// histories and caller phase remain unchanged on any refusal.
+    pub fn step_affine_tones(
+        &mut self,
+        prepared: &PreparedBroadbandTones,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+    ) -> Result<f64, BroadbandModalError> {
+        let (raw, pressure) = self.preview_forcing(
+            &prepared.filters,
+            cosine_start,
+            sine_start,
+            Some((cosine_end, sine_end)),
+            |i, state, c0, s0, c1, s1| {
+                prepared
+                    .mechanics
+                    .advance_mode_affine(i, state, c0, s0, c1, s1)
+            },
+        )?;
+        self.model
+            .step_tones_affine_into(
+                &prepared.mechanics,
+                cosine_start,
+                sine_start,
+                cosine_end,
+                sine_end,
+                &mut self.candidate_workspace,
+            )
+            .map_err(BroadbandModalError::Modal)?;
+        self.commit_observation(raw);
+        Ok(pressure)
+    }
+
+    fn admit_forcing_columns(
+        &self,
+        omega: &[f64],
+        affine: bool,
+    ) -> Result<ForcingColumns, BroadbandModalError> {
         let maximum = core::f64::consts::PI * self.model.budget().nyquist_guard_fraction
             / self.model.sample_period_s();
         if omega.is_empty()
@@ -229,7 +304,7 @@ impl BroadbandModalObserver {
             .filters
             .iter()
             .try_fold(0usize, |sum, filter| {
-                let n = filter.n + 1;
+                let n = filter.n + if affine { 3 } else { 1 };
                 let new = if filter.state.is_empty() {
                     0
                 } else {
@@ -250,8 +325,10 @@ impl BroadbandModalObserver {
         Ok(ForcingColumns {
             owner: Arc::clone(&self.forcing_owner),
             tone_count: omega.len(),
+            affine,
             groups,
             columns: Vec::new(),
+            delta_columns: Vec::new(),
         })
     }
 
@@ -263,19 +340,33 @@ impl BroadbandModalObserver {
         let groups = &prepared.groups;
         let dt = self.model.sample_period_s();
         let mut columns = Vec::with_capacity(self.filters.len());
+        let mut delta_columns = if prepared.affine {
+            Vec::with_capacity(self.filters.len())
+        } else {
+            Vec::new()
+        };
         for (filter, mode) in self.filters.iter().zip(self.model.modes()) {
             let ss = filter.model.state_space();
             let mut response = vec![[0.0; 2]; ss.n * groups.len()];
+            let mut delta_response = vec![
+                [0.0; 2];
+                if prepared.affine {
+                    ss.n * groups.len()
+                } else {
+                    0
+                }
+            ];
             if ss.n != 0 {
                 // [scaled displacement, velocity, filter state, Fc, Fs].
                 // Fc' = Omega*Fs, Fs' = -Omega*Fc; force(t)=Fc(t).
-                let n = ss.n + 4;
+                let n = ss.n + if prepared.affine { 6 } else { 4 };
+                let source = ss.n + 2;
                 let mut a = vec![0.0; n * n];
                 let w = mode.angular_frequency_rad_s;
                 a[1] = filter.q_scale * dt;
                 a[n] = -w * w / filter.q_scale * dt;
                 a[n + 1] = -2.0 * mode.damping_ratio * w * dt;
-                a[2 * n - 2] = dt;
+                a[n + source] = dt;
                 for i in 0..ss.n {
                     a[(i + 2) * n + 1] = ss.b[i] * dt;
                     for j in 0..ss.n {
@@ -283,21 +374,39 @@ impl BroadbandModalObserver {
                     }
                 }
                 for (tone, group) in groups.iter().enumerate() {
-                    a[(n - 2) * n + n - 1] = omega[group[0]] * dt;
-                    a[(n - 1) * n + n - 2] = -omega[group[0]] * dt;
+                    a[source * n + source + 1] = omega[group[0]] * dt;
+                    a[(source + 1) * n + source] = -omega[group[0]] * dt;
+                    if prepared.affine {
+                        // Normalized endpoint deltas, never force/time rates.
+                        // C'=Omega*S+Dc/h, S'=-Omega*C+Ds/h.
+                        a[source * n + source + 2] = 1.0;
+                        a[(source + 1) * n + source + 3] = 1.0;
+                        a[(source + 2) * n + source + 3] = omega[group[0]] * dt;
+                        a[(source + 3) * n + source + 2] = -omega[group[0]] * dt;
+                    }
                     let transition = fs_phs::linear_exact::exponential(&a, n)
                         .map_err(BroadbandModalError::Exact)?;
                     for row in 0..ss.n {
                         response[row * groups.len() + tone] = [
-                            transition[(row + 2) * n + n - 2],
-                            transition[(row + 2) * n + n - 1],
+                            transition[(row + 2) * n + source],
+                            transition[(row + 2) * n + source + 1],
                         ];
+                        if prepared.affine {
+                            delta_response[row * groups.len() + tone] = [
+                                transition[(row + 2) * n + source + 2],
+                                transition[(row + 2) * n + source + 3],
+                            ];
+                        }
                     }
                 }
             }
             columns.push(response);
+            if prepared.affine {
+                delta_columns.push(delta_response);
+            }
         }
         prepared.columns = columns;
+        prepared.delta_columns = delta_columns;
         Ok(prepared)
     }
 
@@ -306,16 +415,19 @@ impl BroadbandModalObserver {
         prepared: &ForcingColumns,
         cosine: &[f64],
         sine: &[f64],
+        ends: Option<(&[f64], &[f64])>,
         mut advance: impl FnMut(
             usize,
             ModalAcousticState,
             &[f64],
             &[f64],
+            &[f64],
+            &[f64],
         ) -> Result<ModalAcousticState, ModalAcousticTimeError>,
     ) -> Result<(f64, f64), BroadbandModalError> {
-        if !Arc::ptr_eq(&prepared.owner, &self.forcing_owner) {
+        if !Arc::ptr_eq(&prepared.owner, &self.forcing_owner) || prepared.affine != ends.is_some() {
             return Err(BroadbandModalError::Invalid(
-                "forcing preparation belongs to a different broadband receiver",
+                "forcing preparation must match this broadband receiver and envelope law",
             ));
         }
         let tones = prepared.tone_count;
@@ -328,11 +440,26 @@ impl BroadbandModalObserver {
                 "finite complete mode-major continuous force arrays required",
             ));
         }
+        if ends.is_some_and(|(c, s)| {
+            c.len() != count
+                || s.len() != count
+                || c.iter().chain(s).any(|value| !value.is_finite())
+        }) {
+            return Err(BroadbandModalError::Invalid(
+                "finite complete affine force endpoint arrays required",
+            ));
+        }
         let mut raw = 0.0;
         for (index, &state) in self.model.states().iter().enumerate() {
             let c = &cosine[index * tones..(index + 1) * tones];
             let s = &sine[index * tones..(index + 1) * tones];
-            let next = advance(index, state, c, s).map_err(BroadbandModalError::Modal)?;
+            let (ce, se) = ends.map_or((c, s), |(ce, se)| {
+                (
+                    &ce[index * tones..(index + 1) * tones],
+                    &se[index * tones..(index + 1) * tones],
+                )
+            });
+            let next = advance(index, state, c, s, ce, se).map_err(BroadbandModalError::Modal)?;
             if let Some(h) = &self.constant {
                 raw += h[index].re * next.velocity_m_sqrt_kg_per_s;
                 continue;
@@ -348,6 +475,14 @@ impl BroadbandModalObserver {
                 for (tone, group) in prepared.groups.iter().enumerate() {
                     let column = prepared.columns[index][row * prepared.groups.len() + tone];
                     x += column[0] * grouped_force(c, group) + column[1] * grouped_force(s, group);
+                    if prepared.affine {
+                        let delta =
+                            prepared.delta_columns[index][row * prepared.groups.len() + tone];
+                        // Match mechanics: independently coalesce both
+                        // endpoints before forming a finite envelope delta.
+                        x += delta[0] * (grouped_force(ce, group) - grouped_force(c, group))
+                            + delta[1] * (grouped_force(se, group) - grouped_force(s, group));
+                    }
                 }
                 if !x.is_finite() {
                     return Err(BroadbandModalError::NonFinite {

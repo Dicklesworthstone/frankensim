@@ -7,14 +7,15 @@ use super::super::{
     ModalAcousticTimeModel, ModalAcousticWorkspace, ModalStepData, stage_modal_frame,
 };
 use super::{
-    HarmonicForceTransition, advance_response, invalid, runtime::require_mechanical_observation,
+    HarmonicForceTransition, advance_response, affine::delta_gains, invalid,
+    runtime::require_mechanical_observation,
 };
-use power::{TonePower, scaling};
+use power::{TonePower, scaling_with_envelope};
 use std::sync::Arc;
 
 /// Hard bound on prescribed tones in one prepared modal bank. No truncation.
 pub const MAX_HARMONIC_TONES: usize = 32;
-const MAX_COORDINATES: usize = 2 + 2 * MAX_HARMONIC_TONES;
+const MAX_COORDINATES: usize = 2 + 4 * MAX_HARMONIC_TONES;
 
 /// Explicit storage and work admission for simultaneous-tone preparation.
 /// Work scores count fixed algebraic loop sizes, not elapsed time or CPU
@@ -29,8 +30,10 @@ pub struct ModalToneBudget {
     /// and caller-owned forces/workspace. Step scratch is bounded on the stack.
     pub maximum_storage_bytes: usize,
     /// Maximum preparation work score: summed over modes, with `n=2+2K`
-    /// for distinct frequencies and `d` resolved-interval doublings,
-    /// `160*n^2 + d*(8*n^3+80*n^2) + K*(2000+80*d)`.
+    /// for constant tones or `n=2+4K` for affine envelopes, `K` distinct
+    /// frequencies and `d` resolved-interval doublings. The score is
+    /// `160*n^2 + d*(8*n^3+80*n^2) + K*(2000+80*d)`; affine preparation
+    /// doubles the last convolution term and admits its larger source norm.
     pub maximum_preparation_work: usize,
     /// Maximum per-step work score: `modes*(16*n^2+128*input_tones)`.
     pub maximum_step_work: usize,
@@ -52,6 +55,7 @@ impl ModalToneBudget {
 #[derive(Clone, Debug)]
 struct PreparedToneMode {
     motion: Box<[HarmonicForceTransition]>,
+    delta: Option<Box<[[f64; 4]]>>,
     power: TonePower,
 }
 
@@ -63,6 +67,8 @@ struct PreparedToneMode {
 /// exactly equal frequencies are coalesced; close frequencies retain beats.
 /// Each physical mode has one homogeneous state and complete cross-frequency
 /// work/positive heat forms. Adding single-tone heats is never used.
+/// [`Self::try_new_affine`] additionally admits linear quadrature envelopes;
+/// it retains both interval-start-basis endpoints and their cross terms.
 ///
 /// Preparation allocates within explicit budgets. Motion, phase rotation and
 /// physical steps allocate nothing and call no transcendentals. No tone or
@@ -75,6 +81,7 @@ struct PreparedToneMode {
 /// transfers must be zero; use a separate physical broadband observer.
 #[derive(Clone, Debug)]
 pub struct PreparedModalTones {
+    affine: bool,
     owner: Arc<ExactZohKernel>,
     frequencies: Box<[f64]>,
     unique: Box<[f64]>,
@@ -98,6 +105,31 @@ impl PreparedModalTones {
         angular_frequencies_rad_s: &[f64],
         duration_s: f64,
         budget: ModalToneBudget,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        Self::prepare(model, angular_frequencies_rad_s, duration_s, budget, false)
+    }
+
+    /// Prepare linear cosine/sine envelopes with endpoints expressed in the
+    /// SAME interval-start carrier basis: `(C0+(C1-C0)*t/h)*cos(Omega*t)`
+    /// plus the corresponding sine term. This retains attack/release work,
+    /// interference and physical ringdown; it does not ramp output pressure.
+    /// Rotate the accepted endpoint pair before continuing the next interval.
+    /// The constant preparation remains a separate smaller fast path.
+    pub fn try_new_affine(
+        model: &ModalAcousticTimeModel,
+        angular_frequencies_rad_s: &[f64],
+        duration_s: f64,
+        budget: ModalToneBudget,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        Self::prepare(model, angular_frequencies_rad_s, duration_s, budget, true)
+    }
+
+    fn prepare(
+        model: &ModalAcousticTimeModel,
+        angular_frequencies_rad_s: &[f64],
+        duration_s: f64,
+        budget: ModalToneBudget,
+        affine: bool,
     ) -> Result<Self, ModalAcousticTimeError> {
         require_mechanical_observation(model)?;
         let count = angular_frequencies_rad_s.len();
@@ -129,7 +161,14 @@ impl PreparedModalTones {
                     distinct - 1
                 };
         }
-        admit_cost(model, &unique[..distinct], count, duration_s, budget)?;
+        admit_cost(
+            model,
+            &unique[..distinct],
+            count,
+            duration_s,
+            budget,
+            affine,
+        )?;
         let mut modes = Vec::with_capacity(model.modes.len());
         for mode in &model.modes {
             let mut motion = Vec::with_capacity(distinct);
@@ -141,7 +180,24 @@ impl PreparedModalTones {
                     duration_s,
                 )?);
             }
-            let power = TonePower::try_new(
+            let delta = if affine {
+                Some(
+                    motion
+                        .iter()
+                        .zip(&unique[..distinct])
+                        .map(|(base, &frequency)| delta_gains(base, frequency))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_boxed_slice(),
+                )
+            } else {
+                None
+            };
+            let prepare_power = if affine {
+                TonePower::try_new_affine
+            } else {
+                TonePower::try_new
+            };
+            let power = prepare_power(
                 mode.angular_frequency_rad_s,
                 mode.damping_ratio,
                 &unique[..distinct],
@@ -149,10 +205,12 @@ impl PreparedModalTones {
             )?;
             modes.push(PreparedToneMode {
                 motion: motion.into_boxed_slice(),
+                delta,
                 power,
             });
         }
         Ok(Self {
+            affine,
             owner: Arc::clone(&model.transition_kernel),
             frequencies: angular_frequencies_rad_s.into(),
             unique: unique[..distinct].into(),
@@ -166,6 +224,12 @@ impl PreparedModalTones {
     #[must_use]
     pub fn duration_s(&self) -> f64 {
         self.duration_s
+    }
+
+    /// Whether this preparation admits affine rotating-quadrature envelopes.
+    #[must_use]
+    pub const fn is_affine(&self) -> bool {
+        self.affine
     }
 
     /// Original caller-ordered frequencies [rad/s], including duplicates/DC.
@@ -217,6 +281,9 @@ impl PreparedModalTones {
         cosine_forces: &[f64],
         sine_forces: &[f64],
     ) -> Result<ModalAcousticState, ModalAcousticTimeError> {
+        if self.affine {
+            return Err(invalid("affine tones require both envelope endpoints"));
+        }
         let mode = self
             .modes
             .get(mode_index)
@@ -226,7 +293,54 @@ impl PreparedModalTones {
             state,
             &cosine[..self.unique.len()],
             &sine[..self.unique.len()],
+            None,
         )
+    }
+
+    /// Pure endpoint proposal for the same affine trajectory used by the
+    /// physical step. Both endpoint rows share the interval-start phase basis.
+    pub fn advance_mode_affine(
+        &self,
+        mode_index: usize,
+        state: ModalAcousticState,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+    ) -> Result<ModalAcousticState, ModalAcousticTimeError> {
+        if !self.affine {
+            return Err(invalid("affine envelopes require affine tone preparation"));
+        }
+        let mode = self
+            .modes
+            .get(mode_index)
+            .ok_or_else(|| invalid("tone mode index must be admitted"))?;
+        let [c, s, dc, ds] = self.collect_affine(cosine_start, sine_start, cosine_end, sine_end)?;
+        let n = self.unique.len();
+        mode.advance(state, &c[..n], &s[..n], Some((&dc[..n], &ds[..n])))
+    }
+
+    fn collect_affine(
+        &self,
+        c0: &[f64],
+        s0: &[f64],
+        c1: &[f64],
+        s1: &[f64],
+    ) -> Result<[[f64; MAX_HARMONIC_TONES]; 4], ModalAcousticTimeError> {
+        let (c, s) = self.collect_forces(c0, s0)?;
+        let (mut dc, mut ds) = self.collect_forces(c1, s1)?;
+        // Coalesce each endpoint before differencing, retaining exact duplicate
+        // cancellation even when individual authored deltas would overflow.
+        for i in 0..self.unique.len() {
+            dc[i] -= c[i];
+            ds[i] -= s[i];
+            if !dc[i].is_finite() || !ds[i].is_finite() {
+                return Err(invalid(
+                    "affine tone endpoint difference must be representable",
+                ));
+            }
+        }
+        Ok([c, s, dc, ds])
     }
 
     fn collect_forces(
@@ -267,6 +381,7 @@ impl PreparedToneMode {
         state: ModalAcousticState,
         cosine: &[f64],
         sine: &[f64],
+        deltas: Option<(&[f64], &[f64])>,
     ) -> Result<ModalAcousticState, ModalAcousticTimeError> {
         let mut held = Sum::default();
         let mut driven_q = Sum::default();
@@ -287,6 +402,23 @@ impl PreparedToneMode {
             if motion.cosine_remainder {
                 has_held = true;
                 held.add(fc);
+            }
+        }
+        if let Some((dc, ds)) = deltas {
+            let delta = self
+                .delta
+                .as_ref()
+                .ok_or_else(|| invalid("affine motion requires affine preparation"))?;
+            for ((gain, &c), &s) in delta.iter().zip(dc).zip(ds) {
+                let c = first.duration_s * c;
+                let s = first.duration_s * s;
+                if !c.is_finite() || !s.is_finite() {
+                    return Err(invalid("scaled affine tone delta must be representable"));
+                }
+                driven_q.add(gain[0] * c);
+                driven_q.add(gain[1] * s);
+                driven_v.add(gain[2] * c);
+                driven_v.add(gain[3] * s);
             }
         }
         advance_response(
@@ -318,6 +450,42 @@ impl ModalAcousticTimeModel {
         sine_forces: &[f64],
         workspace: &'w mut ModalAcousticWorkspace,
     ) -> Result<&'w ModalAcousticFrame, ModalAcousticTimeError> {
+        self.step_tones_envelope_into(prepared, cosine_forces, sine_forces, None, workspace)
+    }
+
+    /// Advance exact affine rotating-quadrature envelopes. Arrays are complete
+    /// mode-major rows, with start and end in the SAME interval-start carrier
+    /// basis. Accepted state is unchanged on refusal; caller phase is never
+    /// mutated. The original work, positive heat and physical gates apply.
+    pub fn step_tones_affine_into<'w>(
+        &mut self,
+        prepared: &PreparedModalTones,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+        workspace: &'w mut ModalAcousticWorkspace,
+    ) -> Result<&'w ModalAcousticFrame, ModalAcousticTimeError> {
+        self.step_tones_envelope_into(
+            prepared,
+            cosine_start,
+            sine_start,
+            Some((cosine_end, sine_end)),
+            workspace,
+        )
+    }
+
+    fn step_tones_envelope_into<'w>(
+        &mut self,
+        prepared: &PreparedModalTones,
+        cosine_forces: &[f64],
+        sine_forces: &[f64],
+        ends: Option<(&[f64], &[f64])>,
+        workspace: &'w mut ModalAcousticWorkspace,
+    ) -> Result<&'w ModalAcousticFrame, ModalAcousticTimeError> {
+        if prepared.affine != ends.is_some() {
+            return Err(invalid("tone step must use its prepared envelope law"));
+        }
         if !Arc::ptr_eq(&prepared.owner, &self.transition_kernel) {
             return Err(invalid(
                 "tone preparation must belong to this model or its clone",
@@ -325,7 +493,10 @@ impl ModalAcousticTimeModel {
         }
         require_mechanical_observation(self)?;
         let expected = self.modes.len() * prepared.tone_count();
-        for forces in [cosine_forces, sine_forces] {
+        for forces in [cosine_forces, sine_forces]
+            .into_iter()
+            .chain(ends.into_iter().flat_map(|(c, s)| [c, s]))
+        {
             if forces.len() != expected {
                 return Err(ModalAcousticTimeError::ForceCountMismatch {
                     expected,
@@ -346,14 +517,29 @@ impl ModalAcousticTimeModel {
             |index, _mode, state| {
                 let begin = index * prepared.tone_count();
                 let end = begin + prepared.tone_count();
-                let (c, s) = prepared
-                    .collect_forces(&cosine_forces[begin..end], &sine_forces[begin..end])?;
-                let c = &c[..prepared.unique.len()];
-                let s = &s[..prepared.unique.len()];
                 let mode = &prepared.modes[index];
-                let next = mode.advance(state, c, s)?;
-                let (work, work_allowance, loss, loss_allowance) =
-                    mode.power.evaluate(state, c, s)?;
+                let n = prepared.unique.len();
+                let (next, accounts) = if let Some((ce, se)) = ends {
+                    let [c, s, dc, ds] = prepared.collect_affine(
+                        &cosine_forces[begin..end],
+                        &sine_forces[begin..end],
+                        &ce[begin..end],
+                        &se[begin..end],
+                    )?;
+                    (
+                        mode.advance(state, &c[..n], &s[..n], Some((&dc[..n], &ds[..n])))?,
+                        mode.power
+                            .evaluate_affine(state, &c[..n], &s[..n], &dc[..n], &ds[..n])?,
+                    )
+                } else {
+                    let (c, s) = prepared
+                        .collect_forces(&cosine_forces[begin..end], &sine_forces[begin..end])?;
+                    (
+                        mode.advance(state, &c[..n], &s[..n], None)?,
+                        mode.power.evaluate(state, &c[..n], &s[..n])?,
+                    )
+                };
+                let (work, work_allowance, loss, loss_allowance) = accounts;
                 Ok(ModalStepData {
                     next,
                     work,
@@ -374,9 +560,10 @@ fn admit_cost(
     input_tones: usize,
     h: f64,
     budget: ModalToneBudget,
+    affine: bool,
 ) -> Result<(), ModalAcousticTimeError> {
     let k = frequencies.len();
-    let n = 2 + 2 * k;
+    let n = 2 + if affine { 4 } else { 2 } * k;
     let square = n * n;
     let count = model.modes.len();
     // The hard mode/tone caps keep these small integer products representable.
@@ -384,6 +571,11 @@ fn admit_cost(
     let storage = count
         * (core::mem::size_of::<PreparedToneMode>()
             + k * core::mem::size_of::<HarmonicForceTransition>()
+            + if affine {
+                k * core::mem::size_of::<[f64; 4]>()
+            } else {
+                0
+            }
             + 2 * square * 8)
         + 4 * square * 8
         + (10 * n + 20 * input_tones) * 8
@@ -391,14 +583,16 @@ fn admit_cost(
     let step_work = count * (16 * square + 128 * input_tones);
     let mut preparation = 0usize;
     for mode in &model.modes {
-        let (_, _, _, _, doublings) = scaling(
+        let (_, _, _, _, doublings) = scaling_with_envelope(
             mode.angular_frequency_rad_s,
             mode.damping_ratio,
             frequencies,
             h,
+            affine,
         )?;
-        let cost =
-            160 * square + doublings * (8 * n * square + 80 * square) + k * (2000 + 80 * doublings);
+        let cost = 160 * square
+            + doublings * (8 * n * square + 80 * square)
+            + k * (if affine { 2 } else { 1 }) * (2000 + 80 * doublings);
         preparation = preparation
             .checked_add(cost)
             .ok_or_else(|| invalid("tone preparation work score overflow"))?;

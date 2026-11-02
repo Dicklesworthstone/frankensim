@@ -358,6 +358,36 @@ the compact radiator and fs-couple's broadband observer take single exact steps;
 last published diagnostics. The opt-in `broadband` observer is not part of this crate; it stays in
 `fs_couple::modal_acoustic_time::broadband`. Determinism: one-host bitwise; no cross-ISA claim is made for the music stack.
 
+### Affine continuous tone envelopes
+
+`PreparedModalTones::try_new_affine` and
+`ModalAcousticTimeModel::step_tones_affine_into` admit
+`(C0+(C1-C0)*t/h)*cos(Omega*t) + (S0+(S1-S0)*t/h)*sin(Omega*t)`.
+Both endpoints use the same interval-start carrier basis and original
+mass-normalized force units. Rotate the accepted endpoint pair before the
+next interval. The caller retains carrier phase through zero amplitude;
+neither a physical step nor a refusal changes caller-owned phase.
+
+The original scalar entire convolution gains two normalized endpoint-delta
+columns; no detuning denominator or force/time-rate representation is added.
+Motion retains one homogeneous state per mode. Cross-tone work and positive
+viscous heat use the original paired force/velocity QR owner with four
+rotating source coordinates per distinct tone. The residual flow includes
+the envelope derivative as well as carrier rotation. Exactly equal source
+frequencies coalesce each endpoint in original order before differencing;
+nearby tones remain independent and retain their interference.
+
+The constant two-coordinate preparation and step remain available unchanged.
+Mixing preparation and step families refuses. Affine preparation remains
+bound to the original immutable modal kernel and requires zero legacy
+natural-frequency observation maps. Original physical-state, energy and
+independent work/heat balance gates apply before accepted state publication.
+Cold byte/work admission includes the larger complete source blocks and
+their power factors; no tone or mode is removed. Warm propagation reuses
+cached coefficients without allocation or transcendental evaluation.
+Finite-arithmetic and Gaussian-composition allowances remain numerical
+estimates, not interval certificates or instrument-validity claims.
+
 ## Invariants
 1. A returned `SliceReport` satisfies `modes.len() == expected ==
    below_high − below_low`; a harvest that cannot meet the certified count
