@@ -385,6 +385,27 @@ with original MimoZoh. G0/G4 cover restored-versus-residual passivity,
 resource/refusal boundaries, hidden-coordinate overflow, abandoned previews,
 and exact retry of accepted poles and delay rings.
 
+`waveguide::network::multiport::DelayedMimoTerminalSpec` attaches this original
+delayed runtime to an unadvanced network's distinct degree-one memoryless
+terminals. The same prepared dense solve enforces
+`2*a - Zc*u = mean_history + mean_direct*u` at all selected ports together.
+Only arrivals inside the current interval enter the direct matrix; later
+arrivals remain in the original input rings. No extra feedback sample,
+delay rounding or gain correction is added. Existing undelayed attachments
+retain their original runtime and results.
+
+All network waves, delayed poles, rings and port observations accept together.
+A failed second participant in a paired step leaves the first participant's
+complete accepted history unchanged. Frames retain exact held-flow signed
+exterior work separately from wave storage and local dissipation; this is not
+a synthesized exterior storage law. Both delayed passivity reports remain
+GridOnly. The terminal's memory budget additionally reserves the original
+installed specification and dense interconnection payload before admitting
+the runtime. G1/G3 tests compare fractional mutual arrivals with independent
+2x2 held-flow network equations, audit wave/exterior work, preserve original
+zero-delay resistor results and compare accepted poles/rings with the original
+runtime under abandoned and failed coupled transactions.
+
 The tests check the following:
 - known-model recovery (`< 1e-8`) and pole recovery;
 - realization parity;

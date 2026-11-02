@@ -5,13 +5,16 @@
 //! Pressure is the exact mean for that held-flow interval, so its product with
 //! flow and duration is the rational model's integrated port work. The wave
 //! interconnection remains sampled and still requires physical clock refinement.
-//! The rational states belong to `MimoZoh`; this module owns only the port
+//! Pole and propagation histories belong to the original admitted runtime;
+//! this module owns only the port
 //! interconnection. Signed work delivered to that model is not relabeled as
 //! dissipation or reconstructed into a fictitious stored-energy coordinate.
 
 use super::{NetworkNode, NodeFrame, WaveguideError, WaveguideNetwork};
 use crate::mimo::load::{MimoLoadLimits, PreparedMimoLoad};
 use crate::mimo::{MimoModel, MimoPassivityReport, MimoZoh};
+use crate::mimo::delayed::{DelayedMimoLoadLimits, PreparedDelayedMimoLoad};
+use crate::mimo::DelayedMimoModel;
 use fs_la::prepared_lu::LuWorkspace;
 
 /// An explicitly ordered, proper rational terminal impedance in SI units.
@@ -34,6 +37,67 @@ pub struct MimoTerminalSpec {
     pub max_memory_bytes: usize,
 }
 
+/// An ordered terminal impedance retaining every physical propagation delay.
+/// The source band, physical clock and separate pole/history/memory limits are
+/// admitted by the delayed owner. Both response checks remain `GridOnly`.
+#[derive(Clone, Debug)]
+pub struct DelayedMimoTerminalSpec {
+    /// Distinct degree-one memoryless nodes, in original matrix order.
+    pub nodes: Vec<usize>,
+    /// Proper impedance on `s = +i omega`, with per-entry delays in seconds.
+    pub model: DelayedMimoModel,
+    /// Runtime limits; its memory allowance also covers this terminal adapter.
+    pub limits: DelayedMimoLoadLimits,
+}
+
+enum TerminalSource {
+    Rational(MimoTerminalSpec),
+    Delayed(DelayedMimoTerminalSpec),
+}
+impl TerminalSource {
+    fn nodes(&self) -> &[usize] {
+        match self { Self::Rational(s) => &s.nodes, Self::Delayed(s) => &s.nodes }
+    }
+    fn ports(&self) -> usize {
+        match self { Self::Rational(s) => s.model.ports, Self::Delayed(s) => s.model.model.ports }
+    }
+}
+
+enum TerminalRuntime {
+    Rational {
+        runtime: MimoZoh,
+        continuous: MimoPassivityReport,
+        sampled: MimoPassivityReport,
+    },
+    Delayed(PreparedDelayedMimoLoad),
+}
+impl TerminalRuntime {
+    fn mean_direct_term(&self) -> &[f64] {
+        match self { Self::Rational { runtime, .. } => runtime.mean_direct_term(), Self::Delayed(r) => r.mean_direct_term() }
+    }
+    fn mean_history_output_into(&self, output: &mut [f64]) -> Result<(), WaveguideError> {
+        match self {
+            Self::Rational { runtime, .. } => { runtime.mean_history_output_into(output); Ok(()) }
+            Self::Delayed(r) => r.mean_history_output_into(output).map_err(|e| invalid(e.0)),
+        }
+    }
+    fn preview_state(&mut self, input: &[f64]) -> bool {
+        match self { Self::Rational { runtime, .. } => runtime.preview_state(input), Self::Delayed(r) => r.preview_state(input) }
+    }
+    fn accept_state(&mut self, input: &[f64]) {
+        match self { Self::Rational { runtime, .. } => runtime.accept_state(input), Self::Delayed(r) => r.accept_state(input) }
+    }
+    fn pole_states(&self) -> &[fs_math::c64::C64] {
+        match self { Self::Rational { runtime, .. } => runtime.pole_states(), Self::Delayed(r) => r.pole_states() }
+    }
+    fn reports(&self) -> (&MimoPassivityReport, &MimoPassivityReport) {
+        match self {
+            Self::Rational { continuous, sampled, .. } => (continuous, sampled),
+            Self::Delayed(runtime) => runtime.reports(),
+        }
+    }
+}
+
 /// Accepted same-sample effort, flow and signed work at one coupled port.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MimoPortFrame {
@@ -47,12 +111,10 @@ pub struct MimoPortFrame {
 }
 
 pub(super) struct MimoTerminals {
-    source: MimoTerminalSpec,
-    runtime: MimoZoh,
+    source: TerminalSource,
+    runtime: TerminalRuntime,
     factor: LuWorkspace,
     impedance: Vec<f64>,
-    continuous: MimoPassivityReport,
-    sampled: MimoPassivityReport,
     history: Vec<f64>,
     rhs: Vec<f64>,
     flow: Vec<f64>,
@@ -65,14 +127,14 @@ fn invalid(what: &'static str) -> WaveguideError {
 }
 
 impl MimoTerminals {
-    fn new(source: MimoTerminalSpec, graph: &WaveguideNetwork) -> Result<Self, WaveguideError> {
-        let n = source.model.ports;
-        if !(1..=128).contains(&n) || source.nodes.len() != n {
+    fn new(source: TerminalSource, graph: &WaveguideNetwork) -> Result<Self, WaveguideError> {
+        let n = source.ports();
+        if !(1..=128).contains(&n) || source.nodes().len() != n {
             return Err(invalid("coupled terminals require one existing node per model port"));
         }
         let mut impedance = Vec::with_capacity(n);
-        for (i, &node) in source.nodes.iter().enumerate() {
-            if source.nodes[..i].contains(&node)
+        for (i, &node) in source.nodes().iter().enumerate() {
+            if source.nodes()[..i].contains(&node)
                 || !matches!(graph.nodes.get(node), Some(NetworkNode::Termination { .. }))
             {
                 return Err(invalid("MIMO ports must be distinct existing memoryless terminals"));
@@ -84,16 +146,37 @@ impl MimoTerminals {
             let port = graph.ports[range.start];
             impedance.push(graph.lines[port / 2].spec.impedance_pa_s_m3);
         }
-        let limits = MimoLoadLimits {
-            band_rad_s: source.band_rad_s,
-            sampled_passivity_points: source.sampled_passivity_points,
-            max_states: source.max_states,
-            max_memory_bytes: source.max_memory_bytes,
+        let runtime = match &source {
+            TerminalSource::Rational(source) => {
+                let limits = MimoLoadLimits {
+                    band_rad_s: source.band_rad_s,
+                    sampled_passivity_points: source.sampled_passivity_points,
+                    max_states: source.max_states,
+                    max_memory_bytes: source.max_memory_bytes,
+                };
+                let (runtime, continuous, sampled) =
+                    PreparedMimoLoad::new(&source.model, graph.time_step_s, limits)
+                        .map_err(|error| invalid(error.0))?.into_parts();
+                TerminalRuntime::Rational { runtime, continuous, sampled }
+            }
+            TerminalSource::Delayed(source) => {
+                let terms = source.model.model.poles.len();
+                if terms > 256 { return Err(invalid("MIMO load exceeds port, pole or sampling limits")); }
+                // The delayed owner retains its source. Charge the original
+                // installed specification and this adapter's dense solve,
+                // vectors and port frames before granting its remaining budget.
+                let retained = n * n * (16 * terms + 24 + 32)
+                    + terms * core::mem::size_of::<crate::model::PoleTerm>()
+                    + n * (80 + 2 * core::mem::size_of::<MimoPortFrame>());
+                let mut limits = source.limits;
+                limits.source.max_memory_bytes = limits.source.max_memory_bytes
+                    .checked_sub(retained)
+                    .ok_or_else(|| invalid("delayed MIMO terminal adapter exceeds its memory allowance"))?;
+                let runtime = PreparedDelayedMimoLoad::new(&source.model, graph.time_step_s, limits)
+                    .map_err(|error| invalid(error.0))?;
+                TerminalRuntime::Delayed(runtime)
+            }
         };
-        let (runtime, continuous, sampled) =
-            PreparedMimoLoad::new(&source.model, graph.time_step_s, limits)
-                .map_err(|error| invalid(error.0))?
-                .into_parts();
         let mut system = runtime.mean_direct_term().to_vec();
         for (i, &z) in impedance.iter().enumerate() {
             system[i * n + i] += z;
@@ -103,7 +186,7 @@ impl MimoTerminals {
         factor.factor(&system)
             .map_err(|_| invalid("coupled terminal direct solve is singular or nonfinite"))?;
         Ok(Self {
-            source, runtime, factor, impedance, continuous, sampled,
+            source, runtime, factor, impedance,
             history: vec![0.0; n], rhs: vec![0.0; n], flow: vec![0.0; n],
             candidate: vec![MimoPortFrame::default(); n],
             accepted: vec![MimoPortFrame::default(); n],
@@ -111,12 +194,12 @@ impl MimoTerminals {
     }
 
     pub(super) fn index(&self, node: usize) -> Option<usize> {
-        self.source.nodes.iter().position(|&n| n == node)
+        self.source.nodes().iter().position(|&n| n == node)
     }
 
     pub(super) fn preview(&mut self, arriving: &[f64], dt: f64) -> Result<f64, WaveguideError> {
-        let n = self.source.nodes.len();
-        self.runtime.mean_history_output_into(&mut self.history);
+        let n = self.source.nodes().len();
+        self.runtime.mean_history_output_into(&mut self.history)?;
         for i in 0..n {
             self.rhs[i] = 2.0 * arriving[i] - self.history[i];
         }
@@ -189,25 +272,63 @@ impl WaveguideNetwork {
         &mut self,
         source: MimoTerminalSpec,
     ) -> Result<(), WaveguideError> {
+        self.install_terminal_group(TerminalSource::Rational(source))
+    }
+    /// Install an exact held-input delayed impedance before any accepted sample.
+    /// Fractional delays split the physical interval analytically; no delay
+    /// rounding, interpolation filter or additional feedback sample is inserted.
+    /// Pressure, flow and signed work use the same simultaneous terminal solve.
+    /// The restored continuous and actual discrete checks remain `GridOnly`;
+    /// they do not establish a delayed storage functional or closed-loop stability.
+    pub fn with_delayed_mimo_terminals(
+        mut self, source: DelayedMimoTerminalSpec,
+    ) -> Result<Self, WaveguideError> {
+        self.install_delayed_mimo_terminals(source)?;
+        Ok(self)
+    }
+    /// Failure-atomic cold attachment of one explicitly delayed terminal group.
+    pub fn install_delayed_mimo_terminals(
+        &mut self, source: DelayedMimoTerminalSpec,
+    ) -> Result<(), WaveguideError> {
+        self.install_terminal_group(TerminalSource::Delayed(source))
+    }
+    fn install_terminal_group(&mut self, source: TerminalSource) -> Result<(), WaveguideError> {
         if self.accepted_steps != 0 || self.mimo.is_some() {
             return Err(invalid(
                 "MIMO terminals require an unadvanced network with no existing coupled group",
             ));
         }
         let model = MimoTerminals::new(source, &self)?;
-        self.mimo_arriving = vec![0.0; model.source.nodes.len()];
+        self.mimo_arriving = vec![0.0; model.source.nodes().len()];
         self.mimo = Some(model);
         Ok(())
     }
-    /// Original ordered model, band and work limits actually installed.
+    /// Original undelayed model, band and limits; absent for a delayed group.
     #[must_use]
     pub fn mimo_terminal_spec(&self) -> Option<&MimoTerminalSpec> {
-        self.mimo.as_ref().map(|m| &m.source)
+        self.mimo.as_ref().and_then(|m| match &m.source {
+            TerminalSource::Rational(source) => Some(source), TerminalSource::Delayed(_) => None,
+        })
+    }
+    /// Original delayed model, node order and complete caller limits.
+    #[must_use]
+    pub fn delayed_mimo_terminal_spec(&self) -> Option<&DelayedMimoTerminalSpec> {
+        self.mimo.as_ref().and_then(|m| match &m.source {
+            TerminalSource::Delayed(source) => Some(source), TerminalSource::Rational(_) => None,
+        })
+    }
+    /// Read-only accepted delayed poles, input rings and reports. Its memory
+    /// allowance is the remainder after the terminal adapter's retained payload.
+    #[must_use]
+    pub fn delayed_mimo_load(&self) -> Option<&PreparedDelayedMimoLoad> {
+        self.mimo.as_ref().and_then(|m| match &m.runtime {
+            TerminalRuntime::Delayed(runtime) => Some(runtime), TerminalRuntime::Rational { .. } => None,
+        })
     }
     /// Continuous and actual sampled passivity reports, without conflating them.
     #[must_use]
     pub fn mimo_passivity(&self) -> Option<(&MimoPassivityReport, &MimoPassivityReport)> {
-        self.mimo.as_ref().map(|m| (&m.continuous, &m.sampled))
+        self.mimo.as_ref().map(|m| m.runtime.reports())
     }
     /// Last accepted coupled port observations, in original model order.
     #[must_use]
@@ -224,7 +345,7 @@ impl WaveguideNetwork {
         let Some(model) = self.mimo.as_ref() else {
             return Ok(0.0);
         };
-        for (i, &node) in model.source.nodes.iter().enumerate() {
+        for (i, &node) in model.source.nodes().iter().enumerate() {
             let port = self.ports[self.offsets[node]];
             self.mimo_arriving[i] = self.arriving(port);
         }
@@ -234,7 +355,7 @@ impl WaveguideNetwork {
             .expect("same admitted group")
             .preview(&self.mimo_arriving, self.time_step_s)?;
         let model = self.mimo.as_ref().expect("same admitted group");
-        for (i, &node) in model.source.nodes.iter().enumerate() {
+        for (i, &node) in model.source.nodes().iter().enumerate() {
             let port = self.ports[self.offsets[node]];
             let frame = model.frame(i);
             self.departing[port] = frame.pressure_pa - self.mimo_arriving[i];

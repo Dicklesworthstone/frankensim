@@ -4,6 +4,8 @@ use crate::model::PoleTerm;
 use crate::waveguide::network::NetworkSegment;
 use fs_math::c64::C64;
 
+mod delayed;
+
 const DT: f64 = 1.0 / 48_000.0;
 
 fn graph() -> WaveguideNetwork {
