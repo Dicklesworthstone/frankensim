@@ -803,3 +803,47 @@ thermal, optical, flow and mechanical wrappers forward the hook. Default None
 preserves existing stepping arithmetic, and the existing empty-grid skip is
 unchanged. Focused observer regressions check exact coupled boundaries, invalid
 time rejection with rollback, coincident native events and split continuation.
+
+## Observed absorption sources in implicit conduction
+
+`ImplicitConductionChain::advance_observed_to` and the corresponding graph
+entry point accept original `DepositionObserver` source owners on the same
+native timeline. The existing backward-Euler residual, analytic conduction/
+contact/cooling Jacobian, Newton line search, chain direct solver and graph
+Krylov solver remain authoritative. There is no second thermal integrator.
+Original source-free nonadaptive advancement shares this event/retry path.
+
+Start-state source watts and final-interval source watts enter the original
+residual exactly once, alongside authored boundary heat. The source sees the
+accepted interval START state; its supplied watts remain fixed during Newton.
+Conduction and native boundary cooling are evaluated at the endpoint. This is
+an IMEX discretization for temperature/enthalpy-dependent absorption, not a
+fully endpoint-coupled optical solve. Optical temporal refinement remains
+necessary even when implicit diffusion permits a much larger thermal step.
+
+Native events and source transitions cut intervals exactly. Observer timestep
+restrictions remain active. A nonlinear interval retry re-evaluates the source
+for its actual shorter duration, so a linear ramp retains the correct mean.
+Source `begin` runs once per advance; work used by rejected preparations stays
+charged. Preparation may replace pending sources/caches but must not publish
+physical history. The source's acceptance hook runs only after the original
+thermal endpoint passes its cell and total joule gates. The entire thermal and
+optical candidate remains transactional if a later source check refuses.
+
+This first entry point supports external sources only. Nonempty observer link
+conductances, reservoir conductances or conservative transfers refuse explicitly;
+their physical effects are never silently dropped or duplicated. Authored
+boundaries are restored before native solving and acceptance. Native external
+heat already contains observed absorption, so component optical accounts are
+parallel descriptions of the same energy, not additional thermal credits.
+Generated-source entropy retains its original unclassified status. The existing
+adaptive step-doubling path remains source-free.
+
+G1/G3/G4 checks cover independent stiff chain/graph forced solutions, implicit
+Robin cooling with authored/start/interval sources, nonlinear halving of ramp
+power, cumulative rejected-work limits, exact event/source cuts, split restart,
+source timestep bounds, unsupported-hook refusal and late cancellation/history
+rollback. Cross-crate tests additionally use actual conductor surface pulses,
+state-dependent n/k response and Beer-Lambert volume deposition. Those checks
+retain independent native and optical energy accounts; they do not certify
+spatial, constitutive or nonlinear-optical accuracy from a small energy residual.

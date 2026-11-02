@@ -33,6 +33,11 @@ mod graph;
 use graph::LinearTopology;
 pub use graph::{ImplicitConductionGraph, ImplicitConductionLinearControls};
 
+/// Source-only IMEX coupling with transactional observer histories.
+#[path = "implicit/observed.rs"]
+mod observed;
+pub use observed::ImplicitConductionObservedError;
+
 /// Source-owned state-dependent contact resistance in the same implicit solve.
 #[path = "implicit/contact.rs"]
 pub mod contact;
@@ -508,6 +513,7 @@ impl<'a> ImplicitConductionChain<'a> {
         &self,
         step: &BackwardEulerStep<'_, 'm>,
         energy: &[f64],
+        sources_w: &BTreeMap<CellId, f64>,
         entropy: bool,
         controls: ImplicitConductionControls,
         report: &mut ImplicitConductionReport,
@@ -525,7 +531,7 @@ impl<'a> ImplicitConductionChain<'a> {
             let reservoirs = endpoint.reservoir_values.clone();
             Ok::<_, ImplicitConductionError>((
                 StepCoefficients {
-                    sources_w: BTreeMap::new(),
+                    sources_w: sources_w.clone(),
                     conductances_w_k: endpoint.link_values.clone(),
                     payload: endpoint,
                 },
@@ -646,11 +652,34 @@ impl<'a> ImplicitConductionChain<'a> {
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError>
     {
+        self.solve_step_with_sources(
+            thermal,
+            target_s,
+            &BTreeMap::new(),
+            controls,
+            workspace,
+            report,
+            checkpoint,
+        )
+    }
+
+    fn solve_step_with_sources<'m>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        sources_w: &BTreeMap<CellId, f64>,
+        controls: ImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        report: &mut ImplicitConductionReport,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError>
+    {
         let step = BackwardEulerStep::new(thermal, target_s, &mut *checkpoint)?;
         workspace.energy.fill(0.0);
         let mut trial = self.evaluate(
             &step,
             &workspace.energy,
+            sources_w,
             false,
             controls,
             report,
@@ -662,8 +691,15 @@ impl<'a> ImplicitConductionChain<'a> {
             if maximum <= controls.cell_tolerance_j
                 && trial.audit().residual_j.abs() <= controls.total_tolerance_j
             {
-                let final_trial =
-                    self.evaluate(&step, &workspace.energy, true, controls, report, checkpoint)?;
+                let final_trial = self.evaluate(
+                    &step,
+                    &workspace.energy,
+                    sources_w,
+                    true,
+                    controls,
+                    report,
+                    checkpoint,
+                )?;
                 let maximum = final_trial.maximum_cell_residual_j();
                 let entropy =
                     *final_trial
@@ -746,6 +782,7 @@ impl<'a> ImplicitConductionChain<'a> {
                     match self.evaluate(
                         &step,
                         &workspace.proposal,
+                        sources_w,
                         false,
                         controls,
                         report,
@@ -790,111 +827,14 @@ impl<'a> ImplicitConductionChain<'a> {
         target_s: f64,
         controls: ImplicitConductionControls,
         workspace: &mut ImplicitConductionWorkspace,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(DepositionSimulation<'m>, ImplicitConductionReport), ImplicitConductionError> {
-        checkpoint()?;
-        validate_advance(
-            thermal.time_s,
-            target_s,
-            self.ids.len(),
-            controls,
-            workspace.cells(),
-        )?;
-        self.admit(thermal, &mut checkpoint)?;
-        let mut next = thermal.clone();
-        let mut observer = self.conduction.clone();
-        let mut report = empty_report();
-        let mut supplied = Sum::default();
-        loop {
-            checkpoint()?;
-            // The original owner applies due events in exact authored order.
-            let (with_events, observed, events) = next.advance_observed(
-                &observer,
-                next.time_s,
-                StepConfig {
-                    max_dt_s: controls.maximum_dt_s,
-                    energy_tolerance_j: controls.total_tolerance_j,
-                },
-                &mut checkpoint,
-            )?;
-            next = with_events;
-            observer = observed;
-            report.energy.events += events.events;
-            self.admit(&next, &mut checkpoint)?;
-            if next.time_s == target_s {
-                break;
-            }
-            if report.energy.substeps >= controls.maximum_steps.min(next.budget.max_substeps) {
-                return Err(DepositionError::Budget("implicit thermal intervals").into());
-            }
-            let stop = next
-                .schedule
-                .get(next.cursor)
-                .map_or(target_s, |e| e.time_s.min(target_s));
-            let mut dt = controls.maximum_dt_s.min(stop - next.time_s);
-            let mut halvings = 0;
-            loop {
-                checkpoint()?;
-                let end = if dt == stop - next.time_s {
-                    stop
-                } else {
-                    next.time_s + dt
-                };
-                if !end.is_finite() || end <= next.time_s {
-                    return Err(DepositionError::Arithmetic.into());
-                }
-                match self.solve_step(
-                    &next,
-                    end,
-                    controls,
-                    workspace,
-                    &mut report,
-                    &mut checkpoint,
-                ) {
-                    Ok((accepted, energy, entropy, maximum)) => {
-                        supplied.add(energy.external_heat_j)?;
-                        accumulate_entropy(&mut report.entropy, entropy)?;
-                        report.maximum_cell_residual_j =
-                            report.maximum_cell_residual_j.max(maximum);
-                        report.energy.substeps += 1;
-                        next = accepted;
-                        break;
-                    }
-                    Err(
-                        error @ (ImplicitConductionError::NotConverged { .. }
-                        | ImplicitConductionError::KrylovNotConverged { .. }
-                        | ImplicitConductionError::Linear(TridiagonalError::Singular {
-                            ..
-                        })),
-                    ) => {
-                        report.rejected_intervals += 1;
-                        if halvings >= controls.maximum_halvings || dt * 0.5 < controls.minimum_dt_s
-                        {
-                            return Err(error);
-                        }
-                        halvings += 1;
-                        dt *= 0.5;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        let mut storage = Sum::default();
-        for &id in &self.ids {
-            checkpoint()?;
-            storage.add(
-                thermal.cells[&id].mass_kg
-                    * (next.cells[&id].specific_h_j_kg - thermal.cells[&id].specific_h_j_kg),
-            )?;
-        }
-        report.energy.external_heat_j = supplied.total()?;
-        report.energy.stored_energy_change_j = storage.total()?;
-        report.energy.residual_j =
-            finite(report.energy.stored_energy_change_j - report.energy.external_heat_j)?;
-        if report.energy.residual_j.abs() > controls.total_tolerance_j {
-            return Err(DepositionError::EnergyBalance(report.energy.residual_j).into());
-        }
-        checkpoint()?;
+        let (next, (), report) = self
+            .advance_observed_to(thermal, &(), target_s, controls, workspace, checkpoint)
+            .map_err(|error| match error {
+                ImplicitConductionObservedError::Implicit(error) => error,
+                ImplicitConductionObservedError::Observer(error) => error.into(),
+            })?;
         Ok((next, report))
     }
 }

@@ -33,6 +33,9 @@ mod surface;
 #[path = "optical_heating/surface_feedback.rs"]
 mod surface_feedback;
 
+#[path = "optical_heating/implicit.rs"]
+mod implicit;
+
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::volumes::VolumeGrid;

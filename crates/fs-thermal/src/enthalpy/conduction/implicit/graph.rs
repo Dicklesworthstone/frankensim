@@ -110,6 +110,26 @@ impl<'a> ImplicitConductionGraph<'a> {
             .advance_to(thermal, target_s, controls, workspace, checkpoint)
     }
 
+    /// Source-only IMEX advance through the same graph Newton/Krylov owner.
+    /// Sources are prescribed or lagged at each accepted start; see the chain's
+    /// [`ImplicitConductionChain::advance_observed_to`] for history, retry and
+    /// unsupported-hook semantics. No explicit conduction CFL is imposed.
+    pub fn advance_observed_to<'m, O: DepositionObserver>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        observer: &O,
+        target_s: f64,
+        controls: ImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (DepositionSimulation<'m>, O, ImplicitConductionReport),
+        ImplicitConductionObservedError<O::Error>,
+    > {
+        self.inner
+            .advance_observed_to(thermal, observer, target_s, controls, workspace, checkpoint)
+    }
+
     /// Advance with the original enthalpy/temperature/phase step-doubling owner.
     /// All coarse, fine and rejected trials share one Krylov iteration budget.
     pub fn advance_adaptive_to<'m>(

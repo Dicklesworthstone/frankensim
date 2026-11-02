@@ -247,6 +247,7 @@ fn analytic_nonlinear_tangent_matches_original_residual_and_time_refinement() {
         .evaluate(
             &step,
             &energy,
+            &BTreeMap::new(),
             false,
             controls(1.0),
             &mut report,
@@ -265,14 +266,21 @@ fn analytic_nonlinear_tangent_matches_original_residual_and_time_refinement() {
         plus[column] += 1e-3;
         minus[column] -= 1e-3;
         let a = chain
-            .evaluate(&step, &plus, false, controls(1.0), &mut report, &mut || {
-                Ok(())
-            })
+            .evaluate(
+                &step,
+                &plus,
+                &BTreeMap::new(),
+                false,
+                controls(1.0),
+                &mut report,
+                &mut || Ok(()),
+            )
             .unwrap();
         let b = chain
             .evaluate(
                 &step,
                 &minus,
+                &BTreeMap::new(),
                 false,
                 controls(1.0),
                 &mut report,
@@ -524,4 +532,506 @@ fn long_chain_resolves_heat_without_unrepresentable_far_field_increments() {
         1e-12,
     );
     assert_eq!(thermal.cells()[&CellId(0)].specific_h_j_kg, 400.0);
+}
+
+#[derive(Clone)]
+struct Forcing {
+    time_s: f64,
+    constant_w: f64,
+    interval_w: f64,
+    ramp_w_s: f64,
+    transitions: Vec<f64>,
+    maximum_dt_s: f64,
+    maximum_evaluations: usize,
+    evaluations: usize,
+    begins: usize,
+    events: usize,
+    energy_j: f64,
+    pending: Option<(f64, f64, f64)>,
+    accepted: Vec<(f64, f64, f64)>,
+    unsupported: u8,
+    refuse_at_s: f64,
+}
+impl Default for Forcing {
+    fn default() -> Self {
+        Self {
+            time_s: 0.0,
+            constant_w: 0.0,
+            interval_w: 0.0,
+            ramp_w_s: 0.0,
+            transitions: vec![],
+            maximum_dt_s: f64::MAX,
+            maximum_evaluations: usize::MAX,
+            evaluations: 0,
+            begins: 0,
+            events: 0,
+            energy_j: 0.0,
+            pending: None,
+            accepted: vec![],
+            unsupported: 0,
+            refuse_at_s: f64::INFINITY,
+        }
+    }
+}
+impl DepositionObserver for Forcing {
+    type Error = DepositionError;
+    fn begin(&mut self) -> Result<(), Self::Error> {
+        self.begins += 1;
+        self.evaluations = 0;
+        self.pending = None;
+        Ok(())
+    }
+    fn requires_step_interval(&self) -> bool {
+        true
+    }
+    fn next_transition_time_s(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        Ok(self
+            .transitions
+            .iter()
+            .copied()
+            .find(|&time| time > self.time_s))
+    }
+    fn sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        assert_eq!(thermal.time_s(), self.time_s);
+        self.pending = None;
+        Ok(BTreeMap::from([(CellId(0), self.constant_w)]))
+    }
+    fn conductances(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<u64, f64>, Self::Error> {
+        Ok(if self.unsupported == 1 {
+            BTreeMap::from([(0, 1.0)])
+        } else {
+            BTreeMap::new()
+        })
+    }
+    fn reservoir_conductances(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        Ok(if self.unsupported == 2 {
+            BTreeMap::from([(CellId(0), 1.0)])
+        } else {
+            BTreeMap::new()
+        })
+    }
+    fn heat_transfers(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<HeatTransfer>, Self::Error> {
+        Ok(if self.unsupported == 3 {
+            vec![HeatTransfer {
+                a: CellId(0),
+                b: CellId(1),
+                power_w: 1.0,
+            }]
+        } else {
+            vec![]
+        })
+    }
+    fn limit_timestep_s(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        proposed_s: f64,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Self::Error> {
+        Ok(proposed_s.min(self.maximum_dt_s))
+    }
+    fn step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start: f64,
+        dt: f64,
+        end: f64,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        assert_eq!(thermal.time_s(), self.time_s);
+        assert_eq!(start, self.time_s);
+        assert_eq!(dt, end - start);
+        if self.evaluations >= self.maximum_evaluations {
+            return Err(DepositionError::Budget("forcing evaluations"));
+        }
+        self.evaluations += 1;
+        let mean = self.interval_w + self.ramp_w_s * f64::midpoint(start, end);
+        self.pending = Some((end, dt, mean));
+        Ok(BTreeMap::from([(CellId(0), mean)]))
+    }
+    fn event(&mut self, _: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        assert_eq!(self.time_s, thermal.time_s());
+        self.events += 1;
+        Ok(())
+    }
+    fn step(
+        &mut self,
+        start: f64,
+        dt: f64,
+        old: &BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        let (end, duration, mean) = self.pending.unwrap();
+        assert_eq!(self.time_s, start);
+        assert_eq!(dt, duration);
+        assert_eq!(end, thermal.time_s());
+        assert!(old.contains_key(&CellId(0)));
+        if end >= self.refuse_at_s {
+            return Err(DepositionError::MaterialDomain);
+        }
+        self.energy_j += (self.constant_w + mean) * dt;
+        self.accepted.push((start, end, mean));
+        self.pending = None;
+        self.time_s = end;
+        Ok(())
+    }
+}
+
+#[test]
+fn observed_stiff_sources_use_native_chain_graph_and_robin_endpoints() {
+    let law = Law {
+        nonlinear_k: false,
+        plateau: false,
+    };
+    let (thermal, conduction) = setup(&law, &[400.0, 200.0], None, vec![]);
+    let chain =
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &thermal,
+        &conduction,
+        &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap();
+    let forcing = Forcing {
+        constant_w: 3.0,
+        interval_w: 7.0,
+        ..Forcing::default()
+    };
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (next, source, report) = chain
+        .advance_observed_to(
+            &thermal,
+            &forcing,
+            10.0,
+            controls(10.0),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    // C=G=1, dt=10 exceeds the native explicit monotone limit by 12.5x.
+    let sum = 600.0 + 100.0;
+    let difference = (200.0 + 100.0) / 21.0;
+    near(
+        next.temperature_k(CellId(0)).unwrap(),
+        (sum + difference) * 0.5,
+        1e-10,
+    );
+    near(
+        next.temperature_k(CellId(1)).unwrap(),
+        (sum - difference) * 0.5,
+        1e-10,
+    );
+    near(report.energy.external_heat_j, 100.0, 1e-10);
+    near(source.energy_j, 100.0, 0.0);
+    assert_eq!(report.energy.substeps, 1);
+    assert_eq!(source.evaluations, 1);
+    assert_eq!(source.begins, 1);
+    assert!(report.entropy.has_unclassified_sources);
+    let (graph_next, graph_source, graph_report) = graph
+        .advance_observed_to(
+            &thermal,
+            &forcing,
+            10.0,
+            controls(10.0),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    for id in [CellId(0), CellId(1)] {
+        near(
+            graph_next.temperature_k(id).unwrap(),
+            next.temperature_k(id).unwrap(),
+            1e-10,
+        );
+    }
+    near(graph_source.energy_j, source.energy_j, 0.0);
+    near(graph_report.energy.residual_j, 0.0, 1e-9);
+
+    let mut robin = boundary(None);
+    robin.htc_w_m2_k = 2.0;
+    robin.source_w = 2.0;
+    let (thermal, conduction) = setup(
+        &law,
+        &[400.0],
+        None,
+        vec![TimedEvent {
+            time_s: 0.0,
+            event: Event::Boundary(CellId(0), robin),
+        }],
+    );
+    let chain =
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap();
+    let forcing = Forcing {
+        constant_w: 3.0,
+        interval_w: 5.0,
+        ..Forcing::default()
+    };
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let (next, source, report) = chain
+        .advance_observed_to(
+            &thermal,
+            &forcing,
+            10.0,
+            controls(10.0),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    let expected = (400.0 + 10.0 * (4.0 * 300.0 + 10.0)) / 41.0;
+    near(next.temperature_k(CellId(0)).unwrap(), expected, 1e-10);
+    near(report.energy.external_heat_j, expected - 400.0, 1e-9);
+    near(source.energy_j, 80.0, 0.0);
+    assert_eq!(next.cells()[&CellId(0)].boundary, robin);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(forcing.energy_j, 0.0);
+}
+
+#[test]
+fn observed_ramp_retries_recompute_means_without_resetting_source_work() {
+    let law = FallingConductivity;
+    let (thermal, conduction) = setup(&law, &[400.0], Some(250.0), vec![]);
+    let chain =
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap();
+    let source = Forcing {
+        ramp_w_s: 1.0,
+        maximum_evaluations: 3,
+        ..Forcing::default()
+    };
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let (next, accepted, report) = chain
+        .advance_observed_to(
+            &thermal,
+            &source,
+            4.0,
+            controls(4.0),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    // The dt=4 latent-branch Jacobian is singular; each dt=2 root includes
+    // its own ramp mean. Only the two accepted intervals contribute joules.
+    let root = |h: f64, mean: f64| 475.0 - (75_625.0 - 100.0 * h - 200.0 * mean).sqrt();
+    let expected = root(root(400.0, 1.0), 3.0);
+    near(next.cells()[&CellId(0)].specific_h_j_kg, expected, 1e-10);
+    near(report.energy.external_heat_j, expected - 400.0, 1e-9);
+    assert_eq!(report.rejected_intervals, 1);
+    assert_eq!(accepted.evaluations, 3);
+    assert_eq!(accepted.begins, 1);
+    assert_eq!(accepted.accepted, [(0.0, 2.0, 1.0), (2.0, 4.0, 3.0)]);
+    assert_eq!(accepted.energy_j, 8.0);
+    let limited = Forcing {
+        maximum_evaluations: 2,
+        ..source.clone()
+    };
+    assert!(matches!(
+        chain.advance_observed_to(
+            &thermal,
+            &limited,
+            4.0,
+            controls(4.0),
+            &mut workspace,
+            || Ok(())
+        ),
+        Err(ImplicitConductionObservedError::Observer(
+            DepositionError::Budget("forcing evaluations")
+        ))
+    ));
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.cells()[&CellId(0)].specific_h_j_kg, 400.0);
+    assert_eq!(limited.energy_j, 0.0);
+    assert_eq!(limited.evaluations, 0);
+    assert_eq!(limited.begins, 0);
+}
+
+#[test]
+fn observed_transition_events_source_limit_and_restart_keep_exact_history() {
+    let law = Law {
+        nonlinear_k: false,
+        plateau: false,
+    };
+    let mut changed = boundary(None);
+    changed.source_w = 2.0;
+    let (thermal, conduction) = setup(
+        &law,
+        &[300.0],
+        None,
+        vec![TimedEvent {
+            time_s: 1.0,
+            event: Event::Boundary(CellId(0), changed),
+        }],
+    );
+    let chain =
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap();
+    let source = Forcing {
+        ramp_w_s: 1.0,
+        transitions: vec![1.0, 3.0],
+        maximum_dt_s: 2.0,
+        ..Forcing::default()
+    };
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let (next, accepted, report) = chain
+        .advance_observed_to(
+            &thermal,
+            &source,
+            4.0,
+            controls(10.0),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        accepted.accepted,
+        [(0.0, 1.0, 0.5), (1.0, 3.0, 2.0), (3.0, 4.0, 3.5)]
+    );
+    assert_eq!(accepted.energy_j, 8.0);
+    assert_eq!(accepted.events, 1);
+    assert_eq!(accepted.begins, 1);
+    assert_eq!(report.energy.events, 1);
+    near(next.temperature_k(CellId(0)).unwrap(), 314.0, 1e-10);
+    near(report.energy.external_heat_j, 14.0, 1e-10);
+    let (half, half_source, _) = chain
+        .advance_observed_to(
+            &thermal,
+            &source,
+            1.0,
+            controls(10.0),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    let (restarted, restarted_source, _) = chain
+        .advance_observed_to(
+            &half,
+            &half_source,
+            4.0,
+            controls(10.0),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(restarted.cells(), next.cells());
+    assert_eq!(restarted_source.accepted, accepted.accepted);
+    assert_eq!(restarted_source.energy_j, accepted.energy_j);
+    assert_eq!(restarted_source.events, accepted.events);
+    assert_eq!(restarted_source.begins, 2);
+
+    // A separate no-transition interval proves that the source's own bound is
+    // honored even though the implicit conductive bound has been removed.
+    let limited = Forcing {
+        maximum_dt_s: 0.25,
+        ..Forcing::default()
+    };
+    let (_, limited, report) = chain
+        .advance_observed_to(
+            &thermal,
+            &limited,
+            0.5,
+            controls(10.0),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(report.energy.substeps, 2);
+    assert_eq!(limited.accepted, [(0.0, 0.25, 0.0), (0.25, 0.5, 0.0)]);
+}
+
+#[test]
+fn observed_refusals_preserve_native_state_and_source_history() {
+    let law = Law {
+        nonlinear_k: false,
+        plateau: false,
+    };
+    let (thermal, conduction) = setup(&law, &[300.0, 300.0], None, vec![]);
+    let chain =
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let source = Forcing {
+        constant_w: 1.0,
+        refuse_at_s: 2.0,
+        ..Forcing::default()
+    };
+    assert!(matches!(
+        chain.advance_observed_to(
+            &thermal,
+            &source,
+            2.0,
+            controls(1.0),
+            &mut workspace,
+            || Ok(())
+        ),
+        Err(ImplicitConductionObservedError::Observer(
+            DepositionError::MaterialDomain
+        ))
+    ));
+    for unsupported in 1..=3 {
+        let input = Forcing {
+            unsupported,
+            ..source.clone()
+        };
+        assert!(matches!(
+            chain.advance_observed_to(&thermal, &input, 1.0, controls(1.0), &mut workspace, || Ok(
+                ()
+            )),
+            Err(ImplicitConductionObservedError::Implicit(
+                ImplicitConductionError::Invalid(
+                    "observed implicit conduction accepts source-only observers"
+                )
+            ))
+        ));
+    }
+    let mut calls = 0;
+    assert!(matches!(
+        chain.advance_observed_to(
+            &thermal,
+            &source,
+            1.0,
+            controls(1.0),
+            &mut workspace,
+            || {
+                calls += 1;
+                if calls == 40 {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        ),
+        Err(ImplicitConductionObservedError::Implicit(
+            ImplicitConductionError::Thermal(DepositionError::Cancelled)
+        ))
+    ));
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.temperature_k(CellId(0)).unwrap(), 300.0);
+    assert_eq!(thermal.cells()[&CellId(0)].boundary.source_w, 0.0);
+    assert_eq!(source.time_s, 0.0);
+    assert_eq!(source.energy_j, 0.0);
+    assert_eq!(source.evaluations, 0);
+    assert_eq!(source.begins, 0);
 }

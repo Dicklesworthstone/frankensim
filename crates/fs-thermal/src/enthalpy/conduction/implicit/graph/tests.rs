@@ -285,9 +285,15 @@ fn branched_latent_transport_and_cyclic_nonlinear_jacobian_keep_original_caloric
     let energy = [1.0, 2.0, -1.0, 3.0, 0.0];
     let trial = graph
         .inner
-        .evaluate(&step, &energy, false, controls(1.0), &mut work, &mut || {
-            Ok(())
-        })
+        .evaluate(
+            &step,
+            &energy,
+            &BTreeMap::new(),
+            false,
+            controls(1.0),
+            &mut work,
+            &mut || Ok(()),
+        )
         .unwrap();
     graph
         .inner
@@ -332,6 +338,7 @@ fn branched_latent_transport_and_cyclic_nonlinear_jacobian_keep_original_caloric
             .evaluate(
                 &step,
                 &plus,
+                &BTreeMap::new(),
                 false,
                 controls(1.0),
                 &mut work,
@@ -340,9 +347,15 @@ fn branched_latent_transport_and_cyclic_nonlinear_jacobian_keep_original_caloric
             .unwrap();
         let minus = graph
             .inner
-            .evaluate(&step, &minus, false, controls(1.0), &mut work, &mut || {
-                Ok(())
-            })
+            .evaluate(
+                &step,
+                &minus,
+                &BTreeMap::new(),
+                false,
+                controls(1.0),
+                &mut work,
+                &mut || Ok(()),
+            )
             .unwrap();
         for row in 0..5 {
             let mut analytic = if row == column {
