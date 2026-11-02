@@ -8,8 +8,9 @@
 //!
 //! The entire incident grid must lie strictly inside the incident light cone.
 //! Evanescent transmission and tunnelling remain supported by the original
-//! films. An exactly grazing exit refuses because tangential E alone does not
-//! parameterize that mode. No spectral bins are discarded or windowed. Padding,
+//! films. Transmitted tangential E and H retain the finite field at an exactly
+//! critical exit without dividing by its zero normal wavenumber. No spectral
+//! bins are discarded or windowed. Padding,
 //! spatial bandwidth and periodic-image convergence are caller-owned physical
 //! resolution choices, not a certificate for an isolated hard-edged aperture.
 //!
@@ -21,7 +22,9 @@ use super::{Polarization, ReflectionError, layers::PlanarDielectricLayers};
 use fs_fft::{C64 as FftComplex, Fft};
 use fs_material::field_storage::{linear_electric_permittivity, linear_magnetic_permeability};
 use fs_math::{c64::C64, det};
-use modes::{basis, cartesian, fields, finite, normal_flux, polarized, propagation};
+use modes::{
+    basis, cartesian, fields, fields_from_tangential, finite, normal_flux, polarized, propagation,
+};
 
 mod modes;
 
@@ -64,7 +67,6 @@ pub enum AngularSpectrumError {
     Source(ReflectionError),
     Invalid(&'static str),
     IncidentLightCone { column: usize, row: usize },
-    GrazingExit { column: usize, row: usize },
     Cancelled,
 }
 impl From<ReflectionError> for AngularSpectrumError {
@@ -145,7 +147,8 @@ struct Mode {
     exit_kz: C64,
     incident_e: [C64; 2],
     reflected_e: [C64; 2],
-    transmitted_e: [C64; 2],
+    transmitted_e_te_tm: [C64; 2],
+    transmitted_h_te_tm: [C64; 2],
 }
 
 /// One prepared coherent beam and its original material/film owner. The two
@@ -160,6 +163,7 @@ pub struct PlanarAngularSpectrum<'s, 'm> {
     modes: Vec<Mode>,
     incident_omega_mu: f64,
     exit_omega_mu: f64,
+    exit_omega_epsilon: C64,
     power: AngularSpectrumPower,
     workspace_bytes: usize,
     field_fft_work: u64,
@@ -194,9 +198,12 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         let k = omega * det::sqrt(epsilon) * det::sqrt(mu);
         let incident_omega_mu = omega * mu;
         let exit_omega_mu = omega * exit_mu;
+        let exit_omega_epsilon = source.exit_permittivity_f_m().scale(omega);
         if [k, incident_omega_mu, exit_omega_mu]
             .iter()
             .any(|v| !v.is_finite() || *v <= 0.0)
+            || !finite(exit_omega_epsilon)
+            || exit_omega_epsilon.re <= 0.0
         {
             return Err(bad("wave number or magnetic admittance is unrepresentable"));
         }
@@ -277,9 +284,6 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                 let te = source.response(cosine, Polarization::Te)?;
                 let tm = source.response(cosine, Polarization::Tm)?;
                 let exit_kz = te.exit_normal_wavenumber_rad_m;
-                if exit_kz == C64::ZERO {
-                    return Err(AngularSpectrumError::GrazingExit { column, row });
-                }
                 let incident_e = [complex(ex[index]), complex(ey[index])];
                 let p = basis(kx, ky);
                 let a = polarized(incident_e, p);
@@ -290,24 +294,28 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                     ],
                     p,
                 );
-                let transmitted_e = cartesian(
-                    [
-                        a[0] * te.transmitted_tangential_e,
-                        a[1] * tm.transmitted_tangential_e,
-                    ],
-                    p,
-                );
+                let incident_kz = te.incident_normal_wavenumber_rad_m;
+                let te_admittance = incident_kz / incident_omega_mu;
+                let tm_admittance = omega * epsilon / incident_kz;
+                let transmitted_e_te_tm = [
+                    a[0] * te.transmitted_tangential_e,
+                    a[1] * tm.transmitted_tangential_e,
+                ];
+                let transmitted_h_te_tm = [
+                    (a[0] * te.transmitted_conjugate_h).scale(te_admittance),
+                    (a[1] * tm.transmitted_conjugate_h).scale(tm_admittance),
+                ];
                 if !incident_e
                     .iter()
                     .chain(&reflected_e)
-                    .chain(&transmitted_e)
+                    .chain(&transmitted_e_te_tm)
+                    .chain(&transmitted_h_te_tm)
                     .all(|&z| finite(z))
                 {
                     return Err(bad("transformed beam amplitudes are unrepresentable"));
                 }
-                let incident_kz = te.incident_normal_wavenumber_rad_m;
-                let te_power = (area * 0.5) * a[0].norm_sq() * (incident_kz / incident_omega_mu);
-                let tm_power = (area * 0.5) * a[1].norm_sq() * (omega * epsilon / incident_kz);
+                let te_power = (area * 0.5) * a[0].norm_sq() * te_admittance;
+                let tm_power = (area * 0.5) * a[1].norm_sq() * tm_admittance;
                 power.incident_w += te_power + tm_power;
                 power.reflected_w +=
                     te_power * te.reflected_power_fraction + tm_power * tm.reflected_power_fraction;
@@ -323,7 +331,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                     exit_kz,
                     incident_e,
                     reflected_e,
-                    transmitted_e,
+                    transmitted_e_te_tm,
+                    transmitted_h_te_tm,
                 });
             }
         }
@@ -347,6 +356,7 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             modes,
             incident_omega_mu,
             exit_omega_mu,
+            exit_omega_epsilon,
             power,
             workspace_bytes,
             field_fft_work,
@@ -426,12 +436,19 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                 )?;
             }
             if side == AngularSpectrumSide::Transmitted {
-                add(
-                    mode.exit_kz,
+                let phase = propagation(mode.exit_kz, distance_from_face_m)
+                    .ok_or_else(|| bad("propagation phase is unrepresentable"))?;
+                let (em, hm) = fields_from_tangential(
+                    mode.kx,
+                    mode.ky,
+                    self.exit_omega_epsilon,
                     self.exit_omega_mu,
-                    mode.transmitted_e,
-                    distance_from_face_m,
-                )?;
+                    mode.transmitted_e_te_tm,
+                    mode.transmitted_h_te_tm,
+                )
+                .ok_or_else(|| bad("longitudinal or magnetic field is unrepresentable"))?;
+                e = em.map(|value| value * phase);
+                h = hm.map(|value| value * phase);
             }
             electric.push(e);
             magnetic.push(h);

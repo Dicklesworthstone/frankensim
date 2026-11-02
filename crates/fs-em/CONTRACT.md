@@ -2031,9 +2031,14 @@ propagation, enforces k.E=0, and obtains H=(k cross E)/(omega mu). It returns
 all six complex field components and physical cycle-mean Poynting flux.
 Incident, reflected, their coherent sum, and transmitted fields have explicit
 face/distance conventions. Film-induced evanescent fields decay without a
-growing transfer matrix. An exactly grazing exit is refused because the
-supplied tangential-electric parameterization becomes singular there; the
-underlying film solver retains its internal critical-angle limits.
+growing transfer matrix. The original film recursion retains transmitted
+power-conjugate H alongside E, relative to the original incident admittance.
+Transmitted fields use these two tangential traces without dividing by kz.
+At exact critical refraction, the finite longitudinal TM electric field and
+TE magnetic field remain present even though normal transmitted power is zero.
+No perturbation of the incidence angle or artificial transmitted-power floor
+is introduced. The modal storage budget includes the additional two complex
+magnetic traces; further-plane reconstruction still requires no film solve.
 
 Modewise power integrates over the original cell: reflected outward power,
 exit-face transmitted power and physical film absorption are separate. Loss
@@ -2049,7 +2054,9 @@ description, not a measured throughput claim.
 Native leaf tests exercise both Maxwell curls/divergences, polarization and
 signed power, and evanescent decay. Source-backed integration regressions cover
 original-film reduction, an independent direct Fourier diffraction series,
-TIR, Debye film/exit loss, budgets and cancellation. Their Cargo execution
+TIR, exact critical TE/TM fields and finite tangential flux, independent
+critical-load film matrices, both one-sided critical limits, Debye film/exit
+loss, budgets and cancellation. Their Cargo execution
 requires the workspace constellation dependencies. This feature does not add
 transients, incident near-field excitation, rough/finite film edges, arbitrary
 three-dimensional scattering, or empirical material-frequency qualification.

@@ -223,6 +223,170 @@ fn transmitted_evanescent_beam_decays_and_carries_no_spurious_normal_power() {
 }
 
 #[test]
+fn critical_refraction_preserves_longitudinal_tm_and_finite_te_fields_through_films() {
+    // G1: the negative Nyquist mode has sin(theta)=0.6. Derive the source's
+    // critical contrast from the exact admitted cosine so this exercises kz=0,
+    // not an accidentally near-critical floating-point mode.
+    let grid = AngularSpectrumGrid {
+        width: 4,
+        height: 1,
+        spacing_m: [core::f64::consts::PI / 0.6, 1.0],
+    };
+    let sine = core::f64::consts::PI / grid.spacing_m[0];
+    let cosine = det::sqrt((1.0 - sine) * (1.0 + sine));
+    let epsilon_exit = (1.0 - cosine) * (1.0 + cosine);
+    let incident = material(1.0, 1.0);
+    let exit = material(epsilon_exit, 1.0);
+    let film = material(1.7, 1.0);
+    let amplitude = [C64::new(0.7, 0.2), C64::new(-0.3, 0.5)];
+    let input: Vec<_> = (0..4)
+        .map(|i| amplitude.map(|a| a.scale(if i % 2 == 0 { 1.0 } else { -1.0 })))
+        .collect();
+    for thickness in [0.0, 0.43] {
+        let stack = PlanarDielectricLayers::try_new(
+            &incident,
+            DielectricResponse::Lossless(&exit),
+            1.0,
+            &[DielectricLayer {
+                response: DielectricResponse::Lossless(&film),
+                thickness_m: thickness,
+            }],
+        )
+        .unwrap();
+        let te = stack.response(cosine, Polarization::Te).unwrap();
+        let tm = stack.response(cosine, Polarization::Tm).unwrap();
+        assert_eq!(te.exit_normal_wavenumber_rad_m, C64::ZERO);
+        assert_eq!(tm.exit_normal_wavenumber_rad_m, C64::ZERO);
+        assert_eq!(te.transmitted_conjugate_h, C64::ZERO);
+        assert_eq!(tm.transmitted_tangential_e, C64::ZERO);
+        // Independent one-film transfer matrix with the critical load:
+        // TE has H_exit=0; TM has E_exit=0. These retain film phase exactly.
+        let film_kz = (1.7 - sine * sine).sqrt();
+        let phase = film_kz * thickness;
+        let te_gain = C64::from_re(2.0) / C64::new(phase.cos(), phase.sin() * film_kz / cosine);
+        let tm_h_gain =
+            C64::from_re(2.0) / C64::new(phase.cos(), phase.sin() * film_kz / (1.7 * cosine));
+        complex_near(te.transmitted_tangential_e, te_gain, 3e-14);
+        complex_near(tm.transmitted_conjugate_h, tm_h_gain, 3e-14);
+        let beam =
+            PlanarAngularSpectrum::prepare(&stack, grid, &input, limits(), || false).unwrap();
+        relative(beam.power().reflected_w, beam.power().incident_w);
+        assert_eq!(beam.power().transmitted_w, 0.0);
+        let face = beam.field(Side::Transmitted, 0.0, || false).unwrap();
+        for distance in [0.0, 2.0, 1e6] {
+            let field = beam.field(Side::Transmitted, distance, || false).unwrap();
+            assert!(field.normal_power_w().abs() < 1e-13);
+            for (i, &sample) in input.iter().enumerate() {
+                let e = field.electric_v_per_m()[i];
+                let h = field.magnetic_a_per_m()[i];
+                complex_near(e[0], C64::ZERO, 1e-14);
+                complex_near(e[1], sample[1] * te_gain, 2e-13);
+                complex_near(
+                    e[2],
+                    (sample[0] * tm_h_gain).scale(sine / (cosine * epsilon_exit)),
+                    2e-13,
+                );
+                complex_near(h[0], C64::ZERO, 1e-14);
+                complex_near(h[1], (sample[0] * tm_h_gain).scale(1.0 / cosine), 2e-13);
+                complex_near(h[2], (sample[1] * te_gain).scale(-sine), 2e-13);
+                // Normal flux is zero, but the critical wave still transports
+                // finite energy parallel to the interface along negative x.
+                let tangential_flux = 0.5 * (e[1] * h[2].conj() - e[2] * h[1].conj()).re;
+                assert!(tangential_flux < -0.1);
+                assert_eq!(e, face.electric_v_per_m()[i]);
+                assert_eq!(h, face.magnetic_a_per_m()[i]);
+            }
+        }
+        if thickness == 0.0 {
+            let entrance = beam.field(Side::TotalIncidentSide, 0.0, || false).unwrap();
+            for i in 0..4 {
+                for c in 0..2 {
+                    complex_near(
+                        entrance.electric_v_per_m()[i][c],
+                        face.electric_v_per_m()[i][c],
+                        2e-13,
+                    );
+                    complex_near(
+                        entrance.magnetic_a_per_m()[i][c],
+                        face.magnetic_a_per_m()[i][c],
+                        2e-13,
+                    );
+                }
+                complex_near(
+                    entrance.electric_v_per_m()[i][2],
+                    face.electric_v_per_m()[i][2].scale(epsilon_exit),
+                    2e-13,
+                );
+                complex_near(
+                    entrance.magnetic_a_per_m()[i][2],
+                    face.magnetic_a_per_m()[i][2],
+                    2e-13,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn propagating_and_evanescent_transmitted_fields_converge_to_the_critical_wave() {
+    // G3: both physical one-sided limits approach the same finite vector field.
+    let grid = AngularSpectrumGrid {
+        width: 2,
+        height: 1,
+        spacing_m: [core::f64::consts::PI / 0.6, 1.0],
+    };
+    let sine = core::f64::consts::PI / grid.spacing_m[0];
+    let cosine = det::sqrt((1.0 - sine) * (1.0 + sine));
+    let critical = (1.0 - cosine) * (1.0 + cosine);
+    let incident = material(1.0, 1.0);
+    let input = [
+        [C64::ONE, C64::new(0.3, 0.2)],
+        [C64::from_re(-1.0), C64::new(-0.3, -0.2)],
+    ];
+    let field = |contrast: f64| {
+        let exit = material(contrast, 1.0);
+        let stack = PlanarDielectricLayers::try_new(
+            &incident,
+            DielectricResponse::Lossless(&exit),
+            1.0,
+            &[],
+        )
+        .unwrap();
+        PlanarAngularSpectrum::prepare(&stack, grid, &input, limits(), || false)
+            .unwrap()
+            .field(Side::Transmitted, 0.7, || false)
+            .unwrap()
+    };
+    let reference = field(critical);
+    for side in [-1.0, 1.0] {
+        let mut previous = f64::INFINITY;
+        for delta in [1e-6, 1e-8, 1e-10, 1e-12] {
+            let nearby = field(critical + side * delta);
+            let error = nearby
+                .electric_v_per_m()
+                .iter()
+                .flatten()
+                .chain(nearby.magnetic_a_per_m().iter().flatten())
+                .zip(
+                    reference
+                        .electric_v_per_m()
+                        .iter()
+                        .flatten()
+                        .chain(reference.magnetic_a_per_m().iter().flatten()),
+                )
+                .map(|(&actual, &expected)| (actual - expected).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                error < previous * 0.2,
+                "critical-limit error {error}, previous {previous}"
+            );
+            previous = error;
+        }
+        assert!(previous < 1e-4);
+    }
+}
+
+#[test]
 fn original_debye_films_and_exit_keep_absorption_separate_from_propagation_loss() {
     let incident = material(E, M);
     let state = source(

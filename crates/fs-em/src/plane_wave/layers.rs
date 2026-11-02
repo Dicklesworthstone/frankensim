@@ -74,6 +74,11 @@ pub struct LayeredReflection {
     pub reflected_tangential_e: C64,
     /// Referenced to the last film's exit face, including coherent film phase.
     pub transmitted_tangential_e: C64,
+    /// Exit power-conjugate H divided by incident H: `H_exit/(Y_inc*E_inc)`.
+    /// The local positive-flux axis is -H_x for TE and H_y for TM. Retaining
+    /// this independently of E preserves the finite TM field at critical
+    /// refraction, where E_t and the outgoing normal wavenumber both vanish.
+    pub transmitted_conjugate_h: C64,
     pub reflected_power_fraction: f64,
     /// Flux entering the exit half-space, before any subsequent attenuation.
     pub transmitted_power_fraction: f64,
@@ -138,6 +143,9 @@ impl<'a> PlanarDielectricLayers<'a> {
     pub fn exit_material(&self) -> &'a ResolvedMaterialStatePoint {
         self.exit.material()
     }
+    pub const fn exit_permittivity_f_m(&self) -> C64 {
+        self.exit_wave.epsilon_f_m
+    }
     pub const fn angular_frequency_rad_s(&self) -> f64 {
         self.omega
     }
@@ -181,6 +189,7 @@ impl<'a> PlanarDielectricLayers<'a> {
         // the original admittance pair, including an exactly critical exit.
         states[n] = admittance_state(self.exit_wave, c, polarization)?;
         let mut transmitted = exit.transmitted_tangential_e;
+        let mut transmitted_h = states[n][1].scale(2.0) / (states[n][0] + states[n][1]);
         let mut transmitted_power = exit.transmitted_power_fraction;
         for i in (0..n).rev() {
             let slab = slabs[i];
@@ -194,14 +203,20 @@ impl<'a> PlanarDielectricLayers<'a> {
                 // limit. Its original admittance pair is retained directly.
                 states[i] = [slab.matrix[0][0], slab.matrix[1][0]];
                 transmitted = C64::ZERO;
+                transmitted_h = C64::ZERO;
                 transmitted_power = 0.0;
             } else {
                 let (state, gain) = propagate_state(slab, states[i + 1])?;
                 states[i] = state;
                 gains[i] = gain;
                 transmitted = gain * transmitted;
+                transmitted_h = gain * transmitted_h;
                 transmitted_power = gain.scale(det::sqrt(transmitted_power)).norm_sq();
-                if !finite(gain) || !finite(transmitted) || !transmitted_power.is_finite() {
+                if !finite(gain)
+                    || !finite(transmitted)
+                    || !finite(transmitted_h)
+                    || !transmitted_power.is_finite()
+                {
                     return Err(bad("composed film scattering is unrepresentable"));
                 }
             }
@@ -233,6 +248,7 @@ impl<'a> PlanarDielectricLayers<'a> {
         Ok(LayeredReflection {
             reflected_tangential_e: reflected,
             transmitted_tangential_e: transmitted,
+            transmitted_conjugate_h: transmitted_h,
             reflected_power_fraction: reflected_power,
             transmitted_power_fraction: transmitted_power,
             absorbed_power_fraction: absorbed,
