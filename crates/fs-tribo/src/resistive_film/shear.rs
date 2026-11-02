@@ -22,6 +22,10 @@
 //! coefficients explicitly refuse: the constant-viscosity wall drag is not
 //! silently reused under a pressure-dependent law.
 
+mod layer_work;
+use layer_work::LayerWork;
+pub use layer_work::MAX_LAYER_REPORTS;
+
 use super::stratified::{GapViscosityProfile, StratifiedFilm};
 use super::{
     FilmError, FilmReport, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm, Solution, dot, fail,
@@ -61,7 +65,8 @@ impl ShearChannelReport {
     ///
     /// In a stratified passage the pressure/Couette shear-stress cross terms
     /// cancel over the complete gap, but generally not within each layer.
-    /// Pressure-only layer fractions must not be applied to this combined heat.
+    /// Pressure-only layer fractions must not be applied to this combined heat;
+    /// use [ShearedFilm::evaluate_with_layers_into] for its local distribution.
     #[must_use]
     pub fn dissipated_power_w(&self) -> f64 {
         self.pressure_dissipated_power_w + self.shear_dissipated_power_w
@@ -94,6 +99,7 @@ pub struct ShearedFilm {
     profiles: Option<Vec<GapViscosityProfile>>,
     walls: Vec<WallVelocityPorts>,
     coefficients: Vec<Coefficients>,
+    layer_work: LayerWork,
 }
 
 impl ShearedFilm {
@@ -137,6 +143,7 @@ impl ShearedFilm {
         {
             return fail("sliding film needs finite wall rows for every original channel and port");
         }
+        let layer_work = LayerWork::compile(film.channel_count(), profiles.as_deref())?;
         let mut coefficients = Vec::with_capacity(walls.len());
         for (i, (edge, wall)) in film.channels.iter().zip(&walls).enumerate() {
             let (lower_fraction, upper_fraction, shear_viscosity) = match &profiles {
@@ -191,6 +198,7 @@ impl ShearedFilm {
             profiles,
             walls,
             coefficients,
+            layer_work,
         })
     }
 
@@ -204,6 +212,21 @@ impl ShearedFilm {
     #[must_use]
     pub fn stratified_profiles(&self) -> Option<&[GapViscosityProfile]> {
         self.profiles.as_deref()
+    }
+
+    /// Number of layer powers returned by [Self::evaluate_with_layers_into].
+    ///
+    /// A uniform channel has one implicit layer. Explicit profiles retain every
+    /// authored layer in lower-to-upper order; shut channels retain their slots.
+    #[must_use]
+    pub fn layer_count(&self) -> usize {
+        self.layer_work.len()
+    }
+
+    /// Flat output range for one original channel, or None outside the graph.
+    #[must_use]
+    pub fn channel_layer_range(&self, channel: usize) -> Option<core::ops::Range<usize>> {
+        self.layer_work.range(channel)
     }
 
     /// Retained native geometry and pressure coefficients.
@@ -228,7 +251,7 @@ impl ShearedFilm {
         force: &mut [f64],
         pressure: &mut [f64],
     ) -> Result<FilmReport, FilmError> {
-        self.evaluate::<false>(q, velocity, force, pressure, &mut [])
+        self.evaluate::<false, false>(q, velocity, force, pressure, &mut [], &mut [])
     }
 
     /// Return total oriented flow and physical channel work in the SAME solve.
@@ -241,20 +264,44 @@ impl ShearedFilm {
         pressure: &mut [f64],
         channels: &mut [ShearChannelReport],
     ) -> Result<FilmReport, FilmError> {
-        self.evaluate::<true>(q, velocity, force, pressure, channels)
+        self.evaluate::<true, false>(q, velocity, force, pressure, channels, &mut [])
     }
 
-    fn evaluate<const REPORT_CHANNELS: bool>(
+    /// Return physical work in every retained layer from the SAME native solve.
+    ///
+    /// Layer power [W] integrates the complete pressure/Couette shear-stress
+    /// square, including layerwise cross terms. It is nonnegative and closes
+    /// against the original per-channel dissipation to floating-point roundoff.
+    /// No normalization, inferred wall heat split, mass or thermal clock is
+    /// introduced. Use [Self::channel_layer_range] for channel-local destinations.
+    ///
+    /// All force, pressure, channel and layer outputs remain unchanged on any
+    /// refusal, including an unrepresentably small positive layer contribution.
+    pub fn evaluate_with_layers_into(
         &self,
         q: &[f64],
         velocity: &[f64],
         force: &mut [f64],
         pressure: &mut [f64],
         channels: &mut [ShearChannelReport],
+        layer_power_w: &mut [f64],
+    ) -> Result<FilmReport, FilmError> {
+        self.evaluate::<true, true>(q, velocity, force, pressure, channels, layer_power_w)
+    }
+
+    fn evaluate<const REPORT_CHANNELS: bool, const REPORT_LAYERS: bool>(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        force: &mut [f64],
+        pressure: &mut [f64],
+        channels: &mut [ShearChannelReport],
+        layer_power_w: &mut [f64],
     ) -> Result<FilmReport, FilmError> {
         if force.len() != self.film.ports
             || pressure.len() != self.film.cell_count()
             || (REPORT_CHANNELS && channels.len() != self.film.channel_count())
+            || (REPORT_LAYERS && layer_power_w.len() != self.layer_count())
         {
             return fail("invalid sliding film output shape");
         }
@@ -262,6 +309,7 @@ impl ShearedFilm {
         let mut candidate = [0.0; MAX_PORTS];
         let mut channel_candidate = [ShearChannelReport::default(); MAX_CHANNELS];
         self.film.project(&state.pressure.pressure, &mut candidate);
+        let mut pressure_drops = [0.0; MAX_CHANNELS];
         let mut power = 0.0;
         for (k, edge) in self.film.channels.iter().enumerate() {
             let local = state.channels[k];
@@ -289,7 +337,10 @@ impl ShearedFilm {
                 return fail("nonfinite or negative sliding film channel work");
             }
             power += pressure_loss + shear_loss;
-            if REPORT_CHANNELS {
+            if REPORT_LAYERS {
+                pressure_drops[k] = dp;
+            }
+            if REPORT_CHANNELS || REPORT_LAYERS {
                 channel_candidate[k] = ShearChannelReport {
                     volume_flow_m3_s: flow,
                     entrained_flow_m3_s: local.entrainment,
@@ -306,6 +357,14 @@ impl ShearedFilm {
             || (work - power).abs() > 1e-9 * (work.abs() + power.abs()).max(1e-30)
         {
             return fail("sliding film failed reciprocal pressure and wall work balance");
+        }
+        if REPORT_LAYERS {
+            self.layer_work.evaluate_into(
+                &state,
+                &channel_candidate[..self.film.channel_count()],
+                &pressure_drops[..self.film.channel_count()],
+                layer_power_w,
+            )?;
         }
         force.copy_from_slice(&candidate[..self.film.ports]);
         pressure.copy_from_slice(&state.pressure.pressure[..self.film.cell_count()]);

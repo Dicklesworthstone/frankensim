@@ -1,5 +1,30 @@
 # CONTRACT: fs-tribo
 
+## Combined pressure and sliding work within individual layers
+
+`ShearedFilm::evaluate_with_layers_into` reports each original channel's
+complete lower-to-upper layer work, with one implicit layer for uniform
+channels. It integrates the complete affine shear stress squared over local
+viscosity. Normalized centered pressure/Couette amplitudes retain signed
+cross terms and a positive within-layer variance; individual layers cannot
+be assigned pressure-only fractions of total sliding heat.
+
+Pressure-only and shear-only limits use their respective physical fractions.
+A single full-gap layer exactly recovers the native channel work.
+`layer_count`, `channel_layer_range` and `MAX_LAYER_REPORTS` expose the
+bounded flattened layout without changing original channel or layer order.
+All representability and per-channel work-closure checks finish before any
+output publication. A second pure local arithmetic pass publishes identical
+validated inputs, avoiding another pressure solve, heap allocation or a
+maximum-sized internal layer buffer. Existing force/tangent entries retain
+their no-layer evaluation path.
+
+Five focused G1/G3 regressions cover independent stress quadrature, the
+analytic 13/14 versus 1/14 work split under sliding reversal, exact native
+limits, layer subdivision/velocity scaling and late output rollback. The
+profiles remain prescribed within a solve; finite thermal stores, interfaces
+and any source feedback retain their separate physical owners.
+
 ## Sliding-wall and layered Reynolds work
 
 `resistive_film::shear::ShearedFilm` binds explicit lower/upper tangential

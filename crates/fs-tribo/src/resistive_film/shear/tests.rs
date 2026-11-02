@@ -574,3 +574,382 @@ fn common_translation_does_not_erase_a_sub_ulp_sliding_coordinate_or_its_tangent
         }
     }
 }
+
+#[test]
+fn combined_layer_work_matches_independent_stress_quadrature() {
+    // G2: integrate the actual affine shear stress at two Gauss points in each
+    // layer. This oracle does not use normalized work fractions or moments.
+    let profile = GapViscosityProfile::new(vec![
+        ViscosityLayer {
+            upper_fraction: 0.17,
+            dynamic_viscosity_pa_s: 0.009,
+        },
+        ViscosityLayer {
+            upper_fraction: 0.63,
+            dynamic_viscosity_pa_s: 0.08,
+        },
+        ViscosityLayer {
+            upper_fraction: 1.0,
+            dynamic_viscosity_pa_s: 0.003,
+        },
+    ])
+    .unwrap();
+    let moving = ShearedFilm::from_stratified(
+        StratifiedFilm::new(&film(&[H]), vec![profile.clone()]).unwrap(),
+        vec![walls(1.0)],
+    )
+    .unwrap();
+    assert_eq!(moving.layer_count(), 3);
+    assert_eq!(moving.channel_layer_range(0), Some(0..3));
+    assert_eq!(moving.channel_layer_range(1), None);
+    let velocity = [0.0001, 0.001, 0.004];
+    let mut force = [0.0; 3];
+    let mut pressure = [0.0];
+    let mut channels = [ShearChannelReport::default()];
+    let mut actual = [0.0; 3];
+    let report = moving
+        .evaluate_with_layers_into(
+            &[0.0; 3],
+            &velocity,
+            &mut force,
+            &mut pressure,
+            &mut channels,
+            &mut actual,
+        )
+        .unwrap();
+    let mut fluidity = 0.0;
+    let mut first = 0.0;
+    let mut lower = 0.0;
+    for layer in profile.layers() {
+        let upper = layer.upper_fraction;
+        fluidity += (upper - lower) / layer.dynamic_viscosity_pa_s;
+        first += 0.5 * (upper * upper - lower * lower) / layer.dynamic_viscosity_pa_s;
+        lower = upper;
+    }
+    let neutral = first / fluidity;
+    let couette_stress = (velocity[2] - velocity[1]) / (H * fluidity);
+    let pressure_stress = pressure[0] * H / L;
+    lower = 0.0;
+    for (&power, layer) in actual.iter().zip(profile.layers()) {
+        let thickness = layer.upper_fraction - lower;
+        let midpoint = 0.5 * (lower + layer.upper_fraction);
+        let offset = thickness / (2.0 * 3.0_f64.sqrt());
+        let stress = |z: f64| couette_stress - pressure_stress * (z - neutral);
+        let expected = W * L * H * thickness / (2.0 * layer.dynamic_viscosity_pa_s)
+            * (stress(midpoint - offset).powi(2) + stress(midpoint + offset).powi(2));
+        assert!(power > 0.0);
+        near(power, expected, 2e-12 * report.dissipated_power_w);
+        lower = layer.upper_fraction;
+    }
+    near(
+        actual.iter().sum(),
+        channels[0].dissipated_power_w(),
+        2e-12 * report.dissipated_power_w,
+    );
+    near(
+        dot(&force, &velocity),
+        actual.iter().sum(),
+        2e-12 * report.dissipated_power_w,
+    );
+}
+
+#[test]
+fn relative_reversal_exposes_layer_cross_terms_that_whole_gap_work_cancels() {
+    // G2: equal half layers and tau_C = ±delta_p*h/(4L) give work fractions
+    // (13/14, 1/14), exchanged by relative reversal at the SAME pressure drop.
+    // Both pressure and Couette whole-gap powers stay unchanged.
+    let profile = GapViscosityProfile::new(vec![
+        ViscosityLayer {
+            upper_fraction: 0.5,
+            dynamic_viscosity_pa_s: MU,
+        },
+        ViscosityLayer {
+            upper_fraction: 1.0,
+            dynamic_viscosity_pa_s: MU,
+        },
+    ])
+    .unwrap();
+    let moving = ShearedFilm::from_stratified(
+        StratifiedFilm::new(&film(&[H]), vec![profile]).unwrap(),
+        vec![walls(1.0)],
+    )
+    .unwrap();
+    let prescribed_pressure = 1000.0;
+    let relative = prescribed_pressure * H * H / (4.0 * MU * L);
+    let conductance = W * H.powi(3) / (12.0 * MU * L);
+    let mut result = [[0.0; 2]; 2];
+    let mut work = [ShearChannelReport::default(); 2];
+    for (case, sign) in [1.0, -1.0].into_iter().enumerate() {
+        let upper = sign * relative;
+        let swept = (conductance * prescribed_pressure + 0.5 * W * H * upper) / AREA;
+        let mut force = [0.0; 3];
+        let mut pressure = [0.0];
+        let mut channels = [ShearChannelReport::default()];
+        moving
+            .evaluate_with_layers_into(
+                &[0.0; 3],
+                &[swept, 0.0, upper],
+                &mut force,
+                &mut pressure,
+                &mut channels,
+                &mut result[case],
+            )
+            .unwrap();
+        work[case] = channels[0];
+        near(pressure[0], prescribed_pressure, 1e-10);
+        let total = channels[0].dissipated_power_w();
+        let expected = if sign > 0.0 {
+            [13.0 / 14.0, 1.0 / 14.0]
+        } else {
+            [1.0 / 14.0, 13.0 / 14.0]
+        };
+        for (actual, fraction) in result[case].iter().zip(expected) {
+            near(*actual, total * fraction, total * 2e-12);
+        }
+        assert!((result[case][0] - 0.5 * total).abs() > 0.4 * total);
+    }
+    near(result[0][0], result[1][1], 1e-15);
+    near(result[0][1], result[1][0], 1e-15);
+    near(
+        work[0].pressure_dissipated_power_w,
+        work[1].pressure_dissipated_power_w,
+        1e-15,
+    );
+    near(
+        work[0].shear_dissipated_power_w,
+        work[1].shear_dissipated_power_w,
+        1e-15,
+    );
+}
+
+#[test]
+fn layer_reporting_recovers_native_uniform_pressure_only_and_closed_limits() {
+    // G3: implicit uniform channels are exactly the native channel account.
+    let moving = ShearedFilm::new(film(&[H, 0.0]), vec![walls(1.0), walls(0.0)]).unwrap();
+    assert_eq!(moving.layer_count(), 2);
+    assert_eq!(moving.channel_layer_range(0), Some(0..1));
+    assert_eq!(moving.channel_layer_range(1), Some(1..2));
+    let velocity = [0.0001, 0.001, 0.004];
+    let mut force = [0.0; 3];
+    let mut pressure = [0.0];
+    let mut channels = [ShearChannelReport::default(); 2];
+    let mut layer_power = [0.0; 2];
+    let report = moving
+        .evaluate_with_layers_into(
+            &[0.0; 3],
+            &velocity,
+            &mut force,
+            &mut pressure,
+            &mut channels,
+            &mut layer_power,
+        )
+        .unwrap();
+    for (layer, channel) in layer_power.iter().zip(channels) {
+        assert_eq!(*layer, channel.dissipated_power_w());
+    }
+    assert_eq!(layer_power[1], 0.0);
+    let expected_force = force;
+    let expected_pressure = pressure;
+    let expected_channels = channels;
+    let legacy = moving
+        .evaluate_with_channels_into(
+            &[0.0; 3],
+            &velocity,
+            &mut force,
+            &mut pressure,
+            &mut channels,
+        )
+        .unwrap();
+    assert_eq!(force, expected_force);
+    assert_eq!(pressure, expected_pressure);
+    assert_eq!(channels, expected_channels);
+    assert_eq!(report.minimum_gap_m, legacy.minimum_gap_m);
+    assert_eq!(report.peak_pressure_pa, legacy.peak_pressure_pa);
+    assert_eq!(report.dissipated_power_w, legacy.dissipated_power_w);
+
+    let profile = layers();
+    let fixed = ShearedFilm::from_stratified(
+        StratifiedFilm::new(&film(&[H, 0.0]), vec![profile.clone(); 2]).unwrap(),
+        vec![walls(0.0); 2],
+    )
+    .unwrap();
+    assert_eq!(fixed.layer_count(), 4);
+    assert_eq!(fixed.channel_layer_range(0), Some(0..2));
+    assert_eq!(fixed.channel_layer_range(1), Some(2..4));
+    let mut layer_power = [0.0; 4];
+    fixed
+        .evaluate_with_layers_into(
+            &[0.0; 3],
+            &[0.001, 0.0, 0.0],
+            &mut force,
+            &mut pressure,
+            &mut channels,
+            &mut layer_power,
+        )
+        .unwrap();
+    for (channel, report) in channels.iter().enumerate() {
+        for (local, fraction) in profile.layer_pressure_work_fractions().iter().enumerate() {
+            assert_eq!(
+                layer_power[2 * channel + local],
+                report.pressure_dissipated_power_w * fraction
+            );
+        }
+    }
+    assert_eq!(&layer_power[2..], &[0.0, 0.0]);
+}
+
+#[test]
+fn layer_partition_and_velocity_rescaling_preserve_physical_work() {
+    // G3: subdividing a physical layer changes only report grouping.
+    let coarse = layers();
+    let fine = GapViscosityProfile::new(vec![
+        ViscosityLayer {
+            upper_fraction: 0.2,
+            dynamic_viscosity_pa_s: 0.01,
+        },
+        ViscosityLayer {
+            upper_fraction: 0.5,
+            dynamic_viscosity_pa_s: 0.01,
+        },
+        ViscosityLayer {
+            upper_fraction: 0.8,
+            dynamic_viscosity_pa_s: 0.04,
+        },
+        ViscosityLayer {
+            upper_fraction: 1.0,
+            dynamic_viscosity_pa_s: 0.04,
+        },
+    ])
+    .unwrap();
+    let build = |profile| {
+        ShearedFilm::from_stratified(
+            StratifiedFilm::new(&film(&[H]), vec![profile]).unwrap(),
+            vec![walls(1.0)],
+        )
+        .unwrap()
+    };
+    let coarse = build(coarse);
+    let fine = build(fine);
+    let base_velocity = [0.0001, 0.001, 0.004];
+    let mut reference = [0.0; 2];
+    for scale in [1.0, -1.0, 1e-100] {
+        let velocity = base_velocity.map(|v| v * scale);
+        let mut force = [0.0; 3];
+        let mut pressure = [0.0];
+        let mut channels = [ShearChannelReport::default()];
+        let mut grouped = [0.0; 2];
+        let report = coarse
+            .evaluate_with_layers_into(
+                &[0.0; 3],
+                &velocity,
+                &mut force,
+                &mut pressure,
+                &mut channels,
+                &mut grouped,
+            )
+            .unwrap();
+        let mut split = [0.0; 4];
+        fine.evaluate_with_layers_into(
+            &[0.0; 3],
+            &velocity,
+            &mut force,
+            &mut pressure,
+            &mut channels,
+            &mut split,
+        )
+        .unwrap();
+        near(
+            split[0] + split[1],
+            grouped[0],
+            report.dissipated_power_w * 3e-12,
+        );
+        near(
+            split[2] + split[3],
+            grouped[1],
+            report.dissipated_power_w * 3e-12,
+        );
+        if scale == 1.0 {
+            reference = grouped;
+        }
+        for (actual, base) in grouped.into_iter().zip(reference) {
+            assert!(actual > 0.0);
+            near(actual / (base * scale * scale), 1.0, 3e-12);
+        }
+    }
+}
+
+#[test]
+fn layer_reporting_refusals_leave_all_outputs_unchanged() {
+    // G4: a positive channel power may have an unrepresentably small layer
+    // contribution. Refuse that report after the flow solve without publishing
+    // the otherwise valid force, pressure or channel result.
+    let profile = GapViscosityProfile::new(vec![
+        ViscosityLayer {
+            upper_fraction: 0.5,
+            dynamic_viscosity_pa_s: 0.01,
+        },
+        ViscosityLayer {
+            upper_fraction: 1.0,
+            dynamic_viscosity_pa_s: 1e200,
+        },
+    ])
+    .unwrap();
+    let moving = ShearedFilm::from_stratified(
+        StratifiedFilm::new(&film(&[H]), vec![profile]).unwrap(),
+        vec![walls(0.0)],
+    )
+    .unwrap();
+    let sentinel = ShearChannelReport {
+        volume_flow_m3_s: 42.0,
+        entrained_flow_m3_s: 43.0,
+        pressure_dissipated_power_w: 44.0,
+        shear_dissipated_power_w: 45.0,
+    };
+    let mut force = [42.0; 3];
+    let mut pressure = [42.0];
+    let mut channels = [sentinel];
+    let mut wrong_shape = [42.0; 3];
+    assert!(
+        moving
+            .evaluate_with_layers_into(
+                &[0.0; 3],
+                &[0.001, 0.0, 0.0],
+                &mut force,
+                &mut pressure,
+                &mut channels,
+                &mut wrong_shape,
+            )
+            .is_err()
+    );
+    assert_eq!(force, [42.0; 3]);
+    assert_eq!(pressure, [42.0]);
+    assert_eq!(channels, [sentinel]);
+    assert_eq!(wrong_shape, [42.0; 3]);
+    let mut layer_power = [42.0; 2];
+    assert!(
+        moving
+            .evaluate_with_layers_into(
+                &[0.0; 3],
+                &[1e-100, 0.0, 0.0],
+                &mut force,
+                &mut pressure,
+                &mut channels,
+                &mut layer_power,
+            )
+            .is_err()
+    );
+    assert_eq!(force, [42.0; 3]);
+    assert_eq!(pressure, [42.0]);
+    assert_eq!(channels, [sentinel]);
+    assert_eq!(layer_power, [42.0; 2]);
+    let allowed = moving
+        .evaluate_with_channels_into(
+            &[0.0; 3],
+            &[1e-100, 0.0, 0.0],
+            &mut force,
+            &mut pressure,
+            &mut channels,
+        )
+        .unwrap();
+    assert!(allowed.dissipated_power_w > 0.0);
+}
