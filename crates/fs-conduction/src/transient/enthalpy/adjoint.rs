@@ -475,6 +475,18 @@ impl EnthalpyStepLinearization<'_> {
                 ));
             }
         }
+        if let Some(h) = contact.specific_enthalpy_j_kg() {
+            if h.len() != self.primal.specific_enthalpy_j_kg.len()
+                || h.iter().zip(&self.primal.specific_enthalpy_j_kg)
+                    .any(|(actual, expected)| actual.to_bits() != expected.to_bits()) {
+                return Err(EnthalpyAdjointError::InvalidInput(
+                    "contact phase feedback was bound at a different physical enthalpy",
+                ));
+            }
+        }
+        if contact.phase_feedback().is_some_and(|matrix| matrix.nrows() != n || matrix.ncols() != n) {
+            return Err(EnthalpyAdjointError::InvalidInput("contact phase feedback and enthalpy endpoint shapes differ"));
+        }
         let mut coo = Coo::new(n, n);
         for row in 0..n {
             if row % ASSEMBLY_TILE == 0 { poll(cx, row)?; }
@@ -485,6 +497,10 @@ impl EnthalpyStepLinearization<'_> {
             let (columns, entries) = contact.feedback().row(row);
             for (&column, &entry) in columns.iter().zip(entries) {
                 coo.push(row, column, finite(entry * self.slopes[column])?);
+            }
+            if let Some(phase) = contact.phase_feedback() {
+                let (columns, entries) = phase.row(row);
+                for (&column, &entry) in columns.iter().zip(entries) { coo.push(row, column, entry); }
             }
         }
         self.tangent = coo.assemble();

@@ -1,5 +1,31 @@
 # CONTRACT: fs-conduction
 
+## Original material phase states in spatial thermal contacts
+
+`TemperatureContact::with_material_states(MaterialContactState { point, curves })`
+binds the original ordered thermal-interface source and exact native caloric
+objects to matching face means, matching pointwise traces, or retained
+nonmatching quadrature. Each enthalpy trial resolves the original nodal states
+and interpolates temperature and liquid mass fraction independently on each
+side. It never averages material enthalpies or invents a trace caloric state.
+Fixed pressure, finish, medium, source selection, and geometry remain owned by
+the original interface.
+
+The existing enthalpy Newton operator now includes both
+`dR/dT * dT/dh` and `dR/df * df/dh`. Phase-dependent resistance therefore
+continues to evolve on a latent plateau. Signed contact exchange remains
+internal and conservative. Original node states, queried fraction traces, and
+source receipts remain available in the physical report.
+
+Forward phase-bound surface laws use the original selected source-cell tangent,
+including inward motion from zero or unit fraction; every residual still checks
+the pinned source support. Accepted adjoints and public `linearize_enthalpy`
+require unique two-sided participating chart and source derivatives. Accepted
+contact and radiation adjoints rebind the exact enthalpy endpoint, so distinct
+latent states with identical temperature cannot be substituted. Fixed and
+temperature-only contacts also receive strict participating-vertex T(h) checks.
+Temperature-only evolution refuses material-state bindings explicitly.
+
 ## Original source-bound phase conductivity on spatial enthalpy fields
 
 `transient::enthalpy::material::phase::MaterialPhaseTransport` binds an original

@@ -92,9 +92,10 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
         let mut source_domain = false;
         let contacts = self
             .contacts
-            .evaluate_with_query_refusal(
+            .evaluate_enthalpy_with_query_refusal(
                 self.base.cx,
                 self.base.problem.boundary,
+                h,
                 &temperature,
                 &mut |error| {
                     source_domain = matches!(
@@ -146,10 +147,12 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
         let context = self.context(physical.contacts.frozen_interfaces());
         let stage = context.stage(h)?;
         let temperature = context.temperatures(h)?;
-        let contact = self.contacts.linearize_temperature_for_newton(
+        let contact = self.contacts.linearize_enthalpy_for_newton(
             self.base.cx,
             self.base.problem.boundary,
+            h,
             &temperature,
+            &stage.slope,
             self.config.max_face_pairs,
         )?;
         let n = h.len();
@@ -176,6 +179,14 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
                     column,
                     finite(self.base.dt * finite(value * stage.slope[column])?)?,
                 );
+            }
+            // The independent phase source column already has W/(J/kg) units.
+            // It survives a latent dT/dh=0 and must not be scaled by T' again.
+            if let Some(phase) = contact.phase_feedback() {
+                let (columns, values) = phase.row(row);
+                for (&column, &value) in columns.iter().zip(values) {
+                    full.push(row, column, finite(self.base.dt * value)?);
+                }
             }
         }
         *self.tangent.borrow_mut() = Some(Tangent {
@@ -306,6 +317,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
     ) -> Result<(EnthalpyStepSolution, TemperatureContactEvaluation), EnthalpyError> {
         self.admit_step(cx, problem, old_h, dt_s, config.step)?;
         contacts.check_mesh(problem.mesh)?;
+        contacts.check_material_curves(cx, |vertex| Some(self.curve_for_vertex(vertex)))?;
         let radiation_matches = match pointwise_radiation {
             Some(PointwiseBoundary::Ambient(owner)) => {
                 owner.matches(problem.mesh, problem.boundary)

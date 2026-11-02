@@ -32,6 +32,7 @@ impl TemperatureContacts<'_, '_> {
         let contact = self.rebind_pointwise_enthalpy_contacts(
             cx,
             problem,
+            engine,
             &accepted,
             physical_target_j,
             max_face_pairs,

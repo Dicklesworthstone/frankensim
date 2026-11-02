@@ -112,18 +112,22 @@ fn accept_coupled_endpoint(
 impl TemperatureContacts<'_, '_> {
     /// Solve primary enthalpy and source-backed contact resistance together.
     ///
-    /// Every residual queries R at its actual chart-resolved temperatures.
+    /// Every residual queries R at its actual chart-resolved temperatures and,
+    /// for an explicit material-state binding, its independent P1 liquid fractions.
     /// The original spatial owner supplies reference-mass storage, nonlinear
     /// conductivity and latent phase response. The tangent adds only
-    /// `(dK_contact/dT * T) * dT/dh`; frozen contact conduction already belongs
-    /// to the original operator. On a latent plateau the temperature column
-    /// vanishes while reference-mass enthalpy storage remains active.
+    /// `(dK_contact/dT * T) * dT/dh` and the independently bound
+    /// `(dK_contact/df * T) * df/dh`; frozen conduction already belongs to the
+    /// original operator. Phase feedback and reference-mass storage remain
+    /// active on a latent plateau even when the temperature column vanishes.
     ///
     /// Matching and nonmatching interfaces retain their original quadrature,
     /// pinned source laws and fixed geometry/pressure. Source-domain misses
     /// backtrack through the existing Armijo owner. Piecewise-linear resistance
-    /// curves use the owner's one-sided generalized Newton tangent at knots;
-    /// other source surfaces retain their unique-tangent admission rules.
+    /// curves use the owner's one-sided generalized Newton tangent at knots.
+    /// Material phase surfaces use the original selected source-cell tangent,
+    /// allowing inward phase motion at f=0/1; accepted adjoints stay two-sided.
+    /// Temperature-only source surfaces retain their unique-tangent admission.
     /// Prescribed temperatures must select unique enthalpies on their charts.
     /// No radiation or airflow feedback is added by this entry point.
     #[allow(clippy::too_many_arguments)]
@@ -478,11 +482,13 @@ impl TemperatureContacts<'_, '_> {
                 "positive finite physical contact residual target required",
             ));
         }
-        let contact = self.linearize_temperature(
-            cx, problem.boundary, &accepted.conduction.temperature, max_face_pairs,
+        let contact = self.linearize_enthalpy(
+            cx, problem.boundary, engine, &accepted.conduction.specific_enthalpy_j_kg, max_face_pairs,
         )?;
         if contact.physical_contacts().states() != accepted.physical_contacts.states()
-            || contact.physical_contacts().quadrature_states() != accepted.physical_contacts.quadrature_states() {
+            || contact.physical_contacts().quadrature_states() != accepted.physical_contacts.quadrature_states()
+            || contact.physical_contacts().material_node_states() != accepted.physical_contacts.material_node_states()
+            || contact.physical_contacts().material_trace_states() != accepted.physical_contacts.material_trace_states() {
             return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
                 "rebound contact source state differs from the accepted physical endpoint",
             ));
@@ -577,11 +583,13 @@ impl TemperatureContacts<'_, '_> {
                 "positive finite physical contact/radiation residual target required",
             ));
         }
-        let contact = self.linearize_temperature(
-            cx, problem.boundary, &accepted.conduction.temperature, max_face_pairs,
+        let contact = self.linearize_enthalpy(
+            cx, problem.boundary, engine, &accepted.conduction.specific_enthalpy_j_kg, max_face_pairs,
         )?;
         if contact.physical_contacts().states() != accepted.physical_contacts.states()
-            || contact.physical_contacts().quadrature_states() != accepted.physical_contacts.quadrature_states() {
+            || contact.physical_contacts().quadrature_states() != accepted.physical_contacts.quadrature_states()
+            || contact.physical_contacts().material_node_states() != accepted.physical_contacts.material_node_states()
+            || contact.physical_contacts().material_trace_states() != accepted.physical_contacts.material_trace_states() {
             return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
                 "rebound radiative-contact source state differs from accepted physical endpoint",
             ));

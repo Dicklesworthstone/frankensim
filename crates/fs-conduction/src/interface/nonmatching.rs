@@ -409,7 +409,16 @@ impl Bound {
     pub(super) fn at_quadrature(&self,cx:&Cx<'_>,temperature:&[f64],
         mut query:impl FnMut(super::InterfaceFacePair,usize,f64,[f64;2])->Result<InterfaceResistance,ConductionError>)
         ->Result<Self,ConductionError> {
+        self.at_state_quadrature(cx,temperature,None,|pair,index,weight,traces,_|
+            query(pair,index,weight,traces))
+    }
+
+    /// The same retained geometry with one companion P1 source coordinate.
+    pub(super) fn at_state_quadrature(&self,cx:&Cx<'_>,temperature:&[f64],companion:Option<&[f64]>,
+        mut query:impl FnMut(super::InterfaceFacePair,usize,f64,[f64;2],Option<[f64;2]>)
+            ->Result<InterfaceResistance,ConductionError>)->Result<Self,ConductionError> {
         self.check_field(temperature)?;
+        if let Some(field)=companion {self.check_field(field)?;}
         let mut values=Vec::new();
         values.try_reserve_exact(self.stencils.len()).map_err(|_|error(&self.name,"quadrature source allocation refused"))?;
         for (index,stencil) in self.stencils.iter().enumerate() {
@@ -417,11 +426,14 @@ impl Bound {
             let v=stencil.vertices;
             let mut sample=|point:usize|->Result<InterfaceResistance,ConductionError> {
                 let q=stencil.basis[point];
-                let a=finite(temperature[v[0]]+q[1]*(temperature[v[1]]-temperature[v[0]])
-                    +q[2]*(temperature[v[2]]-temperature[v[0]]),&self.name)?;
-                let b=finite(temperature[v[3]]-q[4]*(temperature[v[4]]-temperature[v[3]])
-                    -q[5]*(temperature[v[5]]-temperature[v[3]]),&self.name)?;
-                let resistance=query(stencil.pair,index*3+point,stencil.weight_m2,[a,b])?;
+                let traces=|field:&[f64]|->Result<[f64;2],ConductionError> {
+                    Ok([finite(field[v[0]]+q[1]*(field[v[1]]-field[v[0]])
+                        +q[2]*(field[v[2]]-field[v[0]]),&self.name)?,
+                        finite(field[v[3]]-q[4]*(field[v[4]]-field[v[3]])
+                        -q[5]*(field[v[5]]-field[v[3]]),&self.name)?])
+                };
+                let resistance=query(stencil.pair,index*3+point,stencil.weight_m2,traces(temperature)?,
+                    companion.map(traces).transpose()?)?;
                 let g=1.0/resistance.value_m2_k_per_w();
                 if !g.is_finite() || g<=0.0 || !(g*stencil.weight_m2).is_finite()
                     || g*stencil.weight_m2<=0.0 {

@@ -1,7 +1,8 @@
 //! Source-backed contact resistance at explicitly declared trace coordinates.
 //!
-//! Only the declared temperature coordinates change. Pressure, finish, medium,
-//! source card and selected claim remain fixed. The two bulk traces stay distinct;
+//! Declared temperature coordinates evolve; an explicit material-state binding
+//! also evolves liquid mass fractions from original caloric states. Pressure,
+//! finish, medium, source card and selected claim remain fixed. The two bulk traces stay distinct;
 //! an arithmetic mean is used only by an explicitly selected mean-temperature law.
 //! Frozen snapshots are NOT complete nonlinear-contact tangents or adjoints.
 
@@ -14,6 +15,8 @@ pub mod enthalpy;
 pub mod tangent;
 mod mapped;
 pub use mapped::ContactFaceReference;
+pub mod phase;
+pub use phase::{MaterialContactState, ContactMaterialNodeState, ContactMaterialTraceState};
 
 use fs_exec::Cx;
 use fs_matdb::{InterfaceSystemCard, QueryPoint, SelectionPolicy};
@@ -61,6 +64,7 @@ pub struct TemperatureContact<'a> {
     reference: ContactSurface,
     resistance: InterfaceResistance,
     face_references: Vec<ContactFaceReference>,
+    material_states: Option<MaterialContactState<'a>>,
 }
 
 impl<'a> TemperatureContact<'a> {
@@ -162,7 +166,7 @@ impl<'a> TemperatureContact<'a> {
         };
         Ok(Self {
             card, reference_point: point.clone(), coordinates,
-            reference, resistance, face_references: Vec::new(),
+            reference, resistance, face_references: Vec::new(), material_states: None,
         })
     }
 
@@ -212,6 +216,9 @@ impl<'a> TemperatureContact<'a> {
     pub fn reference_resistance(&self) -> &InterfaceResistance { &self.resistance }
 
     fn query_point_at(&self, side_a: Option<usize>, temperatures_k: [f64; 2]) -> Result<QueryPoint, ConductionError> {
+        if self.material_states.is_some() {
+            return Err(invalid(self.name(), "material contact requires original enthalpy states, not temperature alone"));
+        }
         let [a, b] = [positive(temperatures_k[0])?, positive(temperatures_k[1])?];
         let mut point = self.source_context(side_a)?.0.clone();
         match &self.coordinates {
@@ -230,10 +237,10 @@ impl<'a> TemperatureContact<'a> {
     }
 
     fn at_traces_with_query_refusal(
-        &self, side_a: Option<usize>, temperatures_k: [f64; 2],
+        &self, side_a: Option<usize>, temperatures_k: [f64; 2], fractions: Option<[f64; 2]>,
         on_refusal: &mut dyn FnMut(&fs_matdb::MatDbError),
     ) -> Result<InterfaceResistance, ConductionError> {
-        let point = self.query_point_at(side_a, temperatures_k)?;
+        let point = self.query_point_at_state(side_a, temperatures_k, fractions)?;
         let selected = self.source_context(side_a)?.1.receipt().selected;
         InterfaceResistance::from_card_pinned_with_query_refusal(
             self.name(), self.card, &point, selected, on_refusal,
@@ -265,6 +272,8 @@ pub struct TemperatureContactEvaluation {
     interfaces: ThermalInterfaces,
     states: Vec<ContactFaceState>,
     quadrature_states:Vec<ContactQuadratureState>,
+    material_node_states: Vec<ContactMaterialNodeState>,
+    material_trace_states: Vec<ContactMaterialTraceState>,
 }
 
 /// One physical matching/common-refinement quadrature query, with original A/B roles.
@@ -299,6 +308,12 @@ impl TemperatureContactEvaluation {
     /// representative receipt and does not invent an averaged material claim.
     #[must_use]
     pub fn quadrature_states(&self)->&[ContactQuadratureState] {&self.quadrature_states}
+    /// Original nodal caloric states used by explicitly material-bound contacts.
+    #[must_use]
+    pub fn material_node_states(&self) -> &[ContactMaterialNodeState] { &self.material_node_states }
+    /// Actual independent P1 fraction coordinates, with original face/sample order.
+    #[must_use]
+    pub fn material_trace_states(&self) -> &[ContactMaterialTraceState] { &self.material_trace_states }
 }
 
 /// Complete contact set, including any unchanged constant interfaces.
@@ -313,6 +328,7 @@ pub struct TemperatureContacts<'m, 'c> {
     reference:ThermalInterfaces,
     nonmatching_triangles:usize,
     variable_quadrature_points:usize,
+    phase_curves: Vec<Option<phase::BoundPhaseCurve<'c>>>,
 }
 
 impl<'m, 'c> TemperatureContacts<'m, 'c> {
@@ -419,7 +435,8 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         let variable_quadrature_points=reference.nonmatching.iter().filter(|surface|
             variable.iter().any(|law|law.name()==surface.name)).map(|surface|surface.triangle_count()*3).sum();
         poll(cx, count)?;
-        Ok(Self { mesh, fixed, variable, variable_pairs, reference, nonmatching_triangles,variable_quadrature_points })
+        let phase_curves = phase::prepare_curves(cx, mesh, &variable)?;
+        Ok(Self { mesh, fixed, variable, variable_pairs, reference, nonmatching_triangles,variable_quadrature_points, phase_curves })
     }
 
     /// Query every declared local thermal coordinate and build one complete snapshot.
@@ -438,7 +455,17 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         &self, cx: &Cx<'_>, boundary: &ThermalBoundary, temperatures: &[f64],
         on_refusal: &mut dyn FnMut(&fs_matdb::MatDbError),
     ) -> Result<TemperatureContactEvaluation, ConductionError> {
+        self.evaluate_state(cx, boundary, temperatures, None, on_refusal)
+    }
+
+    fn evaluate_state(
+        &self, cx: &Cx<'_>, boundary: &ThermalBoundary, temperatures: &[f64],
+        phase: Option<&phase::PhaseField>, on_refusal: &mut dyn FnMut(&fs_matdb::MatDbError),
+    ) -> Result<TemperatureContactEvaluation, ConductionError> {
         poll(cx, 0)?;
+        if !self.phase_curves.is_empty() && phase.is_none() {
+            return Err(invalid("<contact-set>", "material contacts require original enthalpy states; temperature-only evolution cannot resolve latent fraction"));
+        }
         if temperatures.len() != self.mesh.vertex_count() {
             return Err(invalid("<contact-set>", "temperature field and contact mesh differ"));
         }
@@ -449,6 +476,7 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         self.reference.validate_for(self.mesh,boundary)?;
         let mut surfaces = Vec::new();
         let mut states = Vec::new();
+        let mut material_trace_states = Vec::new();
         states.try_reserve_exact(self.variable_pairs)
             .map_err(|_| invalid("<contact-set>", "local source-state allocation refused"))?;
         for law in &self.variable {
@@ -469,7 +497,20 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
                 let a = mean(pair.side_a)?;
                 let b = mean(pair.side_b)?;
                 let temperature = positive(0.5 * a + 0.5 * b)?;
-                let resistance = law.at_traces_with_query_refusal(Some(pair.side_a), [a, b], on_refusal)?;
+                let fractions = if law.material_states.is_some() {
+                    let field = &phase.expect("material field admitted").fractions;
+                    let mean = |slot: usize| -> Result<f64, ConductionError> {
+                        let v = self.mesh.boundary()[slot].vertices;
+                        finite(field[v[0] as usize]/3.0 + field[v[1] as usize]/3.0 + field[v[2] as usize]/3.0)
+                    };
+                    Some([mean(pair.side_a)?, mean(pair.side_b)?])
+                } else { None };
+                let resistance = law.at_traces_with_query_refusal(Some(pair.side_a), [a, b], fractions, on_refusal)?;
+                if let Some(liquid_mass_fractions) = fractions {
+                    material_trace_states.push(ContactMaterialTraceState {
+                        interface: law.name().into(), pair, quadrature_index: None, liquid_mass_fractions,
+                    });
+                }
                 resistances.push(resistance.clone());
                 states.push(ContactFaceState {
                     interface: law.name().into(), pair, side_a_temperature_k: a,
@@ -487,21 +528,41 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         let mut quadrature_owned=std::collections::BTreeSet::new();
         for surface in &mut interfaces.nonmatching {
             let Some(law)=self.variable.iter().find(|law|law.name()==surface.name) else {continue;};
-            surface.matching_source_support(cx,temperatures,|traces| {
-                law.at_traces_with_query_refusal(None,traces,on_refusal).map(|_| ())
-            })?;
-            *surface=surface.at_quadrature(cx,temperatures,|pair,index,weight,traces| {
-                let resistance=law.at_traces_with_query_refusal(Some(pair.side_a),traces,on_refusal)?;
+            let fractions = if law.material_states.is_some() {
+                Some(phase.expect("material field admitted").fractions.as_slice())
+            } else { None };
+            if fractions.is_some() {
+                surface.matching_state_support(cx,temperatures,fractions,|_,traces,fractions| {
+                    law.at_traces_with_query_refusal(None,traces,fractions,on_refusal).map(|_| ())
+                })?;
+            } else {
+                surface.matching_source_support(cx,temperatures,|traces| {
+                    law.at_traces_with_query_refusal(None,traces,None,on_refusal).map(|_| ())
+                })?;
+            }
+            let mut query=|pair:InterfaceFacePair,index:usize,weight:f64,traces:[f64;2],fractions:Option<[f64;2]>| {
+                let resistance=law.at_traces_with_query_refusal(Some(pair.side_a),traces,fractions,on_refusal)?;
+                if let Some(liquid_mass_fractions) = fractions {
+                    material_trace_states.push(ContactMaterialTraceState {
+                        interface: law.name().into(), pair, quadrature_index: Some(index), liquid_mass_fractions,
+                    });
+                }
                 quadrature_states.push(ContactQuadratureState {interface:law.name().into(),pair,
                     quadrature_index:index,weight_m2:weight,side_a_temperature_k:traces[0],
                     side_b_temperature_k:traces[1],resistance:resistance.clone()});
                 Ok(resistance)
-            })?;
+            };
+            *surface=if fractions.is_some() {
+                surface.at_state_quadrature(cx,temperatures,fractions,&mut query)?
+            } else {
+                surface.at_quadrature(cx,temperatures,|pair,index,weight,traces| query(pair,index,weight,traces,None))?
+            };
             quadrature_owned.insert(law.name().to_string());
         }
         interfaces.refresh_matching(&surfaces,&quadrature_owned)?;
         poll(cx, states.len())?;
-        Ok(TemperatureContactEvaluation { interfaces, states,quadrature_states })
+        Ok(TemperatureContactEvaluation { interfaces, states,quadrature_states,
+            material_node_states: phase.map_or_else(Vec::new, |field| field.states.clone()), material_trace_states })
     }
 
     pub(crate) fn check_mesh(&self, mesh: &ConductionMesh) -> Result<(), ConductionError> {

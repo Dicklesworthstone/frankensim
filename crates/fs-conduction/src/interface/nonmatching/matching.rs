@@ -98,17 +98,26 @@ impl Bound {
         temperature: &[f64],
         mut query: impl FnMut([f64; 2]) -> Result<(), ConductionError>,
     ) -> Result<(), ConductionError> {
+        self.matching_state_support(cx,temperature,None,|_,traces,_| query(traces))
+    }
+
+    /// Admit each actual paired corner with its companion P1 source coordinate.
+    pub(in crate::interface) fn matching_state_support(
+        &self, cx: &Cx<'_>, temperature: &[f64], companion: Option<&[f64]>,
+        mut query: impl FnMut([usize; 2], [f64; 2], Option<[f64; 2]>) -> Result<(), ConductionError>,
+    ) -> Result<(), ConductionError> {
         if !self.matching_only {
             return Ok(());
         }
         self.check_field(temperature)?;
+        if let Some(field) = companion { self.check_field(field)?; }
         for (index, stencil) in self.stencils.iter().enumerate() {
             poll(cx, index)?;
             for i in 0..3 {
-                query([
+                query([stencil.vertices[i], stencil.vertices[i + 3]], [
                     temperature[stencil.vertices[i]],
                     temperature[stencil.vertices[i + 3]],
-                ])?;
+                ], companion.map(|field| [field[stencil.vertices[i]], field[stencil.vertices[i + 3]]]))?;
             }
         }
         Ok(())

@@ -109,6 +109,7 @@ impl<'a> TemperatureContact<'a> {
             coordinates,
             reference: ContactSurface::Nonmatching(surface),
             face_references: references,
+            material_states: None,
         };
         poll(cx, result.face_references.len())?;
         Ok(result)

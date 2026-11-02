@@ -33,6 +33,7 @@ impl TemperatureContacts<'_, '_> {
         &self,
         cx: &Cx<'_>,
         problem: ConductionProblem<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
         accepted: &ContactEnthalpyStep,
         physical_target_j: f64,
         max_face_pairs: usize,
@@ -47,15 +48,18 @@ impl TemperatureContacts<'_, '_> {
                 "pointwise contact adjoint requires its original positive physical target and no mean-patch boundary",
             ));
         }
-        let contact = self.linearize_temperature(
+        let contact = self.linearize_enthalpy(
             cx,
             problem.boundary,
-            &accepted.conduction.temperature,
+            engine,
+            &accepted.conduction.specific_enthalpy_j_kg,
             max_face_pairs,
         )?;
         if contact.physical_contacts().states() != accepted.physical_contacts.states()
             || contact.physical_contacts().quadrature_states()
                 != accepted.physical_contacts.quadrature_states()
+            || contact.physical_contacts().material_node_states() != accepted.physical_contacts.material_node_states()
+            || contact.physical_contacts().material_trace_states() != accepted.physical_contacts.material_trace_states()
         {
             return Err(EnthalpyAdjointError::InvalidInput(
                 "rebound pointwise contact source state differs from the accepted physical endpoint",
@@ -90,6 +94,7 @@ impl TemperatureContacts<'_, '_> {
         let contact = self.rebind_pointwise_enthalpy_contacts(
             cx,
             problem,
+            engine,
             &accepted,
             physical_target_j,
             max_face_pairs,
@@ -136,6 +141,7 @@ impl TemperatureContacts<'_, '_> {
         let contact = self.rebind_pointwise_enthalpy_contacts(
             cx,
             problem,
+            engine,
             &accepted,
             physical_target_j,
             max_face_pairs,
