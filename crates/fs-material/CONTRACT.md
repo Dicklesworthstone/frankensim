@@ -1,5 +1,31 @@
 # fs-material — CONTRACT
 
+## Source-specific comminution references
+
+`comminution` supplies a typed, uncorrected Bond grinding-energy closure,
+dry-solids throughput from net pinion power, and ideal single-ball critical
+speed. Work-index construction distinguishes kWh per dry metric tonne from
+kWh per dry US short ton and retains the original denominator. The immutable
+card records specimen identity, test/preparation procedure, closing-screen
+aperture and source provenance. Its explicit F80/P80 validity window is a
+caller declaration, not proof of site calibration. This baseline refuses
+P80 below 70 micrometres and requires actual size reduction.
+
+Energy outputs are J/kg dry solids; throughput is kg/s dry solids with explicit
+utilization; critical speed is revolutions/second from the inside-liner and
+ball diameters and caller-supplied gravity. Motor nameplate power cannot stand
+in for net pinion power. Finite/positive admission, out-of-domain inputs and
+unrepresentable arithmetic return `ComminutionError`; nothing is clamped.
+Fixed scalar operation order has no mutable state, IO or unbounded work.
+
+G0/G1/G3 tests cover hand-calculated energy/tonnage, the published GMG 2021
+stage-energy example, metric/short-ton equivalence, monotonicity, one-ULP
+size reductions, validity refusal and critical-speed force balance/scaling.
+These establish reference-formula behavior, not site predictive validity.
+There is no SAG/AG, circuit correction, slurry rheology, liberation, recovery,
+wear, DEM trajectory or recommended operating-speed claim. Source and
+calibration uncertainty are not converted into a certified prediction band.
+
 ## Explicit phase coordinates in spatial conductivity
 
 `SpatialConductorMaterial` retains an optional original liquid-mass-fraction
