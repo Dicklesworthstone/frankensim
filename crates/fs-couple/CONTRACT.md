@@ -21608,13 +21608,17 @@ refusals. Numerical execution is a separate validation step.
 
 ### Thermo-optic feedback from the accepted spatial temperature
 
-`ThermoOpticalWaveHeating` binds one original `VisibleConductorStatePoint` and
-its immutable `MaterialCard` per thermal layer. The complete source includes
-the same-state magnetic permeability; no DC loss, substitute spectrum or
-nonmagnetic default is added. Its temperature coordinate and shared fixed
+`ThermoOpticalWaveHeating` binds one original optical state and its immutable
+`MaterialCard` per thermal layer. Its sealed generic source defaults to
+`VisibleConductorStatePoint`, preserving existing conductor callers. Choosing
+`VisibleOpticalStatePoint` admits mixed metal, Cauchy, tabulated glass and
+Sellmeier layers through the same solver. Dielectrics retain their original
+spectral intensity absorption and phase-index law; RGB-only absorption refuses.
+The complete source includes the same-state magnetic permeability; no DC loss,
+substitute spectrum or nonmagnetic default is added. Its temperature coordinate and shared fixed
 conditions must agree with the original conductivity/capacity owners. Each
 step obtains actual cell temperatures from the accepted native enthalpy state,
-then refreshes every cell's original selected n/k/mu claims at that temperature.
+then refreshes every cell's original selected optical/mu claims at that temperature.
 The other query coordinates and source pins remain fixed. No layer-average
 temperature or separate optical temperature input replaces the spatial state.
 
@@ -21622,7 +21626,8 @@ The original coherent film owner treats these cells as distinct physical
 sublayers, and the existing implicit thermal owner advances their absorbed
 energy once. Before returning, every optical source is readmitted at its
 proposed thermal endpoint. If the endpoint leaves the original optical source
-support, fails passivity/representability, or is cancelled, no joint endpoint
+support, introduces an unsupported dispersion pole, fails passivity or
+representability, or is cancelled, no joint endpoint
 is returned and the accepted thermal history is unchanged. Results expose the
 applied and endpoint source snapshots in original cell order; refreshing the
 endpoint is not a second heat credit. The next interval uses its accepted
@@ -21636,6 +21641,9 @@ geometry-change work, broadband thermal emissivity or a phase-change law.
 Focused tests compare nonuniform feedback with direct source refresh and an
 independent two-cell caloric solution, exercise successive accepted steps,
 and verify late-cancellation, source-substitution and endpoint-domain rollback.
+Mixed glass/metal tests retain each spatial source family and local absorption
+through successive native heat steps, including atomic refusal of a glass
+endpoint outside its original optical source support.
 
 ## Coherent porous acoustic absorption on native thermal cells
 

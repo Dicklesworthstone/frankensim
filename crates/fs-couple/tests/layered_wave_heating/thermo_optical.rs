@@ -2,10 +2,12 @@
 
 use super::*;
 use fs_couple::layered_wave_heating::{ThermoOpticalLayer, ThermoOpticalWaveHeating};
-use fs_em::plane_wave::OpticalConductorResponse;
+use fs_em::plane_wave::{OpticalConductorResponse, OpticalMaterialResponse};
 use fs_material::state_point::{
     VISIBLE_COMPLEX_IOR_ETA_PROPERTIES, VISIBLE_COMPLEX_IOR_K_PROPERTIES,
-    VisibleConductorStatePoint,
+    VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES, VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY,
+    VISIBLE_DIELECTRIC_IOR_PROPERTIES, VisibleConductorStatePoint, VisibleOpticalStatePoint,
+    resolve_visible_optical_state_point,
 };
 
 const LIGHT_SPEED: f64 = 299_792_458.0;
@@ -85,6 +87,77 @@ fn optical_source(card: &MaterialCard, t: f64, pressure: f64) -> VisibleConducto
             MaterialPropertySelection::SingleClaimOnly,
         )
         .unwrap(),
+    )
+    .unwrap()
+}
+
+fn glass_card(upper: f64) -> MaterialCard {
+    let base = card("authored thermo-optic glass", 1.0, 0.0);
+    let mut claims = base.claims().clone();
+    for (names, quantity, values) in [
+        (
+            VISIBLE_DIELECTRIC_IOR_PROPERTIES,
+            QuantitySpec::dimensional(Dims::NONE),
+            [1.4, 1.56],
+        ),
+        (
+            VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES,
+            VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY,
+            [5e5, 2.1e6],
+        ),
+    ] {
+        for name in names {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::with_quantity(name, quantity),
+                    value: PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: fs_qty::Temperature::DIMS,
+                        knots: vec![(280.0, values[0]), (360.0, values[1])],
+                        dims: quantity.dims(),
+                    },
+                    validity: ValidityDomain::unconstrained()
+                        .with_quantity(
+                            "T",
+                            super::quantity(QuantityKind::AbsoluteTemperature),
+                            280.0,
+                            upper,
+                        )
+                        .with_quantity(
+                            "pressure",
+                            super::quantity(QuantityKind::Pressure),
+                            90_000.0,
+                            200_000.0,
+                        ),
+                    interpolation: InterpolationPolicy::LinearInside,
+                    uncertainty: UncertaintyModel::Unstated,
+                    observations: vec![],
+                    provenance: Provenance {
+                        source: "authored spectral glass heat oracle".into(),
+                        license: "test-only".into(),
+                        artifact: None,
+                    },
+                })
+                .unwrap();
+        }
+    }
+    MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
+}
+
+fn glass_source(card: &MaterialCard) -> VisibleOpticalStatePoint {
+    resolve_visible_optical_state_point(
+        card,
+        &at(300.0, 100_000.0),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap()
+    .with_additional_requirements(
+        card,
+        &[
+            ScalarPropertyRequirement::try_new(MU_NAME, MU, ScalarAdmissibility::StrictlyPositive)
+                .unwrap(),
+        ],
+        MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap()
 }
@@ -399,6 +472,179 @@ fn optical_source_substitution_and_endpoint_domain_exit_refuse_without_thermal_c
         ),
         Err(LayeredWaveHeatingError::Material(_))
     ));
+    assert_eq!(initial.cells(), &before);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(source.resolved().state_coordinate("T"), Some(300.0));
+}
+
+#[test]
+fn mixed_glass_and_metal_refresh_original_spatial_optics_and_native_heat_together() {
+    let glass_card = glass_card(360.0);
+    let metal_card = optical_card("metal behind glass", 360.0);
+    let glass = glass_source(&glass_card);
+    let metal = VisibleOpticalStatePoint::Conductor(optical_source(&metal_card, 300.0, 100_000.0));
+    let outside = exterior();
+    let native = body(&[&glass_card, &metal_card], &[420e-9, 35e-9], &[2, 1], AREA);
+    let laws = native.thermal_laws(false).unwrap();
+    let bound = native.bind(&laws, ids()).unwrap();
+    let initial = initial_at(&bound, &[290.0, 330.0, 300.0]);
+    let before = initial.cells().clone();
+    let sources = [
+        ThermoOpticalLayer {
+            source: &glass,
+            card: &glass_card,
+        },
+        ThermoOpticalLayer {
+            source: &metal,
+            card: &metal_card,
+        },
+    ];
+    let owner: ThermoOpticalWaveHeating<'_, '_, '_, VisibleOpticalStatePoint> =
+        ThermoOpticalWaveHeating::try_new(
+            &bound,
+            &outside,
+            DielectricResponse::Lossless(&outside),
+            OPTICAL_OMEGA,
+            0.9,
+            Polarization::Tm,
+            &sources,
+            || false,
+        )
+        .unwrap();
+    let original_cells = [
+        (&glass, &glass_card),
+        (&glass, &glass_card),
+        (&metal, &metal_card),
+    ];
+    let refreshed: Vec<_> = bound
+        .cell_ids()
+        .into_iter()
+        .zip(original_cells)
+        .map(|(id, (source, card))| {
+            source
+                .at_query_point(card, &at(initial.temperature_k(id).unwrap(), 100_000.0))
+                .unwrap()
+        })
+        .collect();
+    let responses: Vec<_> = refreshed
+        .iter()
+        .map(|source| {
+            DielectricResponse::OpticalMaterial(OpticalMaterialResponse::try_new(source).unwrap())
+        })
+        .collect();
+    let reference = LayeredWaveHeating::try_new_cellwise(
+        &bound,
+        &outside,
+        DielectricResponse::Lossless(&outside),
+        OPTICAL_OMEGA,
+        &responses,
+        || false,
+    )
+    .unwrap();
+    let drive = LayeredWaveDrive::Coherent([C64::new(1e6, 0.0), C64::new(2e5, -1e5)]);
+    let mut powers = [0.0; 3];
+    reference
+        .prepare(0.9, Polarization::Tm, || false)
+        .unwrap()
+        .cell_power_into(drive, &mut powers, || false)
+        .unwrap();
+    assert!(powers.iter().all(|p| *p > 0.0));
+    let mut workspace = LayeredThermalWorkspace::new(3).unwrap();
+    let controls = LayeredThermalSolveControls {
+        cell_tolerance_j: 1e-11,
+        total_tolerance_j: 1e-11,
+        ..LayeredThermalSolveControls::default()
+    };
+    let dt = 1e-11;
+    let result = owner
+        .advance_to(
+            &initial,
+            dt,
+            drive,
+            conduction(),
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(result.applied_optical_states, refreshed);
+    assert!(matches!(
+        result.applied_optical_states[0],
+        VisibleOpticalStatePoint::TabulatedDielectric(_)
+    ));
+    assert!(matches!(
+        result.applied_optical_states[2],
+        VisibleOpticalStatePoint::Conductor(_)
+    ));
+    for (i, (id, energy)) in result.step.cell_energy_j.iter().enumerate() {
+        near(*energy, powers[i] * dt, 1e-13);
+        let (source, card) = original_cells[i];
+        assert_eq!(
+            result.endpoint_optical_states[i],
+            source
+                .at_query_point(
+                    card,
+                    &at(result.step.thermal.temperature_k(*id).unwrap(), 100_000.0)
+                )
+                .unwrap()
+        );
+    }
+    near(
+        result.step.heat_report.energy.stored_energy_change_j,
+        result.step.optical.absorbed_j,
+        3e-11,
+    );
+    let next = owner
+        .advance_to(
+            &result.step.thermal,
+            2.0 * dt,
+            drive,
+            conduction(),
+            controls,
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(next.applied_optical_states, result.endpoint_optical_states);
+    assert_eq!(initial.cells(), &before);
+    assert_eq!(initial.time_s(), 0.0);
+}
+
+#[test]
+fn glass_endpoint_outside_original_spectral_source_support_refuses_atomically() {
+    let card = glass_card(301.0);
+    let source = glass_source(&card);
+    let outside = exterior();
+    let native = body(&[&card], &[420e-9], &[1], AREA);
+    let laws = native.thermal_laws(false).unwrap();
+    let bound = native.bind(&laws, ids()).unwrap();
+    let initial = initial(&bound, &[0.0]);
+    let before = initial.cells().clone();
+    let owner = ThermoOpticalWaveHeating::try_new(
+        &bound,
+        &outside,
+        DielectricResponse::Lossless(&outside),
+        OPTICAL_OMEGA,
+        1.0,
+        Polarization::Te,
+        &[ThermoOpticalLayer {
+            source: &source,
+            card: &card,
+        }],
+        || false,
+    )
+    .unwrap();
+    let mut workspace = LayeredThermalWorkspace::new(1).unwrap();
+    let result = owner.advance_to(
+        &initial,
+        1e-9,
+        LayeredWaveDrive::Coherent([C64::new(1.5e6, 0.0), C64::ZERO]),
+        conduction(),
+        LayeredThermalSolveControls::default(),
+        &mut workspace,
+        || false,
+    );
+    assert!(matches!(result, Err(LayeredWaveHeatingError::Material(_))));
     assert_eq!(initial.cells(), &before);
     assert_eq!(initial.time_s(), 0.0);
     assert_eq!(source.resolved().state_coordinate("T"), Some(300.0));

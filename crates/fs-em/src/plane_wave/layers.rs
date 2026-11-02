@@ -238,6 +238,9 @@ impl<'a> PlanarDielectricLayers<'a> {
             (DielectricResponse::OpticalConductor(a), DielectricResponse::OpticalConductor(b)) => {
                 core::ptr::eq(a.source(), b.source())
             }
+            (DielectricResponse::OpticalMaterial(a), DielectricResponse::OpticalMaterial(b)) => {
+                core::ptr::eq(a.source(), b.source())
+            }
             _ => false,
         };
         core::ptr::eq(self.incident, other.incident)

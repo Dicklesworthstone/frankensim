@@ -50,6 +50,9 @@ mod momentum;
 #[path = "plane_wave/two_sided_beam.rs"]
 mod two_sided_beam;
 
+#[path = "plane_wave/optical_dielectric.rs"]
+mod optical_dielectric;
+
 fn source(
     properties: &[(&str, Dims, f64)],
     validity: ValidityDomain,

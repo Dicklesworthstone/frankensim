@@ -38,9 +38,9 @@ pub mod layers;
 /// Coherent vector diffraction of sampled beams through the original films.
 pub mod angular_spectrum;
 
-/// Original spectral metal n/k with explicit same-state magnetic permeability.
+/// Original spectral metal/dielectric optics with explicit same-state permeability.
 pub mod optical;
-pub use optical::OpticalConductorResponse;
+pub use optical::{OpticalConductorResponse, OpticalMaterialResponse};
 
 // Shared power-to-momentum contractions. Source/geometry admission belongs
 // to the original film and beam owners, not to an arbitrary power input.
@@ -79,6 +79,10 @@ pub enum DielectricResponse<'a> {
     /// Includes the source's electric absorption once; real epsilon may be
     /// negative. Frequencies outside the source's spectral band refuse.
     OpticalConductor(OpticalConductorResponse<'a>),
+    /// Original metal, Cauchy, tabulated or Sellmeier optical family. Dielectric
+    /// intensity absorption supplies k=alpha*lambda_vac/(4*pi); RGB-only input
+    /// refuses. The same complete source supplies real scalar permeability.
+    OpticalMaterial(OpticalMaterialResponse<'a>),
 }
 impl<'a> DielectricResponse<'a> {
     pub fn material(self) -> &'a ResolvedMaterialStatePoint {
@@ -88,6 +92,7 @@ impl<'a> DielectricResponse<'a> {
             Self::Ohmic(conductor) => conductor.material(),
             Self::DebyeWithOhmic { dielectric, .. } => dielectric.material(),
             Self::OpticalConductor(response) => response.material(),
+            Self::OpticalMaterial(response) => response.material(),
         }
     }
 
@@ -121,6 +126,7 @@ impl<'a> DielectricResponse<'a> {
                 C64::new(epsilon.re, epsilon.im - positive(sigma / omega)?)
             }
             Self::OpticalConductor(response) => response.permittivity_f_m(omega)?,
+            Self::OpticalMaterial(response) => response.permittivity_f_m(omega)?,
         };
         if !finite(epsilon) || epsilon == C64::ZERO || epsilon.im > 0.0 {
             return Err(ReflectionError::Invalid(
@@ -306,7 +312,9 @@ impl<'a> PlanarDielectricInterface<'a> {
             } => {
                 shared_ohmic_conductivity(dielectric, conductor)?;
             }
-            DielectricResponse::Debye(_) | DielectricResponse::OpticalConductor(_) => {}
+            DielectricResponse::Debye(_)
+            | DielectricResponse::OpticalConductor(_)
+            | DielectricResponse::OpticalMaterial(_) => {}
         }
         Ok(Self {
             incident,

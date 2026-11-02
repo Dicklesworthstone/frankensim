@@ -121,7 +121,7 @@ pub fn resolve_visible_sellmeier_state_point(
     visible_sellmeier_from_resolved(resolved, spectral)
 }
 
-fn visible_sellmeier_from_resolved(
+pub(super) fn visible_sellmeier_from_resolved(
     resolved: ResolvedMaterialStatePoint,
     spectral: bool,
 ) -> Result<VisibleSellmeierStatePoint, MaterialStatePointError> {

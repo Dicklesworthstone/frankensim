@@ -2090,6 +2090,42 @@ skin-depth limit. This is not a mesh
 Maxwell solver, transient wave model, or experimental
 qualification of an otherwise static material at an optical frequency.
 
+### Visible optical sources in the original Maxwell owners
+
+`OpticalConductorResponse` retains the original visible metal n/k behavior.
+`OpticalMaterialResponse` additionally borrows a `VisibleOpticalStatePoint`
+containing the original conductor, Cauchy, tabulated dielectric or Sellmeier
+family. `DielectricResponse::OpticalMaterial` feeds these sources through the
+same interface, coherent film, internal-field and vector-beam owners. The
+incident port retains its existing explicit lossless epsilon/mu admission. The
+original family can be extended with explicit permeability using
+`VisibleOpticalStatePoint::with_additional_requirements`; original claims and
+receipts are retained, newly required properties come from the same immutable
+card and exact state, and all properties refresh together. Real positive
+absolute mu is required; no nonmagnetic default or DC loss is inserted.
+
+Dielectric sources must supply the typed spectral intensity absorption alpha
+[power nepers/metre]. The bridge retains their phase-index law, interpolates
+alpha (not transmission or k), and uses `k = alpha*lambda_vac/(4*pi)` with vacuum
+wavelength in metres. With exp(+i omega t), `N = n-i*k` and
+`epsilon = N*N/(mu*c0*c0)`. This reproduces power attenuation exp(-alpha*d);
+the field amplitude decays at half that exponent. Interface reflection and
+scattering cannot be relabeled as bulk absorption. RGB transmittance, missing
+spectral knots and unowned frequency/field/deformation source coordinates
+refuse rather than supplying a substitute spectrum or zero absorption.
+
+Every family stays within its original 380--780 vacuum-nm spectral convention.
+Cauchy B/C retain SI m²/m⁴; Sellmeier resonance parameters retain SI m². Active
+Sellmeier poles anywhere in the complete band refuse, including between source
+knots, and the phase index must remain finite and positive. Source refresh
+readmits these restrictions. A passive homogeneous monochromatic response does
+not establish causal time-domain dispersion, broadband emissivity, scattering,
+anisotropy or experimental material qualification. Focused source-bound tests
+compare all three dielectric families with independent Fresnel and film sums,
+preserve original receipts and same-state magnetic refresh, and check RGB,
+source-card, pole and adjacent-frequency refusals. The pure constitutive leaf
+has separate native tests for SI dispersion, attenuation and band admission.
+
 ### Coherent finite dielectric films
 
 `plane_wave::layers::PlanarDielectricLayers` prepares up to 64 ordered finite

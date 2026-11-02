@@ -2827,6 +2827,60 @@ impl VisibleOpticalStatePoint {
         }
     }
 
+    /// Extend this exact optical snapshot with name-disjoint source requirements.
+    /// The original family, absorption schema and every selected optical
+    /// receipt remain fixed. This permits a wave consumer to retain explicitly
+    /// sourced permeability in the SAME bundle without reselecting its optics.
+    /// The ordinary immutable-card, coordinate and property-count admission
+    /// applies atomically; the added properties participate in later refreshes.
+    pub fn with_additional_requirements(
+        &self,
+        card: &MaterialCard,
+        requirements: &[ScalarPropertyRequirement],
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, MaterialStatePointError> {
+        // Scalar optical reconstruction uses unique canonical names. The
+        // generic material bundle also permits distinct same-name tensor keys;
+        // adding one here cannot shadow an already selected optical property.
+        let count = self.resolved().properties().len().saturating_add(requirements.len());
+        if count > MAX_MATERIAL_STATE_PROPERTIES {
+            return Err(MaterialStatePointError::RequirementCount {
+                observed: count,
+                maximum: MAX_MATERIAL_STATE_PROPERTIES,
+            });
+        }
+        for requirement in requirements {
+            if self.resolved().properties().iter().any(|property| {
+                property.requirement().name() == requirement.name()
+            }) {
+                return Err(MaterialStatePointError::DuplicateRequirement {
+                    property: requirement.name().to_owned(),
+                });
+            }
+        }
+        let resolved = self
+            .resolved()
+            .with_additional_requirements(card, requirements, selection)?;
+        match self {
+            Self::Conductor(_) => {
+                VisibleConductorStatePoint::try_from_material(resolved).map(Self::Conductor)
+            }
+            Self::Dielectric(source) => visible_dielectric_from_resolved(
+                resolved,
+                matches!(source.absorption(), VisibleDielectricAbsorption::Spectral { .. }),
+            )
+            .map(Self::Dielectric),
+            Self::TabulatedDielectric(_) => {
+                visible_tabulated_dielectric_from_resolved(resolved).map(Self::TabulatedDielectric)
+            }
+            Self::DielectricSellmeier(source) => sellmeier::visible_sellmeier_from_resolved(
+                resolved,
+                matches!(source.absorption(), VisibleDielectricAbsorption::Spectral { .. }),
+            )
+            .map(Self::DielectricSellmeier),
+        }
+    }
+
     /// Refresh the original optical family and source claims at a new complete
     /// physical condition. A different family becoming available does not
     /// replace the admitted law. All original quantity conventions, validity

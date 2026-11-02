@@ -41,7 +41,9 @@ use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 
 /// Accepted-temperature optical refresh on the same spatial thermal timeline.
 pub mod thermo_optical;
-pub use thermo_optical::{ThermoOpticalLayer, ThermoOpticalWaveHeating, ThermoOpticalWaveStep};
+pub use thermo_optical::{
+    ThermoOpticalLayer, ThermoOpticalSource, ThermoOpticalWaveHeating, ThermoOpticalWaveStep,
+};
 
 /// One monochromatic two-face drive in peak tangential E [V/m]. Both sources
 /// share frequency, transverse wavevector, polarization and exp(+i omega t).
