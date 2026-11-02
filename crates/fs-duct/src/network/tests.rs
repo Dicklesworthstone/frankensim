@@ -4,6 +4,7 @@ use fs_math::det;
 use std::time::Instant;
 
 mod coherent;
+mod field;
 mod loaded;
 mod porous;
 mod observation;

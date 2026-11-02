@@ -2731,3 +2731,59 @@ certificate. Capacity/cancellation refuse explicitly.
 `modal::time_domain::ModalEnd::Ports` retains every mouth coordinate and exposes all retained modes on both faces. Original port order is inlet modes followed by mouth modes; each input is volume flow into the region and each output is conjugate modal pressure. The right-face input therefore has the opposite sign to positive axial flow. No characteristic matching law is substituted for an evanescent mode. The two wave-coordinate references use the actual inlet and outlet areas separately.
 
 The original smooth-profile mass/stiffness assembly, radial roots, coupling matrix, canonical state, cancellation and complete-state capacity remain the owners. No coordinate is removed to fit a budget. The new full two-face cylinder regression checks the complete impedance matrix for propagating and evanescent modes, its axial convergence on three rungs, and the corresponding bounded reflection matrix. The lossless, axisymmetric, fixed-gas spatial model retains its original limits; these ports do not supply higher-mode viscothermal loss, an exterior radiation law or a nonlinear interface certificate.
+
+### Native internal network fields and interference
+
+`network::field::PreparedNetworkFields` retains the original loaded graph's
+source-to-internal-field transfers. One retained scattering inverse serves
+every source column, with the original source impedances, mutual source bank,
+external coupled loads, compact-hole corrections and regional edge gases.
+It does not require an open-circuit network impedance to exist. The same
+prepared result exposes its exterior `PreparedNetworkSources` work owner.
+
+Probes select original segment inlet/outlet planes or arbitrary stations
+inside an authored cylinder. Compact zero-length holes retain two distinct
+states at one axial coordinate. Cone/profile endpoints use their original
+propagation blocks and resolution; interior cone/profile stations are not
+inferred. Radius-step sides retain their own areas. Returned volume flow is
+positive along the edge's from-to orientation, while particle velocity is
+the section mean U/A, not a radial viscothermal velocity profile.
+
+A native segment-to-block index map leaves the original chain arithmetic
+unchanged. Prefix/suffix scattering operators reconstruct each station from
+both original incident endpoints, solving their local feedback relation.
+Pressure and velocity nodes require no local impedance division. Only
+forward-decaying wave factors are evaluated, including when the chain is
+opaque. Source contractions use double-double products and accumulation
+before coherent power or finite-window moments are formed.
+
+`sample` returns actual p, U, mean axial velocity and signed cycle-mean work.
+`observe_window` combines an optional deterministic source mean with explicit
+unit, mutually uncorrelated proper-complex factors at this prepared frequency.
+It reports real-field means, uncentered squares, signed power and intensity,
+using the shared analytic window kernels. Factor phases are retained
+within each entire network realization; distinct factors are not spuriously
+interfered. Finite-window boundary work includes storage and is not local
+dissipated heat. Nonuniform profiles report detector-weighted averages;
+mean power times support duration is not unweighted physical work.
+Cross-frequency statistics require a spectral observation
+owner; this native spatial bank does not infer a clock alignment, spectrum,
+Gaussian distribution or stationarity.
+
+Preparation is bounded by the original 32-source, 256-edge and 800-unknown
+graph limits, plus at most 1024 probes, caller-declared transfer entries and
+at most 131072 selected-edge propagation blocks. Prefix/suffix preparation
+is linear in retained blocks, plus per-probe/source contractions; there is
+no source-by-source factorization. Queries have at most 256 factors and
+perform no propagation rebuild or network solve. Cancellation polls bracket
+the existing synchronous dense solve and occur between propagation blocks,
+probes and source columns; that original factorization itself is not
+internally interruptible. Failed/cancelled calls return no partially accepted
+field bank or observation.
+
+G1/G3/G4 regressions in `network/tests/field.rs` cover independent traveling
+waves with complex viscothermal impedance, the loaded exact half-wave case,
+complementary standing-wave pressure/flow nodes, finite-window real-signal
+integration with four proper latent phases, opaque two-sided boundary layers,
+compact-hole flow removal, graph/source reindexing, budgets and cancellation.
+They are synthetic numerical/model checks, not experimental duct validation.

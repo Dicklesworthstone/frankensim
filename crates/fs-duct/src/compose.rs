@@ -1099,6 +1099,27 @@ pub(crate) fn duct_chain_in_exterior(
     wall: WallModel<'_>,
     options: ComposeOptions,
     compact_corrections: bool,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(PreparedChain, Vec<PreparedOpenHole>), DuctError> {
+    duct_chain_with_segment_boundaries(
+        duct, state, exterior, omega, loss, wall, options,
+        compact_corrections, None, cancelled,
+    )
+}
+
+/// The original chain plus block indices at every authored segment boundary.
+/// Zero-length compact holes retain separate inlet and outlet boundaries.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn duct_chain_with_segment_boundaries(
+    duct: &Duct,
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    wall: WallModel<'_>,
+    options: ComposeOptions,
+    compact_corrections: bool,
+    mut boundary_indices: Option<&mut Vec<usize>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<(PreparedChain, Vec<PreparedOpenHole>), DuctError> {
     options.validate()?;
@@ -1122,6 +1143,9 @@ pub(crate) fn duct_chain_in_exterior(
     let sites = crate::collect_open_hole_sites(duct);
     let mut hole_index = 0;
     for (index, s) in duct.segments.iter().enumerate() {
+        if let Some(boundaries) = boundary_indices.as_deref_mut() {
+            boundaries.push(blocks.len());
+        }
         poll(&mut cancelled, index)?;
         match *s {
             Segment::Profile { ref profile, steps } => {
@@ -1241,6 +1265,9 @@ pub(crate) fn duct_chain_in_exterior(
         reference_impedance: reference,
         min_shear_number: min_shear,
     };
+    if let Some(boundaries) = boundary_indices {
+        boundaries.push(chain.blocks.len());
+    }
     Ok((chain, open_holes))
 }
 

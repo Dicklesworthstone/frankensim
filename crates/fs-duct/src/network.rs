@@ -21,6 +21,7 @@ pub use loaded::{
     network_prepare_sources, network_prepare_sources_regional,
 };
 pub mod observation;
+pub mod field;
 mod prepared;
 pub use prepared::{
     NetworkCoherenceBudget, NetworkSourceCoordinate, NetworkSourceQuantity,

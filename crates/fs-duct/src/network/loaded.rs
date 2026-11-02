@@ -335,6 +335,8 @@ struct RetainedSourceSystem<'a> {
     labels: Vec<String>,
     sources: ResolvedSources<'a>,
     wave: LoadedWaveSystem,
+    edges: Vec<WaveEdge>,
+    pressure_count: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -548,6 +550,8 @@ fn retained_source_system<'a>(
         labels: labels.iter().map(|label| (*label).to_owned()).collect(),
         sources,
         wave,
+        edges: wave_edges,
+        pressure_count: pressures,
     })
 }
 
@@ -834,4 +838,74 @@ fn prepare_sources_bound(
         }
         Err(error) => Err(error),
     }
+}
+
+/// One loaded inverse supplies both exterior port and selected edge-end fields.
+/// Edge indices follow stable edge-id order. Each entry is [p_from, U_from,
+/// p_to, U_to], with BOTH volume flows directed from -> to.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_spatial_transfers(
+    net: &DuctNetwork,
+    exterior: &GasState,
+    media: Option<&NetworkMedia>,
+    omega: f64,
+    loss: LossModel,
+    sources: &[PortSource],
+    bank: Option<&CoupledSourceBank>,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+    selected_edges: &[usize],
+) -> Result<(PreparedNetworkSources, Vec<[C64; 4]>), DuctError> {
+    let system = retained_source_system(
+        net, exterior, media, omega, loss, sources, bank, loads, coupled,
+    )?;
+    let wave = &system.wave;
+    let count = wave.driven.len();
+    let mut pressure = vec![C64::ZERO; system.labels.len() * count];
+    let mut flow = pressure.clone();
+    let mut endpoints = vec![[C64::ZERO; 4]; selected_edges.len() * count];
+    for (column, &source) in wave.driven.iter().enumerate() {
+        let (slot, scale) = if system.sources.conditions[source]
+            .and_then(PortExcitation::flow).is_some()
+        {
+            (wave.port_slots[source], wave.row_scales[wave.port_slots[source]])
+        } else {
+            let slot = wave.current_slots[source].expect("pressure-source current retained");
+            (slot, wave.pressure_scales[slot])
+        };
+        let value = |row: usize| wave.inv[row * wave.n + slot].scale(scale);
+        for port in 0..system.labels.len() {
+            pressure[port * count + column] = value(wave.port_slots[port]);
+            flow[port * count + column] = match wave.current_slots[port] {
+                Some(row) => {
+                    let q = value(row);
+                    C64::new(q.re / wave.reference, q.im / wave.reference)
+                }
+                None if port == source => C64::ONE,
+                None => C64::ZERO,
+            };
+        }
+        for (selected, &index) in selected_edges.iter().enumerate() {
+            let edge = system.edges.get(index).ok_or_else(|| bad("unknown spatial edge index"))?;
+            let current = system.pressure_count + 2 * index;
+            let reference = edge.two_port.reference_impedance;
+            let incoming = value(current);
+            let outgoing = value(current + 1);
+            endpoints[selected * count + column] = [
+                edge.ends[0].map_or(C64::ZERO, value),
+                C64::new(incoming.re / reference, incoming.im / reference),
+                edge.ends[1].map_or(C64::ZERO, value),
+                C64::new(-outgoing.re / reference, -outgoing.im / reference),
+            ];
+        }
+    }
+    if endpoints.iter().flatten().any(|&z| !finite(z)) {
+        return Err(DuctError::Singular);
+    }
+    Ok((
+        PreparedNetworkSources::from_transfers(
+            omega, &system.labels, &system.sources, pressure, flow,
+        )?,
+        endpoints,
+    ))
 }
