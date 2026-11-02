@@ -3026,6 +3026,23 @@ legacy pressure coefficients are zeroed only in the observer's private clone,
 so the admitted receiver owns the pressure ceiling. A failed step publishes no
 filter/delay/mechanical state. Block render failures poison their stream wrapper.
 
+`BroadbandModalObserver::prepare_linear_forcing` additionally prepares exact
+first-order-held force observation at the original sample clock. The continuous
+receiver is augmented with one force-increment coordinate in normalized time;
+only its extra filter moment column is retained. `step_linear(start, end)` then
+advances the receiver along the same force ramp used by the shared modal owner
+for motion, signed input work and physical viscous heat. The warm step reuses
+allocated buffers, with no fitting, exponential preparation or transcendentals.
+All pressure/mechanical gates precede publication of mechanics, filter memory
+and delay together. Continuous filters retain bitwise held-step compatibility
+when endpoints coincide. Constant real velocity gains admit free/soft motion;
+constant complex narrow-band quadrature explicitly refuses arbitrary ramps.
+This remains a one-way receiver and adds no mechanical load or damping heat.
+The existing sampled-delay approximation and producer/fit error scope remain.
+Six focused unit regressions cover independent polynomial convolution and
+physical ODE/work/heat integration, time subdivision, rollback, held-step
+compatibility and real/complex feedthrough boundaries.
+
 The pure delay uses exact integer taps or an explicit centered Blackman/sinc
 fractional kernel; all taps must be causal within the physical delay. History
 starts at zero. This approximates a bandlimited sampled pressure history, not

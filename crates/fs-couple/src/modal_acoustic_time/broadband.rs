@@ -9,6 +9,8 @@ pub use crate::broadband_radiation::modal::{
 use crate::broadband_radiation::modal::{admit_modal_samples, fit_modal_velocity_transfers};
 use fs_math::{c64::C64, det};
 
+mod linear;
+
 /// Maximum lag in a receiver's explicit sampled delay history.
 pub const MAX_MODAL_OBSERVER_DELAY_SAMPLES: usize = 1_048_576;
 /// Aggregate dense exponential-entry budget across every retained mode.
@@ -135,6 +137,9 @@ pub struct BroadbandModalObserver {
     constant: Option<Vec<C64>>,
     delay: Delay,
     report: BroadbandModalReport,
+    // One extra force-moment column per continuous filter, prepared explicitly.
+    // None means the warm linear-force path has not been admitted/prepared.
+    linear_force_gains: Option<Vec<Vec<f64>>>,
 }
 impl BroadbandModalObserver {
     /// Fit/gate the complete declared source and prepare exact augmented ZOH.
@@ -252,6 +257,7 @@ impl BroadbandModalObserver {
             constant: bank.constant,
             delay,
             report: report.clone(),
+            linear_force_gains: None,
         };
         Ok((observer, report))
     }
