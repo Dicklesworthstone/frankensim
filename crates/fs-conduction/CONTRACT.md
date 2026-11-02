@@ -3351,3 +3351,31 @@ and exact chart identity. All four changed Rust files pass parser checks and
 tracked diffs pass whitespace checks. Native conduction compilation/execution
 remains unverified under the existing memory/disk constraint; these cases are
 included by the existing thermal-history CI target, not claimed as passed.
+
+## Phase-continuous source clocks across enthalpy feedback intervals
+
+The additive `solve_lumped_enthalpy_spectrum_from_clock_dd[_cancellable]`
+entrypoints accept a canonical DD absolute origin. Finite components are
+normalized without rounding the origin through f64; unrepresentable origins
+refuse before source work. That explicit origin is authoritative and replaces
+the supplied controls' legacy `start_s`. The returned controls retain its
+rounded compatibility view, while `source_start_s_dd()` retains the complete
+clock. The original f64 entrypoints delegate with a zero low component.
+
+A consumer that refreshes the original field/material owner can continue from
+the returned origin plus the final accepted DD elapsed time. Its next interval
+therefore retains carrier/beat phase even when a short interval lies below an
+f64 epoch's spacing. The consuming `into_samples()` moves the actual accepted
+thermal history out of a march without a clone or a borrow of a temporary
+source spectrum. Energy, work and other report getters remain available before
+consumption. These APIs do not add or imply a constitutive feedback law,
+transient polarization-history transfer or a nonlinear temperature-error bound.
+
+Three focused regressions cover repeated accepted intervals at a large epoch
+with a significant fractional-clock contribution, exact accepted-state/history
+composition and source-energy closure, zero-copy history extraction, canonical
+origin admission/cancellation, and unchanged native results through the
+existing f64 API. They pass the repository-pinned native Rust formatter and independent source
+review. They have not yet been executed: the execution environment was reset
+after exhausting disk space, removing its cached native dependency libraries.
+The prior enthalpy suite's reported passes above do not cover these changes.

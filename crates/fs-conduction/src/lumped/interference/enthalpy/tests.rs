@@ -867,3 +867,214 @@ fn physical_source_joules_survive_unit_conversion_before_tiny_time_integration()
         );
     }
 }
+
+#[test]
+fn dd_clock_feedback_intervals_keep_fractional_epoch_and_native_accepted_history() {
+    let curve = phase_curve(ContentHash([0xa1; 32]));
+    let body = body(&curve);
+    let source = modulated(1_000.0, 1_000.0, 0.5);
+    let origin = Dd::from_f64(1e16) + Dd::from_f64(0.25);
+    assert_eq!(origin.to_f64(), 1e16);
+    assert_ne!(origin.lo, 0.0);
+    let cfg = LumpedEnthalpyMarchConfig {
+        duration_s: 0.5,
+        maximum_step_s: 0.125,
+        ..config()
+    };
+    // The DD entrypoint's source_start_s is authoritative; the compatibility
+    // controls view must never replace its physically significant low part.
+    let ctl = LumpedEnthalpySpectrumControls {
+        start_s: -123.0,
+        source_ripple_tolerance_j: 100.0,
+        ..controls()
+    };
+    let full = solve_lumped_enthalpy_spectrum_from_clock_dd(
+        binding(&body, &source),
+        BiotGate::corpus_default(),
+        cfg,
+        ctl,
+        origin,
+    )
+    .unwrap();
+    assert_eq!(full.source_start_s_dd(), origin);
+    assert_eq!(full.controls().start_s, origin.to_f64());
+    let exact_source = source
+        .causal_integral_from_clock_dd(origin, cfg.duration_s, 0.0)
+        .unwrap()
+        .integral_dd();
+    near(
+        (full.energy().source_input_j_dd() - exact_source).to_f64(),
+        0.0,
+        1e-9,
+    );
+    let rounded = run(
+        binding(&body, &source),
+        cfg,
+        LumpedEnthalpySpectrumControls {
+            start_s: origin.to_f64(),
+            ..ctl
+        },
+    );
+    assert!(
+        (rounded.energy().source_input_j_dd() - full.energy().source_input_j_dd())
+            .to_f64()
+            .abs()
+            > 1.0
+    );
+
+    let half_cfg = LumpedEnthalpyMarchConfig {
+        duration_s: 0.25,
+        ..cfg
+    };
+    let first = solve_lumped_enthalpy_spectrum_from_clock_dd(
+        binding(&body, &source),
+        BiotGate::corpus_default(),
+        half_cfg,
+        ctl,
+        origin,
+    )
+    .unwrap();
+    let first_energy = first.energy();
+    let first_last = *first.samples().last().unwrap();
+    let resumed_origin = first.source_start_s_dd() + first_last.elapsed_s_dd();
+    let original_buffer = first.samples().as_ptr();
+    let retained = first.into_samples();
+    assert_eq!(retained.as_ptr(), original_buffer);
+    assert_eq!(retained.as_slice(), &full.samples()[..retained.len()]);
+    let resumed = solve_lumped_enthalpy_spectrum_from_clock_dd_cancellable(
+        binding(&body, &source),
+        BiotGate::corpus_default(),
+        LumpedEnthalpyMarchConfig {
+            initial_specific_enthalpy_j_kg: first_last.phase_state().specific_enthalpy_j_kg(),
+            ..half_cfg
+        },
+        ctl,
+        resumed_origin,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(resumed.source_start_s_dd(), origin + Dd::from_f64(0.25));
+    assert_eq!(
+        resumed.samples().last().unwrap().phase_state(),
+        full.samples().last().unwrap().phase_state()
+    );
+    near(
+        (first_energy.source_input_j_dd() + resumed.energy().source_input_j_dd()
+            - full.energy().source_input_j_dd())
+        .to_f64(),
+        0.0,
+        1e-25,
+    );
+    for (resumed_sample, full_sample) in resumed.samples()[1..]
+        .iter()
+        .zip(&full.samples()[retained.len()..])
+    {
+        assert_eq!(resumed_sample.phase_state(), full_sample.phase_state());
+        assert_eq!(resumed_sample.energy(), full_sample.energy());
+        assert_eq!(
+            resumed_sample.elapsed_s_dd() + first_last.elapsed_s_dd(),
+            full_sample.elapsed_s_dd()
+        );
+    }
+}
+
+#[test]
+fn dd_clock_origin_normalizes_and_rejects_nonfinite_or_unrepresentable_pairs() {
+    let curve = phase_curve(ContentHash([0xa2; 32]));
+    let body = body(&curve);
+    let source = constant(0.0);
+    let cfg = LumpedEnthalpyMarchConfig {
+        duration_s: 0.0,
+        ..config()
+    };
+    for (hi, lo) in [(1e16, 2.25), (-1e16, -2.25), (1e16, -1e16)] {
+        let march = solve_lumped_enthalpy_spectrum_from_clock_dd(
+            binding(&body, &source),
+            BiotGate::corpus_default(),
+            cfg,
+            controls(),
+            Dd { hi, lo },
+        )
+        .unwrap();
+        let canonical = Dd::from_f64(hi) + Dd::from_f64(lo);
+        assert_eq!(march.source_start_s_dd(), canonical);
+        assert_eq!(march.controls().start_s, canonical.to_f64());
+        assert_eq!(march.samples().len(), 1);
+        assert_eq!(march.energy(), LumpedEnthalpySpectrumEnergy::ZERO);
+    }
+    for origin in [
+        Dd {
+            hi: f64::NAN,
+            lo: 0.0,
+        },
+        Dd {
+            hi: 0.0,
+            lo: f64::INFINITY,
+        },
+        Dd {
+            hi: f64::NEG_INFINITY,
+            lo: 0.0,
+        },
+        Dd {
+            hi: f64::MAX,
+            lo: f64::MAX,
+        },
+    ] {
+        assert!(
+            solve_lumped_enthalpy_spectrum_from_clock_dd(
+                binding(&body, &source),
+                BiotGate::corpus_default(),
+                cfg,
+                controls(),
+                origin,
+            )
+            .is_err()
+        );
+    }
+    assert!(matches!(
+        solve_lumped_enthalpy_spectrum_from_clock_dd_cancellable(
+            binding(&body, &source),
+            BiotGate::corpus_default(),
+            cfg,
+            controls(),
+            Dd::ZERO,
+            || true,
+        ),
+        Err(ConductionError::Cancelled { at: 0, .. })
+    ));
+}
+
+#[test]
+fn original_f64_clock_api_retains_exact_native_results() {
+    let curve = phase_curve(ContentHash([0xa3; 32]));
+    let body = body(&curve);
+    let source = modulated(200.0, 150.0, 0.2);
+    let cfg = LumpedEnthalpyMarchConfig {
+        duration_s: 0.5,
+        maximum_step_s: 0.125,
+        ..config()
+    };
+    let ctl = LumpedEnthalpySpectrumControls {
+        start_s: -17.25,
+        source_ripple_tolerance_j: 100.0,
+        ..controls()
+    };
+    let original = run(binding(&body, &source), cfg, ctl);
+    let dd = solve_lumped_enthalpy_spectrum_from_clock_dd(
+        binding(&body, &source),
+        BiotGate::corpus_default(),
+        cfg,
+        ctl,
+        Dd::from_f64(ctl.start_s),
+    )
+    .unwrap();
+    assert_eq!(original.source_start_s_dd(), Dd::from_f64(ctl.start_s));
+    assert_eq!(dd.samples(), original.samples());
+    assert_eq!(dd.energy(), original.energy());
+    assert_eq!(dd.attempts(), original.attempts());
+    assert_eq!(dd.spectral_work(), original.spectral_work());
+    assert_eq!(
+        dd.cumulative_absolute_energy_residual_j_dd(),
+        original.cumulative_absolute_energy_residual_j_dd()
+    );
+}

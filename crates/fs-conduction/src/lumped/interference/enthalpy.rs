@@ -173,6 +173,7 @@ pub struct LumpedEnthalpySpectrumMarch<'a> {
     gate: BiotGate,
     config: LumpedEnthalpyMarchConfig,
     controls: LumpedEnthalpySpectrumControls,
+    source_start_s: Dd,
     maximum_biot: f64,
     admitted_maximum_step_s: f64,
     attempts: usize,
@@ -199,6 +200,13 @@ impl<'a> LumpedEnthalpySpectrumMarch<'a> {
         self.controls
     }
 
+    /// Canonical absolute start in the declared source clock, including its
+    /// low component. Use this plus the last sample's elapsed DD time when
+    /// resuming or refreshing a prescribed source.
+    pub const fn source_start_s_dd(&self) -> Dd {
+        self.source_start_s
+    }
+
     pub const fn maximum_biot(&self) -> f64 {
         self.maximum_biot
     }
@@ -217,6 +225,13 @@ impl<'a> LumpedEnthalpySpectrumMarch<'a> {
 
     pub fn samples(&self) -> &[LumpedEnthalpySpectrumSample] {
         &self.samples
+    }
+
+    /// Move the accepted history out of a march whose source may be temporary.
+    /// No samples are cloned or discarded. Capture any desired energy/work
+    /// report before consuming the march; the source binding is not retained.
+    pub fn into_samples(self) -> Vec<LumpedEnthalpySpectrumSample> {
+        self.samples
     }
 
     pub const fn energy(&self) -> LumpedEnthalpySpectrumEnergy {
@@ -252,10 +267,74 @@ pub fn solve_lumped_enthalpy_spectrum_cancellable<'a>(
     gate: BiotGate,
     config: LumpedEnthalpyMarchConfig,
     controls: LumpedEnthalpySpectrumControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<LumpedEnthalpySpectrumMarch<'a>, ConductionError> {
+    solve_lumped_enthalpy_spectrum_from_clock_dd_cancellable(
+        binding,
+        gate,
+        config,
+        controls,
+        Dd::from_f64(controls.start_s),
+        cancelled,
+    )
+}
+
+/// Native enthalpy evolution from a DD absolute source-clock origin.
+///
+/// `source_start_s` is authoritative. Its finite components are normalized
+/// without an intermediate f64 time conversion. The returned controls retain
+/// its rounded f64 view in `start_s`; the supplied controls' `start_s` is
+/// replaced. All other controls and original material/thermal admission apply.
+pub fn solve_lumped_enthalpy_spectrum_from_clock_dd<'a>(
+    binding: LumpedEnthalpyPowerBinding<'a>,
+    gate: BiotGate,
+    config: LumpedEnthalpyMarchConfig,
+    controls: LumpedEnthalpySpectrumControls,
+    source_start_s: Dd,
+) -> Result<LumpedEnthalpySpectrumMarch<'a>, ConductionError> {
+    solve_lumped_enthalpy_spectrum_from_clock_dd_cancellable(
+        binding,
+        gate,
+        config,
+        controls,
+        source_start_s,
+        || false,
+    )
+}
+
+/// Cancellable DD-clock entrypoint for phase-continuous feedback intervals.
+///
+/// The absolute origin remains in DD for every analytic source integral.
+/// A caller can refresh the original field/material owner between intervals
+/// and continue at `march.source_start_s_dd() + last.elapsed_s_dd()` without
+/// dropping a short elapsed time at a large epoch. This only preserves the
+/// declared source clock: refreshing constitutive coefficients still requires
+/// its own physical time-level and feedback-accuracy contract.
+///
+/// Like the f64 entrypoint, this returns the complete accepted trajectory
+/// atomically. Nonfinite or unrepresentable origins refuse before source work.
+pub fn solve_lumped_enthalpy_spectrum_from_clock_dd_cancellable<'a>(
+    binding: LumpedEnthalpyPowerBinding<'a>,
+    gate: BiotGate,
+    config: LumpedEnthalpyMarchConfig,
+    mut controls: LumpedEnthalpySpectrumControls,
+    source_start_s: Dd,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<LumpedEnthalpySpectrumMarch<'a>, ConductionError> {
     let body = binding.body;
     poll(&mut cancelled, 0)?;
+    if !source_start_s.hi.is_finite() || !source_start_s.lo.is_finite() {
+        return Err(lumped_error(
+            &body.name,
+            "absolute source clock must have finite DD components".to_owned(),
+        ));
+    }
+    let clock_origin = finite(
+        body,
+        Dd::from_f64(source_start_s.hi) + Dd::from_f64(source_start_s.lo),
+        "absolute source-clock origin",
+    )?;
+    controls.start_s = clock_origin.to_f64();
     validate_enthalpy_config(body, config)?;
     admit_controls(binding, config, controls)?;
     let maximum_biot = body.maximum_biot(config.radiation_temperature_k);
@@ -353,7 +432,6 @@ pub fn solve_lumped_enthalpy_spectrum_cancellable<'a>(
         energy: LumpedEnthalpySpectrumEnergy::ZERO,
     });
     let total_duration = Dd::from_f64(config.duration_s);
-    let clock_origin = Dd::from_f64(controls.start_s);
     let mut elapsed = Dd::ZERO;
     let mut previous_h = config.initial_specific_enthalpy_j_kg;
     let mut totals = LumpedEnthalpySpectrumEnergy::ZERO;
@@ -463,6 +541,7 @@ pub fn solve_lumped_enthalpy_spectrum_cancellable<'a>(
         gate,
         config,
         controls,
+        source_start_s: clock_origin,
         maximum_biot,
         admitted_maximum_step_s: admitted_step,
         attempts,
