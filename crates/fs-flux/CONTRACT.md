@@ -419,20 +419,39 @@ The checkpoint also retains the full accepted-request fingerprint for
 provenance, but never mistakes it for a static restart constraint.
 
 The discretization retains pressure-driven Poiseuille mass flux plus moving-wall
-Couette mass flux, implicit storage, uniform squeeze through exact old/new gap
-values, upper-wall Couette shear/relative dissipation heat, and signed normal
-moving-gap power `-integral(p dh/dt dx)`. It also carries
-signed boundary/vent enthalpy transport from a caller-declared specific
-enthalpy; this transport receipt is not a thermochemical calculation. Gauge
-load is relative to a separately declared absolute pressure reference, never
-implicitly the initial condition. Per-cell receipts name both gas-on-upper-wall
-and upper-wall-on-gas normal/tangential tractions with opposite signs; the old
-`upper_wall_shear_pa` remains only as the upper-wall-on-gas alias. `Sealed`,
-two-reservoir `Open`, and one named-cell `Vented` topology are admitted.  The
-receipt retains gas storage, every boundary/vent mass flux, their global closure
-defect, pressure load, wall shear, wall work/heat, residual, iteration count,
-and continuum-envelope maxima. A checkpoint binds active pressure and previous
-gap values to its model/case/authority identity only after a converged step; no
+Couette mass flux, implicit storage, and squeeze through exact old/new gap
+values. Both walls receive the full no-slip Couette--Poiseuille tangential
+traction: wall-on-gas values are `mu*(U_upper-U_lower)/h + h*p_x/2` at the
+upper wall and `-mu*(U_upper-U_lower)/h + h*p_x/2` at the lower wall. The
+pressure contribution uses the accepted Reynolds face gradient and face gap,
+averaged onto each cell. Gas-on-wall tractions have exactly opposite signs;
+the old `upper_wall_shear_pa` remains the upper-wall-on-gas alias. Upper-wall
+normal traction and gauge load retain their explicit sign/reference conventions.
+
+Viscous dissipation includes both `mu*(U_upper-U_lower)^2/h` and
+`h^3*p_x^2/(12*mu)`. Pressure-driven heat is integrated on full interior face
+intervals and half intervals at the boundaries, before averaging gradients,
+so opposing gradients cannot erase dissipation. Closed exterior faces infer
+`p_x = 12*mu*U_mean/h^2` from their zero total flux; moving walls do not
+silently become zero-gradient boundaries. The wall-work receipt is signed work
+by both tangentially moving walls plus normal moving-gap work
+`-integral(p dh/dt dx)`; pressure-driven gas can deliver work to moving walls.
+A separate `pressure_gradient_power_to_gas_w_per_m` records
+`-integral(q*p_x dx)`, where `q` is the accepted mass flux divided by the
+same face ideal-gas density. Tangential wall work plus this pressure-force work
+equals viscous dissipation up to roundoff. Normal gap work is separate from
+that identity. This force-work receipt is not boundary enthalpy transport,
+thermostat heat, or a total-energy closure; no gas temperature equation is solved.
+
+Signed boundary/vent enthalpy transport still comes from a caller-declared
+specific enthalpy and is not a thermochemical calculation. Gauge load is relative
+to a separately declared absolute pressure reference, never implicitly the
+initial condition. `Sealed`, two-reservoir `Open`, and one named-cell `Vented`
+topology are admitted. The receipt retains gas storage, every boundary/vent
+mass flux, their global closure defect, pressure load, both-wall shear,
+wall/pressure work and dissipation, residual, iteration count, and
+continuum-envelope maxima. A checkpoint binds active pressure and previous gap
+values to its model/case/authority identity only after a converged step; no
 partial state is published.
 
 `ContactExclusionMask` is an explicit contact handoff, not a gap floor: this
@@ -453,9 +472,12 @@ than minting material/EOS authority.
 
 `tests/gas_film.rs` supplies G0/G1/G3 coverage for uniform sealed equilibrium,
 analytic planar Couette shear/heat, uniform squeeze mass preservation,
-open Poiseuille direction/closure, vent closure, spatial/time refinement of
-analytic limits, reversal and pressure-density scaling, static contact
-exclusion, rarefaction/negative/slip/roughness refusal,
+open Poiseuille direction/closure and exact steady compressible flux/wall load,
+convergent Poiseuille dissipation, sealed co-moving-wall backpressure,
+pressure flow doing work on translating walls, opposing-gradient heat,
+vent closure, spatial/time refinement of analytic limits, reversal and
+pressure-density scaling, static contact exclusion,
+rarefaction/negative/slip/roughness refusal,
 iteration-budget refusal, and deterministic checkpoint replay.  These are
 software/numerical checks of declared equations only.
 

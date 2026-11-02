@@ -150,7 +150,7 @@ pub struct GasFilmGrid1d {
     pub contact_exclusion: ContactExclusionMask,
 }
 
-/// Relative wall motion used by the Reynolds mass flux and Couette receipt.
+/// Wall motion used by Reynolds mass flux and signed mechanical work.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MovingWallInput {
     /// Lower-wall line velocity [m s^-1].
@@ -338,18 +338,32 @@ pub struct GasFilmReceipt {
     pub gas_on_upper_wall_normal_traction_pa: Vec<Option<f64>>,
     /// Per-cell normal traction of upper wall on gas [Pa]; exactly the negative of gas-on-wall.
     pub upper_wall_on_gas_normal_traction_pa: Vec<Option<f64>>,
-    /// Per-cell tangential traction of gas on the upper wall [Pa].
+    /// Per-cell Couette-plus-Poiseuille tangential traction of gas on the upper wall [Pa].
     pub gas_on_upper_wall_tangential_traction_pa: Vec<Option<f64>>,
     /// Per-cell tangential traction of upper wall on gas [Pa]; exactly the negative of gas-on-wall.
     pub upper_wall_on_gas_tangential_traction_pa: Vec<Option<f64>>,
+    /// Per-cell Couette-plus-Poiseuille tangential traction of gas on the lower wall [Pa].
+    pub gas_on_lower_wall_tangential_traction_pa: Vec<Option<f64>>,
+    /// Per-cell tangential traction of lower wall on gas [Pa]; exactly the negative of gas-on-wall.
+    pub lower_wall_on_gas_tangential_traction_pa: Vec<Option<f64>>,
     /// Legacy-named alias for upper-wall-on-gas tangential traction [Pa].
     /// Excluded cells are `None`; new callers should use the explicit field above.
     pub upper_wall_shear_pa: Vec<Option<f64>>,
     /// Normal moving-gap mechanical power into gas, `-integral(p dh/dt dx)` [W m^-1].
     pub normal_gap_power_to_gas_w_per_m: f64,
-    /// Relative-wall mechanical power into gas per unit width [W m^-1].
+    /// Signed work by both translating walls plus normal moving-gap work [W m^-1].
+    ///
+    /// Pressure-driven gas may do work on a moving wall, so this can be negative.
     pub wall_power_to_gas_w_per_m: f64,
-    /// Isothermal viscous heat receipt, equal to non-negative relative-wall power [W m^-1].
+    /// Pressure-gradient force work, `-integral(q dp/dx dx)` [W m^-1].
+    ///
+    /// Here `q` is the accepted mass flux divided by the face ideal-gas density.
+    /// This is not boundary enthalpy transport or a total-energy closure.
+    pub pressure_gradient_power_to_gas_w_per_m: f64,
+    /// Nonnegative Couette-plus-Poiseuille viscous dissipation [W m^-1].
+    ///
+    /// Equals tangential wall work plus pressure-gradient force work up to
+    /// roundoff; normal gap work is separate. No temperature evolution is solved.
     pub viscous_heat_w_per_m: f64,
     /// Maximum admitted Knudsen number.
     pub maximum_knudsen_number: f64,
@@ -1174,6 +1188,88 @@ fn face_fluxes(
     Ok(flux)
 }
 
+// Integrate pressure-driven mechanics over the same face intervals as the
+// Reynolds flux: full cell spacing internally, half spacing at each boundary.
+// Square gradients BEFORE averaging so opposing/sharp gradients retain heat.
+fn pressure_driven_mechanics(
+    pressure: &[f64],
+    gap: &[f64],
+    flux: &[f64],
+    input: &GasFilmInput,
+    spacing: f64,
+    rt: f64,
+) -> Result<(Vec<f64>, f64, f64), GasFilmError> {
+    let mean_velocity = 0.5
+        * (input.wall_motion.lower_tangential_velocity_m_per_s
+            + input.wall_motion.upper_tangential_velocity_m_per_s);
+    let viscosity = input.gas.dynamic_viscosity_pa_s;
+    let active = pressure.len();
+    let mut face_shear = Vec::with_capacity(active + 1);
+    let mut heat = 0.0;
+    let mut pressure_work = 0.0;
+    for (face, mass_flux) in flux.iter().copied().enumerate() {
+        let (face_gap, face_pressure, gradient, distance) = if face > 0 && face < active {
+            (
+                0.5 * (gap[face - 1] + gap[face]),
+                0.5 * (pressure[face - 1] + pressure[face]),
+                (pressure[face] - pressure[face - 1]) / spacing,
+                spacing,
+            )
+        } else {
+            let cell = if face == 0 { 0 } else { active - 1 };
+            let distance = 0.5 * spacing;
+            match input.boundary {
+                GasFilmBoundaryTopology::Open {
+                    left_absolute_pressure_pa,
+                    right_absolute_pressure_pa,
+                } => {
+                    let reservoir = if face == 0 {
+                        left_absolute_pressure_pa
+                    } else {
+                        right_absolute_pressure_pa
+                    };
+                    let gradient = if face == 0 {
+                        (pressure[cell] - reservoir) / distance
+                    } else {
+                        (reservoir - pressure[cell]) / distance
+                    };
+                    (
+                        gap[cell],
+                        0.5 * (pressure[cell] + reservoir),
+                        gradient,
+                        distance,
+                    )
+                }
+                GasFilmBoundaryTopology::Sealed | GasFilmBoundaryTopology::Vented { .. } => {
+                    // A sealed face has q = h U_mean - h^3 p_x/(12 mu) = 0.
+                    // Moving walls therefore require backpressure, not p_x = 0.
+                    let gradient = 12.0 * viscosity * mean_velocity / gap[cell].powi(2);
+                    (gap[cell], pressure[cell], gradient, distance)
+                }
+            }
+        };
+        let gradient = derived(gradient, "face_pressure_gradient_pa_per_m")?;
+        let face_gap = derived(face_gap, "mechanical_face_gap_m")?;
+        let face_pressure = derived(face_pressure, "mechanical_face_pressure_pa")?;
+        let shear = derived(0.5 * face_gap * gradient, "pressure_wall_shear_pa")?;
+        let conductance = derived(
+            face_gap.powi(3) / (12.0 * viscosity),
+            "reynolds_volume_conductance",
+        )?;
+        heat = derived(
+            heat + conductance * gradient * gradient * distance,
+            "poiseuille_viscous_heat_w_per_m",
+        )?;
+        let volume_flux = derived(mass_flux * rt / face_pressure, "face_volume_flux_m2_per_s")?;
+        pressure_work = derived(
+            pressure_work - volume_flux * gradient * distance,
+            "pressure_gradient_power_to_gas_w_per_m",
+        )?;
+        face_shear.push(shear);
+    }
+    Ok((face_shear, heat, pressure_work))
+}
+
 /// Advance one bounded deterministic isothermal gas-film step.
 ///
 /// A successful result is the only publication path.  Iteration-budget failure
@@ -1343,8 +1439,12 @@ pub fn solve_isothermal_gas_film_1d(
     let mut upper_on_gas_normal = Vec::with_capacity(input.grid.gap_m.len());
     let mut gas_on_upper_tangential = Vec::with_capacity(input.grid.gap_m.len());
     let mut upper_on_gas_tangential = Vec::with_capacity(input.grid.gap_m.len());
+    let mut gas_on_lower_tangential = Vec::with_capacity(input.grid.gap_m.len());
+    let mut lower_on_gas_tangential = Vec::with_capacity(input.grid.gap_m.len());
     let mut upper_shear = Vec::with_capacity(input.grid.gap_m.len());
-    let mut viscous_power = 0.0;
+    let (pressure_shear, mut viscous_power, pressure_gradient_power) =
+        pressure_driven_mechanics(&pressure, gap, &flux, input, spacing, rt)?;
+    let mut tangential_wall_power = 0.0;
     let mut normal_gap_power = 0.0;
     let relative_velocity = input.wall_motion.upper_tangential_velocity_m_per_s
         - input.wall_motion.lower_tangential_velocity_m_per_s;
@@ -1354,6 +1454,8 @@ pub fn solve_isothermal_gas_film_1d(
             upper_on_gas_normal.push(None);
             gas_on_upper_tangential.push(None);
             upper_on_gas_tangential.push(None);
+            gas_on_lower_tangential.push(None);
+            lower_on_gas_tangential.push(None);
             upper_shear.push(None);
             continue;
         }
@@ -1370,18 +1472,32 @@ pub fn solve_isothermal_gas_film_1d(
             normal_gap_power - pressure_value * input.gap_rate_m_per_s(index) * spacing,
             "normal_gap_power_to_gas_w_per_m",
         )?;
-        let shear = derived(
+        let couette_shear = derived(
             input.gas.dynamic_viscosity_pa_s * relative_velocity / gap,
-            "upper_wall_shear_pa",
+            "couette_wall_shear_pa",
         )?;
+        // The face average gives each cell half of each adjacent interval,
+        // matching the pressure-work/heat quadrature including boundary halves.
+        let pressure_shear = 0.5 * (pressure_shear[index] + pressure_shear[index + 1]);
+        let upper_shear_value = derived(couette_shear + pressure_shear, "upper_wall_shear_pa")?;
+        let lower_shear_value = derived(-couette_shear + pressure_shear, "lower_wall_shear_pa")?;
         gas_on_upper_normal.push(Some(pressure_value));
         upper_on_gas_normal.push(Some(-pressure_value));
-        gas_on_upper_tangential.push(Some(-shear));
-        upper_on_gas_tangential.push(Some(shear));
-        upper_shear.push(Some(shear));
+        gas_on_upper_tangential.push(Some(-upper_shear_value));
+        upper_on_gas_tangential.push(Some(upper_shear_value));
+        gas_on_lower_tangential.push(Some(-lower_shear_value));
+        lower_on_gas_tangential.push(Some(lower_shear_value));
+        upper_shear.push(Some(upper_shear_value));
         viscous_power = derived(
-            viscous_power + shear * relative_velocity * spacing,
+            viscous_power + couette_shear * relative_velocity * spacing,
             "viscous_heat_w_per_m",
+        )?;
+        tangential_wall_power = derived(
+            tangential_wall_power
+                + (upper_shear_value * input.wall_motion.upper_tangential_velocity_m_per_s
+                    + lower_shear_value * input.wall_motion.lower_tangential_velocity_m_per_s)
+                    * spacing,
+            "tangential_wall_power_to_gas_w_per_m",
         )?;
     }
     if viscous_power < -1.0e-18 {
@@ -1390,7 +1506,7 @@ pub fn solve_isothermal_gas_film_1d(
         });
     }
     let wall_power = derived(
-        viscous_power + normal_gap_power,
+        tangential_wall_power + normal_gap_power,
         "total_wall_power_to_gas_w_per_m",
     )?;
     let checkpoint_pressure = pressure.clone();
@@ -1420,9 +1536,12 @@ pub fn solve_isothermal_gas_film_1d(
             upper_wall_on_gas_normal_traction_pa: upper_on_gas_normal,
             gas_on_upper_wall_tangential_traction_pa: gas_on_upper_tangential,
             upper_wall_on_gas_tangential_traction_pa: upper_on_gas_tangential,
+            gas_on_lower_wall_tangential_traction_pa: gas_on_lower_tangential,
+            lower_wall_on_gas_tangential_traction_pa: lower_on_gas_tangential,
             upper_wall_shear_pa: upper_shear,
             normal_gap_power_to_gas_w_per_m: normal_gap_power,
             wall_power_to_gas_w_per_m: wall_power,
+            pressure_gradient_power_to_gas_w_per_m: pressure_gradient_power,
             viscous_heat_w_per_m: viscous_power,
             maximum_knudsen_number: max_knudsen,
             maximum_gap_slope: max_slope,

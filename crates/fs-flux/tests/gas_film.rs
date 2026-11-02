@@ -138,8 +138,13 @@ fn g1_planar_couette_is_uniform_and_has_analytic_shear_and_heat() {
 fn g3_uniform_couette_spatial_refinement_preserves_the_analytic_limit() {
     let mut coarse = fixture(4);
     coarse.wall_motion.upper_tangential_velocity_m_per_s = 1.25;
+    coarse.boundary = GasFilmBoundaryTopology::Open {
+        left_absolute_pressure_pa: coarse.initial_absolute_pressure_pa,
+        right_absolute_pressure_pa: coarse.initial_absolute_pressure_pa,
+    };
     let mut fine = fixture(32);
     fine.wall_motion.upper_tangential_velocity_m_per_s = 1.25;
+    fine.boundary = coarse.boundary.clone();
     let coarse_step = solve_isothermal_gas_film_1d(&coarse, None).expect("coarse admitted");
     let fine_step = solve_isothermal_gas_film_1d(&fine, None).expect("fine admitted");
     let expected = coarse.gas.dynamic_viscosity_pa_s * 1.25 / coarse.grid.gap_m[0];
@@ -256,13 +261,21 @@ fn g3_reversing_relative_wall_motion_preserves_pressure_and_reverses_shear() {
     let mirrored_negative_pressure: Vec<f64> =
         active_pressure(&negative).into_iter().rev().collect();
     assert_eq!(active_pressure(&positive), mirrored_negative_pressure);
-    assert_eq!(
-        positive.receipt.upper_wall_shear_pa[0].expect("active"),
-        -negative.receipt.upper_wall_shear_pa[0].expect("active")
-    );
-    assert_eq!(
-        positive.receipt.wall_power_to_gas_w_per_m,
-        negative.receipt.wall_power_to_gas_w_per_m
+    for (forward_shear, reversed_shear) in positive
+        .receipt
+        .upper_wall_shear_pa
+        .iter()
+        .zip(negative.receipt.upper_wall_shear_pa.iter().rev())
+    {
+        assert_eq!(
+            forward_shear.expect("active"),
+            -reversed_shear.expect("active")
+        );
+    }
+    assert!(
+        (positive.receipt.wall_power_to_gas_w_per_m - negative.receipt.wall_power_to_gas_w_per_m)
+            .abs()
+            < 1.0e-12
     );
 }
 
@@ -295,6 +308,14 @@ fn g0_contact_exclusion_is_explicit_and_never_fills_a_gap() {
         solve_isothermal_gas_film_1d(&input, None).expect("static terminal exclusion admitted");
     assert_eq!(step.absolute_pressure_pa[5], None);
     assert_eq!(step.receipt.upper_wall_shear_pa[5], None);
+    assert_eq!(
+        step.receipt.gas_on_lower_wall_tangential_traction_pa[5],
+        None
+    );
+    assert_eq!(
+        step.receipt.lower_wall_on_gas_tangential_traction_pa[5],
+        None
+    );
     assert_eq!(step.checkpoint.active_cells, 5);
 
     input.grid.contact_exclusion.excluded = vec![false, true, false, false, false, false];
@@ -557,4 +578,179 @@ fn gauge_reference_and_mass_flux_sign_receipts_are_independent() {
         + step.receipt.right_boundary_outward_mass_flux_kg_per_m_s
         + step.receipt.vent_outward_mass_flux_kg_per_m_s;
     assert!((independently_summed - step.receipt.mass_closure_residual_kg_per_m_s).abs() < 1.0e-12);
+}
+
+fn assert_mechanical_balance(input: &GasFilmInput, step: &fs_flux::GasFilmStep) {
+    let spacing = input.grid.length_m / input.grid.gap_m.len() as f64;
+    let mut tangential_work = 0.0;
+    for cell in 0..step.checkpoint.active_cells {
+        let upper = step.receipt.upper_wall_on_gas_tangential_traction_pa[cell].expect("active");
+        let lower = step.receipt.lower_wall_on_gas_tangential_traction_pa[cell].expect("active");
+        assert_eq!(
+            step.receipt.gas_on_upper_wall_tangential_traction_pa[cell],
+            Some(-upper)
+        );
+        assert_eq!(
+            step.receipt.gas_on_lower_wall_tangential_traction_pa[cell],
+            Some(-lower)
+        );
+        tangential_work += (upper * input.wall_motion.upper_tangential_velocity_m_per_s
+            + lower * input.wall_motion.lower_tangential_velocity_m_per_s)
+            * spacing;
+    }
+    let wall = step.receipt.wall_power_to_gas_w_per_m;
+    let pressure = step.receipt.pressure_gradient_power_to_gas_w_per_m;
+    let normal = step.receipt.normal_gap_power_to_gas_w_per_m;
+    let heat = step.receipt.viscous_heat_w_per_m;
+    let tolerance = 1.0e-11 * heat.abs().max(1.0e-10);
+    assert!((wall - normal - tangential_work).abs() <= tolerance);
+    assert!((tangential_work + pressure - heat).abs() <= tolerance);
+    assert!(heat >= 0.0);
+}
+
+#[test]
+fn g1_steady_compressible_poiseuille_has_full_shear_and_convergent_heat() {
+    let mut relative_errors = Vec::new();
+    for cells in [8, 32] {
+        let mut input = fixture(cells);
+        let left: f64 = 120_000.0;
+        let right: f64 = 100_000.0;
+        input.boundary = GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: left,
+            right_absolute_pressure_pa: right,
+        };
+        input.budget.maximum_iterations = 20_000;
+        // Seed the exact steady ideal-gas solution p^2(x), independent of the
+        // iteration. The FV face flux is exact for this profile and constant h.
+        let mut state = solve_isothermal_gas_film_1d(&input, None)
+            .expect("open checkpoint")
+            .checkpoint;
+        state.active_absolute_pressure_pa = (0..cells)
+            .map(|cell| {
+                let x_over_length = (cell as f64 + 0.5) / cells as f64;
+                (left * left + (right * right - left * left) * x_over_length).sqrt()
+            })
+            .collect();
+        let step = solve_isothermal_gas_film_1d(&input, Some(&state))
+            .expect("exact steady Poiseuille restart");
+        let h = input.grid.gap_m[0];
+        let mu = input.gas.dynamic_viscosity_pa_s;
+        let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+        let expected_mass =
+            h.powi(3) * (left * left - right * right) / (24.0 * mu * rt * input.grid.length_m);
+        assert!(
+            (step.receipt.right_boundary_outward_mass_flux_kg_per_m_s / expected_mass - 1.0).abs()
+                < 1.0e-10
+        );
+        assert!(
+            (-step.receipt.left_boundary_outward_mass_flux_kg_per_m_s / expected_mass - 1.0).abs()
+                < 1.0e-10
+        );
+        let spacing = input.grid.length_m / cells as f64;
+        for tractions in [
+            &step.receipt.upper_wall_on_gas_tangential_traction_pa,
+            &step.receipt.lower_wall_on_gas_tangential_traction_pa,
+        ] {
+            assert!(tractions.iter().all(|value| value.expect("active") < 0.0));
+            let force = tractions
+                .iter()
+                .map(|value| value.expect("active") * spacing)
+                .sum::<f64>();
+            let expected_force = 0.5 * h * (right - left);
+            assert!((force / expected_force - 1.0).abs() < 1.0e-12);
+        }
+        // Integral of h^3 p_x^2/(12 mu) for p^2 linear in x:
+        // heat = mass_flux * R*T * log(p_left/p_right).
+        let expected_heat = expected_mass * rt * (left / right).ln();
+        let relative_error = (step.receipt.viscous_heat_w_per_m / expected_heat - 1.0).abs();
+        assert!(step.receipt.viscous_heat_w_per_m > 0.0);
+        assert_eq!(step.receipt.wall_power_to_gas_w_per_m, 0.0);
+        assert_mechanical_balance(&input, &step);
+        relative_errors.push(relative_error);
+    }
+    assert!(relative_errors[1] < 3.0e-6, "{relative_errors:?}");
+    assert!(
+        relative_errors[1] < relative_errors[0] / 10.0,
+        "{relative_errors:?}"
+    );
+}
+
+#[test]
+fn g1_sealed_comoving_walls_have_backpressure_shear_and_dissipation() {
+    let mut input = fixture(8);
+    let velocity = 1.0;
+    input.wall_motion.lower_tangential_velocity_m_per_s = velocity;
+    input.wall_motion.upper_tangential_velocity_m_per_s = velocity;
+    let h = input.grid.gap_m[0];
+    let mu = input.gas.dynamic_viscosity_pa_s;
+    let gradient = 12.0 * mu * velocity / h.powi(2);
+    let mut state = solve_isothermal_gas_film_1d(&input, None)
+        .expect("sealed checkpoint")
+        .checkpoint;
+    // This linear pressure cancels Couette transport at every face, including
+    // the two sealed boundary half-cells, despite zero relative wall speed.
+    state.active_absolute_pressure_pa = (0..input.grid.gap_m.len())
+        .map(|cell| {
+            let x = (cell as f64 + 0.5) * input.grid.length_m / input.grid.gap_m.len() as f64;
+            input.initial_absolute_pressure_pa + gradient * (x - 0.5 * input.grid.length_m)
+        })
+        .collect();
+    let step = solve_isothermal_gas_film_1d(&input, Some(&state)).expect("sealed steady state");
+    let expected_shear = 6.0 * mu * velocity / h;
+    for tractions in [
+        &step.receipt.upper_wall_on_gas_tangential_traction_pa,
+        &step.receipt.lower_wall_on_gas_tangential_traction_pa,
+    ] {
+        for traction in tractions {
+            assert!((traction.expect("active") / expected_shear - 1.0).abs() < 1.0e-11);
+        }
+    }
+    let expected_heat = 12.0 * mu * velocity.powi(2) * input.grid.length_m / h;
+    assert!((step.receipt.viscous_heat_w_per_m / expected_heat - 1.0).abs() < 1.0e-11);
+    assert!((step.receipt.wall_power_to_gas_w_per_m / expected_heat - 1.0).abs() < 1.0e-11);
+    assert!(step.receipt.pressure_gradient_power_to_gas_w_per_m.abs() < 1.0e-12);
+    assert_mechanical_balance(&input, &step);
+}
+
+#[test]
+fn g1_pressure_flow_can_drive_both_moving_walls() {
+    let mut input = fixture(8);
+    input.boundary = GasFilmBoundaryTopology::Open {
+        left_absolute_pressure_pa: 120_000.0,
+        right_absolute_pressure_pa: 100_000.0,
+    };
+    input.wall_motion.lower_tangential_velocity_m_per_s = 1.0;
+    input.wall_motion.upper_tangential_velocity_m_per_s = 1.0;
+    let step =
+        solve_isothermal_gas_film_1d(&input, None).expect("pressure-driven translating walls");
+    // Pressure traction integrates to h*(p_right-p_left); both walls translate
+    // at one m/s, so gas delivers mechanical work to the walls.
+    let expected_wall_work = input.grid.gap_m[0] * (100_000.0 - 120_000.0);
+    assert!((step.receipt.wall_power_to_gas_w_per_m / expected_wall_work - 1.0).abs() < 1.0e-12);
+    assert!(step.receipt.wall_power_to_gas_w_per_m < 0.0);
+    assert!(
+        step.receipt.pressure_gradient_power_to_gas_w_per_m > step.receipt.viscous_heat_w_per_m
+    );
+    assert_mechanical_balance(&input, &step);
+}
+
+#[test]
+fn g1_opposing_pressure_gradients_do_not_cancel_viscous_heat() {
+    let input = fixture(3);
+    let mut state = solve_isothermal_gas_film_1d(&input, None)
+        .expect("sealed checkpoint")
+        .checkpoint;
+    state.active_absolute_pressure_pa = vec![100_000.0, 120_000.0, 100_000.0];
+    let step = solve_isothermal_gas_film_1d(&input, Some(&state)).expect("symmetric pressure peak");
+    let p = active_pressure(&step);
+    assert_eq!(p[0], p[2]);
+    assert!(p[1] > p[0]);
+    let spacing = input.grid.length_m / 3.0;
+    let gradient = (p[1] - p[0]) / spacing;
+    let expected_heat = 2.0 * input.grid.gap_m[0].powi(3) * gradient.powi(2) * spacing
+        / (12.0 * input.gas.dynamic_viscosity_pa_s);
+    assert_eq!(step.receipt.upper_wall_shear_pa[1], Some(0.0));
+    assert!(step.receipt.viscous_heat_w_per_m > 0.0);
+    assert!((step.receipt.viscous_heat_w_per_m / expected_heat - 1.0).abs() < 1.0e-12);
+    assert_mechanical_balance(&input, &step);
 }
