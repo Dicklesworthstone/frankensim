@@ -576,6 +576,100 @@ fn nonlinear_robin_conduction_refuses_unrepresentable_fixed_cell_reaction() {
 }
 
 #[test]
+fn projection_refuses_unbalanced_fixed_inflow_without_an_outlet() {
+    let gate = CancelGate::new();
+    let domains = [
+        VoxelDomain::new(4, 1, 1, 0.1).unwrap(),
+        VoxelDomain::graded([vec![0.05, 0.2, 0.1, 0.15], vec![0.2], vec![0.3]])
+            .unwrap(),
+    ];
+    for domain in domains {
+        for speed in [-0.4, 0.4] {
+            let mut faces = [FlowFace::Wall; 6];
+            faces[0] = FlowFace::Fixed;
+            // Gauge pinning cannot repair an incompatible mass balance.
+            assert!(matches!(
+                FlowField::from_cell_velocities(
+                    &domain,
+                    &vec![[speed, 0.0, 0.0]; domain.cell_count()],
+                    faces,
+                    1e-12,
+                    &gate,
+                ),
+                Err(ChtError::InvalidInput {
+                    field: "flow.fixed_boundary_flux",
+                    ..
+                })
+            ));
+        }
+    }
+}
+
+#[test]
+fn projection_checks_disconnected_components_even_when_global_flux_balances() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::from_fn(5, 2, 1, 1.0, |p| {
+        if p[0] > 2.0 && p[0] < 3.0 {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let mut faces = [FlowFace::Wall; 6];
+    faces[0] = FlowFace::Fixed;
+    faces[1] = FlowFace::Fixed;
+    // Globally balanced, but the solid separates inflow from outflow.
+    assert!(matches!(
+        FlowField::from_cell_velocities(
+            &domain,
+            &vec![[1.0, 0.0, 0.0]; domain.cell_count()],
+            faces,
+            1e-12,
+            &gate,
+        ),
+        Err(ChtError::InvalidInput {
+            field: "flow.fixed_boundary_flux",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn projection_of_balanced_fixed_faces_preserves_isothermal_convection() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::graded([vec![0.05, 0.2, 0.1, 0.15], vec![0.2], vec![0.3]])
+        .unwrap();
+    let mut faces = [FlowFace::Wall; 6];
+    faces[0] = FlowFace::Fixed;
+    faces[1] = FlowFace::Fixed;
+    let mut thermal = [ThermalFace::Adiabatic; 6];
+    thermal[0] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+    thermal[1] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+    for direction in [-1.0, 1.0] {
+        let velocities: Vec<_> = [0.4, -0.7, 1.3, 0.4]
+            .into_iter()
+            .map(|u| [direction * u, 0.0, 0.0])
+            .collect();
+        let (flow, report) = FlowField::from_cell_velocities(
+            &domain, &velocities, faces, 1e-12, &gate,
+        ).unwrap();
+        assert_eq!(report.pinned_components, 1);
+        for x in 0..=4 {
+            assert!((flow.flux_x(x, 0, 0) - direction * 0.024).abs() < 1e-13);
+        }
+        for scheme in [ConvectionScheme::Upwind, ConvectionScheme::PowerLaw] {
+            let solution = solve_energy(
+                &domain, &unit_fluid(), &[], &flow, &ThermalSetup::new(thermal),
+                &EnergyConfig { scheme, ..EnergyConfig::default() }, &gate,
+            ).unwrap();
+            assert!(solution.temperature.iter().all(|t| (t - 300.0).abs() < 1e-8));
+            assert!(solution.report.balance.residual_w.abs() < 1e-10);
+        }
+    }
+}
+
+#[test]
 fn graded_cell_projection_preserves_linear_face_interpolation_and_fixed_inflow() {
     let gate = CancelGate::new();
     let domain = VoxelDomain::graded([vec![1.0, 4.0, 2.0, 3.0], vec![0.2], vec![0.5]]).unwrap();

@@ -2244,6 +2244,15 @@ electronics cooling (the wedge's second physics after steady conduction).
   fluxes held, potential zero on `FlowFace::Free` faces, components without
   a free face pinned). `ProjectionReport` retains divergence before/after
   and the largest correction. Faces touching a solid carry exactly zero.
+  Before pinning a component, the projection checks that its prescribed
+  boundary inflow and outflow balance. It refuses incompatible fixed fluxes
+  per connected component, even if separate pockets' imbalances cancel
+  globally: a potential gauge is not a physical mass source. The check uses
+  a compensated boundary-only sum with a `128 epsilon * sum |Q|` floating
+  point allowance, independently of the iterative solver tolerance. G0/G3
+  tests exercise both flow directions, uniform and graded grids, separated
+  pockets, and preservation of uniform temperature under balanced forced
+  convection with both upwind and power-law energy schemes.
 - `lbm_duct_flow` -> `LbmFlow { field, velocity_m_s, pressure_pa, report }`:
   velocity inlet on `x-min`, pressure outlet on `x-max`,
   no-slip elsewhere and on solid voxels; derives `nu_lat`/`tau` from the

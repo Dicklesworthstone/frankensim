@@ -51,8 +51,8 @@ pub struct FlowField {
 pub struct ProjectionReport {
     /// Fluid cells (unknowns of the correction-potential system).
     pub fluid_cells: usize,
-    /// Fluid connected components with no outflow face, each pinned at one
-    /// cell (their net imbalance cannot be removed and stays in the report).
+    /// Fluid connected components with no free outflow face, each pinned at
+    /// one cell after its prescribed boundary flux has passed compatibility.
     pub pinned_components: usize,
     /// BiCGStab iterations.
     pub iterations: usize,
@@ -160,7 +160,9 @@ impl FlowField {
     ///
     /// # Errors
     /// [`ChtError::InvalidInput`] for a wrong-length or non-finite velocity
-    /// array; solver refusals from the potential solve; [`ChtError::Cancelled`].
+    /// array, or a fluid component with unbalanced fixed boundary flux and no
+    /// free face to accommodate it; solver refusals from the potential solve;
+    /// [`ChtError::Cancelled`].
     pub fn from_cell_velocities(
         domain: &VoxelDomain,
         velocities: &[[f64; 3]],
@@ -345,7 +347,10 @@ impl FlowField {
             row_of[c] = row;
         }
         let n = fluid.len();
-        // Components without an outflow face are pinned at their first cell.
+        // A Neumann component needs zero total prescribed boundary flux.
+        // Pinning removes its constant potential nullspace; it cannot remove
+        // a mass source. Check EACH component, since distinct sealed regions
+        // cannot exchange fluid even when their global imbalances cancel.
         let mut component = vec![usize::MAX; n];
         let mut pins = Vec::new();
         for start in 0..n {
@@ -356,7 +361,13 @@ impl FlowField {
             let mut stack = vec![start];
             component[start] = id;
             let mut drains = false;
+            let mut boundary_flux = 0.0f64;
+            let mut boundary_compensation = 0.0f64;
+            let mut boundary_scale = 0.0f64;
+            let mut visited = 0usize;
             while let Some(row) = stack.pop() {
+                poll_every(gate, visited)?;
+                visited += 1;
                 let c = fluid[row];
                 for f in 0..6 {
                     match domain.neighbor(c, f) {
@@ -368,9 +379,34 @@ impl FlowField {
                             }
                         }
                         Some(_) => {}
-                        None => drains |= faces[f] == FlowFace::Free,
+                        None => {
+                            drains |= faces[f] == FlowFace::Free;
+                            let q = self.outward(domain, c, f);
+                            // Compensated boundary-only reduction: interior
+                            // flux cancellation contributes no summation error.
+                            let corrected = q - boundary_compensation;
+                            let next = boundary_flux + corrected;
+                            boundary_compensation = (next - boundary_flux) - corrected;
+                            boundary_flux = next;
+                            boundary_scale += q.abs();
+                        }
                     }
                 }
+            }
+            if !drains
+                && (!boundary_flux.is_finite()
+                    || !boundary_scale.is_finite()
+                    || boundary_flux.abs() > 128.0 * f64::EPSILON * boundary_scale)
+            {
+                return Err(ChtError::InvalidInput {
+                    field: "flow.fixed_boundary_flux",
+                    reason: format!(
+                        "fluid component containing cell {} has net prescribed outflow \
+                         {boundary_flux:e} m^3/s and no free face; balance its fixed \
+                         inflow/outflow or supply a Free boundary",
+                        fluid[start]
+                    ),
+                });
             }
             pins.push((start, drains));
         }
