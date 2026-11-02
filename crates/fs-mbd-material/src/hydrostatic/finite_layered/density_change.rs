@@ -1,12 +1,15 @@
 //! Source updates of closed immiscible liquids and their coupled interfaces.
 
 use super::{
-    FiniteHydrostaticLayer, FiniteLayeredHydrostaticTank, FiniteTankInterface, ResolvedFiniteLayer,
-    set_density_jumps,
+    FiniteHydrostaticLayer, FiniteLayeredHydrostaticTank, FiniteTankBodiesInterface,
+    FiniteTankInterface, ResolvedFiniteLayer, set_density_jumps,
 };
-use crate::hydrostatic::{DisplacementMesh, HydrostaticError, finite, gravity_direction, poll};
+use crate::hydrostatic::{
+    DisplacementMesh, FiniteTankBody, HydrostaticError, finite, gravity_direction, poll,
+};
 use fs_ga::Se3;
 use fs_material::fluid_transport::FluidTransport;
+use fs_mbd::RigidBodyState;
 
 /// One closed liquid's original mass and changed source-defined volume.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -19,20 +22,23 @@ pub struct FiniteLayerDensityChange {
     pub liquid_volume_m3: [f64; 2],
 }
 
-/// Complete gravitational-storage change at a held body pose and fixed tank.
+/// Complete gravitational-storage change at held body geometry and a fixed tank.
 /// The original and returned tanks retain their full sources and snapshots.
+/// Defaults retain one `Se3` and `FiniteTankInterface`; a batch carries ordered
+/// `Vec<Se3>` transforms and original-body `FiniteTankBodiesInterface` records.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FiniteLayeredTankDensityChange {
+pub struct FiniteLayeredTankDensityChange<Pose = Se3, Interface = FiniteTankInterface> {
     /// Original total liquid mass, copied without another sum [kg].
     pub liquid_mass_kg: f64,
     /// Per-liquid changes in the unchanged bottom-to-top order.
     pub layers: Vec<FiniteLayerDensityChange>,
-    /// Same original-body pose used by both interface queries.
-    pub world_from_body: Se3,
+    /// Same original-body transform(s) used by both interface queries.
+    /// Batch transforms follow the original body binding order.
+    pub world_from_body: Pose,
     /// Original interface locations and cumulative volume residuals.
-    pub interfaces_before: Vec<FiniteTankInterface>,
+    pub interfaces_before: Vec<Interface>,
     /// Proposed interface locations and cumulative volume residuals.
-    pub interfaces_after: Vec<FiniteTankInterface>,
+    pub interfaces_after: Vec<Interface>,
     /// Change of sum_i M_i*|g|*(h_empty,i-1+h_empty,i)/2 [J].
     /// Expansion of a lower liquid also lifts the liquids above it.
     pub empty_tank_gravitational_energy_change_j: f64,
@@ -81,7 +87,112 @@ impl FiniteLayeredHydrostaticTank<'_> {
         ),
         HydrostaticError,
     > {
+        let (next, changes, all_same_density, empty_change) =
+            self.rebound_sources(sources, &mut cancelled)?;
+        let (interfaces_before, potential_before) =
+            self.interfaces_and_potential_at_pose(mesh, world_from_body, &mut cancelled)?;
+        let (interfaces_after, potential_after) = if all_same_density {
+            (interfaces_before.clone(), potential_before)
+        } else {
+            next.interfaces_and_potential_at_pose(mesh, world_from_body, &mut cancelled)?
+        };
+        let displacement_change = finite(potential_after - potential_before)?;
+        let gravitational_change = finite(empty_change + displacement_change)?;
         poll(&mut cancelled)?;
+        Ok((
+            next,
+            FiniteLayeredTankDensityChange {
+                liquid_mass_kg: self.liquid_mass_kg,
+                layers: changes,
+                world_from_body,
+                interfaces_before,
+                interfaces_after,
+                empty_tank_gravitational_energy_change_j: empty_change,
+                displacement_potential_change_j: displacement_change,
+                liquid_gravitational_energy_change_j: gravitational_change,
+            },
+        ))
+    }
+
+    /// Change every closed liquid source while ALL original bodies stay held.
+    ///
+    /// The same source/inventory preparation as [`Self::rebind_sources_at_pose`]
+    /// retains each exact material mass and sets `V_i=M_i/rho_i` once. Both
+    /// complete stacks solve `A*h_i - sum(V_sub,b(h_i)) = sum(V_liquid,<=i)`.
+    /// Shared interfaces and their potential are computed together using one
+    /// prepared geometry/cuts buffer per stack; no force assembly or extra
+    /// per-body tank solve is required. Equal-density refreshes retain the
+    /// original interface records and zero complete gravitational change.
+    ///
+    /// The audit includes changing empty-stack storage and displacement cross
+    /// terms. Thus a lower liquid's expansion also lifts every upper inventory.
+    /// The external source owner supplies/accounts for that work alongside its
+    /// caloric and ambient-pressure terms. Bodies retain their poses and momenta
+    /// across the update; [`Self::step_bodies`] continues with the proposed tank.
+    /// The original same-liquid, immiscibility, nonoverlap and source-domain
+    /// obligations still apply. No thermal step, mixing, fluid inertia or
+    /// expansion-driven momentum impulse is inferred by this quasistatic model.
+    /// Source/order/geometry/overflow/cancellation refusal returns no candidate.
+    pub fn rebind_sources_at_bodies<'b>(
+        &self,
+        sources: &[&'b dyn FluidTransport],
+        bodies: &[FiniteTankBody<'_>],
+        states: &[RigidBodyState],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        (
+            FiniteLayeredHydrostaticTank<'b>,
+            FiniteLayeredTankDensityChange<Vec<Se3>, FiniteTankBodiesInterface>,
+        ),
+        HydrostaticError,
+    > {
+        let (next, changes, all_same_density, empty_change) =
+            self.rebound_sources(sources, &mut cancelled)?;
+        let (interfaces_before, potential_before) =
+            self.interfaces_and_potential_at_bodies(bodies, states, &mut cancelled)?;
+        let mut world_from_body = Vec::with_capacity(bodies.len());
+        for (body, &state) in bodies.iter().zip(states) {
+            poll(&mut cancelled)?;
+            world_from_body.push(body.frame.world_from_body(state)?);
+        }
+        let (interfaces_after, potential_after) = if all_same_density {
+            (interfaces_before.clone(), potential_before)
+        } else {
+            next.interfaces_and_potential_at_bodies(bodies, states, &mut cancelled)?
+        };
+        let displacement_change = finite(potential_after - potential_before)?;
+        let gravitational_change = finite(empty_change + displacement_change)?;
+        poll(&mut cancelled)?;
+        Ok((
+            next,
+            FiniteLayeredTankDensityChange {
+                liquid_mass_kg: self.liquid_mass_kg,
+                layers: changes,
+                world_from_body,
+                interfaces_before,
+                interfaces_after,
+                empty_tank_gravitational_energy_change_j: empty_change,
+                displacement_potential_change_j: displacement_change,
+                liquid_gravitational_energy_change_j: gravitational_change,
+            },
+        ))
+    }
+
+    /// Shared material inventory/source and empty-stack gravitational owner.
+    fn rebound_sources<'b>(
+        &self,
+        sources: &[&'b dyn FluidTransport],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<
+        (
+            FiniteLayeredHydrostaticTank<'b>,
+            Vec<FiniteLayerDensityChange>,
+            bool,
+            f64,
+        ),
+        HydrostaticError,
+    > {
+        poll(cancelled)?;
         if sources.len() != self.layers.len() {
             return Err(HydrostaticError::Invalid(
                 "finite liquid source update must retain every layer in order",
@@ -93,7 +204,7 @@ impl FiniteLayeredHydrostaticTank<'_> {
         let mut previous_density = f64::INFINITY;
         let mut all_same_density = true;
         for (old, &source) in self.layers.iter().zip(sources) {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let transport = source.transport_state()?;
             let density = transport.density_kg_m3();
             if density > previous_density {
@@ -143,13 +254,6 @@ impl FiniteLayeredHydrostaticTank<'_> {
             layers: resolved,
             liquid_mass_kg: self.liquid_mass_kg,
         };
-        let (interfaces_before, potential_before) =
-            self.interfaces_and_potential_at_pose(mesh, world_from_body, &mut cancelled)?;
-        let (interfaces_after, potential_after) = if all_same_density {
-            (interfaces_before.clone(), potential_before)
-        } else {
-            next.interfaces_and_potential_at_pose(mesh, world_from_body, &mut cancelled)?
-        };
         let mut empty_change = 0.0;
         if !all_same_density {
             let sides = self.geometry().inside_dimensions_m;
@@ -157,7 +261,7 @@ impl FiniteLayeredHydrostaticTank<'_> {
             let (_, gravity_magnitude) = gravity_direction(self.gravity())?;
             let mut lower_change = 0.0;
             for (old, new) in self.layers.iter().zip(&next.layers) {
-                poll(&mut cancelled)?;
+                poll(cancelled)?;
                 let upper_change = new.cumulative.liquid_volume_m3() / area
                     - old.cumulative.liquid_volume_m3() / area;
                 let twice_center_change = lower_change + upper_change;
@@ -170,21 +274,6 @@ impl FiniteLayeredHydrostaticTank<'_> {
                 lower_change = upper_change;
             }
         }
-        let displacement_change = finite(potential_after - potential_before)?;
-        let gravitational_change = finite(empty_change + displacement_change)?;
-        poll(&mut cancelled)?;
-        Ok((
-            next,
-            FiniteLayeredTankDensityChange {
-                liquid_mass_kg: self.liquid_mass_kg,
-                layers: changes,
-                world_from_body,
-                interfaces_before,
-                interfaces_after,
-                empty_tank_gravitational_energy_change_j: empty_change,
-                displacement_potential_change_j: displacement_change,
-                liquid_gravitational_energy_change_j: gravitational_change,
-            },
-        ))
+        Ok((next, changes, all_same_density, empty_change))
     }
 }

@@ -1,5 +1,31 @@
 //! Closed-layer source updates consumed by the native interfaces and mechanics.
 use super::*;
+use fs_mbd_material::hydrostatic::FiniteTankBody;
+
+fn batch_pose(x: f64, z: f64) -> Se3 {
+    Se3::from_parts(So3::identity(), Vec3::new(x, 0.0, z)).unwrap()
+}
+
+fn batch_stack<'a>(
+    sources: [&'a dyn FluidTransport; 2],
+    volumes: [f64; 2],
+    floor: f64,
+    height: f64,
+) -> FiniteLayeredHydrostaticTank<'a> {
+    let mut tank_geometry = geometry(height);
+    tank_geometry.world_from_tank = pose(floor);
+    FiniteLayeredHydrostaticTank::new(
+        &[0, 1].map(|i| FiniteHydrostaticLayer {
+            source: sources[i],
+            liquid_volume_m3: volumes[i],
+        }),
+        gravity(),
+        tank_geometry,
+        controls(),
+        || false,
+    )
+    .unwrap()
+}
 
 #[test]
 fn source_updates_keep_each_mass_and_change_actual_interfaces_energy_and_motion() {
@@ -387,4 +413,370 @@ fn failed_sources_ordering_overflow_and_late_cancellation_leave_all_original_liq
         .rebind_sources_at_pose(&[&changed_bottom, &changed_top], &mesh, held, || false)
         .unwrap();
     assert_eq!(replay, expected);
+}
+
+// G1/G3/G4: source-driven density/volume changes reach native coupled motion.
+#[test]
+fn shared_layer_source_updates_match_independent_stack_integrals_and_body_motion() {
+    let bottom = fluid(1000.0);
+    let top = fluid(800.0);
+    let changed_bottom = fluid(900.0);
+    let changed_top = fluid(700.0);
+    let tank = batch_stack([&bottom, &top], [16.0; 2], 0.0, 4.0);
+    let sides = Vec3::new(1.0, 1.0, 1.0);
+    let source = body(900.0, sides);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let mesh = DisplacementMesh::cuboid(sides, || false).unwrap();
+    let bindings = [FiniteTankBody {
+        envelope: &mesh,
+        frame: body.frame(),
+    }; 2];
+    let z = [1.1_f64, 1.05];
+    let poses = [batch_pose(-1.0, z[0]), batch_pose(1.0, z[1])];
+    let states = poses.map(|pose| body.state_from_kinematics(pose, Twist::zero()).unwrap());
+    let (next, audit) = tank
+        .rebind_sources_at_bodies(&[&changed_bottom, &changed_top], &bindings, &states, || {
+            false
+        })
+        .unwrap();
+    assert_eq!(audit.world_from_body, poses);
+    assert_eq!(
+        next.layer_masses_kg().collect::<Vec<_>>(),
+        [16000.0, 12800.0]
+    );
+    assert_eq!(
+        next.liquid_mass_kg().to_bits(),
+        tank.liquid_mass_kg().to_bits()
+    );
+    let densities = [[1000.0, 800.0], [900.0, 700.0]];
+    let heights = densities.map(|rho| {
+        let v = [16000.0 / rho[0], 12800.0 / rho[1]];
+        [
+            (v[0] + 1.0 - z[0] - z[1]) / 14.0,
+            (v[0] + v[1] + 2.0) / 16.0,
+        ]
+    });
+    for (interfaces, h) in [&audit.interfaces_before, &audit.interfaces_after]
+        .into_iter()
+        .zip(heights)
+    {
+        for i in 0..2 {
+            close(interfaces[i].surface_height_m, h[i]);
+            assert!(interfaces[i].cumulative_volume_defect_m3.abs() <= 1e-12);
+        }
+    }
+    // Direct first-moment integrals of each liquid slab minus both body parts.
+    let energy = |rho: [f64; 2], h: [f64; 2]| {
+        let lower = 8.0 * h[0] * h[0]
+            - 0.5
+                * z.iter()
+                    .map(|z| h[0] * h[0] - (z - 0.5).powi(2))
+                    .sum::<f64>();
+        let upper = 8.0 * (h[1] * h[1] - h[0] * h[0])
+            - 0.5
+                * z.iter()
+                    .map(|z| (z + 0.5).powi(2) - h[0] * h[0])
+                    .sum::<f64>();
+        10.0 * (rho[0] * lower + rho[1] * upper)
+    };
+    let expected = energy(densities[1], heights[1]) - energy(densities[0], heights[0]);
+    close(audit.liquid_gravitational_energy_change_j, expected);
+    let before = tank.load_bodies(&bindings, &states, || false).unwrap();
+    let after = next.load_bodies(&bindings, &states, || false).unwrap();
+    close(
+        audit.displacement_potential_change_j,
+        after.surface.liquid_gravitational_energy_change_j
+            - before.surface.liquid_gravitational_energy_change_j,
+    );
+    let dt = 0.001_f64;
+    let step = next
+        .step_bodies(
+            &bindings,
+            &states,
+            HydrostaticStepControls {
+                duration_s: dt,
+                maximum_energy_defect_j: 1e-5,
+            },
+            || false,
+        )
+        .unwrap();
+    for i in 0..2 {
+        let displaced_mass = 700.0 + 200.0 * (heights[1][0] - z[i] + 0.5);
+        close(after.bodies[i].displaced_mass_kg(), displaced_mass);
+        close(
+            body.world_from_body(step.dynamics[i].state_after)
+                .unwrap()
+                .translation()
+                .z,
+            z[i] + 0.5 * dt * dt * 10.0 * (displaced_mass / 900.0 - 1.0),
+        );
+    }
+    let (restored, reverse) = next
+        .rebind_sources_at_bodies(&[&bottom, &top], &bindings, &states, || false)
+        .unwrap();
+    assert_eq!(
+        restored.layer_masses_kg().collect::<Vec<_>>(),
+        [16000.0, 12800.0]
+    );
+    assert_eq!(reverse.interfaces_after, audit.interfaces_before);
+    close(reverse.liquid_gravitational_energy_change_j, -expected);
+
+    let (_, one) = tank
+        .rebind_sources_at_pose(&[&changed_bottom, &changed_top], &mesh, poses[0], || false)
+        .unwrap();
+    let (_, batch) = tank
+        .rebind_sources_at_bodies(
+            &[&changed_bottom, &changed_top],
+            &bindings[..1],
+            &states[..1],
+            || false,
+        )
+        .unwrap();
+    assert_eq!(one.layers, batch.layers);
+    assert_eq!(
+        one.liquid_gravitational_energy_change_j,
+        batch.liquid_gravitational_energy_change_j
+    );
+    for (a, b) in one.interfaces_after.iter().zip(batch.interfaces_after) {
+        assert_eq!(a.surface_height_m, b.surface_height_m);
+        assert_eq!(a.displaced_below, b.displaced_below[0]);
+        assert_eq!(a.volume_evaluations, b.volume_evaluations);
+    }
+}
+
+#[test]
+fn shared_density_change_preserves_uniform_parity_and_dry_upper_liquid_lift() {
+    let bottom = fluid(1000.0);
+    let top = fluid(800.0);
+    let sides = Vec3::new(1.0, 1.0, 1.0);
+    let source = body(900.0, sides);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let mesh = DisplacementMesh::cuboid(sides, || false).unwrap();
+    let bindings = [FiniteTankBody {
+        envelope: &mesh,
+        frame: body.frame(),
+    }; 2];
+    for floor in [0.0, 10000.0] {
+        let tank = batch_stack([&bottom, &top], [16.0; 2], floor, 6.0);
+        let states = [-1.0, 1.0].map(|x| {
+            body.state_from_kinematics(batch_pose(x, floor + 4.0), Twist::zero())
+                .unwrap()
+        });
+        let (_, audit) = tank
+            .rebind_sources_at_bodies(&[&top, &top], &bindings, &states, || false)
+            .unwrap();
+        assert_eq!(audit.layers[1].liquid_volume_m3, [16.0, 16.0]);
+        assert!(audit.interfaces_after.iter().all(|interface| {
+            interface
+                .displaced_below
+                .iter()
+                .all(|cut| cut.volume_m3() == 0.0)
+        }));
+        assert_eq!(audit.displacement_potential_change_j, 0.0);
+        // 16000 kg lower liquid rises 1/8 m; 12800 kg upper liquid rises 1/4 m.
+        close(
+            audit.empty_tank_gravitational_energy_change_j,
+            20000.0 + 32000.0,
+        );
+        close(audit.liquid_gravitational_energy_change_j, 52000.0);
+    }
+    let layered = batch_stack([&bottom, &bottom], [16.0; 2], 0.0, 6.0);
+    let uniform =
+        FiniteHydrostaticTank::new(&bottom, gravity(), geometry(6.0), 32.0, controls()).unwrap();
+    let states = [-1.0, 1.0].map(|x| {
+        body.state_from_kinematics(batch_pose(x, 2.1), Twist::zero())
+            .unwrap()
+    });
+    let (new_layered, a) = layered
+        .rebind_sources_at_bodies(&[&top, &top], &bindings, &states, || false)
+        .unwrap();
+    let (new_uniform, b) = uniform
+        .rebind_source_at_bodies(&top, &bindings, &states, || false)
+        .unwrap();
+    assert_eq!(
+        a.empty_tank_gravitational_energy_change_j,
+        b.empty_tank_gravitational_energy_change_j
+    );
+    assert_eq!(
+        a.displacement_potential_change_j,
+        b.displacement_potential_change_j
+    );
+    assert_eq!(
+        a.liquid_gravitational_energy_change_j,
+        b.liquid_gravitational_energy_change_j
+    );
+    assert_eq!(
+        new_layered
+            .load_bodies(&bindings, &states, || false)
+            .unwrap(),
+        new_uniform
+            .load_bodies(&bindings, &states, || false)
+            .unwrap()
+    );
+    let (_, same) = new_layered
+        .rebind_sources_at_bodies(&[&top, &top], &bindings, &states, || false)
+        .unwrap();
+    assert_eq!(same.interfaces_before, same.interfaces_after);
+    assert_eq!(
+        same.liquid_gravitational_energy_change_j.to_bits(),
+        0.0_f64.to_bits()
+    );
+}
+
+#[test]
+fn shared_layers_retain_exact_mass_and_frozen_sources_through_repeats_and_atomic_refusal() {
+    struct Source {
+        rho: f64,
+        calls: std::cell::Cell<usize>,
+    }
+    impl FluidTransport for Source {
+        fn transport_state(&self) -> Result<FluidTransportState, fs_material::MaterialError> {
+            self.calls.set(self.calls.get() + 1);
+            FluidTransportState::try_new(self.rho, 4000.0, 0.5, 0.001)
+        }
+    }
+    let source = |rho| Source {
+        rho,
+        calls: std::cell::Cell::new(0),
+    };
+    let bottom = source(997.3);
+    let top = source(801.7);
+    let changed_bottom = source(654.321);
+    let changed_top = source(400.1);
+    let refused = source(-1.0);
+    let tank = batch_stack([&bottom, &top], [16.123, 16.456], 0.0, 6.0);
+    let sides = Vec3::new(1.0, 1.0, 1.0);
+    let material = body(900.0, sides);
+    let body = material.principal_body(1e-12, || false).unwrap();
+    let mesh = DisplacementMesh::cuboid(sides, || false).unwrap();
+    let bindings = [FiniteTankBody {
+        envelope: &mesh,
+        frame: body.frame(),
+    }; 2];
+    let states = [-1.0, 1.0].map(|x| {
+        body.state_from_kinematics(batch_pose(x, 2.1), Twist::zero())
+            .unwrap()
+    });
+    let originals = states;
+    let masses = tank.layer_masses_kg().map(f64::to_bits).collect::<Vec<_>>();
+    let before = tank.load_bodies(&bindings, &states, || false).unwrap();
+    let (mut next, _) = tank
+        .rebind_sources_at_bodies(&[&changed_bottom, &changed_top], &bindings, &states, || {
+            false
+        })
+        .unwrap();
+    assert_eq!(
+        (
+            bottom.calls.get(),
+            top.calls.get(),
+            changed_bottom.calls.get(),
+            changed_top.calls.get()
+        ),
+        (1, 1, 1, 1)
+    );
+    next.load_bodies(&bindings, &states, || false).unwrap();
+    next.interfaces_at_bodies(&bindings, &states, || false)
+        .unwrap();
+    assert_eq!(
+        (changed_bottom.calls.get(), changed_top.calls.get()),
+        (1, 1)
+    );
+    for _ in 0..4 {
+        let (back, _) = next
+            .rebind_sources_at_bodies(&[&bottom, &top], &bindings, &states, || false)
+            .unwrap();
+        next = back
+            .rebind_sources_at_bodies(&[&changed_bottom, &changed_top], &bindings, &states, || {
+                false
+            })
+            .unwrap()
+            .0;
+        assert_eq!(
+            next.layer_masses_kg().map(f64::to_bits).collect::<Vec<_>>(),
+            masses
+        );
+        assert_eq!(
+            next.liquid_mass_kg().to_bits(),
+            tank.liquid_mass_kg().to_bits()
+        );
+    }
+    assert!(
+        tank.rebind_sources_at_bodies(&[&changed_bottom], &bindings, &states, || false)
+            .is_err()
+    );
+    assert!(
+        tank.rebind_sources_at_bodies(&[&changed_top, &changed_bottom], &bindings, &states, || {
+            false
+        })
+        .is_err()
+    );
+    assert!(matches!(
+        tank.rebind_sources_at_bodies(&[&refused, &top], &bindings, &states, || false),
+        Err(HydrostaticError::Material(_))
+    ));
+    assert!(
+        tank.rebind_sources_at_bodies(&[&bottom, &top], &bindings, &states[..1], || false)
+            .is_err()
+    );
+    let mut polls = 0;
+    let (_, expected) = tank
+        .rebind_sources_at_bodies(&[&changed_bottom, &changed_top], &bindings, &states, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    for stop in [1, polls / 2, polls] {
+        let mut count = 0;
+        assert!(matches!(
+            tank.rebind_sources_at_bodies(
+                &[&changed_bottom, &changed_top],
+                &bindings,
+                &states,
+                || {
+                    count += 1;
+                    count == stop
+                }
+            ),
+            Err(HydrostaticError::Cancelled)
+        ));
+    }
+    assert_eq!(states, originals);
+    assert_eq!(
+        tank.load_bodies(&bindings, &states, || false).unwrap(),
+        before
+    );
+    assert_eq!(
+        tank.rebind_sources_at_bodies(&[&changed_bottom, &changed_top], &bindings, &states, || {
+            false
+        })
+        .unwrap()
+        .1,
+        expected
+    );
+
+    let low = fluid(1000.0);
+    let high = fluid(800.0);
+    let expanded_low = fluid(14000.0 / 15.5);
+    let expanded_high = fluid(11200.0 / 15.0);
+    let shallow = batch_stack([&low, &high], [14.0; 2], 0.0, 2.0);
+    let poses = [batch_pose(-1.0, 1.0), batch_pose(1.0, 1.0)];
+    let submerged = poses.map(|pose| body.state_from_kinematics(pose, Twist::zero()).unwrap());
+    for pose in poses {
+        shallow
+            .rebind_sources_at_pose(&[&expanded_low, &expanded_high], &mesh, pose, || false)
+            .unwrap();
+    }
+    assert!(matches!(
+        shallow.rebind_sources_at_bodies(
+            &[&expanded_low, &expanded_high],
+            &bindings,
+            &submerged,
+            || false
+        ),
+        Err(HydrostaticError::TankOverflow { .. })
+    ));
+    assert_eq!(
+        shallow.layer_masses_kg().collect::<Vec<_>>(),
+        [14000.0, 11200.0]
+    );
 }

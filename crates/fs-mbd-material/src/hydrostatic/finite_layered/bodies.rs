@@ -41,18 +41,31 @@ impl FiniteLayeredHydrostaticTank<'_> {
         states: &[RigidBodyState],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<FiniteTankBodiesInterface>, HydrostaticError> {
+        self.interfaces_and_potential_at_bodies(bodies, states, &mut cancelled)
+            .map(|(interfaces, _)| interfaces)
+    }
+
+    /// Reuse each accepted interface cut for its complete stack potential.
+    /// Source changes need both quantities but no individual wrench assembly.
+    pub(super) fn interfaces_and_potential_at_bodies(
+        &self,
+        bodies: &[FiniteTankBody<'_>],
+        states: &[RigidBodyState],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<FiniteTankBodiesInterface>, f64), HydrostaticError> {
         let top = self.layers.last().expect("nonempty liquid stack");
-        let mut prepared = top
-            .cumulative
-            .prepare_bodies(bodies, states, &mut cancelled)?;
+        let mut prepared = top.cumulative.prepare_bodies(bodies, states, cancelled)?;
         let mut interfaces = Vec::with_capacity(self.layers.len());
         let mut above_height = f64::INFINITY;
+        let mut potential = 0.0;
         for layer in self.layers.iter().rev() {
             let surface = layer
                 .cumulative
-                .fill_prepared_bodies(&mut prepared, &mut cancelled)?;
+                .fill_prepared_bodies(&mut prepared, cancelled)?;
             check_interface(surface.surface_height_m, above_height)?;
             above_height = surface.surface_height_m;
+            let weight = layer.density_jump / layer.cumulative.transport().density_kg_m3();
+            potential = finite(potential + weight * surface.liquid_gravitational_energy_change_j)?;
             interfaces.push(FiniteTankBodiesInterface {
                 surface_height_m: surface.surface_height_m,
                 surface_point_world_m: surface.surface_point_world_m,
@@ -62,8 +75,8 @@ impl FiniteLayeredHydrostaticTank<'_> {
             });
         }
         interfaces.reverse();
-        poll(&mut cancelled)?;
-        Ok(interfaces)
+        poll(cancelled)?;
+        Ok((interfaces, potential))
     }
 
     /// Density-weighted loads on all bodies in the SAME finite liquid stack.

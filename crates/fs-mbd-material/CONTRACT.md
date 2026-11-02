@@ -989,6 +989,24 @@ cancellation failure returns neither new tank nor audit. Focused cases exercise
 independent two-liquid energy/interface changes, continued native motion, upper
 liquid lift, repeated mass preservation, exact one-layer parity and atomic refusal.
 
+`FiniteHydrostaticTank::rebind_source_at_bodies` and
+`FiniteLayeredHydrostaticTank::rebind_sources_at_bodies` extend the same closed
+inventory update to all held body envelopes. Each source is sampled once,
+original total and per-liquid masses are copied exactly, and `V_i=M_i/rho_i`
+drives the shared interface solves. One complete liquid gravitational change
+includes empty-stack storage, upper-liquid lift and displacement cross terms.
+Uniform old/new fills reuse prepared geometry; layered interface geometry and
+potential are reduced together without wrench assembly or duplicate roots.
+Defaulted pose/fill parameters retain the original single-pose audit API, while
+batch records carry ordered original-body transforms and shared interfaces.
+Same-density updates preserve geometry bits and zero work; native batch motion
+continues with the proposed immutable tank. Physical identity, immiscibility,
+nonoverlap and quasistatic thermal/EOS work remain caller obligations. No
+expansion momentum impulse or caloric heat is inferred. G1/G3/G4 native cases
+check independent bath/stack integrals, continued motion, repeated exact mass,
+dry upper-layer lift, singleton/uniform parity, frozen sources and collective
+or late refusal.
+
 ## Buoyancy through gas and layered liquid reservoirs
 
 `hydrostatic::LayeredHydrostaticMedium` accepts an optional upper

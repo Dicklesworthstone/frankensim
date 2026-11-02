@@ -385,3 +385,192 @@ fn collective_overflow_and_late_step_failure_publish_no_body_or_fluid_history() 
         Err(HydrostaticError::TankOverflow { .. })
     ));
 }
+
+#[test]
+fn shared_density_update_matches_independent_liquid_energy_and_continues_native_motion() {
+    let water = fluid(1000.0);
+    let changed = fluid(800.0);
+    let tank = FiniteHydrostaticTank::new(
+        &water,
+        gravity(),
+        tank_geometry(Vec3::new(4.0, 4.0, 4.0)),
+        16.0,
+        volume_controls(),
+    )
+    .unwrap();
+    let sides = Vec3::new(1.0, 1.0, 1.0);
+    let source = body(500.0, sides);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let mesh = DisplacementMesh::cuboid(sides, || false).unwrap();
+    let bindings = [FiniteTankBody {
+        envelope: &mesh,
+        frame: body.frame(),
+    }; 2];
+    let z = [1.1_f64, 1.05];
+    let poses = [at(-1.0, z[0]), at(1.0, z[1])];
+    let states = poses.map(|pose| body.state_from_kinematics(pose, Twist::zero()).unwrap());
+    let old_load = tank.load_bodies(&bindings, &states, || false).unwrap();
+    let (next, audit) = tank
+        .rebind_source_at_bodies(&changed, &bindings, &states, || false)
+        .unwrap();
+    assert_eq!(audit.world_from_body, poses);
+    assert_eq!(audit.liquid_volume_m3, [16.0, 20.0]);
+    assert_eq!(
+        next.liquid_mass_kg().to_bits(),
+        tank.liquid_mass_kg().to_bits()
+    );
+    let h = [16.0, 20.0].map(|v| (v + 1.0 - z[0] - z[1]) / 14.0);
+    close(audit.fill_before.surface_height_m, h[0]);
+    close(audit.fill_after.surface_height_m, h[1]);
+    // Direct integrate rho*g*z over the actual bath minus its two body slabs.
+    let energy = |rho: f64, h: f64| {
+        10.0 * rho * (8.0 * h * h - 0.5 * z.iter().map(|z| h * h - (z - 0.5).powi(2)).sum::<f64>())
+    };
+    close(
+        audit.liquid_gravitational_energy_change_j,
+        energy(800.0, h[1]) - energy(1000.0, h[0]),
+    );
+    close(audit.empty_tank_gravitational_energy_change_j, 20000.0);
+    let load = next.load_bodies(&bindings, &states, || false).unwrap();
+    assert_eq!(load.surface, audit.fill_after);
+    assert_eq!(old_load.surface, audit.fill_before);
+    let dt = 0.001_f64;
+    let step = next
+        .step_bodies(
+            &bindings,
+            &states,
+            HydrostaticStepControls {
+                duration_s: dt,
+                maximum_energy_defect_j: 1e-5,
+            },
+            || false,
+        )
+        .unwrap();
+    for i in 0..2 {
+        let mass = 800.0 * (h[1] - z[i] + 0.5);
+        close(load.bodies[i].displaced_mass_kg(), mass);
+        close(
+            body.world_from_body(step.dynamics[i].state_after)
+                .unwrap()
+                .translation()
+                .z,
+            z[i] + 0.5 * dt * dt * 10.0 * (mass / 500.0 - 1.0),
+        );
+    }
+    let (_, reverse) = next
+        .rebind_source_at_bodies(&water, &bindings, &states, || false)
+        .unwrap();
+    assert_eq!(reverse.fill_after, audit.fill_before);
+    close(
+        reverse.liquid_gravitational_energy_change_j,
+        -audit.liquid_gravitational_energy_change_j,
+    );
+    assert_eq!(
+        tank.load_bodies(&bindings, &states, || false).unwrap(),
+        old_load
+    );
+}
+
+#[test]
+fn shared_source_refresh_preserves_singleton_bits_and_refuses_collective_overflow_atomically() {
+    let water = fluid(1000.0);
+    let changed = fluid(800.0);
+    let tank = FiniteHydrostaticTank::new(
+        &water,
+        gravity(),
+        tank_geometry(Vec3::new(4.0, 4.0, 4.0)),
+        16.0,
+        volume_controls(),
+    )
+    .unwrap();
+    let sides = Vec3::new(1.0, 1.0, 1.0);
+    let source = body(500.0, sides);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let mesh = DisplacementMesh::cuboid(sides, || false).unwrap();
+    let bindings = [FiniteTankBody {
+        envelope: &mesh,
+        frame: body.frame(),
+    }; 2];
+    let poses = [at(-1.0, 1.0), at(1.0, 1.0)];
+    let states = poses.map(|pose| body.state_from_kinematics(pose, Twist::zero()).unwrap());
+    let (_, a) = tank
+        .rebind_source_at_bodies(&changed, &bindings[..1], &states[..1], || false)
+        .unwrap();
+    let (_, b) = tank
+        .rebind_source_at_pose(&changed, &mesh, poses[0], || false)
+        .unwrap();
+    assert_eq!(
+        a.liquid_gravitational_energy_change_j,
+        b.liquid_gravitational_energy_change_j
+    );
+    assert_eq!(
+        a.displacement_potential_change_j,
+        b.displacement_potential_change_j
+    );
+    assert_eq!(a.fill_after.surface_height_m, b.fill_after.surface_height_m);
+    assert_eq!(
+        a.fill_after.displaced_volume_m3,
+        b.fill_after.displaced.volume_m3()
+    );
+    assert_eq!(
+        a.fill_after.volume_evaluations,
+        b.fill_after.volume_evaluations
+    );
+    let (_, unchanged) = tank
+        .rebind_source_at_bodies(&water, &bindings, &states, || false)
+        .unwrap();
+    assert_eq!(unchanged.fill_before, unchanged.fill_after);
+    assert_eq!(
+        unchanged.liquid_gravitational_energy_change_j.to_bits(),
+        0.0_f64.to_bits()
+    );
+    let original = tank.load_bodies(&bindings, &states, || false).unwrap();
+    let mut polls = 0;
+    tank.rebind_source_at_bodies(&changed, &bindings, &states, || {
+        polls += 1;
+        false
+    })
+    .unwrap();
+    for stop in [1, polls / 2, polls] {
+        let mut count = 0;
+        assert!(matches!(
+            tank.rebind_source_at_bodies(&changed, &bindings, &states, || {
+                count += 1;
+                count == stop
+            }),
+            Err(HydrostaticError::Cancelled)
+        ));
+    }
+    assert!(
+        tank.rebind_source_at_bodies(&changed, &bindings, &states[..1], || false)
+            .is_err()
+    );
+    assert!(
+        tank.rebind_source_at_bodies(&changed, &[], &[], || false)
+            .is_err()
+    );
+    assert_eq!(
+        tank.load_bodies(&bindings, &states, || false).unwrap(),
+        original
+    );
+    let shallow = FiniteHydrostaticTank::new(
+        &water,
+        gravity(),
+        tank_geometry(Vec3::new(4.0, 4.0, 2.0)),
+        28.0,
+        volume_controls(),
+    )
+    .unwrap();
+    let expanded = fluid(28000.0 / 30.5);
+    for pose in poses {
+        shallow
+            .rebind_source_at_pose(&expanded, &mesh, pose, || false)
+            .unwrap();
+    }
+    assert!(matches!(
+        shallow.rebind_source_at_bodies(&expanded, &bindings, &states, || false),
+        Err(HydrostaticError::TankOverflow { .. })
+    ));
+    assert_eq!(shallow.liquid_mass_kg(), 28000.0);
+    assert_eq!(shallow.liquid_volume_m3(), 28.0);
+}
