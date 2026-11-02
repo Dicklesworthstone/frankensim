@@ -31,6 +31,10 @@ use fs_tribo::tangential::multiple::{
 };
 use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput};
 
+/// Coupled normal dynamics and retained shear on shared native bodies.
+#[path = "multiple/loading.rs"]
+pub mod loading;
+
 /// Original ordered source/history and attachments for one independent patch.
 #[derive(Clone, Copy, Debug)]
 pub struct RigidMindlinIslandContact<'a> {

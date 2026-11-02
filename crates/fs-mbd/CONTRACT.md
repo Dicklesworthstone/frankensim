@@ -3596,3 +3596,36 @@ Three G1/G3/G4 groups verify exact unchanged native mechanics through elastic
 release and driven loading/reversal, separate ordered k/H inventories, the
 nonlinear frictionless normal trajectory, original selected-role identity,
 overflow after successful mechanics, zero-drive equality and final cancellation.
+
+## Simultaneous Hertz loading and retained shear across shared bodies
+
+`mindlin::multiple::loading::PreparedRigidHertzMindlinIsland::{new,new_driven}`
+advances all original normal and scalar-shear histories on a shared native body
+island. Actual mass, full inertia, orientations and arms assemble the complete
+three-coordinate contact mobility. The original Newton--Krylov owner solves the
+full normal load line using exact source-owned Hertz path means and analytic
+endpoint derivatives; Krylov products reuse those derivatives without another
+source query. The original simultaneous tangential owner then consumes those
+same affine normal paths with every longitudinal cross-contact term retained.
+
+Normal and tangential coordinates keep separate physical owners. The supported
+mechanical blocks must be orthogonal up to arithmetic roundoff; genuine
+normal/shear cross-coupling refuses instead of being discarded. All patches
+remain compressed, and original source rate/indentation limits apply to the path
+and actual native endpoints. Independent footprint admission covers the largest
+radius reached on each affine path, including growth-induced overlap.
+
+Each body receives one summed normal, shear and external resultant. Actual
+midpoint displacements, normal potential work, retained shear storage, physical
+microslip heat, actuator work, native kinetic energy and world momentum close
+before the complete body/history candidate returns. Cancellation and source or
+iteration/evaluation-budget refusal preserve all accepted inputs. Separation,
+geometry/pose evolution, rotating history and interacting elastic patch fields
+retain their surrounding owners.
+
+Four G1/G3/G4 groups verify independently expanded three-body/two-contact load
+lines through loading/unloading/reversal, zero-imposed-shear unloading loss,
+second-order 8/16/32-step refinement against an independent coupled Hertz ODE,
+full-inertia/frame/common-acceleration invariance, canonical body/contact indices,
+growing footprints, genuine cross-block and late unmodeled recoil, source/budget
+refusal and cancellation. The finest ODE indentation error is below 1e-10 m.
