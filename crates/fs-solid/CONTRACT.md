@@ -3796,3 +3796,48 @@ remain green. `examples/conservative_elastic_motion.rs` runs both formulations
 and prints deformation, energy, work, sampled J, weak volume and interval
 pressure with explicit SI controls. These bounded tests do not establish a
 mesh-independent inf-sup constant or the remaining long-horizon/render contract.
+
+## Exact complete-coordinate linear solid motion
+
+`dynamics::ExactLinearSolid` advances every free coordinate of an admitted
+`TetElasticAssembly` using the existing
+`fs-phs::linear_exact::prepared::PreparedQuadraticFlow`. Full consistent mass
+and stiffness are retained; no modal truncation, mass lumping or frequency
+retuning is introduced. State is `[u,v]`, with original physical storage
+`(u^T K u + v^T M v)/2`. Native Cholesky prepares the inverse mass and its
+residual is independently admitted against the original matrix.
+
+Preparation accepts explicit initial free-coordinate displacement/velocity,
+one fixed positive clock, and `ExactLinearSolidControls`: complete-coordinate
+capacity, dense preparation bytes, exponential multiplication work,
+operator-error allowance, work allowance in joules and accepted-step cap.
+The existing complete augmented dimension is bounded by `3*N+1 <= 256`.
+The prepared exponential is reused for warm intervals. Zero-stiffness directions
+remain in the state and retain rigid motion and constant-acceleration response.
+
+Force inputs, initial fields and returned mean velocities follow the source
+assembly's full `free_dofs()` order. The mean velocity is `Delta u/dt`.
+Held-force work is independently `f dot Delta u`; it is not inferred from
+the energy difference. Interval and accumulated original physical work balances
+gate publication. Invalid operators, exhausted budgets, invalid force, work
+refusal and cancellation preserve every accepted state field.
+
+The supported reduced assembly represents homogeneous stationary constraints.
+This API neither accepts a full nodal-force vector that silently drops
+constrained forces nor reconstructs missing support reactions or moving-support
+coupling. It supplies no material damping, nonlinear finite-rotation claim or
+sparse exponential scalability claim. Exactness refers to the admitted spatial
+pencil and held input, not continuum accuracy or arbitrary time-varying forcing.
+The nonlinear conservative owner retains its separate phase limitation.
+
+G0/G1/G5 evidence in `tests/solid_linear_dynamics.rs` passed all five native
+tests. A 5 kHz oscillator at a 48 kHz clock runs 1,000,000 accepted intervals
+with pitch error below `1e-6` cent and maximum relative energy drift
+`5.03e-10`; the independent midpoint formula gives `-59.1076` cents.
+A coupled non-diagonal pencil retains both 5 kHz and 11 kHz analytic frequencies
+and held-force work. Rational P1 and signed P2 consistent-mass pencils, zero-K
+motion, capacity/domain refusal, cancellation and repeatability are covered.
+These tests construct independent pencils in the native assembly type; they
+do not execute the original geometry assembly frontends. The native lane
+compiled the complete original fs-phs crate and was rerun against the current
+shared propagator. No full-workspace Cargo result is claimed.
