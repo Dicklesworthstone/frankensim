@@ -119,8 +119,9 @@ The original fs-solver Armijo/FGMRES driver bounds Newton and linear work.
 One complete sparse tangent is reused at each Newton field, with the original
 positive Picard preconditioner. An explicit residual-callback budget includes
 initialization and rejected trials. Only original chart, bulk-temperature or
-typed contact-source domain misses are retryable; source corners without a
-unique tangent and other constitutive failures refuse. Absolute numerical
+typed contact-source domain misses are retryable. One-dimensional resistance
+curves admit generalized Newton slopes at their knots and inward source ends;
+ambiguous surface gradients and other constitutive failures still refuse. Absolute numerical
 stopping is no looser than the independent physical nodal joule gate, and the
 unchanged energy-balance gate checks the accepted state before publication.
 The result's applied and physical contacts describe that same endpoint.
@@ -132,6 +133,27 @@ bounded residual work, chart-domain refusal and cancellation without changing
 history. This is fixed-geometry, fixed-pressure, non-radiative thermal contact;
 it asserts neither arbitrary-law convergence nor uniqueness or experimental
 validation of the synthetic constitutive fixtures.
+
+## Primal contact tangents at tabulated source knots
+
+`TemperatureContacts::linearize_temperature_for_newton` selects a generalized
+tangent of the original continuous piecewise-linear resistance law: the right
+segment at an interior knot and the inward segment at either source endpoint.
+Scalar laws retain zero temperature derivatives. The complete contact flux
+still includes the original frozen operator and its resistance feedback once.
+The primary-enthalpy Newton owner uses this tangent without smoothing the source
+curve or replacing latent storage. Every physical trial retains its pinned
+source-domain check; unsupported steps are not extrapolated.
+
+The existing `linearize_temperature` and all accepted-endpoint adjoints retain
+their unique two-sided derivative requirements. The new primal rule does not
+assert a unique physical sensitivity at a constitutive corner. Two-dimensional
+source surfaces retain their existing strict gradient admission.
+
+The focused G1/G3 regressions use the exact consistent-triangle contact flux at
+an equilibrium resistance kink, both perturbation directions, known source
+segment slopes, and analytic uniform enthalpy heating/cooling from knots and
+source endpoints. Outward source-domain steps preserve the old history on refusal.
 
 ## Complete steady contact tangents and adjoints
 

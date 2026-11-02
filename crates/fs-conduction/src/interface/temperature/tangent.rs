@@ -69,6 +69,12 @@ enum ContactDerivative<'a> {
     Surface(PreparedSurfaceResponse),
 }
 
+#[derive(Clone, Copy)]
+enum DerivativePolicy {
+    TwoSided,
+    PrimalSemismooth,
+}
+
 impl TemperatureContact<'_> {
     fn axis_weights(&self, axis: &str) -> [f64; 2] {
         match &self.coordinates {
@@ -106,8 +112,15 @@ impl TemperatureContact<'_> {
 
     fn temperature_partials(
         &self, cx: &Cx<'_>, temperatures: [f64; 2], response: &ContactDerivative<'_>,
+        policy: DerivativePolicy,
     ) -> Result<[f64; 2], ConductionError> {
         let point = self.query_point_at(temperatures)?;
+        // A forward solve may use a generalized derivative of a continuous
+        // piecewise-linear curve. Its actual pinned query already admitted
+        // this state; trial residuals still enforce the original support.
+        // Surface laws retain the existing unique, two-sided gradient rule.
+        let primal = matches!(policy, DerivativePolicy::PrimalSemismooth)
+            && !matches!(response, ContactDerivative::Surface(_));
         let axes = match &self.coordinates {
             TemperatureContactCoordinates::Mean(axis) => std::slice::from_ref(axis),
             TemperatureContactCoordinates::TwoSided(axes) => axes.as_slice(),
@@ -116,7 +129,7 @@ impl TemperatureContact<'_> {
         // neighbours admit all declared thermal validity coordinates; they do
         // not estimate a derivative. Perturb the source coordinate directly:
         // half-weighting a trace ULP could otherwise round back to the mean.
-        for axis in axes {
+        for axis in axes.iter().filter(|_| !primal) {
             let t = *point.axes().get(axis)
                 .ok_or_else(|| invalid(self.name(), "contact derivative lost a thermal query coordinate"))?;
             for temperature in [t.next_down(), t.next_up()] {
@@ -133,6 +146,20 @@ impl TemperatureContact<'_> {
             ContactDerivative::Curve { axis, knots } => {
                 let t = *point.axes().get(*axis)
                     .ok_or_else(|| invalid(self.name(), "contact curve derivative lost its source coordinate"))?;
+                if primal {
+                    if knots.len() < 2 || t < knots[0].0 || t > knots[knots.len() - 1].0 {
+                        return Err(invalid(self.name(), "contact temperature is outside the selected curve segments"));
+                    }
+                    // Right segment at an interior knot; the final knot uses
+                    // its inward (left) segment. Neither value nor slope is
+                    // extrapolated beyond the original tabulated intervals.
+                    let upper = knots.partition_point(|knot| knot.0 <= t)
+                        .min(knots.len() - 1);
+                    let lower = knots[upper - 1];
+                    let upper = knots[upper];
+                    let slope = finite((upper.1 - lower.1) / (upper.0 - lower.0))?;
+                    return Ok(self.axis_weights(axis).map(|weight| weight * slope));
+                }
                 let mut slope = None;
                 for (index, pair) in knots.windows(2).enumerate() {
                     if index % 256 == 0 { poll(cx, index)?; }
@@ -173,6 +200,8 @@ impl TemperatureContact<'_> {
 /// Units: loads are W and tangent entries W/K. Geometry and every nonthermal
 /// coordinate are fixed. This is a constitutive derivative, not a PDE solve,
 /// invertibility certificate or derivative of material-source selection.
+/// The explicitly primal constructor may select a generalized derivative at
+/// a source-curve corner; that selection is not a unique physical adjoint.
 #[derive(Debug)]
 pub struct ContactTemperatureLinearization {
     face_pairs: usize,
@@ -247,6 +276,37 @@ impl TemperatureContacts<'_, '_> {
     pub fn linearize_temperature(
         &self, cx: &Cx<'_>, boundary: &ThermalBoundary, temperature: &[f64], max_face_pairs: usize,
     ) -> Result<ContactTemperatureLinearization, ConductionError> {
+        self.linearize_temperature_with_policy(
+            cx, boundary, temperature, max_face_pairs, DerivativePolicy::TwoSided,
+        )
+    }
+
+    /// Build a primal Newton tangent for the same physical contact residual.
+    ///
+    /// Continuous piecewise-linear source curves use their right segment at
+    /// interior knots and their inward segment at either tabulated endpoint.
+    /// Scalar laws have zero temperature partials. These generalized tangents
+    /// let a physical step start at an equilibrium source corner or move inward
+    /// from a source-domain boundary without smoothing or extrapolating R(T).
+    /// Every actual state still passes its original pinned source query; an
+    /// out-of-domain Newton trial must be rejected by the residual owner.
+    /// Two-dimensional surfaces retain the strict unique-gradient requirement.
+    ///
+    /// This method is for forward nonlinear solves only. Accepted-endpoint
+    /// sensitivities and adjoints must use [`Self::linearize_temperature`],
+    /// which still requires a unique two-sided derivative and neighbourhood.
+    pub fn linearize_temperature_for_newton(
+        &self, cx: &Cx<'_>, boundary: &ThermalBoundary, temperature: &[f64], max_face_pairs: usize,
+    ) -> Result<ContactTemperatureLinearization, ConductionError> {
+        self.linearize_temperature_with_policy(
+            cx, boundary, temperature, max_face_pairs, DerivativePolicy::PrimalSemismooth,
+        )
+    }
+
+    fn linearize_temperature_with_policy(
+        &self, cx: &Cx<'_>, boundary: &ThermalBoundary, temperature: &[f64],
+        max_face_pairs: usize, policy: DerivativePolicy,
+    ) -> Result<ContactTemperatureLinearization, ConductionError> {
         poll(cx, 0)?;
         let base = self.variable_pairs.checked_add(self.nonmatching_triangles)
             .ok_or_else(|| invalid("<contact-tangent>", "contact triangle count overflows"))?;
@@ -272,7 +332,7 @@ impl TemperatureContacts<'_, '_> {
             let (law, response) = responses.get(state.interface.as_str())
                 .ok_or_else(|| invalid("<contact-tangent>", "local contact state lost its source owner"))?;
             let derivative = law.temperature_partials(cx,
-                [state.side_a_temperature_k, state.side_b_temperature_k], response)?;
+                [state.side_a_temperature_k, state.side_b_temperature_k], response, policy)?;
             if partials.insert(state.pair, derivative).is_some() {
                 return Err(invalid(law.name(), "duplicate local contact derivative"));
             }
@@ -291,7 +351,7 @@ impl TemperatureContacts<'_, '_> {
                     return Err(invalid(law.name(),"quadrature derivative order differs from the retained physical rule"));
                 }
                 entries.push(law.temperature_partials(cx,
-                    [state.side_a_temperature_k,state.side_b_temperature_k],response)?);
+                    [state.side_a_temperature_k,state.side_b_temperature_k],response,policy)?);
             }
             let mut coo=Coo::new(n,n);
             for row in 0..n {

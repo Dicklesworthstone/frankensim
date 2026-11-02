@@ -1,6 +1,8 @@
 //! Full contact-law derivatives, independently checked against fresh source queries.
 #[path = "temperature_contact_tangent/capacity.rs"]
 mod capacity;
+#[path = "temperature_contact_tangent/semismooth.rs"]
+mod semismooth;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_conduction::{ConductionError, ConductionMesh, ThermalBoundary, ThermalBoundaryBuilder,

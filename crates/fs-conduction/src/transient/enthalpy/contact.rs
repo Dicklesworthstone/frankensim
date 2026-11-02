@@ -138,7 +138,7 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
         let context = self.context(physical.contacts.frozen_interfaces());
         let stage = context.stage(h)?;
         let temperature = context.temperatures(h)?;
-        let contact = self.contacts.linearize_temperature(
+        let contact = self.contacts.linearize_temperature_for_newton(
             self.base.cx,
             self.base.problem.boundary,
             &temperature,
