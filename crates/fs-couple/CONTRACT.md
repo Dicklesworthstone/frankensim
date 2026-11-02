@@ -23044,3 +23044,36 @@ independent original-rho/K transfer-matrix and vector-velocity volume integral
 checks per-angle R/T and separate viscous/thermal losses, angular quadrature
 refinement, and two-frequency many-angle thermal/energy convergence against RK4.
 <!-- porous-angular-feedback:end -->
+
+### Heterogeneous layered moisture and compatible solid response
+
+`moisture::solid::MoistureLayeredSolid` binds one original ordered
+`MoistureLayeredSlab` to a conforming prism mesh with six native tetrahedra
+per actual moisture cell. Shared interface nodes impose perfect mechanical
+bonding independently of the stack's water-transfer contact or sealing laws.
+Each layer retains its own pinned elastic and hygroscopic sources, original
+moisture datum, principal directions, dry inventory and local accepted
+moisture. No material, moisture or dry capacity is averaged across a join.
+
+The homogeneous and layered consumers share the same private source/cell
+evaluation and native FE equilibrium owner. One globally compatible solve
+returns displacement, stress, reactions, elastic energy, admitted deformed
+geometry, conserved wet inertia and the signed initial-stress vibration
+pencil. Cell/source arrays remain in physical layer order, with explicit
+layer-cell ranges.
+
+Fixed-duration and finite-vapor candidates publish water and mechanics
+together. Adaptive wrappers reuse the original layered water controller and
+project its exact final endpoint into native mechanics; late source,
+equilibrium, geometry, mass or cancellation refusal discards the entire
+proposed window. Temporal estimates concern moisture/activity and reservoir
+water, not mechanical interpolation error.
+
+This remains fixed-reference, isothermal, quasistatic small-strain mechanics.
+Mechanical bonding does not imply ideal water contact. Deformation does not
+silently change diffusion geometry; stress-assisted transport, sorption heat,
+hysteresis, finite deformation and dynamic mode-state remapping remain
+separate models. Authored G1/G3 fixtures cover homogeneous splitting,
+heterogeneous rotated free swelling, constrained stress/energy, native
+generalized eigenvalue changes, finite-vapor coupling and whole-window
+atomic refusal; they are not measured laminate or wood validation.

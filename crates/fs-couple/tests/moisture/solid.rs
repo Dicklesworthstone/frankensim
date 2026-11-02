@@ -5,6 +5,9 @@ use fs_blake3::ContentHash;
 use fs_couple::moisture::solid::*;
 use fs_solid::linear3::{TetAssemblyBudget, TetStaticSolveConfig, source::SolidStiffnessModel};
 
+#[path = "solid/layered.rs"]
+mod layered;
+
 fn axes() -> HygroscopicAxes {
     HygroscopicAxes {
         principal_to_mesh: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
