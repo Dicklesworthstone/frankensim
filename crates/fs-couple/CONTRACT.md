@@ -1,5 +1,27 @@
 # CONTRACT: fs-couple
 
+## Sliding Reynolds films in native mechanical time integration
+
+`ImpactSystem::with_sliding_film` attaches the existing `ShearedFilm`
+pressure/entrainment/wall-traction operator to the original joint nonlinear
+mechanical equation. Its prescribed wall rows use the same mass-normalized
+basis and actual discrete-gradient rates as contacts and normal squeeze films.
+The complete resisting force and analytic directional tangent enter both
+reference and prepared execution; the fs-phs dissipation receipt counts their
+work once. No force lag, prescribed driving waveform or second clock is added.
+
+Pressure-only and sliding islands have separate stable insertion indices and
+share the existing four-island work ceiling. Geometry and source profiles
+remain immutable during each solve. Endpoint gap admission, compressible-gas
+domain exclusion, mapped support-memory recomposition restrictions and atomic
+motion/history/cancellation acceptance remain enforced. This binding retains
+the native sliding law's prescribed Newtonian profile and zero-Barus scope.
+
+Three focused G1/G3 regressions exercise the independent two-mass Couette
+relaxation solution, reference/prepared force and analytic-tangent reduction,
+momentum and physical work balance, rejected-step retry and domain/budget
+admission. Runtime execution remains a separate verification obligation.
+
 ## Layer-resolved incompressible film heat
 
 `render::plate::impact::material::heating::SqueezeFilmLayerHeatRoute`

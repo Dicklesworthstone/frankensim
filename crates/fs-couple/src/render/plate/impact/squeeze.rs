@@ -4,6 +4,8 @@
 //! same trial configuration and discrete-gradient effort, never one tick late.
 /// Shared gas/liquid transport data driving the original Reynolds operator.
 pub mod material;
+/// Work-conjugate sliding walls on the original mechanical clock.
+pub mod sliding;
 pub use fs_tribo::resistive_film::{FilmCell, FilmChannel, FilmChannelReport, FilmError, FilmLimits,
     FilmReport, GapPort, ResistiveFilm};
 use super::{ImpactError, ImpactSystem, MAX_IMPACT_MODES, invalid};
@@ -27,7 +29,7 @@ impl ImpactSystem {
     /// supported history requires a new coupled source-domain bound and refuses.
     pub fn with_squeeze_film(mut self, film: ResistiveFilm) -> Result<Self, ImpactError> {
         self.require_recomposition_without_mapped_memory()?;
-        if self.gas_film.is_some() || film.port_count() != self.modes || self.squeeze_films.len() >= 4 {
+        if self.gas_film.is_some() || film.port_count() != self.modes || self.squeeze_films.len()+self.sliding_films.len() >= 4 {
             return Err(invalid("squeeze film mode count, duplicate gas image or four-island ceiling failed"));
         }
         let mut q = [0.0; MAX_IMPACT_MODES];
@@ -44,7 +46,7 @@ impl ImpactSystem {
         // Source-bound elastic contact also uses this callback (zero added
         // resistance) to validate the actual discrete-gradient contact rate.
         self.contact_loss || !self.material_contacts.is_empty()
-            || !self.squeeze_films.is_empty() || self.gas_film.is_some()
+            || !self.squeeze_films.is_empty() || !self.sliding_films.is_empty() || self.gas_film.is_some()
             || self.supports.iter().any(|(_,_,s)|s.has_finite_strain_axial_viscosity())
     }
 
@@ -52,7 +54,7 @@ impl ImpactSystem {
     // publish collapsed/trapped fluid at the end of an otherwise accepted tick.
     pub(super) fn validate_squeeze_configuration(&self, x: &[f64]) -> Result<(), ImpactError> {
         if let Some(gas)=&self.gas_film {gas.observe(x)?;}
-        if self.squeeze_films.is_empty() { return Ok(()); }
+        if self.squeeze_films.is_empty() && self.sliding_films.is_empty() { return Ok(()); }
         if x.len() < 2*self.modes { return Err(invalid("invalid squeeze state prefix")); }
         let mut q = [0.0; MAX_IMPACT_MODES]; let zero = [0.0; MAX_IMPACT_MODES];
         let mut force = [0.0; MAX_IMPACT_MODES]; let mut p = [0.0; MAX_CELLS];
@@ -60,6 +62,11 @@ impl ImpactSystem {
         for film in &self.squeeze_films {
             film.evaluate_into(&q[..self.modes], &zero[..self.modes],
                 &mut force[..self.modes], &mut p[..film.cell_count()])
+                .map_err(|e| invalid(e.0))?;
+        }
+        for film in &self.sliding_films {
+            film.evaluate_into(&q[..self.modes], &zero[..self.modes],
+                &mut force[..self.modes], &mut p[..film.pressure_operator().cell_count()])
                 .map_err(|e| invalid(e.0))?;
         }
         Ok(())
@@ -72,7 +79,7 @@ impl ImpactSystem {
         if !self.contact.dissipative_flow_into(x,e,out) { return false; }
         if self.gas_film.as_ref().is_some_and(|gas|!gas.add_flow(x,e,out)) {return false;}
         let string_loss=self.supports.iter().any(|(_,_,s)|s.has_finite_strain_axial_viscosity());
-        if self.squeeze_films.is_empty() && !string_loss { return true; }
+        if self.squeeze_films.is_empty() && self.sliding_films.is_empty() && !string_loss { return true; }
         let mut q=[0.0; MAX_IMPACT_MODES]; let mut v=[0.0; MAX_IMPACT_MODES];
         let mut f=[0.0; MAX_IMPACT_MODES]; let mut p=[0.0; MAX_CELLS];
         for i in 0..self.modes { q[i]=x[2*i]; v[i]=e[2*i+1]; }
@@ -87,6 +94,11 @@ impl ImpactSystem {
                 &mut f[..self.modes], &mut p[..film.cell_count()]).is_err() { return false; }
             for i in 0..self.modes { out[2*i+1] += f[i]; }
         }
+        for film in &self.sliding_films {
+            if film.evaluate_into(&q[..self.modes], &v[..self.modes],
+                &mut f[..self.modes], &mut p[..film.pressure_operator().cell_count()]).is_err() { return false; }
+            for i in 0..self.modes { out[2*i+1] += f[i]; }
+        }
         out.iter().all(|x| x.is_finite())
     }
 
@@ -97,7 +109,7 @@ impl ImpactSystem {
         if !self.contact.dissipative_flow_tangent_into(x,e,dx,de,out) { return false; }
         if self.gas_film.as_ref().is_some_and(|gas|!gas.add_flow_tangent(x,e,dx,de,out)) {return false;}
         let string_loss=self.supports.iter().any(|(_,_,s)|s.has_finite_strain_axial_viscosity());
-        if self.squeeze_films.is_empty() && !string_loss { return true; }
+        if self.squeeze_films.is_empty() && self.sliding_films.is_empty() && !string_loss { return true; }
         let mut q=[0.0; MAX_IMPACT_MODES]; let mut v=[0.0; MAX_IMPACT_MODES];
         let mut dq=[0.0; MAX_IMPACT_MODES]; let mut dv=[0.0; MAX_IMPACT_MODES];
         let mut f=[0.0; MAX_IMPACT_MODES];
@@ -110,6 +122,11 @@ impl ImpactSystem {
             for (i,&force) in f[..end-first].iter().enumerate() {out[2*(first+i)+1]+=force;}
         }
         for film in &self.squeeze_films {
+            if film.tangent_into(&q[..self.modes], &v[..self.modes], &dq[..self.modes],
+                &dv[..self.modes], &mut f[..self.modes]).is_err() { return false; }
+            for i in 0..self.modes { out[2*i+1] += f[i]; }
+        }
+        for film in &self.sliding_films {
             if film.tangent_into(&q[..self.modes], &v[..self.modes], &dq[..self.modes],
                 &dv[..self.modes], &mut f[..self.modes]).is_err() { return false; }
             for i in 0..self.modes { out[2*i+1] += f[i]; }
