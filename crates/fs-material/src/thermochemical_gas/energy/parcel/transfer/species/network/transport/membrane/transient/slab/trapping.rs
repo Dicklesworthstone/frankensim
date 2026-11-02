@@ -373,7 +373,7 @@ impl TrappingMembraneDiffusionState {
             // rounded away beside a large preloaded site inventory. Audit the
             // original site's independent backward-Euler balance at this final
             // candidate, using the caller's increment-based amount allowance.
-            let site_residual=work.sites[offset+i].maximum_balance_residual_mol;
+            let site_residual=work.sites[offset+i].kinetic_balance_residual_mol.abs();
             check_balance(site_residual,tolerance)?;
             maximum_cell = maximum_cell.max(residual.abs()).max(site_residual);
         }

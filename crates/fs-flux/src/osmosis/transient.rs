@@ -16,6 +16,10 @@
 //! jumps. In the resistance coordinate `s = integral(dx / D)`, the original
 //! steady face equation is `dc/ds = Jv*c - Js`, so the same exponential fit also
 //! covers piecewise-constant D without averaging away a slow barrier layer.
+//! Explicit zero-storage transfer resistances may be added at any film face.
+//! Each is an unresolved stagnant transfer layer in that SAME resistance
+//! coordinate, with the same solvent flux and no extra hydraulic pressure drop.
+//! This includes bulk/film and film/membrane surfaces and internal contacts.
 //!
 //! Optional equilibrium linear sorption stores immobile solute in each cell:
 //! `n_total = R * V_water * c_mobile`, with explicit fixed `R >= 1`. All transport
@@ -31,8 +35,11 @@
 //! Goode and Konikow (1989), <https://doi.org/10.3133/wri894030>.
 //!
 //! This is an isothermal, neutral, ideal dilute film model with cellwise constant
-//! diffusivities and negligible film hydraulic loss. Mobile concentration is
-//! continuous across internal faces. Optional finite Langmuir sites add kinetic
+//! diffusivities and negligible film hydraulic loss. Without an added contact
+//! resistance, mobile concentration is continuous across internal faces.
+//! A resistance permits a driven concentration jump, but the common aqueous
+//! chemical potential still makes equilibrium mobile concentration continuous.
+//! Optional finite Langmuir sites add kinetic
 //! adsorption/desorption to the independent linear pool. Site capacity is an
 //! explicit fixed number of moles, not a water-volume-dependent concentration.
 //! Neither sorption model includes swelling or caloric balance; coefficients
@@ -159,6 +166,7 @@ pub struct TransientFilm {
     initial_concentrations_mol_m3: Box<[f64]>,
     total_to_mobile_ratio: Option<Box<[f64]>>,
     kinetic_sites: Option<Box<[Option<FilmLangmuirSite>]>>,
+    interface_resistances_s_m: Option<Box<[f64]>>,
 }
 impl TransientFilm {
     /// Uniform cells, with one diffusivity per species throughout the film.
@@ -228,6 +236,7 @@ impl TransientFilm {
             initial_concentrations_mol_m3: initial_concentrations_mol_m3.into_boxed_slice(),
             total_to_mobile_ratio: None,
             kinetic_sites: None,
+            interface_resistances_s_m: None,
         })
     }
 
@@ -258,6 +267,66 @@ impl TransientFilm {
             Some(total_to_mobile_ratio.into_boxed_slice())
         };
         Ok(self)
+    }
+
+    /// Add passive, zero-storage mass-transfer resistance [s/m] at each face.
+    /// The array is face-major, then original species order, with `cells+1`
+    /// faces running spatially left to right on BOTH sides of the membrane.
+    /// Face 0 and face `cells` are the exterior ends; interior face i separates
+    /// cells i-1 and i. Thus a left film's last face and a right film's first
+    /// face touch the membrane. Every value is finite and nonnegative.
+    ///
+    /// At zero solvent flux, the isolated contact law is
+    /// `Js = (c_left-c_right)/resistance`. With water motion it is the original
+    /// exact stagnant-layer law `dc/ds = Jv*c-Js`, integrated over this added
+    /// resistance. The same normal solvent flux crosses the contact; no extra
+    /// selectivity, partition coefficient, hydraulic loss, water or solute
+    /// storage is inferred. This is a mass-transfer boundary-layer limit, not
+    /// a general selective membrane or an arbitrary moving phase interface.
+    ///
+    /// Resistances compose with the actual half cells during preparation only.
+    /// All-zero inputs retain the exact original coefficients and memory path.
+    pub fn with_interface_resistances(mut self, resistance_s_m: Vec<f64>) -> Result<Self> {
+        if resistance_s_m.len() != (self.cell_widths_m.len() + 1) * self.species_count
+            || resistance_s_m.iter().any(|&r| !nonnegative(r))
+        {
+            return Err(invalid(
+                "interface resistance requires finite nonnegative s/m at every film face/species",
+            ));
+        }
+        self.interface_resistances_s_m = if resistance_s_m.iter().all(|&r| r == 0.0) {
+            None
+        } else {
+            Some(resistance_s_m.into_boxed_slice())
+        };
+        Ok(self)
+    }
+
+    fn with_face_resistance(&self, permeance: f64, face: usize, species: usize) -> Result<f64> {
+        let r = self
+            .interface_resistances_s_m
+            .as_ref()
+            .map_or(0.0, |r| r[face * self.species_count + species]);
+        if r == 0.0 {
+            return Ok(permeance);
+        }
+        // k/(1+k*r) preserves tiny intrinsic k without taking its reciprocal.
+        // If k*r overflows, the contact conductance 1/r is representable and
+        // the symmetric series form avoids both that product and a lost layer.
+        let kr = permeance * r;
+        let k = if kr.is_finite() {
+            permeance / (1.0 + kr)
+        } else {
+            let contact = 1.0 / r;
+            contact / (1.0 + contact / permeance)
+        };
+        if positive(k) {
+            Ok(k)
+        } else {
+            Err(invalid(
+                "contact and half-cell series permeance is not representable",
+            ))
+        }
     }
 
     fn half_cell_permeance(&self, cell: usize, species: usize) -> Result<FilmPermeance> {
@@ -376,6 +445,7 @@ fn film_operator(
     film: &TransientFilm,
     cell: usize,
     neighbor: Option<usize>,
+    face: usize,
 ) -> Result<MembraneTransport> {
     let solutes = (0..film.species_count)
         .map(|species| -> Result<_> {
@@ -389,6 +459,7 @@ fn film_operator(
                     a.min(b) / (1.0 + a.min(b) / a.max(b))
                 }
             };
+            let k = film.with_face_resistance(k, face, species)?;
             if !positive(k) {
                 return Err(invalid("series film permeance is not representable"));
             }
@@ -415,7 +486,7 @@ fn prepare_film(film: &TransientFilm, area: f64, side: usize) -> Result<FilmGeom
         })
         .collect::<Result<Box<[_]>>>()?;
     let interior = (0..cells - 1)
-        .map(|cell| film_operator(film, cell, Some(cell + 1)))
+        .map(|cell| film_operator(film, cell, Some(cell + 1), cell + 1))
         .collect::<Result<Box<[_]>>>()?;
     let solute_capacities_m3 = film
         .total_to_mobile_ratio
@@ -439,7 +510,12 @@ fn prepare_film(film: &TransientFilm, area: f64, side: usize) -> Result<FilmGeom
         cell_volumes_m3,
         solute_capacities_m3,
         interior,
-        outer_half_cell: film_operator(film, if side == 0 { 0 } else { cells - 1 }, None)?,
+        outer_half_cell: film_operator(
+            film,
+            if side == 0 { 0 } else { cells - 1 },
+            None,
+            if side == 0 { 0 } else { cells },
+        )?,
     })
 }
 
@@ -488,6 +564,12 @@ impl TransientOsmoticPair {
             .filter_map(|film| film.total_to_mobile_ratio.as_ref())
             .map(|ratios| ratios.len())
             .sum();
+        let interface_entries: usize = definitions
+            .iter()
+            .flatten()
+            .filter_map(|film| film.interface_resistances_s_m.as_ref())
+            .map(|values| values.len())
+            .sum();
         let kinetic = definitions
             .iter()
             .flatten()
@@ -502,6 +584,7 @@ impl TransientOsmoticPair {
             + film_cells * size_of::<MembraneTransport>()
             + 2 * count * size_of::<Option<FilmPermeance>>()
             + 2 * sorption_entries * size_of::<f64>()
+            + interface_entries * size_of::<f64>()
             + if kinetic {
                 KineticStorage::bytes(film_cells * count, rows)
             } else {
@@ -524,8 +607,14 @@ impl TransientOsmoticPair {
                     } else {
                         0
                     };
+                    let face = if side == 0 { f.cell_widths_m.len() } else { 0 };
                     (0..count)
-                        .map(|species| Ok(Some(f.half_cell_permeance(cell, species)?)))
+                        .map(|species| {
+                            let half_cell = f.half_cell_permeance(cell, species)?.value();
+                            Ok(Some(FilmPermeance::new(
+                                f.with_face_resistance(half_cell, face, species)?,
+                            )?))
+                        })
                         .collect()
                 }
                 None => Ok(vec![None; count]),

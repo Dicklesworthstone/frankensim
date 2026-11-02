@@ -23,6 +23,13 @@ pub struct ScalarSiteStep {
     pub gross_desorption_mol: f64,
     /// d(n_new)/d(a) [mol s], needed when pressure and storage are coupled.
     pub adsorption_rate_derivative_mol_s: f64,
+    /// Independent occupied-inventory change minus the net kinetic transfer.
+    /// Coupled transport applies its increment/flux allowance to this residual.
+    pub kinetic_balance_residual_mol: f64,
+    /// Occupied plus vacant sites minus capacity. This roundoff closure scales
+    /// with the site capacity, independently of a small physical uptake.
+    pub capacity_balance_residual_mol: f64,
+    /// Maximum of the kinetic and capacity residuals, for compatibility.
     pub maximum_balance_residual_mol: f64,
 }
 
@@ -69,14 +76,17 @@ pub fn backward_euler_site(initial: f64, capacity: f64, adsorption_rate: f64,
         return Err(ScalarSiteError("scalar occupied/vacant sites or gross streams are unrepresentable"));
     }
     let change = occupied - initial;
-    let residual = (change - (incoming - outgoing)).abs()
-        .max((occupied + vacancy - capacity).abs());
+    let kinetic_residual = (change - (incoming - outgoing)).abs();
+    let capacity_residual = (occupied + vacancy - capacity).abs();
+    let residual = kinetic_residual.max(capacity_residual);
     if !residual.is_finite() || residual > 128.0 * f64::EPSILON * capacity {
         return Err(ScalarSiteError("original scalar site equations failed their roundoff balance"));
     }
     Ok(ScalarSiteStep { occupied_moles: occupied, vacancy_moles: vacancy,
         occupied_change_mol: change, gross_adsorption_mol: incoming,
         gross_desorption_mol: outgoing, adsorption_rate_derivative_mol_s: derivative,
+        kinetic_balance_residual_mol: kinetic_residual,
+        capacity_balance_residual_mol: capacity_residual,
         maximum_balance_residual_mol: residual })
 }
 
@@ -94,6 +104,12 @@ mod tests {
         assert!((step.adsorption_rate_derivative_mol_s-derivative).abs()<1e-15);
         assert!((step.gross_adsorption_mol-dt*a*(c-exact)).abs()<1e-15);
         assert!((step.gross_desorption_mol-dt*d*exact).abs()<1e-15);
+        assert_eq!(step.kinetic_balance_residual_mol,
+            (step.occupied_change_mol-(step.gross_adsorption_mol-step.gross_desorption_mol)).abs());
+        assert_eq!(step.capacity_balance_residual_mol,
+            (step.occupied_moles+step.vacancy_moles-c).abs());
+        assert_eq!(step.maximum_balance_residual_mol,
+            step.kinetic_balance_residual_mol.max(step.capacity_balance_residual_mol));
     }
     #[test]
     fn inert_equilibrium_and_empty_limits_keep_finite_sites_exactly() {

@@ -2489,6 +2489,29 @@ multiple permeating species on unequal meshes, steady forward/reverse limits,
 time/space refinement, steep roots, inventory checks and atomic refusal.
 
 
+### Explicit liquid-film surface and interface resistance
+
+`TransientFilm::with_interface_resistances` accepts finite nonnegative
+mass-transfer resistance [s/m] in face-major species order, including both
+bulk/film and film/membrane ends. Spatial left-to-right face order is retained
+on either membrane side. At zero water flux the contact law is
+Js=(c_left-c_right)/resistance. With solvent motion, the same original stagnant-
+layer advection-diffusion equation is integrated through the added resistance.
+
+Preparation composes contact and actual half-cell resistances before the
+existing exponential transport coefficients are evaluated. Stable series
+arithmetic handles extreme contrasts and overflowing k*r products. Zero
+resistance retains the exact original coefficient and storage path. The
+original tridiagonal solve, mobile-only transport, osmotic reconstruction,
+linear/kinetic sorption and adaptive rollback consume these prepared faces.
+
+This is an explicit passive boundary-layer limit with no contact storage,
+partition coefficient, extra selectivity or hydraulic loss. The same solvent
+flux crosses each contact. It does not infer a general moving phase boundary
+or a measured interface coefficient. Focused regressions compare independent
+series transfer and whole-film profiles in both flow directions, signed Peclet
+limits, original zero resistance, and contact plus kinetic adaptive evolution.
+
 ### Equilibrium immobile sorption in transient films
 
 `TransientFilm::with_linear_sorption` accepts an explicit cell/species total-to-
@@ -2538,9 +2561,12 @@ Accepted and trial mobile/linear amounts and finite trapped amounts remain
 separate, avoiding subtraction of a large retained inventory to recover a tiny
 mobile pool. Independent kinetic and coupled conservation residuals must fit
 the caller's increment/flux-scaled budget; an unrepresentable uptake cannot
-silently disappear beside a large preloaded site. The shared scalar owner
-preserves exact empty and balanced-site limits without erasing the uptake
-derivative. Getters expose trapped inventory and the original site coefficients.
+silently disappear beside a large preloaded site. Kinetic residual and total
+site-capacity closure are reported separately: mobile/flux accuracy audits
+kinetics, while the original capacity-scaled closure gate remains intact.
+One-ULP capacity summation cannot force endless refinement of otherwise
+representable tiny uptake. The shared scalar owner preserves exact empty and
+balanced-site limits without erasing the uptake derivative. Getters expose trapped inventory and the original site coefficients.
 Preparation accounts for all new buffers; prepared steps and adaptive windows
 allocate no storage.
 

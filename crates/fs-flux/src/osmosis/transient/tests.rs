@@ -2,6 +2,8 @@ use super::*;
 use crate::osmosis::OsmoticPressureVolume;
 use fs_material::osmosis::IdealDiluteSolution;
 
+#[path = "interface_tests.rs"]
+mod interfaces;
 #[path = "kinetic_tests.rs"]
 mod kinetic;
 #[path = "sorption_tests.rs"]

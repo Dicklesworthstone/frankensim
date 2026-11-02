@@ -243,12 +243,14 @@ impl KineticStorage {
                     // suppresses physical uptake in a large preloaded pool.
                     // Audit the owner's INDEPENDENT kinetic equation at the
                     // converged candidate, using the mobile amount budget.
+                    // Its separate occupied+vacant capacity closure retains
+                    // the scalar owner's capacity-scaled roundoff gate.
                     let tolerance = controls.absolute_amount_tolerance_mol
                         + controls.relative_amount_tolerance * value.max(work.rhs[row]);
-                    if step.maximum_balance_residual_mol > tolerance {
+                    if step.kinetic_balance_residual_mol > tolerance {
                         return Err(TransientOsmosisError::SorptionConvergence { species });
                     }
-                    maximum = maximum.max(step.maximum_balance_residual_mol);
+                    maximum = maximum.max(step.kinetic_balance_residual_mol);
                     trapped = step.occupied_moles;
                 }
                 balance.add(trapped - self.state.trapped[index]);
