@@ -22443,6 +22443,36 @@ conduction, permutation and domain/geometry/cancellation rollback. Prismatic
 face-area admission tolerates only arithmetic roundoff in reconstructed volume
 over length; a separate decimal-coordinate case still refuses physical excess.
 
+### Adhesive trajectories through arrest with finite thermal feedback
+
+`friction_heat::adhesive::transient` closes one original rigid adhesive pair's
+complete sliding/spinning trajectory against the existing finite enthalpy
+network. Geometry, complete native mobility and normal-response rows are
+prepared once. Each thermal trial refreshes the same pinned junction claims at
+its solved face temperature and advances the original trajectory from the same
+accepted momenta. Curved motion, the exact-ray fast path and finite extinction
+retain their original work, stop-interval and unresolved-travel semantics.
+
+Only original integrated traction power and the physical extinction-tail loss
+enter the massless-face balance. Each bulk retains its own finite caloric state
+and endpoint conductivity; signed cooling and ordinary conduction continue after
+mechanical arrest. The original contact link is replaced once within the private
+trial, without adding a heat store, prescribed heat fraction or duplicated loss.
+Actual kinetic-plus-caloric change and the summed independent audits must both
+close. Preparation is immutable; the apply entry publishes both body momenta,
+the thermal network and staged source payload only after final cancellation.
+
+Strengths are sampled at the thermal endpoint and held over the mechanical
+phase. Temporal subdivision is required for material feedback and heat-release
+timing; the mechanical trajectory's error estimates do not bound this thermal
+sampling error. Normal coefficients, solid area, poses and inertia remain fixed.
+Normal thermal potential, expansion, moving footprints and attachment topology
+are not supplied by this phase. Four G1/G3/G4 groups in
+`tests/adhesive_friction_heat/transient.rs` compare finite-inertia spin arrest and
+thermal strength feedback with independently eliminated cell balances, preserve
+the original curved native trajectory, and exercise post-arrest conduction plus
+source/budget/late-cancellation rollback and deterministic retry.
+
 ## Source-bound wear on the actual directional friction and heat trajectory
 
 `friction_heat::directional::wear::apply_source_directional_trajectory_heat_with_wear`

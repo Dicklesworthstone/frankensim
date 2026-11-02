@@ -26,6 +26,9 @@ pub mod transient;
 /// Prescribed thermal changes of normal adhesion, real area and native recoil.
 pub mod thermal_normal;
 
+/// Geometry-authenticated DMT normal motion and simultaneous junction sliding.
+pub mod normal_motion;
+
 use fs_contact::interface_binding::adhesive_shear::spinning::SourceAdhesiveSlidingPatch;
 use fs_exec::CancelGate;
 use fs_tribo::adhesive::spinning::contact::{

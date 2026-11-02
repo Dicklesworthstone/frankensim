@@ -3574,6 +3574,61 @@ virgin and reversal Mindlin work, retained partial/gross/reversal histories,
 products of inertia, common acceleration and world/local frame covariance,
 canonical contact/global body indexing, and physical recoil/transactional refusal.
 
+## Native DMT normal motion with actual junction sliding
+
+`tangential_friction::adhesive::normal_motion::PreparedRigidDmtPair` consumes the
+original source-bound DMT normal/shear load line on two finite native bodies.
+An explicit fixed approach datum and actual collinear geometry markers
+authenticate the original normal state. Paired forces act at the markers'
+common midpoint reaction plane, preserving action/reaction and the work-dual
+normal/shear Jacobian. That plane is the declared contact discretization, not a
+solution for unequal-material surface-deformation partition. Actual masses,
+full inertias and reaction arms supply every entry of the three-point-force
+mobility; no caller effective mass or omitted normal/shear coupling is accepted.
+
+The original source integrates reversible normal work and real solid area along
+the same affine discrete path, including attachment and detachment. Finite-gap
+attraction can exchange native kinetic energy and normal storage while adding
+exactly zero shear area. Actual midpoint body motion is replayed through the
+original source before acceptance. Differential native kinetic work, original
+normal storage, physical junction heat, individual impulses and complete pair
+linear/angular momentum have independent dimensional gates. Static and kinetic
+strengths stay distinct. Unsupported solid-contact torsion and unresolved
+sliding capture/reversal refuse without clipping motion or inventing heat;
+gap-only spin remains free.
+
+Preparation and retries leave accepted bodies/history unchanged. Application
+publishes both momenta and the source-authenticated endpoint occupancy together
+after final cancellation admission. The fixed-Jacobian phase returns actual
+COM, geometry-marker and reaction-point midpoint travel but does not advance
+poses. The surrounding pose/contact owner must consume that travel and refresh
+the geometry before continuation; an advanced normal state against stale marker
+positions refuses. The affine constitutive path supplies neither a validated
+continuous trajectory nor contact detection, finite rotations or an impact law.
+Six G1/G3/G4 groups in `tests/adhesive_normal_motion.rs` cover analytic finite-gap
+recoil/storage and pose-owned continuation, integrated-area attachment and
+detachment with all cross responses, static support, tangent gauge/body indices,
+and source/geometry/torsion/sliding/cancellation/budget refusal with retry.
+Native execution remains subject to the existing dependency build limitation.
+
+## Prepared thermal trials of adhesive transients
+
+`PreparedRigidAdhesiveTransient` captures the original pair, point kinematics,
+actual radius-scaled mobility and complete normal-response row once. Each
+`advance` starts from the same captured endpoints. `advance_thermal` requires
+equality of the complete original source-owned patch and uses only its pinned
+temperature-refreshed junction law; normal source, disk geometry and body poses
+stay held. The original trajectory, integrated impulses, native momentum/work/
+energy and cancellation checks share one execution path with the existing
+prepare/apply APIs. The normal-path bound uses the refreshed strength and actual
+stopping interval. Detached patches retain exact no-op behavior and cannot
+acquire a thermal solid face. Three groups in
+`tests/adhesive_transient_thermal.rs` cover independent finite-inertia thermal
+arrest/heat, retries and original-API equivalence, full source/geometry refusal,
+cancellation/detachment, and strength-dependent normal-path/budget refusal.
+Source/native execution remains subject to the documented dependency build
+limitation.
+
 ## Native Hertz--Mindlin dynamics with two-surface fretting wear
 
 `mindlin::wear::advance_rigid_mindlin_wear` and its driven counterpart compose
