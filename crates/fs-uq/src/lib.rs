@@ -98,9 +98,11 @@ pub use mlmc::{MlmcReport, mlmc_estimate};
 pub use pce::{PceModel, fit_pce};
 pub use seismic::{
     AccelerationUnit, BilinearIdaModel, FragilityPoint, GroundMotionRecord,
-    GroundMotionRecordError, GroundMotionSampling, IdaIntensity, KanaiTajimi, RecordedIda,
+    GroundMotionRecordError, GroundMotionSampling, IdaIntensity, KanaiTajimi,
+    LinearResponseSpectrum, LinearSdofControls, LinearSdofError, LinearSdofResponse,
+    LinearSpectrumPoint, RecordedIda,
     bilinear_peak_ductility, cqc, ida_fragility, ida_fragility_from_records,
-    ida_fragility_with_sampling, sdof_peak, srss,
+    ida_fragility_with_sampling, linear_sdof_response, sdof_peak, srss,
 };
 
 /// Crate version, re-exported for provenance stamping.

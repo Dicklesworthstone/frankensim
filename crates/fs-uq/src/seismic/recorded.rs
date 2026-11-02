@@ -5,7 +5,10 @@
 //! or adding a free-decay tail. Recorded-suite IDA reuses the implicit bilinear
 //! oscillator; PGA/PSA normalization compares records at one physical intensity.
 
-use super::{FragilityPoint, bilinear_peak_ductility, sdof_coefficients, sdof_peak};
+use super::{
+    FragilityPoint, LinearSdofControls, LinearSdofError, LinearSdofResponse,
+    bilinear_peak_ductility, linear_sdof_response, sdof_coefficients, sdof_peak,
+};
 
 /// Units of the supplied acceleration samples before SI conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +42,41 @@ pub struct GroundMotionRecord {
     dt_s: f64,
     acceleration_m_s2: Vec<f64>,
     description: Option<String>,
+}
+
+/// One continuous-peak ordinate of a recorded linear response spectrum.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinearSpectrumPoint {
+    /// Caller-supplied undamped natural period [s], retained in caller order.
+    pub period_s: f64,
+    /// Relative motion, including the signed displacement peak, its time,
+    /// endpoint state and extremum-localization allowance.
+    pub response: LinearSdofResponse,
+    /// Pseudo-spectral velocity `omega * peak_displacement` [m/s].
+    /// This is not the maximum relative or absolute oscillator velocity.
+    pub pseudo_spectral_velocity_m_s: f64,
+    /// Pseudo-spectral acceleration `omega^2 * peak_displacement` [m/s²].
+    /// This is not the maximum absolute oscillator acceleration.
+    pub pseudo_spectral_acceleration_m_s2: f64,
+    /// Displacement-localization allowance scaled by omega [m/s].
+    /// Excludes transition/root roundoff and input/model errors.
+    pub pseudo_velocity_localization_allowance_m_s: f64,
+    /// Displacement-localization allowance scaled by omega squared [m/s²].
+    /// Excludes transition/root roundoff and input/model errors.
+    pub pseudo_acceleration_localization_allowance_m_s2: f64,
+}
+
+/// Complete recorded-motion spectrum; a refusal never returns partial ordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearResponseSpectrum {
+    /// Common viscous damping ratio for every requested oscillator.
+    pub damping_ratio: f64,
+    /// Supplied record duration [s], without an implicit free-decay tail.
+    pub duration_s: f64,
+    /// One ordinate per supplied period, preserving order and repeated periods.
+    pub points: Vec<LinearSpectrumPoint>,
+    /// Sum of full and partial transition evaluations across every ordinate.
+    pub transition_evaluations: usize,
 }
 
 /// Recorded-motion admission refuses incomplete or ambiguous input.
@@ -247,6 +285,141 @@ impl GroundMotionRecord {
             .fold(0.0_f64, |peak, a| peak.max(a.abs()))
     }
 
+    /// Exact linear response to this record's piecewise-linear acceleration.
+    ///
+    /// Starts at rest and observes the entire supplied duration, including
+    /// intersample displacement extrema. The shared oscillator transition is
+    /// prepared once for this period and record clock. No resampling, waveform
+    /// allocation, filtering or implicit decay tail is introduced.
+    ///
+    /// # Errors
+    /// Invalid period/damping/controls, exhausted work limits, cancellation,
+    /// or an unrepresentable oscillator response.
+    pub fn linear_response<C: FnMut() -> bool>(
+        &self,
+        period_s: f64,
+        damping_ratio: f64,
+        controls: LinearSdofControls,
+        cancelled: C,
+    ) -> Result<LinearSdofResponse, LinearSdofError> {
+        let omega = angular_frequency_for_period(period_s)?;
+        linear_sdof_response(
+            &self.acceleration_m_s2,
+            self.dt_s,
+            omega,
+            damping_ratio,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Continuous-peak linear response spectrum at caller-selected periods.
+    ///
+    /// Period order and duplicates are retained. The period-count limit is
+    /// checked before allocating the output. `controls.maximum_transition_evaluations`
+    /// is one TOTAL budget shared across all periods, including extremum
+    /// searches; the other controls apply to each oscillator. Each oscillator
+    /// borrows the original SI record and uses its original clock and duration.
+    ///
+    /// Displacement maxima and localization allowances are scaled explicitly
+    /// into pseudo-spectral velocity and acceleration. These quantities do not
+    /// claim actual velocity/absolute-acceleration peaks, measurement bandwidth,
+    /// or a certified physical-error bound. Existing Newmark-based IDA
+    /// normalization remains defined by [`Self::pseudo_spectral_acceleration`].
+    ///
+    /// # Errors
+    /// Empty/oversized period lists, invalid physical/numerical inputs,
+    /// allocation or shared work-budget exhaustion, cancellation, or an
+    /// unrepresentable response. Returns no partial spectrum.
+    pub fn linear_response_spectrum<C: FnMut() -> bool>(
+        &self,
+        periods_s: &[f64],
+        damping_ratio: f64,
+        maximum_periods: usize,
+        controls: LinearSdofControls,
+        mut cancelled: C,
+    ) -> Result<LinearResponseSpectrum, LinearSdofError> {
+        if cancelled() {
+            return Err(LinearSdofError::Cancelled);
+        }
+        if periods_s.len() > maximum_periods {
+            return Err(LinearSdofError::Budget("response-spectrum periods"));
+        }
+        if periods_s.is_empty() || !damping_ratio.is_finite() || damping_ratio < 0.0 {
+            return Err(LinearSdofError::Invalid(
+                "response spectrum needs periods and finite nonnegative damping",
+            ));
+        }
+        for &period_s in periods_s {
+            if cancelled() {
+                return Err(LinearSdofError::Cancelled);
+            }
+            angular_frequency_for_period(period_s)?;
+        }
+        let mut points = Vec::new();
+        points
+            .try_reserve_exact(periods_s.len())
+            .map_err(|_| LinearSdofError::Budget("response-spectrum allocation"))?;
+        let mut evaluations = 0;
+        for &period_s in periods_s {
+            if cancelled() {
+                return Err(LinearSdofError::Cancelled);
+            }
+            let remaining = controls.maximum_transition_evaluations - evaluations;
+            if remaining == 0 {
+                return Err(LinearSdofError::Budget(
+                    "response-spectrum total transition evaluations",
+                ));
+            }
+            let response = self.linear_response(
+                period_s,
+                damping_ratio,
+                LinearSdofControls {
+                    maximum_transition_evaluations: remaining,
+                    ..controls
+                },
+                &mut cancelled,
+            )?;
+            evaluations += response.transition_evaluations;
+            let omega = angular_frequency_for_period(period_s)?;
+            let stiffness = omega * omega;
+            let velocity = omega * response.peak_displacement_m;
+            let acceleration = stiffness * response.peak_displacement_m;
+            let velocity_allowance = omega * response.peak_localization_allowance_m;
+            let acceleration_allowance = stiffness * response.peak_localization_allowance_m;
+            if ![
+                velocity,
+                acceleration,
+                velocity_allowance,
+                acceleration_allowance,
+            ]
+            .into_iter()
+            .all(f64::is_finite)
+            {
+                return Err(LinearSdofError::Invalid(
+                    "pseudo-spectral ordinates and localization allowances must be representable",
+                ));
+            }
+            points.push(LinearSpectrumPoint {
+                period_s,
+                response,
+                pseudo_spectral_velocity_m_s: velocity,
+                pseudo_spectral_acceleration_m_s2: acceleration,
+                pseudo_velocity_localization_allowance_m_s: velocity_allowance,
+                pseudo_acceleration_localization_allowance_m_s2: acceleration_allowance,
+            });
+        }
+        if cancelled() {
+            return Err(LinearSdofError::Cancelled);
+        }
+        Ok(LinearResponseSpectrum {
+            damping_ratio,
+            duration_s: self.duration_s(),
+            points,
+            transition_evaluations: evaluations,
+        })
+    }
+
     /// Pseudo-spectral acceleration omega² * max|u_relative| [m/s²].
     ///
     /// Uses the existing linear Newmark response on this record's clock and
@@ -270,6 +443,21 @@ impl GroundMotionRecord {
         );
         value
     }
+}
+
+fn angular_frequency_for_period(period_s: f64) -> Result<f64, LinearSdofError> {
+    if !period_s.is_finite() || period_s <= 0.0 {
+        return Err(LinearSdofError::Invalid(
+            "spectral period must be positive and finite",
+        ));
+    }
+    let omega = core::f64::consts::TAU / period_s;
+    if !omega.is_finite() || omega <= 0.0 {
+        return Err(LinearSdofError::Invalid(
+            "spectral angular frequency must be positive and representable",
+        ));
+    }
+    Ok(omega)
 }
 
 fn number(text: &str) -> Option<f64> {

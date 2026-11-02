@@ -17,7 +17,7 @@ pub use linear::{LinearSdofControls, LinearSdofError, LinearSdofResponse, linear
 pub mod recorded;
 pub use recorded::{
     AccelerationUnit, BilinearIdaModel, GroundMotionRecord, GroundMotionRecordError, IdaIntensity,
-    RecordedIda, ida_fragility_from_records,
+    LinearResponseSpectrum, LinearSpectrumPoint, RecordedIda, ida_fragility_from_records,
 };
 
 /// The Kanai–Tajimi power spectral density: filtered white noise

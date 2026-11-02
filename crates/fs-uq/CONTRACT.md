@@ -500,3 +500,28 @@ tail must be supplied explicitly, and clock refinement remains necessary.
 against independent one-interval equilibria, nonlinear PGA/polarity
 equivalence, physical PSA-normalized elastic demands, exact compatibility
 with supplied synthetic suites, and an AT2-to-yielded-response SI calculation.
+
+## Continuous-peak spectra from recorded motion
+
+`GroundMotionRecord::linear_response` consumes the SI samples through the
+shared exact first-order-hold oscillator and bounded intersample-extremum
+search. `linear_response_spectrum` applies that owner to a caller's period
+list, preserving order and duplicates. The period-count cap precedes output
+allocation, and `maximum_transition_evaluations` is one total budget across
+all oscillators and their extremum searches. Cancellation, exhausted limits
+and unrepresentable results return no partial spectrum.
+
+Each `LinearSpectrumPoint` retains the signed relative-displacement peak,
+its physical time, final motion and localization allowance. Pseudo-spectral
+velocity is omega times peak displacement; pseudo-spectral acceleration is
+omega squared times peak displacement. Their localization allowances are
+scaled by the same factors. These are not measured peak velocities/absolute
+accelerations, and the allowances exclude transition/root roundoff and
+input/model error. The original record clock and duration are retained;
+no resampling or implicit decay tail is added. Existing Newmark PSA and IDA
+normalization retain their original semantics.
+
+The recorded-motion tests cover a whole-period interval whose endpoints
+hide the true peak, period ordering, SI-unit equivalence, subdivision of
+the same forcing interpolant, explicit tail duration, total work limits,
+admission and cancellation without changing the record.

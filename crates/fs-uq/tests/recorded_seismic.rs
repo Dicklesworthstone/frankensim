@@ -1,3 +1,4 @@
+use fs_uq::seismic::{LinearSdofControls, LinearSdofError};
 use fs_uq::{
     AccelerationUnit, BilinearIdaModel, GroundMotionRecord, GroundMotionRecordError,
     GroundMotionSampling, IdaIntensity, KanaiTajimi, ida_fragility_from_records,
@@ -311,4 +312,206 @@ fn zero_records_remain_valid_without_physical_intensity_normalization() {
         ))
         .is_err()
     );
+}
+
+fn linear_controls() -> LinearSdofControls {
+    LinearSdofControls {
+        maximum_samples: 10_000,
+        maximum_acceleration_zeros_per_interval: 128,
+        maximum_transition_evaluations: 100_000,
+        maximum_bisections_per_extremum: 128,
+        extremum_time_tolerance_s: 1.0e-10,
+    }
+}
+
+#[test]
+fn continuous_spectrum_resolves_hidden_peaks_and_preserves_period_order() {
+    // The one-second oscillator returns to rest after this whole-period
+    // constant-force interval, hiding its displacement peak between samples.
+    let motion = record(1.0, vec![3.0, 3.0]);
+    let before = motion.clone();
+    let periods = [1.0, 2.0, 0.5, 1.0];
+    let report = motion
+        .linear_response_spectrum(&periods, 0.0, periods.len(), linear_controls(), || false)
+        .unwrap();
+    assert_eq!(report.damping_ratio, 0.0);
+    assert_eq!(report.duration_s, 1.0);
+    for (&period, point) in periods.iter().zip(&report.points) {
+        let omega = core::f64::consts::TAU / period;
+        let expected_peak = 6.0 / (omega * omega);
+        assert_eq!(point.period_s, period);
+        assert!((point.response.peak_displacement_m - expected_peak).abs() < 5e-14);
+        assert!((point.response.signed_peak_displacement_m + expected_peak).abs() < 5e-14);
+        assert!((point.pseudo_spectral_velocity_m_s - 6.0 / omega).abs() < 3e-13);
+        assert!((point.pseudo_spectral_acceleration_m_s2 - 6.0).abs() < 2e-12);
+        assert_eq!(point.response.duration_s, 1.0);
+        assert_eq!(point.response.intervals, 1);
+        assert_eq!(
+            point.pseudo_velocity_localization_allowance_m_s,
+            omega * point.response.peak_localization_allowance_m,
+        );
+        assert_eq!(
+            point.pseudo_acceleration_localization_allowance_m_s2,
+            omega * omega * point.response.peak_localization_allowance_m,
+        );
+    }
+    let first = report.points[0].response;
+    assert!(first.final_displacement_m.abs() < 5e-14);
+    assert!((first.peak_time_s - 0.5).abs() < 1e-10);
+    assert_eq!(report.points[0], report.points[3]);
+    assert_eq!(
+        motion
+            .linear_response(1.0, 0.0, linear_controls(), || false)
+            .unwrap(),
+        first,
+    );
+    assert_eq!(
+        report.transition_evaluations,
+        report
+            .points
+            .iter()
+            .map(|p| p.response.transition_evaluations)
+            .sum::<usize>(),
+    );
+    assert_eq!(motion, before);
+}
+
+#[test]
+fn recorded_continuous_spectra_preserve_si_units_and_linear_interpolation() {
+    let values_g = [0.0, 1.0, -0.5, 0.0];
+    let motion =
+        GroundMotionRecord::try_new(0.3, values_g.to_vec(), AccelerationUnit::StandardGravity)
+            .unwrap();
+    let centimetres = GroundMotionRecord::try_new(
+        0.3,
+        values_g.iter().map(|a| a * 980.665).collect(),
+        AccelerationUnit::CentimetresPerSecondSquared,
+    )
+    .unwrap();
+    // Add only points on the existing straight segments: the continuous
+    // excitation is identical, despite the different record clock.
+    let mut refined_samples = Vec::new();
+    for pair in motion.acceleration_m_s2().windows(2) {
+        for i in 0..8 {
+            let weight = f64::from(i) / 8.0;
+            refined_samples.push((1.0 - weight) * pair[0] + weight * pair[1]);
+        }
+    }
+    refined_samples.push(*motion.acceleration_m_s2().last().unwrap());
+    let refined = record(0.3 / 8.0, refined_samples);
+    let periods = [0.4, 1.1, 2.0];
+    let baseline = motion
+        .linear_response_spectrum(&periods, 0.07, 3, linear_controls(), || false)
+        .unwrap();
+    for equivalent in [centimetres, refined] {
+        let result = equivalent
+            .linear_response_spectrum(&periods, 0.07, 3, linear_controls(), || false)
+            .unwrap();
+        assert!((result.duration_s - baseline.duration_s).abs() < 2e-16);
+        for (actual, expected) in result.points.iter().zip(&baseline.points) {
+            assert!(
+                (actual.response.peak_displacement_m - expected.response.peak_displacement_m).abs()
+                    < 2e-12
+            );
+            assert!(
+                (actual.response.signed_peak_displacement_m
+                    - expected.response.signed_peak_displacement_m)
+                    .abs()
+                    < 2e-12
+            );
+            assert!((actual.response.peak_time_s - expected.response.peak_time_s).abs() < 2e-9);
+            assert!(
+                (actual.pseudo_spectral_acceleration_m_s2
+                    - expected.pseudo_spectral_acceleration_m_s2)
+                    .abs()
+                    < 5e-11
+            );
+        }
+    }
+}
+
+#[test]
+fn recorded_linear_response_ends_at_the_supplied_duration_without_decay_tail() {
+    let motion = record(0.03, vec![0.0, -1.0]);
+    let response = motion
+        .linear_response(1.0, 0.05, linear_controls(), || false)
+        .unwrap();
+    assert_eq!(response.duration_s, 0.03);
+    assert_eq!(response.peak_time_s, 0.03);
+    assert_eq!(
+        response.peak_displacement_m,
+        response.final_displacement_m.abs()
+    );
+    assert!(response.final_velocity_m_s > 0.0);
+    // The explicitly authored zero-acceleration tail is a different record.
+    let extended = record(0.03, vec![0.0, -1.0, 0.0, 0.0, 0.0, 0.0]);
+    let later = extended
+        .linear_response(1.0, 0.05, linear_controls(), || false)
+        .unwrap();
+    assert!(later.peak_displacement_m > response.peak_displacement_m);
+    assert!(later.peak_time_s > response.duration_s);
+}
+
+#[test]
+fn recorded_spectrum_enforces_global_work_period_sample_and_cancellation_limits() {
+    let motion = record(0.1, vec![0.0; 3]);
+    let periods = [0.5, 1.0, 2.0];
+    let mut controls = linear_controls();
+    controls.maximum_transition_evaluations = 5;
+    assert!(matches!(
+        motion.linear_response_spectrum(&periods, 0.05, 3, controls, || false),
+        Err(LinearSdofError::Budget(_)),
+    ));
+    controls.maximum_transition_evaluations = 6;
+    let completed = motion
+        .linear_response_spectrum(&periods, 0.05, 3, controls, || false)
+        .unwrap();
+    assert_eq!(completed.transition_evaluations, 6);
+    assert!(
+        completed
+            .points
+            .iter()
+            .all(|p| p.response.transition_evaluations == 2)
+    );
+    assert!(matches!(
+        motion.linear_response_spectrum(&[f64::NAN], 0.05, 0, controls, || false),
+        Err(LinearSdofError::Budget(_)),
+    ));
+    controls.maximum_samples = 2;
+    assert!(matches!(
+        motion.linear_response_spectrum(&periods, 0.05, 3, controls, || false),
+        Err(LinearSdofError::Budget(_)),
+    ));
+    for period in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MIN_POSITIVE / 4.0] {
+        assert!(
+            motion
+                .linear_response(period, 0.05, linear_controls(), || false)
+                .is_err()
+        );
+    }
+    assert!(
+        motion
+            .linear_response_spectrum(&[], 0.05, 3, linear_controls(), || false)
+            .is_err()
+    );
+    assert!(
+        motion
+            .linear_response_spectrum(&periods, -0.1, 3, linear_controls(), || false)
+            .is_err()
+    );
+    assert!(matches!(
+        motion.linear_response(1.0, 0.05, linear_controls(), || true),
+        Err(LinearSdofError::Cancelled),
+    ));
+    let active = record(0.01, vec![0.1; 50]);
+    let before = active.clone();
+    let mut polls = 0;
+    assert!(matches!(
+        active.linear_response_spectrum(&periods, 0.05, 3, linear_controls(), || {
+            polls += 1;
+            polls >= 80
+        }),
+        Err(LinearSdofError::Cancelled),
+    ));
+    assert_eq!(active, before);
 }
