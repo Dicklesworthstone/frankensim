@@ -24,8 +24,10 @@
 //! no volume emission is assumed. Numerical distance/event limits are errors,
 //! never background. Native zero power cannot distinguish exact extinction from
 //! floating-point underflow and is unresolved before a positive finite source.
-//! Diffuse/rough scattering, point-light connections, moving
+//! Diffuse/rough surface scattering, point-light connections, moving
 //! fields, gain and nonreciprocal media remain outside this consumer.
+//! With `volumes`, `participating` adds the original reciprocal molecular
+//! scattering walk and retains this same endpoint radiometry.
 
 use super::{CurvedPathResult, CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings};
 use crate::charts::Ray;
@@ -40,6 +42,10 @@ use fs_geom::Vec3;
 
 /// Physical camera and spectral pixel integration over these native paths.
 pub mod raster;
+
+/// Molecular multiple-scattering camera paths on the original curved owner.
+#[cfg(feature = "volumes")]
+pub mod participating;
 
 /// Maximum knots in one immutable source spectrum, admitted before storage.
 pub const MAX_RADIANCE_KNOTS: usize = 1024;

@@ -357,6 +357,26 @@ differentiable lift). Pure Rust throughout.
   directional backgrounds, reciprocal noncoplanar interfaces, independent
   dispersive paths, physical camera sampling and refusal boundaries.
 
+- With `volumes`, `camera::participating::CurvedRayleighCameraScene`
+  composes the prepared scalar camera with the exact original
+  `CurvedRayleighScene` surface owner, checked by pointer identity. Native
+  arc-length flights, heterogeneous majorant/null tracking, complete
+  Rayleigh/depolarized-Rayleigh Mueller/PDF response and absorption are reused
+  unchanged. The existing endpoint radiance conversion applies once; no
+  duplicate scattering survival, collision rate, albedo or phase weight is
+  introduced. Samples retain real collision and free-flight counters. Zero
+  scattering preserves surface-camera results bit for bit. Positive-majorant
+  tails do not become vacuum because one density query is zero. All native
+  work/distance/volume/cancellation refusals propagate. No volume emission,
+  general particle polarization inference or polarized camera adjoint is added.
+  `CurvedCameraRaster::sample_pixel_rayleigh` uses the same physical camera,
+  spectral stratification and color integration, with separate per-wavelength
+  surface/flight streams and a fourth independent delta-acceptance variate.
+  Every lane retains its volume counters and path budgets. Nine regressions
+  cover analytic uncollided GRIN transport, source visibility after scattering,
+  polarization-dependent multiple collisions, null tracking, owner identity,
+  zero-scattering pixel equivalence, conditional Beer weights and refusals.
+
 - `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
   absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
   nanometres, strict inclusive 380--780 nm support, deterministic linear

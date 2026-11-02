@@ -22,6 +22,10 @@ use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, cie_x, cie_y, cie_z, y_integral};
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
+/// Spectral pixel integration with native curved molecular scattering.
+#[cfg(feature = "volumes")]
+pub mod participating;
+
 /// Each pixel sample independently traces this many wavelengths.
 pub const CAMERA_WAVELENGTHS: usize = 4;
 
@@ -144,6 +148,30 @@ impl<'a> CurvedCameraRaster<'a> {
         pixel: u32,
         sample: u32,
     ) -> Result<CurvedPixelSample, CurvedRasterError> {
+        let key = [seed as u32, (seed >> 32) as u32];
+        self.sample_pixel_with_transport(cx, seed, pixel, sample, |cx, ray, wavelength, lane| {
+            scene.sample_ray_with_samples(cx, ray, wavelength, initial_medium, settings, |event| {
+                let block = philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
+                core::array::from_fn(|i| unit(block[i]))
+            })
+        })
+    }
+
+    // Both surface-only and participating estimators share raster/lens draws,
+    // wavelength stratification and color integration without changing bits.
+    fn sample_pixel_with_transport(
+        &self,
+        cx: &Cx<'_>,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        mut trace: impl FnMut(
+            &Cx<'_>,
+            Ray,
+            f64,
+            usize,
+        ) -> Result<CameraRadianceSample, CameraRadianceError>,
+    ) -> Result<CurvedPixelSample, CurvedRasterError> {
         cx.checkpoint().map_err(CameraError::from)?;
         if pixel >= self.pixels {
             return Err(CurvedRasterError::InvalidRaster);
@@ -170,20 +198,7 @@ impl<'a> CurvedCameraRaster<'a> {
             LAMBDA_MIN,
             LAMBDA_MAX,
         );
-        let trace_lane = |lane: usize| {
-            scene.sample_ray_with_samples(
-                &render_cx,
-                ray,
-                wavelengths_nm[lane],
-                initial_medium,
-                settings,
-                |event| {
-                    let block =
-                        philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
-                    core::array::from_fn(|i| unit(block[i]))
-                },
-            )
-        };
+        let mut trace_lane = |lane: usize| trace(&render_cx, ray, wavelengths_nm[lane], lane);
         // Fixed storage and explicit propagation of the first failed lane.
         let spectral = [
             trace_lane(0)?,

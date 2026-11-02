@@ -16,7 +16,7 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::{CancelGate, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 
-fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
+pub(super) fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
         let cx = Cx::new(
@@ -35,7 +35,7 @@ fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     });
 }
 
-fn camera(radius: f64) -> PhysicalCamera {
+pub(super) fn camera(radius: f64) -> PhysicalCamera {
     PhysicalCamera::try_look_at(
         Point3::new(0.0, 0.0, 0.0),
         Point3::new(0.0, 0.0, 2.0),
@@ -47,7 +47,7 @@ fn camera(radius: f64) -> PhysicalCamera {
     .unwrap()
 }
 
-fn geometry() -> InstanceScene {
+pub(super) fn geometry() -> InstanceScene {
     InstanceScene::try_new(vec![
         GeometryInstance::try_new(
             7,
@@ -63,14 +63,14 @@ fn geometry() -> InstanceScene {
     .unwrap()
 }
 
-fn bindings() -> Vec<SurfaceBinding> {
+pub(super) fn bindings() -> Vec<SurfaceBinding> {
     vec![SurfaceBinding {
         object_id: 7,
         interaction: Interaction::Opaque,
     }]
 }
 
-fn settings() -> CurvedTraceSettings {
+pub(super) fn settings() -> CurvedTraceSettings {
     CurvedTraceSettings {
         max_surface_events: 8,
         max_distance_m: 4.0,
