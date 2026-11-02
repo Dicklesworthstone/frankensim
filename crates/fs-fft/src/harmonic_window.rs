@@ -74,9 +74,27 @@ impl HarmonicWindow {
 
     /// Average of `exp(-i omega t)`, including the exact DC limit.
     pub fn mean_phase(self, omega: f64) -> Result<C64, WindowError> {
-        let half_width = self.half_width(omega)?;
-        let scale = sinc(half_width).to_f64();
-        Ok(self.rotation(omega, half_width)?.scale(scale))
+        if !omega.is_finite() {
+            return Err(WindowError::InvalidFrequency);
+        }
+        self.mean_phase_extended(Dd::from_f64(omega))
+    }
+
+    /// Mean phase for a frequency authored in cycles/second. Convert to rad/s
+    /// in double-double precision before applying the physical source clock.
+    /// This avoids an independently rounded carrier shifting a resolved beat.
+    pub fn mean_phase_hz(self, frequency_hz: f64) -> Result<C64, WindowError> {
+        self.mean_phase_extended(angular_frequency(frequency_hz)?)
+    }
+
+    fn mean_phase_extended(self, omega: Dd) -> Result<C64, WindowError> {
+        let half_width = self.half_width_extended(omega)?;
+        let scale = sinc(half_width);
+        let [real, imaginary] = self.rotation(omega, half_width)?;
+        Ok(C64::new(
+            checked(real * scale)?.to_f64(),
+            checked(imaginary * scale)?.to_f64(),
+        ))
     }
 
     /// Cache the time integration for a frequency pair. No allocation; reuse
@@ -86,8 +104,35 @@ impl HarmonicWindow {
         omega_a: f64,
         omega_b: f64,
     ) -> Result<HarmonicProduct, WindowError> {
-        let a = self.half_width(omega_a)?;
-        let b = self.half_width(omega_b)?;
+        if !omega_a.is_finite() || !omega_b.is_finite() {
+            return Err(WindowError::InvalidFrequency);
+        }
+        self.product_kernel_extended(Dd::from_f64(omega_a), Dd::from_f64(omega_b))
+    }
+
+    /// Deterministic real-product kernel for frequencies authored in Hz.
+    ///
+    /// Retains the Hz-to-radian conversion through both carrier rotations and
+    /// the centered sum/difference Gram weights. Separately rounded carriers
+    /// can otherwise turn a slow beat into a different physical frequency.
+    pub fn product_kernel_hz(
+        self,
+        frequency_a_hz: f64,
+        frequency_b_hz: f64,
+    ) -> Result<HarmonicProduct, WindowError> {
+        self.product_kernel_extended(
+            angular_frequency(frequency_a_hz)?,
+            angular_frequency(frequency_b_hz)?,
+        )
+    }
+
+    fn product_kernel_extended(
+        self,
+        omega_a: Dd,
+        omega_b: Dd,
+    ) -> Result<HarmonicProduct, WindowError> {
+        let a = self.half_width_extended(omega_a)?;
+        let b = self.half_width_extended(omega_b)?;
         let difference = checked(a - b)?;
         let sum = checked(a + b)?;
         let half = Dd::from_f64(0.5);
@@ -218,26 +263,22 @@ impl HarmonicWindow {
         })
     }
 
-    fn half_width(self, omega: f64) -> Result<Dd, WindowError> {
-        if !omega.is_finite() {
-            return Err(WindowError::InvalidFrequency);
-        }
-        // Halve the larger operand, so neither a tiny duration nor a huge
-        // frequency loses a representable product through scaling order.
-        let (a, b) = if omega.abs() >= self.duration_s {
-            (0.5 * omega, self.duration_s)
+    fn half_width_extended(self, omega: Dd) -> Result<Dd, WindowError> {
+        // Halve the larger operand to preserve representable tiny products.
+        if omega.hi.abs() >= self.duration_s {
+            checked((omega * Dd::from_f64(0.5)) * Dd::from_f64(self.duration_s))
         } else {
-            (omega, 0.5 * self.duration_s)
-        };
-        checked(Dd::from_f64(a) * Dd::from_f64(b))
+            checked(omega * Dd::from_f64(0.5 * self.duration_s))
+        }
     }
 
-    fn rotation(self, omega: f64, half_width: Dd) -> Result<C64, WindowError> {
-        let start = checked(Dd::from_f64(omega) * Dd::from_f64(self.start_s))?;
-        // Do not form start + duration/2: a short window on a large clock
-        // still has a resolved duration. TwoProd also retains product phase
-        // bits that a single rounded omega*time multiplication would discard.
-        Ok(phase(start) * phase(half_width))
+    fn rotation(self, omega: Dd, half_width: Dd) -> Result<[Dd; 2], WindowError> {
+        let start = checked(omega * Dd::from_f64(self.start_s))?;
+        // Preserve a short duration on a large clock and small cosine
+        // decrements near cancellation through the full quadratic contraction.
+        let (sr, si) = proper_phase(start);
+        let (wr, wi) = proper_phase(half_width);
+        Ok([checked(sr * wr - si * wi)?, checked(sr * wi + si * wr)?])
     }
 }
 
@@ -248,8 +289,8 @@ impl HarmonicWindow {
 /// arithmetic; this is not an interval or a relative guarantee near nulls.
 #[derive(Debug, Clone, Copy)]
 pub struct HarmonicProduct {
-    rotation_a: C64,
-    rotation_b: C64,
+    rotation_a: [Dd; 2],
+    rotation_b: [Dd; 2],
     cos_cos: Dd,
     sin_sin: Dd,
 }
@@ -266,6 +307,18 @@ impl HarmonicProduct {
     /// Cached trigonometry remains f64; no relative error bound near an
     /// arbitrary null is implied by this extended-precision accumulator.
     pub fn mean_real_product_dd(self, a: C64, b: C64) -> Result<Dd, WindowError> {
+        self.mean_real_product_parts_dd(
+            [Dd::from_f64(a.re), Dd::from_f64(a.im)],
+            [Dd::from_f64(b.re), Dd::from_f64(b.im)],
+        )
+    }
+
+    /// Contract retained real/imaginary double-double field components.
+    ///
+    /// Equal-frequency field sums can carry a small low component that only
+    /// becomes visible after a later cancellation. Keeping it here also avoids
+    /// expanding one product into four separate C64 contractions.
+    pub fn mean_real_product_parts_dd(self, a: [Dd; 2], b: [Dd; 2]) -> Result<Dd, WindowError> {
         let (ar, ai) = rotate(a, self.rotation_a)?;
         let (br, bi) = rotate(b, self.rotation_b)?;
         let cosine = checked(checked(self.cos_cos * ar)? * br)?;
@@ -298,13 +351,19 @@ impl ProperHarmonicProduct {
     /// nonnegative. Floating trigonometry supplies no relative guarantee at an
     /// arbitrary null. Equal-frequency fields should be combined first.
     pub fn mean_real_product_dd(self, a: C64, b: C64) -> Result<Dd, WindowError> {
-        if [a.re, a.im, b.re, b.im].iter().any(|x| !x.is_finite()) {
-            return Err(WindowError::NonFiniteAmplitude);
+        self.mean_real_product_parts_dd(
+            [Dd::from_f64(a.re), Dd::from_f64(a.im)],
+            [Dd::from_f64(b.re), Dd::from_f64(b.im)],
+        )
+    }
+
+    /// Contract retained real/imaginary double-double field components.
+    pub fn mean_real_product_parts_dd(self, a: [Dd; 2], b: [Dd; 2]) -> Result<Dd, WindowError> {
+        for value in a.into_iter().chain(b) {
+            check_amplitude(value)?;
         }
-        let ar = Dd::from_f64(a.re);
-        let ai = Dd::from_f64(a.im);
-        let br = Dd::from_f64(b.re);
-        let bi = Dd::from_f64(b.im);
+        let [ar, ai] = a;
+        let [br, bi] = b;
         let real = checked(ar * br + ai * bi)?;
         let imaginary = checked(ai * br - ar * bi)?;
         checked(checked(real * self.real)? - checked(imaginary * self.imaginary)?)
@@ -319,14 +378,26 @@ fn checked(x: Dd) -> Result<Dd, WindowError> {
     }
 }
 
-fn rotate(a: C64, r: C64) -> Result<(Dd, Dd), WindowError> {
-    if !a.re.is_finite() || !a.im.is_finite() {
-        return Err(WindowError::NonFiniteAmplitude);
+fn angular_frequency(frequency_hz: f64) -> Result<Dd, WindowError> {
+    if !frequency_hz.is_finite() {
+        return Err(WindowError::InvalidFrequency);
     }
-    let ar = Dd::from_f64(a.re);
-    let ai = Dd::from_f64(a.im);
-    let rr = Dd::from_f64(r.re);
-    let ri = Dd::from_f64(r.im);
+    checked(Dd::from_f64(frequency_hz) * Dd::from_f64(core::f64::consts::TAU))
+}
+
+fn check_amplitude(value: Dd) -> Result<(), WindowError> {
+    if value.hi.is_finite() && value.lo.is_finite() {
+        Ok(())
+    } else {
+        Err(WindowError::NonFiniteAmplitude)
+    }
+}
+
+fn rotate(a: [Dd; 2], r: [Dd; 2]) -> Result<(Dd, Dd), WindowError> {
+    check_amplitude(a[0])?;
+    check_amplitude(a[1])?;
+    let [ar, ai] = a;
+    let [rr, ri] = r;
     Ok((checked(ar * rr - ai * ri)?, checked(ar * ri + ai * rr)?))
 }
 
@@ -723,5 +794,132 @@ mod tests {
             window.proper_product_kernel_hz(f64::INFINITY, 0.0),
             Err(WindowError::InvalidFrequency)
         ));
+    }
+
+    #[test]
+    fn g1_hz_kernels_match_real_signals_and_keep_a_resolved_high_carrier_beat() {
+        let window = HarmonicWindow::new(-0.23, 0.41).unwrap();
+        let a = C64::new(0.7, -0.4);
+        let b = C64::new(-0.3, 1.2);
+        for (fa, fb) in [(3.25, 4.125), (-1.5, 0.0), (0.0, 0.0)] {
+            close(
+                window
+                    .product_kernel_hz(fa, fb)
+                    .unwrap()
+                    .mean_real_product(a, b)
+                    .unwrap(),
+                simpson(window, a, TAU * fa, b, TAU * fb),
+                2e-12,
+            );
+        }
+        // The sum cos(a)cos(b)+sin(a)sin(b) removes the common carrier
+        // exactly. This low-frequency oracle never rotates either carrier.
+        let fa = 2.0_f64.powi(48);
+        let fb = fa + 0.125;
+        let shutter = HarmonicWindow::new(-0.5, 1.0).unwrap();
+        let kernel = shutter.product_kernel_hz(fa, fb).unwrap();
+        let got = kernel.mean_real_product_dd(C64::ONE, C64::ONE).unwrap()
+            + kernel
+                .mean_real_product_dd(C64::new(0.0, 1.0), C64::new(0.0, 1.0))
+                .unwrap();
+        let half_beat = 0.5 * TAU * (fa - fb);
+        let expected = half_beat.sin() / half_beat;
+        close(got.to_f64(), expected, 3e-14);
+        let rounded = shutter.product_kernel(TAU * fa, TAU * fb).unwrap();
+        let wrong = rounded.mean_real_product(C64::ONE, C64::ONE).unwrap()
+            + rounded
+                .mean_real_product(C64::new(0.0, 1.0), C64::new(0.0, 1.0))
+                .unwrap();
+        assert!((wrong - expected).abs() > 1e-3);
+    }
+
+    #[test]
+    fn g1_hz_mean_phase_retains_a_fractional_carrier_on_its_clock() {
+        let base = 2.0_f64.powi(48);
+        let fraction = 0.125;
+        let start = 2.0_f64.powi(-20);
+        let duration = 2.0_f64.powi(-30);
+        let window = HarmonicWindow::new(start, duration).unwrap();
+        // Products by powers of two are exact; evaluate the large and small
+        // physical frequency contributions independently using platform trig.
+        let rotate = |x: f64| C64::new(x.cos(), -x.sin());
+        let base_start = TAU * (base * start);
+        let base_half = TAU * (base * (0.5 * duration));
+        let small_start = TAU * (fraction * start);
+        let small_half = TAU * (fraction * (0.5 * duration));
+        let expected_rotation =
+            rotate(base_start) * rotate(small_start) * rotate(base_half) * rotate(small_half);
+        let half = Dd::from_f64(base_half) + Dd::from_f64(small_half);
+        let expected_sine = (rotate(base_half) * rotate(small_half)).im;
+        let expected = expected_rotation.scale(-expected_sine / half.to_f64());
+        let actual = window.mean_phase_hz(base + fraction).unwrap();
+        close(actual.re, expected.re, 2e-20);
+        close(actual.im, expected.im, 2e-20);
+    }
+
+    #[test]
+    fn g0_extended_amplitudes_keep_grouped_low_components() {
+        let big = Dd::from_f64(2.0_f64.powi(54));
+        let weak = Dd::from_f64(0.25);
+        let a = [big + weak, Dd::ZERO];
+        let b = [Dd::ONE, Dd::ZERO];
+        let window = HarmonicWindow::new(0.0, 1.0).unwrap();
+        let deterministic = window.product_kernel(0.0, 0.0).unwrap();
+        let low = deterministic.mean_real_product_parts_dd(a, b).unwrap()
+            - deterministic
+                .mean_real_product_parts_dd([big, Dd::ZERO], b)
+                .unwrap();
+        close(low.to_f64(), 0.25, 0.0);
+        let proper = window.proper_product_kernel(7.0, 7.0).unwrap();
+        let low = proper.mean_real_product_parts_dd(a, b).unwrap()
+            - proper
+                .mean_real_product_parts_dd([big, Dd::ZERO], b)
+                .unwrap();
+        close(low.to_f64(), 0.125, 0.0);
+        let invalid = [
+            Dd {
+                hi: 1.0,
+                lo: f64::NAN,
+            },
+            Dd::ZERO,
+        ];
+        assert_eq!(
+            deterministic.mean_real_product_parts_dd(invalid, b),
+            Err(WindowError::NonFiniteAmplitude)
+        );
+        assert_eq!(
+            proper.mean_real_product_parts_dd(invalid, b),
+            Err(WindowError::NonFiniteAmplitude)
+        );
+        for frequency in [f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                window.product_kernel_hz(frequency, 1.0),
+                Err(WindowError::InvalidFrequency)
+            ));
+            assert_eq!(
+                window.mean_phase_hz(frequency),
+                Err(WindowError::InvalidFrequency)
+            );
+        }
+    }
+
+    #[test]
+    fn g1_deterministic_rotation_retains_a_sub_ulp_cosine_decrement() {
+        let omega = 2.0_f64.powi(-40);
+        let window = HarmonicWindow::new(1.0, 2.0_f64.powi(-40)).unwrap();
+        let one = window
+            .product_kernel(0.0, 0.0)
+            .unwrap()
+            .mean_real_product_dd(C64::ONE, C64::ONE)
+            .unwrap();
+        let cosine = window
+            .product_kernel(omega, 0.0)
+            .unwrap()
+            .mean_real_product_dd(C64::ONE, C64::ONE)
+            .unwrap();
+        let decrement = (one - cosine).to_f64();
+        let expected = 0.5 * omega * omega;
+        assert!(decrement > 0.0);
+        close(decrement, expected, expected * 3e-11);
     }
 }

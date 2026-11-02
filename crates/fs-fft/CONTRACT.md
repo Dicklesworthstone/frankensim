@@ -384,4 +384,25 @@ authority-policy receipt move.
   same-run diagnostics rather than cross-ISA goldens.
 - `C64` is not a public complex-arithmetic library; only what the FFT needs.
 
+## Extended harmonic field contractions
 
+Deterministic rectangular observations now retain double-double carrier
+rotations, including their small cosine decrements. The Hz-authored
+`mean_phase_hz` and `product_kernel_hz` methods preserve the radian conversion
+through the clock and centered sum/difference-frequency integration, matching
+the existing proper-complex Hz semantics. Signed frequencies and DC are
+supported by the shared numerical kernel.
+
+Both prepared product types expose `mean_real_product_parts_dd`, accepting
+[real, imaginary] double-double field components. Coalesced low components
+therefore survive later products without expanding every contraction into four
+C64 calls. Existing C64 entry points delegate to the same arithmetic.
+Contractions remain allocation-free and reuse cached trigonometry. Transcendental
+leaves remain deterministic f64 evaluations, not certified enclosures or a
+relative accuracy guarantee at every null.
+
+Four focused regressions cover real-signal quadrature, a resolved high-carrier
+beat, a fractional carrier on its original clock, retained low amplitudes and
+cosine decrements, and invalid inputs. The complete 16-test module passes
+native Rust type analysis (`rustc --test -Z no-codegen`); these checks do not
+execute tests or constitute a full workspace build.
