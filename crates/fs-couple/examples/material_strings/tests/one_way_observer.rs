@@ -69,8 +69,10 @@ fn skinned(text: &str, cx: &Cx<'_>, gate: &CancelGate) -> Ready {
 
 // Manufactured molecular reservoirs on the existing manufactured shell. These
 // coefficients exercise wiring; they are not measured nitrogen/oxygen data.
+// The 100..250 Hz band at 8 kHz needs L_w = 286 (closed form: U(285) = 1.13e-10,
+// U(286) = 9.78e-11 against 1e-10); 286 + 286 < 8192/4.
 fn molecular_source(p_tau: f64) -> String {
-    source("").replace("120 400", "100 250").replace("cavity none\n", &format!(
+    source("").replace("120 400 256", "100 250 286").replace("cavity none\n", &format!(
         "observer_molecular declared 2 N2 1 vibration 1 900 1 power {p_tau} 293.15 0 200 500 O2 0\ncavity none\n"))
 }
 
@@ -199,7 +201,7 @@ fn molecular_skin_refuses_missing_species_stale_gas_and_unsupported_reciprocal_l
     let mut spec = input::Spec::parse(source.as_bytes()).unwrap();
     assert_eq!(spec.observer_molecular.as_ref().unwrap().gas(), &spec.gas);
     for text in [
-        source.replace(&RECORD.replace("120 400", "100 250"), ""),
+        source.replace(&RECORD.replace("120 400 256", "100 250 286"), ""),
         source.replace("declared 2 N2", "declared 1 N2").replace(" O2 0\n", "\n"),
         source.replace("200 500 O2 0", "200 500 O2 0 trailing"),
         source.replace("cavity none\n", "observer_molecular declared 2 N2 0 O2 0\ncavity none\n"),

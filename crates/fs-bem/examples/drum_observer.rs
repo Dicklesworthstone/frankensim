@@ -854,7 +854,7 @@ fn bake(piece: &str, fs: f64, dump: Option<&str>) -> Result<Bake, String> {
                 found = Some((baked, latency));
                 break;
             }
-            Err(TransferError::NotConverged { tail, wrap, dtft }) => {
+            Err(TransferError::NotConverged { tail, wrap, dtft, .. }) => {
                 let line = format!("latency {latency}: tail {tail:.2e} wrap {wrap:.2e} dtft {dtft:.2e}");
                 eprintln!("  refused at {line}");
                 refused_at.push(line);

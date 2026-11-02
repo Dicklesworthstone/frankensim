@@ -11,10 +11,16 @@ fn options() -> OneWayShellObserverOptions {
         minimum_clearance_m: 0.05,
         pass_band_upper_hz: 4000.0,
         taper_stop_hz: 5000.0,
-        filter_latency_samples: 512,
-        fft_lengths: vec![512, 1024, 2048, 4096],
+        // At 144 kHz the 4000..5000 Hz window needs L_w = 651 samples (4.52 ms)
+        // for the 1e-10 tail; the admission prints "required 651". L = L_w,
+        // no margin. The finest rung's quarter must exceed L + L_w = 1302:
+        // n >= 4 (651 + 651 + 1) = 5212, so the ladder ends at 8192.
+        filter_latency_samples: 651,
+        fft_lengths: vec![1024, 2048, 4096, 8192],
         tail_energy_tolerance: 1e-10,
         dtft_relative_tolerance: 1e-4,
+        // Declared ceilings, unchanged. The admission's entry need at 8192 is
+        // 1 x 4 x 4097 = 16388; 1 << 22 is MAX_OBSERVATION_ENTRIES, the replay ceiling.
         maximum_frequency_entries: 1 << 20,
         maximum_replay_terms: 1 << 22,
         panel_rule: PanelRule::Triangle { max_pairs: 1 << 24 },
@@ -63,11 +69,50 @@ fn the_declaration_admits_its_ceilings_and_refuses_one_past_each() {
             o.panel_rule = PanelRule::Centroid
         }),
     ];
+    // Each refuses for its own reason, not the window's: the tail tolerance in
+    // the transfer admission, every other edit in this owner's declaration check.
+    let declaration = "closed-shell observer: Invalid(\"invalid one-way receiver, skin, rule or work declaration\")";
+    let transfer = "closed-shell observer: Transfer(Invalid(\"incomplete or invalid transfer declaration\"))";
     for (what, edit) in edits {
         let mut changed = options();
         edit(&mut changed);
-        assert!(changed.validate(rate).is_err(), "{what} was admitted");
+        let refused = changed.validate(rate).unwrap_err().to_string();
+        let expected = if what.starts_with("a tail") { transfer } else { declaration };
+        assert_eq!(refused, expected, "{what}");
     }
+    // One sample under the window's need, and a finest rung one short.
+    let mut under = options();
+    under.filter_latency_samples = 650;
+    let refused = under.validate(rate).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            ShellObserverError::Transfer(TransferError::WindowUncontained {
+                declared_latency_samples: 650,
+                required_latency_samples: Some(651),
+                finest_fft: 8192,
+                required_finest_fft: Some(8192),
+                ..
+            })
+        ),
+        "{refused}"
+    );
+    let mut short = options();
+    short.fft_lengths = vec![512, 1024, 2048, 4096];
+    let refused = short.validate(rate).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            ShellObserverError::Transfer(TransferError::WindowUncontained {
+                declared_latency_samples: 651,
+                required_latency_samples: Some(651),
+                finest_fft: 4096,
+                required_finest_fft: Some(8192),
+                ..
+            })
+        ),
+        "{refused}"
+    );
     let mut ceilings = options();
     ceilings.workers = 256;
     ceilings.maximum_skin_panels = helmholtz::MAX_DENSE_PANELS;

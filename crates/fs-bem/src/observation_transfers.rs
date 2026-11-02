@@ -127,7 +127,54 @@ pub enum TransferError {
     Mechanical(fs_phs::PhsError),
     Fir(FirError),
     Cap { requested: usize, cap: usize },
-    NotConverged { tail: f64, wrap: f64, dtft: f64 },
+    /// The finest rung missed a gate: `tail` (energy from n/4), `wrap` (energy
+    /// from n/2) or `dtft` (the change from the rung before). Each fraction is
+    /// its worst quantity. With the arrival at index L, `tail` splits exactly
+    /// into `pre_arrival` (energy more than L before the arrival, wrapped to the
+    /// buffer's end) and `causal_past_quarter` (energy from n/4 - L after it).
+    ///
+    /// A different latency rotates the same kernel: the spectra are unchanged
+    /// and only the phase moves. So the finest kernel itself gives the need:
+    /// - `kernel_latency_samples`: the smallest latency whose pre-arrival energy
+    ///   meets `tail_energy_tolerance`.
+    /// - `required_latency_samples`: the larger of that and the window's own
+    ///   need (see `WindowUncontained`); `None` beyond `MAX_OBSERVATION_FFT / 4`.
+    /// - `required_finest_fft`: the smallest power-of-two finest rung, from
+    ///   this one up, that admits that latency and whose tail and wrap gates
+    ///   this kernel does not already fail; `None` up to `MAX_OBSERVATION_FFT`.
+    ///
+    /// Both are necessary, not sufficient. This rung resolves offsets within
+    /// n/2 of the arrival; a response that rings longer wraps into it unresolved.
+    /// The bake of the new declaration decides.
+    NotConverged {
+        tail: f64,
+        wrap: f64,
+        dtft: f64,
+        pre_arrival: f64,
+        causal_past_quarter: f64,
+        kernel_latency_samples: usize,
+        required_latency_samples: Option<usize>,
+        required_finest_fft: Option<usize>,
+    },
+    /// Refused at admission: the declared reconstruction window alone cannot
+    /// meet `tail_energy_tolerance` at this rate. Either its own energy more
+    /// than the declared latency before its arrival, or its spread past the
+    /// finest rung's quarter, exceeds the tolerance. This is necessary, not
+    /// sufficient: a producer adds its own ringing at the bake.
+    /// `required_latency_samples` is the smallest admitting latency at this
+    /// rate (`None`: none up to `MAX_OBSERVATION_FFT / 4`). `required_finest_fft`
+    /// is the smallest power-of-two rung whose quarter holds that latency plus
+    /// the window's spread.
+    WindowUncontained {
+        declared_latency_samples: usize,
+        required_latency_samples: Option<usize>,
+        required_latency_s: Option<f64>,
+        finest_fft: usize,
+        required_finest_fft: Option<usize>,
+        /// Upper bound on the window's energy beyond the declared latency, as a
+        /// fraction of its whole sampled energy.
+        pre_arrival_bound: f64,
+    },
     /// The cached positive angular rules did not resolve this specific drive
     /// or coherence factorization. Refine the prepared bank before retrying.
     AngularPowerNotConverged {
@@ -177,6 +224,13 @@ pub struct LadderRung {
 /// Portable data for fs-vfit/receiver consumers. Every source and every p/grad
 /// component is present. This carries Estimate-only numerical information; no
 /// passivity or full spatial-convergence authority is minted.
+///
+/// The type enforces nothing: its fields are public and [`Self::observer`]
+/// replays whatever it holds. The window admission in
+/// [`TransferDeclaration::admit_work`] is a call-site check. Every production
+/// route builds this value through a bake that admits first. The one production
+/// literal, fs-couple's `KeptSetup::into_parts`, has one production caller,
+/// which admits its declaration before building it.
 #[derive(Debug, Clone)]
 pub struct ObservationTransferBake {
     pub declaration_hash: ContentHash,
@@ -322,6 +376,33 @@ impl TransferDeclaration {
                 .ok_or(TransferError::Invalid("history shape overflow"))?,
             MAX_OBSERVATION_ENTRIES,
         )?;
+        // The declared window alone, at this rate. The latency stays in samples;
+        // the check is rate-aware. The bake's tail sums energy from index n/4,
+        // and the arrival sits at index L. Pre-arrival samples more than L away
+        // wrap to the buffer's end, all inside the tail. Post-arrival samples at
+        // n/4 - L or later fall inside it as well. The window is even, so one
+        // bound serves both sides: L >= L_w, and L + L_w < n/4, which holds
+        // index n/4 itself.
+        let latency = self.filter_latency_samples;
+        let window = observation_window_containment(
+            self.fs_hz,
+            self.pass_band_upper_hz,
+            self.taper_stop_hz,
+            latency,
+            self.tail_energy_tolerance,
+        );
+        let required = window.required_latency_samples;
+        if !required.is_some_and(|w| latency >= w && latency + w < n / 4) {
+            return Err(TransferError::WindowUncontained {
+                declared_latency_samples: latency,
+                required_latency_samples: required,
+                required_latency_s: required.map(|w| w as f64 / self.fs_hz),
+                finest_fft: n,
+                required_finest_fft: required
+                    .map(|w| (4 * (latency.max(w) + w + 1)).next_power_of_two()),
+                pre_arrival_bound: window.bound_at_latency,
+            });
+        }
         Ok(pairs * 4)
     }
     /// Hash every explicit numerical/physical declaration, including source
@@ -413,6 +494,128 @@ fn observation_transition_low(t: f64) -> f64 {
     t.powi(5) * (126.0 + t * (-420.0 + t * (540.0 + t * (-315.0 + 70.0 * t))))
 }
 
+/// `P^(j)(0)` for j = 5..=9, with P the C4 transition polynomial
+/// `P(x) = x^5 (126 - 420x + 540x^2 - 315x^3 + 70x^4)`. Since `P(x) + P(1-x) = 1`,
+/// `P^(j)(1) = (-1)^(j+1) P^(j)(0)`. For j <= 4, `P^(j)` vanishes at both ends.
+const C4_JUMPS: [f64; 5] = [15_120.0, -302_400.0, 2_721_600.0, -12_700_800.0, 25_401_600.0];
+/// `∫_0^1 P(x)^2 dx = 38251/92378`, exactly.
+const C4_SQUARE_INTEGRAL: f64 = 38_251.0 / 92_378.0;
+/// Window samples summed explicitly: eight times the largest admissible
+/// latency. Any count gives a rigorous bound. The count only sets how much of
+/// the bound is the analytic remainder past it.
+const WINDOW_SAMPLES: usize = 8 * (MAX_OBSERVATION_FFT / 4);
+
+struct WindowContainment {
+    /// Upper bound on the window's one-sided energy more than the declared
+    /// latency from its arrival, as a fraction of its whole sampled energy.
+    bound_at_latency: f64,
+    /// Smallest latency whose bound meets the tolerance; `None` beyond
+    /// `MAX_OBSERVATION_FFT / 4`.
+    required_latency_samples: Option<usize>,
+}
+
+/// Bounds the declared window's own energy more than L samples from its arrival.
+///
+/// W is 1 on `[0, p]`, `1 - P((f - p)/D)` on `[p, s]` with `D = s - p`, 0 beyond,
+/// and even. It is C^4 and piecewise a polynomial of degree 9, so integrating
+/// `w(t) = 2 ∫_0^∞ W(f) cos(ωf) df` (ω = 2πt) by parts ends after ten steps.
+/// Only the jumps of `W^(j)`, j = 5..=9, at p and s remain, and the f = 0
+/// terms are imaginary. With `r = 1/(Dω)`, `c = cos ωp - cos ωs` and
+/// `σ = sin ωp + sin ωs`:
+///
+/// `w(t) = (2/ω) [c (P5 r^5 - P7 r^7 + P9 r^9) + σ (-P6 r^6 + P8 r^8)]`, with `Pj = P^(j)(0)`.
+///
+/// This is exact for every t ≠ 0. The bake's window kernel is w sampled at
+/// m/fs, even in m. W vanishes before Nyquist, so the sampling aliases
+/// nothing, and Parseval gives the whole energy: `Σ_m w(m/fs)^2 = 2 fs (p + D ∫P^2)`.
+/// The terms are bounded by `|w(m/fs)| <= Σ_j A_j / m^(j+1)`, with
+/// `A_j = 4 |Pj| / (D^j (2π/fs)^(j+1))`. So the samples past M = `WINDOW_SAMPLES`
+/// hold at most `R = Σ_{j,k} A_j A_k / ((j+k+1) M^(j+k+1))`, the integral of the
+/// squared envelope.
+///
+/// Each evaluation is bounded, not estimated:
+/// - Each sample enters as `(|ŵ| + δ)^2`, with `δ = μ u (5πm + 64)` and
+///   `μ = (4/ω) Σ_j |Pj| r^j` the summed term magnitudes. δ covers det::sin_cos
+///   within 3 ulp, the phases ωp and ωs (at most πm) carried to relative 4u,
+///   and the at most 40 roundings of the powers and sums.
+/// - The running sum of M positive terms takes the factor `1 + 2(M + 4)u`.
+/// - R is doubled.
+/// - The energy is lowered by 16u.
+///
+/// The bound is a suffix sum, so it is nonincreasing in L by construction. The
+/// smallest admitting latency is where it first exceeds the tolerance,
+/// streaming down from M. Allocation-free. A NaN or an overflow anywhere
+/// refuses.
+fn observation_window_containment(
+    fs_hz: f64,
+    pass_hz: f64,
+    stop_hz: f64,
+    latency: usize,
+    tolerance: f64,
+) -> WindowContainment {
+    const U: f64 = f64::EPSILON * 0.5;
+    let width = stop_hz - pass_hz;
+    let step = core::f64::consts::TAU / fs_hz;
+    let energy = 2.0 * fs_hz * (pass_hz + width * C4_SQUARE_INTEGRAL) * (1.0 - 16.0 * U);
+    let samples = WINDOW_SAMPLES as f64;
+    let mut envelope = [0.0_f64; 5];
+    for (i, (a, jump)) in envelope.iter_mut().zip(C4_JUMPS).enumerate() {
+        let j = i as i32 + 5;
+        *a = 4.0 * jump.abs() / (det::powi(width, j) * det::powi(step, j + 1));
+    }
+    let mut remainder = 0.0;
+    for (i, a) in envelope.iter().enumerate() {
+        for (k, b) in envelope.iter().enumerate() {
+            let e = (i + k + 11) as i32;
+            remainder += a * b / (f64::from(e) * det::powi(samples, e));
+        }
+    }
+    let remainder = 2.0 * remainder;
+    let grow = 1.0 + 2.0 * (samples + 4.0) * U;
+    let bound = |sum: f64| (sum * grow + remainder) / energy;
+    let magnitudes = C4_JUMPS.map(f64::abs);
+    // Largest m whose inclusion first pushes the bound past the tolerance:
+    // the bound at m - 1 exceeds it, the bound at m does not.
+    let mut first_exceeded = (!(bound(0.0) <= tolerance)).then_some(WINDOW_SAMPLES + 1);
+    let mut bound_at_latency = f64::NAN;
+    let mut sum = 0.0;
+    for m in (1..=WINDOW_SAMPLES).rev() {
+        let omega = step * m as f64;
+        let r = 1.0 / (width * omega);
+        let r2 = r * r;
+        let r5 = r2 * r2 * r;
+        let (sin_p, cos_p) = det::sin_cos(omega * pass_hz);
+        let (sin_s, cos_s) = det::sin_cos(omega * stop_hz);
+        let cos_part = (C4_JUMPS[0] - (C4_JUMPS[2] - C4_JUMPS[4] * r2) * r2) * r5;
+        let sin_part = (C4_JUMPS[3] * r2 - C4_JUMPS[1]) * r5 * r;
+        let value = 2.0 / omega * ((cos_p - cos_s) * cos_part + (sin_p + sin_s) * sin_part);
+        let magnitude = 4.0 / omega
+            * r5
+            * (magnitudes[0]
+                + r * (magnitudes[1] + r * (magnitudes[2] + r * (magnitudes[3] + r * magnitudes[4]))));
+        let slack = magnitude * U * (5.0 * core::f64::consts::PI * m as f64 + 64.0);
+        sum += (value.abs() + slack) * (value.abs() + slack);
+        let upper = bound(sum); // the bound at latency m - 1
+        if m - 1 == latency {
+            bound_at_latency = upper;
+        }
+        if first_exceeded.is_none() && !(upper <= tolerance) {
+            first_exceeded = Some(m);
+        }
+        if first_exceeded.is_some() && m - 1 <= latency {
+            break;
+        }
+    }
+    WindowContainment {
+        bound_at_latency,
+        required_latency_samples: match first_exceeded {
+            None => Some(0),
+            Some(m) if m <= MAX_OBSERVATION_FFT / 4 => Some(m),
+            Some(_) => None,
+        },
+    }
+}
+
 /// Channel ranges of the physical quantities, in kernel order p, dp/dx, dp/dy,
 /// dp/dz per source/receiver pair: pressure [Pa] alone, and the Cartesian
 /// gradient [Pa/m] as one vector. A component's fraction of its own energy is
@@ -421,6 +624,92 @@ fn observation_transition_low(t: f64) -> f64 {
 /// measure each component against its whole vector.
 fn quantities(channels: usize) -> impl Iterator<Item = core::ops::Range<usize>> {
     (0..channels / 4).flat_map(|pair| [4 * pair..4 * pair + 1, 4 * pair + 1..4 * pair + 4])
+}
+
+/// The bake's wrap gate: energy from n/2 on, which the kept taps discard.
+const WRAP_ENERGY_GATE: f64 = 1e-10;
+
+/// One quantity's energy on one rung, split at the arrival (index L), as
+/// fractions of its whole energy. Each index belongs to one offset j in
+/// `[-n/2, n/2)`: `pre[k]` sums the offsets below -k, and `causal[m]` sums the
+/// offsets from m up to n/2 (k, m = 0..=n/2). For any L' <= n/4, the gates on
+/// this rung are then exactly `tail(L') = pre[L'] + causal[n/4 - L']` and
+/// `wrap(L') = pre[L'] + causal[n/2 - L']`.
+struct ArrivalSplit {
+    pre: Vec<f64>,
+    causal: Vec<f64>,
+}
+
+fn arrival_splits(spectra: &[Vec<FftComplex>], latency: usize, n: usize) -> Vec<ArrivalSplit> {
+    let half = n / 2;
+    let mut splits = Vec::new();
+    for range in quantities(spectra.len()) {
+        let group = &spectra[range];
+        let scale = group
+            .iter()
+            .flatten()
+            .fold(0.0_f64, |s, v| s.max(v.re.abs()).max(v.im.abs()));
+        if scale == 0.0 {
+            continue;
+        }
+        let energy = |i: usize| {
+            group
+                .iter()
+                .map(|s| (s[i].re / scale).powi(2) + (s[i].im / scale).powi(2))
+                .sum::<f64>()
+        };
+        let total = (0..n).map(energy).sum::<f64>();
+        let (mut pre, mut causal) = (vec![0.0; half + 1], vec![0.0; half + 1]);
+        for k in (0..half).rev() {
+            pre[k] = pre[k + 1] + energy((latency + n - k - 1) % n) / total;
+            causal[k] = causal[k + 1] + energy((latency + k) % n) / total;
+        }
+        splits.push(ArrivalSplit { pre, causal });
+    }
+    splits
+}
+
+/// The latency and finest rung the finest kernel implies; see `NotConverged`.
+/// Returns (kernel latency, required latency, required finest rung).
+fn kernel_requirement(
+    splits: &[ArrivalSplit],
+    decl: &TransferDeclaration,
+    n: usize,
+) -> (usize, Option<usize>, Option<usize>) {
+    let tolerance = decl.tail_energy_tolerance;
+    let half = n / 2;
+    let kernel = splits
+        .iter()
+        .map(|s| s.pre.iter().position(|&e| e <= tolerance).unwrap_or(half))
+        .max()
+        .unwrap_or(0);
+    let window = observation_window_containment(
+        decl.fs_hz,
+        decl.pass_band_upper_hz,
+        decl.taper_stop_hz,
+        decl.filter_latency_samples,
+        tolerance,
+    )
+    .required_latency_samples;
+    let required = window
+        .map(|w| w.max(kernel))
+        .filter(|&l| l <= MAX_OBSERVATION_FFT / 4);
+    let rung = required.zip(window).and_then(|(latency, w)| {
+        core::iter::successors(Some(n), |&m| m.checked_mul(2))
+            .take_while(|&m| m <= MAX_OBSERVATION_FFT)
+            .find(|&m| {
+                // Offsets past n/2 are not resolved here; they count as zero,
+                // so a rung this kernel does not fail is not yet shown to pass.
+                latency + w < m / 4
+                    && splits.iter().all(|s| {
+                        let pre = s.pre.get(latency).copied().unwrap_or(0.0);
+                        let from = |offset: usize| s.causal[offset.min(half)];
+                        pre + from(m / 4 - latency) <= tolerance
+                            && pre + from(m / 2 - latency) < WRAP_ENERGY_GATE
+                    })
+            })
+    });
+    (kernel, required, rung)
 }
 
 fn dtft_change(
@@ -519,6 +808,7 @@ fn bake_observation_transfers_with_errors<E: From<TransferError>>(
         .ok_or(TransferError::Invalid("empty DFT ladder"))?;
     let mut cache = BTreeMap::<usize, Vec<C64>>::new();
     let mut previous: Option<Vec<FirKernel>> = None;
+    let mut finest_spectra: Vec<Vec<FftComplex>> = Vec::new();
     let mut ladder = Vec::new();
     for &n in &decl.fft_lengths {
         if cancelled() {
@@ -633,19 +923,34 @@ fn bake_observation_transfers_with_errors<E: From<TransferError>>(
             dtft_relative_change: change,
         });
         previous = Some(kernels);
+        if n == finest {
+            finest_spectra = spectra;
+        }
     }
     let last = ladder
         .last()
         .ok_or(TransferError::Invalid("empty ladder"))?;
     let change = last.dtft_relative_change.unwrap_or(f64::INFINITY);
     if last.tail_energy_fraction > decl.tail_energy_tolerance
-        || last.wrap_energy_fraction >= 1e-10
+        || last.wrap_energy_fraction >= WRAP_ENERGY_GATE
         || change >= decl.dtft_relative_tolerance
     {
+        // Admission holds L + L_w < n/4, so both split indices are in range.
+        let latency = decl.filter_latency_samples;
+        let splits = arrival_splits(&finest_spectra, latency, finest);
+        let (kernel, required, rung) = kernel_requirement(&splits, decl, finest);
         return Err(TransferError::NotConverged {
             tail: last.tail_energy_fraction,
             wrap: last.wrap_energy_fraction,
             dtft: change,
+            pre_arrival: splits.iter().map(|s| s.pre[latency]).fold(0.0, f64::max),
+            causal_past_quarter: splits
+                .iter()
+                .map(|s| s.causal[finest / 4 - latency])
+                .fold(0.0, f64::max),
+            kernel_latency_samples: kernel,
+            required_latency_samples: required,
+            required_finest_fft: rung,
         }
         .into());
     }

@@ -476,6 +476,11 @@ fn fir_transfer_refusals() {
     ));
     let mut cap_decl = declaration();
     cap_decl.fft_lengths = vec![32, 64, 128, 256];
+    // This ladder's quarter, 64, must exceed L + L_w. L_w = 21 is the admission's
+    // printed requirement for the 1000..3000 Hz window at 8 kHz and 1e-10. The
+    // declared 64 no longer fits, so the cap card declares L = L_w, with no
+    // margin. A larger ladder would put 4096 sources past the entry cap.
+    cap_decl.filter_latency_samples = 21;
     cap_decl.maximum_frequency_entries = 4_194_304;
     cap_decl.sources = (0..4096)
         .map(|i| SourceId::StructuralMode(format!("SI-mode-{i}")))
@@ -517,13 +522,19 @@ fn fir_transfer_refusals() {
     let mut d = declaration();
     d.fft_lengths = vec![32, 64, 128, 256];
     d.filter_latency_samples = 100;
+    // A latency the finest quarter (64) cannot hold, together with the window's
+    // own 21, used to be found unconverged at the bake. It is now refused at
+    // admission, before any producer call, and the refusal names the rung that
+    // would hold it: 4 * (100 + 21 + 1) = 488, so 512.
     assert!(matches!(
-        bake_observation_transfers(
-            |w| Ok(analytic_sphere(C64::new(0.0, -w), A, R, (R - A) / C)),
-            &d,
-            || false
-        ),
-        Err(TransferError::NotConverged { .. })
+        bake_observation_transfers(|_| panic!("refused before the producer"), &d, || false),
+        Err(TransferError::WindowUncontained {
+            declared_latency_samples: 100,
+            required_latency_samples: Some(21),
+            finest_fft: 256,
+            required_finest_fft: Some(512),
+            ..
+        })
     ));
     d = declaration();
     d.fft_lengths[3] = MAX_OBSERVATION_FFT + 1;
@@ -655,11 +666,20 @@ fn fir_ladder_is_scale_invariant_and_rejects_unresolved_tails() {
             (actual.tail_energy_fraction - expected.tail_energy_fraction).abs()
                 < 1e-3 * expected.tail_energy_fraction + 1e-20
         );
-        let mut coarse = d.clone();
-        coarse.fft_lengths = vec![32, 64, 128, 256];
-        coarse.filter_latency_samples = 100;
+        // The unconverged case at both extreme scales: the coarse 32..256 ladder
+        // with L = 100 is now refused at admission (see `fir_transfer_refusals`).
+        // So the bake's own refusal is exercised by the unresolved Q = 1000
+        // resonance from `zero_by_symmetry_components_are_judged_with_their_gradient_vector`,
+        // scaled, on the admitted declaration.
+        let resonant = |w: f64| {
+            let mut row = analytic_sphere(C64::new(0.0, -w), A, R, (R - A) / C);
+            let w0 = core::f64::consts::TAU * 500.0;
+            row[1] = row[3].scale(1e-3 * w0 * w0)
+                * C64::new(w0 * w0 - w * w, -w * w0 / 1000.0).recip();
+            Ok::<_, helmholtz::HelmholtzError>(row.into_iter().map(|z| z.scale(scale)).collect())
+        };
         assert!(matches!(
-            bake_observation_transfers(sample, &coarse, || false),
+            bake_observation_transfers(resonant, &d, || false),
             Err(TransferError::NotConverged { .. })
         ));
     }
@@ -944,4 +964,146 @@ fn ruled_burton_miller_observation_is_one_operator_across_the_routed_switch() {
     ] {
         assert!(one(empty).is_err());
     }
+}
+
+/// Admission (MagentaBadger 12871). The declared C4 window alone must fit its
+/// latency and the finest rung's quarter at the declared rate. Row 10's card
+/// (120..400 Hz, 1e-10) needs 930 samples at 48 kHz, which is 19.375 ms. The
+/// same time is 155 samples at 8 kHz. The latency stays in samples, and the
+/// check is rate-aware.
+#[test]
+fn the_declared_window_must_fit_its_latency_and_finest_rung_at_its_rate() {
+    let card = |fs_hz: f64, latency: usize, fft_lengths: Vec<usize>| TransferDeclaration {
+        fs_hz,
+        pass_band_upper_hz: 120.0,
+        taper_stop_hz: 400.0,
+        filter_latency_samples: latency,
+        fft_lengths,
+        ..declaration()
+    };
+    let ladder = || vec![1024, 2048, 4096, 8192];
+    // Row 10's card at 48 kHz refuses at compile and prints what it needs.
+    let row10 = card(48_000.0, 256, ladder()).admit_work().unwrap_err();
+    let TransferError::WindowUncontained {
+        declared_latency_samples,
+        required_latency_samples,
+        required_latency_s,
+        finest_fft,
+        required_finest_fft,
+        pre_arrival_bound,
+    } = row10.clone()
+    else {
+        panic!("{row10:?}")
+    };
+    assert_eq!(
+        (declared_latency_samples, required_latency_samples, finest_fft, required_finest_fft),
+        (256, Some(930), 8192, Some(8192))
+    );
+    assert_eq!(required_latency_s, Some(930.0 / 48_000.0));
+    assert!(pre_arrival_bound > 1e-10, "{pre_arrival_bound}");
+    let printed = row10.to_string();
+    assert!(
+        printed.contains("required_latency_samples: Some(930)") && printed.contains("0.019375"),
+        "{printed}"
+    );
+    // The same window at 8 kHz admits: 256 samples are 32 ms there.
+    card(8_000.0, 256, ladder()).admit_work().unwrap();
+    // The exact boundary: L_w admits, and L_w - 1 refuses and names L_w.
+    card(48_000.0, 930, ladder()).admit_work().unwrap();
+    assert!(matches!(
+        card(48_000.0, 929, ladder()).admit_work(),
+        Err(TransferError::WindowUncontained { required_latency_samples: Some(930), .. })
+    ));
+    // The rung clause alone. The tail sums from index n/4, so it needs
+    // L + L_w < n/4: 1117 + 930 = 2047 admits at 8192, and 1118 refuses and
+    // names 16384.
+    card(48_000.0, 1117, ladder()).admit_work().unwrap();
+    assert!(matches!(
+        card(48_000.0, 1118, ladder()).admit_work(),
+        Err(TransferError::WindowUncontained {
+            declared_latency_samples: 1118,
+            required_latency_samples: Some(930),
+            finest_fft: 8192,
+            required_finest_fft: Some(16384),
+            ..
+        })
+    ));
+    // An admissible latency on a ladder whose finest quarter, 512, is short of
+    // L + L_w = 1860.
+    assert!(matches!(
+        card(48_000.0, 930, vec![256, 512, 1024, 2048]).admit_work(),
+        Err(TransferError::WindowUncontained {
+            required_latency_samples: Some(930),
+            finest_fft: 2048,
+            required_finest_fft: Some(8192),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_refused_bake_prints_the_latency_and_rung_its_own_kernel_needs() {
+    // The window alone needs L_w = 21 here (`fir_transfer_refusals`). The
+    // sphere's own high-pass adds pre-arrival energy, so at L = 21 the
+    // declaration admits and the bake refuses. From its finest kernel alone,
+    // the refusal derives the latency and rung that kernel needs. Re-declared
+    // there, the bake passes; one sample under, it is refused again.
+    let declared = |latency: usize, finest: usize| TransferDeclaration {
+        filter_latency_samples: latency,
+        fft_lengths: (0..4).map(|i| finest >> (3 - i)).collect(),
+        ..declaration()
+    };
+    let bake = |d: &TransferDeclaration| {
+        bake_observation_transfers(
+            |w| Ok(analytic_sphere(C64::new(0.0, -w), A, R, (R - A) / C)),
+            d,
+            || false,
+        )
+    };
+    let at_window = declared(21, 256);
+    at_window.admit_work().unwrap();
+    let refusal = bake(&at_window).unwrap_err();
+    println!("{refusal}");
+    let TransferError::NotConverged {
+        tail,
+        pre_arrival,
+        causal_past_quarter,
+        kernel_latency_samples,
+        required_latency_samples,
+        required_finest_fft,
+        ..
+    } = refusal.clone()
+    else {
+        panic!("{refusal}")
+    };
+    // The refusal is the pre-arrival side. Per quantity the split is the tail
+    // exactly; across quantities the worst of each brackets it. Slack: two
+    // 256-term sums taken in different orders.
+    let rounding = 1.0 + 4.0 * 256.0 * f64::EPSILON;
+    assert!(pre_arrival > 1e-10 && causal_past_quarter <= 1e-10, "{refusal}");
+    assert!(
+        pre_arrival <= tail * rounding && tail <= (pre_arrival + causal_past_quarter) * rounding,
+        "{refusal}"
+    );
+    assert_eq!(
+        (kernel_latency_samples, required_latency_samples, required_finest_fft),
+        (26, Some(26), Some(256)),
+        "{refusal}"
+    );
+    assert!(
+        refusal.to_string().contains("required_latency_samples: Some(26)"),
+        "{refusal}"
+    );
+    // Re-declared at what it printed, the bake passes.
+    let (latency, finest) = (26, 256);
+    let baked = bake(&declared(latency, finest)).unwrap();
+    println!("re-declared at L {latency}, finest {finest}: {:?}", baked.ladder.last());
+    // One sample under still holds the window's 21 and admits; the bake refuses.
+    let under = declared(latency - 1, finest);
+    under.admit_work().unwrap();
+    assert!(
+        matches!(bake(&under), Err(TransferError::NotConverged { .. })),
+        "L {} baked",
+        latency - 1
+    );
 }

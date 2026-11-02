@@ -20,7 +20,10 @@ fn declared_opening_faces_reach_joint_bem_and_actual_flow_observation() {
     scoped(|cx,gate| {
         // The declared frequency-entry budget is this card's exact need: 2 observed
         // sources x 4 x (16384/2 + 1) = 65544 entries. One entry less refuses.
-        let short = open_source_text().replace("1e-4 65544 80000000000","1e-4 65543 80000000000");
+        // Parse admits the window first, so this negative declares L_w = 400
+        // (9 kHz, 60..180 Hz) to reach the binding's Cap check, independent of L.
+        let short = open_source_text().replace("1e-4 65544 80000000000","1e-4 65543 80000000000")
+            .replace(" 60 180 256 5 "," 60 180 400 5 ");
         assert_ne!(short, open_source_text());
         let refused = input::Spec::parse(short.as_bytes()).unwrap().compile_with_body(cx,gate,
             Some(body::Profile::parse(OPEN_BODY.as_bytes()).unwrap()),

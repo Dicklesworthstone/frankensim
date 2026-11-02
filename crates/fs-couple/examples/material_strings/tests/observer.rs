@@ -55,10 +55,15 @@ pub(super) fn shell_pack(name: &str) -> NormalizedPack {
 // The site's instruments render at 48 kHz. At this card's 8 kHz the 400 Hz
 // load's complete frequency bound (3695 Hz) exceeds the Nyquist admission
 // (3600 Hz), and its prepared air band exceeds the one cent budget.
+// At 48 kHz the card's 256-sample latency no longer holds the observer's
+// 120..400 Hz window: for the 1e-10 tail the admission prints "required 930"
+// (19.375 ms). L = L_w = 930, no margin; the finest rung's quarter, 2048,
+// holds L + L_w = 1860.
 fn observed_source() -> input::Spec {
     input::Spec::parse(
         OBSERVED.replace("audio 8000 4096", "audio 48000 1024")
-            .replace("shell_angular_refinement 0","shell_angular_refinement 1").as_bytes(),
+            .replace("shell_angular_refinement 0","shell_angular_refinement 1")
+            .replace("0.01 120 400 256 4", "0.01 120 400 930 4").as_bytes(),
     ).unwrap()
 }
 
@@ -94,7 +99,7 @@ fn shell_listener_replays_the_original_body_velocity_once_per_accepted_sample() 
         assert_eq!(load.reciprocal.unknowns,122);
         assert_eq!(report.quadrature.relative_tolerance,1e-7);
         assert!(report.sweep_terms<=report.options.maximum_sweep_terms);
-        assert_eq!(report.transfer().filter_latency_samples, 256);
+        assert_eq!(report.transfer().filter_latency_samples, 930);
         assert!(report.transfer().geometric_delays_s.iter().all(|delay| *delay > 0.0));
         let mut reference = report.transfer().observer().unwrap();
         let body = ready.spec.strings.len();
@@ -144,14 +149,26 @@ fn listener_source_refuses_unmatched_bands_cavities_and_unbounded_fft_before_mat
         assert!(input::Spec::parse(OBSERVED.replace(from, to).as_bytes()).is_err(), "{to}");
     }
     scoped(|cx, gate| {
-        let mut source = observed_source();
-        source.body_radiation = None;
-        let mut reads = 0;
-        assert!(source.compile::<NormalizedPack>(cx, gate, |_| {
-            reads += 1;
-            Err("material reads are forbidden on unmatched observer input".into())
-        }).is_err());
-        assert_eq!(reads, 0);
+        // Without its body-radiation load the source refuses before any material
+        // read, and for a body-radiation reason. observed_source() refines the
+        // shell angularly, and that check, which also needs the BEM owner, runs
+        // first. At refinement 0 the observer's own load check is reached, past
+        // the window admission that L = 930 now passes.
+        for (refinement, reason) in [
+            (1, "shell angular refinement requires the original BEM owner and level 0..2"),
+            (0, "shell_observer requires the original body-radiation bem load"),
+        ] {
+            let mut source = observed_source();
+            source.body_radiation = None;
+            source.shell_bem_angular_refinement = refinement;
+            let mut reads = 0;
+            let refused = source.compile::<NormalizedPack>(cx, gate, |_| {
+                reads += 1;
+                Err("material reads are forbidden on unmatched observer input".into())
+            }).err().unwrap();
+            assert_eq!(refused.to_string(), reason);
+            assert_eq!(reads, 0);
+        }
     });
     let ordinary = input::Spec::parse(include_bytes!("../closed-shell-pluck.material-strings")).unwrap();
     assert!(ordinary.shell_observer.is_none());
