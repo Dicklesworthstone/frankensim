@@ -50,6 +50,10 @@ impl Piston {
     pub const fn velocity_m_s(&self) -> f64 {
         self.velocity_m_s
     }
+
+    pub(crate) fn accept<R>(&mut self, report: &PistonStep<R>) {
+        self.velocity_m_s = report.velocity_m_s[1];
+    }
 }
 
 /// Loads held constant throughout one accepted coupled step.
@@ -78,6 +82,37 @@ pub struct PistonControl {
     pub maximum_iterations: usize,
 }
 
+pub(crate) fn validate(
+    piston: Piston,
+    maximum_duration: Time,
+    gas_controls: StepControl,
+    load: PistonLoad,
+    controls: PistonControl,
+) -> Result<(), PistonError> {
+    let [lo, hi] = controls.midpoint_velocity_bracket_m_s;
+    if !positive(maximum_duration.value())
+        || !positive(gas_controls.cfl)
+        || gas_controls.cfl > 0.45
+        || gas_controls.maximum_halvings > 32
+        || !lo.is_finite()
+        || !hi.is_finite()
+        || lo >= hi
+        || piston.velocity_m_s < lo
+        || piston.velocity_m_s > hi
+        || !positive(controls.momentum_tolerance_n_s)
+        || !positive(controls.energy_tolerance_j)
+        || !(1..=128).contains(&controls.maximum_iterations)
+        || !load.exterior_pressure_pa.is_finite()
+        || load.exterior_pressure_pa < 0.0
+        || !load.external_force_n.is_finite()
+    {
+        return Err(PistonError::Invalid(
+            "invalid piston load, speed bracket, tolerances or step budget",
+        ));
+    }
+    Ok(())
+}
+
 /// A refusal never advances accepted gas, mesh, clock or wall velocity.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PistonError {
@@ -85,6 +120,8 @@ pub enum PistonError {
     Invalid(&'static str),
     /// Original gas/source/geometry refusal with its concrete cause.
     Gas(GasError),
+    /// Original evolving-mixture refusal, retaining its species/source cause.
+    MixtureGas(crate::multicomponent::Error),
     /// Caller cancellation, propagated before any retry or publication.
     Cancelled,
     /// No impulse-residual sign change in the authored midpoint-speed bracket.
@@ -132,12 +169,23 @@ impl From<GasError> for PistonError {
         }
     }
 }
+impl From<crate::multicomponent::Error> for PistonError {
+    fn from(error: crate::multicomponent::Error) -> Self {
+        if error == crate::multicomponent::Error::Cancelled {
+            Self::Cancelled
+        } else {
+            Self::MixtureGas(error)
+        }
+    }
+}
 
 /// Actual common-duration gas and wall exchange, measured before publication.
+/// `R` retains the original frozen or evolving-mixture field report, including
+/// the latter's complete species balances. The default is the frozen report.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PistonStep {
+pub struct PistonStep<R = StepReport> {
     /// The original extensive RK2 field and boundary-exchange report.
-    pub gas: StepReport,
+    pub gas: R,
     /// Initial and accepted final wall velocity [m/s].
     pub velocity_m_s: [f64; 2],
     /// Constant mesh speed for this step, equal to the wall's midpoint speed.
@@ -172,8 +220,8 @@ pub struct PistonStep {
     pub gas_trials: usize,
 }
 
-impl PistonStep {
-    fn admitted(&self, controls: PistonControl) -> bool {
+impl<R> PistonStep<R> {
+    pub(crate) fn admitted(&self, controls: PistonControl) -> bool {
         self.momentum_residual_n_s
             .abs()
             .max(self.combined_momentum_residual_n_s.abs())
@@ -223,27 +271,8 @@ impl Euler1d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep, PistonError> {
         poll(&mut cancelled)?;
+        validate(*piston, maximum_duration, gas_controls, load, controls)?;
         let [lo, hi] = controls.midpoint_velocity_bracket_m_s;
-        if !positive(maximum_duration.value())
-            || !positive(gas_controls.cfl)
-            || gas_controls.cfl > 0.45
-            || gas_controls.maximum_halvings > 32
-            || !lo.is_finite()
-            || !hi.is_finite()
-            || lo >= hi
-            || piston.velocity_m_s < lo
-            || piston.velocity_m_s > hi
-            || !positive(controls.momentum_tolerance_n_s)
-            || !positive(controls.energy_tolerance_j)
-            || !(1..=128).contains(&controls.maximum_iterations)
-            || !load.exterior_pressure_pa.is_finite()
-            || load.exterior_pressure_pa < 0.0
-            || !load.external_force_n.is_finite()
-        {
-            return Err(PistonError::Invalid(
-                "invalid piston load, speed bracket, tolerances or step budget",
-            ));
-        }
         if self.boundaries
             != (Boundaries::Ends {
                 left: Boundary::Reflecting,
@@ -321,9 +350,10 @@ impl Euler1d {
                 )?;
                 let after = totals(&self.work.candidate, moving.mesh.volumes(), &mut cancelled)?;
                 let gas = reported_step(before, after, [a, b], dt, area)?;
+                let exchange = MechanicalExchange::from(&gas);
                 let end = self.states.len();
                 let displacement = moving.mesh.positions()[end] - self.mesh.positions()[end];
-                mechanical_report(gas, *piston, load, speed, displacement, area)
+                mechanical_report(gas, exchange, *piston, load, speed, displacement, area)
             });
             match result {
                 Ok(mut report) => {
@@ -335,7 +365,7 @@ impl Euler1d {
                     core::mem::swap(&mut self.states, &mut self.work.candidate);
                     core::mem::swap(&mut self.mesh, &mut moving.mesh);
                     self.time += dt;
-                    piston.velocity_m_s = report.velocity_m_s[1];
+                    piston.accept(&report);
                     return Ok(report);
                 }
                 Err(PistonError::Cancelled) => return Err(PistonError::Cancelled),
@@ -359,30 +389,68 @@ impl Euler1d {
     }
 }
 
-fn mechanical_report(
-    gas: StepReport,
+// Only the source-neutral mechanical exchange crosses the two field owners.
+// Their native reports and complete species/reference axes remain untouched.
+pub(crate) struct MechanicalExchange {
+    duration_s: f64,
+    momentum_change: f64,
+    energy_change: f64,
+    left_impulse: f64,
+    right_impulse: f64,
+    right_work: f64,
+}
+
+impl From<&StepReport> for MechanicalExchange {
+    fn from(report: &StepReport) -> Self {
+        Self {
+            duration_s: report.elapsed.value(),
+            momentum_change: report.after.momentum - report.before.momentum,
+            energy_change: report.after.energy - report.before.energy,
+            left_impulse: report.left_boundary_change.momentum,
+            right_impulse: report.right_boundary_change.momentum,
+            right_work: report.right_boundary_change.energy,
+        }
+    }
+}
+
+impl From<&crate::multicomponent::StepReport> for MechanicalExchange {
+    fn from(report: &crate::multicomponent::StepReport) -> Self {
+        Self {
+            duration_s: report.elapsed.value(),
+            momentum_change: report.after.momentum - report.before.momentum,
+            energy_change: report.after.energy - report.before.energy,
+            left_impulse: report.left_boundary_change.momentum,
+            right_impulse: report.right_boundary_change.momentum,
+            right_work: report.right_boundary_change.energy,
+        }
+    }
+}
+
+pub(crate) fn mechanical_report<R>(
+    gas: R,
+    exchange: MechanicalExchange,
     piston: Piston,
     load: PistonLoad,
     speed: f64,
     displacement: f64,
     area: f64,
-) -> Result<PistonStep, PistonError> {
+) -> Result<PistonStep<R>, PistonError> {
     let v0 = piston.velocity_m_s;
     let v1 = speed + (speed - v0);
     let momentum = piston.mass_kg * (v1 - v0);
     let kinetic = (0.5 * piston.mass_kg * (v1 - v0)) * (v1 + v0);
-    let impulse = -gas.right_boundary_change.momentum;
-    let fixed = -gas.left_boundary_change.momentum;
+    let impulse = -exchange.right_impulse;
+    let fixed = -exchange.left_impulse;
     let external_impulse =
-        gas.elapsed.value() * (load.external_force_n - area * load.exterior_pressure_pa);
+        exchange.duration_s * (load.external_force_n - area * load.exterior_pressure_pa);
     // Use represented endpoint displacement, not an assumed unrounded dt*w.
     // A geometry/work discrepancy must pass the same independent energy gate.
     let external_work = load.external_force_n * displacement;
     let exterior_work = (area * load.exterior_pressure_pa) * displacement;
     let residual = momentum - impulse - external_impulse;
-    let combined = (gas.after.momentum - gas.before.momentum) + momentum + fixed - external_impulse;
-    let mechanical = (kinetic + gas.right_boundary_change.energy) + exterior_work - external_work;
-    let total = ((gas.after.energy - gas.before.energy) + kinetic) + exterior_work - external_work;
+    let combined = exchange.momentum_change + momentum + fixed - external_impulse;
+    let mechanical = (kinetic + exchange.right_work) + exterior_work - external_work;
+    let total = (exchange.energy_change + kinetic) + exterior_work - external_work;
     if ![
         v1,
         momentum,
@@ -424,11 +492,11 @@ fn mechanical_report(
     })
 }
 
-fn solve(
+pub(crate) fn solve<R>(
     initial: f64,
     controls: PistonControl,
-    mut trial: impl FnMut(f64) -> Result<PistonStep, PistonError>,
-) -> Result<PistonStep, PistonError> {
+    mut trial: impl FnMut(f64) -> Result<PistonStep<R>, PistonError>,
+) -> Result<PistonStep<R>, PistonError> {
     let mut evaluate = |speed| {
         let value = trial(speed)?;
         if value.momentum_residual_n_s == 0.0 && !value.admitted(controls) {

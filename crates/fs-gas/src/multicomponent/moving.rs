@@ -145,46 +145,15 @@ impl MixtureEuler1d {
                         n,
                         &mut cancelled,
                     )?;
-                    let factor = 0.5 * dt * area;
-                    let mut left = [0.0; MAX_COMPONENTS];
-                    let mut right = [0.0; MAX_COMPONENTS];
-                    let mut boundary = [0.0; MAX_COMPONENTS];
-                    let mut residual = [0.0; MAX_COMPONENTS];
-                    for k in 0..m {
-                        left[k] = factor * (a.left[k] + b.left[k]);
-                        right[k] = -factor * (a.right[k] + b.right[k]);
-                        boundary[k] = left[k] + right[k];
-                        residual[k] = after.get(k) - before.get(k) - boundary[k];
-                    }
-                    if !left[..m]
-                        .iter()
-                        .chain(&right[..m])
-                        .chain(&boundary[..m])
-                        .chain(&residual[..m])
-                        .all(|value| value.is_finite())
-                    {
-                        return Err(Error::Invalid("moving mixture extensive balance overflow"));
-                    }
+                    let mut report = reported_step(before, after, [a, b], dt, area, n)?;
+                    report.halvings = halvings;
+                    report.first_order_retry =
+                        first_order_retry && controls.reconstruction == Reconstruction::Muscl;
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.states, &mut self.work.candidate);
                     core::mem::swap(&mut self.mesh, &mut moving.mesh);
                     self.time += dt;
-                    return Ok(StepReport {
-                        elapsed: Time::new(dt),
-                        maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
-                        halvings,
-                        hll_fallback_faces: a.fallbacks + b.fallbacks,
-                        limited_cells: a.limited + b.limited,
-                        first_order_retry: first_order_retry
-                            && controls.reconstruction == Reconstruction::Muscl,
-                        before,
-                        after,
-                        boundary_change: Totals::from_values(&boundary[..m], n),
-                        left_boundary_change: Totals::from_values(&left[..m], n),
-                        right_boundary_change: Totals::from_values(&right[..m], n),
-                        area_momentum_impulse: 0.0,
-                        conservation_residual: Totals::from_values(&residual[..m], n),
-                    });
+                    return Ok(report);
                 }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(error) => {
@@ -203,8 +172,54 @@ impl MixtureEuler1d {
     }
 }
 
+pub(super) fn reported_step(
+    before: Totals,
+    after: Totals,
+    [a, b]: [Stage; 2],
+    dt: f64,
+    area: f64,
+    n: usize,
+) -> Result<StepReport, Error> {
+    let m = n + 2;
+    let factor = 0.5 * dt * area;
+    let mut left = [0.0; MAX_COMPONENTS];
+    let mut right = [0.0; MAX_COMPONENTS];
+    let mut boundary = [0.0; MAX_COMPONENTS];
+    let mut residual = [0.0; MAX_COMPONENTS];
+    for k in 0..m {
+        left[k] = factor * (a.left[k] + b.left[k]);
+        right[k] = -factor * (a.right[k] + b.right[k]);
+        boundary[k] = left[k] + right[k];
+        residual[k] = after.get(k) - before.get(k) - boundary[k];
+    }
+    if !left[..m]
+        .iter()
+        .chain(&right[..m])
+        .chain(&boundary[..m])
+        .chain(&residual[..m])
+        .all(|value| value.is_finite())
+    {
+        return Err(Error::Invalid("moving mixture extensive balance overflow"));
+    }
+    Ok(StepReport {
+        elapsed: Time::new(dt),
+        maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
+        halvings: 0,
+        hll_fallback_faces: a.fallbacks + b.fallbacks,
+        limited_cells: a.limited + b.limited,
+        first_order_retry: false,
+        before,
+        after,
+        boundary_change: Totals::from_values(&boundary[..m], n),
+        left_boundary_change: Totals::from_values(&left[..m], n),
+        right_boundary_change: Totals::from_values(&right[..m], n),
+        area_momentum_impulse: 0.0,
+        conservation_residual: Totals::from_values(&residual[..m], n),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
-fn attempt(
+pub(super) fn attempt(
     gas: &MixtureGas,
     states: &[f64],
     mesh: &Mesh1d,
@@ -294,7 +309,7 @@ fn check_cfl(observed: f64, maximum: f64) -> Result<(), Error> {
     }
 }
 
-fn geometry_error(error: crate::dynamics::Error) -> Error {
+pub(super) fn geometry_error(error: crate::dynamics::Error) -> Error {
     match error {
         crate::dynamics::Error::Cancelled => Error::Cancelled,
         crate::dynamics::Error::Allocation => Error::Allocation,

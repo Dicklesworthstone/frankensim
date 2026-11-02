@@ -20,6 +20,7 @@ mod evolve;
 mod flux;
 mod moving;
 mod normal;
+mod piston;
 mod wall;
 
 /// Conservative shockwaves and species mixing through finite-plenum networks.

@@ -1159,6 +1159,38 @@ coupling. Context: Lefrançois and Boufflet, SIAM Review 52(4), 747–767 (2010)
 <https://doi.org/10.1137/090758313>; the discrete work identity above is derived
 directly for this implementation, not inherited from that paper.
 
+`MixtureEuler1d::step_with_piston` now supplies the same inertial end wall for
+the original evolving-composition field. It uses the identical `Piston`,
+`PistonLoad`, `PistonControl`, scalar root and mechanical balance code. A small
+source-neutral exchange carries actual gas momentum/energy changes, both
+wall impulses, right-wall work and elapsed duration into that shared code.
+`PistonStep<R>` retains the native gas report: the public default remains the
+original frozen `StepReport`, while the mixture method returns its original
+species-bearing report. No species, total-mass or energy-reference axis is
+collapsed into a frozen surrogate.
+
+Every mixture trial calls the existing extensive species ALE operator at the
+common nonlinear duration. Actual partial densities, independent formation
+references and source calorics determine pressure throughout the field.
+Closed walls have zero flux of every species, and structural zeros remain
+zero. The complete accepted field, geometry, clock and piston publish only
+after shared momentum/energy acceptance and final cancellation polling.
+Original mixture errors remain distinguishable as `PistonError::MixtureGas`;
+native source/geometry cancellation is converted to `PistonError::Cancelled`
+before retry handling. The prescribed-motion mixture path shares only its
+original report extraction and trial visibility; its arithmetic is unchanged.
+
+Four additional G0/G1/G4 regressions cover heterogeneous-composition inertial
+compression with every species balance, independent source-gauge shifts and
+global work/support exchange; single-species agreement with frozen inertia;
+replay of the final solved midpoint speed through the original prescribed
+mixture motion; and cancellation plus distinctly typed source, bracket and
+geometry rollback. They are authored but unexecuted under the same worker
+resource limit. This entry does not advance separately bound reaction,
+diffusion, heat or network owners. The existing pressure-oscillation limit at
+general moving unequal-caloric contacts remains explicit; shared mechanical
+balance acceptance is not an entropy or pressure-equilibrium theorem.
+
 
 ## Conservative molecular, thermal and viscous field evolution
 
