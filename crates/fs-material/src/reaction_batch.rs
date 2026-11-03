@@ -25,6 +25,10 @@
 #[path = "reaction_batch/network.rs"]
 pub mod network;
 
+/// Spherical mineral dissolution with film, surface and product-layer resistance.
+#[path = "reaction_batch/shrinking_core.rs"]
+pub mod shrinking_core;
+
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint};
 use fs_math::det;
 use fs_qty::{Amount, AmountConcentration, Qty, QuantitySpec, Temperature, Time, Volume};

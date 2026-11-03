@@ -1,5 +1,70 @@
 # fs-material — CONTRACT
 
+## Particle-size-dependent shrinking-core leaching
+
+`reaction_batch::shrinking_core::ShrinkingCoreReaction` binds one exactly
+conserved equation, explicit solid/reagent species roles and an original
+version-1 `spherical-shrinking-core-reaction` constitutive card. For
+`a A(aq) + b B(s) -> products`, a monodisperse population has fixed outer
+particle radius R and an initially unreacted core. With
+`u=1-r/R` and `X=u*(3-3*u+u*u)`, the local progress law is
+
+`dt/du = (a/b)*rho_B*R * [r_f*(1-u)^2 + r_s + R*r_d*u*(1-u)] / C_A(u)`.
+
+The finite, well-mixed bath supplies
+`C_A(u) = [n_A0 - (a/b)*n_B0*X(u)] / V`.
+The declared resistances are `film-transfer-resistance` and
+`surface-reaction-resistance` in s/m, plus
+`product-layer-diffusion-resistance` in s/m². They are inverses of the film
+coefficient, surface coefficient and effective diffusivity. Each is nonnegative,
+at least one is positive, and zero explicitly neglects that resistance.
+`solid-molar-density` is positive mol/m³ of the chosen solid formula unit.
+No rate, surface coefficient or diffusivity is inferred from mineral identity.
+
+Source admission requires original hashes/provenance, zero hidden state and
+six finite typed ranges: elapsed time from zero, temperature, batch volume,
+initial particle **radius**, reagent concentration and initial solid loading.
+Additional declared conditions remain mandatory and fixed; caller coordinates
+cannot replace these owned axes. Initial loading is a retained batch descriptor.
+Reagent concentration decreases monotonically, so initial/final admission
+covers the path through the rectangular source domain.
+
+`advance` inverts the integrated resistance law with bounded adaptive Simpson
+quadrature and bisection. Its reported time error is an estimate, not a rigorous
+interval certificate. A shared evaluation budget and cancellation polling bound
+work. Nearly stoichiometric short-time requests do not integrate an unnecessary
+completion tail; an analytical tail upper bound permits complete solid
+dissolution only with sufficient excess reagent and elapsed time. Positive
+finite-time stocks must remain representable. Reagent depletion is integrated
+into the rate, never imposed by clipping a separate recovery curve.
+
+The original `ConservedReaction::advance_inventory` publishes the final
+extent, all species, stoichiometric amounts and explicit reactant accounts.
+The result retains the original model, initial/final source points, elapsed
+time, conversion, residual core radius and numerical-work/error report.
+Failures publish no partial result or mutation. The separate
+`constant_concentration_time` method evaluates the analytic maintained-bath
+limit; it does not silently replenish a closed batch.
+
+Eight G0/G1/G3 regression groups cover the independent finite-reagent film
+solution, matched-capacity surface/diffusion/mixed integrals, R versus R²
+scaling, series resistance, complete/excess/zero-stock cases, stoichiometric and
+batch scaling, source-domain refusal, work limits/cancellation, and early time
+with nearly stoichiometric excess. The runnable
+`cargo run -p fs-material --example mineral_shrinking_core` uses the new
+chalcopyrite/ferric endpoint with explicitly synthetic coefficients and prints
+size-sensitive conversion, copper production and remaining ferric stock.
+
+This is one irreversible, initially virgin, spherical solid population at
+fixed volume, temperature and transport coefficients. It does not infer
+activity/speciation, equilibrium, evolving porosity or film properties,
+non-spherical geometry, reagent competition between particle populations,
+temperature evolution or plant calibration. An already partially reacted
+particle requires a history-aware model; repeated calls with a smaller stock
+are not a continuation of its existing core geometry. The resistance form
+follows Shiea, Crema and Macchi (2024), equation 3,
+<https://doi.org/10.1016/j.ces.2024.119987>.
+
 ## Time-dependent grinding population balance
 
 `comminution::kinetics::SelectionBreakageModel` binds the original
