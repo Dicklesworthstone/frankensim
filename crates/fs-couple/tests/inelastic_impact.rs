@@ -36,6 +36,9 @@ mod directional;
 #[path = "inelastic_impact/surface.rs"]
 mod surface;
 
+#[path = "inelastic_impact/scene.rs"]
+mod scene;
+
 #[path = "inelastic_impact/trajectory.rs"]
 mod trajectory;
 
@@ -279,6 +282,7 @@ fn relaxed_viscoelastic_body_collides_through_full_rigid_inertia_and_moving_supp
         );
         check_visco_manifold(&motion, cx);
         surface::check_visco_geometry(&motion, cx);
+        scene::check_visco_scene(&motion, cx);
         elliptic::check_visco_directional(&motion, cx);
         directional::check_visco_sources(&motion, cx);
         let mut wrong_line = point;

@@ -298,6 +298,19 @@ reactions. Penetration and reference mismatch refuse without repairing geometry.
 This discrete adapter makes no swept-path claim and does not approximate Hex8
 or curved P2 boundaries with Tet4 faces.
 
+`inelastic_impact::surface::scene` extends the same native Tet4 queries to the
+complete prepared sphere scene. Plastic, Maxwell and thermoplastic bodies use
+the original sphere-pair broad phase, explicit pair laws and disjoint canonical
+surface/pair IDs. A shared scene composition changes only the solid point
+payload to its unchanged native tetrahedron and barycentric coordinates. All
+rigid/solid and rigid/rigid rows can therefore enter one original native mixed
+solve, retaining shared-body cross mobility and reciprocal momentum transfer.
+Pair penetration, scene mismatch, reference mismatch and original budgets
+refuse before any state changes. The existing relaxed-Maxwell fixture adds an
+independent unequal-mass solid/two-sphere chain, separate pair/surface restitution,
+contact permutation and refusal checks. This query is instantaneous; its native
+consumer owns the subsequent trajectory and any thermal allocation.
+
 `inelastic_impact::directional` samples the original interface sources for all
 four native manifold owners before invoking the shared elliptic mechanical
 solve. One original history and explicit static/kinetic coefficient role bind

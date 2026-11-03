@@ -11,6 +11,7 @@ use super::surface::{
     FiniteSolidSurfaceError, FiniteSolidSurfaceQuery,
 };
 use crate::finite_solid::FiniteSolidBody;
+use crate::finite_solid::impulse::FiniteSolidPoint;
 use fs_contact::broad_phase::{
     SweepConfig, SweepError, SweepItem, sweep_candidates, swept_sphere_aabb,
 };
@@ -39,9 +40,9 @@ pub enum FiniteSolidSphereSceneKey {
 
 /// Complete admitted current geometry; no state has been advanced or repaired.
 #[derive(Clone, Debug)]
-pub struct FiniteSolidSphereSceneQuery {
+pub struct FiniteSolidSphereSceneQuery<P = FiniteSolidPoint> {
     /// Sorted by scene contact ID. Surface IDs are even; rigid-pair IDs are odd.
-    pub contacts: Vec<FiniteSolidMixedContact>,
+    pub contacts: Vec<FiniteSolidMixedContact<f64, P>>,
     pub keys: Vec<FiniteSolidSphereSceneKey>,
     pub maximum_contact_gap_m: f64,
     pub surface: FiniteSolidSurfaceQuery,
@@ -186,6 +187,26 @@ impl FiniteSolidSphereScene {
         }
         let surface_query =
             surface.sphere_separations(solid, bodies, &self.spheres, controls, cx)?;
+        self.contacts_from_surface_query(surface_query, bodies, controls, cx, |point| point)
+    }
+
+    /// Compose an original current-surface query with this scene's rigid-pair
+    /// owner. Only the solid material-point payload may change; IDs, physical
+    /// witnesses, frames, laws, canonical ordering and capacity remain here.
+    pub(crate) fn contacts_from_surface_query<P>(
+        &self,
+        surface_query: FiniteSolidSurfaceQuery,
+        bodies: &[RigidBodyState],
+        controls: FiniteSolidSurfaceControls,
+        cx: &Cx<'_>,
+        map_point: impl Fn(FiniteSolidPoint) -> P,
+    ) -> Result<FiniteSolidSphereSceneQuery<P>, FiniteSolidSphereSceneError> {
+        poll(cx)?;
+        if bodies.len() != self.spheres.len() {
+            return Err(FiniteSolidSphereSceneError::Invalid(
+                "scene/native body count mismatch",
+            ));
+        }
         surface_query.admitted_contacts()?;
         let mut rows = Vec::with_capacity(surface_query.contacts.len());
         let mut maximum_gap = 0.0_f64;
@@ -284,7 +305,32 @@ impl FiniteSolidSphereScene {
             }
         }
         rows.sort_unstable_by_key(|(c, _)| c.id);
-        let (contacts, keys) = rows.into_iter().unzip();
+        let (contacts, keys) = rows
+            .into_iter()
+            .map(|(contact, key)| {
+                let counterpart = match contact.counterpart {
+                    FiniteSolidContactCounterpart::Solid(point) => {
+                        FiniteSolidContactCounterpart::Solid(map_point(point))
+                    }
+                    FiniteSolidContactCounterpart::Rigid(point) => {
+                        FiniteSolidContactCounterpart::Rigid(point)
+                    }
+                };
+                (
+                    FiniteSolidMixedContact {
+                        id: contact.id,
+                        point: contact.point,
+                        counterpart,
+                        normal_world: contact.normal_world,
+                        tangent_world: contact.tangent_world,
+                        activation_tolerance_m: contact.activation_tolerance_m,
+                        friction_coefficient: contact.friction_coefficient,
+                        normal_law: contact.normal_law,
+                    },
+                    key,
+                )
+            })
+            .unzip();
         Ok(FiniteSolidSphereSceneQuery {
             contacts,
             keys,

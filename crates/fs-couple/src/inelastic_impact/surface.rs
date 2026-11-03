@@ -8,6 +8,9 @@
 //! This discrete event supplies no swept-path claim, penetration repair or heat
 //! partition. Hex8 and curved P2 boundaries require their own exact geometry.
 
+/// Complete canonical rigid/solid and rigid/rigid sphere scenes on native bodies.
+pub mod scene;
+
 use super::multiple::{
     FiniteSolidContactCounterpart, InelasticMixedContact, InelasticMixedContactCandidate,
     InelasticMixedContactControls, InelasticMixedContactError, RigidImpactPoint,
