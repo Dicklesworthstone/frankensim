@@ -1,10 +1,10 @@
 //! Spherical and distance closures on the original native graph solver.
 
 use super::{
-    Dd, DistanceGraphControls, DistanceGraphError, DistanceGraphStep, DistanceLink,
-    DistanceStepError, Geometry, MAX_DISTANCE_ROWS, MassProperties, RigidBodyIntegrator,
-    RigidBodyState, Row, RowKind, Rows, Vec3, Wrench, advance_between, driven, limit,
-    planned_bytes, poll, reserved,
+    ActionReactionImpulseReceipt, Dd, DistanceGraphControls, DistanceGraphError, DistanceGraphStep,
+    DistanceLink, DistanceStepError, Geometry, MAX_DISTANCE_ROWS, MassProperties,
+    RigidBodyIntegrator, RigidBodyState, Row, RowKind, Rows, Vec3, Wrench, advance_between, driven,
+    limit, planned_bytes, poll, reserved,
 };
 
 /// A ball-and-socket joint: two material points coincide, while relative
@@ -31,16 +31,17 @@ pub enum GraphJoint {
 pub struct JointRows {
     /// First index into `step.position_impulses`, `velocity_impulses` and `residuals`.
     pub first_row: usize,
-    /// One for distance, three for spherical. Spherical rows are world x/y/z.
+    /// One for distance, three for spherical, five for revolute. Each point
+    /// closure uses world x/y/z; a hinge then uses its two body-relative axes.
     pub row_count: usize,
 }
 
 /// Atomic motion of a mixed independent-body joint graph.
 #[derive(Debug, Clone, PartialEq)]
-pub struct JointGraphStep {
+pub struct JointGraphStep<E = ActionReactionImpulseReceipt> {
     /// Original solver receipt, in scalar-row order. Every original free step
-    /// and every actual native pair impulse remain available for inspection.
-    pub step: DistanceGraphStep,
+    /// and every actual native reaction remain available for inspection.
+    pub step: DistanceGraphStep<E>,
     /// Row spans in authored joint order; no persistent state is inferred.
     pub joint_rows: Vec<JointRows>,
     /// Signed reaction work [J], paired from native relative COM/spin components
@@ -124,7 +125,7 @@ pub fn advance_joint_graph(
     limit("live bytes", bytes, controls.maximum_live_bytes as u128)?;
     let mut native_controls = controls;
     native_controls.maximum_live_bytes -= extra as usize;
-    let (step, _) = advance_between(
+    let (step, _) = advance_between::<ActionReactionImpulseReceipt>(
         states,
         properties,
         Rows::Mixed(&rows[..row_count]),

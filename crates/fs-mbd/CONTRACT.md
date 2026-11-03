@@ -5407,3 +5407,68 @@ invalid intermediate inventory and terminal cancellation. Existing pairwise
 transfer reuses the same generalized physical-balance and attachment helpers.
 Native compilation and numerical execution remain necessary for conformance;
 formatter parsing and analytical checks do not substitute for them.
+
+## Coupled finite-body revolute hinges
+
+`rigid_rattle::distance::graph::advance_articulated_graph` extends the existing
+native coupled graph with `RevoluteJoint`, alongside its original spherical
+and positive-distance joints. A hinge contributes three coincident-point rows
+and two body-relative alignment rows, leaving relative axial rotation free.
+The two axes are normalized once; a transverse basis is prepared in body two.
+The positive directed-axis branch is explicit, and opposite axes refuse.
+
+For unit world axes `a` and `b` and body-two transverse directions `t_i`, the
+angular equations are `g_i = L * a.dot(t_i)`. The exact torque Jacobian on body
+two is `L * (t_i cross a)`; body one receives its negative. Thus both axes follow
+their evolving native attitudes, and the physical reaction is a pure couple.
+The complete force/couple `J M^-1 J^T` includes all cross responses between
+coincident-point rows, angular rows and shared full-inertia bodies. It is the
+original bounded dense owner, not sequential independent joint solves or a
+redundant six-row hinge.
+
+The caller supplies a positive `angular_length_m = L`. Original graph position
+and velocity tolerances `(p,v)` remain in metres and metres per second. The
+angular admission is `sin(axis_angle) <= p/L` on `a.dot(b)>0`, with the Euclidean
+norm of the two alignment derivatives at most `v/L` per second. At exact
+alignment that norm is the relative tilt speed; away from exact alignment it
+is the derivative of the stated equations, including their moving basis.
+`L` must exceed `p`. Changing `L` without changing the controls changes these
+authored angular tolerances. The complete hinge couple at each impulse stage
+is bounded by `L * maximum_impulse_ns`; each coincident-point reaction retains
+its separate original vector impulse cap. Bounds use the actual summed couple,
+including finite-residual nonorthogonality, not independent component caps.
+
+Every pure couple calls the original `apply_momentum_impulse` on both bodies.
+`JointReactionImpulse` distinguishes untouched native point-pair receipts from
+`CoupleImpulseReceipt`, whose two native updates retain requested impulses,
+actual representable increments and residuals. Paired angular work uses the
+commanded world couple and double-double midpoint relative angular velocity.
+Paired kinetic change uses the actual body-momentum increments. Their difference
+and actual total angular increment remain visible; no fictitious force arm or
+pose repair hides them. The joint receipt also retains original free steps,
+point-gap angular impulse, scalar residuals and authored-joint row spans.
+
+The generic `DistanceGraphStep` defaults to its original point receipt, so
+existing distance, driven-distance and spherical APIs retain their event type
+and logical heap payload. The shared trial buffers and mobility factorization
+serve both paths. An articulated run adds one fixed 32-row stack bank and one
+bounded joint-row map; no per-trial allocation or per-step axis preparation is
+introduced. A hinge consumes five of the existing 32 scalar rows. Native body
+travel, local solve/backtrack/rank and whole-transaction memory/work/cancellation
+bounds remain in force. Any refusal publishes no partial state.
+
+Nine focused G0/G1/G3/G4 tests cover analytical unequal-inertia hinge-chain
+torque and mass recoil, free axial spin, an independent continuous two-rotor
+gyroscopic precession reference with refinement/reversal, long off-center
+full-tensor mixed-joint momentum/work balance, frame/boost/endpoint/order and
+explicit-scale covariance, point-only native parity, opposed/invalid axes and
+large-boost admission, complete vector caps, the actual connected 32-row
+boundary, rank/payload/trial limits and every observed cancellation checkpoint.
+All 24 pre-existing distance, driven and spherical graph tests also pass in the
+bounded actual-source native build. This evidence does not substitute for
+unrun full-workspace/DSR gates or independent experimental validation.
+
+This remains a local smooth bilateral hinge between finite rigid bodies.
+Joint friction, motors, angular stops, backlash, impacts, fixed supports,
+arbitrary dependent constraints, nonlinear state enclosures, exact energy,
+global branches, symplecticity and the other integrator lanes remain unclaimed.
