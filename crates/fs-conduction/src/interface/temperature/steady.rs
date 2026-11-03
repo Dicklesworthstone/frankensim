@@ -6,6 +6,8 @@ pub use linearization::{ContactSteadyGradient, ContactSteadyLinearization};
 /// Coupled sparse Newton iteration for strong source-law temperature feedback.
 pub mod newton;
 pub use newton::{ContactSteadyNewtonSolution, SteadyContactNewtonConfig};
+/// Complete contact/bulk Newton responses inside ambient patch radiation.
+pub mod radiation;
 
 use fs_exec::Cx;
 use fs_solver::norm2;

@@ -645,6 +645,27 @@ impl<'m> ConductionSolver<'m> {
         Self::new_inner(problem, None, config)
     }
 
+    /// Prepare the original full initial field without performing a solve.
+    ///
+    /// This retains source/configuration admission, heterogeneous material-span
+    /// initialization and exact prescribed values. It does not require a
+    /// conduction-only anchor: a coupled owner may subsequently supply its
+    /// physical radiation boundary. The numerical solve must still establish
+    /// its own nonsingularity and constitutive/residual acceptance.
+    pub fn initial_temperature(
+        problem: ConductionProblem<'m>,
+        config: &SolveConfig,
+    ) -> Result<Vec<f64>, ConductionError> {
+        config.validate()?;
+        problem.source.validate("volumetric source", problem.mesh.vertex_count())?;
+        if let Some(assigned) = problem.element_materials {
+            assigned.validate_for(problem.mesh)?;
+        }
+        let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count())?;
+        let free = initial_free(&problem, &dofs, &config.initial)?;
+        Ok(dofs.scatter(&free))
+    }
+
     /// Build a solver with an explicitly complete matching-face interface set.
     ///
     /// # Errors

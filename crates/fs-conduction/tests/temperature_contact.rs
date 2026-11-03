@@ -15,6 +15,9 @@ use fs_matdb::{ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialState
     SystemContext, UncertaintyModel};
 use fs_rep_mesh::TetComplex;
 
+#[path = "temperature_contact/radiation.rs"]
+mod radiation;
+
 fn context<T>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> T) -> T {
     ArenaPool::new(ArenaConfig::default()).scope(|arena| f(&Cx::new(gate, arena,
         StreamKey { seed: 19, kernel_id: 820, tile: 0, iteration: 0 },

@@ -284,6 +284,24 @@ checking that strict sensitivity queries still refuse there. Arbitrary-law
 convergence, root uniqueness, evolving pressure/contact area and interface
 storage are outside this stationary contact model.
 
+`TemperatureContacts::solve_steady_newton_with_ambient_radiation` composes
+that complete bulk/contact Newton solve with the original area-mean gray
+radiation driver. Each radiative response reuses its last accepted temperature
+as an initial field. Source support, prescribed values and all contact queries
+remain active. The original initial-field policy is also available without
+claiming a conduction-only boundary anchor, so a declared radiating zero-flux
+surface can supply the real thermal reservoir.
+
+After the original radiation gates pass, the unchanged endpoint is independently
+reassembled with newly queried contact resistance and its exact radiative
+coefficient. Free-node residual, whole-domain heat closure and the separate
+convection/radiation decomposition must meet the original watt allowances.
+Original convection alone is available to transported-air consumers. The result
+retains both the applied secant boundary and the physical endpoint boundary,
+as well as cumulative Newton/Krylov work. Its last Newton history describes
+the applied secant; this is a bounded radiation fixed point and does not supply
+a monolithic radiation tangent or a contact/radiation adjoint.
+
 ## Coupled transient capacity contact feedback
 
 `TemperatureContacts::advance_capacity_newton` solves constant-capacity
