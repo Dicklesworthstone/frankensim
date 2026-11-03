@@ -23,9 +23,12 @@ fn g0_separated_profile_drag_reaches_the_actual_aircraft_force_and_work() {
         .force_buildup(speed, alpha, canard, 40.0, 0.0, RHO)
         .unwrap();
     let (panels, strips) = design.layout(canard).unwrap();
-    let q = 0.5 * RHO * speed * speed;
+    let local = loads.coupled.strip_velocity_mps.as_ref().unwrap();
+    let cg_velocity = [speed * alpha.cos(), speed * alpha.sin()];
     let mut expected = 0.0;
     let mut attached_only = 0.0;
+    let mut profile_power = 0.0;
+    let mut kj_power = 0.0;
     let mut separated_count = 0;
     for (s, strip) in strips.iter().enumerate() {
         let a = loads.coupled.strip_alpha_eff_rad[s];
@@ -44,8 +47,21 @@ fn g0_separated_profile_drag_reaches_the_actual_aircraft_force_and_work() {
         let cd = design.cd0_wing * (1.0 - weight) + pressure_drag * weight;
         let panel = panels[strip.panel_indices[0]];
         let area = strip.chord_m * (panel.b[1] - panel.a[1]).abs();
-        expected += q * area * cd;
+        let [u, _, w] = local[s];
+        let local_speed = (u * u + w * w).sqrt();
+        let q = 0.5 * RHO * local_speed * local_speed;
+        let drag = q * area * cd;
+        expected += drag;
         attached_only += q * area * design.cd0_wing;
+        profile_power += drag * (u * cg_velocity[0] + w * cg_velocity[1]) / local_speed;
+        // Lift is normal to the local washed flow, so its work at the CG
+        // is generally nonzero. Include that resolved momentum transfer
+        // instead of assuming the CG velocity is every strip's velocity.
+        for &j in &strip.panel_indices {
+            let panel = panels[j];
+            let scale = RHO * loads.coupled.gamma[j] * (panel.b[1] - panel.a[1]);
+            kj_power += scale * (-w * cg_velocity[0] + u * cg_velocity[1]);
+        }
     }
     assert!(separated_count > 0);
     assert!(
@@ -58,8 +74,10 @@ fn g0_separated_profile_drag_reaches_the_actual_aircraft_force_and_work() {
     let weight = design.gross_mass_kg * 9.80665;
     let aero_x = loads.force_n[0] - loads.thrust_n.iter().sum::<f64>() + weight * alpha.sin();
     let aero_z = loads.force_n[2] - weight * alpha.cos();
-    let dissipated_power = -speed * (aero_x * alpha.cos() + aero_z * alpha.sin());
-    assert!((dissipated_power - speed * loads.drag_n).abs() < 1e-7);
+    let dissipated_power = -(aero_x * cg_velocity[0] + aero_z * cg_velocity[1]);
+    let expected_power = speed * (parasite + loads.induced_drag_n) + profile_power - kj_power;
+    assert!(profile_power > 0.0 && dissipated_power > 0.0);
+    assert!((dissipated_power - expected_power).abs() < 1e-7);
 }
 
 #[test]
@@ -132,26 +150,150 @@ fn distributed_pitch_motion_enters_relative_flow_once() {
 }
 
 #[test]
+fn uniform_flight_uses_the_same_material_velocity_at_zero_and_finite_pitch_rate() {
+    let mut design = wright_openloop_v1();
+    design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
+    let velocity = [
+        13.86 * fs_math::det::cos(0.06),
+        0.0,
+        13.86 * fs_math::det::sin(0.06),
+    ];
+    for q in [-0.2, 0.0, 0.2] {
+        let uniform = design
+            .force_buildup(13.86, 0.06, 0.05, 40.0, q, RHO)
+            .unwrap();
+        let distributed = design
+            .force_buildup_with_incident(13.86, 0.06, 0.05, 40.0, q, RHO, None, &|_| Ok(velocity))
+            .unwrap();
+        assert_eq!(uniform, distributed);
+        assert!(
+            (uniform.lift_n - uniform.coupled.wing_lift_n).abs() < 1e-9,
+            "circulation and assembled lift must use the same washed velocity at q={q}"
+        );
+    }
+    let stationary = design
+        .force_buildup(13.86, 0.06, 0.05, 40.0, 0.0, RHO)
+        .unwrap();
+    for q in [-1e-8, 1e-8] {
+        let moving = design
+            .force_buildup(13.86, 0.06, 0.05, 40.0, q, RHO)
+            .unwrap();
+        assert!((moving.moment_y_nm - stationary.moment_y_nm).abs() < 1e-3);
+        for axis in 0..3 {
+            assert!(
+                (moving.force_n[axis] - stationary.force_n[axis]).abs() < 1e-3,
+                "the force law must be continuous through zero pitch rate"
+            );
+        }
+    }
+}
+
+#[test]
+fn pitch_velocity_matches_moving_geometry_and_reaches_propeller_hubs() {
+    let mut design = wright_openloop_v1();
+    design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
+    // Different hub heights expose the axial part of omega cross r in both
+    // rotor solves; a strip-only incidence correction cannot reproduce it.
+    design.disks[0].center_m[2] = -1.4;
+    design.disks[1].center_m[2] = -0.1;
+    let velocity = [
+        13.86 * fs_math::det::cos(0.06),
+        0.0,
+        13.86 * fs_math::det::sin(0.06),
+    ];
+    let (panels, strips) = design.layout(0.05).unwrap();
+    let q = 0.2;
+    let loads = design
+        .force_buildup(13.86, 0.06, 0.05, 40.0, q, RHO)
+        .unwrap();
+    let local = loads.coupled.strip_velocity_mps.as_ref().unwrap();
+    // Independent central difference of the material point's finite rigid
+    // rotation about body y. This checks axial and vertical signs together.
+    let point_velocity = |point: [f64; 3]| {
+        let arm = [point[0] - design.cg_m[0], point[2] - design.cg_m[2]];
+        let epsilon = 1e-5;
+        let (s, c) = (q * epsilon).sin_cos();
+        let forward = [c * arm[0] + s * arm[1], -s * arm[0] + c * arm[1]];
+        let backward = [c * arm[0] - s * arm[1], s * arm[0] + c * arm[1]];
+        [
+            velocity[0] + (forward[0] - backward[0]) / (2.0 * epsilon),
+            0.0,
+            velocity[2] + (forward[1] - backward[1]) / (2.0 * epsilon),
+        ]
+    };
+    let mut unwashed = 0;
+    for (s, strip) in strips.iter().enumerate() {
+        let p = panels[strip.panel_indices[0]];
+        let point = core::array::from_fn(|axis| 0.5 * (p.a[axis] + p.b[axis]));
+        let expected = point_velocity(point);
+        assert!((local[s][2] - expected[2]).abs() < 1e-10);
+        // Outside both finite wake windows, the axial velocity is exactly
+        // the derivative of body geometry, with no induction to subtract.
+        if design.disks.iter().all(|disk| {
+            (point[1] - disk.center_m[1]).abs() >= design.rotor.radius_m
+                || (point[0] - disk.center_m[0]).abs() >= 2.0 * design.rotor.radius_m
+        }) {
+            assert!((local[s][0] - expected[0]).abs() < 1e-10);
+            unwashed += 1;
+        }
+    }
+    assert!(unwashed >= 4);
+    for (k, disk) in design.disks.iter().enumerate() {
+        let induced =
+            fs_wing::induced_velocity_free(disk.center_m, &panels, &loads.coupled.gamma, velocity);
+        let axial = point_velocity(disk.center_m)[0] + induced[0];
+        let rotor = fs_airscrew::bemt_solve(&design.rotor, RHO, axial, 40.0).unwrap();
+        assert!((loads.thrust_n[k] - rotor.thrust_n).abs() < 1e-7);
+        assert!((loads.coupled.torque_nm[k] - rotor.torque_nm).abs() < 1e-7);
+        let without_rotation =
+            fs_airscrew::bemt_solve(&design.rotor, RHO, velocity[0] + induced[0], 40.0).unwrap();
+        assert!(
+            (rotor.thrust_n - without_rotation.thrust_n).abs() > 0.05,
+            "the regression must expose omitted hub velocity"
+        );
+    }
+}
+
+#[test]
 fn force_buildup_per_axis_oracles() {
     let d = wright_openloop_v1();
     let b = d.force_buildup(13.86, 0.06, 0.05, 40.0, 0.0, RHO).unwrap();
-    // Per-axis oracles against independent recomputation. lift_n is the
-    // z-component of the KJ forces; KJ acts perpendicular to the local
-    // freestream, so its x-component is EXACTLY lift_n·tan(alpha) (the
-    // leading-edge-suction analog).
+    // Each strip's lift/drag is normal/parallel to its own incident velocity.
+    // With prop wash the ratios w/u differ across strips, so rotating the
+    // summed lift/drag by the CG incidence is not a physical force oracle.
+    let (panels, strips) = d.layout(0.05).unwrap();
+    let local = b.coupled.strip_velocity_mps.as_ref().unwrap();
+    let mut suction_x = 0.0;
+    let mut profile_drag = [0.0; 2];
+    for (s, strip) in strips.iter().enumerate() {
+        let [u, _, z] = local[s];
+        let speed2 = u * u + z * z;
+        let speed = speed2.sqrt();
+        for &j in &strip.panel_indices {
+            let panel = panels[j];
+            let lift = -RHO * b.coupled.gamma[j] * u * (panel.b[1] - panel.a[1]);
+            suction_x += lift * z / u;
+        }
+        let front = panels[strip.panel_indices[0]];
+        let drag = 0.5 * RHO * speed2 * strip.chord_m * front.width_m * d.cd0_wing;
+        profile_drag[0] += drag * u / speed;
+        profile_drag[1] += drag * z / speed;
+    }
     let w = d.gross_mass_kg * 9.80665;
     let alpha = 0.06f64;
-    let fz_ref = -b.lift_n + w * alpha.cos() - b.drag_n * alpha.sin();
+    let cg_drag = b.induced_drag_n + d.ledger.evaluate(RHO, 13.86).unwrap().total_parasite_n;
+    let fz_ref = -b.lift_n + w * alpha.cos() - profile_drag[1] - cg_drag * alpha.sin();
     assert!(
-        (b.force_n[2] - fz_ref).abs() < 2.0,
+        (b.force_n[2] - fz_ref).abs() < 1e-9,
         "Fz {} vs reconstructed {fz_ref}",
         b.force_n[2]
     );
-    let fx_ref = b.lift_n * alpha.tan() + b.thrust_n[0] + b.thrust_n[1]
-        - b.drag_n * alpha.cos()
+    let fx_ref = suction_x + b.thrust_n[0] + b.thrust_n[1]
+        - profile_drag[0]
+        - cg_drag * alpha.cos()
         - w * alpha.sin();
     assert!(
-        (b.force_n[0] - fx_ref).abs() < 2.0,
+        (b.force_n[0] - fx_ref).abs() < 1e-9,
         "Fx {} vs reconstructed {fx_ref}",
         b.force_n[0]
     );
@@ -340,8 +482,11 @@ fn trim_golden_digest() {
     // Golden bump 2026-10-28: ordinary prop wash now applies disk induction
     // once, matching its momentum root. Aircraft parameters and all physical
     // trim bands remain unchanged.
+    // Golden bump 2026-11-03: ordinary loads now use the accepted local
+    // washed velocity, matching their circulation solve. The original trim
+    // digest was reproduced before this correction; physical bands are intact.
     assert_eq!(
-        digest, "7633d43057a81be27b75cbcbbc6d4f4640f8a613a557c1be838b958fec7838a7",
+        digest, "2d4ee0b2095f360e5c405488435f097d027710890e68ccd566e5599da468fd1e",
         "trim golden moved — determinism regression or an intentional \
          model change requiring the golden-bump protocol"
     );

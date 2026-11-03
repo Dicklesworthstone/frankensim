@@ -239,9 +239,17 @@ fn preconditioner_receives_the_actual_nonlinear_stage_and_logical_iteration_keys
         assert_eq!(call.inner, 0);
     }
     for i in 0..2 {
-        let guess = H.mul_add(original.rate[i], original.u[i]);
-        let expected = alpha_f.mul_add(guess, (1.0 - alpha_f) * original.u[i]);
-        assert_eq!(calls[0].state[i].to_bits(), expected.to_bits());
+        // The predictor is u0 + alpha_f*h*rate0. Its exact rounding can
+        // change when the Newton unknown is an increment; the bitwise
+        // tangent/preconditioner equality above pins the actual stage.
+        let drift = alpha_f * H;
+        let expected = drift.mul_add(original.rate[i], original.u[i]);
+        let scale = original.u[i].abs() + (drift * original.rate[i]).abs();
+        assert!(
+            (calls[0].state[i] - expected).abs() <= 2.0 * f64::EPSILON * scale,
+            "initial stage {} != predictor {expected}",
+            calls[0].state[i]
+        );
     }
     assert_ne!(calls[0].state, calls[1].state);
 }

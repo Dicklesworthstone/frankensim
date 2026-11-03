@@ -242,9 +242,13 @@ fn v02a_golden_digest() {
     // gravity belongs only in the attitude column. The original source
     // reproduces the old digest and fails the mass-scaling regression above.
     // Only x86_64 was measured; other ISA pins await native remeasurement.
+    // Golden bump 2026-11-03: full rigid-point velocity replaces clamped
+    // pitch incidence, and accepted washed flow supplies both circulation
+    // and forces. The prior x86_64 digest was reproduced before correction;
+    // only that measured pin changes and all physical gates remain intact.
     #[cfg(target_arch = "x86_64")]
     const EXPECTED_DIGEST: &str =
-        "66b7955e4ff0487adbf13899ad2fe0bd026679b77c7b50211678084333aa5c26";
+        "8c96457b30ee55cb8dcb9783fc62c91aa5d482ce20892d271051c7f6314e4c65";
     #[cfg(not(target_arch = "x86_64"))]
     const EXPECTED_DIGEST: &str =
         "61e99ada8f4afecc337b219955bc557bf22f9a5358f440091e4417f3ee1fae1c";

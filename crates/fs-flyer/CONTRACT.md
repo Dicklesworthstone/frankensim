@@ -938,10 +938,14 @@ consistency. Run with `cargo test -p fs-flyer --lib simloop::spatial_wind`.
 `SimLoop::init_with_distributed_spatial_wind` samples every wing/canard strip
 reference point and both propeller disk centers from the same frozen tick.
 `OpenLoopDesign::force_buildup_with_incident` admits the corresponding explicit
-body-relative incident field. Rigid pitch velocity `q cross (position - CG)`
-enters each local sample once; the legacy pitch-as-twist approximation is
-disabled on this path. Local chord-plane speed and incidence drive the nonlinear
-strip solve, and its accepted local velocity drives Kutta-Joukowsky forces,
+body-relative incident field. Ordinary `force_buildup` and `force_buildup_warm`
+use this same owner with a uniform ambient field, including at zero pitch rate.
+Rigid pitch velocity `q cross (position - CG)` enters each local sample once;
+the former clamped pitch-as-twist approximation is removed. Both the axial
+`q*(z-z_CG)` and vertical `-q*(x-x_CG)` components change actual local flow,
+including the separate propeller-hub inflows. Local chord-plane speed and
+incidence drive the nonlinear strip solve, and its accepted local velocity
+drives Kutta-Joukowsky forces,
 profile drag and section pitching moments. Converged propeller wash is included
 in both circulation and force velocity. The separate disk-center axial inflows
 drive the two BEMT thrust/torque solves and the existing engine dynamics.
@@ -958,10 +962,14 @@ physical convention; candidate tuples, acceptance tolerances and budgets are
 unchanged. The independent native regression reconstructs mass-flux thrust and
 the washed wing circulation, and rejects a second halving of the wash.
 
-This corrects the induction amplitude within the existing model: the ordinary
-path retains freestream Kutta–Joukowsky force evaluation, while the distributed
-path evaluates forces with local strip velocities. The finite 2R influence
-window, spanwise overlap approximation and omission of wake contraction, swirl
+The aircraft force assembly always evaluates Kutta–Joukowsky and profile loads
+with those same accepted local strip velocities. Ordinary zero-rate loads and
+trim also use this consistent local field, keeping the force law continuous
+through zero pitch rate. `aircraft_battery` checks uniform/distributed identity
+for signed pitch rates, assembled/solver lift agreement, finite-differenced
+moving-point velocities, actual BEMT thrust/torque at both moving hubs, and
+separated-drag work with strip-local pressure and force directions. The finite
+2R influence window, spanwise overlap approximation and omission of wake contraction, swirl
 and vertical disk overlap remain explicit model limitations. References: NASA
 Glenn, [Propeller Thrust](https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/propeller-thrust/),
 and Deters, Ananda and Selig, AIAA 2015-2265, equations (3)–(7).
@@ -986,8 +994,8 @@ strip. Returned strip velocities belong to the actual evaluated iterate that
 produced circulation. Distributed acceptance checks each disk's relative
 fixed-point residual separately; a strong rotor cannot mask the weak rotor's
 error. The rationalized momentum root retains weak-loading accuracy.
-Existing legacy and CG modes retain their previous wash
-scaling and arithmetic. Invalid or reversed local flow and below-ground surface
+Ordinary and CG force entry points supply a uniform ambient field to this
+same local-velocity owner. Invalid or reversed local flow and below-ground surface
 samples refuse through the existing envelope receipt without a CG-flow fallback.
 
 Distributed runs select V4 checkpoint integrity and a distinct run identity;

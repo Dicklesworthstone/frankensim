@@ -8,9 +8,9 @@
 //!   - the coupled multisurface solve (biplane wings + biplane canard in
 //!     ONE influence system — canard–wing interference is solved, never
 //!     superposed) under the converged prop slipstream (E4.5),
-//!   - per-panel Kutta–Joukowsky forces F = ρΓ(V×seg) (freestream-KJ
-//!     tier: induced drag is NOT in these forces and is carried as the
-//!     declared classical term CL²/(π·AR·e) — documented, Estimated),
+//!   - per-panel Kutta–Joukowsky forces F = ρΓ(V×seg), using local rigid-point
+//!     relative velocity plus prop wash; wing-induced drag is carried as the
+//!     declared classical term CL²/(π·AR·e) — documented, Estimated,
 //!   - per-strip section quarter-chord moments (thin-airfoil cm₀),
 //!   - wing profile drag (declared attached cd₀, the same flat-plate
 //!     continuation as the lift law), the parasite LEDGER (E4.6a-i),
@@ -30,7 +30,7 @@ use crate::Refusal;
 use crate::dragledger::{DragLedger, wright_ledger_v1};
 use crate::propcoupling::{
     CANDIDATE_A, CoupledStep, IncidentInflow, PropCouplingSolverSpec, PropDisk,
-    coupled_prop_airframe_step, coupled_prop_airframe_step_with_incident,
+    coupled_prop_airframe_step_with_incident,
 };
 use fs_airscrew::{BladeStation, Rotor};
 use fs_blake3::hash_domain;
@@ -353,6 +353,9 @@ impl OpenLoopDesign {
     }
 
     /// Full force/moment build-up at (V, α, δc), θ = α (level flight).
+    /// Uniform ambient flow is sampled at every strip and propeller hub, with
+    /// the full rigid pitch velocity added before the coupled solve. Accepted
+    /// local flow, including prop wash, supplies both circulation and loads.
     ///
     /// # Errors
     /// Wing/coupling/ledger refusals pass through; `state-invalid`.
@@ -479,27 +482,7 @@ impl OpenLoopDesign {
             message: e.message,
             ranked_repairs: e.ranked_repairs,
         };
-        let (panels, mut strips) = self.layout(delta_canard_rad)?;
-        // Pitch-rate plunge: a strip at dx ahead of the CG swings upward
-        // under +q and sees Δα = −q·dx/V (the tail-aft mirror gives the
-        // classical +q·l_t/V — both are DAMPING). Quasi-steady, enters
-        // as strip twist; q = 0 leaves the strips bitwise untouched.
-        if q_pitch_rad_s != 0.0 && incident.is_none() {
-            for st in &mut strips {
-                let p0 = &panels[st.panel_indices[0]];
-                let dx = 0.5 * (p0.a[0] + p0.b[0]) - self.cg_m[0];
-                // Tier clamp (declared): the quasi-steady plunge twist is
-                // bounded to ±0.25 rad so a violent pitch rate (PIO at the
-                // stops, |q| ~ 2.8 rad/s measured in the H-02c family)
-                // keeps the strips inside the closure's admitted domain.
-                // Damping stays monotone up to the bound; beyond it the
-                // model saturates rather than handing the wing solver a
-                // ±0.7 rad twist it cannot converge.
-                let twist_upd = (q_pitch_rad_s * dx / v_mps).clamp(-0.25, 0.25);
-                st.twist_rad -= twist_upd;
-            }
-        }
-        let strips = strips;
+        let (panels, strips) = self.layout(delta_canard_rad)?;
         // Body-axes airspeed (u = V cos α, w = V sin α, FRD).
         let fs_v = [
             v_mps * det::cos(alpha_rad),
@@ -522,7 +505,13 @@ impl OpenLoopDesign {
                 ..self.disks[1]
             },
         ];
-        let coupled = if let Some(incident) = incident {
+        let uniform = |_: [f64; 3]| Ok(fs_v);
+        let incident = incident.unwrap_or(&uniform);
+        let coupled = {
+            // The same material-point velocity drives every loading path.
+            // For omega = (0, q, 0), omega cross r = (q rz, 0, -q rx).
+            // Keeping the actual vector also changes local speed and hub
+            // inflow; replacing only incidence with q rx/V misses both.
             let sample = |point: [f64; 3]| -> Result<[f64; 3], Refusal> {
                 let mut velocity = incident(point)?;
                 velocity[0] += q_pitch_rad_s * (point[2] - self.cg_m[2]);
@@ -554,19 +543,6 @@ impl OpenLoopDesign {
                     strip_velocity_mps: &local_strips,
                     disk_velocity_mps: local_disks,
                 },
-            )?
-        } else {
-            coupled_prop_airframe_step(
-                &op,
-                &panels,
-                &strips,
-                &closure,
-                &self.rotor,
-                &disks,
-                fs_v,
-                rho_kg_m3,
-                &self.coupling,
-                warm,
             )?
         };
         let q = 0.5 * rho_kg_m3 * v_mps * v_mps;
@@ -656,7 +632,7 @@ impl OpenLoopDesign {
             m_y += m_term;
         }
         // Induced drag: declared classical term at the CG line (the
-        // freestream-KJ panel forces exclude it by construction).
+        // incident-flow KJ panel forces exclude it by construction).
         let s_ref = 2.0 * self.wing_span_m * self.wing_chord_m;
         let ar = self.wing_span_m * self.wing_span_m / (s_ref / 2.0);
         let cl = lift / (q * s_ref);
