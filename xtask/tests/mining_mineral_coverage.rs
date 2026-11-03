@@ -57,6 +57,32 @@ const MINERALS: &[Mineral] = &[
         ],
         mohs: [3.5, 4.0],
     },
+    Mineral {
+        name: "stannite",
+        density: &[
+            ("density-reported-range-minimum", 4.3),
+            ("density-reported-range-maximum", 4.5),
+        ],
+        mohs: [4.0, 4.0],
+    },
+    Mineral {
+        name: "cuprite",
+        density: &[("density", 6.14)],
+        mohs: [3.5, 4.0],
+    },
+    Mineral {
+        name: "tenorite",
+        density: &[("density", 6.45)],
+        mohs: [3.5, 3.5],
+    },
+    Mineral {
+        name: "kaolinite",
+        density: &[
+            ("density-reported-range-minimum", 2.61),
+            ("density-reported-range-maximum", 2.68),
+        ],
+        mohs: [2.0, 2.5],
+    },
 ];
 
 fn workspace() -> PathBuf {
@@ -118,6 +144,21 @@ fn packs() -> &'static [NormalizedPack] {
 }
 
 fn context(mineral: &Mineral) -> QueryPoint {
+    let point = base_context(mineral);
+    if mineral.name == "tenorite" {
+        point
+            .with_quantity(
+                "source-density-synthetic",
+                QuantitySpec::dimensional(Dims::NONE),
+                1.0,
+            )
+            .unwrap()
+    } else {
+        point
+    }
+}
+
+fn base_context(mineral: &Mineral) -> QueryPoint {
     [
         (format!("source-mineral-{}", mineral.name), 1.0),
         ("mineral-reference-model".into(), 1.0),
@@ -173,7 +214,44 @@ fn additional_ore_phase_values_survive_compilation_and_typed_queries() {
             claims += 1;
         }
     }
-    assert_eq!(claims, 19);
+    assert_eq!(claims, 33);
+}
+
+#[test]
+fn tenorite_density_preserves_its_synthetic_source_qualification() {
+    let index = MINERALS
+        .iter()
+        .position(|mineral| mineral.name == "tenorite")
+        .unwrap();
+    let mineral = &MINERALS[index];
+    let pack = &packs()[index];
+    let density = PropertyKey::new("density", RHO);
+    for unsupported in [
+        base_context(mineral),
+        context(mineral)
+            .with("source-density-synthetic", 0.0)
+            .unwrap(),
+    ] {
+        assert!(
+            pack.claims()
+                .query_typed(&density, &unsupported, SelectionPolicy::SingleClaimOnly)
+                .is_err(),
+            "synthetic measurement must not silently become natural-ore density"
+        );
+    }
+
+    // The source does not identify the hardness specimen as synthetic.
+    let hardness = pack
+        .claims()
+        .query_typed(
+            &PropertyKey::new("hardness-mohs-source-minimum", Dims::NONE),
+            &base_context(mineral),
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+    assert_eq!(hardness.evidence.value.value, 3.5);
+    let claim = pack.claims().claim(hardness.receipt.selected).unwrap();
+    assert_eq!(claim.validity.bound("source-density-synthetic"), None);
 }
 
 #[test]

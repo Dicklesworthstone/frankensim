@@ -1,0 +1,35 @@
+frankensim.matdb-source.v1
+observation	density	Kaolinite Al2Si2O5(OH)4, triclinic, measured mineral density	Handbook of Mineralogy Kaolinite, Physical Properties, page 1	The source reports measured density D(meas.) 2.61-2.68 g/cm3. Preserve the endpoints separately; calculated D(calc.) 2.63 g/cm3 is not substituted. This is a kaolinite mineral constituent, not bulk kaolin, mixed clay or a slurry. Structural hydroxyl in Al2Si2O5(OH)4 is not a measured free-water or moisture fraction. The source row does not state test temperature, pressure or a common specimen. No bulk-ore density, porosity, Bond work index, abrasion index, recovery or site calibration is inferred.
+observation	hardness	Kaolinite Al2Si2O5(OH)4, triclinic, ordinal Mohs hardness	Handbook of Mineralogy Kaolinite, Physical Properties, page 1	The source reports Mohs hardness 2-2.5. Preserve the ordinal endpoints. These values do not establish slurry viscosity, yield stress, settling behavior, flocculant dose or breakage energy. Mohs scratch hardness has no supplied conversion to Bond work index or milling energy. The source row does not state test temperature, pressure or a common specimen. No bulk-ore density, porosity, Bond work index, abrasion index, recovery or site calibration is inferred.
+scalar	rho-low	density	density_min	2.61	g/cm3	constant
+uncertainty	rho-low	unstated	-	-	-	-
+validity	rho-low	mineral	1	1	1
+validity	rho-low	grain	1	1	1
+validity	rho-low	temperature_known	0	0	1
+validity	rho-low	pressure_known	0	0	1
+validity	rho-low	bulk_ore_qualified	0	0	1
+validity	rho-low	specimen_qualified	0	0	1
+scalar	rho-high	density	density_max	2.68	g/cm3	constant
+uncertainty	rho-high	unstated	-	-	-	-
+validity	rho-high	mineral	1	1	1
+validity	rho-high	grain	1	1	1
+validity	rho-high	temperature_known	0	0	1
+validity	rho-high	pressure_known	0	0	1
+validity	rho-high	bulk_ore_qualified	0	0	1
+validity	rho-high	specimen_qualified	0	0	1
+scalar	mohs-low	hardness	mohs_min	2	1	constant
+uncertainty	mohs-low	unstated	-	-	-	-
+validity	mohs-low	mineral	1	1	1
+validity	mohs-low	grain	1	1	1
+validity	mohs-low	temperature_known	0	0	1
+validity	mohs-low	pressure_known	0	0	1
+validity	mohs-low	bulk_ore_qualified	0	0	1
+validity	mohs-low	specimen_qualified	0	0	1
+scalar	mohs-high	hardness	mohs_max	2.5	1	constant
+uncertainty	mohs-high	unstated	-	-	-	-
+validity	mohs-high	mineral	1	1	1
+validity	mohs-high	grain	1	1	1
+validity	mohs-high	temperature_known	0	0	1
+validity	mohs-high	pressure_known	0	0	1
+validity	mohs-high	bulk_ore_qualified	0	0	1
+validity	mohs-high	specimen_qualified	0	0	1

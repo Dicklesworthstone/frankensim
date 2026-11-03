@@ -1,0 +1,28 @@
+frankensim.matdb-source.v1
+observation	density	Tenorite CuO, monoclinic, measured mineral density	Handbook of Mineralogy Tenorite, Physical Properties, page 1	The source explicitly reports measured density D(meas.) 6.45 g/cm3 for synthetic material. This density requires source-density-synthetic=1; it is not a measurement of a mine's natural tenorite. Calculated D(calc.) 6.515(2) g/cm3 is not substituted. This mineral-density entry and any separate CuO thermochemistry pack do not establish shared specimens or conditions. The source row does not state test temperature, pressure or a common specimen. No bulk-ore density, porosity, Bond work index, abrasion index, recovery or site calibration is inferred.
+observation	hardness	Tenorite CuO, monoclinic, ordinal Mohs hardness	Handbook of Mineralogy Tenorite, Physical Properties, page 1	The source reports Mohs hardness 3.5. Equal minimum and maximum entries preserve that single stated ordinal value. The printed synthetic qualification belongs to the density entry; the source does not identify the hardness specimen as synthetic, so no synthetic-density condition is attached to these hardness claims. Mohs scratch hardness has no supplied conversion to Bond work index or milling energy. The source row does not state test temperature, pressure or a common specimen. No bulk-ore density, porosity, Bond work index, abrasion index, recovery or site calibration is inferred.
+scalar	rho	density	rho	6.45	g/cm3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	mineral	1	1	1
+validity	rho	grain	1	1	1
+validity	rho	temperature_known	0	0	1
+validity	rho	pressure_known	0	0	1
+validity	rho	bulk_ore_qualified	0	0	1
+validity	rho	specimen_qualified	0	0	1
+validity	rho	synthetic_density	1	1	1
+scalar	mohs-low	hardness	mohs_min	3.5	1	constant
+uncertainty	mohs-low	unstated	-	-	-	-
+validity	mohs-low	mineral	1	1	1
+validity	mohs-low	grain	1	1	1
+validity	mohs-low	temperature_known	0	0	1
+validity	mohs-low	pressure_known	0	0	1
+validity	mohs-low	bulk_ore_qualified	0	0	1
+validity	mohs-low	specimen_qualified	0	0	1
+scalar	mohs-high	hardness	mohs_max	3.5	1	constant
+uncertainty	mohs-high	unstated	-	-	-	-
+validity	mohs-high	mineral	1	1	1
+validity	mohs-high	grain	1	1	1
+validity	mohs-high	temperature_known	0	0	1
+validity	mohs-high	pressure_known	0	0	1
+validity	mohs-high	bulk_ore_qualified	0	0	1
+validity	mohs-high	specimen_qualified	0	0	1

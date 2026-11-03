@@ -1,9 +1,9 @@
 # Mining mineral reference data
 
-Five source profiles add 19 claims to the existing material compiler and catalog.
+Nine source profiles add 33 claims to the existing material compiler and catalog.
 They extend the existing pyrite, chalcopyrite, chalcocite, cassiterite, dolomite
 and magnetite reference profiles with bornite, sphalerite, galena, arsenopyrite
-and malachite. Each addition retains the publisher's mineral identity and
+malachite, stannite, cuprite, tenorite and kaolinite. Each addition retains the publisher's mineral identity and
 measured-density role. It supplies reference data for explicitly selected grains;
 it does not characterize a mine's ore.
 
@@ -14,23 +14,33 @@ it does not characterize a mine's ore.
 | `galena` | PbS, cubic | 7.58 | 2.5–2.75 |
 | `arsenopyrite` | FeAsS, monoclinic | 6.07(15) | 5.5–6 |
 | `malachite` | Cu₂(CO₃)(OH)₂, monoclinic | 4.05(2) | 3.5–4 |
+| `stannite` | Cu₂FeSnS₄, tetragonal | 4.3–4.5 | 4–4 |
+| `cuprite` | Cu₂O, cubic | 6.14 | 3.5–4 |
+| `tenorite` | CuO, monoclinic | 6.45, synthetic | 3.5–3.5 |
+| `kaolinite` | Al₂Si₂O₅(OH)₄, triclinic | 2.61–2.68 | 2–2.5 |
 
 Append `-handbook-mineralogy` to the prefix for the pack ID. Each manifest cites
 the corresponding original *Handbook of Mineralogy* sheet, Physical Properties,
-version 1 (2001–2005), hosted by the Mineralogical Society of America. It also
-pins the downloaded PDF's SHA-256. The publisher's
+version 1 (2001–2005), except kaolinite version 1.2 (2001), hosted by the
+Mineralogical Society of America. The original five manifests also pin their
+downloaded PDFs' SHA-256; the four newer records cite the original version and
+page without claiming a downloaded binary hash. The publisher's
 [page guide](https://handbookofmineralogy.org/) identifies the density unit as
 g/cm³. Source PDFs, illustrations, descriptive text and table layouts are not
 redistributed; the bundles contain selected attributed facts and original notes.
 
-For bornite and sphalerite, `density-reported-range-minimum` and
+For bornite, sphalerite, stannite and kaolinite, `density-reported-range-minimum` and
 `density-reported-range-maximum` retain the source endpoints using the existing
-mineral-range vocabulary. Neither profile supplies a fabricated point `density`.
+mineral-range vocabulary. These profiles supply no fabricated point `density`.
 For the two parenthetical values, `density` carries the printed central value
 and `density-source-parenthetical-spread` carries 0.15 or 0.02 g/cm³. No
-confidence level, distribution or prediction interval is supplied. All 19 claims
+confidence level, distribution or prediction interval is supplied. All 33 claims
 therefore retain `UncertaintyModel::Unstated`. Calculated crystallographic
-densities are not silently substituted for the measured values.
+densities are not silently substituted for the measured values. Tenorite's density
+is explicitly a synthetic-source measurement and requires the additional
+`source-density-synthetic=1` flag. Its separately sourced Mohs observation does
+not acquire that specimen assertion. Stannite remains distinct from cassiterite;
+kaolinite mineral density does not become the bulk density or rheology of kaolin.
 
 Mohs values use distinct dimensionless endpoint properties:
 `hardness-mohs-source-minimum` and `hardness-mohs-source-maximum`. Mohs hardness
@@ -66,6 +76,7 @@ cargo run -p xtask -- matdb-catalog \
 
 The result is 5060 kg/m³ with the source receipt. It is not a bulk density for a
 copper-bearing rock or a recovery prediction. The focused integration test
-`cargo test -p xtask --test mining_mineral_coverage` compiles all five manifests,
+`cargo test -p xtask --test mining_mineral_coverage` compiles all nine manifests,
 round-trips their canonical packs, queries every source value, and checks the
 missing-context, incompatible-context, wrong-unit and unsupported-property cases.
+

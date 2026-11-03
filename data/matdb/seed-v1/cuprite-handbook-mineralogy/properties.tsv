@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	density	Cuprite Cu2O, cubic, measured mineral density	Handbook of Mineralogy Cuprite, Physical Properties, page 1	The source reports measured density D(meas.) 6.14 g/cm3; calculated D(calc.) 6.15 g/cm3 is not substituted. Cuprite is the crystalline copper(I) oxide mineral. This mineral-density entry and any separate Cu2O thermochemistry pack do not establish shared specimens or measurement conditions. The source row does not state test temperature, pressure or a common specimen. No bulk-ore density, porosity, Bond work index, abrasion index, recovery or site calibration is inferred.
+observation	hardness	Cuprite Cu2O, cubic, ordinal Mohs hardness	Handbook of Mineralogy Cuprite, Physical Properties, page 1	The source reports Mohs hardness 3.5-4. Preserve the two ordinal endpoints without a probability law or a conversion to indentation hardness. Mohs scratch hardness has no supplied conversion to Bond work index or milling energy. The source row does not state test temperature, pressure or a common specimen. No bulk-ore density, porosity, Bond work index, abrasion index, recovery or site calibration is inferred.
+scalar	rho	density	rho	6.14	g/cm3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	mineral	1	1	1
+validity	rho	grain	1	1	1
+validity	rho	temperature_known	0	0	1
+validity	rho	pressure_known	0	0	1
+validity	rho	bulk_ore_qualified	0	0	1
+validity	rho	specimen_qualified	0	0	1
+scalar	mohs-low	hardness	mohs_min	3.5	1	constant
+uncertainty	mohs-low	unstated	-	-	-	-
+validity	mohs-low	mineral	1	1	1
+validity	mohs-low	grain	1	1	1
+validity	mohs-low	temperature_known	0	0	1
+validity	mohs-low	pressure_known	0	0	1
+validity	mohs-low	bulk_ore_qualified	0	0	1
+validity	mohs-low	specimen_qualified	0	0	1
+scalar	mohs-high	hardness	mohs_max	4	1	constant
+uncertainty	mohs-high	unstated	-	-	-	-
+validity	mohs-high	mineral	1	1	1
+validity	mohs-high	grain	1	1	1
+validity	mohs-high	temperature_known	0	0	1
+validity	mohs-high	pressure_known	0	0	1
+validity	mohs-high	bulk_ore_qualified	0	0	1
+validity	mohs-high	specimen_qualified	0	0	1
