@@ -48,6 +48,7 @@ struct ReedOutletObserver<'a> {
 // No second assembly or legacy spherical image can enter between those steps.
 pub(super) struct PreparedReedOutlet<'a> {
     pub(super) line: fs_phs::PortHamiltonian,
+    pub(super) exterior_gas: GasState,
     observer: ReedOutletObserver<'a>,
 }
 
@@ -57,6 +58,7 @@ impl<'a> PreparedReedOutlet<'a> {
         outlet: ChainOutlet,
         taps: &[AcousticTap],
         gas: &GasState,
+        exterior_gas: &GasState,
         wall: Option<LocallyReactingWall>,
         receiver: &'a mut crate::pcm_wav::baffled::BaffledPressure,
     ) -> Result<Self, AcousticRealizeError> {
@@ -65,10 +67,12 @@ impl<'a> PreparedReedOutlet<'a> {
                 what: "physical ODE outlet observation requires separate receivers for side openings",
             });
         }
-        let (line, flow) = fs_phs::acoustic_outlet::acoustic_chain_with_outlet_flow(
+        let (line, flow) = fs_phs::acoustic_outlet::acoustic_chain_with_outlet_flow_in_exterior(
             sections,
             gas.density,
             gas.sound_speed,
+            exterior_gas.density,
+            exterior_gas.sound_speed,
             outlet,
             1,
             taps,
@@ -78,6 +82,7 @@ impl<'a> PreparedReedOutlet<'a> {
         .map_err(render_phs_error)?;
         Ok(Self {
             line,
+            exterior_gas: *exterior_gas,
             observer: ReedOutletObserver { flow, receiver },
         })
     }

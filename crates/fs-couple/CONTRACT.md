@@ -815,12 +815,12 @@ remains unverified while the required constellation siblings are unavailable.
 
 `acoustic_realize::duct_observer::BaffledDuctObserver` admits the existing
 `BoreRealization::LumpedLadder` for an unbranched flanged cylinder/frustum bore,
-including a single widening cone, with one uniform interior/exterior gas and
-its original numerical wall law. Both massive and quasistatic reeds retain
-their implicit pressure/work junction. The original `fs-phs` terminal-flow row
-observes the accepted state; that flow enters the existing finite-aperture
-Rayleigh receiver and causal atmospheric filter. Internal source pressure is
-not added to physical microphone pressure.
+including a single widening cone, with one uniform interior gas, an independent
+pressure-matched exterior and its original numerical wall law. Both massive
+and quasistatic reeds retain their implicit pressure/work junction. The original
+`fs-phs` terminal-flow row observes the accepted state; that flow enters the
+existing finite-aperture Rayleigh receiver and causal atmospheric filter.
+Internal source pressure is not added to physical microphone pressure.
 
 The physical image selects the original mass-conserving frustum owner before
 model-form admission. Its prepared chain is borrowed by the passive impedance
@@ -831,19 +831,30 @@ after admission. The generic dispersion bound, measured pitch tolerance,
 source-band admission and complete material state remain binding. Legacy
 source-pressure comparisons retain their automatic spherical-cone behavior.
 
+Interior density and sound speed determine cell compression/inertia, interior
+viscothermal and wall response, and reed/Bernoulli flow. The exterior determines
+only the original terminal radiation load, Rayleigh pressure and atmospheric
+propagation. Passive-pitch admission compares that prepared chain with the
+original exterior-aware TMM using the same two media. Open frozen regions still
+require coherent gas states and equal static pressure; mean flow, mixing and
+thermal equilibration are not modeled. Explicit identical media preserve the
+complete physical output bit for bit.
+
 The original compact/Foster radiation-load approximation remains. Rayleigh
 observation does not certify its continuum loading accuracy. Axial propagation
 stays in the spatial ODE, so the receipt reports zero separately factored
 axial-delay samples; finite spatial resolution does not claim an exact continuum
-wavefront. Receiver geometry, exterior delay, quadrature band and source medium
-remain explicit. Regional media, a distinct exterior, source-bound walls, side
-openings and separate body receivers require their own supported owners and
-refuse on this bounded path.
+wavefront. Receiver geometry, exterior delay, quadrature band and both media
+remain explicit. Nonuniform interior media, source-bound walls, side openings
+and separate body receivers require their own supported owners and refuse on
+this bounded path.
 
 Authored G1/G3 regressions cover retarded inverse-range pressure for massive
 and quasistatic reeds on cylinders and single cones, absolute-pressure
-substitution, physical boundary/media refusals, and a cone pitch tolerance
-that rejects the physical frustum even when the legacy psi image would pass.
+substitution, warm-bore/cool-room source and receiver assignment, equal-medium
+output bits, unequal-pressure/nonuniform-interior refusal, the exterior-aware
+passive reference, and a cone pitch tolerance that rejects the physical frustum
+even when the legacy psi image would pass.
 
 ## Superfluid mutual-friction heat on the original thermal timeline
 

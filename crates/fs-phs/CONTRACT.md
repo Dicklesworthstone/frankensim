@@ -22,10 +22,23 @@ retained flux. Evaluation is read-only and allocation-free; invalid state
 extent, nonfinite coordinates or arithmetic refuse. Observation adds no power
 port, radiation solver or side-opening receiver.
 
+`acoustic_outlet::acoustic_chain_with_outlet_flow_in_exterior` supplies
+independent exterior density and sound speed to the same original terminal
+radiation owner. Cell compression/inertia, viscothermal and wall response,
+and the acoustic pin frequency retain the interior medium; only terminal
+radiation resistance, memory and added mass use the exterior. Pressure and
+volume flow remain continuous without a density-ratio multiplier. Coherent
+media at a common static pressure are the caller's responsibility because
+this layer has no gas EOS. Distinct media with side taps refuse. The original
+compact/Foster approximation and bandwidth remain; this adds no full-wave
+interface solver. Equal media preserve original assembly arithmetic bit for bit.
+
 Authored G1/G3 regressions cover independent compression-volume conservation
 for odd/even cylinder, single-cone and joined-frustum chains; their low-frequency
 through-flow limit with and without viscothermal memory; physical radiation
-work; rigid closure; and continued legacy spherical-source behavior.
+work; rigid closure; and continued legacy spherical-source behavior. Independent
+interior cell storage and exterior radiation mass/work checks cover unequal
+media, while explicit identical media preserve storage, structure and flow bits.
 
 ## Purpose and layer
 

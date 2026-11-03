@@ -200,14 +200,96 @@ fn pressure_changes_reach_the_same_source_and_microphone_without_pressure_normal
 }
 
 #[test]
+fn warm_bore_uses_its_own_source_gas_and_the_rooms_retarded_microphone() {
+    let exterior = gas(101_325.0);
+    let interior =
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, exterior.pressure).unwrap();
+    for mass in [0.0, 1e-4] {
+        let input = input(mass);
+        let observer_options = |path_samples| {
+            let mut options = options(interior, path_samples);
+            let binding = options.baffled_duct.as_mut().unwrap();
+            binding.exterior_gas = Some(exterior);
+            binding.receiver = receiver(exterior, path_samples, 0.004);
+            options
+        };
+        let near = realize_assembly_with_options(&input, &observer_options(16)).unwrap();
+        let far = realize_assembly_with_options(&input, &observer_options(32)).unwrap();
+        let binding = near.duct_observer.as_ref().unwrap();
+        assert_eq!(binding.segment_gases, vec![interior]);
+        assert_eq!(binding.exterior_gas, exterior);
+        assert_eq!(near.gas, exterior);
+        assert!(near.pressure_pa[..15].iter().all(|p| *p == 0.0));
+        let amplitude = near
+            .pressure_pa
+            .iter()
+            .map(|p| p.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(amplitude > 0.0 && amplitude.is_finite());
+        for i in 0..near.pressure_pa.len() - 16 {
+            assert!(
+                (far.pressure_pa[i + 16] - 0.5 * near.pressure_pa[i]).abs() < 1e-10 * amplitude
+            );
+        }
+        // Replacing the bore by room gas changes its compression, inertia,
+        // losses and Bernoulli source. The exterior override must not perform
+        // that replacement implicitly while leaving only a different receipt.
+        let uniform_room = realize_assembly_with_options(&input, &options(exterior, 16)).unwrap();
+        let difference = near
+            .pressure_pa
+            .iter()
+            .zip(&uniform_room.pressure_pa)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(difference > 1e-8 * amplitude);
+    }
+}
+
+#[test]
+fn explicit_same_exterior_preserves_the_complete_physical_output_bits() {
+    let gas = gas(101_325.0);
+    let input = input(0.0);
+    let implicit = options(gas, 16);
+    let mut explicit = implicit;
+    explicit.baffled_duct.as_mut().unwrap().exterior_gas = Some(gas);
+    let implicit = realize_assembly_with_options(&input, &implicit).unwrap();
+    let explicit = realize_assembly_with_options(&input, &explicit).unwrap();
+    let bits = |values: &[f64]| {
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&implicit.pressure_pa), bits(&explicit.pressure_pa));
+    assert_eq!(implicit.bore_receipt, explicit.bore_receipt);
+    assert_eq!(implicit.duct_observer, explicit.duct_observer);
+}
+
+#[test]
 fn unsupported_boundary_and_region_physics_are_not_silently_omitted() {
     let gas = gas(101_325.0);
     let mut input = input(0.0);
     let mut options = options(gas, 16);
     options.baffled_duct.as_mut().unwrap().exterior_gas =
-        Some(GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, gas.pressure).unwrap());
+        Some(GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, 1.01 * gas.pressure).unwrap());
     assert!(realize_assembly_with_options(&input, &options).is_err());
     options.baffled_duct.as_mut().unwrap().exterior_gas = None;
     input.duct.as_mut().unwrap().termination = WaveguideEnd::Closed;
     assert!(realize_assembly_with_options(&input, &options).is_err());
+    let duct = input.duct.as_mut().unwrap();
+    duct.termination = WaveguideEnd::FlangedOpen;
+    duct.segments = vec![CylinderSegment::cylinder(0.004, 0.15); 2];
+    let regions = [
+        gas,
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, gas.pressure).unwrap(),
+    ];
+    let regional_options = RealizeOptions {
+        gas: None,
+        baffled_duct: Some(BaffledDuctObserver {
+            segment_gases: Some(&regions),
+            ..options.baffled_duct.unwrap()
+        }),
+        ..options
+    };
+    assert!(realize_assembly_with_options(&input, &regional_options).is_err());
 }

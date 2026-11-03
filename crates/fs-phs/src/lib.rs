@@ -4471,7 +4471,6 @@ pub fn acoustic_chain_outlet_wall(
 /// # Errors
 /// As [`acoustic_chain_outlet_wall`] for the original frustum-chain parameters.
 #[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
-#[allow(clippy::too_many_lines)] // one coherent physics stage
 pub fn acoustic_frustum_chain_outlet_wall(
     sections: &[AcousticSection],
     density: f64,
@@ -4482,6 +4481,53 @@ pub fn acoustic_frustum_chain_outlet_wall(
     viscothermal: Option<&ViscothermalPin>,
     wall: Option<&WallPin>,
 ) -> Result<PortHamiltonian, PhsError> {
+    acoustic_frustum_chain_outlet_wall_in_exterior(
+        sections,
+        density,
+        sound_speed,
+        density,
+        sound_speed,
+        outlet,
+        inlets,
+        taps,
+        viscothermal,
+        wall,
+    )
+}
+
+// One assembly owns both media: the cells retain the interior, while only the
+// original terminal radiation load receives the exterior. Separate side-mouth
+// media are not represented here, so a distinct exterior with taps refuses.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_lines)] // one coherent physics stage
+fn acoustic_frustum_chain_outlet_wall_in_exterior(
+    sections: &[AcousticSection],
+    density: f64,
+    sound_speed: f64,
+    exterior_density: f64,
+    exterior_sound_speed: f64,
+    outlet: ChainOutlet,
+    inlets: usize,
+    taps: &[AcousticTap],
+    viscothermal: Option<&ViscothermalPin>,
+    wall: Option<&WallPin>,
+) -> Result<PortHamiltonian, PhsError> {
+    if !(exterior_density.is_finite()
+        && exterior_density > 0.0
+        && exterior_sound_speed.is_finite()
+        && exterior_sound_speed > 0.0)
+    {
+        return Err(PhsError::Unadmitted {
+            what: "acoustic exterior density and sound speed must be positive and finite",
+        });
+    }
+    if !taps.is_empty()
+        && (density != exterior_density || sound_speed != exterior_sound_speed)
+    {
+        return Err(PhsError::Unadmitted {
+            what: "distinct acoustic exterior requires separate side-mouth load owners",
+        });
+    }
     let mouth = match outlet {
         ChainOutlet::Radiating(flange) => Some(flange),
         ChainOutlet::PressureRelease | ChainOutlet::Rigid => None,
@@ -4655,8 +4701,8 @@ pub fn acoustic_frustum_chain_outlet_wall(
             &mut r,
             n,
             n_line - 1,
-            density,
-            sound_speed,
+            exterior_density,
+            exterior_sound_speed,
             last_radius,
             omega_pin,
             1.0,

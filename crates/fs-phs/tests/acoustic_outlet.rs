@@ -1,6 +1,8 @@
 //! G1/G3: physical outlet flow, coordinate orientation and complete storage.
 use fs_math::c64::C64;
-use fs_phs::acoustic_outlet::acoustic_chain_with_outlet_flow;
+use fs_phs::acoustic_outlet::{
+    acoustic_chain_with_outlet_flow, acoustic_chain_with_outlet_flow_in_exterior,
+};
 use fs_phs::harmonic::{HarmonicBudget, HarmonicModel};
 use fs_phs::{
     AcousticSection, ChainOutlet, MouthFlange, ViscothermalPin, acoustic_chain_outlet_wall,
@@ -153,44 +155,150 @@ fn observed_terminal_flow_reproduces_independent_physical_radiation_work() {
     let dt = 1e-5;
     for cells in [3, 4] {
         for (shape, sections) in geometries(cells) {
-            let (system, flow) = acoustic_chain_with_outlet_flow(
+            for (exterior_density, exterior_speed) in [(density, speed), (1.9, 280.0)] {
+                let (system, flow) = acoustic_chain_with_outlet_flow_in_exterior(
+                    &sections,
+                    density,
+                    speed,
+                    exterior_density,
+                    exterior_speed,
+                    ChainOutlet::Radiating(MouthFlange::Flanged),
+                    1,
+                    &[],
+                    None,
+                    None,
+                )
+                .unwrap();
+                let radius = sections.last().unwrap().outlet_radius;
+                let length: f64 = sections.iter().map(|section| section.length).sum();
+                // Independently, the compact flanged load at the original pin
+                // frequency dissipates R * U_out^2. The accepted step's original
+                // material resistance account must equal this physical work.
+                let omega = core::f64::consts::PI * speed / (2.0 * length);
+                let area = core::f64::consts::PI * radius * radius;
+                let resistance = exterior_density * exterior_speed / area
+                    * (omega * radius / exterior_speed).powi(2)
+                    / 2.0;
+                // Every cell keeps its actual interior frustum volume/inertance.
+                // Only the terminal flux acquires the original compact mouth mass
+                // M_rad = rho_exterior * 0.8216 * radius / area.
+                let effort = system.effort(&vec![1.0; system.state_dim()]);
+                let mut cell = 0;
+                for section in &sections {
+                    let dx = section.length / section.cells as f64;
+                    for i in 0..section.cells {
+                        let ra = section.radius
+                            + (section.outlet_radius - section.radius)
+                                * (i as f64 / section.cells as f64);
+                        let rb = section.radius
+                            + (section.outlet_radius - section.radius)
+                                * ((i + 1) as f64 / section.cells as f64);
+                        let volume =
+                            core::f64::consts::PI * (ra * ra + ra * rb + rb * rb) * dx / 3.0;
+                        let mut inertia = density * dx / (core::f64::consts::PI * ra * rb);
+                        if cell + 1 == cells {
+                            inertia += exterior_density * 0.8216 * radius / area;
+                        }
+                        assert!(
+                            (effort[2 * cell] * volume / (density * speed * speed) - 1.0).abs()
+                                < 1e-13
+                        );
+                        assert!((effort[2 * cell + 1] * inertia - 1.0).abs() < 1e-13);
+                        cell += 1;
+                    }
+                }
+                let mut initial = vec![0.0; system.state_dim()];
+                for i in 0..cells {
+                    initial[2 * i] = (i as f64 + 1.0) * 1e-8;
+                    initial[2 * i + 1] = (2 * i + 1) as f64 * 1e-4;
+                }
+                let step = fs_phs::step(&system, &initial, &[2e-4], dt).unwrap();
+                let midpoint: Vec<_> = initial
+                    .iter()
+                    .zip(&step.x)
+                    .map(|(a, b)| f64::midpoint(*a, *b))
+                    .collect();
+                let outward = flow.volume_flow_m3_s(&midpoint).unwrap();
+                let expected = dt * resistance * outward * outward;
+                let stored_volume_change: f64 = (0..cells)
+                    .map(|i| {
+                        let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                        sign * (step.x[2 * i] - initial[2 * i])
+                    })
+                    .sum();
+                let boundary_change = dt * (2e-4 - outward);
+                assert!(
+                    (stored_volume_change - boundary_change).abs()
+                        < 1e-11 * boundary_change.abs().max(1e-12)
+                );
+                assert!(expected > 0.0);
+                assert!(
+                    (step.dissipated - expected).abs() < 1e-11 * expected,
+                    "{shape}, cells={cells}: native={}, physical={expected}",
+                    step.dissipated
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn explicitly_identical_exterior_preserves_native_storage_structure_and_flow_bits() {
+    let pin = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 2,
+    };
+    let bits = |values: &[f64]| {
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    for (_, sections) in geometries(3) {
+        for loss in [None, Some(&pin)] {
+            let (original, original_flow) = acoustic_chain_with_outlet_flow(
                 &sections,
-                density,
-                speed,
+                1.2,
+                340.0,
                 ChainOutlet::Radiating(MouthFlange::Flanged),
                 1,
                 &[],
-                None,
+                loss,
                 None,
             )
             .unwrap();
-            let radius = sections.last().unwrap().outlet_radius;
-            let length: f64 = sections.iter().map(|section| section.length).sum();
-            // Independently, the compact flanged load at the original pin
-            // frequency dissipates R * U_out^2. The accepted step's original
-            // material resistance account must equal this physical work.
-            let omega = core::f64::consts::PI * speed / (2.0 * length);
-            let area = core::f64::consts::PI * radius * radius;
-            let resistance = density * speed / area * (omega * radius / speed).powi(2) / 2.0;
-            let mut initial = vec![0.0; system.state_dim()];
-            for i in 0..cells {
-                initial[2 * i] = (i as f64 + 1.0) * 1e-8;
-                initial[2 * i + 1] = (2 * i + 1) as f64 * 1e-4;
-            }
-            let step = fs_phs::step(&system, &initial, &[2e-4], dt).unwrap();
-            let midpoint: Vec<_> = initial
-                .iter()
-                .zip(&step.x)
-                .map(|(a, b)| f64::midpoint(*a, *b))
-                .collect();
-            let outward = flow.volume_flow_m3_s(&midpoint).unwrap();
-            let expected = dt * resistance * outward * outward;
-            assert!(expected > 0.0);
-            assert!(
-                (step.dissipated - expected).abs() < 1e-11 * expected,
-                "{shape}, cells={cells}: native={}, physical={expected}",
-                step.dissipated
+            let (explicit, explicit_flow) = acoustic_chain_with_outlet_flow_in_exterior(
+                &sections,
+                1.2,
+                340.0,
+                1.2,
+                340.0,
+                ChainOutlet::Radiating(MouthFlange::Flanged),
+                1,
+                &[],
+                loss,
+                None,
+            )
+            .unwrap();
+            let (j, r, g) = original.structure();
+            let (ej, er, eg) = explicit.structure();
+            assert_eq!(bits(j), bits(ej));
+            assert_eq!(bits(r), bits(er));
+            assert_eq!(bits(g), bits(eg));
+            assert_eq!(
+                bits(original_flow.coefficients()),
+                bits(explicit_flow.coefficients())
             );
+            for i in 0..original.state_dim() {
+                let mut basis = vec![0.0; original.state_dim()];
+                basis[i] = 1.0;
+                assert_eq!(
+                    bits(&original.effort(&basis)),
+                    bits(&explicit.effort(&basis))
+                );
+            }
         }
     }
 }

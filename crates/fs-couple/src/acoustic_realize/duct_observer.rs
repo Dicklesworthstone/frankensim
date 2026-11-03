@@ -27,16 +27,20 @@ use fs_scenario::{AcousticAssembly, WaveguideEnd};
 /// local wall law and flanged termination. Strings, separate body/plate/cavity
 /// members, other excitation and tone holes refuse; none is silently dropped.
 /// The explicit lumped ladder uses the original compression-volume/volume-flow
-/// frustum owner, including for a single widening cone, with uniform
-/// interior/exterior gas and its original numerical wall. The exact same
-/// prepared chain supplies passive-pitch admission, reed feedback and terminal
-/// flow. The legacy spherical psi-line is not used by this physical image.
+/// frustum owner, including for a single widening cone, with uniform interior
+/// gas, an independent pressure-matched exterior and its original numerical
+/// wall. The exact same prepared chain supplies passive-pitch admission, reed
+/// feedback and terminal flow. The legacy spherical psi-line is not used by
+/// this physical image.
 /// It observes the actual admitted loaded terminal flow;
 /// spatial propagation remains in the LC state, without a separate TMM transfer.
 /// The original compact/Foster mouth-load approximation remains; this receiver
 /// neither replaces it nor certifies its continuum radiation match.
-/// Regional media and source-bound walls still require the characteristic line.
-/// Side-hole and general body microphones
+/// Interior cell storage/losses and the reed use the interior gas; only the
+/// terminal radiation load, receiver and atmosphere use the exterior. The
+/// passive-pitch reference uses the same assignment through the original TMM.
+/// Nonuniform interior media and source-bound walls still require the
+/// characteristic line. Side-hole and general body microphones
 /// retain their existing dedicated owners and are not inferred from this input.
 ///
 /// Frozen gas regions share one static pressure. This is not advective mixing,
@@ -178,9 +182,10 @@ pub(super) fn realize(
         _ => regional,
     };
     let exterior = *regional.exterior_gas();
-    if is_lumped && (gases.iter().any(|gas| *gas != exterior) || binding.material_wall.is_some()) {
+    let interior = *regional.inlet_gas();
+    if is_lumped && (gases.iter().any(|gas| *gas != interior) || binding.material_wall.is_some()) {
         return Err(invalid(
-            "physical lumped outlet observation requires one uniform interior/exterior gas and the original numerical wall; regional media and source-bound walls need their own spatial owner",
+            "physical lumped outlet observation requires uniform interior gas and the original numerical wall; nonuniform interior media and source-bound walls need their own spatial owner",
         ));
     }
     let [x, y, z] = binding.receiver.position_m;
@@ -252,12 +257,12 @@ pub(super) fn realize(
             duct,
             reed,
             &mut PlateBank::default(),
-            &exterior,
+            &interior,
             range_m,
             assembly.sample_rate_hz,
             count,
             options.bore,
-            Some(&mut microphone),
+            Some((&mut microphone, exterior)),
         )?;
         for pressure in &mut pressure_pa {
             *pressure = observer.process(*pressure);

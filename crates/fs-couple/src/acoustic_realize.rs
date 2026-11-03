@@ -4985,7 +4985,7 @@ fn realize_reed_on_duct_with_receiver(
     sample_rate_hz: u32,
     n: usize,
     bore: BoreRealization,
-    receiver: Option<&mut crate::pcm_wav::baffled::BaffledPressure>,
+    receiver: Option<(&mut crate::pcm_wav::baffled::BaffledPressure, GasState)>,
 ) -> Result<(Vec<f64>, BoreRealizationReceipt), AcousticRealizeError> {
     let physics = physics_duct(duct)?;
     let termination = match duct.termination {
@@ -5044,12 +5044,13 @@ fn realize_reed_on_duct_with_receiver(
             // takes it unchanged, so a cone is never qualified as a psi-line
             // and rendered with a different finite-volume approximation.
             let receiver = receiver
-                .map(|receiver| {
+                .map(|(receiver, exterior_gas)| {
                     reed_ode::PreparedReedOutlet::new(
                         &sections,
                         duct_outlet(duct.termination),
                         &taps,
                         gas,
+                        &exterior_gas,
                         duct.wall,
                         receiver,
                     )
@@ -5074,7 +5075,7 @@ fn realize_reed_on_duct_with_receiver(
                 duct,
                 termination,
                 gas,
-                receiver.as_ref().map(|prepared| &prepared.line),
+                receiver.as_ref(),
             )?;
             if pitch_error_cents.abs() > max_pitch_error_cents {
                 return Err(AcousticRealizeError::LumpedLadderBand {
@@ -5265,10 +5266,10 @@ fn lumped_ladder_pitch_error_cents(
     duct: &ViscothermalDuct,
     termination: Termination,
     gas: &GasState,
-    prepared_chain: Option<&fs_phs::PortHamiltonian>,
+    prepared: Option<&reed_ode::PreparedReedOutlet<'_>>,
 ) -> Result<f64, AcousticRealizeError> {
     let (ladder, line) =
-        lumped_ladder_resonances(physics, sections, taps, duct, termination, gas, prepared_chain)?;
+        lumped_ladder_resonances(physics, sections, taps, duct, termination, gas, prepared)?;
     Ok(ladder.map_or(f64::INFINITY, |ladder| {
         1200.0 * det::ln(ladder / line) / core::f64::consts::LN_2
     }))
@@ -5287,28 +5288,42 @@ fn lumped_ladder_resonances(
     duct: &ViscothermalDuct,
     termination: Termination,
     gas: &GasState,
-    prepared_chain: Option<&fs_phs::PortHamiltonian>,
+    prepared: Option<&reed_ode::PreparedReedOutlet<'_>>,
 ) -> Result<(Option<f64>, f64), AcousticRealizeError> {
     let length: f64 = physics.segments.iter().map(Segment::axial_length).sum();
     let quarter = core::f64::consts::TAU * gas.sound_speed / (4.0 * length);
     let wall = wall_pin(duct.wall);
     let line = first_impedance_peak(0.25 * quarter, 6.0 * quarter, 920, |omega| {
-        fs_duct::input_impedance_wall(
-            physics,
-            gas,
-            omega,
-            fs_duct::LossModel::Bessel,
-            termination,
-            wall.as_ref(),
-        )
+        // The continuum reference must use the same interior and exterior
+        // assignment as the exact prepared chain consumed by the source.
+        let response = match prepared {
+            Some(prepared) => fs_duct::exterior::input_impedance(
+                physics,
+                gas,
+                &prepared.exterior_gas,
+                omega,
+                fs_duct::LossModel::Bessel,
+                termination,
+                fs_duct::WallModel::from_pin(wall.as_ref()),
+            ),
+            None => fs_duct::input_impedance_wall(
+                physics,
+                gas,
+                omega,
+                fs_duct::LossModel::Bessel,
+                termination,
+                wall.as_ref(),
+            ),
+        };
+        response
         .map(|response| response.impedance.abs())
         .map_err(AcousticRealizeError::Duct)
     })?
     .ok_or(AcousticRealizeError::InvalidDescription {
         what: "no passive line resonance inside the lumped-ladder scan",
     })?;
-    let chain = match prepared_chain {
-        Some(chain) => ChainImpedance::new(chain)?,
+    let chain = match prepared {
+        Some(prepared) => ChainImpedance::new(&prepared.line)?,
         None => ChainImpedance::new(&ode_bore_chain(
             sections,
             duct_outlet(duct.termination),
@@ -6153,6 +6168,51 @@ mod lumped_ladder_resonance_tests {
         let (sections, taps) = bore_spec_with_cells(duct, cells).unwrap();
         let physics = physics_duct(duct).unwrap();
         lumped_ladder_resonances(&physics, &sections, &taps, duct, termination, &gas, None).unwrap()
+    }
+
+    #[test]
+    fn physical_pitch_gate_uses_the_prepared_exterior_in_its_continuum_reference() {
+        use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
+        let spec = fs_material::gas::GasSpec::dry_air_ussa1976();
+        let interior = GasState::try_new(&spec, 310.0, 101_325.0).unwrap();
+        let exterior = GasState::try_new(&spec, 280.0, interior.pressure).unwrap();
+        let duct = ViscothermalDuct {
+            segments: vec![CylinderSegment::cylinder(0.004, 0.3)],
+            tone_holes: vec![],
+            termination: WaveguideEnd::FlangedOpen,
+            wall: None,
+        };
+        let physics = physics_duct(&duct).unwrap();
+        let (sections, taps) = bore_spec_with_cells(&duct, 4).unwrap();
+        let mut microphone = BaffledPressure::circular_outlet(
+            0.004, 16_000,
+            CircularOutletReceiver {
+                position_m: [0.0, 0.0, 1.0],
+                radial_rings: 1,
+                angular_points: 8,
+                maximum_frequency_hz: 500.0,
+            },
+            RayleighMedium { density: exterior.density, sound_speed: exterior.sound_speed },
+        ).unwrap();
+        let prepared = reed_ode::PreparedReedOutlet::new(
+            &sections, duct_outlet(duct.termination), &taps, &interior, &exterior,
+            None, &mut microphone,
+        ).unwrap();
+        let (_, admitted_reference) = lumped_ladder_resonances(
+            &physics, &sections, &taps, &duct, Termination::FlangedOpen, &interior,
+            Some(&prepared),
+        ).unwrap();
+        let quarter = core::f64::consts::TAU * interior.sound_speed / (4.0 * 0.3);
+        let reference = |outside: &GasState| first_impedance_peak(
+            0.25 * quarter, 6.0 * quarter, 920,
+            |omega| fs_duct::exterior::input_impedance(
+                &physics, &interior, outside, omega, fs_duct::LossModel::Bessel,
+                Termination::FlangedOpen, fs_duct::WallModel::Rigid,
+            ).map(|response| response.impedance.abs()).map_err(AcousticRealizeError::Duct),
+        ).unwrap().unwrap();
+        let exterior_reference = reference(&exterior);
+        assert_eq!(admitted_reference.to_bits(), exterior_reference.to_bits());
+        assert!((exterior_reference / reference(&interior) - 1.0).abs() > 1e-6);
     }
 
     #[test]

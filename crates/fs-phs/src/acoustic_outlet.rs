@@ -8,7 +8,7 @@
 
 use crate::{
     AcousticSection, AcousticTap, ChainOutlet, PhsError, PortHamiltonian, ViscothermalPin, WallPin,
-    acoustic_frustum_chain_outlet_wall,
+    acoustic_frustum_chain_outlet_wall, acoustic_frustum_chain_outlet_wall_in_exterior,
 };
 
 /// Immutable physical flow row belonging to one returned acoustic chain.
@@ -89,6 +89,56 @@ pub fn acoustic_chain_with_outlet_flow(
         viscothermal,
         wall,
     )?;
+    with_outlet_flow(system, sections, outlet)
+}
+
+/// The same physical chain with an independently supplied exterior at its end.
+///
+/// Cell storage, viscothermal response, wall loading and the acoustic pin
+/// frequency retain the interior `density` and `sound_speed`. Only the original
+/// compact/Foster terminal radiation load uses the exterior density and speed.
+/// Pressure and outward volume flow are continuous across this frozen boundary;
+/// neither receives a density-ratio multiplier. The caller must supply coherent
+/// media at a common static pressure: this numerical layer has no gas-state EOS.
+/// Distinct media with side taps refuse because their exterior loads need their
+/// own owners. Equal media preserve the original assembly arithmetic.
+///
+/// # Errors
+/// Original chain refusals, nonpositive/nonfinite exterior properties, distinct
+/// exterior with side taps, or an unrepresentable physical observation map.
+#[allow(clippy::too_many_arguments)]
+pub fn acoustic_chain_with_outlet_flow_in_exterior(
+    sections: &[AcousticSection],
+    density: f64,
+    sound_speed: f64,
+    exterior_density: f64,
+    exterior_sound_speed: f64,
+    outlet: ChainOutlet,
+    inlets: usize,
+    taps: &[AcousticTap],
+    viscothermal: Option<&ViscothermalPin>,
+    wall: Option<&WallPin>,
+) -> Result<(PortHamiltonian, AcousticOutletFlow), PhsError> {
+    let system = acoustic_frustum_chain_outlet_wall_in_exterior(
+        sections,
+        density,
+        sound_speed,
+        exterior_density,
+        exterior_sound_speed,
+        outlet,
+        inlets,
+        taps,
+        viscothermal,
+        wall,
+    )?;
+    with_outlet_flow(system, sections, outlet)
+}
+
+fn with_outlet_flow(
+    system: PortHamiltonian,
+    sections: &[AcousticSection],
+    outlet: ChainOutlet,
+) -> Result<(PortHamiltonian, AcousticOutletFlow), PhsError> {
     let n = system.state_dim();
     let mut coefficients = vec![0.0; n];
     if outlet != ChainOutlet::Rigid {
