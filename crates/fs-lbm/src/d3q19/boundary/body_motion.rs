@@ -257,7 +257,7 @@ impl BoundaryGrid3 {
     /// repeatedly reconstructed from its angular velocity.
     ///
     /// # Errors
-    /// Inherits the BGK/held-Guo-force and low-Mach admission of the native coupling.
+    /// Inherits the BGK/TRT, held-Guo-force and low-Mach admission of the native coupling.
     /// Both swept enclosing balls must stay in the interior domain halo and
     /// avoid fixed solid voxels; contact and periodic body wrapping are refused.
     /// Native drift, endpoint geometry, receipt and cancellation failures leave

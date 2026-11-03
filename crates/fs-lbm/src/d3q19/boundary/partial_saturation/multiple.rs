@@ -162,7 +162,7 @@ impl BoundaryGrid3 {
     /// body order: permutations agree to roundoff, not necessarily bit for bit.
     ///
     /// # Errors
-    /// Inherits single-body BGK, held Guo forcing, finite/SPD, low-Mach, stationary
+    /// Inherits single-body BGK/TRT, held Guo forcing, finite/SPD, low-Mach, stationary
     /// wall/periodic admission. Also refuses an empty assembly, malformed
     /// fraction fields and aggregate occupancy above one. Every refusal leaves
     /// all bodies, fluid populations and topology admission unchanged.
@@ -302,9 +302,9 @@ impl BoundaryGrid3 {
             *bodies = proposed;
             return Ok((receipt, value, Vec::new()));
         }
-        let CollisionModel3::Bgk { tau } = self.collision_model else {
-            return Err(invalid("immersed assembly requires BGK"));
-        };
+        let relaxation = ImmersedRelaxation3::new(self.collision_model)
+            .ok_or_else(|| invalid("immersed assembly requires BGK or TRT"))?;
+        let tau = relaxation.tau;
         if !origin.into_iter().all(f64::is_finite)
             || Face3::ALL.into_iter().any(|face| {
                 !matches!(self.boundaries.face(face), FaceBoundary3::Periodic)
@@ -440,6 +440,7 @@ impl BoundaryGrid3 {
                     let (rho, velocity) = moments(f, force, cell)?;
                     let physical = physical_populations(f, velocity, force);
                     let eq = equilibrium3(rho, velocity);
+                    let fluid_collision = relaxation.increments(&physical, &eq);
                     let mut summed = [0.0; Q3];
                     for a in 0..N {
                         if a.is_multiple_of(TILE_CELLS) {
@@ -473,10 +474,9 @@ impl BoundaryGrid3 {
                         let b = epsilon * (tau - 0.5) / (1.0 - total + tau - 0.5);
                         let mut impulse = [0.0; 3];
                         for q in 0..Q3 {
-                            let fluid_collision = (eq[q] - physical[q]) / tau;
                             let solid_collision =
                                 physical[OPP3[q]] - physical[q] + solid_eq[q] - eq[OPP3[q]];
-                            let correction = b * (solid_collision - fluid_collision);
+                            let correction = b * (solid_collision - fluid_collision[q]);
                             summed[q] += correction;
                             response.hydrodynamic.fluid_population_mass_change += correction;
                             impulse[0] += f64::from(E3[q].0) * correction;

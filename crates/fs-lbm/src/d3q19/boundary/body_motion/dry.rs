@@ -199,7 +199,7 @@ impl BoundaryGrid3 {
     /// the configured fluid force; reduced-pressure gravity instead uses
     /// `(M-rho*V)*g` with the hydrostatic fluid source removed. Do not combine
     /// both conventions. Stationary walls/periodic faces and the original
-    /// BGK/low-Mach envelope remain required.
+    /// BGK/TRT and low-Mach envelope remain required.
     ///
     /// The correction subtracts the imposed force on the midpoint interior
     /// from its measured PHYSICAL momentum change. Thus fictitious-fluid

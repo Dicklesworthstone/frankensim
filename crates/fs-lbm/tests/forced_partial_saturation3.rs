@@ -2,9 +2,9 @@
 use fs_exec::CancelGate;
 use fs_ga::{Mat3, So3, Vec3};
 use fs_lbm::d3q19::{
-    BodyFrameEllipsoid3, BodyFrameSampler3, BoundaryGrid3, BoundarySpec3, E3, FaceBoundary3,
-    MovingPartialSaturationBody3, PartialSaturationBody3, PartialSaturationError3, Q3, W3,
-    equilibrium3,
+    BodyFrameEllipsoid3, BodyFrameSampler3, BoundaryGrid3, BoundarySpec3, CollisionModel3, E3,
+    FaceBoundary3, MovingPartialSaturationBody3, PartialSaturationBody3, PartialSaturationError3,
+    Q3, W3, equilibrium3,
 };
 use fs_time::lie::gyrostat::InertiaTensor3;
 
@@ -39,12 +39,12 @@ fn field(c: [usize; 3]) -> [f64; 3] {
         1.7e-6 * (c[0] as f64 - 3.5),
     ]
 }
-fn grid(walls: bool) -> BoundaryGrid3 {
-    let mut g = BoundaryGrid3::new(
+fn grid_with_model(walls: bool, model: CollisionModel3) -> BoundaryGrid3 {
+    let mut g = BoundaryGrid3::with_collision_model(
         N,
         N,
         N,
-        TAU,
+        model,
         UNIFORM,
         if walls {
             BoundarySpec3::new([FaceBoundary3::Wall { velocity: [0.0; 3] }; 6])
@@ -149,10 +149,46 @@ fn source(u: [f64; 3], force: [f64; 3]) -> [f64; Q3] {
 
 #[test]
 fn forced_shared_cell_matches_independent_physical_population_formula() {
+    shared_cell_formula(
+        CollisionModel3::Bgk { tau: TAU },
+        [0.3, 0.6],
+        [6e-4, -3e-4, 2e-4],
+    );
+}
+
+// Parity is reconstructed directly from distribution pairs, independently of
+// the production immersed helper and the native TRT collision/source kernel.
+fn collision_oracle(model: CollisionModel3, f: &[f64; Q3], eq: &[f64; Q3]) -> [f64; Q3] {
+    match model {
+        CollisionModel3::Bgk { tau } => core::array::from_fn(|q| (eq[q] - f[q]) / tau),
+        CollisionModel3::Trt { tau, magic } => {
+            let odd_tau = 0.5 + magic / (tau - 0.5);
+            core::array::from_fn(|q| {
+                let opp = fs_lbm::d3q19::OPP3[q];
+                ((eq[q] + eq[opp]) - (f[q] + f[opp])) / (2.0 * tau)
+                    + ((eq[q] - eq[opp]) - (f[q] - f[opp])) / (2.0 * odd_tau)
+            })
+        }
+        _ => unreachable!("fixture uses linear BGK/TRT collision"),
+    }
+}
+
+#[test]
+fn trt_all_fill_limits_and_shared_cells_match_independent_forced_parity_formula() {
+    for magic in [0.07, 3.0 / 16.0, (TAU - 0.5).powi(2)] {
+        for occupancy in [[0.0, 0.0], [0.37, 0.0], [1.0, 0.0], [0.3, 0.6]] {
+            for force in [[0.0; 3], [6e-4, -3e-4, 2e-4]] {
+                shared_cell_formula(CollisionModel3::Trt { tau: TAU, magic }, occupancy, force);
+            }
+        }
+    }
+}
+
+fn shared_cell_formula(model: CollisionModel3, occupancy: [f64; 2], force: [f64; 3]) {
     let cell = [3, 3, 3];
-    let force = [6e-4, -3e-4, 2e-4];
     let (rho, u) = (1.07, [0.024, -0.017, 0.011]);
-    let mut g = BoundaryGrid3::new(N, N, N, TAU, [0.0; 3], BoundarySpec3::periodic());
+    let mut g =
+        BoundaryGrid3::with_collision_model(N, N, N, model, [0.0; 3], BoundarySpec3::periodic());
     g.set_force_field(|c| if c == cell { force } else { [0.0; 3] });
     let eq = equilibrium3(rho, u);
     let s = source(u, force);
@@ -161,14 +197,35 @@ fn forced_shared_cell_matches_independent_physical_population_formula() {
     physical[1] += 2e-4;
     physical[2] += 2e-4;
     physical[0] -= 4e-4;
+    // Odd third-order content with zero mass and momentum ensures that an
+    // accidental BGK substitution cannot pass the TRT population oracle.
+    physical[7] += 1e-4;
+    physical[8] -= 1e-4;
+    physical[9] += 1e-4;
+    physical[10] -= 1e-4;
+    physical[1] -= 2e-4;
+    physical[2] += 2e-4;
     let f = core::array::from_fn(|q| physical[q] - 0.5 * s[q]);
     g.set_populations(3, 3, 3, &f);
+    let mut single = (occupancy[1] == 0.0).then(|| {
+        let mut grid = BoundaryGrid3::with_collision_model(
+            N,
+            N,
+            N,
+            model,
+            [0.0; 3],
+            BoundarySpec3::periodic(),
+        );
+        grid.set_force_field(|c| if c == cell { force } else { [0.0; 3] });
+        grid.set_populations(3, 3, 3, &f);
+        grid
+    });
     for i in 0..3 {
         close(g.velocity(3, 3, 3)[i], u[i], 5e-17);
     }
     let mut fractions = [vec![0.0; N * N * N], vec![0.0; N * N * N]];
-    fractions[0][index(cell)] = 0.3;
-    fractions[1][index(cell)] = 0.6;
+    fractions[0][index(cell)] = occupancy[0];
+    fractions[1][index(cell)] = occupancy[1];
     let mut bodies = [body(0), body(1)];
     for b in &mut bodies {
         b.center = [3.5; 3];
@@ -188,10 +245,47 @@ fn forced_shared_cell_matches_independent_physical_population_formula() {
             &CancelGate::new(),
         )
         .unwrap();
-    let mut expected: [f64; Q3] =
-        core::array::from_fn(|q| f[q] + (eq[q] - f[q]) / TAU + (1.0 - 0.5 / TAU) * s[q]);
+    if let Some(grid) = &mut single {
+        let mut body = before[0];
+        grid.step_with_partial_saturation_body(
+            &fractions[0],
+            &mut body,
+            external[0],
+            ORIGIN,
+            &CancelGate::new(),
+        )
+        .unwrap();
+        for i in 0..3 {
+            close(body.velocity[i], bodies[0].velocity[i], 2e-16);
+            close(
+                body.angular_velocity[i],
+                bodies[0].angular_velocity[i],
+                2e-16,
+            );
+        }
+        for (single, shared) in snapshot(grid).iter().zip(snapshot(&g)) {
+            for q in 0..Q3 {
+                close(single[q], shared[q], 3e-16);
+            }
+        }
+    }
+    let raw_collision = collision_oracle(model, &f, &eq);
+    let physical_collision = collision_oracle(model, &physical, &eq);
+    let mut expected: [f64; Q3] = core::array::from_fn(|q| {
+        let forcing = match model {
+            CollisionModel3::Bgk { tau } => (1.0 - 0.5 / tau) * s[q],
+            CollisionModel3::Trt { tau, magic } => {
+                let opp = fs_lbm::d3q19::OPP3[q];
+                let odd_tau = 0.5 + magic / (tau - 0.5);
+                (1.0 - 0.5 / tau) * 0.5 * (s[q] + s[opp])
+                    + (1.0 - 0.5 / odd_tau) * 0.5 * (s[q] - s[opp])
+            }
+            _ => unreachable!(),
+        };
+        f[q] + raw_collision[q] + forcing
+    });
     for a in 0..2 {
-        let b = [0.3, 0.6][a] * (TAU - 0.5) / (1.0 - 0.9 + TAU - 0.5);
+        let b = occupancy[a] * (TAU - 0.5) / (1.0 - occupancy.iter().sum::<f64>() + TAU - 0.5);
         let weight = b * rho;
         let after: [f64; 3] = core::array::from_fn(|i| {
             before[a].velocity[i]
@@ -205,9 +299,8 @@ fn forced_shared_cell_matches_independent_physical_population_formula() {
         }
         for q in 0..Q3 {
             let opp = fs_lbm::d3q19::OPP3[q];
-            let fluid = (eq[q] - physical[q]) / TAU;
             let solid = physical[opp] - physical[q] + solid[q] - eq[opp];
-            expected[q] += b * (solid - fluid);
+            expected[q] += b * (solid - physical_collision[q]);
         }
         for d in receipt.bodies[a].momentum_residual {
             close(d, 0.0, 3e-16);
@@ -239,7 +332,15 @@ fn forced_shared_cell_matches_independent_physical_population_formula() {
 
 #[test]
 fn zero_occupancy_retains_native_guo_populations_bit_for_bit() {
-    let (mut native, mut coupled) = (grid(false), grid(false));
+    zero_occupancy(CollisionModel3::Bgk { tau: TAU });
+    zero_occupancy(CollisionModel3::Trt {
+        tau: TAU,
+        magic: 3.0 / 16.0,
+    });
+}
+
+fn zero_occupancy(model: CollisionModel3) {
+    let (mut native, mut coupled) = (grid_with_model(false, model), grid_with_model(false, model));
     let empty = vec![0.0; N * N * N];
     let mut bodies = [body(0), body(1)];
     let initial = bodies;
@@ -276,7 +377,24 @@ fn forced_periodic_assembly_closes_independent_world_angular_momentum() {
 }
 
 fn forced_assembly_balance(walls: bool) {
-    let mut g = grid(walls);
+    assembly_balance_with_model(walls, CollisionModel3::Bgk { tau: TAU });
+}
+
+#[test]
+fn trt_rotating_shared_bodies_close_world_momentum_torque_and_work() {
+    for walls in [false, true] {
+        assembly_balance_with_model(
+            walls,
+            CollisionModel3::Trt {
+                tau: TAU,
+                magic: 3.0 / 16.0,
+            },
+        );
+    }
+}
+
+fn assembly_balance_with_model(walls: bool, model: CollisionModel3) {
+    let mut g = grid_with_model(walls, model);
     let f = fields();
     let mut bodies = [body(0), body(1)];
     let external = [
@@ -377,7 +495,24 @@ fn moving_periodic_bodies_keep_world_angular_balance_and_single_transport_owners
 }
 
 fn moving_forced_balance(walls: bool) {
-    let mut g = grid(walls);
+    moving_balance_with_model(walls, CollisionModel3::Bgk { tau: TAU });
+}
+
+#[test]
+fn trt_moving_full_tensor_bodies_retain_world_momentum_and_force_ownership() {
+    for walls in [false, true] {
+        moving_balance_with_model(
+            walls,
+            CollisionModel3::Trt {
+                tau: TAU,
+                magic: 3.0 / 16.0,
+            },
+        );
+    }
+}
+
+fn moving_balance_with_model(walls: bool, model: CollisionModel3) {
+    let mut g = grid_with_model(walls, model);
     let shape = BodyFrameEllipsoid3::sphere(0.34).unwrap();
     let mut samplers = [
         BodyFrameSampler3::new(&g, 6).unwrap(),
@@ -450,7 +585,15 @@ fn moving_forced_balance(walls: bool) {
 
 #[test]
 fn forced_single_and_singleton_assembly_retain_identical_results() {
-    let (mut single, mut assembly) = (grid(false), grid(false));
+    singleton_replay(CollisionModel3::Bgk { tau: TAU });
+    singleton_replay(CollisionModel3::Trt {
+        tau: TAU,
+        magic: 3.0 / 16.0,
+    });
+}
+
+fn singleton_replay(model: CollisionModel3) {
+    let (mut single, mut assembly) = (grid_with_model(false, model), grid_with_model(false, model));
     let fractions = fields();
     let (mut body, mut bodies) = (body(0), [body(0)]);
     for _ in 0..12 {
@@ -485,8 +628,64 @@ fn forced_single_and_singleton_assembly_retain_identical_results() {
 }
 
 #[test]
+fn equal_trt_rates_recover_bgk_with_forced_rotating_shared_cells() {
+    let mut bgk = grid_with_model(false, CollisionModel3::Bgk { tau: TAU });
+    let mut trt = grid_with_model(
+        false,
+        CollisionModel3::Trt {
+            tau: TAU,
+            magic: (TAU - 0.5).powi(2),
+        },
+    );
+    let fractions = fields();
+    let mut baseline = [body(0), body(1)];
+    let mut actual = baseline;
+    for _ in 0..12 {
+        bgk.step_with_partial_saturation_bodies(
+            fractions.each_ref().map(Vec::as_slice),
+            &mut baseline,
+            [[0.0; 6]; 2],
+            ORIGIN,
+            &CancelGate::new(),
+        )
+        .unwrap();
+        trt.step_with_partial_saturation_bodies(
+            fractions.each_ref().map(Vec::as_slice),
+            &mut actual,
+            [[0.0; 6]; 2],
+            ORIGIN,
+            &CancelGate::new(),
+        )
+        .unwrap();
+        for a in 0..2 {
+            for i in 0..3 {
+                close(actual[a].velocity[i], baseline[a].velocity[i], 2e-14);
+                close(
+                    actual[a].angular_velocity[i],
+                    baseline[a].angular_velocity[i],
+                    2e-14,
+                );
+            }
+        }
+        for (actual, baseline) in snapshot(&trt).iter().zip(snapshot(&bgk)) {
+            for q in 0..Q3 {
+                close(actual[q], baseline[q], 2e-14);
+            }
+        }
+    }
+}
+
+#[test]
 fn late_force_overflow_and_cancellation_publish_no_fluid_or_body_state() {
-    let (mut refused, mut clean) = (grid(true), grid(true));
+    atomic_refusal(CollisionModel3::Bgk { tau: TAU });
+    atomic_refusal(CollisionModel3::Trt {
+        tau: TAU,
+        magic: 3.0 / 16.0,
+    });
+}
+
+fn atomic_refusal(model: CollisionModel3) {
+    let (mut refused, mut clean) = (grid_with_model(true, model), grid_with_model(true, model));
     let f = fields();
     let mut bodies = [body(0), body(1)];
     let mut expected = bodies;

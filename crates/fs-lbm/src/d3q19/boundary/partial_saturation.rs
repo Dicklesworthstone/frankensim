@@ -1,4 +1,4 @@
-//! Spatial rigid-body response for the native partially saturated BGK law.
+//! Spatial rigid-body response for the native partially saturated BGK/TRT law.
 //!
 //! With `G(r) v = V + omega cross r`, the solid impulse at one cell is
 //! `B rho (u-Gv)`, where `u` includes the native Guo half-force shift.
@@ -11,12 +11,20 @@
 //! by D2Q9 (`doi:10.1142/S0129183198001084`). Fluid populations remain inside
 //! the body, so its inertia is ADDITIONAL to the retained fluid. This is not
 //! a displaced-fluid/physical-density model.
+//!
+//! TRT retains the same solid reflection and even/shear saturation weight,
+//! while the fluid part relaxes its odd modes at the native independent rate.
+//! The BGK force-free path is unchanged. This extension does not establish a
+//! curved-wall magic parameter, stresslet accuracy or suspension rheology.
 
 use super::{
     BoundaryGrid3, BoundaryLink3, CancelGate, CollisionError3, CollisionModel3, E3, Face3,
     FaceBoundary3, OPP3, PullSource, Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force,
     collision_kernel3, equilibrium3, planar_face_cells,
 };
+
+mod collision;
+use collision::ImmersedRelaxation3;
 
 mod multiple;
 pub use multiple::{PartialSaturationBodiesExchange3, PartialSaturationBodyResponse3};
@@ -42,7 +50,7 @@ pub struct PartialSaturationBody3 {
     pub angular_velocity: [f64; 3],
 }
 
-/// The measured correction to ordinary BGK, before streaming.
+/// The measured correction to the ordinary fluid collision, before streaming.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PartialSaturationExchange3 {
     /// Population mass introduced by the immersed collision (roundoff only).
@@ -186,7 +194,7 @@ pub enum PartialSaturationError3 {
         /// Stable diagnostic.
         reason: &'static str,
     },
-    /// Refusal from the unchanged native BGK cell owner.
+    /// Refusal from the unchanged native BGK/TRT cell owner.
     Collision {
         /// Global cell coordinate.
         cell: [usize; 3],
@@ -278,9 +286,9 @@ fn moments(populations: [f64; Q3], force: [f64; 3], cell: [usize; 3]) -> Result<
     Ok((rho, velocity))
 }
 
-// Guo stores f = g - S(u,F)/2. Replace the BGK collision on physical g,
-// leaving the source outside that replacement: native_BGK(f,F) +
-// sum_a B_a [Omega_s,a(g) - Omega_BGK(g)]. Each correction then has
+// Guo stores f = g - S(u,F)/2. Replace the BGK/TRT collision on physical g,
+// leaving the source outside that replacement: native_collision(f,F) +
+// sum_a B_a [Omega_s,a(g) - Omega_fluid(g)]. Each correction then has
 // first moment B_a rho (v_a-u), and the external fluid impulse remains F.
 // Reuse the source-frame owner rather than reproducing its polynomial.
 fn physical_populations(
@@ -365,13 +373,13 @@ impl BoundaryGrid3 {
     /// native tile-major collision and pull operators. The existing `post`
     /// and `next` buffers are reused; only first-use streaming scratch and two
     /// fixed-size Cholesky factors allocate. Zero fractions recover the
-    /// ordinary BGK/Guo step bit for bit. The immersed correction operates on
+    /// ordinary BGK/TRT Guo step bit for bit. The immersed correction operates on
     /// physical half-source-shifted populations; body response uses the same
     /// force-corrected fluid velocity. Uniform and per-cell forcing are added
     /// by the original grid owner, and reported separately from reactions.
     ///
     /// # Errors
-    /// Requires BGK, finite held forcing, periodic or stationary-wall faces,
+    /// Requires BGK or TRT, finite held forcing, periodic or stationary-wall faces,
     /// symmetric positive-definite inertia, finite inputs, and body center/
     /// sampled point speeds squared below `0.03` before/midpoint/after.
     /// Invalid inputs, numerical overflow and cancellation leave all fluid
@@ -415,7 +423,13 @@ impl BoundaryGrid3 {
         ) -> Result<T>,
     ) -> Result<(PartialSaturationBodyExchange3, T)> {
         self.partial_saturation_body_transition(
-            solid_fractions, body, external_impulse, moment_origin, gate, true, finish,
+            solid_fractions,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            true,
+            finish,
         )
     }
 
@@ -438,9 +452,9 @@ impl BoundaryGrid3 {
         ) -> Result<T>,
     ) -> Result<(PartialSaturationBodyExchange3, T)> {
         checkpoint(gate)?;
-        let CollisionModel3::Bgk { tau } = self.collision_model else {
-            return Err(invalid("finite-inertia immersed coupling requires BGK"));
-        };
+        let relaxation = ImmersedRelaxation3::new(self.collision_model)
+            .ok_or_else(|| invalid("finite-inertia immersed coupling requires BGK or TRT"))?;
+        let tau = relaxation.tau;
         if solid_fractions.len() != self.nx * self.ny * self.nz {
             return Err(invalid("solid fractions must cover the whole grid"));
         }
@@ -594,18 +608,18 @@ impl BoundaryGrid3 {
                     let (rho, velocity) = moments(f, force, cell)?;
                     let physical = physical_populations(f, velocity, force);
                     let fluid_eq = equilibrium3(rho, velocity);
+                    let fluid_collision = relaxation.increments(&physical, &fluid_eq);
                     let solid_eq = equilibrium3(rho, solid_velocity);
                     let b = epsilon * (tau - 0.5) / (1.0 - epsilon + tau - 0.5);
                     let mut fluid_impulse = [0.0; 3];
                     for q in 0..Q3 {
-                        let fluid_collision = (fluid_eq[q] - physical[q]) / tau;
                         let solid_collision =
                             physical[OPP3[q]] - physical[q] + solid_eq[q] - fluid_eq[OPP3[q]];
                         post[q] = if force == [0.0; 3] {
                             // Preserve the original force-free numerical path.
-                            f[q] + (1.0 - b) * fluid_collision + b * solid_collision
+                            f[q] + (1.0 - b) * fluid_collision[q] + b * solid_collision
                         } else {
-                            ordinary[q] + b * (solid_collision - fluid_collision)
+                            ordinary[q] + b * (solid_collision - fluid_collision[q])
                         };
                         let correction = post[q] - ordinary[q];
                         exchange.fluid_population_mass_change += correction;

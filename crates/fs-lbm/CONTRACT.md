@@ -7402,7 +7402,7 @@ alongside the original transfer budgets, clock and refusal rollback.
 ## Spatial finite-inertia immersed-body coupling on D3Q19
 
 `BoundaryGrid3::step_with_partial_saturation_body` couples the three translational
-and three angular velocities of `PartialSaturationBody3` to the native BGK
+and three angular velocities of `PartialSaturationBody3` to the native BGK/TRT
 populations and then runs the existing pull stream. The supplied symmetric,
 positive-definite inertia is expressed in world axes about the body's center;
 off-diagonal products and asymmetric sampled fractions are retained. Fractions
@@ -7411,6 +7411,8 @@ are row-major `(z*ny+y)*nx+x`; cell centers are `[x+0.5,y+0.5,z+0.5]`.
 At offset `r`, `Gv = V + omega cross r`. The same Noble-Torczynski
 non-equilibrium reflection law as D2Q9 supplies solid impulse
 `B*rho*(u-Gv)`, with `B=epsilon*(tau-1/2)/(1-epsilon+tau-1/2)`.
+For TRT, `tau` is the even/shear relaxation time; the fluid collision retains
+its independently configured odd rate. The solid reflection law is unchanged.
 The operator reduces `K=sum(B*rho*G^T*G)` through a scalar weight, first
 moments and the six independent rotary moments; one deterministic 6-by-6
 Cholesky solve advances `(M+K/2)*delta_v=sum(B*rho*G^T*(u-Gv_n))+J_external`.
@@ -7420,7 +7422,7 @@ matrix, per-step field allocation, nonlinear coupling iteration, or duplicated
 fluid owner is introduced. Existing post/next buffers are reused; first-use
 next storage and fixed 3-by-3/6-by-6 Cholesky factors allocate.
 
-The receipt measures the actual population correction to ordinary BGK,
+The receipt measures the actual population correction to the selected fluid collision,
 equal-and-opposite body impulse and angular impulse about a caller-selected
 origin, center torque reduced without distant-origin subtraction, and midpoint
 body work. Actual rounded velocity changes independently determine body
@@ -7431,7 +7433,7 @@ blended populations using the existing native link receipt. Thus the immersed
 body's action/reaction is not confused with wall reaction. Global angular
 balance on a periodic domain additionally needs periodic transport flux.
 
-This is a BGK/Guo, fixed-geometry/world-inertia velocity substep in
+This is a BGK/TRT/Guo, fixed-geometry/world-inertia velocity substep in
 lattice units `dx=dt=1`. The caller owns pose drift and gyroscopic evolution and
 must rotate world inertia when orientation changes. Fluid populations and their
 mass/momentum remain in the immersed volume: body inertia is **additional** to
@@ -7519,7 +7521,7 @@ buffer clearing and swept-support checks poll at most every 64 cells, with at
 most 512 membership queries per cell. Native collision and streaming retain
 their existing tile checkpoints. Scratch allocation itself is not interruptible.
 
-This is one BGK/Guo immersed body in lattice `dx=dt=1`, with solid inertia
+This is one BGK/TRT/Guo immersed body in lattice `dx=dt=1`, with solid inertia
 additional to all retained interior fluid. It supplies no displaced-fluid
 physical-density closure, moving-mask/fresh-cell remap, discrete GCL, exact
 cell-intersection volume, wall contact, periodic body wrapping, overlapping
@@ -7680,14 +7682,15 @@ uses `BoundaryGrid3::rebind_force_field` to retain physical momentum and stress.
 Stored Guo populations are `f = g - S(u,F)/2`, with physical velocity
 `rho*u = sum_q(f_q*c_q) + F/2`. The existing native source-frame transform
 recovers `g`. The immersed correction is
-`sum_a B_a (Omega_s,a(g) - Omega_BGK(g))`, added to the unchanged native
-`collide_cell3(f, BGK, F)`. Its first moment remains
+`sum_a B_a (Omega_s,a(g) - Omega_fluid(g))`, added to the unchanged native
+`collide_cell3(f, model, F)` for the selected BGK or TRT model. Its first moment remains
 `sum_a B_a*rho*(v_a_mid-u)`; the original six-velocity solve uses this same
 physical velocity. The remaining imposed collision impulse is `F`. This is
 the declared additive-force extension of the retained-fluid PSM law, not a
 new displaced-fluid density closure or a full coupled temporal-order claim.
-Unforced paths retain their numerical arithmetic, and zero occupancy reproduces
-the native forced BGK populations bit for bit.
+Existing BGK paths retain their numerical arithmetic, and zero occupancy
+reproduces the native selected BGK/TRT forced populations bit for bit.
+Central-moment and reduced-cumulant immersed coupling remain unsupported.
 
 `PartialSaturationForcing3` reports the sum of the actual configured fluid forces,
 their moment about the requested world origin, and imposed-force work at the
