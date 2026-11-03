@@ -26,6 +26,9 @@ use super::{
 /// Half-range momentum moments and explicitly declared Maxwell reflection.
 pub mod momentum;
 
+/// Exact incoming mass, vector momentum and crossing energy with bulk drift.
+pub mod drift;
+
 /// Opposing mass fluxes per unit exposed area [kg/(m² s)].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MolecularMassFlux {

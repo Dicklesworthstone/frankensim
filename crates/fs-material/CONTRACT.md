@@ -1,5 +1,42 @@
 # fs-material — CONTRACT
 
+## Moving molecular interface mass, momentum and energy
+
+`sublimation::gas::kinetic::evaluate_molecular_interface` resolves one local
+solid/gas interface from the original finite gas snapshot and retained species
+catalog. The original phase law supplies emission and sticking; the shared
+drifting-Maxwellian kernel supplies complete incident moments. An explicitly
+declared Maxwell model splits nonsticking molecules into specular and diffuse
+branches. Carrier pressure, phase recoil, sticking momentum and reflected
+normal/shear loads therefore share the same molecular account. These complete
+loads must not be added to a second pressure load for the same molecules.
+
+Original species enthalpy differences cancel formation constants before energy
+evaluation. Each row reports surface-relative and laboratory momentum, energy
+beyond the original gas partial enthalpy, mechanical wall power, and transported
+bulk kinetic energy. Laboratory transformation is P_lab=P_rel+w*j and
+q_lab=q_rel+w·P_rel+|w|²*j/2. The condensed body's variable-mass force is
+−P_rel times actual exposed area; it excludes transported bulk momentum. Patch
+torque uses the explicitly declared centroid and moment origin. The near-zero
+normal-drift net phase rate retains the original saturation difference and the
+separately computed drift increment instead of subtracting rounded gross beams.
+
+Pure solids use the original h/T callback. An explicit sharp fusion chart uses
+its original solid constituent enthalpy and density; bulk mixed-phase enthalpy
+is not substituted for the solid/vapor latent anchor. All-liquid states refuse,
+and exposed solid area is never inferred from bulk phase fraction. Catalog
+source identity, complete scattering coverage, temperatures, geometry, finite
+arithmetic and cancellation are admitted before returning the rate.
+
+This operation is an instantaneous boundary constitutive query. It does not
+evolve finite inventories, bulk gas/body momentum or moving gas volume. Such a
+consumer must bound gross withdrawals, reconstruct original thermal stores and
+subtract actual bulk kinetic change from laboratory stream energy. No extra
+pressure work, fabricated caloric law or continuum flow solution is supplied.
+Focused regressions specify stationary-owner agreement, independent drifting
+mixture quadrature, diffuse/specular slip, inertial covariance, energy-reference
+invariance, sub-ulp saturation drift, fusion and atomic source/frame refusal.
+
 ## Explicit Landau two-fluid material response
 
 `superfluid::TwoFluidState` admits immutable, explicitly supplied SI density,

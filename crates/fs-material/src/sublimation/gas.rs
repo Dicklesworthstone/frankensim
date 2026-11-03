@@ -24,6 +24,8 @@
 pub mod accommodation;
 /// Finite solid inventory and fusion energy on the original equilibrium chart.
 pub mod equilibrium;
+/// Source-resolved molecular mass, momentum and energy at a drifting interface.
+pub mod kinetic;
 /// Reciprocal molecular loads on explicitly stationary, supported surfaces.
 pub mod momentum;
 

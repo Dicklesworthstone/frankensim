@@ -100,7 +100,7 @@ impl<'a> SharpMeltingCaloric<'a> {
             .map_err(|_| invalid("original solid/liquid enthalpy chart refused state"))
     }
 
-    fn solid_enthalpy(&self, state: EquilibriumPhaseState) -> f64 {
+    pub(in crate::sublimation::gas) fn solid_enthalpy(&self, state: EquilibriumPhaseState) -> f64 {
         if state.is_fully_solid() { state.specific_enthalpy_j_kg() }
         else { self.solid_at_melting_h_j_kg }
     }
@@ -108,7 +108,7 @@ impl<'a> SharpMeltingCaloric<'a> {
         if state.is_fully_solid() { state.bulk_density_kg_m3() }
         else { self.solid_at_melting_density_kg_m3 }
     }
-    fn admit_density(&self, state: EquilibriumPhaseState, density: f64) -> Result<(), GasSurfaceError> {
+    pub(in crate::sublimation::gas) fn admit_density(&self, state: EquilibriumPhaseState, density: f64) -> Result<(), GasSurfaceError> {
         if !positive(density) || (density / self.solid_density(state) - 1.0).abs() > 64.0 * f64::EPSILON {
             Err(invalid("sublimation density disagrees with the original SOLID caloric branch"))
         } else { Ok(()) }

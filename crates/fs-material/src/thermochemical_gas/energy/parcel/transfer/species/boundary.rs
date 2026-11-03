@@ -130,7 +130,7 @@ impl<'catalog> GasSpeciesBoundaryCandidate<'catalog> {
 // Check source identity separately from composition: reconstructing mole
 // fractions from mass may change their last rounding bit, but cannot authorize
 // a different caloric law, transport claim, water binding or source receipt.
-fn admit_catalog(
+pub(crate) fn admit_catalog(
     gas: &ClosedGasParcel,
     catalog: &ThermochemicalGasModel,
 ) -> Result<(), GasEnergyError> {

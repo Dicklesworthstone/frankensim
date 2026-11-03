@@ -4,6 +4,34 @@ Layer L3. Shared conservative thermal transport and solid/vapor exchange.
 Runtime dependencies: std, fs-la, fs-math, fs-solver. Spatial discretizations and material
 constitutive data remain owned by their existing crates.
 
+## Drifting Maxwellian incident molecular moments
+
+`sublimation::molecular::drift::incident_maxwellian` supplies incoming mass,
+conditional vector velocity and crossing energy relative to the original
+species enthalpy at a locally moving planar surface. Normal and tangential
+drift use the same truncated three-dimensional Maxwellian. The caller supplies
+partial density, original specific gas constant, gas temperature, relative
+bulk velocity and an already-unit outward normal. Empty species yield exactly
+zero mass and no conditional moments; unrepresentable nonzero outputs refuse.
+
+Central moments use deterministic Gaussian functions and compensated arithmetic.
+Away-flow tails use positive integral-ratio recurrences with checked terminal
+bounds and at most 496 backward iterations. Scaled logarithmic amplitudes retain
+representable low-probability incidence; dimensional full moments handle cold
+inward beams once the omitted tail is below floating-point resolution. There
+is no physical Mach cutoff. The signed mass change from zero normal drift is
+evaluated independently, preserving small net deposition near saturation even
+when the gross beams round equally. Energy includes tangential slip and the
+flux-weighted normal second moment; adding bulk kinetic energy to a stationary
+beam would not give these moments.
+
+The kernel adds no state, thermochemical datum, film resistance, continuum
+stress, velocity-dependent sticking or Knudsen-layer model. Original material
+owners must combine these incident moments with emission/reflection and the
+laboratory momentum/energy transformation. Focused tests specify independent
+quadrature, opposite-half reconstruction, rotations, tiny drift, scaled tails,
+cold beams, vacuum and representability refusals.
+
 ## Conducting ambient faces and separate physical baths
 
 `ConductiveAmbient` and `ConductionObserver::with_ambient_faces` bind a selected
