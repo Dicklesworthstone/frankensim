@@ -37,9 +37,11 @@ use crate::capillary_bridge::contact_line::{
     RECEDING_CONTACT_ANGLE_PROPERTY,
 };
 pub use crate::capillary_bridge::contact_line::{ContactLineError, ContactLineRegime};
+use crate::capillary_bridge::{BridgeVolumeConstraint, refresh_sources};
 use core::f64::consts::{FRAC_PI_2, PI};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
+use fs_matdb::{InterfaceSystemCard, MaterialCard, QueryPoint};
 use fs_material::liquid::DYNAMIC_VISCOSITY_DIMS;
 use fs_material::liquid::surface::require_frozen_coefficient_support;
 use fs_math::det;
@@ -134,6 +136,39 @@ pub struct SourceAsymmetricCircularContactLineBridge {
     advancing_per_radius_n_m: [f64; 2],
     receding_per_radius_n_m: [f64; 2],
 }
+
+/// Original-source material continuation at fixed gap and BOTH actual radii.
+/// No contact-line time passes and no pinning/sliding loss is manufactured.
+#[derive(Debug)]
+pub struct AsymmetricCircularContactLineSourceRefresh {
+    source: SourceAsymmetricCircularContactLineBridge,
+    previous: AsymmetricCircularContactLineState,
+    state: AsymmetricCircularContactLineState,
+    parameter_work_j: f64,
+    estimated_parameter_work_error_j: f64,
+}
+impl AsymmetricCircularContactLineSourceRefresh {
+    pub const fn source(&self) -> &SourceAsymmetricCircularContactLineBridge {
+        &self.source
+    }
+    /// Complete authenticated predecessor, including both inverse-shape states.
+    pub const fn previous_state(&self) -> AsymmetricCircularContactLineState {
+        self.previous
+    }
+    pub const fn state(&self) -> AsymmetricCircularContactLineState {
+        self.state
+    }
+    /// Signed surface-free-energy change at fixed mechanical and line coordinates.
+    /// This is separate from mechanical work, dissipated heat and bulk calorics.
+    pub const fn parameter_work_j(&self) -> f64 {
+        self.parameter_work_j
+    }
+    /// Original shape and coordinate-error estimates, not an interval enclosure.
+    pub const fn estimated_parameter_work_error_j(&self) -> f64 {
+        self.estimated_parameter_work_error_j
+    }
+}
+
 impl SourceAsymmetricCircularContactLineBridge {
     pub fn new(
         original: SourceAxisymmetricCapillaryBridge,
@@ -236,6 +271,111 @@ impl SourceAsymmetricCircularContactLineBridge {
     }
     pub const fn line_frictions_pa_s(&self) -> [f64; 2] {
         self.zeta
+    }
+
+    /// Continue the same selected liquid and ordered wetting claims at a new
+    /// material endpoint, retaining the actual nonequilibrium contact lines.
+    ///
+    /// The original inverse Young--Laplace problem is solved at exactly the
+    /// accepted gap and radii. In particular, refreshed Young angles do NOT
+    /// reinitialize either footprint or advance physical relaxation. Fixed mass
+    /// can change the liquid volume through its sourced density; fixed volume
+    /// still refuses a density change. All original geometric, source and work
+    /// limits apply to the candidate, and unsupported continuation refuses.
+    ///
+    /// This is an endpoint parameter transfer, with frozen coefficients in each
+    /// subsequent mechanical increment. Surface parameter work has no automatic
+    /// heat recipient. Bulk thermal/pressure work, evaporation and a resolved
+    /// thermal transient require their own owners.
+    pub fn refresh_at_query_point(
+        &self,
+        previous: AsymmetricCircularContactLineState,
+        material: &MaterialCard,
+        interfaces: [&InterfaceSystemCard; 2],
+        point: &QueryPoint,
+        constraint: BridgeVolumeConstraint,
+        gate: &CancelGate,
+    ) -> Result<AsymmetricCircularContactLineSourceRefresh, ContactLineError> {
+        poll(gate)?;
+        let before = self.evaluate(previous)?;
+        let (liquid, wetting, volume) = refresh_sources(
+            self.original.liquid(),
+            self.original.wetting(),
+            self.original.volume,
+            material,
+            interfaces,
+            point,
+            constraint,
+        )?;
+        let original = SourceAxisymmetricCapillaryBridge::new(
+            liquid,
+            wetting,
+            volume,
+            self.original.branch,
+            self.original.limits,
+        )
+        .map_err(original_error)?;
+        let source = Self::new(original, self.config)?;
+        let mut work = shape::Work::default();
+        // Reevaluate the retained parameters under the NEW source before using
+        // its geometry/Jacobian as a continuation seed. The old force/Hessian
+        // must never leak into the refreshed shape or its error estimates.
+        let seed = source.at_parameters(
+            previous.evaluation.q,
+            previous.evaluation.alpha,
+            &mut work,
+            gate,
+        )?;
+        let evaluation = source.at(
+            [
+                before.gap_m,
+                before.wetted_radii_m[0],
+                before.wetted_radii_m[1],
+            ],
+            seed,
+            &mut work,
+            gate,
+        )?;
+        let state = source.state_from(evaluation);
+        let after = state.profile();
+        let parameter_work_j = after.surface_free_energy_j - before.surface_free_energy_j;
+        let error = before.estimated_surface_energy_error_j
+            + after.estimated_surface_energy_error_j
+            + 8.0
+                * f64::EPSILON
+                * (before.surface_free_energy_j.abs() + after.surface_free_energy_j.abs());
+        let tolerance = self.config.energy_absolute_tolerance_j
+            + self.config.energy_relative_tolerance
+                * before
+                    .surface_free_energy_j
+                    .abs()
+                    .max(after.surface_free_energy_j.abs())
+                    .max(parameter_work_j.abs());
+        if !parameter_work_j.is_finite()
+            || parameter_work_j.abs() > self.original.limits.maximum_abs_step_work_j
+            || !error.is_finite()
+            || !tolerance.is_finite()
+        {
+            return Err(ContactLineError::Domain(
+                "circular wetting source parameter-work envelope",
+            ));
+        }
+        if error > tolerance {
+            // The endpoint identity is algebraically exact; its independent
+            // original shape uncertainty must also fit the existing work gate.
+            return Err(ContactLineError::Energy {
+                residual_j: 0.0,
+                tolerance_j: tolerance,
+            });
+        }
+        poll(gate)?;
+        Ok(AsymmetricCircularContactLineSourceRefresh {
+            source,
+            previous,
+            state,
+            parameter_work_j,
+            estimated_parameter_work_error_j: error,
+        })
     }
 
     /// Dynamic endpoint angles describe a physical initial shape, not sources.

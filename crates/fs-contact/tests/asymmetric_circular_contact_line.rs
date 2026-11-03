@@ -7,6 +7,250 @@ use fs_contact::capillary_bridge::axisymmetric::asymmetric_contact_line::*;
 use fs_exec::CancelGate;
 
 #[test]
+fn thermal_refresh_retains_both_actual_footprints_and_changes_subsequent_wetting() {
+    use fs_contact::capillary_bridge::BridgeVolumeConstraint;
+    use fs_matdb::QueryPoint;
+    let gate = CancelGate::new_clock_free();
+    let (material, interfaces) = temperature_cards(1.0);
+    let source = temperature_source(&material, &interfaces, 300.0);
+    let initial = source
+        .initialize_at_suction(INITIAL_Q, [1.05, 1.28], &gate)
+        .unwrap();
+    let state = source
+        .advance(initial, initial.gap_m(), 2e-4, &gate)
+        .unwrap()
+        .state();
+    assert!(state.wetted_radii_m()[1] > initial.wetted_radii_m()[1]);
+    let old = source.evaluate(state).unwrap();
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    let refresh = source
+        .refresh_at_query_point(
+            state,
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    let next = refresh.state();
+    let after = refresh.source().evaluate(next).unwrap();
+    assert_eq!(refresh.previous_state(), state);
+    assert_eq!(next.gap_m(), state.gap_m());
+    assert_eq!(next.wetted_radii_m(), state.wetted_radii_m());
+    assert_eq!(after.liquid_volume_m3, old.liquid_volume_m3);
+    assert_eq!(refresh.source().line_frictions_pa_s(), [1.0, 8.0]);
+    close(after.normal_force_n, 0.8 * old.normal_force_n, 3e-15);
+    let mut expected_work = (0.8 - 1.0) * SIGMA * old.liquid_gas_area_m2;
+    for i in 0..2 {
+        let before_law = &source.original().surface_laws()[i];
+        let after_law = &refresh.source().original().surface_laws()[i];
+        expected_work += (after_law.wetted_surface_energy_difference_j_m2()
+            - before_law.wetted_surface_energy_difference_j_m2())
+            * old.wetted_areas_m2[i];
+        assert_eq!(
+            source.original().wetting()[i].resolved().card_identity(),
+            refresh.source().original().wetting()[i]
+                .resolved()
+                .card_identity()
+        );
+    }
+    close(refresh.parameter_work_j(), expected_work, 3e-18);
+    assert!(
+        refresh.estimated_parameter_work_error_j()
+            <= config().energy_absolute_tolerance_j
+                + config().energy_relative_tolerance
+                    * old
+                        .surface_free_energy_j
+                        .abs()
+                        .max(after.surface_free_energy_j.abs())
+    );
+    let cold_step = source.advance(state, state.gap_m(), 1e-4, &gate).unwrap();
+    let hot_step = refresh
+        .source()
+        .advance(next, next.gap_m(), 1e-4, &gate)
+        .unwrap();
+    assert_eq!(cold_step.regimes[0], ContactLineRegime::Pinned);
+    assert_eq!(hot_step.regimes[0], ContactLineRegime::Advancing);
+    assert_eq!(
+        cold_step.state().wetted_radii_m()[0],
+        state.wetted_radii_m()[0]
+    );
+    assert!(hot_step.state().wetted_radii_m()[0] > state.wetted_radii_m()[0]);
+    assert!(hot_step.per_line_viscous_dissipation_j[0] > 0.0);
+    let cold = QueryPoint::new().with("T", 300.0).unwrap();
+    let reverse = refresh
+        .source()
+        .refresh_at_query_point(
+            next,
+            &material,
+            interfaces.each_ref(),
+            &cold,
+            BridgeVolumeConstraint::FixedVolume,
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(reverse.state().wetted_radii_m(), state.wetted_radii_m());
+    close(
+        reverse.parameter_work_j(),
+        -refresh.parameter_work_j(),
+        3e-18,
+    );
+    assert_eq!(source.evaluate(state).unwrap(), old);
+}
+
+#[test]
+fn fixed_mass_thermal_refresh_changes_shape_without_creating_liquid_or_moving_lines() {
+    use fs_contact::capillary_bridge::BridgeVolumeConstraint;
+    use fs_matdb::QueryPoint;
+    let gate = CancelGate::new_clock_free();
+    let (material, interfaces) = temperature_cards(0.995);
+    let source = temperature_source(&material, &interfaces, 300.0);
+    let state = source
+        .initialize_at_suction(INITIAL_Q, [1.17, 1.28], &gate)
+        .unwrap();
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    assert!(
+        source
+            .refresh_at_query_point(
+                state,
+                &material,
+                interfaces.each_ref(),
+                &hot,
+                BridgeVolumeConstraint::FixedVolume,
+                &gate
+            )
+            .is_err()
+    );
+    let refresh = source
+        .refresh_at_query_point(
+            state,
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedMass,
+            &gate,
+        )
+        .unwrap();
+    let old = state.profile();
+    let after = refresh.state();
+    assert_eq!(after.gap_m(), state.gap_m());
+    assert_eq!(after.wetted_radii_m(), state.wetted_radii_m());
+    assert_ne!(
+        after.contact_angles_radians(),
+        state.contact_angles_radians()
+    );
+    assert!(after.profile().liquid_volume_m3 > old.liquid_volume_m3);
+    close(
+        refresh.source().original().liquid().density_kg_m3() * after.profile().liquid_volume_m3,
+        source.original().liquid().density_kg_m3() * old.liquid_volume_m3,
+        3e-23,
+    );
+    close(
+        refresh.parameter_work_j(),
+        after.profile().surface_free_energy_j - old.surface_free_energy_j,
+        1e-25,
+    );
+    let step = refresh
+        .source()
+        .advance(after, after.gap_m(), 1e-4, &gate)
+        .unwrap();
+    assert!(step.contact_line_dissipation_j > 0.0);
+    close(
+        step.energy_balance_residual_j,
+        0.0,
+        config().energy_absolute_tolerance_j,
+    );
+}
+
+#[test]
+fn circular_material_refresh_refuses_wrong_history_source_domain_and_cancellation() {
+    use fs_contact::capillary_bridge::BridgeVolumeConstraint;
+    use fs_matdb::QueryPoint;
+    let gate = CancelGate::new_clock_free();
+    let (material, interfaces) = temperature_cards(1.0);
+    let source = temperature_source(&material, &interfaces, 300.0);
+    let state = source
+        .initialize_at_suction(INITIAL_Q, [1.05, 1.28], &gate)
+        .unwrap();
+    let before = source.evaluate(state).unwrap();
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    let foreign = common::source([1.05, 1.15], [2.0, 4.0], [1.0, 1.1], [1.1, 1.2]);
+    assert!(matches!(
+        foreign.refresh_at_query_point(
+            state,
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedMass,
+            &gate
+        ),
+        Err(ContactLineError::StateMismatch)
+    ));
+    let outside = QueryPoint::new().with("T", 321.0).unwrap();
+    assert!(
+        source
+            .refresh_at_query_point(
+                state,
+                &material,
+                interfaces.each_ref(),
+                &outside,
+                BridgeVolumeConstraint::FixedMass,
+                &gate
+            )
+            .is_err()
+    );
+    assert!(
+        source
+            .refresh_at_query_point(
+                state,
+                &material,
+                [&interfaces[1], &interfaces[0]],
+                &hot,
+                BridgeVolumeConstraint::FixedMass,
+                &gate
+            )
+            .is_err()
+    );
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(matches!(
+        source.refresh_at_query_point(
+            state,
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedMass,
+            &cancelled
+        ),
+        Err(ContactLineError::Cancelled)
+    ));
+    assert_eq!(source.evaluate(state).unwrap(), before);
+    let first = source
+        .refresh_at_query_point(
+            state,
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedMass,
+            &gate,
+        )
+        .unwrap();
+    let retry = source
+        .refresh_at_query_point(
+            state,
+            &material,
+            interfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedMass,
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(first.state(), retry.state());
+    assert_eq!(first.parameter_work_j(), retry.parameter_work_j());
+}
+
+#[test]
 fn g1_unlike_young_equilibrium_matches_both_original_meridian_halves() {
     let source = source([1.02, 1.2], [2.0, 5.0], [1.0, 1.17], [1.05, 1.23]);
     let gate = CancelGate::new_clock_free();

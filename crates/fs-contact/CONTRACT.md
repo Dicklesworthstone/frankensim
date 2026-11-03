@@ -1668,6 +1668,23 @@ checks compare both halves against independent radial-graph integration and
 recover second-order time refinement against independent two-line motion;
 G0/G4 checks retain source/history, budgets, cancellation and identical retry.
 
+`SourceAsymmetricCircularContactLineBridge::refresh_at_query_point` continues
+the same selected liquid and both ordered wetting claims at a new material
+endpoint. The original bounded inverse Young--Laplace solve retains the exact
+accepted gap and both actual circular radii, including nonequilibrium footprints.
+Refreshed equilibrium angles and line resistances affect subsequent physical
+motion; they do not reset contact lines or manufacture elapsed time or line loss.
+Fixed mass admits the sourced density/volume change; fixed volume still refuses
+a density change. Original shape, coordinate and arithmetic estimates must fit
+the original energy gate before an immutable candidate is returned.
+
+The candidate binds its complete predecessor and reports signed surface
+parameter work separately from mechanical work, contact-line dissipation and
+heat. It is an endpoint source transfer with frozen coefficients within each
+later increment, not a thermal transient, evaporation model or bulk caloric
+balance. Focused regressions exercise actual thermal unpinning, independent
+surface-area work, fixed-mass expansion, reverse transfer and atomic refusal.
+
 ## Exact source-owned elastic Hertz path averages
 
 `normal_patch::source::SourcePointContact::elastic_path_average` supplies the
