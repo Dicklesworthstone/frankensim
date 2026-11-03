@@ -154,10 +154,17 @@ exterior through continuously varying fields, including local chimneys.
 Response and reflection use it together. An omitted exterior preserves the
 historical local-gas hole convention; every explicit gas must be coherent and
 at the common static pressure. These are frozen acoustic interfaces, with no
-mean flow, species diffusion, condensation or varying-medium mutual-hole law.
+mean flow, species diffusion or condensation. Several open/vented holes may lie
+in a gradient: the mutual open-hole correction is Nederveen's near-field series
+length `t_m = -0.37 b_i b_j / a exp(-s/a)`, a geometric length that does not
+depend on the gas, added to each open hole in that hole's own local gas, so no
+averaged medium is substituted and no mutual term is omitted (the law and its
+size bounds are stated in the `GasFieldDuct::new` doc).
 G1 tests compare independent finite-line ABCD assembly and chimney/outlet flow
 continuity; G0/G3 cover identical-gas bits, closed-hole isolation, pressure
-scaling, invalid media, and a warm field feeding a complete hole cluster.
+scaling, invalid media, a warm field feeding a complete hole cluster, and the
+mutual law across a gradient (gas-independent `t_m`, continuity in the
+gradient, supersaturated chords and inexact fractions still refusing).
 `GasFieldDuct::response_with_wall_and_holes` retains open/vented chimney flows
 from their actual locations in that same stable cascade. Uniform and varying
 fields share one chimney/series-branch preparation and flow-reconstruction
@@ -299,13 +306,12 @@ piecewise-constant comparison rung. Scheduled `ReedPerformance` selects
 terminal loading and baffled microphone share that binding. The existing
 midpoint constructor and input records retain their behavior.
 Tone-hole junctions retain their exact authored station and use its resolved
-gas in the original junction and homogeneous-chimney law. Closed holes may
-lie anywhere in the field. Multiple open/vented holes require a constant
-primitive temperature/composition state throughout the span between them:
-the original mutual-hole correction is retained in full. A single open hole
-may lie in a gradient. A varying inter-hole span refuses, including equal
-endpoint states with an intervening gradient; no effective medium or omitted
-mutual term is inferred. The chimney is explicitly the local homogeneous
+gas in the original junction and homogeneous-chimney law. Closed holes and any
+number of open/vented holes may lie anywhere in the field. Every open hole
+retains the mutual-hole correction in full: Nederveen's geometric near-field
+series length, which does not depend on the gas, added to that hole in its own
+local gas. A varying inter-hole span is therefore admitted; no effective
+medium or omitted mutual term is inferred. The chimney is explicitly the local homogeneous
 model, not transverse heat/species transport. Junction blocks consume the
 same work budget and cancellation checkpoints as propagation blocks.
 `chain_wall_controlled`, `response_wall` and `reflection_wall`

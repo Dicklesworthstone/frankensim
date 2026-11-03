@@ -525,6 +525,56 @@ fn midpoint_field_is_a_second_order_rung_of_continuous_propagation() {
 }
 
 #[test]
+fn continuous_constructor_admits_open_holes_across_a_gradient_and_the_other_bindings_keep_their_refusals() {
+    use fs_duct::{HoleState, RiccatiSteps};
+
+    let axial = Segment::Cylinder { radius: RADIUS, length: LENGTH / 3.0 };
+    let hole = |state| Segment::ToneHole {
+        hole_radius: 0.002,
+        chimney_height: 0.005,
+        bore_radius: RADIUS,
+        state,
+    };
+    let geometry = Duct { segments: vec![
+        axial.clone(), hole(HoleState::Open), axial.clone(), hole(HoleState::Open), axial,
+    ] };
+    let source = field(340.0);
+    // The authored per-segment samples differ between the two open holes, so the segment-gas
+    // binding keeps its own refusal on exactly these inputs.
+    let mut offset = 0.0;
+    let samples: Vec<GasState> = geometry.segments.iter().map(|segment| {
+        let state = *source.state_at(offset).unwrap().state();
+        offset += segment.axial_length();
+        state
+    }).collect();
+    assert!(samples[1] != samples[3]);
+    assert!(RegionalDuct::new(&geometry, &samples).is_err());
+    // The midpoint binding keeps its no-tone-holes refusal for a nonuniform field.
+    assert!(RegionalDuct::from_gas_field(&geometry, &source, 4).is_err());
+    // The continuous binding applies the geometric mutual law and admits them.
+    let duct = RegionalDuct::from_continuous_gas_field(&geometry, &source, RiccatiSteps(16)).unwrap();
+    let owner = duct.continuous_gas_field().unwrap();
+    // The one-run metadata binding must not move the exterior: it is the field's own outlet gas.
+    assert_eq!(duct.exterior_gas(), owner.outlet_gas());
+    assert_eq!(duct.outlet_gas(), owner.outlet_gas());
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        // The wrapper always hands the owner its homogeneous exterior (the outlet gas by default),
+        // so the owner is called with that same exterior; `None` would radiate each hole into its
+        // own local gas instead and is a different question.
+        let direct = owner
+            .response(TAU * 430.0, loss, Termination::FlangedOpen, Some(duct.exterior_gas()))
+            .unwrap();
+        let regional = duct.response(TAU * 430.0, loss, Termination::FlangedOpen, None).unwrap();
+        assert_eq!(regional.impedance, direct.impedance);
+        assert_eq!(regional.u_mouth_over_u_in, direct.u_mouth_over_u_in);
+    }
+    // The authored per-segment samples are retained as metadata, not the one-run binding.
+    assert_eq!(duct.segment_gases(), samples.as_slice());
+    assert_eq!(duct.inlet_gas(), owner.inlet_gas());
+    assert!(duct.one_way_time_s() > 0.0);
+}
+
+#[test]
 fn continuous_regional_field_requires_axial_end_segments() {
     let mut geometry = cylinder();
     geometry.segments.insert(0, Segment::ToneHole {

@@ -491,8 +491,9 @@ impl ReedBoreVoice {
     ///
     /// This is the existing reed and compact-source observer with a frozen
     /// axial field, not a species/thermal transport or complete-player model.
-    /// Tone-hole junctions use their local gas. Multiple active holes require
-    /// a homogeneous connecting field for the existing mutual-hole law.
+    /// Tone-hole junctions use their local gas. Several active holes may lie in
+    /// a gradient under the geometric mutual-hole law stated in
+    /// `fs_duct::profile::gas_field::GasFieldDuct::new`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_continuous_gas_field<'a>(
         physics: &Duct,

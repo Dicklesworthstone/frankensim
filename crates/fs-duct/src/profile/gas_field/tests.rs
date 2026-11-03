@@ -846,11 +846,250 @@ fn single_open_hole_with_closed_fingerings_retains_fourth_order_field_convergenc
     );
 }
 
+/// Three holes (open, vented, open) between four equal cylinders.
+fn fingered_bore3(states: [crate::HoleState; 3]) -> Duct {
+    let axial = Segment::Cylinder {
+        radius: RADIUS,
+        length: LENGTH / 4.0,
+    };
+    Duct {
+        segments: vec![
+            axial.clone(),
+            tone_hole(states[0]),
+            axial.clone(),
+            tone_hole(states[1]),
+            axial.clone(),
+            tone_hole(states[2]),
+            axial,
+        ],
+    }
+}
+
+/// Two open holes 12 mm apart (about 1.6 bore radii), where the mutual term is live.
+fn close_open_pair() -> Duct {
+    Duct {
+        segments: vec![
+            Segment::Cylinder { radius: RADIUS, length: 0.3 },
+            tone_hole(crate::HoleState::Open),
+            Segment::Cylinder { radius: RADIUS, length: 0.012 },
+            tone_hole(crate::HoleState::Open),
+            Segment::Cylinder { radius: RADIUS, length: LENGTH - 0.312 },
+        ],
+    }
+}
+
+/// The mutual series length of every open hole, summed exactly as the binding sums it:
+/// `fs_phs::side_hole_mutual_length` over all open holes in site order, from zero.
+fn expected_mutual_lengths(geometry: &Duct) -> Vec<f64> {
+    let mut sites = Vec::new();
+    let mut position = 0.0;
+    for segment in &geometry.segments {
+        if let Segment::ToneHole { hole_radius, bore_radius, state, .. } = *segment {
+            let sigma = crate::hole_sigma(state);
+            if sigma > 0.0 {
+                sites.push((position, hole_radius * sigma.sqrt(), bore_radius));
+            }
+        }
+        position += segment.axial_length();
+    }
+    sites
+        .iter()
+        .map(|&(xi, bi, ai)| {
+            let mut total = 0.0;
+            for &(xj, bj, _) in &sites {
+                total += fs_phs::side_hole_mutual_length(bi, bj, ai, (xj - xi).abs());
+            }
+            total
+        })
+        .collect()
+}
+
 #[test]
-fn varying_mutual_hole_media_refuse_even_when_endpoint_states_match() {
+fn uniform_field_with_three_open_holes_is_bitwise_the_uniform_owner() {
+    let source = field([300.0, 300.0], [0.8, 0.8], 101325.0);
+    let geometry = fingered_bore3([
+        crate::HoleState::Open,
+        crate::HoleState::Vent(0.4),
+        crate::HoleState::Open,
+    ]);
+    let bound = GasFieldDuct::new(&geometry, &source, RiccatiSteps(8)).unwrap();
+    assert_eq!(bound.steps_used(), 0);
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        for frequency in [210.0, 470.0, 900.0] {
+            let expected = input_impedance(
+                &geometry,
+                bound.inlet_gas(),
+                TAU * frequency,
+                loss,
+                Termination::FlangedOpen,
+            )
+            .unwrap();
+            let actual = bound
+                .response(TAU * frequency, loss, Termination::FlangedOpen, None)
+                .unwrap();
+            assert_eq!(actual.impedance, expected.impedance);
+            assert_eq!(actual.u_mouth_over_u_in, expected.u_mouth_over_u_in);
+            assert_eq!(actual.p_mouth_over_u_in, expected.p_mouth_over_u_in);
+        }
+    }
+}
+
+#[test]
+fn mutual_length_across_a_gradient_is_geometric_and_independent_of_the_gas() {
+    // The law: t_m = -0.37 b_i b_j / a exp(-s/a), geometry only; each hole adds its sum in its own gas.
+    let geometry = close_open_pair();
+    let expected = expected_mutual_lengths(&geometry);
+    assert_eq!(expected.len(), 2);
+    assert!(
+        expected.iter().all(|t| *t < -3.0e-5 && *t > -5.0e-5),
+        "the term must be live (about -0.04 mm) on this pair: {expected:?}"
+    );
+    for gradient in [
+        field([300.0, 330.0], [0.8, 0.8], 101325.0),
+        field([360.0, 300.0], [0.8, 0.8], 101325.0),
+        field([300.0, 330.0], [0.8, 0.3], 101325.0),
+    ] {
+        let bound = GasFieldDuct::new(&geometry, &gradient, RiccatiSteps(8)).unwrap();
+        assert_eq!(bound.holes.len(), 2);
+        for (hole, want) in bound.holes.iter().zip(&expected) {
+            assert_eq!(hole.extra_series_m, *want, "t_m must not depend on the gas");
+        }
+        // each hole is still built in its own local gas
+        for hole in &bound.holes {
+            assert_eq!(hole.gas, *gradient.state_at(hole.axial_position_m).unwrap().state());
+        }
+    }
+}
+
+#[test]
+fn a_vanishing_gradient_across_open_holes_is_continuous_with_the_uniform_owner() {
+    // The nonuniform path must keep the mutual correction: dropping t_m (-0.04 mm here) would
+    // move the response by about 1e-4 relative or more, far above this bound.
+    let geometry = close_open_pair();
+    let nearly = field([300.0, 300.0 + 1.0e-9], [0.8, 0.8], 101325.0);
+    assert!(nearly.uniform_state().is_none());
+    let bound = GasFieldDuct::new(&geometry, &nearly, RiccatiSteps(8)).unwrap();
+    assert!(bound.steps_used() > 0);
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        for frequency in [210.0, 470.0, 900.0] {
+            let uniform = input_impedance(
+                &geometry,
+                bound.inlet_gas(),
+                TAU * frequency,
+                loss,
+                Termination::FlangedOpen,
+            )
+            .unwrap();
+            let actual = bound
+                .response(TAU * frequency, loss, Termination::FlangedOpen, None)
+                .unwrap();
+            assert!(
+                relative(actual.impedance, uniform.impedance) < 1.0e-6,
+                "{loss:?} {frequency} Hz: {}",
+                relative(actual.impedance, uniform.impedance)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_gradient_across_open_holes_changes_the_response() {
     let geometry = fingered_bore([crate::HoleState::Open, crate::HoleState::Vent(0.4)]);
     let gradient = field([300.0, 330.0], [0.8, 0.8], 101325.0);
-    assert!(GasFieldDuct::new(&geometry, &gradient, RiccatiSteps(8)).is_err());
+    let bound = GasFieldDuct::new(&geometry, &gradient, RiccatiSteps(8)).unwrap();
+    let uniform = input_impedance(
+        &geometry,
+        bound.inlet_gas(),
+        TAU * 430.0,
+        LossModel::Bessel,
+        Termination::FlangedOpen,
+    )
+    .unwrap();
+    let actual = bound
+        .response(TAU * 430.0, LossModel::Bessel, Termination::FlangedOpen, None)
+        .unwrap();
+    assert!(
+        relative(actual.impedance, uniform.impedance) > 1.0e-3,
+        "the gradient must reach the physical response"
+    );
+}
+
+fn watery_model() -> ThermochemicalGasModel {
+    // Species A is declared the water species so that the liquid-water limit can be checked.
+    let (a, transport_a) = species("analytic-field-a", 0.028, 3.5, 1.8e-5, 0.026);
+    let (b, transport_b) = species("analytic-field-b", 0.044, 4.5, 1.45e-5, 0.016);
+    let water = SpeciesId::new("analytic-field-a").unwrap();
+    ThermochemicalGasModel::new(
+        FrozenIdealGasMixtureModelV1::new(
+            vec![a, b],
+            Composition::new(CompositionBasis::MoleFraction, vec![0.75, 0.25]).unwrap(),
+        )
+        .unwrap(),
+        vec![transport_a, transport_b],
+        Some(&water),
+    )
+    .unwrap()
+}
+
+/// 322 K with 0.10 water and 290 K with 0.018 water are both below the Buck saturation fractions
+/// (0.115 and 0.0189 at 101325 Pa), but the linear chord at 306 K (0.059) is above 0.049.
+fn chord_field(phase: ThermochemicalPhase) -> AxialGasField {
+    AxialGasField::new(
+        vec![0.0, LENGTH],
+        101325.0,
+        vec![primitive(322.0, 0.10), primitive(290.0, 0.018)],
+        watery_model(),
+        QueryPoint::new(),
+        phase,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_supersaturated_chord_across_open_holes_still_refuses() {
+    let geometry = fingered_bore([crate::HoleState::Open, crate::HoleState::Vent(0.4)]);
+    let refused = GasFieldDuct::new(
+        &geometry,
+        &chord_field(ThermochemicalPhase::LiquidWaterLimit),
+        RiccatiSteps(8),
+    )
+    .unwrap_err();
+    assert!(matches!(refused, GasFieldDuctError::Material(_)), "{refused}");
+    assert!(refused.to_string().contains("supersaturated"), "{refused}");
+    // the same stations without the phase check are admitted, so the refusal is the phase check
+    assert!(
+        GasFieldDuct::new(&geometry, &chord_field(ThermochemicalPhase::FrozenGas), RiccatiSteps(8)).is_ok()
+    );
+}
+
+#[test]
+fn fractions_that_do_not_sum_to_exact_one_still_refuse() {
+    let refused = match Composition::new(CompositionBasis::MoleFraction, vec![0.8, 0.2 + 1.0e-12]) {
+        Err(error) => format!("{error:?}"),
+        Ok(composition) => format!(
+            "{:?}",
+            AxialGasField::new(
+                vec![0.0, LENGTH],
+                101325.0,
+                vec![
+                    PrimitiveGasState { temperature_k: 300.0, composition },
+                    primitive(300.0, 0.8),
+                ],
+                gas_model(),
+                QueryPoint::new(),
+                ThermochemicalPhase::FrozenGas,
+            )
+            .unwrap_err()
+        ),
+    };
+    assert!(refused.contains("exact") || refused.contains("sum"), "{refused}");
+}
+
+#[test]
+fn varying_media_across_open_holes_are_admitted_and_closed_pads_stay_local_shunts() {
+    let geometry = fingered_bore([crate::HoleState::Open, crate::HoleState::Vent(0.4)]);
+    let gradient = field([300.0, 330.0], [0.8, 0.8], 101325.0);
+    assert!(GasFieldDuct::new(&geometry, &gradient, RiccatiSteps(8)).is_ok());
     let hidden_gradient = AxialGasField::new(
         vec![0.0, LENGTH / 3.0, LENGTH / 2.0, 2.0 * LENGTH / 3.0, LENGTH],
         101325.0,
@@ -866,7 +1105,8 @@ fn varying_mutual_hole_media_refuse_even_when_endpoint_states_match() {
         ThermochemicalPhase::FrozenGas,
     )
     .unwrap();
-    assert!(GasFieldDuct::new(&geometry, &hidden_gradient, RiccatiSteps(8)).is_err());
+    // A bump between equal endpoint states is admitted too: the mutual term is geometric.
+    assert!(GasFieldDuct::new(&geometry, &hidden_gradient, RiccatiSteps(8)).is_ok());
     // Closed pads have no mutual open-hole term and remain local shunts.
     let closed = fingered_bore([crate::HoleState::Closed, crate::HoleState::Closed]);
     assert!(GasFieldDuct::new(&closed, &hidden_gradient, RiccatiSteps(8)).is_ok());

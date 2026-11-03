@@ -14,7 +14,7 @@ use crate::compose::{
 use crate::{Duct, DuctError, DuctResponse, LossModel, OpenHoleFlow, Segment, Termination};
 use fs_material::MaterialError;
 use fs_material::gas::GasState;
-use fs_material::gas_field::{AxialGasField, AxialGasSampling};
+use fs_material::gas_field::AxialGasField;
 use fs_math::{c64::C64, det};
 use fs_phs::WallPin;
 use crate::WallModel;
@@ -132,10 +132,24 @@ impl GasFieldDuct {
     /// All local material states are admitted before this binding is returned.
     /// Each tone hole uses the exact gas at its axial station for its junction
     /// and homogeneous chimney, as in the regional-duct model. Closed holes may
-    /// lie anywhere in the field. Multiple open/vented holes require a constant
-    /// primitive state throughout their connecting span, preserving the existing
-    /// homogeneous mutual-hole law. A gradient across that span refuses; no
-    /// averaged medium or omitted mutual correction is substituted.
+    /// lie anywhere in the field.
+    ///
+    /// MUTUAL OPEN-HOLE LAW. Several open/vented holes may lie in a varying
+    /// field. The mutual correction between two open holes is Nederveen's
+    /// near-field series length `t_m = -0.37 b_i b_j / a exp(-s/a)`
+    /// (`fs_phs::side_hole_mutual_length`): a purely geometric length of the
+    /// main bore that depends on the two effective hole radii `b`, the bore
+    /// radius `a` at hole `i` and the spacing `s` only, never on the gas.
+    /// Hole `i` adds the sum of `t_m` over the other open holes to its own
+    /// series length, and its junction is built in hole `i`'s OWN local gas
+    /// (the exact state at its station), as for every hole in this binding.
+    /// The gas between two holes does not enter `t_m`. What remains is a first
+    /// order effect through the density: on the clarinet family `t_m` is at
+    /// most about 0.06 mm (about 0.3 cent of pitch if it all entered one note)
+    /// and a 2-3 K gradient changes the density by about 0.5 %, so the part
+    /// that depends on the gradient is about 0.002 cent. No averaged medium is
+    /// substituted and no mutual term is omitted. A uniform field still
+    /// delegates the original duct verbatim, in its original operation order.
     pub fn new(
         duct: &Duct,
         field: &AxialGasField,
@@ -200,31 +214,9 @@ impl GasFieldDuct {
             }
             position += segment.axial_length();
         }
-        if let (Some(first), Some(last)) = (open_sites.first(), open_sites.last()) {
-            // Equal endpoint coefficients alone are insufficient: temperature
-            // or composition could change between them. Inspect the actual
-            // reconstruction on every intersecting span. A cellwise interval
-            // holds its RIGHT station; its left neighbor need not be identical.
-            let first_index = field.stations_m().partition_point(|x| *x < first.0);
-            let first_state = &field.primitive_states()[first_index];
-            for (positions, states) in field
-                .stations_m()
-                .windows(2)
-                .zip(field.primitive_states().windows(2))
-            {
-                let varies = match field.sampling() {
-                    AxialGasSampling::LinearPrimitives => states[0] != states[1],
-                    AxialGasSampling::CellwiseConstant => &states[1] != first_state,
-                };
-                if first.0 < last.0
-                    && positions[1] > first.0
-                    && positions[0] < last.0
-                    && varies
-                {
-                    return Err(bad("open tone holes across a varying gas field need an unavailable mutual-hole law").into());
-                }
-            }
-        }
+        // Several open holes in a varying field: the mutual series length added to
+        // each hole below is geometric (see the law in the doc of `new`) and the
+        // hole is built in its own local gas, so no span of the field is refused.
         let root3 = det::sqrt(3.0);
         let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
         let mut offset = 0.0;

@@ -7,7 +7,9 @@
 
 use fs_material::gas_field::AxialGasField;
 
-use super::{Duct, DuctError, MAX_REGIONAL_SEGMENTS, RegionalDuct, Segment, invalid};
+use super::{
+    Duct, DuctError, GasState, HoleState, MAX_REGIONAL_SEGMENTS, RegionalDuct, Segment, invalid,
+};
 
 /// Midpoint subdivision limits are independent of the authored segment cap.
 pub(crate) const MAX_CELLS_PER_SEGMENT: usize = 64;
@@ -15,6 +17,24 @@ const MAX_GAS_FIELD_CELLS: usize = 64;
 
 /// Shared material/propagation refusal from the continuous duct owner.
 pub use fs_duct::profile::gas_field::GasFieldDuctError;
+
+/// True when the segment-gas binding `RegionalDuct::new` would refuse these
+/// per-segment samples under its own rule: open or vented holes in different
+/// constant-medium runs, that is, a change of sample between the first and the
+/// last open hole. The continuous binding does not use that rule (see
+/// `from_continuous_gas_field`).
+fn open_holes_span_different_samples(duct: &Duct, gases: &[GasState]) -> bool {
+    let is_open = |segment: &Segment| match *segment {
+        Segment::ToneHole { state: HoleState::Open, .. } => true,
+        Segment::ToneHole { state: HoleState::Vent(fraction), .. } => fraction > 0.0,
+        _ => false,
+    };
+    let mut open = duct.segments.iter().enumerate().filter(|(_, segment)| is_open(segment));
+    match (open.next(), open.last()) {
+        (Some((first, _)), Some((last, _))) => gases[first..=last].windows(2).any(|pair| pair[0] != pair[1]),
+        _ => false,
+    }
+}
 
 impl RegionalDuct {
     /// Bind continuous temperature/composition and smooth radius geometry to
@@ -29,9 +49,22 @@ impl RegionalDuct {
     /// This freezes the field during rendering. Supplied wall pins use the
     /// shared local wall law at the actual gas/geometry quadrature points.
     /// Tone-hole junctions and homogeneous chimneys use the exact gas at their
-    /// authored station. Multiple open/vented holes require a constant primitive
-    /// field throughout their connecting span, preserving the original mutual
-    /// correction. A single open hole and any closed holes may lie in a gradient.
+    /// authored station. Several open/vented holes may lie in a gradient: the
+    /// mutual correction between them is Nederveen's geometric near-field
+    /// series length, which does not depend on the gas, and every hole is built
+    /// in its own local gas (the law is stated in
+    /// `fs_duct::profile::gas_field::GasFieldDuct::new`). The segment-gas
+    /// binding of [`RegionalDuct::new`] keeps its own rule and is not used for
+    /// propagation here.
+    ///
+    /// When the authored per-segment samples differ between the first and the
+    /// last open hole, the piecewise runs inside the returned object are bound in
+    /// ONE run (the inlet gas for every segment). That one-run binding feeds
+    /// metadata only (inlet radius, wall admission); it is not a uniform-gas
+    /// shortcut. Propagation, the hole blocks and every response method use the
+    /// continuous operator, which builds each segment and each hole in the
+    /// authored per-segment gas, and `segment_gases` reports those authored
+    /// samples.
     pub fn from_continuous_gas_field(
         duct: &Duct,
         field: &AxialGasField,
@@ -56,7 +89,22 @@ impl RegionalDuct {
             gases.push(*field.state_at(offset)?.state());
             offset += segment.axial_length();
         }
-        let mut regional = Self::new(duct, &gases)?;
+        // Every response method of a continuous binding delegates to the field
+        // operator before it reads the piecewise runs below, which only carry
+        // metadata (inlet radius, wall admission). `RegionalDuct::new` refuses
+        // open holes in different runs, a segment-gas rule that does not apply to
+        // the continuous operator, so when the samples differ between the first
+        // and the last open hole the metadata is bound in ONE run (the inlet gas
+        // for every segment) and the authored per-segment samples are put back.
+        // Every input that `new` admits today takes the unchanged call.
+        let mut regional = if open_holes_span_different_samples(duct, &gases) {
+            let one_run = vec![*continuous.inlet_gas(); duct.segments.len()];
+            let mut bound = Self::new(duct, &one_run)?;
+            bound.gases = gases;
+            bound
+        } else {
+            Self::new(duct, &gases)?
+        };
         regional.one_way_time_s = continuous.one_way_time_s();
         regional.inlet_gas_override = Some(*continuous.inlet_gas());
         regional.continuous = Some(continuous);

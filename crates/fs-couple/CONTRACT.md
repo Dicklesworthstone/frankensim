@@ -5560,8 +5560,9 @@ This also reaches the continuous-field response/reflection, baked terminal
 loads and scheduled reed renderer. A closed main outlet does not disable
 radiation through open side holes. An omitted exterior retains the original
 local-gas convention and identical media retain their original bits. Static
-pressure mismatch and unavailable varying-medium mutual-hole laws still
-refuse. Focused G1/G3 tests cover physical side-hole transfers, upstream gas
+pressure mismatch still refuses, and the segment-gas and midpoint bindings keep
+their varying-medium mutual-hole refusals; the continuous-field binding applies
+the stated geometric law below. Focused G1/G3 tests cover physical side-hole transfers, upstream gas
 regions, continuous fields and changes to both reed motion and microphone
 pressure. This is frozen pressure-matched acoustics, not a mixing/mean-flow
 model or experimental validation of a complete instrument.
@@ -5597,10 +5598,14 @@ remain constant; actual radius and slope set the surface coupling. This is a
 locally reacting wall, not an axial shell, evolving wall temperature or a
 nonlocal wall-radiation model. The continuous binding now admits tone holes
 at their exact local gas state through the original homogeneous-chimney and
-junction laws. Closed holes and a single open/vented hole may lie in a
-gradient. Multiple open/vented holes retain every mutual correction and
-require a constant primitive field throughout their connecting span;
-unsupported varying inter-hole media still refuse. This also reaches the
+junction laws. Closed holes and any number of open/vented holes may lie in a
+gradient. Every open hole is built in its own local gas and retains every
+mutual correction, Nederveen's geometric near-field series length, which does
+not depend on the gas: no averaged medium is substituted and no term is omitted
+(the term is at most about 0.06 mm, about 0.3 cent, on the clarinet family and
+its gradient-dependent part about 0.002 cent; the law is stated in the
+`GasFieldDuct::new` doc). The segment-gas and midpoint bindings keep their own
+refusals. This also reaches the
 existing scheduled reed renderer without a separate propagation path.
 Open/vented chimney flows now cross this continuous-field binding into the
 same bell-and-hole microphone realization. Axial delays use the original
