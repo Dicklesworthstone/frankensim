@@ -15,8 +15,8 @@
 //! The rigid-frame, infinite-planar and shared-fluid limits of the parent remain.
 
 use super::{
-    Layer, RigidBackedLayers, bad, bounded_propagator, divided, finite, magnitude_scale,
-    reflected_state, transfer_step,
+    Layer, RigidBackedLayers, bad, divided, finite, magnitude_scale, normal_wavenumber_ratio,
+    reflected_state, retained_fluid_snapshot,
 };
 use crate::MaterialError;
 use crate::fluid_acoustics::thermoviscous::ThermoviscousFluid;
@@ -52,7 +52,9 @@ pub struct LayeredTransmission {
 
 impl<'a> TransmittingLayers<'a> {
     /// The receiver is explicitly modeled as lossless using its original
-    /// acoustic state. Gaps and pore fluid retain the incident fluid snapshot.
+    /// acoustic state. Gaps and pore fluid retain the incident fluid snapshot;
+    /// explicit `FluidLayer` entries retain their own acoustic snapshots.
+    /// A source reused in any of these roles shares its one prepared state.
     /// Material support and the parent's MAX_LAYERS limit are unchanged.
     pub fn new(
         incident: &'a dyn ThermoviscousFluid,
@@ -61,8 +63,17 @@ impl<'a> TransmittingLayers<'a> {
         layers: &[Layer<'a>],
     ) -> Result<Self, MaterialError> {
         let prepared = RigidBackedLayers::new(incident, omega, layers)?;
-        let receiver = receiver_source.acoustic_state()?;
         let exterior = prepared.fluid().acoustic();
+        let original_incident: &dyn FluidAcoustics = incident;
+        let receiver = match retained_fluid_snapshot(
+            receiver_source,
+            original_incident,
+            exterior,
+            &prepared.layers,
+        ) {
+            Some(state) => state,
+            None => receiver_source.acoustic_state()?,
+        };
         let speed_ratio = exterior.sound_speed_m_s() / receiver.sound_speed_m_s();
         let density_ratio = exterior.density_kg_m3() / receiver.density_kg_m3();
         if !speed_ratio.is_finite()
@@ -104,7 +115,7 @@ impl<'a> TransmittingLayers<'a> {
         if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
             return Err(bad("layer transmission needs incidence cosine in (0,1]"));
         }
-        let q = receiving_normal_ratio(self.speed_ratio, cosine);
+        let q = normal_wavenumber_ratio(self.speed_ratio, cosine);
         let receiving_kn = q.scale(self.prepared.k0);
         if !finite(receiving_kn) || (q != C64::ZERO && receiving_kn == C64::ZERO) {
             return Err(bad("receiving normal wavenumber is unrepresentable"));
@@ -132,11 +143,11 @@ impl<'a> TransmittingLayers<'a> {
             if d == 0.0 {
                 continue;
             }
-            let (kn, ratio) = self.prepared.normal_wave(layer, cosine)?;
-            let (sum, difference) = bounded_propagator(kn, d)?;
+            let kn;
             let normalization;
-            (pressure, velocity, normalization) =
-                transfer_step(pressure, velocity, sum, difference, ratio)?;
+            (pressure, velocity, normalization, kn) = self
+                .prepared
+                .propagate_layer(layer, cosine, pressure, velocity)?;
             if kn.im == 0.0 {
                 // Lossless parent pair is the unscaled cos/i*sin matrix.
                 amplitude.add(-log_scaled(16.0, normalization));
@@ -195,31 +206,6 @@ impl<'a> TransmittingLayers<'a> {
             transmitted_fraction: transmitted,
             absorbed_fraction: absorbed,
         })
-    }
-}
-
-// q=k_n_receiver/k_incident. Keep matched grazing and small normal contrasts;
-// the naive ratio^2-(1-cosine^2) loses one or both limits.
-fn receiving_normal_ratio(ratio: f64, cosine: f64) -> C64 {
-    if cosine == 1.0 {
-        return C64::from_re(ratio);
-    }
-    if ratio == 1.0 {
-        return C64::from_re(cosine);
-    }
-    if ratio > 2.0 {
-        let sine_over_ratio = det::sqrt((1.0 - cosine) * (1.0 + cosine)) / ratio;
-        return C64::from_re(ratio * det::sqrt(1.0 - sine_over_ratio * sine_over_ratio));
-    }
-    let squared = if cosine > 0.5 {
-        ratio * ratio - (1.0 - cosine) * (1.0 + cosine)
-    } else {
-        (ratio - 1.0) * (ratio + 1.0) + cosine * cosine
-    };
-    if squared >= 0.0 {
-        C64::from_re(det::sqrt(squared))
-    } else {
-        C64::new(0.0, -det::sqrt(-squared))
     }
 }
 

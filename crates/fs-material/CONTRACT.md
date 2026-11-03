@@ -9976,12 +9976,34 @@ normal power. Transmitted power uses its actual normal-admittance weight.
 Bounded transfer retains the common complex amplitude with compensated log
 magnitude and phase; it neither infers T from R nor treats an unspecified backing
 as opaque. Weighted power is evaluated before squaring can underflow. Queries
-allocate nothing and preserve the 64-layer limit. All-gap stacks have exactly
-zero absorption. For absorbing transmitting stacks, absorption is entrance work
+allocate nothing and preserve the 64-layer limit. All-lossless-fluid stacks have
+exactly zero absorption. For absorbing transmitting stacks, absorption is entrance work
 minus outgoing power: sub-roundoff loss is unresolved, and values are not clipped.
 The focused regression source covers independent matrices, reciprocity,
 subdivision, critical/TIR phase, matched delays, thick absorption, extreme
 contrast, original-source sampling and admission.
+
+`Layer::FluidLayer` additionally retains a borrowed original `FluidAcoustics`
+source for each finite homogeneous layer, so differing density and sound speed
+participate in the same oblique reflection/transmission solve. Repeated uses of
+one source share its prepared snapshot, including reuse as the incident or
+receiving half-space source. Distinct sources are each sampled independently.
+`FluidGap` still means the original
+incident fluid, and porous constitutive responses still use the original pore
+fluid. No viscosity, thermal loss or source calibration is inferred from the
+lossless finite-layer view.
+
+Normal-wave matching retains finite transmission through evanescent layers
+(frustrated total internal reflection). Such decay is not heat. At critical
+incidence, the transfer uses the finite pressure/normal-velocity limit instead
+of dividing by zero normal wavenumber. Bounded decaying matrices preserve thick
+evanescent layers without growing exponentials. Focused G1/G3 regressions cover
+independent heterogeneous fluid/porous matrices, analytic evanescent tunneling,
+critical-angle continuity, quarter-wave impedance matching and original-source
+reuse/refusal. `layered_acoustic_refraction` is a runnable warm-air-layer example
+using the existing gas-state owner. Infinite planar, linear, stationary-fluid
+and rigid-frame scope remains; finite beams, shear waves, flow and continuous
+sound-speed gradients are not supplied by this layer model.
 
 ### Finite reservoirs in transient dense membrane transport
 

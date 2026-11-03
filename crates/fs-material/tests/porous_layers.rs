@@ -72,24 +72,49 @@ fn matrix_response(stack: &RigidBackedLayers<'_>, cosine: f64, load: C64) -> (C6
     let kt = stack.exterior_wavenumber_rad_m() * (1.0 - cosine * cosine).sqrt();
     let mut m = [[C64::ONE, C64::ZERO], [C64::ZERO, C64::ONE]];
     for i in 0..stack.layer_count() {
-        let (kn, ratio, d) = match stack.layer(i).unwrap() {
+        let (kn, normal_inertia, d) = match stack.layer(i).unwrap() {
             Layer::FluidGap { thickness_m } => (
                 C64::from_re(stack.exterior_wavenumber_rad_m() * cosine),
-                C64::ONE,
+                C64::from_re(stack.exterior_wavenumber_rad_m() * cosine),
                 thickness_m,
             ),
+            Layer::FluidLayer { thickness_m, .. } => {
+                let state = stack.fluid_response(i).unwrap();
+                let k = stack.angular_frequency_rad_s() / state.sound_speed_m_s();
+                let normal_squared = k * k - kt * kt;
+                let kn = if normal_squared >= 0.0 {
+                    C64::from_re(normal_squared.sqrt())
+                } else {
+                    C64::new(0.0, -(-normal_squared).sqrt())
+                };
+                (
+                    kn,
+                    C64::from_re(
+                        stack.angular_frequency_rad_s() * state.density_kg_m3() * cosine / z0,
+                    ),
+                    thickness_m,
+                )
+            }
             Layer::Porous { thickness_m, .. } => {
                 let (zc, k) = stack.material_response(i).unwrap().characteristic();
                 let mut kn = (k * k - C64::from_re(kt * kt)).sqrt();
                 if kn.im > 0.0 {
                     kn = -kn;
                 }
-                (kn, (zc * k / kn).scale(cosine / z0), thickness_m)
+                (kn, (zc * k).scale(cosine / z0), thickness_m)
             }
         };
         let (cos, sin) = cos_sin(kn.scale(d));
         let j_sin = C64::new(0.0, 1.0) * sin;
-        let layer = [[cos, ratio * j_sin], [j_sin / ratio, cos]];
+        let layer = if kn == C64::ZERO {
+            [
+                [C64::ONE, C64::new(0.0, d) * normal_inertia],
+                [C64::ZERO, C64::ONE],
+            ]
+        } else {
+            let ratio = normal_inertia / kn;
+            [[cos, ratio * j_sin], [j_sin / ratio, cos]]
+        };
         let mut product = [[C64::ZERO; 2]; 2];
         for row in 0..2 {
             for col in 0..2 {
@@ -445,6 +470,253 @@ fn receiving_interface_obeys_pressure_velocity_refraction_and_critical_limits() 
 }
 
 #[test]
+fn heterogeneous_fluid_and_porous_layers_match_independent_refracted_matrices() {
+    let exterior = fluid();
+    let faster = FluidAcousticState::try_new(2.3, 425.0).unwrap();
+    let slower = FluidAcousticState::try_new(0.6, 280.0).unwrap();
+    let receiver = FluidAcousticState::try_new(1.8, 380.0).unwrap();
+    let foam = foam();
+    let layers = [
+        Layer::FluidLayer {
+            fluid: &faster,
+            thickness_m: 0.025,
+        },
+        Layer::Porous {
+            law: &foam,
+            thickness_m: 0.018,
+        },
+        Layer::FluidGap { thickness_m: 0.007 },
+        Layer::FluidLayer {
+            fluid: &slower,
+            thickness_m: 0.04,
+        },
+    ];
+    for frequency in [150.0, 500.0, 1600.0] {
+        let stack = TransmittingLayers::new(
+            &exterior,
+            &receiver,
+            core::f64::consts::TAU * frequency,
+            &layers,
+        )
+        .unwrap();
+        assert_eq!(stack.prepared_layers().fluid_response(0), Some(&faster));
+        assert_eq!(stack.prepared_layers().fluid_response(3), Some(&slower));
+        assert!(stack.prepared_layers().fluid_response(1).is_none());
+        for cosine in [1.0, 0.8, 0.5, 0.05] {
+            let q2 = (340.0_f64 / 380.0).powi(2) - (1.0 - cosine * cosine);
+            let q = if q2 >= 0.0 {
+                C64::from_re(q2.sqrt())
+            } else {
+                C64::new(0.0, -(-q2).sqrt())
+            };
+            let load = q.scale((1.2 / 1.8) / cosine);
+            let (expected_r, expected_t) = matrix_response(stack.prepared_layers(), cosine, load);
+            let actual = stack.scattering(cosine).unwrap();
+            near(actual.pressure_reflection, expected_r, 8e-14);
+            near(actual.pressure_transmission, expected_t, 8e-14);
+            assert!((actual.transmitted_fraction - load.re * expected_t.norm_sq()).abs() < 8e-14);
+            near(
+                stack
+                    .prepared_layers()
+                    .reflection(cosine)
+                    .unwrap()
+                    .pressure_reflection,
+                matrix_reflection(stack.prepared_layers(), cosine),
+                8e-14,
+            );
+            assert!(
+                (actual.reflected_fraction
+                    + actual.transmitted_fraction
+                    + actual.absorbed_fraction
+                    - 1.0)
+                    .abs()
+                    < 8e-14
+            );
+        }
+    }
+}
+
+#[test]
+fn finite_fluid_transmits_evanescent_sound_without_turning_it_into_heat() {
+    let exterior = fluid();
+    let faster = FluidAcousticState::try_new(2.4, 425.0).unwrap();
+    let omega = core::f64::consts::TAU * 500.0;
+    let cosine = 0.5;
+    // Independent closed form for a symmetric fluid slab. Its interior k_n
+    // is imaginary, but the coupled two interfaces transmit finite power.
+    let beta = (1.0_f64 - cosine * cosine - 0.8 * 0.8).sqrt();
+    let a = (2.4 / 1.2) * cosine;
+    let mut previous = 1.0;
+    for thickness in [0.005, 0.05, 0.5] {
+        let stack = TransmittingLayers::new(
+            &exterior,
+            &exterior,
+            omega,
+            &[Layer::FluidLayer {
+                fluid: &faster,
+                thickness_m: thickness,
+            }],
+        )
+        .unwrap();
+        let actual = stack.scattering(cosine).unwrap();
+        let x = (omega / 340.0) * beta * thickness;
+        let denominator = C64::new(2.0 * x.cosh(), (a / beta - beta / a) * x.sinh());
+        near(
+            actual.pressure_transmission,
+            C64::from_re(2.0) / denominator,
+            2e-14,
+        );
+        near(
+            actual.pressure_reflection,
+            C64::new(0.0, (a / beta + beta / a) * x.sinh()) / denominator,
+            2e-14,
+        );
+        assert!(actual.transmitted_fraction > 0.0 && actual.transmitted_fraction < previous);
+        assert_eq!(actual.absorbed_fraction, 0.0);
+        previous = actual.transmitted_fraction;
+    }
+    // A thick evanescent layer tends to the single-interface phase, retaining
+    // zero heat even after its transmitted amplitude underflows to zero.
+    let thick = TransmittingLayers::new(
+        &exterior,
+        &exterior,
+        omega,
+        &[Layer::FluidLayer {
+            fluid: &faster,
+            thickness_m: 1000.0,
+        }],
+    )
+    .unwrap();
+    let actual = thick.scattering(cosine).unwrap();
+    near(
+        actual.pressure_reflection,
+        C64::new(1.0, beta / a) / C64::new(1.0, -beta / a),
+        2e-14,
+    );
+    assert_eq!(actual.pressure_transmission, C64::ZERO);
+    assert_eq!(actual.transmitted_fraction, 0.0);
+    assert_eq!(actual.absorbed_fraction, 0.0);
+}
+
+#[test]
+fn critical_fluid_layer_has_the_finite_pressure_velocity_limit() {
+    let exterior = fluid();
+    let faster = FluidAcousticState::try_new(2.4, 425.0).unwrap();
+    let omega = core::f64::consts::TAU * 500.0;
+    let thickness = 0.07;
+    let stack = TransmittingLayers::new(
+        &exterior,
+        &exterior,
+        omega,
+        &[Layer::FluidLayer {
+            fluid: &faster,
+            thickness_m: thickness,
+        }],
+    )
+    .unwrap();
+    // At sin(theta)=c0/c1=0.8, dp/dz=-i*omega*rho*v_n and dv_n/dz=0.
+    // The finite transfer is [1, i*omega*rho*d/Z_ref; 0, 1], not an
+    // infinite normal impedance or a zero-throughput half-space.
+    let inertia = omega * 2.4 * thickness * 0.6 / (1.2 * 340.0);
+    let denominator = C64::new(2.0, inertia);
+    let expected_t = C64::from_re(2.0) / denominator;
+    let expected_r = C64::new(0.0, inertia) / denominator;
+    let exact = stack.scattering(0.6).unwrap();
+    near(exact.pressure_transmission, expected_t, 3e-14);
+    near(exact.pressure_reflection, expected_r, 3e-14);
+    near(
+        stack
+            .prepared_layers()
+            .reflection(0.6)
+            .unwrap()
+            .pressure_reflection,
+        C64::ONE,
+        1e-15,
+    );
+    for cosine in [0.6 - 1e-10, 0.6 + 1e-10] {
+        let adjacent = stack.scattering(cosine).unwrap();
+        near(adjacent.pressure_transmission, expected_t, 2e-9);
+        near(adjacent.pressure_reflection, expected_r, 2e-9);
+        assert_eq!(adjacent.absorbed_fraction, 0.0);
+    }
+}
+
+#[test]
+fn fluid_matching_layer_and_original_source_snapshot_are_retained() {
+    struct Source {
+        samples: Cell<usize>,
+        state: FluidAcousticState,
+    }
+    impl FluidAcoustics for Source {
+        fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+            self.samples.set(self.samples.get() + 1);
+            Ok(self.state)
+        }
+    }
+    let exterior = fluid();
+    let receiver = FluidAcousticState::try_new(2.4, 425.0).unwrap();
+    let matching = Source {
+        samples: Cell::new(0),
+        state: FluidAcousticState::try_new(
+            ((1.2_f64 * 340.0) * (2.4 * 425.0)).sqrt() / 425.0,
+            425.0,
+        )
+        .unwrap(),
+    };
+    let omega = core::f64::consts::TAU * 500.0;
+    let eighth_wave = 425.0 / (8.0 * 500.0);
+    let stack = TransmittingLayers::new(
+        &exterior,
+        &receiver,
+        omega,
+        &[
+            Layer::FluidLayer {
+                fluid: &matching,
+                thickness_m: eighth_wave,
+            },
+            Layer::FluidLayer {
+                fluid: &matching,
+                thickness_m: eighth_wave,
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(matching.samples.get(), 1);
+    let original: &dyn FluidAcoustics = &matching;
+    assert!(
+        matches!(stack.prepared_layers().layer(0), Some(Layer::FluidLayer { fluid, .. }) if core::ptr::eq(fluid, original))
+    );
+    for _ in 0..3 {
+        let response = stack.scattering(1.0).unwrap();
+        assert!(response.reflected_fraction < 1e-28);
+        assert!((response.transmitted_fraction - 1.0).abs() < 2e-14);
+        assert_eq!(response.absorbed_fraction, 0.0);
+    }
+    assert_eq!(matching.samples.get(), 1);
+
+    struct RefusingSource;
+    impl FluidAcoustics for RefusingSource {
+        fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+            Err(MaterialError::State {
+                what: "original source refuses this state".into(),
+            })
+        }
+    }
+    // Even zero thickness does not bypass the original source's admission.
+    assert!(
+        RigidBackedLayers::new(
+            &exterior,
+            omega,
+            &[Layer::FluidLayer {
+                fluid: &RefusingSource,
+                thickness_m: 0.0
+            }]
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn transmitting_porous_gap_stack_matches_full_independent_matrices() {
     let fluid = fluid();
     let first = foam();
@@ -671,6 +943,100 @@ impl FluidAcoustics for CountedReceiver {
         self.samples.set(self.samples.get() + 1);
         Ok(self.state)
     }
+}
+
+#[test]
+fn one_original_source_has_one_state_across_incident_layers_and_receiver() {
+    // A second query deliberately advances to a different coherent state.
+    // Composing repeated calls would create a fictitious refracting interface.
+    struct EvolvingFluid {
+        states: [ThermoviscousFluidState; 2],
+        samples: Cell<usize>,
+    }
+    impl EvolvingFluid {
+        fn next(&self) -> ThermoviscousFluidState {
+            let index = self.samples.get();
+            self.samples.set(index + 1);
+            self.states[index.min(1)]
+        }
+    }
+    impl FluidAcoustics for EvolvingFluid {
+        fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+            Ok(self.next().acoustic())
+        }
+    }
+    impl FluidTransport for EvolvingFluid {
+        fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+            Ok(self.next().transport())
+        }
+    }
+    impl ThermoviscousFluid for EvolvingFluid {
+        fn thermoviscous_state(&self) -> Result<ThermoviscousFluidState, MaterialError> {
+            Ok(self.next())
+        }
+    }
+    let first = fluid();
+    let second = ThermoviscousFluidState::from_heat_capacity_ratio(
+        FluidAcousticState::try_new(2.4, 425.0).unwrap(),
+        FluidTransportState::try_new(2.4, 1005.0, 0.0257, 1.81e-5).unwrap(),
+        1.4,
+    )
+    .unwrap();
+    let omega = core::f64::consts::TAU * 500.0;
+    for with_layers in [false, true] {
+        let source = EvolvingFluid {
+            states: [first, second],
+            samples: Cell::new(0),
+        };
+        let layers = [Layer::FluidLayer {
+            fluid: &source,
+            thickness_m: 0.01,
+        }; 2];
+        let stack = TransmittingLayers::new(
+            &source,
+            &source,
+            omega,
+            if with_layers { &layers } else { &[] },
+        )
+        .unwrap();
+        assert_eq!(source.samples.get(), 1);
+        assert_eq!(stack.receiving_state(), &first.acoustic());
+        for cosine in [1.0, 0.6, 0.01] {
+            let response = stack.scattering(cosine).unwrap();
+            assert!(response.reflected_fraction < 1e-28);
+            assert!((response.transmitted_fraction - 1.0).abs() < 2e-14);
+        }
+        assert_eq!(source.samples.get(), 1);
+    }
+    // The incident source is distinct; a finite layer and the receiver still
+    // share their first evaluation. Equal-valued but distinct owners do not.
+    let interior = EvolvingFluid {
+        states: [second, first],
+        samples: Cell::new(0),
+    };
+    let distinct = EvolvingFluid {
+        states: [second, first],
+        samples: Cell::new(0),
+    };
+    let layers = [Layer::FluidLayer {
+        fluid: &interior,
+        thickness_m: 0.01,
+    }];
+    let shared = TransmittingLayers::new(&first, &interior, omega, &layers).unwrap();
+    assert_eq!(interior.samples.get(), 1);
+    assert_eq!(shared.receiving_state(), &second.acoustic());
+    let separate = TransmittingLayers::new(&first, &distinct, omega, &layers).unwrap();
+    assert_eq!(interior.samples.get(), 2);
+    assert_eq!(distinct.samples.get(), 1);
+    assert_eq!(
+        separate.prepared_layers().fluid_response(0),
+        Some(&first.acoustic())
+    );
+    assert_eq!(separate.receiving_state(), &second.acoustic());
+    shared.scattering(0.8).unwrap();
+    separate.scattering(0.8).unwrap();
+    assert_eq!(interior.samples.get(), 2);
+    assert_eq!(distinct.samples.get(), 1);
 }
 
 #[test]

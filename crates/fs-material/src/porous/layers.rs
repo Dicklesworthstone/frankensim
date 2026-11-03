@@ -3,7 +3,8 @@
 //! Ordered homogeneous isotropic equivalent-fluid layers share ONE saturating
 //! fluid snapshot. Pore drag, density, bulk modulus and source-frequency support
 //! remain owned by PorousFluidLaw. Gaps use the same fluid's lossless acoustics;
-//! no elastic frame, lateral finite-size effect or gap wall loss is invented.
+//! explicit fluid layers retain their own original acoustic source. No elastic
+//! frame, lateral finite-size effect or fluid attenuation is invented.
 //!
 //! exp(+i omega t), forward exp(-i k_n z). Tangential wavenumber is conserved,
 //! k_n^2=k^2-k_0^2 sin^2(theta), Z_n=Z_c k/k_n. Pressure and normal velocity
@@ -16,12 +17,16 @@
 //!
 //! Reference: COMSOL Porous Absorber, Eq. (5), rigid-frame oblique response:
 //! <https://doc.comsol.com/6.1/doc/com.comsol.help.models.aco.porous_absorber/models.aco.porous_absorber.pdf>.
+//! Distinct-fluid layers use the same pressure/normal-velocity conditions as
+//! Oelze, ECE/TAM 373, Chapter 6, sections 6.3–6.4:
+//! <https://jontalle.web.engr.illinois.edu/uploads/473.F18/Lectures/Chapter_6b.pdf>.
 //! Plane reflection here is extended reaction. A local BEM boundary must
 //! explicitly select the NORMAL-incidence admittance instead.
 
 use super::{PorousFluidLaw, PorousFluidResponse};
 use crate::MaterialError;
 use crate::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
+use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_math::{c64::C64, det};
 
 /// Coherent pressure and power transmission into a sourced receiving fluid.
@@ -33,7 +38,7 @@ pub const MAX_LAYERS: usize = 64;
 
 /// Ordered from the exposed face toward the termination. Zero thickness is
 /// an exact identity, but an included porous source still must admit frequency.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub enum Layer<'a> {
     Porous {
         law: &'a PorousFluidLaw,
@@ -41,11 +46,38 @@ pub enum Layer<'a> {
     },
     /// Lossless gap filled by the original coherent saturating/exterior fluid.
     FluidGap { thickness_m: f64 },
+    /// Lossless homogeneous fluid with its own density and adiabatic sound
+    /// speed. The original source is retained; no transport loss is inferred.
+    FluidLayer {
+        fluid: &'a dyn FluidAcoustics,
+        thickness_m: f64,
+    },
+}
+impl core::fmt::Debug for Layer<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Porous { law, thickness_m } => f
+                .debug_struct("Porous")
+                .field("law", law)
+                .field("thickness_m", thickness_m)
+                .finish(),
+            Self::FluidGap { thickness_m } => f
+                .debug_struct("FluidGap")
+                .field("thickness_m", thickness_m)
+                .finish(),
+            Self::FluidLayer { thickness_m, .. } => f
+                .debug_struct("FluidLayer")
+                .field("thickness_m", thickness_m)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 impl Layer<'_> {
     fn thickness_m(self) -> f64 {
         match self {
-            Self::Porous { thickness_m, .. } | Self::FluidGap { thickness_m } => thickness_m,
+            Self::Porous { thickness_m, .. }
+            | Self::FluidGap { thickness_m }
+            | Self::FluidLayer { thickness_m, .. } => thickness_m,
         }
     }
 }
@@ -54,11 +86,13 @@ impl Layer<'_> {
 struct PreparedLayer<'a> {
     source: Layer<'a>,
     porous: Option<PorousFluidResponse>,
+    fluid: Option<FluidAcousticState>,
 }
 
-/// Prepared material responses at ONE frequency and ONE coherent fluid state.
-/// The fluid source and all porous source laws remain borrowed, not replaced by
-/// equivalent fitted coefficients. Each angle query is allocation-free.
+/// Prepared material responses at ONE frequency. The incident/pore fluid has
+/// one coherent state; each distinct explicit fluid source has its own snapshot.
+/// Original sources remain borrowed, not replaced by fitted coefficients.
+/// Each angle query is allocation-free.
 pub struct RigidBackedLayers<'a> {
     source: &'a dyn ThermoviscousFluid,
     fluid: ThermoviscousFluidState,
@@ -112,6 +146,24 @@ fn divided(z: C64, scale: f64) -> C64 {
     C64::new(z.re / scale, z.im / scale)
 }
 
+// One source may occur as the incident fluid, several finite layers and the
+// receiving half-space. Reuse its snapshot by original identity in every role.
+fn retained_fluid_snapshot(
+    original: &dyn FluidAcoustics,
+    incident: &dyn FluidAcoustics,
+    exterior: FluidAcousticState,
+    layers: &[PreparedLayer<'_>],
+) -> Option<FluidAcousticState> {
+    if core::ptr::eq(original, incident) {
+        Some(exterior)
+    } else {
+        layers.iter().find_map(|layer| match layer.source {
+            Layer::FluidLayer { fluid, .. } if core::ptr::eq(original, fluid) => layer.fluid,
+            _ => None,
+        })
+    }
+}
+
 impl<'a> RigidBackedLayers<'a> {
     pub fn new(
         fluid: &'a dyn ThermoviscousFluid,
@@ -138,13 +190,30 @@ impl<'a> RigidBackedLayers<'a> {
         if !k0.is_finite() || k0 <= 0.0 || !z0.is_finite() || z0 <= 0.0 {
             return Err(bad("layered exterior wave data are unrepresentable"));
         }
-        let mut prepared = Vec::with_capacity(layers.len());
+        let mut prepared: Vec<PreparedLayer<'a>> = Vec::with_capacity(layers.len());
         for &source in layers {
             let porous = match source {
                 Layer::Porous { law, .. } => Some(law.effective_fluid(&snapshot, omega)?),
-                Layer::FluidGap { .. } => None,
+                Layer::FluidGap { .. } | Layer::FluidLayer { .. } => None,
             };
-            prepared.push(PreparedLayer { source, porous });
+            let layer_fluid = if let Layer::FluidLayer {
+                fluid: original, ..
+            } = source
+            {
+                let incident: &dyn FluidAcoustics = fluid;
+                let prior = retained_fluid_snapshot(original, incident, acoustic, &prepared);
+                Some(match prior {
+                    Some(state) => state,
+                    None => original.acoustic_state()?,
+                })
+            } else {
+                None
+            };
+            prepared.push(PreparedLayer {
+                source,
+                porous,
+                fluid: layer_fluid,
+            });
         }
         Ok(Self {
             source: fluid,
@@ -177,6 +246,11 @@ impl<'a> RigidBackedLayers<'a> {
     pub fn material_response(&self, index: usize) -> Option<&PorousFluidResponse> {
         self.layers.get(index).and_then(|l| l.porous.as_ref())
     }
+    /// Coherent snapshot of an explicitly sourced finite fluid layer.
+    /// Shared-fluid gaps and porous layers retain their existing response views.
+    pub fn fluid_response(&self, index: usize) -> Option<&FluidAcousticState> {
+        self.layers.get(index).and_then(|l| l.fluid.as_ref())
+    }
 
     /// Exact planar extended-reaction reflection within the admitted material
     /// model. Positive incidence cosine is measured from the interface normal.
@@ -193,9 +267,7 @@ impl<'a> RigidBackedLayers<'a> {
             if d == 0.0 {
                 continue;
             }
-            let (kn, ratio) = self.normal_wave(layer, cosine)?;
-            let (sum, difference) = bounded_propagator(kn, d)?;
-            (pressure, velocity, _) = transfer_step(pressure, velocity, sum, difference, ratio)?;
+            (pressure, velocity, _, _) = self.propagate_layer(layer, cosine, pressure, velocity)?;
         }
         let (reflection, absorbed) = reflected_state(pressure, velocity)?;
         Ok(LayeredReflection {
@@ -205,6 +277,81 @@ impl<'a> RigidBackedLayers<'a> {
             normalized_velocity: velocity,
             cosine,
         })
+    }
+
+    // Both terminations consume the same normal-wave and critical-angle law.
+    fn propagate_layer(
+        &self,
+        layer: &PreparedLayer<'_>,
+        cosine: f64,
+        pressure: C64,
+        velocity: C64,
+    ) -> Result<(C64, C64, f64, C64), MaterialError> {
+        let d = layer.source.thickness_m();
+        let (p, v, scale, kn) = if let Some(fluid) = layer.fluid {
+            let speed_ratio = self.fluid.acoustic().sound_speed_m_s() / fluid.sound_speed_m_s();
+            if !speed_ratio.is_finite() || speed_ratio <= 0.0 {
+                return Err(bad("finite fluid sound-speed contrast is unrepresentable"));
+            }
+            let q = normal_wavenumber_ratio(speed_ratio, cosine);
+            let kn = q.scale(self.k0);
+            // Z_n/Z_ref = a/q, q=k_n/k0. Form the finite matrix entries
+            // directly: at q=0, sin(k_n*d)/q -> k0*d. Dividing by k_n
+            // would falsely reject critical refraction or overflow beside it.
+            let a = (fluid.density_kg_m3() / self.fluid.acoustic().density_kg_m3()) * cosine;
+            if !finite(kn) || (q != C64::ZERO && kn == C64::ZERO) || !a.is_finite() || a <= 0.0 {
+                return Err(bad("finite fluid normal-wave contrast is unrepresentable"));
+            }
+            let (diagonal, upper, lower) = if q.im == 0.0 {
+                let phase = kn.re * d;
+                if !phase.is_finite() {
+                    return Err(bad("finite fluid layer phase is unrepresentable"));
+                }
+                let (sine, cos) = det::sin_cos(phase);
+                let sine_over_q = if phase.abs() < 1.0e-4 {
+                    (self.k0 * d) * if phase == 0.0 { 1.0 } else { sine / phase }
+                } else {
+                    sine / q.re
+                };
+                (
+                    C64::from_re(cos),
+                    C64::new(0.0, a * sine_over_q),
+                    C64::new(0.0, (q.re / a) * sine),
+                )
+            } else {
+                let decay = -kn.im * d;
+                let difference = -det::expm1(-2.0 * decay);
+                let difference_over_q = if decay < 1.0e-4 {
+                    (self.k0 * d)
+                        * if decay == 0.0 {
+                            2.0
+                        } else {
+                            difference / decay
+                        }
+                } else {
+                    difference / -q.im
+                };
+                (
+                    C64::from_re(2.0 - difference),
+                    C64::new(0.0, a * difference_over_q),
+                    C64::new(0.0, (q.im / a) * difference),
+                )
+            };
+            let (p, v, scale) = normalized_step(
+                pressure,
+                velocity,
+                diagonal.scale(1.0 / 16.0),
+                upper.scale(1.0 / 16.0),
+                lower.scale(1.0 / 16.0),
+            )?;
+            (p, v, scale, kn)
+        } else {
+            let (kn, ratio) = self.normal_wave(layer, cosine)?;
+            let (sum, difference) = bounded_propagator(kn, d)?;
+            let (p, v, scale) = transfer_step(pressure, velocity, sum, difference, ratio)?;
+            (p, v, scale, kn)
+        };
+        Ok((p, v, scale, kn))
     }
 
     // Shared by rigid and transmitting terminations: no second material law.
@@ -246,6 +393,32 @@ impl<'a> RigidBackedLayers<'a> {
     }
 }
 
+// q=k_n/k_incident for a lossless fluid. Share this Snell branch between
+// finite fluid layers and the outgoing receiving half-space. Keep matched
+// grazing and small normal contrasts; ratio^2-(1-cosine^2) loses those limits.
+fn normal_wavenumber_ratio(ratio: f64, cosine: f64) -> C64 {
+    if cosine == 1.0 {
+        return C64::from_re(ratio);
+    }
+    if ratio == 1.0 {
+        return C64::from_re(cosine);
+    }
+    if ratio > 2.0 {
+        let sine_over_ratio = det::sqrt((1.0 - cosine) * (1.0 + cosine)) / ratio;
+        return C64::from_re(ratio * det::sqrt(1.0 - sine_over_ratio * sine_over_ratio));
+    }
+    let squared = if cosine > 0.5 {
+        ratio * ratio - (1.0 - cosine) * (1.0 + cosine)
+    } else {
+        (ratio - 1.0) * (ratio + 1.0) + cosine * cosine
+    };
+    if squared >= 0.0 {
+        C64::from_re(det::sqrt(squared))
+    } else {
+        C64::new(0.0, -det::sqrt(-squared))
+    }
+}
+
 // Return the normalization as well, so a transmitting owner can retain the
 // common pressure amplitude that cancels out of rigid reflection.
 fn transfer_step(
@@ -266,6 +439,16 @@ fn transfer_step(
     let off_diagonal = difference.scale(1.0 / 16.0);
     let upper = ratio * off_diagonal;
     let lower = inverse * off_diagonal;
+    normalized_step(pressure, velocity, diagonal, upper, lower)
+}
+
+fn normalized_step(
+    pressure: C64,
+    velocity: C64,
+    diagonal: C64,
+    upper: C64,
+    lower: C64,
+) -> Result<(C64, C64, f64), MaterialError> {
     let next_p = diagonal * pressure + upper * velocity;
     let next_v = lower * pressure + diagonal * velocity;
     let normalization = magnitude_scale(next_p).max(magnitude_scale(next_v));
