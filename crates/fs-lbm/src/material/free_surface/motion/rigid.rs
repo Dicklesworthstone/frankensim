@@ -1,7 +1,7 @@
 //! Physical rigid-wall wrench through the original material and VOF owners.
 
 use super::*;
-use crate::d3q19::freesurface3::PlanarRigidWallMotion3;
+use crate::d3q19::freesurface3::{PlanarRigidWallMotion3, PlanarRigidWallReport3};
 
 /// Rigid material motion along one fixed, fully flooded domain plane.
 /// The liquid domain's physical origin is zero. Angular speed is right handed
@@ -45,7 +45,7 @@ impl MaterialPlanarRigidWallMotion3 {
 /// Raw momentum includes the native numerical pressure datum. Physical support
 /// loads are separately relative to, or inclusive of, the explicitly declared
 /// reference pressure. All moments use `motion.origin_m`. Mechanical wall work
-/// is not caloric heat or a total energy certificate for the isothermal liquid.
+/// is not caloric heat or a total energy certificate for the liquid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialPlanarRigidWallReport3 {
     /// Prescribed local motion and common moment origin.
@@ -113,6 +113,28 @@ impl MaterialFreeSurface3<'_> {
         maximum_relative_mass_defect: f64,
         gate: &CancelGate,
     ) -> Result<(Self, MaterialPlanarRigidWallReport3), MaterialLbmError> {
+        let native_motion = self.prepare_planar_rigid_wall_motion_si(motion, gate)?;
+        let (candidate, raw) = self.lattice.planar_rigid_wall_motion_candidate(
+            native_motion,
+            maximum_relative_mass_defect,
+            gate,
+        )?;
+        let report = self.planar_rigid_wall_report_si(motion, raw, gate)?;
+        Ok((
+            Self {
+                lattice: candidate,
+                scaling: self.scaling,
+            },
+            report,
+        ))
+    }
+
+    /// Shared source/scenario admission before either enclosing owner's clone.
+    pub(crate) fn prepare_planar_rigid_wall_motion_si(
+        &self,
+        motion: MaterialPlanarRigidWallMotion3,
+        gate: &CancelGate,
+    ) -> Result<PlanarRigidWallMotion3, MaterialLbmError> {
         if gate.is_requested() {
             return Err(FreeSurfaceError3::Cancelled.into());
         }
@@ -130,6 +152,17 @@ impl MaterialFreeSurface3<'_> {
                 "local rigid wall speed exceeds the original material scenario",
             ));
         }
+        Ok(native_motion)
+    }
+
+    /// Read the actual final native receipt through the original SI/pressure owner.
+    pub(crate) fn planar_rigid_wall_report_si(
+        &self,
+        motion: MaterialPlanarRigidWallMotion3,
+        raw: PlanarRigidWallReport3,
+        gate: &CancelGate,
+    ) -> Result<MaterialPlanarRigidWallReport3, MaterialLbmError> {
+        let scale = &self.scaling;
         let units = self.planar_wall_units()?;
         let angular_unit = positive(
             units[0] * scale.cell_size_m,
@@ -150,11 +183,6 @@ impl MaterialFreeSurface3<'_> {
                 "rigid wall spin-response unit is unrepresentable",
             )?,
         ];
-        let (candidate, raw) = self.lattice.planar_rigid_wall_motion_candidate(
-            native_motion,
-            maximum_relative_mass_defect,
-            gate,
-        )?;
         if raw.maximum_speed > scale.flow.u_lattice {
             return Err(MaterialLbmError::Invalid(
                 "rigid wall-driven liquid exceeds the original material scenario speed",
@@ -163,7 +191,7 @@ impl MaterialFreeSurface3<'_> {
         let linear = self.planar_wall_report_si(
             PlanarWallMotionReport3 {
                 wall: motion.wall,
-                velocity: native_motion.velocity_at_origin,
+                velocity: raw.motion.velocity_at_origin,
                 fluid_impulse: raw.fluid_impulse,
                 wall_impulse: raw.wall_impulse,
                 reference_pressure_fluid_impulse: raw.reference_pressure_fluid_impulse,
@@ -264,13 +292,7 @@ impl MaterialFreeSurface3<'_> {
         if gate.is_requested() {
             return Err(FreeSurfaceError3::Cancelled.into());
         }
-        Ok((
-            Self {
-                lattice: candidate,
-                scaling: self.scaling,
-            },
-            report,
-        ))
+        Ok(report)
     }
 
     /// Atomically publish the same fully admitted original rigid-wall candidate.

@@ -28002,3 +28002,10 @@ The sustained first-order contact lane and inelastic material trajectories
 retain their existing uniform rigid-gravity interfaces. No source recoil,
 gravity inference from an undeclared shape, continuum path certificate or
 global impact-accuracy claim is added.
+
+
+## Finite planar wall recoil with thermal liquid
+
+`free_surface_wall::planar::thermal::FreeSurfaceThermalPlanarWall` retains the original thermal VOF owner and native full-inertia rigid body. The isothermal and thermal variants share one planar mechanical implementation. One original rigid-link pilot and one final native replay feed the existing mass-whitened three-mode midpoint solve, preserving translation/spin coupling. Actual replay loads drive the native MBD endpoint, followed by the original linear, spin, orbital-plus-spin, midpoint, affine-response and work audits before either owner escapes.
+
+Discarded trials advance no accepted source history, enthalpy or clock. The final thermal receipt distinguishes authored and optional molecular heat; mechanical wall, applied and guide work remain separate. Existing body, full-grid trial, motion and work limits remain binding. Geometry is a fixed flooded plane with tangential translation and principal spin; cover/vacate, tilt, finite edges and a solved conduction boundary are not supplied. Four regression groups cover all-plane isothermal parity, heated/buoyant finite recoil, molecular heat applied once, and transactional late refusal/cancellation/retry. Source parsing, formatting and scoped whitespace checks passed; native build and test execution remain outstanding in this resource-constrained session.

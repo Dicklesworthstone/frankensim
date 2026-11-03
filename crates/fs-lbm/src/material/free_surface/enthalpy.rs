@@ -68,7 +68,10 @@ pub mod viscous;
 
 /// Tangential wall forcing on the same evolving material/enthalpy trajectory.
 pub mod motion;
-pub use motion::{FreeSurfacePlanarWallEnthalpyReport, FreeSurfacePlanarWallViscousReport};
+pub use motion::{
+    FreeSurfacePlanarWallEnthalpyReport, FreeSurfacePlanarWallViscousReport,
+    FreeSurfaceRigidWallEnthalpyReport, FreeSurfaceRigidWallViscousReport,
+};
 
 /// Original T/shear source tables on actual native collision and molecular heat.
 pub mod rheology;
@@ -329,6 +332,20 @@ struct ResolvedFlowMaterials {
     rheology: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
 }
 
+// Only evolved state belongs to this unpublished tick. Prepared source/core
+// bindings stay borrowed, so ordinary steps never clone a prepared operator.
+struct PreparedEnthalpyTick<'m> {
+    lattice: FreeSurface3,
+    h: BTreeMap<MassLocation3, f64>,
+    states: BTreeMap<MassLocation3, ResolvedLiquidState>,
+    rheology_samples: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
+    wetting: Option<WettingBinding<'m>>,
+    surface_temperature_forces: bool,
+    accepted_steps: u64,
+    report: FreeSurfaceEnthalpyReport,
+    wall: Option<motion::ThermalWallReport>,
+}
+
 impl<'s> MaterialFreeSurface3<'s> {
     /// Bind liquid enthalpy to this actual VOF state without changing its mass
     /// or populations. The callback supplies specific enthalpy [J/kg] for every
@@ -522,7 +539,7 @@ impl<'s> MaterialFreeSurface3<'s> {
     }
 }
 
-impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
+impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// Set the physical time at which this thermal/native trajectory was bound.
     /// Populations, mass, material state and enthalpy are unchanged. A trajectory
     /// that has already advanced cannot have its physical clock reset.
@@ -846,12 +863,41 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         body_heat: f64,
         absolute_heat: f64,
         additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
+        surface: Option<&mut SurfaceTensionResolver<'_>>,
+        wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
+        wall: Option<motion::ThermalWallBoundary<'_>>,
+        gate: &CancelGate,
+    ) -> Result<(FreeSurfaceEnthalpyReport, Option<motion::ThermalWallReport>), Error> {
+        let prepared = self.prepare_enthalpy_tick_with_wall(
+            heated, external, viscous, body_heat, absolute_heat, additional_forces,
+            surface, wetting_outer_gas, gas_pressure, wall, gate,
+        )?;
+        self.flow.lattice = prepared.lattice;
+        self.h = prepared.h;
+        self.states = prepared.states;
+        self.rheology_samples = prepared.rheology_samples;
+        self.wetting = prepared.wetting;
+        self.surface_temperature_forces = prepared.surface_temperature_forces;
+        self.accepted_steps = prepared.accepted_steps;
+        Ok((prepared.report, prepared.wall))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_enthalpy_tick_with_wall(
+        &self,
+        heated: BTreeMap<MassLocation3, f64>,
+        external: f64,
+        viscous: f64,
+        body_heat: f64,
+        absolute_heat: f64,
+        additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
         mut surface: Option<&mut SurfaceTensionResolver<'_>>,
         wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
         gas_pressure: Option<(f64, GasPressureField<'_>)>,
         wall: Option<motion::ThermalWallBoundary<'_>>,
         gate: &CancelGate,
-    ) -> Result<(FreeSurfaceEnthalpyReport, Option<super::MaterialPlanarWallFieldReport3>), Error> {
+    ) -> Result<PreparedEnthalpyTick<'m>, Error> {
         poll(gate)?;
         if wall.is_some() && gas_pressure.is_some() {
             return Err(Error::Invalid("thermal wall field does not own prescribed gas pressure"));
@@ -911,9 +957,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         )?;
         let (mut trace, wall_exchange) = match wall {
             Some(boundary) => {
-                let (trace, exchange) = lattice.step_with_planar_wall_field_transport(
-                    boundary.native, boundary.controls, &resolved.tau,
-                    resolved.forces, self.controls.max_mass_routes, gate,
+                let (trace, exchange) = boundary.step(
+                    &mut lattice, &resolved.tau, resolved.forces,
+                    self.controls.max_mass_routes, gate,
                 )?;
                 (trace, Some(exchange))
             }
@@ -1015,25 +1061,21 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         // reflection. Recheck the actual final candidate, then convert every SI
         // face receipt before accepting either source history or populations.
         let wall_report = match (wall, wall_exchange) {
-            (Some(boundary), Some(mut exchange)) => {
-                lattice.refresh_planar_wall_field_endpoint(
-                    boundary.native, boundary.controls, &mut exchange, gate,
-                )?;
-                Some(self.flow.planar_wall_field_report_si(
-                    exchange, boundary.moment_origin_m, gate,
-                )?)
-            }
+            (Some(boundary), Some(exchange)) => Some(boundary.finish(&self.flow, &lattice, exchange, gate)?),
             _ => None,
         };
         poll(gate)?;
-        self.flow.lattice = lattice;
-        self.h = h;
-        self.states = endpoint.states;
-        self.rheology_samples = endpoint.rheology;
-        self.wetting = accepted_wetting;
-        self.surface_temperature_forces |= uses_surface_temperature;
-        self.accepted_steps = next_step;
-        Ok((report, wall_report))
+        Ok(PreparedEnthalpyTick {
+            lattice,
+            h,
+            states: endpoint.states,
+            rheology_samples: endpoint.rheology,
+            wetting: accepted_wetting,
+            surface_temperature_forces: self.surface_temperature_forces || uses_surface_temperature,
+            accepted_steps: next_step,
+            report,
+            wall: wall_report,
+        })
     }
 
     fn location_at(&self, coordinates: [usize; 3]) -> Option<MassLocation3> {

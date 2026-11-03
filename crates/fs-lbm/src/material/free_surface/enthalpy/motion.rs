@@ -1,10 +1,18 @@
 //! Wall momentum on the existing source-driven thermal free-surface owner.
 
 use super::*;
-use crate::d3q19::freesurface3::{PlanarWallFieldControls3, PlanarWallVelocityField3};
-use crate::material::free_surface::{
-    MaterialPlanarWallFieldReport3, MaterialPlanarWallVelocityField3,
+use crate::d3q19::freesurface3::transport::MassTransport3;
+use crate::d3q19::freesurface3::{
+    PlanarRigidWallMotion3, PlanarRigidWallReport3, PlanarWallFieldControls3,
+    PlanarWallFieldReport3, PlanarWallVelocityField3,
 };
+use crate::material::free_surface::{
+    MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3, MaterialPlanarWallFieldReport3,
+    MaterialPlanarWallVelocityField3,
+};
+
+mod rigid;
+pub use rigid::{FreeSurfaceRigidWallEnthalpyReport, FreeSurfaceRigidWallViscousReport};
 
 /// One accepted thermal flow tick and its actual distributed wall exchange.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,10 +33,115 @@ pub struct FreeSurfacePlanarWallViscousReport {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct ThermalWallBoundary<'a> {
-    pub native: PlanarWallVelocityField3<'a>,
-    pub controls: PlanarWallFieldControls3,
-    pub moment_origin_m: [f64; 3],
+pub(super) enum ThermalWallBoundary<'a> {
+    Field {
+        native: PlanarWallVelocityField3<'a>,
+        controls: PlanarWallFieldControls3,
+        moment_origin_m: [f64; 3],
+    },
+    Rigid {
+        native: PlanarRigidWallMotion3,
+        motion_si: MaterialPlanarRigidWallMotion3,
+        maximum_relative_mass_defect: f64,
+    },
+}
+
+pub(super) enum NativeThermalWallReport {
+    Field(PlanarWallFieldReport3),
+    Rigid(PlanarRigidWallReport3),
+}
+
+pub(super) enum ThermalWallReport {
+    Field(MaterialPlanarWallFieldReport3),
+    Rigid(MaterialPlanarRigidWallReport3),
+}
+
+impl ThermalWallBoundary<'_> {
+    pub(super) fn step(
+        self,
+        lattice: &mut FreeSurface3,
+        tau: &BTreeMap<(u64, usize), f64>,
+        forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
+        maximum_routes: usize,
+        gate: &CancelGate,
+    ) -> Result<(MassTransport3, NativeThermalWallReport), Error> {
+        match self {
+            Self::Field {
+                native, controls, ..
+            } => {
+                let (trace, report) = lattice.step_with_planar_wall_field_transport(
+                    native,
+                    controls,
+                    tau,
+                    forces,
+                    maximum_routes,
+                    gate,
+                )?;
+                Ok((trace, NativeThermalWallReport::Field(report)))
+            }
+            Self::Rigid {
+                native,
+                maximum_relative_mass_defect,
+                ..
+            } => {
+                let (trace, report) = lattice.step_with_planar_rigid_wall_transport(
+                    native,
+                    maximum_relative_mass_defect,
+                    tau,
+                    forces,
+                    maximum_routes,
+                    gate,
+                )?;
+                Ok((trace, NativeThermalWallReport::Rigid(report)))
+            }
+        }
+    }
+
+    pub(super) fn finish(
+        self,
+        flow: &MaterialFreeSurface3<'_>,
+        lattice: &FreeSurface3,
+        report: NativeThermalWallReport,
+        gate: &CancelGate,
+    ) -> Result<ThermalWallReport, Error> {
+        match (self, report) {
+            (
+                Self::Field {
+                    native,
+                    controls,
+                    moment_origin_m,
+                },
+                NativeThermalWallReport::Field(mut report),
+            ) => {
+                lattice.refresh_planar_wall_field_endpoint(native, controls, &mut report, gate)?;
+                Ok(ThermalWallReport::Field(flow.planar_wall_field_report_si(
+                    report,
+                    moment_origin_m,
+                    gate,
+                )?))
+            }
+            (
+                Self::Rigid {
+                    motion_si,
+                    maximum_relative_mass_defect,
+                    ..
+                },
+                NativeThermalWallReport::Rigid(mut report),
+            ) => {
+                lattice.refresh_planar_rigid_wall_endpoint(
+                    &mut report,
+                    maximum_relative_mass_defect,
+                    gate,
+                )?;
+                Ok(ThermalWallReport::Rigid(
+                    flow.planar_rigid_wall_report_si(motion_si, report, gate)?,
+                ))
+            }
+            _ => Err(Error::Invalid(
+                "native thermal wall receipt changed representation",
+            )),
+        }
+    }
 }
 
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
@@ -66,7 +179,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             .prepare_planar_wall_velocity_field_si(motion, controls, gate)?;
         let (heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
         self.advance_wall_enthalpy(
-            ThermalWallBoundary {
+            ThermalWallBoundary::Field {
                 native: PlanarWallVelocityField3 {
                     wall: motion.wall,
                     moment_origin: origin,
@@ -106,7 +219,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             .prepare_planar_wall_velocity_field_si(motion, controls, gate)?;
         let prepared = self.prepare_viscous_heat(heat, gate)?;
         let flow = self.advance_wall_enthalpy(
-            ThermalWallBoundary {
+            ThermalWallBoundary::Field {
                 native: PlanarWallVelocityField3 {
                     wall: motion.wall,
                     moment_origin: origin,
@@ -151,7 +264,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         )?;
         Ok(FreeSurfacePlanarWallEnthalpyReport {
             flow,
-            wall: wall.expect("thermal wall candidate retains its native receipt"),
+            wall: match wall {
+                Some(ThermalWallReport::Field(report)) => report,
+                _ => unreachable!("field boundary retains its original wall receipt"),
+            },
         })
     }
 }

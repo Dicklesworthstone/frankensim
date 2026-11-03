@@ -10,13 +10,18 @@
 //! half-drifts around that impulse configuration. This choice retains orbital
 //! as well as spin momentum and midpoint work. It does not establish the
 //! temporal order of the complete liquid coupling. The flooded domain plane
-//! stays fixed: finite plate edges, tilt, normal motion and heat are absent.
+//! stays fixed: finite plate edges, tilt and normal motion are absent. The
+//! `thermal` variant retains this SAME mechanical solve and the native thermal
+//! liquid's material/enthalpy trajectory.
+
+pub mod thermal;
 
 use super::{array, norm, normal_axis, vector};
 use fs_exec::CancelGate;
 use fs_la::factor::cholesky;
 use fs_lbm::d3q19::freesurface3::PlanarWall3;
 use fs_lbm::material::MaterialLbmError;
+use fs_lbm::material::free_surface::enthalpy::FreeSurfaceEnthalpyError;
 use fs_lbm::material::free_surface::{
     MaterialFreeSurface3, MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3,
 };
@@ -61,6 +66,8 @@ pub enum PlanarWallError {
     Invalid(&'static str),
     /// Original liquid source, scaling, speed or population refusal.
     Fluid(MaterialLbmError),
+    /// Original thermal source, transport, material or heat-boundary refusal.
+    Thermal(FreeSurfaceEnthalpyError),
     /// Original native rigid state, inertia or integration refusal.
     Mechanics(DynamicsError),
     /// Pilot and final replay exceed the declared complete-grid work ceiling.
@@ -107,11 +114,37 @@ impl From<DynamicsError> for PlanarWallError {
         Self::Mechanics(value)
     }
 }
+impl From<FreeSurfaceEnthalpyError> for PlanarWallError {
+    fn from(value: FreeSurfaceEnthalpyError) -> Self {
+        Self::Thermal(value)
+    }
+}
+
+mod sealed {
+    pub trait NativeLiquid {}
+    impl NativeLiquid for super::MaterialFreeSurface3<'_> {}
+}
+
+/// Original flow/scaling view for the two supported native liquid owners.
+/// This is sealed: it cannot substitute an unrelated trial or a new flow law.
+pub trait PlanarWallLiquid: sealed::NativeLiquid {
+    fn wall_flow(&self) -> &MaterialFreeSurface3<'_>;
+}
+
+impl PlanarWallLiquid for MaterialFreeSurface3<'_> {
+    fn wall_flow(&self) -> &MaterialFreeSurface3<'_> {
+        self
+    }
+}
 
 /// Original source-bound liquid and native finite wall retained for continuation.
+pub type FreeSurfacePlanarWall<'a> = PlanarWallMotion<MaterialFreeSurface3<'a>>;
+
+/// One mechanical owner shared by the original isothermal and thermal liquids.
+/// Source/scaling access is read-only; native trials remain in their own solver.
 #[derive(Clone)]
-pub struct FreeSurfacePlanarWall<'a> {
-    liquid: MaterialFreeSurface3<'a>,
+pub struct PlanarWallMotion<L> {
+    liquid: L,
     properties: MassProperties,
     body: RigidBodyState,
     wall: PlanarWall3,
@@ -123,9 +156,14 @@ pub struct FreeSurfacePlanarWall<'a> {
 }
 
 /// Jointly admitted wall, liquid, guide reactions and physical work.
-pub struct PlanarWallStep<'a> {
+pub type PlanarWallStep<'a> = PlanarWallCandidate<MaterialFreeSurface3<'a>>;
+
+/// Jointly admitted native owners and unchanged mechanical exchange accounts.
+pub struct PlanarWallCandidate<L, R = ()> {
     /// Both accepted original owners; continue by stepping this motion.
-    pub motion: FreeSurfacePlanarWall<'a>,
+    pub motion: PlanarWallMotion<L>,
+    /// Original liquid owner's additional thermal/source receipt, when selected.
+    pub liquid_report: R,
     /// Final original reflection. Its moments use the free half-drift COM.
     pub wall: MaterialPlanarRigidWallReport3,
     /// Native MBD endpoint; includes both the actual COM drift and attitude.
@@ -182,7 +220,7 @@ pub struct PlanarWallStep<'a> {
     pub trial_cells: usize,
 }
 
-impl<'a> FreeSurfacePlanarWall<'a> {
+impl<L: PlanarWallLiquid> PlanarWallMotion<L> {
     /// Bind one fixed flooded plane to the original finite rigid-body inertia.
     ///
     /// The normal is a principal inertia axis. Initial linear momentum must
@@ -190,7 +228,7 @@ impl<'a> FreeSurfacePlanarWall<'a> {
     /// is projected. COM may be off the plane. The guide prevents normal
     /// translation and tilt, while both tangent translations and spin are free.
     pub fn new(
-        liquid: MaterialFreeSurface3<'a>,
+        liquid: L,
         properties: MassProperties,
         body: RigidBodyState,
         wall: PlanarWall3,
@@ -225,6 +263,7 @@ impl<'a> FreeSurfacePlanarWall<'a> {
             ));
         }
         let domain_cells = liquid
+            .wall_flow()
             .lattice()
             .domain_cells()
             .into_iter()
@@ -252,7 +291,7 @@ impl<'a> FreeSurfacePlanarWall<'a> {
     }
 
     /// Original accepted source-bound liquid and its population history.
-    pub const fn liquid(&self) -> &MaterialFreeSurface3<'a> {
+    pub const fn liquid(&self) -> &L {
         &self.liquid
     }
     /// Original native body, including the actual COM and attitude.
@@ -311,13 +350,14 @@ impl<'a> FreeSurfacePlanarWall<'a> {
     fn admit_endpoint(&self, body: RigidBodyState) -> Result<(), PlanarWallError> {
         let bound = self
             .liquid
+            .wall_flow()
             .scaling()
-            .velocity_si(self.liquid.scaling().flow().u_lattice)?;
+            .velocity_si(self.liquid.wall_flow().scaling().flow().u_lattice)?;
         let actual = self
             .prescribed(body.pose().position_world(), self.body_twist(body)?)
             .maximum_speed_m_s(
-                self.liquid.lattice().domain_cells(),
-                self.liquid.scaling().cell_size_m(),
+                self.liquid.wall_flow().lattice().domain_cells(),
+                self.liquid.wall_flow().scaling().cell_size_m(),
             )?;
         if actual > bound {
             return Err(invalid(
@@ -336,13 +376,19 @@ impl<'a> FreeSurfacePlanarWall<'a> {
     /// native arithmetic. Final fluid replay supplies the actual MBD wrench;
     /// the solved twist is not substituted for the native endpoint state.
     #[allow(clippy::too_many_lines)] // One coupled candidate and its endpoint admission.
-    pub fn step_candidate(
+    fn step_candidate_with<R>(
         &self,
         external_force_n: Vec3,
         external_torque_nm: f64,
         controls: PlanarWallControls,
         gate: &CancelGate,
-    ) -> Result<PlanarWallStep<'a>, PlanarWallError> {
+        mut trial: impl FnMut(
+            MaterialPlanarRigidWallMotion3,
+            f64,
+            &CancelGate,
+        )
+            -> Result<(L, MaterialPlanarRigidWallReport3, R), PlanarWallError>,
+    ) -> Result<PlanarWallCandidate<L, R>, PlanarWallError> {
         poll(gate)?;
         controls.validate()?;
         let axis = normal_axis(self.wall);
@@ -364,7 +410,7 @@ impl<'a> FreeSurfacePlanarWall<'a> {
                 maximum: controls.maximum_trial_cells,
             });
         }
-        let dt = self.liquid.scaling().timestep_s();
+        let dt = self.liquid.wall_flow().scaling().timestep_s();
         let q0 = self.body_twist(self.body)?;
         let v0 = self.tangent(q0);
         let initial_center = self.body.pose().position_world();
@@ -380,7 +426,7 @@ impl<'a> FreeSurfacePlanarWall<'a> {
         let external_spin = finite(external_torque_nm * dt)?;
         let external_couple = axis_vector(axis).scale(external_spin);
         let pilot = {
-            let (candidate, report) = self.liquid.planar_rigid_wall_motion_candidate_si(
+            let (candidate, report, _) = trial(
                 self.prescribed(origin, q0),
                 controls.maximum_relative_mass_defect,
                 gate,
@@ -443,7 +489,7 @@ impl<'a> FreeSurfacePlanarWall<'a> {
                 (Dd::from_f64(q0[i]) + Dd::from_f64(change[i]) / Dd::from_f64(roots[i])).to_f64(),
             )?;
         }
-        let (liquid, wall) = self.liquid.planar_rigid_wall_motion_candidate_si(
+        let (liquid, wall, liquid_report) = trial(
             self.prescribed(origin, imposed),
             controls.maximum_relative_mass_defect,
             gate,
@@ -694,7 +740,7 @@ impl<'a> FreeSurfacePlanarWall<'a> {
             .map(|m| checked_vector(transverse_reaction(m, axis, dt)))
             .transpose()?;
         poll(gate)?;
-        Ok(PlanarWallStep {
+        Ok(PlanarWallCandidate {
             motion: Self {
                 liquid,
                 properties: self.properties,
@@ -706,6 +752,7 @@ impl<'a> FreeSurfacePlanarWall<'a> {
                 elapsed_time_s: time,
                 accepted_steps,
             },
+            liquid_report,
             wall,
             mechanics,
             coupling_origin_world_m: origin,
@@ -732,6 +779,34 @@ impl<'a> FreeSurfacePlanarWall<'a> {
             native_trials: 2,
             trial_cells,
         })
+    }
+}
+
+impl<'a> PlanarWallMotion<MaterialFreeSurface3<'a>> {
+    /// Advance held tangential force [N] and axial couple [N m] with liquid.
+    /// The same full three-mode midpoint solve and native endpoint audits are
+    /// shared with the thermal variant. Discarded trials advance no state.
+    pub fn step_candidate(
+        &self,
+        external_force_n: Vec3,
+        external_torque_nm: f64,
+        controls: PlanarWallControls,
+        gate: &CancelGate,
+    ) -> Result<PlanarWallStep<'a>, PlanarWallError> {
+        self.step_candidate_with(
+            external_force_n,
+            external_torque_nm,
+            controls,
+            gate,
+            |motion, mass_tolerance, gate| {
+                let (candidate, report) = self.liquid.planar_rigid_wall_motion_candidate_si(
+                    motion,
+                    mass_tolerance,
+                    gate,
+                )?;
+                Ok((candidate, report, ()))
+            },
+        )
     }
 }
 

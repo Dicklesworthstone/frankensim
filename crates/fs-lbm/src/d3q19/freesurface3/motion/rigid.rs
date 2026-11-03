@@ -1,5 +1,6 @@
 //! Rigid tangential motion through the original halfway reflection.
 
+use super::super::transport::MassTransport3;
 use super::*;
 use fs_math::dd::Dd;
 
@@ -241,6 +242,14 @@ impl RigidWallExchange3 {
     }
 }
 
+struct PreparedRigidWall3 {
+    exchange: PlanarWallStep3,
+    wetted_area: f64,
+    mass_before: f64,
+    before_speed: f64,
+    maximum_wall_speed: f64,
+}
+
 impl FreeSurface3 {
     /// Propose spatial rigid wall motion through one original liquid step.
     ///
@@ -256,6 +265,61 @@ impl FreeSurface3 {
         maximum_relative_mass_defect: f64,
         gate: &CancelGate,
     ) -> Result<(Self, PlanarRigidWallReport3), FreeSurfaceError3> {
+        let mut prepared =
+            self.prepare_planar_rigid_wall_motion(motion, maximum_relative_mass_defect, gate)?;
+        let mut candidate = self.clone();
+        candidate.step_inner_with_wall(gate, None, None, None, Some(&mut prepared.exchange))?;
+        let report = candidate.finish_planar_rigid_wall_motion(
+            motion,
+            maximum_relative_mass_defect,
+            prepared,
+            gate,
+        )?;
+        Ok((candidate, report))
+    }
+
+    /// The thermal owner supplies its one private candidate. The same native
+    /// rigid reflection records the actual collision/conversion mass routes.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_planar_rigid_wall_transport(
+        &mut self,
+        motion: PlanarRigidWallMotion3,
+        maximum_relative_mass_defect: f64,
+        tau: &BTreeMap<(u64, usize), f64>,
+        forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
+        maximum_routes: usize,
+        gate: &CancelGate,
+    ) -> Result<(MassTransport3, PlanarRigidWallReport3), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        if let Some(forces) = forces {
+            self.rebind_force_field(forces, gate)?;
+        }
+        let mut prepared =
+            self.prepare_planar_rigid_wall_motion(motion, maximum_relative_mass_defect, gate)?;
+        let mut trace = MassTransport3::new(self.mass_snapshot(), maximum_routes);
+        self.step_inner_with_wall(
+            gate,
+            Some(&mut trace),
+            Some(tau),
+            None,
+            Some(&mut prepared.exchange),
+        )?;
+        trace.after = self.mass_snapshot();
+        let report = self.finish_planar_rigid_wall_motion(
+            motion,
+            maximum_relative_mass_defect,
+            prepared,
+            gate,
+        )?;
+        Ok((trace, report))
+    }
+
+    fn prepare_planar_rigid_wall_motion(
+        &self,
+        motion: PlanarRigidWallMotion3,
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+    ) -> Result<PreparedRigidWall3, FreeSurfaceError3> {
         check_cancel(gate)?;
         let cells = self.domain_cells();
         let maximum_wall_speed = motion.maximum_speed(cells)?;
@@ -271,6 +335,35 @@ impl FreeSurface3 {
                 "rigid wall relative mass tolerance must be finite and nonnegative",
             ));
         }
+        let (wetted_area, before_speed) = self.admit_planar_rigid_wall_state(motion, gate)?;
+        let mass_before = self.ledger_mass();
+        if !mass_before.is_finite() || mass_before <= 0.0 {
+            return Err(refused(
+                None,
+                "rigid wall requires finite positive liquid mass",
+            ));
+        }
+        Ok(PreparedRigidWall3 {
+            exchange: PlanarWallStep3 {
+                wall: motion.wall,
+                extent: cells[motion.wall.axis()] as i64,
+                velocity: motion.velocity_at_origin,
+                impulse: [0.0; 3],
+                rigid: Some(RigidWallExchange3::new(motion)),
+                field: None,
+            },
+            wetted_area,
+            mass_before,
+            before_speed,
+            maximum_wall_speed,
+        })
+    }
+
+    fn admit_planar_rigid_wall_state(
+        &self,
+        motion: PlanarRigidWallMotion3,
+        gate: &CancelGate,
+    ) -> Result<(f64, f64), FreeSurfaceError3> {
         let admit = |p: [usize; 3], liquid: [f64; 3]| {
             for q in 1..Q3 {
                 let direction = [E3[q].0 as f64, E3[q].1 as f64, E3[q].2 as f64];
@@ -290,27 +383,19 @@ impl FreeSurface3 {
             }
             Ok(())
         };
-        let (wetted_area, before_speed) =
-            self.admit_planar_wall_state_with(motion.wall, gate, admit)?;
-        let mass_before = self.ledger_mass();
-        if !mass_before.is_finite() || mass_before <= 0.0 {
-            return Err(refused(
-                None,
-                "rigid wall requires finite positive liquid mass",
-            ));
-        }
-        let mut exchange = PlanarWallStep3 {
-            wall: motion.wall,
-            extent: cells[motion.wall.axis()] as i64,
-            velocity: motion.velocity_at_origin,
-            impulse: [0.0; 3],
-            rigid: Some(RigidWallExchange3::new(motion)),
-            field: None,
-        };
-        let mut candidate = self.clone();
-        candidate.step_inner_with_wall(gate, None, None, None, Some(&mut exchange))?;
-        let (_, after_speed) = candidate.admit_planar_wall_state_with(motion.wall, gate, admit)?;
-        let mass_after = candidate.ledger_mass();
+        self.admit_planar_wall_state_with(motion.wall, gate, admit)
+    }
+
+    /// Coupled thermal force/wetting refresh must admit the actual final state.
+    pub(crate) fn refresh_planar_rigid_wall_endpoint(
+        &self,
+        report: &mut PlanarRigidWallReport3,
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        let (_, after_speed) = self.admit_planar_rigid_wall_state(report.motion, gate)?;
+        let mass_before = report.mass_before;
+        let mass_after = self.ledger_mass();
         let relative_mass_defect = ((mass_after - mass_before) / mass_before).abs();
         if !mass_after.is_finite()
             || !relative_mass_defect.is_finite()
@@ -321,6 +406,28 @@ impl FreeSurface3 {
                 "rigid wall exceeds its liquid mass-conservation tolerance",
             ));
         }
+        report.mass_after = mass_after;
+        report.relative_mass_defect = relative_mass_defect;
+        report.maximum_speed = report.maximum_speed.max(after_speed);
+        check_cancel(gate)?;
+        Ok(())
+    }
+
+    fn finish_planar_rigid_wall_motion(
+        &self,
+        motion: PlanarRigidWallMotion3,
+        maximum_relative_mass_defect: f64,
+        prepared: PreparedRigidWall3,
+        gate: &CancelGate,
+    ) -> Result<PlanarRigidWallReport3, FreeSurfaceError3> {
+        let PreparedRigidWall3 {
+            exchange,
+            wetted_area,
+            mass_before,
+            before_speed,
+            maximum_wall_speed,
+        } = prepared;
+        let cells = self.domain_cells();
         let axis = motion.wall.axis();
         let mut reference_pressure_fluid_impulse = [0.0; 3];
         reference_pressure_fluid_impulse[axis] =
@@ -352,7 +459,7 @@ impl FreeSurface3 {
                 "rigid wall reference-pressure moment overflowed",
             ));
         }
-        let report = PlanarRigidWallReport3 {
+        let mut report = PlanarRigidWallReport3 {
             motion,
             fluid_impulse: exchange.impulse,
             wall_impulse: exchange.impulse.map(|v| -v),
@@ -366,13 +473,13 @@ impl FreeSurface3 {
             wetted_area,
             wetted_centroid,
             mass_before,
-            mass_after,
-            relative_mass_defect,
-            maximum_speed: before_speed.max(after_speed),
+            mass_after: mass_before,
+            relative_mass_defect: 0.0,
+            maximum_speed: before_speed,
             maximum_wall_speed,
         };
-        check_cancel(gate)?;
-        Ok((candidate, report))
+        self.refresh_planar_rigid_wall_endpoint(&mut report, maximum_relative_mass_defect, gate)?;
+        Ok(report)
     }
 
     /// Publish the same fully admitted rigid-wall candidate atomically.
