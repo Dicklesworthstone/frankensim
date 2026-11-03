@@ -16484,6 +16484,21 @@ The candidate retains original accepted gas/mechanical reports, midpoint loads
 and independent endpoint diagnostics. Powered and explicit closed-valve modes
 are distinct, and source/nozzle failure never silently turns into coasting.
 
+The initial and predicted midpoint drag must each resolve the complete outer
+interval. For locally frozen density and coefficient, quadratic drag has
+Jacobian norm `2|F|/|u|`. The point mobility is
+`G = I/m - [r]x I_body^-1 [r]x`; its largest eigenvalue is bounded by `1/m`
+plus the trace of its positive rotational part, evaluated in the original
+principal frame. The outer condition is `dt * 2|F|/|u| * mobility_bound <= 1`.
+`AtmosphericFlightError::DragResolution` identifies the failed sample and its
+maximum duration without publishing a candidate. Refining native attitude
+substeps alone cannot resolve a drag force held over the outer interval.
+This prevents the demonstrated coarse-step reversed-predictor acceleration;
+it is a local frozen-coefficient resolution condition, not a bound on arbitrary
+coefficient derivatives, evolving wind or other forcing, and not a global
+passivity/accuracy certificate. The condition uses air-relative slip and allows
+wind to do positive inertial-frame work on the vehicle.
+
 This smooth composition is second order, with physical outer timestep and
 native substep controls; it does not locate impact, cutoff, staging or source-
 domain events. The caller splits intervals at known mode changes and refines

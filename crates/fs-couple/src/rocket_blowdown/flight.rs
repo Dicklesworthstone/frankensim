@@ -7,6 +7,8 @@
 //! Endpoint atmosphere and the caller coefficient law are admitted before either
 //! physical owner is published. The smooth composition is second order and needs
 //! temporal refinement; it does not locate impact, cutoff or source-domain events.
+//! The outer interval must also resolve local quadratic drag at the initial and
+//! predicted midpoint states. Native attitude substeps do not resample drag.
 
 use super::environment::spherical::SphericalStandardAtmosphere;
 use super::environment::{AerodynamicLoad, FlightEnvironmentError, RelativeAirflow};
@@ -117,6 +119,17 @@ pub enum AtmosphericFlightError {
     Coupling(GasRigidRocketError),
     /// Original native mass or body-point kinematics refused.
     Mechanics(RigidRocketError),
+    /// The outer explicit interval does not resolve the sampled quadratic drag.
+    /// Reduce the outer interval; smaller frozen-load mechanics substeps do not
+    /// resolve this atmosphere/drag update.
+    DragResolution {
+        /// Sample at which the local drag timescale was exceeded.
+        sample: &'static str,
+        /// Requested complete outer interval [s].
+        duration_s: f64,
+        /// Maximum interval from this sample's drag and point mobility [s].
+        maximum_duration_s: f64,
+    },
     /// Cancellation at the atmosphere composition boundary.
     Cancelled,
 }
@@ -247,6 +260,55 @@ fn sample_environment(
     })
 }
 
+// For frozen rho and Cd, F(u)=-k|u|u has derivative norm 2|F|/|u|.
+// A force at body arm r changes point velocity through
+// G = I/m - [r]x I_body^-1 [r]x. The rotational term is positive
+// semidefinite, so its trace bounds its largest eigenvalue. Evaluating that
+// trace in the ORIGINAL principal frame keeps this bound basis independent.
+// h*||dF/du||*||G|| <= 1 is a conservative local explicit-resolution rule,
+// not an error certificate for arbitrary Cd callbacks or evolving wind.
+fn admit_drag_interval(
+    state: &GasRigidRocketState,
+    sample: RocketFlightEnvironmentSample,
+    geometry: RocketFlightGeometry,
+    duration_s: f64,
+    sample_name: &'static str,
+) -> Result<(), AtmosphericFlightError> {
+    let speed = sample.airflow.speed_m_s();
+    let magnitude = sample.airflow.dynamic_pressure_pa()
+        * geometry.aerodynamic_reference_area_m2
+        * sample.drag_coefficient;
+    if speed == 0.0 || magnitude == 0.0 {
+        return Ok(());
+    }
+    let properties = state.vehicle().mass_properties()?;
+    let inertia = properties.principal_inertia_body();
+    let arm = properties
+        .principal_axes_to_body()
+        .rotate_world_to_body(geometry.aerodynamic_application_arm_body_m);
+    let rotational_mobility = (arm.y * arm.y + arm.z * arm.z) / inertia.x
+        + (arm.x * arm.x + arm.z * arm.z) / inertia.y
+        + (arm.x * arm.x + arm.y * arm.y) / inertia.z;
+    let mobility_bound = 1.0 / properties.mass() + rotational_mobility;
+    let rate_bound = 2.0 * (magnitude / speed) * mobility_bound;
+    if !mobility_bound.is_finite() || !rate_bound.is_finite() {
+        return Err(AtmosphericFlightError::Invalid(
+            "quadratic drag relaxation rate is unrepresentable",
+        ));
+    }
+    if rate_bound > 0.0 {
+        let maximum_duration_s = 1.0 / rate_bound;
+        if duration_s > maximum_duration_s {
+            return Err(AtmosphericFlightError::DragResolution {
+                sample: sample_name,
+                duration_s,
+                maximum_duration_s,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn advance_under_sample(
     state: &GasRigidRocketState,
     sample: RocketFlightEnvironmentSample,
@@ -322,6 +384,15 @@ fn advance_under_sample(
 /// precedes publication. Refinement is required for smoothly changing fields;
 /// source boundaries, ground contact, automatic cutoff and staging events are
 /// not localized by this operation.
+///
+/// The outer interval must resolve the initial AND predicted midpoint drag:
+/// `dt * 2|F|/|u| * (1/m + tr(-[r]x I_body^-1 [r]x)) <= 1`. This accounts
+/// for translational and rotational response at the actual application point.
+/// The rate is for locally frozen density and drag coefficient; it does not
+/// bound the caller coefficient's derivatives, changing wind, or other loads.
+/// [`AtmosphericFlightError::DragResolution`] reports an actionable outer-step
+/// limit without publishing either owner. `controls.mechanics` only resolves
+/// motion under held loads and cannot satisfy this condition by itself.
 pub fn advance_atmospheric_rocket(
     state: &GasRigidRocketState,
     atmosphere: &SphericalStandardAtmosphere,
@@ -356,6 +427,7 @@ pub fn advance_atmospheric_rocket(
         &mut drag_coefficient,
         &mut cancelled,
     )?;
+    admit_drag_interval(state, initial, geometry, duration_s, "initial")?;
     let (predictor, _) = advance_under_sample(
         state,
         initial,
@@ -371,6 +443,7 @@ pub fn advance_atmospheric_rocket(
         &mut drag_coefficient,
         &mut cancelled,
     )?;
+    admit_drag_interval(&predictor, midpoint, geometry, duration_s, "midpoint")?;
     let (endpoint, step) = advance_under_sample(
         state,
         midpoint,

@@ -193,6 +193,188 @@ fn midpoint_atmosphere_drag_and_central_gravity_refine_coast_at_second_order() {
 }
 
 #[test]
+fn strong_drag_cannot_accelerate_a_coasting_body_through_a_reversed_predictor() {
+    let source = atmosphere(false);
+    let original = state(1000.0, Vec3::new(0.0, 100.0, 0.0), 0.0);
+    let unchanged = original.clone();
+    let geometry = RocketFlightGeometry {
+        aerodynamic_reference_area_m2: 0.1,
+        ..geometry()
+    };
+    // Before outer-step admission the half-step drag reversed the predictor,
+    // then its reversed force accelerated the ORIGINAL coasting body. All
+    // queried Mach numbers remain below 0.5, so source/Cd admission cannot
+    // detect that temporal instability. Native held-load substeps cannot fix it.
+    let error = advance_atmospheric_rocket(
+        &original,
+        &source,
+        geometry,
+        coast(),
+        0.05,
+        controls(),
+        |flow| {
+            assert!(flow.mach_number() < 0.5);
+            Ok(1.0)
+        },
+        || false,
+    )
+    .unwrap_err();
+    let AtmosphericFlightError::DragResolution {
+        sample,
+        duration_s,
+        maximum_duration_s,
+    } = error
+    else {
+        panic!("expected a drag-resolution refusal, got {error:?}");
+    };
+    assert_eq!(sample, "initial");
+    assert_eq!(duration_s, 0.05);
+    assert!(maximum_duration_s > 0.0 && maximum_duration_s < 0.01);
+    assert_eq!(original, unchanged);
+
+    let mut current = original.clone();
+    for _ in 0..64 {
+        let candidate = advance_atmospheric_rocket(
+            &current,
+            &source,
+            geometry,
+            coast(),
+            duration_s / 64.0,
+            controls(),
+            |_| Ok(1.0),
+            || false,
+        )
+        .unwrap();
+        let before = current.vehicle().translation().velocity_m_s.y;
+        let after = candidate.endpoint().vehicle().translation().velocity_m_s.y;
+        assert!(after > 0.0 && after < before);
+        current = candidate.into_parts().0;
+    }
+    // Independent constant-density quadratic-drag solution. Over this short
+    // tangential coast, radial gravity and source-density variation perturb its
+    // tangential speed by much less than this 0.02 m/s absolute tolerance.
+    let density = source
+        .sample_at(FRAME, original.vehicle().translation().position_m)
+        .unwrap()
+        .air
+        .gas()
+        .density;
+    let mass = original.vehicle().mass_properties().unwrap().mass();
+    let exact = 100.0
+        / (1.0
+            + 0.5 * density * geometry.aerodynamic_reference_area_m2 * 100.0 * duration_s / mass);
+    near(current.vehicle().translation().velocity_m_s.y, exact, 0.02);
+    assert_eq!(current.reservoir(), original.reservoir());
+}
+
+#[test]
+fn drag_interval_accounts_for_rotational_point_mobility_and_midpoint_loading() {
+    let source = atmosphere(false);
+    let moving = state(1000.0, Vec3::new(0.0, 100.0, 0.0), 0.0);
+    let center = RocketFlightGeometry {
+        aerodynamic_reference_area_m2: 0.1,
+        ..geometry()
+    };
+    assert!(
+        advance_atmospheric_rocket(
+            &moving,
+            &source,
+            center,
+            coast(),
+            0.005,
+            controls(),
+            |_| Ok(1.0),
+            || false,
+        )
+        .is_ok()
+    );
+    let offset = RocketFlightGeometry {
+        aerodynamic_application_arm_body_m: Vec3::new(0.2, 0.0, 0.0),
+        ..center
+    };
+    assert!(matches!(
+        advance_atmospheric_rocket(
+            &moving,
+            &source,
+            offset,
+            coast(),
+            0.005,
+            controls(),
+            |_| Ok(1.0),
+            || false,
+        ),
+        Err(AtmosphericFlightError::DragResolution {
+            sample: "initial",
+            ..
+        })
+    ));
+
+    // Zero initial slip does not license an unresolved drag force after an
+    // independently authored force creates substantial midpoint motion.
+    let resting = state(1000.0, Vec3::ZERO, 0.0);
+    let unchanged = resting.clone();
+    let forcing = RocketFlightForcing {
+        additional_force_world_n: Vec3::new(0.0, 150.0, 0.0),
+        ..coast()
+    };
+    assert!(matches!(
+        advance_atmospheric_rocket(
+            &resting,
+            &source,
+            center,
+            forcing,
+            0.05,
+            controls(),
+            |_| Ok(1.0),
+            || false,
+        ),
+        Err(AtmosphericFlightError::DragResolution {
+            sample: "midpoint",
+            ..
+        })
+    ));
+    assert_eq!(resting, unchanged);
+}
+
+#[test]
+fn resolved_wind_drag_may_legitimately_increase_inertial_body_energy() {
+    let source = SphericalStandardAtmosphere::new(
+        FRAME,
+        Vec3::ZERO,
+        RADIUS,
+        9.80665 * RADIUS * RADIUS,
+        Vec3::ZERO,
+        Vec3::new(0.0, 20.0, 0.0),
+    )
+    .unwrap();
+    let original = state(1000.0, Vec3::ZERO, 0.0);
+    let candidate = advance_atmospheric_rocket(
+        &original,
+        &source,
+        RocketFlightGeometry {
+            aerodynamic_reference_area_m2: 0.1,
+            ..geometry()
+        },
+        coast(),
+        0.01,
+        controls(),
+        |_| Ok(1.0),
+        || false,
+    )
+    .unwrap();
+    let velocity = candidate.endpoint().vehicle().translation().velocity_m_s;
+    assert!(velocity.y > 0.0 && velocity.y < 20.0);
+    assert!(
+        candidate
+            .midpoint_environment()
+            .aerodynamic_load
+            .relative_power_w
+            < 0.0
+    );
+    assert_eq!(candidate.endpoint().reservoir(), original.reservoir());
+}
+
+#[test]
 fn powered_journey_reuses_original_gas_and_actual_body_point_environment() {
     let source = atmosphere(true);
     let position = Vec3::new(RADIUS + 1000.0, 0.0, 0.0);
