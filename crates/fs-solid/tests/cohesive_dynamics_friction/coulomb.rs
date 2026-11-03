@@ -1,5 +1,8 @@
 //! Native unregularized sticking, breakaway and retained source/history.
 use super::*;
+
+#[path = "impulse.rs"]
+mod impulse;
 use fs_solid::cohesive::dynamics::coulomb::{CoulombActivation, CoulombConfig, CoulombRegime};
 
 #[path = "interval.rs"]

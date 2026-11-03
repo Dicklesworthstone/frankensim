@@ -43,6 +43,9 @@ use coulomb::CoulombBinding;
 /// Bounded continuation through original Coulomb reversal refusals.
 pub mod interval;
 
+/// Instantaneous momentum transfer retaining damage and contact history.
+pub mod impulse;
+
 /// Explicit numerical, trajectory and energy controls. These are not material
 /// coefficients or inferred small-strain validity limits.
 #[derive(Debug, Clone, Copy)]

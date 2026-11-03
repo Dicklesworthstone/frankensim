@@ -20,6 +20,9 @@ use fs_solid::linear3::{
 };
 use fs_solver::{CsrOp, LinearOp, NewtonKrylovConfig};
 
+#[path = "cohesive_dynamics/impulse.rs"]
+mod impulse;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {

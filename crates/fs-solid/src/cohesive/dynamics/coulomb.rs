@@ -66,6 +66,10 @@ struct Model {
 pub(super) struct CoulombBinding {
     models: Arc<[Option<Model>]>,
     pub(super) states: Arc<[CoulombState]>,
+    // An instantaneous change invalidates inherited sliding occupancy only on
+    // affected tangential traces. Reclassify using the next interval's actual
+    // incoming velocity, including prescribed motion; keep prior reactions.
+    impulse_recheck: Option<Arc<[bool]>>,
     config: CoulombConfig,
     extra: usize,
 }
@@ -191,6 +195,7 @@ impl CoulombBinding {
         Ok(Self {
             models: models.into(),
             states,
+            impulse_recheck: None,
             config,
             extra,
         })
@@ -290,9 +295,9 @@ impl CoulombBinding {
             poll(cancelled)?;
             let mu = if let Some(model) = model {
                 let v = local_velocity(motion, p, offsets[p], dt, &motion.velocity_m_s)?;
-                if self.states[p].occupancy == CoulombRegime::Sliding
-                    || v[0].hypot(v[1]) > self.config.velocity_tolerance_m_s
-                {
+                let inherited_sliding = self.states[p].occupancy == CoulombRegime::Sliding
+                    && !self.impulse_recheck.as_ref().is_some_and(|flags| flags[p]);
+                if inherited_sliding || v[0].hypot(v[1]) > self.config.velocity_tolerance_m_s {
                     model.kinetic_mu
                 } else {
                     model.static_mu
@@ -445,8 +450,45 @@ impl CoulombBinding {
     pub(super) fn accepted(&self, states: Vec<CoulombState>) -> Self {
         Self {
             states: states.into(),
+            impulse_recheck: None,
             ..self.clone()
         }
+    }
+
+    /// Retain history and sources, but reconsider affected occupancy after an
+    /// impulse. The prescribed rate is only known at the next finite interval,
+    /// so classifying from the free velocity alone would be physically wrong.
+    pub(super) fn after_impulse(
+        &self,
+        before: &CohesiveMotion<'_, '_>,
+        velocity: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, super::impulse::ImpulseError> {
+        use super::impulse::ImpulseError;
+        let mut successor = self.clone();
+        for (p, model) in self.models.iter().enumerate() {
+            if cancelled() {
+                return Err(ImpulseError::Cancelled);
+            }
+            if model.is_none() {
+                continue;
+            }
+            let patch = &before.state.system.patches[p];
+            let trace = |v: &[f64]| {
+                patch.jump(v, [0.0; 3]).map_err(|_| {
+                    ImpulseError::Invalid("non-finite retained contact velocity trace")
+                })
+            };
+            let old = trace(&before.velocity_m_s)?;
+            let new = trace(velocity)?;
+            if old[1] != new[1] || old[2] != new[2] {
+                let flags = successor
+                    .impulse_recheck
+                    .get_or_insert_with(|| vec![false; self.models.len()].into());
+                Arc::make_mut(flags)[p] = true;
+            }
+        }
+        Ok(successor)
     }
     /// Refinement may finish well inside the ORIGINAL velocity-resolution band.
     /// This tests an already audited native candidate; it changes no velocity,
@@ -484,7 +526,9 @@ impl CoulombBinding {
             poll(cancelled)?;
             models.push(old.map(|_| Model::from_patch(patch)).transpose()?);
         }
-        Self::new(models, self.states.clone(), self.config)
+        let mut successor = Self::new(models, self.states.clone(), self.config)?;
+        successor.impulse_recheck = self.impulse_recheck.clone();
+        Ok(successor)
     }
 }
 

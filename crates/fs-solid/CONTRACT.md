@@ -4155,6 +4155,38 @@ also retain the complete accepted trajectory. These focused native tests do
 not constitute a dynamic crack-propagation, finite-strain or service-validation
 campaign.
 
+### Instantaneous cohesive momentum transfer
+
+`CohesiveMotion::impulse_candidate` applies an explicitly supplied generalized
+impulse in the original free-coordinate ordering by solving `M delta_v = J`
+with the native checked CG owner and supplied SPD preconditioner. It uses
+operator actions and bounded Krylov storage, without a dense inverse or a
+replacement mass. The original immutable motion supplies displacement, damage,
+source-bound viscosity, friction/contact bindings, clock, step count and controls.
+Only an accepted velocity and its incremental event account are published.
+
+The event independently rechecks `M (v_after - v_before) - J` using the actual
+representable returned velocity. Its signed work is
+`((v_before + v_after)/2) dot J`; kinetic change uses the corresponding mass
+increment. Compensated accumulation and a work tolerance scaled to the event
+avoid hiding a lost impulse in a large unchanged background energy. Numerical
+workspace, solver iterations, cancellation and the original velocity limit are
+explicit gates. Refusals leave the accepted state intact.
+
+No displacement path or physical time elapses, so the event does not invent
+fracture, viscous or frictional loss. The next physical interval retains those
+original owners. An affected Coulomb tangential trace reconsiders inherited
+sliding occupancy using that interval's actual incoming velocity, including its
+prescribed rate; prior reactions and material history survive the impulse.
+An unaffected trace retains its existing occupancy. Accepted finite-time replay
+clears this pending classification, and temperature transfer preserves it.
+
+The caller owns impulse generation, other-body reaction, restitution and any
+impact energy loss, and adds the signed event work to its trajectory account.
+These reduced-coordinate balances do not establish Cartesian angular momentum
+without the original geometric trace. Moving support impulses, new collision
+topology and automatic heat routing are outside this operation.
+
 ### Damaged-area friction in the original deformable dynamics
 
 `CohesiveMotion::with_damaged_area_friction` binds one explicit regularization
