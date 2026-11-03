@@ -151,6 +151,81 @@ fn translated_housing(path: &ArticulatedContactPath<'_>) -> Result<(), &'static 
 }
 
 #[test]
+fn small_internal_actuation_survives_a_large_common_translation() {
+    let centered = |mass, moment| {
+        SpatialInertia::new(
+            mass,
+            Vec3::default(),
+            Mat3 {
+                m: [moment, 0.0, 0.0, 0.0, moment, 0.0, 0.0, 0.0, moment],
+            },
+        )
+        .unwrap()
+    };
+    let model = ArticulatedModel::new(vec![
+        Link::new(
+            "shell",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            centered(2.0, 1.0),
+        ),
+        Link::new(
+            "rotor",
+            Some(0),
+            Se3::identity(),
+            JointModel::revolute(Vec3::new(1.0, 0.0, 0.0), None).unwrap(),
+            centered(1.0, 0.2),
+        ),
+    ])
+    .unwrap();
+    let initial = state(2.0_f64.powi(30));
+    let wrenches = [Wrench::default(); 2];
+    let duration = 1.0 / 16.0;
+    let mut settings = config(duration);
+    settings.angular_origin_world = Vec3::default();
+    let result = step_articulated_frictional_contacts(
+        &[ArticulatedTrajectorySystem {
+            model: &model,
+            state: &initial,
+            loads: FreeFloatingMotionLoads {
+                generalized_force: &[0.2],
+                external_body_wrench: &wrenches,
+                gravity_world: Vec3::default(),
+            },
+        }],
+        &[],
+        settings,
+        |_| Ok::<(), &'static str>(()), // This manufactured scene has no obstacles.
+        || false,
+    )
+    .unwrap();
+    assert_eq!(
+        result.momentum_before.kinetic_energy,
+        result.momentum_after.kinetic_energy
+    );
+    // Original shell/rotor inertias are 1 and 0.2 kg m². The motor produces
+    // opposite shell recoil and 0.12*dt² joules without changing bulk motion.
+    close(result.states_after[0].joint_velocity[0], 1.2 * duration);
+    close(
+        result.states_after[0].base.twist_body.angular.x,
+        -0.2 * duration,
+    );
+    vector(
+        result.states_after[0].base.twist_body.linear,
+        initial.base.twist_body.linear,
+    );
+    close(result.kinetic_energy_change, 0.12 * duration * duration);
+    close(result.actuator_impulse_work, 0.12 * duration * duration);
+    vector(result.linear_momentum_change_world, Vec3::default());
+    vector(
+        result.angular_momentum_change_about_origin_world,
+        Vec3::default(),
+    );
+    audit(&result);
+}
+
+#[test]
 fn gravity_and_actuation_support_the_carrier_while_its_internal_carriage_accelerates() {
     let model = carrier(None);
     let zero = [Wrench::default(); 2];

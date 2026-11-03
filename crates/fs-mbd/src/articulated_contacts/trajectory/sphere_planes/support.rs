@@ -15,8 +15,9 @@ use crate::articulated_contacts::step::{
     ArticulatedContactPath, ArticulatedContactStepConfig, ArticulatedContactStepError,
     step_articulated_frictional_contacts,
 };
-use crate::articulated_contacts::trajectory::ArticulatedTrajectoryMomentum;
+use crate::articulated_contacts::trajectory::{ArticulatedTrajectoryMomentum, Impulses};
 use fs_ga::Vec3;
+use fs_math::dd::Dd;
 
 /// Bounds and physical gates for a complete, atomically published window.
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +42,12 @@ pub struct CarrierSupportResult {
     pub state_after: FreeFloatingMotionState,
     pub momentum_before: ArticulatedTrajectoryMomentum,
     pub momentum_after: ArticulatedTrajectoryMomentum,
+    /// Sum of actual native kinetic increments, independent of rounded totals.
+    pub kinetic_energy_change: f64,
+    /// Sum of independently measured native changes, in N s.
+    pub linear_momentum_change_world: Vec3,
+    /// Actual angular change about `step.angular_origin_world`, in N m s.
+    pub angular_momentum_change_about_origin_world: Vec3,
     /// All original gravity, torque and support impulses, in N s.
     pub external_linear_impulse_world: Vec3,
     /// External angular impulse about `step.angular_origin_world`, in N m s.
@@ -176,6 +183,17 @@ pub fn advance_supported_carrier_planes(
     };
     let mut time = 0.0;
     let mut result: Option<CarrierSupportResult> = None;
+    let mut impulses = Impulses::default();
+    let mut momentum_change = Impulses::default();
+    let mut kinetic_change = Dd::ZERO;
+    let mut actuator_work = Dd::ZERO;
+    let mut gravity_work = Dd::ZERO;
+    let mut body_work = Dd::ZERO;
+    let mut support_work = Dd::ZERO;
+    let mut loss = Dd::ZERO;
+    let mut actuator_displacement_work = Dd::ZERO;
+    let mut gravity_displacement_work = Dd::ZERO;
+    let mut drift_defect = Dd::ZERO;
     while time < config.step.duration {
         let current = ArticulatedTrajectorySystem {
             state: &state,
@@ -234,6 +252,9 @@ pub fn advance_supported_carrier_planes(
             state_after: state.clone(),
             momentum_before: step.momentum_before,
             momentum_after: step.momentum_after,
+            kinetic_energy_change: 0.0,
+            linear_momentum_change_world: Vec3::default(),
+            angular_momentum_change_about_origin_world: Vec3::default(),
             external_linear_impulse_world: Vec3::default(),
             external_angular_impulse_about_origin_world: Vec3::default(),
             actuator_impulse_work: 0.0,
@@ -253,19 +274,28 @@ pub fn advance_supported_carrier_planes(
             minimum_gap: f64::INFINITY,
         });
         total.momentum_after = step.momentum_after;
-        total.external_linear_impulse_world =
-            total.external_linear_impulse_world + step.external_linear_impulse_world;
-        total.external_angular_impulse_about_origin_world = total
-            .external_angular_impulse_about_origin_world
-            + step.external_angular_impulse_about_origin_world;
-        total.actuator_impulse_work += step.actuator_impulse_work;
-        total.gravity_impulse_work += step.gravity_impulse_work;
-        total.body_torque_impulse_work += step.body_wrench_impulse_work;
-        total.support_work += step.contact.plane_work;
-        total.contact_loss += step.contact.contact.dissipated_energy;
-        total.actuator_displacement_work += step.actuator_displacement_work;
-        total.gravity_displacement_work += step.gravity_displacement_work;
-        total.drift_energy_defect += step.drift_energy_defect;
+        // Both spatial receipts already use the caller's fixed origin.
+        impulses.add(
+            step.external_linear_impulse_world,
+            step.external_angular_impulse_about_origin_world,
+            Vec3::default(),
+        );
+        momentum_change.add(
+            step.linear_momentum_change_world,
+            step.angular_momentum_change_about_origin_world,
+            Vec3::default(),
+        );
+        kinetic_change = kinetic_change + Dd::from_f64(step.kinetic_energy_change);
+        actuator_work = actuator_work + Dd::from_f64(step.actuator_impulse_work);
+        gravity_work = gravity_work + Dd::from_f64(step.gravity_impulse_work);
+        body_work = body_work + Dd::from_f64(step.body_wrench_impulse_work);
+        support_work = support_work + Dd::from_f64(step.contact.plane_work);
+        loss = loss + Dd::from_f64(step.contact.contact.dissipated_energy);
+        actuator_displacement_work =
+            actuator_displacement_work + Dd::from_f64(step.actuator_displacement_work);
+        gravity_displacement_work =
+            gravity_displacement_work + Dd::from_f64(step.gravity_displacement_work);
+        drift_defect = drift_defect + Dd::from_f64(step.drift_energy_defect);
         state = step
             .states_after
             .into_iter()
@@ -274,19 +304,25 @@ pub fn advance_supported_carrier_planes(
         time += duration;
     }
     let mut result = result.ok_or(CarrierSupportError::NoTimeProgress)?;
-    result.kinetic_work_residual = result.momentum_after.kinetic_energy
-        - result.momentum_before.kinetic_energy
-        - result.actuator_impulse_work
-        - result.gravity_impulse_work
-        - result.body_torque_impulse_work
-        - result.support_work
-        + result.contact_loss;
-    result.linear_momentum_residual = result.momentum_after.linear_world
-        - result.momentum_before.linear_world
-        - result.external_linear_impulse_world;
-    result.angular_momentum_residual = result.momentum_after.angular_about_origin_world
-        - result.momentum_before.angular_about_origin_world
-        - result.external_angular_impulse_about_origin_world;
+    result.kinetic_work_residual =
+        (kinetic_change - actuator_work - gravity_work - body_work - support_work + loss).to_f64();
+    (
+        result.linear_momentum_residual,
+        result.angular_momentum_residual,
+    ) = momentum_change.difference(&impulses);
+    result.kinetic_energy_change = kinetic_change.to_f64();
+    result.linear_momentum_change_world = momentum_change.linear;
+    result.angular_momentum_change_about_origin_world = momentum_change.angular;
+    result.external_linear_impulse_world = impulses.linear;
+    result.external_angular_impulse_about_origin_world = impulses.angular;
+    result.actuator_impulse_work = actuator_work.to_f64();
+    result.gravity_impulse_work = gravity_work.to_f64();
+    result.body_torque_impulse_work = body_work.to_f64();
+    result.support_work = support_work.to_f64();
+    result.contact_loss = loss.to_f64();
+    result.actuator_displacement_work = actuator_displacement_work.to_f64();
+    result.gravity_displacement_work = gravity_displacement_work.to_f64();
+    result.drift_energy_defect = drift_defect.to_f64();
     if ![
         result.actuator_impulse_work,
         result.gravity_impulse_work,
@@ -297,9 +333,14 @@ pub fn advance_supported_carrier_planes(
         result.gravity_displacement_work,
         result.drift_energy_defect,
         result.kinetic_work_residual,
+        result.kinetic_energy_change,
     ]
     .into_iter()
     .all(f64::is_finite)
+        || !finite_vector(result.external_linear_impulse_world)
+        || !finite_vector(result.external_angular_impulse_about_origin_world)
+        || !finite_vector(result.linear_momentum_change_world)
+        || !finite_vector(result.angular_momentum_change_about_origin_world)
         || !finite_vector(result.linear_momentum_residual)
         || !finite_vector(result.angular_momentum_residual)
         || result.kinetic_work_residual.abs() > config.step.energy_tolerance

@@ -9,7 +9,7 @@ use super::friction::{
     ArticulatedFrictionalContact, ArticulatedFrictionalContactResult,
     resolve_articulated_frictional_contacts,
 };
-use super::trajectory::{ArticulatedTrajectoryMomentum, ArticulatedTrajectorySystem};
+use super::trajectory::{ArticulatedTrajectoryMomentum, ArticulatedTrajectorySystem, Impulses};
 use super::{
     ArticulatedContactError, ArticulatedContactSystem, ContactCounterpart, LinkContactPoint,
 };
@@ -24,6 +24,7 @@ use crate::articulated::{
 };
 use fs_contact::frictional_multicontact::FrictionalContactConfig;
 use fs_ga::{Se3, Twist, Vec3, Wrench};
+use fs_math::dd::Dd;
 
 /// Independent physical gates for the composed step; SI units throughout.
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +35,8 @@ pub struct ArticulatedContactStepConfig {
     pub angular_origin_world: Vec3,
     /// Original simultaneous contact solver controls.
     pub contact: FrictionalContactConfig,
-    /// Maximum absolute per-tree and aggregate unforced drift energy change, in J.
+    /// Maximum absolute per-tree and aggregate unloaded drift work defect, in J.
+    /// A free tree has no drift source; a prescribed base retains its drive work.
     pub drift_energy_tolerance: f64,
     /// Maximum complete-step work/energy residual, in joules.
     pub energy_tolerance: f64,
@@ -122,6 +124,11 @@ pub enum ArticulatedContactStepError<E> {
         system_index: usize,
         error: FreeFloatingMotionError,
     },
+    /// Original unloaded drift with a prescribed base refused.
+    PrescribedDrift {
+        system_index: usize,
+        error: crate::articulated::motion::prescribed::PrescribedBaseMotionError,
+    },
     /// Original simultaneous contact owner refused.
     Contact(ArticulatedContactError),
     /// Required whole-path geometry admission refused.
@@ -164,6 +171,13 @@ pub struct ArticulatedContactStepResult<P> {
     pub momentum_before: ArticulatedTrajectoryMomentum,
     /// Independent physical final momentum and energy.
     pub momentum_after: ArticulatedTrajectoryMomentum,
+    /// Sum of actual native load, contact and drift kinetic increments, in J.
+    /// This remains meaningful when the rounded endpoint energies coincide.
+    pub kinetic_energy_change: f64,
+    /// Independently measured native momentum changes, in N s.
+    pub linear_momentum_change_world: Vec3,
+    /// Independently measured native angular changes about the configured origin.
+    pub angular_momentum_change_about_origin_world: Vec3,
     /// Total load and support impulse; dynamic contact pairs cancel globally.
     pub external_linear_impulse_world: Vec3,
     /// Total applied angular impulse about the configured fixed origin.
@@ -240,11 +254,12 @@ pub fn step_articulated_frictional_contacts<P, E>(
     )?;
     let mut post_contact = initial.clone();
     let mut load_responses = Vec::with_capacity(systems.len());
-    let mut actuator_work = 0.0;
-    let mut gravity_work = 0.0;
-    let mut body_work = 0.0;
-    let mut linear_impulse = Vec3::default();
-    let mut angular_impulse = Vec3::default();
+    let mut actuator_work = Dd::ZERO;
+    let mut gravity_work = Dd::ZERO;
+    let mut body_work = Dd::ZERO;
+    let mut impulses = Impulses::default();
+    let mut momentum_change = Impulses::default();
+    let mut kinetic_change = Dd::ZERO;
     for (system_index, system) in systems.iter().enumerate() {
         poll(&mut cancelled)?;
         let loads = system.loads;
@@ -317,21 +332,37 @@ pub fn step_articulated_frictional_contacts<P, E>(
             if link_index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
-            let midpoint = before[system_index].body_twist[link_index]
-                .scale(0.5)
-                .plus(after_kick.body_twist[link_index].scale(0.5));
-            gravity_work += gravity.pairing(midpoint);
-            body_work += config.duration * loads.external_body_wrench[link_index].pairing(midpoint);
+            let old = before[system_index].body_twist[link_index];
+            let new = after_kick.body_twist[link_index];
+            gravity_work = gravity_work + impulse_pairing(*gravity, old, new);
+            let applied = loads.external_body_wrench[link_index];
+            body_work = body_work
+                + impulse_pairing(
+                    Wrench::new(
+                        applied.torque.scale(config.duration),
+                        applied.force.scale(config.duration),
+                    ),
+                    old,
+                    new,
+                );
         }
         for (index, impulse) in joint_impulses.iter().enumerate() {
-            actuator_work += impulse
-                * (0.5 * state.joint_velocity[index] + 0.5 * response.joint_velocity_after[index]);
+            actuator_work = actuator_work
+                + Dd::from_f64(*impulse)
+                    * (Dd::from_f64(0.5 * state.joint_velocity[index])
+                        + Dd::from_f64(0.5 * response.joint_velocity_after[index]));
         }
-        linear_impulse = linear_impulse + response.external_linear_impulse_world;
-        angular_impulse = angular_impulse + response.external_angular_impulse_world
-            - config
-                .angular_origin_world
-                .cross(response.external_linear_impulse_world);
+        impulses.add(
+            response.external_linear_impulse_world,
+            response.external_angular_impulse_world,
+            config.angular_origin_world,
+        );
+        momentum_change.add(
+            response.linear_momentum_change_world,
+            response.angular_momentum_change_world,
+            config.angular_origin_world,
+        );
+        kinetic_change = kinetic_change + Dd::from_f64(response.kinetic_energy_change);
         load_responses.push(response);
     }
     let inputs: Vec<_> = systems
@@ -358,20 +389,21 @@ pub fn step_articulated_frictional_contacts<P, E>(
         state
             .joint_velocity
             .clone_from(&response.joint_velocity_after);
-        linear_impulse = linear_impulse + response.external_linear_impulse_world;
-        angular_impulse = angular_impulse + response.external_angular_impulse_world
-            - config
-                .angular_origin_world
-                .cross(response.external_linear_impulse_world);
+        impulses.add(
+            response.external_linear_impulse_world,
+            response.external_angular_impulse_world,
+            config.angular_origin_world,
+        );
+        momentum_change.add(
+            response.linear_momentum_change_world,
+            response.angular_momentum_change_world,
+            config.angular_origin_world,
+        );
+        kinetic_change = kinetic_change + Dd::from_f64(response.kinetic_energy_change);
     }
-    let before_drift = totals(
-        systems,
-        &post_contact,
-        config.angular_origin_world,
-        &mut cancelled,
-    )?;
     let mut states_after = Vec::with_capacity(systems.len());
-    let mut drift_energy_defect = 0.0;
+    let mut drift_energy_defect = Dd::ZERO;
+    let mut drift_change = Impulses::default();
     for (index, (system, state)) in systems.iter().zip(&post_contact).enumerate() {
         let result =
             drift(system.model, state, config.duration, &mut cancelled).map_err(|error| {
@@ -389,7 +421,18 @@ pub fn step_articulated_frictional_contacts<P, E>(
                 "one tree exceeds the unforced drift energy gate",
             ));
         }
-        drift_energy_defect += result.kinetic_work_residual;
+        drift_energy_defect = drift_energy_defect + Dd::from_f64(result.kinetic_work_residual);
+        drift_change.add(
+            result.linear_momentum_change_world,
+            result.angular_momentum_change_world,
+            config.angular_origin_world,
+        );
+        momentum_change.add(
+            result.linear_momentum_change_world,
+            result.angular_momentum_change_world,
+            config.angular_origin_world,
+        );
+        kinetic_change = kinetic_change + Dd::from_f64(result.kinetic_energy_change);
         states_after.push(result.state_after);
     }
     let after = kinematics(systems, &states_after, &mut cancelled)?;
@@ -400,51 +443,74 @@ pub fn step_articulated_frictional_contacts<P, E>(
         config.angular_origin_world,
         &mut cancelled,
     )?;
-    let mut actuator_displacement_work = 0.0;
-    let mut gravity_displacement_work = 0.0;
-    let mut gravity_angular_splitting = Vec3::default();
+    let mut actuator_displacement_work = Dd::ZERO;
+    let mut gravity_displacement_work = Dd::ZERO;
+    let mut gravity_angular_splitting = [Dd::ZERO; 3];
     for (system_index, system) in systems.iter().enumerate() {
         for (dof, &effort) in system.loads.generalized_force.iter().enumerate() {
-            actuator_displacement_work += effort
-                * (states_after[system_index].joint_position[dof]
-                    - system.state.joint_position[dof]);
+            actuator_displacement_work = actuator_displacement_work
+                + Dd::from_f64(effort)
+                    * (Dd::from_f64(states_after[system_index].joint_position[dof])
+                        - Dd::from_f64(system.state.joint_position[dof]));
         }
         for (link_index, link) in system.model.links().iter().enumerate() {
             if link_index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
             let local_com = link.inertia().center_of_mass();
-            let first = before[system_index].world_from_link[link_index]
-                .transform_point(local_com)
-                .map_err(|error| dynamics(system_index, error.into()))?;
-            let last = after[system_index].world_from_link[link_index]
-                .transform_point(local_com)
+            let first_pose = before[system_index].world_from_link[link_index];
+            let last_pose = after[system_index].world_from_link[link_index];
+            let displacement = com_displacement(first_pose, last_pose, local_com)
                 .map_err(|error| dynamics(system_index, error.into()))?;
             let force = system.loads.gravity_world.scale(link.inertia().mass());
-            gravity_displacement_work += force.dot(last - first);
+            let force = [force.x, force.y, force.z].map(Dd::from_f64);
+            for (dx, force) in displacement.into_iter().zip(force) {
+                gravity_displacement_work = gravity_displacement_work + force * dx;
+            }
             // Individual link COM paths need not be linear. Their mass-weighted
             // sum is the native unforced tree COM and IS linear, so this sum
             // gives the exact total uniform-gravity angular splitting term.
-            gravity_angular_splitting = gravity_angular_splitting
-                + (first - last).cross(force).scale(0.5 * config.duration);
+            for (i, j, k) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)] {
+                gravity_angular_splitting[i] = gravity_angular_splitting[i]
+                    + (displacement[k] * force[j] - displacement[j] * force[k])
+                        * Dd::from_f64(0.5 * config.duration);
+            }
         }
     }
-    let work_residual = momentum_after.kinetic_energy
-        - momentum_before.kinetic_energy
+    let work_residual = (kinetic_change
         - actuator_work
         - gravity_work
         - body_work
-        - contact.plane_work
-        + contact.contact.dissipated_energy;
-    let linear_residual =
-        momentum_after.linear_world - momentum_before.linear_world - linear_impulse;
-    let angular_residual = momentum_after.angular_about_origin_world
-        - momentum_before.angular_about_origin_world
-        - angular_impulse;
-    let drift_angular =
-        momentum_after.angular_about_origin_world - before_drift.angular_about_origin_world;
-    let actuator_splitting_work = actuator_work - actuator_displacement_work;
-    let gravity_splitting_work = gravity_work - gravity_displacement_work;
+        - Dd::from_f64(contact.plane_work)
+        + Dd::from_f64(contact.contact.dissipated_energy))
+    .to_f64();
+    let (linear_residual, angular_residual) = momentum_change.difference(&impulses);
+    let drift_angular = drift_change.angular;
+    let actuator_splitting_work = (actuator_work - actuator_displacement_work).to_f64();
+    let gravity_splitting_work = (gravity_work - gravity_displacement_work).to_f64();
+    let [
+        kinetic_energy_change,
+        actuator_work,
+        gravity_work,
+        body_work,
+        actuator_displacement_work,
+        gravity_displacement_work,
+        drift_energy_defect,
+    ] = [
+        kinetic_change,
+        actuator_work,
+        gravity_work,
+        body_work,
+        actuator_displacement_work,
+        gravity_displacement_work,
+        drift_energy_defect,
+    ]
+    .map(Dd::to_f64);
+    let gravity_angular_splitting = Vec3::new(
+        gravity_angular_splitting[0].to_f64(),
+        gravity_angular_splitting[1].to_f64(),
+        gravity_angular_splitting[2].to_f64(),
+    );
     if ![
         actuator_work,
         gravity_work,
@@ -455,12 +521,15 @@ pub fn step_articulated_frictional_contacts<P, E>(
         drift_energy_defect,
         actuator_splitting_work,
         gravity_splitting_work,
+        kinetic_energy_change,
     ]
     .iter()
     .all(|x| x.is_finite())
         || ![
-            linear_impulse,
-            angular_impulse,
+            impulses.linear,
+            impulses.angular,
+            momentum_change.linear,
+            momentum_change.angular,
             linear_residual,
             angular_residual,
             drift_angular,
@@ -501,8 +570,11 @@ pub fn step_articulated_frictional_contacts<P, E>(
         endpoint_gaps,
         momentum_before,
         momentum_after,
-        external_linear_impulse_world: linear_impulse,
-        external_angular_impulse_about_origin_world: angular_impulse,
+        kinetic_energy_change,
+        linear_momentum_change_world: momentum_change.linear,
+        angular_momentum_change_about_origin_world: momentum_change.angular,
+        external_linear_impulse_world: impulses.linear,
+        external_angular_impulse_about_origin_world: impulses.angular,
         actuator_impulse_work: actuator_work,
         gravity_impulse_work: gravity_work,
         body_wrench_impulse_work: body_work,
@@ -605,11 +677,8 @@ fn totals<E>(
     origin: Vec3,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ArticulatedTrajectoryMomentum, ArticulatedContactStepError<E>> {
-    let mut total = ArticulatedTrajectoryMomentum {
-        linear_world: Vec3::default(),
-        angular_about_origin_world: Vec3::default(),
-        kinetic_energy: 0.0,
-    };
+    let mut spatial = Impulses::default();
+    let mut kinetic = Dd::ZERO;
     for (index, (system, state)) in systems.iter().zip(states).enumerate() {
         poll(cancelled)?;
         let mut base = state.base;
@@ -625,12 +694,53 @@ fn totals<E>(
             &state.joint_velocity,
         )
         .map_err(|error| dynamics(index, error))?;
-        total.linear_world = total.linear_world + value.linear_momentum_world;
-        total.angular_about_origin_world =
-            total.angular_about_origin_world + value.angular_momentum_world;
-        total.kinetic_energy += value.kinetic_energy;
+        spatial.add(
+            value.linear_momentum_world,
+            value.angular_momentum_world,
+            Vec3::default(),
+        );
+        kinetic = kinetic + Dd::from_f64(value.kinetic_energy);
     }
-    Ok(total)
+    Ok(ArticulatedTrajectoryMomentum {
+        linear_world: spatial.linear,
+        angular_about_origin_world: spatial.angular,
+        kinetic_energy: kinetic.to_f64(),
+    })
+}
+fn impulse_pairing(impulse: Wrench, before: Twist, after: Twist) -> Dd {
+    let spatial = |angular: Vec3, linear: Vec3| {
+        [
+            angular.x, angular.y, angular.z, linear.x, linear.y, linear.z,
+        ]
+    };
+    spatial(impulse.torque, impulse.force)
+        .into_iter()
+        .zip(spatial(before.angular, before.linear))
+        .zip(spatial(after.angular, after.linear))
+        .fold(Dd::ZERO, |sum, ((source, old), new)| {
+            sum + Dd::from_f64(source) * (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new))
+        })
+}
+// Keep local COM rotation separate from absolute link translation. Combining
+// them first can erase real displacement beside a large coordinate offset.
+fn com_displacement(first: Se3, last: Se3, local_com: Vec3) -> Result<[Dd; 3], fs_ga::GaError> {
+    let mut displacement = [Dd::ZERO; 3];
+    for (first, last) in [
+        (first.translation(), last.translation()),
+        (
+            first.rotation().rotate(local_com)?,
+            last.rotation().rotate(local_com)?,
+        ),
+    ] {
+        for ((sum, old), new) in displacement
+            .iter_mut()
+            .zip([first.x, first.y, first.z])
+            .zip([last.x, last.y, last.z])
+        {
+            *sum = *sum + Dd::from_f64(new) - Dd::from_f64(old);
+        }
+    }
+    Ok(displacement)
 }
 fn gaps<E>(
     states: &[Kinematics],

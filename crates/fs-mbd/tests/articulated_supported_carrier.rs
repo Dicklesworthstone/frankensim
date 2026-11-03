@@ -131,6 +131,58 @@ fn audit(result: &CarrierSupportResult) {
 }
 
 #[test]
+fn supported_spin_work_survives_large_parallel_translation_across_steps() {
+    let model = sphere();
+    let initial = state(
+        Vec3::new(0.0, 0.5 + GAP, 0.0),
+        Vec3::new(2.0_f64.powi(22), 0.0, 0.0),
+        0,
+    );
+    let wrenches = [Wrench::new(Vec3::new(0.2, 0.0, 0.0), Vec3::default())];
+    let duration = 1.0 / 16.0;
+    let mut settings = config(duration);
+    settings.maximum_step = 1.0 / 64.0;
+    settings.step.angular_origin_world = Vec3::default();
+    let result = advance_supported_carrier_planes(
+        ArticulatedTrajectorySystem {
+            model: &model,
+            state: &initial,
+            loads: FreeFloatingMotionLoads {
+                generalized_force: &[],
+                external_body_wrench: &wrenches,
+                gravity_world: Vec3::new(0.0, -8.0, 0.0),
+            },
+        },
+        0.5,
+        &[plane(0.0)],
+        settings,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(result.accepted_steps, 4);
+    assert!(result.minimum_gap >= 0.0);
+    assert_eq!(
+        result.momentum_before.kinetic_energy,
+        result.momentum_after.kinetic_energy
+    );
+    close(spin(&result.state_after).x, duration);
+    close(result.kinetic_energy_change, 0.1 * duration * duration);
+    close(result.body_torque_impulse_work, 0.1 * duration * duration);
+    // Each support removes its gravity kick; that splitting loss is kept
+    // separate from the independently retained physical spin energy.
+    close(result.gravity_impulse_work, result.contact_loss);
+    close(result.gravity_displacement_work, 0.0);
+    close(result.kinetic_work_residual, result.drift_energy_defect);
+    vector(result.linear_momentum_change_world, Vec3::default());
+    vector(
+        result.angular_momentum_change_about_origin_world,
+        Vec3::new(0.2 * duration, 0.0, 0.0),
+    );
+    vector(result.linear_momentum_residual, Vec3::default());
+    vector(result.angular_momentum_residual, Vec3::default());
+}
+
+#[test]
 fn internal_wheel_actuation_rolls_the_shell_with_analytic_recoil_and_gravity_support() {
     let model = carrier();
     let initial = state(Vec3::new(0.0, 1.0 + GAP, 0.0), Vec3::default(), 1);

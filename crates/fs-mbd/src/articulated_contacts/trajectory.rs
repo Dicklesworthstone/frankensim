@@ -517,14 +517,14 @@ fn momentum(
 }
 
 #[derive(Default)]
-struct Impulses {
-    linear: Vec3,
-    angular: Vec3,
+pub(super) struct Impulses {
+    pub(super) linear: Vec3,
+    pub(super) angular: Vec3,
     linear_sum: [Dd; 3],
     angular_sum: [Dd; 3],
 }
 impl Impulses {
-    fn add(&mut self, linear: Vec3, angular: Vec3, origin: Vec3) {
+    pub(super) fn add(&mut self, linear: Vec3, angular: Vec3, origin: Vec3) {
         let p = [linear.x, linear.y, linear.z].map(Dd::from_f64);
         let l = [angular.x, angular.y, angular.z].map(Dd::from_f64);
         let x = [origin.x, origin.y, origin.z].map(Dd::from_f64);
@@ -538,7 +538,7 @@ impl Impulses {
         self.angular = Self::vector(self.angular_sum);
     }
 
-    fn difference(&self, other: &Self) -> (Vec3, Vec3) {
+    pub(super) fn difference(&self, other: &Self) -> (Vec3, Vec3) {
         (
             Self::vector(core::array::from_fn(|i| {
                 self.linear_sum[i] - other.linear_sum[i]
