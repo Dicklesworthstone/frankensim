@@ -1,4 +1,7 @@
 //! G0/G1/G4 uniform-field reductions from synthetic data, not measurements.
+#[path = "field_storage/spatial.rs"]
+mod spatial_dielectric;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

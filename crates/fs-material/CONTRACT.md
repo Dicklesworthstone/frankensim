@@ -5053,6 +5053,24 @@ does not supply one. All source coefficients remain in the original complete
 material bundle.
 
 
+### Explicit three-dimensional dielectric source laws
+
+`field_storage::spatial::SpatialDielectricLaw` supplies the same absolute-SI
+storage admission to full three-dimensional fields. Its orthotropic law needs
+all three `electric_permittivity_1`, `_2`, `_3` sources and explicitly admitted
+orthonormal principal directions in the mesh frame. The existing tensor rotation
+forms the complete symmetric epsilon; no normal coefficient or conductor frame
+is inferred. Source applicability and representable tensor positivity are
+checked before returning D=epsilon E. Weighted FEEC separately checks its
+assembled tensor's interval positivity.
+
+This is a static, lossless linear snapshot. Dispersion, evolving orientation,
+nonlinearity and temperature/geometry parameter work retain separate owners.
+`tests/field_storage/spatial.rs` checks the uniform-capacitor limit, independent
+principal-frame vector/energy projection, axis-sign invariance, and refusal of
+missing, wrong-unit, nonpositive or unsupported dynamic sources and bad axes.
+
+
 ### Complete liquid bundles through temperature and shear evolution
 
 `ResolvedLiquidState::try_from_material` adopts an already resolved material

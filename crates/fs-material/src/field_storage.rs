@@ -27,6 +27,8 @@ pub mod hysteresis;
 pub mod thermal;
 /// Source-backed scalar or oriented planar dielectric response.
 pub mod planar;
+/// Source-backed scalar or oriented three-dimensional dielectric response.
+pub mod spatial;
 /// Passive source-backed dielectric polarization memory and its RC realization.
 pub mod dielectric;
 
