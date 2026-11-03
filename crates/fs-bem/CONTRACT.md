@@ -221,6 +221,10 @@ everywhere: this is screening, not a viscous truth source.
   trailing-edge panels; circulation DETERMINED, not assumed); lift by
   PRESSURE INTEGRATION of the enforced surface field (the Γ-accounting
   shortcut was measurably wrong bookkeeping and is gone);
+  `Cl = L'/(q∞ c)` uses the distance from trailing-edge node zero to the
+  farthest leading-edge node as its reference chord. Both chord endpoints must
+  be present. Pressure coefficients, lift, and the adjoint are invariant under
+  uniform scaling and joint rigid rotation/translation of section and flow;
   `dcl_dalpha_adjoint` — one transposed solve for the solution
   sensitivity plus solve-free finite-difference output partials, FD-gated
   and explicitly not claimed as an exact symbolic derivative. The
@@ -234,7 +238,18 @@ everywhere: this is screening, not a viscous truth source.
 - `wake2d`: `WakeSim` — impulsive-start free wake; Kelvin-conserving
   trailing-edge shedding, regularized point-vortex convection, the
   quasi-steady bound circulation relaxing against wake downwash;
-  ledgered traces.
+  ledgered traces. The global freestream direction is resolved relative to the
+  actual chord. Wake positions are in the local unit-chord frame (LE = (0, 0),
+  TE = (1, 0)), circulation is scaled by U∞c, and time by c/U∞. The
+  quarter-chord bound vortex and three-quarter-chord control point therefore
+  move and scale with the supplied section, preserving its nondimensional lift
+  history. A cached panel lift slope supplies a bounded harmonic response to
+  local wake downwash: `Γ_target = Γ_steady cos(δα) + (dCl/dα)/2 sin(δα)`.
+  The response retains camber lift at zero incidence and the section's actual
+  zero-lift angle without dividing by `sin(alpha)`. This is a local
+  attached-flow, quasi-steady screening closure; it is not a resolved unsteady
+  pressure, stall, or separated-flow model. The slope is evaluated once at
+  construction, with no panel solves or sensitivity work inside wake steps.
 
 ### `helmholtz` (bead frankensim-fsim-helmholtz-bem-k1ryv)
 

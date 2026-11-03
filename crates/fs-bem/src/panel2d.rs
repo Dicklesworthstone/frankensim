@@ -49,7 +49,7 @@ fn copied_vec(values: &[f64], operation: &'static str) -> Result<Vec<f64>, BemEr
 /// discipline): bump on ANY change that can move this kernel's output
 /// bits — transcendental routing, quadrature, assembly order.
 /// Downstream goldens pin this in golden-couplings.json.
-pub const PANEL_BIT_SEMANTICS_VERSION: u32 = 1;
+pub const PANEL_BIT_SEMANTICS_VERSION: u32 = 2;
 
 fn det_hypot(x: f64, y: f64) -> f64 {
     det::sqrt(x.mul_add(x, y * y))
@@ -57,6 +57,8 @@ fn det_hypot(x: f64, y: f64) -> f64 {
 
 /// A closed airfoil section: nodes ordered clockwise from the trailing
 /// edge along the lower surface and back over the upper surface.
+/// The reference leading edge is the node farthest from node zero; both
+/// chord endpoints must therefore be represented in the input polygon.
 #[derive(Debug, Clone)]
 pub struct Airfoil2d {
     /// Panel endpoints (closed: node N = node 0 implicitly).
@@ -76,6 +78,37 @@ impl Airfoil2d {
     #[must_use]
     pub fn nodes(&self) -> &[[f64; 2]] {
         &self.nodes
+    }
+
+    /// Reference chord length in the same units as the section coordinates.
+    /// Coefficients are normalized by this length, independent of the section's
+    /// position, orientation, or uniform scale.
+    #[must_use]
+    pub fn reference_chord(&self) -> f64 {
+        self.chord_frame().2
+    }
+
+    /// Leading edge, unit chord direction (leading to trailing), and length.
+    /// Farthest-node ties retain the first node in the declared panel order.
+    pub(crate) fn chord_frame(&self) -> ([f64; 2], [f64; 2], f64) {
+        let trailing = self.nodes[0];
+        let mut leading = trailing;
+        let mut chord2 = 0.0;
+        for &node in &self.nodes {
+            let dx = trailing[0] - node[0];
+            let dy = trailing[1] - node[1];
+            let distance2 = dx.mul_add(dx, dy * dy);
+            if distance2 > chord2 {
+                chord2 = distance2;
+                leading = node;
+            }
+        }
+        let chord = det::sqrt(chord2);
+        let direction = [
+            (trailing[0] - leading[0]) / chord,
+            (trailing[1] - leading[1]) / chord,
+        ];
+        (leading, direction, chord)
     }
 
     /// Validate bounds, finiteness, scale, orientation, and simple-polygon
@@ -166,7 +199,8 @@ pub struct PanelSolution2d {
     pub sources: Vec<f64>,
     /// The shared vortex density.
     pub gamma: f64,
-    /// Lift coefficient from pressure integration of the solved surface field.
+    /// Dimensionless lift coefficient L'/(q∞ c), from pressure integration of
+    /// the solved surface field and the section's reference chord c.
     pub cl: f64,
     /// Tangential speeds at panel midpoints.
     pub vt: Vec<f64>,
@@ -285,6 +319,7 @@ struct Geometry {
     tangent: Vec<[f64; 2]>,
     normal: Vec<[f64; 2]>,
     len: Vec<f64>,
+    chord: f64,
 }
 
 fn geometry(foil: &Airfoil2d) -> Result<Geometry, BemError> {
@@ -295,6 +330,7 @@ fn geometry(foil: &Airfoil2d) -> Result<Geometry, BemError> {
         tangent: Vec::new(),
         normal: Vec::new(),
         len: Vec::new(),
+        chord: foil.reference_chord(),
     };
     g.mid
         .try_reserve_exact(n)
@@ -343,8 +379,11 @@ fn source_velocity(foil: &Airfoil2d, g: &Geometry, j: usize, p: [f64; 2]) -> [f6
     let xl = dx * t[0] + dy * t[1];
     let yl = dx * nrm[0] + dy * nrm[1];
     let l = g.len[j];
-    let r1 = det_hypot(xl, yl).max(1e-12);
-    let r2 = det_hypot(xl - l, yl).max(1e-12);
+    // A dimensional absolute cutoff would change Cp when the same section is
+    // supplied in different units. Keep the endpoint guard panel-relative.
+    let min_radius = l * 1e-12;
+    let r1 = det_hypot(xl, yl).max(min_radius);
+    let r2 = det_hypot(xl - l, yl).max(min_radius);
     let theta1 = det::atan2(yl, xl);
     let theta2 = det::atan2(yl, xl - l);
     let two_pi = std::f64::consts::TAU;
@@ -363,7 +402,9 @@ fn vortex_velocity(foil: &Airfoil2d, g: &Geometry, j: usize, p: [f64; 2]) -> [f6
     [s[1], -s[0]]
 }
 
-/// Solve at angle of attack `alpha` (radians), unit freestream.
+/// Solve with unit freestream at angle `alpha` (radians) from the global +x
+/// axis. For a chord aligned with +x this is the angle of attack; rotating the
+/// section and freestream together preserves the lift coefficient.
 ///
 /// # Errors
 /// Returns [`BemError`] for invalid geometry/angle, an inadmissible dense
@@ -416,8 +457,8 @@ pub fn solve(foil: &Airfoil2d, alpha: f64) -> Result<PanelSolution2d, BemError> 
         vt.push(v[0] * tan[0] + v[1] * tan[1]);
     }
     // Lift by PRESSURE INTEGRATION (v_n = 0 on the body, so
-    // |v|² = v_t²): Cl = −∮ Cp·n_y ds, then rotate the force normal to
-    // the freestream. Trustworthy bookkeeping — the surface field is
+    // |v|² = v_t²): Cl = −∮ Cp·n_lift ds/c. Rotate the force normal to
+    // the freestream and divide by the reference chord. The surface field is
     // what the collocation system actually enforces.
     let mut fx = 0.0;
     let mut fy = 0.0;
@@ -426,7 +467,7 @@ pub fn solve(foil: &Airfoil2d, alpha: f64) -> Result<PanelSolution2d, BemError> 
         fx += -cp * g.normal[i][0] * g.len[i];
         fy += -cp * g.normal[i][1] * g.len[i];
     }
-    let cl = fy * det::cos(alpha) - fx * det::sin(alpha);
+    let cl = (fy * det::cos(alpha) - fx * det::sin(alpha)) / g.chord;
     if !cl.is_finite() || vt.iter().any(|value| !value.is_finite()) {
         return Err(BemError::NonFiniteResult {
             operation: "2D pressure integration",
@@ -625,5 +666,5 @@ fn output_cl(foil: &Airfoil2d, g: &Geometry, x: &[f64], alpha: f64) -> f64 {
         fx += -cp * g.normal[i][0] * g.len[i];
         fy += -cp * g.normal[i][1] * g.len[i];
     }
-    fy * det::cos(alpha) - fx * det::sin(alpha)
+    (fy * det::cos(alpha) - fx * det::sin(alpha)) / g.chord
 }

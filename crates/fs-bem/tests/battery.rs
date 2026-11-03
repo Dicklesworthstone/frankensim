@@ -400,6 +400,173 @@ fn bem_006_naca0012_ladson_prestall_envelope() {
     }
 }
 
+/// G3: changing the units or rigid frame of a section cannot change its
+/// nondimensional lift, pressure field, or lift sensitivity.
+#[test]
+fn bem_lift_and_adjoint_are_section_similarity_invariant() {
+    let foil = naca4_symmetric(0.12, 80).expect("valid section");
+    let alpha = 0.07;
+    let baseline = panel2d::solve(&foil, alpha).expect("baseline solve");
+    let baseline_slope = panel2d::dcl_dalpha_adjoint(&foil, alpha).expect("baseline adjoint");
+    for (scale, rotation, translation) in [
+        (1.0e-9, 0.0, [0.0, 0.0]),
+        (0.2, 0.7, [-1.3, 0.8]),
+        (8.0, 2.3, [13.0, -21.0]),
+    ] {
+        let transformed = transformed_section(&foil, scale, rotation, translation);
+        let solution = panel2d::solve(&transformed, alpha + rotation).expect("transformed solve");
+        let slope = panel2d::dcl_dalpha_adjoint(&transformed, alpha + rotation)
+            .expect("transformed adjoint");
+        assert!((transformed.reference_chord() / scale - 1.0).abs() < 1e-12);
+        assert!((solution.cl - baseline.cl).abs() < 2e-10, "scale={scale}");
+        assert!((slope - baseline_slope).abs() < 2e-7, "scale={scale}");
+        for (got, want) in solution.vt.iter().zip(&baseline.vt) {
+            assert!((got - want).abs() < 2e-10, "scale={scale}");
+        }
+        let h = 1e-5;
+        let fd = (panel2d::solve(&transformed, alpha + rotation + h)
+            .expect("positive perturbation")
+            .cl
+            - panel2d::solve(&transformed, alpha + rotation - h)
+                .expect("negative perturbation")
+                .cl)
+            / (2.0 * h);
+        assert!((slope - fd).abs() < 2e-7, "scale={scale}");
+    }
+}
+
+/// G3: the nondimensional transient is attached to the actual chord, rather
+/// than fixed points in the caller's global frame.
+#[test]
+fn bem_wake_lift_history_is_section_similarity_invariant() {
+    // The cached slope uses finite-difference output partials. Account for its
+    // 2e-7 derivative tolerance in this time-integrated similarity comparison.
+    let tolerance = 2e-7;
+    let foil = naca4_symmetric(0.12, 48).expect("valid section");
+    let alpha = 0.07;
+    let mut baseline = WakeSim::new(&foil, alpha, 0.05, 0.05).expect("baseline wake");
+    for _ in 0..80 {
+        baseline.step().expect("baseline step");
+    }
+    for (scale, rotation, translation) in [(0.01, 0.0, [3.0, -2.0]), (5.0, 2.3, [13.0, -21.0])] {
+        let transformed = transformed_section(&foil, scale, rotation, translation);
+        let mut wake =
+            WakeSim::new(&transformed, alpha + rotation, 0.05, 0.05).expect("transformed wake");
+        for _ in 0..80 {
+            wake.step().expect("transformed step");
+        }
+        for (got, want) in wake.history().iter().zip(baseline.history()) {
+            assert_eq!(got.t.to_bits(), want.t.to_bits());
+            assert_eq!(got.vortices, want.vortices);
+            assert!((got.bound - want.bound).abs() < tolerance);
+            assert!((got.peak_speed - want.peak_speed).abs() < tolerance);
+        }
+        for (got, want) in wake.wake().iter().zip(baseline.wake()) {
+            assert!((got.gamma - want.gamma).abs() < tolerance);
+            assert!((got.pos[0] - want.pos[0]).abs() < tolerance);
+            assert!((got.pos[1] - want.pos[1]).abs() < tolerance);
+        }
+    }
+}
+
+/// G0/G3: camber can produce lift at zero geometric incidence. The transient
+/// must retain that lift, vary continuously across zero, and shed the opposite
+/// circulation into the wake instead of using a singular Cl/sin(alpha) ratio.
+#[test]
+fn bem_cambered_wake_has_continuous_zero_incidence_lift() {
+    let foil = cambered_section();
+    let run = |alpha| {
+        let mut wake = WakeSim::new(&foil, alpha, 0.05, 0.05).expect("cambered wake");
+        for _ in 0..40 {
+            wake.step().expect("finite cambered wake step");
+            let bound = wake.history().last().expect("accepted step").bound;
+            let shed: f64 = wake.wake().iter().map(|vortex| vortex.gamma).sum();
+            assert!((bound + shed).abs() < 1e-12, "Kelvin balance at {alpha}");
+            assert!(bound > 0.0, "camber lift at {alpha}");
+        }
+        wake
+    };
+    let at_zero = run(0.0);
+    assert!(at_zero.steady_circulation() > 0.05);
+    assert!((at_zero.history()[0].bound / at_zero.steady_circulation() - 0.5).abs() < 1e-12);
+    for alpha in [-1e-10, -1e-14, 1e-14, 1e-10] {
+        let nearby = run(alpha);
+        for (got, want) in nearby.history().iter().zip(at_zero.history()) {
+            assert!((got.bound - want.bound).abs() < 2e-7, "continuity at {alpha}");
+        }
+    }
+}
+
+/// G0/G3: the zero-lift angle is supplied by the section, not hard-coded at
+/// alpha = 0. Bracket it independently with the steady pressure solve, then
+/// check the transient on both sides and at the root.
+#[test]
+fn bem_cambered_wake_tracks_the_sections_zero_lift_angle() {
+    let foil = cambered_section();
+    let mut lo = -0.2;
+    let mut hi = 0.0;
+    assert!(panel2d::solve(&foil, lo).expect("negative lift").cl < 0.0);
+    assert!(panel2d::solve(&foil, hi).expect("positive camber lift").cl > 0.0);
+    for _ in 0..30 {
+        let mid = f64::midpoint(lo, hi);
+        if panel2d::solve(&foil, mid).expect("root probe").cl < 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let zero_lift_alpha = f64::midpoint(lo, hi);
+    assert!(zero_lift_alpha < -0.005, "camber shifts the zero-lift angle");
+    for offset in [-0.02, 0.0, 0.02] {
+        let mut wake =
+            WakeSim::new(&foil, zero_lift_alpha + offset, 0.05, 0.05).expect("wake near zero lift");
+        for _ in 0..40 {
+            wake.step().expect("finite signed lift step");
+            let bound = wake.history().last().expect("accepted step").bound;
+            if offset == 0.0 {
+                assert!(bound.abs() < 2e-8, "zero-lift section must stay unloaded");
+            } else {
+                assert!(bound * offset > 0.0, "transient lift sign follows the section");
+            }
+            let shed: f64 = wake.wake().iter().map(|vortex| vortex.gamma).sum();
+            assert!((bound + shed).abs() < 1e-12);
+        }
+    }
+}
+
+fn cambered_section() -> panel2d::Airfoil2d {
+    let symmetric = naca4_symmetric(0.12, 40).expect("valid section");
+    panel2d::Airfoil2d::new(
+        symmetric
+            .nodes()
+            .iter()
+            .map(|&[x, y]| [x, y + 0.08 * x * (1.0 - x)])
+            .collect(),
+    )
+    .expect("two-percent parabolic camber")
+}
+
+fn transformed_section(
+    foil: &panel2d::Airfoil2d,
+    scale: f64,
+    rotation: f64,
+    translation: [f64; 2],
+) -> panel2d::Airfoil2d {
+    let (sin, cos) = rotation.sin_cos();
+    panel2d::Airfoil2d::new(
+        foil.nodes()
+            .iter()
+            .map(|p| {
+                [
+                    translation[0] + scale * (cos * p[0] - sin * p[1]),
+                    translation[1] + scale * (sin * p[0] + cos * p[1]),
+                ]
+            })
+            .collect(),
+    )
+    .expect("transformed valid section")
+}
+
 // ------------------------------------------------------------------ totality
 
 #[test]

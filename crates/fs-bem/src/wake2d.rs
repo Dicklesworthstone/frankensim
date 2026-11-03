@@ -13,7 +13,7 @@
 //! ledgered.
 
 use crate::BemError;
-use crate::panel2d::{Airfoil2d, solve};
+use crate::panel2d::{Airfoil2d, dcl_dalpha_adjoint, solve};
 
 /// Largest admitted number of wake steps/vortices in one v1 state.
 pub const MAX_WAKE_STEPS: usize = 1_000_000;
@@ -42,7 +42,8 @@ impl std::fmt::Write for ByteCounter {
 /// One wake vortex.
 #[derive(Debug, Clone, Copy)]
 pub struct WakeVortex {
-    /// Position.
+    /// Position in the section's chord frame: leading edge (0, 0), trailing
+    /// edge (1, 0), positive y toward the upper surface. Units are chord lengths.
     pub pos: [f64; 2],
     /// Nondimensional circulation (unit chord and freestream).
     pub gamma: f64,
@@ -70,18 +71,22 @@ pub struct WakeSim {
     wake: Vec<WakeVortex>,
     history: Vec<WakeStep>,
     steady_gamma: f64,
+    circulation_slope: f64,
     te: [f64; 2],
 }
 
 impl WakeSim {
-    /// Impulsive start at `alpha`, time step `dt`, regularization core
-    /// radius `core`.
+    /// Impulsive start with global freestream angle `alpha`, time step `dt`
+    /// in chord/freestream units, and regularization radius `core` in chord
+    /// lengths. Wake positions and circulation are stored in the local unit
+    /// chord frame, so a rigid transform or change of geometric units cannot
+    /// change the transient lift history.
     pub fn new(foil: &Airfoil2d, alpha: f64, dt: f64, core: f64) -> Result<WakeSim, BemError> {
-        if !alpha.is_finite() || alpha.abs() > MAX_ABS_WAKE_ALPHA {
+        if !alpha.is_finite() {
             return Err(BemError::InvalidScalar {
-                name: "wake angle of attack",
+                name: "wake freestream angle",
                 value: alpha,
-                requirement: "finite radians with |alpha| <= pi/2",
+                requirement: "finite radians",
             });
         }
         if !dt.is_finite() || dt <= 0.0 || dt > MAX_WAKE_DT {
@@ -98,10 +103,26 @@ impl WakeSim {
                 requirement: "finite and in [1e-6, 1] chord lengths",
             });
         }
+        let (_, chord_direction, _) = foil.chord_frame();
+        let (sin_alpha, cos_alpha) = (fs_math::det::sin(alpha), fs_math::det::cos(alpha));
+        let local_alpha = fs_math::det::atan2(
+            sin_alpha * chord_direction[0] - cos_alpha * chord_direction[1],
+            cos_alpha * chord_direction[0] + sin_alpha * chord_direction[1],
+        );
+        if local_alpha.abs() > MAX_ABS_WAKE_ALPHA {
+            return Err(BemError::InvalidScalar {
+                name: "wake angle of attack",
+                value: local_alpha,
+                requirement: "finite radians with |alpha relative to chord| <= pi/2",
+            });
+        }
         let steady = solve(foil, alpha)?;
-        let te = foil.nodes()[0];
+        // Cache the section's local attached-flow response. Unlike Γ/sin(α),
+        // this remains finite when camber produces lift at zero incidence.
+        // No additional panel solves are needed while stepping the wake.
+        let circulation_slope = 0.5 * dcl_dalpha_adjoint(foil, alpha)?;
         let sim = WakeSim {
-            alpha,
+            alpha: local_alpha,
             dt,
             core2: core * core,
             wake: Vec::new(),
@@ -110,7 +131,8 @@ impl WakeSim {
             // inferred circulation scale, not a second exact Kutta-Joukowski
             // evaluation of the pressure-integrated panel result.
             steady_gamma: steady.cl / 2.0,
-            te,
+            circulation_slope,
+            te: [1.0, 0.0],
         };
         sim.validate_state()?;
         Ok(sim)
@@ -187,17 +209,16 @@ impl WakeSim {
                 operation: "wake downwash",
             });
         }
-        // Effective incidence: α + downwash/U (small-angle).
+        // Effective incidence increment: downwash/U (small-angle).
         let bound_prev = self.history.last().map_or(0.0, |s| s.bound);
-        // Guard the degenerate zero-incidence case: sin α = 0 makes the ratio
-        // 0/0 = NaN, which would poison the whole screening simulation. At zero
-        // incidence this model carries no bound circulation to scale.
-        let sin_alpha = fs_math::det::sin(self.alpha);
-        let bound_target = if sin_alpha.abs() < 1e-12 {
-            0.0
-        } else {
-            self.steady_gamma * fs_math::det::sin(self.alpha + wake_wash) / sin_alpha
-        };
+        // Bounded harmonic continuation matching both the panel circulation
+        // and its slope at the declared incidence. It retains camber lift at
+        // α = 0 and changes sign at the section's actual zero-lift angle;
+        // dividing by sin(α) would be singular precisely in that useful case.
+        // This is a local attached-flow closure, not a resolved unsteady
+        // pressure/separation model for large downwash or stalled sections.
+        let bound_target = self.steady_gamma * fs_math::det::cos(wake_wash)
+            + self.circulation_slope * fs_math::det::sin(wake_wash);
         // First-order relaxation with the shed vortex carrying the
         // difference (Kelvin: dΓ_bound = −Γ_shed).
         let bound = bound_prev + 0.5 * (bound_target - bound_prev);
@@ -354,6 +375,7 @@ impl WakeSim {
             || !(MIN_WAKE_CORE * MIN_WAKE_CORE..=MAX_WAKE_CORE * MAX_WAKE_CORE)
                 .contains(&self.core2)
             || !self.steady_gamma.is_finite()
+            || !self.circulation_slope.is_finite()
             || self.te.iter().any(|value| !value.is_finite())
         {
             return Err(BemError::NonFiniteResult {
