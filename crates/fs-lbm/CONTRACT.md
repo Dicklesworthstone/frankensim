@@ -1,5 +1,37 @@
 # CONTRACT: fs-lbm
 
+## Rigid-frame momentum forcing on the native D2Q9 core
+
+`core2::frame::RigidFrame2::prepare_step` supplies prescribed translation,
+centrifugal, Euler and Coriolis acceleration to the original D2Q9 collision,
+streaming and free-surface paths. All coordinates and rates use lattice units
+(`dx = dt = 1`), positive spin is counterclockwise, and physical gravity is
+supplied already resolved in the moving frame. The owner explicitly replaces
+`g` and `fext`; pressure, viscosity and boundary traction keep their native
+owners.
+
+The local Coriolis source uses the exact two-by-two implicit-midpoint solve.
+Its isolated force step rotates momentum without increasing kinetic energy;
+there is no velocity rescaling, nonlinear iteration or additional flow solve.
+The complete spatial/free-surface scheme does not acquire an energy-exact
+claim. Motion coefficients are held over one step; scheduled callers provide
+midpoint coefficients and refresh after every native step.
+
+Changing forces first transforms the existing Guo half-source populations at
+fixed physical velocity and stress. Preparation therefore applies no impulse
+and advances no time. Two linear passes admit every live cell before publishing
+anything, without a dense scratch allocation. Nonfinite motion, inconsistent
+public storage and unrepresentable cell states refuse atomically. The existing
+low-Mach, geometry and timestep-resolution requirements remain; frame motion is
+prescribed, with no inferred finite-inertia support/vessel dynamics.
+
+`tests/rotating_frame.rs` checks native collision/streaming response, 2,000-step
+pure-Coriolis kinetic preservation, centrifugal and Euler impulses, free-fall
+equivalence, unchanged physical stress during force replacement, and atomic
+refusal. The acceleration decomposition follows
+[MIT rotating-frame mechanics](https://ocw.mit.edu/courses/res-tll-004-stem-concept-videos-fall-2013/resources/rotating-frames-of-reference/);
+the force representation follows [Guo et al. (2002)](https://doi.org/10.1103/PhysRevE.65.046308).
+
 ## Native terrain velocity evolution
 
 `terrain_wind::run_v04c_terrain_wind` now evolves the existing D3Q19 BGK

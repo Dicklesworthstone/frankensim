@@ -8,6 +8,9 @@
 use crate::{CS2, E, OPP, Q, W};
 use std::f64::consts::{PI, SQRT_2};
 
+/// Prescribed translating/rotating frames on the original force operator.
+pub mod frame;
+
 /// Finite-inertia disk motion with geometry rasterized on the native lattice.
 pub mod moving_disk;
 
