@@ -16,6 +16,10 @@ use fs_la::LuWorkspace;
 mod driven;
 pub use driven::ShellSupportMotion;
 
+#[path = "moving_load/payload.rs"]
+mod payload;
+pub use payload::ShellRigidPayload;
+
 /// A reference material location on one original triangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellLoadPoint {
@@ -112,6 +116,7 @@ pub struct MovingShellModel {
     assembly: ShellAssembly,
     free_index: Vec<Option<usize>>,
     max_load_points: usize,
+    payloads: Vec<ShellRigidPayload>,
 }
 
 impl MovingShellModel {
@@ -138,6 +143,7 @@ impl MovingShellModel {
             assembly,
             free_index,
             max_load_points,
+            payloads: Vec::new(),
         })
     }
 
@@ -145,7 +151,8 @@ impl MovingShellModel {
     pub fn plate(&self) -> &ShellPlate {
         &self.plate
     }
-    /// Original full/reduced operators and fixed support membership.
+    /// Native full/reduced operators, including any attached payload inertia,
+    /// and the original fixed support membership.
     pub fn assembly(&self) -> &ShellAssembly {
         &self.assembly
     }

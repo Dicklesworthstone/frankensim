@@ -647,6 +647,41 @@ actuator work, manufactured full-operator deformation with and without damping,
 shuffled support order, changing accelerations, stationary parity, and late
 cancellation with exact retry.
 
+### Finite rigid payloads at material ports
+
+`MovingShellModel::new_with_payloads` binds finite masses and complete symmetric
+COM inertia tensors to immutable `ShellLoadPoint` attachments. The point offset
+locates the payload center of mass; the original P1 translation plus director
+rotation supplies its velocity. Each payload contributes the consistent form
+`B^T diag(m I, I_COM) B` to the original full mass before support restriction.
+This retains inter-node inertial coupling, the reference parallel-axis terms,
+and reciprocal translation/rotation coupling. It is not nodal mass lumping.
+
+Payload mass must be finite and positive. COM inertia must be finite, exactly
+symmetric, and physically realizable: the normalized second moment
+`trace(I_COM)/2 * identity - I_COM` must admit a positive-semidefinite
+factorization, enforcing the principal-inertia triangle inequalities. Zero
+COM inertia is admitted for a point mass. Negative or numerically unresolved
+pivots refuse without clipping. Derived mass must remain finite and symmetric;
+the original bounded algebraic diagnostics are refreshed for the augmented mass.
+
+The original shell stiffness and damping are preserved exactly; payload mass
+does not acquire fictitious Rayleigh drag. Full and reduced augmented inertia
+feed the existing initial-equilibrium solve, prepared Newmark factors, driven
+pin condensation, reactions, kinetic storage and linear/reference-angular
+momentum inventory. Payload assembly visits bounded 18-DOF point stencils
+once and adds no DOFs or per-step payload loops. Payload count and each endpoint
+load count are separately capped by the model's admitted point bound.
+
+Payload attachment and reference orientation remain fixed. Gravity and other
+external payload forces must be supplied explicitly through the force port.
+This remains a small-rotation attached-inertia model, without sliding,
+collision, finite-rotation gyroscopic dynamics or finite support-carrier
+motion. Empty payload input preserves the original path exactly. Focused
+G0/G1/G3/G4 regressions in `tests/moving_load/payload.rs` assert independent COM
+energy and angular-momentum identities, native forced acceleration, driven
+support impulse/work, physical tensor admission, parity, and atomic retry.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,

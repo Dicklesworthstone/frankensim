@@ -6,6 +6,9 @@ use fs_solid::shell_time::ShellTimeConfig;
 #[path = "moving_load/driven.rs"]
 mod driven;
 
+#[path = "moving_load/payload.rs"]
+mod payload;
+
 fn plate() -> ShellPlate {
     ShellPlate {
         nodes: vec![

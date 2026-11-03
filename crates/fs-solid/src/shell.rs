@@ -188,7 +188,7 @@ pub enum OperatorDiagnostics {
     /// Jacobi algebraic diagnostics were completed within the declared bound.
     Computed {
         /// Smallest raw mass-array eigenvalue; a positive value is a structural
-        /// check for the assembled lumped array, not a physical eigenvalue.
+        /// check for the assembled mass array, not a physical eigenvalue.
         raw_mass_min_eigenvalue: f64,
         /// Raw stiffness-array nullity under the deterministic tolerance.
         raw_stiffness_nullity: usize,
@@ -226,6 +226,41 @@ pub struct ShellAssembly {
     pub free_dofs: Vec<usize>,
     /// Raw algebraic report for the full mixed-unit spatial operator.
     pub diagnostics: OperatorDiagnostics,
+}
+
+impl ShellAssembly {
+    /// Replace inertia assembled by a native physical adapter, retaining the
+    /// original shell stiffness and damping rather than damping attached mass.
+    /// Only complete finite symmetric matrices are published.
+    pub(crate) fn replace_mass_preserving_damping(
+        &mut self,
+        values: Vec<f64>,
+        max_conditioning_dofs: usize,
+    ) -> Result<(), ShellError> {
+        let n = self.full_mass.dimension;
+        if values.len() != self.full_mass.values.len() {
+            return Err(ShellError::InvalidInput {
+                what: "replacement shell mass dimension mismatch".into(),
+            });
+        }
+        validate_derived_matrix("augmented mass", &values)?;
+        for i in 0..n {
+            for j in 0..i {
+                if values[i * n + j] != values[j * n + i] {
+                    return Err(ShellError::InvalidInput {
+                        what: "augmented shell mass is not symmetric".into(),
+                    });
+                }
+            }
+        }
+        let full_mass = matrix::<Mass>(n, values);
+        let mass = reduce(&full_mass, &self.free_dofs);
+        let report = diagnostics(&full_mass, &self.full_stiffness, max_conditioning_dofs);
+        self.full_mass = full_mass;
+        self.mass = mass;
+        self.diagnostics = report;
+        Ok(())
+    }
 }
 
 /// Refusals are structured so callers never receive partial operators.
