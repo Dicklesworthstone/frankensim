@@ -2,7 +2,8 @@
 //! Cells refer to material packs already used by this assembly. Density, Cp,
 //! conductivity and film constitutive properties are queried from those SAME
 //! cards. The profile supplies physical geometry and numerical resolution only.
-//! Outer boundaries are explicitly adiabatic. Links select endpoint-Fourier
+//! Outer boundaries are explicitly adiabatic or a source-gas reservoir.
+//! Links select endpoint-Fourier
 //! conduction or the original source-integrated two-layer flux at every trial.
 
 use super::*;
@@ -38,6 +39,9 @@ mod film_surface;
 #[path = "contact_thermal/material_heat.rs"]
 mod material_heat;
 
+#[path = "contact_thermal/gas_convection.rs"]
+mod gas_convection;
+
 #[cfg(test)]
 #[path = "contact_thermal/tests.rs"]
 mod tests;
@@ -65,6 +69,7 @@ struct Link {
 #[derive(Clone, Debug)]
 pub struct Profile {
     cells: Vec<Cell>,
+    convection: Vec<gas_convection::Route>,
     dry: Vec<dry::Route>,
     films: Vec<(usize, CellId)>,
     film_surfaces: Vec<film_surface::Route>,
@@ -154,19 +159,23 @@ impl Profile {
             Some("frankensim-contact-thermal-v2") => 2,
             Some("frankensim-contact-thermal-v3") => 3,
             Some("frankensim-contact-thermal-v4") => 4,
+            Some("frankensim-contact-thermal-v5") => 5,
             _ => return Err("unsupported contact-thermal profile version".into()),
         };
         rows.row(match format {
             1 => "frankensim-contact-thermal-v1",
             2 => "frankensim-contact-thermal-v2",
             3 => "frankensim-contact-thermal-v3",
-            _ => "frankensim-contact-thermal-v4",
+            4 => "frankensim-contact-thermal-v4",
+            _ => "frankensim-contact-thermal-v5",
         })?
         .end()?;
         let mut boundary = rows.row("boundary")?;
-        if boundary.word()? != "adiabatic" {
-            return Err("contact-thermal requires an explicit adiabatic outer boundary".into());
-        }
+        let gas_reservoir = match boundary.word()? {
+            "adiabatic" => false,
+            "gas-reservoir" if format >= 5 => true,
+            _ => return Err("contact-thermal needs adiabatic, or v5 gas-reservoir boundary".into()),
+        };
         boundary.end()?;
         let mut row = rows.row("solver")?;
         let trials: usize = row.parse()?;
@@ -228,6 +237,9 @@ impl Profile {
                 geometry,
             });
         }
+        let convection = if gas_reservoir {
+            gas_convection::parse(&mut rows, &cells)?
+        } else { Vec::new() };
         let dry = if format >= 2 {
             dry::parse(&mut rows, &cells)?
         } else {
@@ -348,6 +360,7 @@ impl Profile {
         newton.validate()?;
         Ok(Self {
             cells,
+            convection,
             dry,
             films,
             film_surfaces,
@@ -541,9 +554,11 @@ impl Profile {
             )?;
         }
         poll(gate)?;
+        let reservoir = gas_convection::Reservoir::prepare(self, ready, &sources, gate)?;
         let prepared = Prepared {
             profile: self.clone(),
             sources,
+            reservoir,
             sample_period_s: 1.0 / f64::from(ready.spec.rate),
             gate,
         };
@@ -591,6 +606,7 @@ struct IntegratedConductivity {
 pub struct Prepared<'gate> {
     profile: Profile,
     sources: Vec<CellSource>,
+    reservoir: Option<gas_convection::Reservoir>,
     sample_period_s: f64,
     gate: &'gate CancelGate,
 }
@@ -729,6 +745,11 @@ impl Prepared<'_> {
         Ok(network)
     }
     fn resolve(&self, network: &DepositionSimulation<'_>) -> Result<StepCoefficients<()>> {
+        self.checkpoint()?;
+        let sources_w = match &self.reservoir {
+            Some(reservoir) => reservoir.sources(self, network)?,
+            None => BTreeMap::new(),
+        };
         let mut conductances_w_k = BTreeMap::new();
         let mut constitutive_residual_w = 0.0;
         for link in &self.profile.links {
@@ -753,7 +774,7 @@ impl Prepared<'_> {
         // These are flux secants, not Jacobian entries. The existing implicit
         // owner differentiates this callback by re-solving every perturbed trial.
         Ok(StepCoefficients {
-            sources_w: BTreeMap::new(),
+            sources_w,
             conductances_w_k,
             payload: (),
         })
@@ -770,8 +791,12 @@ impl Prepared<'_> {
             );
         }
         eprintln!(
-            "contact_thermal=source-bound finite solid cells; adiabatic exterior; retained films with optional sliding thermal counterfaces or moving dry footprints; original sample clock"
+            "contact_thermal=source-bound finite solid cells; exterior={}; retained films with optional sliding thermal counterfaces or moving dry footprints; original sample clock",
+            if self.reservoir.is_some() { "prescribed source-gas reservoir" } else { "adiabatic" },
         );
+        if let Some(reservoir) = &self.reservoir {
+            reservoir.describe(&self.profile.convection);
+        }
         for (cell, source) in self.profile.cells.iter().zip(&self.sources) {
             eprintln!(
                 "contact_thermal_cell={}; pack={:?}; card={}; caloric={}; source_caloric=[{},{}]; mass_kg={}; initial_T_K={}",

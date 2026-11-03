@@ -60,3 +60,6 @@ fn retaining_caloric_sources_does_not_change_fixed_density_pressure_pcm() {
         assert_eq!(old_wav.into_inner(), new_wav.into_inner());
     });
 }
+
+#[path = "gas_convection_tests.rs"]
+mod gas_convection;
