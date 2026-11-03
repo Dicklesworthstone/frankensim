@@ -9,7 +9,73 @@
 
 use fs_airscrew::{
     BladeStation, MAX_STATIONS, Rotor, bemt_solve, engine_torque_at_prop_nm, rotor_spinup_step,
+    rotor_spinup_step_with_work,
 };
+
+#[test]
+fn held_torque_power_accounts_for_spinup_regeneration_and_reversal() {
+    // These cases have exact binary-representable endpoints. Integrating a
+    // held torque gives angle = omega_0 dt + (Q_engine-Q_load) dt²/(2I).
+    for (inertia, omega, engine, load, dt) in [
+        (2.0, 0.0, 8.0, 0.0, 0.5),
+        (2.0, 10.0, -6.0, 2.0, 0.5),
+        (2.0, 4.0, 0.0, -4.0, 0.5),
+        (2.0, 1.0, -8.0, 0.0, 1.0),
+        (2.0, -3.0, -8.0, -2.0, 0.5),
+        (2.0, 10.0, 4.0, 4.0, 0.5),
+    ] {
+        let step = rotor_spinup_step_with_work(inertia, omega, engine, load, dt).unwrap();
+        let acceleration = (engine - load) / inertia;
+        let angle = omega * dt + 0.5 * acceleration * dt * dt;
+        let endpoint = omega + acceleration * dt;
+        let kinetic_change = 0.5 * inertia * (endpoint * endpoint - omega * omega);
+        assert_eq!(step.rotation_rad, angle);
+        assert_eq!(step.omega_after_rad_s, endpoint);
+        assert_eq!(step.engine_work_j, engine * angle);
+        assert_eq!(step.load_work_j, load * angle);
+        assert_eq!(step.mean_engine_power_w * dt, step.engine_work_j);
+        assert_eq!(step.mean_load_power_w * dt, step.load_work_j);
+        assert_eq!(step.kinetic_energy_change_j, kinetic_change);
+        assert_eq!(step.work_energy_residual_j, 0.0);
+        assert_eq!(
+            rotor_spinup_step(inertia, omega, engine, load, dt).unwrap(),
+            endpoint
+        );
+    }
+    let launch = rotor_spinup_step_with_work(2.0, 0.0, 8.0, 0.0, 0.5).unwrap();
+    assert_eq!(launch.mean_engine_power_w, 8.0);
+    assert_eq!(launch.engine_work_j, 4.0);
+    let braking = rotor_spinup_step_with_work(2.0, 10.0, -6.0, 2.0, 0.5).unwrap();
+    assert!(
+        braking.engine_work_j < 0.0,
+        "regeneration is not clipped to zero"
+    );
+    assert!(braking.load_work_j > 0.0);
+}
+
+#[test]
+fn rotor_power_rejects_nonfinite_torques_inertia_and_unrepresentable_motion() {
+    for inputs in [
+        [f64::INFINITY, 1.0, 1.0, 0.0, 1.0],
+        [1.0, 1.0, f64::NAN, 0.0, 1.0],
+        [1.0, 1.0, 1.0, f64::INFINITY, 1.0],
+        [1.0, 1.0, 1.0, 0.0, f64::INFINITY],
+        [1.0, f64::INFINITY, 1.0, 0.0, 1.0],
+        [0.0, 1.0, 1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0, 0.0, 0.0],
+        [f64::MIN_POSITIVE, 1.0, f64::MAX, 0.0, 1.0],
+        [1.0, 1e200, 1e200, 0.0, 1.0],
+    ] {
+        let [inertia, omega, engine, load, dt] = inputs;
+        assert_eq!(
+            rotor_spinup_step_with_work(inertia, omega, engine, load, dt)
+                .unwrap_err()
+                .code,
+            "rotor-dynamics-invalid"
+        );
+        assert!(rotor_spinup_step(inertia, omega, engine, load, dt).is_err());
+    }
+}
 
 fn jlog(case: &str, payload: &str) {
     println!("{{\"suite\":\"fs-airscrew-v03\",\"case\":\"{case}\",{payload}}}");

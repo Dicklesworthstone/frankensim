@@ -174,8 +174,34 @@ pub struct BemtSolution {
     pub cq: f64,
     /// Advance ratio J = V/(nD).
     pub j: f64,
+    /// Power split at the same accepted annular states as the returned loads.
+    pub power: BemtPower,
     /// Per-station receipts.
     pub stations: Vec<StationReceipt>,
+}
+
+/// Signed steady blade-element power in watts for one rotor.
+///
+/// In the admitted axial, no-resolved-swirl model, each section satisfies
+/// `Omega dQ = V dT + w dT + D |U_relative|`. Lift is perpendicular to
+/// relative velocity, so only profile drag dissipates local section power.
+/// The induced term is energy transferred to the axial wake, not blade heat.
+/// These are balances of the declared model, not a resolved wake-energy or
+/// calibrated rotor-efficiency claim. Braking contributions are never clipped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BemtPower {
+    /// Signed mechanical power supplied at the shaft, `Omega Q` [W].
+    /// A negative value means the admitted air load drives the shaft.
+    pub shaft_power_w: f64,
+    /// Signed axial thrust power, `V T` [W]; exactly zero on a static bench.
+    pub thrust_power_w: f64,
+    /// Sum of actual annular `w dT`, retaining nonuniform induction [W].
+    pub induced_power_w: f64,
+    /// Sum of section profile drag times relative air speed [W].
+    pub profile_drag_power_w: f64,
+    /// Shaft minus thrust, induced and profile-drag power [W].
+    /// Floating-point closure error, not an additional physical loss.
+    pub residual_w: f64,
 }
 
 /// Section closure: attached thin-airfoil + flat-plate blend (the same
@@ -239,6 +265,8 @@ pub fn bemt_solve(
     let r_root = rotor.stations[0].r_over_r * 0.8; // hub cutout fraction
     let mut thrust = 0.0;
     let mut torque = 0.0;
+    let mut induced_power = 0.0;
+    let mut profile_drag_power = 0.0;
     let mut receipts = Vec::with_capacity(rotor.stations.len());
     let mut w_warm = 0.1 * v_axial_mps.max(1.0);
     for (si, st) in rotor.stations.iter().enumerate() {
@@ -260,6 +288,10 @@ pub fn bemt_solve(
         thrust += dthrust;
         let dtorque = accepted.torque * dr;
         torque += dtorque;
+        induced_power += dthrust * accepted.w;
+        let axial = v_axial_mps + accepted.w;
+        let relative_speed = det::sqrt(axial * axial + u_tan * u_tan);
+        profile_drag_power += accepted.profile_drag * relative_speed * dr;
         receipts.push(StationReceipt {
             r_over_r: st.r_over_r,
             w_mps: accepted.w,
@@ -271,12 +303,22 @@ pub fn bemt_solve(
     }
     let n_rev = omega_rad_s / (2.0 * core::f64::consts::PI);
     let d = 2.0 * r_tip;
+    let shaft_power = omega_rad_s * torque;
+    let thrust_power = v_axial_mps * thrust;
+    let power = BemtPower {
+        shaft_power_w: shaft_power,
+        thrust_power_w: thrust_power,
+        induced_power_w: induced_power,
+        profile_drag_power_w: profile_drag_power,
+        residual_w: ((shaft_power - thrust_power) - induced_power) - profile_drag_power,
+    };
     let solution = BemtSolution {
         thrust_n: thrust,
         torque_nm: torque,
         ct: thrust / (rho_kg_m3 * n_rev * n_rev * d.powi(4)),
         cq: torque / (rho_kg_m3 * n_rev * n_rev * d.powi(5)),
         j: v_axial_mps / (n_rev * d),
+        power,
         stations: receipts,
     };
     if ![
@@ -285,6 +327,11 @@ pub fn bemt_solve(
         solution.ct,
         solution.cq,
         solution.j,
+        power.shaft_power_w,
+        power.thrust_power_w,
+        power.induced_power_w,
+        power.profile_drag_power_w,
+        power.residual_w,
     ]
     .into_iter()
     .all(f64::is_finite)
@@ -318,6 +365,7 @@ struct StationSample {
     prandtl: f64,
     thrust: f64,
     torque: f64,
+    profile_drag: f64,
     target_product: f64,
     momentum_product: f64,
     balance: f64,
@@ -414,7 +462,7 @@ impl StationProblem<'_> {
             sin_phi,
             thrust,
             torque,
-            ..
+            profile_drag,
         } = self.blade_loads(w)?;
         let b = f64::from(self.rotor.n_blades);
         let f_tip = if sin_phi.abs() > 1e-9 {
@@ -481,6 +529,7 @@ impl StationProblem<'_> {
             prandtl,
             thrust,
             torque,
+            profile_drag,
             target_product,
             momentum_product,
             balance,
@@ -662,7 +711,105 @@ pub fn engine_torque_at_prop_nm(omega_prop_rad_s: f64) -> f64 {
     }
 }
 
-/// One rotor spin-up step: I_eq·Ω̇ = Q_avail − Q_prop (per prop).
+/// Accepted held-torque rotor motion and its actual shaft-power quadrature.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RotorSpinupStep {
+    /// Signed endpoint shaft speed [rad/s]. No zero-speed clamp is applied.
+    pub omega_after_rad_s: f64,
+    /// Actual endpoint midpoint speed [rad/s].
+    pub midpoint_speed_rad_s: f64,
+    /// Rotation over the held-torque interval [rad].
+    pub rotation_rad: f64,
+    /// Signed mean input shaft power, `Q_engine * Omega_mid` [W].
+    pub mean_engine_power_w: f64,
+    /// Signed mean power delivered to the resisting load [W].
+    /// Negative means the load supplies power to the rotor; this is not heat.
+    pub mean_load_power_w: f64,
+    /// Signed engine work over the accepted rotation [J].
+    pub engine_work_j: f64,
+    /// Signed work delivered to the load over the accepted rotation [J].
+    pub load_work_j: f64,
+    /// Polarized kinetic change of the actual returned endpoint [J].
+    pub kinetic_energy_change_j: f64,
+    /// Kinetic change minus engine work plus load work [J].
+    pub work_energy_residual_j: f64,
+}
+
+/// Integrate `I_eq Omega' = Q_engine - Q_load` with both torques held.
+///
+/// Constant acceleration makes endpoint-midpoint power exact for this local
+/// model. Evaluating power only at the initial speed would lose the quadratic
+/// impulse energy, including all work during spin-up from rest. Speed-dependent
+/// torques must be sampled/iterated by the caller; this function does not turn
+/// a frozen aerodynamic torque into an exact nonlinear rotor trajectory.
+/// Signed speeds, torques, braking, and reversal remain explicit. The load
+/// port is mechanical transfer and must not also be counted as rotor heat.
+///
+/// # Errors
+/// `rotor-dynamics-invalid` for nonfinite inputs or unrepresentable results.
+pub fn rotor_spinup_step_with_work(
+    i_eq_kgm2: f64,
+    omega_rad_s: f64,
+    q_engine_nm: f64,
+    q_load_nm: f64,
+    dt_s: f64,
+) -> Result<RotorSpinupStep, Refusal> {
+    if ![i_eq_kgm2, omega_rad_s, q_engine_nm, q_load_nm, dt_s]
+        .into_iter()
+        .all(f64::is_finite)
+        || i_eq_kgm2 <= 0.0
+        || dt_s <= 0.0
+    {
+        return Err(refuse(
+            "rotor-dynamics-invalid",
+            "nonfinite inertia, speed, torque or duration; nonpositive inertia or duration".into(),
+            "supply finite signed speed/torques and positive finite I and dt",
+        ));
+    }
+    let omega_after = omega_rad_s + (q_engine_nm - q_load_nm) / i_eq_kgm2 * dt_s;
+    let midpoint = 0.5 * omega_rad_s + 0.5 * omega_after;
+    let rotation = midpoint * dt_s;
+    let mean_engine_power = q_engine_nm * midpoint;
+    let mean_load_power = q_load_nm * midpoint;
+    let engine_work = q_engine_nm * rotation;
+    let load_work = q_load_nm * rotation;
+    let kinetic_change = (i_eq_kgm2 * (omega_after - omega_rad_s)) * midpoint;
+    let residual = (kinetic_change - engine_work) + load_work;
+    if ![
+        omega_after,
+        midpoint,
+        rotation,
+        mean_engine_power,
+        mean_load_power,
+        engine_work,
+        load_work,
+        kinetic_change,
+        residual,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        return Err(refuse(
+            "rotor-dynamics-invalid",
+            "unrepresentable held-torque state, power or work".into(),
+            "reduce the step or use representable physical inertia, speed and torque",
+        ));
+    }
+    Ok(RotorSpinupStep {
+        omega_after_rad_s: omega_after,
+        midpoint_speed_rad_s: midpoint,
+        rotation_rad: rotation,
+        mean_engine_power_w: mean_engine_power,
+        mean_load_power_w: mean_load_power,
+        engine_work_j: engine_work,
+        load_work_j: load_work,
+        kinetic_energy_change_j: kinetic_change,
+        work_energy_residual_j: residual,
+    })
+}
+
+/// One held-torque rotor spin-up step: I_eq·Ω̇ = Q_avail − Q_prop (per prop).
+/// Use [`rotor_spinup_step_with_work`] to retain its mechanical power/work.
 ///
 /// # Errors
 /// `rotor-dynamics-invalid`.
@@ -673,12 +820,6 @@ pub fn rotor_spinup_step(
     q_prop_nm: f64,
     dt_s: f64,
 ) -> Result<f64, Refusal> {
-    if !(i_eq_kgm2 > 0.0) || !omega_rad_s.is_finite() || !dt_s.is_finite() || dt_s <= 0.0 {
-        return Err(refuse(
-            "rotor-dynamics-invalid",
-            "I/omega/dt".into(),
-            "positive I and dt",
-        ));
-    }
-    Ok(omega_rad_s + (q_engine_nm - q_prop_nm) / i_eq_kgm2 * dt_s)
+    rotor_spinup_step_with_work(i_eq_kgm2, omega_rad_s, q_engine_nm, q_prop_nm, dt_s)
+        .map(|step| step.omega_after_rad_s)
 }

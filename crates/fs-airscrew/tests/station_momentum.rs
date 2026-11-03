@@ -34,7 +34,7 @@ fn rotor() -> Rotor {
 
 /// Independent dimensional blade-element loading and annular momentum at
 /// the PUBLIC receipt's induction. No production iteration helpers are used.
-fn loads(rotor: &Rotor, i: usize, axial: f64, omega: f64, w: f64) -> [f64; 4] {
+fn loads(rotor: &Rotor, i: usize, axial: f64, omega: f64, w: f64) -> [f64; 5] {
     let station = rotor.stations[i];
     let radius = station.r_over_r * rotor.radius_m;
     let tangent = omega * radius;
@@ -77,7 +77,13 @@ fn loads(rotor: &Rotor, i: usize, axial: f64, omega: f64, w: f64) -> [f64; 4] {
         * factor(radius - 0.8 * rotor.stations[0].r_over_r * rotor.radius_m))
     .clamp(1e-3, 1.0);
     let coefficient = 4.0 * std::f64::consts::PI * radius * RHO * prandtl;
-    [thrust, torque, coefficient * (axial + w) * w, coefficient]
+    [
+        thrust,
+        torque,
+        coefficient * (axial + w) * w,
+        coefficient,
+        blade_factor * cd * (axial + w).hypot(tangent),
+    ]
 }
 
 fn independent_root(rotor: &Rotor, axial: f64, mut low: f64, mut high: f64) -> f64 {
@@ -149,6 +155,8 @@ fn accepted_induction_closes_momentum_and_reconstructs_returned_loads() {
         }
         let mut thrust = 0.0;
         let mut torque = 0.0;
+        let mut induced_power = 0.0;
+        let mut profile_drag_power = 0.0;
         for (i, receipt) in solution.stations.iter().enumerate() {
             let values = loads(&rotor, i, axial, omega, receipt.w_mps);
             let tolerance = values[3]
@@ -173,12 +181,35 @@ fn accepted_induction_closes_momentum_and_reconstructs_returned_loads() {
             let width = rotor.radius_m * (high - low);
             thrust += width * values[0];
             torque += width * values[1];
+            induced_power += width * values[0] * receipt.w_mps;
+            profile_drag_power += width * values[4];
             assert!(receipt.iterations <= MAX_STATION_ITERS);
             assert!(receipt.w_mps >= -MAX_BRAKING_INDUCTION * axial);
             assert!(axial + 2.0 * receipt.w_mps >= 0.2 * axial);
         }
         assert!((solution.thrust_n - thrust).abs() < 2e-12);
         assert!((solution.torque_nm - torque).abs() < 2e-12);
+        let power = solution.power;
+        let tolerance = 2e-12
+            * (power.shaft_power_w.abs()
+                + power.thrust_power_w.abs()
+                + power.induced_power_w.abs()
+                + power.profile_drag_power_w.abs())
+            .max(1.0);
+        assert_eq!(power.shaft_power_w, omega * solution.torque_nm);
+        assert_eq!(power.thrust_power_w, axial * solution.thrust_n);
+        assert!((power.induced_power_w - induced_power).abs() < tolerance);
+        assert!((power.profile_drag_power_w - profile_drag_power).abs() < tolerance);
+        assert!(power.residual_w.abs() < tolerance);
+        assert!(power.induced_power_w >= 0.0);
+        assert!(power.profile_drag_power_w > 0.0);
+        if axial == 0.0 {
+            assert_eq!(power.thrust_power_w, 0.0);
+            assert!(power.shaft_power_w > 0.0);
+        }
+        if axial == 50.0 {
+            assert!(power.thrust_power_w < 0.0, "braking power is signed");
+        }
     }
 }
 

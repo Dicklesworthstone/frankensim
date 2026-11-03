@@ -24,6 +24,10 @@ CoupledPropAirframeStep (Aitken candidate A).
 - `engine_torque_at_prop_nm(omega)` — 12 hp @ 1025 engine rpm through the
   23:8 chain, flat-torque-then-power-limited (DISCLOSED approximation).
 - `rotor_spinup_step(I, omega, Q_eng, Q_prop, dt)`.
+- `BemtSolution::power` retains signed shaft and thrust powers, the actual
+  annular induced power, and profile-drag power from its accepted states.
+- `rotor_spinup_step_with_work` returns signed held-torque shaft motion,
+  midpoint mean powers, mechanical work, and actual kinetic-energy change.
 
 ## Invariants
 
@@ -63,6 +67,22 @@ CoupledPropAirframeStep (Aitken candidate A).
   braking limit receives a distinct wake-domain refusal. No reversed-flow,
   turbulent-wake, vortex-ring or universal turbine model is inferred.
 - Prandtl F ∈ (0, 1], falling toward the tip.
+- The steady blade law closes `Omega Q = V T + sum(w dT) + sum(D |U|)`.
+  Induced power uses each accepted annulus's own induction, including braking
+  annuli; it is not `T` times a mean induction. Profile power comes from actual
+  section drag, not a residual assigned to heat. Axial wake energy transfer
+  remains distinct from local dissipative drag. Negative shaft power means
+  air-to-shaft transfer; signed thrust power is zero on a static bench. The
+  reported residual is floating-point closure of the declared axial model,
+  not physical loss or a whole-fluid energy/passivity theorem. No resolved
+  swirl-energy or universal turbine model is inferred.
+- Held-torque spin-up integrates both torques over the actual rotation.
+  Midpoint mean power includes acceleration from rest and regenerative signs.
+  Torques remain held data: freezing a speed-dependent aerodynamic or engine
+  torque does not become an exact nonlinear trajectory. Load work is a
+  mechanical transfer, not rotor heating. The original speed-only entry point
+  shares the same admission and rejects nonfinite torques/inertia and
+  unrepresentable power/work. Reversal is signed rather than clamped.
 
 ## Error model
 
@@ -109,6 +129,13 @@ first target; a real `a=0.41` root refuses the high-induction domain. Nonfinite
 and unresolved non-real static states refuse explicitly. This is numerical
 closure of the declared model, not new validation of the reconstructed rotor
 or a universal branch selector.
+The same independent strip integration reconstructs induced and profile-drag
+powers for static, advancing, mixed-loading and braking states. The original
+BEMT force/torque golden is unchanged. `tests/bemt_battery.rs` additionally
+checks analytic held-torque spin-up from rest, regeneration, reverse rotation,
+load-driven acceleration and exact work/kinetic closure, with nonfinite and
+overflow refusals. No additional station solves or allocations are introduced
+by the power split; only one relative-speed evaluation per accepted station.
 
 ## No-claim boundaries
 
