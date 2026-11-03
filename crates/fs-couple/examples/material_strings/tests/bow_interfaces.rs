@@ -748,3 +748,48 @@ mod held_environment {
         });
     }
 }
+
+mod rosin_wg2025_eq13 {
+    use super::*;
+
+    fn numeric(record: &str) -> String {
+        String::from_utf8(spec().bytes)
+            .unwrap()
+            .replace("friction stribeck 0.8 0.4 0.1 0", record)
+            .replace("initial\tbow\t0e0\t0e0\t2e-1", "initial\tbow\t3e-1\t1e-4\t2e-1")
+    }
+
+    #[test]
+    fn the_named_row_selects_the_measured_law_and_reaches_the_pressure() {
+        let measured = input::Spec::parse(numeric("friction rosin-wg2025-eq13").as_bytes()).unwrap();
+        assert_eq!(measured.bow_law(0).unwrap(), &FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13());
+        let hyperbolic = input::Spec::parse(numeric("friction hyperbolic 0.8 0.4 0.2").as_bytes()).unwrap();
+        scoped(|cx, gate| {
+            let mut measured = compile(cx, gate, measured, 7800.0);
+            let mut hyperbolic = compile(cx, gate, hyperbolic, 7800.0);
+            let a = pressure(&mut measured, 64);
+            let b = pressure(&mut hyperbolic, 64);
+            assert!(a.iter().all(|p| p.is_finite()));
+            assert!(a.iter().any(|p| p.abs() > 1e-15));
+            assert_ne!(a, b, "the friction row must reach the coupled pressure");
+        });
+    }
+
+    /// The general shifted power law is not a card knob: only the named
+    /// measured row reaches it, and any numbers are refused.
+    #[test]
+    fn a_malformed_named_row_is_refused_with_text() {
+        for (record, text) in [
+            ("friction rosin-wg2025-eq13 0.2", "extra field"),
+            ("friction rosin-wg2025-eq13 0.2 0.011 0.4", "extra field"),
+            ("friction rosin-wg2025-eq1", "unsupported physical friction law"),
+            ("friction shifted-power 1.21471 0 0.011 0.4", "unsupported physical friction law"),
+            ("friction shiftedpower 1.21471 0 0.011 0.4", "unsupported physical friction law"),
+        ] {
+            match input::Spec::parse(numeric(record).as_bytes()) {
+                Ok(_) => panic!("{record} must be refused"),
+                Err(error) => assert!(error.to_string().contains(text), "{record}: {error}"),
+            }
+        }
+    }
+}

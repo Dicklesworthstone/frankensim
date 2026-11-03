@@ -978,6 +978,13 @@ impl Spec {
                     characteristic_speed:row.positive()? };
                 row.end()?; bow_interfaces::Inputs::research(law)?
             },
+            // Woodhouse & Galluzzo (2025) eq. (13): the measured steady-sliding
+            // fit for rosin. No numbers on the row; the constants live in fs-tribo.
+            // This is the ONLY card route to FrictionLaw::ShiftedPower: no row
+            // takes its four numbers, so it cannot become a tuning knob (MB 16552).
+            "rosin-wg2025-eq13" => {
+                row.end()?; bow_interfaces::Inputs::research(FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13())?
+            },
             kind @ ("layers" | "interfaces" | "contacts") => {
                 let count=row.count(16)?; row.end()?;
                 if count == 0 { return Err("source-bound friction requires explicit contact declarations".into()); }

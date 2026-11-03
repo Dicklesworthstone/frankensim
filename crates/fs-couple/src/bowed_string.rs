@@ -297,8 +297,10 @@ impl FrictionIsland {
                 return Ok(None);
             }
         };
-        if !matches!(law, fs_tribo::FrictionLaw::Stribeck { .. } | fs_tribo::FrictionLaw::Hyperbolic { .. }) {
-            return Err(BowedRunError::Friction("set-valued bow contact requires a Stribeck or hyperbolic law"));
+        if !matches!(law, fs_tribo::FrictionLaw::Stribeck { .. } | fs_tribo::FrictionLaw::Hyperbolic { .. }
+            | fs_tribo::FrictionLaw::ShiftedPower { .. }) {
+            return Err(BowedRunError::Friction(
+                "set-valued bow contact requires a Stribeck, hyperbolic or shifted-power law"));
         }
         law.validate().map_err(BowedRunError::Interface)?;
         Ok(Some(law))

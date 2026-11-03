@@ -508,9 +508,48 @@ pub enum FrictionLaw {
         /// Physical weakening speed v0 [m/s], NOT an ODE regularization scale.
         characteristic_speed: f64,
     },
+    /// Memoryless shifted power-law weakening:
+    /// `mu(v) = kinetic_mu + (static_mu-kinetic_mu)*(1+|v|/v0)^(-exponent)`.
+    /// `exponent = 1` is the [`Self::Hyperbolic`] curve. With `kinetic_mu = 0`
+    /// it is `C*(|v|+v0)^(-exponent)`, `C = static_mu*v0^exponent`, the form of
+    /// a measured rosin fit ([`Self::rosin_woodhouse_galluzzo_2025_eq13`]).
+    /// This steady sliding law does not supply thermal/third-body hysteresis.
+    ShiftedPower {
+        /// Static capacity and one-sided zero-speed sliding coefficient.
+        static_mu: f64,
+        /// Asymptotic sliding coefficient at high speed.
+        kinetic_mu: f64,
+        /// Physical weakening speed v0 [m/s], NOT an ODE regularization scale.
+        characteristic_speed: f64,
+        /// Positive decay exponent of the weakening term.
+        exponent: f64,
+    },
 }
 
 impl FrictionLaw {
+    /// Woodhouse & Galluzzo (2025), "Enhanced tribological modelling of
+    /// violin rosin", Tribology Letters, doi:10.1007/s11249-025-02062-4,
+    /// eq. (13), p. 11 of the accepted manuscript: the revised fit to MEASURED
+    /// steady sliding of a rosin-coated contact, `mu = 0.2 (|v| + 0.011)^-0.4`
+    /// with `v` in m/s. Section 4 uses it "throughout" in place of the
+    /// eq. (1) fit, because rosin above its glass transition should give
+    /// `mu -> 0` at high sliding speed and eq. (1) nearly contravenes their
+    /// inequality (12). The measured points span about 0.3 m/s; beyond that
+    /// this is the fit's own trend. The static capacity is the curve's
+    /// zero-speed limit `0.2 * 0.011^-0.4` (about 1.215) and the asymptote is 0.
+    #[must_use]
+    pub fn rosin_woodhouse_galluzzo_2025_eq13() -> Self {
+        const COEFFICIENT: f64 = 0.2;
+        const OFFSET_M_S: f64 = 0.011;
+        const EXPONENT: f64 = 0.4;
+        Self::ShiftedPower {
+            static_mu: COEFFICIENT * det::pow(OFFSET_M_S, -EXPONENT),
+            kinetic_mu: 0.0,
+            characteristic_speed: OFFSET_M_S,
+            exponent: EXPONENT,
+        }
+    }
+
     /// Reports static capacity at rest; during sliding traction opposes the checked tangent slip.
     pub fn evaluate(
         &self,
@@ -566,6 +605,11 @@ impl FrictionLaw {
                 static_mu,
                 kinetic_mu,
                 ..
+            }
+            | Self::ShiftedPower {
+                static_mu,
+                kinetic_mu,
+                ..
             } => (static_mu, kinetic_mu),
             Self::VelocityDependent {
                 static_mu,
@@ -600,6 +644,10 @@ impl FrictionLaw {
         if let Self::Hyperbolic { characteristic_speed, .. } = *self {
             positive_finite(characteristic_speed, "characteristic_speed")?;
         }
+        if let Self::ShiftedPower { characteristic_speed, exponent, .. } = *self {
+            positive_finite(characteristic_speed, "characteristic_speed")?;
+            positive_finite(exponent, "exponent")?;
+        }
         Ok(())
     }
 
@@ -608,7 +656,8 @@ impl FrictionLaw {
             Self::Coulomb { static_mu, .. }
             | Self::VelocityDependent { static_mu, .. }
             | Self::Stribeck { static_mu, .. }
-            | Self::Hyperbolic { static_mu, .. } => static_mu,
+            | Self::Hyperbolic { static_mu, .. }
+            | Self::ShiftedPower { static_mu, .. } => static_mu,
         }
     }
 
@@ -626,7 +675,9 @@ impl FrictionLaw {
         Ok(match *self {
             Self::Coulomb { kinetic_mu, .. } => kinetic_mu,
             Self::VelocityDependent { mu_zero, .. } => mu_zero,
-            Self::Stribeck { static_mu, .. } | Self::Hyperbolic { static_mu, .. } => static_mu,
+            Self::Stribeck { static_mu, .. }
+            | Self::Hyperbolic { static_mu, .. }
+            | Self::ShiftedPower { static_mu, .. } => static_mu,
         })
     }
 
@@ -643,6 +694,22 @@ impl FrictionLaw {
                     inverse / (1.0 + inverse)
                 };
                 kinetic_mu + (static_mu - kinetic_mu) * fraction
+            }
+            Self::ShiftedPower {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed,
+                exponent,
+            } => {
+                let ratio = speed / characteristic_speed;
+                finite(ratio, "shifted_power_speed_ratio")?;
+                let decay = det::pow(1.0 + ratio, -exponent);
+                finite(decay, "shifted_power_decay")?;
+                checked_add(
+                    kinetic_mu,
+                    checked_mul(static_mu - kinetic_mu, decay, "shifted_power_mu")?,
+                    "shifted_power_mu",
+                )?
             }
             Self::VelocityDependent {
                 mu_zero,

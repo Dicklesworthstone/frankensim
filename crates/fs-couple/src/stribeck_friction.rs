@@ -266,6 +266,14 @@ pub struct SetValuedFrictionStep {
 /// negative, the critical slips are `0` and `sqrt(m N (mu_s - mu_k) v0) - v0`;
 /// otherwise the residual is monotone and has only its low sliding branch.
 ///
+/// The fs-tribo shifted power law
+/// `mu(v) = mu_k + (mu_s - mu_k)(1 + v/v0)^-n` (n > 0; n = 1 is hyperbolic)
+/// is convex the same way, with
+/// `g'(v) = 1 - m N (mu_s - mu_k)(n/v0)(1 + v/v0)^-(n+1)`. When this derivative
+/// starts negative, the critical slips are `0` and
+/// `v0 ((m N (mu_s - mu_k) n/v0)^(1/(n+1)) - 1)`; otherwise the residual is
+/// monotone.
+///
 /// [`Self::for_adhesive`] adds the actual junction forces `tau_static A` and
 /// `tau_kinetic A`. The kinetic offset shifts `g` without moving its critical
 /// points. When the two strengths differ, a stable low sliding root can coexist
@@ -285,8 +293,19 @@ pub struct StribeckLoadLine {
 
 type SetValuedError = ImplicitFrictionError<fs_tribo::TriboError>;
 
+/// The weakening term whose shape places the residual's critical points.
+#[derive(Debug, Clone, Copy)]
+enum Weakening {
+    /// Stribeck `exp(-(v/v0)^2)`: rising then falling `g'`, found by bisection.
+    Gaussian,
+    /// `1/(1 + v/v0)`: closed-form minimum.
+    Hyperbolic,
+    /// `(1 + v/v0)^-n`: closed-form minimum.
+    Power(f64),
+}
+
 impl StribeckLoadLine {
-    /// Admit a Stribeck or hyperbolic law at positive load and discrete mobility,
+    /// Admit a Stribeck, hyperbolic or shifted-power law at positive load and discrete mobility,
     /// and locate the residual's critical points once.
     ///
     /// # Errors
@@ -303,7 +322,7 @@ impl StribeckLoadLine {
         Self::with_junction(law, normal_n, mobility_m_per_n_s, 0.0, 0.0)
     }
 
-    /// Continue a frozen adhesive junction's complete Stribeck/hyperbolic law.
+    /// Continue a frozen adhesive junction's complete Stribeck/hyperbolic/shifted-power law.
     /// The real area and nonnegative repulsive load stay with the normal owner.
     /// Zero repulsive load is admitted: the independent junction still carries
     /// shear. This adds no normal evolution, shear peeling or elastic storage.
@@ -333,12 +352,15 @@ impl StribeckLoadLine {
         static_junction_n: f64,
         kinetic_junction_n: f64,
     ) -> Result<Self, SetValuedError> {
-        let (static_mu, kinetic_mu, characteristic_speed, viscous_per_speed, hyperbolic) = match *law {
+        let (static_mu, kinetic_mu, characteristic_speed, viscous_per_speed, weakening) = match *law {
             fs_tribo::FrictionLaw::Stribeck { static_mu, kinetic_mu, characteristic_speed, viscous_per_speed } =>
-                (static_mu, kinetic_mu, characteristic_speed, viscous_per_speed, false),
+                (static_mu, kinetic_mu, characteristic_speed, viscous_per_speed, Weakening::Gaussian),
             fs_tribo::FrictionLaw::Hyperbolic { static_mu, kinetic_mu, characteristic_speed } =>
-                (static_mu, kinetic_mu, characteristic_speed, 0.0, true),
-            _ => return Err(ImplicitFrictionError::InvalidInput("set-valued contact requires a Stribeck or hyperbolic law")),
+                (static_mu, kinetic_mu, characteristic_speed, 0.0, Weakening::Hyperbolic),
+            fs_tribo::FrictionLaw::ShiftedPower { static_mu, kinetic_mu, characteristic_speed, exponent } =>
+                (static_mu, kinetic_mu, characteristic_speed, 0.0, Weakening::Power(exponent)),
+            _ => return Err(ImplicitFrictionError::InvalidInput(
+                "set-valued contact requires a Stribeck, hyperbolic or shifted-power law")),
         };
         // Validates the law through its owner before any root work.
         law.kinetic_coefficient(characteristic_speed)
@@ -360,7 +382,16 @@ impl StribeckLoadLine {
         let b = 1.0 + mobility_m_per_n_s * normal_n * viscous_per_speed;
         let shape = |x: f64| x * fs_math::det::exp(-(x * x));
         let peak = core::f64::consts::FRAC_1_SQRT_2;
-        let (local_max_m_s, local_min_m_s) = if hyperbolic {
+        let (local_max_m_s, local_min_m_s) = if let Weakening::Power(exponent) = weakening {
+            // g'(v) = 1 - (a n / v0) (1 + v/v0)^-(n+1) rises monotonically, so
+            // the one minimum is at (1 + v/v0)^(n+1) = a n / v0.
+            let scale = a * exponent / characteristic_speed;
+            let bottom = characteristic_speed * (fs_math::det::pow(scale, 1.0 / (exponent + 1.0)) - 1.0);
+            if !bottom.is_finite() {
+                return Err(ImplicitFrictionError::InvalidInput("load_line_scale"));
+            }
+            if bottom > 0.0 { (0.0, bottom) } else { (f64::INFINITY, f64::INFINITY) }
+        } else if matches!(weakening, Weakening::Hyperbolic) {
             // (v + v0)^2 = m N (mu_s - mu_k) v0 at the one minimum.
             let bottom = fs_math::det::sqrt(a * characteristic_speed) - characteristic_speed;
             if !bottom.is_finite() {
@@ -1061,5 +1092,131 @@ mod tests {
         assert_eq!(valid.traction(0.01, -1.0), Err("normal_force"));
         let large = StribeckFriction::try_new(4.0, 4.0, 0.05, 0.05).unwrap();
         assert_eq!(large.traction(0.1, f64::MAX), Err("regularized_traction"));
+    }
+}
+
+#[cfg(test)]
+mod shifted_power_line_tests {
+    use super::*;
+
+    fn power(static_mu: f64, kinetic_mu: f64, speed: f64, exponent: f64) -> fs_tribo::FrictionLaw {
+        fs_tribo::FrictionLaw::ShiftedPower { static_mu, kinetic_mu, characteristic_speed: speed, exponent }
+    }
+
+    // Independent oracle: every upward sign change of g on a uniform grid of (0, S].
+    fn upward_crossings(law: &fs_tribo::FrictionLaw, n: f64, m: f64, s: f64) -> Vec<f64> {
+        let cells = 200_000;
+        let g = |v: f64| {
+            let mu = if v == 0.0 {
+                law.zero_speed_kinetic_coefficient().unwrap()
+            } else {
+                law.kinetic_coefficient(v).unwrap()
+            };
+            v - s + m * mu * n
+        };
+        let mut out = Vec::new();
+        let mut prev = g(0.0);
+        for i in 1..=cells {
+            let v = s * f64::from(i) / f64::from(cells);
+            let cur = g(v);
+            if prev < 0.0 && cur >= 0.0 {
+                out.push(v);
+            }
+            prev = cur;
+        }
+        out
+    }
+
+    fn lcg(state: &mut u64) -> f64 {
+        *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        f64::from(u32::try_from(*state >> 40).unwrap()) / f64::from(1_u32 << 24)
+    }
+
+    /// The closed-form minimum is where the residual's slope vanishes.
+    #[test]
+    fn critical_slip_is_where_the_residual_slope_vanishes() {
+        for (law, n, m) in [
+            (fs_tribo::FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13(), 1.0, 0.2),
+            (power(1.0, 0.3, 0.02, 0.4), 2.0, 0.5),
+            (power(0.9, 0.2, 0.05, 2.5), 0.5, 1.0),
+        ] {
+            let line = StribeckLoadLine::new(&law, n, m).unwrap();
+            let (top, bottom) = line.critical_slips_m_s();
+            assert_eq!(top, 0.0, "{law:?}");
+            assert!(bottom > 0.0 && bottom.is_finite(), "{law:?}: {bottom}");
+            let g = |v: f64| v + m * n * law.kinetic_coefficient(v).unwrap();
+            let h = bottom * 1.0e-4;
+            let slope = (g(bottom + h) - g(bottom - h)) / (2.0 * h);
+            assert!(slope.abs() < 1.0e-6, "{law:?}: slope {slope} at {bottom}");
+            assert!(g(bottom) < g(0.5 * bottom) && g(bottom) < g(2.0 * bottom), "{law:?}");
+        }
+        // A light load leaves the residual monotone: no hysteresis.
+        let light = StribeckLoadLine::new(&power(1.0, 0.3, 0.02, 0.4), 0.01, 0.01).unwrap();
+        assert_eq!(light.critical_slips_m_s(), (f64::INFINITY, f64::INFINITY));
+    }
+
+    /// Exponent 1 is the hyperbolic curve: same critical slips and steps to rounding.
+    #[test]
+    fn unit_exponent_is_the_hyperbolic_line() {
+        let hyperbolic = fs_tribo::FrictionLaw::Hyperbolic { static_mu: 0.8, kinetic_mu: 0.4, characteristic_speed: 0.04 };
+        let unit = power(0.8, 0.4, 0.04, 1.0);
+        let close = |a: f64, b: f64| (a - b).abs() <= 1.0e-12 * a.abs().max(b.abs()).max(1.0e-12);
+        for (n, m) in [(3.9, 0.2), (1.0, 0.05), (0.5, 2.0)] {
+            let a = StribeckLoadLine::new(&hyperbolic, n, m).unwrap();
+            let b = StribeckLoadLine::new(&unit, n, m).unwrap();
+            let (a_top, a_bottom) = a.critical_slips_m_s();
+            let (b_top, b_bottom) = b.critical_slips_m_s();
+            assert_eq!(a_top, b_top);
+            assert!(a_bottom == b_bottom || close(a_bottom, b_bottom), "{a_bottom} vs {b_bottom}");
+            for free in [0.0, 0.05, 0.3, 0.62, 0.7, 1.5, 4.0] {
+                for previous in [ContactBranch::Fresh, ContactBranch::SlidingHigh { positive: true }] {
+                    let x = a.step(free, previous).unwrap();
+                    let y = b.step(free, previous).unwrap();
+                    assert_eq!(x.branch, y.branch, "free {free}, n {n}, m {m}");
+                    assert!(close(x.traction_n, y.traction_n), "{x:?} vs {y:?}");
+                    assert!(close(x.relative_velocity_m_s, y.relative_velocity_m_s), "{x:?} vs {y:?}");
+                }
+            }
+        }
+    }
+
+    /// From rest the step takes the first upward crossing; a high-branch slide
+    /// takes the last one; sticking happens exactly inside the cone.
+    #[test]
+    fn shifted_power_roots_match_a_dense_scan_oracle() {
+        let mut seed = 0x0013_5eed_u64;
+        let mut hysteretic = 0;
+        for _ in 0..120 {
+            let kinetic = 0.5 * lcg(&mut seed);
+            let static_mu = kinetic + 0.2 + 0.8 * lcg(&mut seed);
+            let c = 0.005 + 0.1 * lcg(&mut seed);
+            let exponent = 0.2 + 1.8 * lcg(&mut seed);
+            let f = power(static_mu, kinetic, c, exponent);
+            let n = 0.05 + 5.0 * lcg(&mut seed);
+            let m = 0.01 + 0.5 * lcg(&mut seed);
+            let line = StribeckLoadLine::new(&f, n, m).unwrap();
+            let s = 1.5 * lcg(&mut seed) * (m * static_mu * n + 0.2);
+            let roots = upward_crossings(&f, n, m, s);
+            let cell = s / 200_000.0;
+            let fresh = line.step(s, ContactBranch::Fresh).unwrap();
+            let high = line.step(s, ContactBranch::SlidingHigh { positive: true }).unwrap();
+            if s / m <= static_mu * n {
+                assert_eq!(fresh.branch, ContactBranch::Stuck);
+                assert_eq!(fresh.relative_velocity_m_s, 0.0);
+                assert_eq!(fresh.traction_n, s / m);
+                if !roots.is_empty() {
+                    hysteretic += 1;
+                }
+            } else {
+                assert!((fresh.relative_velocity_m_s - roots[0]).abs() <= cell, "{fresh:?} vs {roots:?}");
+            }
+            match roots.last() {
+                Some(&last) => assert!((high.relative_velocity_m_s - last).abs() <= cell, "{high:?} vs {roots:?}"),
+                None => assert_eq!(high.branch, ContactBranch::Stuck),
+            }
+            let mirror = line.step(-s, ContactBranch::Fresh).unwrap();
+            assert_eq!(mirror.traction_n.to_bits(), (-fresh.traction_n).to_bits());
+        }
+        assert!(hysteretic >= 5, "the sample must exercise the multi-root region: {hysteretic}");
     }
 }

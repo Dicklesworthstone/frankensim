@@ -763,7 +763,8 @@ impl MultiFrictionModalSystem {
             self.staged_branches[i] = ContactBranch::Fresh;
             return contact.solve(free, compliance, normal, dt, config);
         }
-        let continued = matches!(law, FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. });
+        let continued = matches!(law,
+            FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. } | FrictionLaw::ShiftedPower { .. });
         if !continued || normal == 0.0 {
             self.staged_branches[i] = ContactBranch::Fresh;
             let (force, regime, iterations) = scalar::solve(&law, config, compliance, dt, free, normal, gate)?;

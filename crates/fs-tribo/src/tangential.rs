@@ -190,6 +190,7 @@ impl TangentialLaw for FrictionLaw {
             Self::Stribeck { .. } => "dry-stribeck-set-valued-benchmark",
             Self::VelocityDependent { .. } => "dry-velocity-dependent-set-valued-benchmark",
             Self::Hyperbolic { .. } => "dry-hyperbolic-set-valued-benchmark",
+            Self::ShiftedPower { .. } => "dry-shifted-power-set-valued-benchmark",
         }
     }
 
@@ -477,7 +478,7 @@ impl FrictionLaw {
                 Ok((force.is_finite() && force >= 0.0 && force <= static_force)
                     .then_some(force))
             }
-            Self::Stribeck { .. } => Ok(None),
+            Self::Stribeck { .. } | Self::ShiftedPower { .. } => Ok(None),
         }
     }
 }

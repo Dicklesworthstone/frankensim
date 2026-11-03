@@ -618,14 +618,15 @@ impl FrictionModalSystem {
         Ok(accepted)
     }
 
-    // Stribeck and hyperbolic laws take the branch-continuation owner on the
-    // same endpoint load line, v = v_free - (c/dt) F with v_free = free_slip/dt,
-    // starting from the branch the contact occupies. Every other law, and a
-    // released contact, keeps the scalar bisection unchanged.
+    // Stribeck, hyperbolic and shifted-power laws take the branch-continuation
+    // owner on the same endpoint load line, v = v_free - (c/dt) F with
+    // v_free = free_slip/dt, starting from the branch the contact occupies.
+    // Every other law, and a released contact, keeps the scalar bisection unchanged.
     fn solve_contact(&mut self, free_slip: f64, normal: f64, gate: Option<&CancelGate>)
         -> Result<(f64, ModalFrictionRegime, usize, Option<FrictionRoots>), ModalFrictionError>
     {
-        let continued = matches!(self.port.law, FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. });
+        let continued = matches!(self.port.law,
+            FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. } | FrictionLaw::ShiftedPower { .. });
         if let Some(binding) = &self.adhesive {
             let contact = binding.tangential().contact();
             if normal != contact.repulsive_normal_force_n() {

@@ -97,7 +97,9 @@ impl AdhesiveTangentialContact {
                 let force = released / denominator;
                 Ok((force.is_finite() && force >= junction).then_some(force))
             }
-            FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. } => Ok(None),
+            FrictionLaw::Stribeck { .. }
+            | FrictionLaw::Hyperbolic { .. }
+            | FrictionLaw::ShiftedPower { .. } => Ok(None),
         }
     }
 }

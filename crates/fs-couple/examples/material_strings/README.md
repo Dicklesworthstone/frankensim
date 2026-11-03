@@ -1403,6 +1403,17 @@ is also accepted. These coefficients retain **caller authority**. Bulk material
 data do not certify a rosin/string friction law. The render log labels these
 numeric inputs as a research override.
 
+`friction rosin-wg2025-eq13` takes no numbers. It selects the measured steady-sliding
+fit for a rosin-coated contact from Woodhouse & Galluzzo (2025), "Enhanced tribological
+modelling of violin rosin", Tribology Letters, doi:10.1007/s11249-025-02062-4,
+eq. (13): `mu = 0.2 (|v| + 0.011)^-0.4`, with v in m/s. The constants live in
+`fs_tribo::FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13`. The paper uses this fit in
+place of its eq. (1), because rosin above its glass transition should give mu -> 0 at high
+sliding speed. The curve is continuous at rest (static capacity `0.2 * 0.011^-0.4`,
+about 1.215) and takes the same set-valued branch continuation as `hyperbolic`. The measured
+points span about 0.3 m/s; above that the curve is the fit's own trend. It is a steady-sliding
+curve: no thermal or rosin-temperature memory.
+
 The material-layer form above selects bulk constitutive properties and layer geometry.
 A separate supported choice replaces the friction row with source-bound ordered interfaces:
 
