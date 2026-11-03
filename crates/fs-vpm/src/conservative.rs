@@ -16,6 +16,9 @@ use super::{
     invalid_scalar, pairwise::advance_validated_pair, reserved_vec, validate_particle,
 };
 
+mod viscous;
+pub use viscous::simulate_with_cx as simulate_viscous_with_cx;
+
 /// Advance the inviscid cloud by symmetric exact-pair splitting under the
 /// existing local and ambient execution budgets.
 ///
@@ -92,24 +95,15 @@ pub fn simulate_with_cx(
     let mut completed_pairs = 0;
     for _ in 0..steps {
         if active {
-            for i in 0..state.len() {
-                for j in (i + 1)..state.len() {
-                    meter.unit(&mut accountant, cx, "fs-vpm.conservative-forward", || {
-                        advance(&mut state, i, j, dt, core)?;
-                        completed_pairs += 1;
-                        Ok(())
-                    })?;
-                }
-            }
-            for i in (0..state.len()).rev() {
-                for j in ((i + 1)..state.len()).rev() {
-                    meter.unit(&mut accountant, cx, "fs-vpm.conservative-reverse", || {
-                        advance(&mut state, i, j, dt, core)?;
-                        completed_pairs += 1;
-                        Ok(())
-                    })?;
-                }
-            }
+            symmetric_sweep(
+                &mut state,
+                dt,
+                core,
+                &mut completed_pairs,
+                &mut meter,
+                &mut accountant,
+                cx,
+            )?;
         }
         meter.unit(&mut accountant, cx, "fs-vpm.conservative-step", || Ok(()))?;
         meter.boundary(&mut accountant, cx, "fs-vpm.conservative-step-complete")?;
@@ -135,6 +129,39 @@ pub fn simulate_with_cx(
         peak_live_bytes,
         budget: accountant.consumption(),
     })
+}
+
+// The inviscid and viscous transactions share exactly the same pair map,
+// ordering, arithmetic and work-meter phases. This performs one full advection
+// interval; diffusion composes around it without replacing the advection owner.
+fn symmetric_sweep(
+    state: &mut [VortexParticle],
+    dt: f64,
+    core: f64,
+    completed_pairs: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+) -> Result<(), VpmError> {
+    for i in 0..state.len() {
+        for j in (i + 1)..state.len() {
+            meter.unit(accountant, cx, "fs-vpm.conservative-forward", || {
+                advance(state, i, j, dt, core)?;
+                *completed_pairs += 1;
+                Ok(())
+            })?;
+        }
+    }
+    for i in (0..state.len()).rev() {
+        for j in ((i + 1)..state.len()).rev() {
+            meter.unit(accountant, cx, "fs-vpm.conservative-reverse", || {
+                advance(state, i, j, dt, core)?;
+                *completed_pairs += 1;
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn advance(

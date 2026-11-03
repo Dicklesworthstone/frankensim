@@ -270,6 +270,30 @@ on arbitrary finite clouds. The velocity core remains algebraic, not a Gaussian
 heat kernel. This bounded 2-D addition does not close the deferred 3-D/FMM/BEM
 epic or change the existing inviscid thrust-screening consumer.
 
+## Viscous evolution with conservative advection
+
+`conservative::simulate_viscous_with_cx` composes the original PSE diffusion
+half steps around the original exact-pair conservative advection sweep:
+D(dt/2), A(dt), D(dt/2). Quadrature areas remain explicit and distinct from
+the Biot–Savart core. Time is nonnegative; every area is validated even for
+zero motion or zero viscosity. Within this domain, zero viscosity recovers
+the existing conservative trajectory, work counts and live-memory bound.
+
+Positive time and viscosity require `3*S*N*(N-1)` pair visits and
+`N + S + 3*S*N*(N-1)` logical work units. One particle vector is owned, with
+no RK4 buffers or per-step allocation. Original local/ambient budgets,
+bounded checkpoints and atomic publication apply.
+
+Advection preserves its vortex-impulse moments; PSE preserves circulation
+and contracts its vorticity range and weighted enstrophy. PSE does not
+exactly preserve linear/angular impulse on an arbitrary finite cloud, and
+the composition does not hide that quadrature error with a projection.
+Temporal and cloud/kernel refinement remain distinct requirements.
+No complete fluid/body momentum balance, viscous heat, wall condition,
+evolving-core model or measured performance claim is added.
+`tests/conservative_viscous.rs` checks zero-viscosity equivalence, analytical
+dipole decay and travel, refinement, signed-cloud behavior and refusals.
+
 ## Three-dimensional impulse and conservative coarsening
 
 `FilamentWake::hydrodynamic_impulse_per_density` reports the complete closed
