@@ -209,6 +209,38 @@ fn impulse_increment(before: f64, change: f64) -> Result<f64, Refusal> {
     Ok(after)
 }
 
+fn admit_held_shaft_transfer(
+    before: f64,
+    after: f64,
+    torque: f64,
+    dt_s: f64,
+) -> Result<f64, Refusal> {
+    let requested = torque * dt_s;
+    let actual = after - before;
+    // Finite trajectories retain ordinary addition quantization, especially
+    // near motor/aerodynamic balance. The strict relative transfer budget of
+    // an explicit impulse is not an accuracy requirement on each O(dt) kick.
+    if !requested.is_finite()
+        || !actual.is_finite()
+        || (torque != 0.0 && requested == 0.0)
+        || (requested != 0.0 && actual == 0.0)
+    {
+        return Err(impulse_refusal());
+    }
+    Ok(actual)
+}
+
+fn admit_stored_transfer(before: Vec3, after: Vec3, required: [Dd; 3]) -> Result<(), Refusal> {
+    for i in 0..3 {
+        let actual = (dd(array(after)[i]) - dd(array(before)[i])).to_f64();
+        let expected = required[i].to_f64();
+        if !expected.is_finite() || !actual.is_finite() || (expected != 0.0 && actual == 0.0) {
+            return Err(impulse_refusal());
+        }
+    }
+    Ok(())
+}
+
 fn impulse_kinematics(
     mass: f64,
     inertia: InertiaTensor3,
@@ -478,6 +510,8 @@ pub fn apply_impulse<const N: usize>(
 /// # Errors
 /// Native spine/gyrostat admission and `rotor-assembly-invalid`. All inputs
 /// are immutable and no physical state is published on any refusal.
+/// `impulse-unrepresentable` refuses an erased nonzero shaft kick or stored
+/// rotor-momentum transfer before the gyrostat can lose its carrier recoil.
 pub fn step_held<const N: usize>(
     assembly: &RotorAssembly<N>,
     state: &RotorState<N>,
@@ -507,16 +541,30 @@ pub fn step_held<const N: usize>(
     let mut next = *state;
     next.rigid = canonical;
     let stored_before = assembly.stored(&state.axial_momentum);
+    let mut stored_transfer = [dd(0.0); 3];
     let mut total_torque = vec(loads.moment_nm);
     for i in 0..N {
         next.axial_momentum[i] = dt_s.mul_add(
             torques.motor_nm[i] + torques.aerodynamic_nm[i],
             state.axial_momentum[i],
         );
+        let actual = admit_held_shaft_transfer(
+            state.axial_momentum[i],
+            next.axial_momentum[i],
+            torques.motor_nm[i] + torques.aerodynamic_nm[i],
+            dt_s,
+        )?;
+        for j in 0..3 {
+            let term = dd(assembly.rotors[i].axis_body[j]) * dd(actual);
+            stored_transfer[j] = stored_transfer[j] + term;
+        }
         total_torque =
             total_torque + vec(assembly.rotors[i].axis_body).scale(torques.aerodynamic_nm[i]);
     }
     let stored_after = assembly.stored(&next.axial_momentum);
+    // A resolved shaft impulse can still disappear when another rotor's much
+    // larger momentum dominates h. Refuse before the gyrostat loses recoil.
+    admit_stored_transfer(stored_before, stored_after, stored_transfer)?;
     if !next.axial_momentum.iter().all(|x| x.is_finite())
         || !finite(stored_before)
         || !finite(stored_after)

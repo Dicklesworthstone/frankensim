@@ -13,8 +13,8 @@ use super::super::{
     rotation_from_boundary, rotation_to_boundary,
 };
 use super::{
-    CarrierImpulse, MAX_ROTORS, array, dd, dot_dd, finite, impulse_increment, impulse_kinematics,
-    vec,
+    CarrierImpulse, MAX_ROTORS, admit_held_shaft_transfer, admit_stored_transfer, array, dd,
+    dot_dd, finite, impulse_increment, impulse_kinematics, vec,
 };
 use crate::Refusal;
 use fs_ga::{Mat3, So3, Vec3};
@@ -429,6 +429,8 @@ pub fn apply_impulse<const N: usize>(
 ///
 /// # Errors
 /// Native state/step/group admission, load admission or gear/gyrostat refusal.
+/// `impulse-unrepresentable` for a completely erased nonzero shaft kick or
+/// stored-momentum transfer; ordinary finite-step quantization is retained.
 /// Inputs are immutable; a refusal publishes no physical endpoint.
 pub fn step_held<const N: usize>(
     assembly: &GearedAssembly<N>,
@@ -512,8 +514,13 @@ fn advance_held<const N: usize>(
     }
     let mut next = *state;
     next.momentum += dt_s * generalized_torque;
+    let actual_dp =
+        admit_held_shaft_transfer(state.momentum, next.momentum, generalized_torque, dt_s)?;
     let stored_before = assembly.stored(state.momentum);
     let stored_after = assembly.stored(next.momentum);
+    let stored_transfer =
+        array(assembly.cross_inertia).map(|c| dd(c) * dd(actual_dp / assembly.equivalent_inertia));
+    admit_stored_transfer(stored_before, stored_after, stored_transfer)?;
     if !next.momentum.is_finite()
         || !finite(total_torque)
         || !finite(stored_before)

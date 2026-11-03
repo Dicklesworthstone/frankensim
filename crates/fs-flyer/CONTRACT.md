@@ -758,6 +758,14 @@ without subtracting large endpoint totals. The `rotor_spine` battery covers
 analytic recoil, signed gears, off-center impulses, world-frame covariance and
 representability with a large neighboring rotor momentum.
 
+Finite held-load updates also refuse a completely erased nonzero shaft kick,
+torque-times-step underflow, or a shaft change lost when forming the aggregate
+stored rotor momentum used by the gyrostat. The shared geared midpoint owner
+carries those refusals into native steady/dynamic/harmonic propulsion. Normal
+finite-step addition quantization near balanced motor/aerodynamic torques is
+retained; the stricter transfer-relative budget applies only to an explicit
+instantaneous jump. Accepted finite trajectory arithmetic is unchanged.
+
 ### Spatially mounted propellers
 
 `propcoupling::spatial::{DiskAxes, coupled_step}` and

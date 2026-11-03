@@ -746,3 +746,164 @@ fn g0_impulses_refuse_dropped_coordinates_but_resolve_recoil_beside_large_other_
         );
     }
 }
+
+#[test]
+fn g0_finite_steps_refuse_erased_shaft_transfers_and_aggregate_recoil() {
+    let a = RotorAssembly {
+        reduced_body: body(),
+        rotors: [rotor([1.0, 0.0, 0.0]); 2],
+    };
+    let s = a
+        .state_from_relative_spin(rigid(), [0.0; 2], [0.0; 2])
+        .unwrap();
+    let mut enormous = s;
+    enormous.axial_momentum[0] = 1e30;
+    for motor in [[1.0, 0.0], [0.0, 1.0]] {
+        // First: the shaft's own increment disappears. Second: shaft 1
+        // resolves its kick, but aggregation with shaft 0 would erase recoil.
+        let error = step_held(
+            &a,
+            &enormous,
+            no_loads(),
+            RotorTorques {
+                motor_nm: motor,
+                aerodynamic_nm: [0.0; 2],
+            },
+            ZERO,
+            0.05,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "impulse-unrepresentable");
+    }
+    let zero = RotorTorques {
+        motor_nm: [0.0; 2],
+        aerodynamic_nm: [0.0; 2],
+    };
+    assert!(step_held(&a, &enormous, no_loads(), zero, ZERO, 0.05).is_ok());
+    let underflow = RotorTorques {
+        motor_nm: [f64::from_bits(1), 0.0],
+        ..zero
+    };
+    assert_eq!(
+        step_held(&a, &s, no_loads(), underflow, ZERO, 1e-6)
+            .unwrap_err()
+            .code,
+        "impulse-unrepresentable"
+    );
+    assert!(step_held(&a, &s, no_loads(), zero, ZERO, 1e-6).is_ok());
+    assert!(step_held(&a, &s, no_loads(), zero, ZERO, 0.0).is_err());
+    assert_eq!(enormous.axial_momentum, [1e30, 0.0]);
+
+    let gear = geared::GearedAssembly::new(
+        3.0,
+        Mat3 {
+            m: [2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0],
+        },
+        [geared::GearedRotor {
+            axis_body: [1.0, 0.0, 0.0],
+            axial_inertia_kgm2: 0.2,
+            ratio: 1.0,
+        }],
+    )
+    .unwrap();
+    let mut state = gear.state_from_speed(rigid(), 0.0, 1.0).unwrap();
+    state.momentum = 1e30;
+    let loads = geared::GearedLoads {
+        carrier: no_loads(),
+        motor_nm: 1.0,
+        aerodynamic_nm: [0.0],
+    };
+    assert_eq!(
+        geared::step_held(&gear, &state, loads, ZERO, 0.05)
+            .unwrap_err()
+            .code,
+        "impulse-unrepresentable"
+    );
+    let mut calls = 0;
+    let error = geared::step(&gear, &state, 0.0, 0.05, ZERO, |_, _| {
+        calls += 1;
+        Ok(loads)
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "impulse-unrepresentable");
+    assert_eq!(
+        calls, 1,
+        "refused half-step must not evaluate a fictitious midpoint"
+    );
+    let ordinary = gear.state_from_speed(rigid(), 0.0, 0.0).unwrap();
+    let tiny = geared::GearedLoads {
+        motor_nm: f64::from_bits(1),
+        ..loads
+    };
+    assert_eq!(
+        geared::step_held(&gear, &ordinary, tiny, ZERO, 1e-6)
+            .unwrap_err()
+            .code,
+        "impulse-unrepresentable"
+    );
+    assert_eq!(state.momentum, 1e30);
+}
+
+#[test]
+fn g1_near_balanced_finite_torques_retain_the_existing_quantized_trajectory() {
+    let gear = geared::GearedAssembly::new(
+        3.0,
+        Mat3 {
+            m: [2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0],
+        },
+        [geared::GearedRotor {
+            axis_body: [1.0, 0.0, 0.0],
+            axial_inertia_kgm2: 0.2,
+            ratio: 1.0,
+        }],
+    )
+    .unwrap();
+    let state = gear.state_from_speed(rigid(), 0.0, 500.0).unwrap();
+    let loads = geared::GearedLoads {
+        carrier: no_loads(),
+        motor_nm: 1.0,
+        aerodynamic_nm: [-1.0 + 1e-6],
+    };
+    let dt = 0.1;
+    let held = geared::step_held(&gear, &state, loads, ZERO, dt).unwrap();
+    let midpoint = geared::step(&gear, &state, 0.0, dt, ZERO, |_, _| Ok(loads)).unwrap();
+    assert_eq!(state.momentum, 100.0);
+    assert_eq!(
+        held.state.momentum,
+        state.momentum + dt * (loads.motor_nm + loads.aerodynamic_nm[0])
+    );
+    assert!(held.state.momentum > state.momentum);
+    assert_eq!(held, midpoint);
+    let actual = held.state.momentum - state.momentum;
+    let requested = dt * (loads.motor_nm + loads.aerodynamic_nm[0]);
+    assert!(
+        (actual - requested).abs() > 4096.0 * f64::EPSILON * requested.abs(),
+        "fixture must exercise normal addition quantization beyond the explicit-impulse budget"
+    );
+    let independent = RotorAssembly {
+        reduced_body: body(),
+        rotors: [rotor([1.0, 0.0, 0.0])],
+    };
+    let s = independent
+        .state_from_relative_spin(rigid(), [0.0], [500.0])
+        .unwrap();
+    let r = step_held(
+        &independent,
+        &s,
+        no_loads(),
+        RotorTorques {
+            motor_nm: [loads.motor_nm],
+            aerodynamic_nm: loads.aerodynamic_nm,
+        },
+        ZERO,
+        dt,
+    )
+    .unwrap();
+    assert_eq!(
+        r.state.axial_momentum[0],
+        dt.mul_add(
+            loads.motor_nm + loads.aerodynamic_nm[0],
+            s.axial_momentum[0]
+        )
+    );
+}
