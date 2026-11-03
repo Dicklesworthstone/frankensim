@@ -600,6 +600,42 @@ impl<'m> FluxSystem<'m> {
                     }
                     continue;
                 }
+                if let Some(beta) = boundary.and_then(|data| data.tangential_resistance(e)) {
+                    // Navier slip: the normal BDM moments are already strong.
+                    // The original symmetric-stress volume/interior owner is
+                    // unchanged. This tangential resistance IS the wall law,
+                    // so no Dirichlet consistency or artificial penalty belongs
+                    // on this face. Two Gauss points integrate the affine traces.
+                    if beta == 0.0 {
+                        continue;
+                    }
+                    let tangent = [-n[1], n[0]];
+                    for (q, (gx, w)) in gauss.into_iter().enumerate() {
+                        let wall = boundary.expect("admitted slip").velocity(e, q);
+                        let wall_t = wall[0] * tangent[0] + wall[1] * tangent[1];
+                        let weight_beta = w * beta;
+                        let traces = core::array::from_fn::<_, 6, _>(|i| {
+                            let v = eval_basis(&self.bases[t0], i, gx);
+                            v[0] * tangent[0] + v[1] * tangent[1]
+                        });
+                        for (i, &vi_t) in traces.iter().enumerate() {
+                            let gi = self.dof(t0, i);
+                            for (j, &vj_t) in traces.iter().enumerate() {
+                                let gj = self.dof(t0, j);
+                                momentum_entry(
+                                    &mut coo,
+                                    &mut reactions,
+                                    &con,
+                                    gi,
+                                    gj,
+                                    weight_beta * vi_t * vj_t,
+                                );
+                            }
+                            rhs[gi] += weight_beta * wall_t * vi_t;
+                        }
+                    }
+                    continue;
+                }
                 // Velocity boundary: weak tangential data (normal is strong).
                 for (q, (gx, w)) in gauss.into_iter().enumerate() {
                     let gval = boundary.map_or_else(|| g(gx), |data| data.velocity(e, q));
@@ -763,7 +799,10 @@ impl<'m> FluxSystem<'m> {
             let (va, vb) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
             let open_policy = boundary.and_then(|data| data.open_policy(edge_id));
             let reservoir = boundary.and_then(|data| data.reservoir_velocity(edge_id));
-            let prescribed = (t1 == usize::MAX && open_policy.is_none()).then(|| {
+            let slip = boundary
+                .and_then(|data| data.tangential_resistance(edge_id))
+                .is_some();
+            let prescribed = (t1 == usize::MAX && open_policy.is_none() && !slip).then(|| {
                 let points = crate::bdm::edge_gauss_pub(va, vb);
                 core::array::from_fn(|q| {
                     boundary.map_or_else(|| g(points[q].0), |data| data.velocity(edge_id, q))
@@ -783,7 +822,10 @@ impl<'m> FluxSystem<'m> {
                         if con[gi].is_some() && reactions.is_none() {
                             continue;
                         }
-                        if wn >= 0.0 || (open_policy.is_some() && reservoir.is_none()) {
+                        if wn >= 0.0 || slip || (open_policy.is_some() && reservoir.is_none()) {
+                            // Slip does not prescribe incoming tangential
+                            // momentum: use the interior trace on either sign.
+                            // An impermeable wall has zero relative normal flux.
                             // Natural traction uses the interior trace even
                             // during inflow. The explicit dissipative policy
                             // adds -min(w.n,0) u to this conservative flux,

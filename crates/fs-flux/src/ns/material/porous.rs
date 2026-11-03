@@ -119,7 +119,8 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                         let physical = value(point, normal);
                         [physical[0] / density, physical[1] / density]
                     }
-                    MaterialStokesBoundary::Velocity { .. } => {
+                    MaterialStokesBoundary::Velocity { .. }
+                    | MaterialStokesBoundary::NavierSlip { .. } => {
                         unreachable!("only traction edges request stress")
                     }
                 }
@@ -132,6 +133,18 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 MaterialStokesBoundary::Velocity { edge, value } => StokesBoundary::Velocity {
                     edge: *edge,
                     value: *value,
+                },
+                MaterialStokesBoundary::NavierSlip {
+                    edge,
+                    value,
+                    tangential_resistance_pa_s_per_m,
+                } => StokesBoundary::NavierSlip {
+                    edge: *edge,
+                    value: *value,
+                    tangential_resistance_m_s: super::mixed::kinematic_slip_resistance(
+                        *tangential_resistance_pa_s_per_m,
+                        density,
+                    ),
                 },
                 MaterialStokesBoundary::TotalTraction { edge, .. } => {
                     StokesBoundary::TotalTraction {

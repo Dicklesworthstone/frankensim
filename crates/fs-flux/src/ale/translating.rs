@@ -13,9 +13,9 @@
 //! rotation, deformation, changing topology, or a whole-domain energy audit.
 
 use crate::{
-    FluxSystem, MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialFluxError, MaterialFluxNumerics, MaterialFluxSystem,
-    MaterialNavierStokesBoundary, MaterialNavierStokesStep, NavierStokesControls,
-    OpenBoundaryPolicy,
+    FluxSystem, MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialFluxError,
+    MaterialFluxNumerics, MaterialFluxSystem, MaterialNavierStokesBoundary,
+    MaterialNavierStokesStep, NavierStokesControls, OpenBoundaryPolicy,
 };
 use fs_material::fluid_transport::FluidTransport;
 
@@ -122,10 +122,15 @@ impl TranslatingAleStep {
         pressure_offsets_pa: &[Option<f64>],
     ) -> Result<MaterialBoundaryLoad, TranslatingAleError> {
         let origin = self.reference_origin(origin_world_m)?;
-        let mut load = self.relative_flow.solution
-            .boundary_loads(edges, origin, pressure_offsets_pa)?;
-        let transport = self.relative_flow.solution
-            .boundary_transport(edges, origin, self.mesh_velocity_m_s)?;
+        let mut load =
+            self.relative_flow
+                .solution
+                .boundary_loads(edges, origin, pressure_offsets_pa)?;
+        let transport = self.relative_flow.solution.boundary_transport(
+            edges,
+            origin,
+            self.mesh_velocity_m_s,
+        )?;
         load.outward_momentum = transport.outward_momentum;
         load.origin_m = origin_world_m;
         Ok(load)
@@ -147,8 +152,11 @@ impl TranslatingAleStep {
         origin_world_m: [f64; 2],
     ) -> Result<MaterialBoundaryTransport, TranslatingAleError> {
         let origin = self.reference_origin(origin_world_m)?;
-        let mut transport = self.relative_flow.solution
-            .boundary_transport(edges, origin, self.mesh_velocity_m_s)?;
+        let mut transport = self.relative_flow.solution.boundary_transport(
+            edges,
+            origin,
+            self.mesh_velocity_m_s,
+        )?;
         transport.origin_m = origin_world_m;
         Ok(transport)
     }
@@ -392,6 +400,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
             .map(|boundary| {
                 move |point: [f64; 2]| match boundary {
                     MaterialNavierStokesBoundary::Velocity { value, .. }
+                    | MaterialNavierStokesBoundary::NavierSlip { value, .. }
                     | MaterialNavierStokesBoundary::OpenReservoir {
                         velocity: value, ..
                     } => {
@@ -413,7 +422,8 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
                         [point[0] + translation[0], point[1] + translation[1]],
                         normal,
                     ),
-                    MaterialNavierStokesBoundary::Velocity { .. } => {
+                    MaterialNavierStokesBoundary::Velocity { .. }
+                    | MaterialNavierStokesBoundary::NavierSlip { .. } => {
                         unreachable!("only open edges request traction samples")
                     }
                 }
@@ -429,6 +439,15 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> TranslatingAleFlow<'s, 'm, 'a, F> {
                         value: &velocities[i],
                     }
                 }
+                MaterialNavierStokesBoundary::NavierSlip {
+                    edge,
+                    tangential_resistance_pa_s_per_m,
+                    ..
+                } => MaterialNavierStokesBoundary::NavierSlip {
+                    edge,
+                    value: &velocities[i],
+                    tangential_resistance_pa_s_per_m,
+                },
                 MaterialNavierStokesBoundary::Open { edge, backflow, .. } => {
                     MaterialNavierStokesBoundary::Open {
                         edge,

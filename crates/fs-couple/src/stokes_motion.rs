@@ -426,6 +426,19 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedStokesMotion<'s, 'm, 'a, F> {
                 MaterialStokesBoundary::Velocity { edge, .. } => {
                     MaterialStokesBoundary::Velocity { edge, value: &zero }
                 }
+                MaterialStokesBoundary::NavierSlip {
+                    edge,
+                    tangential_resistance_pa_s_per_m,
+                    ..
+                } => {
+                    // Differentiate wall data while retaining the physical
+                    // Robin operator in the native homogeneous response.
+                    MaterialStokesBoundary::NavierSlip {
+                        edge,
+                        value: &zero,
+                        tangential_resistance_pa_s_per_m,
+                    }
+                }
                 MaterialStokesBoundary::TotalTraction { edge, .. } => {
                     MaterialStokesBoundary::TotalTraction {
                         edge,

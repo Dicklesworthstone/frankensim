@@ -103,6 +103,9 @@ pub struct PlanarTranslationStep {
     /// Couple enforcing fixed orientation [N m]; its angular velocity is zero.
     pub restraint_torque_n_m: f64,
     pub interface_work_j: f64,
+    /// Physical slip dissipation on the body [J], kept separately from body
+    /// work, bulk viscosity and backward-Euler loss. No heat deposit is made.
+    pub interface_slip_dissipation_j: f64,
     pub external_work_j: f64,
     pub body_kinetic_change_j: f64,
     pub spring_energy_change_j: f64,
@@ -120,6 +123,7 @@ pub struct PlanarTranslationMotion<'s, 'm, 'a, F: FluidTransport + ?Sized> {
     reference_pose: Pose,
     config: PlanarTranslationConfig,
     edges: Vec<usize>,
+    tangential_resistance_pa_s_per_m: Option<f64>,
     body: RigidBodyState,
     schur: LuWorkspace,
 }
@@ -139,6 +143,67 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
         body_edges: &[usize],
         config: PlanarTranslationConfig,
     ) -> Result<Self, PlanarTranslationError> {
+        Self::with_wall_law(
+            system,
+            material,
+            numerics,
+            properties,
+            body,
+            initial_world_velocity,
+            body_edges,
+            config,
+            None,
+        )
+    }
+
+    /// The same freely translating body with impermeable Navier-slip edges.
+    /// Normal momentum remains strongly coupled to the native fluid. Tangential
+    /// fluid-on-body traction is beta*(u-body)_t [Pa], with the opposite fluid
+    /// effort assembled by the original Robin owner. Finite beta >= 0 has units
+    /// [Pa s/m]; zero gives perfect slip. Use new for exact no-slip.
+    /// This coefficient is fixed on all selected body edges during this owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_slip(
+        system: &'s FluxSystem<'m>,
+        material: &'a F,
+        numerics: MaterialFluxNumerics,
+        properties: MassProperties,
+        body: RigidBodyState,
+        initial_world_velocity: &[f64],
+        body_edges: &[usize],
+        config: PlanarTranslationConfig,
+        tangential_resistance_pa_s_per_m: f64,
+    ) -> Result<Self, PlanarTranslationError> {
+        Self::with_wall_law(
+            system,
+            material,
+            numerics,
+            properties,
+            body,
+            initial_world_velocity,
+            body_edges,
+            config,
+            Some(tangential_resistance_pa_s_per_m),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_wall_law(
+        system: &'s FluxSystem<'m>,
+        material: &'a F,
+        numerics: MaterialFluxNumerics,
+        properties: MassProperties,
+        body: RigidBodyState,
+        initial_world_velocity: &[f64],
+        body_edges: &[usize],
+        config: PlanarTranslationConfig,
+        tangential_resistance_pa_s_per_m: Option<f64>,
+    ) -> Result<Self, PlanarTranslationError> {
+        if tangential_resistance_pa_s_per_m.is_some_and(|beta| !nonnegative(beta)) {
+            return Err(invalid(
+                "finite nonnegative physical wall resistance required",
+            ));
+        }
         if !positive(config.depth_m)
             || !positive(config.velocity_tolerance_m_s)
             || !config
@@ -190,6 +255,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
             reference_pose: body.pose(),
             config,
             edges,
+            tangential_resistance_pa_s_per_m,
             body,
             schur: LuWorkspace::new(2)?,
         })
@@ -265,11 +331,16 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
         let wall = |_: [f64; 2]| wall_velocity.get();
         let mut boundaries = Vec::with_capacity(exterior.len() + self.edges.len());
         boundaries.extend_from_slice(exterior);
-        boundaries.extend(
-            self.edges
-                .iter()
-                .map(|&edge| MaterialNavierStokesBoundary::Velocity { edge, value: &wall }),
-        );
+        boundaries.extend(self.edges.iter().map(
+            |&edge| match self.tangential_resistance_pa_s_per_m {
+                Some(beta) => MaterialNavierStokesBoundary::NavierSlip {
+                    edge,
+                    value: &wall,
+                    tangential_resistance_pa_s_per_m: beta,
+                },
+                None => MaterialNavierStokesBoundary::Velocity { edge, value: &wall },
+            },
+        ));
         let mut search = EndpointSearch::new(v0, controls);
         let mut last_residual = [f64::NAN; 2];
         for index in 0..controls.maximum_flow_solves {
@@ -376,6 +447,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
             last_residual = residual;
             if (0..2).all(|i| residual[i].abs() <= limits[i]) {
                 let interface_work = sum(core::array::from_fn::<_, 2, _>(|i| force[i] * dx[i]));
+                let slip_loss = dt * cfg.depth_m * load.slip_dissipation_w_per_m;
                 let external_work = sum(core::array::from_fn::<_, 2, _>(|i| {
                     external_force_n[i] * dx[i]
                 }));
@@ -404,7 +476,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
                 let torque = -cfg.depth_m * load.stress.moment_n;
                 if !terms
                     .into_iter()
-                    .chain([work, work_limit, torque])
+                    .chain([work, work_limit, torque, slip_loss])
                     .all(f64::is_finite)
                 {
                     return Err(invalid(
@@ -428,6 +500,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
                     fluid_force_n: force,
                     restraint_torque_n_m: torque,
                     interface_work_j: interface_work,
+                    interface_slip_dissipation_j: slip_loss,
                     external_work_j: external_work,
                     body_kinetic_change_j: kinetic_change,
                     spring_energy_change_j: spring_change,

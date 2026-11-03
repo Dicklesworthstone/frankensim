@@ -63,6 +63,10 @@ pub struct MaterialBoundaryLoad {
     pub backflow: MaterialBoundaryWrench,
     /// Outward advective momentum and its moment; not a mechanical wall load.
     pub outward_momentum: MaterialBoundaryWrench,
+    /// Nonnegative physical wall-slip power [W/m], integral beta*|(u-wall)_t|².
+    /// Kept separate from mechanical wall work and numerical upwind losses;
+    /// a coupled thermal owner must explicitly receive any dissipated heat.
+    pub slip_dissipation_w_per_m: f64,
     /// Selected component references: None retains its traction datum;
     /// Some(offset) adds that authored [Pa] offset to its mean-zero pressure.
     pub pressure_offsets_pa: Vec<(usize, Option<f64>)>,
@@ -88,13 +92,21 @@ pub struct MaterialBoundaryTransport {
     pub upwind_kinetic_dissipation_w_per_m: f64,
 }
 
-fn physical_wrench(value: BoundaryWrench, density: f64) -> Result<MaterialBoundaryWrench, MaterialFluxError> {
+fn physical_wrench(
+    value: BoundaryWrench,
+    density: f64,
+) -> Result<MaterialBoundaryWrench, MaterialFluxError> {
     let force_n_per_m = value.force.map(|f| density * f);
     let moment_n = density * value.moment;
     if !force_n_per_m.iter().all(|f| f.is_finite()) || !moment_n.is_finite() {
-        Err(MaterialFluxError::Invalid("unrepresentable physical boundary effort"))
+        Err(MaterialFluxError::Invalid(
+            "unrepresentable physical boundary effort",
+        ))
     } else {
-        Ok(MaterialBoundaryWrench { force_n_per_m, moment_n })
+        Ok(MaterialBoundaryWrench {
+            force_n_per_m,
+            moment_n,
+        })
     }
 }
 
@@ -114,12 +126,19 @@ pub(super) fn physical_boundary_load(
         .resultant(edges, origin_m, &offsets)
         .map_err(MaterialFluxError::Boundary)?;
     let physical = |value| physical_wrench(value, density);
+    let slip_dissipation_w_per_m = density * load.slip_dissipation;
+    if !slip_dissipation_w_per_m.is_finite() {
+        return Err(MaterialFluxError::Invalid(
+            "unrepresentable physical wall-slip loss",
+        ));
+    }
     Ok(MaterialBoundaryLoad {
         origin_m,
         stress: physical(load.stress)?,
         imposed: physical(load.imposed)?,
         backflow: physical(load.backflow)?,
         outward_momentum: physical(load.outward_momentum)?,
+        slip_dissipation_w_per_m,
         pressure_offsets_pa: load
             .pressure_offsets
             .iter()
@@ -128,7 +147,7 @@ pub(super) fn physical_boundary_load(
     })
 }
 
-/// Exactly one physical velocity or total-traction owner per boundary edge.
+/// Exactly one physical velocity, Navier-slip or total-traction owner per edge.
 /// Geometry is in metres. Callbacks must be pure and fixed during the solve.
 #[derive(Clone, Copy)]
 pub enum MaterialStokesBoundary<'a> {
@@ -139,6 +158,19 @@ pub enum MaterialStokesBoundary<'a> {
         /// Physical velocity [m/s].
         value: &'a dyn Fn([f64; 2]) -> [f64; 2],
     },
+    /// Prescribed normal wall velocity and tangential traction
+    /// t.(2 mu D(u)-p I)n = -beta*(u-value).t.
+    /// The original source density divides beta, stress and inertia together.
+    /// For a Newtonian fluid the corresponding slip length is mu/beta.
+    NavierSlip {
+        /// Original mesh boundary edge.
+        edge: usize,
+        /// Wall velocity [m/s] in the flow history's frame.
+        value: &'a dyn Fn([f64; 2]) -> [f64; 2],
+        /// Constant physical edge resistance [Pa s/m], finite and nonnegative.
+        /// Zero is perfect slip. Exact no-slip remains Velocity.
+        tangential_resistance_pa_s_per_m: f64,
+    },
     /// Physical total stress vector (2 mu D(u) - p I)n.
     TotalTraction {
         /// Mesh boundary edge index.
@@ -146,6 +178,18 @@ pub enum MaterialStokesBoundary<'a> {
         /// Traction [Pa], evaluated at position [m] with outward unit normal.
         value: &'a dyn Fn([f64; 2], [f64; 2]) -> [f64; 2],
     },
+}
+
+// Preserve physical refusal through the native admission path. In particular,
+// division must not round a negative or positive physical resistance to zero
+// and silently select the perfect-slip model. No material callback is repeated.
+pub(super) fn kinematic_slip_resistance(beta: f64, density: f64) -> f64 {
+    let scaled = beta / density;
+    if !beta.is_finite() || beta < 0.0 || (beta > 0.0 && scaled == 0.0) {
+        f64::NAN
+    } else {
+        scaled
+    }
 }
 
 /// Accepted linear Stokes flow in SI units, with the exact transport snapshot.
@@ -171,7 +215,9 @@ impl MaterialStokesSolution {
         origin_m: [f64; 2],
         velocity_offset_m_s: [f64; 2],
     ) -> Result<MaterialBoundaryTransport, MaterialFluxError> {
-        let transport = self.flow.reactions
+        let transport = self
+            .flow
+            .reactions
             .transport(edges, origin_m, velocity_offset_m_s)
             .map_err(MaterialFluxError::Boundary)?;
         let density = self.transport.density_kg_m3();
@@ -179,7 +225,9 @@ impl MaterialStokesSolution {
         let kinetic = density * transport.outward_kinetic_energy_flux;
         let dissipation = density * transport.upwind_kinetic_dissipation;
         if !mass_flux.is_finite() || !kinetic.is_finite() || !dissipation.is_finite() {
-            return Err(MaterialFluxError::Invalid("physical boundary transport overflow"));
+            return Err(MaterialFluxError::Invalid(
+                "physical boundary transport overflow",
+            ));
         }
         Ok(MaterialBoundaryTransport {
             origin_m,
@@ -203,14 +251,18 @@ impl MaterialStokesSolution {
         edges: &[usize],
         origin_m: [f64; 2],
     ) -> Result<(f64, [f64; 2]), MaterialFluxError> {
-        let (flux, moment) = self.flow.reactions
+        let (flux, moment) = self
+            .flow
+            .reactions
             .volume_flux_moments(edges, origin_m)
             .map_err(MaterialFluxError::Boundary)?;
         let rho = self.transport.density_kg_m3();
         let mass_flux = rho * flux;
         let first_moment = moment.map(|v| rho * v);
         if !mass_flux.is_finite() || !first_moment.iter().all(|v| v.is_finite()) {
-            return Err(MaterialFluxError::Invalid("physical mass flux moment overflow"));
+            return Err(MaterialFluxError::Invalid(
+                "physical mass flux moment overflow",
+            ));
         }
         Ok((mass_flux, first_moment))
     }
@@ -403,7 +455,8 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                         let physical = value(point, normal);
                         [physical[0] / density, physical[1] / density]
                     }
-                    MaterialStokesBoundary::Velocity { .. } => {
+                    MaterialStokesBoundary::Velocity { .. }
+                    | MaterialStokesBoundary::NavierSlip { .. } => {
                         unreachable!("only traction owners request stress samples")
                     }
                 }
@@ -416,6 +469,18 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 MaterialStokesBoundary::Velocity { edge, value } => StokesBoundary::Velocity {
                     edge: *edge,
                     value: *value,
+                },
+                MaterialStokesBoundary::NavierSlip {
+                    edge,
+                    value,
+                    tangential_resistance_pa_s_per_m,
+                } => StokesBoundary::NavierSlip {
+                    edge: *edge,
+                    value: *value,
+                    tangential_resistance_m_s: kinematic_slip_resistance(
+                        *tangential_resistance_pa_s_per_m,
+                        density,
+                    ),
                 },
                 MaterialStokesBoundary::TotalTraction { edge, .. } => {
                     StokesBoundary::TotalTraction {
@@ -502,7 +567,8 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                         let physical = value(point, normal);
                         [physical[0] / density, physical[1] / density]
                     }
-                    MaterialStokesBoundary::Velocity { .. } => {
+                    MaterialStokesBoundary::Velocity { .. }
+                    | MaterialStokesBoundary::NavierSlip { .. } => {
                         unreachable!("only traction owners request stress samples")
                     }
                 }
@@ -515,6 +581,18 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 MaterialStokesBoundary::Velocity { edge, value } => StokesBoundary::Velocity {
                     edge: *edge,
                     value: *value,
+                },
+                MaterialStokesBoundary::NavierSlip {
+                    edge,
+                    value,
+                    tangential_resistance_pa_s_per_m,
+                } => StokesBoundary::NavierSlip {
+                    edge: *edge,
+                    value: *value,
+                    tangential_resistance_m_s: kinematic_slip_resistance(
+                        *tangential_resistance_pa_s_per_m,
+                        density,
+                    ),
                 },
                 MaterialStokesBoundary::TotalTraction { edge, .. } => {
                     StokesBoundary::TotalTraction {

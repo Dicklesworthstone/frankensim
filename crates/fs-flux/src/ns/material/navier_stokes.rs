@@ -21,6 +21,22 @@ pub enum MaterialNavierStokesBoundary<'a> {
         /// Velocity [m/s] at position [m].
         value: &'a dyn Fn([f64; 2]) -> [f64; 2],
     },
+    /// Prescribed normal wall velocity and tangential traction
+    /// t.(2 mu D(u)-p I)n = -beta*(u-value).t.
+    /// The original source density divides beta, stress and inertia together.
+    /// For a Newtonian fluid the corresponding slip length is mu/beta.
+    /// Advected momentum retains the interior trace on either sign; normal
+    /// throughflow does not acquire an invented reservoir velocity. Only zero
+    /// mesh-relative normal speed represents an impermeable wall.
+    NavierSlip {
+        /// Original mesh boundary edge.
+        edge: usize,
+        /// Wall velocity [m/s] in the flow history's frame.
+        value: &'a dyn Fn([f64; 2]) -> [f64; 2],
+        /// Constant physical edge resistance [Pa s/m], finite and nonnegative.
+        /// Zero is perfect slip. Exact no-slip remains Velocity.
+        tangential_resistance_pa_s_per_m: f64,
+    },
     /// Open physical stress and the separately selected backflow treatment.
     Open {
         /// Original mesh boundary edge.
@@ -236,7 +252,8 @@ fn with_kinematic_boundaries<T>(
                     let t = traction(point, normal);
                     [t[0] / density, t[1] / density]
                 }
-                MaterialNavierStokesBoundary::Velocity { .. } => {
+                MaterialNavierStokesBoundary::Velocity { .. }
+                | MaterialNavierStokesBoundary::NavierSlip { .. } => {
                     unreachable!("only open edges request traction samples")
                 }
             }
@@ -249,6 +266,18 @@ fn with_kinematic_boundaries<T>(
             MaterialNavierStokesBoundary::Velocity { edge, value } => {
                 NavierStokesBoundary::Velocity { edge, value }
             }
+            MaterialNavierStokesBoundary::NavierSlip {
+                edge,
+                value,
+                tangential_resistance_pa_s_per_m,
+            } => NavierStokesBoundary::NavierSlip {
+                edge,
+                value,
+                tangential_resistance_m_s: super::mixed::kinematic_slip_resistance(
+                    tangential_resistance_pa_s_per_m,
+                    density,
+                ),
+            },
             MaterialNavierStokesBoundary::Open { edge, backflow, .. } => {
                 NavierStokesBoundary::Open {
                     edge,

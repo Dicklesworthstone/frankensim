@@ -4,10 +4,10 @@ use super::*;
 use fs_flux::bdm::edge_gauss_pub;
 use fs_flux::{NavierStokesBoundary, NavierStokesControls, OpenBoundaryPolicy};
 
-#[path = "navier_stokes_rheology.rs"]
-mod rheology;
 #[path = "reservoir.rs"]
 mod reservoir;
+#[path = "navier_stokes_rheology.rs"]
+mod rheology;
 
 fn moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
     let mut values = Vec::new();
@@ -158,6 +158,15 @@ fn nonlinear_pressure_flow_has_live_convection_and_keeps_its_datum() {
                     NavierStokesBoundary::Velocity { edge, value } => {
                         StokesBoundary::Velocity { edge, value }
                     }
+                    NavierStokesBoundary::NavierSlip {
+                        edge,
+                        value,
+                        tangential_resistance_m_s,
+                    } => StokesBoundary::NavierSlip {
+                        edge,
+                        value,
+                        tangential_resistance_m_s,
+                    },
                     NavierStokesBoundary::Open { edge, traction, .. }
                     | NavierStokesBoundary::OpenReservoir { edge, traction, .. } => {
                         StokesBoundary::TotalTraction {

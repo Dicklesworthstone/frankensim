@@ -3413,3 +3413,55 @@ callback counts and canonical selection. Stored transport is fixed-size per
 boundary edge (176 nominal bytes on 64-bit targets), with a capacity shared
 with the native quadrature generator and an explicit overflow refusal. Reporting does not resample fields and needs no nonlinear solve or per-face
 heap allocation.
+
+## Physical Navier-slip wall momentum
+
+The original mixed BDM1/P0 Stokes and Navier-Stokes owners accept `NavierSlip`
+alongside prescribed velocity and open total stress. Normal BDM moments remain
+strong: u.n = wall.n. Tangential Cauchy traction obeys
+t.(2 mu D(u)-p I)n = -beta*(u-wall).t with finite edgewise beta >= 0 [Pa s/m].
+The source-material paths divide beta, viscosity, pressure and inertia by the
+SAME retained density; nonzero physical resistance may not silently underflow
+to perfect slip. Zero beta selects perfect slip, while the original Velocity
+condition retains exact no-slip. For Newtonian viscosity mu, slip length is
+mu/beta; beta itself is an authored physical interface coefficient.
+
+The original sparse momentum operator adds the exact tangential Robin bilinear
+form and wall-velocity load. It retains symmetric stress, interior SIP, mass,
+history, nonlinear convection and constitutive endpoint ownership. No boundary
+Dirichlet penalty is added to a slip edge. Free-slip faces add no Robin entries;
+finite faces reuse six tangent basis traces per quadrature point. Steady
+configurations that retain an unrestrained rigid mode retain the native singular
+or convergence refusal; finite BDF1 inertia remains the transient anchor.
+
+The SAME removed normal rows recover the normal constraint reaction; adding
+the equal/opposite physical tangential Robin effort recovers fluid-on-exterior
+force, moment and rigid virtual work. `BoundaryLoad::slip_dissipation` and
+`MaterialBoundaryLoad::slip_dissipation_w_per_m` retain integral
+beta*|(u-wall)_t|², separately from stress work, viscous volume loss, numerical
+upwinding and transported kinetic energy. No thermal recipient is invented.
+
+Slip does not prescribe an incoming reservoir velocity. Native convection and
+the retained reaction/transport samples use the interior carried velocity on
+both signs of prescribed normal flow. Nonzero normal data on a fixed mesh
+therefore define an explicit transport boundary, not an impermeable stationary
+wall. In translating ALE, physical wall velocity is transformed with the SAME
+accepted mesh rate; an impermeable wall has zero relative normal flux. Slip
+traction and loss are invariant under a common boost, while world momentum
+transport retains the existing original quadrature owner.
+
+Material Stokes, Brinkman, rheology, nonlinear flow and translating ALE all
+retain the law. The existing linear guided/planar Stokes response keeps beta
+when homogenizing boundary data. The finite two-axis body owner exposes
+`PlanarTranslationMotion::new_with_slip`; its original constructor stays
+no-slip. Native stress closes body momentum and work before body/fluid/mesh/time
+commit, and physical interface slip loss is reported separately in joules.
+
+Four native regression groups cover analytic Couette force, normal pressure,
+torque, bulk-plus-slip power, zero-friction limit, nonlinear constitutive
+endpoints, source-density scaling, accelerated translating frames, boundary
+callback reuse, prescribed-normal momentum transport, and invalid coefficients
+or normal flux. A coupled regression closes an actual translating body's
+impulse/work and separate slip loss against an independent affine-flow oracle.
+Pinned nightly rustfmt parsed all changed Rust in this session. Native Cargo
+execution was unavailable; these added regressions are not claimed passing.

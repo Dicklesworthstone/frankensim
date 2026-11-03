@@ -43,6 +43,21 @@ pub enum StokesBoundary<'a> {
         /// Velocity [m/s] at the boundary quadrature point.
         value: &'a dyn Fn([f64; 2]) -> [f64; 2],
     },
+    /// Prescribed normal velocity and finite tangential momentum accommodation.
+    /// With outward normal n and tangent t: u.n = value.n and
+    /// t.(2 nu D(u)-p I)n = -beta*(u-value).t. The normal BDM moments stay
+    /// strong; the tangential law is a physical Robin term, without a penalty.
+    /// On a moving mesh, supply velocity in that mesh's frame. Impermeability
+    /// means value.n equals the boundary's normal speed in the same frame.
+    NavierSlip {
+        /// Index in TriMesh::edges.
+        edge: usize,
+        /// Wall velocity [m/s] at the boundary quadrature point.
+        value: &'a dyn Fn([f64; 2]) -> [f64; 2],
+        /// Constant edge resistance beta/rho [m/s], finite and nonnegative.
+        /// Zero is perfect slip. Use Velocity for exact no-slip, not infinity.
+        tangential_resistance_m_s: f64,
+    },
     /// Natural total traction, including pressure and viscous stress.
     TotalTraction {
         /// Index in TriMesh::edges.
@@ -144,9 +159,16 @@ pub(super) struct AdmittedBoundary {
     pub(super) has_traction: Vec<bool>,
     open_policies: Option<Vec<Option<OpenBoundaryPolicy>>>,
     reservoir_velocities: Option<Vec<Option<[[f64; 2]; 2]>>>,
+    tangential_resistances: Option<Vec<Option<f64>>>,
 }
 
 impl AdmittedBoundary {
+    pub(super) fn tangential_resistance(&self, edge: usize) -> Option<f64> {
+        self.tangential_resistances
+            .as_ref()
+            .and_then(|values| values[edge])
+    }
+
     pub(super) fn open_policy(&self, edge: usize) -> Option<OpenBoundaryPolicy> {
         self.open_policies
             .as_ref()
@@ -506,10 +528,15 @@ impl<'m> FluxSystem<'m> {
         let mut has_velocity = vec![false; components];
         let mut has_traction = vec![false; components];
         let mut boundary_count = vec![0_usize; components];
+        let mut tangential_resistances = boundaries
+            .iter()
+            .any(|b| matches!(b, StokesBoundary::NavierSlip { .. }))
+            .then(|| vec![None; mesh.edges.len()]);
         // Complete the ownership audit before querying any user callback.
         for boundary in boundaries {
             let edge = match *boundary {
                 StokesBoundary::Velocity { edge, .. }
+                | StokesBoundary::NavierSlip { edge, .. }
                 | StokesBoundary::TotalTraction { edge, .. } => edge,
             };
             if edge >= mesh.edges.len() {
@@ -525,6 +552,22 @@ impl<'m> FluxSystem<'m> {
             boundary_count[component] += 1;
             match boundary {
                 StokesBoundary::Velocity { .. } => has_velocity[component] = true,
+                StokesBoundary::NavierSlip {
+                    tangential_resistance_m_s,
+                    ..
+                } => {
+                    let beta = *tangential_resistance_m_s;
+                    if !beta.is_finite() || beta < 0.0 {
+                        return Err(StokesBoundaryError::InvalidInput(
+                            "finite nonnegative tangential wall resistance required",
+                        ));
+                    }
+                    tangential_resistances.as_mut().expect("slip storage")[edge] = Some(beta);
+                    // Normal constraints can anchor a closed free-slip domain.
+                    // If they leave a rigid mode, the original solve refuses it;
+                    // finite BDF1 mass remains the transient velocity anchor.
+                    has_velocity[component] = true;
+                }
                 StokesBoundary::TotalTraction { .. } => has_traction[component] = true,
             }
         }
@@ -553,13 +596,17 @@ impl<'m> FluxSystem<'m> {
             let mut values = [[0.0; 2]; 2];
             for (q, (point, weight)) in points.into_iter().enumerate() {
                 values[q] = match owner {
-                    StokesBoundary::Velocity { value, .. } => value(point),
+                    StokesBoundary::Velocity { value, .. }
+                    | StokesBoundary::NavierSlip { value, .. } => value(point),
                     StokesBoundary::TotalTraction { value, .. } => value(point, geometry.normal),
                 };
                 if !values[q].iter().all(|value| value.is_finite()) {
                     return Err(StokesBoundaryError::NonFiniteBoundary { edge });
                 }
-                if matches!(owner, StokesBoundary::Velocity { .. }) {
+                if matches!(
+                    owner,
+                    StokesBoundary::Velocity { .. } | StokesBoundary::NavierSlip { .. }
+                ) {
                     let flux = weight
                         * (values[q][0] * geometry.normal[0] + values[q][1] * geometry.normal[1]);
                     net_flux[component] += flux;
@@ -567,7 +614,9 @@ impl<'m> FluxSystem<'m> {
                 }
             }
             samples[edge] = Some(match owner {
-                StokesBoundary::Velocity { .. } => Samples::Velocity(values),
+                StokesBoundary::Velocity { .. } | StokesBoundary::NavierSlip { .. } => {
+                    Samples::Velocity(values)
+                }
                 StokesBoundary::TotalTraction { .. } => Samples::Traction(values),
             });
         }
@@ -597,6 +646,7 @@ impl<'m> FluxSystem<'m> {
             has_traction,
             open_policies: None,
             reservoir_velocities: None,
+            tangential_resistances,
         })
     }
 }

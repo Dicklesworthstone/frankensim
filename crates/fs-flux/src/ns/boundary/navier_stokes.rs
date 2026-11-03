@@ -38,6 +38,23 @@ pub enum NavierStokesBoundary<'a> {
         /// Endpoint velocity [m/s] at physical position [m].
         value: &'a dyn Fn([f64; 2]) -> [f64; 2],
     },
+    /// Strong normal wall velocity with a physical tangential Robin law.
+    /// Uses the same stress, mass, convection and reaction owners as Velocity.
+    /// See StokesBoundary::NavierSlip for its precise traction convention.
+    /// Advected momentum uses the interior trace on both signs: the wall law
+    /// does not author an incoming reservoir velocity. An impermeable wall
+    /// requires zero normal speed relative to this mesh. Nonzero normal data
+    /// instead describe a prescribed-normal transport boundary, with literal
+    /// conservative inflow and no additional backflow resistance.
+    NavierSlip {
+        /// Original mesh boundary edge.
+        edge: usize,
+        /// Endpoint wall velocity [m/s], in the flow history's frame.
+        value: &'a dyn Fn([f64; 2]) -> [f64; 2],
+        /// Constant edge resistance beta/rho [m/s], finite and nonnegative.
+        /// Zero is perfect slip; exact no-slip remains Velocity.
+        tangential_resistance_m_s: f64,
+    },
     /// Open total stress with an explicit treatment of reverse flow.
     Open {
         /// Boundary edge in the original mesh.
@@ -473,6 +490,15 @@ impl<'m> FluxSystem<'m> {
                 NavierStokesBoundary::Velocity { edge, value } => {
                     StokesBoundary::Velocity { edge, value }
                 }
+                NavierStokesBoundary::NavierSlip {
+                    edge,
+                    value,
+                    tangential_resistance_m_s,
+                } => StokesBoundary::NavierSlip {
+                    edge,
+                    value,
+                    tangential_resistance_m_s,
+                },
                 NavierStokesBoundary::Open { edge, traction, .. }
                 | NavierStokesBoundary::OpenReservoir { edge, traction, .. } => {
                     StokesBoundary::TotalTraction {
@@ -516,7 +542,8 @@ impl<'m> FluxSystem<'m> {
                     }
                     reservoirs.as_mut().expect("reservoir storage")[edge] = Some(samples);
                 }
-                NavierStokesBoundary::Velocity { .. } => {}
+                NavierStokesBoundary::Velocity { .. } | NavierStokesBoundary::NavierSlip { .. } => {
+                }
             }
         }
         admitted.open_policies = Some(policies);

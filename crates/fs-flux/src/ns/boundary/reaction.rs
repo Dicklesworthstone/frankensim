@@ -1,9 +1,9 @@
 //! Discrete boundary reactions from the original mixed momentum equations.
 
+use super::transport::{BoundaryTransport, Sums, TransportAccumulator, TransportQuadrature};
 use super::{
     AdmittedBoundary, OpenBoundaryPolicy, Samples, StokesBoundaryError, StokesPressureReference,
 };
-use super::transport::{BoundaryTransport, Sums, TransportAccumulator, TransportQuadrature};
 use crate::bdm::{edge_gauss_pub, eval_basis};
 use crate::ns::{
     FluxSolution, FluxSystem, convection_boundary_trace, convection_edge_quadrature, viscous_normal,
@@ -15,6 +15,8 @@ use fs_sparse::{Coo, Csr};
 pub enum BoundaryReactionOwner {
     /// Strong normal velocity and weak SIP velocity, possibly an inlet/outlet.
     VelocityConstraint,
+    /// Strong normal velocity with finite tangential Robin resistance.
+    NavierSlip,
     /// Prescribed total stress, with an optional convective open-boundary law.
     OpenTraction {
         /// None for Stokes; otherwise the explicitly admitted backflow policy.
@@ -99,6 +101,11 @@ pub struct BoundaryLoad {
     /// original upwind trace. This is NOT a mechanical wall force. It is zero
     /// when convection is absent from the selected flow model.
     pub outward_momentum: BoundaryWrench,
+    /// Physical wall-slip loss per unit depth / density [m⁴/s³]:
+    /// integral beta/rho * |(u-wall)_t|². Nonnegative and frame invariant.
+    /// Separate from viscous volume loss, upwind loss and wall stress work;
+    /// no thermal recipient or automatic heat deposition is implied.
+    pub slip_dissipation: f64,
     /// Actual reference for each selected component: None retains its traction
     /// datum; Some(offset) adds that explicit [m²/s²] offset to its mean-zero
     /// pressure. Unselected components are omitted.
@@ -111,6 +118,7 @@ impl BoundaryLoad {
         self.imposed.add(other.imposed);
         self.backflow.add(other.backflow);
         self.outward_momentum.add(other.outward_momentum);
+        self.slip_dissipation += other.slip_dissipation;
     }
     fn finite(&self) -> bool {
         self.origin_m.iter().all(|x| x.is_finite())
@@ -118,12 +126,15 @@ impl BoundaryLoad {
             && self.imposed.finite()
             && self.backflow.finite()
             && self.outward_momentum.finite()
+            && self.slip_dissipation.is_finite()
+            && self.slip_dissipation >= 0.0
     }
 }
 
 /// One discrete reaction functional, NOT a pointwise Cauchy-traction estimate.
-/// Normal constraint equations and the FULL numerical viscous flux restore
-/// the original rigid virtual work, including symmetric Nitsche consistency.
+/// Normal constraint equations and the retained boundary flux restore the
+/// original rigid virtual work: FULL numerical viscous flux for SIP velocity,
+/// or the physical tangential Robin effort for Navier slip.
 #[derive(Clone, Debug)]
 pub struct DiscreteBoundaryReaction {
     /// Original mesh boundary edge.
@@ -264,8 +275,14 @@ impl BoundaryReactions {
         origin_m: [f64; 2],
         velocity_offset_m_s: [f64; 2],
     ) -> Result<BoundaryTransport, StokesBoundaryError> {
-        if !origin_m.iter().chain(&velocity_offset_m_s).all(|v| v.is_finite()) {
-            return Err(invalid("finite transport origin and velocity offset required"));
+        if !origin_m
+            .iter()
+            .chain(&velocity_offset_m_s)
+            .all(|v| v.is_finite())
+        {
+            return Err(invalid(
+                "finite transport origin and velocity offset required",
+            ));
         }
         let mut sums = Sums::<6>::new();
         for index in self.selected_transport_edges(edges)? {
@@ -307,7 +324,9 @@ impl BoundaryReactions {
             return Err(invalid("duplicate flux edge"));
         }
         for edge in &mut selected {
-            *edge = self.edges.binary_search_by_key(edge, |item| item.edge)
+            *edge = self
+                .edges
+                .binary_search_by_key(edge, |item| item.edge)
                 .map_err(|_| invalid("flux selection must contain original boundary edges"))?;
         }
         Ok(selected)
@@ -371,6 +390,7 @@ struct Face {
     samples: Samples,
     policy: Option<OpenBoundaryPolicy>,
     reservoir: Option<[[f64; 2]; 2]>,
+    tangential_resistance: Option<f64>,
     viscosity: [f64; 2],
     penalty: [f64; 2],
     advection: Option<([f64; 2], [f64; 6])>,
@@ -407,6 +427,7 @@ impl ReactionAssembly {
                     samples,
                     policy: boundary.open_policy(edge),
                     reservoir: boundary.reservoir_velocity(edge),
+                    tangential_resistance: boundary.tangential_resistance(edge),
                     viscosity: [0.0; 2],
                     penalty: [0.0; 2],
                     advection: advection.map(|v| {
@@ -502,29 +523,49 @@ impl ReactionOperator {
                         [-residual[0] * edge.normal[0], -residual[0] * edge.normal[1]];
                     load.stress.moment = -residual[0] * cross(edge.mid, edge.normal)
                         - residual[1] * cross([b[0] - a[0], b[1] - a[1]], edge.normal) / 12.0;
-                    let mut gradient = [[0.0; 2]; 2];
-                    for i in 0..6 {
-                        for (r, values) in gradient.iter_mut().enumerate() {
-                            for (c, value) in values.iter_mut().enumerate() {
-                                *value +=
-                                    field.x[system.dof(cell, i)] * system.bases[cell].grad[i][r][c];
+                    if let Some(beta) = face.tangential_resistance {
+                        // The normal rows already contain the Robin operator.
+                        // Restore its physical equal/opposite tangential effort
+                        // to recover the full fluid-on-wall rigid virtual work.
+                        // There was no boundary Nitsche flux to restore here.
+                        if beta > 0.0 {
+                            let tangent = [-edge.normal[1], edge.normal[0]];
+                            for (q, (point, weight)) in edge_gauss_pub(a, b).into_iter().enumerate()
+                            {
+                                let u = velocity(system, cell, point, &field.x);
+                                let slip = (u[0] - prescribed[q][0]) * tangent[0]
+                                    + (u[1] - prescribed[q][1]) * tangent[1];
+                                let effort = weight * beta * slip;
+                                load.stress.sample(point, tangent.map(|t| effort * t));
+                                load.slip_dissipation += effort * slip;
                             }
                         }
+                        BoundaryReactionOwner::NavierSlip
+                    } else {
+                        let mut gradient = [[0.0; 2]; 2];
+                        for i in 0..6 {
+                            for (r, values) in gradient.iter_mut().enumerate() {
+                                for (c, value) in values.iter_mut().enumerate() {
+                                    *value += field.x[system.dof(cell, i)]
+                                        * system.bases[cell].grad[i][r][c];
+                                }
+                            }
+                        }
+                        let normal = viscous_normal(gradient, edge.normal, true);
+                        for (q, (point, weight)) in edge_gauss_pub(a, b).into_iter().enumerate() {
+                            let u = velocity(system, cell, point, &field.x);
+                            // Restore FULL vector flux: the stored normal row also
+                            // included its Nitsche consistency term. Restoring only
+                            // the tangent would omit viscous normal stress.
+                            let force = core::array::from_fn(|axis| {
+                                -weight
+                                    * (face.viscosity[q] * normal[axis]
+                                        - face.penalty[q] * (u[axis] - prescribed[q][axis]))
+                            });
+                            load.stress.sample(point, force);
+                        }
+                        BoundaryReactionOwner::VelocityConstraint
                     }
-                    let normal = viscous_normal(gradient, edge.normal, true);
-                    for (q, (point, weight)) in edge_gauss_pub(a, b).into_iter().enumerate() {
-                        let u = velocity(system, cell, point, &field.x);
-                        // Restore FULL vector flux: the stored normal row also
-                        // included its Nitsche consistency term. Restoring only
-                        // the tangent would omit viscous normal stress.
-                        let force = core::array::from_fn(|axis| {
-                            -weight
-                                * (face.viscosity[q] * normal[axis]
-                                    - face.penalty[q] * (u[axis] - prescribed[q][axis]))
-                        });
-                        load.stress.sample(point, force);
-                    }
-                    BoundaryReactionOwner::VelocityConstraint
                 }
                 Samples::Traction(prescribed) => {
                     for (q, (point, weight)) in edge_gauss_pub(a, b).into_iter().enumerate() {
@@ -553,7 +594,7 @@ impl ReactionOperator {
                         }
                     }
                     let wn = w[0] * edge.normal[0] + w[1] * edge.normal[1];
-                    let upwind = if wn < 0.0 {
+                    let upwind = if wn < 0.0 && face.tangential_resistance.is_none() {
                         match (face.reservoir, face.samples) {
                             (Some(prescribed), _) | (None, Samples::Velocity(prescribed)) => {
                                 convection_boundary_trace(prescribed, fraction)

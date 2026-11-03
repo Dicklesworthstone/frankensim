@@ -528,3 +528,131 @@ fn native_refusal_bounds_budget_and_final_cancellation_preserve_both_owners() {
         );
     }
 }
+
+/// Exact endpoint shear supplies a nonzero tangential body impulse while the
+/// same native ALE history carries zero world-fluid acceleration. The wall
+/// slip loss is distinct from body work and the physical force is reduced
+/// relative to the no-slip Couette value mu*speed/H.
+#[test]
+fn slipping_moving_body_closes_native_impulse_and_separate_interface_loss() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3));
+    let system = FluxSystem::new(&mesh);
+    let source = material(2.0, 0.4);
+    let body_edges: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(e, g)| mesh.is_boundary(*e) && g.normal[1] < -0.5)
+        .map(|(e, _)| e)
+        .collect();
+    let (old_speed, speed, dt, mu) = (0.02, 0.05, 0.03, 0.4);
+    let cfg = config();
+    for beta in [0.0, 1.2] {
+        let shear = if beta == 0.0 {
+            0.0
+        } else {
+            mu * speed / (1.0 + mu / beta)
+        };
+        let exact = |x: [f64; 2]| [shear / mu * (1.0 - x[1]), 0.0];
+        let mut initial = vec![0.0; system.n_u];
+        for (e, g) in mesh.edges.iter().enumerate() {
+            let a = exact(mesh.verts[g.verts.0]);
+            let b = exact(mesh.verts[g.verts.1]);
+            for i in 0..2 {
+                initial[2 * e] += 0.5 * (a[i] + b[i]) * g.normal[i];
+                initial[2 * e + 1] += (b[i] - a[i]) * g.normal[i] / 12.0;
+            }
+        }
+        let traction = |_: [f64; 2], n: [f64; 2]| [-shear * n[1], -shear * n[0]];
+        let exterior: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(e, _)| mesh.is_boundary(*e) && !body_edges.contains(e))
+            .map(|(edge, g)| {
+                if g.normal[1] > 0.5 {
+                    MaterialNavierStokesBoundary::Velocity { edge, value: &zero }
+                } else {
+                    MaterialNavierStokesBoundary::Open {
+                        edge,
+                        traction: &traction,
+                        backflow: OpenBoundaryPolicy::NaturalTraction,
+                    }
+                }
+            })
+            .collect();
+        let mut owner = PlanarTranslationMotion::new_with_slip(
+            &system,
+            &source,
+            MaterialFluxNumerics::default(),
+            mass(),
+            native_body([old_speed, 0.0]),
+            &initial,
+            &body_edges,
+            cfg,
+            beta,
+        )
+        .unwrap();
+        let applied = [
+            mass().mass() * (speed - old_speed) / dt + cfg.depth_m * shear,
+            0.0,
+        ];
+        let step = owner
+            .step(
+                dt,
+                &zero,
+                &exterior,
+                &[None],
+                applied,
+                fluid_controls(),
+                controls(),
+                || false,
+            )
+            .unwrap();
+        near(step.velocity_m_s[0], speed, 2e-8);
+        near(step.velocity_m_s[1], 0.0, 2e-8);
+        near(step.fluid_force_n[0], -cfg.depth_m * shear, 5e-8);
+        near(step.fluid_force_n[1], 0.0, 5e-8);
+        near(
+            step.momentum.linear_increment_world.x,
+            mass().mass() * (speed - old_speed),
+            5e-8,
+        );
+        let (error, div) = system.velocity_error(&step.flow.world_velocity_dofs, &exact);
+        assert!(error < 3e-8 && div < 3e-8);
+        let slip_loss = if beta == 0.0 {
+            0.0
+        } else {
+            dt * cfg.depth_m * shear * shear / beta
+        };
+        near(step.interface_slip_dissipation_j, slip_loss, 2e-9);
+        near(
+            step.interface_work_j,
+            -cfg.depth_m * shear * speed * dt,
+            2e-9,
+        );
+        near(step.mechanical_work_residual_j, 0.0, 3e-9);
+        assert!(shear < mu * speed);
+        let transport = step
+            .flow
+            .boundary_transport_world(&body_edges, step.translation_m)
+            .unwrap();
+        near(transport.outward_mass_flux_kg_per_m_s, 0.0, 2e-9);
+    }
+    for invalid_beta in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            PlanarTranslationMotion::new_with_slip(
+                &system,
+                &source,
+                MaterialFluxNumerics::default(),
+                mass(),
+                native_body([0.0; 2]),
+                &vec![0.0; system.n_u],
+                &body_edges,
+                cfg,
+                invalid_beta,
+            )
+            .is_err()
+        );
+    }
+}
