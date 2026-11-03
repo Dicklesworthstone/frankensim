@@ -1,11 +1,12 @@
 //! Finite wall inertia coupled to the original material free-surface liquid.
 //!
-//! One fully flooded planar wall translates along a fixed tangent guide. The
+//! The original guided owner translates a flooded wall along one tangent. The
 //! native liquid supplies its actual reflected-population impulse and work;
 //! the native rigid owner supplies the wall's representable momentum change.
 //! Their shared midpoint wall velocity is solved before either state escapes.
-//! The plane does not move normally and the wall cannot spin. No cover/vacate,
-//! guide torque, angular-momentum audit or deformable geometry is inferred.
+//! Its wall cannot spin; the rotor and planar submodules add axial and joint
+//! tangential/axial motion. All retain a fixed plane without cover/vacate,
+//! normal motion, finite plate edges or deformable geometry.
 //!
 //! The wall's kinetic work is checked against native liquid boundary work.
 //! This is not an energy-conserving liquid discretization or a heat model:
@@ -16,6 +17,8 @@
 
 /// Fixed-center finite-inertia rotation driven by the original liquid links.
 pub mod rotor;
+/// Joint tangential translation and axial spin through the same liquid links.
+pub mod planar;
 
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::PlanarWall3;
@@ -663,3 +666,4 @@ fn normal_axis(wall: PlanarWall3) -> usize {
         PlanarWall3::ZMin | PlanarWall3::ZMax => 2,
     }
 }
+

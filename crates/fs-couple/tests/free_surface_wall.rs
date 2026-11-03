@@ -496,3 +496,6 @@ fn native_late_liquid_speed_refusal_preserves_wall_and_liquid_together() {
 
 #[path = "free_surface_wall/rotor.rs"]
 mod rotor;
+#[path = "free_surface_wall/planar.rs"]
+mod planar;
+

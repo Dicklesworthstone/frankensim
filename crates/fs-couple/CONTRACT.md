@@ -26176,9 +26176,10 @@ The raw guide reaction closes native numerical momentum; pressure-perturbation
 and explicitly pressure-referenced physical support loads remain separate.
 An absolute load is not invented when the source has no pressure reference.
 
-This supplies finite translational wall feedback, not moving occupancy, wall
-rotation or a complete angular-momentum audit: native wall link moments are
-unavailable. Original isothermal VOF viscosity, forcing, capillarity and phase
+This guided translation owner does not evolve moving occupancy, wall
+rotation or a complete angular-momentum audit. The native link-moment and affine
+response APIs are consumed by the rotor and joint planar wall owners.
+Original isothermal VOF viscosity, forcing, capillarity and phase
 conversion keep their numerical/physical limits; boundary work balance does
 not turn that discretization into an energy-conserving thermal fluid. Five
 integration regressions cover independent D3Q19/finite-inertia momentum and
@@ -26814,3 +26815,38 @@ Scoped Rustfmt parsing, concrete API review and CSV column accounting passed.
 Native compilation/execution remains unverified because the constellation
 sibling manifests are unavailable in this checkout; no numerical run or
 performance result is asserted.
+
+### Joint tangential translation and spin of finite planar liquid walls
+
+`free_surface_wall::planar::FreeSurfacePlanarWall` extends the existing guided
+wall and rotor family with simultaneous finite-mass translation along both
+plane tangents and principal normal-axis spin. The original material wall
+reflection supplies its full three-mode affine impedance, including both
+translation/spin cross terms. For the midpoint change q_mid-q_0, one
+mass-whitened three-by-three Cholesky solve supplies the shared twist; final
+native replay supplies the actual wrench to the original MBD integrator.
+Neither the solved twist nor a fitted fluid-added mass replaces the actual
+native position, attitude and momentum endpoint.
+
+Both fluid candidates use the same free half-drift COM as their moment origin.
+This retains full orbital as well as spatial spin momentum under the native
+midpoint position update. Actual linear momentum, spin, orbital-plus-spin,
+midpoint velocity/angular velocity, affine-response replay and mechanical work
+must pass separate explicit bounds before the liquid, body or clock escapes.
+Kinetic and source work use impulse/midpoint pairings; no residual is assigned
+to heat or repaired by an energy rescaling.
+
+The guide carries normal force and transverse moment. Raw numerical-pressure,
+pressure-perturbation and explicitly absolute physical reactions remain
+separate. Their measured work is retained. The complete-domain work allowance
+covers exactly two original fluid candidates: the discarded pilot and final
+replay. There is no coordinatewise root iteration or finite-difference sweep.
+
+Focused regression definitions cover independent off-centre reflection
+impedance on all six planes and three mass/inertia ratios, native replay and
+driven continuation with noncollinear COM motion, full angular-impulse arms,
+pressure-reference covariance, and source/geometry/budget/cancellation/late
+endpoint refusal with unchanged-state retry. Fixed flooded geometry excludes
+normal motion, tilt, finite plate edges, cover/vacate, moving contact lines and
+caloric heat. The implementation does not add a whole-liquid energy or complete
+coupled temporal-order claim.
