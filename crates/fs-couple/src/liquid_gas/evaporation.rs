@@ -9,6 +9,8 @@
 
 /// Phase transfer joined to original liquid, wall and finite-gas conduction.
 pub mod conduction;
+/// Finite gas drift, native donor momentum and physical phase mixing heat.
+pub mod momentum;
 pub mod multiple;
 /// Chemistry, optional sensible heat and phase transfer on one native clock.
 pub mod reactive;
@@ -50,6 +52,8 @@ pub struct EvaporatingLiquidGasSolve {
     /// Whole physical interval, including actual native transport drift [kg].
     pub mass_tolerance_kg: f64,
     /// Whole source-relative thermal defect after native transport [J].
+    /// The moving-gas entry also includes its closed phase-source kinetic
+    /// account; subsequent native-flow kinetic truncation is not heat.
     pub energy_tolerance_j: f64,
 }
 
@@ -92,6 +96,7 @@ pub struct EvaporatingLiquidGasReport {
     /// Original-to-final combined heat/phase storage and temperatures. Its
     /// energy_into_gas_j is the vapor stream ONLY; subtract heat_into_liquid_j
     /// to obtain the net supplied gas energy. Equals phase without film heat.
+    /// The moving-gas entry's receiver mixing is accounted by its own report.
     pub exchange: GasEvaporationStep,
     /// Original reciprocal sensible heat, already included in exchange.
     pub heat: Option<GasFilmHeatStep>,
@@ -104,14 +109,16 @@ pub struct EvaporatingLiquidGasReport {
     /// Actual native liquid change in its retained caloric datum [J].
     pub native_liquid_enthalpy_change_j: f64,
     /// Native heat/phase endpoint minus the original candidate's sensible
-    /// storage, evaluated before adding any formation reference [J].
+    /// storage, evaluated before adding any formation reference [J]. Explicit
+    /// receiver mixing heat is excluded from this numerical defect.
     pub native_phase_caloric_defect_j: f64,
     /// Actual gas + native phase + subsequent native-flow mass change [kg].
     pub mass_residual_kg: f64,
     /// Same account using the actual volatile species instead of total gas [kg].
     pub volatile_mass_residual_kg: f64,
     /// Combined original heat/phase defect + native caloric adjustment + native
-    /// flow defect. The separate heat report's defect is not added again.
+    /// flow defect. The moving-gas entry adds its closed source mechanical
+    /// account. The separate heat report's defect is not added again.
     /// Gas-species representation rounding remains separately mass-budgeted,
     /// as in the original source-relative boundary owner.
     pub energy_residual_j: f64,
@@ -367,6 +374,38 @@ fn advance_native<'s, 'm, 'catalog>(
     maximum_density_excursion: Option<f64>,
     gate: &CancelGate,
 ) -> Result<EvaporatingLiquidGasCandidate<'s, 'm, 'catalog>, EvaporatingLiquidGasError> {
+    advance_native_with_momentum(
+        liquid,
+        gas,
+        catalog,
+        surface,
+        controls,
+        heat_controls,
+        maximum_density_excursion,
+        None,
+        gate,
+    )
+    .map(|(candidate, _)| candidate)
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn advance_native_with_momentum<'s, 'm, 'catalog>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surface: LiquidGasEvaporationSurface<'_>,
+    controls: EvaporatingLiquidGasSolve,
+    heat_controls: Option<(f64, GasFilmHeatSolve)>,
+    maximum_density_excursion: Option<f64>,
+    gas_momentum: Option<[f64; 3]>,
+    gate: &CancelGate,
+) -> Result<
+    (
+        EvaporatingLiquidGasCandidate<'s, 'm, 'catalog>,
+        Option<momentum::PhaseMomentumReport>,
+    ),
+    EvaporatingLiquidGasError,
+> {
     type Error = EvaporatingLiquidGasError;
     poll(gate)?;
     admit_pressure(liquid, maximum_density_excursion)?;
@@ -465,7 +504,8 @@ fn advance_native<'s, 'm, 'catalog>(
     if let Some(error) = chart_error.into_inner().or(mass_error) {
         return Err(error.into());
     }
-    let (phase_liquid, next_gas, catalog, phase, exchange, film_heat, phase_initial_h) = proposal?;
+    let (phase_liquid, mut next_gas, catalog, phase, exchange, film_heat, phase_initial_h) =
+        proposal?;
     let projection = selected.ok_or(Error::Invalid("phase owner did not select native mass"))?;
     // The native post-transfer mass owns its actual caloric update. Any last-bit
     // difference from SI subtraction in the phase owner is audited below.
@@ -477,22 +517,46 @@ fn advance_native<'s, 'm, 'catalog>(
         ));
     }
     let mut next_liquid = liquid.clone();
-    let mass_exchange = next_liquid.exchange_interface_mass(
-        &[FreeSurfaceMassExchange {
-            coordinates: surface.liquid,
-            mass_kg: projection.mass_change_kg,
-            specific_enthalpy_j_kg: h0,
-            heat_j: heat,
-        }],
-        controls.native,
-        gate,
-    )?;
+    let transfer = FreeSurfaceMassExchange {
+        coordinates: surface.liquid,
+        mass_kg: projection.mass_change_kg,
+        specific_enthalpy_j_kg: h0,
+        heat_j: heat,
+    };
+    let (mass_exchange, momentum) = if let Some(gas_momentum) = gas_momentum {
+        let (exchange, motion) = momentum::exchange(
+            &mut next_liquid,
+            gas,
+            &mut next_gas,
+            gas_momentum,
+            transfer,
+            controls,
+            gate,
+        )?;
+        (exchange, Some(motion))
+    } else {
+        (
+            next_liquid.exchange_interface_mass(&[transfer], controls.native, gate)?,
+            None,
+        )
+    };
     if mass_exchange.mass_change_kg != -exchange.transferred_mass_kg {
         return Err(Error::Invalid(
             "native phase transfer differs from its selected gas debit",
         ));
     }
     let stored_delta_h = mass_exchange.samples[0].specific_enthalpy_j_kg[1] - h0;
+    if momentum.is_some() {
+        momentum::admit_mixed_endpoints(
+            &next_liquid,
+            &next_gas,
+            catalog,
+            surface,
+            controls,
+            &phase,
+            mass_exchange.samples[0].specific_enthalpy_j_kg[1],
+        )?;
+    }
     let source_relative_storage = if let Some(heat) = film_heat {
         // Retain the original two caloric increments before changing their
         // reference to h0. Mass leaving after heating carries the heated h;
@@ -503,8 +567,11 @@ fn advance_native<'s, 'm, 'catalog>(
     } else {
         phase_liquid.mass_kg * target_delta_h
     };
+    // Physical relative-motion heat is already in the native h. It is not a
+    // caloric defect and must not be added twice to the source energy balance.
+    let liquid_mixing_heat_j = momentum.as_ref().map_or(0.0, |m| m.liquid_mixing_heat_j);
     let native_phase_caloric_defect_j =
-        projection.final_mass_kg * stored_delta_h - source_relative_storage;
+        projection.final_mass_kg * stored_delta_h - source_relative_storage - liquid_mixing_heat_j;
     poll(gate)?;
     let (flow, pressure) = advance_flow(
         &mut next_liquid,
@@ -523,8 +590,10 @@ fn advance_native<'s, 'm, 'catalog>(
             - gas
                 .species_mass_kg(&surface.binding.species)
                 .map_err(GasEvaporationError::from)?);
-    let energy_residual_j =
-        exchange.energy_residual_j + native_phase_caloric_defect_j + flow.balance_defect_j;
+    let energy_residual_j = exchange.energy_residual_j
+        + native_phase_caloric_defect_j
+        + momentum.as_ref().map_or(0.0, |m| m.energy_residual_j)
+        + flow.balance_defect_j;
     let native_liquid_enthalpy_change_j =
         mass_exchange.enthalpy_change_j + (flow.enthalpy_after_j - flow.enthalpy_before_j);
     if ![
@@ -559,23 +628,26 @@ fn advance_native<'s, 'm, 'catalog>(
         });
     }
     poll(gate)?;
-    Ok(EvaporatingLiquidGasCandidate {
-        liquid: next_liquid,
-        gas: next_gas,
-        catalog,
-        report: EvaporatingLiquidGasReport {
-            duration_s,
-            phase,
-            exchange,
-            heat: film_heat,
-            mass_exchange,
-            flow,
-            pressure,
-            native_liquid_enthalpy_change_j,
-            native_phase_caloric_defect_j,
-            mass_residual_kg,
-            volatile_mass_residual_kg,
-            energy_residual_j,
+    Ok((
+        EvaporatingLiquidGasCandidate {
+            liquid: next_liquid,
+            gas: next_gas,
+            catalog,
+            report: EvaporatingLiquidGasReport {
+                duration_s,
+                phase,
+                exchange,
+                heat: film_heat,
+                mass_exchange,
+                flow,
+                pressure,
+                native_liquid_enthalpy_change_j,
+                native_phase_caloric_defect_j,
+                mass_residual_kg,
+                volatile_mass_residual_kg,
+                energy_residual_j,
+            },
         },
-    })
+        momentum,
+    ))
 }

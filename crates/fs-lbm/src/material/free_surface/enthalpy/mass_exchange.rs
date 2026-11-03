@@ -37,6 +37,7 @@ impl MassExchangeCandidate {
 
 #[derive(Clone, Copy)]
 enum TransferMomentum<'a> {
+    Comoving,
     Mixing(&'a BTreeMap<MassLocation3, inflow::IncomingMixture>),
     Ejection {
         velocities: &'a BTreeMap<MassLocation3, [f64; 3]>,
@@ -47,6 +48,7 @@ enum TransferMomentum<'a> {
 impl TransferMomentum<'_> {
     fn velocity_at(&self, location: &MassLocation3) -> Option<[f64; 3]> {
         match self {
+            Self::Comoving => None,
             Self::Mixing(mixtures) => mixtures.get(location).map(|m| m.velocity_m_s),
             Self::Ejection { velocities, .. } => velocities.get(location).copied(),
         }
@@ -57,7 +59,7 @@ impl TransferMomentum<'_> {
             Self::Mixing(mixtures) => mixtures
                 .get(location)
                 .map_or(0.0, |m| m.specific_kinetic_variance_j_kg),
-            Self::Ejection { .. } => 0.0,
+            Self::Comoving | Self::Ejection { .. } => 0.0,
         }
     }
 
@@ -71,8 +73,12 @@ impl TransferMomentum<'_> {
         new_mass: f64,
         velocity: [f64; 3],
     ) -> Option<([f64; 3], f64, f64)> {
-        let carried = self.velocity_at(location)?;
+        let carried = match self {
+            Self::Comoving => velocity,
+            _ => self.velocity_at(location)?,
+        };
         match self {
+            Self::Comoving => Some((velocity, 0.0, 0.0)),
             Self::Mixing(_) => {
                 let (next, mut heat) =
                     inflow::mixing_state(old_mass, dm, new_mass, velocity, carried)?;
@@ -172,6 +178,21 @@ pub struct FreeSurfaceMassExchangeReport {
     pub absolute_momentum_defect_kg_m_s: f64,
     /// Stable native-coordinate order, independently of caller enumeration.
     pub samples: Vec<FreeSurfaceMassExchangeSample>,
+}
+
+/// Actual co-moving mass transfer with its resolved kinetic-energy account.
+///
+/// This is the original local-velocity exchange, including zero-mass heating.
+/// It introduces neither a stream velocity nor a physical mixing/ejection law.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FreeSurfaceComovingExchangeReport {
+    pub exchange: FreeSurfaceMassExchangeReport,
+    /// Signed kinetic energy carried into the liquid [J].
+    pub carried_kinetic_energy_j: f64,
+    /// Actual resolved liquid kinetic-energy change, including force refresh [J].
+    pub kinetic_energy_change_j: f64,
+    /// Sum of absolute local enthalpy-plus-kinetic balance defects [J].
+    pub absolute_total_energy_defect_j: f64,
 }
 
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
@@ -302,6 +323,35 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             self.prepare_interface_mass_model(exchanges, None, controls, gate)?;
         candidate.publish(self);
         Ok(report)
+    }
+
+    /// Apply the original co-moving exchange and retain its kinetic account.
+    ///
+    /// Positive, negative and zero mass have the same meaning as in
+    /// exchange_interface_mass. No relative-motion heat or powered recoil is
+    /// inferred. The original actual-population readback additionally gates
+    /// enthalpy plus kinetic energy against the carried stream energy. This
+    /// lets a finite donor/receiver close its shared mechanical account even
+    /// for a zero-mass sensible-heating step.
+    pub fn exchange_interface_mass_with_kinetic(
+        &mut self,
+        exchanges: &[FreeSurfaceMassExchange],
+        controls: FreeSurfaceMassExchangeControls,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceComovingExchangeReport, Error> {
+        let (candidate, exchange, balance) = self.prepare_interface_mass_model(
+            exchanges,
+            Some(TransferMomentum::Comoving),
+            controls,
+            gate,
+        )?;
+        candidate.publish(self);
+        Ok(FreeSurfaceComovingExchangeReport {
+            exchange,
+            carried_kinetic_energy_j: balance.carried_kinetic_energy_j,
+            kinetic_energy_change_j: balance.kinetic_energy_change_j,
+            absolute_total_energy_defect_j: balance.absolute_total_energy_defect_j,
+        })
     }
 
     fn prepare_interface_mass_model(
@@ -519,7 +569,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 // Preserve the original inflow arithmetic, including signed
                 // zero, while accounting for authored actuator work on exit.
                 kinetic_balance.absolute_total_energy_defect_j += match momentum {
-                    TransferMomentum::Mixing(_) => total_defect.abs(),
+                    TransferMomentum::Comoving | TransferMomentum::Mixing(_) => total_defect.abs(),
                     TransferMomentum::Ejection { .. } => (total_defect - work).abs(),
                 };
                 heat

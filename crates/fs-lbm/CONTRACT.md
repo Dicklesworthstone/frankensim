@@ -848,6 +848,10 @@ that coupling owner. `fs-couple::liquid_gas::evaporation` uses these read-only
 operations, the shared finite-rate phase owner and this native exchange to
 publish finite gas plus real VOF liquid together on one native flow interval.
 
+### Kinetic account for co-moving native mass exchange
+
+`MaterialFreeSurfaceEnthalpy3::exchange_interface_mass_with_kinetic` applies the original local-velocity signed exchange and returns its actual resolved kinetic-energy change, carried kinetic energy and local enthalpy-plus-kinetic defect. Positive, negative and zero-mass heat-only updates use the same source, geometry, material refresh and publication rules. It adds no mixing heat or powered recoil. The existing `exchange_interface_mass` API and arithmetic are unchanged. Finite donor/receiver owners can close a shared mechanical account without reconstructing kinetic energy from pressure density or losing force-refresh changes.
+
 ### Positive liquid inflow with explicit local complete mixing
 
 `MaterialFreeSurfaceEnthalpy3::mix_interface_inflow` adds positive mass at a

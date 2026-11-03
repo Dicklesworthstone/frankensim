@@ -25393,3 +25393,9 @@ The existing bounded solver, source-domain, native mass-solve and physical
 acceptance gates remain authoritative. This is a frozen-geometry mechanical
 event; evolving texture/source laws and sustained-contact stepping retain their
 separate original owners.
+
+## Retained gas drift in native phase transfer
+
+`liquid_gas::evaporation::momentum::advance_liquid_with_moving_gas` advances the original Stefan/enthalpy phase solve and one native VOF interval with explicit retained gas bulk momentum. `MovingGasParcel` requires an authored Cartesian velocity and preserves the original finite gas composition, internal energy, volume and source axes; bulk kinetic energy is derived separately. Evaporation carries the actual liquid mean velocity into gas; condensation carries the retained gas mean velocity into the original native complete-mixing owner. The receiver's physical relative kinetic loss heats that same receiver once through its original caloric law. Gas momentum updates by the reciprocal accepted mass impulse, and actual represented liquid plus gas source momentum and kinetic-plus-caloric energy must close within the declared budgets.
+
+Optional sensible heat retains the original source solve; optional pressure uses the actual mixing-heated gas EOS. Neither pressure traction nor a molecular vapor-jet recoil is inferred as an additional phase impulse. Source domains, latent-datum compatibility, temperature-increment limits, native capacity and speed bounds remain authoritative after mixing. The complete private gas/liquid candidate publishes atomically after one retained flow timestep; zero-flux sensible heating preserves the same mechanical account. This is a homogeneous mean-drift, first-order phase/mixing/flow split, with fixed connected gas volume. Its closed source ledger excludes subsequent VOF wall/pressure forces and numerical kinetic truncation; those are not mixing heat.

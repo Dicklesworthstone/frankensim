@@ -270,11 +270,46 @@ pub fn with_electrical_liquid<R>(
     with_liquid_configuration(datum, &[(INTERFACE, fill, 300.0)], None, true, run)
 }
 
+/// Explicit Cartesian boost of the authored shear fixture, in m/s.
+pub fn with_liquid_velocity<R>(
+    datum: f64,
+    fill: f64,
+    boost_m_s: [f64; 3],
+    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
+    with_liquid_configuration_velocity(
+        datum,
+        &[(INTERFACE, fill, 300.0)],
+        None,
+        false,
+        boost_m_s,
+        run,
+    )
+}
+
 fn with_liquid_configuration<R>(
     datum: f64,
     interfaces: &[([usize; 3], f64, f64)],
     pressure_reference: Option<f64>,
     electrical: bool,
+    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
+    with_liquid_configuration_velocity(
+        datum,
+        interfaces,
+        pressure_reference,
+        electrical,
+        [0.0; 3],
+        run,
+    )
+}
+
+fn with_liquid_configuration_velocity<R>(
+    datum: f64,
+    interfaces: &[([usize; 3], f64, f64)],
+    pressure_reference: Option<f64>,
+    electrical: bool,
+    boost_m_s: [f64; 3],
     run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
     let card = liquid_card(electrical);
@@ -352,7 +387,11 @@ fn with_liquid_configuration<R>(
                         .iter()
                         .find(|(cell, _, _)| *cell == coordinates)
                         .map_or(1.0, |(_, fill, _)| *fill),
-                    velocity_m_s: [0.0, 0.003 * (x as f64 - 1.5), 0.0],
+                    velocity_m_s: [
+                        boost_m_s[0],
+                        boost_m_s[1] + 0.003 * (x as f64 - 1.5),
+                        boost_m_s[2],
+                    ],
                 });
             }
         }

@@ -24,6 +24,8 @@ use fs_thermal::evaporation::{EvaporationError, EvaporationLaw, GasFilm, surface
 mod conduction;
 #[path = "evaporating_liquid_gas/fixture.rs"]
 mod fixture;
+#[path = "evaporating_liquid_gas/momentum.rs"]
+mod momentum;
 #[path = "evaporating_liquid_gas/multiple.rs"]
 mod multiple;
 #[path = "evaporating_liquid_gas/pressure.rs"]
