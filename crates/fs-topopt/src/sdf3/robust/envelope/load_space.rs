@@ -133,7 +133,7 @@ pub struct LoadSpaceEvaluation3 {
 impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     // A common material force is an affine offset, not another basis column.
     // The existing Gram eigenproblem solves only a zero-centered load set.
-    fn require_homogeneous_load_space(&self) -> Result<(), &'static str> {
+    pub(crate) fn require_homogeneous_load_space(&self) -> Result<(), &'static str> {
         if self.has_material_body_load() {
             return Err("continuous load-space envelopes do not support a material body-load offset");
         }

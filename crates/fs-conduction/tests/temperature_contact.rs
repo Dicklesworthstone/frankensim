@@ -274,11 +274,15 @@ fn cancelled_contact_evaluation_and_step_publish_no_candidate() {
     });
 }
 
-fn two_sided_point(a: f64, b: f64) -> QueryPoint {
+fn absolute_kelvin() -> fs_qty::QuantitySpec {
     use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-    let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
+    fs_qty::QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature, ValueForm::Static,
-    ));
+    ))
+}
+
+fn two_sided_point(a: f64, b: f64) -> QueryPoint {
+    let kelvin = absolute_kelvin();
     QueryPoint::new().with_quantity("TA", kelvin, a).unwrap()
         .with_quantity("TB", kelvin, b).unwrap()
         .with("normal_pressure", 1e6).unwrap()
@@ -300,8 +304,8 @@ fn two_sided_card(reverse: bool) -> InterfaceSystemCard {
             axis_dims: [fs_conduction::TEMPERATURE_DIMS; 2],
             samples, triangles: vec![[0,1,2], [1,3,2]], dims,
         },
-        validity: ValidityDomain::unconstrained().with("TA",256.,384.)
-            .with("TB",256.,384.).with("normal_pressure",1e6,1e6),
+        validity: ValidityDomain::unconstrained().with_quantity("TA",absolute_kelvin(),256.,384.)
+            .with_quantity("TB",absolute_kelvin(),256.,384.).with("normal_pressure",1e6,1e6),
         uncertainty: UncertaintyModel::Unstated,
         interpolation: InterpolationPolicy::LinearInside,
         observations: vec![], provenance: Provenance {

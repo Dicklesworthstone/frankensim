@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{ElasticityError3, MaterialBodyLoad3, adaptive::AdaptiveElasticity3};
 use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
 use fs_cutfem::elastic3::surface::ReferenceLoad3;
-use fs_cutfem::octree3::Octant3;
+use fs_cutfem::octree3::{Octant3, OctreeError3};
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::{
     AdaptiveJacobi3, AdaptivePreconditionError3, AdaptiveMultilevelOptions3, AdaptiveSolveSpace3,
 };
@@ -107,6 +107,8 @@ pub enum GoalRefinementError3 {
     Evaluation(EvaluationStop),
     /// Incompatible geometry/fields or a failed physical callback.
     Physics(ElasticityError3),
+    /// Invalid refinement marks or exhausted background leaf/level allowance.
+    Background(OctreeError3),
     /// Refused setup size, diagonal, or coarse factorization.
     Preconditioner(AdaptivePreconditionError3),
     /// Numerical estimator refused its assumptions or identity.
@@ -118,6 +120,12 @@ impl From<EvaluationStop> for GoalRefinementError3 { fn from(e: EvaluationStop) 
 impl From<ElasticityError3> for GoalRefinementError3 {
     fn from(e: ElasticityError3) -> Self {
         if matches!(e, ElasticityError3::Cancelled) { Self::Evaluation(EvaluationStop::Cancelled) } else { Self::Physics(e) }
+    }
+}
+impl From<OctreeError3> for GoalRefinementError3 {
+    fn from(e: OctreeError3) -> Self {
+        if e == OctreeError3::Cancelled { Self::Evaluation(EvaluationStop::Cancelled) }
+        else { Self::Background(e) }
     }
 }
 impl From<AdaptivePreconditionError3> for GoalRefinementError3 {
