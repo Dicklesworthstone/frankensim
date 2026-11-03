@@ -132,3 +132,40 @@ fn changed_gas_does_not_bypass_the_owners_radiation_band_refusal() {
     let text = INPUT.replace("ambient 293.15 101325 0", "ambient mixture 293.15 100000 mole 1 CO2 1");
     assert!(matches!(ReedPerformance::from_bytes(text.as_bytes(), 37), Err(ReedPerformanceError::Model(_))));
 }
+
+/// G3: explicit mixture relaxation reaches actual native pressure without
+/// altering the original reed/duct trajectory or filtering internal pressure.
+#[test]
+fn declared_relaxation_observes_the_same_native_reed_once() {
+    use fs_material::relaxation::input::{medium_from_record, read_relaxation};
+    // Synthetic source law; this is no empirical CO2 absorption claim.
+    let declaration = "declared 3 N2 0 O2 0 CO2 1 vibration 1 960 2 power 10 293.15 0 200 400";
+    let text = source(CO2).replace("listener_m 1", &format!("listener_m 1\nobserver_law relaxation {declaration}"));
+    let unabsorbed = source(CO2).replace("listener_m 1", "listener_m 1\nobserver_law none");
+    let mut actual = ReedPerformance::from_bytes(text.as_bytes(), 37).unwrap();
+    let mut original = ReedPerformance::from_bytes(unabsorbed.as_bytes(), 37).unwrap();
+    let record = original.gas_records.iter().find(|record| record.state() == original.ambient_gas()).unwrap();
+    let law = read_relaxation(&mut declaration.split_ascii_whitespace()).unwrap();
+    let state = law.evaluate(&medium_from_record(record).unwrap()).unwrap();
+    let mut filter = ObserverFilter::molecular_relaxation(&state, 1.0, 48000).unwrap();
+    assert_eq!(&actual.observer().filter, filter.receipt());
+    assert!(actual.observer_law_declared());
+    assert!(actual.observer_admission().is_ok());
+    let mut output = Vec::new();
+    let mut changed = false;
+    for _ in 0..actual.info().samples {
+        let mut p = [0.0];
+        let mut q = [0.0];
+        actual.pressure_block(&mut p).unwrap();
+        original.pressure_block(&mut q).unwrap();
+        let parts = original.renderer.context().reed_voice(0).unwrap().last_observer_parts();
+        let expected = parts.internal_pa + filter.process(parts.radiated_pa);
+        assert_eq!(p[0].to_bits(), expected.to_bits());
+        changed |= p[0].to_bits() != q[0].to_bits();
+        output.push(p[0]);
+    }
+    assert!(changed, "the original radiated pressure must acquire absorption and dispersion");
+    assert_eq!(output, render(&text, 113));
+    let missing = text.replace("declared 3 N2 0 O2 0 CO2 1", "declared 3 N2 0 O2 0 Ar 1");
+    assert!(ReedPerformance::from_bytes(missing.as_bytes(), 37).is_err());
+}

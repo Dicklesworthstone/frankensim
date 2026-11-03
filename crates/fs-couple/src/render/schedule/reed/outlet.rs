@@ -135,7 +135,7 @@ impl ObservationInput {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_molecular(self, point: MolecularDrivingPoint, reed: BeatingReed,
         termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64,
-        declared_law: Option<DeclaredObserverLaw>, records: &[GasRecord])
+        declared_law: Option<&DeclaredObserverLaw>, records: &[GasRecord])
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
         let delay = 2.0 * point.one_way_wavefront_s() * f64::from(rate);
         if !(delay >= 2.0 && delay < samples as f64 - 2.0) {
@@ -446,12 +446,12 @@ mod molecular_tests {
         let source = point(gas);
         let (mut proxy, no_terminal) = ObservationInput::Legacy(1.0)
             .build_molecular(source.clone(), reed(), Termination::FlangedOpen,
-                8000, 1024, gas.sound_speed, Some(DeclaredObserverLaw::Lossless), &[]).unwrap();
+                8000, 1024, gas.sound_speed, Some(&DeclaredObserverLaw::Lossless), &[]).unwrap();
         assert!(no_terminal.is_none());
         let (mut physical, terminal) = ObservationInput::Baffled {
             receiver: receiver(), exterior: Some(gas),
         }.build_molecular(source, reed(), Termination::FlangedOpen,
-            8000, 1024, gas.sound_speed, Some(DeclaredObserverLaw::Lossless), &[]).unwrap();
+            8000, 1024, gas.sound_speed, Some(&DeclaredObserverLaw::Lossless), &[]).unwrap();
         let mut terminal = terminal.unwrap();
         assert!(terminal.holes.is_empty());
         let mut expected = physical.molecular_driving_point().unwrap()
@@ -478,14 +478,14 @@ mod molecular_tests {
         let source = point(gas(320.0));
         assert!(ObservationInput::Legacy(1.0).build_molecular(
             source.clone(), reed(), Termination::FlangedOpen,
-            8000, 1024, gas(320.0).sound_speed, Some(DeclaredObserverLaw::Lossless), &[]).is_err());
+            8000, 1024, gas(320.0).sound_speed, Some(&DeclaredObserverLaw::Lossless), &[]).is_err());
         for (exterior, termination) in [
             (Some(gas(293.15)), Termination::FlangedOpen),
             (Some(gas(320.0)), Termination::UnflangedOpen),
         ] {
             assert!(ObservationInput::Baffled { receiver: receiver(), exterior }
                 .build_molecular(source.clone(), reed(), termination,
-                    8000, 1024, gas(320.0).sound_speed, Some(DeclaredObserverLaw::Lossless), &[]).is_err());
+                    8000, 1024, gas(320.0).sound_speed, Some(&DeclaredObserverLaw::Lossless), &[]).is_err());
         }
     }
 }

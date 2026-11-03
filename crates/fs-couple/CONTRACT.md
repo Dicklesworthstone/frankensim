@@ -5803,6 +5803,15 @@ clarinet is one filling of those objects.
   iso9613-terrestrial-air` record. `none` (`GasAbsorptionModel::Lossless`) is
   a receipted lossless choice for comparisons with lossless analytic oracles,
   never a default. `ReedPerformance::observer` returns the receipt.
+  The same shared input in native reed and plate performances also accepts
+  `observer_law relaxation declared ...`, using
+  `fs-material::relaxation::input::read_relaxation`'s original bounded
+  species/reservoir/rate grammar. The law evaluates against the exact exterior
+  mixture or thermochemical record; missing species/partners, a legacy
+  pseudocomponent or a rate outside its temperature domain refuses. Declared
+  data remains authored constitutive input, not measured calibration. Each
+  open mouth keeps its own range, causal dispersion and receiver delay; no
+  second classical or ISO absorption is added. Existing defaults are unchanged.
   How each law is made causal:
   - Molecular relaxation: its own causal transfer.
   - ISO 9613-1: each O2 and N2 term by its exact complex Debye

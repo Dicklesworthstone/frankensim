@@ -28,7 +28,9 @@
 //! Stokes-Kirchhoff with its omission receipted. An optional
 //! `observer_law none|iso9613|stokes-kirchhoff|relaxation
 //! iso9613-terrestrial-air` record after the observation declares the law
-//! instead. `none` is a receipted lossless choice for analytic oracles.
+//! instead. `relaxation declared ...` supplies the original material owner's
+//! bounded species/reservoir/rate grammar for arbitrary explicit mixtures.
+//! `none` is a receipted lossless choice for analytic oracles.
 //! The law acts on radiated pressure only. The proxy's bore pressure is an
 //! internal observation that travels no distance, so it passes unfiltered.
 
@@ -242,7 +244,7 @@ fn check_receiver_delay(
 /// declared, or by default ISO 9613-1 for a legacy air record inside ISO's
 /// window, otherwise Stokes-Kirchhoff.
 fn observer_filter(
-    declared: Option<DeclaredObserverLaw>,
+    declared: Option<&DeclaredObserverLaw>,
     gas: &GasState,
     records: &[GasRecord],
     range_m: f64,
@@ -635,21 +637,8 @@ impl ReedPerformance {
         let declared_law = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("observer_law") {
             let mut row = r.row("observer_law")?;
-            let law = match row.word()? {
-                "none" => DeclaredObserverLaw::Lossless,
-                "iso9613" => DeclaredObserverLaw::Iso9613,
-                "stokes-kirchhoff" => DeclaredObserverLaw::StokesKirchhoff,
-                "relaxation" => {
-                    if row.word()? != "iso9613-terrestrial-air" {
-                        return Err(bad(r.line, "observer relaxation data must be iso9613-terrestrial-air"));
-                    }
-                    DeclaredObserverLaw::IsoAirRelaxation
-                }
-                _ => return Err(bad(
-                    r.line,
-                    "observer_law must be none, iso9613, stokes-kirchhoff or relaxation iso9613-terrestrial-air",
-                )),
-            };
+            let law = DeclaredObserverLaw::parse(&row.words.by_ref().collect::<Vec<_>>())
+                .map_err(|what| bad(row.line, what))?;
             row.finish()?;
             Some(law)
         } else {
@@ -903,7 +892,7 @@ impl ReedPerformance {
             let medium = observer_medium(baffled, &air, &outlet_gas);
             let exterior_gas = baffled.and_then(|(_, exterior)| exterior).unwrap_or(outlet_gas);
             let observer =
-                observer_filter(declared_law, &medium, &gas_records, observer_range_m, rate)?;
+                observer_filter(declared_law.as_ref(), &medium, &gas_records, observer_range_m, rate)?;
             admit_receiver_delay(&observer, baffled, outlet_radius_m, medium.sound_speed)?;
             let omission = observer_omission(&medium, &gas_records, observer_range_m, band_top_hz);
             let point = match &gas_field {
@@ -929,7 +918,7 @@ impl ReedPerformance {
             let (voice, terminal) = observation.build_molecular(
                 point, reed, termination, rate, samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
-                declared_law, &gas_records,
+                declared_law.as_ref(), &gas_records,
             )?;
             (voice, terminal, observer, omission)
         } else if let Some((field, resolution)) = &gas_field {
@@ -953,7 +942,7 @@ impl ReedPerformance {
             segment_gases = regional.segment_gases().to_vec();
             let medium = observer_medium(baffled, &air, regional.outlet_gas());
             let observer =
-                observer_filter(declared_law, &medium, &gas_records, observer_range_m, rate)?;
+                observer_filter(declared_law.as_ref(), &medium, &gas_records, observer_range_m, rate)?;
             admit_receiver_delay(&observer, baffled, outlet_radius_m, medium.sound_speed)?;
             let omission = observer_omission(&medium, &gas_records, observer_range_m, band_top_hz);
             let (voice, terminal) = observation.build_regional(
@@ -970,7 +959,7 @@ impl ReedPerformance {
             let outlet_gas = *segment_gases.last().expect("at least one admitted segment");
             let medium = observer_medium(baffled, &air, &outlet_gas);
             let observer =
-                observer_filter(declared_law, &medium, &gas_records, observer_range_m, rate)?;
+                observer_filter(declared_law.as_ref(), &medium, &gas_records, observer_range_m, rate)?;
             admit_receiver_delay(&observer, baffled, outlet_radius_m, medium.sound_speed)?;
             let omission = observer_omission(&medium, &gas_records, observer_range_m, band_top_hz);
             let (voice, terminal) = observation.build(

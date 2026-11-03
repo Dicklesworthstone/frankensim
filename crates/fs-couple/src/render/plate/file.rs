@@ -13,8 +13,9 @@
 //! Omission keeps the original unloaded image; no loss model is inferred.
 //! An optional `observer_law` after that record (or directly after `observer`)
 //! selects the shared causal atmosphere law: `none`, `stokes-kirchhoff`,
-//! `iso9613`, or `relaxation iso9613-terrestrial-air`. Source admission is the
-//! same as for native wind performers. Without the record, the existing
+//! `iso9613`, or `relaxation` followed by `iso9613-terrestrial-air` or the
+//! material owner's `declared` species/reservoir/rate grammar. Source admission
+//! is the same as for native wind performers. Without the record, the existing
 //! unfiltered compact observation is retained and explicitly reported.
 //!
 //! A section is either bare numbers ending in an explicit `fixture LABEL`
@@ -195,7 +196,7 @@ impl PlatePerformance {
             CompactPlateVoice::from_radiators(bodies, input.initial_force_n, input.config)
         }
             .map_err(PlatePerformanceError::Render)?;
-        let voice = match input.observer_law {
+        let voice = match input.observer_law.as_ref() {
             Some(law) => {
                 let filter = observer_filter(Some(law), &input.config.gas,
                     core::slice::from_ref(&input.gas_record), input.config.listener_m,

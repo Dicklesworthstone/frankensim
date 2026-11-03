@@ -192,3 +192,52 @@ fn signed_force_events_retain_source_order_for_same_sample_assignments() {
     assert_eq!(applied[1].delta, ControlDelta::SetPlateForce { voice:0, force_n:-0.2 });
     assert_eq!(renderer.pending_controls()[0].sample, 1701);
 }
+
+/// G3: a native plate's explicit mixture law is the original material response
+/// on the retarded mechanical trajectory, including the shared delay allocation.
+#[test]
+fn declared_relaxation_reaches_native_plate_pressure_and_preserves_block_replay() {
+    use crate::air_path::GasAbsorptionModel;
+    use fs_material::relaxation::input::{medium_from_record, read_relaxation};
+    // Synthetic reservoir/rate data, not a measured gas or plate qualification.
+    let declaration = "declared 1 CO2 1 vibration 1 960 2 power 10.1325 293.15 0 200 400";
+    let text = std::str::from_utf8(SOURCE).unwrap()
+        .replace("ambient 293.15 101325 0", "ambient mixture 293.15 101325 mole 1 CO2 1")
+        .replace("observer 1.0", &format!("observer 1.0\nobserver_law relaxation {declaration}"));
+    let input = Parsed::read(text.as_bytes(), 37, None).unwrap();
+    let law = read_relaxation(&mut declaration.split_ascii_whitespace()).unwrap();
+    let state = law.evaluate(&medium_from_record(&input.gas_record).unwrap()).unwrap();
+    let (chart, options) = independent_chart();
+    let mut reference = CompactPlateVoice::from_radiators(
+        certified_chart_radiators(&chart, &options).unwrap(), 1.0, input.config,
+    ).unwrap().with_observer_law(GasAbsorptionModel::MolecularRelaxation, Some(&state)).unwrap();
+    let receipt = *reference.observer_receipt().unwrap();
+    assert!((receipt.receiver_delay_s + receipt.low_frequency_delay_s
+        - input.config.listener_m / input.config.gas.sound_speed).abs() < 1e-14);
+    let mut expected = vec![0.0; 4801];
+    for (n, sample) in expected.iter_mut().enumerate() {
+        match n {
+            37 | 1738 => reference.set_force_admitted(0.0),
+            1701 => reference.set_force_admitted(-0.4),
+            _ => {}
+        }
+        reference.step_block(core::slice::from_mut(sample)).unwrap();
+    }
+    assert!(expected.iter().all(|p| p.is_finite()));
+    assert!(expected.iter().any(|p| p.abs() > 1e-9));
+    for block in [37, 571] {
+        let source = PlatePerformance::from_bytes(text.as_bytes(), block).unwrap();
+        assert_eq!(source.info().observer_filter, Some(receipt));
+        let mut renderer = source.into_renderer();
+        let mut actual = vec![0.0; expected.len()];
+        for part in actual.chunks_mut(block) { renderer.block(part).unwrap(); }
+        assert_eq!(actual, expected);
+    }
+    for invalid in [
+        text.replace("CO2 1 vibration", "O2 1 vibration"),
+        text.replace("0 200 400", "0 310 400"),
+        text.replace(declaration, "iso9613-terrestrial-air"),
+    ] {
+        assert!(PlatePerformance::from_bytes(invalid.as_bytes(), 37).is_err());
+    }
+}
