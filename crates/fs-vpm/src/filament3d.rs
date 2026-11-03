@@ -649,38 +649,75 @@ pub fn segment_velocity_with_core(
     b: [f64; 3],
     core2_m2: f64,
 ) -> [f64; 3] {
-    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let length = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).sqrt();
-    if length == 0.0 {
-        return [0.0; 3];
+    SegmentGeometry::new(a, b).velocity(p, core2_m2)
+}
+
+/// Immutable source geometry shared by one-off queries and cached RK stages.
+/// A stage computes the source length and unit tangent once, not per target.
+#[derive(Clone, Copy)]
+struct SegmentGeometry {
+    start: [f64; 3],
+    end: [f64; 3],
+    tangent: [f64; 3],
+    length: f64,
+}
+
+impl SegmentGeometry {
+    #[inline]
+    fn new(a: [f64; 3], b: [f64; 3]) -> Self {
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let length = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).sqrt();
+        let tangent = if length == 0.0 {
+            [0.0; 3]
+        } else {
+            ab.map(|v| v / length)
+        };
+        Self {
+            start: a,
+            end: b,
+            tangent,
+            length,
+        }
     }
-    let t = ab.map(|v| v / length);
-    let r1 = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
-    let r2 = [p[0] - b[0], p[1] - b[1], p[2] - b[2]];
-    let c = [
-        t[1] * r1[2] - t[2] * r1[1],
-        t[2] * r1[0] - t[0] * r1[2],
-        t[0] * r1[1] - t[1] * r1[0],
-    ];
-    let h2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
-    if h2 == 0.0 {
-        return [0.0; 3];
+
+    #[inline]
+    fn velocity(&self, p: [f64; 3], core2_m2: f64) -> [f64; 3] {
+        let Self {
+            start: a,
+            end: b,
+            tangent: t,
+            length,
+        } = *self;
+        if length == 0.0 {
+            return [0.0; 3];
+        }
+        let r1 = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+        let r2 = [p[0] - b[0], p[1] - b[1], p[2] - b[2]];
+        let c = [
+            t[1] * r1[2] - t[2] * r1[1],
+            t[2] * r1[0] - t[0] * r1[2],
+            t[0] * r1[1] - t[1] * r1[0],
+        ];
+        let h2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+        if h2 == 0.0 {
+            return [0.0; 3];
+        }
+        let z1 = t[0] * r1[0] + t[1] * r1[1] + t[2] * r1[2];
+        let z2 = t[0] * r2[0] + t[1] * r2[1] + t[2] * r2[2];
+        let transverse2 = h2 + core2_m2;
+        let l1 = (z1 * z1 + transverse2).sqrt();
+        let l2 = (z2 * z2 + transverse2).sqrt();
+        // Work with a unit tangent: all squared lengths have units m²,
+        // avoiding the old dimensionally inconsistent cross-product cutoff.
+        let coefficient = if (z1 > 0.0 && z2 > 0.0) || (z1 < 0.0 && z2 < 0.0) {
+            // Rationalize the endpoint difference outside the segment. Directly
+            // subtracting z1/l1 - z2/l2 loses the small finite field near the axis
+            // or far beyond an endpoint, especially for a short segment.
+            length / (l1 * l2) * ((z1 + z2) / (z1 * l2 + z2 * l1))
+        } else {
+            (z1 / l1 - z2 / l2) / transverse2
+        };
+        let k = coefficient / (4.0 * core::f64::consts::PI);
+        [k * c[0], k * c[1], k * c[2]]
     }
-    let z1 = t[0] * r1[0] + t[1] * r1[1] + t[2] * r1[2];
-    let z2 = t[0] * r2[0] + t[1] * r2[1] + t[2] * r2[2];
-    let transverse2 = h2 + core2_m2;
-    let l1 = (z1 * z1 + transverse2).sqrt();
-    let l2 = (z2 * z2 + transverse2).sqrt();
-    // Work with a unit tangent: all squared lengths have units m²,
-    // avoiding the old dimensionally inconsistent cross-product cutoff.
-    let coefficient = if (z1 > 0.0 && z2 > 0.0) || (z1 < 0.0 && z2 < 0.0) {
-        // Rationalize the endpoint difference outside the segment. Directly
-        // subtracting z1/l1 - z2/l2 loses the small finite field near the axis
-        // or far beyond an endpoint, especially for a short segment.
-        length / (l1 * l2) * ((z1 + z2) / (z1 * l2 + z2 * l1))
-    } else {
-        (z1 / l1 - z2 / l2) / transverse2
-    };
-    let k = coefficient / (4.0 * core::f64::consts::PI);
-    [k * c[0], k * c[1], k * c[2]]
 }

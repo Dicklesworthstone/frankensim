@@ -2,8 +2,15 @@
 //! Circulation remains on material quads; moving their shared vertices
 //! transports the vortex lines and their stretching without rescaling Γ.
 
-use super::{FilamentWake, Refusal, WakeSegment, segment_velocity_with_core};
+use super::{FilamentWake, Refusal, SegmentGeometry};
 use crate::farfield3d::WakeCoreEvolutionMode;
+
+/// Prepared once per stage, then read by every target's direct sweep.
+struct PreparedSource {
+    geometry: SegmentGeometry,
+    circulation: f64,
+    core2_m2: f64,
+}
 
 /// Inputs to one self-induced shedding interval of length `1 / shed_hz`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -164,7 +171,10 @@ impl FilamentWake {
                 (substep > 0).then_some(resolved_edges.as_slice()),
             )? * config.max_displacement_fraction;
             if substep == 0 {
-                resolved_edges = sources.iter().map(|s| s.start != s.end).collect();
+                resolved_edges = sources
+                    .iter()
+                    .map(|s| s.geometry.start != s.geometry.end)
+                    .collect();
             }
             for (row, midrow) in state.rows.iter().zip(&mut midpoint.rows) {
                 for (p, q) in row.nodes.iter().zip(&mut midrow.nodes) {
@@ -205,7 +215,7 @@ fn collect_sources(
     wake: &FilamentWake,
     growth: f64,
     extra_age: f64,
-    sources: &mut Vec<WakeSegment>,
+    sources: &mut Vec<PreparedSource>,
     resolved_edges: Option<&[bool]>,
 ) -> Result<f64, Refusal> {
     sources.clear();
@@ -213,20 +223,23 @@ fn collect_sources(
     let mut valid = true;
     wake.visit_segments_with_core_growth(growth, |mut source| {
         source.core2_m2 += growth * extra_age;
-        let edge = std::array::from_fn::<_, 3, _>(|i| source.end[i] - source.start[i]);
-        let length2: f64 = edge.iter().map(|v| v * v).sum();
-        let resolved = resolved_edges.map_or(length2 > 0.0, |mask| mask[sources.len()]);
+        let geometry = SegmentGeometry::new(source.start, source.end);
+        let resolved = resolved_edges.map_or(geometry.length > 0.0, |mask| mask[sources.len()]);
         valid &= source.circulation.is_finite()
             && source.core2_m2.is_finite()
             && source.core2_m2 > 0.0
             && source.core2_m2 <= f64::MAX / 16.0
-            && length2.is_finite()
-            && (length2 > 0.0 || (!resolved && source.start == source.end));
+            && geometry.length.is_finite()
+            && (geometry.length > 0.0 || (!resolved && source.start == source.end));
         scale = scale.min(source.core2_m2.sqrt());
         if resolved {
-            scale = scale.min(length2.sqrt());
+            scale = scale.min(geometry.length);
         }
-        sources.push(source);
+        sources.push(PreparedSource {
+            geometry,
+            circulation: source.circulation,
+            core2_m2: source.core2_m2,
+        });
     });
     if !valid {
         return Err(refusal(
@@ -239,7 +252,7 @@ fn collect_sources(
 
 fn velocity_at(
     p: [f64; 3],
-    sources: &[WakeSegment],
+    sources: &[PreparedSource],
     ambient: [f64; 3],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<[f64; 3], Refusal> {
@@ -254,9 +267,10 @@ fn velocity_at(
         // products in range; checking only its final velocity could conceal
         // an overflow to an apparent zero far-field contribution.
         let extent = s
+            .geometry
             .start
             .iter()
-            .zip(s.end)
+            .zip(s.geometry.end)
             .zip(p)
             .fold(0.0_f64, |v, ((a, b), x)| {
                 v.max((x - a).abs()).max((x - b).abs())
@@ -267,7 +281,7 @@ fn velocity_at(
                 "source-target separation exceeds the numerical domain",
             ));
         }
-        let value = segment_velocity_with_core(p, s.start, s.end, s.core2_m2);
+        let value = s.geometry.velocity(p, s.core2_m2);
         for c in 0..3 {
             let increment = s.circulation * value[c] - correction[c];
             let sum = velocity[c] + increment;
