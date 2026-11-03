@@ -445,6 +445,8 @@ pub mod isobaric {
 
 // Relative equilibrium entropy uses this same admitted h -> T chart.
 mod entropy;
+// Source-preserving adjacent sensible spans with an exact reference node.
+mod caloric_join;
 
 use core::fmt;
 
