@@ -10,6 +10,7 @@ use fs_math::det;
 use fs_qty::{DynViscosity, Length, Time};
 
 mod gas;
+pub(crate) mod shared;
 use gas::MixtureCaloric;
 pub(crate) use gas::{WallGasCaloric, WallGasState};
 

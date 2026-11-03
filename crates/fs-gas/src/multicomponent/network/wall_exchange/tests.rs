@@ -380,3 +380,4 @@ mod conduction;
 #[cfg(feature = "material")]
 mod phase_conduction;
 mod thermal_law;
+mod shared;

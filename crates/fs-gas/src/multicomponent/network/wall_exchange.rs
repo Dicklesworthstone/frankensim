@@ -24,6 +24,13 @@ use fs_qty::Time;
 
 mod caloric;
 
+mod shared;
+use shared::SharedWalls;
+pub use shared::{
+    SharedWall, SharedWallControl, SharedWallGas, SharedWallPort, SharedWallReport,
+    SharedWallStorage,
+};
+
 mod transport;
 pub use transport::CircularLaminarWall;
 use transport::CircularWallTransport;
@@ -31,9 +38,9 @@ use transport::CircularWallTransport;
 #[cfg(feature = "material")]
 mod conduction;
 #[cfg(feature = "material")]
-pub use conduction::{MaterialWallConduction, PhaseWallConductionSource, WallConductionEvaluation};
-#[cfg(feature = "material")]
 use conduction::BoundWallConduction;
+#[cfg(feature = "material")]
+pub use conduction::{MaterialWallConduction, PhaseWallConductionSource, WallConductionEvaluation};
 
 /// Source-only exchanges over a complete interval, or both composed wall halves.
 ///
@@ -78,9 +85,9 @@ struct BranchShape {
 
 /// Prepared source operator bound to original gas calorics and cell geometry.
 ///
-/// Each branch cell and each plenum owns one distinct thermal contact. A
-/// finite-capacity wall is a lumped storage attached to that cell; sharing one
-/// physical wall between multiple cells requires an additional thermal owner.
+/// Each local thermal contact owns a distinct wall. [`Self::with_shared_walls`]
+/// instead attaches several gas amounts to one original finite wall inventory,
+/// retaining each gas cell's current composition without mixing its species.
 /// Drag coefficients are frozen during each source interval. Plenums have no
 /// bulk momentum and therefore admit only `WallDrag::None`.
 /// [`Self::with_circular_laminar_transport`] derives selected branch coefficients
@@ -104,6 +111,7 @@ pub struct NetworkWallOperator<'law> {
     trial_active: bool,
     transport: Option<CircularWallTransport>,
     caloric: Vec<Option<MaterialWallCaloric<'law>>>,
+    shared: Option<SharedWalls<'law>>,
     #[cfg(feature = "material")]
     conduction: Option<Vec<Option<BoundWallConduction>>>,
 }
@@ -199,6 +207,7 @@ impl<'law> NetworkWallOperator<'law> {
             trial_active: false,
             transport: None,
             caloric: allocated(count, None)?,
+            shared: None,
             #[cfg(feature = "material")]
             conduction: None,
         };
@@ -215,9 +224,9 @@ impl<'law> NetworkWallOperator<'law> {
     /// Bound transport branches report the coefficients used in the last accepted
     /// source half; each following half resolves them again from its actual gas.
     pub fn branch_contacts(&self, branch: usize) -> Option<&[WallContact]> {
-        self.branches.get(branch).map(|shape| {
-            &self.contacts[shape.start..shape.start + shape.mesh.cell_count()]
-        })
+        self.branches
+            .get(branch)
+            .map(|shape| &self.contacts[shape.start..shape.start + shape.mesh.cell_count()])
     }
 
     /// Accepted wall states of finite plenums in retained topology order.
@@ -251,8 +260,7 @@ impl<'law> NetworkWallOperator<'law> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkWallReport, WallExchangeError> {
         self.begin_trial(&mut cancelled)?;
-        let report =
-            self.advance_for_trial(network, duration, controls, &mut cancelled)?;
+        let report = self.advance_for_trial(network, duration, controls, &mut cancelled)?;
         // advance_for_trial already performed the final cancellation check.
         // Publication here is infallible and contains no user callback.
         self.publish_trial_report();
@@ -278,6 +286,9 @@ impl<'law> NetworkWallOperator<'law> {
         for impulse in &mut self.candidate_impulses {
             poll(cancelled)?;
             *impulse = 0.0;
+        }
+        if let Some(shared) = &mut self.shared {
+            shared.begin_trial(cancelled)?;
         }
         poll(cancelled)?;
         self.trial_active = true;
@@ -337,11 +348,8 @@ impl<'law> NetworkWallOperator<'law> {
         let n = self.gas.species_count();
         let width = n + 2;
         let mut balance = Balance::new();
-        for (branch_index, (branch, shape)) in network
-            .branches
-            .iter()
-            .zip(&self.branches)
-            .enumerate()
+        for (branch_index, (branch, shape)) in
+            network.branches.iter().zip(&self.branches).enumerate()
         {
             poll(cancelled)?;
             if branch.gas != self.gas || branch.mesh != shape.mesh {
@@ -361,8 +369,12 @@ impl<'law> NetworkWallOperator<'law> {
                 let contact = self.film_contact(index, contact);
                 let contact = match self.transport.as_mut() {
                     Some(transport) => transport.resolve(
-                        &self.gas, branch_index, state, shape.mesh.volumes()[i],
-                        contact, cancelled,
+                        &self.gas,
+                        branch_index,
+                        state,
+                        shape.mesh.volumes()[i],
+                        contact,
+                        cancelled,
                     )?,
                     None => contact,
                 };
@@ -379,10 +391,16 @@ impl<'law> NetworkWallOperator<'law> {
                     // A frozen-coefficient source step must also leave an
                     // endpoint supported by the original material/domain.
                     transport.resolve(
-                        &self.gas, branch_index,
-                        Cell { partial_densities: state.partial_densities,
-                            momentum: update.momentum, energy: update.energy },
-                        shape.mesh.volumes()[i], update.contact, cancelled,
+                        &self.gas,
+                        branch_index,
+                        Cell {
+                            partial_densities: state.partial_densities,
+                            momentum: update.momentum,
+                            energy: update.energy,
+                        },
+                        shape.mesh.volumes()[i],
+                        update.contact,
+                        cancelled,
                     )?;
                 }
                 self.candidate_states[index] = [update.momentum, update.energy];
@@ -395,7 +413,9 @@ impl<'law> NetworkWallOperator<'law> {
         for (i, plenum) in network.plenums.iter().enumerate() {
             poll(cancelled)?;
             if !positive(plenum.volume_m3) {
-                return Err(WallExchangeError::Invalid("wall plenum volume must be positive"));
+                return Err(WallExchangeError::Invalid(
+                    "wall plenum volume must be positive",
+                ));
             }
             self.candidate_plenum_volumes[i] = plenum.volume_m3;
             let index = self.plenum_start + i;
@@ -417,6 +437,40 @@ impl<'law> NetworkWallOperator<'law> {
             self.candidate_states[index] = [0.0, update.energy];
             self.candidate_contacts[index] = update.contact;
             balance.add(update.report)?;
+        }
+        if let Some(shared) = &mut self.shared {
+            let shared_report = shared.prepare(
+                network,
+                &mut self.candidate_states,
+                duration,
+                controls,
+                cancelled,
+            )?;
+            balance.add(shared_report)?;
+            // Shared heat follows local drag. Its endpoint must still be in
+            // the original transport closure's declared applicability domain.
+            if let Some(transport) = self.transport.as_mut() {
+                for (branch_index, (branch, shape)) in
+                    network.branches.iter().zip(&self.branches).enumerate()
+                {
+                    for (i, values) in branch.states.chunks_exact(width).enumerate() {
+                        let index = shape.start + i;
+                        let [momentum, energy] = self.candidate_states[index];
+                        transport.resolve(
+                            &self.gas,
+                            branch_index,
+                            Cell {
+                                partial_densities: &values[..n],
+                                momentum,
+                                energy,
+                            },
+                            shape.mesh.volumes()[i],
+                            self.candidate_contacts[index],
+                            cancelled,
+                        )?;
+                    }
+                }
+            }
         }
         let report = balance.report(duration);
         let complete = match self.trial_report {
@@ -462,9 +516,11 @@ impl<'law> NetworkWallOperator<'law> {
     ) -> Result<crate::multicomponent::wall_exchange::WallUpdate, WallExchangeError> {
         #[cfg(feature = "material")]
         if self.implicit_conduction(index) {
-            let source = self.caloric[index].as_ref().ok_or(
-                WallExchangeError::Invalid("implicit conductivity lost its caloric source"),
-            )?;
+            let source = self.caloric[index]
+                .as_ref()
+                .ok_or(WallExchangeError::Invalid(
+                    "implicit conductivity lost its caloric source",
+                ))?;
             // Every storage proposal retains this half's original gas film;
             // the callback composes it with k at that very same proposed state.
             let mut conductance = |candidate| self.endpoint_conductance(index, candidate);
@@ -481,7 +537,9 @@ impl<'law> NetworkWallOperator<'law> {
                 &self.gas, state, volume, duration, contact, source, controls, cancelled,
             )?
         } else {
-            exchange_cell(&self.gas, state, volume, duration, contact, controls, cancelled)?
+            exchange_cell(
+                &self.gas, state, volume, duration, contact, controls, cancelled,
+            )?
         };
         #[cfg(feature = "material")]
         self.admit_conduction_endpoint(index, update.contact)?;
@@ -490,10 +548,14 @@ impl<'law> NetworkWallOperator<'law> {
 
     pub(super) fn publish_trial_report(&mut self) {
         if let Some(report) = self.trial_report {
-            self.plenum_volumes.copy_from_slice(&self.candidate_plenum_volumes);
+            self.plenum_volumes
+                .copy_from_slice(&self.candidate_plenum_volumes);
             core::mem::swap(&mut self.contacts, &mut self.candidate_contacts);
             core::mem::swap(&mut self.branch_impulses, &mut self.candidate_impulses);
             self.last_report = Some(report);
+            if let Some(shared) = &mut self.shared {
+                shared.commit();
+            }
         }
         self.trial_active = false;
     }
@@ -528,8 +590,7 @@ impl Balance {
         if !report.thermal_residual_j.is_finite() {
             return Err(WallExchangeError::Invalid("wall thermal residual"));
         }
-        self.maximum_residual =
-            self.maximum_residual.max(report.thermal_residual_j.abs());
+        self.maximum_residual = self.maximum_residual.max(report.thermal_residual_j.abs());
         self.maximum_iterations = self.maximum_iterations.max(report.iterations);
         Ok(())
     }
@@ -576,11 +637,7 @@ fn combine(
     })
 }
 
-fn accumulate(
-    total: &mut f64,
-    correction: &mut f64,
-    term: f64,
-) -> Result<(), WallExchangeError> {
+fn accumulate(total: &mut f64, correction: &mut f64, term: f64) -> Result<(), WallExchangeError> {
     let y = term - *correction;
     let next = *total + y;
     if !term.is_finite() || !next.is_finite() {

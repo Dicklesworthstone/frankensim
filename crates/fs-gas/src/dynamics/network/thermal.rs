@@ -23,18 +23,8 @@ pub use shared::{
     SharedWallPort, SharedWallReport,
 };
 
-/// One compact volume's thermal boundary and optional original finite storage.
-/// Distinct contacts represent distinct physical wall masses. A shared wall
-/// requires its own thermal owner, rather than duplicating its stored energy.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PlenumThermalContact<'law> {
-    /// Prescribed reservoir, authored constant capacity, or original h/u state.
-    pub thermal: WallThermal,
-    /// Original material calorics, required for `WallThermal::Caloric` and
-    /// optional for a temperature-coordinate finite wall. None retains the
-    /// explicitly authored constant capacity; no Cp-to-Cv conversion is inferred.
-    pub heat_storage: Option<MaterialWallCaloric<'law>>,
-}
+// Preserve the original public storage name while sharing its one source owner.
+pub use crate::multicomponent::wall_exchange::shared::SharedWallStorage as PlenumThermalContact;
 
 /// Whole-network balances after its accepted wave interval and thermal source.
 #[derive(Clone, Copy, Debug, PartialEq)]

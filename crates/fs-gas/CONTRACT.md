@@ -3046,6 +3046,32 @@ thermal rest at a large common potential datum, one original latent inventory,
 heat-driven field motion, source/work/overlap refusal, and final cancellation
 with deterministic history replay.
 
+### Shared walls with evolving mixture composition
+
+With `experimental-euler`, the multicomponent network's
+`wall_exchange::NetworkWallOperator::with_shared_walls` binds the same original
+finite inventories and `SharedWallPort` values to evolving mixture cells and
+plenums. The frozen and mixture adapters share one scalar energy-balance
+kernel; every mixture query borrows the current constituent densities and
+original gas caloric owner. Chemistry or transport between source halves
+therefore changes the actual gas heat capacity and inversion used by the next
+half, without freezing composition or replacing the source energy reference.
+
+Local drag precedes shared heat. Every gas target must have an adiabatic local
+contact without competing storage and may occur only once across the shared
+groups. Any bound gas transport law also admits the heated endpoint. A moving
+plenum uses the composing owner's current trial volume; only that owner can
+change the accepted geometry, and its pressure work remains separate.
+
+Candidate wall storage carries through both source halves and publishes with
+the complete network transaction. Accepted accessors expose only the last
+complete state. `SharedWallControl` counts original source queries across both
+halves and resets on retry; `last_shared_wall_report` combines their storage
+residuals, contact residuals and work. A failed second half cannot publish a
+first-half wall state. Original h/u, latent energy, pressure-work conventions,
+uniform-wall applicability, authored conductances and first-order composition
+retain the limits described above.
+
 ## Connected finite wall inventories
 
 `NetworkWallOperator::with_shared_wall_links` connects the existing shared-wall
