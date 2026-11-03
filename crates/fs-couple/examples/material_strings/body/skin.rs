@@ -9,6 +9,9 @@ use fs_blake3::ContentHash;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::{
     MAX_ONE_WAY_SETUP_BYTES, OneWaySetupStore, ShellAcousticSkin, SkinAnchor, SkinAperture,
 };
+use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::{
+    MAX_SKIN_LOAD_BYTES, SkinLoadStore,
+};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -17,47 +20,72 @@ const MAX_VERTICES: usize = fs_bem::helmholtz::MAX_DENSE_PANELS;
 const MAX_ANCHORS: usize = 8;
 const MAX_APERTURES: usize = 8;
 
-/// `--observer-store DIR`: this executable's one-way observer setups, kept in an
-/// existing directory. Each entry's name holds its setup key and the start of
-/// the executable's own hash, because the key cannot see a solver change that
+/// What a [`SetupDir`] keeps: its option, its entries' suffix and their byte ceiling.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Kept {
+    option: &'static str,
+    suffix: &'static str,
+    maximum_bytes: usize,
+}
+/// `--observer-store`: one-way observer setups, under their setup keys.
+pub(super) const ONE_WAY_SETUPS: Kept = Kept {
+    option: "--observer-store",
+    suffix: "one-way-setup",
+    maximum_bytes: MAX_ONE_WAY_SETUP_BYTES,
+};
+/// `--skin-load-store`: two-way skin loads, under their loading identities.
+pub(super) const SKIN_LOADS: Kept = Kept {
+    option: "--skin-load-store",
+    suffix: "skin-load",
+    maximum_bytes: MAX_SKIN_LOAD_BYTES,
+};
+
+/// `--observer-store DIR` or `--skin-load-store DIR`: this executable's
+/// one-way observer setups or two-way skin loads, kept in an existing
+/// directory. Each entry's name holds its key and the start of the
+/// executable's own hash, because the key cannot see a solver change that
 /// keeps its hash domains, so a rebuilt binary bakes afresh. An entry is
 /// written once and never replaced.
 #[derive(Clone, Debug)]
 pub(super) struct SetupDir {
     dir: PathBuf,
     build: String,
+    kept: Kept,
 }
 
 impl SetupDir {
-    pub(super) fn open(dir: &Path) -> Result<Self> {
+    pub(super) fn open(dir: &Path, kept: Kept) -> Result<Self> {
         if !dir.is_dir() {
-            return Err("--observer-store needs an existing directory".into());
+            return Err(format!("{} needs an existing directory", kept.option).into());
         }
         let executable = std::fs::read(std::env::current_exe()?)?;
         let build = fs_blake3::hash_domain(
             "frankensim:material-strings:observer-store-build:v1",
             &executable,
         );
-        Ok(Self {
+        Ok(Self::with_build(dir, build, kept))
+    }
+
+    fn with_build(dir: &Path, build: ContentHash, kept: Kept) -> Self {
+        Self {
             dir: dir.to_path_buf(),
             build: build.to_hex()[..32].into(),
-        })
+            kept,
+        }
     }
 
     pub(super) fn entry(&self, key: &ContentHash) -> PathBuf {
         self.dir
-            .join(format!("{}-{}.one-way-setup", key.to_hex(), self.build))
+            .join(format!("{}-{}.{}", key.to_hex(), self.build, self.kept.suffix))
     }
-}
 
-impl OneWaySetupStore for SetupDir {
-    fn load(&self, key: &ContentHash) -> std::result::Result<Option<Vec<u8>>, String> {
+    fn read(&self, key: &ContentHash) -> std::result::Result<Option<Vec<u8>>, String> {
         let path = self.entry(key);
         let failed = |e: std::io::Error| format!("{}: {e}", path.display());
         match File::open(&path) {
             Ok(file) => {
                 let mut bytes = Vec::new();
-                file.take(MAX_ONE_WAY_SETUP_BYTES as u64 + 1)
+                file.take(self.kept.maximum_bytes as u64 + 1)
                     .read_to_end(&mut bytes)
                     .map_err(failed)?;
                 Ok(Some(bytes))
@@ -67,7 +95,7 @@ impl OneWaySetupStore for SetupDir {
         }
     }
 
-    fn keep(&self, key: &ContentHash, entry: &[u8]) -> std::result::Result<(), String> {
+    fn write(&self, key: &ContentHash, entry: &[u8]) -> std::result::Result<(), String> {
         let path = self.entry(key);
         let written = OpenOptions::new()
             .write(true)
@@ -81,6 +109,26 @@ impl OneWaySetupStore for SetupDir {
             Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
             other => other.map_err(|e| format!("{}: {e}", path.display())),
         }
+    }
+}
+
+impl OneWaySetupStore for SetupDir {
+    fn load(&self, key: &ContentHash) -> std::result::Result<Option<Vec<u8>>, String> {
+        self.read(key)
+    }
+
+    fn keep(&self, key: &ContentHash, entry: &[u8]) -> std::result::Result<(), String> {
+        self.write(key, entry)
+    }
+}
+
+impl SkinLoadStore for SetupDir {
+    fn load(&self, key: &ContentHash) -> std::result::Result<Option<Vec<u8>>, String> {
+        self.read(key)
+    }
+
+    fn keep(&self, key: &ContentHash, entry: &[u8]) -> std::result::Result<(), String> {
+        self.write(key, entry)
     }
 }
 

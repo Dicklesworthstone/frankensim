@@ -20,7 +20,7 @@ use std::time::Instant;
 
 mod reciprocal;
 pub use reciprocal::{ReciprocalLoadingBake, ReciprocalLoadingDiagnostics,
-    modal_radiation_loading_reciprocal};
+    modal_radiation_loading_reciprocal, reciprocal_loading_declaration};
 
 /// Physical boundary and complete outward normal-velocity traces. A structure
 /// must supply a work-consistent transfer; this module does not interpolate it.

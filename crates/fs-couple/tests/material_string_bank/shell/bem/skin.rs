@@ -288,7 +288,7 @@ fn a_band_below_the_upper_mode_loads_the_prefix_and_leaves_the_rest_one_way() {
         let mut band = resolution();
         band.maximum_hz = resolution().maximum_hz.min(0.5 * (hz[0] + hz[1]));
         let (mut loaded, report) = build()
-            .with_material_skin_bem(band, &skin, 0.0, 0, gate)
+            .with_material_skin_bem(band, &skin, 0.0, 0, None, gate)
             .unwrap();
         assert_eq!(
             (
@@ -338,7 +338,7 @@ fn a_skin_prefix_load_survives_both_orders_of_string_gas_loading() {
         };
         // The first rebuild restores the stored prefix map [0], not the full [0, 1].
         let mut first = build()
-            .with_material_skin_bem(band, &skin, 0.0, 0, gate)
+            .with_material_skin_bem(band, &skin, 0.0, 0, None, gate)
             .unwrap()
             .0
             .with_cylinder_gas_loading(flow, gate)
@@ -346,7 +346,7 @@ fn a_skin_prefix_load_survives_both_orders_of_string_gas_loading() {
         let mut second = build()
             .with_cylinder_gas_loading(flow, gate)
             .unwrap()
-            .with_material_skin_bem(band, &skin, 0.0, 0, gate)
+            .with_material_skin_bem(band, &skin, 0.0, 0, None, gate)
             .unwrap()
             .0;
         assert_eq!(first.system().mode_count(), second.system().mode_count());
@@ -387,7 +387,7 @@ fn an_exterior_owned_mouth_radiates_through_its_caps_and_every_other_pairing_ref
             )
         };
         let (mut loaded, report) = exterior()
-            .with_material_skin_bem(resolution(), &caps, 0.0, LEVEL, gate)
+            .with_material_skin_bem(resolution(), &caps, 0.0, LEVEL, None, gate)
             .unwrap();
         assert_eq!(
             (

@@ -227,8 +227,9 @@ Names inside the performance and optional body, stop, contact-thermal, interface
 and gas sources must resolve to those exact attachment paths. Add each referenced
 file with another `--attached-source`. Restricted execution snapshots the
 admitted files before decoding them; an unlisted reference refuses rather than
-reading another file. It also refuses `--observer-store`, so computed observer
-setups come from the attached physical sources.
+reading another file. It also refuses `--observer-store` and
+`--skin-load-store`, so computed observer setups and skin loads come from the
+attached physical sources.
 
 Without `--self-contained`, existing CLI path resolution is unchanged: material
 references are relative to the performance file, while profile and explicit gas
@@ -2956,6 +2957,28 @@ length share one entry.
   that wrote it: a rebuilt binary bakes afresh.
 - The command prints `setup_key`, `setup_loaded` and the entry's path.
 - Fill a store with one render before starting others on the same key.
+
+A `body-radiation skin` load's sweep and fit are the other expensive part
+(hours on the guitar and violin skins). The fitted model and the numbers
+its report states depend only on the loading declaration, whose identity is the
+report's `loading_identity`: the basis identity, every skin triangle and trace,
+the frequency grid, the gas, the matrix allowance and the angular level. Notes
+on one body and skin share it. `--skin-load-store DIR` (with `--body-profile`,
+and only for a performance with `body-radiation skin`) keeps them in an existing
+directory, in one file per loading identity. The key is found before any
+boundary work.
+- The entry holds the reciprocal diagnostics, the reciprocity and fit errors,
+  and every pole's frequency, damping and couplings as exact f64 bits, and a
+  hash over all of them. The report's declared fields come from the live inputs.
+- A loaded load renders the computed one bit for bit. The pole allowance and
+  the reciprocal work allowance, which the key does not bind, are checked
+  against the kept load as against a computed one.
+- A damaged, truncated or foreign entry refuses. Nothing is recomputed behind
+  it, and an existing entry is never replaced.
+- Each file name also carries the hash of the executable that wrote it, as in
+  `--observer-store`: a rebuilt binary computes afresh.
+- The command prints the entry's path and `skin_load_loaded`.
+- `--self-contained` refuses it, as it refuses `--observer-store`.
 
 ## Material profile and physical limits
 

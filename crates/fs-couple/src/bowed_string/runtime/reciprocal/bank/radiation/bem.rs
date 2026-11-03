@@ -24,6 +24,7 @@ use super::super::multiple::performance::observation::{
 use fs_bem::helmholtz::{HelmholtzError, Medium};
 use fs_bem::modal_loading::{
     ModalLoadingError, ReciprocalLoadingDiagnostics, modal_radiation_loading_reciprocal,
+    reciprocal_loading_declaration,
 };
 use fs_bem::reciprocal_radiation::{
     Budget as ReciprocalBudget, MAX_ANGULAR_REFINEMENT, MAX_RECIPROCAL_PANELS, MAX_RECIPROCAL_UNKNOWNS,
@@ -37,6 +38,9 @@ use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_plate::shell::pressure::ShellFace;
+
+mod store;
+pub use store::{MAX_SKIN_LOAD_BYTES, SkinLoadStore};
 
 /// Independent geometry, frequency, work and causal-realization limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,6 +141,9 @@ pub struct ShellBemReport {
     /// Body modes above the loaded band, after the `body_modes` it loads. They
     /// carry no exterior load; the shell path loads every mode, so zero there.
     pub one_way_body_modes: usize,
+    /// The model and the computed numbers above came from a [`SkinLoadStore`]
+    /// entry under `loading_identity`, not from a sweep and fit in this run.
+    pub loaded_from_store: bool,
 }
 
 #[derive(Debug)]
@@ -148,6 +155,8 @@ pub enum ShellBemError {
     Loading(ModalLoadingError),
     Fit(String),
     Bank(ReciprocalStringError),
+    /// A [`SkinLoadStore`]'s own read or write failure.
+    Store(String),
     Cancelled,
 }
 impl core::fmt::Display for ShellBemError {
@@ -301,17 +310,20 @@ impl ReciprocalStringBank {
             options.frequency_samples, gate,
         )?;
         self.fit_exterior_load(options, angular_refinement, basis_identity, modes.len(),
-            opening_ports, &surface, &fields, gate)
+            opening_ports, &surface, &fields, None, gate)
     }
 
     /// The shared Galerkin loading, passive fit and report of one complete
     /// exterior source on `surface`: `body_modes` structural traces first,
     /// then `opening_ports` mouth traces, in the order of the bank's ports.
+    /// With a `store`, the model and the computed numbers come from the entry
+    /// kept under the loading identity; without one there, they are computed
+    /// and kept once every gate has passed.
     #[allow(clippy::too_many_arguments)]
     fn fit_exterior_load(
         &self, options:ShellBemOptions, angular_refinement:u32, basis_identity:ContentHash,
         body_modes:usize, opening_ports:usize, surface:&SpherePanels, fields:&[Vec<f64>],
-        gate:&CancelGate,
+        store:Option<&dyn SkinLoadStore>, gate:&CancelGate,
     ) -> Result<(Model,ShellBemReport),ShellBemError> {
         let panels = surface.areas().len();
         let gas = self.source.gas;
@@ -330,76 +342,123 @@ impl ReciprocalStringBank {
         omega[options.frequency_samples - 1] = high;
         let entries=fields.len().checked_mul(fields.len()).and_then(|n|n.checked_mul(omega.len()))
             .ok_or(ShellBemError::Invalid("complete reciprocal matrix extent overflow"))?;
-        let source=modal_radiation_loading_reciprocal(surface,fields,&omega,medium,
-            options.reciprocal_budget(omega.len(),angular_refinement)?,basis_identity,entries,
-            ||gate.is_requested()).map_err(|error|match error {
-                ModalLoadingError::Helmholtz(HelmholtzError::Cancelled)=>ShellBemError::Cancelled,
-                ModalLoadingError::Helmholtz(error)=>ShellBemError::Solve(error),
-                other=>ShellBemError::Loading(other),
-            })?;
-        let loading=&source.loading;
-        let reciprocal=source.diagnostics;
-        let mut impedance = Vec::with_capacity(omega.len());
-        let mut reciprocity = 0.0_f64;
-        for row in loading.rows() {
-            poll(gate)?;
-            impedance.push(row.impedance().to_vec());
-            reciprocity = reciprocity.max(row.reciprocity_relative_defect());
-        }
-        let mut extent = 0.0_f64;
-        for a in surface.centroids() {
-            poll(gate)?;
-            for b in surface.centroids() {
-                extent = extent.max(fs_math::det::hypot(
-                    fs_math::det::hypot(a[0]-b[0],a[1]-b[1]),a[2]-b[2]));
-            }
-        }
-        let spacing = if extent > 0.0 {
-            (core::f64::consts::TAU * gas.sound_speed / (6.0 * extent)).min(high - low)
-        } else {
-            high - low
+        let budget=options.reciprocal_budget(omega.len(),angular_refinement)?;
+        let key=match store {
+            Some(_) => Some(reciprocal_loading_declaration(surface,fields,&omega,medium,
+                angular_refinement,basis_identity,entries).map_err(ShellBemError::Loading)?),
+            None => None,
         };
-        let fitted = fit::fit_resolved(&omega, &impedance, fields.len(), spacing)
-            .map_err(ShellBemError::Fit)?;
+        let kept=match (store,&key) {
+            (Some(store),Some(key)) => store.load(key).map_err(ShellBemError::Store)?,
+            _ => None,
+        };
+        let loaded_from_store=kept.is_some();
+        let (model,numbers,loading_identity)=if let (Some(entry),Some(key))=(kept,key) {
+            let (model,numbers)=store::decode(&entry,&key,fields.len(),angular_refinement)?;
+            // The key does not bind this run's work allowance; the kept owner's
+            // own extents meet it as the computing owner's would have.
+            let d=&numbers.reciprocal;
+            if d.unknowns > budget.maximum_unknowns || d.cache_bytes > budget.maximum_cache_bytes
+                || d.frequency_work > budget.maximum_work
+            {
+                return Err(ShellBemError::Invalid("a kept skin load exceeds this run's reciprocal work allowance"));
+            }
+            (model,numbers,key)
+        } else {
+            let source=modal_radiation_loading_reciprocal(surface,fields,&omega,medium,
+                budget,basis_identity,entries,
+                ||gate.is_requested()).map_err(|error|match error {
+                    ModalLoadingError::Helmholtz(HelmholtzError::Cancelled)=>ShellBemError::Cancelled,
+                    ModalLoadingError::Helmholtz(error)=>ShellBemError::Solve(error),
+                    other=>ShellBemError::Loading(other),
+                })?;
+            let loading=&source.loading;
+            if key.is_some_and(|key| key != loading.declaration_hash()) {
+                return Err(ShellBemError::Invalid("a computed loading differs from its declared store key"));
+            }
+            let mut impedance = Vec::with_capacity(omega.len());
+            let mut reciprocity = 0.0_f64;
+            for row in loading.rows() {
+                poll(gate)?;
+                impedance.push(row.impedance().to_vec());
+                reciprocity = reciprocity.max(row.reciprocity_relative_defect());
+            }
+            let mut extent = 0.0_f64;
+            for a in surface.centroids() {
+                poll(gate)?;
+                for b in surface.centroids() {
+                    extent = extent.max(fs_math::det::hypot(
+                        fs_math::det::hypot(a[0]-b[0],a[1]-b[1]),a[2]-b[2]));
+                }
+            }
+            let spacing = if extent > 0.0 {
+                (core::f64::consts::TAU * gas.sound_speed / (6.0 * extent)).min(high - low)
+            } else {
+                high - low
+            };
+            let fitted = fit::fit_resolved(&omega, &impedance, fields.len(), spacing)
+                .map_err(ShellBemError::Fit)?;
+            let numbers = store::LoadNumbers {
+                reciprocal: source.diagnostics,
+                reciprocity_relative_residual: reciprocity,
+                peak_error: fitted.peak_error,
+                rms_error: fitted.rms_error,
+                resistance_peak_error: fitted.resistance_peak_error,
+                resistance_rms_error: fitted.resistance_rms_error,
+            };
+            (fitted.model,numbers,loading.declaration_hash())
+        };
         poll(gate)?;
-        if fitted.model.poles.len() > options.maximum_poles {
+        if model.poles.len() > options.maximum_poles {
             return Err(ShellBemError::Invalid(
                 "complete shell acoustic fit exceeds its pole allowance",
             ));
         }
+        if let (Some(store),false) = (store,loaded_from_store) {
+            store.keep(&loading_identity,&store::encode(&loading_identity,&model,&numbers))
+                .map_err(ShellBemError::Store)?;
+        }
+        let reciprocal=numbers.reciprocal;
         let report = ShellBemReport {
             basis_identity,
-            loading_identity: loading.declaration_hash(),
+            loading_identity,
             gas,
             options,
             body_modes,
             opening_ports,
             surface_panels: panels,
             reciprocal,
-            acoustic_poles: fitted.model.poles.len(),
+            acoustic_poles: model.poles.len(),
             sweep_terms: reciprocal.sweep_work,
             minimum_panels_per_wavelength: reciprocal.minimum_panels_per_wavelength,
             maximum_condition_lower_bound: 1.0,
-            reciprocity_relative_residual: reciprocity,
-            peak_error: fitted.peak_error,
-            rms_error: fitted.rms_error,
-            resistance_peak_error: fitted.resistance_peak_error,
-            resistance_rms_error: fitted.resistance_rms_error,
+            reciprocity_relative_residual: numbers.reciprocity_relative_residual,
+            peak_error: numbers.peak_error,
+            rms_error: numbers.rms_error,
+            resistance_peak_error: numbers.resistance_peak_error,
+            resistance_rms_error: numbers.resistance_rms_error,
             skin_identity: None,
             one_way_body_modes: 0,
+            loaded_from_store,
         };
-        Ok((fitted.model, report))
+        Ok((model, report))
     }
 
     /// The same Galerkin air load on a declared closed acoustic skin of this
     /// body, the skin its one-way observer reads, attached to the original
     /// mechanics as by [`Self::with_material_shell_bem`].
+    ///
+    /// With a `store`, the fitted load and its computed numbers come from the
+    /// entry kept under its loading identity, which is found before any
+    /// boundary work; without one there, they are computed and kept. Every
+    /// gate outside the sweep and the fit runs either way. A kept entry that
+    /// does not decode completely refuses, as do the store's own failures.
     pub fn with_material_skin_bem(
         self, options:ShellBemOptions, skin:&ShellAcousticSkin, maximum_anchor_distance_m:f64,
-        angular_refinement:u32, gate:&CancelGate,
+        angular_refinement:u32, store:Option<&dyn SkinLoadStore>, gate:&CancelGate,
     ) -> Result<(Self,ShellBemReport),ShellBemError> {
-        let (model, report) = self.prepare_material_skin_bem(
-            options, skin, maximum_anchor_distance_m, angular_refinement, gate)?;
+        let (model, report) = self.prepare_skin_bem(
+            options, skin, maximum_anchor_distance_m, angular_refinement, store, gate)?;
         // Body coordinates relative to the body's first mode: the loaded prefix,
         // then the neck, the first coordinate of the component after the body.
         let structural = report.body_modes + report.one_way_body_modes;
@@ -428,6 +487,13 @@ impl ReciprocalStringBank {
     pub fn prepare_material_skin_bem(
         &self, options:ShellBemOptions, skin:&ShellAcousticSkin, maximum_anchor_distance_m:f64,
         angular_refinement:u32, gate:&CancelGate,
+    ) -> Result<(Model,ShellBemReport),ShellBemError> {
+        self.prepare_skin_bem(options, skin, maximum_anchor_distance_m, angular_refinement, None, gate)
+    }
+
+    fn prepare_skin_bem(
+        &self, options:ShellBemOptions, skin:&ShellAcousticSkin, maximum_anchor_distance_m:f64,
+        angular_refinement:u32, store:Option<&dyn SkinLoadStore>, gate:&CancelGate,
     ) -> Result<(Model,ShellBemReport),ShellBemError> {
         poll(gate)?;
         options.validate(self.source.options.sample_rate_hz)?;
@@ -531,7 +597,7 @@ impl ReciprocalStringBank {
             return Err(ShellBemError::Invalid("complete skin exterior exceeds its sweep-work allowance"));
         }
         let (model, mut report) = self.fit_exterior_load(options, angular_refinement,
-            basis_identity, loaded, opening_ports, &traces.surface, &fields, gate)?;
+            basis_identity, loaded, opening_ports, &traces.surface, &fields, store, gate)?;
         report.skin_identity = Some(skin_identity(skin));
         report.one_way_body_modes = modes.len() - loaded;
         Ok((model, report))

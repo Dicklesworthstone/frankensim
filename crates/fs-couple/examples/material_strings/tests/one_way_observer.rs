@@ -816,3 +816,214 @@ fn a_skin_load_refuses_a_compact_mouth_a_missing_skin_and_bad_records_before_mat
         }
     });
 }
+
+type LoadReport =
+    fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemReport;
+
+// The store tests run on at48's clock: at source()'s 8 kHz the exact owner refuses
+// this load's fitted poles at its Nyquist admission.
+
+/// An empty directory of one test's kept skin loads.
+fn load_store(name: &str) -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{name}-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    dir
+}
+
+fn kept_load(text: &str, dir: &std::path::Path, cx: &Cx<'_>, gate: &CancelGate) -> Result<Ready> {
+    let mut body = profile(&own_skin());
+    body.keep_skin_loads(dir)?;
+    input::Spec::parse(text.as_bytes())
+        .unwrap()
+        .compile_with_body(cx, gate, Some(body), |name| {
+            Ok(if name == "closed-shell.fsmatpk" {
+                shell_pack(name)
+            } else {
+                pack(name, 7800.0, 200_000.0, None)
+            })
+        })
+}
+
+fn load_report(ready: &Ready) -> LoadReport {
+    match &ready.body_radiation {
+        Some(BodyRadiationReport::ShellBem(report)) => report.clone(),
+        other => panic!("expected the skin load's report, got {other:?}"),
+    }
+}
+
+fn load_entry(ready: &Ready) -> std::path::PathBuf {
+    ready
+        .body_profile
+        .as_ref()
+        .unwrap()
+        .skin_load_entry(&load_report(ready).loading_identity)
+        .unwrap()
+}
+
+fn model_bits(ready: &Ready) -> Vec<(u64, u64, Vec<u64>)> {
+    let bank = ready.performance.bank().source().bank();
+    bank.body_radiation()
+        .unwrap()
+        .model()
+        .poles
+        .iter()
+        .map(|p| {
+            let coupling = p.coupling.iter().map(|c| c.to_bits()).collect();
+            (p.omega.to_bits(), p.zeta.to_bits(), coupling)
+        })
+        .collect()
+}
+
+fn rendered(ready: &mut Ready) -> Vec<u64> {
+    (0..ready.spec.samples)
+        .map(|_| {
+            let mut output = [0.0];
+            ready.performance.block(&mut output).unwrap();
+            output[0].to_bits()
+        })
+        .collect()
+}
+
+#[test]
+fn a_kept_skin_load_renders_the_computed_one_bit_for_bit() {
+    let dir = load_store("fs-skin-loads-kept");
+    scoped(|cx, gate| {
+        let text = at48(source(SKIN_LOAD));
+        let mut plain = compiled(&text, &own_skin(), cx, gate);
+        let mut computed = kept_load(&text, &dir, cx, gate).unwrap();
+        let mut loaded = kept_load(&text, &dir, cx, gate).unwrap();
+        let reports = [&plain, &computed, &loaded].map(load_report);
+        assert_eq!(
+            reports.each_ref().map(|r| r.loaded_from_store),
+            [false, false, true]
+        );
+        // Every number the report states, to the bit, but where it came from.
+        let stated = |r: &LoadReport| {
+            format!(
+                "{:?}",
+                LoadReport {
+                    loaded_from_store: false,
+                    ..r.clone()
+                }
+            )
+        };
+        for report in &reports[1..] {
+            assert_eq!(report.loading_identity, reports[0].loading_identity);
+            assert_eq!(stated(report), stated(&reports[0]));
+        }
+        let bits = [&plain, &computed, &loaded].map(model_bits);
+        assert!(!bits[0].is_empty());
+        assert_eq!(bits[1], bits[0]);
+        assert_eq!(bits[2], bits[0], "the kept model is the computed one");
+        let entry = load_entry(&computed);
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect::<Vec<_>>(),
+            [entry.clone()],
+            "one load, one entry, under its loading identity"
+        );
+        let expected = rendered(&mut plain);
+        assert!(expected.iter().any(|&p| f64::from_bits(p).abs() > 1e-14));
+        assert_eq!(
+            rendered(&mut computed),
+            expected,
+            "keeping a load changes no sample"
+        );
+        assert_eq!(
+            rendered(&mut loaded),
+            expected,
+            "a warm-store render is the cold one bit for bit"
+        );
+        std::fs::remove_file(&entry).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    });
+}
+
+#[test]
+fn another_build_or_load_misses_and_rebuilds_and_a_foreign_entry_is_never_used() {
+    let dir = load_store("fs-skin-loads-foreign");
+    scoped(|cx, gate| {
+        let text = at48(source(SKIN_LOAD));
+        let first = kept_load(&text, &dir, cx, gate).unwrap();
+        let identity = load_report(&first).loading_identity;
+        let entry = load_entry(&first);
+        let bytes = std::fs::read(&entry).unwrap();
+        // Another executable's entry for the same load carries another build in its name.
+        let name = entry.file_name().unwrap().to_str().unwrap().to_owned();
+        let (key, _) = name.split_once('-').unwrap();
+        assert_eq!(key, identity.to_hex());
+        let other_build = dir.join(format!("{key}-{}.skin-load", "0".repeat(32)));
+        std::fs::rename(&entry, &other_build).unwrap();
+        let rebuilt = kept_load(&text, &dir, cx, gate).unwrap();
+        assert!(
+            !load_report(&rebuilt).loaded_from_store,
+            "another build's entry misses"
+        );
+        assert_eq!(
+            std::fs::read(&entry).unwrap(),
+            bytes,
+            "the rebuild keeps the same entry"
+        );
+        assert_eq!(
+            std::fs::read(&other_build).unwrap(),
+            bytes,
+            "and leaves the other as it is"
+        );
+        // Another band edge is another loading identity: a miss that computes its own.
+        let moved = text.replace("skin 0.5 400", "skin 0.6 400");
+        let second = kept_load(&moved, &dir, cx, gate).unwrap();
+        let other = load_report(&second);
+        assert!(!other.loaded_from_store && other.loading_identity != identity);
+        let other_entry = load_entry(&second);
+        let own = std::fs::read(&other_entry).unwrap();
+        assert_ne!(own, bytes);
+        // Planted under the moved load's name: the first load's complete entry, then the
+        // moved load's own entry with one identity byte flipped. Neither is used.
+        let at = own
+            .windows(32)
+            .position(|w| w == other.loading_identity.as_bytes())
+            .unwrap();
+        let mut flipped = own.clone();
+        flipped[at] ^= 1;
+        for planted in [bytes.clone(), flipped] {
+            std::fs::write(&other_entry, &planted).unwrap();
+            let refusal = kept_load(&moved, &dir, cx, gate).err().unwrap().to_string();
+            assert!(refusal.contains("another load's"), "{refusal}");
+            assert_eq!(
+                std::fs::read(&other_entry).unwrap(),
+                planted,
+                "a refused entry is left as it is"
+            );
+        }
+        for path in [&entry, &other_build, &other_entry] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(&dir).unwrap();
+    });
+}
+
+#[test]
+fn a_truncated_kept_skin_load_refuses_and_is_never_half_read() {
+    let dir = load_store("fs-skin-loads-truncated");
+    scoped(|cx, gate| {
+        let text = at48(source(SKIN_LOAD));
+        let entry = load_entry(&kept_load(&text, &dir, cx, gate).unwrap());
+        let whole = std::fs::read(&entry).unwrap();
+        for cut in [whole.len() - 1, whole.len() - 32, whole.len() / 2, 0] {
+            std::fs::write(&entry, &whole[..cut]).unwrap();
+            let refusal = kept_load(&text, &dir, cx, gate).err().unwrap().to_string();
+            assert!(refusal.contains("damaged, incomplete"), "{cut}: {refusal}");
+            assert_eq!(std::fs::read(&entry).unwrap(), &whole[..cut]);
+        }
+        std::fs::write(&entry, &whole).unwrap();
+        assert!(load_report(&kept_load(&text, &dir, cx, gate).unwrap()).loaded_from_store);
+        std::fs::remove_file(&entry).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    });
+}

@@ -67,18 +67,8 @@ pub fn modal_radiation_loading_reciprocal(
     }
     let sweep_work = frequency_work.checked_mul(omegas.len() as u64)
         .ok_or(ModalLoadingError::Invalid("reciprocal sweep work overflow"))?;
-    let mut hash = DomainHasher::new("fs-bem/complete-modal-loading/reciprocal-p1p0/v1");
-    hash.update(provenance.as_bytes());
-    for value in [surface.areas().len() as u64,modes as u64,omegas.len() as u64,
-        maximum_matrix_entries as u64,u64::from(budget.angular_refinement)] {
-        hash.update(&value.to_le_bytes());
-    }
-    let triangles = surface.triangles().ok_or(ModalLoadingError::Invalid(
-        "reciprocal source requires its original triangles"))?;
-    for value in [medium.density,medium.sound_speed].iter()
-        .chain(omegas).chain(triangles.iter().flatten().flatten()).chain(shapes.iter().flatten()) {
-        hash.update(&value.to_bits().to_le_bytes());
-    }
+    let declaration_hash = reciprocal_loading_declaration(surface,shapes,omegas,medium,
+        budget.angular_refinement,provenance,maximum_matrix_entries)?;
     let refs: Vec<_> = shapes.iter().map(Vec::as_slice).collect();
     let mut diagnostics = ReciprocalLoadingDiagnostics {
         angular_refinement:budget.angular_refinement,unknowns:owner.unknowns(),
@@ -117,8 +107,32 @@ pub fn modal_radiation_loading_reciprocal(
     }
     poll(&mut cancelled)?;
     Ok(ReciprocalLoadingBake {
-        loading:ModalLoadingBake {modes,declaration_hash:hash.finalize(),rows},diagnostics,
+        loading:ModalLoadingBake {modes,declaration_hash,rows},diagnostics,
     })
+}
+
+/// The declaration identity [`modal_radiation_loading_reciprocal`] gives these
+/// inputs, without boundary work, so a caller's store can find a complete
+/// sweep before computing it. It binds the provenance, every triangle, trace,
+/// frequency and the medium, the matrix allowance and the angular refinement;
+/// not the solver's code. Only the triangles are checked here.
+pub fn reciprocal_loading_declaration(
+    surface: &SpherePanels, shapes: &[Vec<f64>], omegas: &[f64], medium: Medium,
+    angular_refinement: u32, provenance: ContentHash, maximum_matrix_entries: usize,
+) -> Result<ContentHash, ModalLoadingError> {
+    let mut hash = DomainHasher::new("fs-bem/complete-modal-loading/reciprocal-p1p0/v1");
+    hash.update(provenance.as_bytes());
+    for value in [surface.areas().len() as u64,shapes.len() as u64,omegas.len() as u64,
+        maximum_matrix_entries as u64,u64::from(angular_refinement)] {
+        hash.update(&value.to_le_bytes());
+    }
+    let triangles = surface.triangles().ok_or(ModalLoadingError::Invalid(
+        "reciprocal source requires its original triangles"))?;
+    for value in [medium.density,medium.sound_speed].iter()
+        .chain(omegas).chain(triangles.iter().flatten().flatten()).chain(shapes.iter().flatten()) {
+        hash.update(&value.to_bits().to_le_bytes());
+    }
+    Ok(hash.finalize())
 }
 
 /// `solve` every frequency on `workers` scoped threads, each taking the lowest

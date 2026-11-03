@@ -535,8 +535,9 @@ impl input::Spec {
             Some(input::BodyRadiation::Skin(load)) => {
                 let skin = profile.as_ref().and_then(|body| body.acoustic_skin(&self))
                     .ok_or("a computed skin load requires a body profile that declares its closed acoustic skin")?;
+                let store = profile.as_ref().and_then(|body| body.skin_load_store());
                 let (bank, report) = bank.with_material_skin_bem(load.options, &skin,
-                    load.maximum_anchor_distance_m, load.angular_refinement, gate)?;
+                    load.maximum_anchor_distance_m, load.angular_refinement, store, gate)?;
                 (bank, Some(BodyRadiationReport::ShellBem(report)))
             },
             None => (bank, None),
@@ -855,6 +856,10 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if sources.is_restricted() && store_dir.is_some() {
         return Err("--self-contained refuses --observer-store; observer setup must be computed from attached physical sources".into());
     }
+    let (load_store_dir,options)=path_option(&options,"--skin-load-store")?;
+    if sources.is_restricted() && load_store_dir.is_some() {
+        return Err("--self-contained refuses --skin-load-store; the skin load must be computed from attached physical sources".into());
+    }
     let (trace_path,options)=path_option(&options,"--bow-trace")?;
     let (thermal_path,options)=path_option(&options,"--contact-thermal")?;
     if response_only && (store_dir.is_some() || trace_path.is_some() || thermal_path.is_some() || source_options.decimate) {
@@ -879,6 +884,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     }
     if let Some(dir)=store_dir {
         profile.as_mut().ok_or("--observer-store requires --body-profile")?.keep_observer_setups(dir)?;
+    }
+    if let Some(dir)=load_store_dir {
+        profile.as_mut().ok_or("--skin-load-store requires --body-profile")?.keep_skin_loads(dir)?;
     }
     let mut stop_profile=stop_path.map(|p|stops::Profile::parse(&sources.read_option(p,stops::MAX_BYTES)?)).transpose()?;
     let gas_sources=if sources.is_restricted() {
@@ -1051,6 +1059,11 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         }
     }
     if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }
+    if let Some(BodyRadiationReport::ShellBem(report))=&ready.body_radiation {
+        if let Some(entry)=ready.body_profile.as_ref().and_then(|body|body.skin_load_entry(&report.loading_identity)) {
+            eprintln!("skin_load_store_entry={}; skin_load_loaded={}",entry.display(),report.loaded_from_store);
+        }
+    }
     for receipt in two_way_load_receipt(&ready)? {
         eprintln!("two_way_load_port={}; coordinate={}; f_Hz={}; radiation_zeta={}; added_mass_shift={}{}",
             receipt.port,receipt.coordinate,receipt.omega_rad_s/core::f64::consts::TAU,
