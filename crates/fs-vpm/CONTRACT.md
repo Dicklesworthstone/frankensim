@@ -427,6 +427,35 @@ checks in `tests/remeshed_viscous.rs` compare explicit original-owner compositio
 zero-net inviscid impulse, changing quadrature, whole-run work and combined-bank
 admission, and late support/cancellation refusal with deterministic retry.
 
+`conservative::remeshed::simulate_with_affine_flows_cx` composes the same
+trajectory with exactly `ceil(S/K)` authored `AffineFlow2` sources. Source `k`
+is held after remapping to grid `k` until remapping to grid `k+1`; the last
+partial interval has its own source. Each physical step uses the original
+`F(dt/2) D(dt/2) A(dt) D(dt/2) F(dt/2)` owners. Flow changes occur only at
+these authored interval boundaries, without inferred time interpolation.
+Zero steps requires no sources. Zero source or zero time preserves the original
+scheduled result and resource receipt exactly, including all authored remaps.
+
+Each active interval adds `2*S_k*G_k` source visits to the complete work plan,
+including zero-strength quadrature nodes. The unchanged two-bank payload bound
+still applies. One fixed-size affine map is prepared on entering each interval;
+there are no per-step cloud copies, map allocations or further heap payload.
+Source, PSE, pair advection and remapping share one execution account, including
+source checkpoints and complete work admission before any allocation.
+`AmbientRemeshedVpmRun` returns the original regular-cloud receipt plus actual
+first/quadratic source moment increments accumulated in double-double arithmetic
+across all intervals. PSE and remap defects remain separate from that source
+account. This does not imply a fluid/body reaction force or close the momentum
+balance of an infinite prescribed background. Arbitrary changing source/remap
+schedules do not acquire a global second-order convergence guarantee.
+
+G0/G3/G4 checks in `tests/remeshed_affine_flow.rs` compare the complete run with
+explicit original-owner composition for positive and zero viscosity, moving
+windows and changing anisotropic resolution. Independent piecewise affine moment
+laws cover signed zero-net circulation, while whole-source work, exact combined
+payload, inactive-source parity and late source/support/cancellation refusals
+exercise the shared transaction and deterministic retry.
+
 ## Three-dimensional impulse and conservative coarsening
 
 `FilamentWake::hydrodynamic_impulse_per_density` reports the complete closed

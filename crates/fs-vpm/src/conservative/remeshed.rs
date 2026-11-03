@@ -1,7 +1,11 @@
 //! Conservative viscous evolution with explicitly scheduled regular remeshing.
 //!
-//! Original D/2-A-D/2 steps and the original M4' remap share one execution
-//! account. Target grids, padding, resolution and cadence are authored data.
+//! Original D/2-A-D/2 steps, prescribed affine flows and the original M4' remap
+//! share one execution account. Target grids, padding, resolution, cadence and
+//! optional held flow per interval are authored data.
+
+use super::ambient::{AffineFlow2, AmbientMomentChange, HalfFlow};
+use fs_math::dd::Dd;
 
 use crate::{
     AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx, VortexParticle, VpmError, WorkMeter,
@@ -39,7 +43,7 @@ pub struct RemeshedVpmBudget {
     pub max_steps: usize,
     /// Maximum total original pair visits over all changing grid sizes.
     pub max_pair_evaluations: u64,
-    /// Maximum pair, step-boundary and remap visits for the complete run.
+    /// Maximum pair, step-boundary, source and remap visits for the complete run.
     pub max_work_units: u64,
     /// Maximum owned payload reserved for both alternating buffer banks.
     /// Borrowed inputs/grids and allocator metadata/rounding are excluded.
@@ -69,6 +73,20 @@ pub struct RemeshedVpmRun {
     pub peak_live_bytes: usize,
     /// Original ambient budget and exact complete-run consumption.
     pub budget: BudgetConsumption,
+}
+
+/// A remeshed trajectory with separately measured prescribed-flow effects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AmbientRemeshedVpmRun {
+    /// Original final cloud, quadrature and complete shared execution account.
+    pub run: RemeshedVpmRun,
+    /// Actual signed vortex-moment changes during the source substeps alone.
+    /// PSE/remap errors remain separate; these are not fluid/body momentum or
+    /// pressure-work receipts for an infinite prescribed background.
+    pub ambient_moment_change: AmbientMomentChange,
+    /// Two visits per current grid node and active-source evolution step.
+    /// Included in `run.work_units`, independent of pair/remap visits.
+    pub source_particle_updates: u64,
 }
 
 /// Original evolution and remap refusals, with no partial trajectory published.
@@ -134,13 +152,77 @@ pub fn simulate_with_cx(
     schedule: RemeshSchedule<'_>,
     budget: RemeshedVpmBudget,
 ) -> Result<RemeshedVpmRun, RemeshedVpmError> {
+    run(cx, particles, dt, steps, core, law, schedule, None, budget).map(|result| result.run)
+}
+
+/// Evolve the same scheduled trajectory in piecewise held affine backgrounds.
+///
+/// `flows` contains exactly `ceil(steps/every_steps)` entries. Flow `k` acts
+/// after remapping to `grids[k]` and before remapping to `grids[k+1]`, including
+/// the final partial interval. The source changes at that declared boundary;
+/// no interpolation or smooth time-dependence is inferred. Zero steps needs
+/// an empty source list and performs the original initial remap only.
+///
+/// Each step is `F(dt/2) D(dt/2) A(dt) D(dt/2) F(dt/2)`, followed by remapping
+/// only at the authored endpoints. All stages reuse their original owners.
+/// The affine map is prepared once on entering each active interval, with
+/// constant stack storage; both cloud banks remain reserved once to the
+/// largest grid. There are no per-step copies or further heap allocations.
+///
+/// Active intervals add exactly `2 * grid_nodes * interval_steps` visits to
+/// the original whole-run work plan; zero source or zero time adds none.
+/// Source moment increments are accumulated across all grid/flow changes in
+/// double-double arithmetic. The final grid has its own original quadrature,
+/// while every source subflow preserves its incoming particle areas.
+///
+/// All target support, input, physical, execution and publication checks remain
+/// authoritative. Late map/support failure or cancellation returns no result.
+/// This combines the existing source, PSE and remapping error models; arbitrary
+/// remap/flow schedules do not inherit a global second-order convergence claim.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_with_affine_flows_cx(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    dt: f64,
+    steps: usize,
+    core: f64,
+    law: PseDiffusion,
+    schedule: RemeshSchedule<'_>,
+    flows: &[AffineFlow2],
+    budget: RemeshedVpmBudget,
+) -> Result<AmbientRemeshedVpmRun, RemeshedVpmError> {
+    run(
+        cx,
+        particles,
+        dt,
+        steps,
+        core,
+        law,
+        schedule,
+        Some(flows),
+        budget,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    dt: f64,
+    steps: usize,
+    core: f64,
+    law: PseDiffusion,
+    schedule: RemeshSchedule<'_>,
+    flows: Option<&[AffineFlow2]>,
+    budget: RemeshedVpmBudget,
+) -> Result<AmbientRemeshedVpmRun, RemeshedVpmError> {
     if !dt.is_finite() || dt < 0.0 {
         return Err(invalid_scalar("dt", dt, None).into());
     }
     if !core.is_finite() || core < 0.0 {
         return Err(invalid_scalar("core", core, None).into());
     }
-    let plan = Plan::new(cx, particles.len(), dt, steps, law, schedule, budget)?;
+    let plan = Plan::new(cx, particles.len(), dt, steps, law, schedule, flows, budget)?;
     let mut accountant = AdmittedBudget::admit_ambient(cx, plan.work)?;
     accountant.checkpoint("fs-vpm.remeshed-admission", cx)?;
     let first = workspace(plan.max_grid)?;
@@ -168,7 +250,26 @@ pub fn simulate_with_cx(
     let mut remeshes = 1;
     let mut meter = WorkMeter::default();
     let mut pairs = 0;
+    let mut source = None;
+    let mut source_updates = 0;
+    let mut source_moments = [Dd::ZERO; 3];
     for step in 0..steps {
+        if step % schedule.every_steps == 0 {
+            source = match flows.map(|flows| flows[step / schedule.every_steps]) {
+                Some(flow) if dt > 0.0 && !flow.is_zero() => Some(HalfFlow::new(flow, dt)?),
+                _ => None,
+            };
+        }
+        if let Some(source) = &source {
+            source.apply(
+                &mut cloud.particles,
+                &mut source_moments,
+                &mut meter,
+                &mut accountant,
+                cx,
+            )?;
+            source_updates += cloud.particles.len() as u64;
+        }
         super::viscous::step(
             &mut cloud.particles,
             &cloud.areas_m2,
@@ -180,9 +281,21 @@ pub fn simulate_with_cx(
             &mut accountant,
             cx,
         )?;
+        if let Some(source) = &source {
+            source.apply(
+                &mut cloud.particles,
+                &mut source_moments,
+                &mut meter,
+                &mut accountant,
+                cx,
+            )?;
+            source_updates += cloud.particles.len() as u64;
+            // The second source half follows the original step's checkpoint.
+            // Flush it before remap progress charges the same ambient account.
+            meter.boundary(&mut accountant, cx, "fs-vpm.remeshed-source-complete")?;
+        }
         if (step + 1) % schedule.every_steps == 0 || step + 1 == steps {
-            // The original step flushes its meter before remap work enters the
-            // same account. The old bank becomes the next remap's workspace.
+            // The old bank becomes the next remap's workspace.
             let next = remap(
                 cx,
                 &cloud.particles,
@@ -205,6 +318,7 @@ pub fn simulate_with_cx(
         || pairs != plan.pairs
         || remesh_work != plan.remesh_work
         || deposits != plan.deposits
+        || source_updates != plan.source_updates
         || consumption.cost_charged != plan.work
     {
         return Err(VpmError::AccountingMismatch {
@@ -215,7 +329,7 @@ pub fn simulate_with_cx(
         .into());
     }
     accountant.checkpoint("fs-vpm.remeshed-publication", cx)?;
-    Ok(RemeshedVpmRun {
+    let run = RemeshedVpmRun {
         particles: cloud.particles,
         areas_m2: cloud.areas_m2,
         grid: cloud.grid,
@@ -226,6 +340,14 @@ pub fn simulate_with_cx(
         work_units: completed,
         peak_live_bytes: plan.peak_bytes,
         budget: accountant.consumption(),
+    };
+    Ok(AmbientRemeshedVpmRun {
+        run,
+        ambient_moment_change: AmbientMomentChange {
+            first_moment_m3_s: [source_moments[0].to_f64(), source_moments[1].to_f64()],
+            quadratic_moment_m4_s: source_moments[2].to_f64(),
+        },
+        source_particle_updates: source_updates,
     })
 }
 
@@ -258,6 +380,7 @@ fn remap(
 struct Plan {
     max_grid: usize,
     pairs: u64,
+    source_updates: u64,
     remesh_work: u64,
     deposits: u64,
     work: u64,
@@ -266,6 +389,7 @@ struct Plan {
 }
 
 impl Plan {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         cx: &Cx<'_>,
         inputs: usize,
@@ -273,6 +397,7 @@ impl Plan {
         steps: usize,
         law: PseDiffusion,
         schedule: RemeshSchedule<'_>,
+        flows: Option<&[AffineFlow2]>,
         budget: RemeshedVpmBudget,
     ) -> Result<Self, RemeshedVpmError> {
         if schedule.every_steps == 0 {
@@ -295,12 +420,23 @@ impl Plan {
             }
             .into());
         }
+        if let Some(flows) = flows
+            && flows.len() != count - 1
+        {
+            return Err(VpmError::LengthMismatch {
+                field: "interval affine flows",
+                expected: count - 1,
+                actual: flows.len(),
+            }
+            .into());
+        }
         let sweeps = if law.kinematic_viscosity_m2_s() > 0.0 {
             3
         } else {
             1
         };
         let (mut previous, mut max_grid, mut pairs) = (inputs, 0, 0_u64);
+        let mut source_updates = 0_u64;
         let (mut remesh_work, mut deposits) = (0_u128, 0_u128);
         let mut remaining = steps;
         for (index, grid) in schedule.grids.iter().enumerate() {
@@ -325,6 +461,15 @@ impl Plan {
                         .ok_or(VpmError::PlanOverflow {
                             resource: "scheduled pair visits",
                         })?;
+                    if flows.is_some_and(|flows| !flows[index].is_zero()) {
+                        source_updates = (nodes as u64)
+                            .checked_mul(interval as u64)
+                            .and_then(|visits| visits.checked_mul(2))
+                            .and_then(|visits| source_updates.checked_add(visits))
+                            .ok_or(VpmError::PlanOverflow {
+                                resource: "scheduled affine source visits",
+                            })?;
+                    }
                 }
                 remaining -= interval;
             }
@@ -335,7 +480,7 @@ impl Plan {
             pairs as u128,
             budget.max_pair_evaluations as u128,
         )?;
-        let work = remesh_work + pairs as u128 + steps as u128;
+        let work = remesh_work + u128::from(pairs) + steps as u128 + u128::from(source_updates);
         limit("work units", work, budget.max_work_units as u128)?;
         let bank_bytes = max_grid as u128
             * (core::mem::size_of::<VortexParticle>() + core::mem::size_of::<f64>()) as u128;
@@ -348,6 +493,7 @@ impl Plan {
         Ok(Self {
             max_grid,
             pairs,
+            source_updates,
             remesh_work: remesh_work as u64,
             deposits: deposits as u64,
             work: work as u64,

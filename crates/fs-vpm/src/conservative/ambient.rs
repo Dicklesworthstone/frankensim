@@ -49,7 +49,7 @@ impl AffineFlow2 {
         })
     }
 
-    fn is_zero(self) -> bool {
+    pub(super) fn is_zero(self) -> bool {
         self.velocity == [0.0; 2] && self.gradient == [0.0; 3]
     }
 }
@@ -280,7 +280,7 @@ fn run(
 // exactly nilpotent shear), phi_1(B) = s I + t B is evaluated by its entire
 // series. Elliptic flow uses stable sine/cosine functions. Hyperbolic flow uses
 // spectral projectors: subtracting cosh and sinh would erase contraction.
-struct HalfFlow {
+pub(super) struct HalfFlow {
     origin: [f64; 2],
     generator: [[Dd; 2]; 2],
     offset: [Dd; 2],
@@ -300,7 +300,7 @@ enum HalfMap {
 }
 
 impl HalfFlow {
-    fn new(flow: AffineFlow2, dt: f64) -> Result<Self, VpmError> {
+    pub(super) fn new(flow: AffineFlow2, dt: f64) -> Result<Self, VpmError> {
         let [a, b, c] = flow.gradient.map(|value| half_product(value, dt));
         let offset = flow.velocity.map(|value| half_product(value, dt));
         let delta = a * a + b * c;
@@ -380,7 +380,7 @@ impl HalfFlow {
         })
     }
 
-    fn apply(
+    pub(super) fn apply(
         &self,
         state: &mut [VortexParticle],
         moments: &mut [Dd; 3],
