@@ -515,6 +515,7 @@ def kit_pairs(kit: Path, media: Media) -> list[dict]:
     out = []
     for g in grade["pairs"]:
         pid, d, im = g["id"], g["descriptors"], g["images"]
+        late = (src.get("latest") or {}).get(pid) or {}  # a piece re-rendered with newer physics: its render time and what went in
         base = f"kit9/{pid}"
         audio = {side: media.audio(kit / "grade" / Path(g["audio"][side]).with_suffix(".wav"), f"audio/{base}/{side}") for side in ("ours", "real")}
         imgs = {side: media.image(kit / "grade" / im[side], f"img/{base}/{side}.webp") for side in ("real", "ours", "diff")}
@@ -525,7 +526,8 @@ def kit_pairs(kit: Path, media: Media) -> list[dict]:
             "origin": "kit9", "audio": {k: v for k, v in audio.items() if v}, "level_match": g["audio"]["level_match"],
             "figures": {"spectrogram": {"img": {k: v for k, v in imgs.items() if v}, "f_lo_hz": im["f_lo"], "f_hi_hz": im["f_hi"],
                                         "span_db": im["span_db"], "diff_range_db": im["diff_range_db"], "diff_key": VERISIM_DIFF_KEY}},
-            "ours": {"git_sha": kit_commit(src, pid), "observer": g["ours"]["label"], "recipe": f"kit {pid} (fs-vkplate)", "sample_rate": 48000},
+            "ours": {"git_sha": kit_commit(src, pid), "observer": g["ours"]["label"], "recipe": late.get("recipe", f"kit {pid} (fs-vkplate)"),
+                     "sample_rate": 48000, "rendered_utc": late.get("rendered_utc"), "physics": late.get("physics") or []},
             "real": {"reference_id": g["real"]["file"], "file": f"{g['real']['file']}.wav", "segment_s": None, **SALAMANDER},
             "no_reference": None, "refused": None,
             "f0_hz": {"ours": d["fundamental_hz"]["ours"], "real": d["fundamental_hz"]["real"]},
