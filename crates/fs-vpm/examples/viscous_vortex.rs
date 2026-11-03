@@ -1,11 +1,11 @@
 //! Run with `cargo run -p fs-vpm --example viscous_vortex`.
-//! A declared SI viscosity broadens a Gaussian vortex through real PSE/RK4 flow.
+//! A declared SI viscosity broadens a Gaussian vortex through PSE diffusion
+//! and impulse-preserving pair advection in one live particle buffer.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_vpm::{
-    VortexParticle, VpmBudget,
-    diffusion::{PseDiffusion, simulate_viscous_with_cx},
+    VortexParticle, VpmBudget, conservative::simulate_viscous_with_cx, diffusion::PseDiffusion,
     total_circulation,
 };
 
