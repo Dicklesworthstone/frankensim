@@ -81,6 +81,20 @@
 //! extraction remain separate pathways. `S(s)` selects orthorhombic sulfur,
 //! counted per mole of S atoms, not per mole of S8. This reference-state choice
 //! does not predict the form of sulfur produced by an actual leach.
+//! Zinc roast/leach/electrowinning follows the explicitly separated stages in
+//! the Australian NPI zinc-concentrating/smelting/refining manual, section 2.3:
+//! <https://www.dcceew.gov.au/sites/default/files/documents/fzinc.pdf>.
+//! Sulfate spectators are omitted in the net ionic leach and productive-cell
+//! equations; solution purification, ferrite residues and side reactions are
+//! not supplied. Zinc ferric attack follows Fowler and Crundwell (1999), eq. 1:
+//! <https://doi.org/10.1128/AEM.65.12.5285-5292.1999>. The selected reference
+//! species use USGS B2131 pp10,13,18,20 at 298.15 K and 1 bar. These aggregate
+//! balances and point thermochemistry do not describe roaster operating heat
+//! duty, kinetic conversion, leach purification or electrochemical losses.
+//! Copper cementation is the net Cu(II)/Zn displacement endpoint for the zinc
+//! dust purification stage in NPI section 2.3.4. It accounts for one dissolved
+//! Zn(II) per copper removed; rates, competing impurities and removal targets
+//! require caller-supplied process models.
 
 use super::{ConservedReaction, ReactionBalanceError};
 use crate::{
@@ -187,6 +201,22 @@ pub enum MineralReaction {
     /// Cu5FeS4(s) + 12 Fe3+(aq) -> 5 Cu2+(aq) + 13 Fe2+(aq) + 4 S(s).
     /// Complete bornite endpoint; its one Fe atom remains as additional Fe(II).
     FerricBorniteLeach,
+    /// 2 ZnS(s) + 3 O2(g) -> 2 ZnO(s) + 2 SO2(g).
+    /// Sphalerite-to-zincite roasting endpoint; no sulfate or ferrite residue.
+    SphaleriteRoastingToZincite,
+    /// ZnO(s) + 2 H+(aq) -> Zn2+(aq) + H2O(l).
+    /// Zincite acid-leaching endpoint; two proton equivalents per zinc.
+    ZinciteAcidLeach,
+    /// 2 Zn2+(aq) + 2 H2O(l) -> 2 Zn(s) + O2(g) + 4 H+(aq).
+    /// Productive oxygen-evolving electrowinning path: four electrons per
+    /// written equation, or two per zinc atom. Side reactions remain separate.
+    ZincElectrowinning,
+    /// ZnS(s) + 2 Fe3+(aq) -> Zn2+(aq) + 2 Fe2+(aq) + S(s).
+    /// Sphalerite ferric-leach endpoint to orthorhombic elemental sulfur.
+    FerricSphaleriteLeach,
+    /// Cu2+(aq) + Zn(s) -> Cu(s) + Zn2+(aq).
+    /// Zinc-dust copper cementation; no impurity selectivity or rate is inferred.
+    CopperCementationWithZinc,
 }
 
 // One species: stable phase/charge id, element counts, charge, signed coefficient.
@@ -506,6 +536,58 @@ impl MineralReaction {
                     ("H2O(l)", &[0, 0, 1, 2], 0, -8),
                     ("Fe2O3(s)", &[2, 0, 3, 0], 0, 2),
                     ("H2SO4(l)", &[0, 1, 4, 2], 0, 8),
+                ],
+            ),
+            Self::SphaleriteRoastingToZincite => (
+                "sphalerite-roasting-to-zincite",
+                &["Zn", "S", "O"],
+                &[
+                    ("ZnS(s)", &[1, 1, 0], 0, -2),
+                    ("O2(g)", &[0, 0, 2], 0, -3),
+                    ("ZnO(s)", &[1, 0, 1], 0, 2),
+                    ("SO2(g)", &[0, 1, 2], 0, 2),
+                ],
+            ),
+            Self::ZinciteAcidLeach => (
+                "zincite-acid-leach",
+                &["Zn", "H", "O"],
+                &[
+                    ("ZnO(s)", &[1, 0, 1], 0, -1),
+                    ("H+(aq)", &[0, 1, 0], 1, -2),
+                    ("Zn[2+](aq)", &[1, 0, 0], 2, 1),
+                    ("H2O(l)", &[0, 2, 1], 0, 1),
+                ],
+            ),
+            Self::ZincElectrowinning => (
+                "zinc-electrowinning",
+                &["Zn", "H", "O"],
+                &[
+                    ("Zn[2+](aq)", &[1, 0, 0], 2, -2),
+                    ("H2O(l)", &[0, 2, 1], 0, -2),
+                    ("Zn(s)", &[1, 0, 0], 0, 2),
+                    ("O2(g)", &[0, 0, 2], 0, 1),
+                    ("H+(aq)", &[0, 1, 0], 1, 4),
+                ],
+            ),
+            Self::FerricSphaleriteLeach => (
+                "ferric-sphalerite-leach",
+                &["Zn", "Fe", "S"],
+                &[
+                    ("ZnS(s)", &[1, 0, 1], 0, -1),
+                    ("Fe[3+](aq)", &[0, 1, 0], 3, -2),
+                    ("Zn[2+](aq)", &[1, 0, 0], 2, 1),
+                    ("Fe[2+](aq)", &[0, 1, 0], 2, 2),
+                    ("S(s)", &[0, 0, 1], 0, 1),
+                ],
+            ),
+            Self::CopperCementationWithZinc => (
+                "copper-cementation-with-zinc",
+                &["Cu", "Zn"],
+                &[
+                    ("Cu[2+](aq)", &[1, 0], 2, -1),
+                    ("Zn(s)", &[0, 1], 0, -1),
+                    ("Cu(s)", &[1, 0], 0, 1),
+                    ("Zn[2+](aq)", &[0, 1], 2, 1),
                 ],
             ),
             Self::CopperElectrowinning => (

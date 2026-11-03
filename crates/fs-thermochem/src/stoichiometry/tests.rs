@@ -75,6 +75,11 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         FerricChalcociteLeach,
         FerricCovelliteLeach,
         FerricBorniteLeach,
+        SphaleriteRoastingToZincite,
+        ZinciteAcidLeach,
+        ZincElectrowinning,
+        FerricSphaleriteLeach,
+        CopperCementationWithZinc,
     ] {
         let first = recipe.build().unwrap();
         let second = recipe.build().unwrap();
@@ -95,6 +100,70 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
                 .iter()
                 .all(|a| a.amount.value() == 0.0)
         );
+    }
+}
+
+#[test]
+fn zinc_roast_leach_electrowinning_closes_intermediates_and_respects_stage_stocks() {
+    let roast = MineralReaction::SphaleriteRoastingToZincite
+        .build()
+        .unwrap();
+    let leach = MineralReaction::ZinciteAcidLeach.build().unwrap();
+    let electrowinning = MineralReaction::ZincElectrowinning.build().unwrap();
+    // Two mol sphalerite through the three separately declared stages yields
+    // 2 ZnS + 2 O2 -> 2 Zn + 2 SO2. Acid/water cancel only across stages.
+    let mut net = std::collections::BTreeMap::new();
+    for (reaction, extent) in [(&roast, 1), (&leach, 2), (&electrowinning, 1)] {
+        for term in reaction.terms() {
+            *net.entry(term.species.as_str()).or_insert(0_i128) += extent * term.coefficient;
+        }
+    }
+    net.retain(|_, coefficient| *coefficient != 0);
+    assert_eq!(
+        net,
+        std::collections::BTreeMap::from([
+            ("ZnS(s)", -2),
+            ("O2(g)", -2),
+            ("Zn(s)", 2),
+            ("SO2(g)", 2),
+        ])
+    );
+    close(amount(&roast, 0.5, "O2(g)"), 1.5);
+    close(amount(&leach, 1.0, "H+(aq)"), 2.0);
+    close(amount(&electrowinning, 0.5, "H+(aq)"), 2.0);
+    let initial = [
+        (id("ZnO(s)"), Amount::new(3.0)),
+        (id("H+(aq)"), Amount::new(4.0)),
+        (id("Zn[2+](aq)"), Amount::new(0.0)),
+        (id("H2O(l)"), Amount::new(0.0)),
+    ];
+    let available = leach.limiting_extent(&initial[..2]).unwrap();
+    close(available.value(), 2.0);
+    let final_inventory = leach.advance_inventory(&initial, available).unwrap();
+    for ((species, _), expected) in initial.iter().zip([1.0, 0.0, 2.0, 2.0]) {
+        close(
+            final_inventory
+                .iter()
+                .find(|(id, _)| id == species)
+                .unwrap()
+                .1
+                .value(),
+            expected,
+        );
+    }
+    assert!(
+        leach
+            .advance_inventory(&initial, Amount::new(2.01))
+            .is_err()
+    );
+    let ferric = MineralReaction::FerricSphaleriteLeach.build().unwrap();
+    close(amount(&ferric, 1.0, "Fe[3+](aq)"), 2.0);
+    close(amount(&ferric, 1.0, "Zn[2+](aq)"), 1.0);
+    close(amount(&ferric, 1.0, "Fe[2+](aq)"), 2.0);
+    close(amount(&ferric, 1.0, "S(s)"), 1.0);
+    let cementation = MineralReaction::CopperCementationWithZinc.build().unwrap();
+    for species in ["Cu[2+](aq)", "Zn(s)", "Cu(s)", "Zn[2+](aq)"] {
+        close(amount(&cementation, 1.5, species), 1.5);
     }
 }
 

@@ -10,6 +10,10 @@
 //! reference data, with bicarbonate retained in solution.
 //! Ferric hydrolysis, goethite precipitation with hydrated lime, and hydrated-
 //! lime neutralization use compatible USGS goethite/portlandite source phases.
+//! Zinc modes retain compatible USGS sphalerite, zincite, aqueous zinc, zinc
+//! metal and sulfur-dioxide references for roasting, acid/ferric leaching and
+//! oxygen-evolving electrowinning. Zinc-dust cementation of dissolved copper
+//! uses the same zinc references and compatible USGS copper references.
 //! Gold cyanidation uses six matched historical NBS/1989-errata references,
 //! including the individual aqueous CN-, Au(CN)2- and OH- ions.
 //! Separate NBS cases resolve molecular HCN dissociation, water dissociation,
@@ -22,7 +26,7 @@
 //! Repeated `--activity 'SPECIES=VALUE'` arguments imply `--gibbs` and evaluate
 //! the local reaction Gibbs energy only when every active activity is supplied.
 //! Both routes can be requested; independently tabulated source values can differ.
-//! Copper electrowinning also reports its signed reversible cell potential from
+//! Copper and zinc electrowinning report signed reversible cell potentials from
 //! the direct Gibbs route; this does not supply an operating cell voltage.
 //! Or explicit malachite inventory accounting, with all four inputs in moles:
 //! `cargo run -p fs-thermochem --example mineral_processing -- \
@@ -61,7 +65,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 30] = [
+const REACTIONS: [&str; 35] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
@@ -71,6 +75,11 @@ const REACTIONS: [&str; 30] = [
     "cupric-oxide-acid-leach",
     "cuprous-oxide-reduction",
     "copper-electrowinning",
+    "sphalerite-roasting",
+    "zincite-acid-leach",
+    "zinc-electrowinning",
+    "ferric-sphalerite-leach",
+    "copper-cementation-with-zinc",
     "gold-cyanidation",
     "gold-cyanidation-dissolved-oxygen",
     "hydrogen-cyanide-dissociation",
@@ -342,6 +351,100 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-aqueous",
             ],
             equation: "2 Cu[2+](aq) + 2 H2O(l) -> 2 Cu(s) + O2(g) + 4 H+(aq), oxygen-evolving electrowinning endpoint",
+        },
+        "sphalerite-roasting" => ReactionCase {
+            reaction: MineralReaction::SphaleriteRoastingToZincite,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "sphalerite-solid-usgs-b2131-thermochemistry",
+                "oxygen-gas-usgs-b2131",
+                "zincite-solid-usgs-b2131-thermochemistry",
+                "sulfur-dioxide-gas-usgs-b2131",
+            ],
+            species: &["ZnS(s)", "O2(g)", "ZnO(s)", "SO2(g)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-solid",
+                "source-phase-gas",
+            ],
+            equation: "2 ZnS(sphalerite) + 3 O2(g) -> 2 ZnO(zincite) + 2 SO2(g), oxide roasting endpoint",
+        },
+        "zincite-acid-leach" => ReactionCase {
+            reaction: MineralReaction::ZinciteAcidLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "zincite-solid-usgs-b2131-thermochemistry",
+                "hydrogen-ion-aqueous-usgs-b2131",
+                "zinc-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+            ],
+            species: &["ZnO(s)", "H+(aq)", "Zn[2+](aq)", "H2O(l)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+            ],
+            equation: "ZnO(zincite) + 2 H+(aq) -> Zn[2+](aq) + H2O(l), dissolved zinc(II) endpoint",
+        },
+        "zinc-electrowinning" => ReactionCase {
+            reaction: MineralReaction::ZincElectrowinning,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "zinc-ion-aqueous-usgs-b2131",
+                "water-liquid-usgs-b2131",
+                "zinc-solid-usgs-b2131",
+                "oxygen-gas-usgs-b2131",
+                "hydrogen-ion-aqueous-usgs-b2131",
+            ],
+            species: &["Zn[2+](aq)", "H2O(l)", "Zn(s)", "O2(g)", "H+(aq)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-liquid",
+                "source-phase-solid",
+                "source-phase-gas",
+                "source-phase-aqueous",
+            ],
+            equation: "2 Zn[2+](aq) + 2 H2O(l) -> 2 Zn(s) + O2(g) + 4 H+(aq), oxygen-evolving electrowinning endpoint",
+        },
+        "ferric-sphalerite-leach" => ReactionCase {
+            reaction: MineralReaction::FerricSphaleriteLeach,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "sphalerite-solid-usgs-b2131-thermochemistry",
+                "iron-iii-ion-aqueous-usgs-b2131",
+                "zinc-ion-aqueous-usgs-b2131",
+                "iron-ii-ion-aqueous-usgs-b2131",
+                "sulfur-orthorhombic-solid-usgs-b2131",
+            ],
+            species: &["ZnS(s)", "Fe[3+](aq)", "Zn[2+](aq)", "Fe[2+](aq)", "S(s)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-solid",
+            ],
+            equation: "ZnS(sphalerite) + 2 Fe[3+](aq) -> Zn[2+](aq) + 2 Fe[2+](aq) + S(orthorhombic), ferric co-dissolution endpoint",
+        },
+        "copper-cementation-with-zinc" => ReactionCase {
+            reaction: MineralReaction::CopperCementationWithZinc,
+            reference: USGS_REFERENCE,
+            packs: &[
+                "copper-ii-ion-aqueous-usgs-b2131",
+                "zinc-solid-usgs-b2131",
+                "copper-solid-usgs-b2131",
+                "zinc-ion-aqueous-usgs-b2131",
+            ],
+            species: &["Cu[2+](aq)", "Zn(s)", "Cu(s)", "Zn[2+](aq)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-solid",
+                "source-phase-solid",
+                "source-phase-aqueous",
+            ],
+            equation: "Cu[2+](aq) + Zn(s) -> Cu(s) + Zn[2+](aq), zinc-dust copper cementation endpoint",
         },
         "pyrite-roasting" => ReactionCase {
             reaction: MineralReaction::PyriteRoastingToHematite,
@@ -839,6 +942,8 @@ fn reference_point(
         "chalcocite-solid-usgs-b2131-thermochemistry" => Some("source-phase-chalcocite"),
         "covellite-solid-usgs-b2131-thermochemistry" => Some("source-phase-covellite"),
         "bornite-solid-usgs-b2131-thermochemistry" => Some("source-phase-bornite"),
+        "sphalerite-solid-usgs-b2131-thermochemistry" => Some("source-phase-sphalerite"),
+        "zincite-solid-usgs-b2131-thermochemistry" => Some("source-phase-zincite"),
         "sulfur-orthorhombic-solid-usgs-b2131" => Some("source-phase-sulfur-orthorhombic"),
         _ => None,
     };
@@ -990,7 +1095,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "Activity Gibbs energy is dG/dxi at the supplied state, not the total change for a finite reaction extent. No equilibrium composition, reaction rate or conversion is predicted."
         );
         println!(
-            "For copper-electrowinning, --gibbs also reports E = -Delta G/(nF), with two electrons per Cu and four per written equation. The signed reversible potential is not an operating voltage or an efficiency-scaled voltage."
+            "For copper-electrowinning and zinc-electrowinning, --gibbs also reports E = -Delta G/(nF), with two electrons per metal atom and four per written equation. The signed reversible potential is not an operating voltage or an efficiency-scaled voltage."
         );
         return Ok(());
     }
@@ -1068,7 +1173,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 reference_axis: case.reference,
             })
             .collect::<Vec<_>>();
-        if case.reaction == MineralReaction::CopperElectrowinning {
+        if matches!(
+            case.reaction,
+            MineralReaction::CopperElectrowinning | MineralReaction::ZincElectrowinning
+        ) {
             let model = ElectrolysisReaction::new(
                 reaction.clone(),
                 species[2].clone(),
