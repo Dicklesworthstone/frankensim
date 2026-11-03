@@ -385,6 +385,23 @@ differentiable lift). Pure Rust throughout.
   cover homogeneous survival, prescribed heterogeneous factors on curved paths,
   stochastic zeros, multi-medium refraction, invalid laws and work/cancellation.
 
+- `curved::bundle::connection::images::BundleImageWorkspace` prepares bounded
+  image and seed storage for repeated native discovery. The allocating and
+  workspace entry points share the same shooting, branch-history, angular
+  resolution, parity and ambiguity rules. Failed discovery invalidates the
+  workspace result; capacity failures never trigger hidden growth while tracing.
+  With `volumes`, `transmittance::images::CurvedTransmittanceImageWorkspace`
+  discovers and deduplicates the complete authored seed list before source
+  tracking. Each retained image then replays its solved launch once through the
+  same original molecular scene, without another Newton solve. The original
+  bundle remains authoritative for geometry, Fresnel power, absorption and
+  focusing; only independent scattering survival is added. Duplicate seeds
+  consume geometric search work but no duplicate power or tracking draws.
+  Search and replay share one total trace limit; source draw/candidate limits
+  are cumulative across all retained images. A failed replay publishes no
+  partial survival catalog. Finite seeds, recorded local misses and numerical
+  caustic refusals do not establish image completeness or exact darkness.
+
 - `polarization::dielectric::scene::curved::camera::CurvedCameraScene` consumes
   native curved visibility, full smooth/GGX reciprocal Fresnel/frame transport and
   Beer integrals as scalar unpolarized camera radiance. It retains the native

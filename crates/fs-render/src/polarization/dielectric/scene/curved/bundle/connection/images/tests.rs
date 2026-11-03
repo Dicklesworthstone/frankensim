@@ -403,3 +403,197 @@ fn g4_multistart_enforces_total_work_capacity_and_cancellation_without_partial_c
         ));
     });
 }
+
+#[test]
+fn g3_prepared_multistart_reuses_storage_across_wavelengths_and_seed_counts() {
+    with_ball(|cx, _, scene| {
+        let seeds = [seed(-0.18), seed(0.065), seed(0.14), seed(0.075)];
+        let options = BundleImageOptions {
+            max_images: 3,
+            ..image_options()
+        };
+        let mut workspace = BundleImageWorkspace::try_new(3, 4).unwrap();
+        let images_ptr = workspace.catalog.images.as_ptr();
+        let seeds_ptr = workspace.catalog.seeds.as_ptr();
+        let images_capacity = workspace.catalog.images.capacity();
+        let seeds_capacity = workspace.catalog.seeds.capacity();
+        assert_eq!(workspace.image_capacity(), 3);
+        assert_eq!(workspace.seed_capacity(), 4);
+
+        for (wavelength_nm, seed_count) in [(550.0, 4), (600.0, 1), (550.0, 4)] {
+            let launch = BundleConnectionLaunch {
+                wavelength_nm,
+                ..launch()
+            };
+            let expected = scene
+                .discover_bundle_images(
+                    cx,
+                    launch,
+                    target(),
+                    connection_options(),
+                    &seeds[..seed_count],
+                    options,
+                )
+                .unwrap();
+            let actual = scene
+                .discover_bundle_images_with_workspace(
+                    cx,
+                    launch,
+                    target(),
+                    connection_options(),
+                    &seeds[..seed_count],
+                    options,
+                    &mut workspace,
+                )
+                .unwrap();
+            assert_eq!(actual, &expected);
+            assert_eq!(actual.images().len(), if seed_count == 1 { 1 } else { 3 });
+            assert_eq!(actual.seed_results().len(), seed_count);
+            assert!(actual.trace_evaluations() > 0);
+            if seed_count == 4 {
+                assert!(matches!(
+                    actual.seed_results()[3].outcome(),
+                    BundleImageSeedOutcome::Duplicate { image: 1 }
+                ));
+            }
+            assert_eq!(workspace.catalog.images.as_ptr(), images_ptr);
+            assert_eq!(workspace.catalog.seeds.as_ptr(), seeds_ptr);
+            assert_eq!(workspace.catalog.images.capacity(), images_capacity);
+            assert_eq!(workspace.catalog.seeds.capacity(), seeds_capacity);
+        }
+    });
+}
+
+#[test]
+fn g4_prepared_multistart_invalidates_failures_and_refuses_capacity_before_tracing() {
+    for (images, seeds) in [
+        (0, 1),
+        (1, 0),
+        (MAX_BUNDLE_IMAGES + 1, 1),
+        (1, MAX_BUNDLE_IMAGE_SEEDS + 1),
+    ] {
+        assert!(matches!(
+            BundleImageWorkspace::try_new(images, seeds),
+            Err(BundleImageError::InvalidOptions)
+        ));
+    }
+    with_ball(|cx, _, scene| {
+        let mut workspace = BundleImageWorkspace::try_new(3, 4).unwrap();
+        let images_ptr = workspace.catalog.images.as_ptr();
+        let seeds_ptr = workspace.catalog.seeds.as_ptr();
+        let options = BundleImageOptions {
+            max_images: 3,
+            ..image_options()
+        };
+        let seeds = [seed(-0.18), seed(0.065), seed(0.14)];
+        scene
+            .discover_bundle_images_with_workspace(
+                cx,
+                launch(),
+                target(),
+                connection_options(),
+                &seeds,
+                options,
+                &mut workspace,
+            )
+            .unwrap();
+        assert_eq!(workspace.catalog.images().len(), 3);
+        let invalid = BundleImageSeed {
+            initial_direction: Vec3::new(0.0, 0.0, 0.0),
+            ..seed(0.0)
+        };
+        assert!(matches!(
+            scene.discover_bundle_images_with_workspace(
+                cx,
+                launch(),
+                target(),
+                connection_options(),
+                &[seeds[0], invalid],
+                options,
+                &mut workspace,
+            ),
+            Err(BundleImageError::Seed {
+                seed: 1,
+                error: BundleConnectionError::NumericalRange
+            })
+        ));
+        assert!(workspace.catalog.images().is_empty());
+        assert!(workspace.catalog.seed_results().is_empty());
+        assert_eq!(workspace.catalog.trace_evaluations(), 0);
+        assert_eq!(workspace.catalog.field_evaluations(), 0);
+        assert_eq!(workspace.catalog.query_work(), 0);
+        assert_eq!(workspace.catalog.images.as_ptr(), images_ptr);
+        assert_eq!(workspace.catalog.seeds.as_ptr(), seeds_ptr);
+
+        let expected = scene
+            .discover_bundle_images(
+                cx,
+                launch(),
+                target(),
+                connection_options(),
+                &seeds[..1],
+                options,
+            )
+            .unwrap();
+        assert_eq!(
+            scene
+                .discover_bundle_images_with_workspace(
+                    cx,
+                    launch(),
+                    target(),
+                    connection_options(),
+                    &seeds[..1],
+                    options,
+                    &mut workspace,
+                )
+                .unwrap(),
+            &expected
+        );
+        // An invalid direction would fail the native solve. Capacity must
+        // refuse first, with no retained result from the preceding success.
+        assert!(matches!(
+            scene.discover_bundle_images_with_workspace(
+                cx,
+                launch(),
+                target(),
+                connection_options(),
+                &[invalid],
+                BundleImageOptions {
+                    max_images: 4,
+                    ..options
+                },
+                &mut workspace,
+            ),
+            Err(BundleImageError::WorkspaceCapacity {
+                required_images: 4,
+                required_seeds: 1,
+                image_capacity: 3,
+                seed_capacity: 4
+            })
+        ));
+        assert!(matches!(
+            scene.discover_bundle_images_with_workspace(
+                cx,
+                launch(),
+                target(),
+                connection_options(),
+                &[invalid; 5],
+                options,
+                &mut workspace,
+            ),
+            Err(BundleImageError::WorkspaceCapacity {
+                required_images: 3,
+                required_seeds: 5,
+                image_capacity: 3,
+                seed_capacity: 4
+            })
+        ));
+        assert!(workspace.catalog.images().is_empty());
+        assert!(workspace.catalog.seed_results().is_empty());
+        assert_eq!(workspace.catalog.trace_evaluations(), 0);
+        assert_eq!(workspace.catalog.field_evaluations(), 0);
+        assert_eq!(workspace.catalog.query_work(), 0);
+        assert_eq!(workspace.catalog.images.as_ptr(), images_ptr);
+        assert_eq!(workspace.catalog.seeds.as_ptr(), seeds_ptr);
+    });
+}

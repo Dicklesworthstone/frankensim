@@ -24,6 +24,9 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::{
 };
 use core::cell::RefCell;
 
+/// Distinct optical images with independently tracked molecular survival.
+pub mod images;
+
 /// Cumulative work limits for one source-leg replay. Zero budgets permit
 /// uniform/clear paths; refusal occurs only before an actual draw or candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,27 +180,7 @@ impl CurvedRayleighScene<'_, '_, '_> {
     ) -> Result<CurvedTransmittanceConnection, CurvedTransmittanceError> {
         cx.checkpoint()?;
         options.validate()?;
-        let mut clear = true;
-        for index in 0..self.scene.media.len() {
-            if index % 1024 == 0 {
-                cx.checkpoint()?;
-            }
-            let known_clear = match self.media.get(index) {
-                None => true,
-                Some(CurvedRayleighBinding::Density(law)) => {
-                    matches!(law.density, CurvedDensityProfile::Uniform(density) if density == 0.0)
-                        && law.scattering.at(launch.wavelength_nm).is_ok()
-                }
-                Some(CurvedRayleighBinding::Field(_)) => false,
-            };
-            if !known_clear {
-                // An unsupported spectrum is not vacuum. Defer its refusal to
-                // the replay so an unrelated, unvisited medium is not queried
-                // as though the connected branch had traversed it.
-                clear = false;
-                break;
-            }
-        }
+        let clear = self.scattering_known_clear(cx, launch.wavelength_nm)?;
         if !clear && options.max_trace_evaluations < 2 {
             return Err(BundleConnectionError::TraceBudgetExceeded.into());
         }
@@ -208,6 +191,54 @@ impl CurvedRayleighScene<'_, '_, '_> {
         let connection =
             self.scene
                 .connect_bundle_with_policy(cx, launch, target, solve_options, policy)?;
+        self.replay_connected_bundle_with_transmittance(
+            cx, launch, target, options, policy, tracking, connection, clear, samples,
+        )
+    }
+
+    // Only native solves owned by this exact scene call the replay below.
+    // A public replay accepting an arbitrary connection would lose that source
+    // and scene identity guarantee.
+    fn scattering_known_clear(
+        &self,
+        cx: &Cx<'_>,
+        wavelength_nm: f64,
+    ) -> Result<bool, CurvedTransmittanceError> {
+        for index in 0..self.scene.media.len() {
+            if index % 1024 == 0 {
+                cx.checkpoint()?;
+            }
+            let known_clear = match self.media.get(index) {
+                None => true,
+                Some(CurvedRayleighBinding::Density(law)) => {
+                    matches!(law.density, CurvedDensityProfile::Uniform(density) if density == 0.0)
+                        && law.scattering.at(wavelength_nm).is_ok()
+                }
+                Some(CurvedRayleighBinding::Field(_)) => false,
+            };
+            if !known_clear {
+                // An unsupported spectrum is not vacuum. Defer its refusal to
+                // the replay so an unrelated, unvisited medium is not queried
+                // as though the connected branch had traversed it.
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replay_connected_bundle_with_transmittance(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        target: BundleConnectionTarget,
+        options: BundleConnectionOptions,
+        policy: BundleBranchPolicy<'_>,
+        tracking: CurvedTransmittanceOptions,
+        connection: BundleConnection,
+        clear: bool,
+        samples: impl FnMut(u32) -> f64,
+    ) -> Result<CurvedTransmittanceConnection, CurvedTransmittanceError> {
         let mut output = CurvedTransmittanceConnection {
             connection,
             log_scattering_survival: 0.0,

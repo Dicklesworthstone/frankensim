@@ -84,6 +84,12 @@ pub enum BundleImageError {
     TooManySeeds,
     InvalidOptions,
     AllocationFailure,
+    WorkspaceCapacity {
+        required_images: usize,
+        required_seeds: usize,
+        image_capacity: usize,
+        seed_capacity: usize,
+    },
     TraceBudgetExceeded {
         seed: usize,
     },
@@ -205,6 +211,64 @@ impl BundleImageCatalog {
     }
 }
 
+/// Reusable storage for native image discovery, prepared outside the path loop.
+/// Capacities are explicit admission limits even when an allocator supplies
+/// more storage. Discovery never grows these buffers. A failed operation clears
+/// the incomplete result while retaining both allocations for the next call.
+///
+/// Completed catalogs are borrowed only from a successful discovery call;
+/// mutably reusing this workspace cannot coexist with a prior catalog borrow.
+#[derive(Debug)]
+pub struct BundleImageWorkspace {
+    catalog: BundleImageCatalog,
+    image_capacity: usize,
+    seed_capacity: usize,
+}
+
+impl BundleImageWorkspace {
+    pub fn try_new(max_images: usize, max_seeds: usize) -> Result<Self, BundleImageError> {
+        if max_images == 0
+            || max_images > MAX_BUNDLE_IMAGES
+            || max_seeds == 0
+            || max_seeds > MAX_BUNDLE_IMAGE_SEEDS
+        {
+            return Err(BundleImageError::InvalidOptions);
+        }
+        let mut catalog = BundleImageCatalog {
+            images: Vec::new(),
+            seeds: Vec::new(),
+            work: Work::default(),
+        };
+        catalog
+            .images
+            .try_reserve_exact(max_images)
+            .map_err(|_| BundleImageError::AllocationFailure)?;
+        catalog
+            .seeds
+            .try_reserve_exact(max_seeds)
+            .map_err(|_| BundleImageError::AllocationFailure)?;
+        Ok(Self {
+            catalog,
+            image_capacity: max_images,
+            seed_capacity: max_seeds,
+        })
+    }
+
+    pub const fn image_capacity(&self) -> usize {
+        self.image_capacity
+    }
+
+    pub const fn seed_capacity(&self) -> usize {
+        self.seed_capacity
+    }
+
+    fn clear(&mut self) {
+        self.catalog.images.clear();
+        self.catalog.seeds.clear();
+        self.catalog.work = Work::default();
+    }
+}
+
 impl CurvedPolarizedScene<'_> {
     /// Discover distinct regular images from an authored finite seed list.
     /// A per-seed local trace limit is a recorded miss; exhausting the total
@@ -219,29 +283,75 @@ impl CurvedPolarizedScene<'_> {
         seeds: &[BundleImageSeed<'_>],
         options: BundleImageOptions,
     ) -> Result<BundleImageCatalog, BundleImageError> {
-        options.validate()?;
-        connection
-            .validate()
-            .map_err(|error| BundleImageError::Seed { seed: 0, error })?;
-        if seeds.is_empty() {
-            return Err(BundleImageError::EmptySeeds);
+        validate_discovery_request(connection, seeds, options)?;
+        let mut workspace = BundleImageWorkspace::try_new(options.max_images, seeds.len())?;
+        self.discover_bundle_images_with_workspace(
+            cx,
+            launch,
+            target,
+            connection,
+            seeds,
+            options,
+            &mut workspace,
+        )?;
+        Ok(workspace.catalog)
+    }
+
+    /// Discover through the same native shooting and image-classification
+    /// owners using caller-prepared storage. Every authored seed is attempted
+    /// in order, including duplicate seeds and recorded local misses. Their
+    /// work remains part of the complete catalog's totals.
+    ///
+    /// Insufficient prepared capacity refuses before tracing; it never triggers
+    /// a path-time allocation. Any failure invalidates the incomplete catalog
+    /// while preserving storage for subsequent pixels or wavelength lanes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn discover_bundle_images_with_workspace<'w>(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        target: BundleConnectionTarget,
+        connection: BundleConnectionOptions,
+        seeds: &[BundleImageSeed<'_>],
+        options: BundleImageOptions,
+        workspace: &'w mut BundleImageWorkspace,
+    ) -> Result<&'w BundleImageCatalog, BundleImageError> {
+        workspace.clear();
+        validate_discovery_request(connection, seeds, options)?;
+        if options.max_images > workspace.image_capacity || seeds.len() > workspace.seed_capacity {
+            return Err(BundleImageError::WorkspaceCapacity {
+                required_images: options.max_images,
+                required_seeds: seeds.len(),
+                image_capacity: workspace.image_capacity,
+                seed_capacity: workspace.seed_capacity,
+            });
         }
-        if seeds.len() > MAX_BUNDLE_IMAGE_SEEDS {
-            return Err(BundleImageError::TooManySeeds);
+        if let Err(error) = self.discover_bundle_images_prepared(
+            cx,
+            launch,
+            target,
+            connection,
+            seeds,
+            options,
+            &mut workspace.catalog,
+        ) {
+            workspace.clear();
+            return Err(error);
         }
-        let mut catalog = BundleImageCatalog {
-            images: Vec::new(),
-            seeds: Vec::new(),
-            work: Work::default(),
-        };
-        catalog
-            .images
-            .try_reserve_exact(options.max_images)
-            .map_err(|_| BundleImageError::AllocationFailure)?;
-        catalog
-            .seeds
-            .try_reserve_exact(seeds.len())
-            .map_err(|_| BundleImageError::AllocationFailure)?;
+        Ok(&workspace.catalog)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn discover_bundle_images_prepared(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        target: BundleConnectionTarget,
+        connection: BundleConnectionOptions,
+        seeds: &[BundleImageSeed<'_>],
+        options: BundleImageOptions,
+        catalog: &mut BundleImageCatalog,
+    ) -> Result<(), BundleImageError> {
         for (seed_index, seed) in seeds.iter().enumerate() {
             cx.checkpoint().map_err(|_| BundleImageError::Seed {
                 seed: seed_index,
@@ -319,8 +429,26 @@ impl CurvedPolarizedScene<'_> {
             };
             catalog.seeds.push(BundleImageSeedResult { outcome, work });
         }
-        Ok(catalog)
+        Ok(())
     }
+}
+
+fn validate_discovery_request(
+    connection: BundleConnectionOptions,
+    seeds: &[BundleImageSeed<'_>],
+    options: BundleImageOptions,
+) -> Result<(), BundleImageError> {
+    options.validate()?;
+    connection
+        .validate()
+        .map_err(|error| BundleImageError::Seed { seed: 0, error })?;
+    if seeds.is_empty() {
+        return Err(BundleImageError::EmptySeeds);
+    }
+    if seeds.len() > MAX_BUNDLE_IMAGE_SEEDS {
+        return Err(BundleImageError::TooManySeeds);
+    }
+    Ok(())
 }
 
 fn add_work(total: &mut Work, next: Work) -> Result<(), BundleImageError> {
