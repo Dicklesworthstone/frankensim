@@ -1,5 +1,6 @@
-//! Source tables in temperature and physical shear rate drive the actual VOF
-//! collision and molecular heat. The fixed-domain rheology owner supplies the
+//! Source tables in temperature, physical shear rate and optionally absolute
+//! mechanical pressure drive the actual VOF collision and molecular heat.
+//! The fixed-domain rheology owner supplies the
 //! same local constitutive solve; no second viscosity law or stress estimator
 //! is introduced. This is generalized Newtonian response, without elastic
 //! memory, yield-surface history, phase mobility or capillary energy. A sourced
@@ -32,6 +33,7 @@ pub struct FreeSurfaceRheologySample {
 #[derive(Clone, Debug)]
 pub(in crate::material::free_surface) struct RheologyBinding {
     rate_axis: String,
+    pressure_axis: Option<String>,
     solve: RheologySolve,
 }
 
@@ -40,6 +42,8 @@ pub(super) struct RheologyStress {
     /// Force-corrected lattice `gamma_dot * tau`, before the thermal split.
     numerator: f64,
     initial_tau: f64,
+    /// Actual liquid pressure, held with the stress during the thermal split.
+    pressure_pa: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -68,11 +72,7 @@ impl RheologyBinding {
         solve
             .validate()
             .map_err(|_| Error::Invalid("invalid liquid rheology controls"))?;
-        if source.rheology_pressure_axis().is_some() {
-            return Err(Error::Invalid(
-                "thermal rheology does not own evolving source pressure or its caloric pressure-work convention",
-            ));
-        }
+        let pressure_axis = source.rheology_pressure_axis();
         let (temperature_axis, rate_axis) = source.rheology_axes().ok_or(Error::Invalid(
             "moving-liquid rheology needs an explicitly evolving source bundle",
         ))?;
@@ -83,13 +83,47 @@ impl RheologyBinding {
         }
         // Thermal conductivity and Cp may belong to a broader law bundle than
         // the momentum ingress. They cannot introduce an unevolved source axis.
-        ResolvedLiquidSurfaceState::try_for_shear_rate_evolution_with_capillarity(
-            law.reference_state().material().clone(),
-            law.viscosity_basis(),
-            source.capillarity(),
-            temperature_axis,
-            rate_axis,
-        )?;
+        match pressure_axis {
+            Some(axis) => {
+                ResolvedLiquidSurfaceState::try_for_pressure_shear_rate_evolution(
+                    law.reference_state().material().clone(),
+                    law.viscosity_basis(),
+                    source.capillarity(),
+                    temperature_axis,
+                    rate_axis,
+                    axis,
+                )?;
+                // Mechanical pressure may change transport, but this owner
+                // retains one incompressible caloric chart h(T). Even a flat
+                // sampled pressure response cannot establish that independence.
+                for material in [source.material(), law.reference_state().material()] {
+                    if [
+                        "density",
+                        "specific_heat_capacity",
+                        SURFACE_TENSION_PROPERTY,
+                    ]
+                    .iter()
+                    .any(|name| {
+                        material.property(name).is_some_and(|property| {
+                            property.source_axes().iter().any(|(a, _)| a == axis)
+                        })
+                    }) {
+                        return Err(Error::Invalid(
+                            "thermal pressure rheology requires pressure-independent density, caloric storage and surface tension",
+                        ));
+                    }
+                }
+            }
+            None => {
+                ResolvedLiquidSurfaceState::try_for_shear_rate_evolution_with_capillarity(
+                    law.reference_state().material().clone(),
+                    law.viscosity_basis(),
+                    source.capillarity(),
+                    temperature_axis,
+                    rate_axis,
+                )?;
+            }
+        }
         if ["density", "specific_heat_capacity"].iter().any(|name| {
             law.reference_state()
                 .material()
@@ -107,8 +141,30 @@ impl RheologyBinding {
         }
         Ok(Self {
             rate_axis: rate_axis.to_owned(),
+            pressure_axis: pressure_axis.map(str::to_owned),
             solve,
         })
+    }
+
+    pub(super) fn admit_pressure_reference(
+        &self,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+    ) -> Result<(), Error> {
+        if let Some(axis) = &self.pressure_axis {
+            let source_pressure = scaling
+                .material()
+                .material()
+                .query_point()
+                .iter()
+                .find(|(name, _)| name == axis)
+                .map(|(_, value)| *value);
+            if scaling.reference_pressure_pa() != source_pressure {
+                return Err(Error::Invalid(
+                    "thermal pressure rheology requires its initial source pressure as the explicit flow reference",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -127,13 +183,21 @@ impl RheologyModel<'_> {
             self.binding.solve,
             check,
             |rate| {
-                let point = self
+                let mut point = self
                     .law
                     .reference_point()
                     .clone()
                     .with(self.law.temperature_axis(), temperature)
                     .and_then(|point| point.with(&self.binding.rate_axis, rate))
                     .map_err(|_| Error::Invalid("invalid liquid temperature/shear coordinates"))?;
+                if let Some(axis) = &self.binding.pressure_axis {
+                    let pressure = stress.pressure_pa.ok_or(Error::Invalid(
+                        "thermal rheology is missing its actual liquid pressure",
+                    ))?;
+                    point = point
+                        .with(axis, pressure)
+                        .map_err(|_| Error::Invalid("invalid liquid pressure coordinate"))?;
+                }
                 let material = self
                     .law
                     .reference_state()
@@ -186,6 +250,16 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     /// source-declared constant sigma in the same complete thermal bundle.
     /// The numerical conversion carry transports enthalpy but has no assigned
     /// strain, viscosity or molecular heat until it returns to a resolved cell.
+    ///
+    /// A source explicitly marked for pressure evolution also requires
+    /// [`MaterialFreeSurfaceScaling::with_pressure_reference`] equal to its
+    /// initial absolute source pressure. Actual native liquid pressure then
+    /// joins temperature and shear in each source query. Density, caloric
+    /// storage and surface tension must be pressure-independent. The retained
+    /// h(T) chart is a fixed-reference caloric energy; no pressure-volume work
+    /// or pressure-dependent stored energy is inferred. Molecular heat keeps
+    /// its original accepted-start coefficient, while subsequent thermal
+    /// updates refresh the collision coefficient before the native flow step.
     #[allow(clippy::too_many_arguments)]
     pub fn free_surface3_from_cells_with_rheology<'m>(
         self,
@@ -231,7 +305,16 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
         self.free_surface3_from_cells_with_rheology_model(
-            domain, initial, law, caloric, controls, solve, Some(buoyancy), initial_h, cx, gate,
+            domain,
+            initial,
+            law,
+            caloric,
+            controls,
+            solve,
+            Some(buoyancy),
+            initial_h,
+            cx,
+            gate,
         )
     }
 
@@ -253,7 +336,14 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         let binding = RheologyBinding::try_new(self.material(), law, solve)?;
         let flow = self.free_surface3_from_cells_inner(domain, initial, cx)?;
         let liquid = flow.with_bound_thermal_transport(
-            law, caloric, controls, initial_h, buoyancy, Some(binding), None, gate,
+            law,
+            caloric,
+            controls,
+            initial_h,
+            buoyancy,
+            Some(binding),
+            None,
+            gate,
         )?;
         cx.checkpoint().map_err(|_| FreeSurfaceError3::Cancelled)?;
         Ok(liquid)
@@ -276,7 +366,15 @@ impl<'s> MaterialFreeSurface3<'s> {
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
         self.with_enthalpy_model_seeded(
-            law, caloric, controls, initial_h, buoyancy, binding, None, initial_tau, gate,
+            law,
+            caloric,
+            controls,
+            initial_h,
+            buoyancy,
+            binding,
+            None,
+            initial_tau,
+            gate,
         )
     }
 }
@@ -307,12 +405,28 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         lattice: &FreeSurface3,
         location: MassLocation3,
     ) -> Result<RheologyStress, Error> {
+        let pressure_pa = if self
+            .rheology
+            .as_ref()
+            .is_some_and(|binding| binding.pressure_axis.is_some())
+        {
+            let [x, y, z] = FreeSurface3::transport_coordinates(location).ok_or(Error::Invalid(
+                "liquid pressure requires a resolved wet cell",
+            ))?;
+            let native = lattice
+                .sample_at(x, y, z)
+                .ok_or(Error::Invalid("liquid pressure cell is unavailable"))?;
+            Some(self.flow.scaling.absolute_pressure_si(native.density)?)
+        } else {
+            None
+        };
         Ok(RheologyStress {
             numerator: lattice.transport_shear_rate(location, 1.0)?,
             initial_tau: self
                 .rheology_samples
                 .get(&location)
                 .map_or(self.flow.scaling.flow.tau, |sample| sample.collision_tau),
+            pressure_pa,
         })
     }
 }

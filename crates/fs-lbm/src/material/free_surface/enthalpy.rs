@@ -399,6 +399,9 @@ impl<'s> MaterialFreeSurface3<'s> {
                 "evolving liquid source requires its runtime rheology owner",
             ));
         }
+        if let Some(binding) = &rheology {
+            binding.admit_pressure_reference(&self.scaling)?;
+        }
         if self.scaling.planar_wetting.is_some() {
             return Err(Error::Invalid(
                 "thermal free surface must bind wetting through its evolving interface owner",

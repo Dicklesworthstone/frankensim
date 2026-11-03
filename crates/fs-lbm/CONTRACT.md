@@ -6148,12 +6148,12 @@ original source validity, local rheology convergence and speed must all pass
 before flow and material receipts publish together. Temperature, composition
 and other context remain fixed. Shifting actual pressure and its datum can now
 change viscosity and motion, as required by a pressure-dependent source.
-Frozen and thermal T/shear consumers refuse this explicit pressure owner; the
-thermal path has not gained a pressure-dependent caloric/work chart.
+Frozen consumers refuse this explicit pressure owner. The thermal composition
+below owns pressure-dependent transport with pressure-independent caloric storage.
 G0/G1/G3/G4 regressions specify the actual interior pressure coordinate, an
 independent pressure/shear constitutive root, constant-law native bit parity,
 absolute-pressure-dependent motion, source-domain rollback, cancellation and
-unsupported density/sigma or thermal-owner refusal. No new runtime execution,
+unsupported density/sigma or missing thermal pressure-reference refusal. No new runtime execution,
 continuum convergence, physical calibration or total-energy claim is made.
 For the incompressible pressure/shear-dependent constitutive model family see
 Bulíček, Majdoub and Málek (2010), <https://arxiv.org/abs/1004.0835>; its analytic
@@ -6168,6 +6168,41 @@ certificates. Focused tests in `tests/material_free_surface_rheology.rs` exercis
 an independent force-corrected tensor and analytical constitutive root, native
 Newtonian bit parity, source-only viscosity/capillary motion changes with mass
 conservation and deterministic replay, and endpoint source/convergence rollback.
+
+## Pressure-dependent viscosity on the thermal VOF timeline
+
+`free_surface3_from_cells_with_rheology` also accepts the existing explicitly
+pressure-marked source bundle. Its `with_pressure_reference` value must equal
+the original positive absolute source pressure. The same scaling owner supplies
+`p_ref + cs²*(rho_lattice-1)*rho0*(dx/dt)²` from each actual wet cell; prescribed
+external gas pressure never substitutes for this interior state. That pressure
+is held with the original force-corrected stress while the existing bounded
+constitutive root and thermal substeps query the SAME selected material claims
+at their current temperature and physical shear rate. The actual new native
+pressure, temperature and shear are re-admitted before joint publication.
+
+Viscosity and conductivity may respond to these owned transport coordinates.
+Pressure-response axes on density, specific heat or surface tension refuse,
+even when sampled values happen to coincide. The original fixed-reference
+caloric h(T), mass transport, optional buoyancy/capillary owners and thermal
+balance remain unchanged. Pressure-dependent stored energy, physical liquid
+compression and pressure-volume heating are not inferred. This is the
+constant-density, pressure-independent caloric model with pressure/temperature/
+shear-dependent transport described by Bulíček, Málek and Rajagopal (2009),
+§2.1–2.2, DOI:10.1137/07069540X; its existence theorem is not a discrete claim.
+
+Molecular heating retains its original first-order source split: accepted-start
+mu and strain supply the held `mu*gamma_dot²` heat; heated material then refreshes
+the collision viscosity before the single native step. Both use this same law
+and actual held pressure, at their distinct thermal epochs. No new viscosity
+fit, solver, numerical-loss heating or source-format extension is introduced.
+Original two-axis surfaces can express T/p or p/shear response while the query
+retains all three coordinates. Unmarked T/shear paths keep their original bits.
+
+The focused `material_free_surface_enthalpy/rheology/pressure.rs` cases compare
+an independent pressure/shear quadratic root and physical heat, exercise actual
+T/p feedback and constant-law bit parity, and refuse unsupported caloric axes,
+late source-domain failures and cancellation without changing accepted state.
 
 ### Anchored conducting phase changes retain reciprocal MHD
 

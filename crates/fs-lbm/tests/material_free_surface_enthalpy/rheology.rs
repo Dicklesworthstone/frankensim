@@ -7,6 +7,9 @@ use fs_lbm::material::free_surface::enthalpy::rheology::RheologySolve;
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 use fs_qty::Frequency;
 
+#[path = "rheology/pressure.rs"]
+mod pressure;
+
 const CELL: [usize; 3] = [3; 3];
 
 fn solve() -> RheologySolve {
@@ -19,7 +22,7 @@ fn solve() -> RheologySolve {
 }
 
 #[test]
-fn g0_pressure_owned_source_cannot_enter_a_fixed_pressure_thermal_owner() {
+fn g0_pressure_owned_thermal_source_requires_an_explicit_matching_reference() {
     let card = card(0.1, 1000.0);
     let law = LiquidTemperatureLaw::try_new(
         &card,
@@ -49,22 +52,24 @@ fn g0_pressure_owned_source_cannot_enter_a_fixed_pressure_thermal_owner() {
                 .free_surface3_from_cells(domain(), &initial(false), cx)
                 .is_err()
         );
-        assert!(matches!(
-            scaling.free_surface3_from_cells_with_rheology(
-                domain(),
-                &initial(false),
-                &law,
-                &chart,
-                FreeSurfaceEnthalpyControls::default(),
-                solve(),
-                |_| 800_000.0,
-                cx,
-                &gate,
-            ),
-            Err(FreeSurfaceEnthalpyError::Invalid(
-                "thermal rheology does not own evolving source pressure or its caloric pressure-work convention"
-            ))
-        ));
+        for scaling in [scaling, scaling.with_pressure_reference(100_001.0).unwrap()] {
+            assert!(matches!(
+                scaling.free_surface3_from_cells_with_rheology(
+                    domain(),
+                    &initial(false),
+                    &law,
+                    &chart,
+                    FreeSurfaceEnthalpyControls::default(),
+                    solve(),
+                    |_| 800_000.0,
+                    cx,
+                    &gate,
+                ),
+                Err(FreeSurfaceEnthalpyError::Invalid(
+                    "thermal pressure rheology requires its initial source pressure as the explicit flow reference"
+                ))
+            ));
+        }
     });
 }
 
