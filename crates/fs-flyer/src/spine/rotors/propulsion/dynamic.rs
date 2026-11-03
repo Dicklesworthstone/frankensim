@@ -32,6 +32,10 @@ use fs_wing::nonlinear::solve_nonlinear_with_incident;
 #[path = "dynamic/first_harmonic.rs"]
 pub mod first_harmonic;
 
+#[path = "dynamic/blade_wash.rs"]
+mod blade_wash;
+use blade_wash::BladeWash;
+
 // One wing/wash solve shared by the uniform and harmonic blade owners.
 struct WingAtInduction {
     disk_velocity_mps: [[f64; 3]; 2],
@@ -126,6 +130,7 @@ pub struct DynamicPropulsion<'p, 'a, const N: usize> {
     axes: DiskAxes,
     disk_wash: [[DiskWash; 2]; 2],
     oblique: Option<(AzimuthQuadrature, [DiskFrame; 2])>,
+    blade_wash: Option<BladeWash>,
 }
 
 fn air_error(error: fs_airscrew::Refusal) -> Refusal {
@@ -157,6 +162,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             axes,
             disk_wash,
             oblique: None,
+            blade_wash: None,
         })
     }
 
@@ -164,6 +170,8 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
     /// kinematics. The same scalar axial wake and straight axial wing wash are
     /// retained deliberately: this is not a skewed-wake momentum closure.
     /// The finite azimuth rule uses a fixed body-frame radial reference.
+    /// Other-disk wash is resolved at each real blade section, with fixed
+    /// geometry prepared once; the wake-transport law retains its disk mean.
     ///
     /// # Errors
     /// Native density, axis, quadrature and orthonormal-frame admission.
@@ -197,7 +205,16 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             };
             DiskFrame::new(axis, radial, spin).map_err(air_error)
         };
-        result.oblique = Some((rule, [frame(0)?, frame(1)?]));
+        let frames = [frame(0)?, frame(1)?];
+        result.blade_wash = Some(BladeWash::new(
+            result.axes,
+            &propulsion.design.disks,
+            &propulsion.design.rotor,
+            &rule,
+            frames,
+            &result.disk_wash,
+        )?);
+        result.oblique = Some((rule, frames));
         Ok(result)
     }
 
@@ -343,19 +360,12 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
     ) -> Result<DynamicAerodynamics, Refusal> {
         let wing = self.solve_wing(&stage, induced_mps, None, None)?;
         let disk_axial_mps = wing.disk_axial_mps;
-        let oblique = if let Some((rule, frames)) = &self.oblique {
-            let loads = |k: usize| {
-                rule.evaluate(
-                    &self.propulsion.design.rotor,
-                    stage.rho,
-                    frames[k],
-                    wing.disk_velocity_mps[k],
-                    stage.carrier_angular_velocity_body_rad_s,
-                    induced_mps[k],
-                    stage.disks[k].omega_rad_s,
-                )
-                .map_err(air_error)
-            };
+        let oblique = if self.oblique.is_some() {
+            let induction = induced_mps.map(|mean_mps| HarmonicInduction {
+                mean_mps,
+                first_mps: [0.0; 2],
+            });
+            let loads = |k| self.blade_loads(&stage, &wing, induction, k);
             Some([loads(0)?, loads(1)?])
         } else {
             None
@@ -391,6 +401,48 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             wing_lift_n: wing.lift_n,
             wing_residual: wing.residual,
         })
+    }
+
+    // Shared by uniform, harmonic and continued/skewed force evaluations.
+    // The prepared field is a variation about the SAME external disk mean
+    // consumed by wake transport, never an extra self-induced velocity.
+    fn blade_loads(
+        &self,
+        stage: &AerodynamicStage<'_>,
+        wing: &WingAtInduction,
+        induction: [HarmonicInduction; 2],
+        k: usize,
+    ) -> Result<ObliqueLoads, Refusal> {
+        let (rule, frames) = self.oblique.as_ref().expect("prepared oblique frames");
+        let wash = self
+            .blade_wash
+            .as_ref()
+            .expect("prepared external blade wash");
+        let source = induction[1 - k];
+        if wash.active(k, source) {
+            return rule
+                .evaluate_with_incident_variation(
+                    &self.propulsion.design.rotor,
+                    stage.rho,
+                    frames[k],
+                    wing.disk_velocity_mps[k],
+                    stage.carrier_angular_velocity_body_rad_s,
+                    induction[k],
+                    stage.disks[k].omega_rad_s,
+                    |sample, _| Ok(wash.velocity(k, sample, source)),
+                )
+                .map_err(air_error);
+        }
+        rule.evaluate_first_harmonic(
+            &self.propulsion.design.rotor,
+            stage.rho,
+            frames[k],
+            wing.disk_velocity_mps[k],
+            stage.carrier_angular_velocity_body_rad_s,
+            induction[k],
+            stage.disks[k].omega_rad_s,
+        )
+        .map_err(air_error)
     }
 
     /// Evaluate wing, blades and all shaft/body forces at the actual stored

@@ -109,7 +109,7 @@ fn angular_momentum(assembly: &GearedAssembly<2>, state: &GearedState, origin: [
 }
 
 #[test]
-fn partial_overlap_transfers_the_source_harmonic_mean_into_real_disk_loads() {
+fn partial_overlap_resolves_blade_wash_and_retains_the_original_transport_mean() {
     let mut design = wright_openloop_v1();
     let radius = design.rotor.radius_m;
     design.disks[0].center_m = [-2.5, 0.0, -0.9];
@@ -182,7 +182,47 @@ fn partial_overlap_transfers_the_source_harmonic_mean_into_real_disk_loads() {
                         < 1e-12
                 );
             }
+            let mean_increment = factor * (mode.mean_mps + first);
             let native = rule
+                .evaluate_with_incident_variation(
+                    &design.rotor,
+                    RHO,
+                    frame,
+                    a(expected),
+                    ZERO,
+                    state.induction[k],
+                    result.propeller_absolute_speed_rad_s[k].abs(),
+                    |_, arm| {
+                        // Independent pointwise cylindrical support and source
+                        // harmonic coordinates, without production wash maps.
+                        let offset = (v(design.disks[k].center_m) + v(arm)
+                            - v(design.disks[other].center_m))
+                        .scale(1.0 / radius);
+                        let axial = offset.dot(source_axis);
+                        let radial = offset - source_axis.scale(axial);
+                        let local = if radial.norm() < 1.0 && axial.abs() < 2.0 {
+                            let amplitude = mode.mean_mps
+                                + mode.first_mps[0]
+                                    * offset.dot(v(frames[other].radial_reference()))
+                                + mode.first_mps[1]
+                                    * offset.dot(v(frames[other].azimuth_reference()));
+                            (1.0 - axial / (1.0 + axial * axial).sqrt()) * amplitude
+                        } else {
+                            0.0
+                        };
+                        Ok(a(source_axis.scale(local - mean_increment)))
+                    },
+                )
+                .unwrap();
+            let actual = result.aerodynamics.propellers[k];
+            assert!((actual.thrust_n - native.thrust_n).abs() < 1e-9);
+            assert!((actual.torque_nm - native.torque_nm).abs() < 1e-10);
+            assert!((v(actual.hub_moment_nm) - v(native.hub_moment_nm)).norm() < 1e-9);
+            assert!(
+                (actual.incident_variation_work_w - native.incident_variation_work_w).abs() < 1e-9
+            );
+            assert!(actual.power_residual_w.abs() < 1e-9);
+            let mean_only = rule
                 .evaluate_first_harmonic(
                     &design.rotor,
                     RHO,
@@ -193,9 +233,10 @@ fn partial_overlap_transfers_the_source_harmonic_mean_into_real_disk_loads() {
                     result.propeller_absolute_speed_rad_s[k].abs(),
                 )
                 .unwrap();
-            let actual = result.aerodynamics.propellers[k];
-            assert!((actual.thrust_n - native.thrust_n).abs() < 1e-9);
-            assert!((actual.torque_nm - native.torque_nm).abs() < 1e-10);
+            assert!(
+                (v(actual.hub_moment_nm) - v(mean_only.hub_moment_nm)).norm() > 0.01,
+                "the resolved source wake must create its asymmetric loading couple"
+            );
             if harmonics {
                 assert!((factor * first).abs() > 0.001);
             }
@@ -215,6 +256,37 @@ fn partial_overlap_transfers_the_source_harmonic_mean_into_real_disk_loads() {
             assert_eq!(old.aerodynamics.gamma, result.aerodynamics.gamma);
         }
     }
+    // A receiver's own induction must never reenter through the external
+    // field. With the other disk unloaded its native blade result is unchanged,
+    // including the original wing feedback caused by both physical disks.
+    state.induction[1] = HarmonicInduction {
+        mean_mps: 0.0,
+        first_mps: [0.0; 2],
+    };
+    let result = model.evaluate(&state, inputs(0.0), &|_| Ok(ZERO)).unwrap();
+    let wing = fs_wing::induced_velocity_free(
+        design.disks[0].center_m,
+        &panels,
+        &result.aerodynamics.gamma,
+        state.motion.rigid.vel_mps,
+    );
+    let incident = core::array::from_fn(|j| state.motion.rigid.vel_mps[j] + wing[j]);
+    let native = rule
+        .evaluate_first_harmonic(
+            &design.rotor,
+            RHO,
+            frames[0],
+            incident,
+            ZERO,
+            state.induction[0],
+            result.propeller_absolute_speed_rad_s[0].abs(),
+        )
+        .unwrap();
+    assert_eq!(result.aerodynamics.propellers[0], native);
+    assert_eq!(
+        result.aerodynamics.propellers[0].incident_variation_work_w,
+        0.0
+    );
 }
 
 #[test]

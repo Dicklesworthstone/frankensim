@@ -102,7 +102,12 @@ fn angular_momentum(assembly: &GearedAssembly<2>, state: &GearedState, origin: [
 
 #[test]
 fn full_crossflow_force_and_transverse_hub_moment_reach_the_original_carrier_once() {
-    let design = wright_openloop_v1();
+    let mut design = wright_openloop_v1();
+    // Canted, partially overlapping disks exercise the pointwise external
+    // blade field as well as the original crossflow and carrier tilt motion.
+    let radius = design.rotor.radius_m;
+    design.disks[0].center_m = [-2.5, 0.0, -0.9];
+    design.disks[1].center_m = [-2.5 - radius, 1.5 * radius, -0.9];
     let assembly = assembly(design.gross_mass_kg, false);
     let base = GearedPropulsion::new_spatial(&design, &assembly, mounts(false)).unwrap();
     let axial = DynamicPropulsion::new(&base, RHO).unwrap();
@@ -121,6 +126,7 @@ fn full_crossflow_force_and_transverse_hub_moment_reach_the_original_carrier_onc
     let mut delta_force = Vec3::default();
     let mut delta_moment = Vec3::default();
     let mut transverse = 0.0;
+    let mut external_air_work = 0.0;
     for k in 0..2 {
         let difference =
             v(loads[k].force_n) - v(axes()[k]).scale(old.aerodynamics.propellers[k].thrust_n);
@@ -130,6 +136,7 @@ fn full_crossflow_force_and_transverse_hub_moment_reach_the_original_carrier_onc
             + v(loads[k].hub_moment_nm);
         let offaxis = v(loads[k].force_n) - v(axes()[k]).scale(loads[k].thrust_n);
         transverse += offaxis.norm() + v(loads[k].hub_moment_nm).norm();
+        external_air_work += loads[k].incident_variation_work_w.abs();
         assert_eq!(
             new.loads.aerodynamic_nm[k],
             [-1.0, 1.0][k] * loads[k].torque_nm
@@ -143,6 +150,7 @@ fn full_crossflow_force_and_transverse_hub_moment_reach_the_original_carrier_onc
         );
     }
     assert!(transverse > 0.1);
+    assert!(external_air_work > 1e-4);
     assert!(
         (v(new.aerodynamic_force_body_n) - v(old.aerodynamic_force_body_n) - delta_force).norm()
             < 2e-10
@@ -157,7 +165,10 @@ fn full_crossflow_force_and_transverse_hub_moment_reach_the_original_carrier_onc
 
 #[test]
 fn actual_oblique_body_shaft_wake_trajectory_closes_world_linear_and_angular_impulse() {
-    let design = wright_openloop_v1();
+    let mut design = wright_openloop_v1();
+    let radius = design.rotor.radius_m;
+    design.disks[0].center_m = [-2.5, 0.0, -0.9];
+    design.disks[1].center_m = [-2.5 - radius, 1.5 * radius, -0.9];
     let assembly = assembly(design.gross_mass_kg, false);
     let base = GearedPropulsion::new_spatial(&design, &assembly, mounts(false)).unwrap();
     let model = DynamicPropulsion::new_oblique(&base, RHO, 64).unwrap();

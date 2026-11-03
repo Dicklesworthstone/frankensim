@@ -1214,9 +1214,9 @@ calibration, browser wiring or cross-platform qualification.
 `spine::rotors::propulsion::dynamic::DynamicPropulsion::new_oblique` explicitly
 selects native revolution-averaged oblique blade loads over the existing geared
 aircraft and uniform axial wake. The normal constructor keeps the original
-axial model. Each actual aerodynamic stage supplies incident, wing-induced and other-disk
-velocity at each disk center and the carrier angular rate to the native blade
-owner. Fixed body-frame disk references and physical spin directions are
+axial model. Each actual aerodynamic stage supplies hub incident/wing-induced
+velocity, the carrier angular rate and the pointwise other-disk wake to the
+native blade owner. Fixed body-frame disk references and physical spin directions are
 prepared independently of the signs chosen for mechanical shaft coordinates.
 
 The shared aerodynamic assembly applies the full force at the disk center,
@@ -1232,9 +1232,10 @@ that same physical absolute-spin work.
 
 The wake remains the named constant-density uniform AXIAL apparent-air-mass
 model and its straight axial wash. The scalar momentum/energy receipts are not
-a full oblique-fluid impulse or passivity theorem. Incident flow is uniform
-across each disk apart from actual carrier tilt kinematics; intra-disk wind
-gradients, skew-wake geometry/induction, blade-phase harmonics, flapping and
+a full oblique-fluid impulse or passivity theorem. Ambient/wing incident flow
+is sampled at the hub; actual carrier tilt and the other disk's finite wake
+vary over the blades. Intradisk ambient wind gradients, skew-wake
+geometry/induction, blade-phase harmonics, flapping and
 unsteady airfoil memory remain outside this model. The existing normal wake
 and new section-domain refusals both apply; no negative-speed clipping or
 reversed-flow fallback occurs.
@@ -1282,8 +1283,9 @@ existing straight wash geometry is a finite-window transfer approximation;
 it is not a free wake, skewed induction solution, full world-fluid momentum
 account, wake-distortion model or total fluid/body energy theorem. Incident
 air/wing-induced flow is still sampled at each disk center apart from actual
-carrier tilt kinematics. Finite blade phase, higher modes, flapping, cyclic
-pitch, swirl, resolved intra-disk wake loading and intradisk ambient wind
+carrier tilt kinematics; other-disk wake loading is evaluated at the actual
+blade sections. Finite blade phase, higher modes, flapping, cyclic
+pitch, swirl, wake deformation and intradisk ambient wind
 gradients remain unimplemented. Apparent air inertia remains excluded from
 the aircraft's rigid inertia.
 
@@ -1383,14 +1385,49 @@ their own physical disk frame before their receiving-area mean is transferred.
 Geometry is prepared outside steady iteration and once at dynamic/harmonic
 model construction; no additional nonlinear wing solve is introduced.
 
-This extends the declared actuator field, not a resolved mutual wake. The
-receiving blades still consume one mean external wash vector; its intra-disk
-variation, wake deformation/contraction, swirl and mutual-wake world energy
+This extends the declared actuator field, not a resolved mutual wake. Axial-only
+blade models consume one mean external wash vector. Oblique and harmonic
+blades additionally resolve the same finite field at every section as described
+below. Wake deformation/contraction, swirl and mutual-wake world energy
 closure remain outside this tier. The canted area rule has a focused
 refinement test, not a uniform quadrature-error certificate. The existing
 wing-strip wash model and gates remain unchanged. Tests cover analytic lens
 area/centroid, canted refinement, separated/coaxial/partial-overlap disk
 inflow, native blade/momentum consumers, and zero-harmonic parity.
+
+### Pointwise external wake loads on oblique blades
+
+`DynamicPropulsion::new_oblique` and all `HarmonicPropulsion` variants use the
+other rotor's physical mean/first-harmonic wake at every original radial and
+azimuth blade sample. Partial overlap therefore changes local force and creates
+the corresponding asymmetric hub moment, even when neither hub lies inside
+the source cylinder. Each source's harmonic coordinates use its own fixed
+disk frame. Self-wash stays in the original blade owner; the receiving-area
+mean is subtracted from the prepared variation before adding it to the same
+mean incident velocity used by transport. Neither contribution is doubled.
+
+Fixed geometry, cylindrical support, axial influence and source-mode
+projections are prepared once at construction in two bounded arrays. The force
+loop needs only three coefficient products per section and no geometry queries,
+trigonometry or allocations beyond the original blade quadrature. Uniform
+axial-only models do not allocate those arrays. Zero external modes retain the
+original native blade path. The accepted force, transverse hub moment and
+separate signed shaft torque pass through the original shared aircraft wrench
+and geared midpoint mechanics, including continued and skewed harmonic stages.
+
+The native blade result reports `incident_variation_work_w = sum(dF dot delta_V)`
+separately from mean-relative hub work, own induced work and profile heating.
+That signed spatial-air term closes the local section power identity; it is not
+extra carrier work or a total two-wake energy balance. The scalar/modal wake
+transport still consumes its declared receiving-disk mean, not a newly resolved
+transport PDE. No wake deformation, contraction, intra-disk ambient/wing-field
+gradient, swirl or full fluid/body conservation theorem is introduced.
+
+The partial-overlap harmonic test independently reconstructs pointwise support
+and source coordinates, checks the new hub moment and work, and retains exact
+zero-harmonic parity and absence of self-wash. Canted force/arm/shaft and actual
+trajectory momentum regressions exercise overlapping disks. Native blade tests
+independently integrate the original section law and spatial-air work.
 
 ## Actual stage-by-stage wing continuation in skewed flight
 

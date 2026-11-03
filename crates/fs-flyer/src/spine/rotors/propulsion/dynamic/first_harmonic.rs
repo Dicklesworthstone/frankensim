@@ -176,23 +176,12 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
             Some(&induction),
             continuation,
         )?;
-        let (rule, frames) = self
+        let (_, frames) = self
             .base
             .oblique
             .as_ref()
             .expect("prepared harmonic frames");
-        let blade = |k: usize| {
-            rule.evaluate_first_harmonic(
-                &self.base.propulsion.design.rotor,
-                stage.rho,
-                frames[k],
-                wing.disk_velocity_mps[k],
-                stage.carrier_angular_velocity_body_rad_s,
-                induction[k],
-                stage.disks[k].omega_rad_s,
-            )
-            .map_err(air_error)
-        };
+        let blade = |k| self.base.blade_loads(&stage, &wing, induction, k);
         let propellers = [blade(0)?, blade(1)?];
         let force = |k: usize| {
             frames[k]
