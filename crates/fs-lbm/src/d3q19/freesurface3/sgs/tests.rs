@@ -1,6 +1,6 @@
 use super::*;
 use crate::d3q19::freesurface3::{ContactModel3, ConversionRedistribution3};
-use crate::d3q19::{E3, Q3, W3, equilibrium3};
+use crate::d3q19::{CollisionError3, E3, OPP3, Q3, W3, equilibrium3};
 use crate::sgs3::SgsUse;
 
 fn controls(cs: f64) -> SgsConfig {
@@ -13,6 +13,7 @@ fn controls(cs: f64) -> SgsConfig {
 }
 
 fn assert_same(a: &FreeSurface3, b: &FreeSurface3) {
+    assert_eq!(a.collision_model(), b.collision_model());
     assert_eq!(a.grid.state_bits(), b.grid.state_bits());
     assert_eq!(a.mass_snapshot(), b.mass_snapshot());
     assert_eq!(a.conversions(), b.conversions());
@@ -150,11 +151,14 @@ fn g1_force_corrected_deviatoric_stress_solves_current_viscosity_and_drives_coll
 #[test]
 fn g0_g5_zero_coefficient_preserves_native_free_surface_trajectory_bitwise() {
     let gate = CancelGate::new_clock_free();
-    for model in [
+    for (model, magic) in [
         ConversionRedistribution3::Local,
         ConversionRedistribution3::ConservativeLocal,
         ConversionRedistribution3::LegacyGlobal,
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|model| [None, Some(3.0 / 16.0)].map(|magic| (model, magic)))
+    {
         let mut ordinary = FreeSurface3::new(
             8,
             8,
@@ -167,6 +171,9 @@ fn g0_g5_zero_coefficient_preserves_native_free_surface_trajectory_bitwise() {
         )
         .unwrap()
         .with_conversion_redistribution(model);
+        if let Some(magic) = magic {
+            ordinary.set_trt_magic(magic).unwrap();
+        }
         let mut zero = ordinary.clone();
         let mut workspace = FreeSurfaceSgsWorkspace3::default();
         for _ in 0..6 {
@@ -179,6 +186,204 @@ fn g0_g5_zero_coefficient_preserves_native_free_surface_trajectory_bitwise() {
             assert_same(&ordinary, &zero);
         }
     }
+}
+
+#[test]
+fn g1_trt_sgs_streams_variable_even_viscosity_with_fixed_magic_and_odd_ghosts() {
+    let gate = CancelGate::new_clock_free();
+    let molecular_tau = 0.65;
+    let magic = 3.0 / 16.0;
+    let mut lattice = FreeSurface3::new(
+        4,
+        4,
+        4,
+        molecular_tau,
+        [0.0; 3],
+        0.0,
+        ContactModel3::Neutral,
+        |_, _, _| true,
+    )
+    .unwrap();
+    assert!(
+        lattice
+            .tiles
+            .values()
+            .all(|tile| { tile.cells.iter().all(|&cell| cell == Cell3::Fluid) })
+    );
+    lattice.set_trt_magic(magic).unwrap();
+    let forces: BTreeMap<_, _> = (0..TILE_CELLS)
+        .map(|lane| ((0, lane), [0.0003 + lane as f64 * 0.00001, -0.0002, 0.0001]))
+        .collect();
+    lattice.rebind_force_field(forces.clone(), &gate).unwrap();
+    let mut expected_tau = [0.0; TILE_CELLS];
+    let u = [0.04, -0.025, 0.015];
+    for (lane, tau) in expected_tau.iter_mut().enumerate() {
+        let scale = 1.0 + 0.03 * lane as f64;
+        let strain = [
+            [0.004, 0.002, -0.001],
+            [0.002, -0.003, 0.0015],
+            [-0.001, 0.0015, -0.001],
+        ]
+        .map(|row| row.map(|s| scale * s));
+        let rate = (2.0 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+        *tau = molecular_tau + 3.0 * (0.35_f64 * 1.7).powi(2) * rate;
+        let rho = 0.85 + 0.02 * (lane % 5) as f64;
+        let mut f = populations(rho, u, forces[&(0, lane)], *tau, strain, 0.005);
+        // Third-order odd mode with zero density, momentum and second moment.
+        // Pure stress plus the half-source would not distinguish TRT from BGK.
+        for (q, e) in E3.iter().enumerate() {
+            let ex = f64::from(e.0);
+            let ey = f64::from(e.1);
+            f[q] += 0.012 * W3[q] * ex * (ey * ey - 1.0 / 3.0);
+        }
+        lattice.grid.set_populations(0, lane, f);
+    }
+    let mut workspace = FreeSurfaceSgsWorkspace3::default();
+    lattice
+        .prepare_sgs(&gate, controls(0.35), &mut workspace)
+        .unwrap();
+    for (lane, expected) in expected_tau.iter().enumerate() {
+        let p = [lane % 4, (lane / 4) % 4, lane / 16];
+        assert!((workspace.relaxation_at(p).unwrap() - expected).abs() < 3e-13);
+    }
+    assert!(expected_tau[63] - expected_tau[0] > 0.01);
+    let mut expected = [0.0; Q3];
+    let mut bgk_difference: f64 = 0.0;
+    let mut frozen_odd_difference: f64 = 0.0;
+    for (q, e) in E3.iter().enumerate() {
+        let (slot, lane) = lattice
+            .grid
+            .resolve_source(i64::from(2 - e.0), i64::from(2 - e.1), i64::from(2 - e.2))
+            .unwrap();
+        let f = lattice.grid.populations(slot, lane);
+        let rho = 0.85 + 0.02 * (lane % 5) as f64;
+        let eq = equilibrium3(rho, u);
+        let opposite = OPP3[q];
+        let even_neq = 0.5 * (f[q] - eq[q] + f[opposite] - eq[opposite]);
+        let odd_neq = 0.5 * (f[q] - eq[q] - f[opposite] + eq[opposite]);
+        let source = |direction: usize| {
+            let e = E3[direction];
+            let e = [f64::from(e.0), f64::from(e.1), f64::from(e.2)];
+            let eu: f64 = (0..3).map(|a| e[a] * u[a]).sum();
+            W3[direction]
+                * (0..3)
+                    .map(|a| (3.0 * (e[a] - u[a]) + 9.0 * eu * e[a]) * forces[&(0, lane)][a])
+                    .sum::<f64>()
+        };
+        let even_source = 0.5 * (source(q) + source(opposite));
+        let odd_source = 0.5 * (source(q) - source(opposite));
+        let tau = expected_tau[lane];
+        let collide = |odd_tau: f64| {
+            f[q] - even_neq / tau - odd_neq / odd_tau
+                + (1.0 - 0.5 / tau) * even_source
+                + (1.0 - 0.5 / odd_tau) * odd_source
+        };
+        expected[q] = collide(0.5 + magic / (tau - 0.5));
+        bgk_difference = bgk_difference.max((expected[q] - collide(tau)).abs());
+        frozen_odd_difference = frozen_odd_difference
+            .max((expected[q] - collide(0.5 + magic / (molecular_tau - 0.5))).abs());
+    }
+    assert!(bgk_difference > 1e-5, "oracle must detect BGK substitution");
+    assert!(
+        frozen_odd_difference > 1e-7,
+        "oracle must detect changed magic"
+    );
+    // Fully wet cells own mass through their current population sums. Snapshot
+    // after authoring rho; constructor/interface mass is not this ledger owner.
+    let mass = lattice.ledger_mass();
+    lattice
+        .step_with_sgs(&gate, controls(0.35), &mut workspace)
+        .unwrap();
+    let (slot, lane) = lattice.grid.resolve_source(2, 2, 2).unwrap();
+    let actual = lattice.grid.populations(slot, lane);
+    for q in 0..Q3 {
+        assert!(
+            (actual[q] - expected[q]).abs() < 4e-14,
+            "TRT population {q}"
+        );
+    }
+    assert_eq!(
+        lattice.collision_model(),
+        CollisionModel3::Trt {
+            tau: molecular_tau,
+            magic
+        }
+    );
+    assert!((lattice.ledger_mass() - mass).abs() < 3e-12);
+}
+
+#[test]
+fn g0_trt_selection_and_unrepresentable_odd_relaxation_refuse_atomically() {
+    let gate = CancelGate::new_clock_free();
+    let mut lattice = FreeSurface3::new(
+        4,
+        4,
+        4,
+        0.65,
+        [0.0; 3],
+        0.0,
+        ContactModel3::Neutral,
+        |_, _, _| true,
+    )
+    .unwrap();
+    lattice.set_trt_magic(3.0 / 16.0).unwrap();
+    let before = lattice.clone();
+    for magic in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::from_bits(1)] {
+        assert!(lattice.set_trt_magic(magic).is_err());
+        assert_same(&lattice, &before);
+    }
+    let mut workspace = FreeSurfaceSgsWorkspace3::default();
+    for model in [
+        CollisionModel3::CentralMoment {
+            second_order_rate: 1.2,
+            higher_order_rate: 1.0,
+        },
+        CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.2,
+            third_order_rate: 1.0,
+            fourth_order_rate: 1.0,
+        },
+    ] {
+        let mut unsupported = lattice.clone();
+        unsupported.grid.set_collision_model(model).unwrap();
+        let before = unsupported.clone();
+        assert!(matches!(
+            unsupported.step_with_sgs(&gate, controls(0.2), &mut workspace),
+            Err(FreeSurfaceSgsError3::Invalid(_)),
+        ));
+        assert_same(&unsupported, &before);
+    }
+    lattice.set_trt_magic(1e-16).unwrap();
+    lattice.grid.set_populations(
+        0,
+        0,
+        populations(
+            1.0,
+            [0.0; 3],
+            [0.0; 3],
+            0.65,
+            [[0.003, 0.002, 0.0], [0.002, -0.003, 0.0], [0.0; 3]],
+            0.0,
+        ),
+    );
+    let before = lattice.clone();
+    let excessive = SgsConfig {
+        maximum_eddy_to_molecular: 1e9,
+        ..controls(1000.0)
+    };
+    // Molecular TRT is valid; only the derived effective odd tau rounds to 1/2.
+    assert!(matches!(
+        lattice.prepare_sgs(&gate, excessive, &mut workspace),
+        Err(FreeSurfaceSgsError3::Flow(FreeSurfaceError3::Collision {
+            source: CollisionError3::InvalidRelaxationTime { tau }, ..
+        })) if tau == 0.5,
+    ));
+    assert!(
+        lattice
+            .step_with_sgs(&gate, excessive, &mut workspace)
+            .is_err()
+    );
+    assert_same(&lattice, &before);
 }
 
 #[test]

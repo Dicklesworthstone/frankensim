@@ -544,6 +544,17 @@ impl SparseGrid3 {
         (self.model, self.force)
     }
 
+    /// Retain populations, forcing and sparse topology while selecting a
+    /// checked native collision law. Refusal preserves the current law.
+    pub(super) fn set_collision_model(
+        &mut self,
+        model: CollisionModel3,
+    ) -> Result<(), CollisionError3> {
+        model.validate()?;
+        self.model = model;
+        Ok(())
+    }
+
     /// Published populations of one cell.
     pub(super) fn populations(&self, slot: usize, lane: usize) -> [f64; Q3] {
         core::array::from_fn(|q| self.pre[slot].f[q].0[lane])

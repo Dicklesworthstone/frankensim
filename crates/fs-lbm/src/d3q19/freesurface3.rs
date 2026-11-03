@@ -42,6 +42,8 @@ use std::collections::BTreeMap;
 
 use fs_exec::CancelGate;
 
+use crate::lattice3::{D3q19, ViscousLattice3};
+
 use super::sparse::{SparseError3, SparseGrid3, demorton3, morton3};
 use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
 
@@ -776,6 +778,30 @@ impl FreeSurface3 {
         &self.grid
     }
 
+    /// The authoritative native molecular collision law. Local material/SGS
+    /// relaxation does not replace this reference law.
+    #[must_use]
+    pub fn collision_model(&self) -> super::CollisionModel3 {
+        self.grid.collision().0
+    }
+
+    /// Select TRT with an authored positive even/odd relaxation product,
+    /// retaining the exact current molecular shear relaxation, populations and
+    /// source frame. Local viscosity changes then preserve this product.
+    /// This is not a wall-error guarantee for arbitrary forcing or geometry.
+    /// Invalid or unrepresentable parameters refuse before changing the law.
+    pub fn set_trt_magic(&mut self, magic: f64) -> Result<(), CollisionError3> {
+        let tau = match self.collision_model() {
+            super::CollisionModel3::Bgk { tau } | super::CollisionModel3::Trt { tau, .. } => tau,
+            super::CollisionModel3::CentralMoment { second_order_rate, .. }
+            | super::CollisionModel3::ReducedCumulant { second_order_rate, .. } => {
+                1.0 / second_order_rate
+            }
+        };
+        self.grid
+            .set_collision_model(super::CollisionModel3::Trt { tau, magic })
+    }
+
     /// Impose a homogeneous equilibrium angle through the liquid at one planar
     /// domain face. Other walls use the neutral closure. The angle is not a
     /// dynamic contact-line law or a claim of calibrated sessile-drop accuracy.
@@ -1158,12 +1184,19 @@ impl FreeSurface3 {
                     Cell3::Fluid | Cell3::Interface => {
                         let cell_model = match local_tau {
                             None => model,
-                            Some(values) => super::CollisionModel3::Bgk {
-                                tau: *values.get(&(key, lane)).ok_or(
+                            Some(values) => {
+                                let tau = *values.get(&(key, lane)).ok_or(
                                     FreeSurfaceError3::Transport(
                                         "missing source viscosity at a wet cell",
                                     ),
-                                )?,
+                                )?;
+                                D3q19::with_shear_relaxation(model, tau).map_err(|source| {
+                                    FreeSurfaceError3::Collision {
+                                        tile_key: key,
+                                        lane,
+                                        source,
+                                    }
+                                })?
                             },
                         };
                         collide(populations, cell_model, self.force_at_lane(key, lane)).map_err(

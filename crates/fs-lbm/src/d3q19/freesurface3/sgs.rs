@@ -9,8 +9,9 @@
 //! The quadratic follows the Smagorinsky BGK construction in Chiappini,
 //! Water 12 (2020), 1212, equations (6)-(8), doi:10.3390/w12041212. Here the
 //! trace is removed before fitting shear, and the original Guo half-source
-//! correction is retained. BGK retains its tied relaxation of shear and bulk;
-//! this does not supply independent bulk-viscosity control. This is weakly
+//! correction is retained. BGK/TRT retain their tied shear/bulk relaxation;
+//! TRT preserves the authored even/odd product as the even viscosity changes.
+//! This does not supply independent bulk-viscosity control. This is weakly
 //! compressible, isothermal exploration:
 //! no subgrid free-surface, entrainment, wall damping, resolved heating, or
 //! turbulent-flow validation is supplied. WALE/Vreman require the full velocity
@@ -21,6 +22,7 @@ use std::collections::BTreeMap;
 use super::transport::MassLocation3;
 use super::{Cell3, FreeSurface3, FreeSurfaceError3, TILE_CELLS, check_cancel};
 use crate::d3q19::{CollisionModel3, force_corrected_stress3};
+use crate::lattice3::{D3q19, ViscousLattice3};
 use crate::sgs3::{SgsConfig, SgsError, SgsModel, eddy_viscosity};
 use fs_exec::CancelGate;
 use fs_math::det;
@@ -92,7 +94,8 @@ impl FreeSurfaceSgsWorkspace3 {
 /// Cancellation and closure refusal leave the native accepted state untouched.
 impl FreeSurface3 {
     /// Prepare an explicitly authored Smagorinsky closure at every wet cell.
-    /// The native molecular law must be BGK; no collision family is replaced.
+    /// The native molecular law must be BGK or TRT; its family and, for TRT,
+    /// even/odd product are retained. No collision family is replaced.
     /// Coefficient zero retains the exact original relaxation. The viscosity
     /// ratio is refused, never clipped, even in a zero-mass interface ghost.
     pub fn prepare_sgs(
@@ -108,10 +111,14 @@ impl FreeSurface3 {
                 "free-surface stress SGS supports Smagorinsky only",
             ));
         }
-        let CollisionModel3::Bgk { tau: molecular_tau } = self.grid.collision().0 else {
-            return Err(FreeSurfaceSgsError3::Invalid(
-                "free-surface stress SGS requires native BGK collision",
-            ));
+        let model = self.collision_model();
+        let molecular_tau = match model {
+            CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => tau,
+            CollisionModel3::CentralMoment { .. } | CollisionModel3::ReducedCumulant { .. } => {
+                return Err(FreeSurfaceSgsError3::Invalid(
+                    "free-surface stress SGS requires native BGK or TRT collision",
+                ));
+            }
         };
         let molecular_nu = (molecular_tau - 0.5) / 3.0;
         if !molecular_nu.is_finite() || molecular_nu <= 0.0 {
@@ -168,6 +175,15 @@ impl FreeSurface3 {
                     }
                     .into());
                 }
+                // A finite even tau can still round TRT's derived odd tau to
+                // one half. Admit the exact same model the native owner uses.
+                D3q19::with_shear_relaxation(model, tau).map_err(|source| {
+                    FreeSurfaceError3::Collision {
+                        tile_key: key,
+                        lane,
+                        source,
+                    }
+                })?;
                 workspace.tau.insert((key, lane), tau);
                 let rate_squared: f64 = strain_tau
                     .iter()

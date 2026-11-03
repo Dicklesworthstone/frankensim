@@ -59,10 +59,23 @@ material label, inferred mixture law, thermal owner or yield history is added.
 
 `FreeSurface3::prepare_sgs` and `step_with_sgs` accept explicit shared
 `SgsConfig` controls and a reusable `FreeSurfaceSgsWorkspace3`. This path
-requires native BGK and Smagorinsky; WALE and Vreman need information absent
-from a symmetric local moment and refuse. Acceptance use, invalid controls,
-and excess eddy/molecular viscosity refuse without changing accepted flow.
-The zero coefficient follows the original native collision path bit for bit.
+requires native BGK or TRT and Smagorinsky; central/cumulant collisions refuse.
+WALE and Vreman need information absent from a symmetric local moment and
+refuse. Acceptance use, invalid controls, and excess eddy/molecular viscosity
+refuse without changing accepted flow. The zero coefficient follows the
+original native BGK or TRT collision path bit for bit.
+
+`FreeSurface3::set_trt_magic` selects TRT with an explicit positive even/odd
+relaxation product while preserving the exact molecular even relaxation and
+all populations. The checked selection is atomic; `collision_model` reports
+the authoritative molecular law. Native local material/SGS relaxation uses
+the shared `D3q19::with_shear_relaxation` owner, preserving the selected family
+and authored TRT product as local even viscosity changes. SGS preparation
+also refuses unrepresentable derived odd relaxation, before cache acceptance.
+Fixed product is not a viscosity-independent wall-error guarantee under
+arbitrary forcing, variable viscosity or free-surface geometry; the native
+Guo source retains its second-order force moment (Postma and Silva, Physical
+Review E 102, 063307, doi:10.1103/PhysRevE.102.063307).
 
 The shared Guo half-source correction uses each wet cell's actual retained
 force and physical velocity. Removing the stress trace yields `tau*S_dev`;
@@ -70,7 +83,9 @@ the shared Smagorinsky closure then supplies `K = tau*nu_t`. The rationalized
 positive root of `tau*(tau-tau_molecular) = 3*K` determines current relaxation
 without a lagged viscosity or a stencil through gas. This follows Chiappini,
 Water 12 (2020), 1212, equations (6)-(8), doi:10.3390/w12041212, restricted to
-deviatoric shear. The native BGK collision still ties shear/bulk relaxation.
+deviatoric shear. TRT's stress is even, so the same root supplies its even
+relaxation; the native collision applies each Guo parity at its own rate.
+Both BGK and TRT still tie shear/bulk relaxation.
 
 Morton-key/lane cache entries survive sparse slot changes; newly wet cells
 are resolved on the next preparation. Only one native candidate is cloned.
@@ -82,11 +97,14 @@ and modeled shear dissipation are weighted by native bounded liquid fill.
 Empty interface ghosts and unlocated carry add no liquid dissipation. No
 diagnostic power is added as heat to this isothermal owner.
 
-Four focused G0/G1/G4/G5 regressions in `d3q19::freesurface3::sgs::tests`
+Six focused G0/G1/G4/G5 regressions in `d3q19::freesurface3::sgs::tests`
 cover independently reconstructed forced populations and actual collision,
-trace exclusion, all three zero-control conversion trajectories, active mass
-conservation/replay, viscosity/usage refusal, cancellation and new wet cells
-after sparse activation. This is an exploratory constitutive integration,
+trace exclusion, all three zero-control conversion trajectories for BGK/TRT,
+active mass conservation/replay, viscosity/usage refusal, cancellation and new
+wet cells after sparse activation. Variable-viscosity TRT populations include
+an odd nonhydrodynamic mode so the oracle detects either BGK substitution or
+a frozen odd rate that changes the authored product. Selection and derived
+odd-rate refusal are atomic. This is an exploratory constitutive integration,
 not a turbulent-flow calibration, subgrid interface or entrainment model,
 wall-damping law, resolved heat equation, or free-surface energy certificate.
 
