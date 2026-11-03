@@ -39,6 +39,20 @@ struct Integrator {
     count: usize,
     limit: usize,
 }
+fn validate_budget(budget: MaugisWorkBudget) -> Result<(), MaugisError> {
+    if !budget.absolute_tolerance_j.is_finite()
+        || budget.absolute_tolerance_j <= 0.0
+        || !budget.relative_tolerance.is_finite()
+        || budget.relative_tolerance < 0.0
+        || budget.relative_tolerance >= 1.0
+        || budget.maximum_evaluations < 5
+    {
+        return Err(MaugisError::InvalidInput {
+            field: "branch work budget",
+        });
+    }
+    Ok(())
+}
 impl Integrator {
     fn f(&mut self, t: f64) -> Result<f64, MaugisError> {
         if self.count >= self.limit {
@@ -102,17 +116,7 @@ impl SourceMaugisSphereContact {
         to_m: f64,
         budget: MaugisWorkBudget,
     ) -> Result<MaugisWorkEstimate, MaugisError> {
-        if !budget.absolute_tolerance_j.is_finite()
-            || budget.absolute_tolerance_j <= 0.0
-            || !budget.relative_tolerance.is_finite()
-            || budget.relative_tolerance < 0.0
-            || budget.relative_tolerance >= 1.0
-            || budget.maximum_evaluations < 5
-        {
-            return Err(MaugisError::InvalidInput {
-                field: "branch work budget",
-            });
-        }
+        validate_budget(budget)?;
         let from = self.state_at_indentation(from_m)?;
         let to = self.state_at_indentation(to_m)?;
         if from_m == to_m {
@@ -127,15 +131,44 @@ impl SourceMaugisSphereContact {
                 field: "distinct work endpoints collapse",
             });
         }
+        self.reversible_work_between_coordinates(from.t, to.t, budget)
+    }
+
+    // Retain already solved roots for finite loading compliance. Reconstructing
+    // indentation and reinverting can round a valid envelope endpoint outside
+    // its own bound, as well as repeating the original nonlinear solve.
+    pub(super) fn reversible_work_between_coordinates(
+        &self,
+        from_t: f64,
+        to_t: f64,
+        budget: MaugisWorkBudget,
+    ) -> Result<MaugisWorkEstimate, MaugisError> {
+        validate_budget(budget)?;
+        if !from_t.is_finite()
+            || !to_t.is_finite()
+            || from_t < self.minimum_t
+            || to_t < self.minimum_t
+            || from_t > self.maximum_t
+            || to_t > self.maximum_t
+        {
+            return Err(MaugisError::InvalidInput {
+                field: "stable branch work coordinates",
+            });
+        }
+        if from_t == to_t {
+            return Err(MaugisError::Unrepresentable {
+                field: "distinct work endpoints collapse",
+            });
+        }
         let scale = self.force_scale_n * self.indentation_scale_m;
         if !scale.is_finite() || scale <= 0.0 {
             return Err(MaugisError::Unrepresentable {
                 field: "branch work scale",
             });
         }
-        let sign = if to.t > from.t { 1.0 } else { -1.0 };
-        let a = from.t.min(to.t);
-        let b = from.t.max(to.t);
+        let sign = if to_t > from_t { 1.0 } else { -1.0 };
+        let a = from_t.min(to_t);
+        let b = from_t.max(to_t);
         let mut q = Integrator {
             lambda: self.lambda,
             count: 0,

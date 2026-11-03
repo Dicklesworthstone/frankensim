@@ -409,6 +409,11 @@ impl SourceMaugisSphereContact {
     /// dU/d(delta)=F, with no numerical integration or reference-state fitting.
     pub fn evaluate_contact_energy(&self, indentation_m: f64) -> Result<MaugisEquilibrium, MaugisContinuationError> {
         let state = self.state_at_indentation(indentation_m)?;
+        self.contact_energy_at_state(state)
+    }
+    // The finite-stiffness fixture already inverted the same contact kernel.
+    // Reuse its root rather than performing a second indentation inversion.
+    pub(super) fn contact_energy_at_state(&self, state: kernel::State) -> Result<MaugisEquilibrium, MaugisContinuationError> {
         let contact = self.response(state)?;
         let (elastic, surface, potential) = contact_energies(self.lambda, state);
         let scale = self.continuation_energy_scale()?;
@@ -456,6 +461,19 @@ impl SourceMaugisSphereContact {
         if !c.is_finite() || c < fold || c > zero.c {
             return Err(MaugisError::Unrepresentable { field: "stable noncontact radius" }.into());
         }
+        let endpoint = indentation_m == limits.minimum_indentation_m || indentation_m == limits.first_contact_indentation_m;
+        self.noncontact_energy_at_radius(c, indentation_m, endpoint)
+    }
+    // A spring fixture inverts its own stage/radius quadratic directly. Keep
+    // that radius rather than lose a small fold offset in a second inversion.
+    pub(super) fn noncontact_energy_at_radius(&self, c: f64, indentation_m: f64, endpoint: bool)
+        -> Result<MaugisEquilibrium, MaugisContinuationError>
+    {
+        let zero = kernel::state(self.lambda, 0.0)?;
+        let fold = (8.0/(3.0*PI))*self.lambda;
+        if !c.is_finite() || c < fold || c > zero.c {
+            return Err(MaugisError::Unrepresentable { field: "stable noncontact radius" }.into());
+        }
         let radius = c*self.radius_scale_m;
         self.admit_noncontact_radius(radius)?;
         let c2 = c*c;
@@ -465,7 +483,6 @@ impl SourceMaugisSphereContact {
         let surface = -geometric-0.5*elastic;
         let potential = -geometric+0.5*elastic;
         let gap = (zero.c-c)*(0.5*(zero.c+c)+(4.0/3.0-8.0/(3.0*PI))*self.lambda)*self.indentation_scale_m;
-        let endpoint = indentation_m == limits.minimum_indentation_m || indentation_m == limits.first_contact_indentation_m;
         let tangent = if endpoint { None } else {
             Some(-PI*self.lambda*(c/(c-fold))*(self.force_scale_n/self.indentation_scale_m))
         };

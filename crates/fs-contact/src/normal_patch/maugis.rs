@@ -23,6 +23,9 @@ pub use work::{MaugisWorkBudget, MaugisWorkEstimate};
 /// Absolute energy and finite-deformation noncontact continuation of the same law.
 #[path = "maugis/continuation.rs"]
 pub mod continuation;
+/// Original finite-zone adhesion under finite loading-spring compliance.
+#[path = "maugis/fixture.rs"]
+pub mod fixture;
 
 /// Explicit small-strain, smooth elastic half-space operating domain.
 #[derive(Clone, Copy, Debug, PartialEq)]

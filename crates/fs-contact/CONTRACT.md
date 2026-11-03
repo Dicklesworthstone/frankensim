@@ -1903,3 +1903,38 @@ independent temperatures, loaded/reversal histories, exact unchanged-T behavior,
 equal-endpoint nonconstant mu(T) and E(T), original-card/claim/domain/schema
 refusals and cancellation with identical retry. This exact invariant-parameter
 transfer enables same-transaction finite heat without silently resetting memory.
+
+## Finite-stiffness Maugis loading and adhesive snap history
+
+`normal_patch::maugis::fixture::MaugisSpringFixture` connects the original
+Maugis--Dugdale sphere owner to an explicitly supplied linear loading spring.
+It solves `F(delta)=K(D-delta)` on the stable contacting or deformed noncontact
+branch; the finite-stiffness fold follows `K+F'(delta)=0`, rather than either
+ideal-control pull-off threshold. The same original source identities, work of
+adhesion, finite interaction range, elastic properties and applicability bounds
+remain attached. The attractive disk retains zero solid junction-shear area.
+
+Construction prepares the contact fold, any stable noncontact interval, and
+the snap-in/snap-off states. Scalar solves are bounded to 128 iterations and
+allocate nothing. Shared radius-to-energy evaluation avoids a second branch
+inversion. Indistinguishable branch limits, unresolved equilibrium, invalid
+source domains and snap landings beyond the original envelope refuse.
+
+An explicit initial phase selects metastable history. Monotone proposals
+localize jumps at fixed stage, retain actual spring storage, and expose the
+decrease of total spring/contact potential as a separate release. Continuous
+stage work uses the original force-work quadrature plus the spring-energy
+increment; the noncontact stage integral is analytic. An independent total
+energy gate precedes publication of the immutable successor token. Rejected
+steps leave accepted history unchanged; zero-length or already detached steps
+cannot release the same event again. Folds and junctions withhold smooth stage
+tangents. The stage port and tip port have different conjugate coordinates.
+
+The focused `adhesive_maugis_fixture` regressions cover original-law recovery,
+spring equilibrium/storage, force and energy derivatives, compliant pull-off
+and both control limits, deformed noncontact geometry and zero-area continuity,
+complete loading/unloading energy, source/stiffness mismatch and budget refusal.
+This is massless axisymmetric quasistatic loading, with numerical work-error
+estimates rather than interval certificates. Inertial snap trajectories,
+nonaxisymmetric stability, frictional peeling, heat partition, evolving material
+conditions and experimental adhesive calibration remain outside this owner.
