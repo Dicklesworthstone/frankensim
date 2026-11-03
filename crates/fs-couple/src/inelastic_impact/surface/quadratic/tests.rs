@@ -19,7 +19,12 @@ fn with_cx(f: impl FnOnce(&Cx<'_>)) {
         f(&Cx::new(
             &gate,
             arena,
-            StreamKey { seed: 31, kernel_id: 17, tile: 0, iteration: 0 },
+            StreamKey {
+                seed: 31,
+                kernel_id: 17,
+                tile: 0,
+                iteration: 0,
+            },
             Budget::INFINITE,
             ExecMode::Deterministic,
         ));
@@ -67,13 +72,8 @@ fn conforming_internal_faces_cancel_and_every_original_midside_binds_identity() 
     with_cx(|cx| {
         let mut corners = CORNERS.to_vec();
         corners.push([0.0, 0.0, -1.0]);
-        let (nodes, elements) = promote_p1_to_p2(
-            &corners,
-            &[[0, 1, 2, 3], [0, 2, 1, 4]],
-            None,
-            cx,
-        )
-        .unwrap();
+        let (nodes, elements) =
+            promote_p1_to_p2(&corners, &[[0, 1, 2, 3], [0, 2, 1, 4]], None, cx).unwrap();
         let surface = QuadraticSolidContactSurface::from_reference(
             &nodes,
             &elements,
@@ -99,7 +99,9 @@ fn conforming_internal_faces_cancel_and_every_original_midside_binds_identity() 
                 &vec![[0.0; 3]; changed.len()],
                 cx,
             ),
-            Err(QuadraticSolidSurfaceError::Surface(FiniteSolidSurfaceError::ReferenceMismatch))
+            Err(QuadraticSolidSurfaceError::Surface(
+                FiniteSolidSurfaceError::ReferenceMismatch
+            ))
         ));
         let mut reordered = elements.clone();
         reordered.swap(0, 1);
@@ -119,7 +121,9 @@ fn conforming_internal_faces_cancel_and_every_original_midside_binds_identity() 
                 8,
                 cx,
             ),
-            Err(QuadraticSolidSurfaceError::SolidGeometry(TetElasticError::MidsideMismatch { .. }))
+            Err(QuadraticSolidSurfaceError::SolidGeometry(
+                TetElasticError::MidsideMismatch { .. }
+            ))
         ));
     });
 }
@@ -129,7 +133,11 @@ fn curved_material_edges_and_vertices_have_stable_deduplicated_contact_ids() {
     with_cx(|cx| {
         let (nodes, elements) = promote_p1_to_p2(&CORNERS, &[[0, 1, 2, 3]], None, cx).unwrap();
         let surface = QuadraticSolidContactSurface::from_reference(
-            &nodes, &elements, TetAssemblyBudget::standard(), 4, cx,
+            &nodes,
+            &elements,
+            TetAssemblyBudget::standard(),
+            4,
+            cx,
         )
         .unwrap();
         let bodies = [
@@ -142,7 +150,14 @@ fn curved_material_edges_and_vertices_have_stable_deduplicated_contact_ids() {
             .unwrap();
         assert_eq!(query.contacts.len(), 2);
         assert!(query.candidate_triangles >= 5);
-        assert_eq!(query.closest.iter().map(|w| w.sphere_id).collect::<Vec<_>>(), [3, 9]);
+        assert_eq!(
+            query
+                .closest
+                .iter()
+                .map(|w| w.sphere_id)
+                .collect::<Vec<_>>(),
+            [3, 9]
+        );
         let contacts = query.admitted_contacts().unwrap();
         for witness in &query.contacts {
             let FiniteSolidContactCounterpart::Solid(point) = witness.contact.counterpart else {
@@ -162,7 +177,11 @@ fn curved_material_edges_and_vertices_have_stable_deduplicated_contact_ids() {
         }
         let reordered = surface
             .sphere_separations_at_positions(
-                &nodes, &bodies, &[spheres[1], spheres[0]], controls(), cx,
+                &nodes,
+                &bodies,
+                &[spheres[1], spheres[0]],
+                controls(),
+                cx,
             )
             .unwrap();
         assert_eq!(contacts, reordered.admitted_contacts().unwrap());
@@ -172,12 +191,17 @@ fn curved_material_edges_and_vertices_have_stable_deduplicated_contact_ids() {
                 &bodies,
                 &spheres,
                 QuadraticSolidSurfaceControls {
-                    surface: FiniteSolidSurfaceControls { maximum_contacts: 1, ..controls().surface },
+                    surface: FiniteSolidSurfaceControls {
+                        maximum_contacts: 1,
+                        ..controls().surface
+                    },
                     ..controls()
                 },
                 cx,
             ),
-            Err(QuadraticSolidSurfaceError::Surface(FiniteSolidSurfaceError::ContactBudgetExhausted { .. }))
+            Err(QuadraticSolidSurfaceError::Surface(
+                FiniteSolidSurfaceError::ContactBudgetExhausted { .. }
+            ))
         ));
     });
 }
@@ -187,7 +211,11 @@ fn interior_and_uncertain_activation_refuse_without_repairing_raw_geometry() {
     with_cx(|cx| {
         let (nodes, elements) = promote_p1_to_p2(&CORNERS, &[[0, 1, 2, 3]], None, cx).unwrap();
         let surface = QuadraticSolidContactSurface::from_reference(
-            &nodes, &elements, TetAssemblyBudget::standard(), 4, cx,
+            &nodes,
+            &elements,
+            TetAssemblyBudget::standard(),
+            4,
+            cx,
         )
         .unwrap();
         assert!(matches!(
@@ -198,7 +226,9 @@ fn interior_and_uncertain_activation_refuse_without_repairing_raw_geometry() {
                 controls(),
                 cx,
             ),
-            Err(QuadraticSolidSurfaceError::Surface(FiniteSolidSurfaceError::UnresolvedExterior { .. }))
+            Err(QuadraticSolidSurfaceError::Surface(
+                FiniteSolidSurfaceError::UnresolvedExterior { .. }
+            ))
         ));
         let mut admission = controls();
         // Exact binary gap equals the band boundary. Directed numerical bounds
@@ -215,6 +245,9 @@ fn interior_and_uncertain_activation_refuse_without_repairing_raw_geometry() {
             .unwrap();
         assert!(raw.closest[0].gap_m > 0.0);
         assert!(raw.unresolved_activation.is_some());
-        assert!(matches!(raw.admitted_contacts(), Err(QuadraticSolidSurfaceError::UnresolvedActivation { .. })));
+        assert!(matches!(
+            raw.admitted_contacts(),
+            Err(QuadraticSolidSurfaceError::UnresolvedActivation { .. })
+        ));
     });
 }

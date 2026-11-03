@@ -119,16 +119,9 @@ fn moving_midside_nodes_cannot_hide_behind_stationary_corners() {
         )
         .unwrap();
         assert!(matches!(linear.verdict, LinearSweepVerdict::Clear { .. }));
-        let curved = linear_sphere_quadratic_triangle(
-            center,
-            center,
-            0.0625,
-            FLAT,
-            bowed,
-            controls(),
-            cx,
-        )
-        .unwrap();
+        let curved =
+            linear_sphere_quadratic_triangle(center, center, 0.0625, FLAT, bowed, controls(), cx)
+                .unwrap();
         match curved.path.verdict {
             LinearSweepVerdict::PossibleContact {
                 fraction_start,
@@ -151,17 +144,13 @@ fn curved_distance_bound_proves_clearance_inside_the_control_hull() {
         // Thus the exact closest distance is sqrt(3/2)/8. C lies inside the
         // original Bernstein hull, so root-hull planes alone cannot prove it.
         let analytic_clearance = 1.5_f64.sqrt() / 8.0 - 0.125;
-        for origin in [
-            [0.0; 3],
-            [1073741824.0, -1073741824.0, 1073741824.0],
-        ] {
-            let start = paraboloid(1.0)
-                .map(|node| core::array::from_fn(|axis| origin[axis] + node[axis]));
-            let center =
-                core::array::from_fn(|axis| origin[axis] + [0.1875, 0.1875, 0.25][axis]);
+        for origin in [[0.0; 3], [1073741824.0, -1073741824.0, 1073741824.0]] {
+            let start =
+                paraboloid(1.0).map(|node| core::array::from_fn(|axis| origin[axis] + node[axis]));
+            let center = core::array::from_fn(|axis| origin[axis] + [0.1875, 0.1875, 0.25][axis]);
             for translation in [[0.0; 3], [4.0, -2.0, 1.0]] {
-                let end = start
-                    .map(|node| core::array::from_fn(|axis| node[axis] + translation[axis]));
+                let end =
+                    start.map(|node| core::array::from_fn(|axis| node[axis] + translation[axis]));
                 let center_end = core::array::from_fn(|axis| center[axis] + translation[axis]);
                 let report = linear_sphere_quadratic_triangle(
                     center,

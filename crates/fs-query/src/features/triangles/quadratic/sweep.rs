@@ -40,6 +40,13 @@ impl Default for QuadraticSweepControls {
     }
 }
 
+impl QuadraticSweepControls {
+    /// Validate even when a caller's broad phase finds no candidate patches.
+    pub fn validate(self) -> Result<(), QuadraticQueryError> {
+        validate(self)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuadraticSweepReport {
     pub path: LinearSweepReport,
@@ -68,7 +75,7 @@ pub fn linear_sphere_quadratic_triangle(
     cx: &Cx<'_>,
 ) -> Result<QuadraticSweepReport, QuadraticQueryError> {
     poll(cx)?;
-    validate(controls)?;
+    controls.validate()?;
     if !radius.is_finite()
         || radius <= 0.0
         || center_start
@@ -185,9 +192,9 @@ pub fn linear_sphere_quadratic_triangle(
                     if !stationary {
                         // Scale the control velocity before its norm to avoid
                         // overflowing a speed whose window displacement fits.
-                        motion = motion.max(enclosed_norm_upper(core::array::from_fn(
-                            |axis| (end[i][axis] - start[i][axis]) * half_width,
-                        ))?);
+                        motion = motion.max(enclosed_norm_upper(core::array::from_fn(|axis| {
+                            (end[i][axis] - start[i][axis]) * half_width
+                        }))?);
                     }
                 }
                 let lower = (Interval::point(closest.distance_lower)

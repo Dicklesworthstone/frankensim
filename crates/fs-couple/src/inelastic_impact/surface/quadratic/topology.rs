@@ -95,7 +95,9 @@ impl QuadraticSolidContactSurface {
             checkpoint(cx)?;
             let corners = compact.map(|node| corner_ids[node]);
             for [a, b] in [[0, 1], [0, 2], [1, 2]] {
-                exterior_edges.entry(edge(corners[a], corners[b])).or_insert(0);
+                exterior_edges
+                    .entry(edge(corners[a], corners[b]))
+                    .or_insert(0);
             }
         }
         for (id, entry) in exterior_edges.values_mut().enumerate() {
@@ -131,9 +133,9 @@ impl QuadraticSolidContactSurface {
                 .find(|local| !local_corners.contains(local))
                 .ok_or_else(|| invalid("quadratic face has no opposite corner"))?;
             let outward = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]][opposite];
-            if !(0..3).any(|start| {
-                (0..3).all(|slot| local_corners[slot] == outward[(start + slot) % 3])
-            }) {
+            if !(0..3)
+                .any(|start| (0..3).all(|slot| local_corners[slot] == outward[(start + slot) % 3]))
+            {
                 corners.swap(1, 2);
                 local_corners.swap(1, 2);
             }
@@ -178,8 +180,13 @@ impl QuadraticSolidContactSurface {
                 edge_ids,
             });
         }
-        if edge_orientation.into_iter().any(|orientation| orientation != 0) {
-            return Err(invalid("native quadratic exterior charts are inconsistently oriented"));
+        if edge_orientation
+            .into_iter()
+            .any(|orientation| orientation != 0)
+        {
+            return Err(invalid(
+                "native quadratic exterior charts are inconsistently oriented",
+            ));
         }
         let feature_count = nodes_m
             .len()
@@ -238,7 +245,9 @@ impl QuadraticSolidContactSurface {
                 checkpoint(cx)?;
             }
             vector(*displacement)?;
-            positions.push(vector(core::array::from_fn(|axis| node[axis] + displacement[axis]))?);
+            positions.push(vector(core::array::from_fn(|axis| {
+                node[axis] + displacement[axis]
+            }))?);
         }
         checkpoint(cx)?;
         Ok(positions)

@@ -39,7 +39,9 @@ impl QuadraticSolidContactSurface {
             || controls.query.maximum_cells == 0
             || controls.query.maximum_active_cells == 0
         {
-            return Err(invalid("matching bounded curved geometry and positive finite tolerances required"));
+            return Err(invalid(
+                "matching bounded curved geometry and positive finite tolerances required",
+            ));
         }
         let mut query_controls = controls.query;
         // Leave room for the original native trace's independent floating-point
@@ -80,7 +82,9 @@ impl QuadraticSolidContactSurface {
                 || sphere.friction_coefficient < 0.0
                 || (slot > 0 && spheres[order[slot - 1]].id == sphere.id)
             {
-                return Err(invalid("distinct sphere IDs, valid rigid body, positive radius and nonnegative friction required"));
+                return Err(invalid(
+                    "distinct sphere IDs, valid rigid body, positive radius and nonnegative friction required",
+                ));
             }
             sphere
                 .id
@@ -91,9 +95,8 @@ impl QuadraticSolidContactSurface {
                 })?;
             let rigid = rigid_bodies[sphere.rigid_body];
             let center = rigid.pose().point_world_from_body(sphere.center_body_m)?;
-            let within = finite(
-                finite(sphere.radius_m + admission.activation_tolerance_m)?.next_up(),
-            )?;
+            let within =
+                finite(finite(sphere.radius_m + admission.activation_tolerance_m)?.next_up())?;
             query_controls.maximum_cells = controls
                 .query
                 .maximum_cells
@@ -111,9 +114,9 @@ impl QuadraticSolidContactSurface {
             let query = surface.point_query(
                 array(center),
                 within,
-                admission.maximum_query_visits.saturating_sub(
-                    report.visited_nodes.saturating_add(report.tested_triangles),
-                ),
+                admission
+                    .maximum_query_visits
+                    .saturating_sub(report.visited_nodes.saturating_add(report.tested_triangles)),
                 admission
                     .maximum_candidates
                     .saturating_sub(report.candidate_triangles),
@@ -240,7 +243,9 @@ impl QuadraticSolidContactSurface {
             || !sum.is_finite()
             || (sum - 1.0).abs() > 64.0 * f64::EPSILON
         {
-            return Err(invalid("quadratic query returned inadmissible native barycentrics"));
+            return Err(invalid(
+                "quadratic query returned inadmissible native barycentrics",
+            ));
         }
         let solid_point = Tet10ImpulsePoint {
             tetrahedron: material.tetrahedron,
@@ -284,7 +289,11 @@ impl QuadraticSolidContactSurface {
             }
             .into());
         }
-        let normal_world = Vec3::new(radial.x / distance, radial.y / distance, radial.z / distance);
+        let normal_world = Vec3::new(
+            radial.x / distance,
+            radial.y / distance,
+            radial.z / distance,
+        );
         let arm_body = sphere.center_body_m.sub(
             rigid
                 .pose()
@@ -320,11 +329,10 @@ impl QuadraticSolidContactSurface {
             }
             TriangleFeature::Face => self.reference_nodes_m.len() + self.edge_count + face,
         };
-        let feature = u64::try_from(feature).map_err(|_| {
-            FiniteSolidSurfaceError::ContactIdOverflow {
+        let feature =
+            u64::try_from(feature).map_err(|_| FiniteSolidSurfaceError::ContactIdOverflow {
                 sphere_id: sphere.id,
-            }
-        })?;
+            })?;
         let id = sphere
             .id
             .checked_mul(self.feature_count)
@@ -332,7 +340,11 @@ impl QuadraticSolidContactSurface {
             .ok_or(FiniteSolidSurfaceError::ContactIdOverflow {
                 sphere_id: sphere.id,
             })?;
-        let components = [normal_world.x.abs(), normal_world.y.abs(), normal_world.z.abs()];
+        let components = [
+            normal_world.x.abs(),
+            normal_world.y.abs(),
+            normal_world.z.abs(),
+        ];
         let axis = if components[0] <= components[1] && components[0] <= components[2] {
             Vec3::new(1.0, 0.0, 0.0)
         } else if components[1] <= components[2] {

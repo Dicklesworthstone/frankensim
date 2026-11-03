@@ -126,6 +126,19 @@ physical pressure, Maxwell memory, displacement and time through the original
 complete-state candidate. No replacement mass, constitutive or contact law is
 introduced.
 
+`QuadraticSolidContactSurface::affine_sphere_paths_at_positions` reuses that
+prepared curved topology for a complete declared path of every original node
+and sphere center. The initial curved query admits exterior containment and
+preserves negative-gap refusal. An uncertain nonnegative initial gap can be
+resolved only by the subsequent whole-path proof, including exact touching and
+receding support cases. Endpoint poses locate sphere centers; interpolating
+those centers affinely does not assert an underlying rigid rotational path.
+Endpoint Bernstein hull unions supply a conservative swept broad phase. Every
+remaining face uses the original directed quadratic sweep, with aggregate
+traversal, candidate, time-window and distance-cell limits across the scene.
+The earliest unresolved window retains its sphere and face identity; a clear
+receipt carries a finite lower clearance bound, including culled pairs.
+
 The input solid must be a consistently oriented, conforming nonoverlapping mesh.
 Positive native Jacobians at selected points are local admission checks; they do
 not prove global injectivity or a valid material trajectory between states.

@@ -12,7 +12,9 @@
 //! Jacobian at the selected material point is a local admission check, not a
 //! certificate of global injectivity: the source mesh must be a nonoverlapping,
 //! consistently oriented solid. There is no curved-volume corner containment
-//! approximation, swept-path certificate, penetration repair or time integrator.
+//! approximation, penetration repair or time integrator. The path module
+//! separately bounds declared affine coordinate motion; it does not certify a
+//! material trajectory between integration endpoints.
 
 use crate::finite_solid::contact::surface::{
     FiniteSolidSphere, FiniteSolidSurfaceControls, FiniteSolidSurfaceError,
@@ -32,6 +34,9 @@ mod topology;
 
 /// Native circular and pressure-constrained mechanical adapters.
 pub mod mechanical;
+
+/// Whole-path bounds for explicitly declared affine nodal and sphere motion.
+pub mod path;
 
 /// Bounded geometry controls; all distances are in metres.
 #[derive(Clone, Copy, Debug)]
@@ -125,7 +130,11 @@ impl QuadraticSolidSurfaceQuery {
                 activation_tolerance_m: witness.contact.activation_tolerance_m,
             });
         }
-        Ok(self.contacts.iter().map(|witness| witness.contact).collect())
+        Ok(self
+            .contacts
+            .iter()
+            .map(|witness| witness.contact)
+            .collect())
     }
 }
 
