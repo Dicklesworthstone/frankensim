@@ -31,10 +31,10 @@
 //!
 //! The wall distance runs from each fluid voxel centre to the box of the
 //! nearest solid voxel or wall-type domain face (exact for axis-aligned
-//! walls), the nearest seed from the separable linear-time feature
-//! transform of Felzenszwalb & Huttenlocher (Theory of Computing 8, 2012) on
-//! the cell centres of a uniform or graded grid padded by one ghost layer
-//! behind each wall face.
+//! walls). A separable linear-time feature transform minimizes distance to
+//! each seed's actual cell interval, including on graded grids. Minimizing
+//! distance to solid centres and then measuring only the selected box would
+//! choose the wrong surface near unequal cells and some obstacle corners.
 //!
 //! # No-claim boundaries
 //!
@@ -112,15 +112,44 @@ pub fn eddy_viscosity_ratio(reynolds: f64) -> f64 {
     law_of_the_wall_ratios(reynolds).0
 }
 
-/// One-dimensional squared Euclidean distance transform with features
-/// (Felzenszwalb & Huttenlocher, on arbitrary sample positions `x`):
-/// `out[q] = min_p ((x_q - x_p)^2 + f[p])` over finite `f[p]`, and
-/// `feature_out[q] = feature[p]` of the minimizing `p` (all infinite gives
-/// infinity). `v` and `z` are scratch of length `f.len()` and
-/// `f.len() + 1`.
+/// Intersection of the costs `f_p + dist(x, [a,b])^2` and
+/// `f_q + dist(x, [c,d])^2`, where `a < b <= c < d` and
+/// `offset = f_q - f_p`. Their difference increases monotonically, so
+/// there is one switch from p to q. Depending on the offset, it lies in
+/// the gap, inside one interval, or beyond both. The latter two cases are
+/// essential on graded grids; a centre-parabola intersection is not valid.
+fn interval_crossing([a, b]: [f64; 2], [c, d]: [f64; 2], offset: f64) -> f64 {
+    let gap = c - b;
+    let root = offset.abs().sqrt();
+    if root <= gap {
+        if gap == 0.0 {
+            b
+        } else {
+            b + 0.5 * (gap + offset / gap)
+        }
+    } else if offset > 0.0 {
+        if root <= d - b {
+            b + root
+        } else {
+            b + 0.5 * ((d - b) + offset / (d - b))
+        }
+    } else if root <= c - a {
+        c - root
+    } else {
+        a + 0.5 * ((c - a) + offset / (c - a))
+    }
+}
+
+/// Squared distance transform to ordered, nonoverlapping cell intervals:
+/// `out[q] = min_p (dist(x[q], [edges[p], edges[p+1]])^2 + f[p])`.
+/// It retains the minimizing source feature. Each interval is pushed and
+/// popped at most once, and each sample advances through the lower envelope
+/// once, giving linear work as for the point-parabola transform. Exact
+/// switch ties prefer the earlier interval. `v` and `z` are reusable scratch.
 #[allow(clippy::too_many_arguments)] // the transform's inputs and scratch
 fn edt_1d(
     x: &[f64],
+    edges: &[f64],
     f: &[f64],
     feature: &[[usize; 3]],
     out: &mut [f64],
@@ -129,13 +158,12 @@ fn edt_1d(
     z: &mut [f64],
 ) {
     let n = f.len();
-    // Lower envelope of the parabolas rooted at finite samples.
+    // Lower envelope of the squared-distance functions of finite intervals.
     let mut k: Option<usize> = None;
     for q in 0..n {
         if !f[q].is_finite() {
             continue;
         }
-        let fq = x[q].mul_add(x[q], f[q]);
         loop {
             match k {
                 None => {
@@ -147,7 +175,11 @@ fn edt_1d(
                 }
                 Some(top) => {
                     let p = v[top];
-                    let s = (fq - x[p].mul_add(x[p], f[p])) / (2.0 * (x[q] - x[p]));
+                    let s = interval_crossing(
+                        [edges[p], edges[p + 1]],
+                        [edges[q], edges[q + 1]],
+                        f[q] - f[p],
+                    );
                     if s <= z[top] {
                         k = top.checked_sub(1);
                         continue;
@@ -172,7 +204,7 @@ fn edt_1d(
             j += 1;
         }
         let p = v[j];
-        let d = x[q] - x[p];
+        let d = (edges[p] - x[q]).max(x[q] - edges[p + 1]).max(0.0);
         out[q] = d.mul_add(d, f[p]);
         feature_out[q] = feature[p];
     }
@@ -180,11 +212,10 @@ fn edt_1d(
 
 /// Distance (m) from each fluid cell centre to the nearest wall: a solid
 /// voxel or a domain face whose `wall[face]` is true (openings, inlets and
-/// symmetry planes are not walls). The nearest seed cell comes from an
-/// exact separable feature transform over the cell centres (uniform or
-/// graded), with one ghost layer behind each wall face; the distance is
-/// then to that seed cell's box (exact for axis-aligned walls), at least
-/// half the cell's smallest width. Solid cells get zero.
+/// symmetry planes are not walls). The separable transform minimizes distance
+/// to the actual solid boxes, including corners and unequal cell widths.
+/// Ghost boxes behind wall faces represent those domain planes. The distance
+/// is at least half the cell's smallest width. Solid cells get zero.
 #[must_use]
 pub fn wall_distance(domain: &VoxelDomain, wall: [bool; 6]) -> Vec<f64> {
     let mut distance = Vec::with_capacity(domain.cell_count());
@@ -212,28 +243,29 @@ pub(super) fn wall_distance_and_boundary(
 /// Share the distance/feature transform without a second grid scan or an
 /// intermediate per-cell tuple allocation. The additional small boundary
 /// cache is absent from laminar/SGS solvers.
-#[allow(clippy::too_many_lines)] // padding, three passes, box distances
+#[allow(clippy::too_many_lines)] // padding and three interval-transform passes
 fn wall_features(domain: &VoxelDomain, wall: [bool; 6], mut emit: impl FnMut(f64, Option<u8>)) {
     let [nx, ny, nz] = domain.dims();
     let n = [nx, ny, nz];
     // Padded grid: one ghost layer on every side; ghost cells are seeds on
-    // wall faces, far away otherwise. Ghost centres mirror the edge cells.
+    // wall faces, far away otherwise. Ghost intervals mirror the edge cells.
     let dims = [nx + 2, ny + 2, nz + 2];
     let index = |x: usize, y: usize, z: usize| (z * dims[1] + y) * dims[0] + x;
-    let width = |a: usize, i: usize| domain.width(a, i.clamp(1, n[a]) - 1);
-    let position: [Vec<f64>; 3] = [0, 1, 2].map(|a| {
-        (0..dims[a])
+    let edges: [Vec<f64>; 3] = [0, 1, 2].map(|a| {
+        (0..=dims[a])
             .map(|i| {
                 if i == 0 {
-                    domain.face_coord(a, 0) - 0.5 * domain.width(a, 0)
-                } else if i == dims[a] - 1 {
-                    domain.face_coord(a, n[a]) + 0.5 * domain.width(a, n[a] - 1)
+                    domain.face_coord(a, 0) - domain.width(a, 0)
+                } else if i == dims[a] {
+                    domain.face_coord(a, n[a]) + domain.width(a, n[a] - 1)
                 } else {
-                    0.5 * (domain.face_coord(a, i - 1) + domain.face_coord(a, i))
+                    domain.face_coord(a, i - 1)
                 }
             })
             .collect()
     });
+    let position: [Vec<f64>; 3] =
+        core::array::from_fn(|a| edges[a].windows(2).map(|e| 0.5 * (e[0] + e[1])).collect());
     let mut grid = vec![f64::INFINITY; dims[0] * dims[1] * dims[2]];
     let mut feature = vec![[0usize; 3]; grid.len()];
     for z in 0..dims[2] {
@@ -300,6 +332,7 @@ fn wall_features(domain: &VoxelDomain, wall: [bool; 6], mut emit: impl FnMut(f64
                 }
                 edt_1d(
                     &position[axis],
+                    &edges[axis],
                     &f[..len],
                     &feat[..len],
                     &mut out[..len],
@@ -325,16 +358,10 @@ fn wall_features(domain: &VoxelDomain, wall: [bool; 6], mut emit: impl FnMut(f64
             emit(f64::INFINITY, None);
             continue;
         }
-        // Distance from this centre to the nearest seed's box.
+        // The interval transform already minimized the complete box distance;
+        // this same feature selects the moving-wall velocity reference.
         let seed = feature[cell];
         let own = domain.widths(c);
-        let mut squared = 0.0;
-        for a in 0..3 {
-            let gap = ((position[a][[x, y, z][a] + 1] - position[a][seed[a]]).abs()
-                - 0.5 * width(a, seed[a]))
-            .max(0.0);
-            squared = gap.mul_add(gap, squared);
-        }
         let floor = 0.5 * own.iter().fold(f64::INFINITY, |m, w| m.min(*w));
         let boundary = (0..3).find_map(|a| {
             if seed[a] == 0 {
@@ -345,6 +372,142 @@ fn wall_features(domain: &VoxelDomain, wall: [bool; 6], mut emit: impl FnMut(f64
                 None
             }
         });
-        emit(squared.sqrt().max(floor), boundary);
+        emit(grid[cell].sqrt().max(floor), boundary);
+    }
+}
+
+#[cfg(test)]
+mod distance_tests {
+    use super::*;
+    use crate::conjugate::Voxel;
+
+    #[test]
+    fn interval_envelope_crosses_in_gaps_interiors_and_exterior_tails() {
+        // G0: check the five distinct intersection cases against the defining
+        // distances, independently of the three-dimensional transform.
+        let left = [0.0, 2.0];
+        let right = [3.0, 8.0];
+        for offset in [-100.0_f64, -4.0, 0.0, 4.0, 100.0] {
+            let x = interval_crossing(left, right, offset);
+            let squared = |x: f64, interval: [f64; 2]| {
+                (interval[0] - x).max(x - interval[1]).max(0.0).powi(2)
+            };
+            let residual = squared(x, left) - squared(x, right) - offset;
+            assert!(
+                residual.abs() < 1e-12,
+                "offset={offset}, x={x}, residual={residual}"
+            );
+            assert!(squared(x - 0.01, left) - squared(x - 0.01, right) < offset);
+            assert!(squared(x + 0.01, left) - squared(x + 0.01, right) > offset);
+        }
+        assert_eq!(interval_crossing([0.0, 2.0], [2.0, 3.0], 0.0), 2.0);
+    }
+
+    #[test]
+    fn nearest_solid_centre_is_not_the_nearest_surface() {
+        // The narrower solid has the nearest centre (2.75 vs 5.5), but
+        // its surface is farther away (2.5 vs 1.5).
+        let mut graded = VoxelDomain::graded([
+            vec![1.0, 1.0, 8.0, 0.5],
+            vec![1.0, 2.0, 0.5, 5.0],
+            vec![1.0],
+        ])
+        .unwrap();
+        graded.set(0, 2, 0, Voxel::Solid(0));
+        graded.set(2, 0, 0, Voxel::Solid(0));
+        let distances = wall_distance(&graded, [false; 6]);
+        assert_eq!(distances[graded.index(0, 0, 0)], 1.5);
+
+        // This also fails on a uniform grid: the farther centre's corner
+        // lies closer than the other voxel's face (sqrt(40.5) vs 6.5).
+        let mut uniform = VoxelDomain::new(8, 8, 1, 1.0).unwrap();
+        uniform.set(0, 7, 0, Voxel::Solid(0));
+        uniform.set(5, 5, 0, Voxel::Solid(0));
+        assert_eq!(wall_distance(&uniform, [false; 6])[0], 40.5_f64.sqrt());
+    }
+
+    #[test]
+    fn wall_distance_and_feature_match_direct_box_and_plane_geometry() {
+        // G0/G3: the small direct oracle enumerates actual occupied boxes
+        // and domain planes. It does not use centres, seeds or the transform.
+        for widths in [
+            [vec![1.0; 4], vec![1.0; 3], vec![1.0; 2]],
+            [
+                vec![0.25, 2.0, 0.5, 4.0],
+                vec![3.0, 0.125, 1.0],
+                vec![0.25, 4.0],
+            ],
+        ] {
+            for scale in [1e-4, 1.0, 1e4] {
+                let mut domain = VoxelDomain::graded(
+                    widths
+                        .clone()
+                        .map(|axis| axis.into_iter().map(|w| w * scale).collect()),
+                )
+                .unwrap();
+                for [x, y, z] in [[0, 2, 0], [2, 0, 1], [3, 2, 1]] {
+                    domain.set(x, y, z, Voxel::Solid(0));
+                }
+                for mask in 0..64 {
+                    let walls = core::array::from_fn(|side| mask & (1 << side) != 0);
+                    let (distance, boundary) = wall_distance_and_boundary(&domain, walls);
+                    for cell in 0..domain.cell_count() {
+                        if !domain.is_fluid(cell) {
+                            assert_eq!(distance[cell], 0.0);
+                            assert_eq!(boundary[cell], None);
+                            continue;
+                        }
+                        let [x, y, z] = domain.coords(cell);
+                        let point = domain.center(x, y, z);
+                        let mut solid_distance = f64::INFINITY;
+                        for other in 0..domain.cell_count() {
+                            if domain.is_fluid(other) {
+                                continue;
+                            }
+                            let at = domain.coords(other);
+                            let squared: f64 = (0..3)
+                                .map(|axis| {
+                                    (domain.face_coord(axis, at[axis]) - point[axis])
+                                        .max(point[axis] - domain.face_coord(axis, at[axis] + 1))
+                                        .max(0.0)
+                                        .powi(2)
+                                })
+                                .sum();
+                            solid_distance = solid_distance.min(squared.sqrt());
+                        }
+                        let plane_distance = |side: usize| {
+                            let axis = side / 2;
+                            if side % 2 == 0 {
+                                point[axis]
+                            } else {
+                                domain.face_coord(axis, domain.dims()[axis]) - point[axis]
+                            }
+                        };
+                        let expected = (0..6)
+                            .filter(|&side| walls[side])
+                            .map(plane_distance)
+                            .fold(solid_distance, f64::min);
+                        let selected = boundary[cell].map_or(solid_distance, |side| {
+                            assert!(walls[usize::from(side)]);
+                            plane_distance(usize::from(side))
+                        });
+                        assert!(
+                            (distance[cell] - expected).abs() < 2e-14 * scale,
+                            "mask={mask}, cell={cell}, got={}, expected={expected}",
+                            distance[cell]
+                        );
+                        assert!(
+                            (selected - expected).abs() < 2e-14 * scale,
+                            "wrong wall frame: mask={mask}, cell={cell}, boundary={:?}",
+                            boundary[cell]
+                        );
+                    }
+                }
+            }
+        }
+        let empty = VoxelDomain::new(2, 2, 2, 1.0).unwrap();
+        let (distance, boundary) = wall_distance_and_boundary(&empty, [false; 6]);
+        assert!(distance.iter().all(|d| d.is_infinite()));
+        assert!(boundary.iter().all(Option::is_none));
     }
 }

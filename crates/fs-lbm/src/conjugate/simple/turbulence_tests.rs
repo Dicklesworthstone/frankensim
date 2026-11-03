@@ -283,6 +283,36 @@ fn lvel_uses_stationary_internal_solids_and_the_nearest_moving_domain_wall() {
 }
 
 #[test]
+fn graded_obstacle_surface_controls_lvel_distance_and_wall_velocity_frame() {
+    // A small moving domain-wall ghost has a nearer centre than the wide
+    // stationary obstacle. Its plane is farther away, however. Using the
+    // nearest centre would select the comoving wall, erase nu_t, and use
+    // L=2.5 instead of the actual stationary-solid distance L=1.5.
+    let mut domain =
+        VoxelDomain::graded([vec![1.0, 1.0, 8.0, 0.5], vec![1.0, 2.0], vec![1.0]]).unwrap();
+    domain.set(2, 0, 0, crate::conjugate::Voxel::Solid(0));
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    faces[3] = FvBoundary::Wall {
+        velocity: [3.0, 0.0, 0.0],
+    };
+    let mut config = SimpleConfig::new(faces);
+    config.turbulence = Turbulence::Lvel;
+    let fluid = fluid();
+    let mut solver = Solver::new(&domain, &fluid, &config);
+    solver.vel[0].fill(3.0);
+    solver.update_turbulence();
+    let cell = domain.index(0, 0, 0);
+    assert_eq!(solver.wall_distance[cell], 1.5);
+    assert_eq!(solver.wall_boundary[cell], None);
+    let (tangent, secant) = law_of_the_wall_ratios(3.0 * 1.5);
+    assert_eq!(solver.eddy_viscosity[cell], tangent);
+    assert_eq!(solver.wall_ratio[cell], secant);
+    assert!(solver.eddy_viscosity[cell] > 0.0);
+}
+
+#[test]
 fn moving_wall_channel_recovers_plug_flow_without_artificial_heat_diffusion() {
     // G0: exercise the public solve and returned thermal coefficients, not
     // only a manufactured closure field. The belts and inflow move together.

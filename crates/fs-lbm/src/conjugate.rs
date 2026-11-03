@@ -173,7 +173,9 @@ pub use unsteady::{
 /// LBM driver's steady criterion. Bump on any change that can move results.
 /// Version 4 preserves paired convection coefficients under flow reversal,
 /// including weak counterflow diffusion and dimensional exponential fitting.
-pub const CHT_SEMANTICS_VERSION: u32 = 4;
+/// Version 5 selects the nearest physical wall surface, rather than nearest
+/// solid-cell centre, for LVEL distance and moving-wall velocity references.
+pub const CHT_SEMANTICS_VERSION: u32 = 5;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]
