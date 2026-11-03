@@ -5,6 +5,9 @@ use fs_couple::material_immersed::dry::{
 };
 use fs_lbm::d3q19::{DryLubricatedSurfacesExchange3, MovingLubricationSurface3};
 
+#[path = "surfaces/shared.rs"]
+mod shared;
+
 type Surfaces<'a> = ResolvedImmersedSurfaces<'a, ResolvedLiquidState, 1>;
 const POINT_BODY: [f64; 3] = [-0.003, -0.002, 0.001];
 

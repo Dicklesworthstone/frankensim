@@ -21,7 +21,8 @@ use super::*;
 mod assembly;
 /// Source-backed physical dry assemblies, including simultaneous sphere films.
 pub use assembly::{
-    MaterialFilmSurfaceSi, PlaneFilmSi, ResolvedImmersedBodies, ResolvedImmersedPlanes,
+    MaterialFilmCarrierSi, MaterialFilmPatchSi, MaterialFilmSurfaceSi, PlaneFilmSi,
+    ResolvedImmersedBodies, ResolvedImmersedPlanes, ResolvedImmersedSharedSurfaces,
     ResolvedImmersedSurfaces,
 };
 

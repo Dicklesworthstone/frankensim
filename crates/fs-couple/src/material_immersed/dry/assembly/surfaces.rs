@@ -5,6 +5,9 @@ use fs_lbm::d3q19::{
     DryLubricatedSurfacesExchange3, MovingFiniteLubricationPlane3, MovingLubricationSurface3,
 };
 
+mod shared;
+pub use shared::{MaterialFilmCarrierSi, MaterialFilmPatchSi, ResolvedImmersedSharedSurfaces};
+
 /// A prescribed reservoir or an independent material-backed finite carrier.
 ///
 /// These are local planar missing-film models, not resolved no-slip boundaries.

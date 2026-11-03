@@ -1,5 +1,42 @@
 # CONTRACT: fs-couple
 
+## Material carriers shared by moving film patches
+
+`MaterialFilmCarrierSi` binds each physical registry body to its original
+`ResolvedBody` mass/full inertia and accepted SI state. `MaterialFilmPatchSi`
+separately describes prescribed reservoirs or body-coordinate patches attached
+by explicit carrier index. `ResolvedImmersedBodies::with_shared_surfaces`
+retains the existing dry-sphere/fluid history and creates
+`ResolvedImmersedSharedSurfaces`. Several patches may reference one carrier;
+equal material references in different registry entries remain independent.
+
+One shared native dry-body correction and resistance solve advances spheres,
+fluid, registry bodies and prescribed patch positions on the same accepted
+clock. Each carrier's complete external force/couple is converted once with
+the original shared SI/lattice helper. Its mass, full inertia, free half-drifts,
+film impulse and kinetic-storage account are never repeated per patch. All
+attached faces use the common accepted pose and solved midpoint rigid velocity.
+Source definitions remain immutable and observers read accepted state.
+
+Reports separate per-patch reaction/work from per-carrier aggregate momentum,
+kinetic storage, authored work and free-rotation defect. Existing assembly
+converters interpret the unchanged native lattice units. The wrapper forwards
+the original initial-flow, held-fluid-force, live open-boundary target and
+density-preserving viscosity updates; every normal/tangential film reads the same fluid snapshot. Invalid
+indices, unused registry entries, bad load counts, cancellation or rejected
+native probes preserve the accepted states and clock. There are at most 64
+registry carriers and 64 patches, with original native dry/body/film budgets.
+
+This remains a local planar missing-film model. Carrier material supplies
+inertia, not certification of patch extent or a resolved no-slip wall. There
+is no inferred gravity/buoyancy, carrier sampled fluid interior, contact, GCL
+or finite heat destination. Complete carrier external loads are explicit.
+Focused material regressions use the original source resolver and native
+solver to check multi-face response at the shared midpoint velocity, unique
+storage and actual momentum balance, legacy equivalence, coefficient refresh,
+source identity and transactional retry.
+
+
 ## Sealed finite gas and full nonlinear membrane equilibrium
 
 `cavity_phs::membrane::GasMembrane` joins the original finite-deformation
