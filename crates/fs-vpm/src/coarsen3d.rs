@@ -239,60 +239,70 @@ pub fn coarsen_oldest(wake: &mut FilamentWake, k: usize) -> Result<CoarsenMetric
 }
 
 fn merged_circulation(
-    ga: f64,
-    aa: [f64; 3],
-    gb: f64,
-    ab: [f64; 3],
-    area: [f64; 3],
+    gamma_a: f64,
+    area_a: [f64; 3],
+    gamma_b: f64,
+    area_b: [f64; 3],
+    area_new: [f64; 3],
 ) -> Result<f64, Refusal> {
-    let mut pivot = 0;
-    for c in 1..3 {
-        if area[c].abs() > area[pivot].abs() {
-            pivot = c;
-        }
+    let refuse = || Refusal {
+        code: "coarsen-impulse-unrepresentable",
+        message: "one coarse quad cannot retain the original vector impulse".into(),
+        ranked_repairs: vec!["retain these rows or choose a geometrically compatible pair".into()],
+    };
+    if area_a
+        .iter()
+        .chain(&area_b)
+        .chain(&area_new)
+        .any(|x| !x.is_finite())
+        || !gamma_a.is_finite()
+        || !gamma_b.is_finite()
+    {
+        return Err(refuse());
     }
-    if area[pivot] == 0.0 {
+    // Normalize both dimensions separately. Neither a world-axis spacing nor
+    // an absolute area/impulse cutoff may decide whether a merge is physical.
+    let area_scale = area_a
+        .iter()
+        .chain(&area_b)
+        .chain(&area_new)
+        .map(|x| x.abs())
+        .fold(0.0_f64, f64::max);
+    let pivot = (0..3)
+        .max_by(|&i, &j| area_new[i].abs().total_cmp(&area_new[j].abs()))
+        .expect("three area components");
+    if area_scale == 0.0 || area_new[pivot] == 0.0 {
         return Err(Refusal {
             code: "coarsen-degenerate",
-            message: "merged quad has zero representable vector area".into(),
-            ranked_repairs: vec![
-                "retain the resolved rows or rescale underflowing geometry".into(),
-            ],
+            message: "the represented coarse quad has zero oriented area".into(),
+            ranked_repairs: vec!["retain the original nondegenerate wake cells".into()],
         });
     }
-    let ia = aa.map(|v| ga * v);
-    let ib = ab.map(|v| gb * v);
-    let target: [f64; 3] = std::array::from_fn(|c| ia[c] + ib[c]);
-    let gamma = target[pivot] / area[pivot];
-    let represented = area.map(|v| gamma * v);
-    let mut scale = 0.0_f64;
-    for c in 0..3 {
-        scale = scale
-            .max(ia[c].abs())
-            .max(ib[c].abs())
-            .max(represented[c].abs());
+    let gamma_scale = gamma_a.abs().max(gamma_b.abs());
+    if gamma_scale == 0.0 {
+        return Ok(0.0);
     }
-    // A vector-wide scale admits rotated cancellations in near-zero components.
-    // There is no unit-dependent absolute floor. If tolerance underflows to
-    // zero, only an exactly represented component can pass.
-    let tolerance = 128.0 * f64::EPSILON * scale;
-    if !gamma.is_finite()
-        || ia
-            .iter()
-            .chain(&ib)
-            .chain(&area)
-            .chain(&target)
-            .chain(&represented)
-            .any(|v| !v.is_finite())
-        || (0..3).any(|c| (represented[c] - target[c]).abs() > tolerance)
+    let a = area_a.map(|x| x / area_scale);
+    let b = area_b.map(|x| x / area_scale);
+    let c = area_new.map(|x| x / area_scale);
+    let ga = gamma_a / gamma_scale;
+    let gb = gamma_b / gamma_scale;
+    let target: [f64; 3] = core::array::from_fn(|i| ga * a[i] + gb * b[i]);
+    let strength = target[pivot] / c[pivot];
+    let represented = c.map(|x| strength * x);
+    let scale = (0..3)
+        .map(|i| (ga * a[i]).abs() + (gb * b[i]).abs() + represented[i].abs())
+        .fold(0.0_f64, f64::max);
+    let roundoff = 128.0 * f64::EPSILON * scale;
+    if !strength.is_finite()
+        || !scale.is_finite()
+        || (0..3).any(|i| (represented[i] - target[i]).abs() > roundoff)
     {
-        return Err(Refusal {
-            code: "coarsen-impulse-unrepresentable",
-            message: "one merged circulation cannot retain the original vector impulse".into(),
-            ranked_repairs: vec![
-                "retain the resolved rows for this warped or ill-scaled pair".into(),
-            ],
-        });
+        return Err(refuse());
+    }
+    let gamma = strength * gamma_scale;
+    if !gamma.is_finite() || (strength != 0.0 && gamma == 0.0) {
+        return Err(refuse());
     }
     Ok(gamma)
 }

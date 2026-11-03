@@ -286,6 +286,10 @@ fluid control volume.
 `coarsen_oldest` now uses the actual three-dimensional quad areas at every
 station to solve `Gamma_new A_new = Gamma_a A_a + Gamma_b A_b`. It checks all
 three components against a vector-wide floating-point roundoff scale.
+Area and circulation are normalized separately before combining their products.
+A representable merged circulation is retained even when the dimensional
+`Gamma * area` intermediate would overflow, underflow, or lose accuracy in the
+subnormal range. The coarse representation still refuses incompatible vectors.
 Rotated or transverse wakes and small length units no longer depend on an
 x-spacing assumption or a fixed dimensional spacing cutoff. A single merged
 circulation cannot reproduce a vector outside its new quad's area direction;
@@ -307,6 +311,10 @@ an analytic rectangular ring, proper rotations and translations, transverse
 and rescaled wakes, near/far source accounting, and atomic refusal of warped
 or malformed inputs. Existing topology, viscosity and field tests retain
 their own source-model checks.
+Additional physical-edge integrals isolate each span on sheared, nonuniform-width
+wakes through repeated coarsening and length rescaling. A late incompatible pair
+checks atomic refusal after an earlier pair is prepared. Analytical rectangular
+pairs check independently scaled area/circulation, including signed cancellation.
 
 ## Finite-core connected 3-D wake
 

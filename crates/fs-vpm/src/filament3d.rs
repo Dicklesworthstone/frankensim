@@ -97,7 +97,7 @@ pub struct ShedRow {
     /// is the strength of the quad from this row to its newer successor,
     /// positive along the successor's left-to-right spanwise edge.
     pub gamma: Vec<f64>,
-    /// Base core width squared [m²], including the streamwise geometric
+    /// Base core width squared [m²], including the spatial geometric
     /// smoothing added by coarsening. Zero for newly shed rows; viscous
     /// growth is applied separately using retained elapsed age.
     pub core2_m2: f64,

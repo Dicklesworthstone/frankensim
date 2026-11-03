@@ -194,11 +194,10 @@ fn caps_and_determinism() {
     let a = run();
     assert_eq!(a, run(), "bit-identical twice");
     jlog("golden", &format!("\"digest\":\"{a}\""));
-    // Full vector-area merging and 3-D geometric core spread change this pin.
-    // Independent impulse/frame/refusal oracles pass, and this identity agrees
-    // in unoptimized and optimized builds of the committed numerical source.
+    // Separate area/circulation normalization changes final rounding in this pin.
+    // Independent impulse/frame/refusal oracles validate the merge physics.
     assert_eq!(
-        a, "75f3b22833b2065de1a4e61be95879ba88214c26184ed708afe969945a59353c",
+        a, "26d8bfdb64df343cc9e3a7a4940dc528471c96dae8e1a49d70f5154f1ba15f82",
         "coarsen golden moved — determinism regression or an \
          intentional merge-rule change requiring the golden-bump protocol"
     );
@@ -304,7 +303,7 @@ fn full_vector_impulse_and_core_smoothing_are_rotation_covariant() {
 
 #[test]
 fn transverse_convection_and_small_length_units_remain_admissible() {
-    for length_scale in [1.0, 2.0_f64.powi(-40)] {
+    for length_scale in [1.0, 1.0 / 1_099_511_627_776.0] {
         let mut wake = built_wake(8);
         // A proper cyclic rotation of a flat sheet: every x is exactly zero.
         map_geometry(&mut wake, |p| {
@@ -370,4 +369,179 @@ fn overflowing_pair_count_and_invalid_geometry_refuse_atomically() {
         "filament-geometry-invalid"
     );
     assert_eq!(wake, before);
+}
+
+fn physical_impulse(wake: &FilamentWake) -> [f64; 3] {
+    let mut result = [0.0; 3];
+    wake.visit_segments_with_core_growth(0.0, |edge| {
+        let a = edge.start;
+        let b = edge.end;
+        let cross = [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ];
+        for i in 0..3 {
+            result[i] += 0.5 * edge.circulation * cross[i];
+        }
+    });
+    result
+}
+
+fn strip_impulse(wake: &FilamentWake, station: usize) -> [f64; 3] {
+    let mut isolated = wake.clone();
+    for row in &mut isolated.rows {
+        for (s, gamma) in row.gamma.iter_mut().enumerate() {
+            if s != station {
+                *gamma = 0.0;
+            }
+        }
+    }
+    physical_impulse(&isolated)
+}
+
+fn vector_near(actual: [f64; 3], expected: [f64; 3]) {
+    let scale = actual
+        .iter()
+        .chain(&expected)
+        .map(|x| x.abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        (0..3).all(|i| (actual[i] - expected[i]).abs() <= 3e-12 * scale),
+        "{actual:?} != {expected:?}"
+    );
+}
+
+fn sheared_planar_wake(length_scale: f64) -> FilamentWake {
+    let nodes = |row: usize| {
+        (0..=3)
+            .map(|s| {
+                let x = row as f64 + 0.07 * (s * s) as f64;
+                let y = (1.0 + 0.06 * row as f64) * s as f64 + 0.2 * row as f64;
+                [
+                    x * length_scale,
+                    y * length_scale,
+                    (0.3 * x - 0.2 * y) * length_scale,
+                ]
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut wake = FilamentWake::new(
+        WakeRateCertificate {
+            shed_hz: 120.0,
+            n_stations: 3,
+            max_rows: 12,
+        },
+        nodes(6),
+    )
+    .unwrap();
+    wake.rows = (0..6)
+        .map(|i| ShedRow {
+            nodes: nodes(i),
+            gamma: vec![
+                1.0 + 0.2 * i as f64,
+                -(2.0 + 0.1 * i as f64),
+                0.5 - 0.03 * i as f64,
+            ],
+            core2_m2: 0.0,
+            age_ticks: (6 - i) as f64,
+        })
+        .collect();
+    wake
+}
+
+#[test]
+fn g0_g3_nonuniform_width_multiple_pairs_preserve_each_physical_strip() {
+    for scale in [1e-6, 1.0, 1e6] {
+        let mut wake = sheared_planar_wake(scale);
+        let before: Vec<_> = (0..3).map(|s| strip_impulse(&wake, s)).collect();
+        coarsen_oldest(&mut wake, 2).unwrap();
+        for s in 0..3 {
+            vector_near(strip_impulse(&wake, s), before[s]);
+        }
+        coarsen_oldest(&mut wake, 1).unwrap();
+        for s in 0..3 {
+            vector_near(strip_impulse(&wake, s), before[s]);
+        }
+    }
+}
+
+#[test]
+fn g0_nonrepresentable_vector_impulse_refuses_without_partial_coarsening() {
+    for late in [false, true] {
+        let count = if late { 4 } else { 2 };
+        let mut wake = FilamentWake::new(
+            WakeRateCertificate {
+                shed_hz: 120.0,
+                n_stations: 1,
+                max_rows: 8,
+            },
+            vec![[count as f64, 0.0, 0.0], [count as f64, 1.0, 0.0]],
+        )
+        .unwrap();
+        let heights = if late {
+            vec![0.0, 0.0, 1.0, -1.0]
+        } else {
+            vec![0.0, 1.0]
+        };
+        let gamma = if late {
+            vec![1.0, 0.0, 1.0, 1.0]
+        } else {
+            vec![1.0, 2.0]
+        };
+        wake.rows = (0..count)
+            .map(|i| ShedRow {
+                nodes: vec![[i as f64, 0.0, 0.0], [i as f64, 1.0, heights[i]]],
+                gamma: vec![gamma[i]],
+                core2_m2: 0.0,
+                age_ticks: (count - i) as f64,
+            })
+            .collect();
+        if !late {
+            vector_near(physical_impulse(&wake), [0.5, -1.5, 3.0]);
+        }
+        let before = wake.digest();
+        assert_eq!(
+            coarsen_oldest(&mut wake, count / 2).unwrap_err().code,
+            "coarsen-impulse-unrepresentable"
+        );
+        assert_eq!(wake.digest(), before);
+    }
+}
+
+#[test]
+fn circulation_survives_overflowing_and_underflowing_dimensional_impulse_products() {
+    // The circulation and every geometric coordinate are representable even
+    // when Gamma * area is not. The analytical one-span merge has strength
+    // (2/3) * (Gamma_a + Gamma_b), independent of either physical scale.
+    for (length, strength) in [(1e-60, 1e-240), (1e-60, 1e-200), (1e60, 1e200)] {
+        for sign in [1.0, -1.0] {
+            let nodes = |x| vec![[x * length, 0.0, 0.0], [x * length, length, 0.0]];
+            let mut wake = FilamentWake::new(
+                WakeRateCertificate {
+                    shed_hz: 1.0,
+                    n_stations: 1,
+                    max_rows: 2,
+                },
+                nodes(2.0),
+            )
+            .unwrap();
+            wake.rows = (0..2)
+                .map(|r| ShedRow {
+                    nodes: nodes(r as f64),
+                    gamma: vec![if r == 0 { strength } else { sign * strength }],
+                    core2_m2: 0.0,
+                    age_ticks: (2 - r) as f64,
+                })
+                .collect();
+            coarsen_oldest(&mut wake, 1).unwrap();
+            let expected = (2.0 / 3.0) * (1.0 + sign);
+            let actual = wake.rows[0].gamma[0] / strength;
+            assert!(
+                (actual - expected).abs() < 2e-14,
+                "length {length:e}, strength {strength:e}, sign {sign}: {actual} != {expected}"
+            );
+            assert!((wake.rows[0].core2_m2 / (length * length) - 0.25).abs() < 2e-14);
+        }
+    }
 }
