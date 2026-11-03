@@ -4,7 +4,9 @@
 //! the native canonical state across accepted steps. Springs and viscous drag
 //! act between shafts and carrier; their recoil, phase and physical energy
 //! account come from the same fs-time owner. Translation uses the original
-//! Flyer impulse admission and drift/kick/drift map.
+//! drift/kick/drift map. Continuous force increments retain ordinary addition
+//! rounding in the momentum/work residuals; erased transfers refuse. Explicit
+//! event impulses keep their stricter transfer-relative admission.
 //! State-dependent loads use two real native stages while only the accepted
 //! full interval contributes physical work, heat and committed shaft history.
 //!
@@ -14,9 +16,8 @@
 
 use super::super::admit_time_interval;
 use super::{
-    CarrierImpulse, Loads, RotorAssembly, RotorState, RotorTorques, admit_derived_state,
-    admit_loads, admitted_state_and_rotation, array, dd, dot_dd, finite, impulse_kinematics,
-    reject, rotation_to_boundary, vec,
+    Loads, RotorAssembly, RotorState, RotorTorques, admit_derived_state, admit_loads,
+    admitted_state_and_rotation, array, dd, dot_dd, finite, reject, rotation_to_boundary, vec,
 };
 use crate::Refusal;
 use fs_ga::Vec3;
@@ -183,6 +184,11 @@ impl<const N: usize> RotorAssembly<N> {
 }
 
 impl<const N: usize> ShaftMotion<N> {
+    /// Fixed physical inventory used by this prepared mechanical owner.
+    pub const fn assembly(&self) -> &RotorAssembly<N> {
+        &self.assembly
+    }
+
     /// The accepted state in the existing Flyer representation.
     pub const fn state(&self) -> &RotorState<N> {
         &self.state
@@ -324,18 +330,26 @@ impl<const N: usize> ShaftMotion<N> {
                 return Err(super::impulse_refusal());
             }
         }
-        let (mut rigid, actual_linear, _) = impulse_kinematics(
-            self.assembly.reduced_body.mass_kg,
-            self.assembly.reduced_body.inertia_tensor(),
-            &self.state.rigid,
-            CarrierImpulse {
-                linear_world_ns: array(impulse),
-                angular_body_nms: [0.0; 3],
-            },
-            Vec3::default(),
-        )?;
+        let mut rigid = self.state.rigid;
+        for (velocity, applied) in rigid.vel_mps.iter_mut().zip(array(impulse)) {
+            let increment = applied / self.assembly.reduced_body.mass_kg;
+            let next = *velocity + increment;
+            // A continuous O(dt) force keeps ordinary addition quantization in
+            // its numerical residuals, as the native held-shaft path does.
+            // An entirely erased transfer still lies outside this state domain.
+            // Explicit event impulses retain their separate, stricter gate.
+            if !increment.is_finite()
+                || !next.is_finite()
+                || (applied != 0.0 && increment == 0.0)
+                || (increment != 0.0 && next == *velocity)
+            {
+                return Err(super::impulse_refusal());
+            }
+            *velocity = next;
+        }
         let v0 = vec(self.state.rigid.vel_mps);
         let v1 = vec(rigid.vel_mps);
+        let actual_linear = (v1 - v0).scale(self.assembly.reduced_body.mass_kg);
         let mean_velocity = v0.scale(0.5) + v1.scale(0.5);
         let midpoint_position = vec(self.state.rigid.pos_m) + v0.scale(0.5 * dt);
         rigid.pos_m = array(midpoint_position + v1.scale(0.5 * dt));

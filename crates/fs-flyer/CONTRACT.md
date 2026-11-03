@@ -658,11 +658,14 @@ speed round trip. The common inventory bound is 64.
 
 Spring recoil, relative phase, spring storage and viscous heat come from the
 native coupled solver. Zero stiffness selects its viscous path; zero stiffness
-and damping select its held-torque path. Original Flyer translation and impulse
-admission supply the external force response. Motor work uses relative shaft
-motion, while aerodynamic work includes absolute shaft motion exactly once.
-Physical heat, elastic storage and the native gyrostat drift defect remain
-separate in the receipt.
+and damping select its held-torque path. Translation uses the original
+drift/kick/drift map. Continuous force increments retain resolved addition
+rounding in momentum and work residuals; nonfinite, underflowed and fully erased
+transfers refuse. Explicit event impulses retain their original strict
+transfer-relative admission. Motor work uses relative shaft motion, while
+aerodynamic work includes absolute shaft motion exactly once. Physical heat,
+elastic storage and the native gyrostat drift defect remain separate in the
+receipt.
 
 The prepared owner publishes its canonical and Flyer states together after all
 motion and accounting checks succeed. Unresolved carrier momentum, phase or
@@ -686,6 +689,30 @@ failure leave both stored states unchanged; callback side effects remain the
 caller's responsibility. `tests/rotor_spine/passive/stages.rs` checks native
 full-tensor stages after impulses, independent work/momentum accounting, a
 coupled ODE refinement oracle, exact held-law parity and refusal/retry.
+
+### Real aerodynamics through independent passive shafts
+
+`propulsion::passive::ShaftPropulsion` binds the existing two-disk wing/BEMT and
+native lifting-surface owner to `ShaftMotion`. Each mounted shaft supplies its
+own signed absolute speed `p/J`; blade handedness maps that speed into the
+existing positive-spin BEMT domain. Axial aerodynamic torque enters only the
+external shaft port. Motor torque remains internal, while force-arm and
+transverse hub moments plus world gravity use the original carrier ports.
+
+Axial and spatial disk-wash paths, including custom lifting surfaces, share the
+same aerodynamic stage as the geared and dynamic consumers. Two actual solves
+sample the initial and native predicted midpoint states, including after
+impulses; only the accepted full interval contributes mechanical work and heat.
+A physical-inventory mismatch refuses before callbacks. Any stage or final
+accounting refusal preserves both native and published motion; callback side
+effects remain caller-owned.
+
+This consumer is quasi-steady. It adds no dynamic wake storage, ideal gear
+constraint or total fluid/body energy closure claim. `tests/passive_propulsion.rs`
+checks axial/canted shared-owner parity, independent rotor inventory mapping,
+real two-stage stepping after an impulse, independently reconstructed physical
+momentum and work, refusal/retry, and the distinct numerical admission domains
+of continuous forces and explicit event impulses.
 
 ### Ideal gears and real propeller/airframe motion
 

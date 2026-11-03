@@ -8,7 +8,7 @@
 //! Motor torque, wind, gravity and canard setting are evaluated at each stage.
 //! No stopped/reversed rotor or reversed axial inflow is silently floored.
 
-use super::super::{Loads, TICK_HZ};
+use super::super::{Loads, SixDofState, TICK_HZ};
 use super::geared::{self, GearedAssembly, GearedLoads, GearedState, GearedStep};
 use super::{array, finite, vec};
 use crate::Refusal;
@@ -17,7 +17,7 @@ use crate::propcoupling::spatial::{self, DiskAxes};
 use crate::propcoupling::{
     CoupledStep, IncidentInflow, PropDisk, coupled_prop_airframe_step_with_incident,
 };
-use fs_ga::Vec3;
+use fs_ga::{So3, Vec3};
 use fs_math::det;
 use fs_wing::Panel;
 use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, SectionFrame, StripSpec};
@@ -35,6 +35,9 @@ pub mod swirl;
 
 #[path = "propulsion/surfaces.rs"]
 pub mod surfaces;
+
+#[path = "propulsion/passive.rs"]
+pub mod passive;
 
 /// Blade handedness relative to a mounted rotor's declared positive spin axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,10 +57,10 @@ impl PropellerHandedness {
     }
 }
 
-/// Map one of the two aerodynamic disks to a physical geared rotor.
+/// Map one of the two aerodynamic disks to a physical rotor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PropellerMount {
-    /// Index into the gear assembly. Other geared rotors may represent an
+    /// Index into the mechanical assembly. Other rotors may represent an
     /// engine or flywheel and receive no propeller aerodynamic torque.
     pub rotor_index: usize,
     /// Blade handedness, independent of signed mechanical gear ratio.
@@ -165,6 +168,31 @@ struct StageEvaluation<const N: usize, S> {
     aerodynamics: S,
 }
 
+// One aerodynamic owner consumes either mechanical family's actual rigid
+// state and absolute disk speeds. No gear constraint enters force assembly.
+#[derive(Clone, Copy)]
+struct PropulsionGeometry<'a> {
+    design: &'a OpenLoopDesign,
+    mounts: [PropellerMount; 2],
+    spatial_axes: Option<DiskAxes>,
+    surfaces: Option<&'a surfaces::LiftingSurfaces<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct StageEnvironment {
+    density_kg_m3: f64,
+    canard_rad: f64,
+    gravity_world_mps2: [f64; 3],
+}
+
+struct AerodynamicWrench<const N: usize, S> {
+    carrier: Loads,
+    aerodynamic_nm: [f64; N],
+    aerodynamic_force_body_n: [f64; 3],
+    propeller_absolute_speed_rad_s: [f64; 2],
+    aerodynamics: S,
+}
+
 fn reject(code: &'static str, message: &str) -> Refusal {
     Refusal {
         code,
@@ -184,6 +212,15 @@ fn wing_error(error: fs_wing::Refusal) -> Refusal {
 }
 
 impl<'a, const N: usize> GearedPropulsion<'a, N> {
+    fn geometry(&self) -> PropulsionGeometry<'a> {
+        PropulsionGeometry {
+            design: self.design,
+            mounts: self.mounts,
+            spatial_axes: self.spatial_axes,
+            surfaces: self.surfaces,
+        }
+    }
+
     /// Bind existing aerodynamic geometry to explicit geared mass properties.
     /// The two mounts must name distinct axial rotors aligned with body x.
     ///
@@ -220,69 +257,22 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         mounts: [PropellerMount; 2],
         spatial_axes: Option<DiskAxes>,
     ) -> Result<Self, Refusal> {
-        if design.gross_mass_kg != assembly.mass_kg()
-            || !finite(vec(design.cg_m))
-            || !design.drag_z_m.is_finite()
-            || !design.camber_ratio.is_finite()
-            || design.camber_ratio.abs() > 0.15
-            || !design.cd0_wing.is_finite()
-            || design.cd0_wing < 0.0
-            || !design.oswald_e.is_finite()
-            || design.oswald_e <= 0.0
-            || mounts[0].rotor_index == mounts[1].rotor_index
-        {
-            return Err(reject(
-                "propulsion-assembly-invalid",
-                "mass/geometry invalid or duplicate propeller rotor",
-            ));
+        PropulsionGeometry {
+            design,
+            mounts,
+            spatial_axes,
+            surfaces: None,
         }
-        for (mount, disk) in mounts.iter().zip(&design.disks) {
-            let rotor = assembly.rotors().get(mount.rotor_index).ok_or_else(|| {
-                reject(
-                    "propulsion-assembly-invalid",
-                    "propeller rotor index is outside the gear assembly",
-                )
-            })?;
-            let aligned = if spatial_axes.is_some() {
-                vec(mount.thrust_direction_body)
-                    .cross(vec(rotor.axis_body))
-                    .norm()
-                    <= 1e-12
-            } else {
-                mount.thrust_direction_body == [1.0, 0.0, 0.0]
-                    && rotor.axis_body[1] == 0.0
-                    && rotor.axis_body[2] == 0.0
-                    && rotor.axis_body[0].abs() == 1.0
-            };
-            if !aligned || !finite(vec(disk.center_m)) {
-                return Err(reject(
-                    "propulsion-assembly-invalid",
-                    "thrust must align with a finite physical shaft; legacy wash requires body +x thrust",
-                ));
-            }
-        }
-        let spec = design.coupling;
-        if ![spec.omega0, spec.clamp.0, spec.clamp.1, spec.tol]
-            .iter()
-            .all(|x| x.is_finite())
-            || spec.omega0 <= 0.0
-            || spec.omega0 > 1.0
-            || spec.clamp.0 <= 0.0
-            || spec.clamp.0 > spec.clamp.1
-            || spec.clamp.1 > 1.0
-            || spec.tol <= 0.0
-        {
-            return Err(reject(
-                "propulsion-assembly-invalid",
-                "invalid declared propeller coupling solver parameters",
-            ));
-        }
-        design.rotor.admit().map_err(|error| Refusal {
-            code: error.code,
-            message: error.message,
-            ranked_repairs: error.ranked_repairs,
-        })?;
-        design.ledger.admit()?;
+        .admit(
+            assembly.mass_kg(),
+            mounts.map(|mount| {
+                assembly
+                    .rotors()
+                    .get(mount.rotor_index)
+                    .map(|rotor| rotor.axis_body)
+            }),
+            "gear",
+        )?;
         Ok(Self {
             design,
             assembly,
@@ -322,50 +312,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             ));
         }
         let result = self.evaluate_with(state, inputs, wind_world, |stage| {
-            match (self.spatial_axes, stage.section_frames) {
-                (Some(axes), Some(frames)) => spatial::coupled_step_with_section_frames(
-                    &axes,
-                    stage.op,
-                    stage.panels,
-                    stage.strips,
-                    stage.closure,
-                    frames,
-                    &self.design.rotor,
-                    stage.disks,
-                    stage.freestream,
-                    stage.rho,
-                    &self.design.coupling,
-                    warm,
-                    stage.incident,
-                ),
-                (Some(axes), None) => spatial::coupled_step(
-                    &axes,
-                    stage.op,
-                    stage.panels,
-                    stage.strips,
-                    stage.closure,
-                    &self.design.rotor,
-                    stage.disks,
-                    stage.freestream,
-                    stage.rho,
-                    &self.design.coupling,
-                    warm,
-                    stage.incident,
-                ),
-                (None, _) => coupled_prop_airframe_step_with_incident(
-                    stage.op,
-                    stage.panels,
-                    stage.strips,
-                    stage.closure,
-                    &self.design.rotor,
-                    stage.disks,
-                    stage.freestream,
-                    stage.rho,
-                    &self.design.coupling,
-                    warm,
-                    stage.incident,
-                ),
-            }
+            self.geometry().equilibrium(stage, warm)
         })?;
         Ok(PropulsionEvaluation {
             loads: result.loads,
@@ -383,11 +330,180 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         solve: impl FnOnce(AerodynamicStage<'_>) -> Result<S, Refusal>,
     ) -> Result<StageEvaluation<N, S>, Refusal> {
         let rotation = self.assembly.admit_state(state, 1.0 / TICK_HZ)?;
+        if !inputs.motor_nm.is_finite() {
+            return Err(reject(
+                "propulsion-state-invalid",
+                "nonfinite or out-of-domain stage input",
+            ));
+        }
+        let speed = self.assembly.speed(state)?;
+        let omega = vec(state.rigid.omega_body);
+        let absolute = self.mounts.map(|mount| {
+            let rotor = self.assembly.rotors()[mount.rotor_index];
+            rotor.ratio * speed + vec(rotor.axis_body).dot(omega)
+        });
+        let result = self.geometry().evaluate_with(
+            &state.rigid,
+            rotation,
+            self.assembly.mass_kg(),
+            absolute,
+            StageEnvironment {
+                density_kg_m3: inputs.density_kg_m3,
+                canard_rad: inputs.canard_rad,
+                gravity_world_mps2: inputs.gravity_world_mps2,
+            },
+            wind_world,
+            solve,
+        )?;
+        Ok(StageEvaluation {
+            loads: GearedLoads {
+                carrier: result.carrier,
+                motor_nm: inputs.motor_nm,
+                aerodynamic_nm: result.aerodynamic_nm,
+            },
+            aerodynamic_force_body_n: result.aerodynamic_force_body_n,
+            propeller_absolute_speed_rad_s: result.propeller_absolute_speed_rad_s,
+            aerodynamics: result.aerodynamics,
+        })
+    }
+}
+
+impl PropulsionGeometry<'_> {
+    fn admit(
+        &self,
+        mass_kg: f64,
+        rotor_axes: [Option<[f64; 3]>; 2],
+        assembly_kind: &str,
+    ) -> Result<(), Refusal> {
+        let design = self.design;
+        if design.gross_mass_kg != mass_kg
+            || !finite(vec(design.cg_m))
+            || !design.drag_z_m.is_finite()
+            || !design.camber_ratio.is_finite()
+            || design.camber_ratio.abs() > 0.15
+            || !design.cd0_wing.is_finite()
+            || design.cd0_wing < 0.0
+            || !design.oswald_e.is_finite()
+            || design.oswald_e <= 0.0
+            || self.mounts[0].rotor_index == self.mounts[1].rotor_index
+        {
+            return Err(reject(
+                "propulsion-assembly-invalid",
+                "mass/geometry invalid or duplicate propeller rotor",
+            ));
+        }
+        for ((mount, disk), axis) in self.mounts.iter().zip(&design.disks).zip(rotor_axes) {
+            let axis = axis.ok_or_else(|| {
+                reject(
+                    "propulsion-assembly-invalid",
+                    &format!("propeller rotor index is outside the {assembly_kind} assembly"),
+                )
+            })?;
+            let aligned = if self.spatial_axes.is_some() {
+                vec(mount.thrust_direction_body).cross(vec(axis)).norm() <= 1e-12
+            } else {
+                mount.thrust_direction_body == [1.0, 0.0, 0.0]
+                    && axis[1] == 0.0
+                    && axis[2] == 0.0
+                    && axis[0].abs() == 1.0
+            };
+            if !aligned || !finite(vec(disk.center_m)) {
+                return Err(reject(
+                    "propulsion-assembly-invalid",
+                    "thrust must align with a finite physical shaft; legacy wash requires body +x thrust",
+                ));
+            }
+        }
+        let spec = design.coupling;
+        if ![spec.omega0, spec.clamp.0, spec.clamp.1, spec.tol]
+            .iter()
+            .all(|x| x.is_finite())
+            || spec.omega0 <= 0.0
+            || spec.omega0 > 1.0
+            || spec.clamp.0 <= 0.0
+            || spec.clamp.0 > spec.clamp.1
+            || spec.clamp.1 > 1.0
+            || spec.tol <= 0.0
+        {
+            return Err(reject(
+                "propulsion-assembly-invalid",
+                "invalid declared propeller coupling solver parameters",
+            ));
+        }
+        design.rotor.admit().map_err(|error| Refusal {
+            code: error.code,
+            message: error.message,
+            ranked_repairs: error.ranked_repairs,
+        })?;
+        design.ledger.admit()
+    }
+
+    fn equilibrium(
+        &self,
+        stage: AerodynamicStage<'_>,
+        warm: Option<[f64; 2]>,
+    ) -> Result<CoupledStep, Refusal> {
+        match (self.spatial_axes, stage.section_frames) {
+            (Some(axes), Some(frames)) => spatial::coupled_step_with_section_frames(
+                &axes,
+                stage.op,
+                stage.panels,
+                stage.strips,
+                stage.closure,
+                frames,
+                &self.design.rotor,
+                stage.disks,
+                stage.freestream,
+                stage.rho,
+                &self.design.coupling,
+                warm,
+                stage.incident,
+            ),
+            (Some(axes), None) => spatial::coupled_step(
+                &axes,
+                stage.op,
+                stage.panels,
+                stage.strips,
+                stage.closure,
+                &self.design.rotor,
+                stage.disks,
+                stage.freestream,
+                stage.rho,
+                &self.design.coupling,
+                warm,
+                stage.incident,
+            ),
+            (None, _) => coupled_prop_airframe_step_with_incident(
+                stage.op,
+                stage.panels,
+                stage.strips,
+                stage.closure,
+                &self.design.rotor,
+                stage.disks,
+                stage.freestream,
+                stage.rho,
+                &self.design.coupling,
+                warm,
+                stage.incident,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_with<const N: usize, S: AerodynamicSolution>(
+        &self,
+        state: &SixDofState,
+        rotation: So3,
+        mass_kg: f64,
+        absolute_speed_rad_s: [f64; 2],
+        inputs: StageEnvironment,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        solve: impl FnOnce(AerodynamicStage<'_>) -> Result<S, Refusal>,
+    ) -> Result<AerodynamicWrench<N, S>, Refusal> {
         if !inputs.density_kg_m3.is_finite()
             || inputs.density_kg_m3 <= 0.0
             || !inputs.canard_rad.is_finite()
             || inputs.canard_rad.abs() >= 0.6
-            || !inputs.motor_nm.is_finite()
             || !finite(vec(inputs.gravity_world_mps2))
         {
             return Err(reject(
@@ -396,14 +512,11 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             ));
         }
         let design = self.design;
-        let speed = self.assembly.speed(state)?;
-        let omega = vec(state.rigid.omega_body);
         let mut disks = design.disks;
         let mut propeller_absolute_speed_rad_s = [0.0; 2];
         for k in 0..2 {
             let mount = self.mounts[k];
-            let rotor = self.assembly.rotors()[mount.rotor_index];
-            let absolute = rotor.ratio * speed + vec(rotor.axis_body).dot(omega);
+            let absolute = absolute_speed_rad_s[k];
             let canonical = mount.handedness.sign() * absolute;
             if !canonical.is_finite() || canonical <= 0.0 {
                 return Err(reject(
@@ -419,9 +532,9 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         }
         let air = StageIncidentAir::new(
             design.cg_m,
-            state.rigid.pos_m,
-            state.rigid.vel_mps,
-            state.rigid.omega_body,
+            state.pos_m,
+            state.vel_mps,
+            state.omega_body,
             rotation,
             wind_world,
         );
@@ -486,7 +599,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             freestream,
             rho,
             incident,
-            carrier_angular_velocity_body_rad_s: state.rigid.omega_body,
+            carrier_angular_velocity_body_rad_s: state.omega_body,
             air: &air,
             disk_wind_world_mps: disk_air.map(|air| air.wind_world_mps),
         })?;
@@ -592,7 +705,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                 "propulsion-state-invalid",
                 "world aerodynamic force overflow",
             )
-        })? + vec(inputs.gravity_world_mps2).scale(self.assembly.mass_kg());
+        })? + vec(inputs.gravity_world_mps2).scale(mass_kg);
         if !finite(force)
             || !finite(world_force)
             || !finite(moment)
@@ -603,21 +716,20 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                 "aerodynamic wrench overflow",
             ));
         }
-        Ok(StageEvaluation {
-            loads: GearedLoads {
-                carrier: Loads {
-                    force_n: array(world_force),
-                    moment_nm: array(moment),
-                },
-                motor_nm: inputs.motor_nm,
-                aerodynamic_nm,
+        Ok(AerodynamicWrench {
+            carrier: Loads {
+                force_n: array(world_force),
+                moment_nm: array(moment),
             },
+            aerodynamic_nm,
             aerodynamic_force_body_n: array(force),
             propeller_absolute_speed_rad_s,
             aerodynamics,
         })
     }
+}
 
+impl<const N: usize> GearedPropulsion<'_, N> {
     /// Advance the actual coupled aerodynamic model using start/midpoint
     /// evaluations. Inputs receive time and full gear/body state; wind receives
     /// time and WORLD position. The second solve uses the first accepted wash
