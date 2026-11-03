@@ -30,6 +30,9 @@ use std::cell::RefCell;
 /// Work-conjugate finite-thickness shear on the original rigid bodies.
 pub mod rigid;
 
+/// Native adhesive-joint viscosity heating an existing finite adhesive layer.
+pub mod cohesive;
+
 /// Original two-body/layer topology and finite material storage.
 #[derive(Clone, Debug)]
 pub struct ThirdBodyHeatRoute {

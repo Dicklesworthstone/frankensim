@@ -21,7 +21,17 @@ use fs_solid::cohesive::{Budget, CohesivePatch, CohesiveState, CohesiveSystem, C
 use fs_solver::{LinearOp, NewtonKrylovConfig};
 use std::cell::Cell;
 
+#[path = "cohesive/layer.rs"]
+mod layer;
+
 fn material(viscous: bool) -> ResolvedBilinearCohesive {
+    material_and_card(viscous, None).0
+}
+
+fn material_and_card(
+    viscous: bool,
+    third_body: Option<&str>,
+) -> (ResolvedBilinearCohesive, InterfaceSystemCard) {
     let mut rows = vec![
         (
             COHESIVE_STIFFNESS_PROPERTY,
@@ -97,7 +107,7 @@ fn material(viscous: bool) -> ResolvedBilinearCohesive {
         surface("B"),
         SystemContext {
             medium: "original bond and residual surfaces".into(),
-            third_body: None,
+            third_body: third_body.map(str::to_owned),
             environment: "manufactured constant coefficients over admitted temperature".into(),
             history: "initially bonded".into(),
         },
@@ -112,7 +122,7 @@ fn material(viscous: bool) -> ResolvedBilinearCohesive {
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
-    if viscous {
+    let source = if viscous {
         ResolvedBilinearCohesive::try_from_viscous_resolved(
             &card,
             resolved,
@@ -123,7 +133,8 @@ fn material(viscous: bool) -> ResolvedBilinearCohesive {
         .unwrap()
     } else {
         ResolvedBilinearCohesive::try_from_resolved(&card, resolved, 0.02).unwrap()
-    }
+    };
+    (source, card)
 }
 
 struct Scalar(f64);

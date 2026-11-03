@@ -23904,6 +23904,26 @@ bond-viscosity work, analytic unequal finite-cell heating with signed ordinary
 conduction, continued exact native-mechanics parity, progressive fracture kept
 out of heat, and late thermal-source/cancellation rollback (G1/G3/G4).
 
+`friction_heat::third_body::cohesive::propose_deformable_cohesive_layer_heat`
+adds real finite adhesive storage to one original sourced deformable cohesive
+patch. The source card's named third body maps explicitly to an existing layer
+material; ordered surface/body/material identities, both contact areas and the
+full layer cross-section must match. The native mechanical candidate supplies
+only surviving-bond viscosity to the existing `ThirdBodyHeatStep`; its original
+mass/caloric law retains heat, while two source contact resistances and geometric
+bulk resistances control delayed asymmetric body heating. Fracture remains
+nonthermal. Nonzero damaged-surface friction refuses because its localized
+surface destination is absent. Mechanical coefficients remain frozen and no
+source parameter work is thermalized. The small-deformation thermal geometry is
+a fixed material-reference layer with a closed normal path; the original source
+must be calibrated for that thickness. Open cracks, evolving thickness and
+thermal weakening are outside this split. Optional entropy covers caloric
+storage, conduction and viscosity, without claiming a fracture/surface-entropy
+closure. Both immutable candidates remain unpublished on source, nonlinear,
+energy or cancellation failure. The `friction_heat/cohesive/layer.rs` regression
+uses independent three-capacity conduction and bilinear damage/viscosity
+integrals, plus native friction, identity and late-refusal cases.
+
 ### Prescribed source temperature with native cohesive heating
 
 `apply_rigid_cohesive_heat_with_temperature` stages one successor of each
