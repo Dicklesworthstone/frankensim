@@ -85,18 +85,37 @@ pub(super) fn phase_error(cx: &Cx<'_>, run: &EnthalpyHistoryRun<'_, '_, '_>,
     adaptive: AdaptiveHistoryConfig, phase: PhaseErrorTolerance)
     -> Result<f64, HeterogeneousEnthalpyError>
 {
+    phase_field_error(cx, run,
+        PhaseFields { h: &coarse.specific_enthalpy_j_kg, temperature: &coarse.temperature,
+            fraction: &coarse.liquid_mass_fraction },
+        PhaseFields { h: &fine.specific_enthalpy_j_kg, temperature: &fine.temperature,
+            fraction: &fine.liquid_mass_fraction }, adaptive, phase)
+}
+
+/// Borrowed caloric fields let every time method use the same error coordinates.
+pub(super) struct PhaseFields<'a> {
+    pub h: &'a [f64],
+    pub temperature: &'a [f64],
+    pub fraction: &'a [f64],
+}
+
+pub(super) fn phase_field_error(cx: &Cx<'_>, run: &EnthalpyHistoryRun<'_, '_, '_>,
+    coarse: PhaseFields<'_>, fine: PhaseFields<'_>,
+    adaptive: AdaptiveHistoryConfig, phase: PhaseErrorTolerance)
+    -> Result<f64, HeterogeneousEnthalpyError>
+{
     let n = run.specific_h.len();
-    if [coarse.specific_enthalpy_j_kg.len(), fine.specific_enthalpy_j_kg.len(),
-        coarse.liquid_mass_fraction.len(), fine.liquid_mass_fraction.len()].iter().any(|&len| len != n)
+    if [coarse.h.len(), fine.h.len(), coarse.fraction.len(), fine.fraction.len()]
+        .iter().any(|&len| len != n)
     { return Err(invalid("adaptive caloric fields must preserve the original nodal shape")); }
     let mut error = temperature_error(cx, &run.temperature, &coarse.temperature,
         &fine.temperature, adaptive).map_err(conduction)?;
     for i in 0..n {
         if i % 512 == 0 { poll(cx, i).map_err(conduction)?; }
-        error = error.max(component_error(run.specific_h[i], coarse.specific_enthalpy_j_kg[i],
-            fine.specific_enthalpy_j_kg[i], phase.absolute_enthalpy_j_kg, phase.relative_enthalpy).map_err(conduction)?);
-        error = error.max(component_error(run.liquid_mass_fraction[i], coarse.liquid_mass_fraction[i],
-            fine.liquid_mass_fraction[i], phase.absolute_liquid_fraction, 0.0).map_err(conduction)?);
+        error = error.max(component_error(run.specific_h[i], coarse.h[i],
+            fine.h[i], phase.absolute_enthalpy_j_kg, phase.relative_enthalpy).map_err(conduction)?);
+        error = error.max(component_error(run.liquid_mass_fraction[i], coarse.fraction[i],
+            fine.fraction[i], phase.absolute_liquid_fraction, 0.0).map_err(conduction)?);
     }
     Ok(error)
 }

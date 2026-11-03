@@ -3706,3 +3706,40 @@ check an independent spatial eigenmode and its second-order refinement, the
 exact SDIRK stability function, valid real stages with an out-of-domain
 algebraic carry, enthalpy datum shifts, cancellation/refusal/replay, and changing
 prescribed baths with independently integrated source and reservoir heat.
+
+## Scheduled second-order enthalpy with contact and material reflection
+
+`into_sdirk2` converts an existing `EnthalpyHistoryRun`, Newton
+`ContactEnthalpyHistoryRun`, or `MaterialEnclosureEnthalpyHistoryRun` into
+`Sdirk2EnthalpyHistoryRun` without resetting its accepted h/T/f, clock, reference
+mass, source conductivity, pinned contact/emissivity claims or lifetime budget.
+Each interval samples the original boundary/source/bath schedules at both
+SDIRK2 tableau times. The original spatial stage kernel closes source k,
+phase-dependent contact and local material reflection at their actual stage
+states. Only the stiffly accurate endpoint publishes; stages are not separate
+accepted intervals and their carry is never a physical heat source.
+
+Direct advancement uses right-continuous stage samples. Event advancement
+ends at the next source, boundary or open-bath knot and uses its exact final-
+stage left limit. Coincident heater/bath switches participate once. Both stage
+owners retain their own sampled boundary, source and reservoir; one endpoint
+sample cannot silently stand in for both stages. A nonrepresentable interior
+stage time refuses without altering physical history.
+
+Adaptive advancement reuses the existing phase-aware interval controller:
+one full SDIRK2 interval is compared with two actual half intervals in h, T and
+liquid fraction. The full discrepancy and conservative unequal-half inflation
+are retained rather than assuming smooth second-order asymptotics at material
+corners. No Richardson-extrapolated state is accepted. The actual fine pair's
+integrated heat reports remain separate, two interval slots are reserved, and
+publication is atomic after the final physical/error/cancellation checks.
+`endpoint_solves` counts SDIRK2 interval attempts, each containing two implicit
+stage solves. Original material/solver refusals propagate unchanged.
+
+Five new native history tests compare original P1 conductivity moments and
+source-clock quadrature with independent scalar stages; preserve graded
+reference masses and enthalpy datum invariance; resolve held sources and
+closed/open contact-reflection events; reject temperature-invisible phase
+error; and resume after second-stage source, future-bath or cancellation
+failure. The full thermal-history target passes 19 tests and the focused
+contact-history group passes 8, alongside 16 spatial enthalpy transport tests.

@@ -23,6 +23,9 @@ pub mod contact;
 /// Moving absorbed-power footprints with persistent phase and optional radiation.
 pub mod scanning;
 
+/// Second-order stiffly accurate time integration on these same physical owners.
+pub mod sdirk;
+
 use super::{HeatSourceHistory, ThermalHistoryProblem, poll};
 use super::events;
 use crate::bc::history::ThermalBoundaryHistory;
@@ -91,6 +94,13 @@ pub struct EnthalpyHistoryRun<'h, 'm, 'c> {
 }
 
 impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
+    /// Continue the original accepted state and schedules with two-stage SDIRK2.
+    /// No material, reference mass, phase fraction or accepted clock is reset.
+    #[must_use]
+    pub fn into_sdirk2(self) -> sdirk::Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'c> {
+        sdirk::Sdirk2EnthalpyHistoryRun::from_parts(self, None, None)
+    }
+
     /// Bind the original mesh, reference materials, schedules and initial J/kg.
     ///
     /// Initial temperature and liquid fraction are resolved from the supplied
@@ -349,10 +359,18 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
     fn publish(&mut self, cx: &Cx<'_>, time_s: f64, solved: &EnthalpyStepSolution)
         -> Result<(), HeterogeneousEnthalpyError>
     {
+        self.publish_fields(cx, time_s, &solved.specific_enthalpy_j_kg,
+            &solved.temperature, &solved.liquid_mass_fraction)
+    }
+
+    fn publish_fields(&mut self, cx: &Cx<'_>, time_s: f64,
+        specific_h: &[f64], temperature: &[f64], liquid_mass_fraction: &[f64])
+        -> Result<(), HeterogeneousEnthalpyError>
+    {
         // Prepare every owned array before changing any accepted field.
-        let h = solved.specific_enthalpy_j_kg.clone();
-        let temperature = solved.temperature.clone();
-        let fraction = solved.liquid_mass_fraction.clone();
+        let h = specific_h.to_vec();
+        let temperature = temperature.to_vec();
+        let fraction = liquid_mass_fraction.to_vec();
         poll(cx, self.accepted_steps).map_err(conduction)?;
         self.specific_h = h;
         self.temperature = temperature;

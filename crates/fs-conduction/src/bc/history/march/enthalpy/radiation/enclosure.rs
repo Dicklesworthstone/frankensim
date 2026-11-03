@@ -127,6 +127,13 @@ pub struct MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
 }
 
 impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
+    /// Continue the same accepted material/radiation history with SDIRK2.
+    /// The original pinned sources, caloric objects and bath schedule survive.
+    #[must_use]
+    pub fn into_sdirk2(self) -> super::super::sdirk::Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'c> {
+        super::super::sdirk::Sdirk2EnthalpyHistoryRun::from_parts(self.run, None, Some(self.radiation))
+    }
+
     /// Attach original material reflection before the first endpoint.
     /// An open enclosure requires one black-bath temperature history; a closed
     /// enclosure requires `None`. Exact storage charts and pinned source claims

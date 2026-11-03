@@ -40,6 +40,25 @@ enum ContactHistoryCoupling {
 }
 
 impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
+    /// Retain the original coupled contact/enclosure model and accepted state
+    /// while switching to second-order SDIRK2 time integration.
+    ///
+    /// # Errors
+    /// The outer temperature-only iteration and mean-patch radiation cannot
+    /// supply the original full-h stage residual required by this method.
+    pub fn into_sdirk2(self)
+        -> Result<super::sdirk::Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i>, HeterogeneousEnthalpyError>
+    {
+        let config = self.newton_config()
+            .ok_or_else(|| invalid("SDIRK2 contact history requires the retained coupled enthalpy Newton policy"))?;
+        if self.radiation.is_some() {
+            return Err(invalid("SDIRK2 contact history requires an explicit pointwise radiation owner"));
+        }
+        Ok(super::sdirk::Sdirk2EnthalpyHistoryRun::from_parts(
+            self.run, Some((self.contacts, config)), self.material_enclosure,
+        ))
+    }
+
     /// Attach the full fixed/variable contact set before the first physical step.
     /// Declare any constant interfaces in `TemperatureContacts::new`, not in the
     /// base problem as well. Initial contact source queries are checked without

@@ -1,4 +1,6 @@
 //! Exact P1 source moments, latent history and immutable material support.
+#[path = "source_conductivity/sdirk.rs"]
+mod sdirk;
 use super::*;
 use fs_conduction::bc::history::march::enthalpy::PhaseEnthalpyHistoryProblem;
 use fs_conduction::bc::history::march::enthalpy::adaptive::PhaseErrorTolerance;
