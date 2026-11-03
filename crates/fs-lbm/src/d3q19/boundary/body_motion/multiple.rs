@@ -15,8 +15,8 @@ pub struct MovingPartialSaturationBodiesExchange3<const N: usize> {
     /// walls, each counted once. Gap work/impulses belong to `coupling.lubrication`.
     pub coupling: PartialSaturationBodiesExchange3<N>,
     /// Per-body trajectory accounts in stable input order. The nested
-    /// `coupling.walls` and `coupling.forcing` fields are zero; use the assembly
-    /// wall and imposed-fluid-force accounts above.
+    /// `coupling.walls`, `coupling.periodic`, `coupling.open` and
+    /// `coupling.forcing` fields are zero; use the shared assembly accounts above.
     pub bodies: [MovingPartialSaturationExchange3; N],
 }
 
@@ -391,6 +391,7 @@ impl BoundaryGrid3 {
                             hydrodynamic: response.hydrodynamic,
                             walls: super::super::WallMomentumExchange3::default(),
                             periodic: super::super::PeriodicMomentumTransport3::default(),
+                            open: super::super::OpenBoundaryMomentumTransport3::default(),
                             forcing: super::super::PartialSaturationForcing3::default(),
                             velocity_midpoint: response.velocity_midpoint,
                             angular_velocity_midpoint: response.angular_velocity_midpoint,

@@ -30,11 +30,15 @@ use super::{
 mod collision;
 use collision::ImmersedRelaxation3;
 
+mod open;
+pub use open::OpenBoundaryMomentumTransport3;
+use open::OpenTransport;
+
 mod multiple;
 pub use multiple::{PartialSaturationBodiesExchange3, PartialSaturationBodyResponse3};
 pub(super) mod lubrication;
 pub use lubrication::{
-    FiniteLubricationPlane3, LubricationSurface3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3,
+    FiniteLubricationPlane3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3, LubricationSurface3,
     PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,
 };
 
@@ -154,7 +158,7 @@ impl PartialSaturationForcing3 {
     }
 }
 
-/// Accepted body update plus separately accounted stationary-wall exchange.
+/// Accepted body update plus separately accounted wall and reservoir exchange.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[must_use]
 pub struct PartialSaturationBodyExchange3 {
@@ -166,6 +170,9 @@ pub struct PartialSaturationBodyExchange3 {
     pub walls: WallMomentumExchange3,
     /// Actual periodic angular transport, counted once over the whole fluid.
     pub periodic: PeriodicMomentumTransport3,
+    /// Prescribed velocity/pressure reservoir exchange, counted once over the
+    /// whole fluid and separate from hydrodynamic and wall reactions.
+    pub open: OpenBoundaryMomentumTransport3,
     /// External fluid forcing, counted once over all retained fluid cells.
     pub forcing: PartialSaturationForcing3,
     /// Translational velocity used by the fluid collision.
@@ -367,7 +374,8 @@ impl BoundaryGrid3 {
     /// Couple one six-DOF rigid velocity to the native D3Q19 fluid, then stream.
     ///
     /// `solid_fractions[(z*ny+y)*nx+x]` lies in `[0,1]`; positive fractions
-    /// may only select fluid cells. `external_impulse` contains three linear
+    /// may only select fluid cells away from reconstructed open faces.
+    /// `external_impulse` contains three linear
     /// components applied at the body's center, then three couple components.
     /// Geometry, center and world inertia stay fixed; this API advances only
     /// velocities. Pose drift and gyroscopic evolution belong to the caller's
@@ -376,7 +384,9 @@ impl BoundaryGrid3 {
     /// Uses one 6-by-6 SPD solve, no nonlinear fluid/body iteration, and the
     /// native tile-major collision and pull operators. The existing `post`
     /// and `next` buffers are reused; only first-use streaming scratch and two
-    /// fixed-size Cholesky factors allocate. Zero fractions recover the
+    /// fixed-size Cholesky factors and first-use open-face cache allocate.
+    /// Native open faces reconstruct the unpublished candidate; their measured
+    /// reservoir exchange is returned separately. Zero fractions recover the
     /// ordinary selected Guo step bit for bit. The immersed correction operates on
     /// physical half-source-shifted populations; body response uses the same
     /// force-corrected fluid velocity. Uniform and per-cell forcing are added
@@ -384,7 +394,8 @@ impl BoundaryGrid3 {
     ///
     /// # Errors
     /// Admits BGK, TRT, central-moment and reduced-cumulant collision with finite
-    /// viscous relaxation time, held forcing, periodic or stationary-wall faces,
+    /// viscous relaxation time, held forcing, periodic, stationary-wall or
+    /// native prescribed velocity/pressure faces,
     /// symmetric positive-definite inertia, finite inputs, and body center/
     /// sampled point speeds squared below `0.03` before/midpoint/after.
     /// Invalid inputs, numerical overflow and cancellation leave all fluid
@@ -464,11 +475,10 @@ impl BoundaryGrid3 {
             return Err(invalid("solid fractions must cover the whole grid"));
         }
         if Face3::ALL.into_iter().any(|face| {
-                !matches!(self.boundaries.face(face), FaceBoundary3::Periodic)
-                    && !matches!(self.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity == [0.0; 3])
-            })
+            matches!(self.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity != [0.0; 3])
+        })
         {
-            return Err(invalid("requires periodic/stationary-wall faces"));
+            return Err(invalid("immersed coupling requires stationary wall faces"));
         }
         if !(body.mass.is_finite() && body.mass > 0.0)
             || !body
@@ -510,6 +520,12 @@ impl BoundaryGrid3 {
                 if epsilon == 0.0 {
                     continue;
                 }
+                if self.open_link_masks[tile].0[lane] != 0 {
+                    return Err(PartialSaturationError3::Cell {
+                        cell,
+                        reason: "immersed fraction must vanish on reconstructed open faces",
+                    });
+                }
                 let r = core::array::from_fn(|axis| cell[axis] as f64 + 0.5 - body.center[axis]);
                 let solid_velocity = point_velocity(body.velocity, body.angular_velocity, r);
                 if !low_mach(solid_velocity) {
@@ -544,6 +560,7 @@ impl BoundaryGrid3 {
         let mut exchange = multiple::Exchange::default();
         let mut walls = WallMomentumExchange3::default();
         let mut forcing = PartialSaturationForcing3::default();
+        let mut open = OpenTransport::default();
         let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
@@ -604,6 +621,10 @@ impl BoundaryGrid3 {
                     });
                 }
                 forcing.add(f, post, force, cell, moment_origin)?;
+                let open_mask = self.open_link_masks[tile].0[lane];
+                if open_mask != 0 {
+                    open.add_links(&post, open_mask, cell, moment_origin);
+                }
                 for (field, value) in self.post.iter_mut().zip(post) {
                     field[tile].0[lane] = value;
                 }
@@ -711,10 +732,14 @@ impl BoundaryGrid3 {
                 }
             }
         }
-        if let Err(error) = checkpoint(gate) {
-            self.next = Some(next);
-            return Err(error);
-        }
+        let open = match self.reconstruct_immersed_open_faces(&mut next, open, moment_origin, gate)
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.next = Some(next);
+                return Err(error);
+            }
+        };
         let proposed_body = PartialSaturationBody3 {
             velocity: after,
             angular_velocity: omega_after,
@@ -724,6 +749,7 @@ impl BoundaryGrid3 {
             hydrodynamic: exchange,
             walls,
             periodic,
+            open,
             forcing,
             velocity_midpoint: midpoint,
             angular_velocity_midpoint: omega_mid,

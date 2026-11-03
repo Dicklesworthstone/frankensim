@@ -9304,3 +9304,57 @@ public BGK/TRT grid integration tests additionally cover actual population
 momentum and two-tick state, native parity and joint rollback; these parsed but
 were not executed in the delivery environment. No full workspace/grid pass or
 experimental calibration is claimed.
+
+### Immersed bodies with native velocity/pressure reservoirs
+
+The single-body, simultaneous, moving and physical dry-body D3Q19 owners now
+admit the grid's existing prescribed-velocity and prescribed-pressure faces.
+The original boundary law still limits open faces to one grid axis, retains
+paired periodic directions and stationary resolved walls, and reconstructs
+physical Guo moments in the destination cell's own held force frame. All four
+admitted collision models keep their original native fluid increment.
+
+Open-face reconstruction runs on the unpublished streamed candidate, in the
+same canonical face/cell order as an ordinary grid step. Positive immersed
+fractions on reconstructed open-face cells are refused before collision.
+Moving-body support still stays inside the existing domain halo; bodies
+entering/leaving the reservoir, moving topology and contact are not introduced.
+Zero occupancy recovers the ordinary native open step bit for bit.
+
+`OpenBoundaryMomentumTransport3`, exposed as the shared `open` receipt, measures
+mass, linear momentum and fixed-origin angular momentum delivered to the fluid
+by the actual boundary operator. Its opposite belongs to the external reservoir.
+During the existing collision traversal each open incoming link contributes
+`2*c_q*f_post,opp`, the exact exchange from the original temporary reflection.
+The subsequent native reconstruction contributes its actual population
+differences, including replacement of tangential rows on open-face interiors.
+Wall-owned corner links retain their original rows and wall account. Periodic
+coordinate transport remains separately counted. The account is measured from
+those local operators, not inferred from a whole-domain balance residual.
+
+Reservoir reductions retain double-double low bits until the shared receipt is
+rounded. After first-use native face-cache allocation, the added work scales
+with open links and reconstructed boundary cells, with no additional grid-sized
+field or whole-grid inventory scan. The single/assembly/dry owners reuse their
+existing collision and next-population scratch. Failure during reconstruction,
+receipt overflow, endpoint checks or cancellation restores the scratch/cache
+owners without publishing populations, bodies or topology admission.
+
+Physical dry-body combined linear and angular momentum gates include reservoir
+exchange once. Nested body receipts do not duplicate shared wall, periodic,
+forcing or reservoir terms. Full and retained-interior fluid masses remain
+explicit inventories; this extension does not renormalize moving occupancy or
+claim exact displaced-fluid mass/GCL closure. Reservoir mass is the measured
+full-grid population transfer. This is an isothermal momentum extension, with
+no pressure-work, thermal/internal-energy or complete fluid-energy claim, and
+does not by itself establish calibrated continuum drag or high-Re validity.
+
+`tests/open_partial_saturation3.rs` checks repeated exact native-step parity for
+BGK/TRT/central-moment/reduced-cumulant empty overlays; independent forced
+shared-body mass, linear and angular balances with wall/open and periodic
+corners; translated-origin covariance; occupied-face refusal and exact retry;
+late reservoir overflow rollback; cancellation after reconstruction; and actual
+exterior-fluid-plus-dry-body inventories for a single body, delegated singleton
+and simultaneous pair. The earlier unsupported-model regression now refuses
+an unrepresentable reciprocal viscous time and moving walls, reflecting the
+newly admitted moment collision and open boundary capabilities.

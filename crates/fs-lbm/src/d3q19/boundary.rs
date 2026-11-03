@@ -28,11 +28,11 @@ mod forcing;
 pub use forcing::{BoundaryForcingError3, RigidFrame3};
 mod partial_saturation;
 pub use partial_saturation::{
-    FiniteLubricationPlane3, LubricationSurface3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3,
-    PartialSaturationBodiesExchange3, PartialSaturationBody3, PartialSaturationBodyExchange3,
-    PartialSaturationBodyResponse3, PartialSaturationError3, PartialSaturationExchange3,
-    PartialSaturationForcing3, PeriodicMomentumTransport3, PlaneLubricationExchange3,
-    SphereLubrication3, SphereLubricationExchange3,
+    FiniteLubricationPlane3, FinitePlaneResponse3, LubricatedPlanesExchange3, LubricationPlane3, LubricationSurface3,
+    OpenBoundaryMomentumTransport3, PartialSaturationBodiesExchange3, PartialSaturationBody3,
+    PartialSaturationBodyExchange3, PartialSaturationBodyResponse3, PartialSaturationError3,
+    PartialSaturationExchange3, PartialSaturationForcing3, PeriodicMomentumTransport3,
+    PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,
 };
 mod body_motion;
 pub use body_motion::{

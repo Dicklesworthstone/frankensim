@@ -526,7 +526,7 @@ fn invalid_requests_and_cancellation_publish_nothing_and_recover() {
 }
 
 #[test]
-fn unsupported_collision_open_faces_and_voxel_occupancy_refuse() {
+fn unbounded_viscous_time_moving_walls_and_voxel_occupancy_refuse() {
     let mut body = body();
     let good = fractions();
     let mut grids = [
@@ -535,7 +535,9 @@ fn unsupported_collision_open_faces_and_voxel_occupancy_refuse() {
             N,
             N,
             CollisionModel3::CentralMoment {
-                second_order_rate: 1.2,
+                // The cell law admits a positive rate, but immersed NT
+                // weighting requires a finite reciprocal viscous time.
+                second_order_rate: 1e-310,
                 higher_order_rate: 1.5,
             },
             [0.0; 3],
@@ -547,7 +549,7 @@ fn unsupported_collision_open_faces_and_voxel_occupancy_refuse() {
             N,
             0.83,
             [0.0; 3],
-            BoundarySpec3::pressure_duct_z(1.001, 1.0),
+            BoundarySpec3::lid_cavity([0.02, 0.0, 0.0]),
         ),
     ];
     for grid in &mut grids {

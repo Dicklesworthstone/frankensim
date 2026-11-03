@@ -51,6 +51,9 @@ pub struct PartialSaturationBodiesExchange3<const N: usize> {
     /// Periodic coordinate-wrap angular transport, counted only once over the
     /// actual composite populations, not once per immersed body.
     pub periodic: PeriodicMomentumTransport3,
+    /// Native prescribed velocity/pressure reservoir exchange, counted once
+    /// over the composite fluid rather than once per body.
+    pub open: OpenBoundaryMomentumTransport3,
     /// Imposed fluid body-force impulse, torque and local midpoint work once
     /// over the whole fluid, including retained interior populations.
     pub forcing: PartialSaturationForcing3,
@@ -244,7 +247,7 @@ impl BoundaryGrid3 {
     ///
     /// # Errors
     /// Inherits single-body D3Q19 collision, held Guo forcing, finite/SPD, low-Mach, stationary
-    /// wall/periodic admission. Also refuses an empty assembly, malformed
+    /// wall/periodic/open-face admission. Also refuses an empty assembly, malformed
     /// fraction fields and aggregate occupancy above one. Every refusal leaves
     /// all bodies, fluid populations and topology admission unchanged.
     pub fn step_with_partial_saturation_bodies<const N: usize>(
@@ -370,6 +373,7 @@ impl BoundaryGrid3 {
                         bodies: [(*exchange).into(); N],
                         walls: exchange.walls,
                         periodic: exchange.periodic,
+                        open: exchange.open,
                         forcing: exchange.forcing,
                         lubrication: SphereLubricationExchange3::default(),
                         population_mass_residual: 0.0,
@@ -388,10 +392,9 @@ impl BoundaryGrid3 {
         let tau = relaxation.tau;
         if !origin.into_iter().all(f64::is_finite)
             || Face3::ALL.into_iter().any(|face| {
-                !matches!(self.boundaries.face(face), FaceBoundary3::Periodic)
-                && !matches!(self.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity == [0.0; 3])
+                matches!(self.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity != [0.0; 3])
             }) {
-            return Err(invalid("assembly requires finite origin and periodic/stationary faces"));
+            return Err(invalid("assembly requires finite origin and stationary wall faces"));
         }
         let mut response = [Response::default(); N];
         for a in 0..N {
@@ -436,6 +439,12 @@ impl BoundaryGrid3 {
                 if total == 0.0 {
                     continue;
                 }
+                if self.open_link_masks[tile].0[lane] != 0 {
+                    return Err(PartialSaturationError3::Cell {
+                        cell,
+                        reason: "immersed fraction must vanish on reconstructed open faces",
+                    });
+                }
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
                 let (rho, u) = moments(self.f.each_ref().map(|f| f[tile].0[lane]), force, cell)?;
                 for a in 0..N {
@@ -464,6 +473,7 @@ impl BoundaryGrid3 {
             bodies: [PartialSaturationBodyResponse3::default(); N],
             walls: WallMomentumExchange3::default(),
             periodic: PeriodicMomentumTransport3::default(),
+            open: OpenBoundaryMomentumTransport3::default(),
             forcing: PartialSaturationForcing3::default(),
             lubrication: SphereLubricationExchange3::default(),
             population_mass_residual: 0.0,
@@ -497,6 +507,7 @@ impl BoundaryGrid3 {
             });
         }
         let mut exchanges = [Exchange::default(); N];
+        let mut open = OpenTransport::default();
         let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
@@ -592,6 +603,10 @@ impl BoundaryGrid3 {
                     });
                 }
                 report.forcing.add(f, post, force, cell, origin)?;
+                let open_mask = self.open_link_masks[tile].0[lane];
+                if open_mask != 0 {
+                    open.add_links(&post, open_mask, cell, origin);
+                }
                 for (field, value) in self.post.iter_mut().zip(post) {
                     field[tile].0[lane] = value;
                 }
@@ -723,6 +738,13 @@ impl BoundaryGrid3 {
                 }
             }
         }
+        report.open = match self.reconstruct_immersed_open_faces(&mut next, open, origin, gate) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.next = Some(next);
+                return Err(error);
+            }
+        };
         let value = match checkpoint(gate).and_then(|()| finish(self, &proposed, &report)) {
             Ok(value) => value,
             Err(error) => {

@@ -441,7 +441,18 @@ fn single_member_preserves_original_body_and_populations_bit_for_bit() {
             .unwrap();
         assert_eq!(single, many[0]);
         assert_eq!(snapshot(&a), snapshot(&b));
-        assert_eq!(ra, rb.bodies[0]);
+        // Shared external exchanges belong to the assembly exactly once,
+        // even for a singleton. Per-body dynamics remain bit-identical.
+        assert_eq!(ra.coupling.walls, rb.coupling.walls);
+        assert_eq!(ra.coupling.periodic, rb.coupling.periodic);
+        assert_eq!(ra.coupling.open, rb.coupling.open);
+        assert_eq!(ra.coupling.forcing, rb.coupling.forcing);
+        let mut per_body = ra;
+        per_body.coupling.walls = Default::default();
+        per_body.coupling.periodic = Default::default();
+        per_body.coupling.open = Default::default();
+        per_body.coupling.forcing = Default::default();
+        assert_eq!(per_body, rb.bodies[0]);
     }
 }
 

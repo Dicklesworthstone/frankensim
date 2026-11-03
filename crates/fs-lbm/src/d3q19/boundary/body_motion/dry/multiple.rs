@@ -388,10 +388,11 @@ impl BoundaryGrid3 {
         });
         let boundary = core::array::from_fn(|i| {
             if i < 3 {
-                native.walls.fluid_population_impulse[i]
+                native.walls.fluid_population_impulse[i] + native.open.impulse[i]
             } else {
                 native.walls.fluid_population_angular_impulse[i - 3]
                     + native.periodic.angular_momentum_change[i - 3]
+                    + native.open.angular_impulse[i - 3]
             }
         });
         let mut represented_forcing = core::array::from_fn(|i| {
@@ -728,6 +729,7 @@ fn singleton<const N: usize>(single: DryBodyExchange3) -> DryBodiesExchange3<N> 
     let mut body = single.native;
     body.coupling.walls = Default::default();
     body.coupling.periodic = Default::default();
+    body.coupling.open = Default::default();
     body.coupling.forcing = Default::default();
     DryBodiesExchange3 {
         native: MovingPartialSaturationBodiesExchange3 {
@@ -735,6 +737,7 @@ fn singleton<const N: usize>(single: DryBodyExchange3) -> DryBodiesExchange3<N> 
                 bodies: [coupling.into(); N],
                 walls: coupling.walls,
                 periodic: coupling.periodic,
+                open: coupling.open,
                 forcing: coupling.forcing,
                 lubrication: SphereLubricationExchange3::default(),
                 population_mass_residual: 0.0,

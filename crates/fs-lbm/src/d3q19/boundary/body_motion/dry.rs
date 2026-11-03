@@ -198,7 +198,8 @@ impl BoundaryGrid3 {
     /// during the step. Full-pressure gravity uses the dry body's `M*g` and
     /// the configured fluid force; reduced-pressure gravity instead uses
     /// `(M-rho*V)*g` with the hydrostatic fluid source removed. Do not combine
-    /// both conventions. Stationary walls/periodic faces and the original
+    /// both conventions. Stationary walls, periodic and native open faces are
+    /// admitted; sampled body occupancy must stay away from open-face cells.
     /// The native D3Q19 collision and low-Mach envelope remain required.
     ///
     /// The correction subtracts the imposed force on the midpoint interior
@@ -416,6 +417,7 @@ impl BoundaryGrid3 {
         let boundary: [f64; 6] = core::array::from_fn(|i| {
             if i < 3 {
                 current.native.coupling.walls.fluid_population_impulse[i]
+                    + current.native.coupling.open.impulse[i]
             } else {
                 current
                     .native
@@ -423,6 +425,7 @@ impl BoundaryGrid3 {
                     .walls
                     .fluid_population_angular_impulse[i - 3]
                     + current.native.coupling.periodic.angular_momentum_change[i - 3]
+                    + current.native.coupling.open.angular_impulse[i - 3]
             }
         });
         let combined_residual = core::array::from_fn(|i| {
