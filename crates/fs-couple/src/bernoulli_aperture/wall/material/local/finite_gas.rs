@@ -119,13 +119,16 @@ pub struct FiniteGasDgStep<S> {
     pub work_residual_j: f64,
     pub gas_energy_residual_j: f64,
     /// Original total acoustic/wall/boundary decrement, unchanged and unclamped.
-    /// `molecular_heat_j` is its independently integrated internal transfer when
-    /// the source-positive heat path is selected.
+    /// Molecular and viscous heat report independently integrated internal
+    /// transfers when their respective source-positive paths are selected.
     pub acoustic_dissipation_j: f64,
     /// Actual molecular slip-square integral deposited once into this finite gas.
     /// Zero for the generic callback path, whose losses remain explicit exports.
     pub molecular_heat_j: f64,
-    /// Total native decrement minus the internal molecular transfer. Other
+    /// Actual gas-viscosity source integral deposited once into this finite gas.
+    /// Excludes thermal-wall transport, molecular relaxation and solid viscosity.
+    pub viscous_heat_j: f64,
+    /// Total native decrement minus the internal molecular and viscous transfers. Other
     /// gas/wall/boundary losses retain their existing exported-energy meaning.
     /// Roundoff is left visible; no negative remainder is silently clipped.
     pub exported_acoustic_dissipation_j: f64,
@@ -217,15 +220,18 @@ pub(crate) fn admit_controls<E>(controls: FiniteGasDgSolve) -> Result<(), Finite
 fn prepare<S, E, C: FnMut() -> bool>(
     duct: &DgDuct, state: &DgState, propagator: &DgPropagator,
     gas: &ClosedGasParcel, ports: &[PortInput], controls: FiniteGasDgSolve,
-    molecular_heat_j: f64,
+    molecular_heat_j: f64, viscous_heat_j: f64,
     mut evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
         -> Result<FiniteGasDgBackground<S>, E>,
     cancelled: &mut C,
 ) -> Result<Candidate<S>, FiniteGasDgError<E>> {
     check(cancelled)?;
     admit_controls(controls)?;
-    if !molecular_heat_j.is_finite() || molecular_heat_j < 0.0 {
-        return Err(FiniteGasDgError::Invalid("molecular heat must be the finite nonnegative original source integral"));
+    let internal_heat_j = molecular_heat_j + viscous_heat_j;
+    if !molecular_heat_j.is_finite() || molecular_heat_j < 0.0
+        || !viscous_heat_j.is_finite() || viscous_heat_j < 0.0 || !internal_heat_j.is_finite()
+    {
+        return Err(FiniteGasDgError::Invalid("internal heat must contain finite nonnegative original source integrals"));
     }
     let [lo, hi] = controls.work_bracket_j;
     let original = duct.gas_field().ok_or(FiniteGasDgError::Invalid(
@@ -252,9 +258,9 @@ fn prepare<S, E, C: FnMut() -> bool>(
     if !dissipation.is_finite() {
         return Err(FiniteGasDgError::Invalid("native acoustic loss increment is unrepresentable"));
     }
-    let exported_dissipation = dissipation - molecular_heat_j;
-    if molecular_heat_j > 0.0 && exported_dissipation < -controls.energy_tolerance_j {
-        return Err(FiniteGasDgError::Invalid("source molecular heat exceeds the native total decrement beyond its energy allowance"));
+    let exported_dissipation = dissipation - internal_heat_j;
+    if internal_heat_j > 0.0 && exported_dissipation < -controls.energy_tolerance_j {
+        return Err(FiniteGasDgError::Invalid("source heat exceeds the native total decrement beyond its energy allowance"));
     }
     check(cancelled)?;
     let maximum_work = lo.abs().max(hi.abs());
@@ -275,7 +281,7 @@ fn prepare<S, E, C: FnMut() -> bool>(
                 ));
             }
             let gas_change = stored_change(gas, &background.gas);
-            let gas_residual = ((gas_change + work - molecular_heat_j) - background.supplied_heat_j)
+            let gas_residual = ((gas_change + work - internal_heat_j) - background.supplied_heat_j)
                 - background.transported_enthalpy_j;
             if !gas_change.is_finite() || !gas_residual.is_finite()
                 || gas_residual.abs() > controls.energy_tolerance_j
@@ -295,7 +301,7 @@ fn prepare<S, E, C: FnMut() -> bool>(
                 transported_enthalpy_j: background.transported_enthalpy_j,
                 gas_energy_change_j: gas_change, work_by_gas_j: work,
                 work_residual_j: residual, gas_energy_residual_j: gas_residual,
-                acoustic_dissipation_j: dissipation, molecular_heat_j,
+                acoustic_dissipation_j: dissipation, molecular_heat_j, viscous_heat_j,
                 exported_acoustic_dissipation_j: exported_dissipation,
                 combined_energy_residual_j: 0.0, trials,
             };
@@ -373,11 +379,34 @@ fn prepare_molecular_heated<C: FnMut() -> bool>(
     if !external_heat_j.is_finite() || !total_heat.is_finite() {
         return Err(FiniteGasDgError::Invalid("external and molecular heat must have a finite sum"));
     }
-    prepare(duct, state, propagator, gas, ports, controls, molecular_heat_j,
+    prepare(duct, state, propagator, gas, ports, controls, molecular_heat_j, 0.0,
         |old, _, work, cancel| {
             let mut background = heated(old, total_heat, work, gas_solve, cancel)?;
             // The original gas report retains ALL heat. The enclosing account
             // keeps only the caller's heat external; molecular heat cancels once.
+            background.supplied_heat_j = external_heat_j;
+            Ok(background)
+        }, cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_viscous_heated<C: FnMut() -> bool>(
+    duct: &DgDuct, state: &DgState, propagator: &DgPropagator,
+    gas: &ClosedGasParcel, ports: &[PortInput], external_heat_j: f64,
+    gas_solve: GasEnergySolve, controls: FiniteGasDgSolve,
+    heat_budget: DenseExponentialBudget, cancelled: &mut C,
+) -> Result<Candidate<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
+    check(cancelled)?;
+    admit_controls(controls)?;
+    let channel = duct.prepare_viscous_heat(propagator, heat_budget, cancelled).map_err(native)?;
+    let viscous_heat_j = channel.integrated_heat_j(state, ports, cancelled).map_err(native)?;
+    let total_heat = external_heat_j + viscous_heat_j;
+    if !external_heat_j.is_finite() || !total_heat.is_finite() {
+        return Err(FiniteGasDgError::Invalid("external and viscous heat must have a finite sum"));
+    }
+    prepare(duct, state, propagator, gas, ports, controls, 0.0, viscous_heat_j,
+        |old, _, work, cancel| {
+            let mut background = heated(old, total_heat, work, gas_solve, cancel)?;
             background.supplied_heat_j = external_heat_j;
             Ok(background)
         }, cancelled)
@@ -434,7 +463,7 @@ impl MaterialWallDg {
             return Err(FiniteGasDgError::Invalid("prepared molecular heat requires its original diffusion owner"));
         }
         let candidate = prepare(&self.duct, state, propagator, gas, ports, controls,
-            molecular_heat_j, evolve, cancelled)?;
+            molecular_heat_j, 0.0, evolve, cancelled)?;
         self.duct = candidate.duct;
         *state = candidate.state;
         *propagator = candidate.propagator;
@@ -483,6 +512,33 @@ impl MaterialWallDg {
         *gas = candidate.gas;
         Ok(candidate.step)
     }
+
+    /// Return the original gas viscous heat to its finite source inventory.
+    /// Uniform or spatial Poiseuille/series-memory dissipation is integrated on
+    /// the complete frozen-medium trajectory under the actual held ports, once
+    /// before the existing caloric/work-feedback solve. The original NASA-9/EOS
+    /// owner updates temperature, viscosity and the continuing acoustic memories.
+    ///
+    /// `viscous_heat_j` is removed from exported acoustic loss once. Thermal-wall
+    /// transport, molecular relaxation, solid Kelvin/Maxwell loss and terminals
+    /// remain distinct exports. No partition of those losses is guessed. The
+    /// original fixed-volume, well-mixed, first-order partition and complete
+    /// 128-state integration cap apply. Any refusal leaves every owner unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_finite_gas_viscous_heat_controlled<C: FnMut() -> bool>(
+        &mut self, state: &mut DgState, propagator: &mut DgPropagator,
+        gas: &mut ClosedGasParcel, ports: &[PortInput], heat_j: f64,
+        gas_solve: GasEnergySolve, controls: FiniteGasDgSolve,
+        heat_budget: DenseExponentialBudget, cancelled: &mut C,
+    ) -> Result<FiniteGasDgStep<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
+        let candidate = prepare_viscous_heated(&self.duct, state, propagator, gas,
+            ports, heat_j, gas_solve, controls, heat_budget, cancelled)?;
+        self.duct = candidate.duct;
+        *state = candidate.state;
+        *propagator = candidate.propagator;
+        *gas = candidate.gas;
+        Ok(candidate.step)
+    }
 }
 
 impl RegionalMaterialWallDg {
@@ -518,7 +574,7 @@ impl RegionalMaterialWallDg {
             return Err(FiniteGasDgError::Invalid("prepared molecular heat requires its original diffusion owner"));
         }
         let candidate = prepare(&self.duct, state, propagator, gas, ports, controls,
-            molecular_heat_j, evolve, cancelled)?;
+            molecular_heat_j, 0.0, evolve, cancelled)?;
         self.duct = candidate.duct;
         *state = candidate.state;
         *propagator = candidate.propagator;
@@ -547,6 +603,24 @@ impl RegionalMaterialWallDg {
         heat_budget: DenseExponentialBudget, cancelled: &mut C,
     ) -> Result<FiniteGasDgStep<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
         let candidate = prepare_molecular_heated(&self.duct, state, propagator, gas,
+            ports, heat_j, gas_solve, controls, heat_budget, cancelled)?;
+        self.duct = candidate.duct;
+        *state = candidate.state;
+        *propagator = candidate.propagator;
+        *gas = candidate.gas;
+        Ok(candidate.step)
+    }
+
+    /// The same viscous-heating transaction with every original regional wall
+    /// source and Kelvin/Maxwell history retained. See the uniform owner's method.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_finite_gas_viscous_heat_controlled<C: FnMut() -> bool>(
+        &mut self, state: &mut DgState, propagator: &mut DgPropagator,
+        gas: &mut ClosedGasParcel, ports: &[PortInput], heat_j: f64,
+        gas_solve: GasEnergySolve, controls: FiniteGasDgSolve,
+        heat_budget: DenseExponentialBudget, cancelled: &mut C,
+    ) -> Result<FiniteGasDgStep<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
+        let candidate = prepare_viscous_heated(&self.duct, state, propagator, gas,
             ports, heat_j, gas_solve, controls, heat_budget, cancelled)?;
         self.duct = candidate.duct;
         *state = candidate.state;

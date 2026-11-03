@@ -205,6 +205,8 @@ pub enum DuctError {
     MolecularHeatUnresolved { reason: fs_phs::PhsError },
     /// The physical solid-wall source integral retained its original refusal.
     CompliantWallHeatUnresolved { reason: fs_phs::PhsError },
+    /// The physical fluid-viscosity source integral retained its original refusal.
+    ViscousHeatUnresolved { reason: fs_phs::PhsError },
 }
 
 impl core::fmt::Display for DuctError {
@@ -247,6 +249,8 @@ impl core::fmt::Display for DuctError {
                 "FS-DUCT-MOLECULAR-HEAT: {reason}"),
             DuctError::CompliantWallHeatUnresolved { reason } => write!(f,
                 "FS-DUCT-COMPLIANT-WALL-HEAT: {reason}"),
+            DuctError::ViscousHeatUnresolved { reason } => write!(f,
+                "FS-DUCT-VISCOUS-HEAT: {reason}"),
         }
     }
 }

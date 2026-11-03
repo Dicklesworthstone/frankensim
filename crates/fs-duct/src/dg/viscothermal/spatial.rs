@@ -112,6 +112,16 @@ pub(in crate::dg) struct SpatialViscothermal {
 }
 
 impl SpatialViscothermal {
+    /// Original velocity projections, drag, series arms and memory offsets.
+    /// Thermal channels remain separate, including after molecular replacement.
+    pub(super) fn viscous_channels(
+        &self, field_dofs: usize,
+    ) -> impl Iterator<Item = (&[f64], f64, &[ZkDiffusiveTerm], usize)> {
+        self.channels.iter().filter(move |channel| channel.field_start == field_dofs)
+            .map(|channel| (channel.projection.as_slice(), channel.drag_per_s,
+                channel.terms.as_slice(), channel.memory_start))
+    }
+
     /// Original pointwise thermal measure, before molecular replacement.
     pub(in crate::dg) fn thermal_quadrature(&self, field_dofs: usize) -> Vec<ThermalQuadrature> {
         self.channels.iter().filter(|channel| channel.field_start < field_dofs)

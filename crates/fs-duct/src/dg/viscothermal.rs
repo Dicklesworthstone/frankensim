@@ -12,6 +12,8 @@ use super::*;
 
 mod spatial;
 pub use spatial::{DgWallAdmission, DgWallResolution};
+mod heat;
+pub use heat::DgViscousHeat;
 
 #[derive(Debug, Clone)]
 pub(super) enum ViscothermalMemory {

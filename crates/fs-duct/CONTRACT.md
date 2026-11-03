@@ -3306,3 +3306,33 @@ independent component momentum integration, duration-cache invalidation,
 common acceleration under tight pressure bounds, and nonpublication on
 physical refusal or late cancellation. Existing channel and forced-momentum
 suites remain applicable.
+
+## Native acoustic viscous heat returned to finite gas
+
+`DgDuct::prepare_viscous_heat` observes the original fluid-viscosity source
+along the complete native DG trajectory under its actual held ports. Uniform
+and spatial circular diffusion retain their Poiseuille drag, positive series
+slip squares, mass basis and material quadrature. Molecular replacement retains
+the original viscous memory offsets. Thermal shunts, molecular relaxation,
+Kelvin/Maxwell wall loss and boundary absorption contribute no viscous rows.
+No total-loss fraction or thermal-wall heat partition is inferred.
+
+The existing source-positive integration owner admits at most 128 complete
+states and at most one source row per complete-state coordinate, under explicit
+dimension, byte and work allowances. Missing viscosity gives exactly zero;
+foreign state/operator, resource refusal or cancellation publishes nothing.
+Changed material or duration requires preparation against the new propagator.
+
+The uniform and regional material-wall owners' finite-gas viscous-heat methods
+deposit this integral once using the original NASA-9/EOS energy inversion and
+reciprocal parameter-work solve. `viscous_heat_j` is separate from molecular
+heat and is subtracted once from exported acoustic dissipation. The refreshed
+gas temperature and viscosity feed the continuing original diffusion operator.
+The existing fixed-volume, well-mixed, first-order partition, finite-temperature
+increment and wall-fit band admissions remain in force. No other loss channel
+is returned to the gas by this viscous-only method.
+
+Focused regressions cover dimensional Poiseuille loss, split-interval heat,
+spatial material quadrature under held input, inactive and unrelated sources,
+regional finite-gas heating, molecular coexistence, unchanged zero-source
+behavior, and complete rollback on refusal or late cancellation.

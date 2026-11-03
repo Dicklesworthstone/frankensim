@@ -91,7 +91,7 @@ pub mod continuous;
 pub use continuous::{DgContinuous, DgHarmonicPort, DgHarmonicResponse};
 
 mod viscothermal;
-pub use viscothermal::{DgWallAdmission, DgWallResolution};
+pub use viscothermal::{DgViscousHeat, DgWallAdmission, DgWallResolution};
 mod compliant_wall;
 pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate, DgWallRelaxationTransfer};
 pub use compliant_wall::DgCompliantWallHeat;
