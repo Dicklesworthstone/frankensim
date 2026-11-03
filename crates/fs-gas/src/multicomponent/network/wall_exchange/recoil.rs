@@ -10,9 +10,10 @@ use crate::multicomponent::wall_exchange::{
 use crate::multicomponent::{Cell, MixtureGas};
 use fs_qty::Time;
 
-/// Mechanical exchanges with one independent finite support over all accepted
-/// source halves. Units use that branch's original axial coordinate. Heat
-/// transfer remains in the original `NetworkWallReport`, separate from work.
+/// Mechanical exchanges with one finite support over all accepted source
+/// halves. The support may belong to one cell or a complete branch. Units use
+/// that branch's original axial coordinate. Heat transfer remains in the
+/// original `NetworkWallReport`, separate from work.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SupportExchange {
     /// Sum of actual gas momentum changes from support friction [N s].
@@ -82,13 +83,22 @@ impl NetworkWallOperator<'_> {
             ));
         }
         let mut accepted = allocated(self.plenum_start, None)?;
-        for (shape, input) in self.branches.iter().zip(&branches) {
+        for (branch, (shape, input)) in self.branches.iter().zip(&branches).enumerate() {
             if input.len() != shape.mesh.cell_count() {
                 return Err(WallExchangeError::Invalid("finite support cell axis"));
             }
             for (cell, support) in input.iter().copied().enumerate() {
                 poll(&mut cancelled)?;
                 if let Some(support) = support {
+                    if self
+                        .shared_supports
+                        .as_ref()
+                        .is_some_and(|supports| supports.has_branch(branch))
+                    {
+                        return Err(WallExchangeError::Invalid(
+                            "independent and shared supports overlap",
+                        ));
+                    }
                     if !positive(support.mass_kg) || !support.velocity_m_s.is_finite() {
                         return Err(WallExchangeError::Invalid(
                             "finite support mass or velocity",
@@ -139,6 +149,12 @@ impl NetworkWallOperator<'_> {
 }
 
 impl FiniteSupports {
+    pub(super) fn any_selected(&self, start: usize, count: usize) -> bool {
+        self.accepted[start..start + count]
+            .iter()
+            .any(Option::is_some)
+    }
+
     pub(super) fn begin_trial(
         &mut self,
         cancelled: &mut impl FnMut() -> bool,
@@ -251,20 +267,27 @@ impl FiniteSupports {
     }
 }
 
-/// Restore the original coefficient source and accepted support velocity after
-/// the thermal owner ran with drag disabled. Its original heat storage, tangent,
+/// Retain exact one-cell mechanics in the common mechanical-update format.
+pub(super) fn mechanical_update(motion: RecoilUpdate, drag: WallDrag) -> WallUpdate {
+    let mut update = motion.gas;
+    update.contact.drag = at_velocity(drag, motion.support.velocity_m_s);
+    update.report.drag_heating_j = motion.slip_dissipation_j;
+    update
+}
+
+/// Restore the coefficient source and accepted support velocity after the
+/// original thermal owner ran with drag disabled. Its storage, tangent,
 /// source identity and conduction admission remain authoritative.
 pub(super) fn finish(
     mut thermal: WallUpdate,
-    motion: RecoilUpdate,
-    drag: WallDrag,
+    motion: WallUpdate,
     controls: WallControl,
 ) -> Result<WallUpdate, WallExchangeError> {
-    thermal.contact.drag = at_velocity(drag, motion.support.velocity_m_s);
-    thermal.report.wall_impulse_ns = motion.gas.report.wall_impulse_ns;
-    thermal.report.mechanical_work_to_gas_j = motion.gas.report.mechanical_work_to_gas_j;
-    thermal.report.drag_heating_j = motion.slip_dissipation_j;
-    thermal.report.energy_residual_j += motion.gas.report.energy_residual_j;
+    thermal.contact.drag = motion.contact.drag;
+    thermal.report.wall_impulse_ns = motion.report.wall_impulse_ns;
+    thermal.report.mechanical_work_to_gas_j = motion.report.mechanical_work_to_gas_j;
+    thermal.report.drag_heating_j = motion.report.drag_heating_j;
+    thermal.report.energy_residual_j += motion.report.energy_residual_j;
     let scale = thermal
         .report
         .mechanical_work_to_gas_j
@@ -282,7 +305,7 @@ pub(super) fn finish(
     Ok(thermal)
 }
 
-fn coefficients(drag: WallDrag) -> RecoilLaw {
+pub(super) fn coefficients(drag: WallDrag) -> RecoilLaw {
     let (linear_rate_per_s, quadratic_per_m) = match drag {
         WallDrag::None => (0.0, 0.0),
         WallDrag::Linear { rate_per_s } | WallDrag::MovingLinear { rate_per_s, .. } => {
@@ -310,7 +333,7 @@ fn coefficients(drag: WallDrag) -> RecoilLaw {
     }
 }
 
-fn at_velocity(drag: WallDrag, wall_velocity_m_s: f64) -> WallDrag {
+pub(super) fn at_velocity(drag: WallDrag, wall_velocity_m_s: f64) -> WallDrag {
     match drag {
         WallDrag::None => WallDrag::MovingLinear {
             rate_per_s: 0.0,

@@ -3640,3 +3640,41 @@ refusal, and cancellation at every exposed checkpoint with exact retry.
 The run compiled original mechanics/drag/controls and fs-math/fs-qty; the
 surrounding parent error type was a test fixture. No full crate or workspace
 build is claimed.
+
+### Shared branch inertia on the original network source transaction
+
+`NetworkWallOperator::with_shared_branch_supports` binds one optional
+`SlidingSupport` per original branch. Every cell on a selected branch reacts
+against that one mass and velocity through `SharedRecoilWorkspace`.
+Independent per-cell supports may coexist on other branches; overlap is
+rejected in either binding order. `None` retains the existing path. Distinct
+branch axes are never summed or treated as one spatial body.
+
+Each original source half resolves all selected coefficients at its actual
+entering common support velocity. Shared mechanics then supplies per-cell
+momentum and mechanical work before the original thermal owner runs with
+drag disabled. Slip loss thermalizes once through total energy minus kinetic
+energy. Local wall capacity, original material calorics/conduction, and shared
+thermal storage retain their existing ownership. Original transport admission
+checks actual relative-slip endpoints, including after shared thermal exchange.
+No thermal inventory, mass, mesh volume or flow clock is added.
+
+Accepted support states and `SupportExchange` receipts publish in the same
+transaction as gas and thermal walls. Both source halves accumulate actual
+friction-only gas impulse/energy; the common support's impulse and kinetic
+change use the complete accepted endpoints. Cancellation, exhausted mechanical
+work, original source-domain failures and balance refusals preserve accepted
+gas, support, thermal states and reports. Preparation allocates the work arrays;
+stepping does not allocate. The fixed-axis/frozen-geometry and local estimated
+mechanical accuracy limits of the shared solver remain explicit.
+
+Six focused selected-source native tests passed with the final solver and
+network source: nonuniform two-species volumes/masses with linear, Darcy and
+combined friction plus original local heat; an independent two-rate shared
+continuum with individual heat; both source halves and endpoint receipts;
+prior-state cancellation/replay and work refusal; disjoint independent
+supports, overlap rejection and None-path identity; and support-relative
+transport/Galilean endpoint admission. The native run used the actual network
+wall owner, heat, friction, transport and mesh source with explicit constant-Cv
+gas/network/transport fixtures. Material and shared-thermal paths were trapped,
+not exercised. Full Cargo/material/advection verification remains separate.

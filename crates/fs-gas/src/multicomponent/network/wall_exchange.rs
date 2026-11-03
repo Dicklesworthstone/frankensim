@@ -26,6 +26,7 @@ mod caloric;
 
 mod recoil;
 pub use recoil::SupportExchange;
+mod shared_recoil;
 
 mod shared;
 use shared::SharedWalls;
@@ -100,6 +101,8 @@ struct BranchShape {
 /// retaining each gas cell's current composition without mixing its species.
 /// Drag coefficients are frozen during each source interval. Plenums have no
 /// bulk momentum and therefore admit only `WallDrag::None`.
+/// [`Self::with_shared_branch_supports`] couples every cell of a selected
+/// branch to one finite axial inertia, with bounded mechanical time refinement.
 /// [`Self::with_circular_laminar_transport`] derives selected branch coefficients
 /// from current source-owned gas properties instead of retaining authored values.
 /// [`Self::with_material_heat_storage`] supplies original source-dependent finite thermal
@@ -123,6 +126,7 @@ pub struct NetworkWallOperator<'law> {
     caloric: Vec<Option<MaterialWallCaloric<'law>>>,
     shared: Option<SharedWalls<'law>>,
     supports: Option<recoil::FiniteSupports>,
+    shared_supports: Option<shared_recoil::SharedBranchSupports>,
     #[cfg(feature = "material")]
     conduction: Option<Vec<Option<BoundWallConduction>>>,
 }
@@ -220,6 +224,7 @@ impl<'law> NetworkWallOperator<'law> {
             caloric: allocated(count, None)?,
             shared: None,
             supports: None,
+            shared_supports: None,
             #[cfg(feature = "material")]
             conduction: None,
         };
@@ -305,6 +310,9 @@ impl<'law> NetworkWallOperator<'law> {
         if let Some(supports) = &mut self.supports {
             supports.begin_trial(cancelled)?;
         }
+        if let Some(supports) = &mut self.shared_supports {
+            supports.begin_trial(cancelled)?;
+        }
         poll(cancelled)?;
         self.trial_active = true;
         Ok(())
@@ -363,6 +371,7 @@ impl<'law> NetworkWallOperator<'law> {
         let n = self.gas.species_count();
         let width = n + 2;
         let mut balance = Balance::new();
+        self.prepare_shared_supports(network, duration, controls, cancelled)?;
         for (branch_index, (branch, shape)) in
             network.branches.iter().zip(&self.branches).enumerate()
         {
@@ -379,40 +388,55 @@ impl<'law> NetworkWallOperator<'law> {
                     momentum: values[n],
                     energy: values[n + 1],
                 };
-                let contact = self.candidate_contacts[index];
-                let contact = match &self.supports {
-                    Some(supports) => supports.contact(index, contact),
-                    None => contact,
+                let shared_motion = self
+                    .shared_supports
+                    .as_ref()
+                    .and_then(|supports| supports.motion(branch_index, i));
+                let contact = if shared_motion.is_some() {
+                    // This branch's coefficients were resolved together at
+                    // its actual entering shared-support velocity.
+                    self.candidate_contacts[index]
+                } else {
+                    let contact = self.candidate_contacts[index];
+                    let contact = match &self.supports {
+                        Some(supports) => supports.contact(index, contact),
+                        None => contact,
+                    };
+                    #[cfg(feature = "material")]
+                    let contact = self.film_contact(index, contact);
+                    match self.transport.as_mut() {
+                        Some(transport) => transport.resolve(
+                            &self.gas,
+                            branch_index,
+                            state,
+                            shape.mesh.volumes()[i],
+                            contact,
+                            cancelled,
+                        )?,
+                        None => contact,
+                    }
                 };
-                #[cfg(feature = "material")]
-                let contact = self.film_contact(index, contact);
-                let contact = match self.transport.as_mut() {
-                    Some(transport) => transport.resolve(
-                        &self.gas,
-                        branch_index,
-                        state,
-                        shape.mesh.volumes()[i],
-                        contact,
-                        cancelled,
-                    )?,
-                    None => contact,
-                };
-                let motion = match &mut self.supports {
-                    Some(supports) => supports.prepare(
-                        index,
-                        &self.gas,
-                        state,
-                        shape.mesh.volumes()[i],
-                        duration,
-                        contact.drag,
-                        controls,
-                        cancelled,
-                    )?,
-                    None => None,
+                let motion = match shared_motion {
+                    Some(motion) => Some(motion),
+                    None => match &mut self.supports {
+                        Some(supports) => supports
+                            .prepare(
+                                index,
+                                &self.gas,
+                                state,
+                                shape.mesh.volumes()[i],
+                                duration,
+                                contact.drag,
+                                controls,
+                                cancelled,
+                            )?
+                            .map(|motion| recoil::mechanical_update(motion, contact.drag)),
+                        None => None,
+                    },
                 };
                 let thermal_state = motion.map_or(state, |motion| Cell {
-                    momentum: motion.gas.momentum,
-                    energy: motion.gas.energy,
+                    momentum: motion.momentum,
+                    energy: motion.energy,
                     ..state
                 });
                 let thermal_contact = if motion.is_some() {
@@ -433,7 +457,7 @@ impl<'law> NetworkWallOperator<'law> {
                     &mut *cancelled,
                 )?;
                 let update = match motion {
-                    Some(motion) => recoil::finish(update, motion, contact.drag, controls)?,
+                    Some(motion) => recoil::finish(update, motion, controls)?,
                     None => update,
                 };
                 if let Some(transport) = self.transport.as_mut() {
@@ -606,6 +630,9 @@ impl<'law> NetworkWallOperator<'law> {
                 shared.commit();
             }
             if let Some(supports) = &mut self.supports {
+                supports.commit();
+            }
+            if let Some(supports) = &mut self.shared_supports {
                 supports.commit();
             }
         }
