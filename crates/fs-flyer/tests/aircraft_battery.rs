@@ -13,7 +13,7 @@ fn jlog(case: &str, payload: &str) {
 const RHO: f64 = 1.294;
 
 #[test]
-fn g0_separated_profile_drag_reaches_the_actual_aircraft_force_and_work() {
+fn g0_separated_profile_and_induced_drag_reach_the_actual_aircraft_force_and_work() {
     let mut design = wright_openloop_v1();
     design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
     let alpha = 0.50_f64;
@@ -29,6 +29,7 @@ fn g0_separated_profile_drag_reaches_the_actual_aircraft_force_and_work() {
     let mut attached_only = 0.0;
     let mut profile_power = 0.0;
     let mut kj_power = 0.0;
+    let mut kj_force = [0.0; 2];
     let mut separated_count = 0;
     for (s, strip) in strips.iter().enumerate() {
         let a = loads.coupled.strip_alpha_eff_rad[s];
@@ -60,9 +61,27 @@ fn g0_separated_profile_drag_reaches_the_actual_aircraft_force_and_work() {
         for &j in &strip.panel_indices {
             let panel = panels[j];
             let scale = RHO * loads.coupled.gamma[j] * (panel.b[1] - panel.a[1]);
+            kj_force[0] -= scale * w;
+            kj_force[1] += scale * u;
             kj_power += scale * (-w * cg_velocity[0] + u * cg_velocity[1]);
         }
     }
+    // Reconstruct the signed transverse force from accepted local flow and
+    // circulation, then project using reference velocity components. This
+    // does not call the production projection helper or infer lift from -Fz.
+    let transverse_lift = (kj_force[0] * cg_velocity[1] - kj_force[1] * cg_velocity[0]) / speed;
+    let q_reference = 0.5 * RHO * speed * speed;
+    // Existing biplane convention: S=2bc and AR=b/c, so S*AR=2b^2.
+    let drag_denominator =
+        2.0 * q_reference * core::f64::consts::PI * design.wing_span_m.powi(2) * design.oswald_e;
+    let expected_induced = transverse_lift.powi(2) / drag_denominator;
+    let body_normal_induced = kj_force[1].powi(2) / drag_denominator;
+    assert!((loads.induced_drag_n - expected_induced).abs() < 1e-9);
+    assert!((loads.lift_n + kj_force[1]).abs() < 1e-9);
+    assert!(
+        loads.induced_drag_n > 1.2 * body_normal_induced,
+        "high incidence must expose missing streamwise momentum loss"
+    );
     assert!(separated_count > 0);
     assert!(
         expected > 2.0 * attached_only,
@@ -485,8 +504,10 @@ fn trim_golden_digest() {
     // Golden bump 2026-11-03: ordinary loads now use the accepted local
     // washed velocity, matching their circulation solve. The original trim
     // digest was reproduced before this correction; physical bands are intact.
+    // Golden bump 2026-11-03: induced drag now uses transverse circulatory
+    // lift. The measured trim changes; its physical acceptance bands do not.
     assert_eq!(
-        digest, "2d4ee0b2095f360e5c405488435f097d027710890e68ccd566e5599da468fd1e",
+        digest, "5580f03a746015c656b9d115900fc7b54517f5337fe61159af4a1b85385c7bbc",
         "trim golden moved — determinism regression or an intentional \
          model change requiring the golden-bump protocol"
     );

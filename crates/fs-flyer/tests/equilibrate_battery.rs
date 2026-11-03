@@ -225,8 +225,10 @@ fn golden_digest() {
     // Golden bump 2026-10-28: correcting the extra half factor in ordinary
     // prop wash changes the native trim and mechanical equilibrium. The
     // initialization, settling law and physical acceptance gates are unchanged.
+    // Golden bump 2026-11-03: accepted local flow and transverse circulatory
+    // lift change the trim carried into tick zero. Settling gates are unchanged.
     assert_eq!(
-        t0.digest, "62bf8b740b924431450e900553f36569cf6f99962a2072bfa5fb4e73747832df",
+        t0.digest, "3a050895cff37ba98fc6d89fece7c6bb8fde4eb86c5a1dff871a2d6990ce83fe",
         "tick-0 golden moved — determinism regression or an intentional \
          closure change requiring the golden-bump protocol"
     );

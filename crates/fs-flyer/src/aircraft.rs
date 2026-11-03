@@ -180,7 +180,8 @@ pub struct ForceBuildup {
     pub force_n: [f64; 3],
     /// Net pitch moment about the CG reference [N·m] (+nose-up).
     pub moment_y_nm: f64,
-    /// Wing+canard lift (up-positive) [N].
+    /// Wing+canard circulatory body-up load `-Fz` [N]. This is the body-axis
+    /// projection; induced drag uses the force perpendicular to reference flow.
     pub lift_n: f64,
     /// Total drag (parasite + profile + induced) [N].
     pub drag_n: f64,
@@ -197,6 +198,14 @@ pub struct ForceBuildup {
 
 /// Standard terrestrial acceleration used by this historical aircraft model.
 pub(crate) const GRAVITY_MPS2: f64 = 9.80665;
+
+// Signed circulatory force perpendicular to the reference flow in the pitch
+// plane. Statement-split to retain the deterministic no-FMA convention.
+pub(crate) fn wind_axis_lift(force: fs_ga::Vec3, alpha: f64) -> f64 {
+    let lift_x = force.x * det::sin(alpha);
+    let lift_z = force.z * det::cos(alpha);
+    lift_x - lift_z
+}
 
 /// Remove the level-flight weight inserted by the force assembly.
 ///
@@ -593,6 +602,8 @@ impl OpenLoopDesign {
             m_y += m_term;
         }
         let lift = -force[2];
+        let transverse_lift =
+            wind_axis_lift(fs_ga::Vec3::new(force[0], force[1], force[2]), alpha_rad);
         // Per-strip quarter-chord camber moments (thin airfoil cm0 = −π·camber)
         // + profile drag at the strip line.
         let cm0 = -core::f64::consts::PI * self.camber_ratio;
@@ -635,7 +646,7 @@ impl OpenLoopDesign {
         // incident-flow KJ panel forces exclude it by construction).
         let s_ref = 2.0 * self.wing_span_m * self.wing_chord_m;
         let ar = self.wing_span_m * self.wing_span_m / (s_ref / 2.0);
-        let cl = lift / (q * s_ref);
+        let cl = transverse_lift / (q * s_ref);
         let d_ind = q * s_ref * cl * cl / (core::f64::consts::PI * ar * self.oswald_e);
         let dix = d_ind * vhat[0];
         let diz = d_ind * vhat[2];

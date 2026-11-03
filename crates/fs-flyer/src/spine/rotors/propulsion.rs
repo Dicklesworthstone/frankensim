@@ -12,7 +12,7 @@ use super::super::{Loads, TICK_HZ};
 use super::geared::{self, GearedAssembly, GearedLoads, GearedState, GearedStep};
 use super::{array, finite, vec};
 use crate::Refusal;
-use crate::aircraft::OpenLoopDesign;
+use crate::aircraft::{OpenLoopDesign, wind_axis_lift};
 use crate::propcoupling::spatial::{self, DiskAxes};
 use crate::propcoupling::{
     CoupledStep, IncidentInflow, PropDisk, coupled_prop_airframe_step_with_incident,
@@ -24,14 +24,6 @@ use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, StripSpec};
 
 #[path = "propulsion/dynamic.rs"]
 pub mod dynamic;
-
-// Signed circulatory force perpendicular to the reference flow in the pitch
-// plane. Statement-split to retain the deterministic no-FMA convention.
-fn wind_axis_lift(force: Vec3, alpha: f64) -> f64 {
-    let lift_x = force.x * det::sin(alpha);
-    let lift_z = force.z * det::cos(alpha);
-    lift_x - lift_z
-}
 
 /// Blade handedness relative to a mounted rotor's declared positive spin axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

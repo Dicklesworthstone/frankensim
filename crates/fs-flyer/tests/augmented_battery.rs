@@ -439,12 +439,14 @@ fn determinism_and_golden() {
     // Golden bump 2026-11-03: rotor/body derivatives now use accepted coupled
     // aircraft loads and the common-shaft torque balance. The old owner
     // reproduces the preceding x86_64 pin and fails both coupling regressions.
+    // Golden bump 2026-11-03: transverse circulatory lift corrects induced
+    // drag and the trim spectrum. Only the measured x86_64 pin changes.
     #[cfg(target_arch = "aarch64")]
     const EXPECTED_DIGEST: &str =
         "389e2a7c4f5a97e8c8507e011979571d10cb87d50c3f57d0b06cd38955d29321";
     #[cfg(target_arch = "x86_64")]
     const EXPECTED_DIGEST: &str =
-        "6ef89a34ac1662a60c3736cdab26a5ae1df3dc14a857898bacda6eb96f99a8cc";
+        "8534327a3f9d497e407d6db6805247d80653e50f21f61980a25052ea6d2c766d";
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     const EXPECTED_DIGEST: &str =
         "48828f654100a2407311265ac37a06525e09ed8543aaca5737ddf86ed1756dcc";

@@ -361,21 +361,15 @@ fn g0_real_coupled_force_matches_existing_symmetric_aerodynamics_and_signed_port
             Ok(state.rigid.vel_mps)
         })
         .unwrap();
-    // The historical longitudinal path retains body-normal induced drag.
-    // Correct that one declared contribution for this native comparison;
-    // every profile, parasite, thrust and gravity contribution stays checked.
+    // Both paths must use transverse circulatory lift for the same induced
+    // drag, independently reconstructed from the accepted panel solution.
     let induced = transverse_induced_drag(&design, &legacy, state.rigid.vel_mps, 0.03, 1.225);
-    let correction = induced - legacy.induced_drag_n;
-    assert!(
-        correction.abs() > 0.01,
-        "fixture must distinguish transverse from body-normal lift"
-    );
-    let direction = v(state.rigid.vel_mps).scale(1.0 / v(state.rigid.vel_mps).norm());
+    assert!((induced - legacy.induced_drag_n).abs() < 1e-9);
     let weight = design.gross_mass_kg * 9.80665;
     let expected = [
-        legacy.force_n[0] + weight * f64::sin(0.08) - correction * direction.x,
-        legacy.force_n[1] - correction * direction.y,
-        legacy.force_n[2] - weight * f64::cos(0.08) - correction * direction.z,
+        legacy.force_n[0] + weight * f64::sin(0.08),
+        legacy.force_n[1],
+        legacy.force_n[2] - weight * f64::cos(0.08),
     ];
     assert!((v(expected) - v(evaluation.aerodynamic_force_body_n)).norm() < 1e-9);
     assert!((legacy.moment_y_nm - evaluation.loads.carrier.moment_nm[1]).abs() < 1e-9);
@@ -460,13 +454,12 @@ fn g3_separated_drag_is_shared_by_longitudinal_lateral_and_six_dof_loads() {
         canard,
         inputs().density_kg_m3,
     );
-    let correction = induced - longitudinal.induced_drag_n;
-    let direction = v(rigid.vel_mps).scale(1.0 / v(rigid.vel_mps).norm());
+    assert!((induced - longitudinal.induced_drag_n).abs() < 1e-9);
     let weight = design.gross_mass_kg * 9.80665;
     let expected = [
-        longitudinal.force_n[0] + weight * alpha.sin() - correction * direction.x,
-        longitudinal.force_n[1] - correction * direction.y,
-        longitudinal.force_n[2] - weight * alpha.cos() - correction * direction.z,
+        longitudinal.force_n[0] + weight * alpha.sin(),
+        longitudinal.force_n[1],
+        longitudinal.force_n[2] - weight * alpha.cos(),
     ];
     assert!((v(expected) - v(evaluation.aerodynamic_force_body_n)).norm() < 1e-8);
     assert!((longitudinal.moment_y_nm - evaluation.loads.carrier.moment_nm[1]).abs() < 1e-8);

@@ -719,9 +719,10 @@ are unchanged. Full coupled accuracy remains bounded by the declared wing,
 BEMT and coupling tolerances; refinement evidence does not certify physical
 validity or arbitrary operating branches.
 
-### Wind-axis lift in native propulsion
+### Wind-axis lift in aircraft loads and native propulsion
 
-The native steady, dynamic and harmonic propulsion consumers compute the
+The longitudinal aircraft and native steady, dynamic and harmonic propulsion
+consumers share one projection helper to compute the
 circulatory lift component along `(sin(alpha), 0, -cos(alpha))` before applying
 the existing classical induced-drag screen. Body-normal force `-Fz` is only its
 projection; squaring that component would spuriously reduce induced drag by
@@ -734,8 +735,15 @@ independently integrate the accepted flat-panel circulation and use a velocity
 projection to compare the corrected native force at attached and separated
 states, retaining the existing force/moment tolerances and shaft-power checks.
 This remains an Estimated global induced-drag model, not a resolved-wake drag
-calculation. The historical longitudinal SimLoop, its coupling identity and
-browser startup golden remain on their existing path.
+calculation. `ForceBuildup::lift_n` retains its documented circulatory body-up
+load; the transverse force is used for induced drag before profile/parasite
+forces are added. The separated aircraft regression independently reconstructs
+lift from accepted local flow, circulation and span, verifies induced drag and
+actual drag work, and exposes the body-axis error at 0.5 rad incidence. In
+uniform flow that deficit is 23%. The longitudinal SimLoop
+and trim now receive this same corrected force; their trajectories and physical
+trim fingerprints intentionally change, without changing the section/coupling
+solve or the model's longitudinal applicability.
 
 ### Instantaneous rotor and geared momentum transfer
 

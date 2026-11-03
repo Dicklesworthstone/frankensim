@@ -153,13 +153,16 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
 /// split was never FP contraction: the true cause was platform libm
 /// reaching the tick path through `f64::acos` in the fs-airscrew
 /// Prandtl tip/root factors and `f64::tanh` in fs-flyer ground-contact
-/// friction; both are det::-routed now and native (aarch64 debug +
-/// release) and wasm (node debug + release) produce this digest
-/// bit-for-bit. Cross-lane identity is REQUIRED from here on.
+/// friction; both are det::-routed now. Native (aarch64 debug +
+/// release) and wasm (node debug + release) were verified bit-for-bit
+/// at lane unification. Cross-lane identity remains REQUIRED.
 /// Golden bump 2026-08-24 (bead frankensim-4pa2k): snapshot v2
 /// appends simulated roll and heading to the chained payload.
+/// Golden bump 2026-11-03: accepted local flow and transverse circulatory
+/// lift change the equilibrated initial state. Measured with the native
+/// canonical 120-tick scenario; the same golden remains required on wasm.
 pub const SELFTEST_GOLDEN: &str =
-    "2c50f8a672617cd3e872dfbfb706d4ff26d5828b25d710c910d8e8d632c50714";
+    "8d87ebbb12fda31f9c3616064c4123e01d565d3d6044f73d9c2d8c44e7702762";
 
 /// Run the canonical 1-second scenario and compare against a golden
 /// (the startup self-test core; the shipped entry uses
@@ -205,7 +208,7 @@ pub fn selftest_against(golden: &str) -> String {
     }
 }
 
-/// The shipped startup self-test (per-lane golden).
+/// The shipped startup self-test (shared canonical golden).
 #[must_use]
 pub fn selftest() -> String {
     selftest_against(SELFTEST_GOLDEN)

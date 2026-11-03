@@ -246,9 +246,11 @@ fn v02a_golden_digest() {
     // pitch incidence, and accepted washed flow supplies both circulation
     // and forces. The prior x86_64 digest was reproduced before correction;
     // only that measured pin changes and all physical gates remain intact.
+    // Golden bump 2026-11-03: transverse circulatory lift corrects induced
+    // drag and the trim linearization. Only the measured x86_64 pin changes.
     #[cfg(target_arch = "x86_64")]
     const EXPECTED_DIGEST: &str =
-        "8c96457b30ee55cb8dcb9783fc62c91aa5d482ce20892d271051c7f6314e4c65";
+        "b0063c1dde9f0d0251ffa8fa5d56d4a6f29306ddc597218c154dec65f3971923";
     #[cfg(not(target_arch = "x86_64"))]
     const EXPECTED_DIGEST: &str =
         "61e99ada8f4afecc337b219955bc557bf22f9a5358f440091e4417f3ee1fae1c";
