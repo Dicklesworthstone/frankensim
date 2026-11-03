@@ -90,6 +90,7 @@ pub(super) fn direct_contribution(
     light: ThermalLightSample<'_>,
     material: &Material,
     point: Point3,
+    mesh_boundary_origin: Option<MeshBoundaryOrigin>,
     frame: SurfaceFrame,
     outgoing: Vec3,
     media: &MediumStack<'_>,
@@ -109,7 +110,10 @@ pub(super) fn direct_contribution(
     if cosine == 0.0 || (boundary.is_none() && cosine < 0.0) {
         return Ok(result);
     }
-    let shadow_origin = dielectric_spawn_origin(point, frame.geometric, incoming);
+    let shadow_origin = mesh_boundary_origin.map_or_else(
+        || dielectric_spawn_origin(point, frame.geometric, incoming),
+        |origin| origin.spawn(frame.geometric, incoming),
+    );
     if !visible_endpoint(
         scene,
         cx,

@@ -32,7 +32,9 @@ mod brushed;
 /// where there is no finite emitter from which to launch a light subpath.
 /// Version 8 retains admitted launch media at camera and light endpoints,
 /// including endpoint connection absorption for paths wholly inside glass.
-pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 8;
+/// Version 9 uses triangle position error for dielectric mesh continuations
+/// and connections, preserving material boundaries closer than one micrometre.
+pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 9;
 
 /// Admitted finite-light BDPT technique set.
 ///
@@ -169,6 +171,7 @@ struct Vertex<'scene> {
     kind: VertexKind,
     point: Point3,
     geometric_normal: Option<Vec3>,
+    mesh_boundary_origin: Option<MeshBoundaryOrigin>,
     /// Body-locked frame at this path's shutter time, facing the sampled
     /// predecessor. Reversing a reflection exchanges directions on that same
     /// side; it must not reconstruct the grooves from world coordinates.
@@ -189,6 +192,7 @@ impl<'scene> Vertex<'scene> {
             kind: VertexKind::Camera,
             point,
             geometric_normal: None,
+            mesh_boundary_origin: None,
             brushed_frame: None,
             wo: None,
             beta: 1.0,
@@ -210,6 +214,7 @@ impl<'scene> Vertex<'scene> {
             },
             point: sample.point,
             geometric_normal: Some(sample.normal),
+            mesh_boundary_origin: None,
             brushed_frame: None,
             wo: None,
             beta: spectrum.eval(wavelength_nm) * scale,
@@ -276,6 +281,7 @@ impl<'scene> Vertex<'scene> {
             kind: VertexKind::Surface { primitive_index },
             point: intersection.hit.point,
             geometric_normal: Some(frame.geometric),
+            mesh_boundary_origin: intersection.mesh_boundary_origin,
             brushed_frame,
             wo: Some(ray.dir.scale(-1.0)),
             beta,
@@ -289,6 +295,15 @@ impl<'scene> Vertex<'scene> {
 
     fn is_surface(self) -> bool {
         matches!(self.kind, VertexKind::Surface { .. })
+    }
+
+    fn spawn_origin(self, direction: Vec3) -> Point3 {
+        self.geometric_normal.map_or(self.point, |normal| {
+            self.mesh_boundary_origin.map_or_else(
+                || dielectric_spawn_origin(self.point, normal, direction),
+                |origin| origin.spawn(normal, direction),
+            )
+        })
     }
 
     fn is_connectible(self, scene: &Scene) -> bool {
@@ -904,6 +919,7 @@ fn random_walk<'scene>(
             },
             point: intersection.hit.point,
             geometric_normal: Some(frame.geometric),
+            mesh_boundary_origin: intersection.mesh_boundary_origin,
             brushed_frame: None,
             wo: Some(ray.dir.scale(-1.0)),
             beta,
@@ -979,13 +995,7 @@ fn random_walk<'scene>(
         pdf_fwd_solid_angle = sample.pdf_fwd_solid_angle;
         segment_origin = vertices[current_index].point;
         ray = Ray {
-            origin: dielectric_spawn_origin(
-                vertices[current_index].point,
-                vertices[current_index]
-                    .geometric_normal
-                    .ok_or(TracerError::MissingNormal)?,
-                sample.direction,
-            ),
+            origin: vertices[current_index].spawn_origin(sample.direction),
             dir: sample.direction,
         };
     }
@@ -1258,9 +1268,7 @@ fn segment_transmittance(
     if !same_medium(from_medium, to_medium) {
         return Ok(0.0);
     }
-    let origin = from.geometric_normal.map_or(from.point, |normal| {
-        dielectric_spawn_origin(from.point, normal, direction)
-    });
+    let origin = from.spawn_origin(direction);
     let ray = Ray {
         origin,
         dir: direction,
@@ -1308,9 +1316,7 @@ fn environment_visible(
     if from.medium_toward(direction).is_some() {
         return Ok(false);
     }
-    let origin = from.geometric_normal.map_or(from.point, |normal| {
-        dielectric_spawn_origin(from.point, normal, direction)
-    });
+    let origin = from.spawn_origin(direction);
     Ok(intersect(
         scene,
         cx,
@@ -1599,7 +1605,7 @@ fn primary_parallel_slab_lane(
         return Ok(None);
     }
     let straight_shadow = Ray {
-        origin: dielectric_spawn_origin(source.point, source_normal, direct.direction),
+        origin: source.spawn_origin(direct.direction),
         dir: direct.direction,
     };
     let Some(first_blocker) = intersect(scene, cx, &straight_shadow, ray_time)? else {
@@ -1836,6 +1842,7 @@ fn connect_s1(
                 },
                 point: sample.point,
                 geometric_normal: Some(sample.normal),
+                mesh_boundary_origin: None,
                 brushed_frame: None,
                 wo: None,
                 beta: emitted / sample.pdf_solid_angle,
@@ -3096,6 +3103,7 @@ mod tests {
             let medium = Some(MediumEntry { boundary_primitive: 0, glass: &glass });
             let vertex = Vertex {
                 kind: VertexKind::Surface { primitive_index: 0 }, point: Point3::new(0.0, 0.0, 0.0),
+                mesh_boundary_origin: None,
                 brushed_frame: None,
                 geometric_normal: Some(normal), wo: Some(normal), beta: 1.0, pdf_fwd: 1.0,
                 pdf_rev: 0.0, delta: false, positive_medium: medium, negative_medium: medium,
@@ -3136,6 +3144,7 @@ mod tests {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let mut vertex = Vertex {
             kind: VertexKind::Surface { primitive_index: 0 },
+            mesh_boundary_origin: None,
             brushed_frame: None,
             point: Point3::new(0.0, 0.0, 0.0), geometric_normal: Some(normal), wo: Some(normal),
             beta: 1.0, pdf_fwd: 1.0, pdf_rev: 0.0, delta: true, positive_medium: None,
@@ -3331,6 +3340,7 @@ mod tests {
         .unwrap();
         let surface = |primitive_index, point, normal| Vertex {
             kind: VertexKind::Surface { primitive_index },
+            mesh_boundary_origin: None,
             brushed_frame: None,
             point,
             geometric_normal: Some(normal),
@@ -3769,6 +3779,7 @@ mod tests {
             .unwrap();
             let surface_vertex = |primitive_index, point, normal, delta| Vertex {
                 kind: VertexKind::Surface { primitive_index },
+                mesh_boundary_origin: None,
                 brushed_frame: None,
                 point,
                 geometric_normal: Some(normal),
@@ -4063,6 +4074,7 @@ mod tests {
                         Vertex::camera(point.offset(normal)),
                         Vertex {
                             kind: VertexKind::Surface { primitive_index: 0 },
+                            mesh_boundary_origin: None,
                             brushed_frame: None,
                             point,
                             geometric_normal: Some(Vec3::new(0.0, 0.0, 1.0)),

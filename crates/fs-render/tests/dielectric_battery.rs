@@ -241,6 +241,187 @@ fn translated_thin_slab_preserves_the_null_boundary_result() {
 }
 
 #[test]
+fn g1_submicron_mesh_slab_keeps_both_interfaces_and_physical_absorption() {
+    let thickness = 2.5e-7;
+    let extinction = 2.0e6;
+    let clear = material(1.0, 0.0, DielectricSurface::SMOOTH);
+    let absorbing = material(1.0, extinction, DielectricSurface::SMOOTH);
+    let settings = settings(DirectStrategy::BsdfOnly, 8, 3);
+    let (bare, transmitted) = with_cx(|cx| {
+        (
+            render(&scene_with_boundaries(&[], -1.0, 2.0), cx, &settings).unwrap(),
+            render(
+                &scene_with_boundaries(&[(0.0, -thickness, absorbing, false)], -1.0, 2.0),
+                cx,
+                &settings,
+            )
+            .unwrap(),
+        )
+    });
+    assert_channel_ratio(
+        &transmitted,
+        &bare,
+        fs_math::det::exp(-extinction * thickness),
+        2.0e-14,
+        "submicron absorption must end at the second mesh interface",
+    );
+    let null = with_cx(|cx| {
+        render(
+            &scene_with_boundaries(&[(0.0, -thickness, clear, false)], -1.0, 2.0),
+            cx,
+            &settings,
+        )
+        .unwrap()
+    });
+    assert_film_bits_eq(&null, &bare, "submicron null interface");
+}
+
+#[test]
+fn g1_distant_origin_preserves_thin_slab_optical_length() {
+    let thickness = 1.0e-8;
+    let glass = material(1.0, 0.5 / thickness, DielectricSurface::SMOOTH);
+    let mut slab = scene_with_boundaries(&[(thickness, 0.0, glass, false)], -1.0, 2.0);
+    slab.camera.eye = Point3::new(0.0, 0.0, 1.0e8);
+    // A zero-FOV pinhole keeps every jittered sample on the central ray.
+    // The two intersection parameters remain distinct at this distance, but
+    // origin + t*direction rounds the entry z to about 1.49e-8, not 1.0e-8.
+    slab.camera.half_tan = 0.0;
+    let mut bare = scene_with_boundaries(&[], -1.0, 2.0);
+    bare.camera = slab.camera;
+    let (reference, transmitted) = with_cx(|cx| {
+        let settings = settings(DirectStrategy::BsdfOnly, 8, 3);
+        (
+            render(&bare, cx, &settings).unwrap(),
+            render(&slab, cx, &settings).unwrap(),
+        )
+    });
+    assert_channel_ratio(
+        &transmitted,
+        &reference,
+        fs_math::det::exp(-0.5),
+        2.0e-14,
+        "optical length must use the physical mesh witness after a long ray",
+    );
+}
+
+#[test]
+fn g1_oblique_submicron_refraction_matches_snell_fresnel_and_beer() {
+    let thickness = 7.5e-7;
+    let index = 1.5_f64;
+    let cos_i = 0.8_f64;
+    let sigma = 0.5 / thickness;
+    let glass = material(index, sigma, DielectricSurface::SMOOTH);
+    let mut slab = scene_with_boundaries(&[(0.0, -thickness, glass, false)], -1.0, 2.0);
+    slab.camera.forward = Vec3::new(0.6, 0.0, -cos_i);
+    let mut bare = scene_with_boundaries(&[], -1.0, 2.0);
+    bare.camera = slab.camera;
+    let (reference, transmitted) = with_cx(|cx| {
+        let settings = settings(DirectStrategy::BsdfOnly, 8, 3);
+        (render(&bare, cx, &settings).unwrap(), render(&slab, cx, &settings).unwrap())
+    });
+    // Independent planar optics. At depth three only the direct T-T path
+    // reaches the source; reflection continuations cannot add higher orders.
+    let cos_t = (1.0 - (1.0 - cos_i * cos_i) / (index * index)).sqrt();
+    let rs = (cos_i - index * cos_t) / (cos_i + index * cos_t);
+    let rp = (index * cos_i - cos_t) / (index * cos_i + cos_t);
+    let transmission = 1.0 - 0.5 * (rs * rs + rp * rp);
+    let expected = transmission * transmission * fs_math::det::exp(-sigma * thickness / cos_t);
+    assert_channel_ratio(&transmitted, &reference, expected, 2.0e-9, "oblique thin glass");
+}
+
+#[test]
+fn g1_rough_submicron_slab_blocks_unrefracted_thermal_connections() {
+    let glass = material(1.5, 0.0, DielectricSurface::try_rough(0.2).unwrap());
+    let mut slab = scene_with_boundaries(&[(0.0, -2.5e-7, glass, false)], -1.0, 2.0);
+    let surface = fs_render::thermal_surface::GrayDiffuseThermalSurface::try_new(
+        1800.0,
+        0.8,
+        fs_blake3::hash_domain("org.frankensim.test.thin-thermal-refraction", b"fixture"),
+    )
+    .unwrap();
+    slab.lights.clear();
+    let emitter = slab.primitives.last_mut().unwrap();
+    emitter.material = Material::GrayDiffuseThermal { surface };
+    emitter.emission = None;
+    let mut bare = slab.clone();
+    bare.primitives.remove(0);
+    with_cx(|cx| {
+        let settings = settings(DirectStrategy::NeeOnly, 8, 1);
+        let reference = render(&bare, cx, &settings).unwrap();
+        assert!(reference.xyz[0].iter().all(|value| *value > 0.0));
+        // One admitted vertex cannot reach this source through both glass
+        // interfaces. The thermal shadow connection must stop at the exit,
+        // even when that exit is closer than the old numerical origin offset.
+        let blocked = render(&slab, cx, &settings).unwrap();
+        assert_eq!(blocked.xyz[0], [0.0; 3]);
+    });
+}
+
+#[test]
+fn g3_dielectric_mesh_transport_is_invariant_under_metre_scale() {
+    let settings = settings(DirectStrategy::BsdfOnly, 8, 3);
+    for scale in [1.0e-6, 1.0, 1.0e6] {
+        let glass = material(1.0, 2.0 / scale, DielectricSurface::SMOOTH);
+        let mut slab = scene_with_boundaries(&[(0.0, -0.25, glass, false)], -1.0, 2.0);
+        for primitive in &mut slab.primitives {
+            let Shape::Mesh(mesh) = &primitive.shape else { unreachable!() };
+            primitive.shape = Shape::Mesh(TriMesh::new(
+                mesh.vertices.iter().map(|vertex| vertex.map(|v| v * scale)).collect(),
+                mesh.triangles.clone(),
+            ));
+        }
+        for light in &mut slab.lights {
+            light.corner = Point3::new(light.corner.x * scale, light.corner.y * scale, light.corner.z * scale);
+            light.edge_u = light.edge_u.scale(scale);
+            light.edge_v = light.edge_v.scale(scale);
+        }
+        slab.camera.eye = Point3::new(0.0, 0.0, scale);
+        let (reference, transmitted) = with_cx(|cx| {
+            let bare = scene_with_boundaries(&[], -1.0, 2.0);
+            (render(&bare, cx, &settings).unwrap(), render(&slab, cx, &settings).unwrap())
+        });
+        assert_channel_ratio(&transmitted, &reference, fs_math::det::exp(-0.5), 2.0e-14, "scaled optical depth");
+    }
+}
+
+#[test]
+fn g3_rotated_translated_mesh_instances_keep_thin_material_boundaries() {
+    use fs_blake3::hash_domain;
+    use fs_render::instances::{GeometryInstance, RigidTransform, SharedGeometry};
+
+    let thickness = 7.5e-7;
+    let glass = material(1.0, 0.5 / thickness, DielectricSurface::SMOOTH);
+    let mut slab = scene_with_boundaries(&[(0.0, -thickness, glass, false)], -1.0, 2.0);
+    let placement = RigidTransform::try_new(
+        [0.0, 0.3826834323650898, 0.0, 0.9238795325112867],
+        [10.0, -2.0, 3.0],
+    ).unwrap();
+    for (index, primitive) in slab.primitives.iter_mut().enumerate() {
+        let Shape::Mesh(mesh) = &primitive.shape else { unreachable!() };
+        primitive.shape = Shape::Instance(GeometryInstance::try_new(
+            index as u64 + 1,
+            hash_domain("org.frankensim.test.thin-refraction", &index.to_le_bytes()),
+            SharedGeometry::mesh(mesh.clone()),
+            placement,
+        ).unwrap());
+    }
+    for light in &mut slab.lights {
+        light.corner = placement.transform_point(light.corner);
+        light.edge_u = placement.transform_vector(light.edge_u);
+        light.edge_v = placement.transform_vector(light.edge_v);
+    }
+    slab.camera.eye = placement.transform_point(slab.camera.eye);
+    slab.camera.forward = placement.transform_vector(slab.camera.forward);
+    slab.camera.up = placement.transform_vector(slab.camera.up);
+    let (reference, transmitted) = with_cx(|cx| {
+        let settings = settings(DirectStrategy::BsdfOnly, 8, 3);
+        let bare = scene_with_boundaries(&[], -1.0, 2.0);
+        (render(&bare, cx, &settings).unwrap(), render(&slab, cx, &settings).unwrap())
+    });
+    assert_channel_ratio(&transmitted, &reference, fs_math::det::exp(-0.5), 2.0e-8, "rigidly placed thin layer");
+}
+
+#[test]
 fn thin_and_thick_slabs_follow_exact_beer_lambert_scaling() {
     let sigma = 2.0;
     let clear = material(1.0, 0.0, DielectricSurface::SMOOTH);

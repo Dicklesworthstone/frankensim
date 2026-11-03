@@ -537,9 +537,10 @@ impl<'a> AreaLighting<'a> {
             Receiver::Phase { .. } => point,
             Receiver::Surface {
                 frame,
+                intersection,
                 boundary: Some(_),
                 ..
-            } => dielectric_spawn_origin(point, frame.geometric, direction),
+            } => intersection.spawn_boundary_ray(frame.geometric, direction),
             Receiver::Surface {
                 frame: SurfaceFrame {
                     oriented: normal, ..

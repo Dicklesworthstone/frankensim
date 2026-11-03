@@ -183,6 +183,23 @@ differentiable lift). Pure Rust throughout.
   existing random streams and radiance arithmetic. Calibrated point-fixture
   probes still require their separate refractive direct connector; area-only
   embedded probes use host absorption in both NEE and continuation paths.
+- **Thin dielectric mesh boundaries:** camera and bidirectional continuations,
+  rough-interface connections to rectangle/environment, thermal surface,
+  calibrated area and volume-emission sources, and slab/manifold replay
+  reconstruct mesh origins from the original triangle barycentrics and project
+  componentwise position roundoff onto the geometric normal, with outward
+  representable-coordinate rounding. Static and animated rigid mesh instances
+  include placement arithmetic. A fixed one-micrometre displacement no longer
+  skips a nearby exit and extends its material absorption into the exterior.
+  Unoffset barycentric vertices determine absorption lengths and path-space
+  densities without long-ray cancellation; instanced world/local witnesses
+  remain consistent and traversal retains its original ray parameter.
+  Numerical origins never shorten the declared optical path. Implicit charts
+  retain their separate proximity-based offset. This is geometric-optics
+  transport, not coherent interference across a geometrically thin body or a
+  general certified minimum separation. Analytic regressions cover submicron
+  absorption, distant camera origins, oblique Snell/Fresnel power, metre
+  scaling and rigid placement.
 - `gradient_index` module (feature `tracer`): allocation-free adaptive
   Dormand--Prince 5(4) propagation of the geometric-optics ray equation
   `d(n t)/ds = grad(n)`. An immutable field supplies local phase index,

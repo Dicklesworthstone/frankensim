@@ -193,7 +193,10 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 /// opaque materials retain tracer-v1 stream order and image bits.
 // v17 shares stable bare Fresnel powers and critical-angle geometry with
 // polarized transport, retaining positive T when grazing R rounds to one.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 17;
+// v18 reconstructs dielectric mesh vertices from their triangle witness and
+// projects floating-point position error onto the normal. A fixed metric
+// displacement must not jump over a thin material's opposite interface.
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 18;
 
 /// Radiance-mode shading-normal projection for brushed GGX conductors.
 /// Version 2 removes spurious gain at geometric grazing incidence.
@@ -313,6 +316,24 @@ struct SceneIntersection {
     primitive_index: usize,
     hit: Hit,
     instance_hit: Option<InstanceHit>,
+    mesh_boundary_origin: Option<MeshBoundaryOrigin>,
+}
+
+/// Unoffset dielectric mesh vertex and its numerical uncertainty. Physical
+/// transport uses `point`; only spawned rays receive the normal displacement.
+#[derive(Clone, Copy)]
+struct MeshBoundaryOrigin {
+    point: Point3,
+    normal_error: f64,
+}
+
+impl SceneIntersection {
+    fn spawn_boundary_ray(self, normal: Vec3, direction: Vec3) -> Point3 {
+        self.mesh_boundary_origin.map_or_else(
+            || dielectric_spawn_origin(self.hit.point, normal, direction),
+            |origin| origin.spawn(normal, direction),
+        )
+    }
 }
 
 /// Accepted frontmost surface for one beauty-path sample.
@@ -10617,7 +10638,7 @@ fn discover_parallel_slab(
     }
     let axis = entry_frame.geometric.scale(-1.0);
     let probe = Ray {
-        origin: dielectric_spawn_origin(first_hit.hit.point, entry_frame.geometric, axis),
+        origin: first_hit.spawn_boundary_ray(entry_frame.geometric, axis),
         dir: axis,
     };
     let Some(opposite) = intersect(scene, cx, &probe, ray_time)? else {
@@ -11136,7 +11157,7 @@ fn trace_parallel_slab_direct_lane(
         ));
     }
     let internal_ray = Ray {
-        origin: dielectric_spawn_origin(entry.hit.point, entry_frame.geometric, internal_direction),
+        origin: entry.spawn_boundary_ray(entry_frame.geometric, internal_direction),
         dir: internal_direction,
     };
     let Some(exit) = intersect(scene, cx, &internal_ray, ray_time)? else {
@@ -11194,7 +11215,7 @@ fn trace_parallel_slab_direct_lane(
         ));
     }
     let exit_ray = Ray {
-        origin: dielectric_spawn_origin(exit.hit.point, exit_frame.geometric, outgoing_direction),
+        origin: exit.spawn_boundary_ray(exit_frame.geometric, outgoing_direction),
         dir: outgoing_direction,
     };
     let final_hit = intersect(scene, cx, &exit_ray, ray_time)?;
@@ -11892,8 +11913,7 @@ fn trace_planar_manifold_rectangle_direct_lanes(
             continue;
         }
         let internal_ray = Ray {
-            origin: dielectric_spawn_origin(
-                entry_hit.hit.point,
+            origin: entry_hit.spawn_boundary_ray(
                 entry_frame.geometric,
                 internal_direction,
             ),
@@ -11933,8 +11953,7 @@ fn trace_planar_manifold_rectangle_direct_lanes(
             continue;
         }
         let exit_ray = Ray {
-            origin: dielectric_spawn_origin(
-                exit_hit.hit.point,
+            origin: exit_hit.spawn_boundary_ray(
                 exit_frame.geometric,
                 outgoing_direction,
             ),
@@ -12104,8 +12123,7 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 continue;
             }
             let reflection_ray = Ray {
-                origin: dielectric_spawn_origin(
-                    entry_hit.hit.point,
+                origin: entry_hit.spawn_boundary_ray(
                     entry_frame.geometric,
                     internal_incident,
                 ),
@@ -12150,8 +12168,7 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 1.0,
             )?;
             let exit_ray = Ray {
-                origin: dielectric_spawn_origin(
-                    reflection_hit.hit.point,
+                origin: reflection_hit.spawn_boundary_ray(
                     reflection_frame.geometric,
                     reflected,
                 ),
@@ -12189,7 +12206,7 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 continue;
             }
             let light_ray = Ray {
-                origin: dielectric_spawn_origin(exit_hit.hit.point, exit_frame.geometric, outgoing),
+                origin: exit_hit.spawn_boundary_ray(exit_frame.geometric, outgoing),
                 dir: outgoing,
             };
             let Some(light_hit) = intersect(scene, cx, &light_ray, ray_time)? else {
@@ -12467,8 +12484,7 @@ fn trace_planar_manifold_environment_direct_lanes(
             continue;
         }
         let internal_ray = Ray {
-            origin: dielectric_spawn_origin(
-                entry_hit.hit.point,
+            origin: entry_hit.spawn_boundary_ray(
                 entry_frame.geometric,
                 internal_direction,
             ),
@@ -12504,8 +12520,7 @@ fn trace_planar_manifold_environment_direct_lanes(
             continue;
         }
         let exit_ray = Ray {
-            origin: dielectric_spawn_origin(
-                exit_hit.hit.point,
+            origin: exit_hit.spawn_boundary_ray(
                 exit_frame.geometric,
                 outgoing_direction,
             ),
@@ -12555,8 +12570,7 @@ fn previous_after_dielectric_sample(
     glass: DielectricGlass,
     surface: DielectricSurface,
     frame: SurfaceFrame,
-    hit: Hit,
-    instance_hit: Option<InstanceHit>,
+    intersection: SceneIntersection,
     incident_ray: Ray,
     sampled_direction: Vec3,
     sampled_event: DielectricEvent,
@@ -12565,6 +12579,7 @@ fn previous_after_dielectric_sample(
     sampled_delta: bool,
     wavelength_nm: f64,
 ) -> Result<PreviousBsdf, TracerError> {
+    let SceneIntersection { hit, instance_hit, .. } = intersection;
     let boundary = boundary_media(boundary_primitive, &glass, frame.entering, medium_stack)?;
     let mut next = PreviousBsdf {
         #[cfg(feature = "volumes")]
@@ -12666,11 +12681,7 @@ fn previous_after_dielectric_sample(
         }) else {
             return Ok(next);
         };
-        let first_hit = SceneIntersection {
-            primitive_index: boundary_primitive,
-            hit,
-            instance_hit,
-        };
+        let first_hit = intersection;
         let source_geometric_normal = source
             .opaque_source_geometric_normal
             .ok_or(TracerError::InvalidInput)?;
@@ -12754,11 +12765,7 @@ fn previous_after_dielectric_sample(
     {
         require_instanced_mesh_face_witness(
             scene,
-            SceneIntersection {
-                primitive_index: boundary_primitive,
-                hit,
-                instance_hit,
-            },
+            intersection,
             "sampled slab exit lacks an instanced triangle-mesh face witness",
             "sampled slab exit lacks admitted thin-axis support",
         )?;
@@ -14130,6 +14137,7 @@ fn trace_path_with_regions<'scene>(
             primitive_index: prim_idx,
             hit,
             instance_hit,
+            ..
         } = intersection;
         #[cfg(feature = "volumes")]
         let use_homogeneous_absorption = !active_region.replaces_host_extinction;
@@ -14431,6 +14439,7 @@ fn trace_path_with_regions<'scene>(
                         .roughness_alpha()
                         .map(|alpha| volume_emission::Receiver::Dielectric {
                             frame,
+                            mesh_boundary_origin: intersection.mesh_boundary_origin,
                             outgoing: ray.dir.scale(-1.0),
                             boundary,
                             alpha,
@@ -14496,6 +14505,7 @@ fn trace_path_with_regions<'scene>(
                     light,
                     &prim.material,
                     hit.point,
+                    intersection.mesh_boundary_origin,
                     frame,
                     ray.dir.scale(-1.0),
                     &medium_stack,
@@ -14529,6 +14539,7 @@ fn trace_path_with_regions<'scene>(
                                 light,
                                 &prim.material,
                                 hit.point,
+                                intersection.mesh_boundary_origin,
                                 frame,
                                 ray.dir.scale(-1.0),
                                 &medium_stack,
@@ -14558,7 +14569,7 @@ fn trace_path_with_regions<'scene>(
                             let wo = ray.dir.scale(-1.0);
                             if cos_s > 0.0 {
                                 let shadow = Ray {
-                                    origin: dielectric_spawn_origin(hit.point, frame.geometric, wi),
+                                    origin: intersection.spawn_boundary_ray(frame.geometric, wi),
                                     dir: wi,
                                 };
                                 let shadow_hit = intersect(scene, cx, &shadow, ray_time)?;
@@ -14723,6 +14734,7 @@ fn trace_path_with_regions<'scene>(
                             light,
                             &prim.material,
                             hit.point,
+                            intersection.mesh_boundary_origin,
                             frame,
                             ray.dir.scale(-1.0),
                             &medium_stack,
@@ -15230,8 +15242,7 @@ fn trace_path_with_regions<'scene>(
                                 path_sobol,
                                 Some(SpectralPathState {
                                     ray: Ray {
-                                        origin: dielectric_spawn_origin(
-                                            hit.point,
+                                        origin: intersection.spawn_boundary_ray(
                                             frame.geometric,
                                             direction,
                                         ),
@@ -15268,8 +15279,7 @@ fn trace_path_with_regions<'scene>(
                         glass,
                         surface,
                         frame,
-                        hit,
-                        instance_hit,
+                        intersection,
                         ray,
                         reflection_direction,
                         DielectricEvent::Reflection,
@@ -15321,8 +15331,7 @@ fn trace_path_with_regions<'scene>(
                                 glass,
                                 surface,
                                 frame,
-                                hit,
-                                instance_hit,
+                                intersection,
                                 ray,
                                 direction,
                                 DielectricEvent::Transmission,
@@ -15361,8 +15370,7 @@ fn trace_path_with_regions<'scene>(
                             glass,
                             surface,
                             frame,
-                            hit,
-                            instance_hit,
+                            intersection,
                             ray,
                             direction,
                             DielectricEvent::Transmission,
@@ -15436,8 +15444,7 @@ fn trace_path_with_regions<'scene>(
                             glass,
                             surface,
                             frame,
-                            hit,
-                            instance_hit,
+                            intersection,
                             ray,
                             continuation.direction,
                             continuation.event,
@@ -15481,8 +15488,7 @@ fn trace_path_with_regions<'scene>(
                             path_sobol,
                             Some(SpectralPathState {
                                 ray: Ray {
-                                    origin: dielectric_spawn_origin(
-                                        hit.point,
+                                    origin: intersection.spawn_boundary_ray(
                                         frame.geometric,
                                         continuation.direction,
                                     ),
@@ -15542,8 +15548,7 @@ fn trace_path_with_regions<'scene>(
                     glass,
                     surface,
                     frame,
-                    hit,
-                    instance_hit,
+                    intersection,
                     ray,
                     sampled.direction,
                     sampled.event,
@@ -15569,7 +15574,7 @@ fn trace_path_with_regions<'scene>(
                 prev_origin = hit.point;
                 segment_origin = hit.point;
                 ray = Ray {
-                    origin: dielectric_spawn_origin(hit.point, frame.geometric, sampled.direction),
+                    origin: intersection.spawn_boundary_ray(frame.geometric, sampled.direction),
                     dir: sampled.direction,
                 };
             }
@@ -16140,6 +16145,96 @@ fn admitted_unit_dot(left: Vec3, right: Vec3) -> f64 {
     left.dot(right)
 }
 
+impl MeshBoundaryOrigin {
+    fn from_triangle(
+        mesh: &TriMesh,
+        triangle_index: u32,
+        barycentric: [f64; 3],
+        transform: RigidTransform,
+        normal: Vec3,
+    ) -> Option<(Self, Point3)> {
+        let triangle = mesh.triangles.get(triangle_index as usize)?;
+        let vertices = triangle.map(|index| mesh.vertices[index as usize]);
+        let mut position = [0.0; 3];
+        let mut error = [0.0; 3];
+        // Barycentric reconstruction avoids cancellation in origin + t*dir.
+        // The componentwise gamma(7) bound follows PBRT 4e §6.8.5; using
+        // EPSILON rather than unit roundoff leaves an extra factor of two.
+        // https://pbr-book.org/4ed/Shapes/Managing_Rounding_Error
+        let gamma7 = 7.0 * f64::EPSILON / (1.0 - 7.0 * f64::EPSILON);
+        for axis in 0..3 {
+            let terms: [f64; 3] = core::array::from_fn(|i| barycentric[i] * vertices[i][axis]);
+            position[axis] = (terms[0] + terms[1]) + terms[2];
+            error[axis] = gamma7 * (terms[0].abs() + terms[1].abs() + terms[2].abs());
+        }
+        let local = Point3::new(position[0], position[1], position[2]);
+        let point = transform.transform_point(local);
+        if transform != RigidTransform::identity() {
+            let axes = [
+                transform.transform_vector(Vec3::new(1.0, 0.0, 0.0)),
+                transform.transform_vector(Vec3::new(0.0, 1.0, 0.0)),
+                transform.transform_vector(Vec3::new(0.0, 0.0, 1.0)),
+            ];
+            let rotated = [
+                axes[0].x.abs() * error[0] + axes[1].x.abs() * error[1] + axes[2].x.abs() * error[2],
+                axes[0].y.abs() * error[0] + axes[1].y.abs() * error[1] + axes[2].y.abs() * error[2],
+                axes[0].z.abs() * error[0] + axes[1].z.abs() * error[1] + axes[2].z.abs() * error[2],
+            ];
+            // Include the quaternion rotation and translation arithmetic;
+            // tangential world translation does not become normal thickness.
+            let gamma64 = 64.0 * f64::EPSILON / (1.0 - 64.0 * f64::EPSILON);
+            let local_scale = position.iter().map(|value| value.abs()).sum::<f64>();
+            let translation = transform.translation_m();
+            for axis in 0..3 {
+                error[axis] = rotated[axis] + gamma64 * (local_scale + translation[axis].abs());
+            }
+        }
+        let normal_error = normal.x.abs() * error[0]
+            + normal.y.abs() * error[1]
+            + normal.z.abs() * error[2];
+        ([point.x, point.y, point.z, normal_error].iter().all(|value| value.is_finite())
+            && normal_error >= 0.0)
+            .then_some((Self { point, normal_error }, local))
+    }
+
+    fn reconstruct_instance_hit(
+        instance: &GeometryInstance,
+        hit: &mut InstanceHit,
+    ) -> Option<Self> {
+        let SharedGeometry::Mesh(mesh) = instance.geometry() else { return None; };
+        let InstanceSurfaceFeature::MeshTriangle { triangle_index, barycentric } = hit.surface_feature
+        else { return None; };
+        let (origin, local_point) = Self::from_triangle(
+            mesh, triangle_index, barycentric, instance.transform(), hit.hit.normal?,
+        )?;
+        // Keep the original ray parameter for traversal and tie-breaking.
+        // The physical world/local vertices must share the feature witness;
+        // inverse-transforming the world point would reintroduce cancellation.
+        hit.hit.point = origin.point;
+        hit.local_hit.point = local_point;
+        Some(origin)
+    }
+
+    fn spawn(self, normal: Vec3, direction: Vec3) -> Point3 {
+        let side = if normal.dot(direction) >= 0.0 { 1.0 } else { -1.0 };
+        let signed_normal = normal.scale(side);
+        let offset = signed_normal.scale(self.normal_error);
+        let outward = |coordinate: f64, displacement: f64, component: f64| {
+            let shifted = coordinate + displacement;
+            // An exactly representable plane can have zero computed error.
+            // Still advance one representable coordinate to choose its side.
+            if component > 0.0 { shifted.next_up() }
+            else if component < 0.0 { shifted.next_down() }
+            else { coordinate }
+        };
+        Point3::new(
+            outward(self.point.x, offset.x, signed_normal.x),
+            outward(self.point.y, offset.y, signed_normal.y),
+            outward(self.point.z, offset.z, signed_normal.z),
+        )
+    }
+}
+
 fn dielectric_spawn_origin(point: Point3, geometric_normal: Vec3, direction: Vec3) -> Point3 {
     let side = if geometric_normal.dot(direction) >= 0.0 {
         1.0
@@ -16243,15 +16338,30 @@ fn intersect_primitive(
     cx.checkpoint()?;
     let candidate = match &prim.shape {
         Shape::Mesh(mesh) => mesh
-            .intersect_with_cx_bounded(
+            .intersect_surface_with_cx_bounded(
                 cx,
                 ray,
                 current_best_t.unwrap_or(distance_limit.unwrap_or(f64::INFINITY)),
             )?
-            .map(|hit| SceneIntersection {
-                primitive_index: i,
-                hit,
-                instance_hit: None,
+            .map(|mut surface_hit| {
+                let mesh_boundary_origin = if matches!(prim.material, Material::Dielectric { .. }) {
+                    surface_hit.hit.normal.and_then(|normal| MeshBoundaryOrigin::from_triangle(
+                        mesh, surface_hit.triangle_index, surface_hit.barycentric,
+                        RigidTransform::identity(), normal,
+                    )).map(|(origin, _)| origin)
+                } else { None };
+                if let Some(origin) = mesh_boundary_origin {
+                    // Retain the kernel's t for nearest-hit ordering. Recover
+                    // physical distances from the unoffset surface witness,
+                    // never from a cancelling ray.origin + t * ray.direction.
+                    surface_hit.hit.point = origin.point;
+                }
+                SceneIntersection {
+                    primitive_index: i,
+                    hit: surface_hit.hit,
+                    instance_hit: None,
+                    mesh_boundary_origin,
+                }
             }),
         Shape::Chart(chart) => {
             let (hit, audit) = sphere_trace(
@@ -16276,6 +16386,7 @@ fn intersect_primitive(
                     primitive_index: i,
                     hit: hit.ok_or(TracerError::BackendFailure(TraceTermination::Hit))?,
                     instance_hit: None,
+                    mesh_boundary_origin: None,
                 }),
                 termination => return Err(TracerError::BackendFailure(termination)),
             }
@@ -16288,10 +16399,16 @@ fn intersect_primitive(
             };
             instance
                 .intersect(cx, ray, t_max, TRACE_EPS)?
-                .map(|instance_hit| SceneIntersection {
-                    primitive_index: i,
-                    hit: instance_hit.hit,
-                    instance_hit: Some(instance_hit),
+                .map(|mut instance_hit| {
+                    let mesh_boundary_origin = if matches!(prim.material, Material::Dielectric { .. }) {
+                        MeshBoundaryOrigin::reconstruct_instance_hit(instance, &mut instance_hit)
+                    } else { None };
+                    SceneIntersection {
+                        primitive_index: i,
+                        hit: instance_hit.hit,
+                        instance_hit: Some(instance_hit),
+                        mesh_boundary_origin,
+                    }
                 })
         }
         Shape::AnimatedInstance(instance) => {
@@ -16301,21 +16418,31 @@ fn intersect_primitive(
                 SharedGeometry::Mesh(_) => current_best_t.map_or(limit, |t| t.min(limit)),
                 SharedGeometry::Chart(_) => limit,
             };
-            let instance_hit = if let Some(cached) = time
+            let (instance_hit, mesh_boundary_origin) = if let Some(cached) = time
                 .cached_animated
                 .iter()
                 .flatten()
                 .find(|cached| cached.primitive_index == i)
             {
-                cached.instance.intersect(cx, ray, t_max, TRACE_EPS)?
+                let mut hit = cached.instance.intersect(cx, ray, t_max, TRACE_EPS)?;
+                let origin = if matches!(prim.material, Material::Dielectric { .. }) {
+                    hit.as_mut().and_then(|hit| MeshBoundaryOrigin::reconstruct_instance_hit(&cached.instance, hit))
+                } else { None };
+                (hit, origin)
             } else {
                 let timed_ray = TimedRay::at_normalized(*ray, time.interval, time.normalized);
-                instance.intersect(cx, &timed_ray, t_max, TRACE_EPS)?
+                let placed = instance.instance_at(cx, timed_ray.absolute_time_s())?;
+                let mut hit = placed.intersect(cx, ray, t_max, TRACE_EPS)?;
+                let origin = if matches!(prim.material, Material::Dielectric { .. }) {
+                    hit.as_mut().and_then(|hit| MeshBoundaryOrigin::reconstruct_instance_hit(&placed, hit))
+                } else { None };
+                (hit, origin)
             };
             instance_hit.map(|instance_hit| SceneIntersection {
                 primitive_index: i,
                 hit: instance_hit.hit,
                 instance_hit: Some(instance_hit),
+                mesh_boundary_origin,
             })
         }
     };
@@ -18922,8 +19049,7 @@ mod tests {
                 glass,
                 DielectricSurface::SMOOTH,
                 reflection_frame,
-                reflection_hit.hit,
-                reflection_hit.instance_hit,
+                reflection_hit,
                 reflection_ray,
                 reflected_direction,
                 DielectricEvent::Reflection,

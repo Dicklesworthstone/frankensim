@@ -55,6 +55,7 @@ pub(super) enum Receiver<'a> {
     },
     Dielectric {
         frame: SurfaceFrame,
+        mesh_boundary_origin: Option<MeshBoundaryOrigin>,
         outgoing: Vec3,
         boundary: BoundaryMedia<'a>,
         alpha: f64,
@@ -87,9 +88,14 @@ impl Receiver<'_> {
     fn shadow_origin(&self, point: Point3, direction: Vec3) -> Point3 {
         match self {
             Self::Surface { frame, .. } => point.offset(frame.oriented.scale(RAY_EPS)),
-            Self::Dielectric { frame, .. } => {
-                dielectric_spawn_origin(point, frame.geometric, direction)
-            }
+            Self::Dielectric {
+                frame,
+                mesh_boundary_origin,
+                ..
+            } => mesh_boundary_origin.map_or_else(
+                || dielectric_spawn_origin(point, frame.geometric, direction),
+                |origin| origin.spawn(frame.geometric, direction),
+            ),
             Self::Phase { .. } => point,
         }
     }
@@ -386,6 +392,7 @@ mod tests {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         Receiver::Dielectric {
             surface: &DielectricSurface::POLISHED,
+            mesh_boundary_origin: None,
             frame: SurfaceFrame {
                 oriented: normal,
                 geometric: normal,
