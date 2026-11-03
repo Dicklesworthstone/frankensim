@@ -337,7 +337,7 @@ impl<'a> MixedViscoTetSolid<'a> {
             None,
             cx,
         )
-        .map(|(step, _)| step)
+        .map(|(step, _, _)| step)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -352,7 +352,7 @@ impl<'a> MixedViscoTetSolid<'a> {
         controls: FiniteViscoStepControls,
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
         cx: &Cx<'_>,
-    ) -> Result<(MixedViscoTetStep<'a>, Option<AcceptedMotion>), MixedViscoTetError> {
+    ) -> Result<(MixedViscoTetStep<'a>, Option<AcceptedMotion>, Vec<f64>), MixedViscoTetError> {
         checkpoint(cx)?;
         let time_s = self.time_s + dt_s;
         if !dt_s.is_finite()
@@ -557,6 +557,7 @@ impl<'a> MixedViscoTetSolid<'a> {
                 energy,
             },
             motion,
+            prepared.external_n,
         ))
     }
 }

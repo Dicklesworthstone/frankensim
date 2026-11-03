@@ -1,5 +1,31 @@
 # fs-solid CONTRACT
 
+## Original quadratic Maxwell momentum during native motion
+
+`MixedViscoTetMotion::advance_with_momentum` advances the same original P2/P1
+Maxwell solve and returns its physical momentum account about an authored origin.
+The native consistent mass supplies actual linear and angular increments. The
+exact external nodal vector already assembled by the mixed owner supplies applied
+impulse and endpoint moment, including signed corner weights, all six midsides,
+curved reference quadrature, distributed body force and repeated nodal loads.
+Original support reactions supply the corresponding external support exchange.
+Accounting performs no load reassembly, mass reconstruction or additional history
+update. The existing `advance` follows the identical accepted-state path.
+
+Backward Euler's angular integration defect remains explicit and separate from
+physical torque and momentum residuals. A consumer must bound that numerical
+defect as well as the residual; it cannot declare angular conservation from the
+work identity alone. The same accounting applies to the native finite-compliance
+and exact-pressure regimes. Exact endpoint volume nevertheless does not make a
+backward-Euler displacement chord an instantaneous volume-tangent velocity;
+pressure-constrained impact continuation retains its own incoming-velocity gate.
+
+Focused native regressions specify affine and curved reference volumes/centroids
+under uniform acceleration, original load torque, nonzero numerical angular drift,
+signed supported quadratic loads on a deformed body and one retained Maxwell
+history update. Independent polynomial moment arithmetic and source formatting
+were checked; native Rust execution remains unverified under the resource blocker.
+
 ## Current-area pressure on finite-deformation membranes
 
 `MembranePatch::solve_with_pressure` uses the original membrane material,

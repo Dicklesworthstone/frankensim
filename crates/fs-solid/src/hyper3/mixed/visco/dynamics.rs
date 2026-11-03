@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use fs_exec::Cx;
+use fs_material::hyper::mixed::VolumetricTreatment;
 
 use super::super::{MixedUpSettings, MixedUpSolution, inertia_error};
 use super::{
@@ -30,8 +31,8 @@ use crate::inertia::{BackwardEulerInertia, ReferenceMass};
 pub use crate::hyper3::mixed::impulse::{MixedImpulseControls, MixedImpulseReport};
 pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
 pub use crate::inertia::{
-    InertialEnergy, SolidImpulseControls, SolidImpulseReport, SolidPointKinematics,
-    SolidPointMobility, SolidPointMobilityMatrix, Tet10ImpulsePoint,
+    InertialEnergy, SolidImpulseControls, SolidImpulseReport, SolidMotionMomentum,
+    SolidPointKinematics, SolidPointMobility, SolidPointMobilityMatrix, Tet10ImpulsePoint,
 };
 
 mod impulse;
@@ -115,6 +116,10 @@ impl<'a> MixedViscoTetMotion<'a> {
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
     }
+    /// Original pressure treatment retained by every accepted native interval.
+    pub fn volumetric_treatment(&self) -> VolumetricTreatment {
+        self.solid.volumetric
+    }
 
     /// Advance one positive interval using absolute support targets and held
     /// dead loads. Native inertia supplies M/dt² only in the displacement block;
@@ -132,6 +137,82 @@ impl<'a> MixedViscoTetMotion<'a> {
         controls: FiniteViscoMotionControls,
         cx: &Cx<'_>,
     ) -> Result<MixedViscoMotionStep<'a>, MixedViscoTetError> {
+        self.advance_accounted(
+            dt_s,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            pressure_gauge,
+            settings,
+            controls,
+            cx,
+        )
+        .map(|(step, _)| step)
+    }
+
+    /// Advance the same native interval and report actual original-mass momentum.
+    /// All signed quadratic load weights and original support reactions enter
+    /// the receipt at the accepted deformed geometry. Endpoint applied/support
+    /// torque and backward-Euler angular drift remain separate; consumers must
+    /// bound physical residuals AND numerical drift. The original load assembly
+    /// is reused without another mass assembly or material update.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_momentum(
+        &self,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_gauge: Option<(usize, f64)>,
+        settings: MixedUpSettings,
+        controls: FiniteViscoMotionControls,
+        origin_m: [f64; 3],
+        cx: &Cx<'_>,
+    ) -> Result<(MixedViscoMotionStep<'a>, SolidMotionMomentum), MixedViscoTetError> {
+        if origin_m.iter().any(|x| !x.is_finite()) {
+            return Err(invalid("finite momentum origin required").into());
+        }
+        let (step, force) = self.advance_accounted(
+            dt_s,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            pressure_gauge,
+            settings,
+            controls,
+            cx,
+        )?;
+        let momentum = self
+            .mass
+            .backward_euler_momentum(
+                self.solid.nodes_m,
+                &self.solid.displacement_m,
+                &step.motion.solid.displacement_m,
+                &self.velocity_mps,
+                &step.motion.velocity_mps,
+                &force,
+                &step.equilibrium.reactions_n,
+                dt_s,
+                origin_m,
+                cx,
+            )
+            .map_err(inertia_error)?;
+        checkpoint(cx)?;
+        Ok((step, momentum))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_accounted(
+        &self,
+        dt_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_gauge: Option<(usize, f64)>,
+        settings: MixedUpSettings,
+        controls: FiniteViscoMotionControls,
+        cx: &Cx<'_>,
+    ) -> Result<(MixedViscoMotionStep<'a>, Vec<f64>), MixedViscoTetError> {
         checkpoint(cx)?;
         if !controls.maximum_numerical_kinetic_loss_j.is_finite()
             || controls.maximum_numerical_kinetic_loss_j < 0.0
@@ -148,7 +229,7 @@ impl<'a> MixedViscoTetMotion<'a> {
             cx,
         )
         .map_err(inertia_error)?;
-        let (step, motion) = self.solid.advance_loaded(
+        let (step, motion, force) = self.solid.advance_loaded(
             dt_s,
             prescribed_m,
             nodal_forces_n,
@@ -172,17 +253,20 @@ impl<'a> MixedViscoTetMotion<'a> {
             controls.material.equilibrium_work_tolerance_j,
         )?;
         checkpoint(cx)?;
-        Ok(MixedViscoMotionStep {
-            motion: Self {
-                solid: step.solid,
-                velocity_mps,
-                reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
-                mass: Arc::clone(&self.mass),
+        Ok((
+            MixedViscoMotionStep {
+                motion: Self {
+                    solid: step.solid,
+                    velocity_mps,
+                    reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                    mass: Arc::clone(&self.mass),
+                },
+                equilibrium: step.equilibrium,
+                material_energy: step.energy,
+                inertia,
+                balance_error_j,
             },
-            equilibrium: step.equilibrium,
-            material_energy: step.energy,
-            inertia,
-            balance_error_j,
-        })
+            force,
+        ))
     }
 }
