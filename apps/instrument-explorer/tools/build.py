@@ -299,7 +299,10 @@ def tally(views: list[dict]) -> dict:
 def pair_kind(pj: dict) -> str:
     if pj.get("ours") is None:
         return "refused" if pj.get("refused") else "reference-only"
-    return "listening" if pj.get("real") is None else "graded"
+    if pj.get("real") is None:
+        return "listening"
+    # a recording set beside the render that the grader does not hold (so no metrics): compared, not graded
+    return "graded" if pj.get("metrics") else "compared"
 
 
 def stamp_of(path: Path) -> str:
@@ -1028,7 +1031,7 @@ def main() -> int:
             if not status.get("draft"):
                 sys.exit(f"{draft}: a status draft must say why it is not the committed card (its 'draft' field)")
         pairs = [p for p in (build_pair(fid, nid, nd, media, origin) for nid, nd, origin in pair_dirs.get(fid, [])) if p]
-        pairs.sort(key=lambda p: ({"graded": 0, "listening": 1, "refused": 2, "reference-only": 3}[p["kind"]], note_key(p["note"]), p["id"]))
+        pairs.sort(key=lambda p: ({"graded": 0, "compared": 1, "listening": 2, "refused": 3, "reference-only": 4}[p["kind"]], note_key(p["note"]), p["id"]))
         kit_dir = mirror / "kit" if (mirror / "kit").is_dir() else mirror / "kit9"  # mirrors before 2026-10-26T03:30Z
         if fid == "kit":
             pairs += kit_pairs(kit_dir, media)
