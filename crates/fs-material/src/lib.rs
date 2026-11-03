@@ -35,6 +35,8 @@ pub mod comminution;
 pub mod conductor;
 /// Permanent sub-yield Norton/Arrhenius creep and consistent physical-step updates.
 pub mod creep;
+/// Finite gold cyanidation coupled to original aqueous acid/base speciation.
+pub mod cyanide_leach;
 /// Ordered source-backed Ohmic contact resistance, distinct from bulk resistivity.
 pub mod electrical_interface;
 pub mod liquid;

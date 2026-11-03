@@ -1,5 +1,48 @@
 # fs-material — CONTRACT
 
+## Finite gold cyanidation with coupled aqueous speciation
+
+`cyanide_leach::GoldCyanidationBatch` advances accessible gold dissolution
+against finite uncomplexed HCN+CN and dissolved-O2 inventories. Its separate
+kinetic card declares the empirical law `r_Au=k*n_Au*c_free_CN*c_O2`, with
+`k` in m6/(mol2 s). These first-order factors are explicit model choices;
+equilibrium data, chemical stoichiometry and ore names supply no rate constant.
+Accessible gold is a declared reactive inventory, not inferred liberation.
+
+Cumulative progress is mol Au dissolved. The original conserved dissolved-O2
+Elsner equation supplies consumption/formation at extent `x/4`. The original
+`IdealAcidBaseSystem` jointly solves all admitted acid families and water at
+every rate stage. The remaining HCN+CN total is `T0-2*x`; dicyanoaurate is an
+internally updated spectator with amount `G0+x`. Thus HCN remains available
+through dissociation, and free CN is never confused with total cyanide.
+Original Gibbs-source receipts, fixed counterions and other family totals
+remain attached to the model and accepted state. Source temperature must
+match the actual fixed bath temperature. The common activity amount and
+liquid volume are separate declarations.
+
+Required source axes cover actual pH, free CN, DO, accessible gold, absolute
+time, volume and temperature; optional owned inventory/activity axes cannot
+be overridden by caller coordinates. Bounded RK4 full/two-half trials retain
+the positive two-half result without extrapolation or stock clipping.
+Time-weighted local difference/15 estimates control accepted numerical work;
+they are not certified global bounds and exclude speciation/model uncertainty.
+Every stage is source admitted. Cancellation, exhausted work, unresolved
+progress or source refusal leaves the full accepted state and clock unchanged.
+Reports separate interval gold dissolution, cumulative equation extent,
+stoichiometric amounts, actual species speciation and analytical Au/CN/DO
+balance residuals.
+
+Water retains fixed unit activity. Stoichiometric OH production is distinct
+from equilibrium OH, and no finite solvent H/O or thermal balance is claimed.
+The scope excludes gas transfer, reagent dosing, cyanide destruction, other
+cyanicide minerals, passivation, through-flow and calibrated ore/plant recovery.
+The `gold_leach_to_carbon` consumer hands analytical dissolved Au to the
+existing finite-time carbon owner and checks the combined solid/liquid/carbon
+Au balance. It specifies carbon-stage pH externally and supplies no ligand or
+counterion adsorption chemistry or simultaneous CIL model. See
+`data/matdb/seed-v1/MINING_CYANIDE_LEACH_KINETICS.md` for source compilation
+and the complete coupled example.
+
 ## Continuous solution flow through retained sorbent populations
 
 `aqueous_adsorption::flow::AdsorptionCstr` advances one full, ideally mixed
