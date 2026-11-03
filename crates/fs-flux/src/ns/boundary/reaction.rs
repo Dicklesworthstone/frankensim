@@ -132,6 +132,8 @@ pub struct DiscreteBoundaryReaction {
     load: BoundaryLoad,
     normal_measure: [f64; 2],
     normal_moment_measure: f64,
+    outward_volume_flux: f64,
+    outward_volume_first_moment: [f64; 2],
 }
 
 impl DiscreteBoundaryReaction {
@@ -195,6 +197,46 @@ impl BoundaryReactions {
     #[must_use]
     pub fn edges(&self) -> &[DiscreteBoundaryReaction] {
         &self.edges
+    }
+
+    /// Signed outward volume flux [m²/s] and its first spatial moment [m³/s]
+    /// about origin_m, from the SAME retained advector quadrature as the
+    /// reported outward momentum. Zero when convection is absent.
+    ///
+    /// This is deliberately not reconstructed from a later endpoint velocity:
+    /// a retained Oseen/Picard advector need not equal that velocity exactly.
+    ///
+    /// # Errors
+    /// Refuses empty, duplicate or nonboundary selections and nonfinite output.
+    pub fn volume_flux_moments(
+        &self,
+        edges: &[usize],
+        origin_m: [f64; 2],
+    ) -> Result<(f64, [f64; 2]), StokesBoundaryError> {
+        if edges.is_empty() || !origin_m.iter().all(|x| x.is_finite()) {
+            return Err(invalid("nonempty boundary selection and finite flux origin required"));
+        }
+        let mut selected = edges.to_vec();
+        selected.sort_unstable();
+        if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(invalid("duplicate flux edge"));
+        }
+        let mut flux = 0.0;
+        let mut first_moment = [0.0; 2];
+        for edge in selected {
+            let index = self.edges.binary_search_by_key(&edge, |item| item.edge)
+                .map_err(|_| invalid("flux selection must contain original boundary edges"))?;
+            let item = &self.edges[index];
+            flux += item.outward_volume_flux;
+            for axis in 0..2 {
+                first_moment[axis] += item.outward_volume_first_moment[axis]
+                    - origin_m[axis] * item.outward_volume_flux;
+            }
+        }
+        if !flux.is_finite() || !first_moment.iter().all(|x| x.is_finite()) {
+            return Err(invalid("unrepresentable boundary volume flux moments"));
+        }
+        Ok((flux, first_moment))
     }
 
     /// Sum selected edges in canonical order without reassembly or source
@@ -419,6 +461,8 @@ impl ReactionOperator {
                     }
                 }
             };
+            let mut outward_volume_flux = 0.0;
+            let mut outward_volume_first_moment = [0.0; 2];
             if let Some((moments, advect)) = face.advection {
                 for (point, weight, fraction) in convection_edge_quadrature(a, b, moments) {
                     let u = velocity(system, cell, point, &field.x);
@@ -436,6 +480,11 @@ impl ReactionOperator {
                         }
                         _ => u,
                     };
+                    let volume_flux = weight * wn;
+                    outward_volume_flux += volume_flux;
+                    for axis in 0..2 {
+                        outward_volume_first_moment[axis] += point[axis] * volume_flux;
+                    }
                     load.outward_momentum
                         .sample(point, upwind.map(|v| weight * wn * v));
                     if face.policy == Some(OpenBoundaryPolicy::DissipativeBackflow) {
@@ -445,7 +494,10 @@ impl ReactionOperator {
                 }
                 load.stress.add(load.backflow);
             }
-            if !load.finite() {
+            if !load.finite()
+                || !outward_volume_flux.is_finite()
+                || !outward_volume_first_moment.iter().all(|v| v.is_finite())
+            {
                 return Err(invalid("nonfinite discrete boundary reaction"));
             }
             edges.push(DiscreteBoundaryReaction {
@@ -460,6 +512,8 @@ impl ReactionOperator {
                 load,
                 normal_measure: edge.normal.map(|n| edge.len * n),
                 normal_moment_measure: edge.len * cross(edge.mid, edge.normal),
+                outward_volume_flux,
+                outward_volume_first_moment,
             });
         }
         Ok(BoundaryReactions {

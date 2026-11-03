@@ -2874,3 +2874,47 @@ limits. Thirty-seven existing cavitation regressions also pass with the shared
 kernel. This model retains fixed-center radial interaction only: translation,
 jets, near-contact deformation, finite propagation delay, radiation loss and
 cloud shocks require additional physical owners.
+
+## Nonlinear pressure flow on exactly translating domains
+
+The original material BDM1/P0 Navier–Stokes solver is now advanced by
+ale::translating::TranslatingAleFlow on x = X(t) + y. The relative velocity
+v = u_world - W obeys the same nonlinear convection and stress operators,
+with the physical body force sampled at y + X1 and inertial source
+-rho*(W1-W0)/dt. The original pressure remains physical mechanical pressure;
+its mean-zero or imposed-traction datum is not converted into an EOS state.
+
+Translation has identity deformation gradient and unit Jacobian. The domain
+actually changes world position while its metric, topology, bases and material
+snapshot are retained. BDF1 uses X1 = X0 + dt*requested_W1; the represented
+W1 = (X1-X0)/dt must meet an explicit velocity tolerance and then owns the
+force, relative boundary velocity and world reporting conversions. Independent
+position/speed histories cannot enter. Each endpoint callback sees world
+coordinates. Relative history, geometry, frame velocity and clock publish
+together after successful native nonlinear admission, physical conversion and
+the final cancellation poll. Native synchronous solvers are polled around,
+not internally interrupted by this composing owner.
+
+The reported world BDM velocity, linear momentum and kinetic energy use the
+same source density. Physical stress and shifted moment origins remain
+separate from outward momentum through the moving control surface:
+rho*u_world*((u_world-W).n). DiscreteBoundaryReaction now retains signed volume
+flux and its first spatial moment from the SAME original advector quadrature
+as its momentum receipt. A native selected-edge accessor and a material
+mass-flux accessor expose those moments without reassembly or source queries.
+The world receipt adds W times those retained mass moments; it never mixes a
+later endpoint normal trace with an earlier frozen-advector momentum flux.
+
+Velocity and NaturalTraction boundaries are supported. The original
+DissipativeBackflow law is fixed-frame and refuses rather than silently
+changing its reference velocity. This entry supplies prescribed translation,
+not rotating/deforming ALE, a moving-mesh rigid-body solve, topology change,
+a nonlinear adjoint, or a whole-domain energy/passivity theorem.
+
+Five authored G1/G3/G4 regression groups cover acceleration-induced pressure
+and reaction; preservation of uniform world flow under changing mesh speed
+with independent moving-surface momentum flux; Galilean covariance of a
+nonlinear mixed-boundary affine flow; a retained advector deliberately distinct
+from the endpoint velocity; and final cancellation, continuation and motion/law
+refusal. Native execution and formatter checks were unavailable after the
+session worker failed; these are authored cases, not claimed passing results.

@@ -6,6 +6,9 @@ use fs_flux::ale::{
 };
 use fs_solid::Mesh2;
 
+#[path = "ale_gcl/translating.rs"]
+mod translating;
+
 fn verdict(name: &str, pass: bool, details: &str) {
     println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
     assert!(pass, "{name}: {details}");

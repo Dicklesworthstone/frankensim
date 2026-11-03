@@ -140,6 +140,30 @@ pub struct MaterialStokesSolution {
 }
 
 impl MaterialStokesSolution {
+    /// Signed outward mass flux [kg/(m s)] and its first spatial moment [kg/s]
+    /// about origin_m. Both come from the original retained convective
+    /// advector, exactly as the endpoint momentum-transport receipt does.
+    /// Stokes-only solutions return zero. No source callback is queried.
+    ///
+    /// # Errors
+    /// Refuses invalid selected edges/origin or physical conversion overflow.
+    pub fn outward_mass_flux_moments(
+        &self,
+        edges: &[usize],
+        origin_m: [f64; 2],
+    ) -> Result<(f64, [f64; 2]), MaterialFluxError> {
+        let (flux, moment) = self.flow.reactions
+            .volume_flux_moments(edges, origin_m)
+            .map_err(MaterialFluxError::Boundary)?;
+        let rho = self.transport.density_kg_m3();
+        let mass_flux = rho * flux;
+        let first_moment = moment.map(|v| rho * v);
+        if !mass_flux.is_finite() || !first_moment.iter().all(|v| v.is_finite()) {
+            return Err(MaterialFluxError::Invalid("physical mass flux moment overflow"));
+        }
+        Ok((mass_flux, first_moment))
+    }
+
     /// Evaluate selected boundary reactions using retained endpoint coefficients
     /// and source density. Mean-zero components require explicit offsets [Pa];
     /// traction-datum components require None. Velocity edges are not inferred

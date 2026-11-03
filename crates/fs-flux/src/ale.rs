@@ -1,10 +1,13 @@
-//! Affine-triangle arbitrary-Lagrangian-Eulerian geometry audits.
+//! ALE geometry audits and exact translating-domain nonlinear flow.
 //!
-//! This module measures the discrete geometric-conservation-law (GCL)
-//! identity for a fixed-connectivity [`TriMesh`] whose vertices move
-//! linearly during one time step.  It does not advance a flow solution or
-//! remap a field; it only returns the geometric evidence a later ALE
-//! operator can bind into its own receipt.
+//! The affine-triangle audit measures the geometric-conservation-law identity
+//! for linearly moving vertices. Its receipt alone does not advance or remap
+//! a field. The translating module advances the original nonlinear physical
+//! flow on exactly translating domains, with relative convection, consistent
+//! frame inertia and world pressure/momentum reporting.
+
+/// Nonlinear incompressible flow in an accelerating translating domain.
+pub mod translating;
 
 use crate::TriMesh;
 use core::fmt;
