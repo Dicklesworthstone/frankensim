@@ -759,6 +759,26 @@ last applied-secant Newton history from the full physical endpoint audit.
 The radiative composition retains the scalar/continuous-source Newton
 admission; unsupported surface tangents refuse rather than freezing the law.
 
+Solve driver 101 extends the same native enthalpy/contact adapter with pointwise
+P1 ambient, closed-enclosure and open-enclosure radiation. The original coupled
+Newton owners include local emission, reflected irradiation, heterogeneous
+conductivity and contact-temperature feedback in one specific-enthalpy residual
+and tangent. Reference masses, latent storage and physical old history remain
+fixed during every trial. The unchanged accepted endpoint passes the original
+independent nodal joule-residual and storage/heat gates. Internal contact and
+closed-enclosure exchange do not become external heat; the open enclosure's
+declared environment is counted once.
+
+The existing face-pair work and memory admission, source-curve restrictions,
+prescribed-boundary histories and physical report fields remain shared with
+the nonradiative path. Actual face queries and local radiative heat are retained
+at each accepted endpoint, with one coupled Newton response per time step.
+`native_contact_adjoint/temperature/enthalpy.rs` covers actual latent melting,
+live versus frozen resistance, independent stored-energy balances for all three
+radiation models and late source-domain refusal. Area-mean radiation,
+natural/transported-air transient feedback and contact trajectory derivatives
+remain unsupported for this enthalpy/contact composition.
+
 The library surface exposes `run_solve`, `resume_solve`, `SolveRunId`,
 `SolveStage`, `SolveDriverState`, `SolveOutcome`, and `SolveRefusal`. The
 `solve` verb wraps them with bounded project I/O and a real monotonic clock.

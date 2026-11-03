@@ -5,6 +5,7 @@ use fs_conduction::{
 };
 use fs_conduction::radiation::GrayDiffuseEnclosure;
 use fs_conduction::transient::enthalpy::EnthalpyEndpointEvaluation;
+use fs_conduction::interface::temperature::enthalpy::{ContactEnthalpyStep, ContactEnthalpyNewtonConfig};
 use super::*;
 
 enum Owner<'a> {
@@ -81,6 +82,33 @@ impl<'a> Owner<'a> {
             ),
         }.map_err(failed)
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_contact(
+        &self, cx: &Cx<'_>, engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+        problem: ConductionProblem<'_>, contacts: &TemperatureContacts<'_, '_>,
+        old: &[f64], dt_s: f64, config: ContactEnthalpyNewtonConfig,
+    ) -> Result<ContactEnthalpyStep, SolveRefusal> {
+        match self {
+            Self::Ambient(owner) => contacts.advance_enthalpy_newton_with_pointwise_ambient_radiation(
+                cx, engine, problem, old, dt_s, config, owner,
+            ),
+            Self::Enclosure(owner) => contacts.advance_enthalpy_newton_with_pointwise_enclosure_radiation(
+                cx, engine, problem, old, dt_s, config, owner,
+            ),
+        }.map_err(failed)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::solve::transient) fn advance_contact(
+    cx: &Cx<'_>, engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+    problem: ConductionProblem<'_>, contacts: &TemperatureContacts<'_, '_>,
+    old: &[f64], dt_s: f64, config: ContactEnthalpyNewtonConfig,
+    lowering: &radiation::LoweredRadiation, enclosure: Option<&GrayDiffuseEnclosure>,
+) -> Result<ContactEnthalpyStep, SolveRefusal> {
+    Owner::new(cx, problem, lowering, enclosure)?
+        .advance_contact(cx, engine, problem, contacts, old, dt_s, config)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -116,17 +144,7 @@ pub(super) fn advance(
         count.checked_add(row.linear_iterations)
             .ok_or_else(|| bad("pointwise Newton Krylov work count overflows"))
     })?;
-    let exchange = radiation::pointwise_receipt(
-        endpoint.pointwise_radiation.as_ref(), endpoint.pointwise_enclosure_radiation.as_ref(),
-        lowering, physical.convective_out_w,
-    )?;
-    let evidence = format!(
-        "{{\"model\":\"pointwise-p1\",\"solid_solves\":1,\"solid_iterations\":{},\"krylov_iterations\":{krylov_iterations},\"physical_residual_j\":{},\"physical_residual_threshold_j\":{},\"physical_energy_residual_j\":{},\"physical_dirichlet_in_w\":{},\"convective_out_w\":{},\"prescribed_neumann_out_w\":{},\"nonlinear_radiative_out_w\":{},\"exchange\":{exchange}}}",
-        endpoint.newton.iterations, number(physical.residual_norm_j)?, number(threshold)?,
-        number(physical.energy_residual_j)?, number(physical.dirichlet_in_w)?,
-        number(physical.convective_out_w)?, number(physical.neumann_out_w)?,
-        number(physical.radiation_out_w)?,
-    );
+    let evidence = receipt(&endpoint, &physical, lowering, threshold)?;
     let net_input_w = finite(physical.source_w + physical.dirichlet_in_w
         - physical.neumann_out_w - physical.convective_out_w - physical.radiation_out_w)?;
     poll(cx, deadline)?;
@@ -140,6 +158,29 @@ pub(super) fn advance(
         neumann_out_w: physical.neumann_out_w,
         dirichlet_in_w: physical.dirichlet_in_w,
     })
+}
+
+/// Both constant and source-backed contacts retain the same pointwise spatial
+/// model and independently checked energy decomposition in their time rows.
+pub(in crate::solve::transient) fn receipt(
+    endpoint: &EnthalpyStepSolution, physical: &EnthalpyEndpointEvaluation,
+    lowering: &radiation::LoweredRadiation, threshold: f64,
+) -> Result<String, SolveRefusal> {
+    let krylov_iterations = endpoint.newton.history.iter().try_fold(0usize, |count, row| {
+        count.checked_add(row.linear_iterations)
+            .ok_or_else(|| bad("pointwise Newton Krylov work count overflows"))
+    })?;
+    let exchange = radiation::pointwise_receipt(
+        endpoint.pointwise_radiation.as_ref(), endpoint.pointwise_enclosure_radiation.as_ref(),
+        lowering, physical.convective_out_w,
+    )?;
+    Ok(format!(
+        "{{\"model\":\"pointwise-p1\",\"solid_solves\":1,\"solid_iterations\":{},\"krylov_iterations\":{krylov_iterations},\"physical_residual_j\":{},\"physical_residual_threshold_j\":{},\"physical_energy_residual_j\":{},\"physical_dirichlet_in_w\":{},\"convective_out_w\":{},\"prescribed_neumann_out_w\":{},\"nonlinear_radiative_out_w\":{},\"exchange\":{exchange}}}",
+        endpoint.newton.iterations, number(physical.residual_norm_j)?, number(threshold)?,
+        number(physical.energy_residual_j)?, number(physical.dirichlet_in_w)?,
+        number(physical.convective_out_w)?, number(physical.neumann_out_w)?,
+        number(physical.radiation_out_w)?,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

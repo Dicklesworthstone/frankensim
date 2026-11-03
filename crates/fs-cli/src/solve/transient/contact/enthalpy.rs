@@ -11,16 +11,19 @@ use fs_conduction::ConductionProblem;
 use fs_exec::Cx;
 use std::time::Instant;
 
-use crate::solve::{SolveRefusal, json_string};
-use crate::solve::transient::{bad, number, poll, lower, enthalpy::failed};
+use crate::solve::{SolveRefusal, json_string, radiation};
+use crate::solve::transient::{bad, number, poll, lower, enthalpy::{
+    failed, advance_pointwise_contact, pointwise_contact_receipt,
+}};
 use super::{face_states, residual_tolerance_j};
 
-pub(in crate::solve::transient) const NO_CLAIM: &str = "Source-backed matching contact resistance from scalar or continuous linear source curves and primary specific enthalpy are solved in one native Newton/FGMRES system with the complete contact-temperature tangent and each regional phase chart's temperature response. Every residual and rejected trial retains the same accepted old enthalpy. The unchanged accepted field passes a freshly queried full nodal joule-residual gate and a separate storage/heat energy gate. Contact flux is internal transfer; prescribed reservoir reactions include boundary-node storage once. All retained contact rows describe accepted physical endpoints under the originally pinned material claims. Both time grids retain every workload and prescribed-boundary switch. Pressure, geometry, source support and reference mass are fixed. Surface-law contact fixed points, radiation, derived natural/airflow feedback, phase-dependent contact resistance and contact trajectory derivatives are not inferred.";
+pub(in crate::solve::transient) const NO_CLAIM: &str = "Source-backed matching contact resistance from scalar or continuous linear source curves and primary specific enthalpy are solved in one native Newton/FGMRES system with the complete contact-temperature tangent and each regional phase chart's temperature response. Every residual and rejected trial retains the same accepted old enthalpy. The unchanged accepted field passes a freshly queried full nodal joule-residual gate and a separate storage/heat energy gate. Contact flux is internal transfer; prescribed reservoir reactions include boundary-node storage once. All retained contact rows describe accepted physical endpoints under the originally pinned material claims. Both time grids retain every workload and prescribed-boundary switch. Explicit pointwise ambient, closed-enclosure and open-enclosure radiation use the original local-emission and reflected-irradiation owners inside that same Newton residual and tangent. Their actual endpoint heat shares the independent physical acceptance gates; closed exchange is internal and open-environment heat is counted once. Pressure, geometry, source support, view factors and reference mass are fixed. Surface-law contact fixed points, patch-mean radiation, derived natural/airflow feedback, phase-dependent contact resistance, contact trajectory derivatives, arbitrary-law convergence and continuum bounds are not inferred.";
 
 pub(in crate::solve::transient) struct Step {
     pub(in crate::solve::transient) conduction: EnthalpyStepSolution,
     pub(in crate::solve::transient) physical: EnthalpyEndpointEvaluation,
     pub(in crate::solve::transient) receipt: String,
+    pub(in crate::solve::transient) radiation_receipt: Option<String>,
 }
 
 /// Retain both grids' physical face rows and bounded contact tangent scratch
@@ -68,12 +71,19 @@ pub(in crate::solve::transient) fn advance(
     old_h: &[f64],
     dt_s: f64,
     config: ContactEnthalpyNewtonConfig,
+    radiation: Option<&radiation::LoweredRadiation>,
+    enclosure: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
     deadline: Option<(Instant, f64)>,
 ) -> Result<Step, SolveRefusal> {
     poll(cx, deadline)?;
-    let accepted = contacts.advance_enthalpy_newton(
-        cx, engine, problem, old_h, dt_s, config,
-    ).map_err(failed)?;
+    let accepted = match radiation {
+        Some(lowering) => advance_pointwise_contact(
+            cx, engine, problem, contacts, old_h, dt_s, config, lowering, enclosure,
+        )?,
+        None => contacts.advance_enthalpy_newton(
+            cx, engine, problem, old_h, dt_s, config,
+        ).map_err(failed)?,
+    };
     poll(cx, deadline)?;
     let states = face_states(cx, &accepted.physical_contacts, deadline)?;
     let receipt = format!(concat!(
@@ -87,6 +97,9 @@ pub(in crate::solve::transient) fn advance(
         number(accepted.physical.energy_residual_j)?, number(config.step.energy_tolerance_j)?,
         states,
     );
+    let radiation_receipt = radiation.map(|lowering| pointwise_contact_receipt(
+        &accepted.conduction, &accepted.physical, lowering, config.residual_tolerance_j,
+    )).transpose()?;
     let mut conduction = accepted.conduction;
     // Publish the fresh accepted physical operator and heat reactions. Newton
     // history remains the original counted numerical solve; storage is never
@@ -101,7 +114,7 @@ pub(in crate::solve::transient) fn advance(
     conduction.stored_energy_change_j = accepted.physical.stored_energy_change_j;
     conduction.energy_residual_j = accepted.physical.energy_residual_j;
     poll(cx, deadline)?;
-    Ok(Step { conduction, physical: accepted.physical, receipt })
+    Ok(Step { conduction, physical: accepted.physical, receipt, radiation_receipt })
 }
 
 pub(in crate::solve::transient) fn receipt(
@@ -109,17 +122,18 @@ pub(in crate::solve::transient) fn receipt(
     coarse_steps: usize,
     fine_steps: usize,
     nonlinear_updates: usize,
+    krylov_iterations: usize,
 ) -> Result<String, SolveRefusal> {
     Ok(format!(concat!(
         ",\"temperature_contact\":{{\"method\":\"source-backed-contact-enthalpy-newton\",",
         "\"face_pairs\":{},\"max_thermal_responses_per_step\":1,\"max_residual_evaluations_per_step\":{},",
         "\"coarse_thermal_responses\":{},\"fine_thermal_responses\":{},\"total_thermal_responses\":{},",
-        "\"total_nonlinear_updates\":{},\"physical_residual_tolerance_j\":{},",
+        "\"total_nonlinear_updates\":{},\"total_krylov_iterations\":{},\"physical_residual_tolerance_j\":{},",
         "\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-newton-trial\",",
         "\"scope\":{}}}"
     ),
         config.max_face_pairs, config.max_residual_evaluations,
-        coarse_steps, fine_steps, coarse_steps + fine_steps, nonlinear_updates,
+        coarse_steps, fine_steps, coarse_steps + fine_steps, nonlinear_updates, krylov_iterations,
         number(config.residual_tolerance_j)?, json_string(NO_CLAIM),
     ))
 }

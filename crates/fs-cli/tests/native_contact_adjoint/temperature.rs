@@ -5,6 +5,8 @@ use super::*;
 mod transient;
 #[path = "temperature/radiation.rs"]
 mod radiation;
+#[path = "temperature/enthalpy.rs"]
+mod enthalpy;
 
 fn temperature_pack() -> (Vec<u8>, String, String) {
     temperature_pack_from_knots(vec![(200.0, 0.2), (450.0, 0.45)])

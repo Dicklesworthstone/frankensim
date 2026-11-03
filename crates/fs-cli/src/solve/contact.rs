@@ -350,11 +350,16 @@ pub(super) fn admit(
             || spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint"))
     });
     // Steady ambient radiation reuses the complete contact Newton response.
-    // Other radiative storage compositions require their own coupled owner.
+    // Total enthalpy has a distinct owner that differentiates local P1
+    // emission and enclosure reflection inside the same contact/storage state.
+    let enthalpy_contact = transient.is_some_and(|time| time.enthalpy.is_some());
     let unsupported_radiation = setup.radiation.as_ref().is_some_and(|declaration| {
         let pointwise = declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise);
-        transient.is_some() || pointwise
-    }) || setup.enclosure_radiation.is_some();
+        !((enthalpy_contact && pointwise) || (transient.is_none() && !pointwise))
+    }) || setup.enclosure_radiation.as_ref().is_some_and(|declaration| {
+        !enthalpy_contact
+            || declaration.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise)
+    });
     if unsupported_transient
         || unsupported_radiation
         || adjoint
@@ -366,8 +371,8 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient radiation, or capacity/total-enthalpy transient solves with prescribed or scheduled boundaries; this requested composition needs additional complete contact feedback",
-            "use an admitted storage and boundary composition without derivative/bound outputs; this contact path admits only steady area-mean ambient radiation; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient radiation, or capacity/total-enthalpy transient solves with prescribed or scheduled boundaries; total enthalpy also admits pointwise ambient/enclosure radiation, while this requested composition needs additional complete contact feedback",
+            "use an admitted storage and boundary composition without derivative/bound outputs; transient radiation requires total enthalpy and pointwise emission; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())
