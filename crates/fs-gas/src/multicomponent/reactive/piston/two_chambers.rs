@@ -10,6 +10,9 @@ use crate::dynamics::piston::{
 use crate::multicomponent::{Boundaries, Boundary, MixtureEuler1d, SharedPistonGasReport};
 use fs_qty::Time;
 
+mod molecular;
+pub use molecular::ReactiveSharedPistonGasReport;
+
 /// One accepted pair of reacting chambers and their common mechanical response.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReactiveSharedPistonStep {

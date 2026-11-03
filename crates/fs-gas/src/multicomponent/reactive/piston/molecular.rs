@@ -16,15 +16,190 @@ use fs_qty::Time;
 use super::thermal::{PistonThermalEnds, SplitPistonThermalReport};
 
 /// Private common-root result; public entries expose their original report.
-pub(super) struct MolecularPistonReport {
+pub(in crate::multicomponent::reactive) struct MolecularPistonReport {
     pub flow: ReactiveStepReport,
     pub before: Totals,
     pub after: Totals,
     pub heat: Option<SplitPistonThermalReport>,
     pub gas_energy_change_j: f64,
+    /// Signed pressure plus viscous impulses entering the gas, [left, right].
+    pub boundary_impulse_n_s: [f64; 2],
+    /// Mechanical pressure/stress work entering the gas, excluding end heat.
+    pub boundary_work_j: [f64; 2],
+    /// Gas and finite-wall storage changes minus prescribed reservoir heat.
+    pub accounted_energy_change_j: f64,
+}
+
+/// Inline reports reuse native workspaces without allocating per root proposal.
+#[allow(clippy::large_enum_variant)]
+pub(in crate::multicomponent::reactive) enum MovingMolecularTrial {
+    Shorter(Time),
+    Complete(MolecularPistonReport),
 }
 
 impl ReactingEuler1d {
+    /// Reuse the original molecular/source/heat stages for one proposed pair
+    /// of end speeds. Every proposal starts from accepted physical endpoints.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::multicomponent::reactive) fn moving_molecular_trial<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        mut thermal: Option<(&mut PistonThermalEnds<'_>, WallControl)>,
+        before: Totals,
+        duration: f64,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        wall_velocity: [f64; 2],
+        retry: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MovingMolecularTrial, ReactiveError> {
+        self.trial
+            .copy_physical_with_motion_from(&self.accepted, cancelled)?;
+        let first_heat = if let Some((walls, wall_controls)) = thermal.as_mut() {
+            walls.begin_trial();
+            Some(walls.advance_trial(
+                &mut self.trial,
+                Time::new(0.5 * duration),
+                *wall_controls,
+                cancelled,
+            )?)
+        } else {
+            None
+        };
+        let middle_before = if first_heat.is_some() {
+            self.trial.totals()
+        } else {
+            before
+        };
+        let first = operator.advance_moving_trial(
+            &mut self.trial,
+            Time::new(0.5 * duration),
+            dissipation_controls,
+            wall_velocity,
+            cancelled,
+        )?;
+        let mut chemistry = ChemistryReport::default();
+        react_cells(
+            &mut self.trial,
+            &mut self.reactor,
+            &mut self.amounts,
+            0.5 * duration,
+            &mut chemistry,
+            cancelled,
+        )?;
+        let transport = self.trial.step_with_moving_walls(
+            Time::new(duration),
+            controls.transport,
+            wall_velocity,
+            &mut *cancelled,
+        )?;
+        if transport.elapsed.value() != duration {
+            return Ok(MovingMolecularTrial::Shorter(transport.elapsed));
+        }
+        react_cells(
+            &mut self.trial,
+            &mut self.reactor,
+            &mut self.amounts,
+            0.5 * duration,
+            &mut chemistry,
+            cancelled,
+        )?;
+        let second = operator.advance_moving_trial(
+            &mut self.trial,
+            Time::new(0.5 * duration),
+            dissipation_controls,
+            wall_velocity,
+            cancelled,
+        )?;
+        let middle_after = self.trial.totals();
+        let heat = if let Some((walls, wall_controls)) = thermal.as_mut() {
+            let second_heat = walls.advance_trial(
+                &mut self.trial,
+                Time::new(0.5 * duration),
+                *wall_controls,
+                cancelled,
+            )?;
+            Some(walls.complete(
+                first_heat.expect("both heat halves share one thermal owner"),
+                second_heat,
+            )?)
+        } else {
+            None
+        };
+        let interval = self.reactor.controls();
+        for i in 0..self.trial.cell_count() {
+            let primitive = self.trial.gas().primitive(
+                self.trial.cell(i).expect("admitted cell index"),
+                &mut *cancelled,
+            )?;
+            if !(interval.minimum_temperature_k..=interval.maximum_temperature_k)
+                .contains(&primitive.temperature)
+            {
+                return Err(ReactiveError::Invalid(
+                    "final molecular piston state is outside chemistry interval",
+                ));
+            }
+        }
+        let after = if heat.is_some() {
+            self.trial.totals()
+        } else {
+            middle_after
+        };
+        let flow = coupled_report(
+            &self.trial.gas,
+            middle_before,
+            middle_after,
+            transport,
+            chemistry,
+            Some(SplitDissipationReport { first, second }),
+            retry,
+        )?;
+        // Closed ends carry no species. Restore each source reference once,
+        // using actual accepted-to-candidate species and energy differences.
+        let gas_energy_change_j = sum(core::iter::once(after.energy - before.energy).chain(
+            (0..self.trial.gas.species_count()).map(|k| {
+                (after.species_masses[k] - before.species_masses[k])
+                    * self.trial.gas.energy_references()[k]
+            }),
+        ));
+        let boundary_impulse_n_s = [
+            transport.left_boundary_change.momentum
+                + first.left_boundary_change.momentum
+                + second.left_boundary_change.momentum,
+            transport.right_boundary_change.momentum
+                + first.right_boundary_change.momentum
+                + second.right_boundary_change.momentum,
+        ];
+        let boundary_work_j = [
+            transport.left_boundary_change.energy
+                + first.left_boundary_change.energy
+                + second.left_boundary_change.energy,
+            transport.right_boundary_change.energy
+                + first.right_boundary_change.energy
+                + second.right_boundary_change.energy,
+        ];
+        // Finite heat storage is internal. Prescribed reservoir heat is
+        // external and never part of the mechanical wall-work arrays.
+        let accounted_energy_change_j = match heat {
+            Some(heat) => sum([
+                gas_energy_change_j,
+                heat.wall_energy_change_j,
+                -heat.external_heat_to_gas_j,
+            ]),
+            None => gas_energy_change_j,
+        };
+        Ok(MovingMolecularTrial::Complete(MolecularPistonReport {
+            flow,
+            before,
+            after,
+            heat,
+            gas_energy_change_j,
+            boundary_impulse_n_s,
+            boundary_work_j,
+            accounted_energy_change_j,
+        }))
+    }
+
     /// Advance chemistry, molecular transport and pressure-driven piston motion.
     ///
     /// Each midpoint-speed proposal starts from the accepted state and runs
@@ -170,150 +345,39 @@ impl ReactingEuler1d {
             let attempt = solve(original_piston.velocity_m_s(), piston_controls, |speed| {
                 poll(&mut cancelled)?;
                 gas_trials += 1;
-                self.trial
-                    .copy_physical_with_motion_from(&self.accepted, &mut cancelled)?;
-                let first_heat = if let Some((walls, wall_controls)) = thermal.as_mut() {
-                    walls.begin_trial();
-                    Some(walls.advance_trial(
-                        &mut self.trial,
-                        Time::new(0.5 * duration),
-                        *wall_controls,
-                        &mut cancelled,
-                    )?)
-                } else {
-                    None
-                };
-                let middle_before = if first_heat.is_some() {
-                    self.trial.totals()
-                } else {
-                    before
-                };
-                let first = operator.advance_moving_trial(
-                    &mut self.trial,
-                    Time::new(0.5 * duration),
+                let gas = match self.moving_molecular_trial(
+                    operator,
+                    thermal
+                        .as_mut()
+                        .map(|(walls, controls)| (&mut **walls, *controls)),
+                    before,
+                    duration,
+                    controls,
                     dissipation_controls,
                     [0.0, speed],
+                    retry,
                     &mut cancelled,
-                )?;
-                let mut chemistry = ChemistryReport::default();
-                react_cells(
-                    &mut self.trial,
-                    &mut self.reactor,
-                    &mut self.amounts,
-                    0.5 * duration,
-                    &mut chemistry,
-                    &mut cancelled,
-                )?;
-                let transport = self.trial.step_with_moving_walls(
-                    Time::new(duration),
-                    controls.transport,
-                    [0.0, speed],
-                    &mut cancelled,
-                )?;
-                if transport.elapsed.value() != duration {
-                    shorter_duration = Some(transport.elapsed.value());
-                    return Err(ReactiveError::Invalid(
-                        "moving transport shortened the molecular piston duration",
-                    ));
-                }
-                react_cells(
-                    &mut self.trial,
-                    &mut self.reactor,
-                    &mut self.amounts,
-                    0.5 * duration,
-                    &mut chemistry,
-                    &mut cancelled,
-                )?;
-                let second = operator.advance_moving_trial(
-                    &mut self.trial,
-                    Time::new(0.5 * duration),
-                    dissipation_controls,
-                    [0.0, speed],
-                    &mut cancelled,
-                )?;
-                let middle_after = self.trial.totals();
-                let heat = if let Some((walls, wall_controls)) = thermal.as_mut() {
-                    let second_heat = walls.advance_trial(
-                        &mut self.trial,
-                        Time::new(0.5 * duration),
-                        *wall_controls,
-                        &mut cancelled,
-                    )?;
-                    Some(walls.complete(
-                        first_heat.expect("both heat halves share one thermal owner"),
-                        second_heat,
-                    )?)
-                } else {
-                    None
-                };
-                let interval = self.reactor.controls();
-                for i in 0..self.trial.cell_count() {
-                    let primitive = self.trial.gas().primitive(
-                        self.trial.cell(i).expect("admitted cell index"),
-                        &mut cancelled,
-                    )?;
-                    if !(interval.minimum_temperature_k..=interval.maximum_temperature_k)
-                        .contains(&primitive.temperature)
-                    {
+                )? {
+                    MovingMolecularTrial::Shorter(elapsed) => {
+                        shorter_duration = Some(elapsed.value());
                         return Err(ReactiveError::Invalid(
-                            "final molecular piston state is outside chemistry interval",
+                            "moving transport shortened the molecular piston duration",
                         ));
                     }
-                }
-                let after = if heat.is_some() {
-                    self.trial.totals()
-                } else {
-                    middle_after
+                    MovingMolecularTrial::Complete(report) => report,
                 };
-                let complete = coupled_report(
-                    &self.trial.gas,
-                    middle_before,
-                    middle_after,
-                    transport,
-                    chemistry,
-                    Some(SplitDissipationReport { first, second }),
-                    retry,
-                )?;
-                // Closed walls carry no species. Use endpoint species-reference
-                // changes exactly once to recover actual total chemical energy.
-                let physical_energy_change = sum(core::iter::once(after.energy - before.energy)
-                    .chain((0..self.trial.gas.species_count()).map(|k| {
-                        (after.species_masses[k] - before.species_masses[k])
-                            * self.trial.gas.energy_references()[k]
-                    })));
                 let exchange = MechanicalExchange {
                     duration_s: duration,
-                    momentum_change: after.momentum - before.momentum,
-                    // Heat is never part of stress work. Finite storage is
-                    // internal; only prescribed reservoir heat is external.
-                    energy_change: match heat {
-                        Some(heat) => sum([
-                            physical_energy_change,
-                            heat.wall_energy_change_j,
-                            -heat.external_heat_to_gas_j,
-                        ]),
-                        None => physical_energy_change,
-                    },
-                    left_impulse: transport.left_boundary_change.momentum
-                        + first.left_boundary_change.momentum
-                        + second.left_boundary_change.momentum,
-                    right_impulse: transport.right_boundary_change.momentum
-                        + first.right_boundary_change.momentum
-                        + second.right_boundary_change.momentum,
-                    right_work: transport.right_boundary_change.energy
-                        + first.right_boundary_change.energy
-                        + second.right_boundary_change.energy,
+                    momentum_change: gas.after.momentum - gas.before.momentum,
+                    energy_change: gas.accounted_energy_change_j,
+                    left_impulse: gas.boundary_impulse_n_s[0],
+                    right_impulse: gas.boundary_impulse_n_s[1],
+                    right_work: gas.boundary_work_j[1],
                 };
                 let displacement =
                     self.trial.mesh.positions()[right] - self.accepted.mesh.positions()[right];
                 mechanical_report(
-                    MolecularPistonReport {
-                        flow: complete,
-                        before,
-                        after,
-                        heat,
-                        gas_energy_change_j: physical_energy_change,
-                    },
+                    gas,
                     exchange,
                     original_piston,
                     load,

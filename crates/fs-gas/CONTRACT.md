@@ -3708,6 +3708,47 @@ wall owner, heat, friction, transport and mesh source with explicit constant-Cv
 gas/network/transport fixtures. Material and shared-thermal paths were trapped,
 not exercised. Full Cargo/material/advection verification remains separate.
 
+## Two reacting molecular chambers driving one shared piston
+
+`ReactingEuler1d::step_with_shared_piston_and_dissipation` evaluates both
+original D/C/A/C/D field compositions inside the same midpoint-speed root.
+Pressure and longitudinal viscous traction on both piston faces contribute
+their actual signed impulses and work. Each chamber keeps its own molecular
+law, species order, chemical references and reactor controls. First molecular
+and chemical halves use the old mesh; second halves use actual moved volumes.
+The original molecular owner supplies Fourier heat and species-enthalpy
+transport, including Soret/Dufour terms when its law provides them.
+
+A reusable private moving-molecular trial also serves the existing single
+piston and thermal piston paths, preserving their stage order and arithmetic.
+It returns separate per-end pressure/stress impulse and mechanical work,
+physical chemical gas-energy change, and finite thermal storage/reservoir
+accounting. Conductive end heat never enters mechanical wall-work arrays.
+
+The shared-piston entry requires matching closed constant-area geometry and
+clocks. Both fixed outer support impulses remain explicit. Whole-system
+admission independently checks actual gas/piston momentum, physical chemical
+gas energy, piston kinetic storage and applied-force displacement work. If
+either chamber shortens its acoustic interval, both complete compositions
+and the mechanical root restart from accepted endpoints. Only the final poll
+publishes both fields, meshes, clocks, original molecular geometry bindings
+and piston. Existing workspaces are reused through the nonlinear proposals;
+no field clone or new constitutive solver is introduced per root proposal.
+
+Four focused regression groups were added for both oriented viscous tractions
+against an independent one-cell RK2 oracle, cumulative physical work/energy
+and momentum with distinct sources, complete shortened-duration stage replay,
+late cancellation with exact retry, and source refusal with both bindings
+unchanged. They were parsed by the pinned formatter but were not compiled or
+executed in the resource-constrained editing environment.
+
+The shared interface is impermeable and adiabatic. A thermally conducting
+shared piston needs one jointly owned finite thermal inventory; two unrelated
+end reservoirs must not be substituted for that inventory. Source validity,
+explicit parabolic budgets and the existing caloric-interface limitations
+remain in force. Symmetric splitting alone establishes no accuracy order,
+entropy theorem or benchmarked performance guarantee.
+
 ## Two reacting chambers sharing one finite piston
 
 `ReactingEuler1d::step_with_shared_piston` composes both original chamber

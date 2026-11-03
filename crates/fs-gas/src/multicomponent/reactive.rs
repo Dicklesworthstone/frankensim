@@ -25,7 +25,7 @@ pub use cell::CellChemistry;
 mod inertial_walls;
 pub use inertial_walls::ReactiveInertialWallsStep;
 mod piston;
-pub use piston::ReactiveSharedPistonStep;
+pub use piston::{ReactiveSharedPistonGasReport, ReactiveSharedPistonStep};
 pub use piston::{
     PistonThermalEnds, PistonThermalReport, ReactivePistonStep, SplitPistonThermalReport,
     ThermalReactiveStepReport,

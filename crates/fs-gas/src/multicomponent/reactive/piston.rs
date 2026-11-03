@@ -8,10 +8,10 @@ use crate::dynamics::piston::{Piston, PistonControl, PistonError, PistonLoad, Pi
 use crate::multicomponent::{Boundaries, Boundary};
 use fs_qty::Time;
 
-mod molecular;
+pub(super) mod molecular;
 mod thermal;
 mod two_chambers;
-pub use two_chambers::ReactiveSharedPistonStep;
+pub use two_chambers::{ReactiveSharedPistonGasReport, ReactiveSharedPistonStep};
 pub use thermal::{
     PistonThermalEnds, PistonThermalReport, SplitPistonThermalReport, ThermalReactiveStepReport,
 };

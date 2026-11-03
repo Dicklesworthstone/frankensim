@@ -1,6 +1,8 @@
 use super::*;
 use crate::multicomponent::Mesh1d;
 
+mod molecular;
+
 fn chamber(
     mechanism: &IdealGasKineticsV1,
     start: f64,

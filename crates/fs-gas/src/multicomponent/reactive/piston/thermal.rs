@@ -59,11 +59,11 @@ pub struct ThermalReactiveStepReport {
 
 /// Two independent finite thermal stores or prescribed reservoirs at gas ends.
 ///
-/// End order is `[fixed_left, moving_right]`. Conductance is the complete hA
+/// End order is `[left, right]`; either end may move. Conductance is the complete hA
 /// in W/K, supplied by the caller; it is not a material or boundary-layer
-/// correlation. Finite thermal masses are distinct, fixed amounts. A right
-/// thermal mass may represent part of the piston, whose total translating mass
-/// remains with `Piston`; this owner adds no second mechanical mass or work.
+/// correlation. Finite thermal masses are distinct, fixed amounts. An end's
+/// thermal mass may represent part of its piston, whose total translating mass
+/// remains with its mechanical owner; no second mass or work is added here.
 /// Wall thermal expansion and deformation are outside this rigid-body model.
 ///
 /// The original gas/source and accepted mesh are bound once. Candidate wall
@@ -164,7 +164,10 @@ impl<'law> PistonThermalEnds<'law> {
         self.last_report
     }
 
-    pub(super) fn admit(&self, flow: &MixtureEuler1d) -> Result<(), WallExchangeError> {
+    pub(in crate::multicomponent::reactive) fn admit(
+        &self,
+        flow: &MixtureEuler1d,
+    ) -> Result<(), WallExchangeError> {
         closed(flow)?;
         if self.gas != *flow.gas() || self.mesh != *flow.mesh() {
             return Err(WallExchangeError::Invalid(
@@ -174,11 +177,11 @@ impl<'law> PistonThermalEnds<'law> {
         Ok(())
     }
 
-    pub(super) fn begin_trial(&mut self) {
+    pub(in crate::multicomponent::reactive) fn begin_trial(&mut self) {
         self.candidate_contacts = self.contacts;
     }
 
-    pub(super) fn advance_trial(
+    pub(in crate::multicomponent::reactive) fn advance_trial(
         &mut self,
         flow: &mut MixtureEuler1d,
         duration: Time,
@@ -232,7 +235,7 @@ impl<'law> PistonThermalEnds<'law> {
         })
     }
 
-    pub(super) fn complete(
+    pub(in crate::multicomponent::reactive) fn complete(
         &self,
         first: PistonThermalReport,
         second: PistonThermalReport,
@@ -286,7 +289,10 @@ impl<'law> PistonThermalEnds<'law> {
         })
     }
 
-    pub(super) fn publish(&mut self, report: SplitPistonThermalReport) {
+    pub(in crate::multicomponent::reactive) fn publish(
+        &mut self,
+        report: SplitPistonThermalReport,
+    ) {
         self.contacts = self.candidate_contacts;
         core::mem::swap(&mut self.mesh, &mut self.candidate_mesh);
         self.last_report = Some(report);
