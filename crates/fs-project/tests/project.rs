@@ -2169,8 +2169,10 @@ fn v7_envelopes_migrate_to_v8_and_refuse_a_pre_v8_surface() {
 fn fan_efficiency_project() -> ProjectSpec {
     let mut spec = surface_project();
     spec.cooling.as_mut().expect("cooling").fan_efficiency = Some(fs_project::spec::FanEfficiency {
-        total: 0.3,
+        nominal: 0.3,
+        basis: fs_project::spec::FanEfficiencyBasis::Static,
         half_width: 0.05,
+        outlet_area_per_fan: None,
         source: "illustrative fan datasheet".to_string(),
         source_id: "fan-efficiency-example-v1".to_string(),
     });
@@ -2186,7 +2188,7 @@ fn fan_efficiency_project() -> ProjectSpec {
 fn fan_efficiency_and_output_regions_round_trip_validate_and_refuse_misuse() {
     let spec = fan_efficiency_project();
     let sexpr = print_sexpr(&spec).expect("renders");
-    assert!(sexpr.contains("(fan-efficiency :total 0.3 :half-width 0.05 :source \"illustrative fan datasheet\" :source-id \"fan-efficiency-example-v1\")"), "{sexpr}");
+    assert!(sexpr.contains("(fan-efficiency :static 0.3 :half-width 0.05 :source \"illustrative fan datasheet\" :source-id \"fan-efficiency-example-v1\")"), "{sexpr}");
     assert!(sexpr.contains(":region \"die-footprint\")"), "{sexpr}");
     assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
     assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
@@ -2222,6 +2224,76 @@ fn v8_envelopes_migrate_to_v9_and_refuse_pre_v9_payloads() {
     assert!(receipt.verifies(v8.as_bytes(), current.as_bytes()));
     let false_v8 = down(&print_sexpr(&fan_efficiency_project()).expect("renders"));
     assert_eq!(parse_sexpr_migrating(&false_v8).expect_err("v8 never carried a fan efficiency").code, "fsim-migration-payload");
+}
+
+#[test]
+fn fan_power_bases_and_outlet_geometry_round_trip_without_inferred_defaults() {
+    use fs_project::spec::{FanEfficiencyBasis, dims};
+
+    let mut spec = fan_efficiency_project();
+    spec.cooling
+        .as_mut()
+        .unwrap()
+        .fan_efficiency
+        .as_mut()
+        .unwrap()
+        .basis = FanEfficiencyBasis::Total;
+    // Historical total efficiency remains total, never implicitly static.
+    let historical = print_sexpr(&spec).unwrap();
+    assert!(historical.contains("fan-efficiency :total 0.3 :half-width 0.05 :source"));
+    assert_eq!(parse_sexpr(&historical).unwrap().spec, spec);
+    spec.cooling
+        .as_mut()
+        .unwrap()
+        .fan_efficiency
+        .as_mut()
+        .unwrap()
+        .outlet_area_per_fan = Some(QtyAny::new(0.001, dims::AREA));
+    let complete = print_sexpr(&spec).unwrap();
+    assert!(complete.contains(":outlet-area-per-fan 0.001m^2"));
+    assert_eq!(parse_sexpr(&complete).unwrap().spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).unwrap()).unwrap().spec, spec);
+    assert!(spec.validate().is_empty());
+
+    let contradictory = complete.replace(":total 0.3", ":static 0.3 :total 0.3");
+    let parsed = parse_sexpr_lenient(&contradictory).unwrap();
+    assert!(
+        parsed
+            .recognition
+            .iter()
+            .any(|v| v.code == "project-fan-efficiency-basis")
+    );
+    spec.cooling
+        .as_mut()
+        .unwrap()
+        .fan_efficiency
+        .as_mut()
+        .unwrap()
+        .basis = FanEfficiencyBasis::Static;
+    assert!(
+        spec.validate()
+            .iter()
+            .any(|v| v.code == "project-fan-efficiency-basis")
+    );
+    spec.cooling
+        .as_mut()
+        .unwrap()
+        .fan_efficiency
+        .as_mut()
+        .unwrap()
+        .basis = FanEfficiencyBasis::Total;
+    spec.cooling
+        .as_mut()
+        .unwrap()
+        .fan_efficiency
+        .as_mut()
+        .unwrap()
+        .outlet_area_per_fan = Some(QtyAny::new(1.0, dims::LENGTH));
+    assert!(
+        spec.validate()
+            .iter()
+            .any(|v| v.code == "project-fan-outlet-area")
+    );
 }
 
 /// The reference project with its convection law replaced by a natural-

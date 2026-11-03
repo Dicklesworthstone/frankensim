@@ -10,8 +10,8 @@
 //! - G5: Bit-identical replay across independent transaction runs.
 
 use fs_airflow::qoi::{
-    FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion, ThermalQoiDeclarations,
-    ThermalRequirement,
+    FanPowerBasis, FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion,
+    ThermalQoiDeclarations, ThermalRequirement,
 };
 use fs_airflow::registered_qoi::{
     OutputQuery, QoiExecutionLimits, QoiSemanticId, extract_registered_qois,
@@ -237,7 +237,7 @@ fn sample_setup() -> (
         SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap(),
     ));
     let fan_power = Box::leak(Box::new(
-        FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap(),
+        FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap(),
     ));
     let req = Box::leak(Box::new(
         ThermalRequirement::try_new(

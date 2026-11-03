@@ -26,15 +26,15 @@ mod enclosure;
 use crate::spec::{
     AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
     ConductionTransient, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl,
-    Envelope, Fan, FanCurveDecl, FanCurvePoint, FanEfficiency, FanToleranceBasis, GeometryArtifact,
-    GeometryAssignment, InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance,
-    Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
-    RadiatingSurface, RadiationSpatialModel, RequirementDirection, RequirementSeverity, RequirementSource,
-    RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, SurfaceOffset,
-    ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
-    TransientEnthalpyKnot, TransientInitialTemperature, TransientPhaseConductivity, TransientPowerStep,
-    TransientRegionCapacity, TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent,
-    Versions,
+    Envelope, Fan, FanCurveDecl, FanCurvePoint, FanEfficiency, FanEfficiencyBasis,
+    FanToleranceBasis, GeometryArtifact, GeometryAssignment, InterfaceCardBinding, InterfaceState,
+    MaterialBinding, MaterialTolerance, Metadata, OutputRequest, PerfectContactBinding,
+    PowerDissipation, ProjectSpec, RadiatingSurface, RadiationSpatialModel, RequirementDirection,
+    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
+    SolverSettings, SurfaceOffset, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit,
+    TransientEnthalpy, TransientEnthalpyKnot, TransientInitialTemperature,
+    TransientPhaseConductivity, TransientPowerStep, TransientRegionCapacity,
+    TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent, Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -900,17 +900,26 @@ fn lower_cooling(cooling: &Cooling, sections: &mut Vec<Node>) -> Result<(), Proj
         cooling_sections.push(lower_conduction(conduction)?);
     }
     if let Some(efficiency) = &cooling.fan_efficiency {
-        cooling_sections.push(list(vec![
+        let mut declaration = vec![
             sym("fan-efficiency"),
-            kw("total"),
-            float(efficiency.total),
+            kw(match efficiency.basis {
+                FanEfficiencyBasis::Static => "static",
+                FanEfficiencyBasis::Total => "total",
+            }),
+            float(efficiency.nominal),
             kw("half-width"),
             float(efficiency.half_width),
+        ];
+        if let Some(area) = efficiency.outlet_area_per_fan {
+            declaration.extend([kw("outlet-area-per-fan"), qty(area)?]);
+        }
+        declaration.extend([
             kw("source"),
             text(&efficiency.source),
             kw("source-id"),
             text(&efficiency.source_id),
-        ]));
+        ]);
+        cooling_sections.push(list(declaration));
     }
     sections.push(list(cooling_sections));
     Ok(())
@@ -2560,10 +2569,25 @@ fn read_cooling(
                 conduction = read_conduction(inner, out);
             }
             Some(("fan-efficiency", inner)) => {
-                let pairs = read_pairs(inner, "fan-efficiency", &["total", "half-width", "source", "source-id"], out);
+                let pairs = read_pairs(inner, "fan-efficiency", &["static", "total", "half-width", "outlet-area-per-fan", "source", "source-id"], out);
+                let (basis, nominal) = match (field(&pairs, "static"), field(&pairs, "total")) {
+                    (Some(value), None) => (FanEfficiencyBasis::Static, expect_float(Some(value), "fan-efficiency.static", out)),
+                    (None, Some(value)) => (FanEfficiencyBasis::Total, expect_float(Some(value), "fan-efficiency.total", out)),
+                    _ => {
+                        out.push(Violation {
+                            code: "project-fan-efficiency-basis",
+                            what: "fan efficiency must declare exactly one pressure basis".to_string(),
+                            fix: "use :static or :total; total power also needs :outlet-area-per-fan".to_string(),
+                        });
+                        (FanEfficiencyBasis::Static, 0.0)
+                    }
+                };
                 fan_efficiency = Some(FanEfficiency {
-                    total: expect_float(field(&pairs, "total"), "fan-efficiency.total", out),
+                    nominal,
+                    basis,
                     half_width: expect_float(field(&pairs, "half-width"), "fan-efficiency.half-width", out),
+                    outlet_area_per_fan: field(&pairs, "outlet-area-per-fan")
+                        .map(|node| expect_qty(Some(node), "fan-efficiency.outlet-area-per-fan", out)),
                     source: expect_str(field(&pairs, "source"), "fan-efficiency.source", out),
                     source_id: expect_str(field(&pairs, "source-id"), "fan-efficiency.source-id", out),
                 });

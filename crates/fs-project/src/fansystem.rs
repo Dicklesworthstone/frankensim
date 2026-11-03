@@ -606,3 +606,76 @@ pub fn lower_fan_system(decl: &FanSystemDecl) -> Result<LoweredFanSystem, Projec
         declaration_identity: decl.identity(),
     })
 }
+
+/// Lower a sourced mechanical fan efficiency for the actual operating density.
+///
+/// Total efficiency needs the original outlet geometry and one original bank;
+/// a composed equivalent curve does not retain the individual outlet flows.
+/// Static efficiency can describe the declared complete fan system. Neither
+/// branch supplies motor losses or rematches a static-pressure network.
+/// Historical `:total` declarations without area remain readable but refuse
+/// this calculation rather than silently being treated as static efficiency.
+///
+/// # Errors
+/// Refuses invalid efficiency, missing or dimensionally invalid total-basis
+/// outlet geometry, or an unsupported composed topology.
+pub fn lower_fan_power(
+    efficiency: &crate::spec::FanEfficiency,
+    system: &FanSystemDecl,
+    operating_density: fs_qty::Density,
+) -> Result<fs_airflow::qoi::FanPowerSpec, ProjectError> {
+    use crate::spec::FanEfficiencyBasis;
+    use fs_airflow::qoi::{FanPowerBasis, FanPowerSpec};
+
+    system.validate()?;
+    let basis = match efficiency.basis {
+        FanEfficiencyBasis::Static => {
+            if efficiency.outlet_area_per_fan.is_some() {
+                return Err(fan_error(
+                    "fan-power-static-outlet",
+                    "static efficiency already contains the static/total pressure ratio"
+                        .to_string(),
+                    "omit :outlet-area-per-fan for :static efficiency",
+                ));
+            }
+            FanPowerBasis::Static
+        }
+        FanEfficiencyBasis::Total => {
+            let area = efficiency.outlet_area_per_fan.ok_or_else(|| fan_error(
+                "fan-power-total-outlet",
+                "total fan efficiency needs outlet kinetic power, which static pressure alone does not supply".to_string(),
+                "cite :outlet-area-per-fan in m^2, or use :static only when the original source states static efficiency",
+            ))?;
+            if area.dims != crate::spec::dims::AREA {
+                return Err(fan_error(
+                    "fan-power-outlet-units",
+                    "fan outlet geometry is not an area".to_string(),
+                    "declare the original per-fan outlet area in m^2",
+                ));
+            }
+            if system.banks.len() != 1 || system.topology != FanSystemTopology::Single {
+                return Err(fan_error(
+                    "fan-power-total-topology",
+                    "a composed fan-system curve does not retain every bank's outlet kinetic power"
+                        .to_string(),
+                    "use a single original bank for total efficiency, or a sourced static efficiency for the complete system",
+                ));
+            }
+            FanPowerBasis::Total {
+                density: operating_density,
+                outlet_area_per_fan: fs_qty::Area::new(area.value),
+                fan_count: system.banks[0].count,
+                arrangement: system.banks[0].arrangement,
+            }
+        }
+    };
+    FanPowerSpec::try_new(
+        efficiency.nominal,
+        efficiency.half_width,
+        basis,
+        SourceProvenance::new(efficiency.source.clone(), efficiency.source_id.clone()),
+    ).map_err(|error| fan_error(
+        "fan-power-lowering", format!("fan mechanical-power inputs refused: {error}"),
+        "declare a sourced efficiency interval inside (0, 1] and positive finite total-basis outlet inputs",
+    ))
+}

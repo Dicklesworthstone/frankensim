@@ -76,6 +76,84 @@ fn single_bank_declaration_validates_and_lowers_lossless() {
 }
 
 #[test]
+fn fan_power_lowering_keeps_pressure_basis_density_and_original_bank_geometry() {
+    use fs_airflow::qoi::FanPowerBasis;
+    use fs_project::fansystem::lower_fan_power;
+    use fs_project::spec::{FanEfficiency, FanEfficiencyBasis};
+    use fs_qty::{Area, Density};
+
+    let mut system = single_system();
+    let density = Density::new(1.1);
+    let mut efficiency = FanEfficiency {
+        nominal: 0.6,
+        half_width: 0.05,
+        basis: FanEfficiencyBasis::Static,
+        outlet_area_per_fan: None,
+        source: "synthetic mechanical efficiency and geometry".into(),
+        source_id: "fan-power-lowering-test".into(),
+    };
+    assert_eq!(
+        lower_fan_power(&efficiency, &system, density)
+            .unwrap()
+            .basis(),
+        FanPowerBasis::Static
+    );
+    efficiency.basis = FanEfficiencyBasis::Total;
+    assert_eq!(
+        lower_fan_power(&efficiency, &system, density)
+            .unwrap_err()
+            .code,
+        "fan-power-total-outlet"
+    );
+    efficiency.outlet_area_per_fan = Some(QtyAny::new(0.01, dims::AREA));
+    for arrangement in [
+        fs_airflow::FanArrangement::Series,
+        fs_airflow::FanArrangement::Parallel,
+    ] {
+        system.banks[0].arrangement = arrangement;
+        let power = lower_fan_power(&efficiency, &system, density).unwrap();
+        assert_eq!(
+            power.basis(),
+            FanPowerBasis::Total {
+                density,
+                outlet_area_per_fan: Area::new(0.01),
+                fan_count: 2,
+                arrangement,
+            }
+        );
+        assert_eq!(power.efficiency(), 0.6);
+        assert_eq!(power.efficiency_half_width(), 0.05);
+    }
+    efficiency.outlet_area_per_fan = Some(QtyAny::new(0.01, dims::LENGTH));
+    assert_eq!(
+        lower_fan_power(&efficiency, &system, density)
+            .unwrap_err()
+            .code,
+        "fan-power-outlet-units"
+    );
+    efficiency.outlet_area_per_fan = Some(QtyAny::new(0.01, dims::AREA));
+    let mut second = system.banks[0].clone();
+    second.bank_id = "bank-b".into();
+    system.banks.push(second);
+    system.topology = FanSystemTopology::Parallel(vec!["bank-a".into(), "bank-b".into()]);
+    assert_eq!(
+        lower_fan_power(&efficiency, &system, density)
+            .unwrap_err()
+            .code,
+        "fan-power-total-topology"
+    );
+    efficiency.basis = FanEfficiencyBasis::Static;
+    assert_eq!(
+        lower_fan_power(&efficiency, &system, density)
+            .unwrap_err()
+            .code,
+        "fan-power-static-outlet"
+    );
+    efficiency.outlet_area_per_fan = None;
+    assert!(lower_fan_power(&efficiency, &system, density).is_ok());
+}
+
+#[test]
 fn validation_refuses_every_inferred_default_class() {
     let mut decl = single_system();
     decl.banks[0].count = 0;

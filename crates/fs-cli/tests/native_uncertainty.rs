@@ -423,8 +423,10 @@ fn g1_g4_g5_multi_output_children_keep_the_decision_calibration_and_recovery() {
         });
         fixture.project.cooling.as_mut().unwrap().fan_efficiency =
             Some(fs_project::spec::FanEfficiency {
-                total: 0.5,
+                nominal: 0.5,
+                basis: fs_project::spec::FanEfficiencyBasis::Static,
                 half_width: 0.05,
+                outlet_area_per_fan: None,
                 source: "native uncertainty integration fixture".into(),
                 source_id: "native-uncertainty-fan-efficiency-v1".into(),
             });

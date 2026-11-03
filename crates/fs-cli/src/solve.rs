@@ -5110,22 +5110,34 @@ fn qoi_receipt(
                 qoi_error(
                     "cli-solve-qoi-fan-power-no-efficiency",
                     "a `fan-power` output is declared but the cooling section cites no fan efficiency",
-                    "declare `(fan-efficiency :total ... :half-width ... :source ... :source-id ...)` under cooling",
+                    "declare a sourced `(fan-efficiency :static ...)` or `(fan-efficiency :total ... :outlet-area-per-fan ...)` under cooling",
                 )
             })?;
-        let fan_spec = fs_airflow::qoi::FanPowerSpec::try_new(
-            efficiency.total,
-            efficiency.half_width,
-            fs_airflow::SourceProvenance::new(efficiency.source.clone(), efficiency.source_id.clone()),
+        let system = spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.fan_system.as_ref())
+            .ok_or_else(|| {
+                qoi_error(
+                    "cli-solve-qoi-fan-power-no-system",
+                    "fan-power needs the original fan-system declaration",
+                    "retain the fan-system used by the flow-network solve",
+                )
+            })?;
+        let power_spec = fs_project::fansystem::lower_fan_power(
+            efficiency,
+            system,
+            fs_qty::Density::new(handoff.air_density_kg_m3),
         )
-        .and_then(|fan_spec| fs_airflow::qoi::extract_fan_power_qoi(&handoff.operating, &fan_spec))
-        .map_err(|error| {
-            qoi_error(
-                "cli-solve-qoi-fan-power",
-                format!("fan-power extraction refused: {error}"),
-                "declare an efficiency interval inside (0, 1] and a valid operating point",
-            )
-        })?;
+        .map_err(|error| qoi_error(error.code, error.detail, &error.hint))?;
+        let fan_spec = fs_airflow::qoi::extract_fan_power_qoi(&handoff.operating, &power_spec)
+            .map_err(|error| {
+                qoi_error(
+                    "cli-solve-qoi-fan-power",
+                    format!("fan-power extraction refused: {error}"),
+                    "declare an efficiency interval inside (0, 1] and a valid operating point",
+                )
+            })?;
         push_row(
             "fan-power",
             None,
@@ -5134,7 +5146,7 @@ fn qoi_receipt(
             &fan_spec.evidence.numerical,
             &fan_spec.evidence.model,
             fan_spec.uncertainty.content_id(),
-            "dp * Q / eta over the operating envelope and the cited efficiency interval",
+            "mechanical shaft input over the operating envelope and cited static/total efficiency; total basis includes original outlet kinetic power, electrical drive losses are not included",
         )?;
     }
     // Surface family: each requested output names a declared surface whose

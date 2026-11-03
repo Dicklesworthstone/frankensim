@@ -12,8 +12,9 @@
 //! - Bit-identical deterministic replay.
 
 use fs_airflow::qoi::{
-    DiscretizationReceipt, FanPowerSpec, JunctionRegion, QoiTermReceipt, SafetyFactorAuthority,
-    SurfaceRegion, ThermalQoiDeclarations, ThermalQoiKind, ThermalRequirement,
+    DiscretizationReceipt, FanPowerBasis, FanPowerSpec, JunctionRegion, QoiTermReceipt,
+    SafetyFactorAuthority, SurfaceRegion, ThermalQoiDeclarations, ThermalQoiKind,
+    ThermalRequirement,
 };
 use fs_airflow::registered_qoi::{
     OutputKind, OutputQuery, QoiExecutionLimits, QoiSemanticId, RegisteredQoiError,
@@ -177,7 +178,7 @@ fn rq_001_extracts_all_canonical_qoi_families() {
 
         let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap();
-        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(380.0, 1.1);
 
         let decls = sample_declarations(&junction, &surface, &fan, &req);
@@ -276,7 +277,7 @@ fn rq_002_query_aliases_map_deterministically() {
 
         let junction = JunctionRegion::try_new("package", vec![0, 1]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0, 1]).unwrap();
-        let fan = FanPowerSpec::try_new(0.5, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.5, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(400.0, 1.1);
         let decls = sample_declarations(&junction, &surface, &fan, &req);
 
@@ -310,6 +311,51 @@ fn rq_002_query_aliases_map_deterministically() {
 }
 
 #[test]
+fn registered_fan_power_retains_total_pressure_kinetic_contribution() {
+    with_cx(|cx| {
+        let (mesh, solution) = sample_mesh_and_solution();
+        let op = operating_point();
+        let q = op.flow.value.value();
+        let junction = JunctionRegion::try_new("package", vec![0, 1]).unwrap();
+        let surface = SurfaceRegion::try_new("case", vec![0, 1]).unwrap();
+        let fan = FanPowerSpec::try_new(
+            0.5,
+            0.0,
+            FanPowerBasis::Total {
+                density: fs_qty::Density::new(2.0),
+                outlet_area_per_fan: fs_qty::Area::new(q / 10.0),
+                fan_count: 1,
+                arrangement: fs_airflow::FanArrangement::Series,
+            },
+            source("total-fan-efficiency"),
+        )
+        .unwrap();
+        let req = sample_requirement(400.0, 1.1);
+        let decls = sample_declarations(&junction, &surface, &fan, &req);
+        let result = extract_registered_qois(
+            &[OutputQuery::scalar("fan-power")],
+            &mesh,
+            &solution,
+            &op,
+            &decls,
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        let expected = 2.0 * q * (op.pressure.value.value() + 100.0);
+        assert!((result.rows[0].value - expected).abs() < 1e-13 * expected);
+        assert!(
+            result.rows[0]
+                .evidence
+                .assumptions
+                .iter()
+                .any(|s| s.contains("shaft input excludes"))
+        );
+    });
+}
+
+#[test]
 fn rq_003_non_scalar_kinds_fail_closed_with_actionable_diagnostics() {
     with_cx(|cx| {
         let (mesh, solution) = sample_mesh_and_solution();
@@ -317,7 +363,7 @@ fn rq_003_non_scalar_kinds_fail_closed_with_actionable_diagnostics() {
 
         let junction = JunctionRegion::try_new("package", vec![0]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0]).unwrap();
-        let fan = FanPowerSpec::try_new(0.5, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.5, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(400.0, 1.1);
         let decls = sample_declarations(&junction, &surface, &fan, &req);
 
@@ -373,7 +419,7 @@ fn rq_004_duplicate_queries_and_unsupported_names_refuse() {
 
         let junction = JunctionRegion::try_new("package", vec![0]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0]).unwrap();
-        let fan = FanPowerSpec::try_new(0.5, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.5, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(400.0, 1.1);
         let decls = sample_declarations(&junction, &surface, &fan, &req);
 
@@ -422,7 +468,7 @@ fn rq_005_work_and_memory_limit_guards_enforce_preflight() {
 
         let junction = JunctionRegion::try_new("package", vec![0]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0]).unwrap();
-        let fan = FanPowerSpec::try_new(0.5, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.5, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(400.0, 1.1);
         let decls = sample_declarations(&junction, &surface, &fan, &req);
 
@@ -455,7 +501,7 @@ fn rq_006_cooperative_cancellation_refuses_cleanly() {
 
         let junction = JunctionRegion::try_new("package", vec![0]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0]).unwrap();
-        let fan = FanPowerSpec::try_new(0.5, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.5, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(400.0, 1.1);
         let decls = sample_declarations(&junction, &surface, &fan, &req);
 
@@ -481,7 +527,8 @@ fn rq_007_deterministic_replay_produces_identical_hashes() {
 
     let junction = JunctionRegion::try_new("package", vec![0, 1, 6, 7]).unwrap();
     let surface = SurfaceRegion::try_new("case", vec![0, 1]).unwrap();
-    let fan = FanPowerSpec::try_new(0.5, 0.05, source("fan-efficiency")).unwrap();
+    let fan =
+        FanPowerSpec::try_new(0.5, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
     let req = sample_requirement(400.0, 1.1);
     let decls = sample_declarations(&junction, &surface, &fan, &req);
 
@@ -533,7 +580,7 @@ fn rq_008_region_constraints_bind_the_exact_qoi_scope() {
 
         let junction = JunctionRegion::try_new("package", vec![0, 1]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0, 1]).unwrap();
-        let fan = FanPowerSpec::try_new(0.5, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.5, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(400.0, 1.1);
         let decls = sample_declarations(&junction, &surface, &fan, &req);
 
@@ -735,7 +782,7 @@ fn rq_010_general_junction_candidate_identity_binds_discretization() {
         let operating = operating_point();
         let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap();
-        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let requirement = sample_requirement(380.0, 1.1);
         let discretization_a =
             DiscretizationReceipt::try_new(1.0, source("general-ladder-v1")).unwrap();

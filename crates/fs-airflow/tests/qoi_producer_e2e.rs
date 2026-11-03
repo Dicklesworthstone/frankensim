@@ -29,7 +29,7 @@
 use std::fmt::Write as _;
 
 use fs_airflow::qoi::{
-    FanPowerSpec, JunctionRegion, QoiError, SafetyFactorAuthority, SurfaceRegion,
+    FanPowerBasis, FanPowerSpec, JunctionRegion, QoiError, SafetyFactorAuthority, SurfaceRegion,
     ThermalOutputAuditError, ThermalQoi, ThermalQoiCardUse, ThermalQoiDeclarations,
     ThermalRequirement, extract_thermal_qois,
 };
@@ -393,7 +393,7 @@ fn declarations(mesh: &ConductionMesh) -> (JunctionRegion, SurfaceRegion, FanPow
     let surface =
         SurfaceRegion::try_new("case", (0..mesh.boundary().len()).rev().collect::<Vec<_>>())
             .expect("surface region");
-    let power = FanPowerSpec::try_new(0.72, 0.04, source("producer-e2e-efficiency-v1"))
+    let power = FanPowerSpec::try_new(0.72, 0.04, FanPowerBasis::Static, source("producer-e2e-efficiency-v1"))
         .expect("efficiency");
     (junction, surface, power)
 }

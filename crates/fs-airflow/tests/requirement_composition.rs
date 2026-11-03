@@ -10,8 +10,8 @@
 //! - Deterministic canonical ordering and bit-identical replay.
 
 use fs_airflow::qoi::{
-    FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion, ThermalQoiDeclarations,
-    ThermalRequirement,
+    FanPowerBasis, FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion,
+    ThermalQoiDeclarations, ThermalRequirement,
 };
 use fs_airflow::registered_qoi::{
     OutputQuery, QoiExecutionLimits, QoiSemanticId, extract_registered_qois,
@@ -183,7 +183,7 @@ fn rc_001_satisfied_and_violated_composition() {
 
         let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap();
-        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(380.0, 1.0);
 
         let decls = ThermalQoiDeclarations {
@@ -264,7 +264,7 @@ fn rc_002_effective_limit_is_not_safety_factored_twice() {
         let op = operating_point();
         let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap();
-        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(390.0, 2.0);
         let declarations = ThermalQoiDeclarations {
             junction_region: &junction,
@@ -313,7 +313,7 @@ fn rc_003_unknown_budget_cannot_mint_a_binary_verdict_or_stronger_color() {
         let op = operating_point();
         let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap();
-        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(400.0, 1.0);
         let declarations = ThermalQoiDeclarations {
             junction_region: &junction,
@@ -360,7 +360,7 @@ fn rc_004_outside_domain_demotes_weakest_color_honestly() {
 
         let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap();
-        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(380.0, 1.0);
 
         let decls = ThermalQoiDeclarations {
@@ -419,7 +419,7 @@ fn rc_005_duplicate_requirements_and_missing_qoi_refuse() {
 
         let junction = JunctionRegion::try_new("package", vec![0]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0]).unwrap();
-        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(380.0, 1.0);
         let decls = ThermalQoiDeclarations {
             junction_region: &junction,
@@ -500,7 +500,7 @@ fn rc_006_cancellation_checkpoints_drain_safely() {
 
         let junction = JunctionRegion::try_new("package", vec![0]).unwrap();
         let surface = SurfaceRegion::try_new("case", vec![0]).unwrap();
-        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
         let req = sample_requirement(380.0, 1.0);
         let decls = ThermalQoiDeclarations {
             junction_region: &junction,
@@ -547,7 +547,8 @@ fn rc_007_deterministic_replay_produces_identical_receipt_hashes() {
 
     let junction = JunctionRegion::try_new("package", vec![0, 1, 6, 7]).unwrap();
     let surface = SurfaceRegion::try_new("case", vec![0, 1]).unwrap();
-    let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+    let fan =
+        FanPowerSpec::try_new(0.6, 0.05, FanPowerBasis::Static, source("fan-efficiency")).unwrap();
     let req = sample_requirement(380.0, 1.0);
     let decls = ThermalQoiDeclarations {
         junction_region: &junction,

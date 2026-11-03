@@ -1,5 +1,22 @@
 # CONTRACT: fs-airflow
 
+## Static and total fan shaft power
+
+`qoi::FanPowerSpec` requires an explicit `FanPowerBasis`. Static efficiency
+uses native AMCA static pressure times flow. Total efficiency adds the outlet
+kinetic power of every original fan before dividing by efficiency; series
+members carry the complete flow and parallel members carry flow/count.
+The caller supplies actual density, physical outlet area per fan, count and
+arrangement. Monotone positive-flow envelope propagation includes the cubic
+kinetic term, and basis/geometry are bound into the existing QoI identity.
+The same result flows through registered extraction and candidate QoI rows.
+
+The result is mechanical shaft input. Motor/drive electrical loss, heat
+deposition, geometry/density uncertainty, and total-pressure operating-point
+rematching are not inferred. Supplied efficiency must apply to the declared
+operating range; this is not a no-load motor or shutoff-power model. The native
+static-pressure fan/network approximation and estimated evidence remain.
+
 ## Material-dependent enclosure heat in stored cooling
 
 `StoredContactRadiation::MaterialClosedEnclosure` and

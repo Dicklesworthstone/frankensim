@@ -85,10 +85,15 @@ body is what the physics needs.
   353.15 K with a 5 K margin on `metal`, and the matching scalar output.
 - **Pressure drop and fan power**: two more scalar outputs. `pressure-drop`
   is the flow network's certified operating pressure. `fan-power` is
-  dp * Q / eta, using the cited `(fan-efficiency :total 0.25 :half-width 0.05
-  ...)`, an illustrative value and not this fan's datasheet. Both are
-  reported and packaged beside the decision QoI with their own certified
-  intervals; no requirement is composed on them. A `fan-power` request with
+  mechanical shaft input `p_static * Q / eta_static`, using the cited
+  `(fan-efficiency :static 0.25 :half-width 0.05 ...)`, an illustrative
+  assumption and not this fan's datasheet. The example previously mislabeled
+  this value as total efficiency. A sourced total efficiency instead needs
+  `:total` and the original `:outlet-area-per-fan` so outlet kinetic power
+  enters the calculation. No motor efficiency is inferred, so this output
+  is not electrical input. Both outputs are reported and packaged beside
+  the decision QoI with estimated intervals; no requirement is composed on
+  them. A `fan-power` request with
   no cited efficiency refuses (`cli-solve-qoi-fan-power-no-efficiency`); it
   never assumes 100 %.
 

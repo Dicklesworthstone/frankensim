@@ -195,8 +195,17 @@ bindings; it runs no solves and admits no scenarios itself.
   thermal boundary row may target it. Migration from v7 is an envelope
   rewrite; a pre-v8 payload that declares a surface is refused
   (`fsim-migration-payload`).
-- The cooling section may cite a fan total efficiency (schema v9,
-  `(fan-efficiency :total :half-width :source :source-id)`). The whole
+- The cooling section may cite a mechanical fan efficiency (schema v9,
+  `(fan-efficiency :static :half-width :source :source-id)` or `:total`
+  with `:outlet-area-per-fan`). Static and total are mutually exclusive.
+  Total efficiency requires the original outlet area in m^2 and actual
+  operating density for shaft-power extraction. Historical `:total` without
+  area stays readable but extraction refuses; it is never silently treated
+  as static efficiency. `fansystem::lower_fan_power` retains one original
+  bank's count/arrangement. Composed multi-bank total efficiency refuses
+  because equivalent static curves do not retain individual outlet flows.
+  Static efficiency may describe the complete declared system. Neither
+  basis claims electrical input or infers motor/drive losses. The whole
   interval must lie inside (0, 1] (`project-fan-efficiency-range`) and the
   citation must be non-empty (`project-fan-efficiency-source`). An
   `OutputRequest` may carry `:region`, which must name a declared surface

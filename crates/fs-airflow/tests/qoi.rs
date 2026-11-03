@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use fs_airflow::qoi::{
-    DiscretizationReceipt, FanPowerSpec, JunctionRegion, QoiError, SafetyFactorAuthority,
-    SurfaceRegion, ThermalOutputAuditError, ThermalQoiCardUse, ThermalQoiDeclarations,
-    ThermalQoiKind, ThermalRequirement, extract_thermal_qois,
+    DiscretizationReceipt, FanPowerBasis, FanPowerSpec, JunctionRegion, QoiError,
+    SafetyFactorAuthority, SurfaceRegion, ThermalOutputAuditError, ThermalQoiCardUse,
+    ThermalQoiDeclarations, ThermalQoiKind, ThermalRequirement, extract_thermal_qois,
 };
 use fs_airflow::{
     AirflowError, EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement,
@@ -142,7 +142,8 @@ fn declarations(mesh: &ConductionMesh) -> (JunctionRegion, SurfaceRegion, FanPow
     let surface =
         SurfaceRegion::try_new("case", (0..mesh.boundary().len()).rev().collect::<Vec<_>>())
             .expect("surface region");
-    let power = FanPowerSpec::try_new(0.72, 0.04, source("efficiency-v1")).expect("fan efficiency");
+    let power = FanPowerSpec::try_new(0.72, 0.04, FanPowerBasis::Static, source("efficiency-v1"))
+        .expect("fan efficiency");
     (junction, surface, power)
 }
 
@@ -809,7 +810,8 @@ fn region_order_is_canonical_and_maximum_tie_break_is_stable() {
         source("limit-v1"),
     )
     .expect("requirement");
-    let power = FanPowerSpec::try_new(0.72, 0.04, source("efficiency-v1")).expect("efficiency");
+    let power = FanPowerSpec::try_new(0.72, 0.04, FanPowerBasis::Static, source("efficiency-v1"))
+        .expect("efficiency");
     let ascending =
         SurfaceRegion::try_new("case", (0..mesh.boundary().len()).collect()).expect("ascending");
     let descending = SurfaceRegion::try_new("case", (0..mesh.boundary().len()).rev().collect())
@@ -957,7 +959,7 @@ fn source_changes_rebind_fan_power_and_margin_identities() {
     let (mesh, solution) = mesh_and_solution();
     let operating = operating_point();
     let (junction, surface, power_a) = declarations(&mesh);
-    let power_b = FanPowerSpec::try_new(0.72, 0.04, source("efficiency-v2"))
+    let power_b = FanPowerSpec::try_new(0.72, 0.04, FanPowerBasis::Static, source("efficiency-v2"))
         .expect("alternate efficiency source");
     let requirement_a = ThermalRequirement::try_new(
         Temperature::new(380.0),
@@ -1071,6 +1073,157 @@ fn geometry_changes_rebind_temperature_qoi_identities() {
         scaled.uniformity.mean_temperature.uncertainty.content_id(),
         "the semantic identity must still bind the physical mesh"
     );
+}
+
+#[test]
+fn fan_total_efficiency_includes_each_outlet_kinetic_energy_flux() {
+    use fs_airflow::qoi::extract_fan_power_qoi;
+    use fs_qty::{Area, Density};
+
+    let point = operating_point();
+    let q = point.flow.value.value();
+    let p = point.pressure.value.value();
+    let area = q / 10.0; // 10 m/s in one original fan outlet.
+    let eta = 0.6;
+    let static_spec =
+        FanPowerSpec::try_new(eta, 0.0, FanPowerBasis::Static, source("power-basis")).unwrap();
+    let static_power = extract_fan_power_qoi(&point, &static_spec).unwrap();
+    for (count, arrangement, per_fan_flow) in [
+        (1, FanArrangement::Series, q),
+        (3, FanArrangement::Series, q),
+        (3, FanArrangement::Parallel, q / 3.0),
+    ] {
+        let spec = FanPowerSpec::try_new(
+            eta,
+            0.0,
+            FanPowerBasis::Total {
+                density: Density::new(2.0),
+                outlet_area_per_fan: Area::new(area),
+                fan_count: count,
+                arrangement,
+            },
+            source("power-basis"),
+        )
+        .unwrap();
+        let power = extract_fan_power_qoi(&point, &spec).unwrap();
+        // Independently sum the outlets' mass rates times specific kinetic
+        // energy. Parallel members carry Q/n; every series member carries Q.
+        let speed = per_fan_flow / area;
+        let kinetic_flux = count as f64 * (2.0 * per_fan_flow) * (0.5 * speed * speed);
+        let expected = (p * q + kinetic_flux) / eta;
+        assert!((power.evidence.value.value() - expected).abs() < 2e-14 * expected);
+        assert!(power.evidence.value.value() > static_power.evidence.value.value());
+        assert_ne!(
+            power.uncertainty.content_id(),
+            static_power.uncertainty.content_id()
+        );
+        assert!(
+            power
+                .evidence
+                .model
+                .assumptions
+                .iter()
+                .any(|s| s.contains("excludes motor"))
+        );
+
+        // ASHRAE eta_static = eta_total * p_static/p_total describes the
+        // same shaft at this operating point, with no second kinetic debit.
+        let equivalent = FanPowerSpec::try_new(
+            eta * (p * q) / (p * q + kinetic_flux),
+            0.0,
+            FanPowerBasis::Static,
+            source("power-basis"),
+        )
+        .unwrap();
+        let equivalent = extract_fan_power_qoi(&point, &equivalent).unwrap();
+        assert!((equivalent.evidence.value.value() - expected).abs() < 2e-14 * expected);
+    }
+}
+
+#[test]
+fn total_fan_power_propagates_cubic_flow_and_efficiency_envelopes() {
+    use fs_airflow::qoi::extract_fan_power_qoi;
+    use fs_qty::{Area, Density};
+
+    let point = operating_point();
+    let spec = FanPowerSpec::try_new(
+        0.6,
+        0.05,
+        FanPowerBasis::Total {
+            density: Density::new(1.2),
+            outlet_area_per_fan: Area::new(0.01),
+            fan_count: 1,
+            arrangement: FanArrangement::Series,
+        },
+        source("total-power-envelope"),
+    )
+    .unwrap();
+    let power = extract_fan_power_qoi(&point, &spec).unwrap();
+    for q in [
+        point.flow.numerical.lo,
+        point.flow.value.value(),
+        point.flow.numerical.hi,
+    ] {
+        for p in [
+            point.pressure.numerical.lo,
+            point.pressure.value.value(),
+            point.pressure.numerical.hi,
+        ] {
+            for eta in [0.55, 0.65] {
+                let mass_rate = 1.2 * q;
+                let velocity = q / 0.01;
+                let expected = (p * q + mass_rate * 0.5 * velocity * velocity) / eta;
+                assert!(expected >= power.evidence.numerical.lo * (1.0 - 1e-14));
+                assert!(expected <= power.evidence.numerical.hi * (1.0 + 1e-14));
+            }
+        }
+    }
+    assert_eq!(power.evidence.numerical.kind, NumericalKind::Estimate);
+    assert!(matches!(
+        power.uncertainty.total(),
+        BudgetTotal::Unknown { .. }
+    ));
+}
+
+#[test]
+fn total_fan_power_refuses_missing_physical_geometry_and_nonfinite_power() {
+    use fs_airflow::qoi::extract_fan_power_qoi;
+    use fs_qty::{Area, Density};
+
+    for (density, area, count) in [
+        (0.0, 0.1, 1),
+        (1.2, 0.0, 1),
+        (f64::NAN, 0.1, 1),
+        (1.2, 0.1, 0),
+    ] {
+        assert!(
+            FanPowerSpec::try_new(
+                0.6,
+                0.0,
+                FanPowerBasis::Total {
+                    density: Density::new(density),
+                    outlet_area_per_fan: Area::new(area),
+                    fan_count: count,
+                    arrangement: FanArrangement::Series,
+                },
+                source("bad-outlet")
+            )
+            .is_err()
+        );
+    }
+    let overflowing = FanPowerSpec::try_new(
+        0.6,
+        0.0,
+        FanPowerBasis::Total {
+            density: Density::new(1.2),
+            outlet_area_per_fan: Area::new(f64::MIN_POSITIVE),
+            fan_count: 1,
+            arrangement: FanArrangement::Series,
+        },
+        source("bad-outlet"),
+    )
+    .unwrap();
+    assert!(extract_fan_power_qoi(&operating_point(), &overflowing).is_err());
 }
 
 /// Analytic oracle. For `T = a + b*z` the P1 face mean is exact, so the

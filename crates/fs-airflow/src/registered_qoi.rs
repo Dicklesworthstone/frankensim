@@ -40,7 +40,9 @@ pub enum QoiSemanticId {
     SurfaceTemperatureStdDev,
     /// Total enclosure pressure drop across the airflow path.
     PressureDrop,
-    /// Required electrical fan power from airflow operating point.
+    /// Mechanical fan shaft input from the airflow operating point and the
+    /// explicitly declared static/total efficiency. Electrical drive losses
+    /// require separate data and are not included.
     FanPower,
     /// Thermal margin against requirement (limit - max_temp).
     ThermalMargin,

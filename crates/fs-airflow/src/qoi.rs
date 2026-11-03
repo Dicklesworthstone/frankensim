@@ -20,14 +20,14 @@ use fs_evidence::{
     Evidence, ModelCard, ModelEvidence, NumericalCertificate, ProvenanceHash, SensitivitySummary,
     StatisticalCertificate, ValidityDomain, color_of,
 };
-use fs_qty::{Power, Pressure, Temperature};
+use fs_qty::{Area, Density, Power, Pressure, Temperature};
 use fs_regime::{
     OperatingPoint as RegimeOperatingPoint, OutputAuditBudgetError, OutputAuditError,
     OverrideAcknowledgement, ProductOutputAudit, QoiClaim, RegimeAuditCard,
     apply_output_audit_to_budget, audit_product_output_with_cards,
 };
 
-use crate::{OperatingPoint, SourceProvenance};
+use crate::{FanArrangement, OperatingPoint, SourceProvenance};
 
 const QOI_IDENTITY_DOMAIN: &str = "org.frankensim.fs-airflow.thermal-qoi.v1";
 const QOI_TERM_DOMAIN: &str = "org.frankensim.fs-airflow.thermal-qoi.term.v1";
@@ -95,23 +95,57 @@ impl SurfaceRegion {
     }
 }
 
-/// Total fan-efficiency input needed to turn air power into fan input power.
+/// Pressure convention of the cited mechanical fan efficiency.
+///
+/// Native fan curves carry AMCA static pressure. Total pressure is static
+/// pressure plus the outlet velocity pressure; shaft input therefore uses
+/// `Q * p_static / eta_static` or `Q * (p_static + p_velocity) / eta_total`.
+/// See ASHRAE Handbook 2016, HVAC Systems and Equipment, chapter 21,
+/// nomenclature and section 5:
+/// <https://handbook.ashrae.org/Handbooks/S16/SI/s16_ch21/s16_ch21_si.aspx>.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FanPowerBasis {
+    /// Static air power / shaft input for the declared complete fan system.
+    Static,
+    /// Total air power / shaft input for one original bank of identical fans.
+    /// Density is the actual operating density, and the area is the physical
+    /// outlet of EACH fan, not a downstream duct or a branch convection area.
+    /// These fixed inputs have no inferred uncertainty or source authority.
+    Total {
+        /// Actual operating gas density, kg/m^3.
+        density: Density,
+        /// Physical outlet area of each original fan, m^2.
+        outlet_area_per_fan: Area,
+        /// Number of identical fans in the original bank.
+        fan_count: usize,
+        /// Original series/parallel topology, before equivalent-curve composition.
+        arrangement: FanArrangement,
+    },
+}
+
+/// Cited fan efficiency and pressure basis for mechanical shaft input power.
+/// Electrical input needs separately supplied motor/drive losses; no motor
+/// efficiency, heat deposition or operating-point rematch is inferred here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FanPowerSpec {
-    /// Nominal total efficiency in `(0, 1]`.
-    total_efficiency: f64,
+    /// Nominal efficiency in `(0, 1]`, under `basis`.
+    efficiency: f64,
     /// Declared absolute efficiency half-width. The full interval must remain
     /// inside `(0, 1]`.
     efficiency_half_width: f64,
+    basis: FanPowerBasis,
     /// Authority for the efficiency value and its allowance.
     source: SourceProvenance,
 }
 
 impl FanPowerSpec {
-    /// Validate a fan-power conversion input.
+    /// Validate a fan-power conversion with an explicit static or total basis.
+    /// The efficiency source also owns the outlet-geometry and density
+    /// assumptions when total efficiency is selected.
     pub fn try_new(
-        total_efficiency: f64,
+        efficiency: f64,
         efficiency_half_width: f64,
+        basis: FanPowerBasis,
         source: SourceProvenance,
     ) -> Result<Self, QoiError> {
         if source.citation.trim().is_empty() || source.identifier.trim().is_empty() {
@@ -120,9 +154,9 @@ impl FanPowerSpec {
                 "citation and stable identifier must both be non-empty",
             ));
         }
-        let low = total_efficiency - efficiency_half_width;
-        let high = total_efficiency + efficiency_half_width;
-        if !(total_efficiency.is_finite()
+        let low = efficiency - efficiency_half_width;
+        let high = efficiency + efficiency_half_width;
+        if !(efficiency.is_finite()
             && efficiency_half_width.is_finite()
             && efficiency_half_width >= 0.0
             && low > 0.0
@@ -133,17 +167,40 @@ impl FanPowerSpec {
                 "nominal +/- half-width must be a finite interval inside (0, 1]",
             ));
         }
+        if let FanPowerBasis::Total {
+            density,
+            outlet_area_per_fan,
+            fan_count,
+            ..
+        } = basis
+            && (!(density.value().is_finite() && density.value() > 0.0)
+                || !(outlet_area_per_fan.value().is_finite() && outlet_area_per_fan.value() > 0.0)
+                || fan_count == 0
+                || fan_count as u128 > (1_u128 << 53))
+        {
+            return Err(QoiError::invalid(
+                "fan outlet power",
+                "total efficiency needs positive finite operating density and per-fan outlet area, and an exactly representable positive fan count",
+            ));
+        }
         Ok(Self {
-            total_efficiency,
+            efficiency,
             efficiency_half_width,
+            basis,
             source,
         })
     }
 
-    /// Nominal total efficiency.
+    /// Nominal mechanical efficiency under the declared pressure basis.
     #[must_use]
-    pub const fn total_efficiency(&self) -> f64 {
-        self.total_efficiency
+    pub const fn efficiency(&self) -> f64 {
+        self.efficiency
+    }
+
+    /// Static or total pressure convention and original outlet inputs.
+    #[must_use]
+    pub const fn basis(&self) -> FanPowerBasis {
+        self.basis
     }
 
     /// Declared absolute efficiency half-width.
@@ -156,6 +213,42 @@ impl FanPowerSpec {
     #[must_use]
     pub const fn source(&self) -> &SourceProvenance {
         &self.source
+    }
+
+    fn air_power(&self, static_pressure: f64, flow: f64) -> Result<f64, QoiError> {
+        let velocity_pressure = match self.basis {
+            FanPowerBasis::Static => 0.0,
+            FanPowerBasis::Total {
+                density,
+                outlet_area_per_fan,
+                fan_count,
+                arrangement,
+            } => {
+                let (series, parallel) = match arrangement {
+                    FanArrangement::Series => (fan_count as f64, 1.0),
+                    FanArrangement::Parallel => (1.0, fan_count as f64),
+                };
+                let velocity = (flow / parallel) / outlet_area_per_fan.value();
+                let pressure = (0.5 * density.value() * velocity) * velocity * series;
+                if !pressure.is_finite() || (flow > 0.0 && pressure <= 0.0) {
+                    return Err(QoiError::invalid(
+                        "fan outlet power",
+                        "outlet velocity pressure is not representable",
+                    ));
+                }
+                pressure
+            }
+        };
+        let power = (static_pressure + velocity_pressure) * flow;
+        if !power.is_finite()
+            || ((static_pressure > 0.0 || velocity_pressure > 0.0) && flow > 0.0 && power <= 0.0)
+        {
+            return Err(QoiError::invalid(
+                "fan air power",
+                "air power is not representable",
+            ));
+        }
+        Ok(power)
     }
 }
 
@@ -451,7 +544,7 @@ pub struct ThermalQoiDeclarations<'a> {
     pub junction_region: &'a JunctionRegion,
     /// Reporting surface the uniformity family is taken over.
     pub surface_region: &'a SurfaceRegion,
-    /// Cited fan total-efficiency interval.
+    /// Cited mechanical efficiency with explicit static/total pressure basis.
     pub fan_power: &'a FanPowerSpec,
     /// Cited effective temperature requirement. Absence refuses; there is no
     /// default limit.
@@ -558,7 +651,7 @@ pub struct ThermalQoiSet {
     pub junction_maximum: JunctionMaximum,
     /// Enclosure pressure drop at the solved operating point.
     pub pressure_drop: ThermalQoi<Pressure>,
-    /// Fan input power `Delta p * Q / eta_total`.
+    /// Mechanical fan shaft input under the declared static/total efficiency.
     pub fan_power: ThermalQoi<Power>,
     /// Surface mean/spread/std family.
     pub uniformity: SurfaceUniformity,
@@ -992,7 +1085,7 @@ pub fn extract_pressure_drop_qoi(
     pressure_drop_qoi(operating_point, operating_identity(operating_point))
 }
 
-/// Extract only the fan input-power QoI `dp * Q / eta` from a solved
+/// Extract only the mechanical fan shaft-power QoI from a solved
 /// operating point and a cited efficiency interval: the same value, evidence
 /// and budget [`extract_thermal_qois`] emits (the operating envelope as the
 /// boundary-conditions term, the efficiency interval as the parameters term).
@@ -1340,13 +1433,16 @@ fn fan_power_qoi(
 ) -> Result<ThermalQoi<Power>, QoiError> {
     let flow = &operating_point.flow;
     let pressure = &operating_point.pressure;
-    let eta = spec.total_efficiency;
+    let eta = spec.efficiency;
     let eta_low = eta - spec.efficiency_half_width;
     let eta_high = eta + spec.efficiency_half_width;
-    let nominal_air_power = pressure.value.value() * flow.value.value();
+    let nominal_air_power = spec.air_power(pressure.value.value(), flow.value.value())?;
     let nominal = nominal_air_power / eta;
-    let low = pressure.numerical.lo.max(0.0) * flow.numerical.lo.max(0.0) / eta_high;
-    let high = pressure.numerical.hi * flow.numerical.hi / eta_low;
+    let low_air_power =
+        spec.air_power(pressure.numerical.lo.max(0.0), flow.numerical.lo.max(0.0))?;
+    let high_air_power = spec.air_power(pressure.numerical.hi, flow.numerical.hi)?;
+    let low = low_air_power / eta_high;
+    let high = high_air_power / eta_low;
     if !(nominal.is_finite()
         && low.is_finite()
         && high.is_finite()
@@ -1360,8 +1456,8 @@ fn fan_power_qoi(
         ));
     }
 
-    let boundary_low = pressure.numerical.lo.max(0.0) * flow.numerical.lo.max(0.0) / eta;
-    let boundary_high = pressure.numerical.hi * flow.numerical.hi / eta;
+    let boundary_low = low_air_power / eta;
+    let boundary_high = high_air_power / eta;
     let boundary_half_width = interval_half_width(nominal, boundary_low, boundary_high)?;
     let efficiency_low_power = nominal_air_power / eta_high;
     let efficiency_high_power = nominal_air_power / eta_low;
@@ -1370,7 +1466,7 @@ fn fan_power_qoi(
     let identity = qoi_identity(
         "fan-power",
         &[operating_id, fan_id],
-        b"pressure-flow-efficiency",
+        b"static-or-total-pressure-flow-shaft-efficiency",
     );
 
     let mut model = pressure.model.clone();
@@ -1379,9 +1475,16 @@ fn fan_power_qoi(
         .push(format!("fan-efficiency:{}", spec.source.identifier));
     model.cards.sort_unstable();
     model.cards.dedup();
+    model.assumptions.push(match spec.basis {
+        FanPowerBasis::Static =>
+            "fan shaft power uses native AMCA static pressure times flow divided by declared static efficiency".to_string(),
+        FanPowerBasis::Total { density, outlet_area_per_fan, fan_count, arrangement } => format!(
+            "fan shaft power uses native AMCA static pressure plus each fan's outlet velocity pressure, divided by total efficiency; fixed density={} kg/m^3, per-fan outlet area={} m^2, count={}, arrangement={arrangement:?}; geometry and density uncertainty are not propagated",
+            density.value(), outlet_area_per_fan.value(), fan_count,
+        ),
+    });
     model.assumptions.push(
-        "fan input power uses Delta-p times volume-flow divided by declared total efficiency"
-            .to_string(),
+        "mechanical shaft input excludes motor/drive electrical losses and heat deposition; the declared static-pressure operating model is not rematched".to_string(),
     );
     model.assumptions.sort_unstable();
     model.assumptions.dedup();
@@ -1928,8 +2031,26 @@ fn operating_identity(point: &OperatingPoint) -> ContentHash {
 
 fn fan_power_identity(spec: &FanPowerSpec) -> ContentHash {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&spec.total_efficiency.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&spec.efficiency.to_bits().to_le_bytes());
     bytes.extend_from_slice(&spec.efficiency_half_width.to_bits().to_le_bytes());
+    match spec.basis {
+        FanPowerBasis::Static => bytes.push(0),
+        FanPowerBasis::Total {
+            density,
+            outlet_area_per_fan,
+            fan_count,
+            arrangement,
+        } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&density.value().to_bits().to_le_bytes());
+            bytes.extend_from_slice(&outlet_area_per_fan.value().to_bits().to_le_bytes());
+            bytes.extend_from_slice(&(fan_count as u64).to_le_bytes());
+            bytes.push(match arrangement {
+                FanArrangement::Series => 0,
+                FanArrangement::Parallel => 1,
+            });
+        }
+    }
     push_string(&mut bytes, &spec.source.citation);
     push_string(&mut bytes, &spec.source.identifier);
     hash_domain(QOI_IDENTITY_DOMAIN, &bytes)

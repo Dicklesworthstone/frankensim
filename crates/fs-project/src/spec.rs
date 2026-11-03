@@ -960,18 +960,36 @@ pub struct Cooling {
     /// loadable for older projects but makes the conduction solve stage a
     /// typed gap; no seed or boundary condition is inferred.
     pub conduction: Option<ConductionSetup>,
-    /// Optional cited fan total-efficiency interval (schema v9). A
+    /// Optional cited fan mechanical-efficiency interval (schema v9). A
     /// `fan-power` output needs it; absence is a declaration, never 100 %.
     pub fan_efficiency: Option<FanEfficiency>,
 }
 
-/// A cited fan total efficiency `total +/- half_width`, inside `(0, 1]`.
+/// Pressure convention of a cited fan mechanical efficiency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanEfficiencyBasis {
+    /// Fan static air power divided by shaft input.
+    Static,
+    /// Fan total air power divided by shaft input; outlet kinetic power is
+    /// required in addition to the native static-pressure operating point.
+    Total,
+}
+
+/// A cited mechanical fan efficiency `nominal +/- half_width`, inside `(0, 1]`.
+/// Both bases return shaft input, not electrical input or deposited heat.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FanEfficiency {
-    /// Nominal total efficiency.
-    pub total: f64,
+    /// Nominal efficiency under the explicit pressure basis.
+    pub nominal: f64,
+    /// Static or total pressure convention of the cited efficiency.
+    pub basis: FanEfficiencyBasis,
     /// Absolute half-width of the declared interval.
     pub half_width: f64,
+    /// Physical outlet area of each identical fan, required for total-basis
+    /// power extraction. Historical total-efficiency declarations without it
+    /// remain readable, but cannot produce a shaft-power result. Static-basis
+    /// declarations must omit it. The efficiency citation owns this geometry.
+    pub outlet_area_per_fan: Option<QtyAny>,
     /// Human-readable citation.
     pub source: String,
     /// Stable citation identifier.
@@ -1727,9 +1745,9 @@ impl ProjectSpec {
             }
         }
         if let Some(efficiency) = self.cooling.as_ref().and_then(|cooling| cooling.fan_efficiency.as_ref()) {
-            let low = efficiency.total - efficiency.half_width;
-            let high = efficiency.total + efficiency.half_width;
-            if !(efficiency.total.is_finite()
+            let low = efficiency.nominal - efficiency.half_width;
+            let high = efficiency.nominal + efficiency.half_width;
+            if !(efficiency.nominal.is_finite()
                 && efficiency.half_width.is_finite()
                 && efficiency.half_width >= 0.0
                 && low > 0.0
@@ -1739,10 +1757,26 @@ impl ProjectSpec {
                     "project-fan-efficiency-range",
                     format!(
                         "fan efficiency {} +/- {} leaves (0, 1]",
-                        efficiency.total, efficiency.half_width
+                        efficiency.nominal, efficiency.half_width
                     ),
-                    "declare a total efficiency whose whole interval lies inside (0, 1]",
+                    "declare a static or total efficiency whose whole interval lies inside (0, 1]",
                 ));
+            }
+            if let Some(area) = efficiency.outlet_area_per_fan {
+                if efficiency.basis != FanEfficiencyBasis::Total {
+                    out.push(violation(
+                        "project-fan-efficiency-basis",
+                        "static efficiency already includes the static/total pressure ratio",
+                        "omit :outlet-area-per-fan for :static efficiency; do not count outlet power twice",
+                    ));
+                }
+                if area.dims != dims::AREA || !area.value.is_finite() || area.value <= 0.0 {
+                    out.push(violation(
+                        "project-fan-outlet-area",
+                        "fan outlet area must be a positive finite area",
+                        "declare :outlet-area-per-fan in m^2 from the original fan geometry",
+                    ));
+                }
             }
             if efficiency.source.trim().is_empty() || efficiency.source_id.trim().is_empty() {
                 out.push(violation(
