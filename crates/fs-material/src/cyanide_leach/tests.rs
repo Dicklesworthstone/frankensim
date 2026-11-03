@@ -6,7 +6,7 @@ use super::*;
 #[path = "tests/competition.rs"]
 pub(in crate::cyanide_leach) mod competition;
 #[path = "tests/gas_transfer.rs"]
-mod gas_transfer;
+pub(in crate::cyanide_leach) mod gas_transfer;
 
 #[path = "tests/dosing.rs"]
 mod dosing;

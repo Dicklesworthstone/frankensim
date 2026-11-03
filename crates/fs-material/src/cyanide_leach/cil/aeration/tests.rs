@@ -1,6 +1,7 @@
 //! Coupled gas/CIL limits and open oxygen accounts.
 
 use super::*;
+use crate::cyanide_leach::tests::gas_transfer::{henry_context, measured_source};
 use crate::cyanide_leach::{
     aeration::{KLA_PARAMETER, OXYGEN_TRANSFER_LAW},
     cil::tests::{cil, close, numerics},
@@ -110,6 +111,148 @@ fn transfer_card(kla: f64) -> ConstitutiveModelCard {
 }
 fn transfer(kla: f64) -> OxygenTransfer {
     OxygenTransfer::from_card(solubility(100_000.0), transfer_card(kla)).unwrap()
+}
+
+#[test]
+fn measured_henry_drives_the_original_simultaneous_leach_and_carbon_owner() {
+    let mut initial = fixture::charge(1.0);
+    initial.dissolved_oxygen = Amount::new(0.0);
+    let closed = cil(initial, 1.0);
+    let source = measured_source(298.15);
+    let context = henry_context(&source);
+    let mut measured = AeratedCarbonInLeachBatch::from_batch(
+        closed.clone(),
+        OxygenTransfer::from_henry_source(source.clone(), transfer_card(0.3)).unwrap(),
+    )
+    .unwrap();
+    let mut gibbs = AeratedCarbonInLeachBatch::from_batch(closed, transfer(0.3)).unwrap();
+    let actual = measured
+        .advance(
+            Time::new(0.5),
+            Pressure::new(80_000.0),
+            &context,
+            numerics(1.0),
+            || false,
+        )
+        .unwrap();
+    let expected = gibbs
+        .advance(
+            Time::new(0.5),
+            Pressure::new(80_000.0),
+            &QueryPoint::new(),
+            numerics(1.0),
+            || false,
+        )
+        .unwrap();
+    // This synthetic Hcp and K=1 pair have the same target ONLY because the
+    // fixture's V=1 m3 and n_ref=1 mol were independently chosen that way.
+    close(actual.oxygen_saturation.value(), 0.8, 1e-15);
+    assert!(actual.cil.interval_gold_dissolved.value() > 0.0);
+    assert!(actual.cil.interval_product_capture.value() > 0.0);
+    close(
+        actual.cil.interval_gold_dissolved.value(),
+        expected.cil.interval_gold_dissolved.value(),
+        3e-9,
+    );
+    close(
+        actual.cil.interval_product_capture.value(),
+        expected.cil.interval_product_capture.value(),
+        3e-9,
+    );
+    close(actual.cil.conservation.gold.value(), 0.0, 2e-11);
+    close(actual.cil.conservation.counterion.value(), 0.0, 2e-11);
+    close(actual.cil.conservation.dissolved_oxygen.value(), 0.0, 2e-11);
+    assert!(actual.transfer().solubility().is_none());
+    assert_eq!(
+        actual.henry_answer.as_ref().unwrap().receipt.selected,
+        source.answer().receipt.selected
+    );
+    assert!(expected.henry_answer.is_none());
+}
+
+#[test]
+fn measured_henry_dosing_retains_the_same_carbon_and_oxygen_history() {
+    let source = measured_source(298.15);
+    let context = henry_context(&source);
+    let mut initial = fixture::charge(1.0);
+    initial.dissolved_oxygen = Amount::new(0.0);
+    let mut bath = AeratedCarbonInLeachBatch::from_batch(
+        cil(initial, 1.0),
+        OxygenTransfer::from_henry_source(source.clone(), transfer_card(0.3)).unwrap(),
+    )
+    .unwrap();
+    let pressure = Pressure::new(80_000.0);
+    bath.advance(Time::new(0.2), pressure, &context, numerics(1.0), || false)
+        .unwrap();
+    let before = bath.state().clone();
+    let gas = [bath.oxygen_in(), bath.oxygen_out()];
+    let receipt = bath
+        .dose_reagent_at_pressure(
+            dosing::DissolvedSodiumReagent::SodiumCyanide,
+            Amount::new(0.3),
+            pressure,
+            &context,
+            1_000_000,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(receipt.cil.state.elapsed, before.elapsed);
+    assert_eq!(
+        receipt.cil.state.solution.dissolved_oxygen,
+        before.solution.dissolved_oxygen
+    );
+    assert_eq!(
+        receipt.cil.state.solution.gold_dissolved,
+        before.solution.gold_dissolved
+    );
+    for (after, before) in receipt
+        .cil
+        .state
+        .populations
+        .iter()
+        .zip(&before.populations)
+    {
+        assert_eq!(after.adsorbed, before.adsorbed);
+        assert_eq!(after.vacant_capacity, before.vacant_capacity);
+    }
+    assert_eq!([bath.oxygen_in(), bath.oxygen_out()], gas);
+    close(receipt.oxygen_saturation.value(), 0.8, 1e-15);
+    close(
+        receipt.cil.conservation.dissolved_oxygen.value(),
+        0.0,
+        2e-12,
+    );
+    assert_eq!(
+        receipt.henry_answer.as_ref().unwrap().receipt.selected,
+        source.answer().receipt.selected
+    );
+    assert_eq!(receipt.cil.inputs.sodium_cyanide, Amount::new(0.3));
+    let accepted = format!("{bath:?}");
+    let invalid = context
+        .clone()
+        .with_quantity(
+            "source-solvent-pure-water",
+            QuantitySpec::dimensional(Dims::NONE),
+            0.0,
+        )
+        .unwrap();
+    assert!(
+        bath.dose_reagent_at_pressure(
+            dosing::DissolvedSodiumReagent::SodiumHydroxide,
+            Amount::new(0.1),
+            pressure,
+            &invalid,
+            1_000_000,
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(format!("{bath:?}"), accepted);
+    let resumed = bath
+        .advance(Time::new(0.1), pressure, &context, numerics(1.0), || false)
+        .unwrap();
+    assert!(resumed.cil.interval_gold_dissolved.value() > 0.0);
+    assert!(resumed.henry_answer.is_some());
 }
 
 #[test]

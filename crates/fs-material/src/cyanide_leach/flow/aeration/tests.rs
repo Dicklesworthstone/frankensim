@@ -1,6 +1,7 @@
 //! G0/G1 manufactured solutions for the coupled flow, gas and reaction owner.
 //! The gas fixture has independently authored K=1; no slurry calibration claim.
 use super::*;
+use crate::cyanide_leach::tests::gas_transfer::{henry_context, measured_source};
 use crate::cyanide_leach::{
     aeration::{AeratedGoldCyanidationBatch, AerationNumerics, KLA_PARAMETER, OXYGEN_TRANSFER_LAW},
     tests as fixture,
@@ -254,6 +255,50 @@ fn balanced(answer: &AeratedFlowAdvance) {
         0.0,
         2e-11,
     );
+}
+
+#[test]
+fn g1_measured_henry_drives_continuous_flow_on_the_actual_volume_basis() {
+    let source = measured_source(298.15);
+    let context = henry_context(&source);
+    let mut charge = fixture::charge(1.0);
+    charge.solution_volume = Volume::new(0.4);
+    charge.amount_at_unit_activity = Amount::new(0.2);
+    charge.dissolved_oxygen = Amount::new(0.1);
+    let mut inlet = feed(&charge);
+    inlet.dissolved_oxygen = AmountConcentration::new(0.2);
+    let mut tank = AeratedCyanidationCstr::from_tank(
+        bare(0.0, charge),
+        OxygenTransfer::from_henry_source(source.clone(), transfer_card(0.3)).unwrap(),
+    )
+    .unwrap();
+    let answer = tank
+        .advance(
+            Time::new(0.7),
+            VolumetricFlowRate::new(0.08),
+            &inlet,
+            Pressure::new(100_000.0),
+            &context,
+            numerics(),
+            || false,
+        )
+        .unwrap();
+    // Unsplit solution of dN/dt=Q*C_in+kLa*N_sat-(Q/V+kLa)*N.
+    let equilibrium = (0.08 * 0.2 + 0.3 * 0.4) / (0.08 / 0.4 + 0.3);
+    let expected = equilibrium + (0.1 - equilibrium) * (-0.35_f64).exp();
+    close(answer.oxygen_saturation.value(), 0.4, 1e-15);
+    close(
+        answer.flow.state.inventory.dissolved_oxygen.value(),
+        expected,
+        2e-7,
+    );
+    assert!(answer.oxygen_in.value() > 0.0);
+    assert!(answer.transfer().solubility().is_none());
+    assert_eq!(
+        answer.henry_answer.as_ref().unwrap().receipt.selected,
+        source.answer().receipt.selected
+    );
+    balanced(&answer);
 }
 fn unchanged(tank: &AeratedCyanidationCstr, before: &AeratedCyanidationCstr) {
     assert_eq!(tank.tank.raw, before.tank.raw);

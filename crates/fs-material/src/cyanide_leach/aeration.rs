@@ -2,7 +2,8 @@
 //!
 //! At fixed liquid volume the explicitly sourced closure is
 //! d(n_O2)/dt = kLa (n_sat - n_O2) - r_Au/4. The original gas-solubility owner
-//! supplies n_sat = n_ref K p_O2/p_ref from retained formation-Gibbs sources.
+//! supplies n_sat = n_ref K p_O2/p_ref from retained formation-Gibbs sources,
+//! or n_sat = V Hcp p_O2 from explicitly selected measured Henry data.
 //! The original cyanidation owner supplies actual speciation, r_Au and its exact
 //! chemical equation. Gold and total cyanide ligand are closed finite pools;
 //! a maintained gas reservoir supplies or removes oxygen.
@@ -21,9 +22,13 @@
 //! two-half states remain positive without clipping. Local estimates and their
 //! accumulated sums are not certified global bounds or model uncertainties.
 
+use super::gas_transfer::{OxygenHenrySource, OxygenPartition};
 use super::*;
+use fs_matdb::MaterialAnswer;
 use fs_qty::{Frequency, Pressure};
-use fs_thermochem::stoichiometry::thermodynamics::gas_liquid::IdealGasLiquidPartition;
+use fs_thermochem::stoichiometry::thermodynamics::{
+    StandardReactionGibbs, gas_liquid::IdealGasLiquidPartition,
+};
 
 /// Version-one completely mixed, prescribed-pressure oxygen-transfer closure.
 pub const OXYGEN_TRANSFER_LAW: &str = "prescribed-pressure-oxygen-transfer";
@@ -37,7 +42,7 @@ pub const SATURATION_CONCENTRATION_AXIS: &str = "oxygen-saturation-concentration
 /// Immutable original gas equilibrium and independent transfer-rate source.
 #[derive(Clone, Debug)]
 pub struct OxygenTransfer {
-    solubility: IdealGasLiquidPartition,
+    solubility: OxygenPartition,
     source: ConstitutiveModelCard,
     coefficient: Frequency,
 }
@@ -48,11 +53,24 @@ impl OxygenTransfer {
         solubility: IdealGasLiquidPartition,
         source: ConstitutiveModelCard,
     ) -> Result<Self> {
-        source.validate()?;
         require(
             solubility.gas().as_str() == "O2(g)" && solubility.aqueous().as_str() == OXYGEN,
             "oxygen transfer requires the original O2(g)/O2(aq) identities",
         )?;
+        Self::with_partition(OxygenPartition::Thermodynamic(solubility), source)
+    }
+    /// Use the same measured Hcp source as finite-headspace oxygen exchange.
+    /// No formation-Gibbs values, activity basis or transfer coefficient are
+    /// inferred from solubility. The original pure-water/infinite-dilution
+    /// reference flags must be supplied explicitly in advance conditions.
+    pub fn from_henry_source(
+        solubility: OxygenHenrySource,
+        source: ConstitutiveModelCard,
+    ) -> Result<Self> {
+        Self::with_partition(OxygenPartition::Henry(solubility), source)
+    }
+    fn with_partition(solubility: OxygenPartition, source: ConstitutiveModelCard) -> Result<Self> {
+        source.validate()?;
         require(
             source.law.0 == OXYGEN_TRANSFER_LAW
                 && source.law_version == 1
@@ -104,19 +122,31 @@ impl OxygenTransfer {
             .validity
             .bound(TEMPERATURE_AXIS)
             .expect("required transfer temperature axis");
-        require(
-            (low..=high).contains(&solubility.standard().temperature().value()),
-            "transfer source must cover the gas equilibrium temperature",
-        )?;
+        if let OxygenPartition::Thermodynamic(value) = &solubility {
+            require(
+                (low..=high).contains(&value.standard().temperature().value()),
+                "transfer source must cover the gas equilibrium temperature",
+            )?;
+        }
         Ok(Self {
             solubility,
             source,
             coefficient,
         })
     }
-    /// Original gas equilibrium, exact equation and all source-selection receipts.
-    pub fn solubility(&self) -> &IdealGasLiquidPartition {
-        &self.solubility
+    /// Original Gibbs equilibrium when selected; measured Hcp creates no Gibbs data.
+    pub fn solubility(&self) -> Option<&IdealGasLiquidPartition> {
+        match &self.solubility {
+            OxygenPartition::Thermodynamic(value) => Some(value),
+            OxygenPartition::Henry(_) => None,
+        }
+    }
+    /// Original measured source, including its claim and observation receipts.
+    pub fn henry_source(&self) -> Option<&OxygenHenrySource> {
+        match &self.solubility {
+            OxygenPartition::Henry(value) => Some(value),
+            OxygenPartition::Thermodynamic(_) => None,
+        }
     }
     /// Original independent transfer coefficient and its applicability.
     pub fn source(&self) -> &ConstitutiveModelCard {
@@ -125,6 +155,86 @@ impl OxygenTransfer {
     /// Explicit kLa; zero means no oxygen crosses the boundary.
     pub const fn coefficient(&self) -> Frequency {
         self.coefficient
+    }
+
+    // Both constructors admit molecular O2 specifically. This identity cannot
+    // also be owned by a liquid family, spectator or sorbed chemical pool.
+    pub(super) fn external_gas(&self) -> &str {
+        "O2(g)"
+    }
+    pub(super) fn reaction(&self) -> Result<ConservedReaction> {
+        Ok(match self.solubility() {
+            Some(value) => value.reaction().clone(),
+            None => MineralReaction::OxygenDissolution.build()?,
+        })
+    }
+    pub(super) fn admit_chemistry(&self, water: &StandardReactionGibbs) -> Result<()> {
+        let (low, high) = self
+            .source
+            .validity
+            .bound(TEMPERATURE_AXIS)
+            .expect("required transfer temperature axis");
+        require(
+            (low..=high).contains(&water.temperature().value()),
+            "transfer source must cover the actual aqueous temperature",
+        )?;
+        match &self.solubility {
+            OxygenPartition::Thermodynamic(value) => {
+                let gas = value.standard();
+                require(
+                    gas.temperature() == water.temperature()
+                        && gas.reference_pressure() == water.reference_pressure()
+                        && gas.reference_axis() == water.reference_axis(),
+                    "gas and aqueous sources need identical temperature and reference conventions",
+                )?;
+            }
+            OxygenPartition::Henry(value) => {
+                // Check the retained selected claim at the actual aqueous T.
+                // Its explicit source qualifications are checked again against
+                // caller conditions on each advance, before any mutation.
+                let point = value.point().clone().with_quantity(
+                    TEMPERATURE_AXIS,
+                    QuantitySpec::dimensional(Temperature::DIMS),
+                    water.temperature().value(),
+                )?;
+                value.at_runtime(&point)?;
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn equilibrium_saturation(
+        &self,
+        pressure: Pressure,
+        amount_at_unit_activity: Amount,
+        chemical_conditions: &QueryPoint,
+        extra: &QueryPoint,
+    ) -> Result<(Amount, Option<MaterialAnswer>)> {
+        nonnegative(
+            pressure.value(),
+            "oxygen partial pressure must be nonnegative",
+        )?;
+        self.validate_extras(chemical_conditions, extra)?;
+        match &self.solubility {
+            OxygenPartition::Thermodynamic(value) => Ok((
+                value.equilibrium_aqueous_amount(pressure, amount_at_unit_activity)?,
+                None,
+            )),
+            OxygenPartition::Henry(value) => {
+                let mut point = chemical_conditions.clone();
+                for (axis, coordinate) in extra.axes() {
+                    point =
+                        point.with_quantity(axis, extra.axis_quantities()[axis], *coordinate)?;
+                }
+                let answer = value.at_runtime(&point)?;
+                // Hcp is a concentration/pressure coefficient. The physical
+                // liquid volume, never n_ref, converts its target into moles.
+                let target = product(
+                    product(answer.evidence.value.value, pressure.value())?,
+                    chemical_conditions.axes()[VOLUME_AXIS],
+                )?;
+                Ok((Amount::new(target), Some(answer)))
+            }
+        }
     }
 }
 
@@ -250,6 +360,9 @@ pub struct AerationAdvance {
     pub oxygen_partial_pressure: Pressure,
     /// Fixed source-derived equilibrium target for this call.
     pub oxygen_saturation: Amount,
+    /// Original pinned Hcp query at the actual temperature and source flags.
+    /// `None` retains the original Gibbs-equilibrium route.
+    pub henry_answer: Option<MaterialAnswer>,
     pub oxygen_in: Amount,
     pub oxygen_out: Amount,
     /// Signed cumulative oxygen crossing the gas boundary, inward positive.
@@ -309,17 +422,17 @@ impl AeratedGoldCyanidationBatch {
         let model = &closed.layout.model;
         let charge = &closed.layout.charge;
         let conditions = &closed.layout.conditions;
-        let external_gas = transfer.solubility.gas();
+        let external_gas = transfer.external_gas();
         require(
             model.chemistry.families().iter().all(|family| {
                 family
                     .species()
                     .iter()
-                    .all(|species| species != external_gas)
+                    .all(|species| species.as_str() != external_gas)
             }) && charge
                 .spectators
                 .iter()
-                .all(|ion| &ion.species != external_gas)
+                .all(|ion| ion.species.as_str() != external_gas)
                 && closed
                     .layout
                     .competition
@@ -329,12 +442,11 @@ impl AeratedGoldCyanidationBatch {
                             family
                                 .species()
                                 .iter()
-                                .all(|species| species != external_gas)
+                                .all(|species| species.as_str() != external_gas)
                         })
                     }),
             "the prescribed external gas cannot also belong to a liquid acid family or spectator pool",
         )?;
-        let gas = transfer.solubility.standard();
         let water = model.chemistry.water().standard();
         require(
             [OXYGEN_PARTIAL_PRESSURE_AXIS, SATURATION_CONCENTRATION_AXIS]
@@ -345,12 +457,7 @@ impl AeratedGoldCyanidationBatch {
                 }),
             "gas pressure and saturation are owned by the transfer source, not fixed chemical conditions",
         )?;
-        require(
-            gas.temperature() == water.temperature()
-                && gas.reference_pressure() == water.reference_pressure()
-                && gas.reference_axis() == water.reference_axis(),
-            "gas and acid/base sources need the same temperature, reference pressure and elemental convention",
-        )?;
+        transfer.admit_chemistry(water)?;
         let aqueous_network = closed
             .layout
             .competition
@@ -363,10 +470,7 @@ impl AeratedGoldCyanidationBatch {
                 .reactions()
                 .iter()
                 .cloned()
-                .chain([
-                    model.reaction.clone(),
-                    transfer.solubility.reaction().clone(),
-                ])
+                .chain([model.reaction.clone(), transfer.reaction()?])
                 .collect(),
         )?;
         let mut layout = (*closed.layout).clone();
@@ -473,9 +577,11 @@ impl AeratedGoldCyanidationBatch {
             duration.value() == 0.0 || end > self.state.elapsed.value(),
             "positive aeration duration must advance the absolute clock",
         )?;
-        let saturation = self.transfer.solubility.equilibrium_aqueous_amount(
+        let (saturation, henry_answer) = self.transfer.equilibrium_saturation(
             oxygen_partial_pressure,
             self.layout.charge.amount_at_unit_activity,
+            &self.state.conditions,
+            transfer_conditions,
         )?;
         let tolerances = numerics.tolerances(
             self.layout.limit,
@@ -609,6 +715,7 @@ impl AeratedGoldCyanidationBatch {
             stoichiometric_amounts: amounts,
             oxygen_partial_pressure,
             oxygen_saturation: saturation,
+            henry_answer,
             oxygen_in: Amount::new(oxygen_in),
             oxygen_out: Amount::new(oxygen_out),
             net_oxygen_transfer: Amount::new(sum([oxygen_in, -oxygen_out].into_iter())?),

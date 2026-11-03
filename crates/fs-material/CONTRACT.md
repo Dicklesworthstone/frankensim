@@ -44,8 +44,9 @@ elapsed clock and prior liquid/reaction accounts remain intact.
 For fixed temperature, solution volume and activity basis, dissolved molecular
 oxygen follows `dn/dt = Q*C_in - Q*n/V + kLa*(n_sat-n) - r_Au/4`.
 The retained gas/liquid Gibbs sources determine
-`n_sat = n_ref*K*p_O2/p_ref`; the independent original transfer card supplies
-kLa and its validity. Feed, flow and prescribed oxygen partial pressure may
+`n_sat = n_ref*K*p_O2/p_ref`, or the original measured-Henry source determines
+`n_sat = V*Hcp*p_O2` using the physical liquid volume. The independent original
+transfer card supplies kLa and its validity. Feed, flow and prescribed oxygen partial pressure may
 change between advances. Stopping liquid flow permits gas exchange and
 dissolution to continue. Neither solubility nor transfer data calibrate the
 separate local gold-dissolution coefficient.
@@ -293,7 +294,17 @@ or an ore-specific kinetic calibration.
 speciated gold law to a maintained oxygen partial pressure. The existing
 `IdealGasLiquidPartition` supplies the equilibrium dissolved amount from
 original gas/aqueous formation-Gibbs receipts, explicit solvent activity basis,
-species partial pressure and the retained standard reference pressure. A
+species partial pressure and the retained standard reference pressure.
+Alternatively, `OxygenTransfer::from_henry_source` retains the same
+`gas_transfer::OxygenHenrySource` used by the finite-headspace owner. Its
+explicit concentration/pressure convention gives `O_sat = Hcp*p_O2*V`; the
+independent solvent activity amount never substitutes for physical volume.
+Batch, continuous CSTR and simultaneous carbon-in-leach routes share this
+evaluation and preserve the original pinned Hcp receipt in `henry_answer`.
+The explicit-pressure CIL reagent-dose path uses that same post-dose query,
+retains its receipt, and leaves the gas and carbon inventories unchanged.
+The original Gibbs accessor is `Some` only for its own route; measured data do
+not synthesize formation energies or a Gibbs reference convention. A
 separate version-one `prescribed-pressure-oxygen-transfer` source card supplies
 nonnegative `volumetric-transfer-coefficient` kLa in inverse seconds; no rate is
 inferred from equilibrium data.
@@ -315,10 +326,21 @@ exchange. Finite headspace and metered dosing belong to the existing
 
 Both kinetic cards admit actual conditions at every stage and endpoint.
 Caller coordinates cannot override chemistry, gas pressure or saturation.
-Gas and chemical sources share temperature, reference pressure and elemental
-convention; the exact network joins original species definitions. The external
+Gibbs gas and chemical sources share temperature, reference pressure and elemental
+convention; the exact network joins original species definitions. Measured Hcp
+requeries its retained selected claim at the actual aqueous temperature, with
+the original explicit pure-water, molecular-O2, infinite-dilution and unqualified
+engineering-reference flags required in advance conditions. The source's
+uncertainty, observation references and temperature support remain unchanged;
+no saline/slurry correction or empirical ore calibration is inferred. The external
 gas identity is excluded from liquid families and spectators, even for empty
 inventories. Original gas-equilibrium errors are retained in the public refusal.
+
+Focused G1 fixtures cover uptake and stripping against exponential solutions
+with physical volume deliberately different from the activity amount, an
+independent unsplit flow/gas target, and measured-Hcp versus equivalent-Gibbs
+simultaneous leaching/carbon capture. G4 fixtures retain the entire batch and
+oxygen accounts on missing/contradictory source flags and late cancellation.
 
 Bounded full/two-half RK4 trials evolve gold, DO and both gross transfer accounts.
 Raw componentwise discrepancies control local numerical estimates without

@@ -38,6 +38,8 @@ pub struct AeratedFlowAdvance {
     pub flow: CyanidationFlowAdvance,
     pub oxygen_partial_pressure: Pressure,
     pub oxygen_saturation: Amount,
+    /// Pinned measured-Hcp receipt at the actual held temperature, when selected.
+    pub henry_answer: Option<fs_matdb::MaterialAnswer>,
     pub oxygen_in: Amount,
     pub oxygen_out: Amount,
     pub cumulative_oxygen_in: Amount,
@@ -58,24 +60,24 @@ impl AeratedCyanidationCstr {
     pub fn from_tank(tank: CyanidationCstr, transfer: OxygenTransfer) -> Result<Self> {
         let layout = &tank.layout;
         let model = &layout.model;
-        let external_gas = transfer.solubility().gas();
+        let external_gas = transfer.external_gas();
         require(
             model.chemistry.families().iter().all(|family| {
                 family
                     .species()
                     .iter()
-                    .all(|species| species != external_gas)
+                    .all(|species| species.as_str() != external_gas)
             }) && layout
                 .charge
                 .spectators
                 .iter()
-                .all(|ion| &ion.species != external_gas)
+                .all(|ion| ion.species.as_str() != external_gas)
                 && layout.competition.as_ref().is_none_or(|metals| {
                     metals.model.families().iter().all(|family| {
                         family
                             .species()
                             .iter()
-                            .all(|species| species != external_gas)
+                            .all(|species| species.as_str() != external_gas)
                     })
                 }),
             "external oxygen cannot also be an owned liquid family or spectator",
@@ -89,14 +91,8 @@ impl AeratedCyanidationCstr {
                 }),
             "gas pressure and saturation belong to the transfer source",
         )?;
-        let gas = transfer.solubility().standard();
         let water = model.chemistry.water().standard();
-        require(
-            gas.temperature() == water.temperature()
-                && gas.reference_pressure() == water.reference_pressure()
-                && gas.reference_axis() == water.reference_axis(),
-            "gas and liquid sources need identical temperature and reference conventions",
-        )?;
+        transfer.admit_chemistry(water)?;
         let aqueous = layout
             .competition
             .as_ref()
@@ -108,10 +104,7 @@ impl AeratedCyanidationCstr {
                 .reactions()
                 .iter()
                 .cloned()
-                .chain([
-                    model.reaction.clone(),
-                    transfer.solubility().reaction().clone(),
-                ])
+                .chain([model.reaction.clone(), transfer.reaction()?])
                 .collect(),
         )?;
         Ok(Self {
@@ -159,9 +152,11 @@ impl AeratedCyanidationCstr {
         let layout = &tank.layout;
         let start = tank.elapsed().value();
         let end = add(start, duration.value())?;
-        let saturation = self.transfer.solubility().equilibrium_aqueous_amount(
+        let (saturation, henry_answer) = self.transfer.equilibrium_saturation(
             oxygen_partial_pressure,
             layout.charge.amount_at_unit_activity,
+            &tank.state.conditions,
+            transfer_conditions,
         )?;
         self.transfer
             .validate_extras(&layout.conditions, transfer_conditions)?;
@@ -359,6 +354,7 @@ impl AeratedCyanidationCstr {
             },
             oxygen_partial_pressure,
             oxygen_saturation: saturation,
+            henry_answer,
             oxygen_in: Amount::new(current.inward),
             oxygen_out: Amount::new(current.outward),
             cumulative_oxygen_in: Amount::new(oxygen_in),

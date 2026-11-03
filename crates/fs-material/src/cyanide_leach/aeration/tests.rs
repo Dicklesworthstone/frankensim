@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::cyanide_leach::tests as fixture;
+use crate::cyanide_leach::tests::gas_transfer::{henry_context, measured_source};
 use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{LawId, LawParameter, Provenance};
@@ -180,6 +181,139 @@ fn unchanged(batch: &AeratedGoldCyanidationBatch, before: &AeratedGoldCyanidatio
 }
 
 #[test]
+fn g1_measured_henry_uses_physical_volume_for_uptake_and_stripping() {
+    let source = measured_source(298.15);
+    let context = henry_context(&source);
+    for initial in [0.1, 1.2] {
+        let mut charge = fixture::charge(1.0);
+        charge.solution_volume = Volume::new(0.4);
+        charge.amount_at_unit_activity = Amount::new(0.2);
+        charge.dissolved_oxygen = Amount::new(initial);
+        let mut batch = AeratedGoldCyanidationBatch::new(
+            make_model(0.0),
+            OxygenTransfer::from_henry_source(source.clone(), transfer_card(0.3)).unwrap(),
+            charge,
+            QueryPoint::new(),
+            fixture::options(),
+        )
+        .unwrap();
+        let answer = batch
+            .advance(
+                Time::new(0.7),
+                Pressure::new(100_000.0),
+                &context,
+                AerationNumerics::default(),
+                || false,
+            )
+            .unwrap();
+        let target = 0.4; // Hcp=1e-5, p=1e5 Pa, V=0.4 m3; n_ref=0.2 mol is independent.
+        let expected = target + (initial - target) * (-0.21_f64).exp();
+        close(answer.oxygen_saturation.value(), target, 1e-15);
+        close(answer.state.dissolved_oxygen.value(), expected, 3e-8);
+        close(
+            answer.interval_oxygen_in.value(),
+            (expected - initial).max(0.0),
+            3e-8,
+        );
+        close(
+            answer.interval_oxygen_out.value(),
+            (initial - expected).max(0.0),
+            3e-8,
+        );
+        balances(&answer);
+        assert!(answer.transfer().solubility().is_none());
+        assert_eq!(
+            answer.transfer().henry_source().unwrap().pack_hash(),
+            source.pack_hash()
+        );
+        assert_eq!(
+            answer.henry_answer.as_ref().unwrap().receipt.selected,
+            source.answer().receipt.selected
+        );
+        let stripped = batch
+            .advance(
+                Time::new(0.2),
+                Pressure::new(0.0),
+                &context,
+                AerationNumerics::default(),
+                || false,
+            )
+            .unwrap();
+        close(stripped.oxygen_saturation.value(), 0.0, 0.0);
+        assert!(stripped.interval_oxygen_out.value() > 0.0);
+        assert_eq!(stripped.interval_oxygen_in.value(), 0.0);
+        balances(&stripped);
+    }
+}
+
+#[test]
+fn g4_measured_henry_refusals_and_cancellation_leave_original_batch_unchanged() {
+    let source = measured_source(298.15);
+    let context = henry_context(&source);
+    let mut batch = AeratedGoldCyanidationBatch::new(
+        make_model(0.0),
+        OxygenTransfer::from_henry_source(source, transfer_card(0.3)).unwrap(),
+        fixture::charge(1.0),
+        QueryPoint::new(),
+        fixture::options(),
+    )
+    .unwrap();
+    let before = batch.clone();
+    for flags in [
+        QueryPoint::new(),
+        context
+            .clone()
+            .with_quantity(
+                "source-solvent-pure-water",
+                QuantitySpec::dimensional(Dims::NONE),
+                0.0,
+            )
+            .unwrap(),
+    ] {
+        assert!(
+            batch
+                .advance(
+                    Time::new(0.5),
+                    Pressure::new(40_000.0),
+                    &flags,
+                    AerationNumerics::default(),
+                    || false
+                )
+                .is_err()
+        );
+        unchanged(&batch, &before);
+    }
+    let mut polls = 0;
+    assert!(matches!(
+        batch.advance(
+            Time::new(0.5),
+            Pressure::new(40_000.0),
+            &context,
+            AerationNumerics::default(),
+            || {
+                polls += 1;
+                polls == 8
+            }
+        ),
+        Err(CyanidationError::Cancelled)
+    ));
+    assert_eq!(polls, 8);
+    unchanged(&batch, &before);
+    let unsupported =
+        OxygenTransfer::from_henry_source(measured_source(300.0), transfer_card(0.3)).unwrap();
+    assert!(
+        AeratedGoldCyanidationBatch::new(
+            make_model(0.0),
+            unsupported,
+            fixture::charge(1.0),
+            QueryPoint::new(),
+            fixture::options()
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn reagent_additions_preserve_open_oxygen_accounts_and_resume_actual_speciated_kinetics() {
     use crate::cyanide_leach::dosing::DissolvedSodiumReagent::*;
     let mut source = transfer_card(0.5);
@@ -271,7 +405,17 @@ fn pure_gas_uptake_and_stripping_match_independent_exponential() {
         );
         balances(&result);
         assert!(result.maximum_local_errors.dissolved_oxygen.value() > 0.0);
-        assert_eq!(result.transfer().solubility().standard().terms().len(), 2);
+        assert_eq!(
+            result
+                .transfer()
+                .solubility()
+                .unwrap()
+                .standard()
+                .terms()
+                .len(),
+            2
+        );
+        assert!(result.henry_answer.is_none());
     }
     // Zero partial pressure strips under active contact; it does not disable kLa.
     let mut stripped = make_batch(0.0, 0.5, 0.75);

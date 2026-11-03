@@ -187,7 +187,7 @@ impl OxygenHenrySource {
         &self.answer
     }
 
-    fn at_runtime(&self, actual: &QueryPoint) -> Result<MaterialAnswer> {
+    pub(super) fn at_runtime(&self, actual: &QueryPoint) -> super::Result<MaterialAnswer> {
         let mut point = QueryPoint::new();
         for (axis, quantity) in self.point.axis_quantities() {
             let value = *actual.axes().get(axis).ok_or(CyanidationError::Invalid(
@@ -220,7 +220,7 @@ impl OxygenHenrySource {
 }
 
 #[derive(Clone, Debug)]
-enum OxygenPartition {
+pub(super) enum OxygenPartition {
     Thermodynamic(IdealGasLiquidPartition),
     Henry(OxygenHenrySource),
 }

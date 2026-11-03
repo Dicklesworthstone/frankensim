@@ -92,7 +92,7 @@ fn henry_pack(point: &QueryPoint, dims: Dims, observation_backed: bool) -> Norma
     )
     .unwrap()
 }
-fn measured_source(temperature: f64) -> OxygenHenrySource {
+pub(in crate::cyanide_leach) fn measured_source(temperature: f64) -> OxygenHenrySource {
     let point = henry_point(temperature);
     OxygenHenrySource::from_pack(
         henry_pack(&point, HenrySolubilityCp::DIMS, true),
@@ -101,7 +101,7 @@ fn measured_source(temperature: f64) -> OxygenHenrySource {
     )
     .unwrap()
 }
-fn henry_context(source: &OxygenHenrySource) -> QueryPoint {
+pub(in crate::cyanide_leach) fn henry_context(source: &OxygenHenrySource) -> QueryPoint {
     let mut point = QueryPoint::new();
     for (axis, value) in source.point().axes() {
         if axis != TEMPERATURE_AXIS {

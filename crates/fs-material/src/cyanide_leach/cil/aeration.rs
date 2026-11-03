@@ -35,6 +35,8 @@ pub struct AeratedCilAdvance {
     pub cil: CilAdvance,
     pub oxygen_partial_pressure: Pressure,
     pub oxygen_saturation: Amount,
+    /// Pinned measured-Hcp receipt at the actual held temperature, when selected.
+    pub henry_answer: Option<fs_matdb::MaterialAnswer>,
     pub interval_oxygen_in: Amount,
     pub interval_oxygen_out: Amount,
     pub cumulative_oxygen_in: Amount,
@@ -56,6 +58,8 @@ pub struct AeratedCilDoseReceipt {
     pub cil: CilReagentDoseReceipt,
     pub oxygen_partial_pressure: Pressure,
     pub oxygen_saturation: Amount,
+    /// Original measured-Hcp query at the actual post-dose aqueous temperature.
+    pub henry_answer: Option<fs_matdb::MaterialAnswer>,
     pub transfer_conditions: QueryPoint,
     transfer: Arc<OxygenTransfer>,
 }
@@ -77,7 +81,7 @@ impl AeratedCarbonInLeachBatch {
                 && closed.state.solution.gold_dissolved.value() == 0.0,
             "aerated CIL attachment requires a fresh zero-progress bath",
         )?;
-        let external_gas = transfer.solubility().gas();
+        let external_gas = transfer.external_gas();
         let chemical = &closed.layout.leach;
         let model = &chemical.model;
         ensure(
@@ -85,22 +89,22 @@ impl AeratedCarbonInLeachBatch {
                 family
                     .species()
                     .iter()
-                    .all(|species| species != external_gas)
+                    .all(|species| species.as_str() != external_gas)
             }) && chemical
                 .charge
                 .spectators
                 .iter()
-                .all(|ion| &ion.species != external_gas)
+                .all(|ion| ion.species.as_str() != external_gas)
                 && chemical.competition.as_ref().is_none_or(|metals| {
                     metals.model.families().iter().all(|family| {
                         family
                             .species()
                             .iter()
-                            .all(|species| species != external_gas)
+                            .all(|species| species.as_str() != external_gas)
                     })
                 })
-                && closed.layout.pair.counterion() != external_gas
-                && closed.layout.pair.adsorbed_pair() != external_gas,
+                && closed.layout.pair.counterion().as_str() != external_gas
+                && closed.layout.pair.adsorbed_pair().as_str() != external_gas,
             "external oxygen cannot also belong to the retained liquid or sorbed chemistry",
         )?;
         ensure(
@@ -112,14 +116,8 @@ impl AeratedCarbonInLeachBatch {
                 }),
             "gas pressure and saturation belong to the transfer source",
         )?;
-        let gas = transfer.solubility().standard();
         let water = model.chemistry.water().standard();
-        ensure(
-            gas.temperature() == water.temperature()
-                && gas.reference_pressure() == water.reference_pressure()
-                && gas.reference_axis() == water.reference_axis(),
-            "gas and aqueous sources need identical temperature and reference conventions",
-        )?;
+        transfer.admit_chemistry(water)?;
         let aqueous = chemical
             .competition
             .as_ref()
@@ -134,7 +132,7 @@ impl AeratedCarbonInLeachBatch {
                 .chain([
                     model.reaction.clone(),
                     closed.layout.pair.reaction().clone(),
-                    transfer.solubility().reaction().clone(),
+                    transfer.reaction()?,
                 ])
                 .collect(),
         )
@@ -250,14 +248,12 @@ impl AeratedCarbonInLeachBatch {
         let mut work = dosing::work(maximum_work, &mut cancelled)?;
         let next =
             reagent_feed::prepare_addition(&self.batch, reagent, delivered, true, &mut work)?;
-        let saturation = self
-            .transfer
-            .solubility()
-            .equilibrium_aqueous_amount(
-                oxygen_partial_pressure,
-                next.layout.leach.charge.amount_at_unit_activity,
-            )
-            .map_err(CyanidationError::from)?;
+        let (saturation, henry_answer) = self.transfer.equilibrium_saturation(
+            oxygen_partial_pressure,
+            next.layout.leach.charge.amount_at_unit_activity,
+            &next.state.solution.conditions,
+            transfer_conditions,
+        )?;
         self.transfer
             .validate_extras(&next.layout.leach.conditions, transfer_conditions)?;
         let boundary = Boundary {
@@ -274,6 +270,7 @@ impl AeratedCarbonInLeachBatch {
             cil,
             oxygen_partial_pressure,
             oxygen_saturation: saturation,
+            henry_answer,
             transfer_conditions: actual_transfer_conditions,
             transfer: self.transfer.clone(),
         };
@@ -302,14 +299,12 @@ impl AeratedCarbonInLeachBatch {
             duration.value() == 0.0 || end > start,
             "aerated CIL duration is below clock resolution",
         )?;
-        let saturation = self
-            .transfer
-            .solubility()
-            .equilibrium_aqueous_amount(
-                oxygen_partial_pressure,
-                self.batch.layout.leach.charge.amount_at_unit_activity,
-            )
-            .map_err(CyanidationError::from)?;
+        let (saturation, henry_answer) = self.transfer.equilibrium_saturation(
+            oxygen_partial_pressure,
+            self.batch.layout.leach.charge.amount_at_unit_activity,
+            &self.batch.state.solution.conditions,
+            transfer_conditions,
+        )?;
         self.transfer
             .validate_extras(&self.batch.layout.leach.conditions, transfer_conditions)?;
         check_clock(&self.batch.layout.leach.model.source, end)?;
@@ -462,6 +457,7 @@ impl AeratedCarbonInLeachBatch {
             cil,
             oxygen_partial_pressure,
             oxygen_saturation: saturation,
+            henry_answer,
             interval_oxygen_in: Amount::new(current.inward),
             interval_oxygen_out: Amount::new(current.outward),
             cumulative_oxygen_in: Amount::new(oxygen_in),
