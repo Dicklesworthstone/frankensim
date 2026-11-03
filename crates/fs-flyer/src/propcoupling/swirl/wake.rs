@@ -1,4 +1,4 @@
-//! Steady annular angular-momentum transport to downstream lifting surfaces.
+//! Steady annular mass/angular-momentum transport to downstream lifting surfaces.
 //!
 //! This explicitly selected engineering model transports each accepted native
 //! blade torque Q_i through a fixed cylindrical annulus: L_i=Q_i/(rho U A_i),
@@ -22,6 +22,11 @@
 //! deleting angular momentum at a cutoff. Upstream/lateral/hub samples are zero.
 //! Receiving disks intersecting another wake refuse: the native axial rotor
 //! API cannot consume the incident angular profile or predict swirl recovery.
+//!
+//! The opt-in MaterialStreamtubes mode replaces downstream axial and angular
+//! wash with per-native-annulus mass/torque transport and continuity-driven
+//! radial velocity. It retains the upstream axial model. See streamtube for
+//! its explicit fixed hub, pressure/exterior-flow and source-field limits.
 
 use super::{
     Controls, CoupledSwirlStep, DiskAxes, IncidentInflow, InfluenceOperator, Panel,
@@ -31,6 +36,21 @@ use super::{
 use fs_blake3::hash_domain;
 use fs_ga::Vec3;
 use fs_math::det;
+
+#[path = "wake/streamtube.rs"]
+mod streamtube;
+pub use streamtube::MaterialAnnulus;
+
+/// Explicit downstream source-field closure. Historical presets keep their
+/// original axial model; even this angular-wake API is opt-in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WakeTransport {
+    #[default]
+    FixedCylinder,
+    /// Preserve each native annulus's disk mass flux and signed torque while
+    /// resolving axial development and radial contraction/expansion.
+    MaterialStreamtubes,
+}
 
 fn vec(v: [f64; 3]) -> Vec3 {
     Vec3::new(v[0], v[1], v[2])
@@ -127,12 +147,14 @@ impl Annulus {
     }
 }
 
-/// A cross section of the declared fixed-cylinder projection.
+/// Aggregate fluxes of the explicitly selected annular source-field closure.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CrossSection {
+    /// Uniform speed in FixedCylinder; area-weighted mean in MaterialStreamtubes.
+    /// Use material_annuli for the actual radial speed distribution.
     pub axial_speed_mps: f64,
-    /// rho U times the annular area; varying with distance is the disclosed
-    /// continuity defect of the fixed-cylinder axial approximation [kg/s].
+    /// Total annular mass flux [kg/s]. Constant in MaterialStreamtubes; varying
+    /// with distance is the disclosed FixedCylinder continuity defect.
     pub mass_flux_kg_s: f64,
     /// Signed angular momentum per second about the positive thrust axis.
     pub angular_momentum_flux_nm: f64,
@@ -156,6 +178,7 @@ pub struct AnnularWake {
     disk_induction_mps: f64,
     cells: Vec<Annulus>,
     maximum_power_defect_w: f64,
+    streamtubes: Option<streamtube::Streamtubes>,
 }
 impl AnnularWake {
     #[allow(clippy::too_many_arguments)]
@@ -169,6 +192,7 @@ impl AnnularWake {
         axial: f64,
         induction: f64,
         controls: WakeControls,
+        transport: WakeTransport,
     ) -> Result<Self, Refusal> {
         let mut cells = Vec::with_capacity(rotor.stations.len());
         for (i, station) in solution.stations.iter().enumerate() {
@@ -200,7 +224,14 @@ impl AnnularWake {
             disk_induction_mps: induction,
             cells,
             maximum_power_defect_w: 0.0,
+            streamtubes: None,
         };
+        if transport == WakeTransport::MaterialStreamtubes {
+            let tubes = streamtube::Streamtubes::new(&wake, solution, controls)?;
+            wake.maximum_power_defect_w = tubes.maximum_power_defect_w();
+            wake.streamtubes = Some(tubes);
+            return Ok(wake);
+        }
         // Each resolved cell power is C_i/U. Sum |C_i/U-P_i| is convex in
         // 1/U, so checking both monotone window endpoints bounds its interior.
         let near = wake.cross_section(0.0)?;
@@ -226,6 +257,33 @@ impl AnnularWake {
     pub fn annuli(&self) -> &[Annulus] {
         &self.cells
     }
+    /// The selected immutable source-field physics.
+    #[must_use]
+    pub fn transport(&self) -> WakeTransport {
+        if self.streamtubes.is_some() {
+            WakeTransport::MaterialStreamtubes
+        } else {
+            WakeTransport::FixedCylinder
+        }
+    }
+
+    /// Actual material annuli, radial interface slopes and kinetic transports.
+    /// Original disk annuli remain available through annuli().
+    ///
+    /// # Errors
+    /// Refuses for FixedCylinder, invalid distance or unrepresentable geometry.
+    pub fn material_annuli(&self, distance_m: f64) -> Result<Vec<MaterialAnnulus>, Refusal> {
+        self.streamtubes
+            .as_ref()
+            .ok_or_else(|| {
+                reject(
+                    "swirl-wake-transport-mismatch",
+                    "select MaterialStreamtubes",
+                )
+            })?
+            .material_annuli(self, distance_m)
+    }
+
     /// Upper bound over the complete admitted observation window [W].
     #[must_use]
     pub fn maximum_power_defect_w(&self) -> f64 {
@@ -238,6 +296,9 @@ impl AnnularWake {
     /// # Errors
     /// Nonfinite/out-of-window distance, nonpositive throughflow or overflow.
     pub fn cross_section(&self, distance_m: f64) -> Result<CrossSection, Refusal> {
+        if let Some(tubes) = &self.streamtubes {
+            return tubes.cross_section(self, distance_m);
+        }
         if !distance_m.is_finite() || distance_m < 0.0 || distance_m > 2.0 * self.radius_m {
             return Err(reject(
                 "swirl-wake-outside-domain",
@@ -292,13 +353,18 @@ impl AnnularWake {
         Ok(axial)
     }
 
-    /// Increment to MATERIAL-RELATIVE wing velocity, opposite fluid swirl.
+    /// Increment to MATERIAL-RELATIVE wing velocity. FixedCylinder supplies
+    /// swirl; MaterialStreamtubes supplies its complete downstream induced
+    /// axial, radial and swirl velocity. Radial/swirl signs oppose the fluid.
     /// Positive blade spin sends fluid along axis cross radius. Handedness and
     /// signed windmilling torque are applied once each.
     ///
     /// # Errors
     /// Nonfinite geometry; an in-annulus point on the disk or at/beyond 2R.
     pub fn relative_velocity_at(&self, point_m: [f64; 3]) -> Result<[f64; 3], Refusal> {
+        if let Some(tubes) = &self.streamtubes {
+            return tubes.relative_velocity_at(self, point_m);
+        }
         if !point_m.into_iter().all(f64::is_finite) {
             return Err(reject("swirl-wake-invalid", "nonfinite sample point"));
         }
@@ -349,10 +415,15 @@ impl AnnularWake {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoupledWakeStep {
     pub solution: CoupledSwirlStep,
-    /// Fields from the SAME accepted native rotor states. Their samples differ
-    /// from the used velocities below by at most the reported field residual.
+    /// Fields from the SAME accepted native rotor states. The reported field
+    /// residual compares their desired contribution with the actual accepted
+    /// force velocity, including material mode's legacy-wash replacement.
     pub wakes: [AnnularWake; 2],
-    /// Exact total swirl increments passed to the accepted nonlinear wing solve.
+    /// Exact numerical velocity correction passed to the inner wing solve.
+    /// FixedCylinder adds only swirl. MaterialStreamtubes also replaces the
+    /// actual downstream legacy wash with axial/radial streamtube transport.
+    /// The historical field name is retained; the correction accessor below
+    /// names its complete meaning. No second authoritative velocity is stored.
     pub used_strip_swirl_velocity_mps: Vec<[f64; 3]>,
     pub field_evaluations: u32,
     /// Maximum Euclidean used-versus-predicted field discrepancy [m/s].
@@ -363,9 +434,17 @@ pub struct CoupledWakeStep {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WakeWarmStart {
     pub rotor: WarmStart,
+    /// Numerical correction seed; see CoupledWakeStep::strip_velocity_correction_mps.
     pub strip_swirl_velocity_mps: Vec<[f64; 3]>,
 }
 impl CoupledWakeStep {
+    /// The exact all-component correction used by the accepted inner solve.
+    /// Complete force velocities remain in solution.coupled.strip_velocity_mps.
+    #[must_use]
+    pub fn strip_velocity_correction_mps(&self) -> &[[f64; 3]] {
+        &self.used_strip_swirl_velocity_mps
+    }
+
     #[must_use]
     pub fn warm_start(&self) -> WakeWarmStart {
         WakeWarmStart {
@@ -429,6 +508,56 @@ pub fn coupled_step(
     warm: Option<&WakeWarmStart>,
     incident: IncidentInflow<'_>,
 ) -> Result<CoupledWakeStep, Refusal> {
+    coupled_step_with_transport(
+        WakeTransport::FixedCylinder,
+        axes,
+        spin_sign,
+        op,
+        panels,
+        strips,
+        closure,
+        frames,
+        rotor,
+        disks,
+        freestream,
+        rho,
+        spec,
+        native,
+        controls,
+        warm,
+        incident,
+    )
+}
+
+/// Select source-field physics while sharing the same native nested iteration.
+///
+/// MaterialStreamtubes removes the ACTUALLY evaluated downstream legacy wash
+/// before adding its full native-annulus field. Original upstream wash remains.
+/// Rejected outer trials never become new native branch anchors.
+///
+/// # Errors
+/// The same admission, source-window, energy-budget and convergence refusals as
+/// coupled_step, including expanded wake/receiver-disk overlap.
+#[allow(clippy::too_many_arguments)]
+pub fn coupled_step_with_transport(
+    transport: WakeTransport,
+    axes: DiskAxes,
+    spin_sign: [f64; 2],
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    closure: SectionClosure<'_>,
+    frames: Option<&[SectionFrame]>,
+    rotor: &Rotor,
+    disks: &[PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    spec: &PropCouplingSolverSpec,
+    native: Controls,
+    controls: WakeControls,
+    warm: Option<&WakeWarmStart>,
+    incident: IncidentInflow<'_>,
+) -> Result<CoupledWakeStep, Refusal> {
     controls.admit()?;
     if !spin_sign.into_iter().all(|v| v == -1.0 || v == 1.0)
         || incident.strip_velocity_mps.len() != strips.len()
@@ -463,6 +592,26 @@ pub fn coupled_step(
             array((vec(panel.a) + vec(panel.b)).scale(0.5))
         })
         .collect();
+    // Upstream axial wash retains its original owner. Prepare these factors
+    // once; the private callback returns the actual accepted x, never G(x).
+    let upstream = if transport == WakeTransport::MaterialStreamtubes {
+        let centers = [disks[0].center_m, disks[1].center_m];
+        let directions = axes.directions();
+        points
+            .iter()
+            .map(|&point| {
+                let mut factors = axes.wash_factors(point, centers, rotor.radius_m)?;
+                for k in 0..2 {
+                    if (vec(point) - vec(centers[k])).dot(vec(directions[k])) <= 0.0 {
+                        factors[k] = 0.0;
+                    }
+                }
+                Ok(factors)
+            })
+            .collect::<Result<Vec<_>, Refusal>>()?
+    } else {
+        Vec::new()
+    };
     let mut used = warm.map_or_else(
         || vec![[0.0; 3]; strips.len()],
         |w| w.strip_swirl_velocity_mps.clone(),
@@ -475,7 +624,7 @@ pub fn coupled_step(
             .zip(&used)
             .map(|(&v, &u)| array(vec(v) + vec(u)))
             .collect();
-        let (mut solution, axial) = coupled_impl(
+        let (mut solution, axial, applied_wash) = coupled_impl(
             Some(axes),
             op,
             panels,
@@ -506,12 +655,33 @@ pub fn coupled_step(
                 axial[k],
                 solution.coupled.w_slip[k],
                 controls,
+                transport,
             )
         };
         let wakes = [make(0)?, make(1)?];
+        if transport == WakeTransport::MaterialStreamtubes {
+            for k in 0..2 {
+                let offset = vec(disks[1 - k].center_m) - vec(disks[k].center_m);
+                let axial = offset.dot(vec(directions[k]));
+                let radial = (offset - vec(directions[k]).scale(axial)).norm();
+                let depth =
+                    rotor.radius_m * vec(directions[k]).cross(vec(directions[1 - k])).norm();
+                let radius = wakes[k]
+                    .streamtubes
+                    .as_ref()
+                    .expect("selected material mode")
+                    .maximum_radius_m();
+                if radial < radius + rotor.radius_m && -axial + depth >= 0.0 {
+                    return Err(reject(
+                        "swirl-wake-disk-interaction",
+                        "receiving disk may intersect an expanded material streamtube",
+                    ));
+                }
+            }
+        }
         let mut predicted = Vec::with_capacity(points.len());
         last_residual = 0.0;
-        for (&point, &current) in points.iter().zip(&used) {
+        for (i, (&point, &current)) in points.iter().zip(&used).enumerate() {
             let left = vec(wakes[0].relative_velocity_at(point)?);
             let right = vec(wakes[1].relative_velocity_at(point)?);
             if left.norm() > 0.0 && right.norm() > 0.0 {
@@ -520,7 +690,17 @@ pub fn coupled_step(
                     "overlapping angular source fields require a wake-mixing model",
                 ));
             }
-            let next = left + right;
+            let mut next = left + right;
+            if transport == WakeTransport::MaterialStreamtubes {
+                let actual = solution
+                    .coupled
+                    .strip_velocity_mps
+                    .as_ref()
+                    .expect("native coupling retains accepted force velocities")[i];
+                let legacy = vec(actual) - vec(velocity[i]);
+                let retained_upstream = axes.velocity([0.0; 3], upstream[i], applied_wash);
+                next = next + vec(retained_upstream) - legacy;
+            }
             last_residual = last_residual.max((next - vec(current)).norm());
             predicted.push(array(next));
         }
@@ -538,7 +718,14 @@ pub fn coupled_step(
                 identity.extend_from_slice(&value.to_bits().to_le_bytes());
             }
             solution.coupled.spec_digest = hash_domain(
-                "org.frankensim.fs-flyer.torque-transport-wake.v1",
+                match transport {
+                    WakeTransport::FixedCylinder => {
+                        "org.frankensim.fs-flyer.torque-transport-wake.v1"
+                    }
+                    WakeTransport::MaterialStreamtubes => {
+                        "org.frankensim.fs-flyer.material-streamtube-wake.v1"
+                    }
+                },
                 &identity,
             )
             .to_hex();
@@ -600,6 +787,7 @@ mod projection_tests {
             disk_induction_mps: 0.0,
             cells,
             maximum_power_defect_w: 0.0,
+            streamtubes: None,
         }
     }
 

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::propcoupling::spatial::DiskAxes;
 use crate::propcoupling::swirl::wake::{
-    self as coupling, CoupledWakeStep, WakeControls, WakeWarmStart,
+    self as coupling, CoupledWakeStep, WakeControls, WakeTransport, WakeWarmStart,
 };
 use fs_ga::Vec3;
 
@@ -16,7 +16,9 @@ impl AerodynamicSolution for CoupledWakeStep {
     }
 }
 
-/// Opt-in fixed-cylinder angular transport, with admitted energy discrepancy.
+/// Opt-in downstream angular transport, with admitted energy discrepancy.
+/// Select material annuli to include native radial loading and continuity-driven
+/// contraction/expansion; the fixed-cylinder projection remains the default.
 /// Reuses the same actual stage atmosphere, prepared wing operator, section
 /// frames, carrier wrench and signed shaft ports as ordinary geared propulsion.
 /// See the coupling module for observation-window and noninteracting-disk limits.
@@ -24,6 +26,7 @@ pub struct WakePropulsion<'p, 'a, const N: usize> {
     propulsion: &'p GearedPropulsion<'a, N>,
     native: Controls,
     wake: WakeControls,
+    transport: WakeTransport,
 }
 impl<'p, 'a, const N: usize> WakePropulsion<'p, 'a, N> {
     #[must_use]
@@ -36,7 +39,15 @@ impl<'p, 'a, const N: usize> WakePropulsion<'p, 'a, N> {
             propulsion,
             native,
             wake,
+            transport: WakeTransport::FixedCylinder,
         }
+    }
+
+    /// Select the source-field physics without replacing the mechanical owner.
+    #[must_use]
+    pub fn with_transport(mut self, transport: WakeTransport) -> Self {
+        self.transport = transport;
+        self
     }
 
     /// Evaluate real downstream angular wash before nonlinear circulation and
@@ -65,7 +76,8 @@ impl<'p, 'a, const N: usize> WakePropulsion<'p, 'a, N> {
             mount.handedness.sign() * alignment.signum()
         });
         let result = p.evaluate_with(state, inputs, wind_world, |stage| {
-            coupling::coupled_step(
+            coupling::coupled_step_with_transport(
+                self.transport,
                 axes,
                 spin,
                 stage.op,

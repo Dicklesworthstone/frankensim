@@ -87,7 +87,7 @@ pub fn coupled_step(
         axes, op, panels, strips, closure, None, rotor, disks, freestream, rho, spec, controls,
         warm, incident,
     )
-    .map(|(step, _)| step)
+    .map(|(step, _, _)| step)
 }
 
 /// Native axial/angular rotor momentum coupled to explicit local wing frames.
@@ -133,7 +133,7 @@ pub fn coupled_step_with_section_frames(
         warm,
         incident,
     )
-    .map(|(step, _)| step)
+    .map(|(step, _, _)| step)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -152,7 +152,7 @@ fn coupled_impl(
     controls: Controls,
     warm: Option<&WarmStart>,
     incident: IncidentInflow<'_>,
-) -> Result<(CoupledSwirlStep, [f64; 2]), Refusal> {
+) -> Result<(CoupledSwirlStep, [f64; 2], [f64; 2]), Refusal> {
     if warm.is_some_and(|w| !w.w_slip.into_iter().all(f64::is_finite)) {
         return Err(Refusal {
             code: "swirl-coupling-invalid",
@@ -162,6 +162,7 @@ fn coupled_impl(
     }
     let mut rotors = [None, None];
     let mut axial_samples = [0.0; 2];
+    let mut applied_wash = [0.0; 2];
     let mut coupled = coupled_step_with_rotors(
         op,
         panels,
@@ -176,7 +177,7 @@ fn coupled_impl(
         Some(incident),
         axes,
         frames,
-        |k, axial, omega| {
+        |k, axial, omega, evaluated_wash| {
             let solution = rotor_swirl::bemt_solve(
                 rotor,
                 rho,
@@ -196,6 +197,7 @@ fn coupled_impl(
                 power: solution.power,
             };
             axial_samples[k] = axial;
+            applied_wash = evaluated_wash;
             rotors[k] = Some(solution);
             Ok(loads)
         },
@@ -220,5 +222,6 @@ fn coupled_impl(
             rotors: [left, right],
         },
         axial_samples,
+        applied_wash,
     ))
 }

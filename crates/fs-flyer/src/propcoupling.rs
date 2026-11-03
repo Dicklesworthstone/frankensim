@@ -332,7 +332,7 @@ fn coupled_step_impl(
         incident,
         spatial,
         section_frames,
-        |_, axial, omega| {
+        |_, axial, omega, _applied_wash| {
             let sol = bemt_solve(rotor, rho, axial, omega).map_err(map_err_a)?;
             Ok(RotorLoads {
                 thrust_n: sol.thrust_n,
@@ -366,7 +366,7 @@ fn coupled_step_with_rotors<P: Copy>(
     incident: Option<IncidentInflow<'_>>,
     spatial: Option<spatial::DiskAxes>,
     section_frames: Option<&[SectionFrame]>,
-    mut rotor_solve: impl FnMut(usize, f64, f64) -> Result<RotorLoads<P>, Refusal>,
+    mut rotor_solve: impl FnMut(usize, f64, f64, [f64; 2]) -> Result<RotorLoads<P>, Refusal>,
 ) -> Result<CoupledStep<P>, Refusal> {
     let map_err = |e: fs_wing::Refusal| Refusal {
         code: e.code,
@@ -536,7 +536,8 @@ fn coupled_step_with_rotors<P: Copy>(
                     ],
                 });
             }
-            let sol = rotor_solve(k, v_disk, disks[k].omega_rad_s)?;
+            // The consumer may retain the actually evaluated wash, distinct from G(x).
+            let sol = rotor_solve(k, v_disk, disks[k].omega_rad_s, *x)?;
             thrust[k] = sol.thrust_n;
             torque[k] = sol.torque_nm;
             power[k] = Some(sol.power);

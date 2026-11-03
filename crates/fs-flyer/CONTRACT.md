@@ -2019,3 +2019,61 @@ unmodified existing swirl/geared/spatial/coupling batteries pass another
 fresh native airscrew and Lie/gyrostat builds, and original numerical kernels;
 the cached solver omits only unused runtime `Cx` wrappers. They are not a
 full workspace Cargo, cross-platform or real-time gate.
+
+## Material annular wake transport into flight dynamics
+
+The opt-in `WakeTransport::MaterialStreamtubes`, selected through
+`WakePropulsion::with_transport` or `coupled_step_with_transport`, replaces
+downstream axial and angular wash with the actual native station distribution.
+For each original disk annulus, `m_i = rho*(V+a_i)*A_i` and
+`ell_i = Q_i/m_i` remain constant. At downstream distance s the prescribed
+axial development is `U_i = V + (1+s/sqrt(s*s+R*R))*a_i`, and its area is
+`m_i/(rho*U_i)`. Adjacent areas build contiguous material annuli around an
+explicitly unloaded fixed-radius hub. Powered annuli contract; braking annuli
+can expand. Original signed blade torque and Prandtl losses are never rescaled.
+
+Changing area also requires radial fluid motion. For inner squared radius b,
+the same geometry gives `v_r = (U*b' - U'*(r*r-b))/(2*r)`. This satisfies
+cylindrical continuity inside every source annulus and
+`v_r/U = dr_boundary/ds` on both material interfaces. Discontinuous axial
+velocities may therefore represent tangential sheets without exchanging mass
+between adjacent annuli. The material-relative aerodynamic increment is
+positive along the thrust axis for positive axial induction and opposite the
+physical radial and azimuthal velocities.
+
+The original inner coupling still owns native wing/rotor solves and its branch
+seeds. A small private callback retains the actually evaluated axial wash x,
+distinct from its next predictor G(x). The outer field correction removes the
+actual downstream legacy wash returned with the accepted circulation, retains
+original upstream wash, and inserts the complete material-streamtube field
+once. The accepted force velocities remain in the original coupled result.
+The published `used_strip_swirl_velocity_mps` and warm-start field names are
+retained; in material mode they hold the all-component numerical correction.
+`strip_velocity_correction_mps()` exposes that meaning without another mutable
+velocity owner. Both initial and midpoint geared flight stages use this path.
+
+`material_annuli(s)` returns the physical radii, interface slopes, mass and
+angular fluxes, resolved swirl power, radial kinetic power and signed axial
+kinetic transport above the native incident speed. Radial kinetic power uses
+a stable positive completed-square analytic annular integral; narrow cells
+avoid subtracting nearly equal logarithms. `cross_section(s)` reports constant
+total material mass flux and native signed angular momentum flux, with its
+axial speed interpreted as an area-weighted mean. The fixed-cylinder default
+keeps its original numerical behavior and uniform-speed interpretation.
+
+Power admission bounds every cell's resolved swirl discrepancy over the
+complete 0..2R interval. Independent positive area/velocity bounds remain
+conservative when annuli have mixed signed induction and the cumulative
+radius is nonmonotone; opposite errors cannot cancel. The same conservative
+outer-radius bound rejects receiver disks reached by an expanding wake.
+Unsupported source overlap, reversed throughflow, unresolved annular width,
+window escape and nonconvergence still refuse.
+
+This is a steady source-streamtube closure, not a radial-pressure/Euler solve,
+a solution for the surrounding bypass flow, a turbulent mixing/entrainment
+law, or an exhaust reconstructed after a wing extracts momentum. The model
+does not claim complete fluid/body energy or linear-momentum closure.
+Resolved meridional kinetic transport is exposed for that future pressure/
+energy closure and is never credited as heat or removed from rotor torque.
+The original finite observation window and disjoint source-disk restrictions
+remain explicit.

@@ -620,3 +620,6 @@ fn windmilling_reverses_angular_transport_and_accelerates_the_real_shaft() {
         }
     }
 }
+
+#[path = "swirl_wake/streamtubes.rs"]
+mod streamtubes;
