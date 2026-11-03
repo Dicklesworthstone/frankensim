@@ -261,7 +261,8 @@ fn wall_features(domain: &VoxelDomain, wall: [bool; 6], mut emit: impl FnMut(f64
                     domain.face_coord(a, n[a]) + domain.width(a, n[a] - 1)
                 } else {
                     domain.face_coord(a, i - 1)
-                })
+                }
+            })
             .collect()
     });
     let position: [Vec<f64>; 3] =
