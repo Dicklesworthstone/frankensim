@@ -9,6 +9,9 @@ use fs_lbm::material::free_surface::wetting::{
     FreeSurfaceWettingControls, MaterialFreeSurfaceWetting3,
 };
 
+#[path = "wetting2.rs"]
+mod dense;
+
 fn controls() -> FreeSurfaceWettingControls {
     FreeSurfaceWettingControls {
         pinning_speed_m_s: 0.0,

@@ -1,13 +1,19 @@
-//! Geometric equilibrium wetting for the existing D2Q9 curvature operator.
+//! Geometric planar wetting for the existing D2Q9 curvature operator.
 //!
 //! With n_w directed from solid into liquid and n=-grad(phi)/|grad(phi)|,
 //! n.n_w=cos(theta) gives dphi/dn_w=-|grad_t(phi)| cot(theta). Extend the
 //! frozen smoothed fill through the planar wall; do not clip ghost values,
 //! which would change the prescribed derivative. No tracked mass is added.
 //! This is the dense counterpart of the existing planar D3Q19 closure, not
-//! a height-function boundary scheme or a calibrated moving-contact-line law.
+//! a height-function boundary scheme. The material owner supplies the optional
+//! source-pinned advancing/receding field and its explicit rate-law limits.
 
 use super::{Cell, ContactModel, FreeSurface};
+use std::collections::BTreeMap;
+use fs_exec::CancelGate;
+
+mod dynamic;
+pub(crate) use dynamic::WallFill2;
 
 /// A complete, stationary outer wall row/column in the dense D2Q9 lattice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +47,10 @@ pub enum ContactAngleError2 {
     InvalidAngle,
     /// The selected face is periodic, incomplete, or lacks its inward stencil.
     InvalidPlanarWall,
+    /// A dynamic field must cover exactly the admitted wall-adjacent row.
+    InvalidField,
+    /// Explicit cancellation before publishing a candidate field.
+    Cancelled,
 }
 impl core::fmt::Display for ContactAngleError2 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -54,6 +64,14 @@ pub(super) struct PlanarContactAngle2 {
     pub(super) wall: PlanarWall2,
     angle_radians: f64,
     cotangent: f64,
+}
+
+// Direct tangential indexing keeps the hot curvature/smoothing stencil O(1).
+// Corner entries are absent; the other intersecting wall retains its closure.
+#[derive(Clone)]
+pub(super) struct PlanarContactField2 {
+    pub(super) wall: PlanarWall2,
+    angles: Vec<Option<PlanarContactAngle2>>,
 }
 
 impl FreeSurface {
@@ -91,6 +109,7 @@ impl FreeSurface {
             angle_radians,
             cotangent,
         });
+        self.planar_contact_field = None;
         self.contact = ContactModel::Neutral;
         Ok(())
     }
@@ -137,7 +156,7 @@ impl FreeSurface {
     // samples from that average would bend an otherwise planar interface
     // before its curvature stencil even sees the prescribed angle.
     pub(super) fn planar_angle_ghost_in(&self, position: [i64; 2], fill: &[f64]) -> Option<f64> {
-        let contact = self.planar_contact?;
+        let contact = self.planar_contact_at(position)?;
         if contact.cotangent == 0.0 {
             return None;
         }
@@ -258,6 +277,46 @@ mod tests {
                     assert!(flow.curvature(p[0], p[1]).abs() < 2e-14);
                     assert_eq!(flow.grid.f, populations);
                     assert_eq!(flow.ledger_mass().to_bits(), mass.to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_geometry_tracks_fill_and_not_the_imposed_angle_field() {
+        let gate = CancelGate::new_clock_free();
+        for wall in [PlanarWall2::XMin, PlanarWall2::XMax, PlanarWall2::YMin, PlanarWall2::YMax] {
+            let mut flow = box_surface();
+            let axis = wall.axis();
+            let tangent = 1 - axis;
+            let theta = PI / 3.0;
+            let slope: f64 = 0.02;
+            let normal_slope = -slope * theta.cos() / theta.sin();
+            for y in 1..11 {
+                for x in 1..11 {
+                    let p = [x, y];
+                    let distance = if wall.upper() { 10 - p[axis] } else { p[axis] - 1 };
+                    let fill = 0.5 + slope * (p[tangent] as f64 - 6.0)
+                        + distance as f64 * normal_slope;
+                    let i = flow.grid.idx(x, y);
+                    flow.mass[i] = fill * flow.grid.f[i].iter().sum::<f64>();
+                }
+            }
+            let original = flow.planar_wall_fill(wall, 10, &gate).unwrap();
+            let mut p = [6; 2];
+            p[axis] = if wall.upper() { 10 } else { 1 };
+            assert!((original[&p].angle_radians - theta).abs() < 2e-14);
+            assert!((original[&p].tangent_gradient - slope).abs() < 2e-15);
+            for applied in [PI / 6.0, 5.0 * PI / 6.0] {
+                flow.set_planar_contact_field(wall,
+                    original.keys().map(|&p| (p, applied)).collect(), &gate).unwrap();
+                flow.refresh_fill(); // Actual ghost-dependent curvature cache.
+                let actual = flow.planar_wall_fill(wall, 10, &gate).unwrap();
+                for (p, before) in &original {
+                    let after = actual[p];
+                    assert_eq!(before.fill.to_bits(), after.fill.to_bits());
+                    assert_eq!(before.tangent_gradient.to_bits(), after.tangent_gradient.to_bits());
+                    assert_eq!(before.angle_radians.to_bits(), after.angle_radians.to_bits());
                 }
             }
         }

@@ -7983,6 +7983,36 @@ same-step buoyancy from solid heating, exact work-budget/source refusal, and
 joint SGS/solid energy accounting with constant-Cp specialization. They were
 syntax-checked; native execution was unavailable in the delivery environment.
 
+## Dense source-pinned moving wetting
+
+`MaterialFreeSurface2::with_dynamic_planar_wetting` binds the original ordered
+solid/liquid interface to one complete stationary X/Y wall. The existing dense
+curvature and capillary-pressure reconstruction consume a complete spatial
+angle field with direct O(1) tangential lookup. Advancing/receding endpoint
+selection, immutable source claims, speed dimensions, fixed source conditions,
+deadband and optional full-angle two-phase Cox law share their owner with sparse
+3-D and thermal wetting. Measured speed-dependent angle curves cannot also use
+Cox rate dependence; stationary receipts stay at zero speed for Cox predictions.
+
+Contact-line speed comes from consecutive accepted first-row VOF fields in
+physical m/s. A local tangential average preserves affine planes and takes
+O(wall cells) work. It is independent of imposed angle ghosts, so changing an
+angle cannot itself fabricate line motion. The geometric normal uses the next
+inward row. This first-cell/backward-time estimate drives the next native step;
+the deadband projects the geometric angle into the sourced interval without
+claiming exact pinning or calibrated slip. Bulk flow is isothermal, single-liquid
+and invariant along the missing dimension; mass remains kg per metre of depth.
+
+`MaterialFreeSurfaceWetting2::step_with_gate` works on a private native candidate
+and publishes populations, mass, carry, conversions, angle field and source
+receipts together. Source-domain exit, degenerate moving geometry, Cox limits
+and cancellation retain the last accepted state. Cancellation is polled around
+the dense clone/kernel and at each wall query; the original dense sweep is not
+internally interruptible, and retains its numerical panic semantics. No surface
+energy closure, heat partition, moving substrate or second-fluid momentum is
+invented. Constant-angle trajectories reproduce the original equilibrium ghost;
+zero surface tension leaves the angle field inactive in momentum.
+
 ## Finite-atmosphere EOS pressure driving free-surface momentum
 
 The opt-in `step_with_pressurized_finite_gas_environment` and

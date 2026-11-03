@@ -1,0 +1,178 @@
+//! Dense contact-line history using the same source and Cox law as sparse VOF.
+
+use super::super::wetting::{
+    CoxVoinovLaw, FreeSurfaceWettingControls, FreeSurfaceWettingError as Error,
+    FreeSurfaceWettingSample, WettingPhysics, checkpoint, contact_speed,
+};
+use super::{FreeSurface, MaterialFreeSurface2, PlanarWall2};
+use crate::freesurface::wetting::WallFill2;
+use fs_exec::CancelGate;
+use fs_matdb::InterfaceSystemCard;
+use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint};
+use std::collections::BTreeMap;
+
+/// Source-pinned advancing/receding adhesion on the actual dense D2Q9 wall.
+///
+/// Accepted wall-adjacent fill changes determine signed speed in m/s. The
+/// first-cell/backward-time estimate drives the next step's capillary ghosts.
+/// Pinned means projection into the sourced bracket, not exact immobilization.
+/// The existing single-liquid, isothermal, unit-depth flow remains the owner
+/// of populations, conversions and mass; no surface-energy/heat law is inferred.
+pub struct MaterialFreeSurfaceWetting2<'s, 'm> {
+    flow: MaterialFreeSurface2<'s>,
+    physics: WettingPhysics<'m>,
+    wall: PlanarWall2,
+    geometry: BTreeMap<[usize; 2], WallFill2>,
+    samples: BTreeMap<[usize; 2], FreeSurfaceWettingSample>,
+}
+
+impl<'s> MaterialFreeSurface2<'s> {
+    /// Attach one named solid/liquid interface and its original endpoint claims
+    /// to a complete stationary wall. Existing equilibrium/legacy wetting refuses.
+    /// The substrate is surface A; surface B must be this exact liquid identity.
+    /// Other source coordinates stay at the original liquid query point.
+    pub fn with_dynamic_planar_wetting<'m>(
+        mut self,
+        wall: PlanarWall2,
+        card: &'m InterfaceSystemCard,
+        selection: MaterialPropertySelection,
+        controls: FreeSurfaceWettingControls,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceWetting2<'s, 'm>, Error> {
+        checkpoint(gate)?;
+        if self.scaling.planar_wetting.is_some() || !self.lattice.admits_dynamic_planar_wetting() {
+            return Err(Error::Invalid(
+                "dynamic planar wetting requires otherwise neutral walls",
+            ));
+        }
+        let physics = WettingPhysics::try_new(&self.scaling, card, selection, controls, gate)?;
+        let geometry = self
+            .lattice
+            .planar_wall_fill(wall, controls.maximum_wall_cells, gate)?;
+        let mut samples = BTreeMap::new();
+        for (&p, current) in &geometry {
+            checkpoint(gate)?;
+            samples.insert(p, physics.sample(current.angle_radians, 0.0, None, gate)?);
+        }
+        install(&mut self.lattice, wall, &samples, gate)?;
+        checkpoint(gate)?;
+        Ok(MaterialFreeSurfaceWetting2 {
+            flow: self,
+            physics,
+            wall,
+            geometry,
+            samples,
+        })
+    }
+}
+
+impl MaterialFreeSurfaceWetting2<'_, '_> {
+    /// Apply the existing full-angle Cox hydrodynamic prediction to STATIC
+    /// source endpoints. Explicit microscopic/observation lengths, phase
+    /// viscosity ratio, low-Ca and angular bounds belong to `law`.
+    /// A measured speed-dependent endpoint curve refuses double rate counting.
+    pub fn with_cox_voinov(mut self, law: CoxVoinovLaw, gate: &CancelGate) -> Result<Self, Error> {
+        let physics = self
+            .physics
+            .with_cox_voinov(law, &self.flow.scaling, gate)?;
+        let mut samples = BTreeMap::new();
+        for (&p, current) in &self.geometry {
+            checkpoint(gate)?;
+            samples.insert(
+                p,
+                physics.sample(
+                    current.angle_radians,
+                    self.samples[&p].signed_speed_m_s,
+                    None,
+                    gate,
+                )?,
+            );
+        }
+        install(&mut self.flow.lattice, self.wall, &samples, gate)?;
+        checkpoint(gate)?;
+        self.physics = physics;
+        self.samples = samples;
+        Ok(self)
+    }
+
+    /// Actual physical-unit flow and immutable native state.
+    #[must_use]
+    pub const fn flow(&self) -> &MaterialFreeSurface2<'_> {
+        &self.flow
+    }
+
+    /// Original stationary endpoint binding; selected claims never reselect.
+    #[must_use]
+    pub const fn source(&self) -> &ResolvedInterfaceStatePoint {
+        &self.physics.source
+    }
+
+    /// Accepted speeds, next-step angles and original query receipts.
+    #[must_use]
+    pub const fn samples(&self) -> &BTreeMap<[usize; 2], FreeSurfaceWettingSample> {
+        &self.samples
+    }
+
+    /// Optional explicit hydrodynamic law with its cached angular integral.
+    #[must_use]
+    pub fn cox_voinov_law(&self) -> Option<&CoxVoinovLaw> {
+        self.physics.cox_voinov_law()
+    }
+
+    /// Transactional native momentum/mass step and contact-history refresh.
+    /// Material-domain, degenerate-geometry, Cox-limit or cancellation refusals
+    /// preserve all accepted populations, mass/carry, conversions and receipts.
+    /// Cancellation is checked around the dense clone/native sweep and at every
+    /// wall query; the existing dense kernel is not internally interruptible.
+    /// Its original numerical panic semantics are retained on the private copy.
+    pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), Error> {
+        checkpoint(gate)?;
+        let mut lattice = self.flow.lattice.clone();
+        checkpoint(gate)?;
+        lattice.step();
+        checkpoint(gate)?;
+        let geometry =
+            lattice.planar_wall_fill(self.wall, self.physics.controls.maximum_wall_cells, gate)?;
+        let mut samples = BTreeMap::new();
+        for (&p, current) in &geometry {
+            checkpoint(gate)?;
+            let previous = self.geometry.get(&p).ok_or(Error::Invalid(
+                "dense contact-line history topology changed",
+            ))?;
+            let speed = contact_speed(
+                current.fill - previous.fill,
+                current.tangent_gradient,
+                self.flow.scaling.cell_size_m(),
+                self.flow.scaling.timestep_s(),
+            )?;
+            samples.insert(
+                p,
+                self.physics
+                    .sample(current.angle_radians, speed, None, gate)?,
+            );
+        }
+        install(&mut lattice, self.wall, &samples, gate)?;
+        checkpoint(gate)?;
+        self.flow.lattice = lattice;
+        self.geometry = geometry;
+        self.samples = samples;
+        Ok(())
+    }
+}
+
+fn install(
+    lattice: &mut FreeSurface,
+    wall: PlanarWall2,
+    samples: &BTreeMap<[usize; 2], FreeSurfaceWettingSample>,
+    gate: &CancelGate,
+) -> Result<(), Error> {
+    lattice.set_planar_contact_field(
+        wall,
+        samples
+            .iter()
+            .map(|(&p, s)| (p, s.applied_angle_radians))
+            .collect(),
+        gate,
+    )?;
+    Ok(())
+}

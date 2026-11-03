@@ -79,6 +79,8 @@ pub enum FreeSurfaceWettingError {
     Material(MaterialStatePointError),
     Query(MatDbError),
     Flow(MaterialLbmError),
+    /// Dense planar geometry, complete-field admission or cancellation.
+    Planar2(crate::freesurface::ContactAngleError2),
     Invalid(&'static str),
 }
 
@@ -88,6 +90,7 @@ impl core::fmt::Display for FreeSurfaceWettingError {
             Self::Material(e) => write!(f, "free-surface wetting material: {e}"),
             Self::Query(e) => write!(f, "free-surface wetting query: {e}"),
             Self::Flow(e) => write!(f, "free-surface wetting: {e}"),
+            Self::Planar2(e) => write!(f, "free-surface wetting: {e}"),
             Self::Invalid(message) => write!(f, "free-surface wetting: {message}"),
         }
     }
@@ -106,6 +109,11 @@ impl From<MatDbError> for FreeSurfaceWettingError {
 impl From<crate::d3q19::freesurface3::FreeSurfaceError3> for FreeSurfaceWettingError {
     fn from(e: crate::d3q19::freesurface3::FreeSurfaceError3) -> Self {
         Self::Flow(e.into())
+    }
+}
+impl From<crate::freesurface::ContactAngleError2> for FreeSurfaceWettingError {
+    fn from(e: crate::freesurface::ContactAngleError2) -> Self {
+        Self::Planar2(e)
     }
 }
 
@@ -128,12 +136,19 @@ pub struct MaterialFreeSurfaceWetting3<'s, 'm> {
 // identical to the original isothermal closure.
 #[derive(Clone)]
 pub(super) struct WettingBinding<'m> {
-    card: &'m InterfaceSystemCard,
-    source: ResolvedInterfaceStatePoint,
+    physics: WettingPhysics<'m>,
     wall: PlanarWall3,
-    controls: FreeSurfaceWettingControls,
     geometry: BTreeMap<[usize; 3], WallFill3>,
     samples: BTreeMap<[usize; 3], FreeSurfaceWettingSample>,
+}
+
+// The original source selection and rate law are shared by dense 2-D, sparse
+// 3-D and thermal owners; only their native geometry/transport differs.
+#[derive(Clone)]
+pub(super) struct WettingPhysics<'m> {
+    card: &'m InterfaceSystemCard,
+    pub(super) source: ResolvedInterfaceStatePoint,
+    pub(super) controls: FreeSurfaceWettingControls,
     hydrodynamic: Option<HydrodynamicWetting>,
 }
 
@@ -170,6 +185,39 @@ impl<'m> WettingBinding<'m> {
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         checkpoint(gate)?;
+        if flow.scaling.planar_wetting.is_some() || !flow.lattice.admits_dynamic_planar_wetting() {
+            return Err(Error::Invalid(
+                "dynamic planar wetting requires otherwise neutral walls",
+            ));
+        }
+        let physics = WettingPhysics::try_new(&flow.scaling, card, selection, controls, gate)?;
+        let geometry = flow
+            .lattice
+            .planar_wall_fill(wall, controls.maximum_wall_cells, gate)?;
+        let mut candidate = Self {
+            physics,
+            wall,
+            geometry,
+            samples: BTreeMap::new(),
+        };
+        let samples = candidate.resolve_samples(
+            &candidate.geometry, None, &flow.scaling, None, gate,
+        )?;
+        checkpoint(gate)?;
+        candidate.samples = samples;
+        Ok(candidate)
+    }
+}
+
+impl<'m> WettingPhysics<'m> {
+    pub(super) fn try_new(
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        card: &'m InterfaceSystemCard,
+        selection: MaterialPropertySelection,
+        controls: FreeSurfaceWettingControls,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        checkpoint(gate)?;
         if !controls.pinning_speed_m_s.is_finite()
             || controls.pinning_speed_m_s < 0.0
             || controls.maximum_wall_cells == 0
@@ -179,12 +227,7 @@ impl<'m> WettingBinding<'m> {
                 "invalid speed deadband or bounded wall-cell budget",
             ));
         }
-        if flow.scaling.planar_wetting.is_some() || !flow.lattice.admits_dynamic_planar_wetting() {
-            return Err(Error::Invalid(
-                "dynamic planar wetting requires otherwise neutral walls",
-            ));
-        }
-        let liquid = flow.scaling.material.material();
+        let liquid = scaling.material.material();
         if &card.surface_b().material != liquid.material()
             || liquid
                 .query_point()
@@ -219,24 +262,13 @@ impl<'m> WettingBinding<'m> {
         let source = resolve_interface_state_point(card, &point, &requirements, selection)?;
         require_owned_axes(&source)?;
         bracket(&source)?;
-        let geometry = flow
-            .lattice
-            .planar_wall_fill(wall, controls.maximum_wall_cells, gate)?;
-        let mut candidate = Self {
+        checkpoint(gate)?;
+        Ok(Self {
             card,
             source,
-            wall,
             controls,
-            geometry,
-            samples: BTreeMap::new(),
             hydrodynamic: None,
-        };
-        let samples = candidate.resolve_samples(
-            &candidate.geometry, None, &flow.scaling, None, gate,
-        )?;
-        checkpoint(gate)?;
-        candidate.samples = samples;
-        Ok(candidate)
+        })
     }
 }
 
@@ -273,7 +305,7 @@ impl MaterialFreeSurfaceWetting3<'_, '_> {
     /// Original two-claim binding at stationary initialization.
     #[must_use]
     pub const fn source(&self) -> &ResolvedInterfaceStatePoint {
-        &self.binding.source
+        &self.binding.physics.source
     }
 
     /// Accepted endpoint queries and next-step angles by wall-cell coordinate.
@@ -298,6 +330,29 @@ impl MaterialFreeSurfaceWetting3<'_, '_> {
 }
 
 impl WettingBinding<'_> {
+    pub(super) fn cox_voinov_law(&self) -> Option<&CoxVoinovLaw> {
+        self.physics.cox_voinov_law()
+    }
+
+    pub(super) fn with_cox_voinov(
+        mut self,
+        law: CoxVoinovLaw,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        self.physics = self.physics.with_cox_voinov(law, scaling, gate)?;
+        let mut samples = BTreeMap::new();
+        for (&position, current) in &self.geometry {
+            checkpoint(gate)?;
+            let speed = self.samples[&position].signed_speed_m_s;
+            samples.insert(position, self.physics.sample(current.angle_radians, speed, None, gate)?);
+        }
+        self.samples = samples;
+        Ok(self)
+    }
+}
+
+impl WettingPhysics<'_> {
     pub(super) fn cox_voinov_law(&self) -> Option<&CoxVoinovLaw> {
         self.hydrodynamic.as_ref().map(|binding| &binding.law)
     }
@@ -341,16 +396,12 @@ impl WettingBinding<'_> {
             surface_tension_n_m,
             outer_gas: None,
         });
-        let mut samples = BTreeMap::new();
-        for (&position, current) in &self.geometry {
-            checkpoint(gate)?;
-            let speed = self.samples[&position].signed_speed_m_s;
-            samples.insert(position, self.sample(current, speed, None, gate)?);
-        }
-        self.samples = samples;
+        checkpoint(gate)?;
         Ok(self)
     }
+}
 
+impl WettingBinding<'_> {
     pub(super) fn with_cox_voinov_gas(
         self,
         controls: CoxVoinovControls,
@@ -365,7 +416,7 @@ impl WettingBinding<'_> {
         let law = CoxVoinovLaw::try_new_with_viscosity_ratio(controls, ratio, gate)?;
         let mut candidate = self.with_cox_voinov(law, scaling, gate)?;
         let source = Arc::new(gas.clone());
-        candidate.hydrodynamic.as_mut().expect("admitted Cox law").outer_gas = Some(source.clone());
+        candidate.physics.hydrodynamic.as_mut().expect("admitted Cox law").outer_gas = Some(source.clone());
         for sample in candidate.samples.values_mut() {
             checkpoint(gate)?;
             sample.outer_gas = Some(source.clone());
@@ -374,14 +425,14 @@ impl WettingBinding<'_> {
     }
 
     pub(super) fn outer_gas(&self) -> Option<&ResolvedThermochemicalGasState> {
-        self.hydrodynamic.as_ref().and_then(|binding| binding.outer_gas.as_deref())
+        self.physics.hydrodynamic.as_ref().and_then(|binding| binding.outer_gas.as_deref())
     }
 
     /// The finite-atmosphere timeline admits original transport sources before
     /// passing this prepared snapshot. Existing fixed-ratio bindings stay fixed.
     pub(super) fn at_prepared_outer_gas(&self, gas: &ResolvedThermochemicalGasState) -> Self {
         let mut candidate = self.clone();
-        if let Some(binding) = &mut candidate.hydrodynamic
+        if let Some(binding) = &mut candidate.physics.hydrodynamic
             && binding.outer_gas.is_some()
             && binding.outer_gas.as_deref() != Some(gas)
         {
@@ -391,7 +442,7 @@ impl WettingBinding<'_> {
     }
 
     pub(super) fn source(&self) -> &ResolvedInterfaceStatePoint {
-        &self.source
+        &self.physics.source
     }
 
     pub(super) fn samples(&self) -> &BTreeMap<[usize; 3], FreeSurfaceWettingSample> {
@@ -418,7 +469,7 @@ impl WettingBinding<'_> {
         temperatures: Option<(&str, &BTreeMap<[usize; 3], WettingThermalPoint>)>,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
-        let geometry = lattice.planar_wall_fill(self.wall, self.controls.maximum_wall_cells, gate)?;
+        let geometry = lattice.planar_wall_fill(self.wall, self.physics.controls.maximum_wall_cells, gate)?;
         let samples = self.resolve_samples(
             &geometry, Some(&self.geometry), scaling, temperatures, gate,
         )?;
@@ -440,7 +491,7 @@ impl WettingBinding<'_> {
             checkpoint(gate)?;
             let speed = self.samples[&position].signed_speed_m_s;
             let temperature = temperatures.get(&position).map(|&t| (axis, t));
-            samples.insert(position, self.sample(current, speed, temperature, gate)?);
+            samples.insert(position, self.physics.sample(current.angle_radians, speed, temperature, gate)?);
         }
         Ok(Self { samples, ..self.clone() })
     }
@@ -454,8 +505,8 @@ impl WettingBinding<'_> {
         gate: &CancelGate,
     ) -> Result<(), Error> {
         if let Some(current) = self.geometry.get(&position) {
-            self.sample(
-                current,
+            self.physics.sample(
+                current.angle_radians,
                 self.samples[&position].signed_speed_m_s,
                 Some((axis, WettingThermalPoint { temperature_k, dynamic_viscosity_pa_s })),
                 gate,
@@ -486,14 +537,17 @@ impl WettingBinding<'_> {
             )?;
             let temperature = temperatures
                 .and_then(|(axis, field)| field.get(&position).map(|&t| (axis, t)));
-            result.insert(position, self.sample(current, speed, temperature, gate)?);
+            result.insert(position, self.physics.sample(current.angle_radians, speed, temperature, gate)?);
         }
         Ok(result)
     }
 
-    fn sample(
+}
+
+impl WettingPhysics<'_> {
+    pub(super) fn sample(
         &self,
-        current: &WallFill3,
+        geometric_angle_radians: f64,
         speed: f64,
         temperature: Option<(&str, WettingThermalPoint)>,
         gate: &CancelGate,
@@ -515,7 +569,7 @@ impl WettingBinding<'_> {
         let material = self.source.at_query_point(self.card, &point)?;
         let (receding, advancing) = bracket(&material)?;
         let (regime, mut applied_angle_radians) = select_angle(
-            speed, self.controls.pinning_speed_m_s, current.angle_radians, receding, advancing,
+            speed, self.controls.pinning_speed_m_s, geometric_angle_radians, receding, advancing,
         );
         let hydrodynamic = if let Some(binding) = &self.hydrodynamic {
             binding.law.admit_angle(receding)?;
@@ -554,7 +608,7 @@ impl WettingBinding<'_> {
         Ok(FreeSurfaceWettingSample {
             signed_speed_m_s: speed,
             regime,
-            geometric_angle_radians: current.angle_radians,
+            geometric_angle_radians,
             applied_angle_radians,
             hydrodynamic,
             outer_gas: self.hydrodynamic.as_ref().and_then(|binding| binding.outer_gas.clone()),
@@ -563,7 +617,7 @@ impl WettingBinding<'_> {
     }
 }
 
-fn checkpoint(gate: &CancelGate) -> Result<(), Error> {
+pub(super) fn checkpoint(gate: &CancelGate) -> Result<(), Error> {
     if gate.is_requested() {
         Err(crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled.into())
     } else {
@@ -574,7 +628,7 @@ fn checkpoint(gate: &CancelGate) -> Result<(), Error> {
 // At a fixed point of a translating fill profile, d(phi)/dt = V |grad_t(phi)|
 // for outward liquid normal -grad_t(phi)/|grad_t(phi)|. Gradient here is per
 // LATTICE CELL, so dx/dt converts its displacement to physical metres/second.
-fn contact_speed(
+pub(super) fn contact_speed(
     delta_fill: f64,
     gradient_per_cell: f64,
     dx_m: f64,

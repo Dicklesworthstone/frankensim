@@ -9,11 +9,12 @@
 //! conservatively — with a carry accumulator so NOTHING is ever
 //! silently dropped. The battery gates the ledger at 1e-10 relative
 //! EVERY step. Legacy contact-line fixtures remain MODEL-BRACKETED;
-//! an explicitly assigned planar equilibrium angle also reaches the actual
-//! curvature stencil, without claiming calibrated moving-contact-line physics.
+//! explicitly assigned planar angles reach the actual curvature stencil.
+//! The material owner can evolve a source-pinned hysteresis/Cox angle field;
+//! its numerical contact-line estimate does not claim measured calibration.
 
 mod curvature;
-mod wetting;
+pub(crate) mod wetting;
 pub use wetting::{ContactAngleError2, PlanarWall2};
 
 use crate::core2::{Cell, Grid};
@@ -302,6 +303,7 @@ fn checked_contact_angle(
 }
 
 /// Free-surface simulation state.
+#[derive(Clone)]
 pub struct FreeSurface {
     /// The lattice (flags: Fluid/Interface/Gas/Wall).
     pub grid: Grid,
@@ -322,6 +324,7 @@ pub struct FreeSurface {
     fill_raw: Vec<f64>,
     fill_smooth: Vec<f64>,
     planar_contact: Option<wetting::PlanarContactAngle2>,
+    planar_contact_field: Option<wetting::PlanarContactField2>,
 }
 
 /// Cumulative conversion ledger.
@@ -396,6 +399,7 @@ impl FreeSurface {
             fill_raw: vec![0.0; nx * ny],
             fill_smooth: vec![0.0; nx * ny],
             planar_contact: None,
+            planar_contact_field: None,
         };
         fs.assert_closure();
         fs
@@ -609,6 +613,12 @@ impl FreeSurface {
                 "a planar contact angle requires neutral fallback walls");
             self.admit_planar_wall(contact.wall)
                 .expect("planar wetting wall topology changed after admission");
+        }
+        if let Some(field) = &self.planar_contact_field {
+            assert_eq!(self.contact, ContactModel::Neutral,
+                "a planar contact field requires neutral fallback walls");
+            self.admit_planar_wall(field.wall)
+                .expect("dynamic wetting wall topology changed after admission");
         }
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         self.refresh_fill();

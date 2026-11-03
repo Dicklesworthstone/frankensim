@@ -7,6 +7,9 @@ use super::{MaterialFreeSurfaceScaling, MaterialLbmError, PlanarWall3, finite, p
 use crate::core2::{Cell, Grid};
 use crate::freesurface::{ContactModel, FreeSurface, PlanarWall2};
 
+mod wetting;
+pub use wetting::MaterialFreeSurfaceWetting2;
+
 /// Closed stationary rectangular D2Q9 domain, including its wall rows.
 #[derive(Clone, Copy, Debug)]
 pub struct MaterialFreeSurfaceDomain2 {
