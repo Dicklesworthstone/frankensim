@@ -286,7 +286,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 106 connects live capacity contact with natural convection.
 /// Version 107 connects native selected-node adjoints to the complete smooth
 /// source-contact/material tangent and independent whole-law resistance controls.
-pub const SOLVE_DRIVER_VERSION: u32 = 107;
+/// Version 108 composes live capacity contact with transported air and mixed
+/// natural/forced convection under the same physical endpoint gates.
+pub const SOLVE_DRIVER_VERSION: u32 = 108;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

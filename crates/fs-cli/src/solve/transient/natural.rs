@@ -140,10 +140,8 @@ pub(super) fn advance(
     {
         return Err(bad("natural convection requires matching live contacts and controls without duplicate frozen interfaces"));
     }
-    if temperature_contacts.is_some()
-        && (airflow.is_some() || radiation.is_some() || enclosure.is_some())
-    {
-        return Err(bad("capacity natural convection with live contacts does not yet admit airflow or radiation"));
+    if temperature_contacts.is_some() && (radiation.is_some() || enclosure.is_some()) {
+        return Err(bad("capacity natural convection with live contacts does not admit radiation"));
     }
     if contact_config.is_some_and(|controls| {
         !(controls.residual_tolerance_j.is_finite() && controls.residual_tolerance_j > 0.0)
@@ -296,7 +294,8 @@ pub(super) fn advance(
         let (mut endpoint, nonlinear_evidence, radiation_evidence, radiative) =
             if let Some(path) = airflow {
                 let solved = conjugate::advance(
-                    cx, engine, trial_problem, interfaces, old, dt_s, inner_step,
+                    cx, engine, trial_problem, interfaces, temperature_contacts, inner_contact,
+                    old, dt_s, inner_step,
                     inner_nonlinear, radiation, enclosure, path, deadline,
                 )?;
                 count(&mut airflow_iterations, solved.outcome.solution.iterations, max_airflow_iterations)?;

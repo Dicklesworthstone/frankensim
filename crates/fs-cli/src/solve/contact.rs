@@ -380,13 +380,7 @@ pub(super) fn admit(
     let transient = setup.transient.as_ref();
     let enthalpy_contact = transient.is_some_and(|time| time.enthalpy.is_some());
     let unsupported_transient = transient.is_some_and(|_| {
-        setup.boundaries.iter().any(|row| {
-            !enthalpy_contact && matches!(
-                row.condition,
-                fs_project::ThermalBoundaryCondition::AirflowConvection { .. }
-            )
-        })
-            || spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint"))
+        spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint"))
     });
     // Steady ambient radiation reuses the complete contact Newton response.
     // Total enthalpy has a distinct owner that differentiates local P1
@@ -424,7 +418,7 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled or natural-convection boundaries; total enthalpy also admits transported-air convection and pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed boundaries and optional whole-law contact controls; this requested composition needs additional complete contact feedback",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural-convection or transported-air boundaries; total enthalpy also admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed boundaries and optional whole-law contact controls; this requested composition needs additional complete contact feedback",
             "use an admitted storage and boundary composition; contact adjoints require steady prescribed boundaries without radiation or prescribed-temperature controls; transient radiation requires total enthalpy and pointwise emission; never replace the contact law by a frozen resistance",
         ));
     }

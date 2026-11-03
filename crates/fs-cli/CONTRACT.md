@@ -3409,3 +3409,27 @@ endpoints. These are local Estimated selected-node derivatives at fixed geometry
 and fixed nonthermal contact state. Contact with natural convection, transported
 air, radiation, transient history or prescribed-temperature control derivatives
 remains outside this adjoint path; none falls back to a frozen contact tangent.
+
+### Live capacity contact through transported air — driver 108
+
+The regional-capacity solver now runs the same source-backed contact response
+inside each existing quasi-steady air trial. Mixed natural/forced convection
+keeps the original capacity loop ordering: every natural-coefficient trial
+encloses a complete air solve, and every inner contact/thermal response receives
+the unchanged physical old temperature. Scalar/curve and source-surface contact
+retain their Newton and bounded fixed-point owners respectively.
+
+The predictor and final endpoint audits re-query pinned contact laws under
+the actual air references. Final natural/air/contact acceptance checks the full
+physical residual, storage/heat closure and actual-air enthalpy balance. Off-path
+natural reservoir heat never enters the air stream. Contact and Robin outputs
+describe the accepted physical candidate; inner numerical evidence remains
+attached to its counted response. The full nesting participates in response,
+Newton, backtrack and Krylov caps and totals. Inner contact and numerical gates
+tighten together to fit the surrounding convection allowance.
+
+Native cases cover curve/surface airflow and mixed natural/forced convection,
+independent air heat and capacity storage, and equivalent sensible-enthalpy
+trajectories. Live capacity contact with radiation and trajectory derivatives
+remains explicitly unsupported. These authored tests require native execution;
+formatter parsing alone does not establish runtime correctness.

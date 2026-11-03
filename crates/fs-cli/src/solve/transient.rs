@@ -515,10 +515,16 @@ fn march(
             (solved.endpoint, solved.nonlinear_evidence, solved.krylov_iterations)
         } else if let Some(path) = airflow {
             let solved = conjugate::advance(
-                cx, engine, step_problem, interfaces, &old, dt, config,
+                cx, engine, step_problem, interfaces, temperature_contacts, contact_config,
+                &old, dt, config,
                 nonlinear, radiation, enclosure, path, deadline,
             )?;
             conjugate_row = airflow_row(path, &solved)?;
+            if let Some(receipt) = solved.contact_evidence.as_ref() {
+                contact_evidence = receipt.clone();
+                contact_responses = contact_responses.checked_add(solved.solid_solves)
+                    .ok_or_else(|| bad("airflow capacity contact response count overflows"))?;
+            }
             physical_energy = Some(solved.physical_energy);
             physical_target_j = Some(solved.physical_residual_tolerance_j);
             airflow_iterations += solved.outcome.solution.iterations;
