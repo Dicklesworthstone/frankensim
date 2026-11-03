@@ -3016,3 +3016,49 @@ convergence, the independent gas-loaded compliant-wall oscillator and its
 physical heat, scalar diffusive-telegraph pole convergence with all memories,
 an analytic real thermal-relaxation mode, and band/capacity/cancellation/seed
 refusals (G0/G1/G3/G4).
+
+
+## Prepared full-state DG resonance spectra
+
+`DgDuct::prepare_resonance_poles` borrows the original complete continuous
+generator and caches a fixed scalar equilibration and coefficient norm. It
+scans the original matrix once, allocates no generator copy, and changes no
+material, spatial state, boundary, or accepted time history. The preparation
+rate is a numerical reference [1/s]; the source scan has an explicit work cap.
+`PreparedDgPoles` reuses that pencil for seeded `resonance_pole` and seed-free
+`resonance_spectrum` queries. The corresponding `DgDuct` convenience methods
+prepare the same owner and retain the original seeded-query semantics.
+
+Spectrum discovery delegates to `fs-la::nonlinear_eig::beyn` on the entire
+linear pencil `s I - L`, with its exact derivative and one fixed scaling for
+all contour nodes. No acoustic or material-memory coordinates are eliminated.
+Each returned mode passes the same independent original-row residual and
+physical pressure/flow, port participation, Hermitian energy and separate
+wall/molecular/matched-boundary loss observations as a seeded mode. Internal
+zero-port-participation and real relaxation modes are retained.
+
+The result exposes unrefined spectral values, refined physical modes, nested
+argument-principle integrals, their numerical count, resolved moment rank,
+quadrature change and sampled contour-conditioning margin. Insufficient
+probes, unresolved counts/clusters, contour proximity, resource limits,
+physical/source-band refusal and cancellation fail the whole query. Every
+returned oscillatory pole passes the original wall-law frequency band; contour
+points are analytic numerical probes, not physical-frequency predictions.
+Near-real candidates are re-refined from their real states through the shared
+Newton owner and must converge locally inside the same contour before they
+receive zero oscillation frequency. No imaginary part is simply clipped.
+
+Physical result payload, callback assembly, observations, and possible real
+re-refinement work are reserved before the shared numerical allocation. All
+dimensions retain the original shared dense cap. Source storage, allocator
+overhead and process RSS are outside numerical payload bounds. Numerical
+quadrature/count agreement is not rigorous spectrum completeness, a continuum
+eigenvalue enclosure, experimental validation of analytic continuation, or a
+claim of audible observability; repeated/defective modes can refuse.
+
+`tests/dg_resonance_spectrum.rs` supplies G0/G1/G3/G4 checks: two independently
+known cylinder resonances on a three-rung spatial ladder; the original uniform
+thermal relaxation mode and heat; an independently derived gas-loaded
+compliant-wall pole and work; live contour quadrature refinement; prepared,
+one-shot and repeated-result parity; and probe, budget, band and cancellation
+refusals without source changes.
