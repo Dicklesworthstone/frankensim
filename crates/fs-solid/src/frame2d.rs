@@ -63,6 +63,8 @@ mod mass;
 pub use mass::FrameMassFormulation;
 mod impulse;
 pub use impulse::FrameImpulse;
+mod normal_impact;
+pub use normal_impact::{FrameNormalContact, FrameNormalImpact, FrameNormalImpactError};
 mod modes;
 pub use modes::{FrameModalAnalysis, FrameMode, FrameModeStatus};
 mod viscosity;

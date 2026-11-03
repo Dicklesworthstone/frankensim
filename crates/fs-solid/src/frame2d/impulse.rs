@@ -1,6 +1,9 @@
 //! Instantaneous generalized momentum transfer through the native frame mass.
 
-use super::{Frame2d, Rayleigh, SolidError, mass::MassMatrix};
+use super::{
+    Frame2d, Rayleigh, SolidError,
+    mass::{MassMatrix, MassSolve},
+};
 use fs_exec::reduce::Compensated;
 
 const RELATIVE_ROUNDOFF: f64 = 512.0 * f64::EPSILON;
@@ -38,7 +41,7 @@ pub struct FrameImpulse {
 /// Check the actual represented response, not just the algebraic solve. A
 /// nonzero jump rounded away on a large stored velocity must not be accepted.
 /// Each row has its own dimensioned allowance, with no absolute mass/force floor.
-fn checked_action(
+pub(super) fn checked_action(
     mass: &MassMatrix,
     response: &[f64],
     target: &[f64],
@@ -64,6 +67,21 @@ fn checked_action(
         }
     }
     Ok(actual)
+}
+
+/// Private rate candidate shared by authored and contact-resolved events.
+pub(super) struct ImpulseTrial {
+    pub(super) velocity: Vec<f64>,
+    pub(super) result: FrameImpulse,
+    acceleration: Vec<f64>,
+    new_reference: Option<Vec<f64>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ImpulseContinuation<'a> {
+    pub(super) load: &'a [f64],
+    pub(super) damping: Rayleigh,
+    pub(super) dt: f64,
 }
 
 impl Frame2d {
@@ -103,17 +121,27 @@ impl Frame2d {
         damping: Rayleigh,
         continuation_dt: f64,
     ) -> Result<FrameImpulse, SolidError> {
+        let mass = self.impulse_mass(post_event_load)?;
+        let inverse = mass.prepare_solve(&self.fixed)?;
+        let trial = self.trial_impulse(
+            impulse,
+            ImpulseContinuation {
+                load: post_event_load,
+                damping,
+                dt: continuation_dt,
+            },
+            &mass,
+            &inverse,
+        )?;
+        Ok(self.accept_impulse(trial))
+    }
+
+    pub(super) fn impulse_mass(&self, post_event_load: &[f64]) -> Result<MassMatrix, SolidError> {
         self.require_untimed_materials()?;
         let n = self.ndof();
-        if impulse.len() != n
-            || post_event_load.len() != n
-            || impulse
-                .iter()
-                .chain(post_event_load)
-                .any(|v| !v.is_finite())
-        {
+        if post_event_load.len() != n || post_event_load.iter().any(|v| !v.is_finite()) {
             return Err(invalid(
-                "frame impulse and finite post-event load need one finite value per DOF",
+                "finite post-event load needs one finite value per DOF",
             ));
         }
         if self.u.iter().chain(&self.vel).any(|v| !v.is_finite())
@@ -129,8 +157,20 @@ impl Frame2d {
                 "free massless coordinates require a DAE impulse projection; use consistent reference or explicit rotary inertia",
             ));
         }
-        // Factor once for both the impulsive jump and its finite-force endpoint.
-        let inverse = mass.prepare_solve(&self.fixed)?;
+        Ok(mass)
+    }
+
+    pub(super) fn trial_impulse(
+        &self,
+        impulse: &[f64],
+        continuation: ImpulseContinuation<'_>,
+        mass: &MassMatrix,
+        inverse: &MassSolve<'_>,
+    ) -> Result<ImpulseTrial, SolidError> {
+        let n = self.ndof();
+        if impulse.len() != n || impulse.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("frame impulse needs one finite value per DOF"));
+        }
         let proposed = inverse.apply(impulse);
         let velocity: Vec<f64> = self
             .vel
@@ -141,7 +181,7 @@ impl Frame2d {
         let velocity_change: Vec<f64> =
             velocity.iter().zip(&self.vel).map(|(a, b)| a - b).collect();
         let generalized_momentum_change = checked_action(
-            &mass,
+            mass,
             &velocity_change,
             impulse,
             &self.fixed,
@@ -196,14 +236,14 @@ impl Frame2d {
             ));
         }
 
-        let preparation = self.prepare_damping(&mass, damping, continuation_dt)?;
+        let preparation = self.prepare_damping(mass, continuation.damping, continuation.dt)?;
         let (internal_force, _, _) = self.assemble(&self.u)?;
         let finite_force: Vec<f64> = (0..n)
             .map(|i| {
                 let damping_force: f64 = (0..n)
                     .map(|j| preparation.cmat[i * n + j] * velocity[j])
                     .sum();
-                post_event_load[i] - damping_force - internal_force[i]
+                continuation.load[i] - damping_force - internal_force[i]
             })
             .collect();
         if finite_force.iter().any(|v| !v.is_finite()) {
@@ -211,29 +251,37 @@ impl Frame2d {
         }
         let acceleration = inverse.apply(&finite_force);
         checked_action(
-            &mass,
+            mass,
             &acceleration,
             &finite_force,
             &self.fixed,
             "finite post-impulse acceleration does not resolve the original mass/force balance",
         )?;
 
-        // No fallible operation follows publication, and no constitutive trial
-        // is committed: this event changes rates, not positions or material state.
-        let result = FrameImpulse {
-            velocity_change,
-            generalized_momentum_change,
-            support_impulse,
-            kinetic_energy_before_j,
-            kinetic_energy_after_j,
-            kinetic_energy_change_j,
-            impulse_work_j,
-        };
-        self.vel = velocity;
-        self.acc = acceleration;
-        if let Some(reference) = preparation.new_reference {
+        Ok(ImpulseTrial {
+            velocity,
+            acceleration,
+            new_reference: preparation.new_reference,
+            result: FrameImpulse {
+                velocity_change,
+                generalized_momentum_change,
+                support_impulse,
+                kinetic_energy_before_j,
+                kinetic_energy_after_j,
+                kinetic_energy_change_j,
+                impulse_work_j,
+            },
+        })
+    }
+
+    pub(super) fn accept_impulse(&mut self, trial: ImpulseTrial) -> FrameImpulse {
+        // Publication is infallible. No constitutive trial is committed:
+        // instantaneous events change rates, not positions or material state.
+        self.vel = trial.velocity;
+        self.acc = trial.acceleration;
+        if let Some(reference) = trial.new_reference {
             self.rayleigh_reference_stiffness = Some(reference);
         }
-        Ok(result)
+        trial.result
     }
 }

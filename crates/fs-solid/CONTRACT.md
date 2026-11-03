@@ -3552,6 +3552,51 @@ formulations, massless refusal and failure atomicity. The material-viscosity
 battery checks the original source loss in the event acceleration, independence
 from admitted continuation clocks and refusal of inadmissible clocks.
 
+### Simultaneous normal impacts on the native frame
+
+`Frame2d::apply_normal_impacts` resolves one declared, fixed-configuration
+frictionless contact set through `fs-contact::multicontact::solve_normal_impacts`.
+Each `FrameNormalContact` supplies the derivative of its physical signed gap in
+the original node-major coordinates and a prescribed obstacle normal speed.
+The same covector maps velocities to gap rates and contact impulses to nodal
+forces and moments. Translational weights are dimensionless; rotational weights
+have metres. Node contacts use their unit normal, linear-reference member
+contacts can use the original Hermite `reference_transverse_trace`, and internal
+contacts include both signed traces in one row. Geometry and event discovery
+remain caller-owned; penetration is refused without position repair.
+
+The original free mass supplies every entry of `G M_ff^-1 G^T`. One native mass
+factor serves streamed mobility columns, the combined impulse and finite
+right-limit acceleration. Additional adapter scratch is `O(ndof + contacts^2)`;
+no retained inverse, frame clone or `ndof`-by-contacts response matrix is needed.
+All geometry-active contacts participate together, including initially
+separating contacts another impulse can drive closed. The shared contact count,
+iteration, PSD/rank, complementarity and global restitution/passivity admissions
+remain authoritative. A redundant result preserves `UniqueVelocity` and its
+checked impulse representative; individual contact loads and local source-work
+allocations do not acquire a uniqueness claim.
+
+The contact solution enters the same private native impulse trial used by
+`apply_impulse`. Actual stored endpoint gap rates, complementarity and relative
+work must agree with the shared law before publication. The receipt separates
+work supplied by prescribed obstacles, native kinetic change, contact loss and
+any explicitly allowed numerical positive relative work. The original-mass
+work balance is `kinetic change = obstacle work + relative work`; stationary
+frame supports contribute their full cross-mass reaction impulse and zero
+work. Relative work is measured directly with compensated extended products,
+not by subtracting large world-frame kinetic or obstacle energies. Cancellation
+or any late endpoint, work, force-balance or continuation refusal preserves all
+accepted frame state, including a previously uncaptured Rayleigh reference.
+
+The existing positive-free-inertia, untimed-material and fixed-reference-inertia
+boundaries remain. Contact loss has no automatic thermal allocation. This is
+an instantaneous event response; sustained contact, friction, moving-support
+integration and finite-rotation world-inertia claims remain separate owners.
+`tests/frame2d_normal_impact.rs` checks analytic coupled contacts, inactive
+endpoints, Hermite moments, support cross mass, moving-obstacle work, internal
+momentum and velocity-boost invariance, finite-force/Newmark continuation,
+redundant determinacy and atomic physical/numerical refusals.
+
 ## Signed, mass-normalized frame modes and participation
 
 `Frame2d::modal_analysis` exposes the complete signed current-tangent spectrum,
