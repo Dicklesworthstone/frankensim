@@ -25,6 +25,8 @@ use crate::aqueous_adsorption::{
 };
 
 mod ion_pair;
+/// Maintained-pressure oxygen exchange coupled to simultaneous carbon-in-leach.
+pub mod aeration;
 pub use ion_pair::IonPairTransfer;
 
 /// Actual concentration of the explicitly transferred aqueous counterion [mol/m³].

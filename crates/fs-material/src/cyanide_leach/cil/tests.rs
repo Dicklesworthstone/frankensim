@@ -24,7 +24,7 @@ use fs_qty::{
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 
-fn close(actual: f64, expected: f64, tolerance: f64) {
+pub(crate) fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
         "{actual:e} != {expected:e}; tolerance={tolerance:e}",
@@ -113,7 +113,7 @@ fn local_source(
     }
 }
 
-fn population(
+pub(crate) fn population(
     name: &str,
     role: CarbonRole,
     mass: f64,
@@ -371,7 +371,7 @@ fn fresh_cyanide_and_caustic_doses_survive_attachment_and_enter_all_accounts() {
     report_accounts(&report);
 }
 
-fn populations(scale: f64) -> Vec<CarbonPopulation> {
+pub(crate) fn populations(scale: f64) -> Vec<CarbonPopulation> {
     vec![
         population(
             "activated-carbon",
@@ -396,7 +396,7 @@ fn populations(scale: f64) -> Vec<CarbonPopulation> {
     ]
 }
 
-fn original(c: CyanidationCharge) -> GoldCyanidationBatch {
+pub(crate) fn original(c: CyanidationCharge) -> GoldCyanidationBatch {
     GoldCyanidationBatch::new(
         GoldCyanidation::from_card(system(false), "uncomplexed-cyanide", leach_card(4.0)).unwrap(),
         c,
@@ -406,7 +406,7 @@ fn original(c: CyanidationCharge) -> GoldCyanidationBatch {
     .unwrap()
 }
 
-fn cil(c: CyanidationCharge, scale: f64) -> CarbonInLeachBatch {
+pub(crate) fn cil(c: CyanidationCharge, scale: f64) -> CarbonInLeachBatch {
     CarbonInLeachBatch::from_batch(
         original(c),
         IonPairTransfer::sodium().unwrap(),
@@ -415,7 +415,7 @@ fn cil(c: CyanidationCharge, scale: f64) -> CarbonInLeachBatch {
     .unwrap()
 }
 
-fn numerics(scale: f64) -> CilNumerics {
+pub(crate) fn numerics(scale: f64) -> CilNumerics {
     CilNumerics {
         maximum_step: Time::new(0.1),
         absolute_amount_error: Amount::new(2e-9 * scale),
