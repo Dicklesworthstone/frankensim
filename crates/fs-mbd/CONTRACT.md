@@ -1,5 +1,20 @@
 # CONTRACT: fs-mbd
 
+## Instantaneous rigid-point motion
+
+`RigidBodyIntegrator::prepare_point_motion` captures one native smooth state,
+constant mass/full inertia and instantaneous external wrench, adding configured
+uniform gravity exactly once. The wrench excludes that gravity and must include
+all other actual loads/reactions. Euler's original full-inertia action retains
+the `omega cross L` term; `PreparedRigidPointMotion::point_motion` supplies native
+position/velocity and tangential plus centripetal acceleration at each body-fixed
+arm. Preparation shares the angular work across attachments; queries use fixed
+work and no allocation, mutate no state and refuse nonfinite derived vectors.
+They do not integrate, solve missing reactions, differentiate impacts, admit
+changing inertia or describe sliding/deforming attachments. Acoustic coupling
+may observe this motion but must supply its separate physical force on fluid;
+gravity or the total mechanical wrench does not create an acoustic source.
+
 ## Exact linearly weighted tetrahedral inertia
 
 `SpatialInertia::from_weighted_tetrahedron` accepts a positive total mass,

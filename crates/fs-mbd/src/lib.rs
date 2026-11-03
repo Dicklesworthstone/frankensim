@@ -55,6 +55,9 @@ pub mod tangential_friction;
 pub mod tri_wheel_cluster;
 pub mod versatran;
 
+mod point_motion;
+pub use point_motion::{PreparedRigidPointMotion, RigidPointMotion};
+
 mod verlet;
 pub use verlet::VerletStage;
 
