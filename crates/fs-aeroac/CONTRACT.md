@@ -125,6 +125,23 @@ material scaling and domain/representability refusals.
   extrapolates. Bounds apply to this interpolant, not the source integrator's
   error or physical model; finite-source and receiver bandwidth admission remain
   separate. Existing uniform-motion queries retain their analytic fast path.
+- `curle3d::moving::trajectory::PreparedKinematicTrajectory` reuses the same
+  C2 quintic compiler and outward speed admission for independent source and
+  microphone paths. `PreparedMovingReceiverSource` borrows two such paths in
+  one original fluid state and admits a finite receiver window, continuous
+  retarded clearance and source-history coverage. Bernstein span-pair bounds
+  carry both physical time intervals, exclude causally unreachable events and
+  subdivide under explicit pair/node/depth caps; inconclusive bounds refuse.
+  Queries allocate nothing, preserve the exact receiver timestamp and measure
+  residual at the actual represented emission time. Pressure is the original
+  Eulerian source field at the moving microphone, without relative-velocity
+  substitution or a receiver-Doppler amplitude multiplier. Separate metadata
+  reports `(1-n.v_receiver/c)/(1-n.v_source/c)` and a conservative whole-window
+  ceiling for bandwidth admission. Trial root positions may have zero distance;
+  the physical clearance applies at admitted retarded events. Bounds concern
+  prescribed interpolation, not mechanical error; microphone aerodynamic
+  self-noise, directivity, finite-source validity and geometric-modulation
+  bandwidth are not inferred. Source strengths remain on their original clock.
 - `curle3d::PreparedCompactSourceObserver` prepares actual 3D source positions
   at one frequency and checked material state. `CompactSourcePhasor` explicitly
   separates volume injection Q [m³/s] from force ON the fluid F [N]. In

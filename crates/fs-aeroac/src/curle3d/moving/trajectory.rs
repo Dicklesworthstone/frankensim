@@ -19,6 +19,17 @@ use crate::AeroacError;
 use fs_ivl::Interval;
 use fs_math::dd::Dd;
 
+/// Shared, observer-independent C2 path preparation.
+pub mod path;
+/// Causal observation of two independently moving, accepted paths.
+pub mod receiver;
+
+pub use path::PreparedKinematicTrajectory;
+pub use receiver::{
+    MovingReceiverBudget, MovingReceiverConfig, PreparedMovingReceiverSample,
+    PreparedMovingReceiverSource,
+};
+
 const MAX_BOUND_DEPTH: usize = 32;
 const MAX_ROOT_ITERATIONS: usize = 256;
 
