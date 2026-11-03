@@ -14,6 +14,9 @@
 //! necessary, particularly for a light wall. All trials start from the same
 //! accepted fluid; trial history never becomes physical elapsed time.
 
+/// Fixed-center finite-inertia rotation driven by the original liquid links.
+pub mod rotor;
+
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::PlanarWall3;
 use fs_lbm::material::MaterialLbmError;

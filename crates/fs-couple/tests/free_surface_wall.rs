@@ -493,3 +493,6 @@ fn native_late_liquid_speed_refusal_preserves_wall_and_liquid_together() {
     assert_eq!(motion.liquid().lattice().grid().steps(), 0);
     assert_eq!(motion.time_s(), 0.0);
 }
+
+#[path = "free_surface_wall/rotor.rs"]
+mod rotor;

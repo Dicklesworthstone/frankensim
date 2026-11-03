@@ -25958,6 +25958,37 @@ tests cover SI conversion, actuator work and momentum, shared-clock rebind,
 zero-rate continuation and refusal/retry; they parsed but were not executed in
 the delivery environment. No full material/grid integration pass is claimed.
 
+## Finite axial rotor on the original flooded free-surface wall
+
+`free_surface_wall::rotor::FreeSurfacePlanarRotor` retains one original material
+liquid and native rigid-body state for continued fixed-center rotation. The
+plane normal must be a principal axis of the original inertia. The guide fixes
+the center of mass and carries transverse torques; the original MBD integrator
+updates axial spin and attitude. Unsupported initial motion is refused rather
+than projected onto the supported subspace.
+
+A pilot native reflection measures the axial angular impedance. Its candidate
+storage is discarded before the final replay. The affine midpoint equation
+couples actual liquid torque, finite rotor inertia and held external torque
+analytically; exactly two native liquid candidates and one native body step are
+used per accepted liquid tick. The final native link wrench, actual represented
+body momentum, midpoint velocity, attitude, kinetic increment and work must all
+pass the declared bounds. No apparent inertia replaces the physical inertia.
+
+Reports distinguish raw numerical-pressure reactions, physical perturbation
+loads, optional absolute pressure loads, transverse guide moments and actuator
+work. All moments use the fixed center. Guide work is measured, not silently
+discarded. The liquid remains isothermal: mechanical boundary work is not an
+invented heat deposit. Work, angular advance and full-grid trial cells are
+explicitly bounded; cancellation and late endpoint-speed refusal publish neither
+owner. Fixed flooded geometry excludes normal translation, tilting, finite
+plate edges, cover/vacate and moving contact lines. Time and spatial refinement
+remain necessary for trajectory accuracy, including very light rotors.
+
+Focused integration regressions specify independent light/heavy rotor response,
+native liquid angular momentum and body attitude, driven continuation,
+off-center pressure-reference guide loads, and atomic early/late refusal.
+
 ### Bidirectional molecular sources on a finite translating vessel
 
 `GasRocketState::advance_effusion_exchange` composes prescribed molecular-source
