@@ -18,6 +18,36 @@ all three explicit paths, with spatial momentum and kinetic-energy checks.
 Native group admission and representability limits apply to the shared drift.
 
 
+## Finite prescribed internal-wrench motion
+
+`spatial_loads::internal_motion::step_internal_wrench` advances two original
+finite bodies through a held world force/free couple using native internal
+half-impulses around the original zero-load rigid-body drift. Both actual
+endpoint attachment geometries determine the transported opposite couple.
+Original full inertia, quaternion motion and implicit Euler-top solve remain
+authoritative; the bounded operation uses two impulse evaluations and two
+free-body steps without allocation or hidden substeps.
+
+This symmetric second-order trajectory separately gates each free body's
+actual momentum and energy drift, then the pair's whole-step linear and
+spin-plus-orbital change and actual kinetic change against signed actuator work.
+Double-double endpoint reductions prevent opposite individual drift defects
+from canceling. The returned work is a discrete conjugate half-impulse
+quadrature; free-drift energy defects remain visible in the work gate, never
+heat. The actuator may supply or recover energy. No spring/contact law,
+passivity or symplecticity is implied. Invalid duration, unrepresentable
+nonzero half-impulses, native solve refusal, budget failure or cancellation
+returns no partial endpoint/account.
+
+Six G1/G3/G4 groups pass in the real source-selected native lane: unequal-mass
+constant-force motion, finite motor-angle exchange/regeneration, full-inertia
+off-centre convergence against an independent refined continuous RK4 reference,
+conservation about multiple origins, rotated/translated/common-boost covariance
+and reversal, exact zero-drive reuse with independent body drift gates, and
+every cancellation/representability refusal. Orientation, spin and work errors
+reduce approximately fourfold under each step halving. Rustfmt check also
+passes; full Cargo/DSR is not claimed.
+
 ## Native internal spatial-wrench impulse transfer
 
 `spatial_loads::internal_impulse::apply_internal_wrench_impulse` transfers a

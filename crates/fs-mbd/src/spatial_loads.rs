@@ -23,6 +23,9 @@ pub mod midpoint;
 /// Momentum-conserving internal wrench impulses between original finite bodies.
 pub mod internal_impulse;
 
+/// Finite internally actuated trajectories on two original native rigid bodies.
+pub mod internal_motion;
+
 use super::{
     AdvanceOutcome, DynamicsError, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState,
     StepReceipt, UnitQuaternion, Vec3, Wrench, finite_derived,
@@ -398,3 +401,4 @@ fn finite_vec(value: Vec3, field: &'static str) -> Result<(), DynamicsError> {
         Err(DynamicsError::NonFinite(field))
     }
 }
+
