@@ -14,6 +14,10 @@ pub mod molecular;
 pub mod reactive;
 mod reservoir;
 pub use reservoir::ReservoirBoundary;
+/// Conservative acceleration and body-force work on the original mixture owner.
+pub mod forcing;
+pub use super::{BodyForce2d, ForceChange2d, ForceControl2d};
+pub use forcing::ForcingWorkspace2d;
 
 use super::{
     Boundaries2d, BoundaryCondition, BoundarySide, CartesianGrid, Primitive, Reconstruction,
@@ -155,7 +159,7 @@ pub struct BoundaryImpulse<'a> {
 pub struct StepReport {
     /// Actual accepted duration.
     pub elapsed: Time,
-    /// Maximum combined x/y face CFL over both SSP stages.
+    /// Maximum combined x/y face CFL and any forced cell endpoint over both stages.
     pub maximum_cfl: f64,
     /// Rejected and halved attempts.
     pub halvings: usize,
@@ -171,7 +175,9 @@ pub struct StepReport {
     pub after: Totals,
     /// Net transfer into the domain, integrated over both stages.
     pub boundary_change: Totals,
-    /// `after - before - boundary_change`, component by component.
+    /// Applied body impulse and signed mechanical work, separate from boundary exchange.
+    pub source_change: ForceChange2d,
+    /// `after - before - boundary_change - source_change`, component by component.
     pub conservation_residual: Totals,
     /// Physical energy residual including original per-species references [J].
     pub absolute_energy_residual_j: f64,
@@ -416,6 +422,16 @@ impl MixtureEuler2d {
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.step_impl(maximum_duration, controls, None, cancelled)
+    }
+
+    fn step_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        mut forcing: Option<forcing::Context<'_, '_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         cartesian::poll::<Error>(&mut cancelled)?;
@@ -428,6 +444,9 @@ impl MixtureEuler2d {
             .zip(&mut self.work.primitive)
         {
             *p = cell(q, n).primitive(&self.gas, &mut cancelled)?;
+            if let Some((_, control, _)) = forcing.as_ref() {
+                control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+            }
             rate = rate.max(
                 (p.velocity[0].abs() + p.sound_speed) / self.grid.spacing[0]
                     + (p.velocity[1].abs() + p.sound_speed) / self.grid.spacing[1],
@@ -435,6 +454,7 @@ impl MixtureEuler2d {
         }
         rate = rate.max(self.reservoirs.maximum_rate(&self.grid));
         let before = checked_totals(&self.states, &self.grid, n, &mut cancelled)?;
+        let mut source_change = ForceChange2d::default();
         let accepted = cartesian::advance(
             maximum_duration.value(),
             self.time,
@@ -442,18 +462,65 @@ impl MixtureEuler2d {
             controls,
             &mut cancelled,
             |dt, reconstruction, cancelled| {
-                attempt(
-                    &self.gas,
-                    &self.grid,
-                    self.boundaries,
-                    &self.reservoirs,
-                    &self.states,
-                    &mut self.work,
-                    dt,
-                    controls.cfl,
-                    reconstruction,
-                    cancelled,
-                )
+                if let Some((force, control, workspace)) = forcing.as_mut() {
+                    copy_values(&self.states, &mut workspace.kicked, cancelled)?;
+                    let mut source = forcing::Accumulator::default();
+                    forcing::kick_field(
+                        &self.gas,
+                        &self.grid,
+                        &mut workspace.kicked,
+                        *force,
+                        *control,
+                        0.5 * dt,
+                        &mut source,
+                        false,
+                        cancelled,
+                    )?;
+                    // The native primitive sweep admits the first kicked state
+                    // without another recovery of composition-dependent calorics.
+                    let mut stats = attempt(
+                        &self.gas,
+                        &self.grid,
+                        self.boundaries,
+                        &self.reservoirs,
+                        &workspace.kicked,
+                        &mut self.work,
+                        dt,
+                        controls.cfl,
+                        reconstruction,
+                        Some(*control),
+                        cancelled,
+                    )?;
+                    let final_rate = forcing::kick_field(
+                        &self.gas,
+                        &self.grid,
+                        &mut self.work.candidate,
+                        *force,
+                        *control,
+                        0.5 * dt,
+                        &mut source,
+                        true,
+                        cancelled,
+                    )?;
+                    cartesian::check_cfl::<Error>(final_rate * dt, controls.cfl)?;
+                    stats.rate = stats.rate.max(final_rate);
+                    source_change = source.finish()?;
+                    Ok(stats)
+                } else {
+                    attempt(
+                        &self.gas,
+                        &self.grid,
+                        self.boundaries,
+                        &self.reservoirs,
+                        &self.states,
+                        &mut self.work,
+                        dt,
+                        controls.cfl,
+                        reconstruction,
+                        None,
+                        cancelled,
+                    )
+                }
             },
         )?;
         let after = checked_totals(&self.work.candidate, &self.grid, n, &mut cancelled)?;
@@ -461,7 +528,17 @@ impl MixtureEuler2d {
         let boundary_change = Totals::from_row(&outward.map(|v| -v), n);
         let residual = std::array::from_fn::<_, WIDTH_LIMIT, _>(|d| {
             if d < width {
-                after.component(d) - before.component(d) - boundary_change.component(d)
+                let delta = after.component(d) - before.component(d) - boundary_change.component(d);
+                if forcing.is_some() && d >= n {
+                    delta
+                        - if d < n + 2 {
+                            source_change.impulse[d - n]
+                        } else {
+                            source_change.work
+                        }
+                } else {
+                    delta
+                }
             } else {
                 0.0
             }
@@ -481,6 +558,7 @@ impl MixtureEuler2d {
             before,
             after,
             boundary_change,
+            source_change,
             conservation_residual,
             absolute_energy_residual_j,
         };
@@ -505,10 +583,11 @@ fn attempt(
     dt: f64,
     cfl: f64,
     reconstruction: Reconstruction,
+    force_control: Option<ForceControl2d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     cartesian::rk2(cancelled, |final_stage, cancelled| {
-        let stats = spatial(
+        let mut stats = spatial(
             gas,
             grid,
             boundaries,
@@ -521,10 +600,11 @@ fn attempt(
             &mut work.x_metadata,
             &mut work.y_metadata,
             reconstruction,
+            force_control,
             cancelled,
         )?;
         cartesian::check_cfl::<Error>(stats.rate * dt, cfl)?;
-        if final_stage {
+        let stage_rate = if final_stage {
             update(
                 gas,
                 grid,
@@ -535,8 +615,9 @@ fn attempt(
                 &mut work.candidate,
                 dt,
                 true,
+                force_control,
                 cancelled,
-            )?;
+            )?
         } else {
             update(
                 gas,
@@ -548,8 +629,13 @@ fn attempt(
                 &mut work.stage,
                 dt,
                 false,
+                force_control,
                 cancelled,
-            )?;
+            )?
+        };
+        if force_control.is_some() {
+            cartesian::check_cfl::<Error>(stage_rate * dt, cfl)?;
+            stats.rate = stats.rate.max(stage_rate);
         }
         let width = gas.species_count() + 3;
         cartesian::capture::<Error>(
@@ -588,13 +674,19 @@ fn spatial(
     x_metadata: &mut [FaceFlux],
     y_metadata: &mut [FaceFlux],
     reconstruction: Reconstruction,
+    force_control: Option<ForceControl2d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     let n = gas.species_count();
     let width = n + 3;
     let slope_width = width + 1;
+    let mut cell_rate: f64 = 0.0;
     for (q, p) in states.chunks_exact(width).zip(primitive.iter_mut()) {
         *p = cell(q, n).primitive(gas, &mut *cancelled)?;
+        if let Some(control) = force_control {
+            control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+            cell_rate = cell_rate.max(forcing::acoustic_rate(*p, grid)?);
+        }
     }
     let value = |k: usize, d: usize| {
         if d == 0 {
@@ -772,6 +864,9 @@ fn spatial(
         },
         cancelled,
     )?;
+    if force_control.is_some() {
+        stats.rate = stats.rate.max(cell_rate);
+    }
     Ok(stats)
 }
 
@@ -786,10 +881,12 @@ fn update(
     output: &mut [f64],
     dt: f64,
     final_stage: bool,
+    force_control: Option<ForceControl2d>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), Error> {
+) -> Result<f64, Error> {
     let n = gas.species_count();
     let width = n + 3;
+    let mut rate: f64 = 0.0;
     cartesian::update::<WIDTH_LIMIT, Error, _>(
         grid,
         width,
@@ -806,11 +903,16 @@ fn update(
         },
         cancelled,
         |k, row, cancelled| {
-            cell(row, n).primitive(gas, &mut *cancelled)?;
+            let p = cell(row, n).primitive(gas, &mut *cancelled)?;
+            if let Some(control) = force_control {
+                control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
+                rate = rate.max(forcing::acoustic_rate(p, grid)?);
+            }
             output[k * width..(k + 1) * width].copy_from_slice(row);
             Ok(())
         },
-    )
+    )?;
+    Ok(rate)
 }
 fn normal_primitive(q: &[f64], n: usize, axis: usize) -> NormalPrimitive<'_> {
     NormalPrimitive {

@@ -1350,7 +1350,27 @@ caller reuses the same planar forcing scratch, with no added retry arrays.
 Regressions cover braking with variable calorics and physical wall loads,
 force-driven common-duration retries/replay, final-checkpoint rollback including
 prior reports/loads, zero-source bit equality and zero-transport recovery of the
-forced Euler owner. Planar varying-composition forcing remains outside this rung.
+forced Euler owner.
+
+`MixtureEuler2d::step_with_forcing` admits the same uniform or per-cell
+`BodyForce2d` and the same conservative kick between its original SSP RK2
+transaction boundaries. Density is the compensated sum of each current cell's
+canonical species masses, including after advection; no independent density
+or frozen-composition surrogate is introduced. Species and their chemical
+energy references are unchanged by the kicks. The mixture report separates
+source impulse/signed work from wall and reservoir exchange, and subtracts
+both when checking referenced and absolute chemical-energy conservation.
+The original composition-dependent calorics, HLLC/HLL closure, reconstruction
+and atomic retry owner remain in use. Mach and acoustic CFL admission cover
+accepted, kicked and RK cell states, with exactly zero forcing following the
+native path. Its `mixture::ForcingWorkspace2d` adds one flat `(species+3)`-double
+row per cell under both the explicit additional-byte budget and the existing
+total mixture cap; source sweeps and retries allocate no arrays. Regressions
+cover distinct composition/density, variable-Cp braking, formation-reference
+invariance, current-stage density across a compatible material contact,
+force-driven retries, zero-source identity and complete cancellation/replay.
+This entry drives the inviscid mixture; planar reactive/molecular mixture
+forcing and hydrostatic well balancing remain outside this extension.
 
 `Euler3d::step_with_forcing` composes source half step, original SSP RK2
 advection and source half step inside the existing retry/publication owner.
