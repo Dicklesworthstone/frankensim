@@ -40,7 +40,7 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleBranchPolicy, BundleConnection, BundleConnectionError, BundleConnectionLaunch,
     BundleConnectionOptions, BundleConnectionTarget,
 };
-use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, SceneMedium};
+use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, CurvedTraceEvent, SceneMedium};
 use crate::polarization::dielectric::scene::PathTermination;
 use crate::polarization::dielectric::transport::PolarizationFrame;
 use fs_exec::Cx;
@@ -286,7 +286,7 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut fixtures = FixtureContributions::new(self, settings, initial_index);
-        let result = self.camera.scene.trace_with_seed_mode(
+        let result = self.camera.scene.trace_with_seed_events_mode(
             cx,
             beam,
             initial_medium,
@@ -294,9 +294,15 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
             seed,
             path_id,
             true,
-            |path| {
-                emission.observe(path)?;
-                fixtures.observe(cx, path)
+            |event| match event {
+                CurvedTraceEvent::Arrival(path) => {
+                    emission.observe(path)?;
+                    fixtures.observe(cx, path)
+                }
+                CurvedTraceEvent::Departure { path, .. } => {
+                    emission.depart(path);
+                    Ok(())
+                }
             },
         );
         self.finish(cx, initial_index, emission, fixtures, result)
@@ -321,16 +327,22 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut fixtures = FixtureContributions::new(self, settings, initial_index);
-        let result = self.camera.scene.trace_with_samples_mode(
+        let result = self.camera.scene.trace_with_samples_events_mode(
             cx,
             beam,
             initial_medium,
             settings.surfaces,
             surface_samples,
             true,
-            |path| {
-                emission.observe(path)?;
-                fixtures.observe(cx, path)
+            |event| match event {
+                CurvedTraceEvent::Arrival(path) => {
+                    emission.observe(path)?;
+                    fixtures.observe(cx, path)
+                }
+                CurvedTraceEvent::Departure { path, .. } => {
+                    emission.depart(path);
+                    Ok(())
+                }
             },
         );
         self.finish(cx, initial_index, emission, fixtures, result)

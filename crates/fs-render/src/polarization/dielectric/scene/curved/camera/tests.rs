@@ -18,6 +18,7 @@ use fs_geom::Point3;
 
 mod rough;
 mod emission;
+mod thermal;
 
 fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new();

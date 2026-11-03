@@ -479,8 +479,8 @@ differentiable lift). Pure Rust throughout.
   independently calibrated, with no inferred emissivity or thermal coupling.
   Environment maps require caller radiometric
   calibration and are sampled only after proven homogeneous escape. Any
-  positive absorption on the remaining infinite tail gives exact zero before
-  source evaluation. Native rough dielectric/conductor and anisotropic brushing
+  positive absorption on the remaining infinite tail extinguishes external
+  environment radiance before source evaluation. Native rough dielectric/conductor and anisotropic brushing
   retain their original directional proposal, Fresnel, masking and
   single-scattering approximation. Authored brushed-normal tilt now uses the
   scalar camera law `F_mueller*G1(wi)`, selected before forming the forward-power
@@ -497,8 +497,7 @@ differentiable lift). Pure Rust throughout.
   refuse. Numerical limits and indistinguishable
   native extinction/underflow are unresolved
   errors. This covers reciprocal isotropic stationary media and intensity-only
-  endpoints, not general polarized adjoints, volume emission or point-light
-  connections. Terminal transport weight describes only the final continuation,
+  endpoints, not general polarized adjoints or nonisothermal volume sources. Terminal transport weight describes only the final continuation,
   while returned radiance sums all encountered sources. Unresolved continuation,
   overflow and cancellation still return errors without publishing a partial sum.
   `camera::raster::CurvedCameraRaster` prepares the original physical
@@ -866,8 +865,36 @@ differentiable lift). Pure Rust throughout.
   numerical references and 3,000 exact planar-overlap comparisons passed; Rust
   compilation and regressions remain unexecuted without Rust/DSR/RCH. Charts
   lacking explicit area sampling or native departure authority, singular caustic
-  integration, volume emission and global optical-image completeness remain
-  outside scope.
+  integration, nonisothermal volume emission and global optical-image
+  completeness remain outside scope.
+
+- `camera::IsothermalVolumeEmitter` explicitly binds a frozen temperature state
+  to an original curved medium through `with_isothermal_volume_emitters`.
+  Positive kelvin temperature, nonzero source identity, valid medium ownership
+  and unique bindings are required. The same native true absorption supplies
+  Kirchhoff LTE emission; no opacity, thermal emissivity or temperature is
+  inferred from unrelated data. The shared Planck owner supplies vacuum
+  spectral radiance. Each isothermal leg contributes
+  `n_camera² * I_departure * B_lambda(T) * (1-exp(-Delta_tau_abs))`,
+  with a stable thin-optical-depth evaluation. The local source phase index
+  cancels in reduced radiance; group index and extra Fresnel/geometry factors
+  do not enter this source. Spatially varying phase index and true absorption
+  follow the original curved integrator without extra field/geometry queries.
+  Ordinary, molecular, point/area-light and spectral raster cameras use the
+  same accumulator. Arrivals close a leg before scattering, and departures
+  retain the native Mueller/PDF throughput. Null candidates do not reset it.
+  Scattering survival is already in the flight proposal; surface-source MIS
+  weights do not attenuate thermal emission. Planck evaluation is reused
+  across successive collisions in the same medium, with stack-only ray state.
+  A proven homogeneous escape with positive absorption supplies the finite
+  remaining equilibrium source while extinguishing the external environment.
+  Unresolved and extinguished paths retain their existing refusals. Empty
+  source bindings preserve existing camera results. Eight authored native
+  regressions cover finite/transparent/thin slabs, spatial absorption on a
+  curved GRIN ray, phase/group normalization, Fresnel transmission, infinite
+  thermal equilibrium, source admission, spectral pixels, two polarized
+  collisions and null tracking. Spatially varying temperature and thermal
+  direct-source sampling remain outside this isothermal capability.
 
 - With `volumes`, `camera::participating::CurvedRayleighCameraScene`
   composes the prepared scalar camera with the exact original
@@ -880,8 +907,10 @@ differentiable lift). Pure Rust throughout.
   introduced. Samples retain real collision and free-flight counters. Zero
   scattering preserves surface-camera results bit for bit. Positive-majorant
   tails do not become vacuum because one density query is zero. All native
-  work/distance/volume/cancellation refusals propagate. No volume emission,
-  general particle polarization inference or polarized camera adjoint is added.
+  work/distance/volume/cancellation refusals propagate. Optional isothermal LTE
+  emission is accumulated on these same absorption legs. Nonisothermal sources,
+  general particle polarization inference and polarized camera adjoints remain
+  outside this consumer.
   `CurvedCameraRaster::sample_pixel_rayleigh` uses the same physical camera,
   spectral stratification and color integration, with separate per-wavelength
   surface/flight streams and a fourth independent delta-acceptance variate.

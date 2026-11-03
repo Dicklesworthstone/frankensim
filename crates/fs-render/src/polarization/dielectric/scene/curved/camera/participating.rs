@@ -18,8 +18,9 @@
 //!
 //! References and endpoint radiometry are those of [`super::CurvedCameraScene`]; the molecular
 //! matrix is owned by [`crate::volumes::transport::scattering::polarized`].
-//! Only its admitted molecular phase laws are supported. No thermal volume
-//! emission, scalar particle-to-Mueller inference, or moving field is added.
+//! Only its admitted molecular phase laws are supported. Optional isothermal
+//! LTE media use the same true-absorption legs as the surface camera. No scalar
+//! particle-to-Mueller inference or moving field is added.
 //!
 //! Original volume, distance, integration and geometry budgets remain binding.
 //! A positive global majorant does not prove vacuum escape when one density
@@ -109,9 +110,9 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         let result = self
             .scattering
             .for_camera()
-            .trace_observed(cx, beam, initial_medium, settings, seed, path_id,
-                |path| emission.observe(path));
-        let (path, emitted) = emission.finish(result)?;
+            .trace_events_observed(cx, beam, initial_medium, settings, seed, path_id,
+                |event| emission.observe_rayleigh_event(event));
+        let (path, emitted) = emission.finish_scattering(result)?;
         self.finish(cx, path, initial_index, emitted)
     }
 
@@ -133,16 +134,16 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
-        let result = self.scattering.for_camera().trace_with_samples_observed(
+        let result = self.scattering.for_camera().trace_with_samples_events_observed(
             cx,
             beam,
             initial_medium,
             settings,
             surface_samples,
             flight_samples,
-            |path| emission.observe(path),
+            |event| emission.observe_rayleigh_event(event),
         );
-        let (path, emitted) = emission.finish(result)?;
+        let (path, emitted) = emission.finish_scattering(result)?;
         self.finish(cx, path, initial_index, emitted)
     }
 
@@ -164,16 +165,16 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
-        let result = self.scattering.for_camera().trace_with_tracking_samples_observed(
+        let result = self.scattering.for_camera().trace_with_tracking_samples_events_observed(
             cx,
             beam,
             initial_medium,
             settings,
             surface_samples,
             flight_samples,
-            |path| emission.observe(path),
+            |event| emission.observe_rayleigh_event(event),
         );
-        let (path, emitted) = emission.finish(result)?;
+        let (path, emitted) = emission.finish_scattering(result)?;
         self.finish(cx, path, initial_index, emitted)
     }
 

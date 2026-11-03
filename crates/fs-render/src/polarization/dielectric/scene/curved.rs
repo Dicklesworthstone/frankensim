@@ -407,9 +407,30 @@ impl<'a> CurvedPolarizedScene<'a> {
         seed: u64,
         path_id: u64,
         radiance_brushing: bool,
-        observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
+        mut observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedPathResult, CurvedSceneError> {
-        self.trace_with_samples_mode(
+        self.trace_with_seed_events_mode(
+            cx, beam, initial_medium, settings, seed, path_id, radiance_brushing,
+            |event| match event {
+                CurvedTraceEvent::Arrival(path) => observe_surface(path),
+                CurvedTraceEvent::Departure { .. } => Ok(()),
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_with_seed_events_mode(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        path_id: u64,
+        radiance_brushing: bool,
+        observe_event: impl FnMut(CurvedTraceEvent<'_>) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedPathResult, CurvedSceneError> {
+        self.trace_with_samples_events_mode(
             cx,
             beam,
             initial_medium,
@@ -422,7 +443,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                 core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
             },
             radiance_brushing,
-            observe_surface,
+            observe_event,
         )
     }
 

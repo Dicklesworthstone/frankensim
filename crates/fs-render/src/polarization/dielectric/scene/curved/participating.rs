@@ -573,7 +573,32 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         settings: CurvedRayleighTraceSettings,
         seed: u64,
         path_id: u64,
-        observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
+        mut observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_events_observed(
+            cx, beam, initial_medium, settings, seed, path_id,
+            |event| match event {
+                CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
+                    observe_vertex(CurvedRayleighVertex::Surface(path))
+                }
+                CurvedRayleighEvent::VolumeArrival { path, phase } => {
+                    observe_vertex(CurvedRayleighVertex::Volume { path, phase })
+                }
+                _ => Ok(()),
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_events_observed(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        path_id: u64,
+        observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
         let draws = |ordinal, domain| {
             let block = philox4x32_10(
@@ -582,7 +607,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             );
             core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
         };
-        self.trace_with_tracking_samples_impl(
+        self.trace_with_tracking_samples_events_impl(
             cx,
             beam,
             initial_medium,
@@ -590,7 +615,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             |event| draws(event, 0x706f_6c32),
             |flight| draws(flight, 0x706f_6c34),
             true,
-            observe_vertex,
+            observe_event,
         )
     }
 
@@ -652,10 +677,35 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         initial_medium: usize,
         settings: CurvedRayleighTraceSettings,
         surface_samples: impl FnMut(u32) -> [f64; 3],
-        mut flight_samples: impl FnMut(u32) -> [f64; 3],
-        observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
+        flight_samples: impl FnMut(u32) -> [f64; 3],
+        mut observe_vertex: impl FnMut(CurvedRayleighVertex<'_>) -> Result<(), CurvedSceneError>,
     ) -> Result<CurvedRayleighPath, CurvedSceneError> {
-        self.trace_with_tracking_samples_impl(
+        self.trace_with_samples_events_observed(
+            cx, beam, initial_medium, settings, surface_samples, flight_samples,
+            |event| match event {
+                CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
+                    observe_vertex(CurvedRayleighVertex::Surface(path))
+                }
+                CurvedRayleighEvent::VolumeArrival { path, phase } => {
+                    observe_vertex(CurvedRayleighVertex::Volume { path, phase })
+                }
+                _ => Ok(()),
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_with_samples_events_observed(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        mut flight_samples: impl FnMut(u32) -> [f64; 3],
+        observe_event: impl FnMut(CurvedRayleighEvent<'_>) -> Result<(), CurvedSceneError>,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_tracking_samples_events_impl(
             cx,
             beam,
             initial_medium,
@@ -666,7 +716,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                 [draw[0], draw[1], draw[2], 0.0]
             },
             false,
-            observe_vertex,
+            observe_event,
         )
     }
 

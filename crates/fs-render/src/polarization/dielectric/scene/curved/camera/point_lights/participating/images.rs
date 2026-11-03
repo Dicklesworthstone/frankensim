@@ -33,7 +33,7 @@ use crate::dielectric::DielectricError;
 use crate::photometry::source::PhotometricSource;
 use crate::polarization::Stokes;
 use crate::polarization::dielectric::scene::Interaction;
-use crate::polarization::dielectric::scene::curved::SceneMedium;
+use crate::polarization::dielectric::scene::curved::{CurvedTraceEvent, SceneMedium};
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleConnectionLaunch, BundleConnectionTarget,
 };
@@ -41,7 +41,7 @@ use crate::polarization::dielectric::scene::curved::bundle::connection::images::
     BundleImageError, BundleImageOptions, BundleImageSeed, BundleImageSeedOutcome,
     MAX_BUNDLE_IMAGE_SEEDS,
 };
-use crate::polarization::dielectric::scene::curved::participating::CurvedRayleighVertex;
+use crate::polarization::dielectric::scene::curved::participating::CurvedRayleighEvent;
 use crate::polarization::dielectric::scene::curved::participating::transmittance::{
     CurvedTransmittanceError, CurvedTransmittanceOptions,
 };
@@ -214,21 +214,22 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
             .camera
             .participating_scene()
             .for_camera()
-            .trace_with_tracking_samples_vertices_observed(
+            .trace_with_tracking_samples_events_observed(
                 cx,
                 beam,
                 initial_medium,
                 camera_settings(settings),
                 surface_samples,
                 flight_samples,
-                |vertex| {
-                    let result = match vertex {
-                        CurvedRayleighVertex::Surface(path) => {
+                |event| {
+                    let result = match event {
+                        CurvedRayleighEvent::Surface(CurvedTraceEvent::Arrival(path)) => {
                             emission.observe(path)?;
                             fixtures.observe_with_connector(cx, path, &mut connector)?;
                             self.add_groups(cx, path, None, &mut fixtures, &mut connector, workspace)
                         }
-                        CurvedRayleighVertex::Volume { path, phase } => {
+                        CurvedRayleighEvent::VolumeArrival { path, phase } => {
+                            emission.observe_volume(path)?;
                             fixtures.observe_volume(
                                 cx,
                                 path,
@@ -244,6 +245,11 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                                 &mut connector,
                                 workspace,
                             )
+                        }
+                        CurvedRayleighEvent::Surface(CurvedTraceEvent::Departure { path, .. })
+                        | CurvedRayleighEvent::VolumeDeparture { path, .. } => {
+                            emission.depart(path);
+                            Ok(())
                         }
                     };
                     result.map_err(|error| {

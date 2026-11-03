@@ -20,6 +20,8 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 
+mod thermal;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new_clock_free();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {

@@ -1,4 +1,4 @@
-//! Add calibrated surface emission before the same native path scatters.
+//! Add surface and optional LTE volume emission before the native path scatters.
 //!
 //! The rendering equation adds Le at every encountered source, including a
 //! surface that subsequently reflects or transmits. Its contribution uses the
@@ -12,6 +12,12 @@ use super::{
     PathTermination, finite_nonnegative, phase_index,
 };
 
+use super::super::CurvedTraceEvent;
+use super::thermal::ThermalEmission;
+
+#[cfg(feature = "volumes")]
+use super::super::participating::{CurvedRayleighEvent, CurvedRayleighPath};
+
 /// A stack-only accumulator. A callback failure stops the original walker and
 /// retains the camera error without exposing camera policy in public power APIs.
 pub(super) struct SurfaceEmission<'a, 's, 'm> {
@@ -19,6 +25,7 @@ pub(super) struct SurfaceEmission<'a, 's, 'm> {
     initial_index: f64,
     radiance: f64,
     error: Option<CameraRadianceError>,
+    thermal: Option<ThermalEmission>,
 }
 
 impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
@@ -28,11 +35,70 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
             initial_index,
             radiance: 0.0,
             error: None,
+            thermal: (!camera.volume_emitters.is_empty()).then(ThermalEmission::new),
         }
     }
 
     pub(super) fn observe(&mut self, path: &CurvedPathResult) -> Result<(), CurvedSceneError> {
         self.observe_weighted(path, 1.0)
+    }
+
+    pub(super) fn observe_event(
+        &mut self,
+        event: CurvedTraceEvent<'_>,
+    ) -> Result<(), CurvedSceneError> {
+        match event {
+            CurvedTraceEvent::Arrival(path) => self.observe(path),
+            CurvedTraceEvent::Departure { path, .. } => {
+                self.depart(path);
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(feature = "volumes")]
+    pub(super) fn observe_rayleigh_event(
+        &mut self,
+        event: CurvedRayleighEvent<'_>,
+    ) -> Result<(), CurvedSceneError> {
+        match event {
+            CurvedRayleighEvent::Surface(event) => self.observe_event(event),
+            CurvedRayleighEvent::VolumeArrival { path, .. } => self.observe_volume(path),
+            CurvedRayleighEvent::VolumeDeparture { path, .. } => {
+                self.depart(path);
+                Ok(())
+            }
+        }
+    }
+
+    /// The native response has already applied its Mueller/PDF weight.
+    pub(super) fn depart(&mut self, path: &CurvedPathResult) {
+        if let Some(thermal) = &mut self.thermal {
+            thermal.depart(path);
+        }
+    }
+
+    #[cfg(feature = "volumes")]
+    pub(super) fn observe_volume(&mut self, path: &CurvedPathResult) -> Result<(), CurvedSceneError> {
+        self.add_thermal(path, false).map_err(|error| {
+            self.error = Some(error);
+            CurvedSceneError::NumericalRange
+        })
+    }
+
+    fn add_thermal(
+        &mut self,
+        path: &CurvedPathResult,
+        terminal: bool,
+    ) -> Result<(), CameraRadianceError> {
+        if let Some(thermal) = &mut self.thermal {
+            let emitted = thermal.arrive(self.camera, self.initial_index, path, terminal)?;
+            // Avoid changing even a retained zero's sign when no source emits.
+            if emitted != 0.0 {
+                self.radiance = finite_nonnegative(self.radiance + emitted)?;
+            }
+        }
+        Ok(())
     }
 
     /// Apply a complementary camera-strategy weight to this emitter hit.
@@ -42,10 +108,14 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         path: &CurvedPathResult,
         weight: f64,
     ) -> Result<(), CurvedSceneError> {
-        self.add_surface(path, weight).map_err(|error| {
-            self.error = Some(error);
-            CurvedSceneError::NumericalRange
-        })
+        // Area-source MIS applies only to the surface term. Thermal emission
+        // has no competing source proposal and retains its full path weight.
+        self.add_thermal(path, false)
+            .and_then(|()| self.add_surface(path, weight))
+            .map_err(|error| {
+                self.error = Some(error);
+                CurvedSceneError::NumericalRange
+            })
     }
 
     fn add_surface(
@@ -110,13 +180,36 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         Ok(())
     }
 
-    pub(super) fn finish<T>(
+    pub(super) fn finish(
         self,
+        result: Result<CurvedPathResult, CurvedSceneError>,
+    ) -> Result<(CurvedPathResult, f64), CameraRadianceError> {
+        self.finish_with(result, |path| path)
+    }
+
+    #[cfg(feature = "volumes")]
+    pub(super) fn finish_scattering(
+        self,
+        result: Result<CurvedRayleighPath, CurvedSceneError>,
+    ) -> Result<(CurvedRayleighPath, f64), CameraRadianceError> {
+        self.finish_with(result, CurvedRayleighPath::path)
+    }
+
+    fn finish_with<T>(
+        mut self,
         result: Result<T, CurvedSceneError>,
+        path: fn(&T) -> &CurvedPathResult,
     ) -> Result<(T, f64), CameraRadianceError> {
-        if let Some(error) = self.error {
+        if let Some(error) = self.error.take() {
             return Err(error);
         }
-        Ok((result?, self.radiance))
+        let result = result?;
+        let terminal = path(&result);
+        if matches!(terminal.termination(),
+            PathTermination::Opaque | PathTermination::Escaped | PathTermination::RejectedMicrofacet)
+        {
+            self.add_thermal(terminal, true)?;
+        }
+        Ok((result, self.radiance))
     }
 }

@@ -263,9 +263,13 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                         }
                         CurvedRayleighEvent::Surface(CurvedTraceEvent::Departure {
                             path, incoming_beam, event, pdf, delta,
-                        }) => self.area_lights.record_departure(path, incoming_beam, event,
-                            pdf, delta, &mut state, &mut workspace.camera),
+                        }) => {
+                            emission.depart(path);
+                            self.area_lights.record_departure(path, incoming_beam, event,
+                                pdf, delta, &mut state, &mut workspace.camera)
+                        }
                         CurvedRayleighEvent::VolumeArrival { path, phase } => {
+                            emission.observe_volume(path)?;
                             // A real collision changes the competing angular
                             // technique even when this medium has no binding.
                             workspace.camera.history.clear();
@@ -283,6 +287,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                                 &mut volume_area_samples, &mut source_samples)
                         }
                         CurvedRayleighEvent::VolumeDeparture { path, incoming_beam, phase, pdf } => {
+                            emission.depart(path);
                             self.record_volume(path, incoming_beam.ray().dir, phase, pdf, &mut state)
                         }
                     };
@@ -293,7 +298,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                 },
             );
         if let Some(error) = source_error { return Err(error); }
-        let (path, emitted) = emission.finish(result)?;
+        let (path, emitted) = emission.finish_scattering(result)?;
         let area_radiance_w_m2_sr_nm = nonnegative(radiance.value())?;
         let radiance = self.surface_camera().finish(cx, *path.path(), initial_index,
             nonnegative(emitted + area_radiance_w_m2_sr_nm)?)?;

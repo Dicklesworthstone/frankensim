@@ -37,7 +37,8 @@
 //! calibrated: no thermal emissivity or material/source energy coupling is inferred.
 //! An environment is evaluated only after proven homogeneous escape. Nonzero
 //! homogeneous absorption over the remaining infinite path gives exactly zero;
-//! no volume emission is assumed. Numerical distance/event limits are errors,
+//! optional isothermal LTE volume sources supply their own finite thermal tail.
+//! Numerical distance/event limits are errors,
 //! never background. Native zero power cannot distinguish exact extinction from
 //! floating-point underflow and is unresolved before a positive finite source.
 //! Explicit depolarizing diffuse surfaces use their native cosine proposal and
@@ -61,6 +62,9 @@ use fs_geom::Vec3;
 
 mod emission;
 use emission::SurfaceEmission;
+
+mod thermal;
+pub use thermal::IsothermalVolumeEmitter;
 
 /// Physical camera and spectral pixel integration over these native paths.
 pub mod raster;
@@ -225,6 +229,9 @@ pub enum CameraRadianceError {
     InvalidEmitter {
         object_id: u64,
     },
+    InvalidVolumeEmitter {
+        medium_index: usize,
+    },
     UnsupportedSurface {
         object_id: u64,
     },
@@ -233,6 +240,7 @@ pub enum CameraRadianceError {
     AllocationRefused,
     NumericalRange,
     Optics(DielectricError),
+    Thermal(crate::thermal_surface::ThermalSurfaceError),
     Scene(CurvedSceneError),
 }
 impl From<CurvedSceneError> for CameraRadianceError {
@@ -308,6 +316,7 @@ pub struct CurvedCameraScene<'s, 'm> {
     scene: &'s CurvedPolarizedScene<'m>,
     emitters: Vec<Option<&'s SurfaceEmitter>>,
     environment: Option<EnvironmentRadiance<'s>>,
+    volume_emitters: Vec<Option<IsothermalVolumeEmitter>>,
 }
 
 impl<'s, 'm> CurvedCameraScene<'s, 'm> {
@@ -366,6 +375,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
             scene,
             emitters: slots,
             environment,
+            volume_emitters: Vec::new(),
         })
     }
 
@@ -388,7 +398,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self, initial_index);
-        let result = self.scene.trace_with_seed_mode(
+        let result = self.scene.trace_with_seed_events_mode(
             cx,
             beam,
             initial_medium,
@@ -396,7 +406,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
             seed,
             path_id,
             true,
-            |path| emission.observe(path),
+            |event| emission.observe_event(event),
         );
         let (path, emitted) = emission.finish(result)?;
         self.finish(cx, path, initial_index, emitted)
@@ -421,14 +431,14 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
         let initial_index = phase_index(beam.medium(), wavelength_nm)?;
         let mut emission = SurfaceEmission::new(self, initial_index);
-        let result = self.scene.trace_with_samples_mode(
+        let result = self.scene.trace_with_samples_events_mode(
             cx,
             beam,
             initial_medium,
             settings,
             samples,
             true,
-            |path| emission.observe(path),
+            |event| emission.observe_event(event),
         );
         let (path, emitted) = emission.finish(result)?;
         self.finish(cx, path, initial_index, emitted)

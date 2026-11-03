@@ -333,6 +333,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                             &mut work, &mut radiance, workspace, &mut area_samples)
                     }
                     CurvedTraceEvent::Departure { path, incoming_beam, event, pdf, delta } => {
+                        emission.depart(path);
                         self.record_departure(path, incoming_beam, event, pdf, delta, &mut state, workspace)
                     }
                 };
