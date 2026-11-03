@@ -445,3 +445,6 @@ fn g4_budgets_band_and_cancellation_refuse_without_source_mutation() {
     ));
     assert_eq!(state, boundary.load().pole_states());
 }
+
+#[path = "rational_modal_analysis/regional.rs"]
+mod regional;

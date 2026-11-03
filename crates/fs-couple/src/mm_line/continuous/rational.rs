@@ -17,7 +17,7 @@ use super::{GasState, LinearSplitBudget, ModalGalerkinSource, ModalTimeError, Mo
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::dg_port::{TerminalSolve, eliminate_mixed_direct, eliminate_zero_direct};
 use crate::modal_mouth::realization::{BemModalMouthRealization, BemModalMouthRealizationRecord};
-use fs_duct::modal::time_domain::{ModalEnd, assemble_lossless};
+use fs_duct::modal::time_domain::{ModalEnd, assemble_lossless, assemble_lossless_regional};
 use fs_duct::{LossModel, RadiusProfile, segment_wave};
 use fs_exec::CancelGate;
 use fs_phs::linear_exact::prepared::PreparedQuadraticFlow;
@@ -210,6 +210,54 @@ impl RationalModalLine {
         budget: RationalModalLineBudget,
         gate: &CancelGate,
     ) -> Result<Self, RationalModalError> {
+        Self::prepare_source(profile, gas, None, elements, boundary, budget, gate)
+    }
+
+    /// Attach the original rational mouth to frozen regional gases, with one
+    /// original state per uniform axial element at a common static pressure.
+    /// Temperature and composition interfaces remain on that grid; refining it
+    /// requires repeating each gas over the same physical interval.
+    ///
+    /// Each region retains its own density, sound speed and transverse cutoff
+    /// in the original modal mass and stiffness. Inlet waves use the inlet
+    /// gas's rho*c/S, while the mouth keeps the original exterior source and
+    /// every accepted load coordinate. No gas, impedance or history is averaged.
+    /// The retained regions do not add mean flow, mixing or thermal evolution.
+    ///
+    /// # Errors
+    /// Original regional-source refusals and the same complete-state, clock,
+    /// pressure-manifold, capacity and cancellation refusals as [Self::new].
+    pub fn new_regional(
+        profile: &RadiusProfile,
+        gases: &[GasState],
+        boundary: ModalRationalLoad,
+        budget: RationalModalLineBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, RationalModalError> {
+        poll(gate)?;
+        let gas = gases.first().ok_or(ModalTimeError::Invalid(
+            "regional modal source needs one gas state per axial element",
+        ))?;
+        Self::prepare_source(
+            profile,
+            gas,
+            Some(gases),
+            gases.len(),
+            boundary,
+            budget,
+            gate,
+        )
+    }
+
+    fn prepare_source(
+        profile: &RadiusProfile,
+        gas: &GasState,
+        regional_gases: Option<&[GasState]>,
+        elements: usize,
+        boundary: ModalRationalLoad,
+        budget: RationalModalLineBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, RationalModalError> {
         poll(gate)?;
         let p = boundary.load.ports();
         let radius = profile.outlet_radius();
@@ -254,15 +302,25 @@ impl RationalModalLine {
                 "complete duct, load, held waves and observations exceed authored exact-flow capacity",
             ));
         }
-        let (source, duct) = assemble_lossless(
-            profile,
-            gas,
-            ModeCount(p),
-            elements,
-            ModalEnd::Ports,
-            budget.linear.max_modes,
-            || gate.is_requested(),
-        )?
+        let (source, duct) = match regional_gases {
+            Some(gases) => assemble_lossless_regional(
+                profile,
+                gases,
+                ModeCount(p),
+                ModalEnd::Ports,
+                budget.linear.max_modes,
+                || gate.is_requested(),
+            ),
+            None => assemble_lossless(
+                profile,
+                gas,
+                ModeCount(p),
+                elements,
+                ModalEnd::Ports,
+                budget.linear.max_modes,
+                || gate.is_requested(),
+            ),
+        }?
         .into_parts();
         let split = split_quadratic(&duct, budget.linear)?;
         let model = view.state_space(budget.exact.max_dense_bytes, &mut || gate.is_requested())?;

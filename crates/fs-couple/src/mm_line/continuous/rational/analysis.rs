@@ -11,10 +11,11 @@
 //! rational continuation and finite spatial image, not exact exterior physics.
 
 use super::{
-    GasState, ModalGalerkinSource, ModalRationalLoad, RationalModalError, RationalModalLine,
+    GasState, ModalGalerkinSource, ModalRationalLoad, ModalTimeError, RationalModalError,
+    RationalModalLine,
 };
 use fs_duct::RadiusProfile;
-use fs_duct::modal::time_domain::{ModalEnd, assemble_lossless};
+use fs_duct::modal::time_domain::{ModalEnd, assemble_lossless, assemble_lossless_regional};
 use fs_exec::CancelGate;
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_la::nonlinear_eig::beyn::{BeynError, BeynReport, beyn_with_cancel};
@@ -203,6 +204,56 @@ impl<'a> PreparedRationalModalAnalysis<'a> {
         budget: RationalModalAnalysisBudget,
         gate: &CancelGate,
     ) -> Result<Self, RationalModalAnalysisError> {
+        Self::prepare_source(profile, gas, None, elements, boundary, budget, gate)
+    }
+
+    /// Prepare continuous response and resonances from the original frozen gas
+    /// in every uniform axial element. The regional mass and stiffness, local
+    /// radial cutoffs, inlet reference and every rational mouth state survive.
+    /// No average gas or effective sound speed replaces an authored region.
+    ///
+    /// All regions must share the exterior's static pressure. Their temperature
+    /// and composition interfaces are fixed on the element grid; refining it
+    /// requires repeating each state over its physical interval. Mean flow,
+    /// mixing and thermal evolution are outside this lossless interior model.
+    ///
+    /// # Errors
+    /// Original regional-source refusals and the same source-band, complete
+    /// descriptor, resource, accuracy and cancellation refusals as [Self::new].
+    pub fn new_regional(
+        profile: &RadiusProfile,
+        gases: &[GasState],
+        boundary: &'a ModalRationalLoad,
+        budget: RationalModalAnalysisBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, RationalModalAnalysisError> {
+        poll(gate)?;
+        let gas = gases
+            .first()
+            .ok_or(ModalTimeError::Invalid(
+                "regional modal source needs one gas state per axial element",
+            ))
+            .map_err(RationalModalError::from)?;
+        Self::prepare_source(
+            profile,
+            gas,
+            Some(gases),
+            gases.len(),
+            boundary,
+            budget,
+            gate,
+        )
+    }
+
+    fn prepare_source(
+        profile: &RadiusProfile,
+        gas: &GasState,
+        regional_gases: Option<&[GasState]>,
+        elements: usize,
+        boundary: &'a ModalRationalLoad,
+        budget: RationalModalAnalysisBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, RationalModalAnalysisError> {
         poll(gate)?;
         let p = boundary.load.ports();
         let nd = elements
@@ -216,15 +267,25 @@ impl<'a> PreparedRationalModalAnalysis<'a> {
         {
             return Err(invalid("original mouth radius or static pressure mismatch"));
         }
-        let (source, duct) = assemble_lossless(
-            profile,
-            gas,
-            boundary.modes(),
-            elements,
-            ModalEnd::Ports,
-            budget.maximum_dimension,
-            || gate.is_requested(),
-        )
+        let (source, duct) = match regional_gases {
+            Some(gases) => assemble_lossless_regional(
+                profile,
+                gases,
+                boundary.modes(),
+                ModalEnd::Ports,
+                budget.maximum_dimension,
+                || gate.is_requested(),
+            ),
+            None => assemble_lossless(
+                profile,
+                gas,
+                boundary.modes(),
+                elements,
+                ModalEnd::Ports,
+                budget.maximum_dimension,
+                || gate.is_requested(),
+            ),
+        }
         .map_err(RationalModalError::from)?
         .into_parts();
         Self::prepare(source, &duct, boundary, budget, gate)

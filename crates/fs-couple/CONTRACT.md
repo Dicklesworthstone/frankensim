@@ -24254,3 +24254,30 @@ Scope: explicitly opted-in spatial diffusivity, isothermal quasistatic small-str
 The caller admits separate physical-observation and complete strain budgets. A successfully completed strain query consumes one allowance even when its sufficient envelope refuses the response; failed solves and failed strain queries consume none. Exhaustion refuses before solving. Reuse leaves the original factor, immutable sources and accepted histories unchanged. This admits only the modeled coating envelopes: the original shell regions author no substrate strain limit, and unmodeled preload or removed static strain, material failure and continuum convergence remain outside the claim.
 
 Two focused regressions in `coating_dynamic_response` cover a phase-interior exceedance under actual dynamic-load forcing and an original assembly with distinct film limits, including source identity, response parity, refusal, reuse, cancellation and resource exhaustion. The current shared `fs-phs` owner and the actual shell source-owner harness compiled; all 14 tests in the focused `coating_dynamic_response` target passed, including both new admission regressions. The harness contains the actual complete shell tree and original supporting physical owners; unrelated application modules are omitted. This is not a full workspace Cargo gate.
+
+
+### Regional gas sources for continuous rational modal radiation
+
+`RationalModalLine::new_regional` and
+`PreparedRationalModalAnalysis::new_regional` consume the original
+`assemble_lossless_regional` source with one authored `GasState` per uniform
+axial element. Every gas state, local density and sound speed, consistent mass,
+stiffness, transverse cutoff, and inlet/outlet reference survives. Repeated
+uniform states reproduce the uniform path; no averaged gas, effective impedance,
+resonance correction, or eliminated physical coordinate is introduced.
+
+The original rational mouth keeps its exterior gas, signed radial basis, source
+band, source clock, and accepted pole history. Runtime analysis uses the same
+retained regional source without consulting or changing accepted history.
+Continuous response, pole refinement and spectrum discovery retain the complete
+joint descriptor and original mouth multipliers. Existing preallocation,
+cancellation, source-pressure, pressure-manifold, and transactional work checks
+remain in force.
+
+These regions are frozen at one common static pressure, with interfaces on the
+authored element grid. Refinement must preserve each physical interval. Mean
+flow, mixing, thermal/species evolution, and causal higher-mode viscothermal
+losses are outside this lossless interior model. Rational mouth work remains
+signed exchange; it is not reclassified as stored energy or heat.
+
+Native compilation of the edited runtime and analysis with the original mixed/zero-direct owners and production physical/numerical dependencies succeeded. All 10 focused `rational_modal_analysis` integration tests passed, including five regional tests for uniform equivalence, local cutoff/transfer convergence, loaded finite-pole convergence, exact-clock work/state subdivision, and source/refusal/history preservation. The bounded harness supplies BEM producer metadata for type linkage only; BEM producer execution and a full `fs-couple` Cargo gate are not claimed.
