@@ -12032,3 +12032,38 @@ qualification/cancellation, and rotation/area/caloric-reference invariance.
 Rustfmt parsing and source/API checks passed. Native compilation and execution
 remain unavailable because required constellation siblings are missing.
 
+### Finite gas exchange with drifting molecular reservoirs
+
+`reservoir::step_candidate_with_drift` composes vacuum outlets, comoving sources,
+qualified drifting sources and existing internal gas paths on one original
+species budget and one caloric reconstruction. The original comoving entry
+delegates with an empty drift slice. A `EffusionDriftingReservoirStep` retains
+distinct source-qualified incoming moments and the finite gas's original
+outgoing vacuum beam. It never labels a shifted distribution as a rest-frame
+reciprocal beam. The prescribed source's volume is not a finite donor budget.
+
+All original accepted masses carry their own molecular energy. The common
+caloric helper evaluates original species enthalpy increments, the rest
+molecular correction and the drift selection change separately, preserving
+heat beside large formation-energy references. Incoming drift energy is
+included once. Gross outgoing streams spend the original finite inventory
+across every path; simultaneous supply cannot fund excessive withdrawal.
+
+Near zero drift, the authoritative signed mass retains the stationary net plus
+the separately resolved drift increment. Far outward tails use direct gross
+incoming mass, so baseline cancellation cannot close a real molecular path.
+The existing boundary owner checks agreement of signed and gross accounts and
+the resulting mass/energy residuals against its independent physical budgets.
+Species may enter from zero using their original source catalog.
+
+Initial samples and final gas endpoints retain original catalog, caloric,
+transport and transmission qualification, including calibrated zero
+transmissions. Closed geometric paths remain inactive. The enclosing mechanical
+owner supplies the inertial transform and re-admits/resamples relative drift
+as its aperture velocity changes; this material owner evolves no bulk momentum.
+
+Five genuine-source groups cover exact comoving parity, tangential heating
+under large reference shifts, shared three-port withdrawal, tiny signed drift
+and nonzero thermal tails, and endpoint/source/cancellation refusal. Source and
+fixture files passed Rustfmt parsing and bounded API review; native execution
+remains blocked by the missing constellation checkouts.

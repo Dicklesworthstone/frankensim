@@ -2,6 +2,8 @@
 use super::super::super::reservoir as open;
 use super::*;
 
+mod drift;
+
 fn port<'a>(
     source: &'a ClosedGasParcel,
     law: &'a EffusiveInterface,

@@ -3,8 +3,13 @@
 //! Both beams remain distinct even at zero net mass. The external reservoir is
 //! a prescribed thermochemical source, not a finite endpoint silently depleted
 //! here. Its owner accepts the opposite exported species and energy accounts.
-//! The scalar molecular law uses a common rest frame; moving-source kinematics
-//! and exterior-wall forces belong to the composing mechanical owner.
+//! Comoving and explicitly qualified drifting sources share this transaction.
+//! A drifting source supplies velocity relative to the aperture at this sample;
+//! moving-source kinematics and exterior-wall forces belong to its mechanical
+//! owner, which must refresh the relative distribution between finite steps.
+
+pub mod drift;
+pub use drift::{EffusionDriftingReservoirLink, EffusionDriftingReservoirStep};
 
 use super::{check, face_error, vacuum};
 use crate::thermochemical_gas::energy::parcel::transfer::{
@@ -25,7 +30,7 @@ use crate::thermochemical_gas::energy::parcel::transfer::{
 };
 use crate::thermochemical_gas::energy::{GasEnergySolve, parcel::ClosedGasParcel};
 use fs_qty::Temperature;
-use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+use fs_thermochem::{Nasa9StandardStateModelV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use std::collections::{BTreeMap, BTreeSet};
 use vacuum::{VacuumEffusionLink, VacuumEffusionOutletStep};
 
@@ -56,6 +61,8 @@ pub struct ReservoirEffusionStep {
     pub transport: GasTransportRates,
     pub vacuum_outlets: Vec<VacuumEffusionOutletStep>,
     pub reservoirs: Vec<EffusionReservoirStep>,
+    /// Distinct incoming drifting distributions and original outgoing beams.
+    pub drifting_reservoirs: Vec<EffusionDriftingReservoirStep>,
     /// Actual gross species transfers and stable net caloric accounts.
     pub exchange: SpeciesNetworkStep,
 }
@@ -97,6 +104,7 @@ impl ReservoirEffusionStep {
                     .map_err(|e| face_error(row.id, e))?;
             }
         }
+        drift::admit_endpoints(&self.drifting_reservoirs, parcels, &mut cancelled)?;
         check(&mut cancelled)?;
         Ok(())
     }
@@ -133,6 +141,47 @@ fn signed_product(id: u64, a: f64, b: f64) -> Result<f64, GasTransportError> {
     Ok(magnitude.copysign(a.signum() * b.signum()))
 }
 
+// One source-relative caloric chart for every molecular reservoir. The final
+// argument is only the incident kinetic selection change from zero drift;
+// original species enthalpy differences and the rest molecular correction are
+// evaluated separately so formation datums never enter a subtraction.
+fn relative_energy(
+    id: u64,
+    original: &Nasa9StandardStateModelV1,
+    tl: f64,
+    tr: f64,
+    net: f64,
+    incoming: f64,
+    drift_specific_energy: f64,
+) -> Result<f64, GasTransportError> {
+    let molar_mass = original.molar_mass().value();
+    let a_left =
+        -positive_product_ratio(&[0.5, R, tl], &[molar_mass]).map_err(|e| face_error(id, e))?;
+    let mut relative = Sum::default();
+    relative
+        .add(signed_product(id, net, a_left)?)
+        .map_err(|e| face_error(id, e))?;
+    if incoming > 0.0 && tl != tr {
+        let dh = original
+            .molar_enthalpy_change(Temperature::new(tl), Temperature::new(tr))
+            .map_err(|e| face_error(id, source_error(e)))?
+            .value()
+            / molar_mass;
+        let correction = positive_product_ratio(&[0.5, R, (tr - tl).abs()], &[molar_mass])
+            .map_err(|e| face_error(id, e))?
+            .copysign(tr - tl);
+        relative
+            .add(signed_product(id, incoming, dh - correction)?)
+            .map_err(|e| face_error(id, e))?;
+    }
+    if drift_specific_energy != 0.0 {
+        relative
+            .add(signed_product(id, incoming, drift_specific_energy)?)
+            .map_err(|e| face_error(id, e))?;
+    }
+    Ok(relative.value)
+}
+
 /// Advance internal paths, vacuum escape and prescribed reservoirs simultaneously.
 ///
 /// Gross outgoing species spend the ORIGINAL inventory, including when an inlet
@@ -150,6 +199,38 @@ pub fn step_candidate(
     duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: GasTransportSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ReservoirEffusionCandidate, GasTransportError> {
+    step_candidate_with_drift(
+        parcels,
+        paths,
+        vacuum_links,
+        reservoir_links,
+        &[],
+        duration_s,
+        endpoints,
+        controls,
+        cancelled,
+    )
+}
+
+/// Advance all original paths and qualified drifting sources in one gas solve.
+///
+/// Relative source velocities and conditional molecular moments are held at
+/// their sampled values. The composing mechanical owner must transform the
+/// accepted streams and refresh drift as its surface velocity changes. The
+/// species/energy transaction itself does not impose an inertial ambient or
+/// an exterior wall force. Geometrically closed ports query no source support.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_drift(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    paths: GasTransportPaths<'_>,
+    vacuum_links: &[VacuumEffusionLink<'_>],
+    reservoir_links: &[EffusionReservoirLink<'_>],
+    drifting_links: &[EffusionDriftingReservoirLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: GasTransportSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ReservoirEffusionCandidate, GasTransportError> {
     check(&mut cancelled)?;
@@ -162,6 +243,7 @@ pub fn step_candidate(
         paths.effusion.len(),
         vacuum_links.len(),
         reservoir_links.len(),
+        drifting_links.len(),
     ]
     .into_iter()
     .try_fold(0usize, |n, k| n.checked_add(k));
@@ -197,6 +279,18 @@ pub fn step_candidate(
             ));
         }
         ordered.insert(link.id, link);
+    }
+    for link in drifting_links {
+        check(&mut cancelled)?;
+        if !parcels.contains_key(&link.parcel)
+            || !link.area_m2.is_finite()
+            || link.area_m2 < 0.0
+            || !ids.insert(link.id)
+        {
+            return Err(GasTransportError::Invalid(
+                "drifting ports need unique IDs, existing gases and nonnegative areas",
+            ));
+        }
     }
     let sampled = transport::sample_transfers(
         parcels,
@@ -247,26 +341,7 @@ pub fn step_candidate(
                 .ok_or(GasTransportError::Invalid(
                     "reservoir beam lost its original caloric source",
                 ))?;
-            let molar_mass = original.molar_mass().value();
-            let a_left = -positive_product_ratio(&[0.5, R, tl], &[molar_mass])
-                .map_err(|e| face_error(id, e))?;
-            let mut relative = Sum::default();
-            relative
-                .add(signed_product(id, net, a_left)?)
-                .map_err(|e| face_error(id, e))?;
-            if mi > 0.0 && tl != tr {
-                let dh = original
-                    .molar_enthalpy_change(Temperature::new(tl), Temperature::new(tr))
-                    .map_err(|e| face_error(id, source_error(e)))?
-                    .value()
-                    / molar_mass;
-                let correction = positive_product_ratio(&[0.5, R, (tr - tl).abs()], &[molar_mass])
-                    .map_err(|e| face_error(id, e))?
-                    .copysign(tr - tl);
-                relative
-                    .add(signed_product(id, mi, dh - correction)?)
-                    .map_err(|e| face_error(id, e))?;
-            }
+            let relative = relative_energy(id, original, tl, tr, net, mi, 0.0)?;
             work += 1 + usize::from(rows.is_empty());
             if work > MAX_SNAPSHOT_TRANSFERS {
                 return Err(GasTransportError::Invalid(
@@ -278,7 +353,7 @@ pub fn step_candidate(
                 incoming_mass_kg: mi,
                 outgoing_mass_kg: mo,
                 net_mass_into_gas_kg: net,
-                relative_energy_into_gas_j: relative.value,
+                relative_energy_into_gas_j: relative,
             });
         }
         reservoirs.push(EffusionReservoirStep {
@@ -288,6 +363,13 @@ pub fn step_candidate(
         });
         reservoir_rows.push(rows);
     }
+    let (drifting_reservoirs, drifting_rows) = drift::sample(
+        parcels,
+        drifting_links,
+        duration_s,
+        &mut work,
+        &mut cancelled,
+    )?;
     let boundaries: Vec<_> = vacuum_outlets
         .iter()
         .zip(&vacuum_rows)
@@ -310,6 +392,23 @@ pub fn step_candidate(
                     species: rows,
                 }),
         )
+        .chain(
+            drifting_reservoirs
+                .iter()
+                .zip(&drifting_rows)
+                .filter(|(_, rows)| !rows.is_empty())
+                .map(|(row, rows)| SpeciesNetworkBoundary {
+                    id: row.id,
+                    parcel: row.parcel,
+                    catalog: row
+                        .incoming
+                        .interface
+                        .momentum_interface()
+                        .interface()
+                        .gas_catalog(),
+                    species: rows,
+                }),
+        )
         .collect();
     let candidate = exchange_candidate_with_boundaries(
         parcels,
@@ -329,6 +428,7 @@ pub fn step_candidate(
         transport: sampled.rates,
         vacuum_outlets,
         reservoirs,
+        drifting_reservoirs,
         exchange,
     };
     step.admit_endpoint_driving_forces(&parcels, &mut cancelled)?;
