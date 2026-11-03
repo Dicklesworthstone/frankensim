@@ -22,6 +22,10 @@
 //! agglomeration, size-dependent discharge, transient response, media trajectory,
 //! power draw, wear, or transfer of laboratory rates to a plant is inferred.
 
+/// Continuous mill/classifier closure with explicit underflow recycle and purge.
+#[path = "population_balance/circuit.rs"]
+pub mod circuit;
+
 use super::breakage::{BreakageTestContext, BreakageTransfer, MAX_SIZE_CLASSES, SizeClass};
 pub use super::circuit::MILL_DRY_FLOW_AXIS;
 use crate::separation::{ParticleClass, ParticleStream, SOLIDS_FRACTION_AXIS, SeparationError};

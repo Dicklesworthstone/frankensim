@@ -408,7 +408,7 @@ impl ClosedGrindingCircuit {
 }
 
 impl CircuitSettings {
-    fn validate(self) -> Result<(), CircuitError> {
+    pub(super) fn validate(self) -> Result<(), CircuitError> {
         require(
             self.absolute_balance_tolerance.value().is_finite()
                 && self.absolute_balance_tolerance.value() >= 0.0,
@@ -427,7 +427,7 @@ impl CircuitSettings {
     }
 }
 
-fn check_closure(
+pub(super) fn check_closure(
     fresh: &ParticleStream,
     local_accounts: &[(&ParticleStream, &ParticleStream)],
     outlet: &ParticleStream,

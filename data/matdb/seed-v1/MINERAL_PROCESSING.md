@@ -4,6 +4,10 @@ Native-silver cyanidation and shared-zinc gold/silver cementation now have
 matched material references, finite-inventory reactions and a runnable
 source-pack consumer; see [precious-metal recovery](MINING_PRECIOUS_METALS.md).
 
+The continuous population-balance mill now closes around classifier recycle
+and purge with explicit water and elemental accounts; see the
+[continuous grinding circuit](MINING_CONTINUOUS_GRINDING_CIRCUIT.md).
+
 These source profiles provide reusable mineral
 and reagent inputs for FrankenMining's material-corpus and Crucible work.
 They use the existing `matdb-pack` compiler, `NormalizedPack` queries and

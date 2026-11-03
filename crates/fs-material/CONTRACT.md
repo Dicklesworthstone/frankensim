@@ -86,6 +86,31 @@ global bounds or calibration uncertainty.
 The prescribed boundary asserts no finite gas-feed capacity, gas power, changing
 volume, heat feedback, nonideal activity correction or measured ore calibration.
 
+## Continuous population-balance grinding with classifier recycle
+
+`comminution::population_balance::circuit::ContinuousGrindingCircuit` closes
+the original continuous perfect-mixer selection/breakage law around the
+original classifier and an explicit common underflow return/purge partition.
+At prescribed residence, a coarse-to-fine triangular solve retains dry mass
+and every original elemental channel. Water has its own recycle closure.
+The positive escape coefficient uses independently retained overflow/purge
+fractions. Fed traps refuse; unforced trapped circulation is zero under the
+existing circuit convention.
+
+The model reconstructs actual circulating feed and reevaluates both original
+physical owners. Their source applicability is checked at actual residence,
+throughput, diameter and solids fraction. Original circuit tolerances govern
+recomputed local and external balances; excess circulation or any failed
+source/closure check refuses the whole result. No source values are normalized
+or caller coordinates substituted to force admission.
+
+`ContinuousCircuitSolution` retains the complete original model, existing
+`CircuitSolution`, and original `ContinuousMillSolution` with class/water
+hold-up and source query. No fixed-hold-up residence solve, selection-rate
+calibration, power draw, capacity, liberation or plant recovery is inferred.
+Seven focused regressions and `continuous_grinding_circuit` exercise analytical
+answers, assays, water, purge, traps, applicability, limits and residence.
+
 ## Finite gas/liquid oxygen supply during cyanidation
 
 `cyanide_leach::gas_transfer::AeratedGoldCyanidation` attaches a finite,
