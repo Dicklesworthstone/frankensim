@@ -3986,11 +3986,30 @@ state trajectory. Original fracture, bond viscosity, friction and prescribed
 work are accumulated separately, including per-patch totals. The interval's
 endpoint first law is checked against the sum of original accepted tolerances.
 
+The interval also retains each original patch's maximum normal jump over its
+incoming endpoint and all accepted straight local paths. Rejected trials never
+enter these bounds; a final closed endpoint cannot erase earlier opening. The
+final remainder uses the exact requested clock coordinate and the unchanged
+positive native timestep, avoiding an extra rounded time addition after a stop.
+Ordinary single-step clock arithmetic is unchanged.
+
+For resolved incoming slip, the augmented Coulomb solve starts its reaction
+guess on the sourced kinetic disk at the incoming damaged compression and in
+the actual displacement predictor's slip direction. This avoids a zero-reaction
+line-search barrier for tiny sliding increments without another material trial
+or solve. The original integrated path pressure, nonlinear equations, work
+limits and physical audits still determine the accepted reaction and losses;
+stationary capture retains its previous reaction predictor.
+
 `tests/cohesive_dynamics_friction/interval.rs` compares an unaligned scalar stop
 with independent constant-friction stopping distance and kinetic-energy loss,
 then holds above kinetic capacity and breaks away above static capacity. It
 also checks accumulated original fracture/viscosity/friction on prescribed
 paths, native replay, work bounds, late cancellation and immutable rollback.
+Path maxima are checked against native replay and incoming opening followed by
+closure; nonzero-origin stopping retains the exact requested final clock.
+A small native kinetic step is checked against constant-force displacement,
+endpoint velocity and frictional-work formulas before completing the stop.
 
 ### Temperature-dependent adhesion in deformable equilibrium and dynamics
 

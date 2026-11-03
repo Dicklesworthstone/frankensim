@@ -53,6 +53,7 @@ fn interval_crosses_an_unaligned_stop_then_holds_and_breaks_away() {
     );
     assert_eq!(stopped.patch_dissipation[0].fracture_j, 0.0);
     assert_eq!(stopped.patch_dissipation[0].viscous_j, 0.0);
+    assert_eq!(stopped.maximum_normal_jump_m, vec![-COMPRESSION]);
     close(stopped.energy_residual_j, 0.0, 1e-13);
     assert_eq!(
         stopped.motion.damaged_area_coulomb_states().unwrap()[0].occupancy,
@@ -71,6 +72,7 @@ fn interval_crosses_an_unaligned_stop_then_holds_and_breaks_away() {
         1e-12,
     );
     assert_eq!(held.friction_dissipated_j, 0.0);
+    assert_eq!(held.motion.time_s(), stopped.motion.time_s() + 0.012);
     let incoming = held.motion.velocity_m_s()[0];
     let sliding = held
         .motion
@@ -90,6 +92,45 @@ fn interval_crosses_an_unaligned_stop_then_holds_and_breaks_away() {
     assert_eq!(motion.velocity_m_s(), &[v0]);
     assert_eq!(motion.time_s(), 1.0);
     assert_eq!(motion.steps(), 0);
+
+    // A small nonzero origin and an unaligned stop leave a rounded remainder.
+    // Its final clock must be the caller's target, not another time+dt sum.
+    let shifted = compressed(&system, 0.005)
+        .into_dynamics(&mass, vec![0.00013], 1e-6, mechanical())
+        .unwrap()
+        .with_damaged_area_coulomb_controlled(
+            &[Some(CoulombActivation::Sliding)],
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    // A native substep shorter than the stopping time must resolve the kinetic
+    // disk even when the physical slip is tiny compared with its force scale.
+    let small_h = 0.00125;
+    let tiny = shifted
+        .advance_controlled(&[0.0], &offsets, small_h, &mut || false)
+        .unwrap();
+    let displacement = 0.00013 * small_h - 0.5 * (0.006 / mass.0) * small_h * small_h;
+    close(
+        tiny.motion.state().displacements_m()[0],
+        displacement,
+        1e-15,
+    );
+    close(
+        tiny.motion.velocity_m_s()[0],
+        0.00013 - 0.006 / mass.0 * small_h,
+        1e-12,
+    );
+    close(tiny.friction_dissipated_j, 0.006 * displacement, 1e-17);
+    let exact = shifted
+        .advance_interval_controlled(&[0.0], &offsets, 0.02, interval_controls(), &mut || false)
+        .unwrap();
+    assert_eq!(exact.motion.time_s(), shifted.time_s() + 0.02);
+    close(
+        exact.friction_dissipated_j,
+        0.5 * mass.0 * 0.00013_f64.powi(2),
+        1e-15,
+    );
 }
 
 #[test]
@@ -99,7 +140,7 @@ fn interval_sums_original_fracture_viscosity_and_friction_on_prescribed_paths() 
     let mass = Scalar(0.1);
     let system = system(&elastic, &source, false);
     let start = [-COMPRESSION, 0.0005, 0.0];
-    let end = [-COMPRESSION, 0.003, 0.0];
+    let end = [-0.5 * COMPRESSION, 0.003, 0.0];
     let state = system
         .bonded_state()
         .solve_over_time_controlled(&[0.0], &[start], 1.0, mechanical().solve, &mut || false)
@@ -118,7 +159,7 @@ fn interval_sums_original_fracture_viscosity_and_friction_on_prescribed_paths() 
         .advance_interval_controlled(&[0.0], &[end], 0.04, interval_controls(), &mut || false)
         .unwrap();
     assert_eq!(integrated.accepted_substeps, 2);
-    let mid = [-COMPRESSION, (start[1] + end[1]) * 0.5, 0.0];
+    let mid = [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5, 0.0];
     let a = motion
         .advance_controlled(&[0.0], &[mid], 0.02, &mut || false)
         .unwrap();
@@ -130,6 +171,11 @@ fn interval_sums_original_fracture_viscosity_and_friction_on_prescribed_paths() 
         integrated.motion.state().points(),
         b.motion.state().points()
     );
+    let maximum = motion.state().points()[0].jump_m()[0]
+        .max(a.motion.state().points()[0].jump_m()[0])
+        .max(b.motion.state().points()[0].jump_m()[0]);
+    assert_eq!(integrated.maximum_normal_jump_m, vec![maximum]);
+    assert_eq!(maximum, end[0]);
     for (got, expected) in [
         (
             integrated.friction_dissipated_j,
@@ -167,6 +213,33 @@ fn interval_sums_original_fracture_viscosity_and_friction_on_prescribed_paths() 
         1e-15,
     );
     close(integrated.energy_residual_j, 0.0, 1e-12);
+}
+
+#[test]
+fn interval_path_bounds_retain_the_incoming_open_endpoint_after_closure() {
+    let (_, source) = sourced([0.6; 2], [0.3; 2], false);
+    let elastic = Scalar(10.0);
+    let mass = Scalar(0.1);
+    let system = system(&elastic, &source, false);
+    let start = [0.0005, 0.0, 0.0];
+    let end = [-COMPRESSION, 0.0, 0.0];
+    let state = system
+        .bonded_state()
+        .solve_over_time_controlled(&[0.0], &[start], 1.0, mechanical().solve, &mut || false)
+        .unwrap()
+        .state;
+    let motion = state
+        .into_dynamics(&mass, vec![0.0], 0.0037, mechanical())
+        .unwrap();
+    let interval = motion
+        .advance_interval_controlled(&[0.0], &[end], 0.037, interval_controls(), &mut || false)
+        .unwrap();
+    assert_eq!(interval.accepted_substeps, 2);
+    assert_eq!(interval.motion.time_s(), motion.time_s() + 0.037);
+    assert_eq!(interval.motion.state().points()[0].jump_m(), end);
+    assert_eq!(interval.maximum_normal_jump_m, vec![start[0]]);
+    assert_eq!(motion.state().points()[0].jump_m(), start);
+    assert_eq!(motion.time_s(), 0.0037);
 }
 
 #[test]

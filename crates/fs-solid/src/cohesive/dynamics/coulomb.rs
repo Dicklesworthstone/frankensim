@@ -221,18 +221,43 @@ impl CoulombBinding {
     }
     pub(super) fn append_predictor(
         &self,
+        motion: &CohesiveMotion<'_, '_>,
         x: &mut Vec<f64>,
+        offsets: &[[f64; 3]],
+        dt: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
         let n = x.len();
         x.resize(self.dimension(n)?, 0.0);
         for (p, model) in self.models.iter().enumerate() {
             poll(cancelled)?;
-            if let Some(c) = model.and_then(|m| m.coordinate) {
+            if let Some(model) = model
+                && let Some(c) = model.coordinate
+            {
+                let mut traction = self.states[p].last_traction_pa;
+                let incoming = local_velocity(motion, p, offsets[p], dt, &motion.velocity_m_s)?;
+                if incoming[0].hypot(incoming[1]) > self.config.velocity_tolerance_m_s {
+                    let point = motion.state.points[p];
+                    let jump = motion.state.system.patches[p].jump(&x[..n], offsets[p])?;
+                    let old = point.jump_m();
+                    let slip = [finite(jump[1] - old[1])?, finite(jump[2] - old[2])?];
+                    let distance = finite(slip[0].hypot(slip[1]))?;
+                    if distance > 0.0 {
+                        // Seed resolved motion on the sourced kinetic disk at
+                        // the incoming damaged compression. Starting at zero
+                        // reaction can trap a tiny-slip natural map's line
+                        // search on the disk interior. This is only a solve
+                        // guess: the original path pressure, equations and
+                        // physical replay still determine every accepted force.
+                        let pressure = finite(point.damage() * (-point.traction_pa()[0]).max(0.0))?;
+                        let capacity = finite(model.kinetic_mu * pressure)?;
+                        for d in 0..2 {
+                            traction[d] = finite(capacity * (slip[d] / distance))?;
+                        }
+                    }
+                }
                 for d in 0..2 {
-                    x[n + c + d] = finite(
-                        self.states[p].last_traction_pa[d] / self.config.traction_scale_pa_per_m,
-                    )?;
+                    x[n + c + d] = finite(traction[d] / self.config.traction_scale_pa_per_m)?;
                 }
             }
         }

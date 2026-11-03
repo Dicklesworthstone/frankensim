@@ -307,6 +307,26 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         dt_s: f64,
         cancelled: &mut C,
     ) -> Result<DynamicsStep<'m, 'a>, DynamicsError> {
+        self.advance_at_controlled(
+            mean_force_n,
+            endpoint_prescribed_jumps_m,
+            dt_s,
+            self.time_s + dt_s,
+            cancelled,
+        )
+    }
+
+    /// The interval owner retains its exact requested final clock coordinate
+    /// while the original mechanics uses the actual positive remainder `dt_s`.
+    /// Ordinary stepping supplies its unchanged `time + dt` coordinate above.
+    fn advance_at_controlled<C: FnMut() -> bool>(
+        &self,
+        mean_force_n: &[f64],
+        endpoint_prescribed_jumps_m: &[[f64; 3]],
+        dt_s: f64,
+        target_s: f64,
+        cancelled: &mut C,
+    ) -> Result<DynamicsStep<'m, 'a>, DynamicsError> {
         if cancelled() {
             return Err(Error::Cancelled.into());
         }
@@ -315,7 +335,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         if dt_s > self.config.maximum_step_s {
             return Err(Error::Budget("time increment").into());
         }
-        let time_s = finite(self.time_s + dt_s)?;
+        let time_s = finite(target_s)?;
         if time_s <= self.time_s {
             return Err(Error::Invalid("clock increment is unrepresentable").into());
         }
@@ -373,7 +393,13 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             predictor.push(finite(u + dt_s * v)?);
         }
         if let Some(binding) = &self.coulomb {
-            binding.append_predictor(&mut predictor, &mut || problem.poll().is_err())?;
+            binding.append_predictor(
+                self,
+                &mut predictor,
+                endpoint_prescribed_jumps_m,
+                dt_s,
+                &mut || problem.poll().is_err(),
+            )?;
         }
         let mut attempts = 0;
         let mut history = Vec::new();

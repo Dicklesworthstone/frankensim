@@ -49,6 +49,9 @@ pub struct DynamicsInterval<'m, 'a> {
     pub viscous_dissipated_j: f64,
     pub friction_dissipated_j: f64,
     pub patch_dissipation: Vec<DynamicsPatchDissipation>,
+    /// Original patch order. Maximum over the incoming jump and every accepted
+    /// straight local material path; rejected stopping trials do not contribute.
+    pub maximum_normal_jump_m: Vec<f64>,
     pub external_work_j: f64,
     pub prescribed_jump_work_j: f64,
     /// Independently reconstructed from interval endpoints and accepted work.
@@ -131,9 +134,16 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             if result.as_ref().map_or(0, |r| r.accepted_substeps) >= controls.maximum_substeps {
                 return Err(Error::Budget("cohesive interval substeps").into());
             }
-            let h = (end_time - current.time_s).min(self.config.maximum_step_s);
+            let remaining = end_time - current.time_s;
+            let h = remaining.min(self.config.maximum_step_s);
             let mut trial = |h: f64, work: &mut Work| {
-                let at = finite(current.time_s + h)?;
+                // Re-adding a rounded remainder can overshoot by one ULP.
+                // Keep the exact requested endpoint without changing native h.
+                let at = if h == remaining {
+                    end_time
+                } else {
+                    finite(current.time_s + h)?
+                };
                 let fraction = if at == end_time {
                     1.0
                 } else {
@@ -154,7 +164,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
                         };
                     }
                 }
-                work.attempt(&current, constant_force_n, &offsets, h, cancelled)
+                work.attempt(&current, constant_force_n, &offsets, h, at, cancelled)
             };
             let accepted = match trial(h, &mut work) {
                 Ok(step) => step,
@@ -197,7 +207,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             if let Some(total) = &mut result {
                 total.append(accepted)?;
             } else {
-                result = Some(DynamicsInterval::first(accepted));
+                result = Some(DynamicsInterval::first(accepted, self));
             }
         }
         let mut result = result.ok_or(Error::Invalid("empty cohesive interval"))?;
@@ -237,6 +247,7 @@ impl Work {
         force: &[f64],
         offsets: &[[f64; 3]],
         h: f64,
+        at: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DynamicsStep<'m, 'a>, DynamicsError> {
         poll(cancelled)?;
@@ -262,7 +273,7 @@ impl Work {
         let mut limited = motion.clone();
         limited.config.solve.max_operator_evaluations = residuals;
         limited.config.solve.max_newton_iterations = iterations;
-        let mut step = limited.advance_controlled(force, offsets, h, cancelled)?;
+        let mut step = limited.advance_at_controlled(force, offsets, h, at, cancelled)?;
         self.residuals -= residuals - step.residual_evaluations;
         self.iterations -= iterations - step.nonlinear.iterations;
         step.motion.config = motion.config;
@@ -271,7 +282,14 @@ impl Work {
 }
 
 impl<'m, 'a> DynamicsInterval<'m, 'a> {
-    fn first(s: DynamicsStep<'m, 'a>) -> Self {
+    fn first(s: DynamicsStep<'m, 'a>, incoming: &CohesiveMotion<'m, 'a>) -> Self {
+        let maximum_normal_jump_m = incoming
+            .state
+            .points
+            .iter()
+            .zip(&s.motion.state.points)
+            .map(|(before, after)| before.jump_m()[0].max(after.jump_m()[0]))
+            .collect();
         Self {
             motion: s.motion,
             accepted_substeps: 1,
@@ -289,6 +307,7 @@ impl<'m, 'a> DynamicsInterval<'m, 'a> {
             viscous_dissipated_j: s.viscous_dissipated_j,
             friction_dissipated_j: s.friction_dissipated_j,
             patch_dissipation: s.patch_dissipation,
+            maximum_normal_jump_m,
             external_work_j: s.external_work_j,
             prescribed_jump_work_j: s.prescribed_jump_work_j,
             energy_residual_j: s.energy_residual_j,
@@ -321,6 +340,13 @@ impl<'m, 'a> DynamicsInterval<'m, 'a> {
             a.fracture_j = finite(a.fracture_j + b.fracture_j)?;
             a.viscous_j = finite(a.viscous_j + b.viscous_j)?;
             a.friction_j = finite(a.friction_j + b.friction_j)?;
+        }
+        for (maximum, point) in self
+            .maximum_normal_jump_m
+            .iter_mut()
+            .zip(&s.motion.state.points)
+        {
+            *maximum = maximum.max(point.jump_m()[0]);
         }
         self.motion = s.motion;
         Ok(())

@@ -15725,6 +15725,22 @@ from friction during growing damage, permute two unequal patch losses sharing a
 finite cell, and check static zero heat, continuation and late rollback.
 These are manufactured analytical references, not specimen calibration.
 
+`friction_heat::cohesive::interval::propose_deformable_cohesive_interval_heat`
+completes an original bounded mechanical interval, including unaligned stopping,
+static recapture and subsequent breakaway, before its accepted per-patch losses
+enter one original finite-body heat solve. Constant reduced forces and affine
+prescribed jumps retain their actual work. Initial and every accepted native
+straight local normal path must remain closed; final reclosure cannot hide an
+earlier opening. The native and thermal endpoints retain the exact requested
+common clock, and rejected stopping trials supply neither heat nor path bounds.
+Interval-average physical powers feed endpoint backward Euler, so refinement
+is required to resolve heat timing and source feedback. Fracture remains outside
+heat. An independent whole-interval energy gate, plus native and thermal audits,
+precedes return of either candidate. Four regressions compare unaligned stopping
+with analytical kinetic loss and finite-volume temperatures, static hold and
+breakaway, two growing-damage patches sharing finite thermal capacity, late
+thermal refusal/cancellation, and opening followed by reclosure.
+
 
 ### Prepared articulated contacts and same-step finite-cell thermal feedback
 

@@ -24,6 +24,9 @@ use std::cell::Cell;
 #[path = "cohesive/layer.rs"]
 mod layer;
 
+#[path = "cohesive/interval.rs"]
+mod interval;
+
 fn material(viscous: bool) -> ResolvedBilinearCohesive {
     material_and_card(viscous, None).0
 }

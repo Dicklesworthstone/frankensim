@@ -29,6 +29,9 @@ use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Complete deformable stopping paths and their finite-body heat destinations.
+pub mod interval;
+
 /// Same canonical link-keyed conductivity/other-source inputs as rigid heat.
 pub use super::hertz::multiple::{
     RigidHertzIslandHeatConductivity as CohesiveHeatConductivity,
@@ -150,77 +153,17 @@ pub fn propose_deformable_cohesive_heat<'s, 'a, 't, P, E>(
         }
     };
     check()?;
-    controls.newton.validate()?;
-    let cells = thermal.cells().len();
     let count = contacts.len();
-    let dimension = cells
-        .checked_add(count)
-        .ok_or(CohesiveHeatError::Invalid("thermal dimension overflow"))?;
     let target = motion.time_s() + dt_s;
-    let patches = motion.state().system().patches();
-    if motion.time_s() != thermal.time_s()
-        || !dt_s.is_finite()
-        || dt_s <= 0.0
-        || !target.is_finite()
-        || target <= motion.time_s()
-        || cells == 0
-        || cells > controls.maximum_cells
-        || count == 0
-        || count != patches.len()
-        || count > controls.maximum_interfaces
-        || dimension > controls.maximum_unknowns
-        || controls.maximum_trials == 0
-        || controls.maximum_newton_iterations == 0
-        || energy_guess_j.len() != cells
-        || energy_guess_j.iter().any(|v| !v.is_finite())
-        || !controls.difference_step_j.is_finite()
-        || controls.difference_step_j <= 0.0
-        || !controls.temperature_scale_j_per_k.is_finite()
-        || controls.temperature_scale_j_per_k <= 0.0
-        || [
-            controls.heat.cell_j,
-            controls.heat.thermal_j,
-            controls.heat.interface_j,
-            controls.heat.total_j,
-            controls.combined_energy_tolerance_j,
-        ]
-        .iter()
-        .any(|v| !v.is_finite() || *v < 0.0)
-    {
-        return Err(CohesiveHeatError::Invalid(
-            "bounded complete synchronized mechanical/thermal state required",
-        ));
-    }
-    let indices: BTreeMap<_, _> = patches
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.id(), i))
-        .collect();
-    let mut ordered: Vec<_> = contacts.iter().collect();
-    ordered.sort_by_key(|c| c.route.link_id());
-    let mut seen = BTreeSet::new();
-    let mut mechanical_indices = Vec::with_capacity(count);
-    for contact in &ordered {
-        check()?;
-        let &index = indices
-            .get(&contact.patch_id)
-            .ok_or(CohesiveHeatError::Invalid("unknown cohesive heat patch"))?;
-        let patch = &patches[index];
-        let area = patch.area_m2();
-        let other = contact.route.contact_area_m2();
-        if !seen.insert(contact.patch_id)
-            || patch.source().is_none()
-            || (area - other).abs() > 64.0 * f64::EPSILON * area.max(other)
-            || !contact.temperature_guess_k.is_finite()
-            || contact.temperature_guess_k <= 0.0
-            || motion.state().points()[index].jump_m()[0] > 0.0
-        {
-            return Err(CohesiveHeatError::Invalid(
-                "heat needs unique sourced closed patches with matching original face area",
-            ));
-        }
-        mechanical_indices.push(index);
-    }
+    let (ordered, mechanical_indices) = ordered_heat_contacts(
+        motion,
+        thermal,
+        contacts,
+        dt_s,
+        controls,
+        energy_guess_j,
+        gate,
+    )?;
     let routes: Vec<_> = ordered.iter().map(|c| c.route).collect();
     let step =
         FrictionHeatNetworkStep::new(thermal, target, &routes, controls.maximum_interfaces, check)?;
@@ -307,6 +250,97 @@ pub fn propose_deformable_cohesive_heat<'s, 'a, 't, P, E>(
         combined_energy_residual_j: combined,
         summed_energy_residual_j: summed,
     })
+}
+
+/// Same source, patch, reference-face and numerical admission for one original
+/// native step or a complete interval. Route ordering never reorders mechanics.
+#[allow(clippy::type_complexity)]
+fn ordered_heat_contacts<'c, 'r, E>(
+    motion: &CohesiveMotion<'_, '_>,
+    thermal: &DepositionSimulation<'_>,
+    contacts: &'c [CohesiveHeatContact<'r>],
+    duration_s: f64,
+    controls: CohesiveHeatControls,
+    energy_guess_j: &[f64],
+    gate: &CancelGate,
+) -> Result<(Vec<&'c CohesiveHeatContact<'r>>, Vec<usize>), CohesiveHeatError<E>> {
+    if gate.is_requested() {
+        return Err(DepositionError::Cancelled.into());
+    }
+    controls.newton.validate()?;
+    let cells = thermal.cells().len();
+    let count = contacts.len();
+    let dimension = cells
+        .checked_add(count)
+        .ok_or(CohesiveHeatError::Invalid("thermal dimension overflow"))?;
+    let target = motion.time_s() + duration_s;
+    let patches = motion.state().system().patches();
+    if motion.time_s() != thermal.time_s()
+        || !duration_s.is_finite()
+        || duration_s <= 0.0
+        || !target.is_finite()
+        || target <= motion.time_s()
+        || cells == 0
+        || cells > controls.maximum_cells
+        || count == 0
+        || count != patches.len()
+        || count > controls.maximum_interfaces
+        || dimension > controls.maximum_unknowns
+        || controls.maximum_trials == 0
+        || controls.maximum_newton_iterations == 0
+        || energy_guess_j.len() != cells
+        || energy_guess_j.iter().any(|v| !v.is_finite())
+        || !controls.difference_step_j.is_finite()
+        || controls.difference_step_j <= 0.0
+        || !controls.temperature_scale_j_per_k.is_finite()
+        || controls.temperature_scale_j_per_k <= 0.0
+        || [
+            controls.heat.cell_j,
+            controls.heat.thermal_j,
+            controls.heat.interface_j,
+            controls.heat.total_j,
+            controls.combined_energy_tolerance_j,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0)
+    {
+        return Err(CohesiveHeatError::Invalid(
+            "bounded complete synchronized mechanical/thermal state required",
+        ));
+    }
+    let indices: BTreeMap<_, _> = patches
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id(), i))
+        .collect();
+    let mut ordered: Vec<_> = contacts.iter().collect();
+    ordered.sort_by_key(|c| c.route.link_id());
+    let mut seen = BTreeSet::new();
+    let mut mechanical_indices = Vec::with_capacity(count);
+    for contact in &ordered {
+        if gate.is_requested() {
+            return Err(DepositionError::Cancelled.into());
+        }
+        let &index = indices
+            .get(&contact.patch_id)
+            .ok_or(CohesiveHeatError::Invalid("unknown cohesive heat patch"))?;
+        let patch = &patches[index];
+        let area = patch.area_m2();
+        let other = contact.route.contact_area_m2();
+        if !seen.insert(contact.patch_id)
+            || patch.source().is_none()
+            || (area - other).abs() > 64.0 * f64::EPSILON * area.max(other)
+            || !contact.temperature_guess_k.is_finite()
+            || contact.temperature_guess_k <= 0.0
+            || motion.state().points()[index].jump_m()[0] > 0.0
+        {
+            return Err(CohesiveHeatError::Invalid(
+                "heat needs unique sourced closed patches with matching original face area",
+            ));
+        }
+        mechanical_indices.push(index);
+    }
+    Ok((ordered, mechanical_indices))
 }
 
 /// Shared finite-body solve for physical losses already audited by an original
