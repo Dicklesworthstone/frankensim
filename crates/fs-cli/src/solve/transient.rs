@@ -418,6 +418,15 @@ fn march(
     let mut natural_endpoint_evaluations = 0;
     let mut coupled_net_input_j = 0.0;
     let mut maximum_coupled_energy_residual_j = 0.0_f64;
+    let contact_config = if temperature_contacts.is_some() {
+        Some(contact::Config {
+            coupled_newton: coupled_contact_newton,
+            max_face_pairs: max_contact_pairs,
+            residual_tolerance_j: contact::residual_tolerance_j(
+                policy.energy_tolerance.value, problem.mesh.vertex_count(),
+            )?,
+        })
+    } else { None };
     for (index, &end) in ends_s.iter().enumerate() {
         let ordinal = index + 1;
         poll(cx, deadline)?;
@@ -446,10 +455,13 @@ fn march(
         let mut contact_evidence = "null".to_string();
         let mut physical_target_j = None;
         let mut physical_energy = None;
-        let (endpoint, nonlinear_evidence, krylov_iterations) = if let Some(contacts) = temperature_contacts {
+        let (endpoint, nonlinear_evidence, krylov_iterations) = if let Some(contacts) = temperature_contacts
+            .filter(|_| natural.is_empty() && airflow.is_none())
+        {
             let solved = contact::advance(
-                cx, engine, step_problem, contacts, coupled_contact_newton,
-                max_contact_pairs, &old, dt, config, nonlinear, deadline,
+                cx, engine, step_problem, contacts,
+                contact_config.ok_or_else(|| bad("live capacity contact lost its controls"))?,
+                &old, dt, config, nonlinear, deadline,
             )?;
             contact_responses += solved.responses;
             nonlinear_updates += solved.nonlinear_updates;
@@ -458,10 +470,16 @@ fn march(
             (solved.conduction, "null".to_string(), solved.krylov_iterations)
         } else if !natural.is_empty() {
             let solved = natural::advance(
-                cx, engine, step_problem, interfaces, &old, dt, config,
+                cx, engine, step_problem, interfaces, temperature_contacts, contact_config,
+                &old, dt, config,
                 nonlinear, radiation, enclosure, airflow, natural, pressure_pa, deadline,
             )?;
             natural_evidence = natural_row(&solved)?;
+            if let Some(receipt) = solved.contact_evidence.as_ref() {
+                contact_evidence = receipt.clone();
+                contact_responses = contact_responses.checked_add(solved.solid_solves)
+                    .ok_or_else(|| bad("natural capacity contact response count overflows"))?;
+            }
             physical_energy = Some(solved.physical_energy);
             // The outer natural owner accepted the complete physical model.
             // An inner radiation target belongs to its frozen natural trial.
@@ -589,7 +607,9 @@ fn march(
         // Enclosure heat is internal exchange. Common trajectory energy must
         // use the fresh physical bath, original Neumann/convection and closed
         // reflected heat, while the inner StepSolution retains its applied law.
-        let energy = if enclosure.is_some() {
+        let energy = if temperature_contacts.is_some() {
+            physical_energy.unwrap_or_else(|| PhysicalEnergy::inner(&endpoint))
+        } else if enclosure.is_some() {
             physical_energy.ok_or_else(|| bad("enclosure endpoint lost its physical energy audit"))?
         } else {
             PhysicalEnergy::inner(&endpoint)
@@ -1104,11 +1124,11 @@ pub(super) fn solve(
             "\"scope\":{}}}"
         ),
             json_string(contact::method(coupled_contact_newton)), max_contact_pairs,
-            contact_factor, max_krylov_per_step,
+            max_solid_solves_per_step, max_krylov_per_step,
             coarse.contact_responses, fine.contact_responses, contact_responses,
             number(contact::residual_tolerance_j(policy.energy_tolerance.value, problem.mesh.vertex_count())?)?,
             json_string(if coupled_contact_newton {
-                "one complete capacity/bulk/contact Newton solve per step; contact rows count its updates, Krylov iterations and backtracks"
+                "complete capacity/bulk/contact Newton responses inside the admitted boundary iteration; contact rows count all updates, Krylov iterations and backtracks"
             } else {
                 "contact step rows count every inner k(T) Newton update and backtrack"
             }),

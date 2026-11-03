@@ -3368,3 +3368,25 @@ these CLI cases are syntax-checked but their runtime execution is not claimed.
 This slice retains fixed reference geometry/mass, prescribed emissivities and
 view factors, and bounded source-support admission. It adds no source-surface
 contact tangent, trajectory adjoint or arbitrary fixed-point convergence claim.
+### Live contact and natural convection with regional heat capacity — driver 106
+
+The regional-capacity backward-Euler path now composes source-backed contact
+with the existing natural-convection owner. Every natural trial solves the
+complete capacity/contact response from the same original old temperature.
+Scalar and continuous-curve sources retain coupled Newton; source surfaces
+retain the bounded contact fixed point. The original declared heat capacities,
+conductivity laws, prescribed-boundary jumps and event-aligned workload grids
+remain the physical model.
+
+Acceptance re-queries contact at the candidate temperature and checks the full
+nodal joule residual and storage/heat balance under the updated natural
+coefficient. Published contact and Robin heat describe this same unchanged
+candidate. The inner contact and numerical tolerances leave room for the outer
+physical gate, and all contact responses, Newton updates, backtracks and Krylov
+iterations count toward the complete nested work allowance. Contact transfers
+remain internal; natural-reservoir heat is counted once in thermal storage.
+
+The native regressions exercise curve/surface contact, evolving natural heat,
+original-history capacity energy and source-domain refusal/retry. This capacity
+composition still refuses live contact with radiation, transported air and
+trajectory derivatives. Syntax checks do not replace native runtime validation.

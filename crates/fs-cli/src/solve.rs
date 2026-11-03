@@ -283,7 +283,7 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// prescribed-bath storage through the shared physical endpoint owner.
 /// Version 105 composes source-surface contact fixed points with local ambient
 /// and enclosure radiation through prescribed, natural and transported-air heat.
-pub const SOLVE_DRIVER_VERSION: u32 = 105;
+pub const SOLVE_DRIVER_VERSION: u32 = 106;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

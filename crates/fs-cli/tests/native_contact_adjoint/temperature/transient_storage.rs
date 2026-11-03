@@ -7,6 +7,9 @@ use fs_project::{
 };
 use fs_qty::QtyAny;
 
+#[path = "transient_storage/convection.rs"]
+mod convection;
+
 const INITIAL_K: f64 = 293.15;
 const CP: f64 = 10.0;
 const DENSITY: f64 = 10.0;
@@ -160,7 +163,8 @@ fn check_contact(row: &J, selected_claim: &str) -> f64 {
     let contact = row.get("temperature_contact").unwrap();
     assert!(matches!(
         contact.str_field("method"),
-        Some("source-backed-contact-newton" | "source-backed-contact-enthalpy-newton"
+        Some("source-backed-contact-newton" | "source-backed-contact-fixed-point"
+            | "source-backed-contact-enthalpy-newton"
             | "source-backed-contact-enthalpy-fixed-point")
     ));
     assert!(contact.f64_field("thermal_responses").unwrap() >= 1.0);

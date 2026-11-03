@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
+use fs_conduction::interface::temperature::TemperatureContacts;
 use fs_conduction::transient::backward_euler::{
     BackwardEuler, NonlinearStepConfig, StepConfig, StepSolution,
 };
@@ -21,7 +22,7 @@ use super::super::{
     conduction_error, conjugate as exchange, natural as boundary_law, radiation, SolveRefusal,
 };
 use super::{
-    airflow_row, bad, conjugate, lower, nonlinear_row, poll, radiative,
+    airflow_row, bad, conjugate, contact, lower, nonlinear_row, poll, radiative,
     AirflowEndpoint, PhysicalEnergy, RadiativeEndpoint,
 };
 
@@ -30,6 +31,7 @@ pub(super) struct NaturalStep {
     /// Final counted inner response; cumulative work is separate below.
     pub(super) nonlinear_evidence: String,
     pub(super) radiation_evidence: String,
+    pub(super) contact_evidence: Option<String>,
     pub(super) radiation: Option<RadiativeEndpoint>,
     /// Natural coefficients actually used by that inner response.
     pub(super) applied_boundary: ThermalBoundary,
@@ -46,7 +48,7 @@ pub(super) struct NaturalStep {
     pub(super) radiation_trials: usize,
     /// Direct physical and frozen-predictor audits by this outer producer.
     pub(super) endpoint_evaluations: usize,
-    /// Inner radiative physical gates only, distinct from the natural gate.
+    /// Inner contact/radiative physical gates, distinct from the natural gate.
     pub(super) maximum_physical_energy_residual_j: f64,
     pub(super) physical_residual_norm_j: f64,
     pub(super) physical_residual_tolerance_j: f64,
@@ -112,6 +114,8 @@ pub(super) fn advance(
     engine: &BackwardEuler<'_>,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    contact_config: Option<contact::Config>,
     old: &[f64],
     dt_s: f64,
     step_config: StepConfig,
@@ -130,6 +134,21 @@ pub(super) fn advance(
             && step_config.energy_tolerance_j.is_finite() && step_config.energy_tolerance_j > 0.0)
     {
         return Err(bad("transient natural convection requires laws, matching history and positive time/energy controls"));
+    }
+    if temperature_contacts.is_some() != contact_config.is_some()
+        || (temperature_contacts.is_some() && interfaces.is_some())
+    {
+        return Err(bad("natural convection requires matching live contacts and controls without duplicate frozen interfaces"));
+    }
+    if temperature_contacts.is_some()
+        && (airflow.is_some() || radiation.is_some() || enclosure.is_some())
+    {
+        return Err(bad("capacity natural convection with live contacts does not yet admit airflow or radiation"));
+    }
+    if contact_config.is_some_and(|controls| {
+        !(controls.residual_tolerance_j.is_finite() && controls.residual_tolerance_j > 0.0)
+    }) {
+        return Err(bad("natural convection needs a positive finite contact residual allowance"));
     }
     let mut names = BTreeSet::new();
     let mut regions = Vec::with_capacity(laws.len());
@@ -176,7 +195,8 @@ pub(super) fn advance(
         .checked_mul(airflow.map_or(0, |_| 2))
         .ok_or_else(|| bad("mixed transient airflow audit allowance overflows"))?;
     let max_solid_solves = max_airflow_iterations.checked_mul(radiation_factor)
-        .ok_or_else(|| bad("natural-convection/airflow/radiation work allowance overflows"))?;
+        .and_then(|count| count.checked_mul(contact_config.map_or(1, contact::Config::max_responses)))
+        .ok_or_else(|| bad("natural-convection/contact/airflow/radiation work allowance overflows"))?;
     let max_krylov = max_solid_solves.checked_mul(step_config.linear.max_iterations)
         .ok_or_else(|| bad("natural-convection Krylov allowance overflows"))?;
     let max_updates = max_solid_solves.checked_mul(nonlinear.map_or(0, |p| p.max_iterations))
@@ -210,22 +230,43 @@ pub(super) fn advance(
         let mut boundary = problem.boundary.with_uniform_robin_replacements(&replacements).map_err(lower)?;
         let mut inner_step = step_config;
         let mut inner_nonlinear = nonlinear;
-        if let Some(target) = physical_target {
+        let mut inner_contact = contact_config;
+        let inner_target = physical_target.or(contact_config.map(|controls| controls.residual_tolerance_j));
+        if let Some(target) = inner_target {
             // This is a residual of the supplied FROZEN h, not a query of the
-            // natural law at old=ambient. The physical target never changes.
+            // natural law at old=ambient. Live contacts are queried from the
+            // first predictor onward without changing the old capacity field.
+            let allowance = finite(target * 0.125, "inner physical residual allowance")?;
+            let numerical_allowance = if let Some(controls) = inner_contact.as_mut() {
+                controls.residual_tolerance_j = controls.residual_tolerance_j.min(allowance);
+                // Capacity Newton adds atol and rtol*initial. Reserve half
+                // for each so its stop remains below the contact audit gate.
+                allowance * 0.5
+            } else { allowance };
+            if numerical_allowance <= 0.0 {
+                return Err(bad("natural-convection inner contact allowance is not representable"));
+            }
             count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-            let initial = radiative::evaluate(
-                cx, engine, ConductionProblem { boundary: &boundary, ..problem },
-                interfaces, old, &predictor, dt_s, step_config, radiation, enclosure, deadline,
-            )?;
+            let initial_problem = ConductionProblem { boundary: &boundary, ..problem };
+            let initial = if let Some(contacts) = temperature_contacts {
+                contact::evaluate(
+                    cx, engine, initial_problem, contacts, old, &predictor,
+                    dt_s, step_config, deadline,
+                )?.0
+            } else {
+                radiative::evaluate(
+                    cx, engine, initial_problem, interfaces, old, &predictor,
+                    dt_s, step_config, radiation, enclosure, deadline,
+                )?
+            };
             if let Some(policy) = inner_nonlinear.as_mut() {
-                policy.residual_atol_j = policy.residual_atol_j.min(target * 0.125);
+                policy.residual_atol_j = policy.residual_atol_j.min(numerical_allowance);
                 policy.residual_rtol = tighter_relative(
-                    policy.residual_rtol, target * 0.125, initial.residual_norm_j,
+                    policy.residual_rtol, numerical_allowance, initial.residual_norm_j,
                 )?;
             } else {
                 inner_step.linear.tolerance = tighter_relative(
-                    step_config.linear.tolerance, target * 0.125, initial.residual_norm_j,
+                    step_config.linear.tolerance, numerical_allowance, initial.residual_norm_j,
                 )?;
                 if radiation.is_some() {
                     // The radiation owner's linear physical gate includes a
@@ -252,7 +293,7 @@ pub(super) fn advance(
         }
         let trial_problem = ConductionProblem { boundary: &boundary, ..problem };
         let mut air_trial = None;
-        let (endpoint, nonlinear_evidence, radiation_evidence, radiative) =
+        let (mut endpoint, nonlinear_evidence, radiation_evidence, radiative) =
             if let Some(path) = airflow {
                 let solved = conjugate::advance(
                     cx, engine, trial_problem, interfaces, old, dt_s, inner_step,
@@ -280,6 +321,20 @@ pub(super) fn advance(
                     air_heat_gain_w: solved.air_heat_gain_w,
                 });
                 (solved.endpoint, solved.nonlinear_evidence, solved.radiation_evidence, solved.radiation)
+            } else if let Some(contacts) = temperature_contacts {
+                let controls = inner_contact
+                    .ok_or_else(|| bad("natural convection lost its live contact controls"))?;
+                let solved = contact::advance(
+                    cx, engine, trial_problem, contacts, controls, old, dt_s,
+                    inner_step, inner_nonlinear, deadline,
+                )?;
+                count(&mut solid_solves, solved.responses, max_solid_solves)?;
+                count(&mut krylov_iterations, solved.krylov_iterations, max_krylov)?;
+                count(&mut nonlinear_updates, solved.nonlinear_updates, max_updates)?;
+                count(&mut nonlinear_backtracks, solved.nonlinear_backtracks, max_backtracks)?;
+                maximum_physical_energy_residual_j = maximum_physical_energy_residual_j
+                    .max(solved.conduction.energy_residual_j.abs());
+                (solved.conduction, "null".to_string(), "null".to_string(), None)
             } else if let Some(lowering) = radiation {
                 let solved = radiative::advance(
                     cx, engine, trial_problem, interfaces, old, dt_s, inner_step,
@@ -348,11 +403,19 @@ pub(super) fn advance(
         let physical_boundary = boundary.with_uniform_robin_replacements(&physical_rows)
             .map_err(lower)?;
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-        let physical = radiative::evaluate(
-            cx, engine, ConductionProblem { boundary: &physical_boundary, ..problem },
-            interfaces, old, &endpoint.temperature, dt_s, step_config,
-            radiation, enclosure, deadline,
-        )?;
+        let physical_problem = ConductionProblem { boundary: &physical_boundary, ..problem };
+        let (physical, physical_contacts) = if let Some(contacts) = temperature_contacts {
+            let (evaluation, states) = contact::evaluate(
+                cx, engine, physical_problem, contacts, old, &endpoint.temperature,
+                dt_s, step_config, deadline,
+            )?;
+            (evaluation, Some(states))
+        } else {
+            (radiative::evaluate(
+                cx, engine, physical_problem, interfaces, old, &endpoint.temperature,
+                dt_s, step_config, radiation, enclosure, deadline,
+            )?, None)
+        };
         let target = match physical_target {
             Some(target) => target,
             None => {
@@ -364,6 +427,8 @@ pub(super) fn advance(
                     / fs_math::det::sqrt(physical.free_dofs as f64);
                 let relative = nonlinear.map_or(step_config.linear.tolerance, |p| p.residual_rtol);
                 let target = finite(absolute + relative * physical.residual_norm_j, "physical residual target")?;
+                let target = contact_config.map_or(target,
+                    |controls| target.min(controls.residual_tolerance_j));
                 if target <= 0.0 {
                     return Err(bad("natural-convection physical residual target is not representable"));
                 }
@@ -412,10 +477,33 @@ pub(super) fn advance(
                 })
             }).collect::<Result<Vec<_>, SolveRefusal>>()?;
             let receipt = boundary_law::receipt_fragment(&converged, iteration)?;
+            if let Some(states) = &physical_contacts {
+                // Flux and heat reports describe the same unchanged field
+                // under the freshly queried contact and natural boundary.
+                endpoint.contact_fluxes = states.frozen_interfaces()
+                    .fluxes(&endpoint.temperature).map_err(lower)?;
+                endpoint.robin_fluxes = physical.convective_robin_fluxes.clone();
+                endpoint.source_w = physical.source_w;
+                endpoint.neumann_out_w = physical.neumann_out_w;
+                endpoint.robin_out_w = physical.convective_out_w;
+                endpoint.dirichlet_in_w = physical.dirichlet_in_w;
+                endpoint.stored_energy_change_j = physical.stored_energy_change_j;
+                endpoint.energy_residual_j = physical.energy_residual_j;
+            }
+            let contact_evidence = match (contact_config, physical_contacts.as_ref()) {
+                (Some(controls), Some(states)) => Some(contact::step_receipt(
+                    cx, controls, &physical, states, solid_solves, krylov_iterations,
+                    nonlinear_updates, nonlinear_backtracks, step_config.energy_tolerance_j,
+                    deadline,
+                )?),
+                (None, None) => None,
+                _ => return Err(bad("natural convection lost its accepted contact audit")),
+            };
             let (airflow, airflow_evidence) = air_trial
                 .map_or((None, "null".to_string()), |air| (Some(air.endpoint), air.evidence));
             return Ok(NaturalStep {
                 endpoint, nonlinear_evidence, radiation_evidence, radiation: radiative,
+                contact_evidence,
                 applied_boundary: boundary, applied_coefficients: coefficients,
                 physical_coefficients: next,
                 physical_energy: PhysicalEnergy::physical(&physical),

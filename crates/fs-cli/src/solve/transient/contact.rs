@@ -1,13 +1,16 @@
 //! Reuse the source-backed contact step without advancing trial history.
 
-use fs_conduction::interface::temperature::{ContactIterationConfig, TemperatureContacts};
+use fs_conduction::interface::temperature::{
+    ContactIterationConfig, TemperatureContactEvaluation, TemperatureContacts,
+};
+use fs_conduction::transient::backward_euler::EndpointEvaluation;
 
 use super::*;
 
 pub(super) mod enthalpy;
 
 pub(super) const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching contact queries each pinned resistance law at the arithmetic mean of its two independent face-temperature means. Pressure, finish, medium, geometry and claim selection remain fixed. Every counted contact trial uses the same immutable old field; the accepted unchanged endpoint passes freshly queried complete nodal joule-residual and separate storage/heat gates. Published contact heat and reservoir reactions describe that physical endpoint, while inner Krylov residuals describe its counted numerical response. Contact heat is internal transfer and is not added to external input. Scalar and continuous linear source curves share the complete capacity/bulk/contact Newton solve, with generalized primal source tangents at curve knots and inward source endpoints; every physical trial still passes its pinned source query. Surface laws retain the bounded contact fixed point. Neither algorithm establishes arbitrary-law convergence or uniqueness. This capacity path does not supply total-enthalpy storage; declared total-enthalpy trajectories use the separate shared contact/enthalpy owner with complete Newton tangents for scalar/continuous-curve sources and a bounded physical fixed point for source surfaces. Radiation, derived natural/airflow convection and trajectory derivatives are not supplied for temperature-varying contact by this capacity adapter.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching contact queries each pinned resistance law at the arithmetic mean of its two independent face-temperature means. Pressure, finish, medium, geometry and claim selection remain fixed. Every counted contact trial uses the same immutable old field; the accepted unchanged endpoint passes freshly queried complete nodal joule-residual and separate storage/heat gates. Published contact heat and reservoir reactions describe that physical endpoint, while inner Krylov residuals describe its counted numerical response. Contact heat is internal transfer and is not added to external input. Scalar and continuous linear source curves share the complete capacity/bulk/contact Newton solve, with generalized primal source tangents at curve knots and inward source endpoints; every physical trial still passes its pinned source query. Surface laws retain the bounded contact fixed point. Neither algorithm establishes arbitrary-law convergence or uniqueness. This capacity path does not supply total-enthalpy storage; declared total-enthalpy trajectories use the separate shared contact/enthalpy owner with complete Newton tangents for scalar/continuous-curve sources and a bounded physical fixed point for source surfaces. Natural-convection trials use these same live contact responses and the original old temperature. Acceptance re-queries contact and evaluates the complete unchanged endpoint under its updated physical convection coefficient, with all nested responses counted. Radiation, transported-air feedback and trajectory derivatives are not supplied for temperature-varying contact by this capacity adapter.";
 
 pub(super) const fn method(coupled_newton: bool) -> &'static str {
     if coupled_newton {
@@ -19,6 +22,19 @@ pub(super) const fn method(coupled_newton: bool) -> &'static str {
 
 pub(super) const fn max_responses(coupled_newton: bool) -> usize {
     if coupled_newton { 1 } else { MAX_RESPONSES }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Config {
+    pub(super) coupled_newton: bool,
+    pub(super) max_face_pairs: usize,
+    pub(super) residual_tolerance_j: f64,
+}
+
+impl Config {
+    pub(super) fn max_responses(self) -> usize {
+        max_responses(self.coupled_newton)
+    }
 }
 
 pub(super) struct Step {
@@ -67,25 +83,73 @@ pub(super) fn face_states(
     Ok(states.join(","))
 }
 
+/// Re-query the pinned laws at the unchanged candidate, then audit that field
+/// under the caller's actual boundary. This never advances thermal history.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn evaluate(
+    cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
+    contacts: &TemperatureContacts<'_, '_>, old: &[f64], candidate: &[f64],
+    dt_s: f64, config: StepConfig,
+    deadline: Option<(Instant, f64)>,
+) -> Result<(EndpointEvaluation, TemperatureContactEvaluation), SolveRefusal> {
+    poll(cx, deadline)?;
+    if old.len() != problem.mesh.vertex_count() || candidate.len() != old.len() {
+        return Err(bad("contact capacity audit requires complete original and candidate fields"));
+    }
+    let actual = contacts.evaluate(cx, problem.boundary, candidate).map_err(lower)?;
+    poll(cx, deadline)?;
+    let physical = engine.evaluate_prescribed_endpoint(
+        cx, problem, Some(actual.frozen_interfaces()), old, candidate, dt_s, config, None,
+    ).map_err(lower)?;
+    poll(cx, deadline)?;
+    Ok((physical, actual))
+}
+
+/// The accepted boundary owner supplies its fresh physical audit and all
+/// counted inner responses; numerical Krylov evidence retains its own meaning.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn step_receipt(
+    cx: &Cx<'_>, controls: Config, physical: &EndpointEvaluation,
+    contacts: &TemperatureContactEvaluation, responses: usize, krylov_iterations: usize,
+    nonlinear_updates: usize, nonlinear_backtracks: usize, energy_tolerance_j: f64,
+    deadline: Option<(Instant, f64)>,
+) -> Result<String, SolveRefusal> {
+    poll(cx, deadline)?;
+    let states = face_states(cx, contacts, deadline)?;
+    let receipt = format!(concat!(
+        "{{\"method\":{},\"thermal_responses\":{},",
+        "\"krylov_iterations\":{},\"nonlinear_updates\":{},\"nonlinear_backtracks\":{},",
+        "\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},",
+        "\"physical_energy_residual_j\":{},\"energy_tolerance_j\":{},\"face_states\":[{}]}}"
+    ),
+        json_string(method(controls.coupled_newton)), responses,
+        krylov_iterations, nonlinear_updates,
+        nonlinear_backtracks, number(physical.residual_norm_j)?,
+        number(controls.residual_tolerance_j)?, number(physical.energy_residual_j)?,
+        number(energy_tolerance_j)?, states,
+    );
+    poll(cx, deadline)?;
+    Ok(receipt)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance(
     cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
-    contacts: &TemperatureContacts<'_, '_>, coupled_newton: bool, max_face_pairs: usize,
+    contacts: &TemperatureContacts<'_, '_>, controls: Config,
     old: &[f64], dt_s: f64,
     config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
     deadline: Option<(Instant, f64)>,
 ) -> Result<Step, SolveRefusal> {
     poll(cx, deadline)?;
-    let tolerance = residual_tolerance_j(config.energy_tolerance_j, problem.mesh.vertex_count())?;
     let coupling = ContactIterationConfig {
-        max_iterations: max_responses(coupled_newton),
+        max_iterations: controls.max_responses(),
         relaxation: 0.5,
-        residual_tolerance_j: tolerance,
+        residual_tolerance_j: controls.residual_tolerance_j,
     };
-    let accepted = if coupled_newton {
+    let accepted = if controls.coupled_newton {
         let nonlinear = nonlinear.ok_or_else(|| bad("coupled contact Newton lost its nonlinear controls"))?;
         contacts.advance_capacity_newton(
-            cx, engine, problem, old, dt_s, config, nonlinear, coupling, max_face_pairs,
+            cx, engine, problem, old, dt_s, config, nonlinear, coupling, controls.max_face_pairs,
         )
     } else {
         contacts.advance_capacity(cx, engine, problem, old, dt_s, config, nonlinear, coupling)
@@ -93,21 +157,11 @@ pub(super) fn advance(
         cancelled @ ConductionError::Cancelled { .. } => lower(cancelled),
         other => bad(format!("source-backed contact step refused: {other}")),
     })?;
-    poll(cx, deadline)?;
-
-    let states = face_states(cx, &accepted.physical_contacts, deadline)?;
-    let receipt = format!(concat!(
-        "{{\"method\":{},\"thermal_responses\":{},",
-        "\"krylov_iterations\":{},\"nonlinear_updates\":{},\"nonlinear_backtracks\":{},",
-        "\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},",
-        "\"physical_energy_residual_j\":{},\"energy_tolerance_j\":{},\"face_states\":[{}]}}"
-    ),
-        json_string(method(coupled_newton)), accepted.iterations,
-        accepted.krylov_iterations, accepted.nonlinear_updates,
-        accepted.nonlinear_backtracks, number(accepted.physical.residual_norm_j)?,
-        number(tolerance)?, number(accepted.physical.energy_residual_j)?,
-        number(config.energy_tolerance_j)?, states,
-    );
+    let receipt = step_receipt(
+        cx, controls, &accepted.physical, &accepted.physical_contacts, accepted.iterations,
+        accepted.krylov_iterations, accepted.nonlinear_updates, accepted.nonlinear_backtracks,
+        config.energy_tolerance_j, deadline,
+    )?;
     let mut conduction = accepted.conduction;
     // The counted inner solve and physical audit describe the same unchanged
     // field. Publish freshly queried contact heat and physical reservoirs;
