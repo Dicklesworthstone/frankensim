@@ -7,6 +7,7 @@ use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
 mod face;
 mod thermodiffusion;
+mod stabilized;
 
 fn gas(count: usize, formation: f64, unequal: bool) -> MixtureGas {
     let mut models = vec![source("A", R, 3.5, 0.0, formation)];

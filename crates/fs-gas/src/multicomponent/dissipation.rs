@@ -11,6 +11,7 @@
 pub(super) mod evolve;
 mod face;
 mod law;
+mod stabilized;
 
 pub use face::{PlanarTransport, SpatialTransport, TransportFaceReport, WallThermalCondition};
 #[cfg(feature = "material")]
@@ -19,6 +20,7 @@ pub use law::{
     ConstantTransport, KineticTransport, SoretDufourTransport, TransportCoefficients,
     TransportDomain, TransportLaw,
 };
+pub use stabilized::{StabilizedDissipationControl, StabilizedDissipationReport};
 
 use super::{
     Boundaries, Boundary, Error as FlowError, MAX_COMPONENTS, Mesh1d, MixtureEuler1d, MixtureGas,
@@ -85,7 +87,7 @@ impl DissipationControl {
 pub struct DissipationReport {
     /// Complete physical duration represented by the molecular operator.
     pub elapsed: Time,
-    /// Accepted internal SSP RK2 steps.
+    /// Accepted internal transport steps (SSP RK2 or opt-in RKL2 macrosteps).
     pub accepted_steps: usize,
     /// Rejected and halved internal attempts.
     pub rejected_steps: usize,
@@ -132,6 +134,11 @@ pub enum DissipationError {
         elapsed_time_s: f64,
         accepted_steps: usize,
         rejected_steps: usize,
+    },
+    /// A stabilized update exhausted its declared spatial-operator budget.
+    OperatorWorkLimit {
+        elapsed_time_s: f64,
+        operator_evaluations: usize,
     },
     /// No admissible complete internal substep remained.
     StepFailure {
@@ -187,6 +194,8 @@ struct Workspace {
     primitive: Vec<Primitive>,
     heat_capacity_v: Vec<f64>,
     faces: Vec<f64>,
+    // Lazily reserved only by the opt-in stabilized time integrator.
+    stabilized_faces: Vec<f64>,
     face_rates: Vec<f64>,
     binary_diffusivities: Vec<f64>,
     diffusion: MaxwellStefanWorkspaceV1,
@@ -273,6 +282,7 @@ impl<L: TransportLaw> DissipationOperator<L> {
             primitive: allocated(count, Primitive::default())?,
             heat_capacity_v: allocated(count, 0.0)?,
             faces: allocated((count + 1) * m, 0.0)?,
+            stabilized_faces: Vec::new(),
             face_rates: allocated(count + 1, 0.0)?,
             binary_diffusivities: allocated(n * n, 0.0)?,
             diffusion: maxwell_stefan.workspace()?,

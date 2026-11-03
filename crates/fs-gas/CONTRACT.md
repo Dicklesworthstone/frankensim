@@ -1611,6 +1611,44 @@ fully discrete entropy/invariant-domain proof. Explicit source-owned Soret/Dufou
 coupling is described below; nonideal phases, Knudsen transport and variable-area
 viscous stresses remain separate closures.
 
+### Stabilized molecular diffusion intervals
+
+`DissipationOperator::advance_stabilized_for` optionally advances the same
+stationary constant-area field with second-order Runge–Kutta–Legendre (RKL2)
+super-time-stepping. Every intermediate and endpoint evaluation uses the
+original Maxwell–Stefan, partial-enthalpy, Fourier, stress and Soret/Dufour
+face owner at its actual state. The linear negative-real stability extension
+is `(s*s+s-2)/4` relative to the existing parabolic estimate. Original physical,
+caloric and source admission still applies; failed stages halve the trial,
+with no clipping of species, temperature or flux.
+
+The three existing state arrays are reused, with one lazily reserved initial
+face array and no per-stage allocation. Signed left/right boundary transfers
+follow the same RKL2 recurrence as the conserved field, including its negative
+weights. Complete-duration publication and the unchanged composing flow clock
+retain the original transaction. Cancellation, exhausted attempts or exhausted
+RHS calls leave the caller field unchanged.
+
+`StabilizedDissipationControl` bounds macrostep duration, stage count (2–256),
+retry halvings, accepted/rejected attempts and actual RHS calls. The report
+retains the original physical balances and adds work, accepted stage counts,
+and the parabolic number scaled by the stability extension. Rejected trials
+and final source qualification consume the RHS budget. The caller chooses an
+accuracy-appropriate maximum macrostep; this path has no temporal estimator.
+The extended linear interval is not a nonlinear stability, SSP positivity,
+entropy-decay or unconditional-stability proof. Moving geometry, chemistry
+and hyperbolic composition remain their separate owners.
+
+Eight focused native tests cover an independent Legendre heat-spectrum oracle,
+physical-time refinement, binary diffusion, unequal-species enthalpy and
+Soret/Dufour reference invariance, wall transfers, nonuniform cell volumes,
+nonlinear rate growth with real rejected trials, and late refusal/reuse.
+They pass with the original molecular/planar/spatial regression subset
+(33 tests), including the current Maxwell–Stefan composition implementation.
+For the tested 128-cell heat interval, RKL2 uses 19 original RHS calls versus
+164 for SSP RK2, including its endpoint check. This is an operation count,
+not a wall-clock speedup or measured-material validation claim.
+
 ### Explicit reciprocal thermal diffusion
 
 `TransportLaw::heats_of_transport` optionally supplies canonical finite kinetic
