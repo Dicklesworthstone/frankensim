@@ -171,3 +171,45 @@ reaction closure; counterions or a declared background-charge inventory are
 also required when initial dissolved species do not balance charge.
 Activity coefficients, copper-cyanide competition, HCN volatilization,
 gas-transfer kinetics and finite leach rates remain separate physical models.
+
+## Coupled pH and free cyanide
+
+`stoichiometry::thermodynamics::acid_base::IdealAcidBaseSystem` now solves
+water and one or more conserved protonation families simultaneously. Each
+one-proton dissociation retains its original equation, selected Gibbs claims
+and reference conditions. All families share one proton activity; a monotone
+charge-balance solve includes the explicit spectator-ion inventories. The
+HCN/CN- analytical total is the **uncomplexed pool**, not total cyanide,
+WAD cyanide or cyanide already in metal complexes.
+
+After compiling the source packs above, run:
+
+```bash
+cargo run -p fs-thermochem --example mineral_speciation -- \
+  --materials "$aqueous_pack_dir"
+```
+
+The example uses an explicit 10 kg solvent basis, so the amount at unit
+molal activity is 10 mol. It compares pure water, 0.1 mol molecular HCN,
+the same analytical pool with 0.1 mol Na+, additional strong-base equivalents,
+and acid equivalents represented by explicit Cl-. These are equilibrium
+scenarios on declared stocks, not salt-dissolution or operating-dose advice.
+With the retained NBS constants, the matching cyanide-salt case gives
+pH approximately 10.6049 and 0.0959293 mol free CN-. Explicit acid equivalents
+change both pH and free cyanide while the HCN+CN- analytical total remains
+0.1 mol.
+
+Every aqueous activity uses the same `n / n_ref` approximation with activity
+coefficient one. Water activity and the solvent basis remain fixed; this
+owner does not claim a closed finite-solvent H/O balance. It refuses conflicting
+shared sources, overlapping pools, double-counted spectators, unsupported pH
+brackets, numerical range loss or exhausted work. The reported bracket and
+charge/mass-action residuals are numerical diagnostics, not uncertainty bounds
+or a validated concentrated-electrolyte model.
+
+Eight focused analytical test groups cover simultaneous mono/polyprotic
+families, water/strong-ion quadratic solutions, counterions, dilution and
+extensive scaling, tiny positive members, source/topology admission and bounded
+atomic refusals. `xtask/tests/mining_speciation_sources.rs` adds three tests
+through the actual five-pack compiler and consumer, including independent
+HCN/cyanide-salt bounds retaining the water contribution.

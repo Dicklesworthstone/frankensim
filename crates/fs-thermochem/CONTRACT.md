@@ -1,5 +1,44 @@
 # CONTRACT: fs-thermochem
 
+## Coupled source-backed ideal aqueous acid/base speciation
+
+`stoichiometry::thermodynamics::acid_base::IdealAcidBaseSystem` couples
+water autoprotolysis and up to 32 analytical protonation families. Each family
+contains one to eight original, exactly conserved one-proton dissociations.
+Original selected formation-Gibbs sources supply Ka and Kw at a common T, p
+and elemental reference. Reused species must retain identical selected
+source answers/receipts; the existing reaction-network owner checks exact
+shared elemental and charge definitions. Overlapping families and spectators
+that duplicate reactive species refuse.
+
+For a shared proton activity h, each family's member weights are
+`w_j=product(K_1..K_j)/h^j`, normalized in logarithmic coordinates. Water
+supplies `aOH=Kw/h`. One monotone charge-balance root includes all family
+amounts and explicitly declared spectator-ion stocks. The solver never
+sequentially equilibrates independent reactions, invents counterions, or
+substitutes total analytical cyanide for free CN-. It retains the complete
+original model, analytical-member amounts/fractions/activities, spectator
+stocks, pH bracket and recomputed charge/mass-action residuals.
+
+Every aqueous species uses the SAME explicit `a=n/n_ref` approximation.
+For the NBS unit-molality references, n_ref corresponds to solvent mass
+times 1 mol/kg; solution volume does not determine it. Water activity is one
+and solvent basis is fixed: no closed finite-water H/O balance, nonideal
+activity coefficients, metal complexation, redox, precipitation, volatilization
+or leaching rate is claimed. The HCN+CN- pool excludes metal-bound and WAD
+cyanide. Numerical brackets/residuals are estimates, not uncertainty or
+interval-arithmetic certificates.
+
+The caller bounds pH, charge accuracy and iteration work. Out-of-bracket
+solutions, numerical range loss, inconsistent sources or cancellation return
+no partial result. Eight independent analytical test groups cover mixed
+mono/polyprotic families, water/strong-ion quadratics, counterions, dilution,
+extensive scaling and tiny positive members. All 63 stoichiometry Cargo tests
+pass. Three actual-source integration tests compile the five NBS packs and
+check coupled chemistry independently, including the water contribution to
+HCN/cyanide-salt roots. The Cargo-built `mineral_speciation --materials
+PACK_DIR` example runs five declared-stock scenarios and prints all residuals.
+
 ## Source-backed aqueous cyanide, protons and dissolved oxygen
 
 Three matched NBS/1989-errata packs add twelve literal molar-mass and H/G/S

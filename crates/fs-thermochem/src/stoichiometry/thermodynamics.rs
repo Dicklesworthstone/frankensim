@@ -17,7 +17,11 @@
 //! Neither route infers a pH, a calibrated activity model, rates or complete
 //! aqueous speciation. A gas activity is a fugacity ratio; identifying it with
 //! p/p° needs an additional ideal-gas assumption that these routes do not impose.
+//! The separate [`acid_base`] owner solves coupled protonation families and
+//! water under a common explicit ideal activity basis and charge balance.
 
+/// Coupled ideal aqueous acid/base families, water and explicit spectator ions.
+pub mod acid_base;
 /// Standard reaction properties derived from matched enthalpy and entropy sources.
 pub mod caloric;
 /// Finite-inventory equilibrium of one reaction under explicit ideal activities.
