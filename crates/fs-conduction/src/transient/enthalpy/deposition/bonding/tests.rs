@@ -3,6 +3,8 @@ use crate::transient::deposition::{Boundary, CellGeometry, DepositedCell};
 use fs_material::healing::{MobilityKnot, MobilityTable};
 use fs_material::healing::strength::{StrengthKnot, StrengthMap};
 
+mod mixed_mode;
+
 struct Sensible;
 impl ThermalLaw for Sensible {
     fn temperature_k(&self, h: f64) -> Result<f64,DepositionError> {

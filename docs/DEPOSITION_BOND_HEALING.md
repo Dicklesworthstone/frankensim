@@ -15,8 +15,9 @@ cargo run -p fs-conduction --example deposited_bond_healing
 Use the repository's required execution/toolchain setup for these commands.
 The example deposits a hot second road onto an earlier road, compares two
 cooling conditions, and freezes the resulting exposure through an explicit
-synthetic strength/fracture table. A new displacement-controlled cohesive pull
-then measures reaction and fracture work per actual contact area. It is not a
+synthetic opening/shear strength and fracture-energy table. Two independent
+fresh-specimen tests then measure opening and shear reactions and fracture work
+per actual contact area. It is not a
 whole-structure failure calculation or a calibrated strength prediction.
 
 ## Physical data and APIs
@@ -61,6 +62,23 @@ calibration authority. Positive outputs are admitted by the existing
 `BilinearCohesive` constructor with explicitly supplied Pa/m stiffness,
 compression stiffness and metre separation limit.
 
+`StrengthMap::new_mixed_mode` accepts `MixedModeStrengthKnot` observations with
+separate opening and shear peak traction, and separate mode-I and mode-II
+fracture work at each dose. `MixedModeStrengthConfig` supplies the original
+normal/shear stiffnesses, BK exponent, compression penalty and separation limit.
+No ratio between opening and shear is guessed. The existing mixed-mode
+`BilinearCohesive` owner applies its quadratic initiation criterion and freezes
+the BK energy mix at first initiation; unloading, irreversible damage, shear
+rotation and compression after failure retain that owner's behavior.
+
+Each supplied column must be finite, nonnegative and nondecreasing with dose.
+All-zero knots may explicitly represent an induction interval without bonding.
+A developed bond needs all four mode observations and must satisfy the original
+cohesive admissibility checks, both at supplied knots and after interpolation.
+Selection is logarithmic in the bounded knot count; it requires no numerical
+quadrature or new constitutive solve. The same `freeze_bond` method carries
+either common-mode or mixed-mode laws into the existing mechanical consumers.
+
 `freeze_bond` carries the actual area, cell IDs, dose and mapping into a fresh
 mechanical stage. A separated or never-contacted interface refuses. Never use
 this handoff to reset existing cohesive damage. Concurrent healing/fracture
@@ -86,7 +104,7 @@ Inserting observation stops may change that grid; compare time refinement,
 spatial refinement and interface-temperature modelling separately. Mobility
 integration exactness is not a temperature or physical-strength error bound.
 
-Six material tests and eight coupling tests cover isothermal dose, crossing
+Eleven material tests and nine coupling tests cover isothermal dose, crossing
 knots, cooling/reheating, independent cooling-integral refinement, thermal
 primal/audit parity, contact windows and area partition, equal-time recontact,
 strength/fracture handoff, atomic refusals and same-grid replay. Native Rust

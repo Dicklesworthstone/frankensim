@@ -5084,6 +5084,28 @@ physics/API review completed; native compilation and tests for the extension
 remain unexecuted because this worker exhausted shared memory/storage in its
 unchanged runtime dependency.
 
+## Dose-dependent opening and shear adhesion
+
+`healing::strength::StrengthMap::new_mixed_mode` maps one original contact's
+accepted mobility dose to independently supplied normal/shear peak traction and
+mode-I/mode-II fracture work. The original `BilinearCohesive::new_mixed_mode`
+admits every developed knot and interpolated output, retaining quadratic
+initiation, frozen-onset BK toughness, irreversible damage and failed-bond
+compression. The existing common-mode map and `FrozenBond` handoff remain
+available to the same deposition and mechanical consumers.
+
+All four observations increase monotonically with dose; all-zero knots can
+declare an induction interval. Missing mode data, invalid envelopes, a different
+mobility identity and extrapolated dose refuse. Fixed stiffnesses and BK
+exponent are explicit inputs. Lookup is logarithmic in at most 1024 knots,
+without numerical integration. No calibration, intimate-contact area, strength
+ratio or concurrent healing/fracture is inferred. The output starts a separate
+mechanical stage and cannot replace an existing damaged point.
+
+Focused G1/G3 regressions cover pure-mode fracture work, independent BK work,
+in-plane shear rotation, induction/cooling/reheating, complete-failure reclosure,
+source/domain refusals and the existing deposition consumer's area partition.
+
 ## Source-defined bilinear cohesive interfaces
 
 `cohesive::source` projects an original ordered `InterfaceSystemCard` or an
