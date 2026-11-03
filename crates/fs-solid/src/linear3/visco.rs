@@ -43,6 +43,7 @@ mod poles;
 pub use poles::{
     PreparedViscoPoles, ViscoMemorySite, ViscoPole, ViscoPoleBudget, ViscoPoleError,
     ViscoPoleSpectrum, ViscoPolePortBudget, ViscoPolePortLoad, ViscoPolePortResponse,
+    ViscoPoleDynamicBudget, ViscoPoleDynamicLoad, ViscoPoleDynamicResponse,
 };
 
 /// Geometry and explicit quadrature; material frames must already be resolved.

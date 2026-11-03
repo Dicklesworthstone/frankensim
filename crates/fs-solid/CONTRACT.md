@@ -4641,3 +4641,57 @@ singular passive directions, source-band admission, active and malformed
 loads, exact resource boundaries, and cancellation (G0/G1/G3/G4). The full
 native fs-solid library builds, all four loaded-pole tests pass, and the five
 existing hereditary-pole regressions pass against the updated library.
+
+## Full hereditary solid poles with independent dynamic physical loads
+
+`ViscoElements::prepare_resonance_poles_with_dynamic_load` assembles the complete
+original body/material/load pencil. The supplied `ViscoPoleDynamicLoad` retains
+every coordinate of an admitted exact quadratic `PortHamiltonian`, including
+mechanically dark states, full mutual storage/resistance and all original port
+columns. For body displacement `u`, the same signed physical map `B` gives load
+flow `v=B^T*u'` and opposing nodal force `-B*effort`. With the original load law
+`z'=(J-R)Qz+Gv`, `effort=G^T*Qz`, the added equations are
+`(sI-(J-R)Q)z-s*G*B^T*u=0` and the body receives `B*G^T*Qz`. No standalone load
+resolvent, sampled impedance, material denominator, projection or modal damping
+ratio replaces those rows. The joint polynomial is regular to evaluate at bare
+load and Maxwell relaxation poles. Its bounded dense coefficients and fixed
+scales are prepared once, while all root iterations remain with `fs-la`.
+
+The existing complete-state dimension/payload/evaluation/solver budgets include
+the appended load states. `ViscoPoleDynamicBudget` separately admits original
+load state/port counts, payload, projection work and the shared numerical PSD
+check. Exact finite quadratic storage, symmetric numerically PSD Q/R and the
+original admitted pHS structure are required; nonlinear storage is refused.
+Source and load bands are intersected and applied conservatively to `|s|` and
+the entire contour. This is a declared causal continuation, not experimental
+evidence outside measured frequencies. Preparation and observation poll `Cx`,
+and no accepted material/attachment history is read, advanced or reset.
+
+`physical_vector` is original free displacement, all original six-component
+Mandel branch states, then the independent load's original state order.
+`dynamic_load_range()` exposes the suffix. Each pole must pass separate
+original coefficient-scaled mechanical, Maxwell and load-state residuals.
+`resonance_pole_from_state` accepts a full authored seed, including dark load
+or memory modes, without a displacement-only resolvent initialization.
+The convenience displacement seed initializes load coordinates to zero and
+retains its existing exact Maxwell initialization/refusal behavior.
+
+The dynamic-load observation independently reports `H=z^H Qz/2`,
+`D=(Qz)^H R(Qz)`, incoming port power, and `P-2 Re(s)H-D`. Body equilibrium,
+consistent-inertia and every Maxwell storage term are evaluated separately,
+as are Kelvin and Maxwell dissipation. The joint signed defect is
+`2 Re(s)*(H_body+H_load)+D_body+D_load`. These are complex-envelope quantities
+at the returned arbitrary mode amplitude, not cycle averages or fitted heat.
+Signed numerical defects remain visible. Finite pencil roots need not be
+observable mechanical resonances. Local/contour results remain numerical,
+without interval enclosures, global completeness, nonlinear-load support,
+measured material validation or a new spatial-convergence certificate.
+
+G1/G3/G4 specimens in `visco_dynamic_poles.rs` verify analytical attached-mass
+mode splitting, a seed exactly at the bare attachment pole, 128/256-node contour
+agreement and honest 64-node count refusal, hereditary loaded roots against an
+independent scalar eliminant, separate original body/load energy and heat,
+signed mutual ports, mechanically dark original load states, nonlinear-law
+refusal, resource/band refusal and cancellation. Native fallback verification
+compiles the complete `fs-solid` crate against aligned cached dependencies;
+it does not claim a DSR or full-workspace run.

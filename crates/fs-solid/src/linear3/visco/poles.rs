@@ -19,12 +19,15 @@ use fs_math::c64::C64;
 mod load;
 use load::PreparedPortLoad;
 pub use load::{ViscoPolePortBudget, ViscoPolePortLoad, ViscoPolePortResponse};
+mod dynamic;
+use dynamic::PreparedDynamicLoad;
+pub use dynamic::{ViscoPoleDynamicBudget, ViscoPoleDynamicLoad, ViscoPoleDynamicResponse};
 
 /// Source-owned preparation and callback resources, separate from fs-la's
 /// numerical iteration budgets. Allocator overhead/process RSS are excluded.
 #[derive(Clone, Copy, Debug)]
 pub struct ViscoPoleBudget {
-    /// Every free displacement AND all original branch-strain coordinates.
+    /// Every free displacement, original branch strain, and independent load state.
     pub maximum_coordinates: usize,
     /// Coefficient caches, fixed scales, map, and one live callback evaluation.
     pub maximum_payload_bytes: usize,
@@ -56,7 +59,8 @@ pub struct ViscoPole {
     /// Pure real roots describe relaxation, not an oscillatory resonance.
     pub rate_per_s: C64,
     /// Shape in original free displacement coordinates, followed by the six
-    /// Mandel strains for each memory_sites() entry. Arbitrary common modal
+    /// Mandel strains for each memory_sites() entry, then every independent
+    /// dynamic-load state in its original order. Arbitrary common modal
     /// normalization; this is NOT a finite-amplitude admitted material history.
     /// A memory-only or unobservable pole is not evidence of audible resonance.
     pub physical_vector: Vec<C64>,
@@ -64,9 +68,13 @@ pub struct ViscoPole {
     pub mechanical_residual: f64,
     /// Original Maxwell-strain equation residual; zero with no memory rows.
     pub memory_residual: f64,
+    /// Original independent load-state equations; zero without a dynamic load.
+    pub dynamic_load_residual: f64,
     /// Original attached port motion, storage and loss at the same arbitrary
     /// modal amplitude. Absent for an unloaded preparation.
     pub port_load: Option<ViscoPolePortResponse>,
+    /// Independent load coordinates, physical work, storage and dissipation.
+    pub dynamic_load: Option<ViscoPoleDynamicResponse>,
     /// Shared solver's scaled final Newton correction.
     pub relative_step: f64,
     /// Number of shared Newton evaluations.
@@ -116,10 +124,11 @@ pub enum ViscoPoleError {
     },
     /// Displacement-only initialization cannot divide through this branch rate.
     SeedAtRelaxationRate { site: usize },
-    /// Original mechanical and memory rows did not both pass.
+    /// An original mechanical, memory or independent load equation family failed.
     PhysicalResidual {
         mechanical: f64,
         memory: f64,
+        dynamic_load: f64,
         tolerance: f64,
     },
     /// Shared local simple-pole solver refusal.
@@ -178,6 +187,7 @@ pub struct PreparedViscoPoles<'a> {
     band: (f64, f64),
     budget: ViscoPoleBudget,
     port_load: Option<PreparedPortLoad>,
+    dynamic_load: Option<PreparedDynamicLoad>,
 }
 
 impl ViscoElements {
@@ -195,7 +205,7 @@ impl ViscoElements {
         budget: ViscoPoleBudget,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
-        self.prepare_poles(budget, None, cx)
+        self.prepare_poles(budget, None, None, cx)
     }
 
     /// Include a physical passive boundary in the ORIGINAL hereditary pencil.
@@ -216,13 +226,29 @@ impl ViscoElements {
         load_budget: ViscoPolePortBudget,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
-        self.prepare_poles(budget, Some((load, load_budget)), cx)
+        self.prepare_poles(budget, Some((load, load_budget)), None, cx)
+    }
+
+    /// Couple every state of an admitted exact quadratic pHS impedance load.
+    /// With original load law z'=(J-R)Qz+Gv, v=B^T*u', the body receives
+    /// opposing force -B*G^T*Qz. The joint polynomial pencil retains z even at
+    /// a bare load pole; no standalone impedance or state resolvent is inverted.
+    /// The load supplies its physical units and declared continuation band.
+    pub fn prepare_resonance_poles_with_dynamic_load(
+        &self,
+        load: ViscoPoleDynamicLoad<'_>,
+        budget: ViscoPoleBudget,
+        load_budget: ViscoPoleDynamicBudget,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
+        self.prepare_poles(budget, None, Some((load, load_budget)), cx)
     }
 
     fn prepare_poles(
         &self,
         budget: ViscoPoleBudget,
         load: Option<(ViscoPolePortLoad<'_>, ViscoPolePortBudget)>,
+        dynamic: Option<(ViscoPoleDynamicLoad<'_>, ViscoPoleDynamicBudget)>,
         cx: &Cx<'_>,
     ) -> Result<PreparedViscoPoles<'_>, ViscoPoleError> {
         checkpoint(cx)?;
@@ -248,10 +274,17 @@ impl ViscoElements {
             band.0 = band.0.max(b.0);
             band.1 = band.1.min(b.1);
         }
-        let n = blocks
+        let body_n = blocks
             .checked_mul(6)
             .and_then(|q| q.checked_add(m))
             .ok_or_else(|| invalid("complete hereditary dimension overflow"))?;
+        let n = body_n
+            .checked_add(
+                dynamic
+                    .as_ref()
+                    .map_or(0, |(load, _)| load.system.state_dim()),
+            )
+            .ok_or_else(|| invalid("joint hereditary/load dimension overflow"))?;
         if m == 0
             || budget.maximum_coordinates > MAX_NONLINEAR_POLE_DIMENSION
             || budget.maximum_evaluations == 0
@@ -287,11 +320,21 @@ impl ViscoElements {
         let port_load = load
             .map(|(load, budget)| PreparedPortLoad::new(m, load, budget, cx))
             .transpose()?;
+        let dynamic_load = dynamic
+            .map(|(load, budget)| PreparedDynamicLoad::new(m, load, budget, cx))
+            .transpose()?;
         if let Some(load) = &port_load {
             band.0 = band.0.max(load.band_rad_s.0);
             band.1 = band.1.min(load.band_rad_s.1);
             if band.0 > band.1 {
                 return Err(invalid("material and boundary-load bands do not intersect"));
+            }
+        }
+        if let Some(load) = &dynamic_load {
+            band.0 = band.0.max(load.band_rad_s.0);
+            band.1 = band.1.min(load.band_rad_s.1);
+            if band.0 > band.1 {
+                return Err(invalid("material and dynamic-load bands do not intersect"));
             }
         }
         let mut reduced = vec![usize::MAX; self.full_dofs];
@@ -364,6 +407,9 @@ impl ViscoElements {
         if let Some(load) = &port_load {
             load.add_to_pencil(&mut a, n, cx)?;
         }
+        if let Some(load) = &dynamic_load {
+            load.add_to_pencil(&mut a, n, body_n, cx)?;
+        }
         if a.iter().flatten().any(|x| !x.is_finite()) {
             return Err(invalid(
                 "original hereditary coefficient is not representable",
@@ -379,6 +425,7 @@ impl ViscoElements {
             band,
             budget,
             port_load,
+            dynamic_load,
         };
         let rate = budget.reference_rate_per_s;
         for i in 0..n {
@@ -420,7 +467,7 @@ impl PreparedViscoPoles<'_> {
     pub fn source(&self) -> &ViscoElements {
         self.source
     }
-    /// Total free displacement plus all original memory coordinates.
+    /// Total free displacement, original memory and independent load coordinates.
     pub fn dimension(&self) -> usize {
         self.dimension
     }
@@ -431,6 +478,16 @@ impl PreparedViscoPoles<'_> {
     /// Element/point/branch order of the subsequent six-component blocks.
     pub fn memory_sites(&self) -> &[ViscoMemorySite] {
         &self.sites
+    }
+    /// Original independent load-state suffix; no load state is condensed out.
+    pub fn dynamic_load_range(&self) -> Option<core::ops::Range<usize>> {
+        self.dynamic_load
+            .as_ref()
+            .map(|_| self.body_dimension()..self.dimension)
+    }
+
+    fn body_dimension(&self) -> usize {
+        self.free_dofs().len() + 6 * self.sites.len()
     }
 
     fn envelope(&self, at: usize, magnitude: f64) -> f64 {
@@ -521,8 +578,8 @@ impl PreparedViscoPoles<'_> {
         if vector.iter().any(|&z| !finite(z)) {
             return Err(invalid("original pole vector is not representable"));
         }
-        let mut numerators = [0.0_f64; 2];
-        let mut denominators = [0.0_f64; 2];
+        let mut numerators = [0.0_f64; 3];
+        let mut denominators = [0.0_f64; 3];
         for i in 0..n {
             poll(cancelled)?;
             let mut sum = C64::ZERO;
@@ -542,11 +599,17 @@ impl PreparedViscoPoles<'_> {
             if !finite(sum) || !envelope.is_finite() {
                 return Err(invalid("original pole residual overflow"));
             }
-            let group = usize::from(i >= self.free_dofs().len());
+            let group = if i < self.free_dofs().len() {
+                0
+            } else if i < self.body_dimension() {
+                1
+            } else {
+                2
+            };
             numerators[group] = numerators[group].max(sum.abs());
             denominators[group] = denominators[group].max(envelope);
         }
-        let residual: [f64; 2] = core::array::from_fn(|i| {
+        let residual: [f64; 3] = core::array::from_fn(|i| {
             if denominators[i] == 0.0 {
                 if numerators[i] == 0.0 {
                     0.0
@@ -562,6 +625,7 @@ impl PreparedViscoPoles<'_> {
             return Err(ViscoPoleError::PhysicalResidual {
                 mechanical: residual[0],
                 memory: residual[1],
+                dynamic_load: residual[2],
                 tolerance,
             });
         }
@@ -572,9 +636,15 @@ impl PreparedViscoPoles<'_> {
                 .as_ref()
                 .map(|load| load.observe(s, &vector[..self.free_dofs().len()], cancelled))
                 .transpose()?,
+            dynamic_load: self
+                .dynamic_load
+                .as_ref()
+                .map(|load| load.observe(self, s, &vector, cancelled))
+                .transpose()?,
             physical_vector: vector,
             mechanical_residual: residual[0],
             memory_residual: residual[1],
+            dynamic_load_residual: residual[2],
             relative_step: pole.relative_step,
             iterations: pole.iterations,
         })
@@ -584,6 +654,8 @@ impl PreparedViscoPoles<'_> {
     /// Maxwell strains are initialized by the exact branch equation; a seed
     /// exactly at an uncoupled relaxation rate refuses. Subsequent iterations
     /// retain ALL strain coordinates and never divide by a material denominator.
+    /// Independent load states start at zero; a load-dominated mode can instead
+    /// use resonance_pole_from_state with an authored full-state seed.
     /// Modes are numerical original-equation roots, not damping enclosures or
     /// a guarantee that a pole is mechanically observable. Real roots relax.
     pub fn resonance_pole(
@@ -608,7 +680,7 @@ impl PreparedViscoPoles<'_> {
         }
         let mut seed = vec![C64::ZERO; n];
         seed[..m].copy_from_slice(displacement_seed);
-        for i in m..n {
+        for i in m..self.body_dimension() {
             poll(&mut cancelled)?;
             let denominator = C64::ONE + rate_seed.scale(self.coefficients[1][i * n + i]);
             if denominator.abs() == 0.0 {
@@ -619,6 +691,31 @@ impl PreparedViscoPoles<'_> {
             });
             seed[i] = -(rate_seed * sum) / denominator;
         }
+        self.resonance_pole_from_state(rate_seed, &seed, options, cx)
+    }
+
+    /// Refine a simple pole from the complete ORIGINAL physical state, including
+    /// each Maxwell strain and independent load coordinate. This also admits
+    /// mechanically dark load/memory modes without inventing a displacement.
+    /// No material or bare-load denominator is used to initialize this seed.
+    pub fn resonance_pole_from_state(
+        &self,
+        rate_seed: C64,
+        physical_seed: &[C64],
+        options: &PoleOptions,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoPole, ViscoPoleError> {
+        let mut cancelled = || cx.checkpoint().is_err();
+        poll(&mut cancelled)?;
+        let n = self.dimension;
+        if !finite(rate_seed)
+            || physical_seed.len() != n
+            || physical_seed.iter().any(|&z| !finite(z))
+            || physical_seed.iter().all(|z| z.abs() == 0.0)
+        {
+            return Err(invalid("finite nonzero complete physical seed required"));
+        }
+        let mut seed = physical_seed.to_vec();
         for (v, &scale) in seed.iter_mut().zip(&self.column_scales) {
             *v = C64::new(v.re / scale, v.im / scale);
         }

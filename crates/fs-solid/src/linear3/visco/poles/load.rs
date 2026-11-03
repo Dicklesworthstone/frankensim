@@ -240,7 +240,7 @@ fn inner(a: C64, b: C64) -> f64 {
     a.re.mul_add(b.re, a.im * b.im)
 }
 
-fn admit_coefficient(
+pub(super) fn admit_coefficient(
     a: &[f64],
     n: usize,
     name: &'static str,
