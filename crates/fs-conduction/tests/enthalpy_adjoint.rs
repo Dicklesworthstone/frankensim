@@ -5,6 +5,9 @@ mod support;
 #[path = "enthalpy_adjoint/robin_feedback.rs"]
 mod robin_feedback;
 
+#[path = "enthalpy_adjoint/sdirk.rs"]
+mod sdirk;
+
 use fs_blake3::ContentHash;
 use fs_conduction::material::LiquidMassFractionConductivity;
 use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;

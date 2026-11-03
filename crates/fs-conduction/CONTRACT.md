@@ -3743,3 +3743,34 @@ closed/open contact-reflection events; reject temperature-invisible phase
 error; and resume after second-stage source, future-bath or cancellation
 failure. The full thermal-history target passes 19 tests and the focused
 contact-history group passes 8, alongside 16 spatial enthalpy transport tests.
+
+## Discrete adjoints of the actual SDIRK2 stages
+
+`linearize_sdirk2` binds the actual two-stage enthalpy solve for uniform or
+heterogeneous reference-mass storage. The primal retains its distinct SDIRK2
+stage and whole-interval heat accounts. Sparse stage Jacobians and bounded
+transpose solves share the existing enthalpy adjoint operator; no fictitious
+previous enthalpy or backward-Euler acceptance receipt is constructed.
+
+Let a=gamma*dt and r=(1-gamma)/gamma. At the accepted first stage, including
+its prescribed-node reaction, a*Q1=M*(h1-h0). The second free-row equation is
+therefore M*h2-(1-r)*M*h0-r*M*h1-a*Q2=0. The reverse sweep first solves the
+second physical transpose and carries r*M times its free-row multiplier into
+the first-stage seed. The old-state pullback includes both the first-stage
+free-row storage multiplier and (1-r) times the second-stage one. Distinct
+prescribed masks remain stage-local, including nodes released between stages.
+
+`pullback_stages` accepts objective cotangents on both physical stage states
+and returns the previous enthalpy gradient plus separate stage nodal-source
+and prescribed-temperature gradients. Temperature objectives use each stage's
+original dT/dh, so a latent plateau does not acquire a fictitious temperature
+slope. The retained stage linearizations can be swept backward over a bounded
+caller-owned trajectory without retaining Newton or Krylov iteration history.
+Each transpose retains its independently recomputed residual and work count.
+
+These are derivatives of the admitted discrete solve on a fixed time grid,
+fixed reference geometry and fixed material/source models. Chart or material
+corners require the existing smoothness admission; the method does not invent
+a derivative at a refused kink. Automatic history tapes, differentiation of
+adaptive/event decisions, geometry and caloric-chart parameter gradients are
+outside this interface.

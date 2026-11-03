@@ -40,6 +40,8 @@ pub mod pointwise;
 /// Original-source derivatives of state-dependent ambient emissivity.
 pub mod material;
 pub mod material_enclosure;
+/// Two-stage SDIRK2 pullbacks on the same original physical tangents.
+pub mod sdirk;
 pub use robin::{EnthalpyRobinGradient, EnthalpyRobinResponse};
 mod conductivity;
 
@@ -210,6 +212,22 @@ pub struct EnthalpyStepLinearization<'m> {
 struct EnthalpyFeedback {
     left: Vec<f64>,
     right: Vec<f64>,
+}
+
+// Borrow the already-admitted physical tangent. Both the BE endpoint owner
+// and genuine RK-stage owners use these exact actions and bounded transpose
+// solve; an RK stage never needs a fabricated BE primal receipt.
+#[derive(Clone, Copy)]
+struct EnthalpyTangent<'a, 'm> {
+    mesh: &'m ConductionMesh,
+    tangent: &'a Csr,
+    slopes: &'a [f64],
+    masses: &'a [f64],
+    prescribed: &'a [bool],
+    inverse_diagonal: &'a [f64],
+    dt: f64,
+    feedback: &'a [EnthalpyFeedback],
+    pointwise_radiation: Option<&'a PointwiseBoundaryAssembly>,
 }
 
 impl<'m> EnthalpyBackwardEuler<'m, '_> {
@@ -610,7 +628,7 @@ impl EnthalpyStepLinearization<'_> {
         cx: &Cx<'_>,
         direction: &[f64],
     ) -> Result<Vec<f64>, EnthalpyAdjointError> {
-        self.action(cx, direction, false)
+        self.operator().action(cx, direction, false)
     }
 
     /// Apply its sparse/feedback transpose, including the correct slope side.
@@ -619,8 +637,30 @@ impl EnthalpyStepLinearization<'_> {
         cx: &Cx<'_>,
         direction: &[f64],
     ) -> Result<Vec<f64>, EnthalpyAdjointError> {
-        self.action(cx, direction, true)
+        self.operator().action(cx, direction, true)
     }
+
+    /// Solve the implicit discrete transpose and return history/source VJPs.
+    /// `max_iterations` caps inner Krylov columns, not restart cycles. The
+    /// shared physical operator checks its independently recomputed residual
+    /// and polls cancellation before publishing any gradient.
+    pub fn pullback(
+        &self, cx: &Cx<'_>, seed: &[f64], config: LinearConfig,
+    ) -> Result<EnthalpyStepGradient, EnthalpyAdjointError> {
+        self.operator().pullback(cx, seed, config)
+    }
+
+    fn operator(&self) -> EnthalpyTangent<'_, '_> {
+        EnthalpyTangent {
+            mesh: self.mesh, tangent: &self.tangent, slopes: &self.slopes,
+            masses: &self.masses, prescribed: &self.prescribed,
+            inverse_diagonal: &self.inverse_diagonal, dt: self.dt,
+            feedback: &self.feedback, pointwise_radiation: self.pointwise_radiation.as_ref(),
+        }
+    }
+}
+
+impl EnthalpyTangent<'_, '_> {
 
     fn action(
         &self,
@@ -681,7 +721,7 @@ impl EnthalpyStepLinearization<'_> {
             }
             *value = finite(self.masses[row].mul_add(x[row], *value))?;
         }
-        for update in &self.feedback {
+        for update in self.feedback {
             let (left, right) = if transpose {
                 (&update.right, &update.left)
             } else {
@@ -728,7 +768,7 @@ impl EnthalpyStepLinearization<'_> {
         };
         let failure = RefCell::new(None);
         let operator = Transpose {
-            linearization: self,
+            linearization: *self,
             cx,
             failure: &failure,
         };
@@ -774,7 +814,7 @@ impl EnthalpyStepLinearization<'_> {
             }
         }
         poll(cx, state.iters)?;
-        let mut residual = self.apply_jacobian_transpose(cx, &state.x)?;
+        let mut residual = self.action(cx, &state.x, true)?;
         for (value, &rhs) in residual.iter_mut().zip(&normalized) {
             *value = finite(rhs - *value)?;
         }
@@ -834,7 +874,7 @@ impl EnthalpyStepLinearization<'_> {
 }
 
 struct Transpose<'a, 'm, 'cx> {
-    linearization: &'a EnthalpyStepLinearization<'m>,
+    linearization: EnthalpyTangent<'a, 'm>,
     cx: &'a Cx<'cx>,
     failure: &'a RefCell<Option<EnthalpyAdjointError>>,
 }

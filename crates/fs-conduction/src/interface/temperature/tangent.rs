@@ -379,9 +379,23 @@ impl TemperatureContacts<'_, '_> {
         -> Result<ContactTemperatureLinearization, crate::transient::enthalpy::EnthalpyError>
     {
         let (temperature, slopes) = self.enthalpy_fields(cx, engine, h, true)?;
-        let phase = self.phase_field(cx, h, &temperature, true, true)?;
-        let response = self.linearize_state_with_policy(cx, boundary, &temperature, phase.as_ref(),
-            Some(h), Some(&slopes), max_face_pairs, DerivativePolicy::TwoSided)?;
+        Ok(self.linearize_enthalpy_at_fields(cx, boundary, h, &temperature, &slopes,
+            max_face_pairs, |vertex| engine.phase_curve_at(vertex))?)
+    }
+
+    // Shared strict binder for native BE endpoints and genuine RK stages.
+    // The caller owns the original native fields; source chart identity and
+    // two-sided constitutive admission remain enforced here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn linearize_enthalpy_at_fields<'c>(&self, cx: &Cx<'_>, boundary: &ThermalBoundary,
+        h: &[f64], temperature: &[f64], slopes: &[f64], max_face_pairs: usize,
+        mut curve_at: impl FnMut(usize) -> Option<&'c fs_material::phase::EquilibriumEnthalpyPhaseCurve>)
+        -> Result<ContactTemperatureLinearization, ConductionError>
+    {
+        self.check_material_curves(cx, &mut curve_at)?;
+        let phase = self.phase_field(cx, h, temperature, true, true)?;
+        let response = self.linearize_state_with_policy(cx, boundary, temperature, phase.as_ref(),
+            Some(h), Some(slopes), max_face_pairs, DerivativePolicy::TwoSided)?;
         // Fixed and temperature-only contacts also inherit T(h). The retained
         // frozen operator identifies their actual participating vertices,
         // including fixed nonmatching faces, without another geometry owner.
@@ -390,7 +404,8 @@ impl TemperatureContacts<'_, '_> {
             if !response.frozen.row(vertex).0.is_empty()
                 && !self.phase_curves.get(vertex).is_some_and(|binding| binding.is_some()) {
                 super::phase::admit_chart_derivative(
-                    engine.phase_curve_at(vertex).expect("original native chart layout checked"),
+                    curve_at(vertex).ok_or_else(|| invalid("<contact-tangent>",
+                        "original native chart missing at a participating vertex"))?,
                     h[vertex], false,
                 )?;
             }

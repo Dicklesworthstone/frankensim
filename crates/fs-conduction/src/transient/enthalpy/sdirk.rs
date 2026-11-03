@@ -93,8 +93,8 @@ impl EnthalpyBackwardEuler<'_, '_> {
     /// at each original stage h. Both nodewise and global joule gates apply;
     /// a failed second stage returns no partially accepted interval.
     /// Prescribed temperatures must have unique h on their original charts.
-    /// A second-order adjoint and unconditional phase monotonicity are not
-    /// supplied by the first-order endpoint adjoint or by L-stability.
+    /// `linearize_sdirk2` binds the two-stage discrete adjoint. L-stability
+    /// alone does not establish unconditional phase monotonicity.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_sdirk2(
         &self, cx: &Cx<'_>, inputs: [EnthalpySdirk2Input<'_>; 2],
@@ -161,7 +161,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             stored_energy_change_j: checked(stored)?, energy_residual_j: residual, nodal_residual_j })
     }
 
-    fn sdirk_radiation<'a>(&self, cx: &Cx<'_>, input: EnthalpySdirk2Input<'a>)
+    pub(super) fn sdirk_radiation<'a>(&self, cx: &Cx<'_>, input: EnthalpySdirk2Input<'a>)
         -> Result<Option<PointwiseBoundary<'a>>, EnthalpyError>
     {
         let p = input.problem;

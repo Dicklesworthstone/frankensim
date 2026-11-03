@@ -161,6 +161,17 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         self.inner.advance_sdirk2(cx, inputs, old_h, dt_s, config)
     }
 
+    /// Solve and bind both SDIRK2 stages on the original heterogeneous charts.
+    /// Reference inventory, material parameters and the time grid stay fixed.
+    /// The radiation entry allowance covers both retained stage tangents.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_sdirk2(&self, cx: &Cx<'_>, inputs: [super::sdirk::EnthalpySdirk2Input<'_>; 2],
+        old_h: &[f64], dt_s: f64, config: EnthalpyStepConfig, max_radiation_entries: usize)
+        -> Result<super::adjoint::sdirk::EnthalpySdirk2Linearization<'m>, super::adjoint::EnthalpyAdjointError>
+    {
+        self.inner.linearize_sdirk2(cx, inputs, old_h, dt_s, config, max_radiation_entries)
+    }
+
     /// Prepare `m_i = sum_(e containing i) rho_e * V_e / 4` and chart ownership.
     ///
     /// `element_material_ids` is in mesh tetrahedron order. Material indices

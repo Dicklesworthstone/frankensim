@@ -177,3 +177,78 @@ fn sdirk_material_enclosure_adapts_on_latent_error_and_retains_bath_after_failed
         assert_eq!(resumed.second_stage.specific_enthalpy_j_kg, replay.second_stage.specific_enthalpy_j_kg);
     });
 }
+
+#[test]
+fn sdirk_adjoint_retains_heterogeneous_latent_contact_and_material_reflection_feedback() {
+    use fs_conduction::transient::enthalpy::heterogeneous::EnthalpyRadiation;
+    use fs_conduction::transient::enthalpy::sdirk::EnthalpySdirk2Input;
+    with_cx(|cx| {
+        let mesh = tetrahedra(); let history = history(cx, &mesh); let boundary = history.at(cx, 0.0).unwrap();
+        let cards = [material_card("cold"), material_card("hot")]; let context = context();
+        let curves = [chart(&cards[0], 400.0), chart(&cards[1], 500.0)];
+        let source = source(&cards, 1.0, false, false, 1.0);
+        let conductivity = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let contact = contacts(cx, &mesh, &boundary, &cards, &curves, &source, &context,
+            sides(&mesh, 4, 2, 0.0), 0, false);
+        let enclosure = open(cx, &mesh, &cards, &context);
+        let radiation = PointwiseEnclosureRadiation::new_open(cx, &mesh, &boundary, &enclosure,
+            350.0, PointwiseEnclosureTolerance::default()).unwrap();
+        let declarations = patches(&cards, &curves, &context);
+        let material = MaterialPointwiseEnclosureRadiation::new(cx, &radiation, &declarations).unwrap();
+        let engine = engine(cx, &mesh, &curves, 4);
+        let zero = ScalarField::Uniform(0.0);
+        let input = |q| EnthalpySdirk2Input {
+            problem: ConductionProblem { mesh: &mesh, boundary: &boundary, material: &conductivity,
+                element_materials: None, source: q }, interfaces: None,
+            radiation: EnthalpyRadiation::MaterialEnclosure(&material), contacts: Some((&contact, config())),
+        };
+        let dt = 0.0005; let allowance = 2 * material.adjoint_workspace_entries().unwrap();
+        assert!(engine.linearize_sdirk2(cx, [input(&zero); 2], &OLD, dt, config().step, allowance - 1).is_err());
+        let response = engine.linearize_sdirk2(cx, [input(&zero); 2], &OLD, dt, config().step, allowance).unwrap();
+        let expected = stages(&OLD, dt, 0.4, 350.0, 0.0, true);
+        admit(response.primal(), &OLD, &expected, dt, 0.4, 350.0, 0.0, true);
+        let first = [0.03, -0.01, 0.04, -0.02, 0.02, -0.03, 0.01, 0.05];
+        let last = [0.7, -0.4, 0.3, 0.2, -0.6, 0.9, -0.2, 0.5];
+        let direction = [0.8, -0.2, 0.4, -0.3, 0.1, 0.6, -0.5, 0.7];
+        let gradient = response.pullback_stages(cx, [&first, &last], LinearConfig {
+            tolerance: 1e-12, max_iterations: 64, restart: 8 }).unwrap();
+        assert_eq!(response.temperature_pullback(cx, [&first, &last]).unwrap(), [vec![0.0; 8], vec![0.0; 8]]);
+        // The oracle solves the original analytic two-body heat equations,
+        // including R(fa,fb), correlated P1 epsilon and reflected irradiation.
+        let objective = |h: [f64; 8]| {
+            let stages = stages(&h, dt, 0.4, 350.0, 0.0, true);
+            dot(&stages[0], &first) + dot(&stages[1], &last)
+        };
+        let epsilon = 0.001;
+        let plus = objective(std::array::from_fn(|i| OLD[i] + epsilon * direction[i]));
+        let minus = objective(std::array::from_fn(|i| OLD[i] - epsilon * direction[i]));
+        near(dot(&gradient.previous_specific_enthalpy, &direction), (plus - minus) / (2.0 * epsilon), 2e-8);
+        assert!(gradient.previous_specific_enthalpy.iter().enumerate()
+            .any(|(i, g)| (g - first[i] - last[i]).abs() > 1e-3));
+        let v = [direction, last]; let w = [last, first];
+        let action = response.apply_jacobian(cx, [&v[0], &v[1]]).unwrap();
+        let transpose = response.apply_jacobian_transpose(cx, [&w[0], &w[1]]).unwrap();
+        near(dot(&action[0], &w[0]) + dot(&action[1], &w[1]),
+            dot(&v[0], &transpose[0]) + dot(&v[1], &transpose[1]), 1e-13);
+        for stage in 0..2 {
+            let evaluate = |delta| {
+                let q = ScalarField::nodal("perturbed stage deposition", 8,
+                    direction.map(|d| delta * d).to_vec()).unwrap();
+                let inputs = [0, 1].map(|sample| EnthalpySdirk2Input {
+                    problem: ConductionProblem { mesh: &mesh, boundary: &boundary,
+                        material: &conductivity, element_materials: None,
+                        source: if sample == stage { &q } else { &zero } }, interfaces: None,
+                    radiation: EnthalpyRadiation::MaterialEnclosure(&material),
+                    contacts: Some((&contact, config())),
+                });
+                let step = engine.advance_sdirk2(cx, inputs, &OLD, dt, config().step).unwrap();
+                dot(&step.first_stage.specific_enthalpy_j_kg, &first)
+                    + dot(&step.second_stage.specific_enthalpy_j_kg, &last)
+            };
+            let epsilon = 0.05;
+            let fd = (-evaluate(2.0 * epsilon) + 8.0 * evaluate(epsilon)
+                - 8.0 * evaluate(-epsilon) + evaluate(-2.0 * epsilon)) / (12.0 * epsilon);
+            near(dot(&gradient.source_density[stage], &direction), fd, 2e-8);
+        }
+    });
+}
