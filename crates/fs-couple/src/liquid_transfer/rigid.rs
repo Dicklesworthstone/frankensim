@@ -11,6 +11,9 @@
 //! Melting kinetics, stress relaxation, density-change volume work, capillarity
 //! and a pressure projection need their own admitted physical owners.
 
+/// Selected-cell release with a source-bound rigid remainder outside the grid.
+pub mod partial;
+
 use fs_exec::{CancelGate, Cx};
 use fs_lbm::material::free_surface::enthalpy::rheology::RheologySolve;
 use fs_lbm::material::free_surface::enthalpy::{
@@ -70,6 +73,8 @@ pub struct RigidLiquidReleaseControls {
 /// Which actual representation failed to reproduce the original rigid state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RigidLiquidBalanceStage {
+    /// Native selected and retained rigid states before any liquid projection.
+    RigidPartition,
     TetrahedralKinematics,
     NativeLiquid,
 }
@@ -219,64 +224,13 @@ pub fn release_rigid_liquid<'s, 'm>(
             "rigid motion must use the exact original matter's principal frame",
         ));
     }
-    let material = scaling.material().material();
-    let density = material
-        .property(DENSITY_PROPERTY)
-        .ok_or(RigidLiquidReleaseError::Invalid(
-            "receiver lost its original density source",
-        ))?;
+    admit_reference_density(source.geometry, scaling, law, cx, gate)?;
     let properties = source.frame.properties();
-    let center = source
-        .motion
-        .pose()
-        .position_world()
-        .sub(vector(grid_origin_m));
-    let momentum = source.motion.linear_momentum_world();
-    let spin = source
-        .motion
-        .pose()
-        .orientation()
-        .rotate_body_to_world(source.motion.angular_momentum_body());
-    let rigid = LiquidTransferMoments {
-        mass_kg: properties.mass(),
-        first_mass_moment_kg_m: array(center.scale(properties.mass())),
-        momentum_kg_m_s: array(momentum),
-        angular_momentum_kg_m2_s: array(center.cross(momentum).add(spin)),
-        kinetic_energy_j: source.motion.kinetic_energy(properties)?,
-    };
-    if !finite_moments(rigid) {
-        return Err(RigidLiquidReleaseError::Invalid(
-            "original rigid moments are unrepresentable",
-        ));
-    }
+    let rigid = rigid_moments(source.frame, source.motion, grid_origin_m)?;
     let mut positions = reserved(source.geometry.vertices().len())?;
     let mut velocities = reserved(source.geometry.vertices().len())?;
     for vertex in source.geometry.vertices() {
         check(cx, gate)?;
-        let original = vertex.material();
-        let original_density =
-            original
-                .property(DENSITY_PROPERTY)
-                .ok_or(RigidLiquidReleaseError::Invalid(
-                    "original vertex lost its density source",
-                ))?;
-        if original.card_identity() != material.card_identity()
-            || original_density.answer().receipt.selected != density.answer().receipt.selected
-            || vertex.density_kg_m3().to_bits() != scaling.material().density_kg_m3().to_bits()
-            || original.axis_quantities() != material.axis_quantities()
-            || !original
-                .query_point()
-                .iter()
-                .filter(|(axis, _)| axis != law.temperature_axis())
-                .eq(material
-                    .query_point()
-                    .iter()
-                    .filter(|(axis, _)| axis != law.temperature_axis()))
-        {
-            return Err(RigidLiquidReleaseError::Invalid(
-                "original matter must retain the receiver's density claim, context and uniform reference density",
-            ));
-        }
         let arm = source.frame.arm_for_body_point(vertex.position_m())?;
         let point = source.motion.point_kinematics(properties, arm)?;
         positions.push(array(point.point_world));
@@ -397,6 +351,73 @@ pub fn release_rigid_liquid<'s, 'm>(
     ))
 }
 
+fn admit_reference_density(
+    geometry: &TetrahedralDensityBody,
+    scaling: MaterialFreeSurfaceScaling<'_>,
+    law: &LiquidTemperatureLaw<'_>,
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+) -> Result<(), RigidLiquidReleaseError> {
+    let material = scaling.material().material();
+    let density = material
+        .property(DENSITY_PROPERTY)
+        .ok_or(RigidLiquidReleaseError::Invalid(
+            "receiver lost its original density source",
+        ))?;
+    for vertex in geometry.vertices() {
+        check(cx, gate)?;
+        let original = vertex.material();
+        let original_density = original.property(DENSITY_PROPERTY).ok_or(
+            RigidLiquidReleaseError::Invalid("original vertex lost its density source"),
+        )?;
+        if original.card_identity() != material.card_identity()
+            || original_density.answer().receipt.selected != density.answer().receipt.selected
+            || vertex.density_kg_m3().to_bits() != scaling.material().density_kg_m3().to_bits()
+            || original.axis_quantities() != material.axis_quantities()
+            || !original
+                .query_point()
+                .iter()
+                .filter(|(axis, _)| axis != law.temperature_axis())
+                .eq(material
+                    .query_point()
+                    .iter()
+                    .filter(|(axis, _)| axis != law.temperature_axis()))
+        {
+            return Err(RigidLiquidReleaseError::Invalid(
+                "original matter must retain the receiver's density claim, context and uniform reference density",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn rigid_moments(
+    frame: &PrincipalFrame,
+    motion: RigidBodyState,
+    grid_origin_m: [f64; 3],
+) -> Result<LiquidTransferMoments, RigidLiquidReleaseError> {
+    let properties = frame.properties();
+    let center = motion.pose().position_world().sub(vector(grid_origin_m));
+    let momentum = motion.linear_momentum_world();
+    let spin = motion
+        .pose()
+        .orientation()
+        .rotate_body_to_world(motion.angular_momentum_body());
+    let moments = LiquidTransferMoments {
+        mass_kg: properties.mass(),
+        first_mass_moment_kg_m: array(center.scale(properties.mass())),
+        momentum_kg_m_s: array(momentum),
+        angular_momentum_kg_m2_s: array(center.cross(momentum).add(spin)),
+        kinetic_energy_j: motion.kinetic_energy(properties)?,
+    };
+    if !finite_moments(moments) {
+        return Err(RigidLiquidReleaseError::Invalid(
+            "original rigid moments are unrepresentable",
+        ));
+    }
+    Ok(moments)
+}
+
 struct Balance {
     centroid_m: [f64; 3],
     kinetic_j: f64,
@@ -434,7 +455,7 @@ fn audit(
     let enthalpy_error_j = actual_h - original_h;
     let limits = controls.transfer.mechanical;
     let (centroid_limit, energy_ok) = match stage {
-        RigidLiquidBalanceStage::TetrahedralKinematics => (
+        RigidLiquidBalanceStage::RigidPartition | RigidLiquidBalanceStage::TetrahedralKinematics => (
             controls.source_centroid_tolerance_m,
             kinetic_error_j.abs() <= controls.source_kinetic_tolerance_j,
         ),

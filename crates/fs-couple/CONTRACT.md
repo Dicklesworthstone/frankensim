@@ -27568,3 +27568,14 @@ tangent rotation, coupled off-centre spin and orbital angular momentum, shared
 body cross-contact mobility and stable-ID reduction, locked tangents and native
 determinacy, invalid frames, global energy refusal, cancellation, penetration,
 late native-state refusal, and continued material/acoustic/forced histories.
+
+
+## Partial release of original rigid liquid with a moving retained body
+
+`liquid_transfer::rigid::partial::release_rigid_liquid_cells` partitions selected original tetrahedra through the material geometry owner and returns both an ordinary thermal VOF liquid and a source-bound rigid remainder. Original cell masses, density receipts, full tensors, topology, nodal enthalpy, and physical clock remain attached through explicit selected/retained index maps. Child velocities come from the original native rigid velocity field sampled at each actual center of mass; the existing principal-frame and full-inertia momentum owners construct the child states without release impulse or supplied work.
+
+The complete original source must already be liquid on the same constant reference-density caloric chart and have no stored elastic, plastic, cohesive, or history energy. Every retained tetrahedron must have a world bounding box strictly outside the receiver grid plus explicit clearance. Touching or ambiguous overlap refuses, including overlap with dry or stationary-solid voxels. This is a handoff-time exclusion and does not authorize later grid entry without an admitted moving occupancy/coupling owner.
+
+Native child M/P/L/h and zero-work kinetic identity are checked against the original before transfer. The actual receiving liquid plus retained native body are checked again against the original with one global budget. Numerical kinetic and gravitational projection changes never become heat. Whole-source caloric admission and selected-piece transfer share one source-query ceiling. Any source, topology, phase, occupancy, projection, budget, or cancellation refusal returns neither child and leaves the borrowed source unchanged.
+
+Three focused regressions cover analytic rotated unequal-body accounting, actual liquid readback, native continuation, successive releases and composed lineage, cold retained matter, missing occupancy, strict projection budgets, cancellation, and deterministic retry. Source parsing, formatting, whitespace, and API checks passed; native compilation and tests were not executed in this resource-constrained session.

@@ -1,6 +1,9 @@
 //! G1/G3/G4: native rigid matter and motion enter the original thermal VOF.
 //! Synthetic properties test physical accounting, not measured melt behavior.
 
+#[path = "rigid_liquid_release/partial.rs"]
+mod partial;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_couple::liquid_transfer::rigid::{
     RigidLiquidReleaseControls, RigidLiquidReleaseError, RigidTetrahedralLiquidState,
