@@ -30,6 +30,23 @@ pub(super) fn rows(
     }
     let gradients = interfaces.matching_resistance_scale_pullback(cx,
         &solved.solution.temperature, lambda, max_faces).map_err(lower)?;
+    rows_from_gradients(cx, spec, gradients,
+        "R''_face -> s R''_face, evaluated at s=1")
+}
+
+/// Format controls supplied by the numerical owner of the complete dual.
+/// Live source-backed contact uses the same names/card binding, while its
+/// gradient producer retains the full temperature-dependent residual.
+pub(super) fn rows_from_gradients(
+    cx: &Cx<'_>, spec: &ProjectSpec,
+    gradients: Vec<fs_conduction::interface::ContactResistanceGradient>,
+    parameterization: &str,
+) -> Result<Vec<String>, SolveRefusal> {
+    poll(cx)?;
+    let declared = spec.interface_cards.as_deref().unwrap_or(&[]);
+    if gradients.len() != declared.len() {
+        return Err(bad("contact gradients do not match the declared independent interfaces"));
+    }
     let mut by_name = BTreeMap::new();
     for gradient in gradients {
         poll(cx)?;
@@ -49,8 +66,8 @@ pub(super) fn rows(
         let mut entry = row("contact-resistance-multiplier", &binding.interface, ordinal,
             "1", gradient.derivative)?;
         entry.pop();
-        entry.push_str(&format!(",\"reference_value\":1,\"interface_card\":{},\"mapped\":{},\"face_pairs\":{},\"parameterization\":\"R''_face -> s R''_face, evaluated at s=1\"}}",
-            json_string(&card), gradient.mapped, gradient.face_pairs));
+        entry.push_str(&format!(",\"reference_value\":1,\"interface_card\":{},\"mapped\":{},\"face_pairs\":{},\"parameterization\":{}}}",
+            json_string(&card), gradient.mapped, gradient.face_pairs, json_string(parameterization)));
         result.push(entry);
     }
     if !by_name.is_empty() { return Err(bad("a native contact gradient has no declared owner")); }

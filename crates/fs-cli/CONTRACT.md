@@ -3368,6 +3368,7 @@ these CLI cases are syntax-checked but their runtime execution is not claimed.
 This slice retains fixed reference geometry/mass, prescribed emissivities and
 view factors, and bounded source-support admission. It adds no source-surface
 contact tangent, trajectory adjoint or arbitrary fixed-point convergence claim.
+
 ### Live contact and natural convection with regional heat capacity — driver 106
 
 The regional-capacity backward-Euler path now composes source-backed contact
@@ -3390,3 +3391,21 @@ The native regressions exercise curve/surface contact, evolving natural heat,
 original-history capacity energy and source-domain refusal/retry. This capacity
 composition still refuses live contact with radiation, transported air and
 trajectory derivatives. Syntax checks do not replace native runtime validation.
+
+### Native adjoints through live source contact — driver 107
+
+Steady prescribed-boundary projects with temperature-dependent matching contact
+now support `temperature-max-adjoint` and `temperature-max-contact-adjoint`.
+The final rung retains its original pinned sources, exact matching traces and
+accepted watt tolerance. `linearize_steady_endpoint` re-queries that unchanged
+field, checks its physical residual and heat closure, and supplies the complete
+nonsymmetric bulk/contact transpose. Native power, conductivity, heat-flux and
+Robin controls all contract that same total adjoint. The contact-extended output
+also differentiates each named interface's whole resistance law under a
+dimensionless multiplier, preserving independent names and card provenance.
+
+The strict numerical owner refuses nonunique source/material slopes and validity
+endpoints. These are local Estimated selected-node derivatives at fixed geometry
+and fixed nonthermal contact state. Contact with natural convection, transported
+air, radiation, transient history or prescribed-temperature control derivatives
+remains outside this adjoint path; none falls back to a frozen contact tangent.

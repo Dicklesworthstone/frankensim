@@ -42,6 +42,7 @@ mod nonlinear_solid;
 mod prescribed_controls;
 mod radiative_feedback;
 mod surface_power;
+mod temperature_contact;
 mod volume_mean;
 
 const OUTPUT: &str = "temperature-max-adjoint";
@@ -150,6 +151,9 @@ pub(super) fn extract(
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
     let region_id = *ids.get(region).ok_or_else(|| bad("maximum region has no mesh label"))?;
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("final operator was not retained"))?;
+    if data.temperature_contact.is_some() && boundary_requested {
+        return Err(bad("prescribed-temperature controls need the complete source-backed contact lift; use temperature-max-adjoint or temperature-max-contact-adjoint"));
+    }
     let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| bad("missing conduction setup"))?;
     if data.radiating_boundary.is_some() != (setup.radiation.is_some() || setup.enclosure_radiation.is_some())
@@ -229,8 +233,15 @@ pub(super) fn extract(
     let mut natural_ambient = BTreeMap::new();
     let mut radiation_rows = Vec::new();
     let mut inlet_rows = Vec::new();
+    let mut live_contact_rows = None;
     let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) =
-    if setup.enclosure_radiation.is_some() {
+    if data.temperature_contact.is_some() {
+        let result = temperature_contact::pullback(cx, spec, solved, &weights,
+            contact_requested, count(64))?;
+        live_contact_rows = Some(result.contact_rows);
+        (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
+            None, None, "nonlinear-contact-full-material-feedback")
+    } else if setup.enclosure_radiation.is_some() {
         let result = enclosure_feedback::pullback(cx, spec, solved, &weights)?;
         inlet_rows = result.air_rows;
         natural_ambient = result.natural_ambient;
@@ -320,7 +331,10 @@ pub(super) fn extract(
     rows.extend(inlet_rows);
     rows.extend(material_controls::rows(cx, spec, solved, ids, &lambda, count(64))?);
     if contact_requested {
-        rows.extend(contact_controls::rows(cx, spec, solved, &lambda, count(64))?);
+        rows.extend(match live_contact_rows {
+            Some(rows) => rows,
+            None => contact_controls::rows(cx, spec, solved, &lambda, count(64))?,
+        });
     }
     let mut missing = Vec::new();
     for (ordinal, power) in spec.power.as_deref().unwrap_or(&[]).iter().enumerate() {
@@ -361,21 +375,25 @@ pub(super) fn extract(
     if boundary_requested {
         prescribed_controls::append(cx, spec, solved, &weights, &lambda, &mut rows, &mut missing, count(32))?;
     }
+    let contact_scope = if data.temperature_contact.is_some() { temperature_contact::CONTROL_SCOPE }
+        else { contact_controls::SCOPE };
     let scope = if volume_mean_requested { format!("{} {} {}",
             SCOPE.replace("Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh.", volume_mean::SCOPE)
                 .replace("Not a unique maximum derivative at a tie, a continuum/shape derivative", "Not a continuum/shape derivative")
                 .replace(" and Dirichlet-temperature derivatives", ""),
-            contact_controls::SCOPE,
+            contact_scope,
             prescribed_controls::SCOPE.replace("direct selected-node objective term", "direct volume-mean objective weights on prescribed nodes")) }
         else if combined { format!("{} {} {}",
             SCOPE.replace(" and Dirichlet-temperature derivatives", ""),
-            contact_controls::SCOPE, prescribed_controls::SCOPE) }
-        else if contact_requested { format!("{SCOPE} {}", contact_controls::SCOPE) }
+            contact_scope, prescribed_controls::SCOPE) }
+        else if contact_requested { format!("{SCOPE} {contact_scope}") }
         else if boundary_requested { format!("{} {}",
             SCOPE.replace(" and Dirichlet-temperature derivatives", ""), prescribed_controls::SCOPE) }
         else { SCOPE.to_string() };
     let scope = if setup.enclosure_radiation.is_some() {
         format!("{scope} {}", enclosure_feedback::SCOPE)
+    } else if data.temperature_contact.is_some() {
+        format!("{scope} {}", temperature_contact::SCOPE)
     } else { scope };
     poll(cx)?;
     Ok(format!(concat!("{{\"schema\":\"frankensim.cli.nominal-adjoint.v1\",\"output\":{},",

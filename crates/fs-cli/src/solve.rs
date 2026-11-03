@@ -283,7 +283,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// prescribed-bath storage through the shared physical endpoint owner.
 /// Version 105 composes source-surface contact fixed points with local ambient
 /// and enclosure radiation through prescribed, natural and transported-air heat.
-pub const SOLVE_DRIVER_VERSION: u32 = 106;
+/// Version 106 connects live capacity contact with natural convection.
+/// Version 107 connects native selected-node adjoints to the complete smooth
+/// source-contact/material tangent and independent whole-law resistance controls.
+pub const SOLVE_DRIVER_VERSION: u32 = 107;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1505,6 +1508,8 @@ struct RungSolved {
 struct RungAdjointData {
     boundary: fs_conduction::ThermalBoundary,
     interfaces: Option<fs_conduction::ThermalInterfaces>,
+    /// Pinned temperature-dependent sources and accepted final-rung watt gate.
+    temperature_contact: Option<contact::Retained>,
     /// Original matching faces and source-backed resistances used to bind
     /// `interfaces`; continuum verification must preserve both traces.
     #[cfg(feature = "thermal-verification")]
@@ -6561,7 +6566,7 @@ fn conduction_solve_receipt(
     let mean_bound_requested = mean_bound::requested(spec)?
         && flow_override.is_none() && htc_scale == 1.0
         && conductivity_side == 0.0 && geometry_side == 0.0;
-    let temperature_contact = contact::prepare(spec, cards)?;
+    let temperature_contact = contact::prepare(spec, cards)?.map(std::sync::Arc::new);
     if temperature_contact.is_some() {
         contact::admit(spec, adjoint_requested, mean_bound_requested)?;
     }
@@ -7225,16 +7230,23 @@ fn conduction_solve_receipt(
         let adjoint_data = if adaptive_requested || roundoff_wanted || adjoint_requested || mean_bound_requested {
             let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary, &surface_heat_inputs)?.boundary;
-            let interface_surfaces = lower_thermal_interface_surfaces(
-                spec, cards, &interface_resolution,
-            )?;
+            let interface_surfaces = if temperature_contact.is_none() {
+                lower_thermal_interface_surfaces(spec, cards, &interface_resolution)?
+            } else { Vec::new() };
             let interfaces = bind_thermal_interfaces(&mesh, &boundary, interface_surfaces.clone())?;
+            let retained_contact = temperature_contact.as_ref().map(|prepared| {
+                // Both steady contact owners publish their original physical
+                // watt allowance here after checking residual and heat closure.
+                contact::Retained::new(std::sync::Arc::clone(prepared),
+                    interface_resolution.clone(), solution.report.residual_threshold)
+            }).transpose()?;
             let mut linear = fs_conduction::LinearConfig::default();
             if let Some(solver) = &spec.solver {
                 linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
             }
             Some(RungAdjointData {
                 boundary, interfaces,
+                temperature_contact: retained_contact,
                 #[cfg(feature = "thermal-verification")]
                 interface_surfaces,
                 source,

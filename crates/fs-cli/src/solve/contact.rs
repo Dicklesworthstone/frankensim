@@ -16,7 +16,7 @@ use super::{SolveRefusal, conduction_error, json_string, parse_claim_id};
 use crate::cards::CardPackSet;
 
 const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. Declared area-mean ambient radiation uses the original radiation iteration around complete contact Newton responses; convection alone heats transported air. The returned field passes freshly queried physical watt residual and heat-balance gates. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Steady enclosure/pointwise radiation, adaptive-goal refinement, adjoints and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. Declared area-mean ambient radiation uses the original radiation iteration around complete contact Newton responses; convection alone heats transported air. The returned field passes freshly queried physical watt residual and heat-balance gates. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Explicit selected-node adjoints for steady prescribed boundaries use the complete smooth bulk/contact tangent and its true transpose; natural/air/radiation feedback and prescribed-temperature controls remain outside that contact derivative. Steady enclosure/pointwise radiation, adaptive-goal refinement and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
 
 struct Source {
     name: String,
@@ -29,6 +29,45 @@ pub(super) struct Prepared {
     library: CardLibrary,
     sources: Vec<Source>,
     temperature_axis: String,
+}
+
+/// Original pinned laws, final matching traces and the accepted physical gate.
+/// The card library is shared across spatial rungs; a frozen resistance is not
+/// sufficient to reconstruct the complete contact derivative.
+pub(super) struct Retained {
+    prepared: std::sync::Arc<Prepared>,
+    resolution: fs_project::ConductionInterfaceResolution,
+    tolerance_w: f64,
+}
+
+impl Retained {
+    pub(super) fn new(
+        prepared: std::sync::Arc<Prepared>,
+        resolution: fs_project::ConductionInterfaceResolution,
+        tolerance_w: f64,
+    ) -> Result<Self, SolveRefusal> {
+        if !resolution.admissible() || !(tolerance_w.is_finite() && tolerance_w > 0.0) {
+            return Err(bad("retained contact needs admitted traces and its accepted watt tolerance"));
+        }
+        Ok(Self { prepared, resolution, tolerance_w })
+    }
+
+    pub(super) fn linearize(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        temperature: &[f64],
+        linear: fs_conduction::LinearConfig,
+        max_pairs: usize,
+    ) -> Result<fs_conduction::interface::temperature::steady::ContactSteadyLinearization, SolveRefusal> {
+        let contacts = self.prepared.bind(
+            cx, problem.mesh, problem.boundary, &self.resolution, max_pairs,
+        )?;
+        contacts.linearize_steady_endpoint(
+            cx, problem, temperature, linear, self.tolerance_w, self.tolerance_w,
+            &[], max_pairs,
+        ).map_err(lower)
+    }
 }
 
 /// Counted contact work and the last physically accepted field on one mesh.
@@ -359,9 +398,24 @@ pub(super) fn admit(
         !enthalpy_contact
             || declaration.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise)
     });
+    let unsupported_adjoint = adjoint && (
+        transient.is_some()
+            || setup.radiation.is_some()
+            || setup.enclosure_radiation.is_some()
+            || setup.boundaries.iter().any(|row| matches!(
+                row.condition,
+                fs_project::ThermalBoundaryCondition::NaturalConvection { .. }
+                    | fs_project::ThermalBoundaryCondition::AirflowConvection { .. }
+            ))
+            || spec.outputs.iter().flatten().any(|output| matches!(output.name.as_str(),
+                "temperature-max-boundary-adjoint"
+                    | "temperature-max-contact-boundary-adjoint"
+                    | "temperature-volume-mean-adjoint"
+            ))
+    );
     if unsupported_transient
         || unsupported_radiation
-        || adjoint
+        || unsupported_adjoint
         || mean_bound
         || spec
             .solver
@@ -370,8 +424,8 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled or natural-convection boundaries; total enthalpy also admits transported-air convection and pointwise ambient/enclosure radiation, while this requested composition needs additional complete contact feedback",
-            "use an admitted storage and boundary composition without derivative/bound outputs; transient radiation requires total enthalpy and pointwise emission; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled or natural-convection boundaries; total enthalpy also admits transported-air convection and pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed boundaries and optional whole-law contact controls; this requested composition needs additional complete contact feedback",
+            "use an admitted storage and boundary composition; contact adjoints require steady prescribed boundaries without radiation or prescribed-temperature controls; transient radiation requires total enthalpy and pointwise emission; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())
