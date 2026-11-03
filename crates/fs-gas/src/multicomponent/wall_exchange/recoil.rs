@@ -11,6 +11,11 @@ use super::{
 };
 
 mod mechanics;
+mod shared;
+pub use shared::{
+    SharedRecoilCell, SharedRecoilCellUpdate, SharedRecoilControl, SharedRecoilUpdate,
+    SharedRecoilWorkspace,
+};
 
 /// Finite translating support, with no prescribed drive or moving gas volume.
 #[derive(Clone, Copy, Debug, PartialEq)]

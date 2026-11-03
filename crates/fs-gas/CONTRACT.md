@@ -3595,3 +3595,48 @@ material-relative domain checks/Galilean boosts, and unselected identity and
 admission. Two additional full network/shared-thermal source tests were authored
 and parsed but not executed in the delivery environment; no full Cargo,
 material or advection pass is claimed.
+
+### One finite support exchanging momentum with multiple gas amounts
+
+`SharedRecoilWorkspace` advances fixed gas amounts against one common
+`SlidingSupport` along an authored scalar axis. Each `SharedRecoilCell`
+retains its own density, volume, momentum and nonnegative frozen linear and
+quadratic resistance coefficients. The original exact reduced-mass pair
+mechanics is composed in a palindromic Strang sweep. This is a convergent
+approximation to simultaneous shared-support dynamics, not a sequence of
+independent masses or an exact many-cell decay formula. Single-active-cell
+intervals reuse the exact original pair map.
+
+Bounded step doubling estimates local errors in each velocity, physical slip
+heat and Galilean-invariant work. The support velocity is included. Dimensional
+velocity/energy tolerances and a relative tolerance are separate from the
+strict endpoint momentum and energy budgets in `RecoilControl`. For multiple
+active cells, each candidate interval also resolves the resistance scale:
+`h*(max(k_i) + sum(m_i/M*k_i)) <= 0.5`, with
+`k_i=a_i+2*b_i*R` and R the initial velocity-hull width of the support and active cells. This prevents
+saturated split pair maps from masquerading as resolved heat allocation.
+Rejected attempts consume the explicit step budget; under-resolved,
+non-advancing or exhausted intervals refuse. These are local time-error
+estimates, not a certified global or stiffness-independent accuracy bound.
+
+Every exact pair flow exchanges opposite impulse and dissipates nonnegative
+physical slip energy. Accepted endpoints audit actual represented momenta,
+support kinetic storage, and per-cell kinetic change/work/heat. Numerical
+residuals are reported or refused; they are not deposited as heat. Work and
+heat remain separate per-cell outputs. The caller's original caloric owner
+must apply total-energy work and retain the associated slip heat once.
+Thermal storage, friction calibration, geometry motion, arbitrary 3D support
+topology and a new flow clock are outside this mechanical interface.
+
+Workspace allocation occurs at preparation; advancing uses retained buffers
+and bounded cancellation checkpoints. A refusal returns no accepted output,
+and retry reinitializes all candidates from the supplied original inputs.
+
+Seven focused G0/G1/G3/G4 native tests check unequal-mass/rate analytic
+shared motion and individual heat/work, tolerance refinement, symmetric
+nonlinear decay, initially comoving cells, Galilean changes and cell order,
+clock subdivision, exact single-active parity and workspace reuse, stiff-rate
+refusal, and cancellation at every exposed checkpoint with exact retry.
+The run compiled original mechanics/drag/controls and fs-math/fs-qty; the
+surrounding parent error type was a test fixture. No full crate or workspace
+build is claimed.

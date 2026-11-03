@@ -15,7 +15,9 @@ mod drag;
 mod gas;
 mod recoil;
 pub use recoil::{
-    RecoilControl, RecoilLaw, RecoilUpdate, SlidingSupport, exchange_cell_with_recoil,
+    RecoilControl, RecoilLaw, RecoilUpdate, SharedRecoilCell, SharedRecoilCellUpdate,
+    SharedRecoilControl, SharedRecoilUpdate, SharedRecoilWorkspace, SlidingSupport,
+    exchange_cell_with_recoil,
 };
 pub(crate) mod shared;
 use gas::MixtureCaloric;
