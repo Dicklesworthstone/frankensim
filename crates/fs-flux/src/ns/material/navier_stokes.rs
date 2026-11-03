@@ -102,19 +102,48 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         timestep_s: f64,
         controls: NavierStokesControls,
     ) -> Result<MaterialNavierStokesStep, MaterialFluxError> {
+        self.bdf1_navier_stokes_mixed_step_with_velocity_tolerance(
+            force_density,
+            boundaries,
+            previous_velocity,
+            timestep_s,
+            controls,
+            0.0,
+        )
+    }
+
+    /// The same source-owned nonlinear endpoint with an absolute unrelaxed
+    /// affine normal-velocity trace correction bound [m/s], in addition to the
+    /// original relative criterion. Both nonlinear equation residual gates
+    /// remain mandatory. Zero retains the existing relative-only behavior;
+    /// neither mass history nor physical material transport is altered.
+    ///
+    /// # Errors
+    /// Native refusals and invalid finite/nonnegative velocity tolerances.
+    pub fn bdf1_navier_stokes_mixed_step_with_velocity_tolerance(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+    ) -> Result<MaterialNavierStokesStep, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
         let endpoint = with_kinematic_boundaries(density, boundaries, |native| {
-            self.system.bdf1_navier_stokes_mixed_step(
-                self.params,
-                &|point| {
-                    let f = force_density(point);
-                    [f[0] / density, f[1] / density]
-                },
-                native,
-                previous_velocity,
-                timestep_s,
-                controls,
-            )
+            self.system
+                .bdf1_navier_stokes_mixed_step_with_velocity_tolerance(
+                    self.params,
+                    &|point| {
+                        let f = force_density(point);
+                        [f[0] / density, f[1] / density]
+                    },
+                    native,
+                    previous_velocity,
+                    timestep_s,
+                    controls,
+                    absolute_velocity_tolerance_m_s,
+                )
         })
         .map_err(MaterialFluxError::Boundary)?;
         self.material_navier_stokes_step(endpoint)

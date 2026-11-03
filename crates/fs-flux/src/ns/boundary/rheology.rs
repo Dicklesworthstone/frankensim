@@ -138,6 +138,33 @@ impl<'m> FluxSystem<'m> {
         assemble: &dyn Fn(&[f64]) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError>,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<StokesRheologySolution, StokesBoundaryError> {
+        self.solve_mixed_picard_with_velocity_tolerance(
+            initial_velocity,
+            controls,
+            0.0,
+            assemble,
+            source_is_valid,
+        )
+    }
+
+    // The absolute criterion measures the MAXIMUM unrelaxed correction of
+    // the original affine BDM normal velocity traces [m/s]. Their endpoint
+    // values are m0 +/- 6*m1, so the exact supremum is |dm0| + 6*|dm1|.
+    // This does not grow with edge count or mix pressure into a velocity norm.
+    // Zero retains the original relative-only convergence contract.
+    pub(super) fn solve_mixed_picard_with_velocity_tolerance<'a>(
+        &'a self,
+        initial_velocity: &[f64],
+        controls: StokesRheologyControls,
+        absolute_velocity_tolerance_m_s: f64,
+        assemble: &dyn Fn(&[f64]) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError>,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<StokesRheologySolution, StokesBoundaryError> {
+        if !absolute_velocity_tolerance_m_s.is_finite() || absolute_velocity_tolerance_m_s < 0.0 {
+            return Err(StokesBoundaryError::InvalidInput(
+                "finite nonnegative absolute velocity correction tolerance required",
+            ));
+        }
         let mut current = vec![0.0; self.n];
         current[..self.n_u].copy_from_slice(initial_velocity);
         for iteration in 1..=controls.maximum_iterations {
@@ -150,10 +177,17 @@ impl<'m> FluxSystem<'m> {
             let linear = assembled?.solve()?;
             let mut next = linear.field;
             let mut difference = 0.0_f64;
+            let mut absolute_update_m_s = 0.0_f64;
             let mut magnitude = 0.0_f64;
             let mut old_magnitude = 0.0_f64;
             for i in 0..self.n_u {
                 difference = difference.hypot(next.x[i] - current[i]);
+                if i % 2 == 0 {
+                    absolute_update_m_s = absolute_update_m_s.max(
+                        (next.x[i] - current[i]).abs()
+                            + 6.0 * (next.x[i + 1] - current[i + 1]).abs(),
+                    );
+                }
                 magnitude = magnitude.hypot(next.x[i]);
                 old_magnitude = old_magnitude.hypot(current[i]);
             }
@@ -163,6 +197,8 @@ impl<'m> FluxSystem<'m> {
                     "unrepresentable constitutive correction",
                 ));
             }
+            let correction_converged = update <= controls.relative_tolerance
+                || absolute_update_m_s <= absolute_velocity_tolerance_m_s;
             if iteration > 1 && controls.relaxation < 1.0 {
                 for (value, old) in next.x.iter_mut().zip(&current) {
                     *value = (1.0 - controls.relaxation) * old + controls.relaxation * *value;
@@ -171,7 +207,7 @@ impl<'m> FluxSystem<'m> {
             if next.x.iter().any(|value| !value.is_finite()) {
                 return Err(StokesBoundaryError::InvalidInput("nonfinite relaxed flow"));
             }
-            if update <= controls.relative_tolerance || iteration == controls.maximum_iterations {
+            if correction_converged || iteration == controls.maximum_iterations {
                 let endpoint = assemble(&next.x);
                 if !source_is_valid() {
                     return Err(StokesBoundaryError::Rheology(FluxRheologyError::Invalid(
@@ -191,7 +227,7 @@ impl<'m> FluxSystem<'m> {
                 } else {
                     f64::INFINITY
                 };
-                if update <= controls.relative_tolerance && defect <= controls.relative_tolerance {
+                if correction_converged && defect <= controls.relative_tolerance {
                     next.rel_residual = original;
                     next.scaled_rel_residual = scaled;
                     return Ok(StokesRheologySolution {

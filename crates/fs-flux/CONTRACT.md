@@ -3256,6 +3256,33 @@ kernel. This model retains fixed-center radial interaction only: translation,
 jets, near-contact deformation, finite propagation delay, radiation loss and
 cloud shocks require additional physical owners.
 
+## Explicit velocity correction at pressure-supported equilibria
+
+`FluxSystem::bdf1_navier_stokes_mixed_step_with_velocity_tolerance` and the
+same-named `MaterialFluxSystem` entry retain the original nonlinear BDM1/P0
+owner while admitting an explicit finite nonnegative absolute correction
+tolerance in m/s. The original entry points pass zero and preserve their
+relative-only behavior and public control structs. No flow, material, pressure
+or history is clipped or replaced when the absolute criterion is selected.
+
+The absolute norm is max_edges(|delta_mean| + 6*|delta_linear_moment|), exactly
+the largest endpoint change of the original affine normal-velocity traces.
+It is measured before under-relaxation and is independent of edge count.
+It controls a normal-trace correction, not a continuum velocity error bound.
+Pressure coefficients never enter this norm. A correction must meet this
+authored absolute bound OR the original relative-L2 bound; both freshly
+reassembled original and row-scaled nonlinear equation residuals must still
+meet the unchanged relative tolerance. The reported relative_update remains
+the actual ratio and may be large for an accepted near-zero field.
+
+This resolves the concrete failure in which pressure supports a conservative
+force with zero or tiny relative flow: solver roundoff could keep the old
+relative correction ratio large even with an independently assembled equation
+residual near machine precision. Focused native regressions exercise zero and
+small physical velocities on two mesh sizes, one-iteration absolute admission,
+zero-absolute parity with the existing path, and refusal when a generous
+correction allowance does not satisfy the nonlinear convection residual.
+
 ## Nonlinear pressure flow on exactly translating domains
 
 The original material BDM1/P0 Navier–Stokes solver is now advanced by

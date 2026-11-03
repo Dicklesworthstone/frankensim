@@ -191,12 +191,48 @@ impl<'m> FluxSystem<'m> {
         timestep_s: f64,
         controls: NavierStokesControls,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.bdf1_navier_stokes_mixed_step_with_velocity_tolerance(
+            params,
+            force,
+            boundaries,
+            previous_velocity,
+            timestep_s,
+            controls,
+            0.0,
+        )
+    }
+
+    /// The same nonlinear BDF1 owner with an explicitly authored absolute
+    /// velocity-correction tolerance [m/s]. The maximum unrelaxed change of
+    /// the ORIGINAL affine edge-normal velocity traces must meet this bound
+    /// OR the original relative-L2 correction bound. The absolute norm is
+    /// max_edges(|delta_mean| + 6*|delta_linear_moment|), exactly the largest
+    /// trace-endpoint change. No pressure coefficient participates; increasing
+    /// the mesh size does not loosen this maximum.
+    /// Both freshly assembled nonlinear equation residuals must still meet
+    /// `controls.relative_tolerance`. The returned `relative_update` remains
+    /// the actual ratio and may exceed it when the absolute criterion passes.
+    /// Zero selects exactly the original relative-only correction criterion.
+    ///
+    /// # Errors
+    /// Original refusals remain; the absolute bound must be finite/nonnegative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf1_navier_stokes_mixed_step_with_velocity_tolerance(
+        &self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
         if !params.nu.is_finite() || params.nu <= 0.0 {
             return Err(StokesBoundaryError::InvalidInput(
                 "invalid Navier–Stokes viscosity",
             ));
         }
-        self.bdf1_navier_stokes_mixed_variable_viscosity_step(
+        self.bdf1_navier_stokes_mixed_variable_viscosity_step_with_velocity_tolerance(
             params,
             &|_, _| params.nu,
             force,
@@ -204,6 +240,7 @@ impl<'m> FluxSystem<'m> {
             previous_velocity,
             timestep_s,
             controls,
+            absolute_velocity_tolerance_m_s,
         )
     }
 
@@ -223,12 +260,37 @@ impl<'m> FluxSystem<'m> {
         timestep_s: f64,
         controls: NavierStokesControls,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.bdf1_navier_stokes_mixed_variable_viscosity_step_with_velocity_tolerance(
+            params,
+            viscosity,
+            force,
+            boundaries,
+            previous_velocity,
+            timestep_s,
+            controls,
+            0.0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bdf1_navier_stokes_mixed_variable_viscosity_step_with_velocity_tolerance(
+        &self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+    ) -> Result<NavierStokesStep, StokesBoundaryError> {
         self.solve_navier_stokes_mixed_bdf1(
             params,
             boundaries,
             previous_velocity,
             timestep_s,
             controls,
+            absolute_velocity_tolerance_m_s,
             &|admitted, velocity| {
                 self.assemble_stokes_admitted_operator(
                     params,
@@ -305,6 +367,7 @@ impl<'m> FluxSystem<'m> {
             previous_velocity,
             timestep_s,
             controls,
+            0.0,
             &|admitted, velocity| {
                 let rates = self.shear_rates(velocity);
                 if rates.iter().any(|rate| !rate.is_finite()) {
@@ -335,6 +398,7 @@ impl<'m> FluxSystem<'m> {
         previous_velocity: &[f64],
         timestep_s: f64,
         controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
         assemble: &dyn Fn(
             &AdmittedBoundary,
             &[f64],
@@ -343,6 +407,8 @@ impl<'m> FluxSystem<'m> {
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
         self.check_mixed_bdf1_history(previous_velocity, timestep_s)?;
         if controls.maximum_iterations == 0
+            || !absolute_velocity_tolerance_m_s.is_finite()
+            || absolute_velocity_tolerance_m_s < 0.0
             || !controls.relative_tolerance.is_finite()
             || controls.relative_tolerance <= 0.0
             || !controls.relaxation.is_finite()
@@ -354,9 +420,10 @@ impl<'m> FluxSystem<'m> {
             ));
         }
         let admitted = self.admit_navier_stokes_boundaries(params, boundaries)?;
-        let solved = self.solve_mixed_picard(
+        let solved = self.solve_mixed_picard_with_velocity_tolerance(
             previous_velocity,
             controls,
+            absolute_velocity_tolerance_m_s,
             &|velocity| assemble(&admitted, velocity),
             source_is_valid,
         )?;

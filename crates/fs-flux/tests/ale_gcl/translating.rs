@@ -363,3 +363,115 @@ fn reservoir_inflow_and_world_momentum_are_covariant_on_translating_domains() {
         near(*a, *b, 4e-9);
     }
 }
+
+#[test]
+fn authored_normal_velocity_correction_admits_pressure_balance_and_retains_small_motion() {
+    // A pressure-supported gradient force with zero or tiny uniform velocity
+    // is an exact nonlinear endpoint. The absolute criterion acts on the
+    // unrelaxed physical normal traces; it never erases that small velocity.
+    for subdivisions in [2, 4] {
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, subdivisions, subdivisions));
+        let system = FluxSystem::new(&mesh);
+        let force = |point: [f64; 2]| [0.2 + 0.3 * point[0], 0.0];
+        let previous = vec![0.0; system.n_u];
+        let params = FluxParams {
+            nu: 0.2,
+            ..FluxParams::default()
+        };
+        let limits = NavierStokesControls {
+            maximum_iterations: 1,
+            ..controls()
+        };
+        for velocity in [[0.0; 2], [2e-8, -1e-8]] {
+            let field = |_: [f64; 2]| velocity;
+            let boundaries: Vec<_> = (0..mesh.edges.len())
+                .filter(|&e| mesh.is_boundary(e))
+                .map(|edge| NavierStokesBoundary::Velocity {
+                    edge,
+                    value: &field,
+                })
+                .collect();
+            let endpoint = system
+                .bdf1_navier_stokes_mixed_step_with_velocity_tolerance(
+                    params,
+                    &force,
+                    &boundaries,
+                    &previous,
+                    0.025,
+                    limits,
+                    1e-7,
+                )
+                .unwrap();
+            let (error, divergence) = system.velocity_error(&endpoint.solution.field.x, &field);
+            assert!(error < 1e-12 && divergence < 1e-12);
+            assert_eq!(endpoint.iterations, 1);
+            assert!(endpoint.nonlinear_residual <= limits.relative_tolerance);
+            if velocity[0] != 0.0 {
+                // With a nonzero first correction from a zero history, the
+                // legacy relative-only test is one. This is not a dependence
+                // on platform-specific noise in an exactly quiescent field.
+                let legacy = system.bdf1_navier_stokes_mixed_step(
+                    params,
+                    &force,
+                    &boundaries,
+                    &previous,
+                    0.025,
+                    limits,
+                );
+                let zero_absolute = system.bdf1_navier_stokes_mixed_step_with_velocity_tolerance(
+                    params,
+                    &force,
+                    &boundaries,
+                    &previous,
+                    0.025,
+                    limits,
+                    0.0,
+                );
+                assert!(legacy.is_err() && zero_absolute.is_err());
+                assert_eq!(
+                    format!("{:?}", legacy.err()),
+                    format!("{:?}", zero_absolute.err())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn absolute_velocity_acceptance_keeps_nonlinear_residuals_mandatory() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let moving_lid = |_: [f64; 2]| [0.4, 0.0];
+    let boundaries: Vec<_> = (0..mesh.edges.len())
+        .filter(|&e| mesh.is_boundary(e))
+        .map(|edge| NavierStokesBoundary::Velocity {
+            edge,
+            value: if mesh.edges[edge].normal[1] > 0.5 {
+                &moving_lid
+            } else {
+                &zero
+            },
+        })
+        .collect();
+    let result = system.bdf1_navier_stokes_mixed_step_with_velocity_tolerance(
+        FluxParams {
+            nu: 0.2,
+            ..FluxParams::default()
+        },
+        &zero,
+        &boundaries,
+        &vec![0.0; system.n_u],
+        0.2,
+        NavierStokesControls {
+            maximum_iterations: 1,
+            ..controls()
+        },
+        10.0,
+    );
+    // The generous correction allowance cannot turn a frozen Stokes/Oseen
+    // answer into an accepted nonlinear flow; the endpoint convection differs.
+    assert!(matches!(result,
+        Err(fs_flux::StokesBoundaryError::Rheology(
+            fs_flux::FluxRheologyError::NonlinearConvergence { residual, .. }
+        )) if residual > controls().relative_tolerance));
+}
