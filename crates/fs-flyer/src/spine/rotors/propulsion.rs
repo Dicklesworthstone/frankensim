@@ -25,6 +25,14 @@ use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, StripSpec};
 #[path = "propulsion/dynamic.rs"]
 pub mod dynamic;
 
+// Signed circulatory force perpendicular to the reference flow in the pitch
+// plane. Statement-split to retain the deterministic no-FMA convention.
+fn wind_axis_lift(force: Vec3, alpha: f64) -> f64 {
+    let lift_x = force.x * det::sin(alpha);
+    let lift_z = force.z * det::cos(alpha);
+    lift_x - lift_z
+}
+
 /// Blade handedness relative to a mounted rotor's declared positive spin axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropellerHandedness {
@@ -469,7 +477,9 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                 moment = moment + arm.cross(panel_force);
             }
         }
-        let lift = -force.z;
+        // The induced-drag screen uses transverse lift, not its body-z
+        // projection; the latter introduces a spurious cos(alpha)^2 factor.
+        let lift = wind_axis_lift(force, alpha);
         let cm0 = -core::f64::consts::PI * camber;
         for (s, strip) in strips.iter().enumerate() {
             let panel = &panels[strip.panel_indices[0]];
@@ -612,5 +622,25 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             midpoint: second
                 .ok_or_else(|| reject("propulsion-state-invalid", "missing midpoint stage"))?,
         })
+    }
+}
+
+#[cfg(test)]
+mod lift_projection_tests {
+    use super::{Vec3, det, wind_axis_lift};
+
+    #[test]
+    fn signed_lift_projection_is_independent_of_pitch_and_streamwise_force() {
+        for alpha in [-0.5_f64, 0.0, 0.5] {
+            let (s, c) = (det::sin(alpha), det::cos(alpha));
+            for lift in [-250.0, 0.0, 250.0] {
+                for drag in [0.0, 37.0] {
+                    // Construct known wind-frame loads in body coordinates.
+                    // The side force is orthogonal to this lift axis too.
+                    let force = Vec3::new(lift * s - drag * c, 19.0, -lift * c - drag * s);
+                    assert!((wind_axis_lift(force, alpha) - lift).abs() < 1e-12);
+                }
+            }
+        }
     }
 }

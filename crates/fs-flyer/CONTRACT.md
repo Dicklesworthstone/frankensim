@@ -719,6 +719,24 @@ are unchanged. Full coupled accuracy remains bounded by the declared wing,
 BEMT and coupling tolerances; refinement evidence does not certify physical
 validity or arbitrary operating branches.
 
+### Wind-axis lift in native propulsion
+
+The native steady, dynamic and harmonic propulsion consumers compute the
+circulatory lift component along `(sin(alpha), 0, -cos(alpha))` before applying
+the existing classical induced-drag screen. Body-normal force `-Fz` is only its
+projection; squaring that component would spuriously reduce induced drag by
+`cos(alpha)^2` in uniform flow. The correction changes neither the section
+solve nor any profile-drag, parasite, propeller or moment-arm owner.
+
+The local analytic regression specifies signed-lift recovery under pitch,
+streamwise-force and side-force changes. The real geared-aircraft tests
+independently integrate the accepted flat-panel circulation and use a velocity
+projection to compare the corrected native force at attached and separated
+states, retaining the existing force/moment tolerances and shaft-power checks.
+This remains an Estimated global induced-drag model, not a resolved-wake drag
+calculation. The historical longitudinal SimLoop, its coupling identity and
+browser startup golden remain on their existing path.
+
 ### Spatially mounted propellers
 
 `propcoupling::spatial::{DiskAxes, coupled_step}` and

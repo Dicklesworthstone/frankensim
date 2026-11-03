@@ -1,5 +1,5 @@
 //! G0/G1/G3 ideal-gear mechanics and real coupled aerodynamic consumers.
-use fs_flyer::aircraft::wright_openloop_v1;
+use fs_flyer::aircraft::{ForceBuildup, OpenLoopDesign, wright_openloop_v1};
 use fs_flyer::propcoupling::CANDIDATE_B;
 use fs_flyer::spine::rotors::geared::{
     self, GearedAssembly, GearedLoads, GearedRotor, GearedState,
@@ -319,6 +319,33 @@ fn inputs() -> PropulsionInputs {
     }
 }
 
+// Independent flat-panel Kutta--Joukowsky integration, projected using the
+// velocity components rather than the production angle/trigonometric helper.
+fn transverse_induced_drag(
+    design: &OpenLoopDesign,
+    loads: &ForceBuildup,
+    velocity: [f64; 3],
+    canard: f64,
+    rho: f64,
+) -> f64 {
+    let (panels, strips) = design.layout(canard).unwrap();
+    let local = loads.coupled.strip_velocity_mps.as_ref().unwrap();
+    let (mut fx, mut fz) = (0.0, 0.0);
+    for (strip, flow) in strips.iter().zip(local) {
+        for &j in &strip.panel_indices {
+            let span = panels[j].b[1] - panels[j].a[1];
+            let circulation = rho * loads.coupled.gamma[j] * span;
+            fx -= circulation * flow[2];
+            fz += circulation * flow[0];
+        }
+    }
+    let chord_speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
+    let lift = (fx * velocity[2] - fz * velocity[0]) / chord_speed;
+    let q = 0.5 * rho * v(velocity).dot(v(velocity));
+    // S=2bc and AR=b/c in this declared biplane screen.
+    lift * lift / (2.0 * q * core::f64::consts::PI * design.wing_span_m.powi(2) * design.oswald_e)
+}
+
 #[test]
 fn g0_real_coupled_force_matches_existing_symmetric_aerodynamics_and_signed_ports() {
     let mut design = wright_openloop_v1();
@@ -334,11 +361,21 @@ fn g0_real_coupled_force_matches_existing_symmetric_aerodynamics_and_signed_port
             Ok(state.rigid.vel_mps)
         })
         .unwrap();
+    // The historical longitudinal path retains body-normal induced drag.
+    // Correct that one declared contribution for this native comparison;
+    // every profile, parasite, thrust and gravity contribution stays checked.
+    let induced = transverse_induced_drag(&design, &legacy, state.rigid.vel_mps, 0.03, 1.225);
+    let correction = induced - legacy.induced_drag_n;
+    assert!(
+        correction.abs() > 0.01,
+        "fixture must distinguish transverse from body-normal lift"
+    );
+    let direction = v(state.rigid.vel_mps).scale(1.0 / v(state.rigid.vel_mps).norm());
     let weight = design.gross_mass_kg * 9.80665;
     let expected = [
-        legacy.force_n[0] + weight * f64::sin(0.08),
-        legacy.force_n[1],
-        legacy.force_n[2] - weight * f64::cos(0.08),
+        legacy.force_n[0] + weight * f64::sin(0.08) - correction * direction.x,
+        legacy.force_n[1] - correction * direction.y,
+        legacy.force_n[2] - weight * f64::cos(0.08) - correction * direction.z,
     ];
     assert!((v(expected) - v(evaluation.aerodynamic_force_body_n)).norm() < 1e-9);
     assert!((legacy.moment_y_nm - evaluation.loads.carrier.moment_nm[1]).abs() < 1e-9);
@@ -416,11 +453,20 @@ fn g3_separated_drag_is_shared_by_longitudinal_lateral_and_six_dof_loads() {
     {
         assert!((left - right).abs() < 1e-12);
     }
+    let induced = transverse_induced_drag(
+        &design,
+        &longitudinal,
+        rigid.vel_mps,
+        canard,
+        inputs().density_kg_m3,
+    );
+    let correction = induced - longitudinal.induced_drag_n;
+    let direction = v(rigid.vel_mps).scale(1.0 / v(rigid.vel_mps).norm());
     let weight = design.gross_mass_kg * 9.80665;
     let expected = [
-        longitudinal.force_n[0] + weight * alpha.sin(),
-        longitudinal.force_n[1],
-        longitudinal.force_n[2] - weight * alpha.cos(),
+        longitudinal.force_n[0] + weight * alpha.sin() - correction * direction.x,
+        longitudinal.force_n[1] - correction * direction.y,
+        longitudinal.force_n[2] - weight * alpha.cos() - correction * direction.z,
     ];
     assert!((v(expected) - v(evaluation.aerodynamic_force_body_n)).norm() < 1e-8);
     assert!((longitudinal.moment_y_nm - evaluation.loads.carrier.moment_nm[1]).abs() < 1e-8);
