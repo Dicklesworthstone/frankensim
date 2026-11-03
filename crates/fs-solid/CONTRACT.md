@@ -587,7 +587,7 @@ weight/torque/reactions, scalar parity and refusals.
 ## Moving force/couple ports on the native shell trajectory
 
 `moving_load::MovingShellModel` binds the original `shell::ShellPlate` geometry,
-six-DOF spatial operators and stationary support map once. A point or explicit
+six-DOF spatial operators and fixed support membership once. A point or explicit
 patch quadrature transfers Cartesian forces and free couples with the transpose
 of its P1 material-point motion, including `offset cross force`. Full restrained
 rows survive for reactions. The same rows sample displacement, director rotation
@@ -608,13 +608,44 @@ publication; duplicate, stale or future endpoint timestamps refuse.
 This is the existing flat, small-rotation, estimate-only shell surrogate. Its
 angular inventory and wrench moments use original reference positions and the
 linearized director field. It is not a finite-rotation continuum shell,
-follower-force/contact solver, automatic patch tracker, moving-support law, or
-modal reduction. Time-varying load paths require temporal refinement. The
+follower-force/contact solver, automatic patch tracker, changing support topology,
+or modal reduction. Time-varying load paths require temporal refinement. The
 physical subset of bead `frankensim-b8bxd.9.3` is implemented; that broader
 adapter's remaining features are not claimed complete. G0/G1/G3/G4 tests in
 `tests/moving_load.rs` exercise independent wrench resultants, rigid motion,
 reciprocal work, analytic accelerated translation, native damped/undamped moving
 loads, support reactions, common-edge traversal, and atomic refusal/retry.
+
+### Driven pin motion and actuator momentum
+
+`start_driven` accepts the Cartesian displacement, velocity and acceleration of
+all three original pinned nodes, in their original support-map order.
+`advance_driven` accepts only new endpoint accelerations and advances the pin
+velocities and displacements with the same average-acceleration kinematics as
+the free shell. Prescribed motion enters the existing free solve as
+`f_f - M_fc a_c - C_fc v_c - K_fc q_c`; the effective matrix and its prepared
+factorization remain unchanged. Condensation visits the nine prescribed
+translation columns, and all director rotations remain original free DOFs.
+
+Reactions use the original full operators and retain prescribed inertial,
+viscous and elastic terms. Material observations include the prescribed node
+motion. Mechanical storage and linear/reference-angular momentum include both
+free and prescribed DOFs; the vectors in `state()` remain free-DOF vectors,
+while its energy fields describe the full shell. Signed `support_work_j` is
+actuator work supplied to the shell, separate from applied-load work and
+Rayleigh damping work. The reported residual is
+`delta_energy + damping_work - applied_work - support_work`. The stationary API
+retains zero support work, and identically zero driven inputs reproduce it.
+
+A failed endpoint, nonfinite support input, or cancellation publishes neither
+free nor prescribed candidate state. Support identities stay fixed; no finite
+support-body dynamics, sliding constraints, or moving-contact law is implied.
+Nonuniform or time-varying prescribed motion remains subject to the existing
+small-rotation surrogate and requires temporal refinement. Focused native
+tests in `tests/moving_load/driven.rs` cover analytic rigid acceleration and
+actuator work, manufactured full-operator deformation with and without damping,
+shuffled support order, changing accelerations, stationary parity, and late
+cancellation with exact retry.
 
 ## Momentum-stable shell integration
 

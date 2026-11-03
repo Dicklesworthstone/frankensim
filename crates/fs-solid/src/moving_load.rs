@@ -12,6 +12,10 @@ use crate::shell::{ShellAssembly, ShellError, ShellPlate};
 use crate::shell_time::{DynamicState, PreparedNewmark, ShellTimeConfig, ShellTimeError};
 use fs_la::LuWorkspace;
 
+#[path = "moving_load/driven.rs"]
+mod driven;
+pub use driven::ShellSupportMotion;
+
 /// A reference material location on one original triangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellLoadPoint {
@@ -141,7 +145,7 @@ impl MovingShellModel {
     pub fn plate(&self) -> &ShellPlate {
         &self.plate
     }
-    /// Original full/reduced operators and stationary support map.
+    /// Original full/reduced operators and fixed support membership.
     pub fn assembly(&self) -> &ShellAssembly {
         &self.assembly
     }
@@ -220,6 +224,16 @@ impl MovingShellModel {
         displacement: &[f64],
         velocity: &[f64],
     ) -> Result<ShellPointMotion, MovingLoadError> {
+        self.observe_with_supports(point, displacement, velocity, None)
+    }
+
+    fn observe_with_supports(
+        &self,
+        point: ShellLoadPoint,
+        displacement: &[f64],
+        velocity: &[f64],
+        supports: Option<&ShellSupportMotion>,
+    ) -> Result<ShellPointMotion, MovingLoadError> {
         self.check_field(displacement)?;
         self.check_field(velocity)?;
         let (nodes, reference_position_m) = self.point(point)?;
@@ -229,6 +243,10 @@ impl MovingShellModel {
                 if let Some(free) = self.free_index[6 * node + axis] {
                     q[axis] += weight * displacement[free];
                     v[axis] += weight * velocity[free];
+                } else if let Some(supports) = supports {
+                    q[axis] +=
+                        weight * self.support_value(6 * node + axis, &supports.displacement_m);
+                    v[axis] += weight * self.support_value(6 * node + axis, &supports.velocity_m_s);
                 }
             }
         }
@@ -267,11 +285,33 @@ impl MovingShellModel {
         velocity: &[f64],
         initial_loads: &[ShellPointWrench],
         config: ShellTimeConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MovingShellMotion<'a>, MovingLoadError> {
+        self.start_with_supports(
+            displacement,
+            velocity,
+            initial_loads,
+            config,
+            None,
+            cancelled,
+        )
+    }
+
+    fn start_with_supports<'a>(
+        &'a self,
+        displacement: &[f64],
+        velocity: &[f64],
+        initial_loads: &[ShellPointWrench],
+        config: ShellTimeConfig,
+        supports: Option<ShellSupportMotion>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MovingShellMotion<'a>, MovingLoadError> {
         poll(&mut cancelled)?;
         self.check_field(displacement)?;
         self.check_field(velocity)?;
+        if let Some(motion) = &supports {
+            self.check_supports(motion)?;
+        }
         if config.beta != 0.25
             || config.gamma != 0.5
             || config.max_steps == 0
@@ -285,7 +325,7 @@ impl MovingShellModel {
         let load = self.project(initial_loads, &mut cancelled)?;
         let a = &self.assembly;
         let n = a.mass.dimension();
-        let mut rhs = load.reduced;
+        let mut rhs = self.effective_load(load.reduced, supports.as_ref())?;
         let elastic = a.stiffness.apply(displacement);
         let viscous = a.damping.as_ref().map(|c| c.apply(velocity));
         for i in 0..n {
@@ -302,7 +342,7 @@ impl MovingShellModel {
         let strain_energy_j = a.stiffness.quadratic_energy(displacement);
         let total_energy_j = kinetic_energy_j + strain_energy_j;
         finite(&[kinetic_energy_j, strain_energy_j, total_energy_j])?;
-        let state = DynamicState {
+        let mut state = DynamicState {
             time_s: 0.0,
             step: 0,
             displacement: displacement.to_vec(),
@@ -312,7 +352,10 @@ impl MovingShellModel {
             strain_energy_j,
             total_energy_j,
         };
-        let reactions = self.reactions(&state, &load.full)?;
+        if let Some(motion) = &supports {
+            self.refresh_full_energy(&mut state, motion)?;
+        }
+        let reactions = self.reactions(&state, supports.as_ref(), &load.full)?;
         let integrator = PreparedNewmark::new(
             n,
             a.mass.values(),
@@ -326,6 +369,7 @@ impl MovingShellModel {
             integrator,
             config,
             state,
+            supports,
             full_load: load.full,
             reactions,
         })
@@ -366,7 +410,12 @@ impl MovingShellModel {
         finite(&result.angular)?;
         Ok(result)
     }
-    fn reactions(&self, state: &DynamicState, load: &[f64]) -> Result<Vec<f64>, MovingLoadError> {
+    fn reactions(
+        &self,
+        state: &DynamicState,
+        supports: Option<&ShellSupportMotion>,
+        load: &[f64],
+    ) -> Result<Vec<f64>, MovingLoadError> {
         let n = self.free_index.len();
         let mut reaction = vec![0.0; n];
         // Only fixed rows need a reaction. Keep the original full M/K/C
@@ -394,6 +443,19 @@ impl MovingShellModel {
                         .as_ref()
                         .map_or(0.0, |c| row_action(c.values(), i, &state.velocity))
                     - load[i];
+                if let Some(motion) = supports {
+                    reaction[i] += self.support_row(
+                        self.assembly.full_mass.values(),
+                        i,
+                        &motion.acceleration_m_s2,
+                    ) + self.support_row(
+                        self.assembly.full_stiffness.values(),
+                        i,
+                        &motion.displacement_m,
+                    ) + self.assembly.full_damping.as_ref().map_or(0.0, |c| {
+                        self.support_row(c.values(), i, &motion.velocity_m_s)
+                    });
+                }
             }
         }
         finite(&reaction)?;
@@ -408,7 +470,7 @@ pub struct MovingShellStep {
     pub time_s: f64,
     /// Applied load integrated by the native endpoint trapezoid, N s / N m s.
     pub applied_impulse: ShellSpatialResultant,
-    /// Actual stationary-support reaction integrated by the same rule.
+    /// Actual fixed or driven support reaction integrated by the same rule.
     pub support_impulse: ShellSpatialResultant,
     /// Signed impulse carried OUT of the shell by the declared damping matrix.
     /// Mass-proportional damping is a momentum sink, not an internal heat proof.
@@ -419,23 +481,29 @@ pub struct MovingShellStep {
     pub momentum_residual: ShellSpatialResultant,
     /// External endpoint-average force dotted with the native displacement increment, J.
     pub applied_work_j: f64,
+    /// Endpoint-average support reaction dotted with prescribed motion, J.
+    /// Zero for stationary supports. Positive work is supplied TO the shell.
+    pub support_work_j: f64,
     /// `dt * v_mid^T C v_mid` in the original shell coordinates, J.
     pub damping_work_j: f64,
-    /// Actual mechanical-energy change plus damping work minus supplied work, J.
+    /// Full mechanical-energy change plus damping work minus applied and support work, J.
     pub energy_residual_j: f64,
 }
 
-/// Continuing motion with immutable geometry/supports and cached native factors.
+/// Continuing motion with immutable reference geometry/support membership and
+/// cached native factors. Prescribed supports move only through explicit inputs.
 pub struct MovingShellMotion<'a> {
     model: &'a MovingShellModel,
     integrator: PreparedNewmark<'a>,
     config: ShellTimeConfig,
     state: DynamicState,
+    supports: Option<ShellSupportMotion>,
     full_load: Vec<f64>,
     reactions: Vec<f64>,
 }
 impl MovingShellMotion<'_> {
-    /// Accepted native reduced motion. Cloning it does not mutate the trajectory.
+    /// Accepted native free-DOF motion. Energy fields include the complete
+    /// prescribed and free motion for a driven-support trajectory.
     pub fn state(&self) -> &DynamicState {
         &self.state
     }
@@ -445,8 +513,12 @@ impl MovingShellMotion<'_> {
     }
     /// Current material point motion, including restrained components.
     pub fn observe(&self, point: ShellLoadPoint) -> Result<ShellPointMotion, MovingLoadError> {
-        self.model
-            .observe(point, &self.state.displacement, &self.state.velocity)
+        self.model.observe_with_supports(
+            point,
+            &self.state.displacement,
+            &self.state.velocity,
+            self.supports.as_ref(),
+        )
     }
 
     /// Advance one sample with explicitly supplied endpoint load locations.
@@ -454,10 +526,21 @@ impl MovingShellMotion<'_> {
     /// future samples refuse. The old endpoint force is retained, so motion of
     /// the load integrates the correct force AND reference moment impulse.
     /// Cancellation/refusal retains the entire old state, load and reactions.
+    /// A driven-support trajectory must instead use [`Self::advance_driven`].
     pub fn advance(
         &mut self,
         time_s: f64,
         loads: &[ShellPointWrench],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MovingShellStep, MovingLoadError> {
+        self.advance_with_supports(time_s, loads, None, cancelled)
+    }
+
+    fn advance_with_supports(
+        &mut self,
+        time_s: f64,
+        loads: &[ShellPointWrench],
+        acceleration: Option<[[f64; 3]; 3]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MovingShellStep, MovingLoadError> {
         poll(&mut cancelled)?;
@@ -473,11 +556,28 @@ impl MovingShellMotion<'_> {
                 "load sample must be the next time within the admitted horizon",
             ));
         }
+        let next_supports = match (&self.supports, acceleration) {
+            (None, None) => None,
+            (Some(old), Some(acceleration)) => Some(old.advance(dt, acceleration)?),
+            _ => {
+                return Err(invalid(
+                    "driven support motion needs an explicit endpoint acceleration",
+                ));
+            }
+        };
         let load = self.model.project(loads, &mut cancelled)?;
+        let effective_load = self
+            .model
+            .effective_load(load.reduced, next_supports.as_ref())?;
         poll(&mut cancelled)?;
-        let next = self.integrator.step(&self.state, &load.reduced)?;
+        let mut next = self.integrator.step(&self.state, &effective_load)?;
+        if let Some(motion) = &next_supports {
+            self.model.refresh_full_energy(&mut next, motion)?;
+        }
         poll(&mut cancelled)?;
-        let reactions = self.model.reactions(&next, &load.full)?;
+        let reactions = self
+            .model
+            .reactions(&next, next_supports.as_ref(), &load.full)?;
         let mean_velocity: Vec<_> = self
             .state
             .velocity
@@ -491,7 +591,21 @@ impl MovingShellMotion<'_> {
             .zip(&self.state.velocity)
             .map(|(a, b)| a - b)
             .collect();
-        let mean_full = self.model.expand(&mean_velocity);
+        let mean_support_velocity = self.supports.zip(next_supports).map(|(old, next)| {
+            std::array::from_fn(|i| {
+                std::array::from_fn(|j| {
+                    f64::midpoint(old.velocity_m_s[i][j], next.velocity_m_s[i][j])
+                })
+            })
+        });
+        let delta_support_velocity = self.supports.zip(next_supports).map(|(old, next)| {
+            std::array::from_fn(|i| {
+                std::array::from_fn(|j| next.velocity_m_s[i][j] - old.velocity_m_s[i][j])
+            })
+        });
+        let mean_full = self
+            .model
+            .expand_with_supports(&mean_velocity, mean_support_velocity.as_ref());
         let damping = self
             .model
             .assembly
@@ -503,11 +617,11 @@ impl MovingShellMotion<'_> {
         let applied = |i| dt * f64::midpoint(self.full_load[i], load.full[i]);
         let support = |i| dt * f64::midpoint(self.reactions[i], reactions[i]);
         let damping_increment = |i| dt * damping.as_ref().map_or(0.0, |c| c[i]);
-        let change = self
-            .model
-            .assembly
-            .full_mass
-            .apply(&self.model.expand(&delta_velocity));
+        let change = self.model.assembly.full_mass.apply(
+            &self
+                .model
+                .expand_with_supports(&delta_velocity, delta_support_velocity.as_ref()),
+        );
         let momentum_change = self.model.resultant(&change)?;
         let applied_impulse = self.model.resultant_by(applied)?;
         let support_impulse = self.model.resultant_by(support)?;
@@ -525,11 +639,27 @@ impl MovingShellMotion<'_> {
             .enumerate()
             .map(|(i, v)| damping_increment(i) * v)
             .sum();
-        let energy_residual_j =
-            next.total_energy_j - self.state.total_energy_j + damping_work_j - applied_work_j;
-        finite(&[applied_work_j, damping_work_j, energy_residual_j])?;
+        let support_work_j = if self.supports.is_some() {
+            mean_full
+                .iter()
+                .enumerate()
+                .map(|(i, v)| support(i) * v)
+                .sum()
+        } else {
+            0.0
+        };
+        let energy_residual_j = next.total_energy_j - self.state.total_energy_j + damping_work_j
+            - applied_work_j
+            - support_work_j;
+        finite(&[
+            applied_work_j,
+            support_work_j,
+            damping_work_j,
+            energy_residual_j,
+        ])?;
         poll(&mut cancelled)?;
         self.state = next;
+        self.supports = next_supports;
         self.full_load = load.full;
         self.reactions = reactions;
         Ok(MovingShellStep {
@@ -540,6 +670,7 @@ impl MovingShellMotion<'_> {
             momentum_change,
             momentum_residual,
             applied_work_j,
+            support_work_j,
             damping_work_j,
             energy_residual_j,
         })

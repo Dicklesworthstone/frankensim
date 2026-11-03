@@ -3,6 +3,9 @@ use fs_solid::moving_load::*;
 use fs_solid::shell::*;
 use fs_solid::shell_time::ShellTimeConfig;
 
+#[path = "moving_load/driven.rs"]
+mod driven;
+
 fn plate() -> ShellPlate {
     ShellPlate {
         nodes: vec![
